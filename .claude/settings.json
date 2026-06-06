@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir c:\\\\stuffs\\\\compyle)",
+      "Read(//c/stuffs/**)",
+      "PowerShell($nasm = Get-Command nasm -ErrorAction SilentlyContinue; $ld = Get-Command ld -ErrorAction SilentlyContinue; $link = Get-Command link -ErrorAction SilentlyContinue; $gcc = Get-Command gcc -ErrorAction SilentlyContinue; $py = Get-Command python -ErrorAction SilentlyContinue; \"nasm: $\\($nasm.Source\\)\"; \"ld: $\\($ld.Source\\)\"; \"link: $\\($link.Source\\)\"; \"gcc: $\\($gcc.Source\\)\"; \"python: $\\($py.Source\\)\")",
+      "PowerShell(wsl --status 2>&1)",
+      "PowerShell(Set-Location c:\\\\stuffs\\\\compyle; python -m compyle build\\\\listgrow_small.py --target windows -o build\\\\lg_small.exe; if \\($?\\) { Write-Host \"---RUN---\"; & .\\\\build\\\\lg_small.exe; Write-Host \"exit: $LASTEXITCODE\" })",
+      "PowerShell(Set-Location c:\\\\stuffs\\\\compyle; python -m compyle build\\\\listgrow_min.py --target windows -o build\\\\lgmin.exe; & .\\\\build\\\\lgmin.exe; Write-Host \"exit: $LASTEXITCODE\")",
+      "PowerShell(Set-Location c:\\\\stuffs\\\\compyle; python -m compyle build\\\\lg5.py --target windows -o build\\\\lg5.exe; & .\\\\build\\\\lg5.exe; Write-Host \"exit: $LASTEXITCODE\")"
+    ]
+  }
+}

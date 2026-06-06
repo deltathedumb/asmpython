@@ -1,0 +1,151 @@
+"""End-to-end test runner for compyle.
+
+Each `tests/cases/*.py` file is compiled, run, and its stdout compared against
+the expected output declared in a leading `# expect:` block:
+
+    # expect:
+    # hello
+    # 42
+
+Negative tests (compiles must fail) live in `tests/cases_fail/*.py` and use
+`# expect-error:` to assert a substring of the formatted error message:
+
+    # expect-error: undefined variable 'x'
+
+Run:    python -m tests.runner
+Exit codes: 0 = all pass; 1 = at least one failure.
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+CASES = ROOT / "tests" / "cases"
+CASES_FAIL = ROOT / "tests" / "cases_fail"
+BUILD = ROOT / "tests" / "_build"
+
+
+@dataclass
+class TestResult:
+    name: str
+    ok: bool
+    detail: str = ""
+
+
+def _parse_expect(src: str, marker: str) -> str | None:
+    """Read a `# {marker}` block at the top of the file and join its lines."""
+    lines: list[str] = []
+    collecting = False
+    for raw in src.splitlines():
+        s = raw.strip()
+        if not collecting:
+            if s.startswith(f"# {marker}"):
+                collecting = True
+                rest = s[len(f"# {marker}"):].strip()
+                if rest.startswith(":"):
+                    rest = rest[1:].strip()
+                if rest:
+                    lines.append(rest)
+            continue
+        if s.startswith("#"):
+            lines.append(s.lstrip("#").lstrip())
+        else:
+            break
+    if not collecting:
+        return None
+    return "\n".join(lines)
+
+
+def _parse_stdin(src: str) -> str:
+    """Read a `# stdin:` block: lines fed to the program's stdin."""
+    out = _parse_expect(src, "stdin")
+    if out is None:
+        return ""
+    return out + "\n"
+
+
+def _detect_target() -> str:
+    if sys.platform == "win32":
+        return "windows"
+    return "linux"
+
+
+def run_positive(case: Path, target: str) -> TestResult:
+    expected = _parse_expect(case.read_text(encoding="utf-8"), "expect")
+    if expected is None:
+        return TestResult(case.name, False, "no `# expect:` block found")
+
+    BUILD.mkdir(parents=True, exist_ok=True)
+    out = BUILD / (case.stem + (".exe" if target == "windows" else ""))
+    cp = subprocess.run(
+        [sys.executable, "-m", "compyle", str(case), "--target", target, "-o", str(out)],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    if cp.returncode != 0:
+        return TestResult(case.name, False, f"compile failed:\n{cp.stderr}{cp.stdout}")
+
+    stdin_data = _parse_stdin(case.read_text(encoding="utf-8"))
+    run = subprocess.run([str(out)], capture_output=True, text=True, input=stdin_data)
+    if run.returncode != 0:
+        return TestResult(case.name, False, f"program exited {run.returncode}\n{run.stderr}")
+    got = run.stdout.replace("\r\n", "\n").rstrip("\n")
+    expected_norm = expected.rstrip("\n")
+    if got != expected_norm:
+        return TestResult(case.name, False, _diff(expected_norm, got))
+    return TestResult(case.name, True)
+
+
+def run_negative(case: Path, target: str) -> TestResult:
+    expected = _parse_expect(case.read_text(encoding="utf-8"), "expect-error")
+    if expected is None:
+        return TestResult(case.name, False, "no `# expect-error:` block found")
+
+    BUILD.mkdir(parents=True, exist_ok=True)
+    out = BUILD / case.stem
+    cp = subprocess.run(
+        [sys.executable, "-m", "compyle", str(case), "--target", target,
+         "--emit-asm", "-o", str(out)],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    if cp.returncode == 0:
+        return TestResult(case.name, False, "expected compile to fail, but it succeeded")
+    msg = (cp.stderr or "") + (cp.stdout or "")
+    if expected not in msg:
+        return TestResult(case.name, False, f"expected substring {expected!r} not found in:\n{msg}")
+    return TestResult(case.name, True)
+
+
+def _diff(expected: str, got: str) -> str:
+    return f"--- expected ---\n{expected}\n--- got ---\n{got}\n--- end ---"
+
+
+def main() -> int:
+    target = _detect_target()
+    print(f"compyle test runner (target={target})")
+
+    results: list[TestResult] = []
+    if CASES.is_dir():
+        for case in sorted(CASES.glob("*.py")):
+            results.append(run_positive(case, target))
+    if CASES_FAIL.is_dir():
+        for case in sorted(CASES_FAIL.glob("*.py")):
+            results.append(run_negative(case, target))
+
+    fails = [r for r in results if not r.ok]
+    for r in results:
+        mark = "OK  " if r.ok else "FAIL"
+        print(f"  [{mark}] {r.name}")
+        if not r.ok:
+            for line in r.detail.splitlines():
+                print(f"        {line}")
+    print(f"\n{len(results) - len(fails)}/{len(results)} passed")
+    return 0 if not fails else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
