@@ -1,4 +1,4 @@
-; mamba generated for target = WindowsCodegen
+; serpent generated for target = WindowsCodegen
 BITS 64
 default rel
 global main

@@ -54,13 +54,13 @@ class Codegen:
 
     def __init__(self, mod: A.Module, *, use_runtime_lib: bool = False) -> None:
         self.mod = mod
-        # If True, skip emitting runtime bodies and assume libmamba_rt is linked.
+        # If True, skip emitting runtime bodies and assume libserpent_rt is linked.
         self.use_runtime_lib = use_runtime_lib
         self.lines: list[str] = []
         self.strings: list[tuple[str, str]] = []  # (label, bytes-literal)
         self.floats: list[tuple[str, float]] = []  # (label, value)
         self.label_counter = 0
-        # FFI surface: { mamba_name: stdlib.Func } across all imports, used
+        # FFI surface: { serpent_name: stdlib.Func } across all imports, used
         # for dispatching bare and module-attribute calls. Also any constants
         # imported by `from <mod> import <name>` for direct value substitution.
         self.ffi_funcs: dict = dict(mod.ffi_funcs)
@@ -125,7 +125,7 @@ class Codegen:
     # ---- driver -------------------------------------------------------------
 
     def generate(self) -> str:
-        self.emit(f"; mamba generated for target = {self.__class__.__name__}")
+        self.emit(f"; serpent generated for target = {self.__class__.__name__}")
         self.emit("BITS 64")
         self.emit("default rel")
         before = len(self.lines)
@@ -161,15 +161,15 @@ class Codegen:
         return "\n".join(self.lines) + "\n"
 
     def generate_runtime_only(self) -> str:
-        """Emit a freestanding `.asm` containing the mamba runtime helpers and
-        nothing else. Used by the `mamba.runtime.build` step to produce
-        `libmamba_rt_<target>.a`.
+        """Emit a freestanding `.asm` containing the serpent runtime helpers and
+        nothing else. Used by the `serpent.runtime.build` step to produce
+        `libserpent_rt_<target>.a`.
 
         The output declares every `_runtime_*` symbol (plus scratch buffers)
         as `global` so user programs can `extern` them at link time.
         """
         assert not self.use_runtime_lib, "Runtime build must emit bodies, not externs."
-        self.emit(f"; mamba runtime library, target = {self.__class__.__name__}")
+        self.emit(f"; serpent runtime library, target = {self.__class__.__name__}")
         self.emit("BITS 64")
         self.emit("default rel")
         # Externs we need from libc (printf, malloc, etc.)
@@ -1099,7 +1099,7 @@ class Codegen:
         """
         if self.use_runtime_lib:
             # Reference rather than define. The library was assembled once
-            # by mamba/runtime/build.py and gcc will resolve these at link.
+            # by serpent/runtime/build.py and gcc will resolve these at link.
             for sym in (
                 "_runtime_zalloc",
                 "_runtime_hash_string",
@@ -2118,7 +2118,7 @@ class Codegen:
         self.emit("section .text")
 
         # ---- _runtime_setjmp -------------------------------------------------
-        # Mamba's internal calling convention for runtime helpers: rax = primary
+        # Serpent's internal calling convention for runtime helpers: rax = primary
         # input/output. Here rax holds the jmp_buf pointer.
         # Output: rax = 0 on initial call; nonzero after longjmp.
         self.label("_runtime_setjmp")
@@ -2678,7 +2678,7 @@ class Codegen:
         "<=": "setle",
         ">": "setg",
         ">=": "setge",
-        # `is` / `is not` lower to identity-as-bit-equality. With mamba's
+        # `is` / `is not` lower to identity-as-bit-equality. With serpent's
         # uniform 8-byte runtime representation that's the same as ==/!= on
         # the two raw 64-bit slots.
         "is": "sete",
@@ -2996,8 +2996,8 @@ class Codegen:
 
     # ---- FFI dispatch ------------------------------------------------------
     #
-    # The mamba FFI is purely positional. Each foreign function's signature
-    # is fully known statically (mamba/stdlib/<mod>.py). The codegen
+    # The serpent FFI is purely positional. Each foreign function's signature
+    # is fully known statically (serpent/stdlib/<mod>.py). The codegen
     # evaluates each argument, promotes int -> float as needed, and places it
     # in the correct ABI register slot. Integer args use the integer regs
     # (rdi/rsi/... on Linux, rcx/rdx/... on Windows); float args use XMM0..N.

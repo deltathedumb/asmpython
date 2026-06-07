@@ -1,4 +1,4 @@
-"""CLI: python -m mamba source.py [options]"""
+"""CLI: python -m serpent source.py [options]"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from .errors import CompileError
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="mamba")
+    ap = argparse.ArgumentParser(prog="serpent")
     ap.add_argument("source", type=Path, help="input .py file")
     ap.add_argument(
         "-o",
@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--use-runtime-lib",
         action="store_true",
-        help="link the pre-built libmamba_rt archive instead of "
+        help="link the pre-built libserpent_rt archive instead of "
         "inlining the runtime helpers into the program "
         "(smaller .asm; builds the archive on demand)",
     )
@@ -60,12 +60,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_const",
         const="onedir",
         help="ship the executable plus a sibling lib/ folder of shared "
-        "libraries (the mamba runtime as .dll/.so today; per-module .dll/.so "
+        "libraries (the serpent runtime as .dll/.so today; per-module .dll/.so "
         "for user imports once cross-file compilation lands)",
     )
     ap.set_defaults(bundle_mode="onefile")
     # Hidden tool-override flags. Useful for the portable archive where the
-    # bundled toolchain lives next to mamba.bat; not something most users
+    # bundled toolchain lives next to serpent.bat; not something most users
     # need to touch, so they're suppressed from --help.
     ap.add_argument("--nasm", type=Path, default=None, help=argparse.SUPPRESS)
     ap.add_argument("--gcc", type=Path, default=None, help=argparse.SUPPRESS)
@@ -99,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         print(e.format(src, str(args.source)), file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"mamba: {e}", file=sys.stderr)
+        print(f"serpent: {e}", file=sys.stderr)
         return 1
     return 0
 

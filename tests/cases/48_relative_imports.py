@@ -9,7 +9,7 @@ from .errors import SomeError, AnotherError
 from ..util import helper
 from . import x, y as z
 
-# Absolute import of a CPython module that isn't in mamba's stdlib registry —
+# Absolute import of a CPython module that isn't in serpent's stdlib registry —
 # also accepted as a no-op so source can be type-checked.
 import os
 import os.path as p

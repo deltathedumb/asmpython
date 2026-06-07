@@ -36,7 +36,7 @@ def _resolve_tool(name: str, *, override: Path | None, env_var: str) -> str:
     1. ``--<name>`` CLI override (caller-provided ``override`` Path).
     2. ``$MAMBA_<NAME>`` environment variable.
     3. A ``bin/`` directory adjacent to the install (lets the standalone
-       archive ship NASM/gcc next to ``mamba.bat``).
+       archive ship NASM/gcc next to ``serpent.bat``).
     4. The system PATH.
 
     Raises if none of those produce a runnable file. Errors mention every
@@ -55,7 +55,7 @@ def _resolve_tool(name: str, *, override: Path | None, env_var: str) -> str:
             return str(p.resolve())
         tried.append(f"${env_var}={env}")
     # Look in <repo-root>/bin for a bundled copy. The repo root is the
-    # grandparent of this file (driver.py is at mamba/driver.py).
+    # grandparent of this file (driver.py is at serpent/driver.py).
     bundled = Path(__file__).resolve().parent.parent / "bin"
     for suffix in ("", ".exe"):
         cand = bundled / f"{name}{suffix}"
@@ -123,7 +123,7 @@ def compile_source(
     if emit_asm_only:
         return BuildResult(asm_path=asm_path, obj_path=None, exe_path=None)
 
-    nasm = _resolve_tool("nasm", override=nasm_path, env_var="MAMBA_NASM")
+    nasm = _resolve_tool("nasm", override=nasm_path, env_var="SERPENT_NASM")
     # `-w-label-redef-late`: NASM 2.16+ promotes "label changed between
     # passes" to an error by default. We hit this in the dict runtime when
     # forward references force the encoder to pick a different instruction
@@ -142,7 +142,7 @@ def compile_source(
 
     # Both targets now use gcc as the linker driver so the C runtime
     # (msvcrt on Windows, libc on Linux) is linked in transparently.
-    gcc = _resolve_tool("gcc", override=gcc_path, env_var="MAMBA_GCC")
+    gcc = _resolve_tool("gcc", override=gcc_path, env_var="SERPENT_GCC")
 
     if bundle_mode == "onedir":
         exe_path = _link_onedir(
@@ -160,7 +160,7 @@ def compile_source(
             build_runtime(target)
             link_cmd += [
                 f"-L{_build_dir()}",
-                f"-lmamba_rt_{'win' if target == 'windows' else 'linux'}",
+                f"-lserpent_rt_{'win' if target == 'windows' else 'linux'}",
             ]
         _run(link_cmd)
 
@@ -201,7 +201,7 @@ def _link_onedir(
 
     # Link against the shared library by short name. Use rpath/$ORIGIN on
     # Linux so the loader looks in `./lib/` next to the executable.
-    short = "mamba_rt_" + ("win" if target == "windows" else "linux")
+    short = "serpent_rt_" + ("win" if target == "windows" else "linux")
     link_cmd = [
         gcc,
         str(obj_path),

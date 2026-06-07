@@ -476,7 +476,7 @@ class Parser:
     def _parse_annotated_assign(self):
         """`name: type [= value]` at statement position.
 
-        The annotation is parsed and discarded (mamba doesn't drive typing
+        The annotation is parsed and discarded (serpent doesn't drive typing
         off annotations yet). If a value follows, returns an Assign;
         otherwise an ExprStmt of a no-op IntLit so the statement still has
         a body — the variable becomes defined in the scope of the wrapping

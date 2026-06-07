@@ -1,10 +1,10 @@
-# mamba
+# serpent
 
-**A Pixelated Dream project.** Mamba's mission is simple: take the Python code people actually write — loops, lists, dicts, math, basic classes, the occasional `import` — and turn it into a fast native executable with the least possible fuss. No virtual machine, no interpreter, no `pip install` dance, no opinions about your build system. Write `.py`, get `.exe` (or ELF).
+**A Pixelated Dream project.** Serpent's mission is simple: take the Python code people actually write — loops, lists, dicts, math, basic classes, the occasional `import` — and turn it into a fast native executable with the least possible fuss. No virtual machine, no interpreter, no `pip install` dance, no opinions about your build system. Write `.py`, get `.exe` (or ELF).
 
-Mamba is built around two goals:
+Serpent is built around two goals:
 
-- **Easiest to use.** One command (`python -m mamba foo.py`) goes from source to native binary. No project file, no toolchain manifest, no decorators or type stubs needed for things to work.
+- **Easiest to use.** One command (`python -m serpent foo.py`) goes from source to native binary. No project file, no toolchain manifest, no decorators or type stubs needed for things to work.
 - **Compatible with what people actually write.** The supported subset deliberately tracks "what 80% of small Python programs look like": hash maps, list iteration, f-strings, math libraries, recursion, simple control flow. We don't aim for CPython parity — we aim for *your* program just working.
 
 Under the hood, source `.py` files compile to NASM, get assembled, then linked into a native executable for **Windows (PE64)** or **Linux (ELF64)**. Strings are nul-terminated; lists and dicts are heap-allocated with stable handles so reassignment isn't required after growth. Allocations come from libc `malloc`/`realloc`; runtime support comes from libc/msvcrt.
@@ -16,11 +16,11 @@ Under the hood, source `.py` files compile to NASM, get assembled, then linked i
 
 ---
 
-## 🐍 The headline goal: mamba compiles mamba — by July 2026
+## 🐍 The headline goal: serpent compiles serpent — by July 2026
 
-The big milestone we're pointing at is **self-compilation**. Today the mamba compiler is ~5,700 lines of CPython that emits NASM. By July, that same source — `mamba/__main__.py`, `mamba/codegen.py`, the works — should compile through mamba itself and produce a working `mamba.exe` that, on the next pass, reproduces itself.
+The big milestone we're pointing at is **self-compilation**. Today the serpent compiler is ~5,700 lines of CPython that emits NASM. By July, that same source — `serpent/__main__.py`, `serpent/codegen.py`, the works — should compile through serpent itself and produce a working `serpent.exe` that, on the next pass, reproduces itself.
 
-It's the honest version of "is this actually a Python compiler?" The answer becomes yes the day mamba stops needing CPython to ship.
+It's the honest version of "is this actually a Python compiler?" The answer becomes yes the day serpent stops needing CPython to ship.
 
 Roughly half the road there is already paved (see the status table below). The remaining work is tracked in [roadmap.md](./roadmap.md#self-host-gap-audit-what-the-compiler-source-actually-needs) — the audit names the specific features the compiler source depends on, in priority order. Most of Tiers 1–4 are on the critical path; most of Tiers 5–12 are post-bootstrap polish.
 
@@ -45,7 +45,7 @@ Roughly half the road there is already paved (see the status table below). The r
 | 13 | Test harness | ✅ | `# expect:` / `# expect-error:` / `# stdin:` blocks |
 | 14 | Classes | ✅ | `__init__`, instance attributes, methods, single inheritance |
 | 15 | Exceptions | ✅ | `try`/`except`/`raise` with hand-rolled setjmp/longjmp |
-| 16 | Runtime library | ✅ | `--use-runtime-lib` links pre-built `libmamba_rt_<target>.a`; 47-67% smaller `.asm` per program |
+| 16 | Runtime library | ✅ | `--use-runtime-lib` links pre-built `libserpent_rt_<target>.a`; 47-67% smaller `.asm` per program |
 
 ---
 
@@ -268,14 +268,14 @@ from math import sin, cos
 print(sin(0.0), cos(0.0))
 ```
 
-- Modules live in [mamba/stdlib/](mamba/stdlib/) as Python files that declare a `BINDINGS` dict
+- Modules live in [serpent/stdlib/](serpent/stdlib/) as Python files that declare a `BINDINGS` dict
 - Each binding is either `Func(arg_types, ret_type, c_name)` or `Const(ty, value)`
 - The compiler emits `extern <c_name>` and dispatches with the correct ABI (System V on Linux, MS x64 on Windows)
 - Int → float promotion happens at the call site
 - **Available now**:
   - `math` — sqrt, cbrt, exp, log, log2, log10, sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, floor, ceil, fabs, pow, atan2, hypot, fmod + constants pi, e, tau, inf, nan
   - `os` — system(cmd), getenv(name), _exit(code)
-- **Adding a new module**: drop `mamba/stdlib/<name>.py` with a `BINDINGS` dict; no compiler changes needed
+- **Adding a new module**: drop `serpent/stdlib/<name>.py` with a `BINDINGS` dict; no compiler changes needed
 - **Limitation**: only int/float/str argument and return types. Anything taking structs, varargs, or callbacks needs custom plumbing.
 
 ### Diagnostics
@@ -353,7 +353,7 @@ These are honest gaps, listed roughly by how often they matter in real Python co
 
 ### Modules and tooling
 
-- **No real module loading** — `import foo` only resolves to mamba's hardcoded `stdlib/` directory. You can't `import` another `.py` file you wrote.
+- **No real module loading** — `import foo` only resolves to serpent's hardcoded `stdlib/` directory. You can't `import` another `.py` file you wrote.
 - **No `if __name__ == "__main__":`** semantics — there's only one entry point per program.
 - **No interactive REPL.**
 - **No traceback** on runtime errors — `KeyError` from a dict miss just prints `KeyError: key not in dict` and exits 1.
@@ -367,7 +367,7 @@ Outside of `math` and `os`, **nothing**. Notable missing modules: `sys`, `json`,
 - **No optimization** — what you write is what you get. No constant folding, dead code elimination, register allocation, common-subexpression elimination, or inlining.
 - **No tail-call optimization** — `fact(10000)` will blow the stack.
 - **Stack allocation** for every local even when register-resident would suffice.
-- **Runtime helpers are inlined into every program** — `_runtime_dict_set`, `_runtime_hash_string`, etc., are emitted in every `.asm`. Should be extracted into `libmamba_rt.a` (planned).
+- **Runtime helpers are inlined into every program** — `_runtime_dict_set`, `_runtime_hash_string`, etc., are emitted in every `.asm`. Should be extracted into `libserpent_rt.a` (planned).
 - **No debug info** — no DWARF, no PDB, no `--debug-asm` source-line annotations.
 
 ### Targets
@@ -381,7 +381,7 @@ Outside of `math` and `os`, **nothing**. Notable missing modules: `sys`, `json`,
 ## Architecture
 
 ```text
-mamba/
+serpent/
 ├── lexer.py          — indent-aware tokenizer; emits INDENT/DEDENT
 ├── parser.py         — recursive-descent; produces AST
 ├── ast_nodes.py      — dataclass node types + static expr_type() resolver
@@ -392,7 +392,7 @@ mamba/
 ├── target_linux.py   — Linux ELF64, System V AMD64 ABI, libc bindings
 ├── target_windows.py — Windows PE64, MS x64 ABI, msvcrt bindings
 ├── driver.py         — invokes NASM then gcc as linker driver
-├── __main__.py       — CLI: `python -m mamba ...`
+├── __main__.py       — CLI: `python -m serpent ...`
 ├── errors.py         — CompileError with source-position rendering
 └── stdlib/
     ├── __init__.py   — Func, Const binding dataclasses
@@ -432,28 +432,28 @@ Headers are stable across mutations; only the underlying buffer relocates. This 
 
 ```sh
 # Compile for the host platform
-python -m mamba hello.py
+python -m serpent hello.py
 
 # Cross-target
-python -m mamba hello.py --target linux        -o hello
-python -m mamba hello.py --target windows      -o hello.exe
+python -m serpent hello.py --target linux        -o hello
+python -m serpent hello.py --target windows      -o hello.exe
 
 # Stop after writing the .asm (useful for inspection)
-python -m mamba hello.py --emit-asm
+python -m serpent hello.py --emit-asm
 
 # Keep intermediate .o / .obj files
-python -m mamba hello.py --keep
+python -m serpent hello.py --keep
 
 # Link the pre-built runtime archive instead of inlining 400 lines of helpers.
 # Shrinks per-program .asm by 50-70%, faster NASM passes.
-python -m mamba hello.py --use-runtime-lib
+python -m serpent hello.py --use-runtime-lib
 
 # Build the runtime archive ahead of time (auto-built on first use):
-python -m mamba.runtime.build --all          # both targets
+python -m serpent.runtime.build --all          # both targets
 
 # Bundling modes -- mutually exclusive.
-python -m mamba hello.py --onefile  # default: single statically-linked .exe
-python -m mamba hello.py --onedir   # exe + lib/libmamba_rt_<target>.{dll,so}
+python -m serpent hello.py --onefile  # default: single statically-linked .exe
+python -m serpent hello.py --onedir   # exe + lib/libserpent_rt_<target>.{dll,so}
 # Short forms: -of and -od respectively.
 ```
 
@@ -510,14 +510,14 @@ The short version, in rough priority order:
 4. **Polymorphism for classes** — a vtable per class so a `Shape` parameter can dispatch to `Square.area` at runtime. Currently dispatch is static.
 5. **Mixed-type instance attributes / collection values** — let `self.name = "alice"`, `list[str]`, `dict[str, str]` work. Requires either runtime type tags or per-collection element types.
 6. **Exception classes** — `raise ValueError("msg")` and `except SpecificError:` dispatch. Builds on the existing try/except plumbing.
-7. **Runtime extraction**: ship the ~400 lines of runtime helpers as `libmamba_rt.a` instead of inlining into every program. Smaller `.asm` outputs, faster builds. ~1 day.
+7. **Runtime extraction**: ship the ~400 lines of runtime helpers as `libserpent_rt.a` instead of inlining into every program. Smaller `.asm` outputs, faster builds. ~1 day.
 8. **More stdlib bindings**: `sys.argv`/`sys.exit`, `time.time`/`time.sleep`, `random.random`/`random.randint`. Each ~30 minutes once the right C function is identified.
 9. **macOS target** — Mach-O 64. Codegen is mostly the same as Linux (System V ABI); the differences are file format and linker invocation. Can't test from a Windows host.
 10. **A real optimizer pass** — at minimum: constant folding, dead-store elimination, peephole. Maybe 1-2 weeks for something meaningful.
 
 What's intentionally **not** on the roadmap:
 
-- CPython parity. Mamba is a compiled language wearing Python's syntax, not a Python implementation.
+- CPython parity. Serpent is a compiled language wearing Python's syntax, not a Python implementation.
 - Bignum / arbitrary precision integers — would require boxing every int, defeating the speed advantage.
 - The GIL, asyncio, generators, descriptors, metaclasses, the import hook system — these are interpreter features that don't fit the "compile to flat machine code" model.
 - A garbage collector. Memory currently leaks (lists and dicts allocate without ever freeing). Plan is either reference counting once we have a uniform value representation, or simple arena allocation for short-lived programs.

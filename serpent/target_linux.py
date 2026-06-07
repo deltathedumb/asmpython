@@ -169,7 +169,7 @@ class LinuxCodegen(Codegen):
         self.emitf("mov rdi, 1", "call exit")
 
     def _emit_call_setjmp(self, buf_off: int) -> None:
-        # Use mamba's hand-rolled _runtime_setjmp (buf in rax).
+        # Use serpent's hand-rolled _runtime_setjmp (buf in rax).
         self.emitf(f"lea rax, [rbp{buf_off:+d}]", "call _runtime_setjmp")
 
     def _emit_call_longjmp_with_buf_in_rax(self) -> None:

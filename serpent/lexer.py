@@ -1,4 +1,4 @@
-"""Indentation-aware lexer for the mamba Python subset.
+"""Indentation-aware lexer for the serpent Python subset.
 
 Emits INDENT/DEDENT tokens like CPython's tokenizer. Newlines inside
 parentheses are suppressed so multi-line argument lists are legal.

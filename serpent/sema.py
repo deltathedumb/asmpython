@@ -90,9 +90,9 @@ class Scope:
 
 
 def _load_module(name: str) -> dict:
-    """Load `mamba.stdlib.<name>` and return its BINDINGS dict."""
+    """Load `serpent.stdlib.<name>` and return its BINDINGS dict."""
     try:
-        mod = importlib.import_module(f"mamba.stdlib.{name}")
+        mod = importlib.import_module(f"serpent.stdlib.{name}")
     except ImportError as e:
         raise SemaError(f"no such module: {name!r}") from e
     if not hasattr(mod, "BINDINGS"):
@@ -313,7 +313,7 @@ class SemaAnalyzer:
                     scope.add(s.var, "str")
                 else:
                     raise SemaError(
-                        "mamba 'for' iterates over range(), list, dict, or str",
+                        "serpent 'for' iterates over range(), list, dict, or str",
                         s.pos,
                     )
             else:
@@ -341,7 +341,7 @@ class SemaAnalyzer:
             try:
                 bindings = _load_module(top_name)
             except SemaError:
-                # Module isn't in mamba's stdlib registry — accept the
+                # Module isn't in serpent's stdlib registry — accept the
                 # statement as a parser-level no-op so source that uses
                 # standard CPython modules can still be checked. The name
                 # becomes a dummy in scope; any subsequent `x.attr` lookup
@@ -502,7 +502,7 @@ class SemaAnalyzer:
                         )
                     continue
                 if op in ("is", "is not"):
-                    # mamba has no `None`-as-distinct-value yet. `x is None`
+                    # serpent has no `None`-as-distinct-value yet. `x is None`
                     # therefore lowers to `x == 0`. Accept any operand types
                     # — the comparison happens at the raw 8-byte level.
                     continue

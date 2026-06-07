@@ -1,18 +1,18 @@
-"""Build mamba's runtime archive for one or both targets.
+"""Build serpent's runtime archive for one or both targets.
 
 Usage (from repo root):
 
-    python -m mamba.runtime.build               # build for the host
-    python -m mamba.runtime.build --all         # both linux + windows
+    python -m serpent.runtime.build               # build for the host
+    python -m serpent.runtime.build --all         # both linux + windows
 
 Produces:
 
-    mamba/runtime/_build/libmamba_rt_linux.a
-    mamba/runtime/_build/libmamba_rt_win.a
+    serpent/runtime/_build/libserpent_rt_linux.a
+    serpent/runtime/_build/libserpent_rt_win.a
 
 The archive contains every `_runtime_*` symbol plus the scratch buffers
 `itoa_str_buf` and `input_buf`. User programs link against it via
-`gcc <prog>.obj -L<runtime/_build> -lmamba_rt_<target>`.
+`gcc <prog>.obj -L<runtime/_build> -lserpent_rt_<target>`.
 """
 from __future__ import annotations
 
@@ -28,15 +28,15 @@ from ..target_windows import WindowsCodegen
 
 
 _TARGETS = {
-    "linux":   (LinuxCodegen,   "elf64", "libmamba_rt_linux.a"),
-    "windows": (WindowsCodegen, "win64", "libmamba_rt_win.a"),
+    "linux":   (LinuxCodegen,   "elf64", "libserpent_rt_linux.a"),
+    "windows": (WindowsCodegen, "win64", "libserpent_rt_win.a"),
 }
 
 # Shared-library outputs, keyed by the same target name. The build_shared
 # path uses these instead of the static archive for --onedir bundles.
 _SHARED_TARGETS = {
-    "linux":   "libmamba_rt_linux.so",
-    "windows": "libmamba_rt_win.dll",
+    "linux":   "libserpent_rt_linux.so",
+    "windows": "libserpent_rt_win.dll",
 }
 
 
@@ -165,7 +165,7 @@ def build_runtime_shared(target: str, *, force: bool = False) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="mamba.runtime.build")
+    ap = argparse.ArgumentParser(prog="serpent.runtime.build")
     ap.add_argument("--target", choices=sorted(_TARGETS), default=None,
                     help="target (default: host)")
     ap.add_argument("--all", action="store_true",
