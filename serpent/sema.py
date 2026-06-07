@@ -237,6 +237,9 @@ class SemaAnalyzer:
             return e.el_type
         if isinstance(e, A.Name):
             return scope.list_el_types.get(e.name, "int")
+        if isinstance(e, A.MethodCall):
+            # `dict.keys()` returns list[str]; `dict.values()` returns list[int].
+            return getattr(e, "list_el_type", "int")
         return "int"
 
     def _check_stmt(self, s, scope: Scope) -> None:
@@ -717,10 +720,20 @@ class SemaAnalyzer:
                     if A.expr_type(e.args[0]) != "str":
                         raise SemaError("dict.contains() key must be a str", e.pos)
                     e.inferred_type = "int"
+                elif e.method == "keys":
+                    if e.args:
+                        raise SemaError("dict.keys() takes no arguments", e.pos)
+                    e.inferred_type = "list"
+                    e.list_el_type = "str"
+                elif e.method == "values":
+                    if e.args:
+                        raise SemaError("dict.values() takes no arguments", e.pos)
+                    e.inferred_type = "list"
+                    e.list_el_type = "int"
                 else:
                     raise SemaError(f"dict has no method {e.method!r}", e.pos)
             elif obj_t == "str":
-                self._check_str_method(e)
+                self._check_str_method(e, scope)
                 return
             elif obj_t.startswith("instance:"):
                 class_name = obj_t.split(":", 1)[1]
@@ -762,7 +775,30 @@ class SemaAnalyzer:
         "replace": (("str", "str"), "str"),
     }
 
-    def _check_str_method(self, e) -> None:
+    def _check_str_method(self, e, scope: Scope) -> None:
+        # Methods with non-trivial signatures: split returns list[str]; join
+        # consumes a list[str].
+        if e.method == "split":
+            if len(e.args) > 1:
+                raise SemaError("str.split() takes 0 or 1 argument", e.pos)
+            if e.args and A.expr_type(e.args[0]) != "str":
+                raise SemaError("str.split() separator must be str", e.pos)
+            e.inferred_type = "list"
+            e.list_el_type = "str"
+            return
+        if e.method == "join":
+            if len(e.args) != 1:
+                raise SemaError("str.join() takes 1 argument", e.pos)
+            arg_t = A.expr_type(e.args[0])
+            if arg_t != "list":
+                raise SemaError("str.join() requires list[str]", e.pos)
+            arg_el = self._list_el_type(e.args[0], scope)
+            if arg_el != "str":
+                raise SemaError(
+                    f"str.join() requires list[str], got list[{arg_el}]", e.pos
+                )
+            e.inferred_type = "str"
+            return
         sig = self.STR_METHODS.get(e.method)
         if sig is None:
             raise SemaError(f"str has no method {e.method!r}", e.pos)

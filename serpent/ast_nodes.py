@@ -336,11 +336,12 @@ class Subscript:
 
 @dataclass
 class Slice:
-    """s[start:stop] inside a Subscript's index slot. start/stop may be None
-    (use the implicit endpoint). Step is not supported yet."""
+    """s[start:stop:step] inside a Subscript's index slot. Any of the three
+    may be None (use the implicit endpoint / step=1)."""
 
     start: "Expr | None" = None
     stop: "Expr | None" = None
+    step: "Expr | None" = None
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
@@ -355,6 +356,9 @@ class MethodCall:
     args: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     inferred_type: str = "int"
+    # When inferred_type == "list", element kind ("int" / "str" / "float").
+    # Set by sema for methods that return lists (e.g. dict.keys()/.values()).
+    list_el_type: str = "int"
 
 
 @dataclass

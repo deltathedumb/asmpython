@@ -843,17 +843,22 @@ class Parser:
         while True:
             if self._check("OP", "["):
                 lbr = self._eat()
-                # Slice form: [start:stop]; either side may be omitted.
+                # Slice form: [start:stop[:step]]; any part may be omitted.
                 start = None
                 if not self._check("OP", ":"):
                     start = self._parse_expr()
                 if self._check("OP", ":"):
                     self._eat()
                     stop = None
-                    if not self._check("OP", "]"):
+                    step = None
+                    if not self._check("OP", ":") and not self._check("OP", "]"):
                         stop = self._parse_expr()
+                    if self._check("OP", ":"):
+                        self._eat()
+                        if not self._check("OP", "]"):
+                            step = self._parse_expr()
                     self._expect("OP", "]")
-                    idx = A.Slice(start=start, stop=stop, pos=lbr.pos)
+                    idx = A.Slice(start=start, stop=stop, step=step, pos=lbr.pos)
                 else:
                     self._expect("OP", "]")
                     idx = start

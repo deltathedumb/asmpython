@@ -5,6 +5,8 @@
 *.exe
 *.obj
 *.asm
+_smoke.log
+
 /tools/
 
 
