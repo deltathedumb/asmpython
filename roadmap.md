@@ -43,7 +43,7 @@ This is the "I can write a numerics or text-munging script that does math, talks
 Without this tier, every higher tier hits the same wall — Python programs are mostly string manipulation.
 
 | # | Item | Why it matters | Depends on |
-|---|------|----------------|-----|
+|-----|------|----------------|-----|
 | 1.1 | ✅ **String concatenation** `"a" + "b"` | Unblocks f-strings outside print, every other string operation | — |
 | 1.2 | ✅ **String equality** `s1 == s2`, `s1 != s2` (ordering with `<`/`>` not yet) | Sorting, dict-with-string-values lookups by content | — |
 | 1.3 | ✅ **String multiplication** `"-" * 80` | Pretty printing, ASCII art | 1.1 |
@@ -51,8 +51,8 @@ Without this tier, every higher tier hits the same wall — Python programs are 
 | 1.5 | ✅ **String slicing** `s[i:j]` (open endpoints, negative indices; no step yet) | Trimming, reversing, splitting by index | 1.4 |
 | 1.6 | ✅ **`in` / `not in` on strings** `"x" in s` | Search predicates | 1.5 |
 | 1.7 | ✅ Partial **String methods**: `.upper`, `.lower`, `.strip`, `.lstrip`, `.rstrip`, `.startswith`, `.endswith`, `.find`, `.count`, `.replace` — still missing `.split`, `.rsplit`, `.join`, `.index`, `.title`, `.capitalize`, `.swapcase`, `.zfill`, `.center`, `.ljust`, `.rjust` (most gated on list-of-string) | The bread and butter of Python text processing | 1.1, 1.5 |
-| 1.8 | **String iteration** `for ch in s` | Character-level loops | 1.4 |
-| 1.9 | **Multiline strings** `"""..."""` | Embedded docs, SQL queries, JSON literals | — |
+| 1.8 | ✅ **String iteration** `for ch in s` (fresh 1-char strs per step) | Character-level loops | 1.4 |
+| 1.9 | ✅ **Multiline strings** `"""..."""` / `'''...'''` | Embedded docs, SQL queries, JSON literals | — |
 | 1.10 | **String escapes**: `\x41`, `é`, `\N{...}` | Unicode-rich code | 1.9 |
 | 1.11 | ✅ **F-strings everywhere** (not just `print`) — lowered through runtime concat | What everybody actually writes | 1.1 |
 | 1.12 | **F-string format specs** `f"{x:.2f}"`, `f"{n:>5}"` | Numeric output, table formatting | 1.11 |
@@ -464,23 +464,29 @@ The 5,700-line compiler relies on a specific slice of Python. Hitting July means
 
 1. ✅ Partial: **`list[str]`, `list[float]`** ship (homogeneous). Still missing: **`list[<instance>]`** (AST node lists), nested lists, mixed-type lists — the compiler's `self.body: list[Stmt]` is the next big hurdle. That needs either an `instance` element type or the full tagged-value runtime.
 2. **`dict[str, str]`, `dict[str, <instance>]`** — symbol tables, scope objects, the imported-modules registry. Same blocker class as (1).
-3. **First-class tuples and `for k, v in pairs`** — sema/codegen iterate over `(name, type)` pairs constantly.
-4. **`dataclass` and `field(default_factory=list)`** — every AST node is a `@dataclass`. Either implement the decorator or strip dataclasses from the compiler source (cheaper short-term).
+3. **First-class tuples and `for k, v in pairs`** — sema/codegen iterate over `(name, type)` pairs constantly. Destructuring `a, b = e1, e2` ships; `(a, b)` as a stored value does not.
+4. **`@dataclass` synthesised `__init__`** — every AST node is a `@dataclass`. The decorator now parses cleanly (along with class-body field declarations and docstrings) but doesn't *do* anything; we'd need to either synthesise the `__init__` from the field declarations or strip the decorator from the compiler source.
 5. ✅ Partial: **Default arguments** ship for int / str / True / False / None literals; the `*` keyword-only marker and basic type annotations parse without effect. Still missing: float defaults, keyword args at call sites.
-6. **`*args` (variadic)** — `emitf` is the worst offender; many helpers also take `*lines`.
-7. **Exception classes** — `CompileError`, `LexError`, `SemaError`. The current `raise <str>` form can't carry structured data (positions, codes). Either lift `raise` to accept instances or rewrite the compiler to thread error info manually.
-8. **`isinstance(x, (A, B, C))`** — tuple form for "or" type checks; pervasive in `gen_stmt` / `gen_expr`.
-9. **`open(path)` / `read()` / `write()` and `with` statement** — the driver reads source files and writes `.asm`. Today it uses `pathlib.Path.read_text` and the `with` form of `open`.
-10. **`sys.argv`, `sys.exit`, `subprocess.run`** — the CLI entry point and the driver. `subprocess.run` is what calls NASM and gcc; without it, no linking.
-11. **List comprehensions** — peppered through the parser and codegen. Each can in principle be rewritten as a manual loop, but that's a lot of churn.
-12. **`enumerate`, `zip`, `sorted`** — every "walk both lists in parallel" or "produce a sorted output" site.
-13. **List methods**: `list.extend`, `list.index`, slicing assignment `xs[:] = ...`.
-14. **`hasattr` / `getattr`** — used in a couple of places in sema for `b.arg_types` checks.
-15. **`Optional[T]` / `T | None`** — type annotations only; ignorable at runtime once the parser accepts the syntax.
+6. ✅ Partial: **Variable type annotations** `x: int = ...` parse and assign (annotation is dropped); same for `self.x: int = ...`. Bare `x: int` becomes `x = 0` so the variable at least exists.
+7. ✅ **Relative imports** `from .x import y` / `from ..pkg.mod import z` parse and bind names as dummies. Cross-file resolution still post-bootstrap.
+8. ✅ **Decorators** `@dataclass`, `@staticmethod`, `@classmethod`, etc. parse and are silently dropped on `def` and `class` (both top-level and method).
+9. ✅ **`is` / `is not`** parse and lower to bit-equality (same as `==` / `!=` on the raw 8-byte slot).
+10. ✅ **`self.x += rhs`** (aug-assign on attribute targets) lowers to `self.x = self.x + rhs`.
+11. **`*args` (variadic)** — `emitf` is the worst offender; many helpers also take `*lines`.
+12. **Exception classes** — `CompileError`, `LexError`, `SemaError`. The current `raise <str>` form can't carry structured data (positions, codes). Either lift `raise` to accept instances or rewrite the compiler to thread error info manually.
+13. **`isinstance(x, (A, B, C))`** — tuple form for "or" type checks; pervasive in `gen_stmt` / `gen_expr`. Blocked on first-class tuples.
+14. **`open(path)` / `read()` / `write()` and `with` statement** — the driver reads source files and writes `.asm`. Today it uses `pathlib.Path.read_text` and the `with` form of `open`.
+15. **`sys.argv`, `sys.exit`, `subprocess.run`** — the CLI entry point and the driver. `subprocess.run` is what calls NASM and gcc; without it, no linking.
+16. **List comprehensions** — peppered through the parser and codegen. Each can in principle be rewritten as a manual loop, but that's a lot of churn.
+17. **`enumerate`, `zip`, `sorted`** — every "walk both lists in parallel" or "produce a sorted output" site.
+18. **List methods**: `list.extend`, `list.index`, slicing assignment `xs[:] = ...`.
+19. **`hasattr` / `getattr`** — used in a couple of places in sema for `b.arg_types` checks.
+20. **Set literal `{a, b, c}` and set-`in`** — `KEYWORDS = {...}` in the lexer is a load-bearing set membership.
+21. **Keyword arguments at call sites** — `argparse.ArgumentParser(prog="mamba")`, every `field(default_factory=...)`. Big lift (needs a new call ABI).
 
 ### Things the compiler doesn't use (so we don't need them for self-host)
 
-Generators / `yield`, async / `await`, `with` (for non-file uses), `match/case`, `lambda` (mostly), decorators beyond `@dataclass`, multiple inheritance, `super()`, `**kwargs`, `del`, walrus `:=`, set literals, comprehension `if` clauses (used once or twice — can be unrolled), most of `re`, `json`, `time`, `random`, `os.path`. These all stay on the roadmap for the 99.9% target but **don't** gate the July milestone.
+Generators / `yield`, async / `await`, `with` (for non-file uses), `match/case`, `lambda` (mostly), multiple inheritance, `super()`, `**kwargs`, `del`, walrus `:=`, comprehension `if` clauses (used once or twice — can be unrolled), most of `re`, `json`, `time`, `random`, `os.path`. These all stay on the roadmap for the 99.9% target but **don't** gate the July milestone.
 
 ### Measuring progress
 

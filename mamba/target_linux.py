@@ -5,6 +5,7 @@ hello-world but painful for everything else: malloc/realloc, printf with %lld,
 fgets, atoll, sin/cos/sqrt for math. We now link against libc through gcc as
 the linker driver, mirroring the Windows path.
 """
+
 from __future__ import annotations
 
 from .codegen import Codegen, FuncInfo
@@ -17,15 +18,31 @@ class LinuxCodegen(Codegen):
     section_text = "section .text"
     section_data = "section .data"
     section_rodata = "section .rodata"
-    label_main = "main"     # we let libc's _start call main()
+    label_main = "main"  # we let libc's _start call main()
 
     def emit_externs(self) -> None:
         self.emit("global main")
         for name in (
-            "printf", "fputs", "fputc", "puts", "putchar",
-            "strlen", "strcmp", "strstr", "strdup",
-            "atoll", "atof", "sprintf", "fgets", "stdin",
-            "malloc", "realloc", "free", "memcpy", "memset", "exit",
+            "printf",
+            "fputs",
+            "fputc",
+            "puts",
+            "putchar",
+            "strlen",
+            "strcmp",
+            "strstr",
+            "strdup",
+            "atoll",
+            "atof",
+            "sprintf",
+            "fgets",
+            "stdin",
+            "malloc",
+            "realloc",
+            "free",
+            "memcpy",
+            "memset",
+            "exit",
             "fmod",
         ):
             self.emit(f"extern {name}")
@@ -65,13 +82,15 @@ class LinuxCodegen(Codegen):
 
     def _emit_print_int_no_newline(self) -> None:
         # printf("%lld", rax)
-        self.emitf("mov rsi, rax", "lea rdi, [fmt_int]",
-                   "xor rax, rax",   # variadic: zero AL = no XMM args
-                   "call printf")
+        self.emitf(
+            "mov rsi, rax",
+            "lea rdi, [fmt_int]",
+            "xor rax, rax",  # variadic: zero AL = no XMM args
+            "call printf",
+        )
 
     def _emit_print_str_ptr_no_newline(self) -> None:
-        self.emitf("mov rsi, rax", "lea rdi, [fmt_str]",
-                   "xor rax, rax", "call printf")
+        self.emitf("mov rsi, rax", "lea rdi, [fmt_str]", "xor rax, rax", "call printf")
 
     def _emit_print_space(self) -> None:
         self.emitf("mov rdi, 32", "call putchar")
@@ -84,12 +103,14 @@ class LinuxCodegen(Codegen):
 
     def _emit_int_to_str(self) -> None:
         # sprintf(buf, "%lld", rax); return buf in rax
-        self.emitf("mov rdx, rax",                # third arg
-                   "lea rsi, [fmt_int]",          # second arg
-                   "lea rdi, [itoa_str_buf]",     # first arg
-                   "xor rax, rax",
-                   "call sprintf",
-                   "lea rax, [itoa_str_buf]")
+        self.emitf(
+            "mov rdx, rax",  # third arg
+            "lea rsi, [fmt_int]",  # second arg
+            "lea rdi, [itoa_str_buf]",  # first arg
+            "xor rax, rax",
+            "call sprintf",
+            "lea rax, [itoa_str_buf]",
+        )
 
     def _emit_str_to_int(self) -> None:
         self.emitf("mov rdi, rax", "call atoll")
@@ -103,16 +124,16 @@ class LinuxCodegen(Codegen):
     def _emit_print_float_no_newline(self) -> None:
         # printf("%g", xmm0). System V: float arg already in xmm0;
         # AL = number of XMM args used = 1.
-        self.emitf("lea rdi, [fmt_flt]",
-                   "mov al, 1",
-                   "call printf")
+        self.emitf("lea rdi, [fmt_flt]", "mov al, 1", "call printf")
 
     def _emit_float_to_str(self) -> None:
-        self.emitf("lea rdi, [itoa_str_buf]",
-                   "lea rsi, [fmt_flt]",
-                   "mov al, 1",
-                   "call sprintf",
-                   "lea rax, [itoa_str_buf]")
+        self.emitf(
+            "lea rdi, [itoa_str_buf]",
+            "lea rsi, [fmt_flt]",
+            "mov al, 1",
+            "call sprintf",
+            "lea rax, [itoa_str_buf]",
+        )
 
     def _emit_str_to_float(self) -> None:
         self.emitf("mov rdi, rax", "call atof")
@@ -127,8 +148,7 @@ class LinuxCodegen(Codegen):
         self.emitf("mov rdi, rax", "xor rsi, rsi", "mov rdx, rbx", "call memset")
 
     def _emit_libc_strcmp(self) -> None:
-        self.emitf("mov rdi, rax", "mov rsi, rbx", "call strcmp",
-                   "movsxd rax, eax")
+        self.emitf("mov rdi, rax", "mov rsi, rbx", "call strcmp", "movsxd rax, eax")
 
     def _emit_libc_strdup(self) -> None:
         self.emitf("mov rdi, rax", "call strdup")
@@ -180,8 +200,7 @@ class LinuxCodegen(Codegen):
 
         if self.use_runtime_lib:
             # Skip emitting helper bodies; runtime library provides them.
-            for sym in ("_runtime_input", "_runtime_list_append",
-                        "_runtime_list_pop"):
+            for sym in ("_runtime_input", "_runtime_list_append", "_runtime_list_pop"):
                 self.emit(f"extern {sym}")
             # Still emit the shared runtime (dict/exception) references.
             self.emit_dict_runtime()
@@ -192,18 +211,21 @@ class LinuxCodegen(Codegen):
         self.emit("section .text")
         self.label("_runtime_input")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
-        self.emitf("mov rdx, [stdin]",
-                   "mov esi, 255",
-                   "lea rdi, [input_buf]",
-                   "call fgets")
-        self.emitf("lea rdi, [input_buf]",
-                   "call strlen",
-                   "lea rdi, [input_buf]",
-                   "test rax, rax", "jz ._li_done",
-                   "mov dl, [rdi+rax-1]",
-                   "cmp dl, 10", "jne ._li_done",
-                   "dec rax",
-                   "mov byte [rdi+rax], 0")
+        self.emitf(
+            "mov rdx, [stdin]", "mov esi, 255", "lea rdi, [input_buf]", "call fgets"
+        )
+        self.emitf(
+            "lea rdi, [input_buf]",
+            "call strlen",
+            "lea rdi, [input_buf]",
+            "test rax, rax",
+            "jz ._li_done",
+            "mov dl, [rdi+rax-1]",
+            "cmp dl, 10",
+            "jne ._li_done",
+            "dec rax",
+            "mov byte [rdi+rax], 0",
+        )
         self.label("._li_done")
         self.emitf("lea rax, [input_buf]", "leave", "ret")
 
@@ -211,40 +233,46 @@ class LinuxCodegen(Codegen):
         self.label("_runtime_list_append")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
         self.emitf("mov [rbp-8], rax", "mov [rbp-16], rbx")
-        self.emitf("mov rcx, [rax+8]",
-                   "cmp rcx, [rax]",
-                   "jl ._la_store")
-        self.emitf("mov rcx, [rax]",
-                   "shl rcx, 1",
-                   "cmp rcx, 4", "jge ._la_grow",
-                   "mov rcx, 4")
+        self.emitf("mov rcx, [rax+8]", "cmp rcx, [rax]", "jl ._la_store")
+        self.emitf(
+            "mov rcx, [rax]", "shl rcx, 1", "cmp rcx, 4", "jge ._la_grow", "mov rcx, 4"
+        )
         self.label("._la_grow")
-        self.emitf("mov [rbp-24], rcx",
-                   "shl rcx, 3",
-                   "mov rsi, rcx",                # 2nd arg = new size
-                   "mov rax, [rbp-8]",
-                   "mov rdi, [rax+16]",           # 1st arg = old buf ptr
-                   "call realloc")
-        self.emitf("mov rbx, [rbp-8]",
-                   "mov [rbx+16], rax",
-                   "mov rdx, [rbp-24]",
-                   "mov [rbx], rdx")
+        self.emitf(
+            "mov [rbp-24], rcx",
+            "shl rcx, 3",
+            "mov rsi, rcx",  # 2nd arg = new size
+            "mov rax, [rbp-8]",
+            "mov rdi, [rax+16]",  # 1st arg = old buf ptr
+            "call realloc",
+        )
+        self.emitf(
+            "mov rbx, [rbp-8]",
+            "mov [rbx+16], rax",
+            "mov rdx, [rbp-24]",
+            "mov [rbx], rdx",
+        )
         self.label("._la_store")
-        self.emitf("mov rax, [rbp-8]",
-                   "mov rcx, [rax+8]",
-                   "mov rbx, [rbp-16]",
-                   "mov rdx, [rax+16]",
-                   "mov [rdx+rcx*8], rbx",
-                   "inc qword [rax+8]",
-                   "leave", "ret")
+        self.emitf(
+            "mov rax, [rbp-8]",
+            "mov rcx, [rax+8]",
+            "mov rbx, [rbp-16]",
+            "mov rdx, [rax+16]",
+            "mov [rdx+rcx*8], rbx",
+            "inc qword [rax+8]",
+            "leave",
+            "ret",
+        )
 
         self.label("_runtime_list_pop")
-        self.emitf("mov rcx, [rax+8]",
-                   "dec rcx",
-                   "mov [rax+8], rcx",
-                   "mov rdx, [rax+16]",
-                   "mov rax, [rdx+rcx*8]",
-                   "ret")
+        self.emitf(
+            "mov rcx, [rax+8]",
+            "dec rcx",
+            "mov [rax+8], rcx",
+            "mov rdx, [rax+16]",
+            "mov rax, [rdx+rcx*8]",
+            "ret",
+        )
 
         # Dict runtime (shared across targets).
         self.emit_dict_runtime()

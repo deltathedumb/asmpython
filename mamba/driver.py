@@ -1,4 +1,5 @@
 """End-to-end driver: source.py -> .asm -> .o -> executable."""
+
 from __future__ import annotations
 
 import os
@@ -8,7 +9,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import CompileError
 from .lexer import Lexer
 from .parser import Parser
 from .sema import analyze as sema_analyze
@@ -30,6 +30,45 @@ def _which_required(name: str) -> str:
     return p
 
 
+def _resolve_tool(name: str, *, override: Path | None, env_var: str) -> str:
+    """Find an external toolchain binary, checking in priority order:
+
+    1. ``--<name>`` CLI override (caller-provided ``override`` Path).
+    2. ``$MAMBA_<NAME>`` environment variable.
+    3. A ``bin/`` directory adjacent to the install (lets the standalone
+       archive ship NASM/gcc next to ``mamba.bat``).
+    4. The system PATH.
+
+    Raises if none of those produce a runnable file. Errors mention every
+    location we tried so the user knows where to drop a binary.
+    """
+    tried: list[str] = []
+    if override is not None:
+        p = Path(override)
+        if p.is_file():
+            return str(p.resolve())
+        tried.append(f"--{name} {override}")
+    env = os.environ.get(env_var)
+    if env:
+        p = Path(env)
+        if p.is_file():
+            return str(p.resolve())
+        tried.append(f"${env_var}={env}")
+    # Look in <repo-root>/bin for a bundled copy. The repo root is the
+    # grandparent of this file (driver.py is at mamba/driver.py).
+    bundled = Path(__file__).resolve().parent.parent / "bin"
+    for suffix in ("", ".exe"):
+        cand = bundled / f"{name}{suffix}"
+        if cand.is_file():
+            return str(cand)
+    tried.append(f"{bundled}/{name}[.exe]")
+    path_hit = shutil.which(name)
+    if path_hit:
+        return path_hit
+    tried.append("$PATH")
+    raise RuntimeError(f"could not find '{name}'. Looked in: " + ", ".join(tried))
+
+
 def _run(cmd: list[str]) -> None:
     print("$", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -49,6 +88,9 @@ def compile_source(
     emit_asm_only: bool = False,
     keep_intermediates: bool = False,
     use_runtime_lib: bool = False,
+    nasm_path: Path | None = None,
+    gcc_path: Path | None = None,
+    bundle_mode: str = "onefile",
 ) -> BuildResult:
     tokens = Lexer(src).tokenize()
     module = Parser(tokens).parse()
@@ -81,24 +123,46 @@ def compile_source(
     if emit_asm_only:
         return BuildResult(asm_path=asm_path, obj_path=None, exe_path=None)
 
-    nasm = _which_required("nasm")
+    nasm = _resolve_tool("nasm", override=nasm_path, env_var="MAMBA_NASM")
     # `-w-label-redef-late`: NASM 2.16+ promotes "label changed between
     # passes" to an error by default. We hit this in the dict runtime when
     # forward references force the encoder to pick a different instruction
     # size on the second pass. The final object code is still correct.
-    _run([nasm, "-f", nasm_fmt, "-w-label-redef-late",
-          str(asm_path), "-o", str(obj_path)])
+    _run(
+        [
+            nasm,
+            "-f",
+            nasm_fmt,
+            "-w-label-redef-late",
+            str(asm_path),
+            "-o",
+            str(obj_path),
+        ]
+    )
 
     # Both targets now use gcc as the linker driver so the C runtime
     # (msvcrt on Windows, libc on Linux) is linked in transparently.
-    gcc = _which_required("gcc")
-    link_cmd = [gcc, str(obj_path), "-o", str(exe_path)]
-    if use_runtime_lib:
-        from .runtime.build import build_runtime, _build_dir
-        # Ensure the runtime archive is up to date for this target.
-        build_runtime(target)
-        link_cmd += [f"-L{_build_dir()}", f"-lmamba_rt_{'win' if target == 'windows' else 'linux'}"]
-    _run(link_cmd)
+    gcc = _resolve_tool("gcc", override=gcc_path, env_var="MAMBA_GCC")
+
+    if bundle_mode == "onedir":
+        exe_path = _link_onedir(
+            target=target,
+            obj_path=obj_path,
+            out_path=exe_path,
+            gcc=gcc,
+        )
+    else:
+        link_cmd = [gcc, str(obj_path), "-o", str(exe_path)]
+        if use_runtime_lib:
+            from .runtime.build import build_runtime, _build_dir
+
+            # Ensure the runtime archive is up to date for this target.
+            build_runtime(target)
+            link_cmd += [
+                f"-L{_build_dir()}",
+                f"-lmamba_rt_{'win' if target == 'windows' else 'linux'}",
+            ]
+        _run(link_cmd)
 
     if not keep_intermediates:
         try:
@@ -108,6 +172,60 @@ def compile_source(
 
     print(f"wrote {exe_path}")
     return BuildResult(asm_path=asm_path, obj_path=obj_path, exe_path=exe_path)
+
+
+def _link_onedir(
+    *, target: str, obj_path: Path, out_path: Path, gcc: str
+) -> Path:
+    """Produce a `<stem>_onedir/` folder containing the exe and a `lib/`
+    sibling with the shared runtime library (and, eventually, one .dll/.so
+    per imported user module).
+
+    Returns the final path of the executable inside that folder.
+    """
+    from .runtime.build import build_runtime_shared
+
+    stem = out_path.with_suffix("")
+    bundle_dir = stem.parent / f"{stem.name}_onedir"
+    lib_dir = bundle_dir / "lib"
+    lib_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build the shared runtime library and copy it into the bundle.
+    shared_path = build_runtime_shared(target)
+    bundled_shared = lib_dir / shared_path.name
+    if bundled_shared.exists():
+        bundled_shared.unlink()
+    bundled_shared.write_bytes(shared_path.read_bytes())
+
+    exe_path = bundle_dir / out_path.name
+
+    # Link against the shared library by short name. Use rpath/$ORIGIN on
+    # Linux so the loader looks in `./lib/` next to the executable.
+    short = "mamba_rt_" + ("win" if target == "windows" else "linux")
+    link_cmd = [
+        gcc,
+        str(obj_path),
+        "-o",
+        str(exe_path),
+        f"-L{lib_dir}",
+        f"-l{short}",
+    ]
+    if target == "linux":
+        link_cmd += ["-Wl,-rpath,$ORIGIN/lib"]
+    _run(link_cmd)
+
+    # On Windows the loader searches the same directory as the .exe, so we
+    # also drop a copy of the .dll next to it. (Keeping the one in lib/ too
+    # is intentional — that's the canonical location for any future per-
+    # module dlls; the side-by-side copy is just so the existing search
+    # rules find the runtime without LD_LIBRARY_PATH analogues.)
+    if target == "windows":
+        side_by_side = bundle_dir / shared_path.name
+        if side_by_side.exists():
+            side_by_side.unlink()
+        side_by_side.write_bytes(shared_path.read_bytes())
+
+    return exe_path
 
 
 def detect_default_target() -> str:

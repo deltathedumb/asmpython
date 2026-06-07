@@ -3,6 +3,7 @@
 Emits INDENT/DEDENT tokens like CPython's tokenizer. Newlines inside
 parentheses are suppressed so multi-line argument lists are legal.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,12 +13,31 @@ from .errors import LexError, SourcePos
 
 
 KEYWORDS = {
-    "def", "return", "if", "elif", "else", "while", "for", "in",
-    "and", "or", "not", "True", "False", "None", "pass",
-    "break", "continue",
-    "import", "from", "as",
+    "def",
+    "return",
+    "if",
+    "elif",
+    "else",
+    "while",
+    "for",
+    "in",
+    "and",
+    "or",
+    "not",
+    "True",
+    "False",
+    "None",
+    "pass",
+    "break",
+    "continue",
+    "import",
+    "from",
+    "as",
     "class",
-    "try", "except", "raise",
+    "try",
+    "except",
+    "raise",
+    "is",
 }
 
 
@@ -154,7 +174,7 @@ class Lexer:
         start = self.pos
         while self._peek() and (self._peek().isalnum() or self._peek() == "_"):
             self._advance()
-        word = self.src[start:self.pos]
+        word = self.src[start : self.pos]
         if word in KEYWORDS:
             return Token("KEYWORD", word, line, col)
         return Token("NAME", word, line, col)
@@ -164,14 +184,17 @@ class Lexer:
         start = self.pos
         # 0x..., 0b..., 0o... prefixes share a single int-parser path.
         if self._peek() == "0" and self._peek(1) in ("x", "X", "b", "B", "o", "O"):
-            self._advance(); self._advance()
+            self._advance()
+            self._advance()
             while self._peek() and (self._peek().isalnum() or self._peek() == "_"):
                 self._advance()
-            text = self.src[start:self.pos].replace("_", "")
+            text = self.src[start : self.pos].replace("_", "")
             try:
                 value = int(text, 0)
             except ValueError:
-                raise LexError(f"invalid numeric literal {text!r}", SourcePos(line, col))
+                raise LexError(
+                    f"invalid numeric literal {text!r}", SourcePos(line, col)
+                )
             return Token("INT", value, line, col)
         while self._peek() and (self._peek().isdigit() or self._peek() == "_"):
             self._advance()
@@ -188,7 +211,7 @@ class Lexer:
                 self._advance()
             while self._peek() and (self._peek().isdigit() or self._peek() == "_"):
                 self._advance()
-        text = self.src[start:self.pos].replace("_", "")
+        text = self.src[start : self.pos].replace("_", "")
         if is_float:
             try:
                 return Token("FLOAT", float(text), line, col)
@@ -221,14 +244,23 @@ class Lexer:
             if c == "\\":
                 self._advance()
                 esc = self._advance()
-                text.append({
-                    "n": "\n", "t": "\t", "r": "\r", "0": "\0",
-                    "\\": "\\", "'": "'", '"': '"', "{": "{", "}": "}",
-                }.get(esc, esc))
+                text.append(
+                    {
+                        "n": "\n",
+                        "t": "\t",
+                        "r": "\r",
+                        "0": "\0",
+                        "\\": "\\",
+                        "'": "'",
+                        '"': '"',
+                        "{": "{",
+                        "}": "}",
+                    }.get(esc, esc)
+                )
                 continue
             if c == "{":
                 self._advance()
-                if self._peek() == "{":   # `{{` escapes to literal `{`
+                if self._peek() == "{":  # `{{` escapes to literal `{`
                     self._advance()
                     text.append("{")
                     continue
@@ -277,6 +309,13 @@ class Lexer:
     def _read_string(self) -> Token:
         line, col = self.line, self.col
         quote = self._advance()
+        # Triple-quoted (""" or ''')? Two more identical quotes opens a
+        # multi-line literal that consumes everything until the matching
+        # triple-quote terminator. Embedded newlines are preserved verbatim.
+        if self._peek() == quote and self._peek(1) == quote:
+            self._advance()
+            self._advance()
+            return self._read_triple_string(quote, line, col)
         chars: list[str] = []
         while True:
             c = self._peek()
@@ -290,33 +329,90 @@ class Lexer:
             if c == "\\":
                 self._advance()
                 esc = self._advance()
-                chars.append({
-                    "n": "\n", "t": "\t", "r": "\r", "0": "\0",
-                    "\\": "\\", "'": "'", '"': '"',
-                }.get(esc, esc))
+                chars.append(
+                    {
+                        "n": "\n",
+                        "t": "\t",
+                        "r": "\r",
+                        "0": "\0",
+                        "\\": "\\",
+                        "'": "'",
+                        '"': '"',
+                    }.get(esc, esc)
+                )
             else:
+                chars.append(self._advance())
+        return Token("STRING", "".join(chars), line, col)
+
+    def _read_triple_string(self, quote: str, line: int, col: int) -> Token:
+        """Reader for the body of a triple-quoted literal. Opening triple
+        quote already consumed by the caller."""
+        chars: list[str] = []
+        while True:
+            c = self._peek()
+            if c == "":
+                raise LexError(
+                    "unterminated triple-quoted string", SourcePos(line, col)
+                )
+            if c == quote and self._peek(1) == quote and self._peek(2) == quote:
+                self._advance()
+                self._advance()
+                self._advance()
+                break
+            if c == "\\":
+                self._advance()
+                esc = self._advance()
+                chars.append(
+                    {
+                        "n": "\n",
+                        "t": "\t",
+                        "r": "\r",
+                        "0": "\0",
+                        "\\": "\\",
+                        "'": "'",
+                        '"': '"',
+                    }.get(esc, esc)
+                )
+            else:
+                # Newlines pass through unchanged (_advance updates self.line).
                 chars.append(self._advance())
         return Token("STRING", "".join(chars), line, col)
 
     def _read_operator(self) -> Token:
         line, col = self.line, self.col
-        three = self.src[self.pos:self.pos + 3]
+        three = self.src[self.pos : self.pos + 3]
         if three == "//=":
-            self._advance(); self._advance(); self._advance()
+            self._advance()
+            self._advance()
+            self._advance()
             return Token("OP", three, line, col)
-        two = self.src[self.pos:self.pos + 2]
+        two = self.src[self.pos : self.pos + 2]
         if two in (
-            "==", "!=", "<=", ">=", "->", "//",
-            "<<", ">>", "+=", "-=", "*=", "/=", "%=",
-            "&=", "|=", "^=",
+            "==",
+            "!=",
+            "<=",
+            ">=",
+            "->",
+            "//",
+            "<<",
+            ">>",
+            "+=",
+            "-=",
+            "*=",
+            "/=",
+            "%=",
+            "&=",
+            "|=",
+            "^=",
         ):
-            self._advance(); self._advance()
+            self._advance()
+            self._advance()
             return Token("OP", two, line, col)
         ch = self._advance()
         if ch in "([{":
             self.paren_depth += 1
         elif ch in ")]}":
             self.paren_depth -= 1
-        if ch in "+-*/%<>=,:()[]{}&|^~.":
+        if ch in "+-*/%<>=,:()[]{}&|^~.@":
             return Token("OP", ch, line, col)
         raise LexError(f"unexpected character {ch!r}", SourcePos(line, col))

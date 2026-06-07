@@ -12,6 +12,7 @@ Design notes:
   inline by the target-specific subclass because they differ wildly across
   OSes (Linux uses raw syscalls; Windows calls into msvcrt).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -22,18 +23,24 @@ from . import ast_nodes as A
 
 # --- Function metadata --------------------------------------------------------
 
+
 @dataclass
 class FuncInfo:
     name: str
     params: list[str]
-    locals_: dict[str, int] = field(default_factory=dict)   # name -> RBP offset (negative)
-    local_types: dict[str, str] = field(default_factory=dict)  # name -> 'int'|'float'|'str'|'list'
-    frame_size: int = 0                                     # bytes to subtract from RSP
+    locals_: dict[str, int] = field(
+        default_factory=dict
+    )  # name -> RBP offset (negative)
+    local_types: dict[str, str] = field(
+        default_factory=dict
+    )  # name -> 'int'|'float'|'str'|'list'
+    frame_size: int = 0  # bytes to subtract from RSP
     # Default value expressions, one per param (None for required).
     defaults: list = field(default_factory=list)
 
 
 # --- Base codegen -------------------------------------------------------------
+
 
 class Codegen:
     """Common shape; subclasses provide the target-specific prologue,
@@ -43,14 +50,14 @@ class Codegen:
     section_text: str = ""
     section_data: str = ""
     section_rodata: str = ""
-    label_main: str = ""        # public entry symbol (e.g. _start on Linux, main on Windows)
+    label_main: str = ""  # public entry symbol (e.g. _start on Linux, main on Windows)
 
     def __init__(self, mod: A.Module, *, use_runtime_lib: bool = False) -> None:
         self.mod = mod
         # If True, skip emitting runtime bodies and assume libmamba_rt is linked.
         self.use_runtime_lib = use_runtime_lib
         self.lines: list[str] = []
-        self.strings: list[tuple[str, str]] = []   # (label, bytes-literal)
+        self.strings: list[tuple[str, str]] = []  # (label, bytes-literal)
         self.floats: list[tuple[str, float]] = []  # (label, value)
         self.label_counter = 0
         # FFI surface: { mamba_name: stdlib.Func } across all imports, used
@@ -86,8 +93,8 @@ class Codegen:
         self.lines.append(line)
 
     def emitf(self, *lines: str) -> None:
-        for l in lines:
-            self.lines.append("    " + l)
+        for line in lines:
+            self.lines.append("    " + line)
 
     def label(self, name: str) -> None:
         self.lines.append(name + ":")
@@ -161,9 +168,7 @@ class Codegen:
         The output declares every `_runtime_*` symbol (plus scratch buffers)
         as `global` so user programs can `extern` them at link time.
         """
-        assert not self.use_runtime_lib, (
-            "Runtime build must emit bodies, not externs."
-        )
+        assert not self.use_runtime_lib, "Runtime build must emit bodies, not externs."
         self.emit(f"; mamba runtime library, target = {self.__class__.__name__}")
         self.emit("BITS 64")
         self.emit("default rel")
@@ -305,6 +310,7 @@ class Codegen:
             if i < len(f.defaults) and f.defaults[i] is not None:
                 ty = A.expr_type(f.defaults[i])
             info.local_types[p] = ty
+
         # Walk the body for any name that becomes bound.
         def define(name: str, ty: str = "int") -> None:
             nonlocal offset
@@ -346,20 +352,26 @@ class Codegen:
                 lt, rt = A.expr_type(expr.left), A.expr_type(expr.right)
                 if "str" in (lt, rt):
                     define(f"__binstr_{id(expr)}")
-                walk_expr(expr.left); walk_expr(expr.right)
+                walk_expr(expr.left)
+                walk_expr(expr.right)
             elif isinstance(expr, A.Compare):
                 # Two str operands with ==/!= or in/not in -> runtime call
                 # needs a scratch slot to park the lhs across the rhs eval.
                 if len(expr.ops) == 1 and len(expr.operands) == 2:
                     op = expr.ops[0]
-                    lt, rt = A.expr_type(expr.operands[0]), A.expr_type(expr.operands[1])
+                    lt, rt = (
+                        A.expr_type(expr.operands[0]),
+                        A.expr_type(expr.operands[1]),
+                    )
                     if op in ("==", "!=") and lt == "str" and rt == "str":
                         define(f"__strcmp_{id(expr)}")
                     elif op in ("in", "not in") and lt == "str" and rt == "str":
                         define(f"__strin_{id(expr)}")
-                for o in expr.operands: walk_expr(o)
+                for o in expr.operands:
+                    walk_expr(o)
             elif isinstance(expr, A.BoolOp):
-                walk_expr(expr.left); walk_expr(expr.right)
+                walk_expr(expr.left)
+                walk_expr(expr.right)
             elif isinstance(expr, A.UnaryOp):
                 walk_expr(expr.operand)
             elif isinstance(expr, A.Call):
@@ -367,22 +379,30 @@ class Codegen:
                 if expr.func in self.ffi_funcs:
                     fn = self.ffi_funcs[expr.func]
                     for k in range(len(expr.args)):
-                        define(f"__ffi_arg_{id(fn)}_{k}",
-                               "float" if fn.arg_types[k] == "float" else "int")
+                        define(
+                            f"__ffi_arg_{id(fn)}_{k}",
+                            "float" if fn.arg_types[k] == "float" else "int",
+                        )
                 # Constructor needs a slot to park the freshly-allocated
                 # instance ptr across the __init__ call.
                 if expr.func in self.mod.classes_sig:
                     define(f"__ctor_inst_{id(expr)}")
-                for a in expr.args: walk_expr(a)
+                for a in expr.args:
+                    walk_expr(a)
             elif isinstance(expr, A.MethodCall):
                 # math.sqrt(x) — same FFI scratch reservation.
-                if isinstance(expr.obj, A.Name) and expr.obj.name in self.imported_modules:
+                if (
+                    isinstance(expr.obj, A.Name)
+                    and expr.obj.name in self.imported_modules
+                ):
                     bindings = self.imported_modules[expr.obj.name]
                     b = bindings.get(expr.method)
                     if b is not None and hasattr(b, "arg_types"):
                         for k in range(len(expr.args)):
-                            define(f"__ffi_arg_{id(b)}_{k}",
-                                   "float" if b.arg_types[k] == "float" else "int")
+                            define(
+                                f"__ffi_arg_{id(b)}_{k}",
+                                "float" if b.arg_types[k] == "float" else "int",
+                            )
                 else:
                     # String methods spill the object pointer (and one extra
                     # for replace's 2-arg signature) across argument eval.
@@ -391,29 +411,38 @@ class Codegen:
                         if len(expr.args) >= 2:
                             define(f"__strm_a1_{id(expr)}")
                     walk_expr(expr.obj)
-                for a in expr.args: walk_expr(a)
+                for a in expr.args:
+                    walk_expr(a)
             elif isinstance(expr, A.Subscript):
                 if isinstance(expr.index, A.Slice):
                     # slice needs 3 scratch slots: obj, start, stop.
                     define(f"__strsl_obj_{id(expr)}")
                     define(f"__strsl_start_{id(expr)}")
                     walk_expr(expr.obj)
-                    if expr.index.start is not None: walk_expr(expr.index.start)
-                    if expr.index.stop is not None: walk_expr(expr.index.stop)
+                    if expr.index.start is not None:
+                        walk_expr(expr.index.start)
+                    if expr.index.stop is not None:
+                        walk_expr(expr.index.stop)
                 elif A.expr_type(expr.obj) == "str":
                     define(f"__stridx_{id(expr)}")
-                    walk_expr(expr.obj); walk_expr(expr.index)
+                    walk_expr(expr.obj)
+                    walk_expr(expr.index)
                 else:
-                    walk_expr(expr.obj); walk_expr(expr.index)
+                    walk_expr(expr.obj)
+                    walk_expr(expr.index)
             elif isinstance(expr, A.Attr):
                 # Module attr access doesn't need to evaluate the obj.
-                if isinstance(expr.obj, A.Name) and expr.obj.name in self.imported_modules:
+                if (
+                    isinstance(expr.obj, A.Name)
+                    and expr.obj.name in self.imported_modules
+                ):
                     pass
                 else:
                     walk_expr(expr.obj)
             elif isinstance(expr, A.FString):
                 define(f"__fstr_acc_{id(expr)}")
-                for s in expr.segments: walk_expr(s)
+                for s in expr.segments:
+                    walk_expr(s)
 
         def walk(stmts):
             for s in stmts:
@@ -440,6 +469,8 @@ class Codegen:
                             var_ty = s.iter.el_type
                     elif s.iter is not None and A.expr_type(s.iter) == "dict":
                         var_ty = "str"
+                    elif s.iter is not None and A.expr_type(s.iter) == "str":
+                        var_ty = "str"
                     define(s.var, var_ty)
                     define(f"__for_stop_{id(s)}", "int")
                     define(f"__for_step_{id(s)}", "int")
@@ -447,15 +478,19 @@ class Codegen:
                         define(f"__for_iter_{id(s)}", "int")  # ptr; treat as int slot
                         walk_expr(s.iter)
                     else:
-                        for a in s.range_args: walk_expr(a)
+                        for a in s.range_args:
+                            walk_expr(a)
                     walk(s.body)
                 elif isinstance(s, A.If):
                     walk_expr(s.test)
-                    walk(s.then); walk(s.orelse)
+                    walk(s.then)
+                    walk(s.orelse)
                 elif isinstance(s, A.While):
-                    walk_expr(s.test); walk(s.body)
+                    walk_expr(s.test)
+                    walk(s.body)
                 elif isinstance(s, A.Return):
-                    if s.value is not None: walk_expr(s.value)
+                    if s.value is not None:
+                        walk_expr(s.value)
                 elif isinstance(s, A.ExprStmt):
                     walk_expr(s.expr)
                 elif isinstance(s, A.IndexAssign):
@@ -476,6 +511,7 @@ class Codegen:
                     walk(s.handler)
                 elif isinstance(s, A.Raise):
                     walk_expr(s.value)
+
         walk(f.body)
         # Frame size must be 16-byte aligned for ABI compliance before calls.
         frame = -offset
@@ -514,16 +550,14 @@ class Codegen:
             for i, target in enumerate(stmt.targets):
                 tmp = info.locals_[f"__tup_tmp_{id(stmt)}_{i}"]
                 off = info.locals_[target]
-                self.emitf(f"mov rax, [rbp{tmp:+d}]",
-                           f"mov [rbp{off:+d}], rax")
+                self.emitf(f"mov rax, [rbp{tmp:+d}]", f"mov [rbp{off:+d}], rax")
             return
         if isinstance(stmt, A.AugAssign):
             off = info.locals_[stmt.target]
             ty = info.local_types.get(stmt.target, "int")
             if ty == "float":
                 self._gen_expr_as_float(stmt.value, info, A.expr_type(stmt.value))
-                self.emitf("movsd xmm1, xmm0",
-                           f"movsd xmm0, [rbp{off:+d}]")
+                self.emitf("movsd xmm1, xmm0", f"movsd xmm0, [rbp{off:+d}]")
                 # Apply float op in place.
                 self._emit_binop_inline_float(stmt.op)
                 self.emitf(f"movsd [rbp{off:+d}], xmm0")
@@ -590,29 +624,35 @@ class Codegen:
                 self.gen_expr(stmt.value, info)
                 self.emitf("push rax")
                 self.gen_expr(stmt.target.obj, info)  # rax = header
-                self.emitf("pop rcx",                 # rcx = value
-                           "pop rbx",                 # rbx = key
-                           "call _runtime_dict_set")
+                self.emitf(
+                    "pop rcx",  # rcx = value
+                    "pop rbx",  # rbx = key
+                    "call _runtime_dict_set",
+                )
                 return
             self.gen_expr(stmt.target.index, info)
             self.emitf("push rax")
             self.gen_expr(stmt.value, info)
             self.emitf("push rax")
-            self.gen_expr(stmt.target.obj, info)   # rax = header
-            self.emitf("pop rbx",                  # rbx = value
-                       "pop rcx",                  # rcx = index
-                       f"mov rax, [rax+{self.LIST_BUF_OFF}]",
-                       "mov [rax+rcx*8], rbx")
+            self.gen_expr(stmt.target.obj, info)  # rax = header
+            self.emitf(
+                "pop rbx",  # rbx = value
+                "pop rcx",  # rcx = index
+                f"mov rax, [rax+{self.LIST_BUF_OFF}]",
+                "mov [rax+rcx*8], rbx",
+            )
             return
         if isinstance(stmt, A.AttrAssign):
             # obj.name = value  ->  dict_set(obj, "name", value)
             key_label, _ = self.intern_string(stmt.name)
             self.gen_expr(stmt.value, info)
             self.emitf("push rax")
-            self.gen_expr(stmt.obj, info)          # rax = instance dict
-            self.emitf("pop rcx",                  # rcx = value
-                       f"lea rbx, [{key_label}]",  # rbx = key
-                       "call _runtime_dict_set")
+            self.gen_expr(stmt.obj, info)  # rax = instance dict
+            self.emitf(
+                "pop rcx",  # rcx = value
+                f"lea rbx, [{key_label}]",  # rbx = key
+                "call _runtime_dict_set",
+            )
             return
         if isinstance(stmt, A.Try):
             self._gen_try(stmt, info)
@@ -645,6 +685,9 @@ class Codegen:
             if iter_t == "dict":
                 self._gen_for_dict(stmt, info)
                 return
+            if iter_t == "str":
+                self._gen_for_str(stmt, info)
+                return
             self._gen_for_list(stmt, info)
             return
         args = stmt.range_args
@@ -663,9 +706,12 @@ class Codegen:
         step_off = info.locals_[f"__for_step_{id(stmt)}"]
 
         # Initialize var, stop, step.
-        self.gen_expr(start_expr, info); self.emitf(f"mov [rbp{var_off:+d}], rax")
-        self.gen_expr(stop_expr, info);  self.emitf(f"mov [rbp{stop_off:+d}], rax")
-        self.gen_expr(step_expr, info);  self.emitf(f"mov [rbp{step_off:+d}], rax")
+        self.gen_expr(start_expr, info)
+        self.emitf(f"mov [rbp{var_off:+d}], rax")
+        self.gen_expr(stop_expr, info)
+        self.emitf(f"mov [rbp{stop_off:+d}], rax")
+        self.gen_expr(step_expr, info)
+        self.emitf(f"mov [rbp{step_off:+d}], rax")
 
         top = self.fresh("for")
         cont = self.fresh("for_cont")
@@ -724,11 +770,11 @@ class Codegen:
         end_lbl = self.fresh("try_end")
 
         # parent_handler = _runtime_handler_top
-        self.emitf("mov rax, [rel _runtime_handler_top]",
-                   f"mov [rbp{parent_off:+d}], rax")
+        self.emitf(
+            "mov rax, [rel _runtime_handler_top]", f"mov [rbp{parent_off:+d}], rax"
+        )
         # _runtime_handler_top = &buf
-        self.emitf(f"lea rax, [rbp{buf_off:+d}]",
-                   "mov [rel _runtime_handler_top], rax")
+        self.emitf(f"lea rax, [rbp{buf_off:+d}]", "mov [rel _runtime_handler_top], rax")
         # setjmp(buf). Returns 0 on direct call, nonzero after longjmp.
         self._emit_call_setjmp(buf_off)
         self.emitf("test eax, eax", f"jnz {handler_lbl}")
@@ -737,19 +783,21 @@ class Codegen:
         for s in stmt.body:
             self.gen_stmt(s, info)
         # Normal completion: restore parent handler and skip handler block.
-        self.emitf(f"mov rax, [rbp{parent_off:+d}]",
-                   "mov [rel _runtime_handler_top], rax",
-                   f"jmp {end_lbl}")
+        self.emitf(
+            f"mov rax, [rbp{parent_off:+d}]",
+            "mov [rel _runtime_handler_top], rax",
+            f"jmp {end_lbl}",
+        )
 
         # ---- handler ----
         self.label(handler_lbl)
         # Restore parent handler too (we caught it).
-        self.emitf(f"mov rax, [rbp{parent_off:+d}]",
-                   "mov [rel _runtime_handler_top], rax")
+        self.emitf(
+            f"mov rax, [rbp{parent_off:+d}]", "mov [rel _runtime_handler_top], rax"
+        )
         if stmt.bind_name is not None:
             exc_off = info.locals_[stmt.bind_name]
-            self.emitf("mov rax, [rel _runtime_exc_msg]",
-                       f"mov [rbp{exc_off:+d}], rax")
+            self.emitf("mov rax, [rel _runtime_exc_msg]", f"mov [rbp{exc_off:+d}], rax")
         for s in stmt.handler:
             self.gen_stmt(s, info)
         self.label(end_lbl)
@@ -762,11 +810,13 @@ class Codegen:
         stop_off = info.locals_[f"__for_stop_{id(stmt)}"]
         step_off = info.locals_[f"__for_step_{id(stmt)}"]
 
-        self.gen_expr(stmt.iter, info)             # rax = header
-        self.emitf(f"mov [rbp{iter_off:+d}], rax",
-                   f"mov rbx, [rax+{self.DICT_CAP_OFF}]",
-                   f"mov [rbp{stop_off:+d}], rbx",
-                   f"mov qword [rbp{step_off:+d}], 0")  # i = 0
+        self.gen_expr(stmt.iter, info)  # rax = header
+        self.emitf(
+            f"mov [rbp{iter_off:+d}], rax",
+            f"mov rbx, [rax+{self.DICT_CAP_OFF}]",
+            f"mov [rbp{stop_off:+d}], rbx",
+            f"mov qword [rbp{step_off:+d}], 0",
+        )  # i = 0
 
         top = self.fresh("for_dict")
         cont = self.fresh("for_dict_cont")
@@ -774,26 +824,27 @@ class Codegen:
         body_lbl = self.fresh("for_dict_body")
         self.loop_labels.append((cont, end))
         self.label(top)
-        self.emitf(f"mov rax, [rbp{step_off:+d}]",
-                   f"cmp rax, [rbp{stop_off:+d}]",
-                   f"jge {end}")
+        self.emitf(
+            f"mov rax, [rbp{step_off:+d}]", f"cmp rax, [rbp{stop_off:+d}]", f"jge {end}"
+        )
         # Load slot: ptr = buf + i * 16; key = [ptr]
-        self.emitf(f"mov rbx, [rbp{iter_off:+d}]",
-                   f"mov rbx, [rbx+{self.DICT_BUF_OFF}]",
-                   f"mov rcx, [rbp{step_off:+d}]",
-                   "shl rcx, 4",                   # *16
-                   "add rbx, rcx",
-                   "mov rax, [rbx]",               # key ptr
-                   "cmp rax, 1",                   # tombstone or empty?
-                   f"jbe {cont}",                  # 0 or 1 -> skip
-                   f"mov [rbp{var_off:+d}], rax",
-                   f"jmp {body_lbl}")
+        self.emitf(
+            f"mov rbx, [rbp{iter_off:+d}]",
+            f"mov rbx, [rbx+{self.DICT_BUF_OFF}]",
+            f"mov rcx, [rbp{step_off:+d}]",
+            "shl rcx, 4",  # *16
+            "add rbx, rcx",
+            "mov rax, [rbx]",  # key ptr
+            "cmp rax, 1",  # tombstone or empty?
+            f"jbe {cont}",  # 0 or 1 -> skip
+            f"mov [rbp{var_off:+d}], rax",
+            f"jmp {body_lbl}",
+        )
         self.label(body_lbl)
         for s in stmt.body:
             self.gen_stmt(s, info)
         self.label(cont)
-        self.emitf(f"inc qword [rbp{step_off:+d}]",
-                   f"jmp {top}")
+        self.emitf(f"inc qword [rbp{step_off:+d}]", f"jmp {top}")
         self.label(end)
         self.loop_labels.pop()
 
@@ -803,35 +854,85 @@ class Codegen:
         var_off = info.locals_[stmt.var]
         iter_off = info.locals_[f"__for_iter_{id(stmt)}"]
         stop_off = info.locals_[f"__for_stop_{id(stmt)}"]
-        step_off = info.locals_[f"__for_step_{id(stmt)}"]   # repurposed as index
+        step_off = info.locals_[f"__for_step_{id(stmt)}"]  # repurposed as index
 
         # Evaluate iterable (header ptr); store header + cached length.
         self.gen_expr(stmt.iter, info)
-        self.emitf(f"mov [rbp{iter_off:+d}], rax",
-                   f"mov rbx, [rax+{self.LIST_LEN_OFF}]",
-                   f"mov [rbp{stop_off:+d}], rbx",
-                   f"mov qword [rbp{step_off:+d}], 0")
+        self.emitf(
+            f"mov [rbp{iter_off:+d}], rax",
+            f"mov rbx, [rax+{self.LIST_LEN_OFF}]",
+            f"mov [rbp{stop_off:+d}], rbx",
+            f"mov qword [rbp{step_off:+d}], 0",
+        )
 
         top = self.fresh("for_list")
         cont = self.fresh("for_list_cont")
         end = self.fresh("endfor_list")
         self.loop_labels.append((cont, end))
         self.label(top)
-        self.emitf(f"mov rax, [rbp{step_off:+d}]",
-                   f"cmp rax, [rbp{stop_off:+d}]",
-                   f"jge {end}")
+        self.emitf(
+            f"mov rax, [rbp{step_off:+d}]", f"cmp rax, [rbp{stop_off:+d}]", f"jge {end}"
+        )
         # iter is header; reload buffer each iteration (it may have been
         # reallocated by append calls inside the loop).
-        self.emitf(f"mov rbx, [rbp{iter_off:+d}]",
-                   f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
-                   f"mov rcx, [rbp{step_off:+d}]",
-                   "mov rax, [rbx+rcx*8]",
-                   f"mov [rbp{var_off:+d}], rax")
+        self.emitf(
+            f"mov rbx, [rbp{iter_off:+d}]",
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+            f"mov rcx, [rbp{step_off:+d}]",
+            "mov rax, [rbx+rcx*8]",
+            f"mov [rbp{var_off:+d}], rax",
+        )
         for s in stmt.body:
             self.gen_stmt(s, info)
         self.label(cont)
-        self.emitf(f"inc qword [rbp{step_off:+d}]",
-                   f"jmp {top}")
+        self.emitf(f"inc qword [rbp{step_off:+d}]", f"jmp {top}")
+        self.label(end)
+        self.loop_labels.pop()
+
+    def _gen_for_str(self, stmt: A.For, info: FuncInfo) -> None:
+        """`for ch in s:` lowering.
+
+        Walks the string by byte index 0..strlen(s). Each iteration allocates
+        a fresh 1-char str via _runtime_str_char_at and binds it to `var`.
+        The source pointer is cached in iter_off; length in stop_off; the
+        running index in step_off (same slot triplet as the list/dict
+        variants, so _collect_locals doesn't need to learn a fourth shape).
+        """
+        var_off = info.locals_[stmt.var]
+        iter_off = info.locals_[f"__for_iter_{id(stmt)}"]
+        stop_off = info.locals_[f"__for_stop_{id(stmt)}"]
+        step_off = info.locals_[f"__for_step_{id(stmt)}"]
+
+        # Evaluate the string once; cache pointer and length.
+        self.gen_expr(stmt.iter, info)
+        self.emitf(f"mov [rbp{iter_off:+d}], rax")
+        self._emit_libc_strlen()
+        self.emitf(
+            f"mov [rbp{stop_off:+d}], rax",
+            f"mov qword [rbp{step_off:+d}], 0",
+        )
+
+        top = self.fresh("for_str")
+        cont = self.fresh("for_str_cont")
+        end = self.fresh("endfor_str")
+        self.loop_labels.append((cont, end))
+        self.label(top)
+        self.emitf(
+            f"mov rax, [rbp{step_off:+d}]",
+            f"cmp rax, [rbp{stop_off:+d}]",
+            f"jge {end}",
+        )
+        # char_at(s, i): rax=s, rbx=i -> rax = newly-allocated 1-char str.
+        self.emitf(
+            f"mov rax, [rbp{iter_off:+d}]",
+            f"mov rbx, [rbp{step_off:+d}]",
+            "call _runtime_str_char_at",
+            f"mov [rbp{var_off:+d}], rax",
+        )
+        for s in stmt.body:
+            self.gen_stmt(s, info)
+        self.label(cont)
+        self.emitf(f"inc qword [rbp{step_off:+d}]", f"jmp {top}")
         self.label(end)
         self.loop_labels.pop()
 
@@ -873,18 +974,20 @@ class Codegen:
                 self.gen_expr(expr.operand, info)
                 # XOR the sign bit. Easiest: subtract from 0.0.
                 zero_lbl = self.intern_float(0.0)
-                self.emitf(f"movsd xmm1, [{zero_lbl}]",
-                           "subsd xmm1, xmm0",
-                           "movsd xmm0, xmm1")
+                self.emitf(
+                    f"movsd xmm1, [{zero_lbl}]", "subsd xmm1, xmm0", "movsd xmm0, xmm1"
+                )
                 return
             if operand_t == "float" and expr.op == "not":
                 # not <float> -> int 0/1
                 self.gen_expr(expr.operand, info)
                 zero_lbl = self.intern_float(0.0)
-                self.emitf(f"movsd xmm1, [{zero_lbl}]",
-                           "ucomisd xmm0, xmm1",
-                           "sete al",                # equal & no NaN -> true
-                           "movzx rax, al")
+                self.emitf(
+                    f"movsd xmm1, [{zero_lbl}]",
+                    "ucomisd xmm0, xmm1",
+                    "sete al",  # equal & no NaN -> true
+                    "movzx rax, al",
+                )
                 return
             self.gen_expr(expr.operand, info)
             if expr.op == "-":
@@ -954,10 +1057,12 @@ class Codegen:
         # Each subsequent segment: convert -> concat with accumulator.
         for seg in e.segments[1:]:
             emit_segment_as_str(seg)
-            self.emitf("mov rbx, rax",
-                       f"mov rax, [rbp{acc_slot:+d}]",
-                       "call _runtime_str_concat",
-                       f"mov [rbp{acc_slot:+d}], rax")
+            self.emitf(
+                "mov rbx, rax",
+                f"mov rax, [rbp{acc_slot:+d}]",
+                "call _runtime_str_concat",
+                f"mov [rbp{acc_slot:+d}], rax",
+            )
         self.emitf(f"mov rax, [rbp{acc_slot:+d}]")
 
     def _gen_attr(self, e: A.Attr, info: FuncInfo) -> None:
@@ -974,10 +1079,12 @@ class Codegen:
         obj_t = A.expr_type(e.obj)
         if obj_t.startswith("instance:"):
             key_label, _ = self.intern_string(e.name)
-            self.gen_expr(e.obj, info)                  # rax = instance dict
-            self.emitf(f"lea rbx, [{key_label}]",
-                       "xor rcx, rcx",                   # default = 0
-                       "call _runtime_dict_get_default")
+            self.gen_expr(e.obj, info)  # rax = instance dict
+            self.emitf(
+                f"lea rbx, [{key_label}]",
+                "xor rcx, rcx",  # default = 0
+                "call _runtime_dict_get_default",
+            )
             return
         raise NotImplementedError(f"attr {e.name!r} on {obj_t}")
 
@@ -994,10 +1101,14 @@ class Codegen:
             # Reference rather than define. The library was assembled once
             # by mamba/runtime/build.py and gcc will resolve these at link.
             for sym in (
-                "_runtime_zalloc", "_runtime_hash_string",
-                "_runtime_dict_lookup_slot", "_runtime_dict_set",
-                "_runtime_dict_get", "_runtime_dict_get_default",
-                "_runtime_dict_contains", "_runtime_dict_grow",
+                "_runtime_zalloc",
+                "_runtime_hash_string",
+                "_runtime_dict_lookup_slot",
+                "_runtime_dict_set",
+                "_runtime_dict_get",
+                "_runtime_dict_get_default",
+                "_runtime_dict_contains",
+                "_runtime_dict_grow",
             ):
                 self.emit(f"extern {sym}")
             return
@@ -1009,7 +1120,7 @@ class Codegen:
         self.emitf("mov [rbp-8], rbx")
         # malloc(size)
         self.emitf("mov rax, rbx")
-        self._emit_libc_malloc_size_in_rax()       # rax = ptr
+        self._emit_libc_malloc_size_in_rax()  # rax = ptr
         # memset(rax, 0, size)
         self.emitf("mov rbx, [rbp-8]")
         self._emit_libc_memset_zero()
@@ -1018,16 +1129,21 @@ class Codegen:
         # ---- _runtime_hash_string: FNV-1a 64-bit. rax = str ptr -> rax = hash.
         self.label("_runtime_hash_string")
         # h = 0xcbf29ce484222325; for each byte b: h ^= b; h *= 0x100000001b3
-        self.emitf("mov rcx, rax",                 # rcx = cursor
-                   "mov rax, 0xcbf29ce484222325")  # FNV offset basis
-        self.emitf("mov r9, 0x100000001b3")        # FNV prime
+        self.emitf(
+            "mov rcx, rax",  # rcx = cursor
+            "mov rax, 0xcbf29ce484222325",
+        )  # FNV offset basis
+        self.emitf("mov r9, 0x100000001b3")  # FNV prime
         self.label("._hs_loop")
-        self.emitf("movzx rdx, byte [rcx]",
-                   "test rdx, rdx", "jz ._hs_done",
-                   "xor rax, rdx",
-                   "mul r9",                        # rax *= r9 (unsigned)
-                   "inc rcx",
-                   "jmp ._hs_loop")
+        self.emitf(
+            "movzx rdx, byte [rcx]",
+            "test rdx, rdx",
+            "jz ._hs_done",
+            "xor rax, rdx",
+            "mul r9",  # rax *= r9 (unsigned)
+            "inc rcx",
+            "jmp ._hs_loop",
+        )
         self.label("._hs_done")
         self.emitf("ret")
 
@@ -1041,62 +1157,81 @@ class Codegen:
         self.label("_runtime_dict_lookup_slot")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
         # Save inputs.
-        self.emitf("mov [rbp-8], rax",   # header
-                   "mov [rbp-16], rbx",  # key
-                   "mov qword [rbp-32], 0")  # first_tombstone = NULL
+        self.emitf(
+            "mov [rbp-8], rax",  # header
+            "mov [rbp-16], rbx",  # key
+            "mov qword [rbp-32], 0",
+        )  # first_tombstone = NULL
         # Hash the key.
         self.emitf("mov rax, rbx", "call _runtime_hash_string")
         # mask = capacity - 1
-        self.emitf("mov rcx, [rbp-8]",
-                   f"mov rcx, [rcx+{self.DICT_CAP_OFF}]",
-                   "dec rcx")                       # mask
-        self.emitf("and rax, rcx",                 # idx = hash & mask
-                   "mov [rbp-24], rax")            # idx
+        self.emitf(
+            "mov rcx, [rbp-8]", f"mov rcx, [rcx+{self.DICT_CAP_OFF}]", "dec rcx"
+        )  # mask
+        self.emitf(
+            "and rax, rcx",  # idx = hash & mask
+            "mov [rbp-24], rax",
+        )  # idx
         self.label("._dl_probe")
         # slot = buf + idx*16
-        self.emitf("mov r8, [rbp-8]",
-                   f"mov r8, [r8+{self.DICT_BUF_OFF}]",
-                   "mov r9, [rbp-24]",
-                   "shl r9, 4",
-                   "add r8, r9",                   # r8 = slot ptr
-                   "mov r10, [r8]")                # r10 = key in slot
+        self.emitf(
+            "mov r8, [rbp-8]",
+            f"mov r8, [r8+{self.DICT_BUF_OFF}]",
+            "mov r9, [rbp-24]",
+            "shl r9, 4",
+            "add r8, r9",  # r8 = slot ptr
+            "mov r10, [r8]",
+        )  # r10 = key in slot
         # Empty?
-        self.emitf("test r10, r10",
-                   "jz ._dl_empty")
+        self.emitf("test r10, r10", "jz ._dl_empty")
         # Tombstone?
-        self.emitf("cmp r10, 1",
-                   "jne ._dl_compare",
-                   # Remember the first tombstone we see.
-                   "mov r11, [rbp-32]",
-                   "test r11, r11", "jnz ._dl_advance",
-                   "mov [rbp-32], r8",
-                   "jmp ._dl_advance")
+        self.emitf(
+            "cmp r10, 1",
+            "jne ._dl_compare",
+            # Remember the first tombstone we see.
+            "mov r11, [rbp-32]",
+            "test r11, r11",
+            "jnz ._dl_advance",
+            "mov [rbp-32], r8",
+            "jmp ._dl_advance",
+        )
         self.label("._dl_compare")
         # Both string ptrs non-null and non-tombstone — strcmp them.
-        self.emitf("mov [rbp-40], r8")             # save slot ptr
-        self.emitf("mov rax, r10",                 # rax = slot.key
-                   "mov rbx, [rbp-16]")            # rbx = our key
-        self._emit_libc_strcmp()                   # rax = result
-        self.emitf("test rax, rax", "jnz ._dl_advance",
-                   # Match!
-                   "mov rax, [rbp-40]",            # slot ptr
-                   "xor rcx, rcx",
-                   "leave", "ret")
+        self.emitf("mov [rbp-40], r8")  # save slot ptr
+        self.emitf(
+            "mov rax, r10",  # rax = slot.key
+            "mov rbx, [rbp-16]",
+        )  # rbx = our key
+        self._emit_libc_strcmp()  # rax = result
+        self.emitf(
+            "test rax, rax",
+            "jnz ._dl_advance",
+            # Match!
+            "mov rax, [rbp-40]",  # slot ptr
+            "xor rcx, rcx",
+            "leave",
+            "ret",
+        )
         self.label("._dl_advance")
-        self.emitf("mov rax, [rbp-24]",
-                   "inc rax",
-                   "mov rcx, [rbp-8]",
-                   f"mov rcx, [rcx+{self.DICT_CAP_OFF}]",
-                   "dec rcx",
-                   "and rax, rcx",
-                   "mov [rbp-24], rax",
-                   "jmp ._dl_probe")
+        self.emitf(
+            "mov rax, [rbp-24]",
+            "inc rax",
+            "mov rcx, [rbp-8]",
+            f"mov rcx, [rcx+{self.DICT_CAP_OFF}]",
+            "dec rcx",
+            "and rax, rcx",
+            "mov [rbp-24], rax",
+            "jmp ._dl_probe",
+        )
         self.label("._dl_empty")
         # Not found. Return rax=NULL, rcx = first_tombstone or this empty slot.
-        self.emitf("xor rax, rax",
-                   "mov rcx, [rbp-32]",
-                   "test rcx, rcx", "jnz ._dl_ret_empty",
-                   "mov rcx, r8")                  # no tombstone; use this empty
+        self.emitf(
+            "xor rax, rax",
+            "mov rcx, [rbp-32]",
+            "test rcx, rcx",
+            "jnz ._dl_ret_empty",
+            "mov rcx, r8",
+        )  # no tombstone; use this empty
         self.label("._dl_ret_empty")
         self.emitf("leave", "ret")
 
@@ -1104,58 +1239,76 @@ class Codegen:
         # rax = header, rbx = key, rcx = value
         self.label("_runtime_dict_set")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
-        self.emitf("mov [rbp-8], rax",   # header
-                   "mov [rbp-16], rbx",  # key
-                   "mov [rbp-24], rcx")  # value
+        self.emitf(
+            "mov [rbp-8], rax",  # header
+            "mov [rbp-16], rbx",  # key
+            "mov [rbp-24], rcx",
+        )  # value
         # Check load factor; grow if (length + tombstones) >= cap * 3/4.
-        self.emitf(f"mov rax, [rbp-8]",
-                   f"mov rcx, [rax+{self.DICT_LEN_OFF}]",
-                   f"add rcx, [rax+{self.DICT_TOMB_OFF}]",
-                   f"mov rdx, [rax+{self.DICT_CAP_OFF}]",
-                   "mov r9, rdx",
-                   "shr rdx, 2",
-                   "sub r9, rdx",                  # r9 = cap * 3/4
-                   "cmp rcx, r9", "jl ._ds_no_grow",
-                   "call _runtime_dict_grow")
+        self.emitf(
+            "mov rax, [rbp-8]",
+            f"mov rcx, [rax+{self.DICT_LEN_OFF}]",
+            f"add rcx, [rax+{self.DICT_TOMB_OFF}]",
+            f"mov rdx, [rax+{self.DICT_CAP_OFF}]",
+            "mov r9, rdx",
+            "shr rdx, 2",
+            "sub r9, rdx",  # r9 = cap * 3/4
+            "cmp rcx, r9",
+            "jl ._ds_no_grow",
+            "call _runtime_dict_grow",
+        )
         self.label("._ds_no_grow")
         # Find slot.
-        self.emitf("mov rax, [rbp-8]",
-                   "mov rbx, [rbp-16]",
-                   "call _runtime_dict_lookup_slot")
+        self.emitf(
+            "mov rax, [rbp-8]", "mov rbx, [rbp-16]", "call _runtime_dict_lookup_slot"
+        )
         # rax = matched slot or NULL; rcx = empty/tombstone slot if no match.
-        self.emitf("test rax, rax", "jz ._ds_new",
-                   # Update in place.
-                   "mov rcx, [rbp-24]",
-                   "mov [rax+8], rcx",
-                   "leave", "ret")
+        self.emitf(
+            "test rax, rax",
+            "jz ._ds_new",
+            # Update in place.
+            "mov rcx, [rbp-24]",
+            "mov [rax+8], rcx",
+            "leave",
+            "ret",
+        )
         self.label("._ds_new")
         # rcx is the insertion slot. Check if it was a tombstone so we
         # decrement the tombstone count.
-        self.emitf("mov r8, [rcx]",                # current key in slot
-                   "cmp r8, 1", "jne ._ds_no_tomb",
-                   "mov r9, [rbp-8]",
-                   f"dec qword [r9+{self.DICT_TOMB_OFF}]")
+        self.emitf(
+            "mov r8, [rcx]",  # current key in slot
+            "cmp r8, 1",
+            "jne ._ds_no_tomb",
+            "mov r9, [rbp-8]",
+            f"dec qword [r9+{self.DICT_TOMB_OFF}]",
+        )
         self.label("._ds_no_tomb")
         # strdup the key so the dict owns it.
-        self.emitf("mov [rbp-32], rcx")            # save slot ptr
+        self.emitf("mov [rbp-32], rcx")  # save slot ptr
         self.emitf("mov rax, [rbp-16]")
-        self._emit_libc_strdup()                   # rax = owned copy
-        self.emitf("mov rcx, [rbp-32]",
-                   "mov [rcx], rax",               # slot.key = strdup'd
-                   "mov r9, [rbp-24]",
-                   "mov [rcx+8], r9",              # slot.value
-                   "mov r9, [rbp-8]",
-                   f"inc qword [r9+{self.DICT_LEN_OFF}]",
-                   "leave", "ret")
+        self._emit_libc_strdup()  # rax = owned copy
+        self.emitf(
+            "mov rcx, [rbp-32]",
+            "mov [rcx], rax",  # slot.key = strdup'd
+            "mov r9, [rbp-24]",
+            "mov [rcx+8], r9",  # slot.value
+            "mov r9, [rbp-8]",
+            f"inc qword [r9+{self.DICT_LEN_OFF}]",
+            "leave",
+            "ret",
+        )
 
         # ---- _runtime_dict_get: panic if missing.
         # rax = header, rbx = key -> rax = value
         self.label("_runtime_dict_get")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
         self.emitf("call _runtime_dict_lookup_slot")
-        self.emitf("test rax, rax", "jnz ._dg_found",
-                   # Missing key -> abort. Print a friendly message and exit.
-                   "lea rax, [_runtime_dict_key_error_msg]")
+        self.emitf(
+            "test rax, rax",
+            "jnz ._dg_found",
+            # Missing key -> abort. Print a friendly message and exit.
+            "lea rax, [_runtime_dict_key_error_msg]",
+        )
         self._emit_panic_message()
         self.label("._dg_found")
         self.emitf("mov rax, [rax+8]", "leave", "ret")
@@ -1164,11 +1317,11 @@ class Codegen:
         # rax = header, rbx = key, rcx = default -> rax = value or default
         self.label("_runtime_dict_get_default")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
-        self.emitf("mov [rbp-8], rcx")             # save default
+        self.emitf("mov [rbp-8], rcx")  # save default
         self.emitf("call _runtime_dict_lookup_slot")
-        self.emitf("test rax, rax", "jnz ._dgd_found",
-                   "mov rax, [rbp-8]",
-                   "leave", "ret")
+        self.emitf(
+            "test rax, rax", "jnz ._dgd_found", "mov rax, [rbp-8]", "leave", "ret"
+        )
         self.label("._dgd_found")
         self.emitf("mov rax, [rax+8]", "leave", "ret")
 
@@ -1177,8 +1330,7 @@ class Codegen:
         self.label("_runtime_dict_contains")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
         self.emitf("call _runtime_dict_lookup_slot")
-        self.emitf("test rax, rax", "setne al", "movzx rax, al",
-                   "leave", "ret")
+        self.emitf("test rax, rax", "setne al", "movzx rax, al", "leave", "ret")
 
         # ---- _runtime_dict_grow
         # rax = header. Doubles capacity, rehashes all live entries.
@@ -1186,56 +1338,62 @@ class Codegen:
         # then walk the old slots and call dict_set for each live one.
         self.label("_runtime_dict_grow")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
-        self.emitf("mov [rbp-8], rax")             # header
+        self.emitf("mov [rbp-8], rax")  # header
         # old_cap, old_buf
-        self.emitf(f"mov rcx, [rax+{self.DICT_CAP_OFF}]",
-                   "mov [rbp-16], rcx",
-                   f"mov rcx, [rax+{self.DICT_BUF_OFF}]",
-                   "mov [rbp-24], rcx")
+        self.emitf(
+            f"mov rcx, [rax+{self.DICT_CAP_OFF}]",
+            "mov [rbp-16], rcx",
+            f"mov rcx, [rax+{self.DICT_BUF_OFF}]",
+            "mov [rbp-24], rcx",
+        )
         # new_cap = old_cap * 2
-        self.emitf("mov rax, [rbp-16]",
-                   "shl rax, 1",
-                   "mov [rbp-32], rax")            # new_cap
+        self.emitf("mov rax, [rbp-16]", "shl rax, 1", "mov [rbp-32], rax")  # new_cap
         # new_buf = zalloc(new_cap * 16)
-        self.emitf("mov rbx, rax", "shl rbx, 4",
-                   "call _runtime_zalloc")
-        self.emitf("mov [rbp-40], rax")            # new_buf
+        self.emitf("mov rbx, rax", "shl rbx, 4", "call _runtime_zalloc")
+        self.emitf("mov [rbp-40], rax")  # new_buf
         # Reset header: cap = new_cap; len = 0; tomb = 0; buf = new_buf.
-        self.emitf("mov r8, [rbp-8]",
-                   "mov r9, [rbp-32]",
-                   f"mov [r8+{self.DICT_CAP_OFF}], r9",
-                   f"mov qword [r8+{self.DICT_LEN_OFF}], 0",
-                   f"mov qword [r8+{self.DICT_TOMB_OFF}], 0",
-                   "mov r9, [rbp-40]",
-                   f"mov [r8+{self.DICT_BUF_OFF}], r9")
+        self.emitf(
+            "mov r8, [rbp-8]",
+            "mov r9, [rbp-32]",
+            f"mov [r8+{self.DICT_CAP_OFF}], r9",
+            f"mov qword [r8+{self.DICT_LEN_OFF}], 0",
+            f"mov qword [r8+{self.DICT_TOMB_OFF}], 0",
+            "mov r9, [rbp-40]",
+            f"mov [r8+{self.DICT_BUF_OFF}], r9",
+        )
         # Walk old buffer.
-        self.emitf("xor rcx, rcx")                 # i
+        self.emitf("xor rcx, rcx")  # i
         self.label("._gr_loop")
-        self.emitf("cmp rcx, [rbp-16]",
-                   "jge ._gr_done",
-                   "mov r8, [rbp-24]",
-                   "mov rdx, rcx", "shl rdx, 4",
-                   "add r8, rdx",                  # r8 = old slot
-                   "mov r9, [r8]",
-                   "cmp r9, 1", "jbe ._gr_next",   # empty or tombstone
-                   # Direct slot move into the new buffer, reusing the
-                   # already-owned key bytes (no double strdup).
-                   "mov [rbp-48], rcx")            # save i
-        self.emitf("mov rax, [rbp-8]",
-                   "mov rbx, r9",
-                   "call _runtime_dict_lookup_slot")
+        self.emitf(
+            "cmp rcx, [rbp-16]",
+            "jge ._gr_done",
+            "mov r8, [rbp-24]",
+            "mov rdx, rcx",
+            "shl rdx, 4",
+            "add r8, rdx",  # r8 = old slot
+            "mov r9, [r8]",
+            "cmp r9, 1",
+            "jbe ._gr_next",  # empty or tombstone
+            # Direct slot move into the new buffer, reusing the
+            # already-owned key bytes (no double strdup).
+            "mov [rbp-48], rcx",
+        )  # save i
+        self.emitf("mov rax, [rbp-8]", "mov rbx, r9", "call _runtime_dict_lookup_slot")
         # rax should be NULL (the new buffer is empty so far), rcx points to
         # the empty slot we should fill.
-        self.emitf("mov r8, [rbp-24]",             # old buf
-                   "mov rdx, [rbp-48]", "shl rdx, 4",
-                   "add r8, rdx",                  # r8 = old slot
-                   "mov r9, [r8]",                 # old key
-                   "mov r10, [r8+8]",              # old value
-                   "mov [rcx], r9",                # new slot key
-                   "mov [rcx+8], r10",             # new slot value
-                   "mov rdx, [rbp-8]",
-                   f"inc qword [rdx+{self.DICT_LEN_OFF}]",
-                   "mov rcx, [rbp-48]")            # restore i
+        self.emitf(
+            "mov r8, [rbp-24]",  # old buf
+            "mov rdx, [rbp-48]",
+            "shl rdx, 4",
+            "add r8, rdx",  # r8 = old slot
+            "mov r9, [r8]",  # old key
+            "mov r10, [r8+8]",  # old value
+            "mov [rcx], r9",  # new slot key
+            "mov [rcx+8], r10",  # new slot value
+            "mov rdx, [rbp-8]",
+            f"inc qword [rdx+{self.DICT_LEN_OFF}]",
+            "mov rcx, [rbp-48]",
+        )  # restore i
         self.label("._gr_next")
         self.emitf("inc rcx", "jmp ._gr_loop")
         self.label("._gr_done")
@@ -1291,8 +1449,7 @@ class Codegen:
         self.label("_runtime_str_concat")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 96")
         # [rbp-8] = a, [rbp-16] = b, [rbp-24] = la, [rbp-32] = lb, [rbp-40] = new ptr
-        self.emitf("mov [rbp-8], rax",
-                   "mov [rbp-16], rbx")
+        self.emitf("mov [rbp-8], rax", "mov [rbp-16], rbx")
         # la = strlen(a)
         self._emit_libc_strlen()
         self.emitf("mov [rbp-24], rax")
@@ -1301,28 +1458,33 @@ class Codegen:
         self._emit_libc_strlen()
         self.emitf("mov [rbp-32], rax")
         # total = la + lb + 1
-        self.emitf("mov rax, [rbp-24]",
-                   "add rax, [rbp-32]",
-                   "inc rax")
+        self.emitf("mov rax, [rbp-24]", "add rax, [rbp-32]", "inc rax")
         self._emit_libc_malloc_size_in_rax()
         self.emitf("mov [rbp-40], rax")
         # memcpy(new, a, la)
-        self.emitf("mov rax, rax",                 # dst
-                   "mov rbx, [rbp-8]",             # src
-                   "mov rcx, [rbp-24]")            # n
+        self.emitf(
+            "mov rax, rax",  # dst
+            "mov rbx, [rbp-8]",  # src
+            "mov rcx, [rbp-24]",
+        )  # n
         self._emit_libc_memcpy()
         # memcpy(new+la, b, lb)
-        self.emitf("mov rax, [rbp-40]",
-                   "add rax, [rbp-24]",
-                   "mov rbx, [rbp-16]",
-                   "mov rcx, [rbp-32]")
+        self.emitf(
+            "mov rax, [rbp-40]",
+            "add rax, [rbp-24]",
+            "mov rbx, [rbp-16]",
+            "mov rcx, [rbp-32]",
+        )
         self._emit_libc_memcpy()
         # nul-terminate at new[la+lb]
-        self.emitf("mov rax, [rbp-40]",
-                   "mov rbx, [rbp-24]",
-                   "add rbx, [rbp-32]",
-                   "mov byte [rax+rbx], 0",
-                   "leave", "ret")
+        self.emitf(
+            "mov rax, [rbp-40]",
+            "mov rbx, [rbp-24]",
+            "add rbx, [rbp-32]",
+            "mov byte [rax+rbx], 0",
+            "leave",
+            "ret",
+        )
 
         # ---- _runtime_str_repeat ---------------------------------------------
         # rax = a (str ptr), rbx = n (int count) -> rax = newly allocated string.
@@ -1330,60 +1492,52 @@ class Codegen:
         self.label("_runtime_str_repeat")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 96")
         # [rbp-8] = a, [rbp-16] = n, [rbp-24] = la, [rbp-32] = new ptr, [rbp-40] = i
-        self.emitf("mov [rbp-8], rax",
-                   "mov [rbp-16], rbx")
+        self.emitf("mov [rbp-8], rax", "mov [rbp-16], rbx")
         # If n <= 0, return empty string.
-        self.emitf("mov rax, [rbp-16]",
-                   "test rax, rax",
-                   "jg ._sr_compute_len",
-                   "mov rax, 1")
+        self.emitf(
+            "mov rax, [rbp-16]", "test rax, rax", "jg ._sr_compute_len", "mov rax, 1"
+        )
         self._emit_libc_malloc_size_in_rax()
-        self.emitf("mov byte [rax], 0",
-                   "leave", "ret")
+        self.emitf("mov byte [rax], 0", "leave", "ret")
         self.label("._sr_compute_len")
         # la = strlen(a)
         self.emitf("mov rax, [rbp-8]")
         self._emit_libc_strlen()
         self.emitf("mov [rbp-24], rax")
         # total = la * n + 1
-        self.emitf("mov rax, [rbp-24]",
-                   "mov rbx, [rbp-16]",
-                   "imul rax, rbx",
-                   "inc rax")
+        self.emitf("mov rax, [rbp-24]", "mov rbx, [rbp-16]", "imul rax, rbx", "inc rax")
         self._emit_libc_malloc_size_in_rax()
-        self.emitf("mov [rbp-32], rax",
-                   "mov qword [rbp-40], 0")
+        self.emitf("mov [rbp-32], rax", "mov qword [rbp-40], 0")
         self.label("._sr_loop")
-        self.emitf("mov rax, [rbp-40]",
-                   "cmp rax, [rbp-16]",
-                   "jge ._sr_done")
+        self.emitf("mov rax, [rbp-40]", "cmp rax, [rbp-16]", "jge ._sr_done")
         # dst = new + i * la
-        self.emitf("mov rax, [rbp-32]",
-                   "mov rcx, [rbp-40]",
-                   "imul rcx, [rbp-24]",
-                   "add rax, rcx",
-                   "mov rbx, [rbp-8]",
-                   "mov rcx, [rbp-24]")
+        self.emitf(
+            "mov rax, [rbp-32]",
+            "mov rcx, [rbp-40]",
+            "imul rcx, [rbp-24]",
+            "add rax, rcx",
+            "mov rbx, [rbp-8]",
+            "mov rcx, [rbp-24]",
+        )
         self._emit_libc_memcpy()
-        self.emitf("inc qword [rbp-40]",
-                   "jmp ._sr_loop")
+        self.emitf("inc qword [rbp-40]", "jmp ._sr_loop")
         self.label("._sr_done")
         # nul-terminate at new + n*la
-        self.emitf("mov rax, [rbp-32]",
-                   "mov rcx, [rbp-16]",
-                   "imul rcx, [rbp-24]",
-                   "mov byte [rax+rcx], 0",
-                   "leave", "ret")
+        self.emitf(
+            "mov rax, [rbp-32]",
+            "mov rcx, [rbp-16]",
+            "imul rcx, [rbp-24]",
+            "mov byte [rax+rcx], 0",
+            "leave",
+            "ret",
+        )
 
         # ---- _runtime_str_eq -------------------------------------------------
         # rax = a, rbx = b -> rax = 1 if strcmp(a,b)==0 else 0.
         self.label("_runtime_str_eq")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
         self._emit_libc_strcmp()
-        self.emitf("test rax, rax",
-                   "sete al",
-                   "movzx rax, al",
-                   "leave", "ret")
+        self.emitf("test rax, rax", "sete al", "movzx rax, al", "leave", "ret")
 
         # ---- _runtime_str_cmp ------------------------------------------------
         # rax = a, rbx = b -> rax = -1/0/+1 (signed compare result).
@@ -1391,11 +1545,13 @@ class Codegen:
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
         self._emit_libc_strcmp()
         # Normalize result to -1/0/+1.
-        self.emitf("test rax, rax",
-                   "jz ._sc_zero",
-                   "js ._sc_neg",
-                   "mov rax, 1",
-                   "jmp ._sc_done")
+        self.emitf(
+            "test rax, rax",
+            "jz ._sc_zero",
+            "js ._sc_neg",
+            "mov rax, 1",
+            "jmp ._sc_done",
+        )
         self.label("._sc_zero")
         self.emitf("xor rax, rax", "jmp ._sc_done")
         self.label("._sc_neg")
@@ -1408,36 +1564,41 @@ class Codegen:
         # Negative indices count from the end. Out-of-range raises (panic).
         self.label("_runtime_str_char_at")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
-        self.emitf("mov [rbp-8], rax",
-                   "mov [rbp-16], rbx")
+        self.emitf("mov [rbp-8], rax", "mov [rbp-16], rbx")
         # len = strlen(s)
         self._emit_libc_strlen()
         self.emitf("mov [rbp-24], rax")
         # Handle negative index.
-        self.emitf("mov rax, [rbp-16]",
-                   "test rax, rax",
-                   "jns ._sca_check",
-                   "add rax, [rbp-24]",
-                   "mov [rbp-16], rax")
+        self.emitf(
+            "mov rax, [rbp-16]",
+            "test rax, rax",
+            "jns ._sca_check",
+            "add rax, [rbp-24]",
+            "mov [rbp-16], rax",
+        )
         self.label("._sca_check")
-        self.emitf("mov rax, [rbp-16]",
-                   "test rax, rax",
-                   "js ._sca_oob",
-                   "cmp rax, [rbp-24]",
-                   "jge ._sca_oob")
+        self.emitf(
+            "mov rax, [rbp-16]",
+            "test rax, rax",
+            "js ._sca_oob",
+            "cmp rax, [rbp-24]",
+            "jge ._sca_oob",
+        )
         # Allocate 2-byte buffer.
         self.emitf("mov rax, 2")
         self._emit_libc_malloc_size_in_rax()
         # buf[0] = s[idx]; buf[1] = 0
-        self.emitf("mov rbx, [rbp-8]",
-                   "mov rcx, [rbp-16]",
-                   "mov dl, [rbx+rcx]",
-                   "mov [rax], dl",
-                   "mov byte [rax+1], 0",
-                   "leave", "ret")
+        self.emitf(
+            "mov rbx, [rbp-8]",
+            "mov rcx, [rbp-16]",
+            "mov dl, [rbx+rcx]",
+            "mov [rax], dl",
+            "mov byte [rax+1], 0",
+            "leave",
+            "ret",
+        )
         self.label("._sca_oob")
-        self.emitf("lea rax, [rel _runtime_str_oob_msg]",
-                   "call _runtime_raise")
+        self.emitf("lea rax, [rel _runtime_str_oob_msg]", "call _runtime_raise")
         self.emitf("leave", "ret")  # unreachable
 
         # ---- _runtime_str_slice ----------------------------------------------
@@ -1446,68 +1607,66 @@ class Codegen:
         # Stop < start returns empty.
         self.label("_runtime_str_slice")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 96")
-        self.emitf("mov [rbp-8], rax",
-                   "mov [rbp-16], rbx",        # start
-                   "mov [rbp-24], rcx")        # stop
+        self.emitf(
+            "mov [rbp-8], rax",
+            "mov [rbp-16], rbx",  # start
+            "mov [rbp-24], rcx",
+        )  # stop
         # len = strlen(s)
         self._emit_libc_strlen()
         self.emitf("mov [rbp-32], rax")
         # Normalize start: if negative, add len. Clamp to [0, len].
-        self.emitf("mov rax, [rbp-16]",
-                   "test rax, rax",
-                   "jns ._sl_start_pos",
-                   "add rax, [rbp-32]")
+        self.emitf(
+            "mov rax, [rbp-16]",
+            "test rax, rax",
+            "jns ._sl_start_pos",
+            "add rax, [rbp-32]",
+        )
         self.label("._sl_start_pos")
-        self.emitf("test rax, rax",
-                   "jns ._sl_start_ok",
-                   "xor rax, rax")
+        self.emitf("test rax, rax", "jns ._sl_start_ok", "xor rax, rax")
         self.label("._sl_start_ok")
-        self.emitf("cmp rax, [rbp-32]",
-                   "jle ._sl_start_done",
-                   "mov rax, [rbp-32]")
+        self.emitf("cmp rax, [rbp-32]", "jle ._sl_start_done", "mov rax, [rbp-32]")
         self.label("._sl_start_done")
         self.emitf("mov [rbp-16], rax")
         # Normalize stop the same way.
-        self.emitf("mov rax, [rbp-24]",
-                   "test rax, rax",
-                   "jns ._sl_stop_pos",
-                   "add rax, [rbp-32]")
+        self.emitf(
+            "mov rax, [rbp-24]",
+            "test rax, rax",
+            "jns ._sl_stop_pos",
+            "add rax, [rbp-32]",
+        )
         self.label("._sl_stop_pos")
-        self.emitf("test rax, rax",
-                   "jns ._sl_stop_ok",
-                   "xor rax, rax")
+        self.emitf("test rax, rax", "jns ._sl_stop_ok", "xor rax, rax")
         self.label("._sl_stop_ok")
-        self.emitf("cmp rax, [rbp-32]",
-                   "jle ._sl_stop_done",
-                   "mov rax, [rbp-32]")
+        self.emitf("cmp rax, [rbp-32]", "jle ._sl_stop_done", "mov rax, [rbp-32]")
         self.label("._sl_stop_done")
         self.emitf("mov [rbp-24], rax")
         # n = stop - start. If <= 0, return empty.
-        self.emitf("mov rax, [rbp-24]",
-                   "sub rax, [rbp-16]")
-        self.emitf("test rax, rax",
-                   "jg ._sl_alloc",
-                   "mov rax, 1")
+        self.emitf("mov rax, [rbp-24]", "sub rax, [rbp-16]")
+        self.emitf("test rax, rax", "jg ._sl_alloc", "mov rax, 1")
         self._emit_libc_malloc_size_in_rax()
-        self.emitf("mov byte [rax], 0",
-                   "leave", "ret")
+        self.emitf("mov byte [rax], 0", "leave", "ret")
         self.label("._sl_alloc")
         # Save n in [rbp-40], malloc(n+1).
-        self.emitf("mov [rbp-40], rax",
-                   "inc rax")
+        self.emitf("mov [rbp-40], rax", "inc rax")
         self._emit_libc_malloc_size_in_rax()
         self.emitf("mov [rbp-48], rax")
         # memcpy(new, s+start, n)
-        self.emitf("mov rax, [rbp-48]",
-                   "mov rbx, [rbp-8]",
-                   "add rbx, [rbp-16]",
-                   "mov rcx, [rbp-40]")
+        self.emitf(
+            "mov rax, [rbp-48]",
+            "mov rbx, [rbp-8]",
+            "add rbx, [rbp-16]",
+            "mov rcx, [rbp-40]",
+        )
         self._emit_libc_memcpy()
         # NUL-terminate.
-        self.emitf("mov rax, [rbp-48]",
-                   "mov rcx, [rbp-40]",
-                   "mov byte [rax+rcx], 0",
-                   "leave", "ret")
+        self.emitf(
+            "mov rax, [rbp-48]",
+            "mov rcx, [rbp-40]",
+            "mov byte [rax+rcx], 0",
+            "leave",
+            "ret",
+        )
 
         # ---- _runtime_str_contains -------------------------------------------
         # rax = haystack, rbx = needle -> rax = 1 if needle is a substring.
@@ -1515,22 +1674,19 @@ class Codegen:
         self.label("_runtime_str_contains")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
         self._emit_libc_strstr()
-        self.emitf("test rax, rax",
-                   "setne al",
-                   "movzx rax, al",
-                   "leave", "ret")
+        self.emitf("test rax, rax", "setne al", "movzx rax, al", "leave", "ret")
 
         # ---- _runtime_str_index_of -------------------------------------------
         # rax = haystack, rbx = needle -> rax = index (or -1 if not found).
         self.label("_runtime_str_index_of")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48",
-                   "mov [rbp-8], rax")            # save haystack
+        self.emitf(
+            "push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax"
+        )  # save haystack
         self._emit_libc_strstr()
         # rax = pointer in haystack or NULL.
-        self.emitf("test rax, rax",
-                   "jz ._sio_notfound",
-                   "sub rax, [rbp-8]",
-                   "leave", "ret")
+        self.emitf(
+            "test rax, rax", "jz ._sio_notfound", "sub rax, [rbp-8]", "leave", "ret"
+        )
         self.label("._sio_notfound")
         self.emitf("mov rax, -1", "leave", "ret")
 
@@ -1538,29 +1694,32 @@ class Codegen:
         # rax = haystack, rbx = needle -> rax = non-overlapping occurrence count.
         # Empty needle returns 0 (CPython would return len+1; we simplify).
         self.label("_runtime_str_count")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48",
-                   "mov [rbp-8], rax",            # haystack cursor
-                   "mov [rbp-16], rbx",           # needle
-                   "xor rcx, rcx",
-                   "mov [rbp-24], rcx")           # count = 0
+        self.emitf(
+            "push rbp",
+            "mov rbp, rsp",
+            "sub rsp, 48",
+            "mov [rbp-8], rax",  # haystack cursor
+            "mov [rbp-16], rbx",  # needle
+            "xor rcx, rcx",
+            "mov [rbp-24], rcx",
+        )  # count = 0
         # nlen = strlen(needle); if 0 -> return 0
         self.emitf("mov rax, [rbp-16]")
         self._emit_libc_strlen()
-        self.emitf("mov [rbp-32], rax",
-                   "test rax, rax",
-                   "jz ._sco_done")
+        self.emitf("mov [rbp-32], rax", "test rax, rax", "jz ._sco_done")
         self.label("._sco_loop")
-        self.emitf("mov rax, [rbp-8]",
-                   "mov rbx, [rbp-16]")
+        self.emitf("mov rax, [rbp-8]", "mov rbx, [rbp-16]")
         self._emit_libc_strstr()
-        self.emitf("test rax, rax",
-                   "jz ._sco_done",
-                   "mov rcx, [rbp-24]",
-                   "inc rcx",
-                   "mov [rbp-24], rcx",
-                   "add rax, [rbp-32]",
-                   "mov [rbp-8], rax",
-                   "jmp ._sco_loop")
+        self.emitf(
+            "test rax, rax",
+            "jz ._sco_done",
+            "mov rcx, [rbp-24]",
+            "inc rcx",
+            "mov [rbp-24], rcx",
+            "add rax, [rbp-32]",
+            "mov [rbp-8], rax",
+            "jmp ._sco_loop",
+        )
         self.label("._sco_done")
         self.emitf("mov rax, [rbp-24]", "leave", "ret")
 
@@ -1568,9 +1727,13 @@ class Codegen:
         # rax = s, rbx = prefix -> rax = 1 if memcmp(s, prefix, plen) == 0
         # and len(s) >= plen, else 0.
         self.label("_runtime_str_starts_with")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48",
-                   "mov [rbp-8], rax",            # s
-                   "mov [rbp-16], rbx")           # prefix
+        self.emitf(
+            "push rbp",
+            "mov rbp, rsp",
+            "sub rsp, 48",
+            "mov [rbp-8], rax",  # s
+            "mov [rbp-16], rbx",
+        )  # prefix
         # plen = strlen(prefix)
         self.emitf("mov rax, [rbp-16]")
         self._emit_libc_strlen()
@@ -1578,21 +1741,23 @@ class Codegen:
         # slen = strlen(s)
         self.emitf("mov rax, [rbp-8]")
         self._emit_libc_strlen()
-        self.emitf("cmp rax, [rbp-24]",
-                   "jl ._ssw_no")
+        self.emitf("cmp rax, [rbp-24]", "jl ._ssw_no")
         # Compare bytes via a byte-loop (avoids needing memcmp in libc list).
-        self.emitf("mov rax, [rbp-8]",
-                   "mov rbx, [rbp-16]",
-                   "mov rcx, [rbp-24]",
-                   "xor rdx, rdx")
+        self.emitf(
+            "mov rax, [rbp-8]", "mov rbx, [rbp-16]", "mov rcx, [rbp-24]", "xor rdx, rdx"
+        )
         self.label("._ssw_loop")
-        self.emitf("test rcx, rcx",
-                   "jz ._ssw_yes",
-                   "mov dl, [rax]",
-                   "cmp dl, [rbx]",
-                   "jne ._ssw_no",
-                   "inc rax", "inc rbx", "dec rcx",
-                   "jmp ._ssw_loop")
+        self.emitf(
+            "test rcx, rcx",
+            "jz ._ssw_yes",
+            "mov dl, [rax]",
+            "cmp dl, [rbx]",
+            "jne ._ssw_no",
+            "inc rax",
+            "inc rbx",
+            "dec rcx",
+            "jmp ._ssw_loop",
+        )
         self.label("._ssw_yes")
         self.emitf("mov rax, 1", "leave", "ret")
         self.label("._ssw_no")
@@ -1601,32 +1766,44 @@ class Codegen:
         # ---- _runtime_str_ends_with ------------------------------------------
         # rax = s, rbx = suffix -> rax = 1 if s ends with suffix else 0.
         self.label("_runtime_str_ends_with")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48",
-                   "mov [rbp-8], rax",
-                   "mov [rbp-16], rbx")
+        self.emitf(
+            "push rbp",
+            "mov rbp, rsp",
+            "sub rsp, 48",
+            "mov [rbp-8], rax",
+            "mov [rbp-16], rbx",
+        )
         self.emitf("mov rax, [rbp-16]")
         self._emit_libc_strlen()
-        self.emitf("mov [rbp-24], rax")           # suflen
+        self.emitf("mov [rbp-24], rax")  # suflen
         self.emitf("mov rax, [rbp-8]")
         self._emit_libc_strlen()
-        self.emitf("mov [rbp-32], rax",           # slen
-                   "cmp rax, [rbp-24]",
-                   "jl ._sew_no")
+        self.emitf(
+            "mov [rbp-32], rax",  # slen
+            "cmp rax, [rbp-24]",
+            "jl ._sew_no",
+        )
         # offset = slen - suflen
-        self.emitf("mov rax, [rbp-32]",
-                   "sub rax, [rbp-24]",
-                   "add rax, [rbp-8]",            # s + offset
-                   "mov rbx, [rbp-16]",
-                   "mov rcx, [rbp-24]",
-                   "xor rdx, rdx")
+        self.emitf(
+            "mov rax, [rbp-32]",
+            "sub rax, [rbp-24]",
+            "add rax, [rbp-8]",  # s + offset
+            "mov rbx, [rbp-16]",
+            "mov rcx, [rbp-24]",
+            "xor rdx, rdx",
+        )
         self.label("._sew_loop")
-        self.emitf("test rcx, rcx",
-                   "jz ._sew_yes",
-                   "mov dl, [rax]",
-                   "cmp dl, [rbx]",
-                   "jne ._sew_no",
-                   "inc rax", "inc rbx", "dec rcx",
-                   "jmp ._sew_loop")
+        self.emitf(
+            "test rcx, rcx",
+            "jz ._sew_yes",
+            "mov dl, [rax]",
+            "cmp dl, [rbx]",
+            "jne ._sew_no",
+            "inc rax",
+            "inc rbx",
+            "dec rcx",
+            "jmp ._sew_loop",
+        )
         self.label("._sew_yes")
         self.emitf("mov rax, 1", "leave", "ret")
         self.label("._sew_no")
@@ -1635,237 +1812,264 @@ class Codegen:
         # ---- _runtime_str_upper ----------------------------------------------
         # rax = s -> rax = newly-allocated upper-case copy. ASCII only.
         self.label("_runtime_str_upper")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48",
-                   "mov [rbp-8], rax")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax")
         self._emit_libc_strlen()
-        self.emitf("mov [rbp-16], rax",           # len
-                   "inc rax")
+        self.emitf(
+            "mov [rbp-16], rax",  # len
+            "inc rax",
+        )
         self._emit_libc_malloc_size_in_rax()
-        self.emitf("mov [rbp-24], rax")           # dst
+        self.emitf("mov [rbp-24], rax")  # dst
         # Copy + transform.
-        self.emitf("mov rcx, [rbp-16]",
-                   "mov rsi, [rbp-8]",
-                   "mov rdi, [rbp-24]",
-                   "xor rdx, rdx")
+        self.emitf(
+            "mov rcx, [rbp-16]", "mov rsi, [rbp-8]", "mov rdi, [rbp-24]", "xor rdx, rdx"
+        )
         self.label("._sup_loop")
-        self.emitf("test rcx, rcx",
-                   "jz ._sup_done",
-                   "mov dl, [rsi]",
-                   "cmp dl, 97",                  # 'a'
-                   "jl ._sup_keep",
-                   "cmp dl, 122",                 # 'z'
-                   "jg ._sup_keep",
-                   "sub dl, 32")
+        self.emitf(
+            "test rcx, rcx",
+            "jz ._sup_done",
+            "mov dl, [rsi]",
+            "cmp dl, 97",  # 'a'
+            "jl ._sup_keep",
+            "cmp dl, 122",  # 'z'
+            "jg ._sup_keep",
+            "sub dl, 32",
+        )
         self.label("._sup_keep")
-        self.emitf("mov [rdi], dl",
-                   "inc rsi", "inc rdi", "dec rcx",
-                   "jmp ._sup_loop")
+        self.emitf("mov [rdi], dl", "inc rsi", "inc rdi", "dec rcx", "jmp ._sup_loop")
         self.label("._sup_done")
-        self.emitf("mov byte [rdi], 0",
-                   "mov rax, [rbp-24]",
-                   "leave", "ret")
+        self.emitf("mov byte [rdi], 0", "mov rax, [rbp-24]", "leave", "ret")
 
         # ---- _runtime_str_lower ----------------------------------------------
         # rax = s -> rax = newly-allocated lower-case copy. ASCII only.
         self.label("_runtime_str_lower")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48",
-                   "mov [rbp-8], rax")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax")
         self._emit_libc_strlen()
         self.emitf("mov [rbp-16], rax", "inc rax")
         self._emit_libc_malloc_size_in_rax()
-        self.emitf("mov [rbp-24], rax",
-                   "mov rcx, [rbp-16]",
-                   "mov rsi, [rbp-8]",
-                   "mov rdi, [rbp-24]",
-                   "xor rdx, rdx")
+        self.emitf(
+            "mov [rbp-24], rax",
+            "mov rcx, [rbp-16]",
+            "mov rsi, [rbp-8]",
+            "mov rdi, [rbp-24]",
+            "xor rdx, rdx",
+        )
         self.label("._slo_loop")
-        self.emitf("test rcx, rcx",
-                   "jz ._slo_done",
-                   "mov dl, [rsi]",
-                   "cmp dl, 65",                  # 'A'
-                   "jl ._slo_keep",
-                   "cmp dl, 90",                  # 'Z'
-                   "jg ._slo_keep",
-                   "add dl, 32")
+        self.emitf(
+            "test rcx, rcx",
+            "jz ._slo_done",
+            "mov dl, [rsi]",
+            "cmp dl, 65",  # 'A'
+            "jl ._slo_keep",
+            "cmp dl, 90",  # 'Z'
+            "jg ._slo_keep",
+            "add dl, 32",
+        )
         self.label("._slo_keep")
-        self.emitf("mov [rdi], dl",
-                   "inc rsi", "inc rdi", "dec rcx",
-                   "jmp ._slo_loop")
+        self.emitf("mov [rdi], dl", "inc rsi", "inc rdi", "dec rcx", "jmp ._slo_loop")
         self.label("._slo_done")
-        self.emitf("mov byte [rdi], 0",
-                   "mov rax, [rbp-24]",
-                   "leave", "ret")
+        self.emitf("mov byte [rdi], 0", "mov rax, [rbp-24]", "leave", "ret")
 
         # ---- _runtime_str_lstrip ---------------------------------------------
         # rax = s -> rax = newly-allocated copy with leading ASCII whitespace
         # (space, tab, newline, carriage-return) removed.
         self.label("_runtime_str_lstrip")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48",
-                   "mov [rbp-8], rax")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax")
         # Advance start past whitespace.
         self.emitf("mov rsi, [rbp-8]")
         self.label("._slst_skip")
-        self.emitf("mov dl, [rsi]",
-                   "cmp dl, 32", "je ._slst_adv",
-                   "cmp dl, 9",  "je ._slst_adv",
-                   "cmp dl, 10", "je ._slst_adv",
-                   "cmp dl, 13", "je ._slst_adv",
-                   "jmp ._slst_copy")
+        self.emitf(
+            "mov dl, [rsi]",
+            "cmp dl, 32",
+            "je ._slst_adv",
+            "cmp dl, 9",
+            "je ._slst_adv",
+            "cmp dl, 10",
+            "je ._slst_adv",
+            "cmp dl, 13",
+            "je ._slst_adv",
+            "jmp ._slst_copy",
+        )
         self.label("._slst_adv")
         self.emitf("inc rsi", "jmp ._slst_skip")
         self.label("._slst_copy")
-        self.emitf("mov [rbp-16], rsi",           # start ptr
-                   "mov rax, rsi")
+        self.emitf(
+            "mov [rbp-16], rsi",  # start ptr
+            "mov rax, rsi",
+        )
         self._emit_libc_strlen()
-        self.emitf("mov [rbp-24], rax",           # n
-                   "inc rax")
+        self.emitf(
+            "mov [rbp-24], rax",  # n
+            "inc rax",
+        )
         self._emit_libc_malloc_size_in_rax()
-        self.emitf("mov [rbp-32], rax",
-                   "mov rbx, [rbp-16]",
-                   "mov rcx, [rbp-24]")
+        self.emitf("mov [rbp-32], rax", "mov rbx, [rbp-16]", "mov rcx, [rbp-24]")
         self._emit_libc_memcpy()
-        self.emitf("mov rax, [rbp-32]",
-                   "mov rcx, [rbp-24]",
-                   "mov byte [rax+rcx], 0",
-                   "leave", "ret")
+        self.emitf(
+            "mov rax, [rbp-32]",
+            "mov rcx, [rbp-24]",
+            "mov byte [rax+rcx], 0",
+            "leave",
+            "ret",
+        )
 
         # ---- _runtime_str_rstrip ---------------------------------------------
         # rax = s -> rax = newly-allocated copy with trailing ASCII whitespace
         # removed.
         self.label("_runtime_str_rstrip")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48",
-                   "mov [rbp-8], rax")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax")
         self._emit_libc_strlen()
-        self.emitf("mov [rbp-16], rax")           # n
+        self.emitf("mov [rbp-16], rax")  # n
         # Walk back from the end while whitespace.
         self.label("._srst_back")
-        self.emitf("mov rcx, [rbp-16]",
-                   "test rcx, rcx",
-                   "jz ._srst_alloc",
-                   "mov rsi, [rbp-8]",
-                   "dec rcx",
-                   "mov dl, [rsi+rcx]",
-                   "cmp dl, 32", "je ._srst_dec",
-                   "cmp dl, 9",  "je ._srst_dec",
-                   "cmp dl, 10", "je ._srst_dec",
-                   "cmp dl, 13", "je ._srst_dec",
-                   "jmp ._srst_alloc")
+        self.emitf(
+            "mov rcx, [rbp-16]",
+            "test rcx, rcx",
+            "jz ._srst_alloc",
+            "mov rsi, [rbp-8]",
+            "dec rcx",
+            "mov dl, [rsi+rcx]",
+            "cmp dl, 32",
+            "je ._srst_dec",
+            "cmp dl, 9",
+            "je ._srst_dec",
+            "cmp dl, 10",
+            "je ._srst_dec",
+            "cmp dl, 13",
+            "je ._srst_dec",
+            "jmp ._srst_alloc",
+        )
         self.label("._srst_dec")
         self.emitf("mov [rbp-16], rcx", "jmp ._srst_back")
         self.label("._srst_alloc")
         self.emitf("mov rax, [rbp-16]", "inc rax")
         self._emit_libc_malloc_size_in_rax()
-        self.emitf("mov [rbp-24], rax",
-                   "mov rbx, [rbp-8]",
-                   "mov rcx, [rbp-16]")
+        self.emitf("mov [rbp-24], rax", "mov rbx, [rbp-8]", "mov rcx, [rbp-16]")
         self._emit_libc_memcpy()
-        self.emitf("mov rax, [rbp-24]",
-                   "mov rcx, [rbp-16]",
-                   "mov byte [rax+rcx], 0",
-                   "leave", "ret")
+        self.emitf(
+            "mov rax, [rbp-24]",
+            "mov rcx, [rbp-16]",
+            "mov byte [rax+rcx], 0",
+            "leave",
+            "ret",
+        )
 
         # ---- _runtime_str_strip ----------------------------------------------
         # rax = s -> lstrip(rstrip(s)). Two passes; allocates twice.
         self.label("_runtime_str_strip")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32",
-                   "call _runtime_str_rstrip",
-                   "call _runtime_str_lstrip",
-                   "leave", "ret")
+        self.emitf(
+            "push rbp",
+            "mov rbp, rsp",
+            "sub rsp, 32",
+            "call _runtime_str_rstrip",
+            "call _runtime_str_lstrip",
+            "leave",
+            "ret",
+        )
 
         # ---- _runtime_str_replace --------------------------------------------
         # rax = s, rbx = old, rcx = new -> rax = newly-allocated copy of s with
         # every non-overlapping occurrence of `old` replaced by `new`. Empty
         # `old` returns a duplicate of s (no replacement).
         self.label("_runtime_str_replace")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 96",
-                   "mov [rbp-8], rax",            # s
-                   "mov [rbp-16], rbx",           # old
-                   "mov [rbp-24], rcx")           # new
+        self.emitf(
+            "push rbp",
+            "mov rbp, rsp",
+            "sub rsp, 96",
+            "mov [rbp-8], rax",  # s
+            "mov [rbp-16], rbx",  # old
+            "mov [rbp-24], rcx",
+        )  # new
         # Lengths: slen, olen, nlen.
         self.emitf("mov rax, [rbp-8]")
         self._emit_libc_strlen()
         self.emitf("mov [rbp-32], rax")
         self.emitf("mov rax, [rbp-16]")
         self._emit_libc_strlen()
-        self.emitf("mov [rbp-40], rax",
-                   "test rax, rax",
-                   "jz ._srep_dup")
+        self.emitf("mov [rbp-40], rax", "test rax, rax", "jz ._srep_dup")
         self.emitf("mov rax, [rbp-24]")
         self._emit_libc_strlen()
         self.emitf("mov [rbp-48], rax")
         # Count occurrences.
-        self.emitf("mov rax, [rbp-8]",
-                   "mov rbx, [rbp-16]",
-                   "call _runtime_str_count",
-                   "mov [rbp-56], rax")           # cnt
+        self.emitf(
+            "mov rax, [rbp-8]",
+            "mov rbx, [rbp-16]",
+            "call _runtime_str_count",
+            "mov [rbp-56], rax",
+        )  # cnt
         # outlen = slen + cnt * (nlen - olen)
-        self.emitf("mov rax, [rbp-48]",
-                   "sub rax, [rbp-40]",
-                   "imul rax, [rbp-56]",
-                   "add rax, [rbp-32]",
-                   "mov [rbp-64], rax",           # outlen
-                   "inc rax")
+        self.emitf(
+            "mov rax, [rbp-48]",
+            "sub rax, [rbp-40]",
+            "imul rax, [rbp-56]",
+            "add rax, [rbp-32]",
+            "mov [rbp-64], rax",  # outlen
+            "inc rax",
+        )
         self._emit_libc_malloc_size_in_rax()
-        self.emitf("mov [rbp-72], rax")           # out ptr
+        self.emitf("mov [rbp-72], rax")  # out ptr
         # Walk: src cursor in r12, dst cursor in r13. We use rbp-80 / rbp-88
         # since r12/r13 are callee-saved on both ABIs; safer to keep in slots.
-        self.emitf("mov rax, [rbp-8]",
-                   "mov [rbp-80], rax")           # src
-        self.emitf("mov rax, [rbp-72]",
-                   "mov [rbp-88], rax")           # dst
+        self.emitf("mov rax, [rbp-8]", "mov [rbp-80], rax")  # src
+        self.emitf("mov rax, [rbp-72]", "mov [rbp-88], rax")  # dst
         self.label("._srep_loop")
         # Find next occurrence at-or-after src.
-        self.emitf("mov rax, [rbp-80]",
-                   "mov rbx, [rbp-16]")
+        self.emitf("mov rax, [rbp-80]", "mov rbx, [rbp-16]")
         self._emit_libc_strstr()
-        self.emitf("test rax, rax",
-                   "jz ._srep_tail")
+        self.emitf("test rax, rax", "jz ._srep_tail")
         # Save match ptr; compute chunk_len = match - src; copy chunk to dst.
-        self.emitf("mov [rbp-96], rax")           # match ptr
+        self.emitf("mov [rbp-96], rax")  # match ptr
         self.emitf("sub rax, [rbp-80]")
         # Skip the memcpy if the chunk is empty (calling memcpy with size 0
         # is fine but we avoid the call overhead).
         self.emitf("test rax, rax", "jz ._srep_no_chunk")
         # memcpy(dst, src, chunk_len)
-        self.emitf("mov rcx, rax",                # rcx = chunk_len
-                   "mov rbx, [rbp-80]",           # rbx = src
-                   "mov rax, [rbp-88]")           # rax = dst
+        self.emitf(
+            "mov rcx, rax",  # rcx = chunk_len
+            "mov rbx, [rbp-80]",  # rbx = src
+            "mov rax, [rbp-88]",
+        )  # rax = dst
         self._emit_libc_memcpy()
         # Advance dst by chunk_len. memcpy clobbered scratch regs, so re-derive
         # chunk_len from (match - src) using the stable slots.
-        self.emitf("mov rax, [rbp-96]",
-                   "sub rax, [rbp-80]",
-                   "add rax, [rbp-88]",
-                   "mov [rbp-88], rax")
+        self.emitf(
+            "mov rax, [rbp-96]",
+            "sub rax, [rbp-80]",
+            "add rax, [rbp-88]",
+            "mov [rbp-88], rax",
+        )
         self.label("._srep_no_chunk")
         # Append `new` to dst.
-        self.emitf("mov rax, [rbp-88]",
-                   "mov rbx, [rbp-24]",
-                   "mov rcx, [rbp-48]")
+        self.emitf("mov rax, [rbp-88]", "mov rbx, [rbp-24]", "mov rcx, [rbp-48]")
         self._emit_libc_memcpy()
         # Advance dst by nlen; advance src to match + olen.
-        self.emitf("mov rax, [rbp-88]",
-                   "add rax, [rbp-48]",
-                   "mov [rbp-88], rax",
-                   "mov rax, [rbp-96]",
-                   "add rax, [rbp-40]",
-                   "mov [rbp-80], rax",
-                   "jmp ._srep_loop")
+        self.emitf(
+            "mov rax, [rbp-88]",
+            "add rax, [rbp-48]",
+            "mov [rbp-88], rax",
+            "mov rax, [rbp-96]",
+            "add rax, [rbp-40]",
+            "mov [rbp-80], rax",
+            "jmp ._srep_loop",
+        )
         self.label("._srep_tail")
         # Copy remaining tail bytes from src to dst.
-        self.emitf("mov rax, [rbp-72]",
-                   "add rax, [rbp-64]",           # = out + outlen
-                   "sub rax, [rbp-88]")           # rax = tail_len
+        self.emitf(
+            "mov rax, [rbp-72]",
+            "add rax, [rbp-64]",  # = out + outlen
+            "sub rax, [rbp-88]",
+        )  # rax = tail_len
         self.emitf("test rax, rax", "jz ._srep_term")
-        self.emitf("mov rcx, rax",
-                   "mov rbx, [rbp-80]",
-                   "mov rax, [rbp-88]")
+        self.emitf("mov rcx, rax", "mov rbx, [rbp-80]", "mov rax, [rbp-88]")
         self._emit_libc_memcpy()
         self.label("._srep_term")
-        self.emitf("mov rax, [rbp-72]",
-                   "mov rcx, [rbp-64]",
-                   "mov byte [rax+rcx], 0",
-                   "leave", "ret")
+        self.emitf(
+            "mov rax, [rbp-72]",
+            "mov rcx, [rbp-64]",
+            "mov byte [rax+rcx], 0",
+            "leave",
+            "ret",
+        )
         self.label("._srep_dup")
         # Empty old: just strdup the input.
         self.emitf("mov rax, [rbp-8]")
@@ -1895,8 +2099,11 @@ class Codegen:
         """
         if self.use_runtime_lib:
             for sym in (
-                "_runtime_setjmp", "_runtime_longjmp", "_runtime_raise",
-                "_runtime_handler_top", "_runtime_exc_msg",
+                "_runtime_setjmp",
+                "_runtime_longjmp",
+                "_runtime_raise",
+                "_runtime_handler_top",
+                "_runtime_exc_msg",
             ):
                 self.emit(f"extern {sym}")
             return
@@ -1916,20 +2123,20 @@ class Codegen:
         # Output: rax = 0 on initial call; nonzero after longjmp.
         self.label("_runtime_setjmp")
         # Save callee-saved registers and the return frame state.
-        self.emitf("mov [rax+0],  rbx",
-                   "mov [rax+8],  rbp",
-                   "mov [rax+16], r12",
-                   "mov [rax+24], r13",
-                   "mov [rax+32], r14",
-                   "mov [rax+40], r15")
+        self.emitf(
+            "mov [rax+0],  rbx",
+            "mov [rax+8],  rbp",
+            "mov [rax+16], r12",
+            "mov [rax+24], r13",
+            "mov [rax+32], r14",
+            "mov [rax+40], r15",
+        )
         # Save rsp at the point just after our caller did `call _runtime_setjmp`.
         # When we entered, the call instruction pushed the return address, so
         # rsp now points at that address. Save rsp+8 (caller's rsp before call).
-        self.emitf("lea rcx, [rsp+8]",
-                   "mov [rax+48], rcx")
+        self.emitf("lea rcx, [rsp+8]", "mov [rax+48], rcx")
         # Save return address (the instruction after the call in the caller).
-        self.emitf("mov rcx, [rsp]",
-                   "mov [rax+56], rcx")
+        self.emitf("mov rcx, [rsp]", "mov [rax+56], rcx")
         self.emitf("xor rax, rax", "ret")
 
         # ---- _runtime_longjmp ------------------------------------------------
@@ -1937,28 +2144,34 @@ class Codegen:
         # Restores all saved registers and resumes at the saved rip.
         self.label("_runtime_longjmp")
         # Move buf to a scratch reg first because we're about to overwrite rbx.
-        self.emitf("mov rcx, rax",
-                   "mov rax, rbx",                # return value
-                   "mov rbx, [rcx+0]",
-                   "mov rbp, [rcx+8]",
-                   "mov r12, [rcx+16]",
-                   "mov r13, [rcx+24]",
-                   "mov r14, [rcx+32]",
-                   "mov r15, [rcx+40]",
-                   "mov rsp, [rcx+48]",
-                   "jmp [rcx+56]")
+        self.emitf(
+            "mov rcx, rax",
+            "mov rax, rbx",  # return value
+            "mov rbx, [rcx+0]",
+            "mov rbp, [rcx+8]",
+            "mov r12, [rcx+16]",
+            "mov r13, [rcx+24]",
+            "mov r14, [rcx+32]",
+            "mov r15, [rcx+40]",
+            "mov rsp, [rcx+48]",
+            "jmp [rcx+56]",
+        )
 
         # ---- _runtime_raise --------------------------------------------------
         self.label("_runtime_raise")
         # rax = exception message (string ptr). Stash it in the global.
         self.emitf("mov [rel _runtime_exc_msg], rax")
         # If no handler installed, print and exit.
-        self.emitf("mov rax, [rel _runtime_handler_top]",
-                   "test rax, rax",
-                   "jnz ._rr_jump")
+        self.emitf(
+            "mov rax, [rel _runtime_handler_top]", "test rax, rax", "jnz ._rr_jump"
+        )
         # Unhandled path.
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32",
-                   "lea rax, [rel _runtime_unhandled_prefix]")
+        self.emitf(
+            "push rbp",
+            "mov rbp, rsp",
+            "sub rsp, 32",
+            "lea rax, [rel _runtime_unhandled_prefix]",
+        )
         self._emit_print_str_ptr_no_newline()
         self.emitf("mov rax, [rel _runtime_exc_msg]")
         self._emit_print_str_ptr_no_newline()
@@ -1966,8 +2179,10 @@ class Codegen:
         self._emit_exit_one()
         # Handler path: hand-rolled longjmp(handler, 1).
         self.label("._rr_jump")
-        self.emitf("mov rbx, 1",                   # longjmp value
-                   "call _runtime_longjmp")
+        self.emitf(
+            "mov rbx, 1",  # longjmp value
+            "call _runtime_longjmp",
+        )
 
     def _emit_panic_message(self) -> None:
         """rax = nul-terminated message ptr -> print and exit(1)."""
@@ -2018,11 +2233,11 @@ class Codegen:
     # Slot (16 bytes each):
     #   [0..8)   key_ptr  (0 = empty, 1 = tombstone, otherwise nul-term string)
     #   [8..16)  value
-    DICT_CAP_OFF  = 0
-    DICT_LEN_OFF  = 8
+    DICT_CAP_OFF = 0
+    DICT_LEN_OFF = 8
     DICT_TOMB_OFF = 16
-    DICT_BUF_OFF  = 24
-    DICT_HEADER   = 32
+    DICT_BUF_OFF = 24
+    DICT_HEADER = 32
     DICT_SLOT_SIZE = 16
 
     def _gen_list_lit(self, e: A.ListLit, info: FuncInfo) -> None:
@@ -2033,21 +2248,26 @@ class Codegen:
 
         n = len(e.elems)
         cap = max(n, 4)
-        self._emit_malloc(self.LIST_HEADER)        # rax = header
-        self.emitf(f"mov qword [rax+{self.LIST_CAP_OFF}], {cap}",
-                   f"mov qword [rax+{self.LIST_LEN_OFF}], {n}",
-                   f"mov [rbp{slot_off:+d}], rax") # park header in slot
-        self._emit_malloc(cap * 8)                 # rax = buffer
-        self.emitf(f"mov rbx, [rbp{slot_off:+d}]", # rbx = header
-                   f"mov [rbx+{self.LIST_BUF_OFF}], rax")
+        self._emit_malloc(self.LIST_HEADER)  # rax = header
+        self.emitf(
+            f"mov qword [rax+{self.LIST_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.LIST_LEN_OFF}], {n}",
+            f"mov [rbp{slot_off:+d}], rax",
+        )  # park header in slot
+        self._emit_malloc(cap * 8)  # rax = buffer
+        self.emitf(
+            f"mov rbx, [rbp{slot_off:+d}]",  # rbx = header
+            f"mov [rbx+{self.LIST_BUF_OFF}], rax",
+        )
         for i, el in enumerate(e.elems):
-            self.gen_expr(el, info)                # rax/xmm0 = value (may call!)
-            self.emitf(f"mov rbx, [rbp{slot_off:+d}]",
-                       f"mov rcx, [rbx+{self.LIST_BUF_OFF}]")
+            self.gen_expr(el, info)  # rax/xmm0 = value (may call!)
+            self.emitf(
+                f"mov rbx, [rbp{slot_off:+d}]", f"mov rcx, [rbx+{self.LIST_BUF_OFF}]"
+            )
             if e.el_type == "float":
-                self.emitf(f"movsd [rcx+{i*8}], xmm0")
+                self.emitf(f"movsd [rcx+{i * 8}], xmm0")
             else:
-                self.emitf(f"mov [rcx+{i*8}], rax")
+                self.emitf(f"mov [rcx+{i * 8}], rax")
         self.emitf(f"mov rax, [rbp{slot_off:+d}]")
 
     def _gen_subscript(self, e: A.Subscript, info: FuncInfo) -> None:
@@ -2060,24 +2280,30 @@ class Codegen:
             # call runtime helper.
             self.gen_expr(e.index, info)
             self.emitf("push rax")
-            self.gen_expr(e.obj, info)             # rax = header
-            self.emitf("pop rbx",                  # rbx = key ptr
-                       "call _runtime_dict_get")    # raises if missing
+            self.gen_expr(e.obj, info)  # rax = header
+            self.emitf(
+                "pop rbx",  # rbx = key ptr
+                "call _runtime_dict_get",
+            )  # raises if missing
             return
         if obj_t == "str":
             slot_off = info.locals_[f"__stridx_{id(e)}"]
             self.gen_expr(e.obj, info)
             self.emitf(f"mov [rbp{slot_off:+d}], rax")
             self.gen_expr(e.index, info)
-            self.emitf("mov rbx, rax",
-                       f"mov rax, [rbp{slot_off:+d}]",
-                       "call _runtime_str_char_at")
+            self.emitf(
+                "mov rbx, rax",
+                f"mov rax, [rbp{slot_off:+d}]",
+                "call _runtime_str_char_at",
+            )
             return
         self.gen_expr(e.index, info)
         self.emitf("push rax")
-        self.gen_expr(e.obj, info)                 # rax = header
-        self.emitf("pop rcx",                      # rcx = index
-                   f"mov rax, [rax+{self.LIST_BUF_OFF}]")
+        self.gen_expr(e.obj, info)  # rax = header
+        self.emitf(
+            "pop rcx",  # rcx = index
+            f"mov rax, [rax+{self.LIST_BUF_OFF}]",
+        )
         # If this list holds floats, drop the 8-byte slot into xmm0; otherwise
         # keep it in rax (int / str-ptr both 8-byte integers).
         if e.inferred_type == "float":
@@ -2110,9 +2336,11 @@ class Codegen:
         else:
             self.gen_expr(sl.stop, info)
             self.emitf("mov rcx, rax")
-        self.emitf(f"mov rax, [rbp{obj_slot:+d}]",
-                   f"mov rbx, [rbp{start_slot:+d}]",
-                   "call _runtime_str_slice")
+        self.emitf(
+            f"mov rax, [rbp{obj_slot:+d}]",
+            f"mov rbx, [rbp{start_slot:+d}]",
+            "call _runtime_str_slice",
+        )
 
     def _gen_dict_lit(self, e: A.DictLit, info: FuncInfo) -> None:
         # Same pattern as list literal: stable header lives in a frame slot
@@ -2124,42 +2352,48 @@ class Codegen:
         while cap < n * 2:
             cap *= 2
         # malloc(header) then malloc(cap * SLOT_SIZE) then zero the slots.
-        self._emit_malloc(self.DICT_HEADER)        # rax = header
-        self.emitf(f"mov qword [rax+{self.DICT_CAP_OFF}], {cap}",
-                   f"mov qword [rax+{self.DICT_LEN_OFF}], 0",
-                   f"mov qword [rax+{self.DICT_TOMB_OFF}], 0",
-                   f"mov [rbp{slot_off:+d}], rax")
+        self._emit_malloc(self.DICT_HEADER)  # rax = header
+        self.emitf(
+            f"mov qword [rax+{self.DICT_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.DICT_LEN_OFF}], 0",
+            f"mov qword [rax+{self.DICT_TOMB_OFF}], 0",
+            f"mov [rbp{slot_off:+d}], rax",
+        )
         # Allocate zero-filled slot buffer via calloc-style: malloc + memset.
         # Easiest: malloc the buffer, store the pointer, then clear it with
         # a small loop in the runtime helper. We just call a runtime helper.
-        self.emitf(f"mov rbx, {cap * self.DICT_SLOT_SIZE}",
-                   "call _runtime_zalloc")         # rax = zero-filled ptr
-        self.emitf(f"mov rbx, [rbp{slot_off:+d}]",
-                   f"mov [rbx+{self.DICT_BUF_OFF}], rax")
+        self.emitf(
+            f"mov rbx, {cap * self.DICT_SLOT_SIZE}", "call _runtime_zalloc"
+        )  # rax = zero-filled ptr
+        self.emitf(
+            f"mov rbx, [rbp{slot_off:+d}]", f"mov [rbx+{self.DICT_BUF_OFF}], rax"
+        )
         # Insert each (key, value) pair via the runtime set helper.
         for k_expr, v_expr in zip(e.keys, e.values):
-            self.gen_expr(k_expr, info)            # rax = key ptr
+            self.gen_expr(k_expr, info)  # rax = key ptr
             self.emitf("push rax")
-            self.gen_expr(v_expr, info)            # rax = value
-            self.emitf("mov rcx, rax",             # rcx = value
-                       "pop rbx",                  # rbx = key ptr
-                       f"mov rax, [rbp{slot_off:+d}]",
-                       "call _runtime_dict_set")
+            self.gen_expr(v_expr, info)  # rax = value
+            self.emitf(
+                "mov rcx, rax",  # rcx = value
+                "pop rbx",  # rbx = key ptr
+                f"mov rax, [rbp{slot_off:+d}]",
+                "call _runtime_dict_set",
+            )
         self.emitf(f"mov rax, [rbp{slot_off:+d}]")
 
     # Each entry maps str method name -> runtime symbol it dispatches to.
     # The arg count (and order) follows the sema.STR_METHODS table.
     STR_METHOD_RUNTIME = {
-        "upper":      "_runtime_str_upper",
-        "lower":      "_runtime_str_lower",
-        "strip":      "_runtime_str_strip",
-        "lstrip":     "_runtime_str_lstrip",
-        "rstrip":     "_runtime_str_rstrip",
+        "upper": "_runtime_str_upper",
+        "lower": "_runtime_str_lower",
+        "strip": "_runtime_str_strip",
+        "lstrip": "_runtime_str_lstrip",
+        "rstrip": "_runtime_str_rstrip",
         "startswith": "_runtime_str_starts_with",
-        "endswith":   "_runtime_str_ends_with",
-        "find":       "_runtime_str_index_of",
-        "count":      "_runtime_str_count",
-        "replace":    "_runtime_str_replace",
+        "endswith": "_runtime_str_ends_with",
+        "find": "_runtime_str_index_of",
+        "count": "_runtime_str_count",
+        "replace": "_runtime_str_replace",
     }
 
     def _gen_str_method(self, e: A.MethodCall, info: FuncInfo) -> None:
@@ -2175,9 +2409,7 @@ class Codegen:
             self.gen_expr(e.obj, info)
             self.emitf(f"mov [rbp{obj_slot:+d}], rax")
             self.gen_expr(e.args[0], info)
-            self.emitf("mov rbx, rax",
-                       f"mov rax, [rbp{obj_slot:+d}]",
-                       f"call {sym}")
+            self.emitf("mov rbx, rax", f"mov rax, [rbp{obj_slot:+d}]", f"call {sym}")
             return
         if len(e.args) == 2:
             # replace(old, new). Two scratch slots.
@@ -2187,10 +2419,12 @@ class Codegen:
             self.gen_expr(e.args[0], info)
             self.emitf(f"mov [rbp{a1_slot:+d}], rax")
             self.gen_expr(e.args[1], info)
-            self.emitf("mov rcx, rax",
-                       f"mov rbx, [rbp{a1_slot:+d}]",
-                       f"mov rax, [rbp{obj_slot:+d}]",
-                       f"call {sym}")
+            self.emitf(
+                "mov rcx, rax",
+                f"mov rbx, [rbp{a1_slot:+d}]",
+                f"mov rax, [rbp{obj_slot:+d}]",
+                f"call {sym}",
+            )
             return
         raise NotImplementedError(f"str.{e.method}: too many args")
 
@@ -2224,7 +2458,7 @@ class Codegen:
                 if reg is None:
                     raise NotImplementedError("too many method args")
                 self.emitf(f"pop {reg}")
-            self.gen_expr(e.obj, info)         # rax = instance
+            self.gen_expr(e.obj, info)  # rax = instance
             self.emitf(f"mov {self._arg_reg(0)}, rax")
             self.emit_call(self._method_symbol(owner, e.method))
             return
@@ -2234,18 +2468,22 @@ class Codegen:
         if obj_t == "dict":
             if e.method == "get":
                 # get(key, default): rax = default, rbx = key, rcx (header).
-                self.gen_expr(e.args[0], info); self.emitf("push rax")  # key
-                self.gen_expr(e.args[1], info); self.emitf("push rax")  # default
-                self.gen_expr(e.obj, info)                              # rax = header
-                self.emitf("pop rcx",                                   # rcx = default
-                           "pop rbx",                                   # rbx = key
-                           "call _runtime_dict_get_default")
+                self.gen_expr(e.args[0], info)
+                self.emitf("push rax")  # key
+                self.gen_expr(e.args[1], info)
+                self.emitf("push rax")  # default
+                self.gen_expr(e.obj, info)  # rax = header
+                self.emitf(
+                    "pop rcx",  # rcx = default
+                    "pop rbx",  # rbx = key
+                    "call _runtime_dict_get_default",
+                )
                 return
             if e.method == "contains":
-                self.gen_expr(e.args[0], info); self.emitf("push rax")
+                self.gen_expr(e.args[0], info)
+                self.emitf("push rax")
                 self.gen_expr(e.obj, info)
-                self.emitf("pop rbx",
-                           "call _runtime_dict_contains")
+                self.emitf("pop rbx", "call _runtime_dict_contains")
                 return
         if e.method == "append":
             arg_t = A.expr_type(e.args[0])
@@ -2255,12 +2493,14 @@ class Codegen:
                 # (which writes 8 raw bytes into the buffer) doesn't care.
                 self.emitf("movq rax, xmm0")
             self.emitf("push rax")
-            self.gen_expr(e.obj, info)             # rax = header
-            self.emitf("pop rbx",                  # rbx = value (raw 8 bytes)
-                       "call _runtime_list_append")
+            self.gen_expr(e.obj, info)  # rax = header
+            self.emitf(
+                "pop rbx",  # rbx = value (raw 8 bytes)
+                "call _runtime_list_append",
+            )
             return
         if e.method == "pop":
-            self.gen_expr(e.obj, info)             # rax = header
+            self.gen_expr(e.obj, info)  # rax = header
             self.emitf("call _runtime_list_pop")
             # pop returns the raw 8 bytes in rax. If the caller expects a
             # float, drop those bytes into xmm0.
@@ -2298,25 +2538,31 @@ class Codegen:
             self.gen_expr(e.left, info)
             self.emitf(f"mov [rbp{slot_off:+d}], rax")
             self.gen_expr(e.right, info)
-            self.emitf("mov rbx, rax",
-                       f"mov rax, [rbp{slot_off:+d}]",
-                       "call _runtime_str_concat")
+            self.emitf(
+                "mov rbx, rax",
+                f"mov rax, [rbp{slot_off:+d}]",
+                "call _runtime_str_concat",
+            )
             return
         if e.op == "*":
             if lt == "str":
                 self.gen_expr(e.left, info)
                 self.emitf(f"mov [rbp{slot_off:+d}], rax")
                 self.gen_expr(e.right, info)
-                self.emitf("mov rbx, rax",
-                           f"mov rax, [rbp{slot_off:+d}]",
-                           "call _runtime_str_repeat")
+                self.emitf(
+                    "mov rbx, rax",
+                    f"mov rax, [rbp{slot_off:+d}]",
+                    "call _runtime_str_repeat",
+                )
             else:
                 self.gen_expr(e.right, info)
                 self.emitf(f"mov [rbp{slot_off:+d}], rax")
                 self.gen_expr(e.left, info)
-                self.emitf("mov rbx, rax",
-                           f"mov rax, [rbp{slot_off:+d}]",
-                           "call _runtime_str_repeat")
+                self.emitf(
+                    "mov rbx, rax",
+                    f"mov rax, [rbp{slot_off:+d}]",
+                    "call _runtime_str_repeat",
+                )
             return
         raise NotImplementedError(f"string binop {e.op!r}")
 
@@ -2362,15 +2608,17 @@ class Codegen:
         """Evaluate expr; jump to false_target if value is falsy."""
         t = A.expr_type(expr)
         if t == "float":
-            self.gen_expr(expr, info)              # xmm0 = value
+            self.gen_expr(expr, info)  # xmm0 = value
             zero_lbl = self.intern_float(0.0)
             past_nan = self.fresh("not_nan")
-            self.emitf(f"movsd xmm1, [{zero_lbl}]",
-                       "ucomisd xmm0, xmm1",
-                       # ucomisd sets PF on unordered (NaN). We treat NaN as
-                       # truthy (Python semantics), so skip the zero-check.
-                       f"jp {past_nan}",
-                       f"je {false_target}")
+            self.emitf(
+                f"movsd xmm1, [{zero_lbl}]",
+                "ucomisd xmm0, xmm1",
+                # ucomisd sets PF on unordered (NaN). We treat NaN as
+                # truthy (Python semantics), so skip the zero-check.
+                f"jp {past_nan}",
+                f"je {false_target}",
+            )
             self.label(past_nan)
             return
         # Default: int or pointer; non-zero is truthy.
@@ -2424,42 +2672,66 @@ class Codegen:
             raise NotImplementedError(op)
 
     SETCC = {
-        "==": "sete", "!=": "setne",
-        "<": "setl",  "<=": "setle",
-        ">": "setg",  ">=": "setge",
+        "==": "sete",
+        "!=": "setne",
+        "<": "setl",
+        "<=": "setle",
+        ">": "setg",
+        ">=": "setge",
+        # `is` / `is not` lower to identity-as-bit-equality. With mamba's
+        # uniform 8-byte runtime representation that's the same as ==/!= on
+        # the two raw 64-bit slots.
+        "is": "sete",
+        "is not": "setne",
     }
     # Inverse jump for short-circuit on chained compares.
     JCC_INV = {
-        "==": "jne", "!=": "je",
-        "<": "jge",  "<=": "jg",
-        ">": "jle",  ">=": "jl",
+        "==": "jne",
+        "!=": "je",
+        "<": "jge",
+        "<=": "jg",
+        ">": "jle",
+        ">=": "jl",
+        "is": "jne",
+        "is not": "je",
     }
     # For ucomisd: signed-comparison setcc/jcc don't work because the result
     # flags are unordered/equal/below/above. Use the unsigned variants.
     SETCC_FLOAT = {
-        "==": "sete", "!=": "setne",
-        "<": "setb",  "<=": "setbe",
-        ">": "seta",  ">=": "setae",
+        "==": "sete",
+        "!=": "setne",
+        "<": "setb",
+        "<=": "setbe",
+        ">": "seta",
+        ">=": "setae",
     }
     JCC_INV_FLOAT = {
-        "==": "jne", "!=": "je",
-        "<": "jae",  "<=": "ja",
-        ">": "jbe",  ">=": "jb",
+        "==": "jne",
+        "!=": "je",
+        "<": "jae",
+        "<=": "ja",
+        ">": "jbe",
+        ">=": "jb",
     }
 
     def _gen_compare(self, e: A.Compare, info: FuncInfo) -> None:
         # String compare: ==/!= and in/not in dispatch to runtime helpers.
-        if len(e.ops) == 1 and \
-                A.expr_type(e.operands[0]) == "str" and A.expr_type(e.operands[1]) == "str":
+        if (
+            len(e.ops) == 1
+            and A.expr_type(e.operands[0]) == "str"
+            and A.expr_type(e.operands[1]) == "str"
+        ):
             op = e.ops[0]
             if op in ("==", "!="):
                 slot_off = info.locals_[f"__strcmp_{id(e)}"]
                 self.gen_expr(e.operands[0], info)
                 self.emitf(f"mov [rbp{slot_off:+d}], rax")
                 self.gen_expr(e.operands[1], info)
-                self.emitf("mov rbx, rax",
-                           f"mov rax, [rbp{slot_off:+d}]",
-                           "call _runtime_str_eq")
+                self.emitf(
+                    "mov rbx, rax",
+                    f"mov rax, [rbp{slot_off:+d}]",
+                    "call _runtime_str_eq",
+                )
                 if op == "!=":
                     self.emitf("xor rax, 1")
                 return
@@ -2467,11 +2739,13 @@ class Codegen:
                 # 'needle in haystack': lhs is the needle, rhs is the
                 # haystack — but _runtime_str_contains takes (haystack, needle).
                 slot_off = info.locals_[f"__strin_{id(e)}"]
-                self.gen_expr(e.operands[0], info)                  # rax = needle
+                self.gen_expr(e.operands[0], info)  # rax = needle
                 self.emitf(f"mov [rbp{slot_off:+d}], rax")
-                self.gen_expr(e.operands[1], info)                  # rax = haystack
-                self.emitf(f"mov rbx, [rbp{slot_off:+d}]",         # rbx = needle
-                           "call _runtime_str_contains")
+                self.gen_expr(e.operands[1], info)  # rax = haystack
+                self.emitf(
+                    f"mov rbx, [rbp{slot_off:+d}]",  # rbx = needle
+                    "call _runtime_str_contains",
+                )
                 if op == "not in":
                     self.emitf("xor rax, 1")
                 return
@@ -2506,7 +2780,9 @@ class Codegen:
             for i, op in enumerate(e.ops):
                 # xmm0 = current LHS
                 self.emitf("sub rsp, 8", "movsd [rsp], xmm0")
-                self._gen_expr_as_float(e.operands[i+1], info, A.expr_type(e.operands[i+1]))
+                self._gen_expr_as_float(
+                    e.operands[i + 1], info, A.expr_type(e.operands[i + 1])
+                )
                 self.emitf("movsd xmm1, xmm0", "movsd xmm0, [rsp]", "add rsp, 8")
                 jcc = self.JCC_INV_FLOAT[op]
                 self.emitf("ucomisd xmm0, xmm1", f"{jcc} {false_lbl}")
@@ -2535,7 +2811,7 @@ class Codegen:
         if e.op == "and":
             self.emitf(f"jz {end}")  # left false -> result is left (0)
         else:
-            self.emitf(f"jnz {end}") # left true  -> result is left (nonzero)
+            self.emitf(f"jnz {end}")  # left true  -> result is left (nonzero)
         self.gen_expr(e.right, info)
         self.label(end)
         # Normalize to 0/1.
@@ -2552,25 +2828,25 @@ class Codegen:
             return
         if e.func == "len":
             arg = e.args[0]
-            self.gen_expr(arg, info)               # rax = ptr
+            self.gen_expr(arg, info)  # rax = ptr
             t = A.expr_type(arg)
             if t == "list":
                 self.emitf(f"mov rax, [rax+{self.LIST_LEN_OFF}]")
             elif t == "dict":
                 self.emitf(f"mov rax, [rax+{self.DICT_LEN_OFF}]")
             else:
-                self._emit_strlen()                # rax = length (string)
+                self._emit_strlen()  # rax = length (string)
             return
         if e.func == "str":
             arg_t = A.expr_type(e.args[0])
             self.gen_expr(e.args[0], info)
             if arg_t == "float":
                 # xmm0 has the value; print into our int_to_str buffer via sprintf.
-                self._emit_float_to_str()          # rax = ptr
+                self._emit_float_to_str()  # rax = ptr
             elif arg_t == "str":
-                pass                               # already a str ptr in rax
+                pass  # already a str ptr in rax
             else:
-                self._emit_int_to_str()            # rax = ptr to ASCII
+                self._emit_int_to_str()  # rax = ptr to ASCII
             return
         if e.func == "int":
             arg_t = A.expr_type(e.args[0])
@@ -2586,7 +2862,7 @@ class Codegen:
             arg_t = A.expr_type(e.args[0])
             self.gen_expr(e.args[0], info)
             if arg_t == "str":
-                self._emit_str_to_float()          # xmm0 = parsed
+                self._emit_str_to_float()  # xmm0 = parsed
             elif arg_t == "int":
                 self.emitf("cvtsi2sd xmm0, rax")
             # float -> float: nothing to do.
@@ -2596,7 +2872,7 @@ class Codegen:
                 # Print the prompt first; no trailing newline.
                 self.gen_expr(e.args[0], info)
                 self._emit_print_str_ptr_no_newline()
-            self._emit_input_line()                # rax = ptr to read buffer
+            self._emit_input_line()  # rax = ptr to read buffer
             return
         # Constructor: ClassName(args). Allocate an empty dict, then if the
         # class chain provides an __init__, dispatch to it with the instance
@@ -2647,14 +2923,16 @@ class Codegen:
         # Inline the empty-dict allocation (mirrors _gen_dict_lit with n=0).
         cap = 8
         self._emit_malloc(self.DICT_HEADER)
-        self.emitf(f"mov qword [rax+{self.DICT_CAP_OFF}], {cap}",
-                   f"mov qword [rax+{self.DICT_LEN_OFF}], 0",
-                   f"mov qword [rax+{self.DICT_TOMB_OFF}], 0",
-                   f"mov [rbp{slot_off:+d}], rax")
-        self.emitf(f"mov rbx, {cap * self.DICT_SLOT_SIZE}",
-                   "call _runtime_zalloc")
-        self.emitf(f"mov rbx, [rbp{slot_off:+d}]",
-                   f"mov [rbx+{self.DICT_BUF_OFF}], rax")
+        self.emitf(
+            f"mov qword [rax+{self.DICT_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.DICT_LEN_OFF}], 0",
+            f"mov qword [rax+{self.DICT_TOMB_OFF}], 0",
+            f"mov [rbp{slot_off:+d}], rax",
+        )
+        self.emitf(f"mov rbx, {cap * self.DICT_SLOT_SIZE}", "call _runtime_zalloc")
+        self.emitf(
+            f"mov rbx, [rbp{slot_off:+d}]", f"mov [rbx+{self.DICT_BUF_OFF}], rax"
+        )
 
         init_owner = self._resolve_method_owner(e.func, "__init__")
         if init_owner is not None:
@@ -2758,7 +3036,7 @@ class Codegen:
                 # cost is one mov and the simplicity is worth it.
                 if self._needs_xmm_mirror_to_int():
                     int_reg = self._int_arg_regs()[i]
-                    self.emitf(f"movq {int_reg}, xmm{float_idx-1}")
+                    self.emitf(f"movq {int_reg}, xmm{float_idx - 1}")
             else:
                 reg = int_regs[int_idx]
                 int_idx += 1
@@ -2817,20 +3095,106 @@ class Codegen:
         else:
             self._emit_print_int_no_newline()
 
-    # The runtime primitives below are provided by the target subclass:
-    #   _emit_print_int_no_newline       (in: rax = signed int)
-    #   _emit_print_str_ptr_no_newline   (in: rax = nul-terminated ptr)
-    #   _emit_print_space
-    #   _emit_print_newline
-    #   _emit_strlen                     (in: rax = ptr; out: rax = length)
-    #   _emit_int_to_str                 (in: rax = int; out: rax = ptr)
-    #   _emit_str_to_int                 (in: rax = ptr; out: rax = int)
-    #   _emit_input_line                 (out: rax = ptr to read buffer)
-    #   _emit_malloc(n)                  (out: rax = ptr; n is a compile-time const)
-    #   _emit_call_libc_double_double(fn) (xmm0,xmm1 = args; result in xmm0)
-    #   _emit_libc_strcmp                (rax, rbx -> rax; signed int)
-    #   _emit_libc_strdup                (rax -> rax)
-    #   _emit_libc_free                  (rax -> void)
-    #   _emit_libc_memset_zero           (rax = ptr, rbx = len -> void)
+    # Runtime primitives provided by the target subclass. Declared here as
+    # abstract stubs so type-checkers can see them on the base class — that
+    # way callers in `Codegen` don't each need a `# type: ignore`.
+
     def emit_print_impls(self) -> None:
+        raise NotImplementedError
+
+    # Print helpers --------------------------------------------------------
+    def _emit_print_int_no_newline(self) -> None:
+        """In: rax = signed int. Emits the value to stdout, no newline."""
+        raise NotImplementedError
+
+    def _emit_print_str_ptr_no_newline(self) -> None:
+        """In: rax = nul-terminated ptr. Emits the string, no newline."""
+        raise NotImplementedError
+
+    def _emit_print_float_no_newline(self) -> None:
+        """In: xmm0 = double. Emits the value with `%g`, no newline."""
+        raise NotImplementedError
+
+    def _emit_print_space(self) -> None:
+        raise NotImplementedError
+
+    def _emit_print_newline(self) -> None:
+        raise NotImplementedError
+
+    def _emit_strlen(self) -> None:
+        """In: rax = ptr. Out: rax = byte length. Like _emit_libc_strlen but
+        the target may inline a fast variant for the print path."""
+        raise NotImplementedError
+
+    # Numeric / string conversions ----------------------------------------
+    def _emit_int_to_str(self) -> None:
+        """In: rax = int. Out: rax = pointer to nul-terminated ASCII."""
+        raise NotImplementedError
+
+    def _emit_str_to_int(self) -> None:
+        """In: rax = nul-terminated ptr. Out: rax = parsed int (atoll)."""
+        raise NotImplementedError
+
+    def _emit_float_to_str(self) -> None:
+        """In: xmm0 = double. Out: rax = ptr to nul-terminated `%g` form."""
+        raise NotImplementedError
+
+    def _emit_str_to_float(self) -> None:
+        """In: rax = nul-terminated ptr. Out: xmm0 = parsed double (atof)."""
+        raise NotImplementedError
+
+    # I/O ------------------------------------------------------------------
+    def _emit_input_line(self) -> None:
+        """Out: rax = ptr to the most recent input buffer (\\n stripped)."""
+        raise NotImplementedError
+
+    # Memory ---------------------------------------------------------------
+    def _emit_malloc(self, n: int) -> None:
+        """Compile-time `n` bytes -> rax = ptr."""
+        del n
+        raise NotImplementedError
+
+    def _emit_libc_malloc_size_in_rax(self) -> None:
+        """In: rax = size. Out: rax = ptr."""
+        raise NotImplementedError
+
+    def _emit_libc_memset_zero(self) -> None:
+        """In: rax = ptr, rbx = len. Zeros `len` bytes starting at `ptr`."""
+        raise NotImplementedError
+
+    def _emit_libc_memcpy(self) -> None:
+        """In: rax = dst, rbx = src, rcx = n. Copies `n` bytes."""
+        raise NotImplementedError
+
+    def _emit_libc_free(self) -> None:
+        """In: rax = ptr. Calls free()."""
+        raise NotImplementedError
+
+    # String helpers -------------------------------------------------------
+    def _emit_libc_strcmp(self) -> None:
+        """In: rax, rbx = nul-terminated ptrs. Out: rax = signed cmp result."""
+        raise NotImplementedError
+
+    def _emit_libc_strdup(self) -> None:
+        """In: rax = ptr. Out: rax = freshly-allocated copy."""
+        raise NotImplementedError
+
+    def _emit_libc_strlen(self) -> None:
+        """In: rax = ptr. Out: rax = byte length (strlen)."""
+        raise NotImplementedError
+
+    def _emit_libc_strstr(self) -> None:
+        """In: rax = haystack, rbx = needle. Out: rax = ptr (or NULL)."""
+        raise NotImplementedError
+
+    # Floats ---------------------------------------------------------------
+    def _emit_call_libc_double_double(self, fn: str) -> None:
+        """In: xmm0, xmm1 = args. Out: xmm0 = result. Calls `fn(double,double)`."""
+        del fn
+        raise NotImplementedError
+
+    # Exception machinery --------------------------------------------------
+    def _emit_call_setjmp(self, buf_off: int) -> None:
+        """Sets up a setjmp call against the buffer at [rbp+buf_off]."""
+        del buf_off
         raise NotImplementedError

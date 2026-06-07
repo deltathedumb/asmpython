@@ -4,6 +4,7 @@ Most nodes carry a `pos` so later phases can blame the right source location
 when they reject the program. Default value is a placeholder; the parser fills
 real positions in.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ _NO_POS = SourcePos(0, 0)
 
 # ---- Module / functions -----------------------------------------------------
 
+
 @dataclass
 class Module:
     funcs: list["FuncDef"]
@@ -26,7 +28,7 @@ class Module:
     imported_modules: dict = field(default_factory=dict)
     ffi_funcs: dict = field(default_factory=dict)
     ffi_consts: dict = field(default_factory=dict)
-    classes_sig: dict = field(default_factory=dict)   # name -> sema.ClassSig
+    classes_sig: dict = field(default_factory=dict)  # name -> sema.ClassSig
 
 
 @dataclass
@@ -48,6 +50,7 @@ class ClassDef:
     Methods are stored as FuncDef nodes whose first parameter is conventionally
     named `self`. Each method's compiled symbol is `ClassName__methodname`.
     """
+
     name: str
     parent: Optional[str]
     methods: list["FuncDef"]
@@ -55,6 +58,7 @@ class ClassDef:
 
 
 # ---- Statements -------------------------------------------------------------
+
 
 @dataclass
 class Assign:
@@ -66,7 +70,7 @@ class Assign:
 @dataclass
 class AugAssign:
     target: str
-    op: str            # "+", "-", "*", "//", "%", "&", "|", "^", "<<", ">>"
+    op: str  # "+", "-", "*", "//", "%", "&", "|", "^", "<<", ">>"
     value: "Expr"
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
@@ -78,8 +82,9 @@ class TupleAssign:
 
     Only simple name targets are supported (no nested unpacking, no `*rest`,
     no subscript/attr targets yet)."""
+
     targets: list[str] = field(default_factory=list)
-    values:  list["Expr"] = field(default_factory=list)
+    values: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
@@ -111,6 +116,7 @@ class For:
     Exactly one of `range_args` or `iter` is populated. `range_args` is
     1/2/3 args matching Python's range(). `iter` is any list-typed expression.
     """
+
     var: str
     range_args: list["Expr"]
     body: list["Stmt"]
@@ -142,22 +148,32 @@ class Pass:
 @dataclass
 class Import:
     """import math  (the module name remains visible as a prefix)."""
+
     module: str
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
 @dataclass
 class FromImport:
-    """from math import sqrt, pi   (names land in current scope unprefixed)."""
+    """from math import sqrt, pi   (names land in current scope unprefixed).
+
+    `level` is the number of leading dots: 0 for absolute imports, 1 for
+    `from .x import y`, 2 for `from ..x import y`, etc. Relative imports
+    aren't resolved against project files yet; they parse and bind their
+    names to the int sentinel so source that uses them can still be checked.
+    """
+
     module: str
     names: list[str] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    level: int = 0
 
 
 @dataclass
 class Attr:
     """obj.name access. Used for `math.sqrt(x)` style after `import math`,
     and for instance attribute access (`self.x`, `point.x`)."""
+
     obj: "Expr"
     name: str
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
@@ -167,6 +183,7 @@ class Attr:
 @dataclass
 class AttrAssign:
     """obj.name = value  (statement-level)."""
+
     obj: "Expr"
     name: str
     value: "Expr"
@@ -181,6 +198,7 @@ class Try:
     catches anything raised. If `bind_name` is set, the exception message
     string is bound to that local name inside the handler.
     """
+
     body: list["Stmt"]
     handler: list["Stmt"]
     bind_name: Optional[str] = None
@@ -190,15 +208,33 @@ class Try:
 @dataclass
 class Raise:
     """`raise expr` — expr must evaluate to a str."""
+
     value: "Expr"
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
-Stmt = Assign | AugAssign | Return | If | While | For | Break | Continue | ExprStmt | Pass | Import | FromImport | AttrAssign | Try | Raise
+Stmt = (
+    Assign
+    | AugAssign
+    | Return
+    | If
+    | While
+    | For
+    | Break
+    | Continue
+    | ExprStmt
+    | Pass
+    | Import
+    | FromImport
+    | AttrAssign
+    | Try
+    | Raise
+)
 # IndexAssign is also a Stmt but forward-referenced because Subscript is defined below.
 
 
 # ---- Expressions ------------------------------------------------------------
+
 
 @dataclass
 class IntLit:
@@ -209,7 +245,7 @@ class IntLit:
 @dataclass
 class FloatLit:
     value: float
-    label: str = ""    # codegen fills with the .rodata label
+    label: str = ""  # codegen fills with the .rodata label
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
@@ -249,6 +285,7 @@ class UnaryOp:
 @dataclass
 class Compare:
     """Chained comparison: ops[i] relates operands[i] and operands[i+1]."""
+
     ops: list[str]
     operands: list["Expr"]
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
@@ -281,6 +318,7 @@ class ListLit:
     working; element-aware sites (append/index/iteration/print) consult
     `el_type` explicitly.
     """
+
     elems: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     el_type: str = "int"
@@ -289,6 +327,7 @@ class ListLit:
 @dataclass
 class Subscript:
     """obj[index] - read or write depending on context."""
+
     obj: "Expr"
     index: "Expr"
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
@@ -299,6 +338,7 @@ class Subscript:
 class Slice:
     """s[start:stop] inside a Subscript's index slot. start/stop may be None
     (use the implicit endpoint). Step is not supported yet."""
+
     start: "Expr | None" = None
     stop: "Expr | None" = None
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
@@ -309,6 +349,7 @@ class MethodCall:
     """obj.method(args...). Only specific known methods are supported
     (lst.append, lst.pop) so this isn't true OOP - it's syntactic sugar
     for special-cased runtime calls."""
+
     obj: "Expr"
     method: str
     args: list["Expr"] = field(default_factory=list)
@@ -319,6 +360,7 @@ class MethodCall:
 @dataclass
 class IndexAssign:
     """lst[i] = value. Statement-level."""
+
     target: "Subscript"
     value: "Expr"
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
@@ -327,6 +369,7 @@ class IndexAssign:
 @dataclass
 class FString:
     """An f-string. `segments` alternates between StrLit and Expr nodes."""
+
     segments: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
@@ -334,12 +377,29 @@ class FString:
 @dataclass
 class DictLit:
     """{key: value, ...} literal. Currently restricted to str-keyed, int-valued."""
+
     keys: list["Expr"] = field(default_factory=list)
     values: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
-Expr = IntLit | FloatLit | StrLit | Name | BinOp | UnaryOp | Compare | BoolOp | Call | ListLit | Subscript | MethodCall | FString | Attr | DictLit
+Expr = (
+    IntLit
+    | FloatLit
+    | StrLit
+    | Name
+    | BinOp
+    | UnaryOp
+    | Compare
+    | BoolOp
+    | Call
+    | ListLit
+    | Subscript
+    | MethodCall
+    | FString
+    | Attr
+    | DictLit
+)
 
 
 def expr_type(e) -> str:
@@ -366,11 +426,13 @@ def expr_type(e) -> str:
     if isinstance(e, BinOp):
         lt, rt = expr_type(e.left), expr_type(e.right)
         if e.op in ("&", "|", "^", "<<", ">>"):
-            return "int"   # bitwise ops only legal on ints (sema rejects floats)
+            return "int"  # bitwise ops only legal on ints (sema rejects floats)
         # String operations: + concatenates; * repeats (str * int).
         if e.op == "+" and lt == "str" and rt == "str":
             return "str"
-        if e.op == "*" and ((lt == "str" and rt == "int") or (lt == "int" and rt == "str")):
+        if e.op == "*" and (
+            (lt == "str" and rt == "int") or (lt == "int" and rt == "str")
+        ):
             return "str"
         # Python's true division always produces a float, even on ints.
         if e.op == "/":

@@ -1,3 +1,9 @@
-/.claude
-/build
-test.py
+/.claude/
+/build/
+
+*.exe
+*.asm
+
+__pycache__/
+**/__pycache__/
+*.pyc

@@ -12,6 +12,7 @@ obviously-wrong things like `print(a_function_name)` or string-as-int math.
 Anything we can't decide statically gets a pass (Python is dynamic; we only
 flag what's clearly wrong).
 """
+
 from __future__ import annotations
 
 import importlib
@@ -25,11 +26,11 @@ from .errors import SemaError
 
 # Builtins we accept. Values describe required arg-count range.
 BUILTINS: dict[str, tuple[int, int]] = {
-    "print": (0, 64),    # 0 args = just a newline; >0 = space-separated
-    "len":   (1, 1),
-    "int":   (1, 1),
+    "print": (0, 64),  # 0 args = just a newline; >0 = space-separated
+    "len": (1, 1),
+    "int": (1, 1),
     "float": (1, 1),
-    "str":   (1, 1),
+    "str": (1, 1),
     "input": (0, 1),
 }
 
@@ -51,10 +52,11 @@ class ClassSig:
     `methods` maps method name -> FuncSig (where arity counts `self`).
     Resolution walks `parent` chains until a method is found.
     """
+
     name: str
     parent: Optional[str]
     methods: dict[str, FuncSig] = field(default_factory=dict)
-    pos: A.SourcePos = None
+    pos: A.SourcePos = None  # type: ignore
 
 
 @dataclass
@@ -67,6 +69,7 @@ class Scope:
     cases (`name = input()` then `print(name)`), without trying to be a real
     type checker.
     """
+
     types: dict[str, str] = field(default_factory=dict)
     # For names typed "list", element type — "int" by default, may be "str"
     # or "float". Mixed-type lists wait on a tagged-value runtime.
@@ -110,7 +113,9 @@ class SemaAnalyzer:
         self.ffi_funcs: dict[str, stdlib.Func] = {}
         self.ffi_consts: dict[str, stdlib.Const] = {}
 
-    def _resolve_method(self, class_name: str, method: str) -> Optional[tuple[str, FuncSig]]:
+    def _resolve_method(
+        self, class_name: str, method: str
+    ) -> Optional[tuple[str, FuncSig]]:
         """Walk parent chain to find the class that owns `method`.
 
         Returns (owner_class_name, FuncSig) or None.
@@ -136,7 +141,8 @@ class SemaAnalyzer:
                 raise SemaError(f"function {f.name!r} redefined", f.pos)
             if f.name in BUILTINS:
                 raise SemaError(
-                    f"cannot redefine builtin {f.name!r}", f.pos,
+                    f"cannot redefine builtin {f.name!r}",
+                    f.pos,
                 )
             self.funcs[f.name] = FuncSig(
                 name=f.name,
@@ -148,7 +154,9 @@ class SemaAnalyzer:
         # Collect class signatures so methods + constructor calls resolve.
         for c in self.mod.classes:
             if c.name in self.classes or c.name in self.funcs or c.name in BUILTINS:
-                raise SemaError(f"class name {c.name!r} collides with existing name", c.pos)
+                raise SemaError(
+                    f"class name {c.name!r} collides with existing name", c.pos
+                )
             sig = ClassSig(name=c.name, parent=c.parent, pos=c.pos)
             for m in c.methods:
                 if not m.params or m.params[0] != "self":
@@ -173,7 +181,9 @@ class SemaAnalyzer:
                 seen, cur = {c.name}, c.parent
                 while cur is not None:
                     if cur in seen:
-                        raise SemaError(f"inheritance cycle involving {c.name!r}", c.pos)
+                        raise SemaError(
+                            f"inheritance cycle involving {c.name!r}", c.pos
+                        )
                     seen.add(cur)
                     cur = self.classes[cur].parent
 
@@ -298,9 +308,12 @@ class SemaAnalyzer:
                 elif it_t == "dict":
                     # Iterating a dict yields its keys (strings).
                     scope.add(s.var, "str")
+                elif it_t == "str":
+                    # Each iteration yields a fresh 1-char str.
+                    scope.add(s.var, "str")
                 else:
                     raise SemaError(
-                        "mamba 'for' iterates over range(), list, or dict",
+                        "mamba 'for' iterates over range(), list, dict, or str",
                         s.pos,
                     )
             else:
@@ -322,27 +335,48 @@ class SemaAnalyzer:
                 raise SemaError("'continue' outside a loop", s.pos)
             return
         if isinstance(s, A.Import):
+            # Dotted path: bind the leading segment ("os.path" -> "os"). Real
+            # submodule lookup is post-bootstrap.
+            top_name = s.module.split(".")[0]
             try:
-                bindings = _load_module(s.module)
-            except SemaError as e:
-                # Reattach the position.
-                raise SemaError(str(e.message), s.pos) from None
-            self.imported_modules[s.module] = bindings
+                bindings = _load_module(top_name)
+            except SemaError:
+                # Module isn't in mamba's stdlib registry — accept the
+                # statement as a parser-level no-op so source that uses
+                # standard CPython modules can still be checked. The name
+                # becomes a dummy in scope; any subsequent `x.attr` lookup
+                # will still error at the attribute resolution step.
+                scope.add(top_name, "module")
+                return
+            self.imported_modules[top_name] = bindings
             # Make `math` a known name in scope (as a dummy int) so `math.x`
             # parses cleanly past the Name lookup.
-            scope.add(s.module, "module")
+            scope.add(top_name, "module")
             return
         if isinstance(s, A.FromImport):
+            # Relative import or unknown module: accept the syntax and bind
+            # each imported name as a dummy int. Self-host needs every source
+            # file to *parse*; real cross-file resolution comes later.
+            if s.level > 0 or not s.module:
+                for name in s.names:
+                    scope.add(name, "int")
+                return
             try:
                 bindings = _load_module(s.module)
-            except SemaError as e:
-                raise SemaError(str(e.message), s.pos) from None
+            except SemaError:
+                # Unknown absolute module (e.g. `from os import getcwd`).
+                # Bind each name as a dummy; subsequent calls will error at
+                # the call site if the name isn't usable.
+                for name in s.names:
+                    scope.add(name, "int")
+                return
             for name in s.names:
                 if name not in bindings:
-                    raise SemaError(
-                        f"module {s.module!r} has no {name!r}",
-                        s.pos,
-                    )
+                    # Unknown binding inside a known module — accept as a
+                    # dummy so source can still parse (mirrors the
+                    # unknown-module fallback above).
+                    scope.add(name, "int")
+                    continue
                 b = bindings[name]
                 if isinstance(b, stdlib.Func):
                     self.ffi_funcs[name] = b
@@ -379,7 +413,8 @@ class SemaAnalyzer:
             obj_t = A.expr_type(s.obj)
             if not obj_t.startswith("instance:"):
                 raise SemaError(
-                    f"cannot assign attribute on {obj_t}", s.pos,
+                    f"cannot assign attribute on {obj_t}",
+                    s.pos,
                 )
             self._check_expr(s.value, scope)
             value_t = A.expr_type(s.value)
@@ -400,7 +435,9 @@ class SemaAnalyzer:
             if A.expr_type(s.value) != "str":
                 raise SemaError("raise requires a string message", s.pos)
             return
-        raise SemaError(f"internal: unhandled stmt {type(s).__name__}", getattr(s, "pos", None))
+        raise SemaError(
+            f"internal: unhandled stmt {type(s).__name__}", getattr(s, "pos", None)
+        )
 
     def _check_expr(self, e, scope: Scope) -> None:
         if isinstance(e, (A.IntLit, A.FloatLit, A.StrLit)):
@@ -427,7 +464,9 @@ class SemaAnalyzer:
             if "str" in (lt, rt):
                 if e.op == "+" and lt == "str" and rt == "str":
                     return
-                if e.op == "*" and ((lt == "str" and rt == "int") or (lt == "int" and rt == "str")):
+                if e.op == "*" and (
+                    (lt == "str" and rt == "int") or (lt == "int" and rt == "str")
+                ):
                     return
                 raise SemaError(
                     f"unsupported operand type for {e.op}: {lt} {e.op} {rt}",
@@ -461,6 +500,11 @@ class SemaAnalyzer:
                             f"'{op}' only supported on strings (got {lt} {op} {rt})",
                             e.pos,
                         )
+                    continue
+                if op in ("is", "is not"):
+                    # mamba has no `None`-as-distinct-value yet. `x is None`
+                    # therefore lowers to `x == 0`. Accept any operand types
+                    # — the comparison happens at the raw 8-byte level.
                     continue
                 if "str" in (lt, rt):
                     if op not in ("==", "!="):
@@ -588,13 +632,17 @@ class SemaAnalyzer:
             # Module function call: math.sqrt(x), math.pow(a, b).
             if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
                 bindings = self.imported_modules[e.obj.name]
-                if e.method not in bindings or not isinstance(bindings[e.method], stdlib.Func):
+                if e.method not in bindings or not isinstance(
+                    bindings[e.method], stdlib.Func
+                ):
                     raise SemaError(
                         f"module {e.obj.name!r} has no callable {e.method!r}",
                         e.pos,
                     )
                 fn = bindings[e.method]
-                self._check_ffi_call(fn, e.args, e.pos, scope, label=f"{e.obj.name}.{e.method}")
+                self._check_ffi_call(
+                    fn, e.args, e.pos, scope, label=f"{e.obj.name}.{e.method}"
+                )
                 e.inferred_type = fn.ret_type
                 return
             self._check_expr(e.obj, scope)
@@ -606,12 +654,14 @@ class SemaAnalyzer:
                 if e.method == "append":
                     if len(e.args) != 1:
                         raise SemaError(
-                            f"list.append() takes 1 argument, got {len(e.args)}", e.pos,
+                            f"list.append() takes 1 argument, got {len(e.args)}",
+                            e.pos,
                         )
                     arg_t = A.expr_type(e.args[0])
                     if arg_t not in ("int", "str", "float"):
                         raise SemaError(
-                            f"list.append() element of type {arg_t} not supported", e.pos,
+                            f"list.append() element of type {arg_t} not supported",
+                            e.pos,
                         )
                     if el_t == "?":
                         # First append on an empty literal — pin the element type.
@@ -624,7 +674,7 @@ class SemaAnalyzer:
                             f"list.append() expected {el_t}, got {arg_t}",
                             e.pos,
                         )
-                    e.inferred_type = "int"   # returns None ~ 0
+                    e.inferred_type = "int"  # returns None ~ 0
                 elif e.method == "pop":
                     if e.args:
                         raise SemaError("list.pop() takes no arguments", e.pos)
@@ -676,20 +726,22 @@ class SemaAnalyzer:
             else:
                 raise SemaError(f"{obj_t} has no method {e.method!r}", e.pos)
             return
-        raise SemaError(f"internal: unhandled expr {type(e).__name__}", getattr(e, "pos", None))
+        raise SemaError(
+            f"internal: unhandled expr {type(e).__name__}", getattr(e, "pos", None)
+        )
 
     # Signature: (arg-types, return-type). The arg-types tuple may be empty.
     STR_METHODS = {
-        "upper":      ((),               "str"),
-        "lower":      ((),               "str"),
-        "strip":      ((),               "str"),
-        "lstrip":     ((),               "str"),
-        "rstrip":     ((),               "str"),
-        "startswith": (("str",),         "int"),
-        "endswith":   (("str",),         "int"),
-        "find":       (("str",),         "int"),
-        "count":      (("str",),         "int"),
-        "replace":    (("str", "str"),   "str"),
+        "upper": ((), "str"),
+        "lower": ((), "str"),
+        "strip": ((), "str"),
+        "lstrip": ((), "str"),
+        "rstrip": ((), "str"),
+        "startswith": (("str",), "int"),
+        "endswith": (("str",), "int"),
+        "find": (("str",), "int"),
+        "count": (("str",), "int"),
+        "replace": (("str", "str"), "str"),
     }
 
     def _check_str_method(self, e) -> None:
@@ -706,12 +758,14 @@ class SemaAnalyzer:
             got = A.expr_type(a)
             if got != want:
                 raise SemaError(
-                    f"str.{e.method}() argument {i+1}: expected {want}, got {got}",
+                    f"str.{e.method}() argument {i + 1}: expected {want}, got {got}",
                     e.pos,
                 )
         e.inferred_type = ret
 
-    def _check_ffi_call(self, fn: stdlib.Func, args: list, pos, scope: Scope, *, label: str) -> None:
+    def _check_ffi_call(
+        self, fn: stdlib.Func, args: list, pos, scope: Scope, *, label: str
+    ) -> None:
         """Validate an FFI call's arity and arg types. Performs implicit
         int->float promotion at the call site (so the user can write
         `math.sqrt(4)` without writing `4.0`)."""
@@ -729,7 +783,7 @@ class SemaAnalyzer:
             if want == "float" and got == "int":
                 continue
             raise SemaError(
-                f"{label}() argument {i+1}: expected {want}, got {got}",
+                f"{label}() argument {i + 1}: expected {want}, got {got}",
                 pos,
             )
 
@@ -751,10 +805,10 @@ class SemaAnalyzer:
             # Set the static return type so codegen knows how to interpret it.
             e.inferred_type = {
                 "print": "int",
-                "len":   "int",
-                "int":   "int",
+                "len": "int",
+                "int": "int",
                 "float": "float",
-                "str":   "str",
+                "str": "str",
                 "input": "str",
             }[e.func]
             # Argument-type sanity for builtins that care.
@@ -801,7 +855,6 @@ class SemaAnalyzer:
         if e.func in self.classes:
             # Constructor call: ClassName(args). If __init__ exists, validate
             # arity against it (skipping `self`). Otherwise no args allowed.
-            cls = self.classes[e.func]
             init = self._resolve_method(e.func, "__init__")
             if init is None:
                 if e.args:

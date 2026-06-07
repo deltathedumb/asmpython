@@ -4,6 +4,7 @@ Each phase raises a `CompileError` carrying the source location it failed at.
 The CLI formats these with a caret-pointer so the user sees exactly where the
 problem is, instead of a bare exception trace.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,7 +24,9 @@ class CompileError(Exception):
     Phase tag distinguishes 'lex error' vs 'parse error' vs 'name error' etc.
     """
 
-    def __init__(self, phase: str, message: str, pos: Optional[SourcePos] = None) -> None:
+    def __init__(
+        self, phase: str, message: str, pos: Optional[SourcePos] = None
+    ) -> None:
         super().__init__(message)
         self.phase = phase
         self.message = message
@@ -32,7 +35,9 @@ class CompileError(Exception):
     def format(self, source: str, filename: str = "<input>") -> str:
         out: list[str] = []
         if self.pos is not None:
-            out.append(f"{filename}:{self.pos.line}:{self.pos.col}: {self.phase} error: {self.message}")
+            out.append(
+                f"{filename}:{self.pos.line}:{self.pos.col}: {self.phase} error: {self.message}"
+            )
             line_text = _get_line(source, self.pos.line)
             if line_text is not None:
                 out.append("  " + line_text.rstrip("\n"))

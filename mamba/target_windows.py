@@ -2,6 +2,7 @@
 
 Runtime support comes from msvcrt: printf, fputs, strlen, _atoi64, sprintf, fgets.
 """
+
 from __future__ import annotations
 
 from .codegen import Codegen, FuncInfo
@@ -19,11 +20,26 @@ class WindowsCodegen(Codegen):
     def emit_externs(self) -> None:
         self.emit("global main")
         for name in (
-            "printf", "fputs", "fputc", "puts", "putchar",
-            "strlen", "strcmp", "strstr", "_strdup",
-            "_atoi64", "atof", "sprintf", "fgets", "exit",
+            "printf",
+            "fputs",
+            "fputc",
+            "puts",
+            "putchar",
+            "strlen",
+            "strcmp",
+            "strstr",
+            "_strdup",
+            "_atoi64",
+            "atof",
+            "sprintf",
+            "fgets",
+            "exit",
             "__acrt_iob_func",
-            "malloc", "realloc", "free", "memset", "memcpy",
+            "malloc",
+            "realloc",
+            "free",
+            "memset",
+            "memcpy",
             "fmod",
         ):
             self.emit(f"extern {name}")
@@ -44,7 +60,7 @@ class WindowsCodegen(Codegen):
     # --- entry: main() -------------------------------------------------------
     def emit_entry_prologue(self, info: FuncInfo) -> None:
         self.emitf("push rbp", "mov rbp, rsp")
-        frame = info.frame_size + 32   # shadow space for child calls
+        frame = info.frame_size + 32  # shadow space for child calls
         if frame % 16 != 0:
             frame += 16 - (frame % 16)
         info.frame_size = frame
@@ -96,11 +112,13 @@ class WindowsCodegen(Codegen):
 
     def _emit_int_to_str(self) -> None:
         # sprintf(itoa_str_buf, "%lld", val). Returns ptr in rax.
-        self.emitf("mov r8, rax",                # third arg = value
-                   "lea rdx, [fmt_int_only]",    # second arg = format
-                   "lea rcx, [itoa_str_buf]",    # first  arg = buffer
-                   "call sprintf",
-                   "lea rax, [itoa_str_buf]")
+        self.emitf(
+            "mov r8, rax",  # third arg = value
+            "lea rdx, [fmt_int_only]",  # second arg = format
+            "lea rcx, [itoa_str_buf]",  # first  arg = buffer
+            "call sprintf",
+            "lea rax, [itoa_str_buf]",
+        )
 
     def _emit_str_to_int(self) -> None:
         self.emitf("mov rcx, rax", "call _atoi64")
@@ -115,18 +133,18 @@ class WindowsCodegen(Codegen):
         # printf("%g", value). MS x64 variadic ABI: each float arg lives in
         # BOTH the corresponding XMM register and the general-purpose register
         # at the same position. So we also mirror xmm0 -> rdx.
-        self.emitf("movq rdx, xmm0",
-                   "lea rcx, [fmt_flt]",
-                   "call printf")
+        self.emitf("movq rdx, xmm0", "lea rcx, [fmt_flt]", "call printf")
 
     def _emit_float_to_str(self) -> None:
         # sprintf(buf, "%g", xmm0). xmm0 must also be mirrored to r8 for
         # variadic MS x64 ABI.
-        self.emitf("movq r8, xmm0",
-                   "lea rdx, [fmt_flt_only]",
-                   "lea rcx, [itoa_str_buf]",
-                   "call sprintf",
-                   "lea rax, [itoa_str_buf]")
+        self.emitf(
+            "movq r8, xmm0",
+            "lea rdx, [fmt_flt_only]",
+            "lea rcx, [itoa_str_buf]",
+            "call sprintf",
+            "lea rax, [itoa_str_buf]",
+        )
 
     def _emit_str_to_float(self) -> None:
         # atof(rax) -> xmm0
@@ -145,8 +163,7 @@ class WindowsCodegen(Codegen):
 
     def _emit_libc_strcmp(self) -> None:
         # rax = a, rbx = b -> rax = signed cmp
-        self.emitf("mov rcx, rax", "mov rdx, rbx", "call strcmp",
-                   "movsxd rax, eax")
+        self.emitf("mov rcx, rax", "mov rdx, rbx", "call strcmp", "movsxd rax, eax")
 
     def _emit_libc_strdup(self) -> None:
         # rax = src -> rax = owned copy
@@ -200,8 +217,7 @@ class WindowsCodegen(Codegen):
         self.emit('fmt_flt_only: db "%g",0')
 
         if self.use_runtime_lib:
-            for sym in ("_runtime_input", "_runtime_list_append",
-                        "_runtime_list_pop"):
+            for sym in ("_runtime_input", "_runtime_list_append", "_runtime_list_pop"):
                 self.emit(f"extern {sym}")
             self.emit_dict_runtime()
             self.emit_string_runtime()
@@ -213,23 +229,28 @@ class WindowsCodegen(Codegen):
         self.emit("section .text")
         self.label("_runtime_input")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
-        self.emitf("mov ecx, 0",                  # stdin
-                   "call __acrt_iob_func",
-                   "mov r8, rax",
-                   "mov edx, 255",
-                   "lea rcx, [input_buf]",
-                   "call fgets")
-        self.emitf("lea rcx, [input_buf]",
-                   "call strlen",
-                   "lea rdi, [input_buf]",
-                   "test rax, rax", "jz ._wi_done",
-                   "mov dl, [rdi+rax-1]",
-                   "cmp dl, 10", "jne ._wi_done",
-                   "dec rax",
-                   "mov byte [rdi+rax], 0")
+        self.emitf(
+            "mov ecx, 0",  # stdin
+            "call __acrt_iob_func",
+            "mov r8, rax",
+            "mov edx, 255",
+            "lea rcx, [input_buf]",
+            "call fgets",
+        )
+        self.emitf(
+            "lea rcx, [input_buf]",
+            "call strlen",
+            "lea rdi, [input_buf]",
+            "test rax, rax",
+            "jz ._wi_done",
+            "mov dl, [rdi+rax-1]",
+            "cmp dl, 10",
+            "jne ._wi_done",
+            "dec rax",
+            "mov byte [rdi+rax], 0",
+        )
         self.label("._wi_done")
-        self.emitf("lea rax, [input_buf]",
-                   "leave", "ret")
+        self.emitf("lea rax, [input_buf]", "leave", "ret")
 
         # List runtime: append + pop. Layout: header [cap, len, buf_ptr];
         # buffer holds the int64 elements. Growth re-allocates the buffer
@@ -243,44 +264,54 @@ class WindowsCodegen(Codegen):
         # [rbp-16] = value
         # [rbp-24] = saved new capacity
         self.emitf("mov [rbp-8], rax", "mov [rbp-16], rbx")
-        self.emitf("mov rcx, [rax+8]",            # length
-                   "cmp rcx, [rax]",              # vs capacity
-                   "jl ._la_store")
+        self.emitf(
+            "mov rcx, [rax+8]",  # length
+            "cmp rcx, [rax]",  # vs capacity
+            "jl ._la_store",
+        )
         # Grow buffer: new_cap = max(cap*2, 4).
-        self.emitf("mov rcx, [rax]",
-                   "shl rcx, 1",
-                   "cmp rcx, 4", "jge ._la_grow",
-                   "mov rcx, 4")
+        self.emitf(
+            "mov rcx, [rax]", "shl rcx, 1", "cmp rcx, 4", "jge ._la_grow", "mov rcx, 4"
+        )
         self.label("._la_grow")
         # realloc(old_buf, new_cap * 8). Win64: 1st arg = rcx, 2nd = rdx.
-        self.emitf("mov [rbp-24], rcx",           # save new cap
-                   "shl rcx, 3",
-                   "mov rdx, rcx",                # 2nd arg = new size
-                   "mov rax, [rbp-8]",
-                   "mov rcx, [rax+16]",           # 1st arg = old buf ptr
-                   "call realloc")
+        self.emitf(
+            "mov [rbp-24], rcx",  # save new cap
+            "shl rcx, 3",
+            "mov rdx, rcx",  # 2nd arg = new size
+            "mov rax, [rbp-8]",
+            "mov rcx, [rax+16]",  # 1st arg = old buf ptr
+            "call realloc",
+        )
         # Update header.
-        self.emitf("mov rbx, [rbp-8]",
-                   "mov [rbx+16], rax",           # new buf ptr
-                   "mov rdx, [rbp-24]",
-                   "mov [rbx], rdx")              # new capacity
+        self.emitf(
+            "mov rbx, [rbp-8]",
+            "mov [rbx+16], rax",  # new buf ptr
+            "mov rdx, [rbp-24]",
+            "mov [rbx], rdx",
+        )  # new capacity
         self.label("._la_store")
-        self.emitf("mov rax, [rbp-8]",
-                   "mov rcx, [rax+8]",            # length
-                   "mov rbx, [rbp-16]",
-                   "mov rdx, [rax+16]",           # buffer ptr
-                   "mov [rdx+rcx*8], rbx",
-                   "inc qword [rax+8]",
-                   "leave", "ret")
+        self.emitf(
+            "mov rax, [rbp-8]",
+            "mov rcx, [rax+8]",  # length
+            "mov rbx, [rbp-16]",
+            "mov rdx, [rax+16]",  # buffer ptr
+            "mov [rdx+rcx*8], rbx",
+            "inc qword [rax+8]",
+            "leave",
+            "ret",
+        )
 
         # list_pop(header_in_rax) -> value in rax
         self.label("_runtime_list_pop")
-        self.emitf("mov rcx, [rax+8]",            # length
-                   "dec rcx",
-                   "mov [rax+8], rcx",
-                   "mov rdx, [rax+16]",           # buffer ptr
-                   "mov rax, [rdx+rcx*8]",
-                   "ret")
+        self.emitf(
+            "mov rcx, [rax+8]",  # length
+            "dec rcx",
+            "mov [rax+8], rcx",
+            "mov rdx, [rax+16]",  # buffer ptr
+            "mov rax, [rdx+rcx*8]",
+            "ret",
+        )
 
         # Dict runtime (shared across targets).
         self.emit_dict_runtime()

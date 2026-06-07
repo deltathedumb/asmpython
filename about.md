@@ -11,7 +11,7 @@ Under the hood, source `.py` files compile to NASM, get assembled, then linked i
 
 - ~4,000 lines of Python compiler driving ~250 lines of NASM runtime per program
 - One pass each: lex → parse → semantic analysis → codegen → NASM → linker
-- 57 end-to-end tests (positive + negative), all passing on Windows; ELF output assembles cleanly under cross-NASM
+- 61 end-to-end tests (positive + negative), all passing on Windows; ELF output assembles cleanly under cross-NASM
 - No dependencies beyond `nasm` and `gcc` on PATH
 
 ---
@@ -68,7 +68,9 @@ Roughly half the road there is already paved (see the status table below). The r
 - Nul-terminated internally, length computed on demand
 - **What you can do**: `print(s)`, `len(s)`, `int(s)`, `s1 + s2` (concat), `"-" * 80` (repeat), `s == t` / `s != t` (comparison), `s[i]` (indexing), `s[i:j]` (slicing — supports omitted endpoints and negative indices, no step yet), `"sub" in s` / `"sub" not in s`, pass to FFI as `str` arg
 - **Methods**: `.upper()`, `.lower()`, `.strip()` / `.lstrip()` / `.rstrip()`, `.startswith(p)`, `.endswith(s)`, `.find(needle)` (returns -1 if not found), `.count(needle)`, `.replace(old, new)` — all return fresh allocations where they need to
-- **What you can't do (yet)**: lexicographic ordering with `<`/`>`, `.split()` / `.join()` (need list-of-string), slice step `s[::2]`, iteration `for ch in s`
+- **Triple-quoted strings**: `"""..."""` and `'''...'''` literals span newlines and respect the standard escape set; at module top level they act as docstrings (no-op ExprStmts).
+- **Iteration**: `for ch in s:` walks the string a byte at a time, yielding fresh 1-char strs.
+- **What you can't do (yet)**: lexicographic ordering with `<`/`>`, `.split()` / `.join()` (need list-of-string), slice step `s[::2]`
 
 ### F-strings
 
@@ -83,10 +85,12 @@ Roughly half the road there is already paved (see the status table below). The r
 + - * / // %               arithmetic + true div + floor div + mod
 == != < <= > >=            comparisons (chainable: 0 < x < 10)
 and or not                 short-circuit boolean
+in / not in                membership (strings only)
+is / is not                identity (lowers to integer equality)
 & | ^ ~ << >>              bitwise (ints only; sema rejects floats)
 ```
 
-All compound assignments work: `+= -= *= /= //= %= &= |= ^= <<= >>=`
+All compound assignments work: `+= -= *= /= //= %= &= |= ^= <<= >>=` (on names *and* on `self.x`-style attribute targets).
 
 ### Control flow
 
@@ -446,7 +450,14 @@ python -m mamba hello.py --use-runtime-lib
 
 # Build the runtime archive ahead of time (auto-built on first use):
 python -m mamba.runtime.build --all          # both targets
+
+# Bundling modes -- mutually exclusive.
+python -m mamba hello.py --onefile  # default: single statically-linked .exe
+python -m mamba hello.py --onedir   # exe + lib/libmamba_rt_<target>.{dll,so}
+# Short forms: -of and -od respectively.
 ```
+
+`--onedir` produces a `<stem>_onedir/` folder containing the executable, a `lib/` subfolder with the runtime shared library, and (on Windows) a side-by-side copy of the DLL next to the exe so the loader finds it. Linux builds add `-Wl,-rpath,$ORIGIN/lib` so the loader looks in the bundle's `lib/` first. Once cross-file user-module imports land, each imported `.py` will compile to its own `.dll`/`.so` in that same `lib/` folder.
 
 Errors print to stderr with non-zero exit; success is silent except for the `wrote …` progress lines from each toolchain step.
 
@@ -483,7 +494,7 @@ print(x)
 
 Programs that read input declare it with `# stdin:` — lines are joined with `\n` and piped into the compiled binary.
 
-Current count: **44 positive cases + 13 negative cases = 57 tests**, all passing on Windows.
+Current count: **48 positive cases + 13 negative cases = 61 tests**, all passing on Windows.
 
 ---
 
