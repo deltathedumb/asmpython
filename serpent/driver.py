@@ -56,12 +56,26 @@ def _resolve_tool(name: str, *, override: Path | None, env_var: str) -> str:
         tried.append(f"${env_var}={env}")
     # Look in <repo-root>/bin for a bundled copy. The repo root is the
     # grandparent of this file (driver.py is at serpent/driver.py).
-    bundled = Path(__file__).resolve().parent.parent / "bin"
+    repo_root = Path(__file__).resolve().parent.parent
+    bundled = repo_root / "bin"
     for suffix in ("", ".exe"):
         cand = bundled / f"{name}{suffix}"
         if cand.is_file():
             return str(cand)
     tried.append(f"{bundled}/{name}[.exe]")
+    # Also check tool-specific subdirectories under tools/ (dev layout).
+    # nasm lives at tools/nasm/nasm.exe; gcc at tools/mingw64/bin/gcc.exe.
+    tools = repo_root / "tools"
+    tool_subdirs = [
+        tools / name,
+        tools / "mingw64" / "bin",
+    ]
+    for subdir in tool_subdirs:
+        for suffix in ("", ".exe"):
+            cand = subdir / f"{name}{suffix}"
+            if cand.is_file():
+                return str(cand)
+    tried.append(f"{tools}/<subdir>/{name}[.exe]")
     path_hit = shutil.which(name)
     if path_hit:
         return path_hit
@@ -69,9 +83,13 @@ def _resolve_tool(name: str, *, override: Path | None, env_var: str) -> str:
     raise RuntimeError(f"could not find '{name}'. Looked in: " + ", ".join(tried))
 
 
-def _run(cmd: list[str]) -> None:
+def _run(cmd: list[str], extra_path_dirs: list[str] | None = None) -> None:
     print("$", " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    env = None
+    if extra_path_dirs:
+        env = os.environ.copy()
+        env["PATH"] = os.pathsep.join(extra_path_dirs) + os.pathsep + env.get("PATH", "")
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if proc.stdout:
         sys.stdout.write(proc.stdout)
     if proc.stderr:
@@ -143,6 +161,10 @@ def compile_source(
     # Both targets now use gcc as the linker driver so the C runtime
     # (msvcrt on Windows, libc on Linux) is linked in transparently.
     gcc = _resolve_tool("gcc", override=gcc_path, env_var="SERPENT_GCC")
+    # gcc needs to find sibling tools (ld, as, collect2) — when we resolve
+    # gcc by absolute path from the bundled MinGW, its directory may not be
+    # on PATH, so add it explicitly.
+    gcc_dir = str(Path(gcc).parent)
 
     if bundle_mode == "onedir":
         exe_path = _link_onedir(
@@ -150,6 +172,7 @@ def compile_source(
             obj_path=obj_path,
             out_path=exe_path,
             gcc=gcc,
+            gcc_dir=gcc_dir,
         )
     else:
         link_cmd = [gcc, str(obj_path), "-o", str(exe_path)]
@@ -162,7 +185,7 @@ def compile_source(
                 f"-L{_build_dir()}",
                 f"-lserpent_rt_{'win' if target == 'windows' else 'linux'}",
             ]
-        _run(link_cmd)
+        _run(link_cmd, extra_path_dirs=[gcc_dir])
 
     if not keep_intermediates:
         try:
@@ -175,7 +198,7 @@ def compile_source(
 
 
 def _link_onedir(
-    *, target: str, obj_path: Path, out_path: Path, gcc: str
+    *, target: str, obj_path: Path, out_path: Path, gcc: str, gcc_dir: str | None = None
 ) -> Path:
     """Produce a `<stem>_onedir/` folder containing the exe and a `lib/`
     sibling with the shared runtime library (and, eventually, one .dll/.so
@@ -212,7 +235,7 @@ def _link_onedir(
     ]
     if target == "linux":
         link_cmd += ["-Wl,-rpath,$ORIGIN/lib"]
-    _run(link_cmd)
+    _run(link_cmd, extra_path_dirs=[gcc_dir] if gcc_dir else None)
 
     # On Windows the loader searches the same directory as the .exe, so we
     # also drop a copy of the .dll next to it. (Keeping the one in lib/ too
