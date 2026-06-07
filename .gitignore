@@ -5,6 +5,8 @@
 *.exe
 *.obj
 *.asm
+/tools/
+
 
 __pycache__/
 **/__pycache__/

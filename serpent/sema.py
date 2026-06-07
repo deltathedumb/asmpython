@@ -494,13 +494,31 @@ class SemaAnalyzer:
                 lt = A.expr_type(e.operands[i])
                 rt = A.expr_type(e.operands[i + 1])
                 if op in ("in", "not in"):
-                    # Only str-in-str is wired up so far.
-                    if lt != "str" or rt != "str":
-                        raise SemaError(
-                            f"'{op}' only supported on strings (got {lt} {op} {rt})",
-                            e.pos,
-                        )
-                    continue
+                    # Supported forms today:
+                    #   str  in str
+                    #   T    in list[T]          (T = int | str | float)
+                    #   str  in dict             (dicts are str-keyed)
+                    if lt == "str" and rt == "str":
+                        continue
+                    if rt == "list":
+                        el_t = self._list_el_type(e.operands[i + 1], scope)
+                        if lt != el_t:
+                            raise SemaError(
+                                f"'{op}': needle is {lt} but list elements are {el_t}",
+                                e.pos,
+                            )
+                        continue
+                    if rt == "dict":
+                        if lt != "str":
+                            raise SemaError(
+                                f"'{op}' on dict requires str key, got {lt}",
+                                e.pos,
+                            )
+                        continue
+                    raise SemaError(
+                        f"'{op}' not supported between {lt} and {rt}",
+                        e.pos,
+                    )
                 if op in ("is", "is not"):
                     # serpent has no `None`-as-distinct-value yet. `x is None`
                     # therefore lowers to `x == 0`. Accept any operand types

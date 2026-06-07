@@ -367,6 +367,12 @@ class Codegen:
                         define(f"__strcmp_{id(expr)}")
                     elif op in ("in", "not in") and lt == "str" and rt == "str":
                         define(f"__strin_{id(expr)}")
+                    elif op in ("in", "not in") and rt == "list":
+                        # Element type drives slot kind (float needs xmm-sized
+                        # spill, but our locals are 8 bytes which matches).
+                        define(f"__listin_{id(expr)}")
+                    elif op in ("in", "not in") and rt == "dict":
+                        define(f"__dictin_{id(expr)}")
                 for o in expr.operands:
                     walk_expr(o)
             elif isinstance(expr, A.BoolOp):
@@ -2715,6 +2721,15 @@ class Codegen:
     }
 
     def _gen_compare(self, e: A.Compare, info: FuncInfo) -> None:
+        # `needle in haystack` where haystack is a list or dict.
+        if len(e.ops) == 1 and e.ops[0] in ("in", "not in"):
+            rt = A.expr_type(e.operands[1])
+            if rt == "list":
+                self._gen_list_in(e, info)
+                return
+            if rt == "dict":
+                self._gen_dict_in(e, info)
+                return
         # String compare: ==/!= and in/not in dispatch to runtime helpers.
         if (
             len(e.ops) == 1
@@ -2817,6 +2832,105 @@ class Codegen:
         self.label(false_lbl)
         self.emitf("xor rax, rax")
         self.label(end_lbl)
+
+    def _gen_list_in(self, e: A.Compare, info: FuncInfo) -> None:
+        """`needle in list[T]` / `needle not in list[T]`.
+
+        Linear scan over the list buffer comparing each element. For int
+        lists the compare is a raw 8-byte equality; for str lists each
+        element is strcmp'd against the needle; float uses ucomisd with
+        NaN treated as never-equal.
+        """
+        op = e.ops[0]
+        rhs = e.operands[1]
+        if isinstance(rhs, A.ListLit):
+            el_t = rhs.el_type
+        elif isinstance(rhs, A.Name):
+            el_t = rhs.list_el_type
+        else:
+            el_t = "int"
+
+        slot_off = info.locals_[f"__listin_{id(e)}"]
+        if el_t == "float":
+            self._gen_expr_as_float(e.operands[0], info, A.expr_type(e.operands[0]))
+            self.emitf(f"movsd [rbp{slot_off:+d}], xmm0")
+        else:
+            self.gen_expr(e.operands[0], info)
+            self.emitf(f"mov [rbp{slot_off:+d}], rax")
+        self.gen_expr(rhs, info)  # rax = header
+
+        loop = self.fresh("listin_loop")
+        found = self.fresh("listin_found")
+        miss = self.fresh("listin_miss")
+        end = self.fresh("listin_end")
+        self.emitf(
+            f"mov rcx, [rax+{self.LIST_LEN_OFF}]",
+            f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+            "xor r8, r8",
+        )
+        self.label(loop)
+        self.emitf("cmp r8, rcx", f"jge {miss}")
+        if el_t == "str":
+            # _runtime_str_eq clobbers caller-saved regs; spill rcx/rdx/r8.
+            self.emitf(
+                "mov r9, [rdx+r8*8]",
+                "push rcx",
+                "push rdx",
+                "push r8",
+                "sub rsp, 8",
+                f"mov rax, [rbp{slot_off:+d}]",
+                "mov rbx, r9",
+                "call _runtime_str_eq",
+                "add rsp, 8",
+                "pop r8",
+                "pop rdx",
+                "pop rcx",
+                "test rax, rax",
+                f"jnz {found}",
+            )
+        elif el_t == "float":
+            nan = self.fresh("listin_nan")
+            self.emitf(
+                "movsd xmm0, [rdx+r8*8]",
+                f"movsd xmm1, [rbp{slot_off:+d}]",
+                "ucomisd xmm0, xmm1",
+                f"jp {nan}",
+                f"je {found}",
+            )
+            self.label(nan)
+        else:
+            self.emitf(
+                "mov r9, [rdx+r8*8]",
+                f"cmp r9, [rbp{slot_off:+d}]",
+                f"je {found}",
+            )
+        self.emitf("inc r8", f"jmp {loop}")
+
+        self.label(found)
+        self.emitf("mov rax, 1", f"jmp {end}")
+        self.label(miss)
+        self.emitf("xor rax, rax")
+        self.label(end)
+        if op == "not in":
+            self.emitf("xor rax, 1")
+
+    def _gen_dict_in(self, e: A.Compare, info: FuncInfo) -> None:
+        """`key in dict` / `key not in dict`.
+
+        Wraps the existing `_runtime_dict_contains` helper. The needle
+        must be a str (sema enforces).
+        """
+        op = e.ops[0]
+        slot_off = info.locals_[f"__dictin_{id(e)}"]
+        self.gen_expr(e.operands[0], info)  # rax = key ptr
+        self.emitf(f"mov [rbp{slot_off:+d}], rax")
+        self.gen_expr(e.operands[1], info)  # rax = dict header
+        self.emitf(
+            f"mov rbx, [rbp{slot_off:+d}]",
+            "call _runtime_dict_contains",
+        )
+        if op == "not in":
+            self.emitf("xor rax, 1")
 
     def _gen_boolop(self, e: A.BoolOp, info: FuncInfo) -> None:
         # Short-circuit. Result is 0 or 1.

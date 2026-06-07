@@ -38,6 +38,7 @@ KEYWORDS = {
     "except",
     "raise",
     "is",
+    "assert",
 }
 
 

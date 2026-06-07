@@ -1,10 +1,14 @@
-serpent compiler - standalone build
+Serpent Compiler - Standalone Build
 
-This archive contains a completely portable build of the serpent compiler.
+This repository contains a completely portable build of the serpent compiler.
 
-Clone this repository to disk, then open a terminal in the repo folder
-and run: setx PATH "%CD%;%PATH%"
+==== FOR WINDOWS ====
+Simply use serpent.bat via the terminal.
+Dependencies are downloaded at runtime so no need for extra downloads!
 
-To verify a correct install, run: serpent from anywhere and if it runs then it worked.
+==== FOR LINUX ====
+We presume you are smart enough to install Python, GCC, and NASM yourself.
+Once dependencies are installed, use serpent.sh via bash.
 
-See about.md for more info.
+==== FOR MAC ====
+There is currently no built-in mac support. ¯\_(ツ)_/¯

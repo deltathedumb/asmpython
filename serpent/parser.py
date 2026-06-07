@@ -332,6 +332,8 @@ class Parser:
                 return self._parse_try()
             if t.value == "raise":
                 return self._parse_raise()
+            if t.value == "assert":
+                return self._parse_assert()
 
         # Assignment / aug-assignment vs expression statement.
         if t.kind == "NAME":
@@ -417,6 +419,25 @@ class Parser:
         value = self._parse_expr()
         self._expect("NEWLINE")
         return A.Raise(value=value, pos=kw.pos)
+
+    def _parse_assert(self) -> A.If:
+        """`assert cond[, msg]` desugars to `if not cond: raise <msg>`.
+
+        With no message we synthesize the string "AssertionError" so the
+        runtime print has something useful. The msg expression (when given)
+        must evaluate to str — sema enforces that on the lowered Raise.
+        """
+        kw = self._expect("KEYWORD", "assert")
+        cond = self._parse_expr()
+        if self._check("OP", ","):
+            self._eat()
+            msg = self._parse_expr()
+        else:
+            msg = A.StrLit(value="AssertionError", pos=kw.pos)
+        self._expect("NEWLINE")
+        negated = A.UnaryOp(op="not", operand=cond, pos=kw.pos)
+        raise_stmt = A.Raise(value=msg, pos=kw.pos)
+        return A.If(test=negated, then=[raise_stmt], orelse=[], pos=kw.pos)
 
     def _parse_import(self) -> A.Import:
         kw = self._expect("KEYWORD", "import")
