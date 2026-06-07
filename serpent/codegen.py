@@ -363,7 +363,7 @@ class Codegen:
                         A.expr_type(expr.operands[0]),
                         A.expr_type(expr.operands[1]),
                     )
-                    if op in ("==", "!=") and lt == "str" and rt == "str":
+                    if op in ("==", "!=", "<", "<=", ">", ">=") and lt == "str" and rt == "str":
                         define(f"__strcmp_{id(expr)}")
                     elif op in ("in", "not in") and lt == "str" and rt == "str":
                         define(f"__strin_{id(expr)}")
@@ -2734,6 +2734,21 @@ class Codegen:
                 )
                 if op == "!=":
                     self.emitf("xor rax, 1")
+                return
+            if op in ("<", "<=", ">", ">="):
+                # Lexicographic compare via _runtime_str_cmp -> -1/0/+1, then
+                # cmp against 0 with the corresponding setcc.
+                slot_off = info.locals_[f"__strcmp_{id(e)}"]
+                self.gen_expr(e.operands[0], info)
+                self.emitf(f"mov [rbp{slot_off:+d}], rax")
+                self.gen_expr(e.operands[1], info)
+                self.emitf(
+                    "mov rbx, rax",
+                    f"mov rax, [rbp{slot_off:+d}]",
+                    "call _runtime_str_cmp",
+                )
+                setcc = self.SETCC[op]
+                self.emitf("cmp rax, 0", f"{setcc} al", "movzx rax, al")
                 return
             if op in ("in", "not in"):
                 # 'needle in haystack': lhs is the needle, rhs is the

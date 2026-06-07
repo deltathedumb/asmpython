@@ -507,9 +507,9 @@ class SemaAnalyzer:
                     # — the comparison happens at the raw 8-byte level.
                     continue
                 if "str" in (lt, rt):
-                    if op not in ("==", "!="):
+                    if op not in ("==", "!=", "<", "<=", ">", ">="):
                         raise SemaError(
-                            f"string comparison only supports == and !=, not {op!r}",
+                            f"string comparison does not support {op!r}",
                             e.pos,
                         )
                     if lt != "str" or rt != "str":
