@@ -3,6 +3,7 @@
 */_build/
 
 *.exe
+*.obj
 *.asm
 
 __pycache__/
