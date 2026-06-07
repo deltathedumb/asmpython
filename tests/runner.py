@@ -1,4 +1,4 @@
-"""End-to-end test runner for compyle.
+"""End-to-end test runner for mamba.
 
 Each `tests/cases/*.py` file is compiled, run, and its stdout compared against
 the expected output declared in a leading `# expect:` block:
@@ -28,6 +28,9 @@ ROOT = Path(__file__).resolve().parent.parent
 CASES = ROOT / "tests" / "cases"
 CASES_FAIL = ROOT / "tests" / "cases_fail"
 BUILD = ROOT / "tests" / "_build"
+
+# Mutated by main() so subprocess calls pick it up.
+_use_runtime_lib = False
 
 
 @dataclass
@@ -82,10 +85,10 @@ def run_positive(case: Path, target: str) -> TestResult:
 
     BUILD.mkdir(parents=True, exist_ok=True)
     out = BUILD / (case.stem + (".exe" if target == "windows" else ""))
-    cp = subprocess.run(
-        [sys.executable, "-m", "compyle", str(case), "--target", target, "-o", str(out)],
-        capture_output=True, text=True, cwd=ROOT,
-    )
+    cmd = [sys.executable, "-m", "mamba", str(case), "--target", target, "-o", str(out)]
+    if _use_runtime_lib:
+        cmd.append("--use-runtime-lib")
+    cp = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
     if cp.returncode != 0:
         return TestResult(case.name, False, f"compile failed:\n{cp.stderr}{cp.stdout}")
 
@@ -107,11 +110,11 @@ def run_negative(case: Path, target: str) -> TestResult:
 
     BUILD.mkdir(parents=True, exist_ok=True)
     out = BUILD / case.stem
-    cp = subprocess.run(
-        [sys.executable, "-m", "compyle", str(case), "--target", target,
-         "--emit-asm", "-o", str(out)],
-        capture_output=True, text=True, cwd=ROOT,
-    )
+    cmd = [sys.executable, "-m", "mamba", str(case), "--target", target,
+           "--emit-asm", "-o", str(out)]
+    if _use_runtime_lib:
+        cmd.append("--use-runtime-lib")
+    cp = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
     if cp.returncode == 0:
         return TestResult(case.name, False, "expected compile to fail, but it succeeded")
     msg = (cp.stderr or "") + (cp.stdout or "")
@@ -125,8 +128,11 @@ def _diff(expected: str, got: str) -> str:
 
 
 def main() -> int:
+    global _use_runtime_lib
+    _use_runtime_lib = "--use-runtime-lib" in sys.argv[1:]
     target = _detect_target()
-    print(f"compyle test runner (target={target})")
+    mode = " (runtime-lib)" if _use_runtime_lib else ""
+    print(f"mamba test runner (target={target}){mode}")
 
     results: list[TestResult] = []
     if CASES.is_dir():
