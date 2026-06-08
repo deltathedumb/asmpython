@@ -36,6 +36,7 @@ KEYWORDS = {
     "class",
     "try",
     "except",
+    "finally",
     "raise",
     "is",
     "assert",
@@ -290,7 +291,9 @@ class Lexer:
                         expr_chars.append(self._advance())
                     else:
                         expr_chars.append(self._advance())
-                segments.append(("expr", "".join(expr_chars).strip()))
+                segments.append(
+                    ("expr", self._strip_fstring_spec("".join(expr_chars).strip()))
+                )
                 continue
             if c == "}":
                 self._advance()
@@ -306,6 +309,38 @@ class Lexer:
         if text:
             segments.append(("str", "".join(text)))
         return Token("FSTRING", segments, line, col)
+
+    @staticmethod
+    def _strip_fstring_spec(raw: str) -> str:
+        """Drop a trailing `!r`/`!s`/`!a` conversion and/or `:format-spec`
+        from an f-string replacement field, leaving just the expression text.
+
+        Only top-level (outside any `()[]{}`) markers count, so `{a != b}` and
+        `{d[1:2]}` keep their `!=` / slice intact. Conversions and format
+        specs aren't applied yet — they're stripped so the expression re-lexes
+        cleanly. (TODO: honour `!r` and `:.2f` once repr / format land.)
+        """
+        depth = 0
+        n = len(raw)
+        i = 0
+        while i < n:
+            ch = raw[i]
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif depth == 0:
+                if ch == ":":
+                    return raw[:i].strip()
+                if (
+                    ch == "!"
+                    and i + 1 < n
+                    and raw[i + 1] in "rsa"
+                    and (i + 2 == n or raw[i + 2] == ":")
+                ):
+                    return raw[:i].strip()
+            i += 1
+        return raw.strip()
 
     def _read_string(self) -> Token:
         line, col = self.line, self.col

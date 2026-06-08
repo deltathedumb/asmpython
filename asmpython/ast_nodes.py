@@ -41,6 +41,18 @@ class FuncDef:
     # params[i], or None for required params. Only literal defaults
     # (IntLit, FloatLit, StrLit) are supported for now.
     defaults: list["Expr | None"] = field(default_factory=list)
+    # Parallel to `params`: param_types[i] is the normalized annotation
+    # descriptor (base, el) for params[i], or None if unannotated. Filled in
+    # by the parser; sema turns it into a static type for the param.
+    param_types: list = field(default_factory=list)
+    # Normalized return annotation descriptor (base, el), or None. Lets sema
+    # type call sites: `s.upper()` returns str, so `print(f())` prints a str.
+    ret_type: object = None
+    # Name of the `*args` parameter, or None. The vararg is also appended to
+    # `params` as a trailing list-typed slot; call sites pack their surplus
+    # positional arguments into a list and pass it there, so the callee and the
+    # register-spill prologue treat it as an ordinary (list) parameter.
+    vararg: "Optional[str]" = None
 
 
 @dataclass
@@ -55,6 +67,11 @@ class ClassDef:
     parent: Optional[str]
     methods: list["FuncDef"]
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    # Class-body variable declarations: parallel list of (name, annot, value)
+    # where annot is a parser annotation descriptor or None and value is the
+    # initializer Expr or None. Used by sema to type class attributes (e.g. a
+    # set/dict constant referenced as `self.NAME`).
+    class_vars: list = field(default_factory=list)
 
 
 # ---- Statements -------------------------------------------------------------
@@ -122,6 +139,11 @@ class For:
     body: list["Stmt"]
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     iter: Optional["Expr"] = None
+    # For `for a, b in <iter>:` the unpack targets land here (len >= 2). When
+    # empty, the loop is single-target and `var` holds the one name. Each entry
+    # is normally a name (str); for nested unpacking like
+    # `for i, (a, b) in enumerate(zip(...))` an entry may itself be a list[str].
+    targets: list = field(default_factory=list)
 
 
 @dataclass
@@ -178,6 +200,11 @@ class Attr:
     name: str
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     inferred_type: str = "int"
+    # When the field is a collection, sema stamps the element kind here so a
+    # later `self.xs[i]` / `for x in self.xs` recovers it (str / instance / …).
+    list_el_type: str = "int"
+    value_type: str = "int"
+    tuple_elem_types: list = field(default_factory=list)
 
 
 @dataclass
@@ -188,21 +215,35 @@ class AttrAssign:
     name: str
     value: "Expr"
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    # Parser annotation descriptor from `self.x: T = value`, or None. Lets sema
+    # type the field from the declaration even when the value is an empty/opaque
+    # initializer (`self.classes: dict[str, ClassSig] = {}`).
+    annot: object = None
 
 
 @dataclass
 class Try:
-    """`try: body except [as name]: handler`.
+    """`try: body (except [Type] [as name]: handler)+ [else: ...] [finally: ...]`.
 
-    No `finally` or `else` clauses in v1. No exception classes — `except`
-    catches anything raised. If `bind_name` is set, the exception message
-    string is bound to that local name inside the handler.
+    serpent has no exception-class RTTI, so an `except` clause's type is parsed
+    but ignored: the first handler catches anything raised. `bind_name` binds
+    the exception's message string inside that first handler.
+
+    The first handler stays in `handler` / `bind_name` for back-compat with the
+    single-handler codegen path. Any additional `except` clauses land in
+    `extra_handlers` as (bind_name, body) pairs; `else_body` / `finally_body`
+    hold the optional trailing clauses. Codegen currently implements only the
+    single-handler, no-else, no-finally shape and rejects the rest until the
+    full handler machinery lands.
     """
 
     body: list["Stmt"]
     handler: list["Stmt"]
     bind_name: Optional[str] = None
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    extra_handlers: list = field(default_factory=list)  # list[(bind_name, body)]
+    else_body: list["Stmt"] = field(default_factory=list)
+    finally_body: list["Stmt"] = field(default_factory=list)
 
 
 @dataclass
@@ -265,6 +306,10 @@ class Name:
     # "str" / "float"). Lets codegen specialise iteration / indexing without
     # re-running the scope analysis.
     list_el_type: str = "int"
+    # Filled in by sema when inferred_type == "tuple": the per-position
+    # element kinds (e.g. ["int", "str"]). Tuples are heterogeneous, so
+    # there's one entry per slot rather than a single element type.
+    tuple_elem_types: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -300,12 +345,55 @@ class BoolOp:
 
 
 @dataclass
+class IfExp:
+    """Conditional expression: `body if test else orelse`.
+
+    Both arms must produce the same static type (with int/float promotion),
+    so codegen knows which register class (rax vs xmm0) the result lands in.
+    `inferred_type` / `list_el_type` are filled in by sema.
+    """
+
+    test: "Expr"
+    body: "Expr"
+    orelse: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    inferred_type: str = "int"
+    list_el_type: str = "int"
+
+
+@dataclass
 class Call:
     func: str
     args: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     # Set by sema for builtins whose return type is known (str / int).
     inferred_type: str = "int"
+    # When inferred_type == "list", the element kind of the returned list.
+    list_el_type: str = "int"
+    # Set by sema when the callee returns a tuple: the element kinds of that
+    # tuple, so `a, b = f()` knows the per-target types at the call site.
+    tuple_elem_types: list[str] = field(default_factory=list)
+    # Keyword arguments: parallel list of (name, expr). Sema maps them onto
+    # the callee's positional parameters.
+    kwargs: list = field(default_factory=list)
+
+
+@dataclass
+class Comprehension:
+    """`[elt for var in iter if cond]` and the generator-expression form
+    `(elt for var in iter if cond)`. serpent treats a genexp as an eagerly
+    materialized list — consumers (`sum`, `sorted`, `for`) iterate it the same
+    way. Single target, single `for`, optional single `if`.
+    """
+
+    elt: "Expr"
+    var: str
+    iter: "Expr"
+    cond: "Optional[Expr]" = None
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    inferred_type: str = "list"
+    # Element kind of the produced list (the static type of `elt`).
+    list_el_type: str = "int"
 
 
 @dataclass
@@ -332,6 +420,12 @@ class Subscript:
     index: "Expr"
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     inferred_type: str = "int"
+    # For list slices: element type of the resulting sub-list. Lets
+    # `for x in xs[a:b]` and friends iterate with the right per-element kind.
+    list_el_type: str = "int"
+    # When this Subscript yields a tuple (reserved for future nested tuples),
+    # the element kinds of that tuple. Empty otherwise.
+    tuple_elem_types: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -359,6 +453,11 @@ class MethodCall:
     # When inferred_type == "list", element kind ("int" / "str" / "float").
     # Set by sema for methods that return lists (e.g. dict.keys()/.values()).
     list_el_type: str = "int"
+    # When inferred_type == "tuple", per-slot kinds (so `x, y = obj.m()`
+    # unpacks). Set by sema for methods that return a tuple.
+    tuple_elem_types: list = field(default_factory=list)
+    # Keyword arguments: parallel list of (name, expr).
+    kwargs: list = field(default_factory=list)
 
 
 @dataclass
@@ -380,10 +479,46 @@ class FString:
 
 @dataclass
 class DictLit:
-    """{key: value, ...} literal. Currently restricted to str-keyed, int-valued."""
+    """{key: value, ...} literal. Keys must be str. Values may be any of int /
+    str / float / instance:<Class>, but the dict is homogeneous in value kind
+    (sema rejects mixed-value dicts). `value_type` is set by sema and lets
+    codegen / iteration recover the right per-element kind."""
 
     keys: list["Expr"] = field(default_factory=list)
     values: list["Expr"] = field(default_factory=list)
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    value_type: str = "int"
+
+
+@dataclass
+class TupleLit:
+    """(a, b, c) literal — a first-class, fixed-size, heterogeneous value.
+
+    At runtime a tuple reuses the list layout (a 24-byte [cap, len, buf]
+    header plus an 8-byte-per-slot buffer), so `len()`, indexing, and
+    iteration share the list machinery. The difference is static: each slot
+    may have its own type. `elem_types` is filled in by sema, one entry per
+    element, and lets codegen pick `mov` vs `movsd` per slot and lets
+    indexing recover the right result type.
+
+    `()` is the empty tuple (len 0); `(a,)` is a 1-tuple. A parenthesised
+    single expression `(a)` is *not* a tuple — the parser only builds a
+    TupleLit when it sees a comma.
+    """
+
+    elems: list["Expr"] = field(default_factory=list)
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    elem_types: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SetLit:
+    """{a, b, c} set literal. Distinguished from a dict literal by the absence
+    of `key: value` colons. Not yet a runtime value — accepted so set-literal
+    source (e.g. the lexer's KEYWORDS set) parses; sema/codegen support is
+    still pending."""
+
+    elems: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
@@ -403,10 +538,13 @@ Expr = (
     | FString
     | Attr
     | DictLit
+    | TupleLit
+    | SetLit
+    | IfExp
 )
 
 
-def expr_type(e) -> str:
+def expr_type(e: Expr) -> str:
     """Static type of an expression: 'int', 'float', 'str', or 'list'.
 
     Numeric promotion: a BinOp/Compare/Unary whose operand types include
@@ -419,20 +557,37 @@ def expr_type(e) -> str:
         return "str"
     if isinstance(e, ListLit):
         return "list"
+    if isinstance(e, Comprehension):
+        return "list"
     if isinstance(e, DictLit):
         return "dict"
+    if isinstance(e, TupleLit):
+        return "tuple"
+    if isinstance(e, SetLit):
+        return "set"
     if isinstance(e, FString):
         return "str"
     if isinstance(e, (Call, Name, MethodCall, Attr)):
         return e.inferred_type
+    if isinstance(e, IfExp):
+        return e.inferred_type
     if isinstance(e, Subscript):
         return getattr(e, "inferred_type", "int")
     if isinstance(e, BinOp):
+        # sema may stamp a BinOp with a non-arithmetic result: a union of class
+        # objects (`A | B | C`) is "type"; an opaque ("any") operand makes the
+        # result "any". Honor those so they chain.
+        if getattr(e, "inferred_type", None) in ("type", "any"):
+            return e.inferred_type
         lt, rt = expr_type(e.left), expr_type(e.right)
         if e.op in ("&", "|", "^", "<<", ">>"):
             return "int"  # bitwise ops only legal on ints (sema rejects floats)
         # String operations: + concatenates; * repeats (str * int).
         if e.op == "+" and lt == "str" and rt == "str":
+            return "str"
+        # `str + any` (an opaque value concatenated onto a string) is still a
+        # string — the str operand pins it. Mirrors sema's stamp.
+        if e.op == "+" and "str" in (lt, rt) and "any" in (lt, rt):
             return "str"
         if e.op == "*" and (
             (lt == "str" and rt == "int") or (lt == "int" and rt == "str")
@@ -449,9 +604,26 @@ def expr_type(e) -> str:
     if isinstance(e, Compare):
         return "int"
     if isinstance(e, BoolOp):
-        # bools track the underlying op's wider type
+        # `a and b` / `a or b` evaluate to one of the operands, so the result
+        # type is their common type. An opaque operand makes the result opaque;
+        # two equal types pass through (so `x or "default"` stays str).
         lt, rt = expr_type(e.left), expr_type(e.right)
+        if "any" in (lt, rt):
+            return "any"
+        if lt == rt:
+            return lt
         if "float" in (lt, rt):
             return "float"
         return "int"
     return "int"
+
+
+def tuple_element_types(e: Expr) -> list[str]:
+    """Per-slot element kinds for a tuple-typed expression, or [] if unknown.
+
+    Reads `elem_types` off a literal and the `tuple_elem_types` carrier field
+    that sema stamps onto Names and Calls that resolve to tuples.
+    """
+    if isinstance(e, TupleLit):
+        return list(e.elem_types)
+    return list(getattr(e, "tuple_elem_types", []))

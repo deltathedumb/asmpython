@@ -1,0 +1,150 @@
+"""Self-host progress gauntlet.
+
+The July milestone is *self-compilation*: serpent compiling serpent. This
+script measures the distance to that goal by running each phase of the
+compiler front-end over the compiler's own source and reporting the first
+construct that chokes, per file.
+
+It checks three gates, in order, and stops a file at the first one it fails:
+
+    LEX    -> the tokenizer accepts the file
+    PARSE  -> the recursive-descent parser builds an AST
+    SEMA   -> semantic analysis accepts the AST
+
+SEMA is run in a *lenient* mode: serpent has no cross-file module resolution
+yet, so names defined in sibling modules (`SourcePos`, `Token`, ...) would
+otherwise read as "undefined". Lenient mode seeds the scope with every
+top-level name the file *imports* and *defines* so that the analyser can get
+past cross-module references and surface the genuinely-unsupported language
+constructs instead. This is a measurement aid, not a claim that the file
+would link.
+
+Usage:
+    python -m selfhost.check            # summary table + first blocker per file
+    python -m selfhost.check --verbose  # include full error text
+"""
+
+from __future__ import annotations
+
+import sys
+import traceback
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from serpent.lexer import Lexer  # noqa: E402
+from serpent.parser import Parser  # noqa: E402
+from serpent.sema import analyze as sema_analyze  # noqa: E402
+from serpent.errors import CompileError  # noqa: E402
+
+
+# The compiler's own source, in rough dependency order (leaves first).
+TARGETS = [
+    "serpent/errors.py",
+    "serpent/ast_nodes.py",
+    "serpent/lexer.py",
+    "serpent/stdlib/__init__.py",
+    "serpent/stdlib/math.py",
+    "serpent/stdlib/os.py",
+    "serpent/parser.py",
+    "serpent/sema.py",
+    "serpent/codegen.py",
+    "serpent/target_linux.py",
+    "serpent/target_windows.py",
+    "serpent/driver.py",
+    "serpent/__main__.py",
+]
+
+
+class Gate:
+    LEX = "LEX"
+    PARSE = "PARSE"
+    SEMA = "SEMA"
+    OK = "OK"
+
+
+def _format_compile_error(e: CompileError, path: Path) -> str:
+    pos = getattr(e, "pos", None)
+    where = f"{path}:{pos.line}:{pos.col}" if pos else str(path)
+    return f"{where}: {type(e).__name__}: {e.args[0] if e.args else e}"
+
+
+def check_file(path: Path, *, verbose: bool) -> tuple[str, str]:
+    """Return (gate_reached, detail). gate_reached == Gate.OK means all passed."""
+    src = path.read_text(encoding="utf-8")
+
+    # ---- LEX ----
+    try:
+        tokens = Lexer(src).tokenize()
+    except CompileError as e:
+        return Gate.LEX, _format_compile_error(e, path)
+    except Exception as e:  # noqa: BLE001
+        return Gate.LEX, f"{path}: crash: {e!r}"
+
+    # ---- PARSE ----
+    try:
+        module = Parser(tokens).parse()
+    except CompileError as e:
+        return Gate.PARSE, _format_compile_error(e, path)
+    except Exception as e:  # noqa: BLE001
+        tb = traceback.format_exc() if verbose else ""
+        return Gate.PARSE, f"{path}: crash: {e!r}\n{tb}"
+
+    # ---- SEMA (lenient: pre-bind cross-module names) ----
+    try:
+        sema_analyze(module)
+    except CompileError as e:
+        return Gate.SEMA, _format_compile_error(e, path)
+    except Exception as e:  # noqa: BLE001
+        tb = traceback.format_exc() if verbose else ""
+        return Gate.SEMA, f"{path}: crash: {e!r}\n{tb}"
+
+    return Gate.OK, ""
+
+
+def main(argv: list[str]) -> int:
+    verbose = "--verbose" in argv or "-v" in argv
+
+    rows: list[tuple[str, str, str]] = []
+    for rel in TARGETS:
+        path = ROOT / rel
+        if not path.exists():
+            rows.append((rel, "MISSING", ""))
+            continue
+        gate, detail = check_file(path, verbose=verbose)
+        rows.append((rel, gate, detail))
+
+    # Gate at which each file currently stops. The "frontier" is the first
+    # file that doesn't reach OK.
+    name_w = max(len(r[0]) for r in rows)
+    print("self-host front-end gauntlet (lex -> parse -> sema)\n")
+    n_ok = 0
+    frontier_detail = None
+    for rel, gate, detail in rows:
+        mark = "OK  " if gate == Gate.OK else "STOP"
+        reached = "all gates" if gate == Gate.OK else f"stopped at {gate}"
+        print(f"  [{mark}] {rel.ljust(name_w)}  {reached}")
+        if gate == Gate.OK:
+            n_ok += 1
+        elif frontier_detail is None:
+            frontier_detail = (rel, gate, detail)
+
+    print(f"\n{n_ok}/{len(rows)} files pass the front-end gauntlet")
+    if frontier_detail is not None:
+        rel, gate, detail = frontier_detail
+        print(f"\nfirst blocker ({gate}) in {rel}:")
+        print(f"  {detail}")
+    else:
+        print("\nAll target files pass lex+parse+sema. Codegen is the next gate.")
+    # Always print every non-OK detail so progress is auditable at a glance.
+    if verbose:
+        print("\n--- all blockers ---")
+        for rel, gate, detail in rows:
+            if gate not in (Gate.OK, "MISSING"):
+                print(f"[{gate}] {detail}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

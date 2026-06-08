@@ -8,6 +8,7 @@
 _smoke.log
 
 /tools/
+/local/
 
 
 __pycache__/

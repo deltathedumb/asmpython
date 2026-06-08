@@ -155,18 +155,31 @@ echo.
 exit /b 0
 
 :usage
-echo Usage: _download-deps.bat [--nasm] [--gcc] [--python] [--all] [--dest ^<dir^>]
+echo Usage:
+echo     _download-deps.bat [TOOLS] [--dest ^<dir^>]
 echo.
-echo Downloads selected toolchain dependencies into a temp directory
-echo (default: %%TEMP%%\serpent-deps\).
+echo Fetch portable copies of the build toolchain so `serpent.bat` can
+echo compile without anything installed on the host.
 echo.
-echo Options:
-echo   --nasm        Download NASM %NASM_VER%
-echo   --gcc         Download MinGW-w64 GCC (with full Win32 sysroot)
-echo   --python      Download embeddable Python %PY_VER%
-echo   --all         All three
-echo   --dest ^<dir^>  Override destination directory
-echo   -h, --help    Show this message
+echo Tools (pick any combination):
+echo     --nasm        NASM assembler %NASM_VER%               (~ 0.6 MB)
+echo     --gcc         MinGW-w64 GCC %GCC_TAG% (full Win32 sysroot) (~275 MB)
+echo     --python      Embeddable Python %PY_VER%               (~ 11 MB)
+echo     --all         shorthand for --nasm --gcc --python
+echo.
+echo Other options:
+echo     --dest ^<dir^>  destination directory (default: %%TEMP%%\serpent-deps)
+echo     -h, --help    show this message and exit
+echo.
+echo Examples:
+echo     _download-deps.bat --nasm --gcc
+echo     _download-deps.bat --all --dest C:\serpent-toolchain
+echo.
+echo After install, plug the paths into serpent with:
+echo     --nasm "%%DEST%%\nasm\nasm.exe"
+echo     --gcc  "%%DEST%%\mingw64\bin\gcc.exe"
+echo or simply rerun serpent.bat - it auto-detects .\tools\ and bootstraps
+echo any missing tools.
 exit /b 1
 
 :fail

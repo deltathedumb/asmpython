@@ -1,6 +1,13 @@
 Serpent Compiler - Standalone Build
 
+CURRENT MILESTONE: Self-compilation
+DEADLINE: July 1st, 2026
+
+NEXT MILESTONE: OS-Capable
+DEADLINE: ???
+
 This repository contains a completely portable build of the serpent compiler.
+See more in about.md
 
 ==== FOR WINDOWS ====
 Simply use serpent.bat via the terminal.

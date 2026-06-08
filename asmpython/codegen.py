@@ -86,8 +86,85 @@ class Codegen:
                 params=list(f.params),
                 defaults=list(f.defaults),
             )
+        # Module-level variables. A top-level `name = expr` lives in a real
+        # .bss slot (a global symbol) instead of the synthetic main frame, so
+        # every function can read it — not just module-level code. name -> type.
+        # Names also bound (anywhere in module-level code, including nested
+        # loops/ifs) as a for-loop variable or tuple-unpack target keep their
+        # frame slot, because those codegen paths address frame locals directly.
+        bound_in_frame: set[str] = set()
+        self._collect_frame_bound(mod.body, bound_in_frame)
+        self.global_vars: dict[str, str] = {}
+        for s in mod.body:
+            if (
+                isinstance(s, A.Assign)
+                and isinstance(s.target, str)
+                and s.target not in bound_in_frame
+            ):
+                self.global_vars[s.target] = A.expr_type(s.value)
+        # RTTI: each user class gets a small integer id. Instances are tagged
+        # with their id (a hidden `__class__` dict entry) at construction, and
+        # isinstance walks the `__class_parents` table to honour inheritance.
+        self.class_ids: dict[str, int] = {
+            cls.name: i for i, cls in enumerate(mod.classes)
+        }
 
     # ---- emit helpers -------------------------------------------------------
+
+    def _global_label(self, name: str) -> str:
+        return f"__g_{name}"
+
+    def _var_mem(self, name: str, info: "FuncInfo") -> str:
+        """NASM memory operand for a user variable: a frame slot when it's a
+        local/param, otherwise the module-global .bss slot."""
+        if name in info.locals_:
+            return f"[rbp{info.locals_[name]:+d}]"
+        if name in self.global_vars:
+            return f"[rel {self._global_label(name)}]"
+        raise NameError(f"undefined variable {name}")
+
+    def _var_type(self, name: str, info: "FuncInfo") -> str:
+        if name in info.locals_:
+            return info.local_types.get(name, "int")
+        if name in self.global_vars:
+            return self.global_vars[name]
+        return "int"
+
+    def _target_names(self, targets: list) -> list:
+        """Flatten a for-loop target list (whose entries may be bare names or
+        nested name groups, as in `for i, (a, b) in ...`) into the bare names
+        it binds."""
+        out: list = []
+        for t in targets:
+            if isinstance(t, list):
+                out.extend(t)
+            else:
+                out.append(t)
+        return out
+
+    def _collect_frame_bound(self, stmts: list, acc: set) -> None:
+        """Collect names bound by a for-loop variable or tuple-unpack target
+        anywhere in `stmts` (recursing into nested blocks). Those codegen paths
+        store directly into a frame slot, so such names can't live in .bss."""
+        for s in stmts:
+            if isinstance(s, A.TupleAssign):
+                acc.update(s.targets)
+            elif isinstance(s, A.For):
+                acc.add(s.var)
+                acc.update(self._target_names(s.targets))
+                self._collect_frame_bound(s.body, acc)
+            elif isinstance(s, A.While):
+                self._collect_frame_bound(s.body, acc)
+            elif isinstance(s, A.If):
+                self._collect_frame_bound(s.then, acc)
+                self._collect_frame_bound(s.orelse, acc)
+            elif isinstance(s, A.Try):
+                self._collect_frame_bound(s.body, acc)
+                self._collect_frame_bound(s.handler, acc)
+                for _bind, hbody in s.extra_handlers:
+                    self._collect_frame_bound(hbody, acc)
+                self._collect_frame_bound(s.else_body, acc)
+                self._collect_frame_bound(s.finally_body, acc)
 
     def emit(self, line: str = "") -> None:
         self.lines.append(line)
@@ -154,6 +231,7 @@ class Codegen:
                     body=list(m.body),
                     pos=m.pos,
                     defaults=list(m.defaults),
+                    param_types=list(m.param_types),
                 )
                 self.emit_function(mangled)
         self.emit_print_impls()
@@ -198,6 +276,7 @@ class Codegen:
         "_runtime_dict_grow",
         "_runtime_dict_keys",
         "_runtime_dict_values",
+        "_runtime_list_slice",
         # String runtime
         "_runtime_str_concat",
         "_runtime_str_repeat",
@@ -244,6 +323,13 @@ class Codegen:
             for label, val in self.floats:
                 # repr(float) round-trips to the exact bit pattern.
                 self.emit(f"{label}: dq {repr(val)}")
+        # bss: one zero-initialized 8-byte slot per module-level variable.
+        # Module-level code (`main`) writes the real value at startup; every
+        # function reads it through the symbol.
+        if self.global_vars:
+            self.emit("section .bss")
+            for name in self.global_vars:
+                self.emit(f"{self._global_label(name)}: resq 1")
 
     # ---- entry point: top-level statements ----------------------------------
 
@@ -288,6 +374,13 @@ class Codegen:
         # Spill incoming register args into their stack slots.
         for i, p in enumerate(info.params):
             off = info.locals_[p]
+            if info.local_types.get(p) == "float":
+                # Float arguments arrive in xmm registers, not the integer
+                # ABI registers, and the SysV/Win64 counters differ. Not wired
+                # up yet — fail loudly rather than spill the wrong register.
+                raise NotImplementedError(
+                    "float parameters are not supported yet"
+                )
             reg = self._arg_reg(i)
             if reg is None:
                 # Beyond ABI register count: argument is already on the stack
@@ -302,23 +395,50 @@ class Codegen:
     def _arg_reg(self, i: int) -> Optional[str]:
         raise NotImplementedError
 
+    def _param_type_from_annot(self, annot) -> Optional[str]:
+        """Concrete slot type for a parameter from its annotation descriptor
+        (base, el), or None if the annotation doesn't constrain the type.
+
+        Mirrors sema's resolution so the body's loads/stores agree with the
+        types sema stamped onto Name nodes.
+        """
+        if annot is None:
+            return None
+        base = annot[0]
+        if base in ("int", "str", "float", "list", "dict", "tuple"):
+            return base
+        if base in ("any", "none", "set"):
+            return None
+        if base in self.mod.classes_sig:
+            return f"instance:{base}"
+        return None
+
     def _collect_locals(self, f: A.FuncDef) -> FuncInfo:
         info = FuncInfo(name=f.name, params=list(f.params), defaults=list(f.defaults))
+        # In module-level code (`main`), a write to a global name targets its
+        # .bss slot, not a frame slot — so don't give those names a local.
+        is_main = f.name == self.label_main
         # Each local (incl. params) gets an 8-byte slot at a negative RBP offset.
         offset = 0
         for i, p in enumerate(f.params):
             offset -= 8
             info.locals_[p] = offset
-            # Default-typed params take the default's type so the body emits
-            # the right load (int vs movsd) when reading the param later.
-            ty = "int"
-            if i < len(f.defaults) and f.defaults[i] is not None:
-                ty = A.expr_type(f.defaults[i])
+            # Param type, in priority order: explicit annotation, then the
+            # default's type, then int. This decides the read/write register
+            # class (int/pointer via rax vs float via xmm0).
+            annot = f.param_types[i] if i < len(f.param_types) else None
+            ty = self._param_type_from_annot(annot)
+            if ty is None:
+                ty = "int"
+                if i < len(f.defaults) and f.defaults[i] is not None:
+                    ty = A.expr_type(f.defaults[i])
             info.local_types[p] = ty
 
         # Walk the body for any name that becomes bound.
         def define(name: str, ty: str = "int") -> None:
             nonlocal offset
+            if is_main and name in self.global_vars:
+                return  # module global: lives in .bss, addressed by symbol
             if name not in info.locals_:
                 offset -= 8
                 info.locals_[name] = offset
@@ -345,8 +465,37 @@ class Codegen:
                 define(f"__listlit_{id(expr)}")
                 for el in expr.elems:
                     walk_expr(el)
+            elif isinstance(expr, A.Comprehension):
+                # Result list header, source iterable, cached length, index,
+                # and a scratch for each appended value; plus the loop var.
+                define(f"__comp_res_{id(expr)}")
+                define(f"__comp_iter_{id(expr)}")
+                define(f"__comp_stop_{id(expr)}")
+                define(f"__comp_idx_{id(expr)}")
+                define(f"__comp_val_{id(expr)}")
+                # Loop variable inherits the iterable's element kind.
+                var_ty = "int"
+                if A.expr_type(expr.iter) == "list":
+                    if isinstance(expr.iter, A.Name):
+                        var_ty = expr.iter.list_el_type
+                    elif isinstance(expr.iter, A.ListLit):
+                        var_ty = expr.iter.el_type
+                    else:
+                        var_ty = getattr(expr.iter, "list_el_type", "int")
+                define(expr.var, var_ty)
+                walk_expr(expr.iter)
+                walk_expr(expr.elt)
+                if expr.cond is not None:
+                    walk_expr(expr.cond)
+            elif isinstance(expr, A.TupleLit):
+                # One scratch slot to park the header pointer across the two
+                # mallocs (mirrors ListLit). Tuples reuse the list layout.
+                define(f"__tuplelit_{id(expr)}")
+                for el in expr.elems:
+                    walk_expr(el)
             elif isinstance(expr, A.DictLit):
                 define(f"__dictlit_{id(expr)}")
+                define(f"__dictlit_key_{id(expr)}")
                 for k in expr.keys:
                     walk_expr(k)
                 for v in expr.values:
@@ -372,9 +521,10 @@ class Codegen:
                         define(f"__strcmp_{id(expr)}")
                     elif op in ("in", "not in") and lt == "str" and rt == "str":
                         define(f"__strin_{id(expr)}")
-                    elif op in ("in", "not in") and rt == "list":
+                    elif op in ("in", "not in") and rt in ("list", "tuple"):
                         # Element type drives slot kind (float needs xmm-sized
                         # spill, but our locals are 8 bytes which matches).
+                        # Tuples reuse the list layout, so the scan is identical.
                         define(f"__listin_{id(expr)}")
                     elif op in ("in", "not in") and rt == "dict":
                         define(f"__dictin_{id(expr)}")
@@ -383,6 +533,10 @@ class Codegen:
             elif isinstance(expr, A.BoolOp):
                 walk_expr(expr.left)
                 walk_expr(expr.right)
+            elif isinstance(expr, A.IfExp):
+                walk_expr(expr.test)
+                walk_expr(expr.body)
+                walk_expr(expr.orelse)
             elif isinstance(expr, A.UnaryOp):
                 walk_expr(expr.operand)
             elif isinstance(expr, A.Call):
@@ -398,6 +552,15 @@ class Codegen:
                 # instance ptr across the __init__ call.
                 if expr.func in self.mod.classes_sig:
                     define(f"__ctor_inst_{id(expr)}")
+                # getattr(obj, "name", default) parks the default across the
+                # object's evaluation (which may itself call).
+                if expr.func == "getattr" and len(expr.args) == 3:
+                    define(f"__getattr_def_{id(expr)}")
+                # User function / constructor calls pass arguments through
+                # frame slots (alignment-safe). One slot per positional arg.
+                if expr.func in self.funcs or expr.func in self.mod.classes_sig:
+                    for k in range(len(expr.args)):
+                        define(f"__callarg_{id(expr)}_{k}")
                 for a in expr.args:
                     walk_expr(a)
             elif isinstance(expr, A.MethodCall):
@@ -421,6 +584,14 @@ class Codegen:
                         define(f"__strm_obj_{id(expr)}")
                         if len(expr.args) >= 2:
                             define(f"__strm_a1_{id(expr)}")
+                    # User-class (and super) method calls pass args through
+                    # frame slots; instance calls also park the receiver.
+                    obj_t = A.expr_type(expr.obj)
+                    if obj_t.startswith("instance:"):
+                        define(f"__callself_{id(expr)}")
+                    if obj_t.startswith("instance:") or obj_t.startswith("super:"):
+                        for k in range(len(expr.args)):
+                            define(f"__callarg_{id(expr)}_{k}")
                     walk_expr(expr.obj)
                 for a in expr.args:
                     walk_expr(a)
@@ -433,6 +604,11 @@ class Codegen:
                     if expr.index.step is not None:
                         define(f"__strsl_stop_{id(expr)}")
                         define(f"__strsl_step_{id(expr)}")
+                    # List slicing dispatches through a different helper; the
+                    # codegen path uses its own pair of slots.
+                    if A.expr_type(expr.obj) == "list":
+                        define(f"__lstsl_obj_{id(expr)}")
+                        define(f"__lstsl_start_{id(expr)}")
                     walk_expr(expr.obj)
                     if expr.index.start is not None:
                         walk_expr(expr.index.start)
@@ -470,11 +646,60 @@ class Codegen:
                     define(s.target, A.expr_type(s.value))
                     walk_expr(s.value)
                 elif isinstance(s, A.TupleAssign):
-                    for i, v in enumerate(s.values):
-                        walk_expr(v)
-                        define(f"__tup_tmp_{id(s)}_{i}", A.expr_type(v))
-                    for t, v in zip(s.targets, s.values):
-                        define(t, A.expr_type(v))
+                    if len(s.values) == 1 and A.expr_type(s.values[0]) == "tuple":
+                        # Unpack form: park the tuple ptr in one slot, then
+                        # type each target from the tuple's element kinds.
+                        define(f"__tupunpack_{id(s)}", "int")
+                        walk_expr(s.values[0])
+                        ets = A.tuple_element_types(s.values[0])
+                        for i, t in enumerate(s.targets):
+                            define(t, ets[i] if i < len(ets) else "int")
+                    else:
+                        for i, v in enumerate(s.values):
+                            walk_expr(v)
+                            define(f"__tup_tmp_{id(s)}_{i}", A.expr_type(v))
+                        for t, v in zip(s.targets, s.values):
+                            define(t, A.expr_type(v))
+                elif isinstance(s, A.For) and self._for_zip_spec(s) is not None:
+                    # for a, b in zip(A, B) / for i, (a, b) in enumerate(zip):
+                    # two iterables walked in lockstep. Reserve the per-buffer
+                    # pointers, the bound, the counter, and the target slots.
+                    zidx, za, zb, zae, zbe = self._for_zip_spec(s)
+                    if zidx is not None:
+                        define(zidx, "int")
+                    define(za, self._list_expr_el_kind(zae))
+                    define(zb, self._list_expr_el_kind(zbe))
+                    define(f"__zip_a_{id(s)}", "int")
+                    define(f"__zip_b_{id(s)}", "int")
+                    define(f"__zip_stop_{id(s)}", "int")
+                    define(f"__zip_i_{id(s)}", "int")
+                    walk_expr(zae)
+                    walk_expr(zbe)
+                    walk(s.body)
+                elif (
+                    isinstance(s, A.For)
+                    and s.iter is not None
+                    and isinstance(s.iter, A.Call)
+                    and s.iter.func == "enumerate"
+                ):
+                    # for i, x in enumerate(inner): index var, element var, plus
+                    # the list-iteration machinery.
+                    inner = s.iter.args[0]
+                    el_ty = "int"
+                    if A.expr_type(inner) == "list":
+                        if isinstance(inner, A.Name):
+                            el_ty = inner.list_el_type
+                        elif isinstance(inner, A.ListLit):
+                            el_ty = inner.el_type
+                        else:
+                            el_ty = getattr(inner, "list_el_type", "int")
+                    define(s.targets[0], "int")
+                    define(s.targets[1], el_ty)
+                    define(f"__for_stop_{id(s)}", "int")
+                    define(f"__for_step_{id(s)}", "int")
+                    define(f"__for_iter_{id(s)}", "int")
+                    walk_expr(inner)
+                    walk(s.body)
                 elif isinstance(s, A.For):
                     # Loop var inherits the iterable's element type so the
                     # later Name load picks the right register class.
@@ -484,6 +709,11 @@ class Codegen:
                             var_ty = s.iter.list_el_type
                         elif isinstance(s.iter, A.ListLit):
                             var_ty = s.iter.el_type
+                    elif s.iter is not None and A.expr_type(s.iter) == "tuple":
+                        # Iterable tuples are homogeneous (sema enforces it),
+                        # so the loop var takes the shared element kind.
+                        ets = A.tuple_element_types(s.iter)
+                        var_ty = ets[0] if ets else "int"
                     elif s.iter is not None and A.expr_type(s.iter) == "dict":
                         var_ty = "str"
                     elif s.iter is not None and A.expr_type(s.iter) == "str":
@@ -546,20 +776,41 @@ class Codegen:
             # Imports are resolved statically by sema; nothing runtime-side.
             return
         if isinstance(stmt, A.Assign):
-            ty = info.local_types.get(stmt.target, "int")
+            ty = self._var_type(stmt.target, info)
             value_t = A.expr_type(stmt.value)
-            off = info.locals_[stmt.target]
+            mem = self._var_mem(stmt.target, info)
             if ty == "float":
                 # Slot expects a float; promote int RHS to float.
                 self._gen_expr_as_float(stmt.value, info, value_t)
-                self.emitf(f"movsd [rbp{off:+d}], xmm0")
+                self.emitf(f"movsd {mem}, xmm0")
             else:
                 self.gen_expr(stmt.value, info)
-                self.emitf(f"mov [rbp{off:+d}], rax")
+                self.emitf(f"mov {mem}, rax")
             return
         if isinstance(stmt, A.TupleAssign):
-            # Evaluate every RHS into a pre-reserved scratch slot, then
-            # commit each store. Two-pass model means `a, b = b, a` works.
+            # Unpack form: `a, b = <tuple>`. Evaluate the tuple once, park its
+            # header ptr, then copy each slot out into the matching target.
+            if len(stmt.values) == 1 and A.expr_type(stmt.values[0]) == "tuple":
+                ptr_slot = info.locals_[f"__tupunpack_{id(stmt)}"]
+                ets = A.tuple_element_types(stmt.values[0])
+                self.gen_expr(stmt.values[0], info)  # rax = tuple header ptr
+                self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+                for i, target in enumerate(stmt.targets):
+                    off = info.locals_[target]
+                    el_t = ets[i] if i < len(ets) else "int"
+                    self.emitf(
+                        f"mov rbx, [rbp{ptr_slot:+d}]",
+                        f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+                    )
+                    if el_t == "float":
+                        self.emitf(
+                            f"movsd xmm0, [rbx+{i * 8}]", f"movsd [rbp{off:+d}], xmm0"
+                        )
+                    else:
+                        self.emitf(f"mov rax, [rbx+{i * 8}]", f"mov [rbp{off:+d}], rax")
+                return
+            # Parallel form: evaluate every RHS into a pre-reserved scratch
+            # slot, then commit each store. Two-pass model means swap works.
             for i, v in enumerate(stmt.values):
                 tmp = info.locals_[f"__tup_tmp_{id(stmt)}_{i}"]
                 self.gen_expr(v, info)
@@ -570,20 +821,20 @@ class Codegen:
                 self.emitf(f"mov rax, [rbp{tmp:+d}]", f"mov [rbp{off:+d}], rax")
             return
         if isinstance(stmt, A.AugAssign):
-            off = info.locals_[stmt.target]
-            ty = info.local_types.get(stmt.target, "int")
+            mem = self._var_mem(stmt.target, info)
+            ty = self._var_type(stmt.target, info)
             if ty == "float":
                 self._gen_expr_as_float(stmt.value, info, A.expr_type(stmt.value))
-                self.emitf("movsd xmm1, xmm0", f"movsd xmm0, [rbp{off:+d}]")
+                self.emitf("movsd xmm1, xmm0", f"movsd xmm0, {mem}")
                 # Apply float op in place.
                 self._emit_binop_inline_float(stmt.op)
-                self.emitf(f"movsd [rbp{off:+d}], xmm0")
+                self.emitf(f"movsd {mem}, xmm0")
             else:
-                self.emitf(f"mov rax, [rbp{off:+d}]", "push rax")
+                self.emitf(f"mov rax, {mem}", "push rax")
                 self.gen_expr(stmt.value, info)
                 self.emitf("mov rbx, rax", "pop rax")
                 self._emit_binop_inline(stmt.op)
-                self.emitf(f"mov [rbp{off:+d}], rax")
+                self.emitf(f"mov {mem}, rax")
             return
         if isinstance(stmt, A.Return):
             if stmt.value is not None:
@@ -703,7 +954,71 @@ class Codegen:
     # For simplicity we evaluate `start`, `stop`, `step` once into the loop
     # variable and the synthetic locals reserved by `_collect_locals`.
 
+    def _list_expr_el_kind(self, expr: A.Expr) -> str:
+        """Element kind of a list-typed expression, defaulting to int when the
+        expression doesn't carry one (so a slot still gets a sane register
+        class). Used to type the targets of a zip loop."""
+        if A.expr_type(expr) != "list":
+            return "int"
+        if isinstance(expr, A.Name):
+            return expr.list_el_type
+        if isinstance(expr, A.ListLit):
+            return expr.el_type
+        return getattr(expr, "list_el_type", "int")
+
+    def _for_zip_spec(self, s: A.For):
+        """Recognize `for a, b in zip(A, B)` and
+        `for i, (a, b) in enumerate(zip(A, B))`. Returns
+        (idx_name_or_None, a_name, b_name, a_expr, b_expr) or None. Mirrors the
+        analyzer's detection so codegen and sema agree on the loop shape."""
+        it = s.iter
+        if it is None or not isinstance(it, A.Call):
+            return None
+        if it.func == "zip":
+            if (
+                len(it.args) == 2
+                and len(s.targets) == 2
+                and isinstance(s.targets[0], str)
+                and isinstance(s.targets[1], str)
+            ):
+                return (None, s.targets[0], s.targets[1], it.args[0], it.args[1])
+            return None
+        if (
+            it.func == "enumerate"
+            and len(it.args) == 1
+            and isinstance(it.args[0], A.Call)
+            and it.args[0].func == "zip"
+        ):
+            z = it.args[0]
+            if (
+                len(z.args) == 2
+                and len(s.targets) == 2
+                and isinstance(s.targets[0], str)
+                and isinstance(s.targets[1], list)
+                and len(s.targets[1]) == 2
+            ):
+                return (
+                    s.targets[0],
+                    s.targets[1][0],
+                    s.targets[1][1],
+                    z.args[0],
+                    z.args[1],
+                )
+            return None
+        return None
+
     def _gen_for(self, stmt: A.For, info: FuncInfo) -> None:
+        zspec = self._for_zip_spec(stmt)
+        if zspec is not None:
+            self._gen_for_zip(stmt, info, zspec)
+            return
+        if (
+            stmt.iter is not None
+            and isinstance(stmt.iter, A.Call)
+            and stmt.iter.func == "enumerate"
+        ):
+            self._gen_for_enumerate(stmt, info)
+            return
         if stmt.iter is not None:
             iter_t = A.expr_type(stmt.iter)
             if iter_t == "dict":
@@ -788,6 +1103,16 @@ class Codegen:
         we then dispatch to the handler block. On normal body exit we pop
         the handler before continuing.
         """
+        if stmt.extra_handlers or stmt.else_body or stmt.finally_body:
+            # Multiple except clauses need exception-class RTTI to dispatch;
+            # else/finally need the full unwinding machinery. The parser and
+            # sema accept these shapes (so the front-end self-host gauntlet can
+            # measure progress), but codegen only implements the single
+            # catch-all handler for now. Fail loudly rather than miscompile.
+            raise NotImplementedError(
+                "try with multiple 'except' clauses, 'else', or 'finally' is "
+                "not supported by codegen yet"
+            )
         buf_off = info.locals_[f"__try_buf_{id(stmt)}"]
         parent_off = info.locals_[f"__try_parent_{id(stmt)}"]
         handler_lbl = self.fresh("try_handler")
@@ -869,6 +1194,118 @@ class Codegen:
             self.gen_stmt(s, info)
         self.label(cont)
         self.emitf(f"inc qword [rbp{step_off:+d}]", f"jmp {top}")
+        self.label(end)
+        self.loop_labels.pop()
+
+    def _gen_for_enumerate(self, stmt: A.For, info: FuncInfo) -> None:
+        # for i, x in enumerate(inner):  i = index, x = inner[i].
+        inner = stmt.iter.args[0]
+        if A.expr_type(inner) != "list":
+            raise NotImplementedError(
+                "enumerate() over a non-list iterable is not supported yet"
+            )
+        idx_off = info.locals_[stmt.targets[0]]
+        el_off = info.locals_[stmt.targets[1]]
+        iter_off = info.locals_[f"__for_iter_{id(stmt)}"]
+        stop_off = info.locals_[f"__for_stop_{id(stmt)}"]
+        step_off = info.locals_[f"__for_step_{id(stmt)}"]  # index counter
+
+        self.gen_expr(inner, info)
+        self.emitf(
+            f"mov [rbp{iter_off:+d}], rax",
+            f"mov rbx, [rax+{self.LIST_LEN_OFF}]",
+            f"mov [rbp{stop_off:+d}], rbx",
+            f"mov qword [rbp{step_off:+d}], 0",
+        )
+        top = self.fresh("for_enum")
+        cont = self.fresh("for_enum_cont")
+        end = self.fresh("endfor_enum")
+        self.loop_labels.append((cont, end))
+        self.label(top)
+        self.emitf(
+            f"mov rax, [rbp{step_off:+d}]", f"cmp rax, [rbp{stop_off:+d}]", f"jge {end}"
+        )
+        # index var = counter; element var = buffer[counter] (reload buffer).
+        self.emitf(
+            f"mov rax, [rbp{step_off:+d}]",
+            f"mov [rbp{idx_off:+d}], rax",
+            f"mov rbx, [rbp{iter_off:+d}]",
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+            f"mov rcx, [rbp{step_off:+d}]",
+            "mov rax, [rbx+rcx*8]",
+            f"mov [rbp{el_off:+d}], rax",
+        )
+        for s in stmt.body:
+            self.gen_stmt(s, info)
+        self.label(cont)
+        self.emitf(f"inc qword [rbp{step_off:+d}]", f"jmp {top}")
+        self.label(end)
+        self.loop_labels.pop()
+
+    def _gen_for_zip(self, stmt: A.For, info: FuncInfo, zspec) -> None:
+        """`for a, b in zip(A, B)` / `for i, (a, b) in enumerate(zip(A, B))`.
+
+        Walks both list buffers in lockstep, stopping at the shorter (Python's
+        zip semantics) via min(len A, len B). Each iteration binds a = A[i],
+        b = B[i], and the optional index. Tuples reuse the list layout, so the
+        same buffer arithmetic works for either A/B being a list or a tuple.
+        Values are copied as raw 8-byte slots, which is correct for any element
+        kind (int/str/ptr/float bits)."""
+        idx_name, a_name, b_name, a_expr, b_expr = zspec
+        iter_a = info.locals_[f"__zip_a_{id(stmt)}"]
+        iter_b = info.locals_[f"__zip_b_{id(stmt)}"]
+        stop_off = info.locals_[f"__zip_stop_{id(stmt)}"]
+        i_off = info.locals_[f"__zip_i_{id(stmt)}"]
+        a_off = info.locals_[a_name]
+        b_off = info.locals_[b_name]
+
+        # Evaluate both iterables (header pointers), cache them and the loop
+        # bound = min(lenA, lenB).
+        self.gen_expr(a_expr, info)
+        self.emitf(f"mov [rbp{iter_a:+d}], rax")
+        self.gen_expr(b_expr, info)
+        self.emitf(f"mov [rbp{iter_b:+d}], rax")
+        self.emitf(
+            f"mov rax, [rbp{iter_a:+d}]",
+            f"mov rax, [rax+{self.LIST_LEN_OFF}]",
+            f"mov rbx, [rbp{iter_b:+d}]",
+            f"mov rbx, [rbx+{self.LIST_LEN_OFF}]",
+            "cmp rax, rbx",
+            "cmovg rax, rbx",  # rax = min(lenA, lenB)
+            f"mov [rbp{stop_off:+d}], rax",
+            f"mov qword [rbp{i_off:+d}], 0",
+        )
+
+        top = self.fresh("for_zip")
+        cont = self.fresh("for_zip_cont")
+        end = self.fresh("endfor_zip")
+        self.loop_labels.append((cont, end))
+        self.label(top)
+        self.emitf(
+            f"mov rax, [rbp{i_off:+d}]", f"cmp rax, [rbp{stop_off:+d}]", f"jge {end}"
+        )
+        # a = A.buf[i]; b = B.buf[i] (reload buffers each step in case a body
+        # append reallocated one of them).
+        self.emitf(
+            f"mov rbx, [rbp{iter_a:+d}]",
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+            f"mov rcx, [rbp{i_off:+d}]",
+            "mov rax, [rbx+rcx*8]",
+            f"mov [rbp{a_off:+d}], rax",
+            f"mov rbx, [rbp{iter_b:+d}]",
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+            "mov rax, [rbx+rcx*8]",
+            f"mov [rbp{b_off:+d}], rax",
+        )
+        if idx_name is not None:
+            idx_off = info.locals_[idx_name]
+            self.emitf(
+                f"mov rax, [rbp{i_off:+d}]", f"mov [rbp{idx_off:+d}], rax"
+            )
+        for s in stmt.body:
+            self.gen_stmt(s, info)
+        self.label(cont)
+        self.emitf(f"inc qword [rbp{i_off:+d}]", f"jmp {top}")
         self.label(end)
         self.loop_labels.pop()
 
@@ -983,14 +1420,14 @@ class Codegen:
             if expr.name in self.ffi_consts:
                 self._gen_const_load(self.ffi_consts[expr.name])
                 return
-            if expr.name not in info.locals_:
+            if expr.name not in info.locals_ and expr.name not in self.global_vars:
                 raise NameError(f"undefined variable {expr.name}")
-            off = info.locals_[expr.name]
-            ty = info.local_types.get(expr.name, "int")
+            mem = self._var_mem(expr.name, info)
+            ty = self._var_type(expr.name, info)
             if ty == "float":
-                self.emitf(f"movsd xmm0, [rbp{off:+d}]")
+                self.emitf(f"movsd xmm0, {mem}")
             else:
-                self.emitf(f"mov rax, [rbp{off:+d}]")
+                self.emitf(f"mov rax, {mem}")
             return
         if isinstance(expr, A.UnaryOp):
             operand_t = A.expr_type(expr.operand)
@@ -1031,11 +1468,20 @@ class Codegen:
         if isinstance(expr, A.BoolOp):
             self._gen_boolop(expr, info)
             return
+        if isinstance(expr, A.IfExp):
+            self._gen_ifexp(expr, info)
+            return
         if isinstance(expr, A.Call):
             self._gen_call(expr, info)
             return
         if isinstance(expr, A.ListLit):
             self._gen_list_lit(expr, info)
+            return
+        if isinstance(expr, A.Comprehension):
+            self._gen_comprehension(expr, info)
+            return
+        if isinstance(expr, A.TupleLit):
+            self._gen_tuple_lit(expr, info)
             return
         if isinstance(expr, A.Subscript):
             self._gen_subscript(expr, info)
@@ -1135,6 +1581,7 @@ class Codegen:
                 "_runtime_dict_grow",
                 "_runtime_dict_keys",
                 "_runtime_dict_values",
+                "_runtime_list_slice",
             ):
                 self.emit(f"extern {sym}")
             return
@@ -1433,6 +1880,7 @@ class Codegen:
 
         self._emit_dict_keys_or_values_helper("_runtime_dict_keys", value_field=False)
         self._emit_dict_keys_or_values_helper("_runtime_dict_values", value_field=True)
+        self._emit_list_slice_helper()
 
         # Error message.
         self.emit("section .rodata")
@@ -1527,6 +1975,100 @@ class Codegen:
         self.label(done)
         # Return the list header.
         self.emitf("mov rax, [rbp-16]", "leave", "ret")
+
+    def _emit_list_slice_helper(self) -> None:
+        """`_runtime_list_slice`: `xs[start:stop]` -> new list (no step yet).
+
+        In:  rax = src list header, rbx = start (or INT64_MIN sentinel),
+             rcx = stop (or INT64_MAX sentinel).
+        Out: rax = newly-allocated list header.
+
+        Element type is irrelevant at runtime — slots are 8 bytes regardless.
+        Locals span [rbp-8..rbp-72]; reserve 80 = 48 locals + 32 shadow.
+        """
+        INT64_MIN = "0x8000000000000000"
+        INT64_MAX = "0x7fffffffffffffff"
+
+        self.label("_runtime_list_slice")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
+        self.emitf(
+            "mov [rbp-8], rax",   # src header
+            "mov [rbp-16], rbx",  # start raw
+            "mov [rbp-24], rcx",  # stop raw
+        )
+        # len = src.len
+        self.emitf(f"mov rax, [rax+{self.LIST_LEN_OFF}]", "mov [rbp-32], rax")
+        # Normalize start.
+        have_start = self.fresh("ls_start_have")
+        s_pos = self.fresh("ls_s_pos")
+        s_ge0 = self.fresh("ls_s_ge0")
+        s_lel = self.fresh("ls_s_lel")
+        self.emitf("mov rax, [rbp-16]", f"mov rbx, {INT64_MIN}", "cmp rax, rbx")
+        self.emitf(f"jne {have_start}", "xor rax, rax")
+        self.label(have_start)
+        self.emitf("test rax, rax", f"jns {s_pos}", "add rax, [rbp-32]")
+        self.label(s_pos)
+        self.emitf("test rax, rax", f"jns {s_ge0}", "xor rax, rax")
+        self.label(s_ge0)
+        self.emitf("cmp rax, [rbp-32]", f"jle {s_lel}", "mov rax, [rbp-32]")
+        self.label(s_lel)
+        self.emitf("mov [rbp-40], rax")  # effective start
+        # Normalize stop.
+        have_stop = self.fresh("ls_stop_have")
+        t_pos = self.fresh("ls_t_pos")
+        t_ge0 = self.fresh("ls_t_ge0")
+        t_lel = self.fresh("ls_t_lel")
+        self.emitf("mov rax, [rbp-24]", f"mov rbx, {INT64_MAX}", "cmp rax, rbx")
+        self.emitf(f"jne {have_stop}", "mov rax, [rbp-32]")
+        self.label(have_stop)
+        self.emitf("test rax, rax", f"jns {t_pos}", "add rax, [rbp-32]")
+        self.label(t_pos)
+        self.emitf("test rax, rax", f"jns {t_ge0}", "xor rax, rax")
+        self.label(t_ge0)
+        self.emitf("cmp rax, [rbp-32]", f"jle {t_lel}", "mov rax, [rbp-32]")
+        self.label(t_lel)
+        self.emitf("mov [rbp-48], rax")  # effective stop
+        # n = max(0, stop - start)
+        nle = self.fresh("ls_n_le")
+        self.emitf("mov rax, [rbp-48]", "sub rax, [rbp-40]", f"jg {nle}", "xor rax, rax")
+        self.label(nle)
+        self.emitf("mov [rbp-56], rax")  # n
+        # cap = max(n, 4)
+        cap_ok = self.fresh("ls_cap_ok")
+        self.emitf("cmp rax, 4", f"jge {cap_ok}", "mov rax, 4")
+        self.label(cap_ok)
+        self.emitf("mov [rbp-64], rax")  # cap
+        # Allocate list header (24)
+        self.emitf("mov rcx, 24", "call malloc", "mov [rbp-72], rax")
+        # Init header
+        self.emitf(
+            "mov rdx, [rbp-72]",
+            "mov rax, [rbp-64]",
+            f"mov [rdx+{self.LIST_CAP_OFF}], rax",
+            "mov rax, [rbp-56]",
+            f"mov [rdx+{self.LIST_LEN_OFF}], rax",
+        )
+        # Allocate buffer cap*8
+        self.emitf("mov rcx, [rbp-64]", "shl rcx, 3", "call malloc")
+        self.emitf(
+            "mov rdx, [rbp-72]",
+            f"mov [rdx+{self.LIST_BUF_OFF}], rax",
+        )
+        # memcpy(new_buf, src.buf + start*8, n*8) — but n could be 0; skip.
+        skip_copy = self.fresh("ls_skip_copy")
+        self.emitf("mov rcx, [rbp-56]", "test rcx, rcx", f"jz {skip_copy}")
+        self.emitf(
+            "shl rcx, 3",
+            # src start ptr
+            "mov rbx, [rbp-8]",
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+            "mov rdx, [rbp-40]",
+            "shl rdx, 3",
+            "add rbx, rdx",
+        )
+        self._emit_libc_memcpy()
+        self.label(skip_copy)
+        self.emitf("mov rax, [rbp-72]", "leave", "ret")
 
     def _emit_str_slice_step_helper(self) -> None:
         """`_runtime_str_slice_step`: full s[start:stop:step].
@@ -2467,7 +3009,8 @@ class Codegen:
         end = self.fresh("ssp_end")
         self.label(loop)
         # Find next sep occurrence in cursor
-        self.emitf("mov rax, [rbp-64]", "mov rbx, [rbp-16]", "call strstr")
+        self.emitf("mov rax, [rbp-64]", "mov rbx, [rbp-16]")
+        self._emit_libc_strstr()
         self.emitf("test rax, rax", f"jz {last}")
         self.emitf("mov [rbp-80], rax")  # match ptr
         # seg_len = match - cursor
@@ -2824,9 +3367,122 @@ class Codegen:
                 self.emitf(f"mov [rcx+{i * 8}], rax")
         self.emitf(f"mov rax, [rbp{slot_off:+d}]")
 
+    def _gen_comprehension(self, e: A.Comprehension, info: FuncInfo) -> None:
+        """[elt for var in iter (if cond)] -> build an empty list, iterate the
+        (list-typed) iterable, and append elt for each element that passes the
+        filter. Result list pointer left in rax.
+
+        Like _gen_list_lit, this never uses push/pop across a call (it parks
+        intermediate pointers in frame slots), keeping rsp 16-byte aligned."""
+        if A.expr_type(e.iter) != "list":
+            raise NotImplementedError(
+                "comprehension iterable must be a list for now"
+            )
+        res = info.locals_[f"__comp_res_{id(e)}"]
+        it = info.locals_[f"__comp_iter_{id(e)}"]
+        stop = info.locals_[f"__comp_stop_{id(e)}"]
+        idx = info.locals_[f"__comp_idx_{id(e)}"]
+        val = info.locals_[f"__comp_val_{id(e)}"]
+        var = info.locals_[e.var]
+
+        # result = empty list (cap 4)
+        cap = 4
+        self._emit_malloc(self.LIST_HEADER)
+        self.emitf(
+            f"mov qword [rax+{self.LIST_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.LIST_LEN_OFF}], 0",
+            f"mov [rbp{res:+d}], rax",
+        )
+        self._emit_malloc(cap * 8)
+        self.emitf(
+            f"mov rbx, [rbp{res:+d}]", f"mov [rbx+{self.LIST_BUF_OFF}], rax"
+        )
+
+        # Iterate the source list (reloading the buffer each step since append
+        # below may have grown a different list — here the source isn't grown,
+        # but appends to `res` are independent).
+        self.gen_expr(e.iter, info)
+        self.emitf(
+            f"mov [rbp{it:+d}], rax",
+            f"mov rbx, [rax+{self.LIST_LEN_OFF}]",
+            f"mov [rbp{stop:+d}], rbx",
+            f"mov qword [rbp{idx:+d}], 0",
+        )
+        top = self.fresh("comp")
+        end = self.fresh("endcomp")
+        self.label(top)
+        self.emitf(
+            f"mov rax, [rbp{idx:+d}]", f"cmp rax, [rbp{stop:+d}]", f"jge {end}"
+        )
+        self.emitf(
+            f"mov rbx, [rbp{it:+d}]",
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+            f"mov rcx, [rbp{idx:+d}]",
+            "mov rax, [rbx+rcx*8]",
+            f"mov [rbp{var:+d}], rax",
+        )
+        # Optional filter.
+        skip = None
+        if e.cond is not None:
+            skip = self.fresh("comp_skip")
+            self._gen_truthy_test(e.cond, info, skip)
+        # Append elt to result: rax = header, rbx = value.
+        self.gen_expr(e.elt, info)
+        if e.list_el_type == "float":
+            self.emitf("movq rax, xmm0")
+        self.emitf(
+            f"mov [rbp{val:+d}], rax",
+            f"mov rax, [rbp{res:+d}]",
+            f"mov rbx, [rbp{val:+d}]",
+            "call _runtime_list_append",
+        )
+        if skip is not None:
+            self.label(skip)
+        self.emitf(f"inc qword [rbp{idx:+d}]", f"jmp {top}")
+        self.label(end)
+        self.emitf(f"mov rax, [rbp{res:+d}]")  # result value
+
+    def _gen_tuple_lit(self, e: A.TupleLit, info: FuncInfo) -> None:
+        """(a, b, c) -> a fresh heap value in the list layout.
+
+        Identical to `_gen_list_lit` except the per-slot store kind comes from
+        the tuple's heterogeneous `elem_types` rather than one shared element
+        type. cap == len == n (tuples never grow); an empty tuple still gets a
+        1-slot buffer so the malloc size is non-zero.
+        """
+        slot_off = info.locals_[f"__tuplelit_{id(e)}"]
+        n = len(e.elems)
+        cap = max(n, 1)
+        self._emit_malloc(self.LIST_HEADER)  # rax = header
+        self.emitf(
+            f"mov qword [rax+{self.LIST_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.LIST_LEN_OFF}], {n}",
+            f"mov [rbp{slot_off:+d}], rax",
+        )
+        self._emit_malloc(cap * 8)  # rax = buffer
+        self.emitf(
+            f"mov rbx, [rbp{slot_off:+d}]",
+            f"mov [rbx+{self.LIST_BUF_OFF}], rax",
+        )
+        for i, el in enumerate(e.elems):
+            self.gen_expr(el, info)  # rax / xmm0 = value (may call!)
+            self.emitf(
+                f"mov rbx, [rbp{slot_off:+d}]", f"mov rcx, [rbx+{self.LIST_BUF_OFF}]"
+            )
+            el_t = e.elem_types[i] if i < len(e.elem_types) else "int"
+            if el_t == "float":
+                self.emitf(f"movsd [rcx+{i * 8}], xmm0")
+            else:
+                self.emitf(f"mov [rcx+{i * 8}], rax")
+        self.emitf(f"mov rax, [rbp{slot_off:+d}]")
+
     def _gen_subscript(self, e: A.Subscript, info: FuncInfo) -> None:
         if isinstance(e.index, A.Slice):
-            self._gen_str_slice(e, info)
+            obj_t_sl = A.expr_type(e.obj)
+            if obj_t_sl == "list":
+                self._gen_list_slice(e, info)
+            else:
+                self._gen_str_slice(e, info)
             return
         obj_t = A.expr_type(e.obj)
         if obj_t == "dict":
@@ -2871,6 +3527,36 @@ class Codegen:
             self.emitf("movsd xmm0, [rax+rcx*8]")
         else:
             self.emitf("mov rax, [rax+rcx*8]")
+
+    def _gen_list_slice(self, e: A.Subscript, info: FuncInfo) -> None:
+        """`xs[start:stop]` -> _runtime_list_slice(xs, start, stop).
+
+        Uses INT64_MIN for missing start and INT64_MAX for missing stop;
+        the runtime fills in 0 and len respectively.
+        """
+        sl: A.Slice = e.index  # type: ignore[assignment]
+        obj_slot = info.locals_[f"__lstsl_obj_{id(e)}"]
+        start_slot = info.locals_[f"__lstsl_start_{id(e)}"]
+        SENTINEL_MIN = "0x8000000000000000"
+        SENTINEL_MAX = "0x7fffffffffffffff"
+
+        self.gen_expr(e.obj, info)
+        self.emitf(f"mov [rbp{obj_slot:+d}], rax")
+        if sl.start is None:
+            self.emitf(f"mov rax, {SENTINEL_MIN}", f"mov [rbp{start_slot:+d}], rax")
+        else:
+            self.gen_expr(sl.start, info)
+            self.emitf(f"mov [rbp{start_slot:+d}], rax")
+        if sl.stop is None:
+            self.emitf(f"mov rcx, {SENTINEL_MAX}")
+        else:
+            self.gen_expr(sl.stop, info)
+            self.emitf("mov rcx, rax")
+        self.emitf(
+            f"mov rax, [rbp{obj_slot:+d}]",
+            f"mov rbx, [rbp{start_slot:+d}]",
+            "call _runtime_list_slice",
+        )
 
     def _gen_str_slice(self, e: A.Subscript, info: FuncInfo) -> None:
         """s[start:stop[:step]] dispatch.
@@ -2983,14 +3669,19 @@ class Codegen:
         self.emitf(
             f"mov rbx, [rbp{slot_off:+d}]", f"mov [rbx+{self.DICT_BUF_OFF}], rax"
         )
-        # Insert each (key, value) pair via the runtime set helper.
+        # Insert each (key, value) pair via the runtime set helper. We can't
+        # use `push rax / pop rbx` to stash the key across the value-eval:
+        # if v_expr calls anything (e.g. a constructor), the callee's MS x64
+        # shadow-space store at [rsp..rsp+31] would clobber the pushed key.
+        # Use the pre-reserved frame slot instead.
+        key_slot = info.locals_[f"__dictlit_key_{id(e)}"]
         for k_expr, v_expr in zip(e.keys, e.values):
             self.gen_expr(k_expr, info)  # rax = key ptr
-            self.emitf("push rax")
+            self.emitf(f"mov [rbp{key_slot:+d}], rax")
             self.gen_expr(v_expr, info)  # rax = value
             self.emitf(
                 "mov rcx, rax",  # rcx = value
-                "pop rbx",  # rbx = key ptr
+                f"mov rbx, [rbp{key_slot:+d}]",  # rbx = key ptr
                 f"mov rax, [rbp{slot_off:+d}]",
                 "call _runtime_dict_set",
             )
@@ -3054,29 +3745,35 @@ class Codegen:
                 self._gen_ffi_call(b, e.args, info)
                 return
         obj_t = A.expr_type(e.obj)
+        if obj_t.startswith("super:"):
+            # super().method(args): dispatch to the base class's method, but
+            # with the *current* instance (`self`) as the receiver.
+            parent = obj_t.split(":", 1)[1]
+            owner = self._resolve_method_owner(parent, e.method)
+            if owner is None:
+                raise NotImplementedError(
+                    f"super().{e.method}: base {parent!r} is not a user class "
+                    f"serpent can dispatch to"
+                )
+            # Receiver is the enclosing method's own `self`, already in its slot.
+            self._emit_positional_args(
+                e, e.args, info, start_reg=1,
+                receiver_slot=info.locals_["self"],
+            )
+            self.emit_call(self._method_symbol(owner, e.method))
+            return
         if obj_t.startswith("instance:"):
             class_name = obj_t.split(":", 1)[1]
             owner = self._resolve_method_owner(class_name, e.method)
             if owner is None:
                 raise NotImplementedError(f"no method {e.method!r} on {class_name}")
-            # Apply default arguments declared on the resolved method.
-            method_defs = self._method_defaults(owner, e.method)
-            # method_defs aligns with method.params (which includes 'self').
-            # User args don't include self, so trim the head default before
-            # filling.
-            user_defaults = method_defs[1:] if method_defs else []
-            full_args = self._fill_defaults(e.args, user_defaults)
-            # Push user args, then load self last so it ends up in reg 0.
-            for a in full_args:
-                self.gen_expr(a, info)
-                self.emitf("push rax")
-            for i in reversed(range(len(full_args))):
-                reg = self._arg_reg(i + 1)
-                if reg is None:
-                    raise NotImplementedError("too many method args")
-                self.emitf(f"pop {reg}")
-            self.gen_expr(e.obj, info)  # rax = instance
-            self.emitf(f"mov {self._arg_reg(0)}, rax")
+            # Sema normalized e.args to a complete positional list; evaluate the
+            # receiver (e.obj) and args into slots, then load reg0=self, reg1..
+            self._emit_positional_args(
+                e, e.args, info, start_reg=1,
+                receiver_expr=e.obj,
+                receiver_slot=info.locals_[f"__callself_{id(e)}"],
+            )
             self.emit_call(self._method_symbol(owner, e.method))
             return
         if obj_t == "str":
@@ -3343,7 +4040,9 @@ class Codegen:
         # `needle in haystack` where haystack is a list or dict.
         if len(e.ops) == 1 and e.ops[0] in ("in", "not in"):
             rt = A.expr_type(e.operands[1])
-            if rt == "list":
+            if rt in ("list", "tuple"):
+                # Tuples share the list [cap,len,buf] layout, so the linear
+                # scan is identical once we know the element kind.
                 self._gen_list_in(e, info)
                 return
             if rt == "dict":
@@ -3462,7 +4161,12 @@ class Codegen:
         """
         op = e.ops[0]
         rhs = e.operands[1]
-        if isinstance(rhs, A.ListLit):
+        if A.expr_type(rhs) == "tuple":
+            # Sema guarantees a homogeneous tuple here, so any element kind
+            # describes them all; default to int when the kinds are unknown.
+            ets = [t for t in A.tuple_element_types(rhs) if t != "any"]
+            el_t = ets[0] if ets else "int"
+        elif isinstance(rhs, A.ListLit):
             el_t = rhs.el_type
         elif isinstance(rhs, A.Name):
             el_t = rhs.list_el_type
@@ -3565,6 +4269,60 @@ class Codegen:
         # Normalize to 0/1.
         self.emitf("test rax, rax", "setne al", "movzx rax, al")
 
+    def _gen_ifexp(self, e: A.IfExp, info: FuncInfo) -> None:
+        """Conditional expression `body if test else orelse`.
+
+        Result type (set by sema) decides the register class: floats land in
+        xmm0, everything else in rax. Each arm is promoted to that class so
+        the join point sees a uniform value.
+        """
+        ty = e.inferred_type
+        else_lbl = self.fresh("condelse")
+        end_lbl = self.fresh("condend")
+        self._gen_truthy_test(e.test, info, else_lbl)
+        if ty == "float":
+            self._gen_expr_as_float(e.body, info, A.expr_type(e.body))
+        else:
+            self.gen_expr(e.body, info)
+        self.emitf(f"jmp {end_lbl}")
+        self.label(else_lbl)
+        if ty == "float":
+            self._gen_expr_as_float(e.orelse, info, A.expr_type(e.orelse))
+        else:
+            self.gen_expr(e.orelse, info)
+        self.label(end_lbl)
+
+    def _emit_positional_args(
+        self, e, args, info, *, start_reg, receiver_expr=None, receiver_slot=None
+    ) -> None:
+        """Evaluate a call's receiver (if any) and `args` into pre-reserved
+        frame slots, then load them into the ABI argument registers.
+
+        Using slots instead of push/pop keeps rsp 16-byte aligned throughout —
+        essential because an argument's own evaluation may emit a `call`
+        (malloc for a list/dict literal, string concat, a nested call), and a
+        stray 8-byte push would misalign the stack for that inner call.
+        """
+        if receiver_expr is not None:
+            self.gen_expr(receiver_expr, info)
+            self.emitf(f"mov [rbp{receiver_slot:+d}], rax")
+        offs: list[int] = []
+        for i, a in enumerate(args):
+            self.gen_expr(a, info)
+            if A.expr_type(a) == "float":
+                self.emitf("movq rax, xmm0")
+            off = info.locals_[f"__callarg_{id(e)}_{i}"]
+            self.emitf(f"mov [rbp{off:+d}], rax")
+            offs.append(off)
+        # All evaluation done; load registers with no intervening call.
+        if receiver_slot is not None:
+            self.emitf(f"mov {self._arg_reg(0)}, [rbp{receiver_slot:+d}]")
+        for i, off in enumerate(offs):
+            reg = self._arg_reg(start_reg + i)
+            if reg is None:
+                raise NotImplementedError("too many call args")
+            self.emitf(f"mov {reg}, [rbp{off:+d}]")
+
     def _gen_call(self, e: A.Call, info: FuncInfo) -> None:
         # FFI: bare-imported foreign function. The args may need int->float
         # promotion to match the declared signature.
@@ -3578,7 +4336,8 @@ class Codegen:
             arg = e.args[0]
             self.gen_expr(arg, info)  # rax = ptr
             t = A.expr_type(arg)
-            if t == "list":
+            if t in ("list", "tuple"):
+                # Tuples reuse the list layout, so len lives at LIST_LEN_OFF.
                 self.emitf(f"mov rax, [rax+{self.LIST_LEN_OFF}]")
             elif t == "dict":
                 self.emitf(f"mov rax, [rax+{self.DICT_LEN_OFF}]")
@@ -3622,6 +4381,41 @@ class Codegen:
                 self._emit_print_str_ptr_no_newline()
             self._emit_input_line()  # rax = ptr to read buffer
             return
+        if e.func == "getattr":
+            # getattr(obj, "name"[, default]) -> dict_get_default(obj, "name",
+            # default-or-0). Instances are dicts keyed by field name, so this is
+            # the same helper that plain `obj.name` uses, just with a caller-
+            # supplied default. The name arg is a string literal (sema-checked).
+            key_label, _ = self.intern_string(e.args[1].value)
+            if len(e.args) == 3:
+                dslot = info.locals_[f"__getattr_def_{id(e)}"]
+                self.gen_expr(e.args[2], info)
+                if A.expr_type(e.args[2]) == "float":
+                    self.emitf("movq rax, xmm0")
+                self.emitf(f"mov [rbp{dslot:+d}], rax")
+                self.gen_expr(e.args[0], info)  # rax = instance dict
+                self.emitf(
+                    f"lea rbx, [{key_label}]",
+                    f"mov rcx, [rbp{dslot:+d}]",
+                    "call _runtime_dict_get_default",
+                )
+            else:
+                self.gen_expr(e.args[0], info)  # rax = instance dict
+                self.emitf(
+                    f"lea rbx, [{key_label}]",
+                    "xor rcx, rcx",
+                    "call _runtime_dict_get_default",
+                )
+            return
+        if e.func == "hasattr":
+            # hasattr(obj, "name") -> dict_contains(obj, "name") (0/1).
+            key_label, _ = self.intern_string(e.args[1].value)
+            self.gen_expr(e.args[0], info)  # rax = instance dict
+            self.emitf(
+                f"lea rbx, [{key_label}]",
+                "call _runtime_dict_contains",
+            )
+            return
         # Constructor: ClassName(args). Allocate an empty dict, then if the
         # class chain provides an __init__, dispatch to it with the instance
         # as the first argument.
@@ -3630,18 +4424,9 @@ class Codegen:
             return
         if e.func not in self.funcs:
             raise NameError(f"undefined function {e.func}")
-        target = self.funcs[e.func]
-        full_args = self._fill_defaults(e.args, target.defaults)
-        # Evaluate args left-to-right, push to runtime stack, then pop into
-        # ABI argument registers in reverse.
-        for a in full_args:
-            self.gen_expr(a, info)
-            self.emitf("push rax")
-        for i in reversed(range(len(full_args))):
-            reg = self._arg_reg(i)
-            if reg is None:
-                raise NotImplementedError("too many call args")
-            self.emitf(f"pop {reg}")
+        # Sema has normalized e.args to a complete positional list (defaults
+        # filled, keyword args placed, varargs packed), so no _fill_defaults.
+        self._emit_positional_args(e, e.args, info, start_reg=0)
         self.emit_call(e.func)
 
     def _fill_defaults(self, args: list, defaults: list) -> list:
@@ -3684,20 +4469,11 @@ class Codegen:
 
         init_owner = self._resolve_method_owner(e.func, "__init__")
         if init_owner is not None:
-            # __init__(self, args...). Stash user args on the stack, pop into
-            # ABI regs 1..N, then load self into reg 0 last.
-            init_defs = self._method_defaults(init_owner, "__init__")
-            user_defaults = init_defs[1:] if init_defs else []
-            full_args = self._fill_defaults(e.args, user_defaults)
-            for a in full_args:
-                self.gen_expr(a, info)
-                self.emitf("push rax")
-            for i in reversed(range(len(full_args))):
-                reg = self._arg_reg(i + 1)
-                if reg is None:
-                    raise NotImplementedError("too many ctor args")
-                self.emitf(f"pop {reg}")
-            self.emitf(f"mov {self._arg_reg(0)}, [rbp{slot_off:+d}]")
+            # __init__(self, args...). Sema normalized e.args to a complete
+            # positional list; the instance (already in slot_off) is reg 0.
+            self._emit_positional_args(
+                e, e.args, info, start_reg=1, receiver_slot=slot_off
+            )
             self.emit_call(self._method_symbol(init_owner, "__init__"))
         # Result: the instance pointer (caller may discard).
         self.emitf(f"mov rax, [rbp{slot_off:+d}]")
