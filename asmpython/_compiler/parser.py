@@ -37,7 +37,7 @@ class Parser:
         self.i += 1
         return t
 
-    def _expect(self, kind: str, value: object = None) -> Token:
+    def _expect(self, kind: str, value: str = None) -> Token:
         t = self.toks[self.i]
         if t.kind != kind or (value is not None and t.value != value):
             want = f"{kind} {value!r}" if value is not None else kind
@@ -45,7 +45,7 @@ class Parser:
         self.i += 1
         return t
 
-    def _check(self, kind: str, value: object = None) -> bool:
+    def _check(self, kind: str, value: str = None) -> bool:
         t = self._peek()
         if t.kind != kind:
             return False
@@ -200,7 +200,17 @@ class Parser:
         if self._check("OP", "="):
             self._eat()
             if annot is not None:
-                self._skip_to_line_end()  # dataclass field(...) — type via annot
+                # Dataclass-style field initializer: TRY to parse it — codegen
+                # synthesizes the field store from it (`field(default_factory=
+                # dict)` allocates an empty dict). Genuinely unparseable
+                # initializers (`field(default_factory=lambda: ...)`) fall back
+                # to a token skip and the field stays unset.
+                saved = self.i
+                try:
+                    value = self._parse_expr()
+                except ParseError:
+                    self.i = saved
+                    self._skip_to_line_end()
             else:
                 value = self._parse_expr()
         self._expect("NEWLINE")
@@ -716,19 +726,26 @@ class Parser:
             # `from import ...` with no module name is invalid.
             raise ParseError("expected module name after 'from'", self._peek().pos)
         self._expect("KEYWORD", "import")
-        names: list[str] = [self._expect("NAME").value]  # type: ignore
-        # Optional `as` alias is eaten but its alias name is what we bind.
+        # `names` holds the locally-bound name (the alias when `as` is present);
+        # `orig_names` holds the exported name as the source module spells it.
+        first: str = self._expect("NAME").value  # type: ignore[assignment]
+        names: list[str] = [first]
+        orig_names: list[str] = [first]
         if self._check("KEYWORD", "as"):
             self._eat()
             names[-1] = self._expect("NAME").value  # type: ignore[assignment]
         while self._check("OP", ","):
             self._eat()
-            names.append(self._expect("NAME").value)  # type: ignore
+            nm: str = self._expect("NAME").value  # type: ignore[assignment]
+            names.append(nm)
+            orig_names.append(nm)
             if self._check("KEYWORD", "as"):
                 self._eat()
                 names[-1] = self._expect("NAME").value  # type: ignore[assignment]
         self._expect("NEWLINE")
-        return A.FromImport(module=module, names=names, pos=kw.pos, level=level)  # type: ignore
+        return A.FromImport(  # type: ignore
+            module=module, names=names, orig_names=orig_names, pos=kw.pos, level=level
+        )
 
     def _parse_assign(self) -> A.Assign:
         name_tok = self._expect("NAME")
@@ -1295,7 +1312,7 @@ class Parser:
                 segments.extend(fs.segments)
                 has_fstring = True
         if not has_fstring:
-            text = "".join(s.value for s in segments)
+            text = "".join([s.value for s in segments])
             return A.StrLit(value=text, pos=atom.pos)
         return A.FString(segments=segments, pos=atom.pos)
 

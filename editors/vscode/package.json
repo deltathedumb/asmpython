@@ -1,0 +1,34 @@
+{
+  "name": "asmpython-syntax-support",
+  "displayName": "ASMPython Syntax Support",
+  "description": "Adds support for ASMPython syntax.",
+  "version": "0.1.0",
+  "publisher": "pixelateddream",
+
+  "engines": {
+    "vscode": "^1.120.0"
+  },
+
+  "categories": [
+    "Programming Languages"
+  ],
+
+  "contributes": {
+    "languages": [
+      {
+        "id": "asmpython",
+        "aliases": ["ASMPython", "asmpython"],
+        "extensions": [".asmpy", ".asmpython", ".apy"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+
+    "grammars": [
+      {
+        "language": "asmpython",
+        "scopeName": "source.asmpython",
+        "path": "./syntaxes/MagicASMPython.tmLanguage"
+      }
+    ]
+  }
+}

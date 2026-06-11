@@ -11,11 +11,11 @@ arrive in the target ABI's integer registers — rdi, rsi, rdx, ... on System V;
 rcx, rdx, r8, ... on Win64 — and the body returns its result in rax.
 """
 
-from asmpython.assembly import assembly_func
+from asmpython.stdlib.assembly import asm_func
 
 
-@assembly_func
-def triple(x: int) -> int:
+@asm_func
+def triple(x: int):
     """
     ; first integer arg: rdi (SysV) / rcx (Win64). This body targets Win64.
     mov rax, rcx
@@ -24,23 +24,23 @@ def triple(x: int) -> int:
     """
 
 
-@assembly_func
-def maxi(a: int, b: int) -> int:
+@asm_func
+def maxi(a: int, b: int):
     """
-    ; max(a, b) — second arg in rdx (Win64)
-    mov rax, rcx
-    cmp rax, rdx
-    jge .done
-    mov rax, rdx
-.done:
-    ret
+        ; max(a, b) — second arg in rdx (Win64)
+        mov rax, rcx
+        cmp rax, rdx
+        jge .done
+        mov rax, rdx
+    .done:
+        ret
     """
 
 
 def run():
-    print(triple(14))      # 42
-    print(maxi(3, 9))      # 9
-    print(maxi(20, 5))     # 20
+    print(triple(14))  # 42
+    print(maxi(3, 9))  # 9
+    print(maxi(20, 5))  # 20
 
 
 run()

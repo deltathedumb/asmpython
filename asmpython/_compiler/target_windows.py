@@ -35,6 +35,10 @@ class WindowsCodegen(Codegen):
             "atof",
             "sprintf",
             "fgets",
+            "fopen",
+            "fgetc",
+            "fclose",
+            "access",
             "exit",
             "__acrt_iob_func",
             "malloc",
@@ -79,12 +83,17 @@ class WindowsCodegen(Codegen):
         info.frame_size = frame
         if frame:
             self.emitf(f"sub rsp, {frame}")
-        for i, p in enumerate(info.params):
-            off = info.locals_[p]
-            reg = self._arg_reg(i)
-            if reg is None:
-                raise NotImplementedError("too many parameters")
-            self.emitf(f"mov [rbp{off:+d}], {reg}")
+        self._spill_incoming_args(info)
+
+    def _incoming_stack_arg_offset(self, stack_index: int) -> int:
+        # Win64: the caller reserves 32 bytes of shadow ("home") space between
+        # the return address and the first stack argument, so stack args start
+        # at [rbp+16+32] rather than [rbp+16].
+        return 16 + 32 + 8 * stack_index
+
+    def _caller_shadow_space(self) -> int:
+        # Win64 requires 32 bytes of shadow space below the stack arguments.
+        return 32
 
     def emit_func_epilogue(self, info: FuncInfo) -> None:
         self.emitf("mov rsp, rbp", "pop rbp", "ret")

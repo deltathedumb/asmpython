@@ -1,16 +1,18 @@
 """math module: binds to libm. All trig/exp functions take and return float."""
 from __future__ import annotations
 
-import math as _py_math
-
 from . import Func, Const
 
 
+# Constant values are written as literals (not `math.pi` from CPython's math
+# module): the binding table is pure, self-contained data so it can be merged
+# into a whole-program compile without pulling in a CPython-runtime dependency.
+# These are the exact IEEE-754 double constants CPython uses.
 BINDINGS = {
     # Constants
-    "pi":  Const(ty="float", value=_py_math.pi),
-    "e":   Const(ty="float", value=_py_math.e),
-    "tau": Const(ty="float", value=_py_math.tau),
+    "pi":  Const(ty="float", value=3.141592653589793),
+    "e":   Const(ty="float", value=2.718281828459045),
+    "tau": Const(ty="float", value=6.283185307179586),
     "inf": Const(ty="float", value=float("inf")),
     "nan": Const(ty="float", value=float("nan")),
 

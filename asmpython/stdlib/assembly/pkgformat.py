@@ -42,7 +42,8 @@ sema and codegen share one source of truth.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
+
+from asmpython.stdlib import ospath
 
 
 ASMPKG_SUFFIX = ".asmpkg"
@@ -62,7 +63,7 @@ class AsmPackage:
     """A parsed ``.asmpkg``: its metadata, its NASM, and what it exports."""
 
     name: str
-    path: Path
+    path: str
     version: str = "0.0.0"
     freestanding: bool = False
     exports: dict[str, AsmExport] = field(default_factory=dict)
@@ -88,41 +89,56 @@ def _parse_signature(rest: str) -> AsmExport:
     name, _, after = sig.partition("(")
     args_part = after.rsplit(")", 1)[0].strip()
     if args_part:
-        arg_types = tuple(a.strip() for a in args_part.split(",") if a.strip())
+        # A list comprehension (not a `tuple(genexpr)`): generator expressions
+        # are interpreter-only and don't compile, and asmpython lists/tuples
+        # share a layout so a list serves the same role here.
+        arg_types = [a.strip() for a in args_part.split(",") if a.strip()]
     else:
-        arg_types = ()
+        arg_types = []
     return AsmExport(symbol=name.strip(), arg_types=arg_types, ret_type=ret)
 
 
-def find_package(name: str, search_dirs: list[Path]) -> Path:
+def find_package(name: str, search_dirs: list) -> str:
     """Locate ``<name>.asmpkg`` (dir or file) on the search path.
 
-    Raises AsmPkgError listing the searched directories if nothing matches.
+    `search_dirs` are plain string directory paths. Returns the matching
+    path as a string. Raises AsmPkgError listing the searched paths if nothing
+    matches. (String paths + os, not pathlib, so the include machinery stays in
+    asmpython's compilable subset.)
     """
     tried: list[str] = []
     for d in search_dirs:
-        for cand in (d / f"{name}{ASMPKG_SUFFIX}",):
-            if cand.exists():
-                return cand
-            tried.append(str(cand))
+        cand = ospath.join(d, f"{name}{ASMPKG_SUFFIX}")
+        if ospath.exists(cand):
+            return cand
+        tried.append(cand)
     raise AsmPkgError(
         f"assembly package {name!r} not found. Looked for: " + ", ".join(tried)
     )
 
 
-def load_package(pkg_path: Path) -> AsmPackage:
-    """Parse a located ``.asmpkg`` directory or single file into an AsmPackage."""
-    if pkg_path.is_dir():
-        manifest_path = pkg_path / "manifest.txt"
-        if not manifest_path.exists():
-            raise AsmPkgError(f"{pkg_path}: missing manifest.txt")
-        base = pkg_path
-        manifest_text = manifest_path.read_text(encoding="utf-8")
-    else:
-        base = pkg_path.parent
-        manifest_text = pkg_path.read_text(encoding="utf-8")
+def load_package(pkg_path: str) -> AsmPackage:
+    """Parse a located ``.asmpkg`` directory or single file into an AsmPackage.
 
-    pkg = AsmPackage(name=pkg_path.stem, path=pkg_path)
+    `pkg_path` is a string path. A ``.asmpkg`` is a *directory* iff it contains
+    a ``manifest.txt`` (so we detect the dir form by probing for that file,
+    avoiding a real `isdir` — which would need a stat the FFI doesn't expose).
+    """
+    inner_manifest = ospath.join(pkg_path, "manifest.txt")
+    if ospath.exists(inner_manifest):
+        # Directory form: <name>.asmpkg/manifest.txt + asm files alongside.
+        base = pkg_path
+        manifest_text = ospath.read_file(inner_manifest)
+    else:
+        # Single-file form: the path itself is the manifest.
+        base = ospath.dirname(pkg_path)
+        manifest_text = ospath.read_file(pkg_path)
+
+    # Package name defaults to the basename of the path without the suffix.
+    stem = ospath.basename(pkg_path)
+    if stem.endswith(ASMPKG_SUFFIX):
+        stem = stem[: -len(ASMPKG_SUFFIX)]
+    pkg = AsmPackage(name=stem, path=pkg_path)
     asm_chunks: list[str] = []
 
     for raw in manifest_text.splitlines():
@@ -144,12 +160,11 @@ def load_package(pkg_path: Path) -> AsmPackage:
             exp = _parse_signature(val)
             pkg.exports[exp.symbol] = exp
         elif key == "asm":
-            asm_file = base / val
-            if not asm_file.exists():
+            asm_file = ospath.join(base, val)
+            if not ospath.exists(asm_file):
                 raise AsmPkgError(f"{pkg_path}: asm file not found: {val}")
             asm_chunks.append(
-                f"; ---- from {pkg.name}: {val} ----\n"
-                + asm_file.read_text(encoding="utf-8")
+                f"; ---- from {pkg.name}: {val} ----\n" + ospath.read_file(asm_file)
             )
         else:
             raise AsmPkgError(f"{pkg_path}: unknown manifest key {key!r}")

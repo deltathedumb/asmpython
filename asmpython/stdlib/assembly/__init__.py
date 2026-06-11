@@ -4,7 +4,7 @@ Two entry points, both recognised specially by the compiler:
 
     from asmpython.assembly import assembly_func, include
 
-`@assembly_func`
+`@asm_func`
 ----------------
 Marks a function whose *body* is raw NASM x86-64. The Python signature carries
 the contract the compiler needs — the symbol name, the parameter types, and the
@@ -44,7 +44,7 @@ from __future__ import annotations
 from typing import Callable
 
 
-__all__ = ["assembly_func", "include", "AssemblyFunc", "included_packages"]
+__all__ = ["asm_func", "include", "AssemblyFunc", "included_packages"]
 
 
 # Packages requested via include(), in source order. The compiler reads its own
@@ -54,7 +54,7 @@ _INCLUDES: list[str] = []
 
 
 class AssemblyFunc:
-    """Marker wrapper the `@assembly_func` decorator returns under CPython.
+    """Marker wrapper the `@asm_func` decorator returns under CPython.
 
     Holds the NASM body and the declared symbol so introspection works, but
     raises on call: the body is machine code meant for the asmpython compiler,
@@ -74,22 +74,22 @@ class AssemblyFunc:
 
     def __call__(self, *args, **kwargs):
         raise RuntimeError(
-            f"@assembly_func {self.name!r} has a raw-NASM body and can only run "
+            f"@asm_func {self.name!r} has a raw-NASM body and can only run "
             f"after compilation with asmpython; it is not callable under CPython."
         )
 
     def __repr__(self) -> str:
-        return f"<assembly_func {self.name!r} symbol={self.symbol!r}>"
+        return f"<asm_func {self.name!r} symbol={self.symbol!r}>"
 
 
-def assembly_func(fn: Callable | None = None, *, symbol: str | None = None):
+def asm_func(fn: Callable | None = None, *, symbol: str | None = None):
     """Mark a function as having a raw-NASM body (see module docstring).
 
-    Usable bare (`@assembly_func`) or parameterised
-    (`@assembly_func(symbol="my_add")`) to override the emitted symbol name.
+    Usable bare (`@asm_func`) or parameterised
+    (`@asm_func(symbol="my_add")`) to override the emitted symbol name.
     """
     if fn is None:
-        # Called with arguments: @assembly_func(symbol=...). Return the real
+        # Called with arguments: @asm_func(symbol=...). Return the real
         # decorator.
         def _decorate(real_fn: Callable) -> AssemblyFunc:
             return AssemblyFunc(real_fn, symbol=symbol)

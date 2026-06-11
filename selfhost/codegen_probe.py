@@ -21,8 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from asmpython._compiler.lexer import Lexer  # noqa: E402
-from asmpython._compiler.parser import Parser  # noqa: E402
+from asmpython._compiler.program import load_program  # noqa: E402
 from asmpython._compiler.sema import analyze as sema_analyze  # noqa: E402
 from asmpython._compiler.target_windows import WindowsCodegen  # noqa: E402
 from asmpython._compiler.errors import CompileError  # noqa: E402
@@ -31,11 +30,14 @@ from selfhost.check import TARGETS  # noqa: E402
 
 
 def probe_file(path: Path, *, verbose: bool) -> tuple[str, str]:
-    """Return (status, detail). status == 'OK' means codegen produced .asm."""
+    """Return (status, detail). status == 'OK' means codegen produced .asm.
+
+    Uses whole-program loading (the real self-compile path) so cross-module
+    classes/functions from sibling files are merged in before sema/codegen.
+    """
     src = path.read_text(encoding="utf-8")
     try:
-        tokens = Lexer(src).tokenize()
-        module = Parser(tokens).parse()
+        module = load_program(src, path)
     except CompileError as e:
         return "FRONTEND", f"parse/lex: {e}"
 

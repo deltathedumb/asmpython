@@ -219,6 +219,12 @@ class FromImport:
     names: list[str] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     level: int = 0
+    # The *original* exported names, parallel to `names`. For `from m import a
+    # as b`, `names == ["b"]` (the local binding) and `orig_names == ["a"]`
+    # (what `m` calls it). Equal to `names` when no `as` alias is used. The
+    # whole-program loader uses this to map a local alias back to the global it
+    # refers to in the source module.
+    orig_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -512,6 +518,9 @@ class MethodCall:
     # When inferred_type == "list", element kind ("int" / "str" / "float").
     # Set by sema for methods that return lists (e.g. dict.keys()/.values()).
     list_el_type: str = "int"
+    # When inferred_type == "dict", the value kind of the returned dict (set
+    # by sema for calls whose signature declares `-> dict[..]`).
+    value_type: str = "int"
     # When inferred_type == "tuple", per-slot kinds (so `x, y = obj.m()`
     # unpacks). Set by sema for methods that return a tuple.
     tuple_elem_types: list = field(default_factory=list)
@@ -547,6 +556,10 @@ class DictLit:
     values: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     value_type: str = "int"
+    # When `value_type` is itself a container ("dict"/"list"), the common
+    # value/element kind of those nested containers, so a chained read
+    # `outer[k][k2]` recovers the leaf type. "int" when unknown / not nested.
+    inner_value_type: str = "int"
 
 
 @dataclass
