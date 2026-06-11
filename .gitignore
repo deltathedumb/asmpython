@@ -1,16 +1,46 @@
+# ── Editor / tooling ────────────────────────────────────────────────────────
 /.claude/
+/.vscode/
+/.idea/
+*.swp
+
+# ── Python bytecode / caches ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Build output ────────────────────────────────────────────────────────────
 /build/
-*/_build/
+# Cached native runtime archives (regenerated on demand by _runtime/build.py).
+_build/
+# The per-test build directory the test runner writes into.
+/tests/_build/
+# Generated *_onedir bundles (executable + lib/ runtime).
+*_onedir/
 
-*.exe
-*.obj
+# ── Compiler / toolchain artifacts ──────────────────────────────────────────
+# asmpython emits .asm next to the source and intermediate objects while
+# linking; none of that belongs in the repo. (Hand-written package .asm under
+# *.asmpkg/ is whitelisted below so packages stay tracked.)
 *.asm
-_smoke.log
+*.obj
+*.o
+*.exe
+*.dll
+*.so
+*.a
+*.lib
 
+# Keep the assembly sources that ship inside assembly packages.
+!**/*.asmpkg/**/*.asm
+
+# ── Downloaded dependencies (NASM / GCC / embeddable Python) ─────────────────
 /tools/
 /local/
 
-
-__pycache__/
-**/__pycache__/
-*.pyc
+# ── Misc logs ───────────────────────────────────────────────────────────────
+_smoke.log
+*.log

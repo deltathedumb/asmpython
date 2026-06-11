@@ -1,0 +1,5 @@
+# Test assembly package for include() — exports one zero-arg function.
+name: answerpkg
+version: 0.1.0
+asm: answer.asm
+export: pkg_answer() -> int

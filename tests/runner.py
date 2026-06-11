@@ -1,4 +1,4 @@
-"""End-to-end test runner for serpent.
+"""End-to-end test runner for asmpython.
 
 Each `tests/cases/*.py` file is compiled, run, and its stdout compared against
 the expected output declared in a leading `# expect:` block:
@@ -85,7 +85,7 @@ def run_positive(case: Path, target: str) -> TestResult:
 
     BUILD.mkdir(parents=True, exist_ok=True)
     out = BUILD / (case.stem + (".exe" if target == "windows" else ""))
-    cmd = [sys.executable, "-m", "serpent", str(case), "--target", target, "-o", str(out)]
+    cmd = [sys.executable, "-m", "asmpython", str(case), "--target", target, "-o", str(out)]
     if _use_runtime_lib:
         cmd.append("--use-runtime-lib")
     cp = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
@@ -110,7 +110,7 @@ def run_negative(case: Path, target: str) -> TestResult:
 
     BUILD.mkdir(parents=True, exist_ok=True)
     out = BUILD / case.stem
-    cmd = [sys.executable, "-m", "serpent", str(case), "--target", target,
+    cmd = [sys.executable, "-m", "asmpython", str(case), "--target", target,
            "--emit-asm", "-o", str(out)]
     if _use_runtime_lib:
         cmd.append("--use-runtime-lib")
@@ -132,7 +132,7 @@ def main() -> int:
     _use_runtime_lib = "--use-runtime-lib" in sys.argv[1:]
     target = _detect_target()
     mode = " (runtime-lib)" if _use_runtime_lib else ""
-    print(f"serpent test runner (target={target}){mode}")
+    print(f"asmpython test runner (target={target}){mode}")
 
     results: list[TestResult] = []
     if CASES.is_dir():

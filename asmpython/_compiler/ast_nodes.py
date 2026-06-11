@@ -29,6 +29,10 @@ class Module:
     ffi_funcs: dict = field(default_factory=dict)
     ffi_consts: dict = field(default_factory=dict)
     classes_sig: dict = field(default_factory=dict)  # name -> sema.ClassSig
+    # Assembly packages requested via include(...), in source order. Populated
+    # by sema from the loaded `.asmpkg` manifests; codegen emits their NASM and
+    # treats their exports as callable symbols.
+    asm_packages: list = field(default_factory=list)  # list[pkgformat.AsmPackage]
 
 
 @dataclass
@@ -53,6 +57,13 @@ class FuncDef:
     # positional arguments into a list and pass it there, so the callee and the
     # register-spill prologue treat it as an ordinary (list) parameter.
     vararg: "Optional[str]" = None
+    # Set when the function was marked `@assembly_func`: `asm_body` is the raw
+    # NASM lifted from the docstring (emitted verbatim as the body) and
+    # `asm_symbol` is the label to define (defaults to `name`). When `asm_body`
+    # is a non-empty string, codegen emits it verbatim instead of generating a
+    # body from `body`, and sema skips analysing `body`.
+    asm_body: "Optional[str]" = None
+    asm_symbol: "Optional[str]" = None
 
 
 @dataclass
@@ -82,6 +93,10 @@ class Assign:
     target: str
     value: "Expr"
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    # Parser annotation descriptor (base, el) from `name: T = value`, or None.
+    # Lets sema type the target from the declaration — e.g. `xs: list[str] = []`
+    # pins the element kind even though the initializer is an empty/opaque list.
+    annot: object = None
 
 
 @dataclass
@@ -176,6 +191,21 @@ class Import:
 
 
 @dataclass
+class Include:
+    """include("name") — pull in an assembly package (`<name>.asmpkg`).
+
+    Built from a top-level `include(...)` call (the function imported from
+    `asmpython.assembly`). The package's exported symbols become callable; its
+    NASM is concatenated into the program's output. `name` is the literal
+    package name. Resolution + loading happen in sema/codegen via
+    `asmpython.assembly.pkgformat`.
+    """
+
+    name: str
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
 class FromImport:
     """from math import sqrt, pi   (names land in current scope unprefixed).
 
@@ -225,7 +255,7 @@ class AttrAssign:
 class Try:
     """`try: body (except [Type] [as name]: handler)+ [else: ...] [finally: ...]`.
 
-    serpent has no exception-class RTTI, so an `except` clause's type is parsed
+    asmpython has no exception-class RTTI, so an `except` clause's type is parsed
     but ignored: the first handler catches anything raised. `bind_name` binds
     the exception's message string inside that first handler.
 
@@ -267,6 +297,7 @@ Stmt = (
     | Pass
     | Import
     | FromImport
+    | Include
     | AttrAssign
     | Try
     | Raise
@@ -373,6 +404,9 @@ class Call:
     # Set by sema when the callee returns a tuple: the element kinds of that
     # tuple, so `a, b = f()` knows the per-target types at the call site.
     tuple_elem_types: list[str] = field(default_factory=list)
+    # When inferred_type == "dict", the value kind of the returned dict, so
+    # `f()[k]` reads recover it. Set by sema from the callee's `-> dict[..]`.
+    value_type: str = "int"
     # Keyword arguments: parallel list of (name, expr). Sema maps them onto
     # the callee's positional parameters.
     kwargs: list = field(default_factory=list)
@@ -381,7 +415,7 @@ class Call:
 @dataclass
 class Comprehension:
     """`[elt for var in iter if cond]` and the generator-expression form
-    `(elt for var in iter if cond)`. serpent treats a genexp as an eagerly
+    `(elt for var in iter if cond)`. asmpython treats a genexp as an eagerly
     materialized list — consumers (`sum`, `sorted`, `for`) iterate it the same
     way. Single target, single `for`, optional single `if`.
     """
@@ -394,6 +428,27 @@ class Comprehension:
     inferred_type: str = "list"
     # Element kind of the produced list (the static type of `elt`).
     list_el_type: str = "int"
+
+
+@dataclass
+class DictComprehension:
+    """`{key: value for var in iter if cond}` — builds a dict.
+
+    The dict comprehension mirrors the list `Comprehension` but produces two
+    expressions per iteration (a str key and a value). Like a DictLit, keys must
+    be str and the values are homogeneous in kind; `value_type` is filled in by
+    sema. Single target, single `for`, optional single `if`.
+    """
+
+    key: "Expr"
+    value: "Expr"
+    var: str
+    iter: "Expr"
+    cond: "Optional[Expr]" = None
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    inferred_type: str = "dict"
+    # Value kind of the produced dict (the static type of `value`).
+    value_type: str = "int"
 
 
 @dataclass
@@ -426,6 +481,10 @@ class Subscript:
     # When this Subscript yields a tuple (reserved for future nested tuples),
     # the element kinds of that tuple. Empty otherwise.
     tuple_elem_types: list[str] = field(default_factory=list)
+    # When this Subscript yields a dict (a nested container read out of an
+    # outer dict/list), the value kind of that inner dict. "any" when the
+    # nested value type isn't tracked. Lets `outer[k][k2]` stay lenient.
+    value_type: str = "int"
 
 
 @dataclass
@@ -541,6 +600,8 @@ Expr = (
     | TupleLit
     | SetLit
     | IfExp
+    | Comprehension
+    | DictComprehension
 )
 
 
@@ -559,6 +620,8 @@ def expr_type(e: Expr) -> str:
         return "list"
     if isinstance(e, Comprehension):
         return "list"
+    if isinstance(e, DictComprehension):
+        return "dict"
     if isinstance(e, DictLit):
         return "dict"
     if isinstance(e, TupleLit):
@@ -578,7 +641,7 @@ def expr_type(e: Expr) -> str:
         # objects (`A | B | C`) is "type"; an opaque ("any") operand makes the
         # result "any". Honor those so they chain.
         if getattr(e, "inferred_type", None) in ("type", "any"):
-            return e.inferred_type
+            return e.inferred_type  # type: ignore
         lt, rt = expr_type(e.left), expr_type(e.right)
         if e.op in ("&", "|", "^", "<<", ">>"):
             return "int"  # bitwise ops only legal on ints (sema rejects floats)

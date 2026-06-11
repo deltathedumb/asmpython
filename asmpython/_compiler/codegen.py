@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from . import ast_nodes as A
+from .. import _stdlib
 
 
 # --- Function metadata --------------------------------------------------------
@@ -37,6 +38,12 @@ class FuncInfo:
     frame_size: int = 0  # bytes to subtract from RSP
     # Default value expressions, one per param (None for required).
     defaults: list = field(default_factory=list)
+    # Running RBP offset (negative) used while collecting locals, and whether
+    # this is the synthetic module-entry frame. Carried on the FuncInfo so the
+    # local-collection helpers can be plain instance methods (no closures /
+    # nonlocal) — a self-host requirement.
+    offset: int = 0
+    is_main: bool = False
 
 
 # --- Base codegen -------------------------------------------------------------
@@ -51,28 +58,40 @@ class Codegen:
     section_data: str = ""
     section_rodata: str = ""
     label_main: str = ""  # public entry symbol (e.g. _start on Linux, main on Windows)
+    # Human-readable target name, set by each subclass. Used in .asm header
+    # comments instead of `self.target_name` (no introspection in the
+    # self-host subset).
+    target_name: str = "Codegen"
 
     def __init__(self, mod: A.Module, *, use_runtime_lib: bool = False) -> None:
         self.mod = mod
-        # If True, skip emitting runtime bodies and assume libserpent_rt is linked.
+        # If True, skip emitting runtime bodies and assume libasmpython_rt is linked.
         self.use_runtime_lib = use_runtime_lib
         self.lines: list[str] = []
         self.strings: list[tuple[str, str]] = []  # (label, bytes-literal)
         self.floats: list[tuple[str, float]] = []  # (label, value)
         self.label_counter = 0
-        # FFI surface: { serpent_name: stdlib.Func } across all imports, used
+        # FFI surface: { asmpython_name: stdlib.Func } across all imports, used
         # for dispatching bare and module-attribute calls. Also any constants
         # imported by `from <mod> import <name>` for direct value substitution.
         self.ffi_funcs: dict = dict(mod.ffi_funcs)
         self.ffi_consts: dict = dict(mod.ffi_consts)
         self.imported_modules: dict = dict(mod.imported_modules)
+        # Symbols supplied by included assembly packages. These are defined in
+        # *this* .asm (the package's NASM is concatenated in), so they must not
+        # also be declared `extern`.
+        self.asm_pkg_symbols: set[str] = set()
+        for pkg in getattr(mod, "asm_packages", []):
+            for exp in getattr(pkg, "exports", {}).values():
+                self.asm_pkg_symbols.add(exp.symbol)
         # Set of c_name symbols we'll need `extern` declarations for.
         self.ffi_externs: set[str] = set()
         for fn in self.ffi_funcs.values():
-            self.ffi_externs.add(fn.c_name)
+            if fn.c_name not in self.asm_pkg_symbols:
+                self.ffi_externs.add(fn.c_name)
         for mod_bindings in self.imported_modules.values():
             for b in mod_bindings.values():
-                if hasattr(b, "c_name"):
+                if hasattr(b, "c_name") and b.c_name not in self.asm_pkg_symbols:
                     self.ffi_externs.add(b.c_name)
         self.funcs: dict[str, FuncInfo] = {}
         # Stack of (continue_label, break_label) pairs for the loop currently
@@ -105,9 +124,14 @@ class Codegen:
         # RTTI: each user class gets a small integer id. Instances are tagged
         # with their id (a hidden `__class__` dict entry) at construction, and
         # isinstance walks the `__class_parents` table to honour inheritance.
-        self.class_ids: dict[str, int] = {
-            cls.name: i for i, cls in enumerate(mod.classes)
-        }
+        # Built with an explicit loop rather than a dict comprehension over
+        # enumerate(...) so this stays self-compilable (asmpython comprehensions
+        # don't take enumerate() iterables or tuple targets).
+        self.class_ids: dict[str, int] = {}
+        cid = 0
+        for cls in mod.classes:
+            self.class_ids[cls.name] = cid
+            cid += 1
 
     # ---- emit helpers -------------------------------------------------------
 
@@ -190,30 +214,40 @@ class Codegen:
         return label
 
     def intern_string(self, s: str) -> tuple[str, int]:
-        """Add a string to .data, return (label, byte_length)."""
+        """Add a string to .data, return (label, byte_length).
+
+        Emits the string as a comma-separated list of byte values for NASM.
+        We walk the characters and take `ord(ch)` rather than `s.encode()` so
+        this stays self-compilable (asmpython has no bytes type). For the ASCII
+        source the compiler emits this is exact; `ord` on a 1-char asmpython str
+        already yields its byte value.
+        """
         label = f"str_{len(self.strings)}"
-        # Encode to bytes once so length is accurate even for escapes / UTF-8.
-        raw = s.encode("utf-8")
-        # NASM needs the data as a sequence of byte values to be robust.
-        body = ",".join(str(b) for b in raw) if raw else "0"
+        parts: list = []
+        for ch in s:
+            parts.append(str(ord(ch)))
+        body = ",".join(parts) if parts else "0"
         self.strings.append((label, body))
-        return label, len(raw)
+        return label, len(parts)
 
     # ---- driver -------------------------------------------------------------
 
     def generate(self) -> str:
-        self.emit(f"; serpent generated for target = {self.__class__.__name__}")
+        self.emit(f"; asmpython generated for target = {self.target_name}")
         self.emit("BITS 64")
         self.emit("default rel")
         before = len(self.lines)
         self.emit_externs()
         # Avoid duplicate `extern foo` declarations: the target subclass
-        # already emits some.
-        already = {
-            line.strip().split()[-1]
-            for line in self.lines[before:]
-            if line.strip().startswith("extern")
-        }
+        # already emits some. Collect their symbol names (the last token of each
+        # `extern ...` line). Built as a list with an explicit loop rather than
+        # a set comprehension so this stays self-compilable (asmpython has no
+        # set runtime); `already` is only used for membership below.
+        already: list = []
+        for line in self.lines[before:]:
+            stripped = line.strip()
+            if stripped.startswith("extern"):
+                already.append(stripped.split()[-1])
         for sym in sorted(self.ffi_externs):
             if sym not in already:
                 self.emit(f"extern {sym}")
@@ -232,29 +266,60 @@ class Codegen:
                     pos=m.pos,
                     defaults=list(m.defaults),
                     param_types=list(m.param_types),
+                    asm_body=m.asm_body,
+                    # An `@assembly_func` method emits under its mangled symbol
+                    # so dispatch (which targets ClassName__method) resolves.
+                    asm_symbol=(
+                        self._method_symbol(cls.name, m.name)
+                        if m.asm_body is not None
+                        else None
+                    ),
                 )
                 self.emit_function(mangled)
+        # NASM contributed by included assembly packages, verbatim.
+        self.emit_asm_packages()
         self.emit_print_impls()
         self.emit_data_sections()
         return "\n".join(self.lines) + "\n"
 
+    def emit_asm_packages(self) -> None:
+        """Emit the NASM body of every included `.asmpkg`, in load order.
+
+        The text is reproduced verbatim (it already lives in the right section
+        directives or is section-agnostic). Each package's exported symbols are
+        also referenced as FFI funcs, so call sites resolve through the normal
+        foreign-call path.
+        """
+        for pkg in getattr(self.mod, "asm_packages", []):
+            text = getattr(pkg, "asm_text", "")
+            if not text.strip():
+                continue
+            self.emit()
+            self.emit(f"; ==== assembly package: {getattr(pkg, 'name', '?')} ====")
+            for line in text.splitlines():
+                self.emit(line)
+
     def generate_runtime_only(self) -> str:
-        """Emit a freestanding `.asm` containing the serpent runtime helpers and
-        nothing else. Used by the `serpent.runtime.build` step to produce
-        `libserpent_rt_<target>.a`.
+        """Emit a freestanding `.asm` containing the asmpython runtime helpers and
+        nothing else. Used by the `asmpython._runtime.build` step to produce
+        `libasmpython_rt_<target>.a`.
 
         The output declares every `_runtime_*` symbol (plus scratch buffers)
         as `global` so user programs can `extern` them at link time.
         """
         assert not self.use_runtime_lib, "Runtime build must emit bodies, not externs."
-        self.emit(f"; serpent runtime library, target = {self.__class__.__name__}")
+        self.emit(f"; asmpython runtime library, target = {self.target_name}")
         self.emit("BITS 64")
         self.emit("default rel")
         # Externs we need from libc (printf, malloc, etc.)
         self.emit_externs()
         # Publish every runtime entry point + the scratch buffers user
         # programs reference.
-        publish = sorted(self.RUNTIME_GLOBALS | {"itoa_str_buf", "input_buf"})
+        # Build the publish list without set ops (self-host: no set runtime).
+        publish = list(self.RUNTIME_GLOBALS)
+        publish.append("itoa_str_buf")
+        publish.append("input_buf")
+        publish = sorted(publish)
         for sym in publish:
             self.emit(f"global {sym}")
         self.emit_print_impls()
@@ -263,8 +328,9 @@ class Codegen:
     # Symbols the runtime library exposes (functions and globals).
     # Anything emitted by `emit_print_impls`, `emit_dict_runtime`,
     # `emit_string_runtime`, or `emit_exception_runtime` that user programs
-    # call or load.
-    RUNTIME_GLOBALS = {
+    # call or load. A list (not a set) so the self-host subset can iterate it;
+    # entries are unique by construction.
+    RUNTIME_GLOBALS = [
         # Dict runtime
         "_runtime_zalloc",
         "_runtime_hash_string",
@@ -308,7 +374,7 @@ class Codegen:
         "_runtime_input",
         "_runtime_list_append",
         "_runtime_list_pop",
-    }
+    ]
 
     def emit_externs(self) -> None:
         pass  # Linux has none; Windows overrides.
@@ -355,6 +421,9 @@ class Codegen:
     # ---- regular function emission ------------------------------------------
 
     def emit_function(self, f: A.FuncDef) -> None:
+        if f.asm_body is not None:
+            self.emit_asm_function(f)
+            return
         info = self._collect_locals(f)
         self.funcs[f.name] = info
         self.label(f.name)
@@ -367,6 +436,34 @@ class Codegen:
         self.label(self.emit_func_epilogue_label)
         self.emit_func_epilogue(info)
 
+    def emit_asm_function(self, f: A.FuncDef) -> None:
+        """Emit an `@assembly_func` body verbatim under its symbol label.
+
+        The function's NASM (lifted from its docstring into `asm_body`) is
+        responsible for the whole calling convention: arguments arrive in the
+        target ABI's integer registers (rdi/rsi/... on System V, rcx/rdx/... on
+        Win64 — the same order `_emit_positional_args(start_reg=0)` uses at the
+        call site), and the body must `ret` with its result in rax. We provide
+        the label and reproduce the instructions exactly; no prologue/epilogue
+        is synthesised, so the author has full control.
+        """
+        symbol = f.asm_symbol or f.name
+        self.emit()
+        self.emit(f"; ---- assembly_func {f.name} (symbol {symbol}) ----")
+        self.label(symbol)
+        # Reproduce the body. The docstring is written indented under the def,
+        # so we strip each line and re-indent instructions uniformly. A line the
+        # author ends with ':' is treated as a label and emitted flush-left so
+        # NASM's local-label scoping works as written.
+        for raw in (f.asm_body or "").splitlines():
+            line = raw.strip()
+            if line == "":
+                self.emit()
+            elif line.endswith(":"):
+                self.emit(line)
+            else:
+                self.emit("    " + line)
+
     def emit_func_prologue(self, info: FuncInfo) -> None:
         self.emitf("push rbp", "mov rbp, rsp")
         if info.frame_size:
@@ -378,9 +475,7 @@ class Codegen:
                 # Float arguments arrive in xmm registers, not the integer
                 # ABI registers, and the SysV/Win64 counters differ. Not wired
                 # up yet — fail loudly rather than spill the wrong register.
-                raise NotImplementedError(
-                    "float parameters are not supported yet"
-                )
+                raise NotImplementedError("float parameters are not supported yet")
             reg = self._arg_reg(i)
             if reg is None:
                 # Beyond ABI register count: argument is already on the stack
@@ -395,7 +490,7 @@ class Codegen:
     def _arg_reg(self, i: int) -> Optional[str]:
         raise NotImplementedError
 
-    def _param_type_from_annot(self, annot) -> Optional[str]:
+    def _param_type_from_annot(self, annot: Optional[tuple]) -> Optional[str]:
         """Concrete slot type for a parameter from its annotation descriptor
         (base, el), or None if the annotation doesn't constrain the type.
 
@@ -417,12 +512,12 @@ class Codegen:
         info = FuncInfo(name=f.name, params=list(f.params), defaults=list(f.defaults))
         # In module-level code (`main`), a write to a global name targets its
         # .bss slot, not a frame slot — so don't give those names a local.
-        is_main = f.name == self.label_main
+        info.is_main = f.name == self.label_main
         # Each local (incl. params) gets an 8-byte slot at a negative RBP offset.
-        offset = 0
+        info.offset = 0
         for i, p in enumerate(f.params):
-            offset -= 8
-            info.locals_[p] = offset
+            info.offset -= 8
+            info.locals_[p] = info.offset
             # Param type, in priority order: explicit annotation, then the
             # default's type, then int. This decides the read/write register
             # class (int/pointer via rax vs float via xmm0).
@@ -431,341 +526,373 @@ class Codegen:
             if ty is None:
                 ty = "int"
                 if i < len(f.defaults) and f.defaults[i] is not None:
-                    ty = A.expr_type(f.defaults[i])
-            info.local_types[p] = ty
+                    ty = A.expr_type(f.defaults[i])  # type: ignore
 
-        # Walk the body for any name that becomes bound.
-        def define(name: str, ty: str = "int") -> None:
-            nonlocal offset
-            if is_main and name in self.global_vars:
-                return  # module global: lives in .bss, addressed by symbol
-            if name not in info.locals_:
-                offset -= 8
-                info.locals_[name] = offset
-                info.local_types[name] = ty
-            elif info.local_types.get(name) == "int" and ty != "int":
-                # Promote int to wider type if a later assignment reveals it.
-                info.local_types[name] = ty
-
-        def define_bytes(name: str, n_bytes: int) -> None:
-            """Reserve an arbitrarily-sized slot (e.g. 200-byte jmp_buf).
-            Rounds up to a multiple of 8 so subsequent 8-byte locals stay aligned."""
-            nonlocal offset
-            if name in info.locals_:
-                return
-            rounded = (n_bytes + 7) & ~7
-            offset -= rounded
-            info.locals_[name] = offset
-            info.local_types[name] = "buf"
-
-        def walk_expr(expr):
-            # Pre-allocate a scratch slot per ListLit / DictLit so codegen
-            # never has to extend the frame at emit-time.
-            if isinstance(expr, A.ListLit):
-                define(f"__listlit_{id(expr)}")
-                for el in expr.elems:
-                    walk_expr(el)
-            elif isinstance(expr, A.Comprehension):
-                # Result list header, source iterable, cached length, index,
-                # and a scratch for each appended value; plus the loop var.
-                define(f"__comp_res_{id(expr)}")
-                define(f"__comp_iter_{id(expr)}")
-                define(f"__comp_stop_{id(expr)}")
-                define(f"__comp_idx_{id(expr)}")
-                define(f"__comp_val_{id(expr)}")
-                # Loop variable inherits the iterable's element kind.
-                var_ty = "int"
-                if A.expr_type(expr.iter) == "list":
-                    if isinstance(expr.iter, A.Name):
-                        var_ty = expr.iter.list_el_type
-                    elif isinstance(expr.iter, A.ListLit):
-                        var_ty = expr.iter.el_type
-                    else:
-                        var_ty = getattr(expr.iter, "list_el_type", "int")
-                define(expr.var, var_ty)
-                walk_expr(expr.iter)
-                walk_expr(expr.elt)
-                if expr.cond is not None:
-                    walk_expr(expr.cond)
-            elif isinstance(expr, A.TupleLit):
-                # One scratch slot to park the header pointer across the two
-                # mallocs (mirrors ListLit). Tuples reuse the list layout.
-                define(f"__tuplelit_{id(expr)}")
-                for el in expr.elems:
-                    walk_expr(el)
-            elif isinstance(expr, A.DictLit):
-                define(f"__dictlit_{id(expr)}")
-                define(f"__dictlit_key_{id(expr)}")
-                for k in expr.keys:
-                    walk_expr(k)
-                for v in expr.values:
-                    walk_expr(v)
-            elif isinstance(expr, A.BinOp):
-                # String concat / repeat needs a scratch slot to park the left
-                # operand across the right-side evaluation (which may call).
-                lt, rt = A.expr_type(expr.left), A.expr_type(expr.right)
-                if "str" in (lt, rt):
-                    define(f"__binstr_{id(expr)}")
-                walk_expr(expr.left)
-                walk_expr(expr.right)
-            elif isinstance(expr, A.Compare):
-                # Two str operands with ==/!= or in/not in -> runtime call
-                # needs a scratch slot to park the lhs across the rhs eval.
-                if len(expr.ops) == 1 and len(expr.operands) == 2:
-                    op = expr.ops[0]
-                    lt, rt = (
-                        A.expr_type(expr.operands[0]),
-                        A.expr_type(expr.operands[1]),
-                    )
-                    if op in ("==", "!=", "<", "<=", ">", ">=") and lt == "str" and rt == "str":
-                        define(f"__strcmp_{id(expr)}")
-                    elif op in ("in", "not in") and lt == "str" and rt == "str":
-                        define(f"__strin_{id(expr)}")
-                    elif op in ("in", "not in") and rt in ("list", "tuple"):
-                        # Element type drives slot kind (float needs xmm-sized
-                        # spill, but our locals are 8 bytes which matches).
-                        # Tuples reuse the list layout, so the scan is identical.
-                        define(f"__listin_{id(expr)}")
-                    elif op in ("in", "not in") and rt == "dict":
-                        define(f"__dictin_{id(expr)}")
-                for o in expr.operands:
-                    walk_expr(o)
-            elif isinstance(expr, A.BoolOp):
-                walk_expr(expr.left)
-                walk_expr(expr.right)
-            elif isinstance(expr, A.IfExp):
-                walk_expr(expr.test)
-                walk_expr(expr.body)
-                walk_expr(expr.orelse)
-            elif isinstance(expr, A.UnaryOp):
-                walk_expr(expr.operand)
-            elif isinstance(expr, A.Call):
-                # FFI call needs one scratch slot per arg.
-                if expr.func in self.ffi_funcs:
-                    fn = self.ffi_funcs[expr.func]
-                    for k in range(len(expr.args)):
-                        define(
-                            f"__ffi_arg_{id(fn)}_{k}",
-                            "float" if fn.arg_types[k] == "float" else "int",
-                        )
-                # Constructor needs a slot to park the freshly-allocated
-                # instance ptr across the __init__ call.
-                if expr.func in self.mod.classes_sig:
-                    define(f"__ctor_inst_{id(expr)}")
-                # getattr(obj, "name", default) parks the default across the
-                # object's evaluation (which may itself call).
-                if expr.func == "getattr" and len(expr.args) == 3:
-                    define(f"__getattr_def_{id(expr)}")
-                # User function / constructor calls pass arguments through
-                # frame slots (alignment-safe). One slot per positional arg.
-                if expr.func in self.funcs or expr.func in self.mod.classes_sig:
-                    for k in range(len(expr.args)):
-                        define(f"__callarg_{id(expr)}_{k}")
-                for a in expr.args:
-                    walk_expr(a)
-            elif isinstance(expr, A.MethodCall):
-                # math.sqrt(x) — same FFI scratch reservation.
-                if (
-                    isinstance(expr.obj, A.Name)
-                    and expr.obj.name in self.imported_modules
-                ):
-                    bindings = self.imported_modules[expr.obj.name]
-                    b = bindings.get(expr.method)
-                    if b is not None and hasattr(b, "arg_types"):
-                        for k in range(len(expr.args)):
-                            define(
-                                f"__ffi_arg_{id(b)}_{k}",
-                                "float" if b.arg_types[k] == "float" else "int",
-                            )
-                else:
-                    # String methods spill the object pointer (and one extra
-                    # for replace's 2-arg signature) across argument eval.
-                    if A.expr_type(expr.obj) == "str":
-                        define(f"__strm_obj_{id(expr)}")
-                        if len(expr.args) >= 2:
-                            define(f"__strm_a1_{id(expr)}")
-                    # User-class (and super) method calls pass args through
-                    # frame slots; instance calls also park the receiver.
-                    obj_t = A.expr_type(expr.obj)
-                    if obj_t.startswith("instance:"):
-                        define(f"__callself_{id(expr)}")
-                    if obj_t.startswith("instance:") or obj_t.startswith("super:"):
-                        for k in range(len(expr.args)):
-                            define(f"__callarg_{id(expr)}_{k}")
-                    walk_expr(expr.obj)
-                for a in expr.args:
-                    walk_expr(a)
-            elif isinstance(expr, A.Subscript):
-                if isinstance(expr.index, A.Slice):
-                    # slice needs scratch slots for obj/start (always) plus
-                    # stop/step when the step-aware path is used.
-                    define(f"__strsl_obj_{id(expr)}")
-                    define(f"__strsl_start_{id(expr)}")
-                    if expr.index.step is not None:
-                        define(f"__strsl_stop_{id(expr)}")
-                        define(f"__strsl_step_{id(expr)}")
-                    # List slicing dispatches through a different helper; the
-                    # codegen path uses its own pair of slots.
-                    if A.expr_type(expr.obj) == "list":
-                        define(f"__lstsl_obj_{id(expr)}")
-                        define(f"__lstsl_start_{id(expr)}")
-                    walk_expr(expr.obj)
-                    if expr.index.start is not None:
-                        walk_expr(expr.index.start)
-                    if expr.index.stop is not None:
-                        walk_expr(expr.index.stop)
-                    if expr.index.step is not None:
-                        walk_expr(expr.index.step)
-                elif A.expr_type(expr.obj) == "str":
-                    define(f"__stridx_{id(expr)}")
-                    walk_expr(expr.obj)
-                    walk_expr(expr.index)
-                else:
-                    walk_expr(expr.obj)
-                    walk_expr(expr.index)
-            elif isinstance(expr, A.Attr):
-                # Module attr access doesn't need to evaluate the obj.
-                if (
-                    isinstance(expr.obj, A.Name)
-                    and expr.obj.name in self.imported_modules
-                ):
-                    pass
-                else:
-                    walk_expr(expr.obj)
-            elif isinstance(expr, A.FString):
-                define(f"__fstr_acc_{id(expr)}")
-                for s in expr.segments:
-                    walk_expr(s)
-
-        def walk(stmts):
-            for s in stmts:
-                if isinstance(s, A.Assign):
-                    define(s.target, A.expr_type(s.value))
-                    walk_expr(s.value)
-                elif isinstance(s, A.AugAssign):
-                    define(s.target, A.expr_type(s.value))
-                    walk_expr(s.value)
-                elif isinstance(s, A.TupleAssign):
-                    if len(s.values) == 1 and A.expr_type(s.values[0]) == "tuple":
-                        # Unpack form: park the tuple ptr in one slot, then
-                        # type each target from the tuple's element kinds.
-                        define(f"__tupunpack_{id(s)}", "int")
-                        walk_expr(s.values[0])
-                        ets = A.tuple_element_types(s.values[0])
-                        for i, t in enumerate(s.targets):
-                            define(t, ets[i] if i < len(ets) else "int")
-                    else:
-                        for i, v in enumerate(s.values):
-                            walk_expr(v)
-                            define(f"__tup_tmp_{id(s)}_{i}", A.expr_type(v))
-                        for t, v in zip(s.targets, s.values):
-                            define(t, A.expr_type(v))
-                elif isinstance(s, A.For) and self._for_zip_spec(s) is not None:
-                    # for a, b in zip(A, B) / for i, (a, b) in enumerate(zip):
-                    # two iterables walked in lockstep. Reserve the per-buffer
-                    # pointers, the bound, the counter, and the target slots.
-                    zidx, za, zb, zae, zbe = self._for_zip_spec(s)
-                    if zidx is not None:
-                        define(zidx, "int")
-                    define(za, self._list_expr_el_kind(zae))
-                    define(zb, self._list_expr_el_kind(zbe))
-                    define(f"__zip_a_{id(s)}", "int")
-                    define(f"__zip_b_{id(s)}", "int")
-                    define(f"__zip_stop_{id(s)}", "int")
-                    define(f"__zip_i_{id(s)}", "int")
-                    walk_expr(zae)
-                    walk_expr(zbe)
-                    walk(s.body)
-                elif (
-                    isinstance(s, A.For)
-                    and s.iter is not None
-                    and isinstance(s.iter, A.Call)
-                    and s.iter.func == "enumerate"
-                ):
-                    # for i, x in enumerate(inner): index var, element var, plus
-                    # the list-iteration machinery.
-                    inner = s.iter.args[0]
-                    el_ty = "int"
-                    if A.expr_type(inner) == "list":
-                        if isinstance(inner, A.Name):
-                            el_ty = inner.list_el_type
-                        elif isinstance(inner, A.ListLit):
-                            el_ty = inner.el_type
-                        else:
-                            el_ty = getattr(inner, "list_el_type", "int")
-                    define(s.targets[0], "int")
-                    define(s.targets[1], el_ty)
-                    define(f"__for_stop_{id(s)}", "int")
-                    define(f"__for_step_{id(s)}", "int")
-                    define(f"__for_iter_{id(s)}", "int")
-                    walk_expr(inner)
-                    walk(s.body)
-                elif isinstance(s, A.For):
-                    # Loop var inherits the iterable's element type so the
-                    # later Name load picks the right register class.
-                    var_ty = "int"
-                    if s.iter is not None and A.expr_type(s.iter) == "list":
-                        if isinstance(s.iter, A.Name):
-                            var_ty = s.iter.list_el_type
-                        elif isinstance(s.iter, A.ListLit):
-                            var_ty = s.iter.el_type
-                    elif s.iter is not None and A.expr_type(s.iter) == "tuple":
-                        # Iterable tuples are homogeneous (sema enforces it),
-                        # so the loop var takes the shared element kind.
-                        ets = A.tuple_element_types(s.iter)
-                        var_ty = ets[0] if ets else "int"
-                    elif s.iter is not None and A.expr_type(s.iter) == "dict":
-                        var_ty = "str"
-                    elif s.iter is not None and A.expr_type(s.iter) == "str":
-                        var_ty = "str"
-                    define(s.var, var_ty)
-                    define(f"__for_stop_{id(s)}", "int")
-                    define(f"__for_step_{id(s)}", "int")
-                    if s.iter is not None:
-                        define(f"__for_iter_{id(s)}", "int")  # ptr; treat as int slot
-                        walk_expr(s.iter)
-                    else:
-                        for a in s.range_args:
-                            walk_expr(a)
-                    walk(s.body)
-                elif isinstance(s, A.If):
-                    walk_expr(s.test)
-                    walk(s.then)
-                    walk(s.orelse)
-                elif isinstance(s, A.While):
-                    walk_expr(s.test)
-                    walk(s.body)
-                elif isinstance(s, A.Return):
-                    if s.value is not None:
-                        walk_expr(s.value)
-                elif isinstance(s, A.ExprStmt):
-                    walk_expr(s.expr)
-                elif isinstance(s, A.IndexAssign):
-                    walk_expr(s.target.obj)
-                    walk_expr(s.target.index)
-                    walk_expr(s.value)
-                elif isinstance(s, A.AttrAssign):
-                    walk_expr(s.obj)
-                    walk_expr(s.value)
-                elif isinstance(s, A.Try):
-                    # jmp_buf on x86-64 libc is typically <= 200 bytes.
-                    define_bytes(f"__try_buf_{id(s)}", 200)
-                    # Saved previous handler ptr to restore on normal exit.
-                    define(f"__try_parent_{id(s)}", "int")
-                    if s.bind_name is not None:
-                        define(s.bind_name, "str")
-                    walk(s.body)
-                    walk(s.handler)
-                elif isinstance(s, A.Raise):
-                    walk_expr(s.value)
-
-        walk(f.body)
+        # Walk the body for any name that becomes bound. The walkers below are
+        # instance methods (not closures) that thread state through `info` —
+        # asmpython can't compile nested functions / nonlocal, and this method
+        # is on the self-host path.
+        self._cl_walk(info, f.body)
         # Frame size must be 16-byte aligned for ABI compliance before calls.
-        frame = -offset
+        frame = -info.offset
         if frame % 16:
             frame += 16 - (frame % 16)
         info.frame_size = frame
         return info
+
+    def _cl_define(self, info: FuncInfo, name: str, ty: str = "int") -> None:
+        """Reserve an 8-byte frame slot for `name` (no-op if already present).
+        Promotes an int slot to a wider type if a later use reveals it."""
+        if info.is_main and name in self.global_vars:
+            return  # module global: lives in .bss, addressed by symbol
+        if name not in info.locals_:
+            info.offset -= 8
+            info.locals_[name] = info.offset
+            info.local_types[name] = ty
+        elif info.local_types.get(name) == "int" and ty != "int":
+            info.local_types[name] = ty
+
+    def _cl_define_bytes(self, info: FuncInfo, name: str, n_bytes: int) -> None:
+        """Reserve an arbitrarily-sized slot (e.g. 200-byte jmp_buf).
+        Rounds up to a multiple of 8 so subsequent 8-byte locals stay aligned."""
+        if name in info.locals_:
+            return
+        rounded = (n_bytes + 7) & ~7
+        info.offset -= rounded
+        info.locals_[name] = info.offset
+        info.local_types[name] = "buf"
+
+    def _cl_walk_expr(self, info: FuncInfo, expr) -> None:
+        # Pre-allocate a scratch slot per ListLit / DictLit so codegen
+        # never has to extend the frame at emit-time.
+        if isinstance(expr, A.ListLit):
+            self._cl_define(info, f"__listlit_{id(expr)}")
+            for el in expr.elems:
+                self._cl_walk_expr(info, el)
+        elif isinstance(expr, A.Comprehension):
+            # Result list header, source iterable, cached length, index,
+            # and a scratch for each appended value; plus the loop var.
+            self._cl_define(info, f"__comp_res_{id(expr)}")
+            self._cl_define(info, f"__comp_iter_{id(expr)}")
+            self._cl_define(info, f"__comp_stop_{id(expr)}")
+            self._cl_define(info, f"__comp_idx_{id(expr)}")
+            self._cl_define(info, f"__comp_val_{id(expr)}")
+            # Loop variable inherits the iterable's element kind.
+            var_ty = "int"
+            if A.expr_type(expr.iter) == "list":
+                if isinstance(expr.iter, A.Name):
+                    var_ty = expr.iter.list_el_type
+                elif isinstance(expr.iter, A.ListLit):
+                    var_ty = expr.iter.el_type
+                else:
+                    var_ty = getattr(expr.iter, "list_el_type", "int")
+            self._cl_define(info, expr.var, var_ty)
+            self._cl_walk_expr(info, expr.iter)
+            self._cl_walk_expr(info, expr.elt)
+            if expr.cond is not None:
+                self._cl_walk_expr(info, expr.cond)
+        elif isinstance(expr, A.DictComprehension):
+            # Result dict header, source iterable, cached length, index,
+            # plus key/value scratch and the loop var.
+            self._cl_define(info, f"__dcomp_res_{id(expr)}")
+            self._cl_define(info, f"__dcomp_iter_{id(expr)}")
+            self._cl_define(info, f"__dcomp_stop_{id(expr)}")
+            self._cl_define(info, f"__dcomp_idx_{id(expr)}")
+            self._cl_define(info, f"__dcomp_key_{id(expr)}")
+            var_ty = "int"
+            if A.expr_type(expr.iter) == "list":
+                if isinstance(expr.iter, A.Name):
+                    var_ty = expr.iter.list_el_type
+                elif isinstance(expr.iter, A.ListLit):
+                    var_ty = expr.iter.el_type
+                else:
+                    var_ty = getattr(expr.iter, "list_el_type", "int")
+            self._cl_define(info, expr.var, var_ty)
+            self._cl_walk_expr(info, expr.iter)
+            self._cl_walk_expr(info, expr.key)
+            self._cl_walk_expr(info, expr.value)
+            if expr.cond is not None:
+                self._cl_walk_expr(info, expr.cond)
+        elif isinstance(expr, A.TupleLit):
+            # One scratch slot to park the header pointer across the two
+            # mallocs (mirrors ListLit). Tuples reuse the list layout.
+            self._cl_define(info, f"__tuplelit_{id(expr)}")
+            for el in expr.elems:
+                self._cl_walk_expr(info, el)
+        elif isinstance(expr, A.DictLit):
+            self._cl_define(info, f"__dictlit_{id(expr)}")
+            self._cl_define(info, f"__dictlit_key_{id(expr)}")
+            for k in expr.keys:
+                self._cl_walk_expr(info, k)
+            for v in expr.values:
+                self._cl_walk_expr(info, v)
+        elif isinstance(expr, A.BinOp):
+            # String concat / repeat needs a scratch slot to park the left
+            # operand across the right-side evaluation (which may call).
+            lt, rt = A.expr_type(expr.left), A.expr_type(expr.right)
+            if "str" in (lt, rt):
+                self._cl_define(info, f"__binstr_{id(expr)}")
+            self._cl_walk_expr(info, expr.left)
+            self._cl_walk_expr(info, expr.right)
+        elif isinstance(expr, A.Compare):
+            # Two str operands with ==/!= or in/not in -> runtime call
+            # needs a scratch slot to park the lhs across the rhs eval.
+            if len(expr.ops) == 1 and len(expr.operands) == 2:
+                op = expr.ops[0]
+                lt, rt = (
+                    A.expr_type(expr.operands[0]),
+                    A.expr_type(expr.operands[1]),
+                )
+                if (
+                    op in ("==", "!=", "<", "<=", ">", ">=")
+                    and lt == "str"
+                    and rt == "str"
+                ):
+                    self._cl_define(info, f"__strcmp_{id(expr)}")
+                elif op in ("in", "not in") and lt == "str" and rt == "str":
+                    self._cl_define(info, f"__strin_{id(expr)}")
+                elif op in ("in", "not in") and rt in ("list", "tuple"):
+                    # Element type drives slot kind (float needs xmm-sized
+                    # spill, but our locals are 8 bytes which matches).
+                    # Tuples reuse the list layout, so the scan is identical.
+                    self._cl_define(info, f"__listin_{id(expr)}")
+                elif op in ("in", "not in") and rt == "dict":
+                    self._cl_define(info, f"__dictin_{id(expr)}")
+            for o in expr.operands:
+                self._cl_walk_expr(info, o)
+        elif isinstance(expr, A.BoolOp):
+            self._cl_walk_expr(info, expr.left)
+            self._cl_walk_expr(info, expr.right)
+        elif isinstance(expr, A.IfExp):
+            self._cl_walk_expr(info, expr.test)
+            self._cl_walk_expr(info, expr.body)
+            self._cl_walk_expr(info, expr.orelse)
+        elif isinstance(expr, A.UnaryOp):
+            self._cl_walk_expr(info, expr.operand)
+        elif isinstance(expr, A.Call):
+            # FFI call needs one scratch slot per arg.
+            if expr.func in self.ffi_funcs:
+                fn = self.ffi_funcs[expr.func]
+                for k in range(len(expr.args)):
+                    self._cl_define(
+                        info,
+                        f"__ffi_arg_{id(fn)}_{k}",
+                        "float" if fn.arg_types[k] == "float" else "int",
+                    )
+            # Constructor needs a slot to park the freshly-allocated
+            # instance ptr across the __init__ call.
+            if expr.func in self.mod.classes_sig:
+                self._cl_define(info, f"__ctor_inst_{id(expr)}")
+            # getattr(obj, "name", default) parks the default across the
+            # object's evaluation (which may itself call).
+            if expr.func == "getattr" and len(expr.args) == 3:
+                self._cl_define(info, f"__getattr_def_{id(expr)}")
+            # int(s, base) parks the base across the string's evaluation.
+            if expr.func == "int" and len(expr.args) == 2:
+                self._cl_define(info, f"__int_base_{id(expr)}")
+            # User function / constructor calls pass arguments through
+            # frame slots (alignment-safe). One slot per positional arg.
+            if expr.func in self.funcs or expr.func in self.mod.classes_sig:
+                for k in range(len(expr.args)):
+                    self._cl_define(info, f"__callarg_{id(expr)}_{k}")
+            for a in expr.args:
+                self._cl_walk_expr(info, a)
+        elif isinstance(expr, A.MethodCall):
+            # math.sqrt(x) — same FFI scratch reservation.
+            if isinstance(expr.obj, A.Name) and expr.obj.name in self.imported_modules:
+                bindings = self.imported_modules[expr.obj.name]
+                b = bindings.get(expr.method)
+                if b is not None and hasattr(b, "arg_types"):
+                    for k in range(len(expr.args)):
+                        self._cl_define(
+                            info,
+                            f"__ffi_arg_{id(b)}_{k}",
+                            "float" if b.arg_types[k] == "float" else "int",
+                        )
+            else:
+                # String methods spill the object pointer (and one extra
+                # for replace's 2-arg signature) across argument eval.
+                if A.expr_type(expr.obj) == "str":
+                    self._cl_define(info, f"__strm_obj_{id(expr)}")
+                    if len(expr.args) >= 2:
+                        self._cl_define(info, f"__strm_a1_{id(expr)}")
+                # User-class (and super) method calls pass args through
+                # frame slots; instance calls also park the receiver.
+                obj_t = A.expr_type(expr.obj)
+                if obj_t.startswith("instance:"):
+                    self._cl_define(info, f"__callself_{id(expr)}")
+                if obj_t.startswith("instance:") or obj_t.startswith("super:"):
+                    for k in range(len(expr.args)):
+                        self._cl_define(info, f"__callarg_{id(expr)}_{k}")
+                self._cl_walk_expr(info, expr.obj)
+            for a in expr.args:
+                self._cl_walk_expr(info, a)
+        elif isinstance(expr, A.Subscript):
+            if isinstance(expr.index, A.Slice):
+                # slice needs scratch slots for obj/start (always) plus
+                # stop/step when the step-aware path is used.
+                self._cl_define(info, f"__strsl_obj_{id(expr)}")
+                self._cl_define(info, f"__strsl_start_{id(expr)}")
+                if expr.index.step is not None:
+                    self._cl_define(info, f"__strsl_stop_{id(expr)}")
+                    self._cl_define(info, f"__strsl_step_{id(expr)}")
+                # List slicing dispatches through a different helper; the
+                # codegen path uses its own pair of slots.
+                if A.expr_type(expr.obj) == "list":
+                    self._cl_define(info, f"__lstsl_obj_{id(expr)}")
+                    self._cl_define(info, f"__lstsl_start_{id(expr)}")
+                self._cl_walk_expr(info, expr.obj)
+                if expr.index.start is not None:
+                    self._cl_walk_expr(info, expr.index.start)
+                if expr.index.stop is not None:
+                    self._cl_walk_expr(info, expr.index.stop)
+                if expr.index.step is not None:
+                    self._cl_walk_expr(info, expr.index.step)
+            elif A.expr_type(expr.obj) == "str":
+                self._cl_define(info, f"__stridx_{id(expr)}")
+                self._cl_walk_expr(info, expr.obj)
+                self._cl_walk_expr(info, expr.index)
+            else:
+                self._cl_walk_expr(info, expr.obj)
+                self._cl_walk_expr(info, expr.index)
+        elif isinstance(expr, A.Attr):
+            # Module attr access doesn't need to evaluate the obj.
+            if isinstance(expr.obj, A.Name) and expr.obj.name in self.imported_modules:
+                pass
+            else:
+                self._cl_walk_expr(info, expr.obj)
+        elif isinstance(expr, A.FString):
+            self._cl_define(info, f"__fstr_acc_{id(expr)}")
+            for s in expr.segments:
+                self._cl_walk_expr(info, s)
+
+    def _cl_walk(self, info: FuncInfo, stmts: list) -> None:
+        for s in stmts:
+            if isinstance(s, A.Assign):
+                self._cl_define(info, s.target, A.expr_type(s.value))
+                self._cl_walk_expr(info, s.value)
+            elif isinstance(s, A.AugAssign):
+                self._cl_define(info, s.target, A.expr_type(s.value))
+                self._cl_walk_expr(info, s.value)
+            elif isinstance(s, A.TupleAssign):
+                if len(s.values) == 1 and A.expr_type(s.values[0]) in (
+                    "tuple",
+                    "any",
+                ):
+                    # Unpack form: park the tuple ptr in one slot, then
+                    # type each target from the tuple's element kinds (an
+                    # opaque "any" tuple has unknown slots -> int/lenient).
+                    self._cl_define(info, f"__tupunpack_{id(s)}", "int")
+                    self._cl_walk_expr(info, s.values[0])
+                    ets = A.tuple_element_types(s.values[0])
+                    for i, t in enumerate(s.targets):
+                        self._cl_define(info, t, ets[i] if i < len(ets) else "int")
+                else:
+                    for i, v in enumerate(s.values):
+                        self._cl_walk_expr(info, v)
+                        self._cl_define(info, f"__tup_tmp_{id(s)}_{i}", A.expr_type(v))
+                    for t, v in zip(s.targets, s.values):
+                        self._cl_define(info, t, A.expr_type(v))
+            elif isinstance(s, A.For) and self._for_zip_spec(s) is not None:
+                # for a, b in zip(A, B) / for i, (a, b) in enumerate(zip):
+                # two iterables walked in lockstep. Reserve the per-buffer
+                # pointers, the bound, the counter, and the target slots.
+                zidx, za, zb, zae, zbe = self._for_zip_spec(s)  # type: ignore
+                if zidx is not None:
+                    self._cl_define(info, zidx, "int")
+                self._cl_define(info, za, self._list_expr_el_kind(zae))
+                self._cl_define(info, zb, self._list_expr_el_kind(zbe))
+                self._cl_define(info, f"__zip_a_{id(s)}", "int")
+                self._cl_define(info, f"__zip_b_{id(s)}", "int")
+                self._cl_define(info, f"__zip_stop_{id(s)}", "int")
+                self._cl_define(info, f"__zip_i_{id(s)}", "int")
+                self._cl_walk_expr(info, zae)
+                self._cl_walk_expr(info, zbe)
+                self._cl_walk(info, s.body)
+            elif (
+                isinstance(s, A.For)
+                and s.iter is not None
+                and isinstance(s.iter, A.Call)
+                and s.iter.func == "enumerate"
+            ):
+                # for i, x in enumerate(inner): index var, element var, plus
+                # the list-iteration machinery.
+                inner = s.iter.args[0]
+                el_ty = "int"
+                if A.expr_type(inner) == "list":
+                    if isinstance(inner, A.Name):
+                        el_ty = inner.list_el_type
+                    elif isinstance(inner, A.ListLit):
+                        el_ty = inner.el_type
+                    else:
+                        el_ty = getattr(inner, "list_el_type", "int")
+                self._cl_define(info, s.targets[0], "int")
+                self._cl_define(info, s.targets[1], el_ty)
+                self._cl_define(info, f"__for_stop_{id(s)}", "int")
+                self._cl_define(info, f"__for_step_{id(s)}", "int")
+                self._cl_define(info, f"__for_iter_{id(s)}", "int")
+                self._cl_walk_expr(info, inner)
+                self._cl_walk(info, s.body)
+            elif isinstance(s, A.For):
+                # Loop var inherits the iterable's element type so the
+                # later Name load picks the right register class.
+                var_ty = "int"
+                if s.iter is not None and A.expr_type(s.iter) == "list":
+                    if isinstance(s.iter, A.Name):
+                        var_ty = s.iter.list_el_type
+                    elif isinstance(s.iter, A.ListLit):
+                        var_ty = s.iter.el_type
+                elif s.iter is not None and A.expr_type(s.iter) == "tuple":
+                    # Iterable tuples are homogeneous (sema enforces it),
+                    # so the loop var takes the shared element kind.
+                    ets = A.tuple_element_types(s.iter)
+                    var_ty = ets[0] if ets else "int"
+                elif s.iter is not None and A.expr_type(s.iter) == "dict":
+                    var_ty = "str"
+                elif s.iter is not None and A.expr_type(s.iter) == "str":
+                    var_ty = "str"
+                self._cl_define(info, s.var, var_ty)
+                self._cl_define(info, f"__for_stop_{id(s)}", "int")
+                self._cl_define(info, f"__for_step_{id(s)}", "int")
+                if s.iter is not None:
+                    self._cl_define(
+                        info, f"__for_iter_{id(s)}", "int"
+                    )  # ptr; treat as int slot
+                    self._cl_walk_expr(info, s.iter)
+                else:
+                    for a in s.range_args:
+                        self._cl_walk_expr(info, a)
+                self._cl_walk(info, s.body)
+            elif isinstance(s, A.If):
+                self._cl_walk_expr(info, s.test)
+                self._cl_walk(info, s.then)
+                self._cl_walk(info, s.orelse)
+            elif isinstance(s, A.While):
+                self._cl_walk_expr(info, s.test)
+                self._cl_walk(info, s.body)
+            elif isinstance(s, A.Return):
+                if s.value is not None:
+                    self._cl_walk_expr(info, s.value)
+            elif isinstance(s, A.ExprStmt):
+                self._cl_walk_expr(info, s.expr)
+            elif isinstance(s, A.IndexAssign):
+                self._cl_walk_expr(info, s.target.obj)
+                self._cl_walk_expr(info, s.target.index)
+                self._cl_walk_expr(info, s.value)
+            elif isinstance(s, A.AttrAssign):
+                self._cl_walk_expr(info, s.obj)
+                self._cl_walk_expr(info, s.value)
+            elif isinstance(s, A.Try):
+                # jmp_buf on x86-64 libc is typically <= 200 bytes.
+                self._cl_define_bytes(info, f"__try_buf_{id(s)}", 200)
+                # Saved previous handler ptr to restore on normal exit.
+                self._cl_define(info, f"__try_parent_{id(s)}", "int")
+                if s.bind_name is not None:
+                    self._cl_define(info, s.bind_name, "str")
+                self._cl_walk(info, s.body)
+                self._cl_walk(info, s.handler)
+            elif isinstance(s, A.Raise):
+                self._cl_walk_expr(info, s.value)
 
     # ---- statement codegen --------------------------------------------------
 
@@ -790,7 +917,13 @@ class Codegen:
         if isinstance(stmt, A.TupleAssign):
             # Unpack form: `a, b = <tuple>`. Evaluate the tuple once, park its
             # header ptr, then copy each slot out into the matching target.
-            if len(stmt.values) == 1 and A.expr_type(stmt.values[0]) == "tuple":
+            # An "any"-typed single RHS is an opaque tuple pointer (sema bound
+            # the targets leniently) — unpack it the same way, reading each slot
+            # as a plain 8-byte move.
+            if len(stmt.values) == 1 and A.expr_type(stmt.values[0]) in (
+                "tuple",
+                "any",
+            ):
                 ptr_slot = info.locals_[f"__tupunpack_{id(stmt)}"]
                 ets = A.tuple_element_types(stmt.values[0])
                 self.gen_expr(stmt.values[0], info)  # rax = tuple header ptr
@@ -1199,7 +1332,7 @@ class Codegen:
 
     def _gen_for_enumerate(self, stmt: A.For, info: FuncInfo) -> None:
         # for i, x in enumerate(inner):  i = index, x = inner[i].
-        inner = stmt.iter.args[0]
+        inner = stmt.iter.args[0]  # type: ignore
         if A.expr_type(inner) != "list":
             raise NotImplementedError(
                 "enumerate() over a non-list iterable is not supported yet"
@@ -1299,9 +1432,7 @@ class Codegen:
         )
         if idx_name is not None:
             idx_off = info.locals_[idx_name]
-            self.emitf(
-                f"mov rax, [rbp{i_off:+d}]", f"mov [rbp{idx_off:+d}], rax"
-            )
+            self.emitf(f"mov rax, [rbp{i_off:+d}]", f"mov [rbp{idx_off:+d}], rax")
         for s in stmt.body:
             self.gen_stmt(s, info)
         self.label(cont)
@@ -1420,6 +1551,18 @@ class Codegen:
             if expr.name in self.ffi_consts:
                 self._gen_const_load(self.ffi_consts[expr.name])
                 return
+            # Module dunders the runtime provides as string constants. A
+            # compiled program is its own entry point, so __name__ is
+            # "__main__"; __file__ is the source path (not tracked here, so the
+            # empty string — enough for `if __name__ == "__main__":` guards).
+            if expr.name == "__name__":
+                label, _ = self.intern_string("__main__")
+                self.emitf(f"lea rax, [{label}]")
+                return
+            if expr.name == "__file__":
+                label, _ = self.intern_string("")
+                self.emitf(f"lea rax, [{label}]")
+                return
             if expr.name not in info.locals_ and expr.name not in self.global_vars:
                 raise NameError(f"undefined variable {expr.name}")
             mem = self._var_mem(expr.name, info)
@@ -1480,6 +1623,9 @@ class Codegen:
         if isinstance(expr, A.Comprehension):
             self._gen_comprehension(expr, info)
             return
+        if isinstance(expr, A.DictComprehension):
+            self._gen_dict_comprehension(expr, info)
+            return
         if isinstance(expr, A.TupleLit):
             self._gen_tuple_lit(expr, info)
             return
@@ -1512,21 +1658,12 @@ class Codegen:
             return
         acc_slot = info.locals_[f"__fstr_acc_{id(e)}"]
 
-        def emit_segment_as_str(seg):
-            t = A.expr_type(seg)
-            self.gen_expr(seg, info)
-            if t == "int":
-                self._emit_int_to_str()
-            elif t == "float":
-                self._emit_float_to_str()
-            # "str" stays as-is
-
         # First segment seeds the accumulator.
-        emit_segment_as_str(e.segments[0])
+        self._gen_fstring_segment(e.segments[0], info)
         self.emitf(f"mov [rbp{acc_slot:+d}], rax")
         # Each subsequent segment: convert -> concat with accumulator.
         for seg in e.segments[1:]:
-            emit_segment_as_str(seg)
+            self._gen_fstring_segment(seg, info)
             self.emitf(
                 "mov rbx, rax",
                 f"mov rax, [rbp{acc_slot:+d}]",
@@ -1534,6 +1671,18 @@ class Codegen:
                 f"mov [rbp{acc_slot:+d}], rax",
             )
         self.emitf(f"mov rax, [rbp{acc_slot:+d}]")
+
+    def _gen_fstring_segment(self, seg, info: FuncInfo) -> None:
+        """Evaluate one f-string segment and leave a str pointer in rax
+        (int/float go through str(); str segments stay as-is). A plain method
+        rather than a closure inside _gen_fstring, so codegen self-compiles."""
+        t = A.expr_type(seg)
+        self.gen_expr(seg, info)
+        if t == "int":
+            self._emit_int_to_str()
+        elif t == "float":
+            self._emit_float_to_str()
+        # "str" stays as-is
 
     def _gen_attr(self, e: A.Attr, info: FuncInfo) -> None:
         # Module constant access: math.pi etc.
@@ -1569,7 +1718,7 @@ class Codegen:
         """
         if self.use_runtime_lib:
             # Reference rather than define. The library was assembled once
-            # by serpent/runtime/build.py and gcc will resolve these at link.
+            # by asmpython/_runtime/build.py and gcc will resolve these at link.
             for sym in (
                 "_runtime_zalloc",
                 "_runtime_hash_string",
@@ -1984,15 +2133,20 @@ class Codegen:
         Out: rax = newly-allocated list header.
 
         Element type is irrelevant at runtime — slots are 8 bytes regardless.
-        Locals span [rbp-8..rbp-72]; reserve 80 = 48 locals + 32 shadow.
+        Locals span [rbp-8..rbp-72] (72 bytes). The inner `call malloc` /
+        `call memcpy` need 32 bytes of shadow space at the top of our frame, so
+        reserve 72 + 32 = 104, rounded up to the next multiple of 16 -> 112.
+        (A previous 80-byte frame let the callee's shadow space overlap and
+        clobber the [rbp-48..rbp-72] locals — n, cap, and the new header ptr —
+        which corrupted the result and crashed on use.)
         """
         INT64_MIN = "0x8000000000000000"
         INT64_MAX = "0x7fffffffffffffff"
 
         self.label("_runtime_list_slice")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 112")
         self.emitf(
-            "mov [rbp-8], rax",   # src header
+            "mov [rbp-8], rax",  # src header
             "mov [rbp-16], rbx",  # start raw
             "mov [rbp-24], rcx",  # stop raw
         )
@@ -2030,7 +2184,9 @@ class Codegen:
         self.emitf("mov [rbp-48], rax")  # effective stop
         # n = max(0, stop - start)
         nle = self.fresh("ls_n_le")
-        self.emitf("mov rax, [rbp-48]", "sub rax, [rbp-40]", f"jg {nle}", "xor rax, rax")
+        self.emitf(
+            "mov rax, [rbp-48]", "sub rax, [rbp-40]", f"jg {nle}", "xor rax, rax"
+        )
         self.label(nle)
         self.emitf("mov [rbp-56], rax")  # n
         # cap = max(n, 4)
@@ -2090,10 +2246,10 @@ class Codegen:
         # rounded up to a multiple of 16.
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 112")
         self.emitf(
-            "mov [rbp-8], rax",   # s
+            "mov [rbp-8], rax",  # s
             "mov [rbp-16], rbx",  # start (raw)
             "mov [rbp-24], rcx",  # stop  (raw)
-            "mov [rbp-32], r8",   # step
+            "mov [rbp-32], r8",  # step
         )
         # len = strlen(s)
         self.emitf("mov rax, [rbp-8]")
@@ -2106,11 +2262,13 @@ class Codegen:
         step_pos = self.fresh("ssl_step_pos")
         step_neg = self.fresh("ssl_step_neg")
         start_done = self.fresh("ssl_start_done")
-        self.emitf("mov rax, [rbp-32]", "test rax, rax", f"jg {step_pos}", f"jmp {step_neg}")
+        self.emitf(
+            "mov rax, [rbp-32]", "test rax, rax", f"jg {step_pos}", f"jmp {step_neg}"
+        )
 
         self.label(step_pos)
         # start (missing sentinel -> 0; else normalize + clamp to [0, len])
-        self.emitf(f"mov rax, [rbp-16]", f"mov rbx, {INT64_MIN}", "cmp rax, rbx")
+        self.emitf("mov rax, [rbp-16]", f"mov rbx, {INT64_MIN}", "cmp rax, rbx")
         sp_have = self.fresh("ssl_sp_have")
         self.emitf(f"jne {sp_have}", "xor rax, rax")  # default 0
         self.label(sp_have)
@@ -2127,7 +2285,7 @@ class Codegen:
         self.label(sp_lel)
         self.emitf("mov [rbp-48], rax")  # effective start
         # stop (missing sentinel INT64_MIN -> len; else normalize + clamp)
-        self.emitf(f"mov rax, [rbp-24]", f"mov rbx, {INT64_MIN}", "cmp rax, rbx")
+        self.emitf("mov rax, [rbp-24]", f"mov rbx, {INT64_MIN}", "cmp rax, rbx")
         st_have_p = self.fresh("ssl_st_have_p")
         self.emitf(f"jne {st_have_p}", "mov rax, [rbp-40]", f"jmp {st_have_p}_done")
         self.label(st_have_p)
@@ -2148,7 +2306,7 @@ class Codegen:
 
         self.label(step_neg)
         # start: missing -> len - 1
-        self.emitf(f"mov rax, [rbp-16]", f"mov rbx, {INT64_MIN}", "cmp rax, rbx")
+        self.emitf("mov rax, [rbp-16]", f"mov rbx, {INT64_MIN}", "cmp rax, rbx")
         sn_have = self.fresh("ssl_sn_have")
         self.emitf(f"jne {sn_have}", "mov rax, [rbp-40]", "dec rax")
         self.label(sn_have)
@@ -2166,7 +2324,7 @@ class Codegen:
         self.label(sn_lel)
         self.emitf("mov [rbp-48], rax")
         # stop: missing -> -1
-        self.emitf(f"mov rax, [rbp-24]", f"mov rbx, {INT64_MIN}", "cmp rax, rbx")
+        self.emitf("mov rax, [rbp-24]", f"mov rbx, {INT64_MIN}", "cmp rax, rbx")
         tn_have = self.fresh("ssl_tn_have")
         self.emitf(f"jne {tn_have}", "mov rax, -1", f"jmp {tn_have}_done")
         self.label(tn_have)
@@ -2944,7 +3102,7 @@ class Codegen:
         self.label("_runtime_str_split")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 128")
         self.emitf(
-            "mov [rbp-8], rax",   # s
+            "mov [rbp-8], rax",  # s
             "mov [rbp-16], rbx",  # sep
         )
         # sep_len
@@ -3074,7 +3232,7 @@ class Codegen:
         self.label("_runtime_str_join")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 112")
         self.emitf(
-            "mov [rbp-8], rax",   # sep
+            "mov [rbp-8], rax",  # sep
             "mov [rbp-16], rbx",  # list header
         )
         # n = list.len
@@ -3086,7 +3244,9 @@ class Codegen:
         # total = sep_len * max(0, n-1)
         sep_zero = self.fresh("sj_sep_zero")
         self.emitf("mov rcx, [rbp-24]", "test rcx, rcx", f"jz {sep_zero}")
-        self.emitf("dec rcx", "mov rax, [rbp-32]", "imul rax, rcx", f"jmp {sep_zero}_done")
+        self.emitf(
+            "dec rcx", "mov rax, [rbp-32]", "imul rax, rcx", f"jmp {sep_zero}_done"
+        )
         self.label(sep_zero)
         self.emitf("xor rax, rax")
         self.label(f"{sep_zero}_done")
@@ -3215,7 +3375,7 @@ class Codegen:
         self.emit("section .text")
 
         # ---- _runtime_setjmp -------------------------------------------------
-        # Serpent's internal calling convention for runtime helpers: rax = primary
+        # asmpython's internal calling convention for runtime helpers: rax = primary
         # input/output. Here rax holds the jmp_buf pointer.
         # Output: rax = 0 on initial call; nonzero after longjmp.
         self.label("_runtime_setjmp")
@@ -3289,14 +3449,14 @@ class Codegen:
     def _emit_exit_one(self) -> None:
         raise NotImplementedError
 
-    def _gen_const_load(self, c) -> None:
+    def _gen_const_load(self, c: _stdlib.Const) -> None:
         if c.ty == "float":
-            label = self.intern_float(c.value)
+            label = self.intern_float(c.value)  # type: ignore
             self.emitf(f"movsd xmm0, [{label}]")
         elif c.ty == "int":
             self.emitf(f"mov rax, {c.value}")
         elif c.ty == "str":
-            label, _ = self.intern_string(c.value)
+            label, _ = self.intern_string(c.value)  # type: ignore
             self.emitf(f"lea rax, [{label}]")
         else:
             raise NotImplementedError(f"const type {c.ty!r}")
@@ -3375,9 +3535,7 @@ class Codegen:
         Like _gen_list_lit, this never uses push/pop across a call (it parks
         intermediate pointers in frame slots), keeping rsp 16-byte aligned."""
         if A.expr_type(e.iter) != "list":
-            raise NotImplementedError(
-                "comprehension iterable must be a list for now"
-            )
+            raise NotImplementedError("comprehension iterable must be a list for now")
         res = info.locals_[f"__comp_res_{id(e)}"]
         it = info.locals_[f"__comp_iter_{id(e)}"]
         stop = info.locals_[f"__comp_stop_{id(e)}"]
@@ -3394,9 +3552,7 @@ class Codegen:
             f"mov [rbp{res:+d}], rax",
         )
         self._emit_malloc(cap * 8)
-        self.emitf(
-            f"mov rbx, [rbp{res:+d}]", f"mov [rbx+{self.LIST_BUF_OFF}], rax"
-        )
+        self.emitf(f"mov rbx, [rbp{res:+d}]", f"mov [rbx+{self.LIST_BUF_OFF}], rax")
 
         # Iterate the source list (reloading the buffer each step since append
         # below may have grown a different list — here the source isn't grown,
@@ -3411,9 +3567,7 @@ class Codegen:
         top = self.fresh("comp")
         end = self.fresh("endcomp")
         self.label(top)
-        self.emitf(
-            f"mov rax, [rbp{idx:+d}]", f"cmp rax, [rbp{stop:+d}]", f"jge {end}"
-        )
+        self.emitf(f"mov rax, [rbp{idx:+d}]", f"cmp rax, [rbp{stop:+d}]", f"jge {end}")
         self.emitf(
             f"mov rbx, [rbp{it:+d}]",
             f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
@@ -3435,6 +3589,79 @@ class Codegen:
             f"mov rax, [rbp{res:+d}]",
             f"mov rbx, [rbp{val:+d}]",
             "call _runtime_list_append",
+        )
+        if skip is not None:
+            self.label(skip)
+        self.emitf(f"inc qword [rbp{idx:+d}]", f"jmp {top}")
+        self.label(end)
+        self.emitf(f"mov rax, [rbp{res:+d}]")  # result value
+
+    def _gen_dict_comprehension(self, e: A.DictComprehension, info: FuncInfo) -> None:
+        """{key: value for var in iter (if cond)} -> build an empty dict, iterate
+        the (list-typed) iterable, and insert key->value for each element that
+        passes the filter. Result dict pointer left in rax.
+
+        Mirrors `_gen_comprehension` for the loop, and `_gen_dict_lit` for the
+        empty-dict allocation and per-pair `_runtime_dict_set` inserts. Parks all
+        intermediates in frame slots — no push/pop across calls."""
+        if A.expr_type(e.iter) != "list":
+            raise NotImplementedError(
+                "dict comprehension iterable must be a list for now"
+            )
+        res = info.locals_[f"__dcomp_res_{id(e)}"]
+        it = info.locals_[f"__dcomp_iter_{id(e)}"]
+        stop = info.locals_[f"__dcomp_stop_{id(e)}"]
+        idx = info.locals_[f"__dcomp_idx_{id(e)}"]
+        key_slot = info.locals_[f"__dcomp_key_{id(e)}"]
+        var = info.locals_[e.var]
+
+        # result = empty dict (cap 8), mirroring _gen_dict_lit's n=0 case.
+        cap = 8
+        self._emit_malloc(self.DICT_HEADER)
+        self.emitf(
+            f"mov qword [rax+{self.DICT_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.DICT_LEN_OFF}], 0",
+            f"mov qword [rax+{self.DICT_TOMB_OFF}], 0",
+            f"mov [rbp{res:+d}], rax",
+        )
+        self.emitf(f"mov rbx, {cap * self.DICT_SLOT_SIZE}", "call _runtime_zalloc")
+        self.emitf(f"mov rbx, [rbp{res:+d}]", f"mov [rbx+{self.DICT_BUF_OFF}], rax")
+
+        # Iterate the source list.
+        self.gen_expr(e.iter, info)
+        self.emitf(
+            f"mov [rbp{it:+d}], rax",
+            f"mov rbx, [rax+{self.LIST_LEN_OFF}]",
+            f"mov [rbp{stop:+d}], rbx",
+            f"mov qword [rbp{idx:+d}], 0",
+        )
+        top = self.fresh("dcomp")
+        end = self.fresh("enddcomp")
+        self.label(top)
+        self.emitf(f"mov rax, [rbp{idx:+d}]", f"cmp rax, [rbp{stop:+d}]", f"jge {end}")
+        self.emitf(
+            f"mov rbx, [rbp{it:+d}]",
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+            f"mov rcx, [rbp{idx:+d}]",
+            "mov rax, [rbx+rcx*8]",
+            f"mov [rbp{var:+d}], rax",
+        )
+        # Optional filter.
+        skip = None
+        if e.cond is not None:
+            skip = self.fresh("dcomp_skip")
+            self._gen_truthy_test(e.cond, info, skip)
+        # Evaluate key (a str ptr) into the scratch slot, then value, then insert.
+        self.gen_expr(e.key, info)
+        self.emitf(f"mov [rbp{key_slot:+d}], rax")
+        self.gen_expr(e.value, info)
+        if e.value_type == "float":
+            self.emitf("movq rax, xmm0")
+        self.emitf(
+            "mov rcx, rax",  # rcx = value
+            f"mov rbx, [rbp{key_slot:+d}]",  # rbx = key ptr
+            f"mov rax, [rbp{res:+d}]",  # rax = dict header
+            "call _runtime_dict_set",
         )
         if skip is not None:
             self.label(skip)
@@ -3606,7 +3833,7 @@ class Codegen:
         stop_slot = info.locals_[f"__strsl_stop_{id(e)}"]
         step_slot = info.locals_[f"__strsl_step_{id(e)}"]
         SENTINEL_MIN = "0x8000000000000000"
-        SENTINEL_MAX = "0x7fffffffffffffff"
+        SENTINEL_MAX = "0x7fffffffffffffff"  # noqa: F841
 
         # Eval obj.
         self.gen_expr(e.obj, info)
@@ -3753,11 +3980,14 @@ class Codegen:
             if owner is None:
                 raise NotImplementedError(
                     f"super().{e.method}: base {parent!r} is not a user class "
-                    f"serpent can dispatch to"
+                    f"asmpython can dispatch to"
                 )
             # Receiver is the enclosing method's own `self`, already in its slot.
             self._emit_positional_args(
-                e, e.args, info, start_reg=1,
+                e,
+                e.args,
+                info,
+                start_reg=1,
                 receiver_slot=info.locals_["self"],
             )
             self.emit_call(self._method_symbol(owner, e.method))
@@ -3770,7 +4000,10 @@ class Codegen:
             # Sema normalized e.args to a complete positional list; evaluate the
             # receiver (e.obj) and args into slots, then load reg0=self, reg1..
             self._emit_positional_args(
-                e, e.args, info, start_reg=1,
+                e,
+                e.args,
+                info,
+                start_reg=1,
                 receiver_expr=e.obj,
                 receiver_slot=info.locals_[f"__callself_{id(e)}"],
             )
@@ -4000,7 +4233,7 @@ class Codegen:
         "<=": "setle",
         ">": "setg",
         ">=": "setge",
-        # `is` / `is not` lower to identity-as-bit-equality. With serpent's
+        # `is` / `is not` lower to identity-as-bit-equality. With asmpython's
         # uniform 8-byte runtime representation that's the same as ==/!= on
         # the two raw 64-bit slots.
         "is": "sete",
@@ -4293,7 +4526,14 @@ class Codegen:
         self.label(end_lbl)
 
     def _emit_positional_args(
-        self, e, args, info, *, start_reg, receiver_expr=None, receiver_slot=None
+        self,
+        e: "A.Call | A.MethodCall",
+        args: list,
+        info: FuncInfo,
+        *,
+        start_reg,
+        receiver_expr=None,
+        receiver_slot=None,
     ) -> None:
         """Evaluate a call's receiver (if any) and `args` into pre-reserved
         frame slots, then load them into the ABI argument registers.
@@ -4332,6 +4572,12 @@ class Codegen:
         if e.func == "print":
             self._gen_print(e, info)
             return
+        if e.func == "id":
+            # id(x): the object's identity. Every asmpython value is an 8-byte
+            # slot (a pointer for heap objects), so the value itself in rax is a
+            # stable, unique-per-object integer — exactly id() semantics.
+            self.gen_expr(e.args[0], info)
+            return
         if e.func == "len":
             arg = e.args[0]
             self.gen_expr(arg, info)  # rax = ptr
@@ -4357,6 +4603,16 @@ class Codegen:
             return
         if e.func == "int":
             arg_t = A.expr_type(e.args[0])
+            if len(e.args) == 2:
+                # int(s, base): parse the string in the given radix via strtoll.
+                # base 0 auto-detects 0x / 0o / 0b prefixes (matches CPython).
+                base_slot = info.locals_[f"__int_base_{id(e)}"]
+                self.gen_expr(e.args[1], info)  # rax = base (int)
+                self.emitf(f"mov [rbp{base_slot:+d}], rax")
+                self.gen_expr(e.args[0], info)  # rax = string ptr
+                self.emitf(f"mov rbx, [rbp{base_slot:+d}]")
+                self._emit_str_to_int_base()  # rax = parsed int
+                return
             self.gen_expr(e.args[0], info)
             if arg_t == "str":
                 self._emit_str_to_int()
@@ -4386,7 +4642,7 @@ class Codegen:
             # default-or-0). Instances are dicts keyed by field name, so this is
             # the same helper that plain `obj.name` uses, just with a caller-
             # supplied default. The name arg is a string literal (sema-checked).
-            key_label, _ = self.intern_string(e.args[1].value)
+            key_label, _ = self.intern_string(e.args[1].value)  # type: ignore
             if len(e.args) == 3:
                 dslot = info.locals_[f"__getattr_def_{id(e)}"]
                 self.gen_expr(e.args[2], info)
@@ -4409,7 +4665,7 @@ class Codegen:
             return
         if e.func == "hasattr":
             # hasattr(obj, "name") -> dict_contains(obj, "name") (0/1).
-            key_label, _ = self.intern_string(e.args[1].value)
+            key_label, _ = self.intern_string(e.args[1].value)  # type: ignore
             self.gen_expr(e.args[0], info)  # rax = instance dict
             self.emitf(
                 f"lea rbx, [{key_label}]",
@@ -4441,7 +4697,10 @@ class Codegen:
         if n_missing <= 0:
             return list(args)
         tail = [d for d in defaults[-n_missing:] if d is not None]
-        return list(args) + tail
+        # Concatenate via extend rather than `+` (asmpython lists have no `+`).
+        combined = list(args)
+        combined.extend(tail)
+        return combined
 
     def _gen_constructor(self, e: A.Call, info: FuncInfo) -> None:
         """ClassName(args)  ->  rax = pointer to new instance.
@@ -4478,12 +4737,14 @@ class Codegen:
         # Result: the instance pointer (caller may discard).
         self.emitf(f"mov rax, [rbp{slot_off:+d}]")
 
-    @staticmethod
-    def _method_symbol(class_name: str, method_name: str) -> str:
+    def _method_symbol(self, class_name: str, method_name: str) -> str:
         """Mangle a method into a unique linker symbol: ClassName__method.
 
         Note that `__init__` mangles to `Class____init__` (four underscores)
         which is intentional — the separator is always two underscores.
+
+        A plain instance method (not a staticmethod) so codegen stays within
+        asmpython's self-compilable subset; `self` is unused but required.
         """
         return f"{class_name}__{method_name}"
 
@@ -4520,14 +4781,14 @@ class Codegen:
 
     # ---- FFI dispatch ------------------------------------------------------
     #
-    # The serpent FFI is purely positional. Each foreign function's signature
-    # is fully known statically (serpent/stdlib/<mod>.py). The codegen
+    # The asmpython FFI is purely positional. Each foreign function's signature
+    # is fully known statically (asmpython/_stdlib/<mod>.py). The codegen
     # evaluates each argument, promotes int -> float as needed, and places it
     # in the correct ABI register slot. Integer args use the integer regs
     # (rdi/rsi/... on Linux, rcx/rdx/... on Windows); float args use XMM0..N.
     # Result type tells callers whether to expect rax or xmm0.
 
-    def _gen_ffi_call(self, fn, args, info: FuncInfo) -> None:
+    def _gen_ffi_call(self, fn: _stdlib.Func, args: list, info: FuncInfo) -> None:
         # Evaluate args left-to-right, spill each into a scratch frame slot.
         # We use `__ffi_arg<i>` slots that we pre-reserve in _collect_locals.
         slot_offs: list[int] = []
@@ -4659,6 +4920,35 @@ class Codegen:
         """In: rax = nul-terminated ptr. Out: rax = parsed int (atoll)."""
         raise NotImplementedError
 
+    def _emit_str_to_int_base(self) -> None:
+        """In: rax = nul-terminated ptr, rbx = base. Out: rax = parsed int.
+        Uses strtoll; base 0 auto-detects 0x/0o/0b prefixes."""
+        raise NotImplementedError
+
+    def _emit_normalize_0b_prefix(self) -> None:
+        """In: rax = str ptr, rbx = base. Out: rax/rbx possibly adjusted.
+
+        C's strtoll with base 0 understands 0x (hex) and a leading 0 (octal)
+        but NOT Python's 0b/0B binary prefix. Emit a guard that, when base==0
+        and the string starts with '0b'/'0B', advances rax past the prefix and
+        forces rbx=2. Other inputs pass through untouched. Called by each
+        target's `_emit_str_to_int_base` just before invoking strtoll, so the
+        ABI-specific register moves happen on the already-normalized values."""
+        done = self.fresh("notbin")
+        self.emitf(
+            "cmp rbx, 0",
+            f"jne {done}",  # explicit base given -> leave alone
+            "cmp byte [rax], '0'",
+            f"jne {done}",
+            "mov cl, byte [rax+1]",
+            "or cl, 0x20",  # lowercase
+            "cmp cl, 'b'",
+            f"jne {done}",
+            "add rax, 2",  # skip "0b"
+            "mov rbx, 2",  # force binary
+        )
+        self.label(done)
+
     def _emit_float_to_str(self) -> None:
         """In: xmm0 = double. Out: rax = ptr to nul-terminated `%g` form."""
         raise NotImplementedError
@@ -4674,8 +4964,7 @@ class Codegen:
 
     # Memory ---------------------------------------------------------------
     def _emit_malloc(self, n: int) -> None:
-        """Compile-time `n` bytes -> rax = ptr."""
-        del n
+        """Compile-time `n` bytes -> rax = ptr. (`n` is used by overrides.)"""
         raise NotImplementedError
 
     def _emit_libc_malloc_size_in_rax(self) -> None:
@@ -4713,12 +5002,12 @@ class Codegen:
 
     # Floats ---------------------------------------------------------------
     def _emit_call_libc_double_double(self, fn: str) -> None:
-        """In: xmm0, xmm1 = args. Out: xmm0 = result. Calls `fn(double,double)`."""
-        del fn
+        """In: xmm0, xmm1 = args. Out: xmm0 = result. Calls `fn(double,double)`.
+        (`fn` is used by overrides.)"""
         raise NotImplementedError
 
     # Exception machinery --------------------------------------------------
     def _emit_call_setjmp(self, buf_off: int) -> None:
-        """Sets up a setjmp call against the buffer at [rbp+buf_off]."""
-        del buf_off
+        """Sets up a setjmp call against the buffer at [rbp+buf_off].
+        (`buf_off` is used by overrides.)"""
         raise NotImplementedError

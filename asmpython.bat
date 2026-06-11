@@ -1,5 +1,5 @@
 @echo off
-REM Wrapper for serpent. If any required tool (Python, NASM, GCC) is missing
+REM Wrapper for asmpython. If any required tool (Python, NASM, GCC) is missing
 REM from ./tools/, _download-deps.bat fetches it before we run the compiler.
 
 setlocal
@@ -20,16 +20,16 @@ if not exist "%GCC%"    set "MISSING=%MISSING% --gcc"
 if exist "%GCC%" if not exist "%GCC_SYSROOT%" set "MISSING=%MISSING% --gcc"
 
 if defined MISSING (
-    echo serpent: bootstrapping missing dependencies via _download-deps.bat:%MISSING%
+    echo asmpython: bootstrapping missing dependencies via _download-deps.bat:%MISSING%
     call "%ROOT%_download-deps.bat" %MISSING% --dest "%ROOT%tools"
     if errorlevel 1 (
-        echo serpent: dependency download failed.
+        echo asmpython: dependency download failed.
         exit /b 1
     )
 )
 
 REM Embeddable Python ignores PYTHONPATH and uses python3XX._pth instead.
-REM Make sure the repo root is on sys.path so `-m serpent` resolves the
+REM Make sure the repo root is on sys.path so `-m asmpython` resolves the
 REM local package. Idempotent: rewriting the file with the same content
 REM each run is cheap.
 for %%P in ("%ROOT%tools\python\python3*._pth") do (
@@ -38,4 +38,4 @@ for %%P in ("%ROOT%tools\python\python3*._pth") do (
     >> "%%P" echo %ROOT%
 )
 
-"%PYTHON%" -m serpent %* --nasm "%NASM%" --gcc "%GCC%"
+"%PYTHON%" -m asmpython %* --nasm "%NASM%" --gcc "%GCC%"

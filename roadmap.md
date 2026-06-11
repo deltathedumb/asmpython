@@ -1,32 +1,77 @@
-# Serpent Roadmap to 99.9% Python Compatibility
+# asmpython Roadmap to 99.9% Python Compatibility
 
-This document is the long-form plan for evolving serpent from "compiles small Python scripts" to "compiles essentially anything that doesn't require CPython's C extension API."
+This document is the long-form plan for evolving asmpython from "compiles small Python scripts" to "compiles essentially anything that doesn't require CPython's C extension API."
 
-99.9% compatibility means: a developer writes idiomatic Python — `requests.get(url).json()`, `with open(path) as f: lines = f.readlines()`, `dataclass`-decorated config, an asyncio task or three — and serpent either compiles it or fails with a clear "this feature isn't implemented yet" message. **Not** "your code segfaults at runtime" or "results silently differ from CPython."
+99.9% compatibility means: a developer writes idiomatic Python — `requests.get(url).json()`, `with open(path) as f: lines = f.readlines()`, `dataclass`-decorated config, an asyncio task or three — and asmpython either compiles it or fails with a clear "this feature isn't implemented yet" message. **Not** "your code segfaults at runtime" or "results silently differ from CPython."
 
 The work is grouped into **tiers**. Each tier completes a self-consistent capability slice. Items within a tier are roughly ordered by dependencies. Estimates are calendar-time for one focused engineer.
 
 ---
 
-## The headline goal: self-compilation by July
+## The release goal: 1.0 — by March 2027
 
-**Serpent should compile serpent.** The compiler is ~5,700 lines of Python; today CPython runs it and emits NASM. The milestone is: feed `serpent/` to `python -m serpent`, get back a `serpent.exe` that itself compiles `serpent/` and produces a byte-identical (or behaviourally-identical) result on the next pass. That's the test that means we actually built a Python compiler, not a Python-subset toy.
+**1.0 is the public release.** It has two required deliverables: the first-party standard library **`asmpython.libs`** and broad **Python language compatibility (the 99.9% target)**.
+
+**(1) `asmpython.libs`** — three required pillars:
+
+| Pillar | What | Layer |
+| ------ | ---- | ----- |
+| `asmpython.libs.os` | OS features — files, processes, environment, time | User-mode; syscall / C-runtime backed |
+| `asmpython.libs.net` | Networking — sockets (bind/listen/connect/send/recv) | User-mode; Winsock (Windows) + POSIX (Linux) |
+| `asmpython.libs.hardware` | **Ring-0 / `--freestanding` driver-grade** hardware access | Loadable driver (`.sys`/`.ko`) or bare-metal; **no OS/libc** |
+
+The private FFI-binding registry (`asmpython/_stdlib/`) **folds into `asmpython.libs`** — `libs` becomes the single public stdlib package. So `import asmpython.libs.os`, etc.
+
+**(2) Python compatibility — the 99.9% target.** 1.0 must support all of Python in the sense defined by the compatibility tiers below: idiomatic Python either compiles, or fails with a clear "this feature isn't implemented yet" message — never a silent miscompile. The 0.1% explicitly excluded is interpreter-only machinery (the GIL, `eval`/`exec`, the C-API, metaclasses/descriptors, async, generators) — see "Decisions I'm punting on" and the tier list. **This is the dominant scope driver and the main tension with the March 2027 date** (see the next subsection).
+
+### Why March 2027, and why `hardware` is the schedule driver
+
+`os` and `net` are user-mode: they extend the existing FFI registry + native runtime, ~3–5 weeks each. **`hardware` at ring-0 is a second compiler backend**, and it gates the date:
+
+- A `--freestanding` output mode: **no libc, no `main`** (custom entry — `DriverEntry` / `module_init` / bare reset vector), kernel calling conventions and structures, a **non-`malloc` runtime** (kernel allocators or a static arena), and a different link + object pipeline.
+- On Windows, an unsigned driver won't load — test-signing at minimum.
+- `asmpython.libs.hardware` only *starts* once `--freestanding` works; it can't be built in parallel with it.
+
+Rough sequencing from today's state (user-mode only, 3-call stdlib, not self-hosting): `libs.os` ~3–5wk, `libs.net` ~3–5wk, **`--freestanding` backend ~2–4mo**, ring-0 `hardware` on top ~1–2mo, 1.0 hardening + docs ~3–4wk. These don't fully parallelize. **March 2027 (~9 months) is aggressive-but-plausible** — it holds only if freestanding work starts soon and the self-compilation track doesn't absorb all the bandwidth. The `freestanding: true` flag in [`asmpython/assembly/pkgformat.py`](asmpython/assembly/pkgformat.py) is the seed the freestanding backend builds on.
+
+### Feasibility: 99.9% compatibility vs. the March 2027 date
+
+These two 1.0 requirements pull against each other on schedule. The `asmpython.libs` work is months. **The 99.9%-compatibility tier list below is the multi-year arc** — Tiers 1–12 cover tagged-value collections, polymorphism/vtables, closures, generators(-as-eager), the dataclass model, exception classes, full kwargs, file I/O, `with`, a real optimizer, more platforms, and a large stdlib. That is not a thing that finishes by March 2027 alongside a ring-0 driver backend.
+
+So one of these has to give, and it's a product call (flagged, not silently assumed):
+
+- **Option A — keep March 2027, redefine "all Python" for 1.0 as the self-host-grade subset** (everything the compiler itself uses + common idioms), with 99.9% as the post-1.0 trajectory. This is achievable.
+- **Option B — keep 99.9% as a hard 1.0 gate, move the date out by 1–2+ years.** This is the only way both requirements hold literally.
+
+Until that's decided, treat 1.0 as carrying *both* requirements with the date as the known risk.
+
+### What 1.0 does *not* require
+
+- **Self-compilation is not a 1.0 gate** — it's a parallel track (next section). 1.0 ships whether or not the compiler self-hosts by then. (Self-host is, however, the honest proxy for compatibility — see that section.)
+- macOS (`hardware` targets Windows + Linux first).
+- Interpreter-only Python features (GIL, `eval`/`exec`, C-API, metaclasses, async, generators) — these are the excluded 0.1%, not on the roadmap at all.
+
+---
+
+## Parallel track: self-compilation
+
+**asmpython should compile asmpython.** The compiler is ~5,700 lines of Python; today CPython runs it and emits NASM. The milestone is: feed `asmpython/` to `python -m asmpython`, get back a `asmpython.exe` that itself compiles `asmpython/` and produces a byte-identical (or behaviourally-identical) result on the next pass. That's the test that means we actually built a Python compiler, not a Python-subset toy.
 
 Why this matters:
 
-- **It's the honest measure of "compatibility."** Every cute test case can be hand-trimmed to fit a subset; the compiler can't. If serpent can compile serpent, the supported subset is broad enough that real code lands on it.
-- **It forces priorities.** The features serpent is missing today (dataclasses, exception classes, `**kwargs`, list-of-string, comprehensions, file I/O, …) are exactly the ones blocking real users — but the compiler source tells us which of them matter *most* by where they appear most often. The tier ordering below already reflects that audit.
-- **It collapses the bootstrap dependency.** Once serpent compiles serpent, CPython stops being a prerequisite for shipping a serpent binary. Users on a machine without Python can still get a working compiler.
+- **It's the honest measure of "compatibility."** Every cute test case can be hand-trimmed to fit a subset; the compiler can't. If asmpython can compile asmpython, the supported subset is broad enough that real code lands on it.
+- **It forces priorities.** The features asmpython is missing today (dataclasses, exception classes, `**kwargs`, list-of-string, comprehensions, file I/O, …) are exactly the ones blocking real users — but the compiler source tells us which of them matter *most* by where they appear most often. The tier ordering below already reflects that audit.
+- **It collapses the bootstrap dependency.** Once asmpython compiles asmpython, CPython stops being a prerequisite for shipping a asmpython binary. Users on a machine without Python can still get a working compiler.
 
-The plan is to hit this by **July 2026**. The detailed tiers below are the path — Tier 1 (strings) is already done, Tier 2 (collections) is the current battleground, and each subsequent tier knocks out a category of Python feature the compiler relies on. We don't need every tier complete to self-host — we need *enough* of each that the specific constructs in `serpent/*.py` parse, type-check, and emit correct code.
+Self-compilation runs as a **parallel track** to the 1.0 release above — valuable, actively worked, but **not** a gate for 1.0 and not pinned to a hard date. The detailed tiers below are the path — Tier 1 (strings) is already done, Tier 2 (collections) is the current battleground, and each subsequent tier knocks out a category of Python feature the compiler relies on. We don't need every tier complete to self-host — we need *enough* of each that the specific constructs in `asmpython/*.py` parse, type-check, and emit correct code.
 
-What we explicitly **don't** need before July:
+What self-compilation explicitly **doesn't** need:
 
 - Full stdlib coverage (Tier 5). The compiler only imports `os`, `sys`, `subprocess`, `dataclasses`, `pathlib`, `typing`, and `enum`. Everything else in Tier 5 is post-bootstrap polish.
 - Performance work (Tier 9). Self-host means *correct* compilation, not fast compilation. A 60-second build is fine as long as it converges.
 - Most of Tier 11 (other platforms). Self-host on Windows x86-64 is the milestone; Linux/macOS follow.
 
-Progress will be measured by a `selfhost/` script that tries to compile the compiler and reports which file in `serpent/` chokes first. Each tier landing should move that needle.
+Progress will be measured by a `selfhost/` script that tries to compile the compiler and reports which file in `asmpython/` chokes first. Each tier landing should move that needle.
 
 ---
 
@@ -127,7 +172,7 @@ Generators require coroutine-style frame save/restore. Easiest implementation: h
 
 ## Tier 4 — Memory management *(~1 week, done in parallel with Tier 1-3)*
 
-Currently serpent leaks: every `[1,2,3]` `malloc`s without freeing. We're below the radar for short-running scripts but production code needs this.
+Currently asmpython leaks: every `[1,2,3]` `malloc`s without freeing. We're below the radar for short-running scripts but production code needs this.
 
 | # | Item | Approach |
 |---|------|----------|
@@ -160,22 +205,22 @@ The stdlib is enormous; 99.9% means we ship enough of it that the typical script
 | `tempfile` | `NamedTemporaryFile`, `TemporaryDirectory`, `mkstemp` | Easy |
 | `subprocess` | `run`, `Popen`, `check_call`, `check_output`, `PIPE`, `DEVNULL` | Medium-hard — fork/exec on Linux, CreateProcess on Windows |
 | `glob` | `glob.glob`, `glob.iglob` | Easy on top of pathlib |
-| `argparse` | The whole thing | Medium — pure-serpent, no FFI |
+| `argparse` | The whole thing | Medium — pure-asmpython, no FFI |
 
 ### 5b. Data and formats
 
 | Module | Notes |
 |--------|-------|
-| `json` | `loads`, `dumps`, `JSONDecodeError`. Pure-serpent parser. |
-| `csv` | `reader`, `writer`, `DictReader`, `DictWriter`. Pure-serpent. |
+| `json` | `loads`, `dumps`, `JSONDecodeError`. Pure-asmpython parser. |
+| `csv` | `reader`, `writer`, `DictReader`, `DictWriter`. Pure-asmpython. |
 | `re` | Regular expressions. **Hard** — port PCRE or write a small NFA engine. ~1 week alone. |
 | `pickle` | Almost certainly skip. Different bytecode universe. |
 | `base64`, `hashlib`, `hmac`, `secrets` | FFI to OpenSSL or implement directly. |
-| `struct` | Pack/unpack binary blobs. Pure-serpent with bit ops. |
+| `struct` | Pack/unpack binary blobs. Pure-asmpython with bit ops. |
 | `xml.etree.ElementTree` | Maybe — XML is fundamentally heavy for "small compiler" energy. Defer. |
-| `configparser`, `tomllib` | Pure-serpent. |
+| `configparser`, `tomllib` | Pure-asmpython. |
 | `gzip`, `zipfile`, `tarfile` | FFI to zlib/libarchive. |
-| `urllib.parse` | Pure-serpent: URL parsing, no network. |
+| `urllib.parse` | Pure-asmpython: URL parsing, no network. |
 
 ### 5c. Numerics
 
@@ -184,7 +229,7 @@ The stdlib is enormous; 99.9% means we ship enough of it that the typical script
 | `math` | ✅ already done. Extend with `gcd`, `lcm`, `isclose`, `isfinite`, `isinf`, `isnan`, `comb`, `perm`. |
 | `cmath` | Complex math — needs complex number type first. |
 | `random` | `random`, `randint`, `choice`, `shuffle`, `sample`, `seed`, `Random` class. FFI to libc rand or implement Mersenne Twister. |
-| `statistics` | `mean`, `median`, `stdev`, `variance`. Pure-serpent. |
+| `statistics` | `mean`, `median`, `stdev`, `variance`. Pure-asmpython. |
 | `decimal` | Arbitrary precision. Hard — port libmpdec or skip. |
 | `fractions` | Bignum dependency. Defer. |
 
@@ -196,7 +241,7 @@ The stdlib is enormous; 99.9% means we ship enough of it that the typical script
 | `multiprocessing` | Hard. Different process model; would need its own serialization layer. |
 | `concurrent.futures` | Layered on threading. |
 | `asyncio` | Major. Coroutine impl (Tier 3.20) + event loop + selectors + `aiohttp` ecosystem hooks. ~2 weeks alone. |
-| `queue` | `Queue`, `LifoQueue`, `PriorityQueue`. Pure-serpent. |
+| `queue` | `Queue`, `LifoQueue`, `PriorityQueue`. Pure-asmpython. |
 
 ### 5e. Networking
 
@@ -204,36 +249,36 @@ The stdlib is enormous; 99.9% means we ship enough of it that the typical script
 |--------|-------|
 | `socket` | FFI to BSD sockets / Winsock. |
 | `select` | `select.select`, `epoll`, `kqueue`. FFI. |
-| `http.client`, `http.server` | Pure-serpent on top of `socket`. |
+| `http.client`, `http.server` | Pure-asmpython on top of `socket`. |
 | `ssl` | FFI to OpenSSL. |
-| `email` | Big — message parsing, MIME. Pure-serpent is hard; consider stub. |
+| `email` | Big — message parsing, MIME. Pure-asmpython is hard; consider stub. |
 
 ### 5f. Datetime
 
 | Module | Notes |
 |--------|-------|
 | `time` | `time`, `sleep`, `strftime`, `monotonic`, `perf_counter`. Easy FFI. |
-| `datetime` | `date`, `time`, `datetime`, `timedelta`, `timezone`. Pure-serpent on top of `time`. Medium. |
-| `calendar` | Pure-serpent on top of `datetime`. |
+| `datetime` | `date`, `time`, `datetime`, `timedelta`, `timezone`. Pure-asmpython on top of `time`. Medium. |
+| `calendar` | Pure-asmpython on top of `datetime`. |
 | `zoneinfo` | Needs tzdata. |
 
 ### 5g. Functional helpers
 
 | Module | Notes |
 |--------|-------|
-| `itertools` | `chain`, `cycle`, `count`, `repeat`, `combinations`, `permutations`, `product`, `groupby`, `accumulate`, `dropwhile`, `takewhile`. Pure-serpent with generators. |
-| `functools` | `reduce`, `partial`, `lru_cache`, `cache`, `cached_property`, `wraps`. Pure-serpent. |
+| `itertools` | `chain`, `cycle`, `count`, `repeat`, `combinations`, `permutations`, `product`, `groupby`, `accumulate`, `dropwhile`, `takewhile`. Pure-asmpython with generators. |
+| `functools` | `reduce`, `partial`, `lru_cache`, `cache`, `cached_property`, `wraps`. Pure-asmpython. |
 | `operator` | `add`, `itemgetter`, `attrgetter`. Trivial. |
-| `collections` | `deque`, `Counter`, `defaultdict`, `OrderedDict`, `namedtuple`. Pure-serpent. |
-| `enum` | `Enum`, `IntEnum`, `auto`. Pure-serpent. |
-| `dataclasses` | `@dataclass` decorator. Pure-serpent, depends on Tier 3.14. |
+| `collections` | `deque`, `Counter`, `defaultdict`, `OrderedDict`, `namedtuple`. Pure-asmpython. |
+| `enum` | `Enum`, `IntEnum`, `auto`. Pure-asmpython. |
+| `dataclasses` | `@dataclass` decorator. Pure-asmpython, depends on Tier 3.14. |
 | `typing` | All annotations are runtime no-ops; `TypeVar`, `Generic`, `Protocol` accepted but unused. |
 
 ### 5h. Other
 
 | Module | Notes |
 |--------|-------|
-| `logging` | Pretty mechanical — handler, formatter, levels. Pure-serpent. |
+| `logging` | Pretty mechanical — handler, formatter, levels. Pure-asmpython. |
 | `inspect` | Reflection. Hard — requires preserved source / AST attribution. |
 | `traceback` | Stack walking. Requires unwind info. |
 | `warnings` | Easy. |
@@ -277,7 +322,7 @@ The killer for "I want to compile any Python program."
 | 7.6 | **Module-level code** runs at first import only | CPython semantics |
 | 7.7 | **`import x as y`**, **`from x import y as z`** | Common aliasing |
 | 7.8 | **Circular import resolution** | Pragmatic codebases |
-| 7.9 | **A package manager** (optional v2) — `serpent install requests` pulling from a curated registry of "serpent-tested" PyPI packages | The big bet — "does this package work?" |
+| 7.9 | **A package manager** (optional v2) — `asmpython install requests` pulling from a curated registry of "asmpython-tested" PyPI packages | The big bet — "does this package work?" |
 | 7.10 | **Compatibility shim layer** — pure-Python packages from PyPI that don't use C extensions just work (after Tier 5 covers their stdlib usage) | The other big bet |
 
 7.9 and 7.10 are the path to 99.9%. We don't reimplement every PyPI package; we **vet** which ones work and surface that. A package that uses `requests` (which uses `urllib3`, which uses `socket`, `ssl`, `select`) needs all of Tier 5e — but once that exists, `requests` itself should just work.
@@ -286,7 +331,7 @@ The killer for "I want to compile any Python program."
 
 ## Tier 8 — Production-grade error reporting *(~1 week)*
 
-Serpent's diagnostics today catch user errors before codegen. Production code needs *runtime* diagnostics too.
+asmpython's diagnostics today catch user errors before codegen. Production code needs *runtime* diagnostics too.
 
 | # | Item | Why |
 |---|------|-----|
@@ -317,30 +362,30 @@ Reasonable performance is part of compatibility. A 100x-slower script doesn't qu
 | 9.9 | **PGO** (profile-guided optimization) | 10-30% |
 | 9.10 | **LTO** (whole-program optimization) | 5-15% |
 
-CPython itself isn't a speed champion; serpent beating it by 5-10x on numeric code is the *baseline* expectation for a compiler. Beating PyPy on tight loops takes years; that's not the goal.
+CPython itself isn't a speed champion; asmpython beating it by 5-10x on numeric code is the *baseline* expectation for a compiler. Beating PyPy on tight loops takes years; that's not the goal.
 
 ---
 
 ## Tier 10 — Tooling and ecosystem *(~3 weeks)*
 
-What makes serpent *easy to use* in addition to capable.
+What makes asmpython *easy to use* in addition to capable.
 
 | # | Item |
 |---|------|
-| 10.1 | **`serpent init <name>`** scaffolds a project (entry point, .gitignore, README) |
-| 10.2 | **`serpent build`** auto-discovers the entry point and produces a binary |
-| 10.3 | **`serpent run`** = build + execute |
-| 10.4 | **`serpent test`** runs the test directory |
-| 10.5 | **`serpent check`** type-checks without compiling — fast feedback loop |
-| 10.6 | **`serpent fmt`** style enforcement (or delegate to Black) |
-| 10.7 | **`serpent doctor`** diagnoses toolchain problems (missing NASM, wrong gcc, etc.) |
+| 10.1 | **`asmpython init <name>`** scaffolds a project (entry point, .gitignore, README) |
+| 10.2 | **`asmpython build`** auto-discovers the entry point and produces a binary |
+| 10.3 | **`asmpython run`** = build + execute |
+| 10.4 | **`asmpython test`** runs the test directory |
+| 10.5 | **`asmpython check`** type-checks without compiling — fast feedback loop |
+| 10.6 | **`asmpython fmt`** style enforcement (or delegate to Black) |
+| 10.7 | **`asmpython doctor`** diagnoses toolchain problems (missing NASM, wrong gcc, etc.) |
 | 10.8 | **VS Code extension** — syntax highlighting, diagnostics inline, build button |
 | 10.9 | **LSP server** — go-to-def, find-references, autocomplete in any editor |
 | 10.10 | **Incremental compilation** — only re-emit changed files |
 | 10.11 | **Cross-compilation pre-built**: ship the runtime archive for every target as a release artifact, so users don't need to assemble it themselves |
 | 10.12 | **One-command install**: `curl … \| sh` (Linux/Mac) or single-MSI (Windows). Bundle NASM and a stripped gcc; users shouldn't have to install a toolchain |
 | 10.13 | **Hosted CI templates** — GitHub Actions, GitLab CI examples |
-| 10.14 | **Auto-update**: `serpent self update` |
+| 10.14 | **Auto-update**: `asmpython self update` |
 
 ---
 
@@ -366,11 +411,11 @@ The hard limit on "99.9% of Python scripts." Many real packages ship `.so`/`.pyd
 
 | # | Item | Approach |
 |---|------|----------|
-| 12.1 | **Subset of CPython C API** that pure-Python packages declare | Implement `Py_BuildValue`, `PyArg_ParseTuple`, `PyDict_New`, etc. against serpent's runtime |
-| 12.2 | **numpy compatibility shim** | Either implement enough numpy in pure serpent, or get binary numpy to load against our shim. |
+| 12.1 | **Subset of CPython C API** that pure-Python packages declare | Implement `Py_BuildValue`, `PyArg_ParseTuple`, `PyDict_New`, etc. against asmpython's runtime |
+| 12.2 | **numpy compatibility shim** | Either implement enough numpy in pure asmpython, or get binary numpy to load against our shim. |
 | 12.3 | **`ctypes`** | Pure FFI; should be implementable directly. |
 | 12.4 | **`cffi`** | Same as 12.3. |
-| 12.5 | **Bridge mode**: ship a `libpython3.so` shim that real CPython extensions can link against; serpent intercepts the calls and bridges to its own runtime | High effort, high payoff if achievable. |
+| 12.5 | **Bridge mode**: ship a `libpython3.so` shim that real CPython extensions can link against; asmpython intercepts the calls and bridges to its own runtime | High effort, high payoff if achievable. |
 
 Realistically: full C-API compatibility is unlikely. The win is "compatible with C-extension *usage patterns*, not all C extensions." numpy is essential; everything else is opt-in.
 
@@ -436,7 +481,7 @@ Things that need agreement before they land:
 
 1. **Boxed vs. unboxed values**. Boxed is simpler, slower, more compatible. Unboxed needs an inference pass and limits dynamism. Pick at the start of Tier 2.
 2. **Reference counting vs. tracing GC**. RC integrates simply with exceptions; tracing is faster on average. Pick at the start of Tier 4.
-3. **Pure serpent stdlib vs. CPython source ports**. Porting CPython's stdlib Python source as-is could be quick but ties us to its conventions. Pick per-module.
+3. **Pure asmpython stdlib vs. CPython source ports**. Porting CPython's stdlib Python source as-is could be quick but ties us to its conventions. Pick per-module.
 4. **PyPI registry strategy** (Tier 7.9). Curate? Mirror? Test against the top-1000? Pick once Tier 5 is mostly done.
 5. **C extension strategy** (Tier 12). Compatible vs. interop-only vs. skip? Pick after Tier 7.10 reveals how many packages actually need C extensions.
 
@@ -444,7 +489,7 @@ Things that need agreement before they land:
 
 ## Self-host gap audit (what the compiler source actually needs)
 
-The 5,700-line compiler relies on a specific slice of Python. Hitting July means closing **these** features, in roughly this order. Items already shipped are checked.
+The ~6,000-line compiler relies on a specific slice of Python. Self-compilation means closing **these** features, in roughly this order. Items already shipped are checked.
 
 ### Already done
 
@@ -482,15 +527,35 @@ The 5,700-line compiler relies on a specific slice of Python. Hitting July means
 18. **List methods**: `list.extend`, `list.index`, slicing assignment `xs[:] = ...`.
 19. **`hasattr` / `getattr`** — used in a couple of places in sema for `b.arg_types` checks.
 20. **Set literal `{a, b, c}` and set-`in`** — `KEYWORDS = {...}` in the lexer is a load-bearing set membership.
-21. **Keyword arguments at call sites** — `argparse.ArgumentParser(prog="serpent")`, every `field(default_factory=...)`. Big lift (needs a new call ABI).
+21. **Keyword arguments at call sites** — `argparse.ArgumentParser(prog="asmpython")`, every `field(default_factory=...)`. Big lift (needs a new call ABI).
 
 ### Things the compiler doesn't use (so we don't need them for self-host)
 
-Generators / `yield`, async / `await`, `with` (for non-file uses), `match/case`, `lambda` (mostly), multiple inheritance, `super()`, `**kwargs`, `del`, walrus `:=`, comprehension `if` clauses (used once or twice — can be unrolled), most of `re`, `json`, `time`, `random`, `os.path`. These all stay on the roadmap for the 99.9% target but **don't** gate the July milestone.
+Generators / `yield`, async / `await`, `with` (for non-file uses), `match/case`, `lambda` (mostly), multiple inheritance, `super()`, `**kwargs`, `del`, walrus `:=`, comprehension `if` clauses (used once or twice — can be unrolled), most of `re`, `json`, `time`, `random`, `os.path`. These all stay on the roadmap for the 99.9% target but **don't** gate self-compilation.
 
 ### Measuring progress
 
-A `selfhost/check.py` script will live in the repo (forthcoming). It runs `python -m serpent serpent/__main__.py` against every file in `serpent/*.py` and reports the first file (and line number) that fails. Every PR that lands a roadmap item should move that pointer.
+`selfhost/check.py` lives in the repo. Run `python -m selfhost.check` (add `--verbose` for every blocker). It runs lex → parse → sema (the front-end gates) over every file the compiler is made of, in dependency order, and reports the first construct that chokes per file. Every PR that lands a roadmap item should move that pointer.
+
+### Frontier snapshot — 2026-06-09
+
+Front-end gauntlet: **12/19 files pass lex+parse+sema.** First blocker per still-failing file (leaves first — the lexer is what everything else depends on):
+
+| File | Gate | Blocker |
+| ---- | ---- | ------- |
+| `_compiler/lexer.py` | SEMA | `int(text, 0)` — `int()` with an explicit base (radix parsing for `0x`/`0o`/`0b` literals). |
+| `_compiler/codegen.py` | PARSE | set comprehension `{... for line in ... if ...}` — dict comprehensions now compile (`{k: v for ...}` works end-to-end); sets aren't a runtime value yet (`SetLit` parses but has no codegen). |
+| `_compiler/sema.py` | SEMA | lenient-mode artifact: `call.args` reads as attribute access on an int (no real cross-module typing yet). |
+| `_compiler/driver.py` | SEMA | `os.environ` (not in the stdlib registry). |
+| `_compiler/__main__.py` | SEMA | `str.format`. |
+| `_runtime/build.py` | SEMA | `__file__` (module dunder not modelled). |
+| `assembly/__init__.py` | PARSE | nested `def` (closures) — CPython-only API glue; not on the self-host critical path. |
+
+Fixed on the way to this snapshot (so they no longer block): generators in the lexer (`_iter`/`_handle_indentation` rewritten to build a token list eagerly — the compiler has no `yield`); `**kwargs` (the lexer now tokenizes `**`/`**=`); `@staticmethod` in lexer/codegen (converted to a module function / an instance method, since the compiler requires methods to take `self`); **dict comprehensions** (`{k: v for var in iter [if cond]}` — new `DictComprehension` node, parsed/typed/lowered to an empty-dict-then-loop-insert; covered by test 78).
+
+Next moves: **set comprehensions / sets as a runtime value** (now the codegen.py blocker — `SetLit` parses but has no codegen), **`int(s, base)`** radix parsing (gates the lexer leaf), then the SEMA stdlib gaps (`os.environ`, `str.format`, `__file__`).
+
+Next moves, in priority order: **dict comprehensions** (parser + lower to a dict build — central, used in codegen/sema), **`int(s, base)`** (runtime radix parse — gates the lexer leaf), then the SEMA stdlib gaps (`os.environ`, `str.format`, `__file__`).
 
 ---
 
@@ -499,6 +564,6 @@ A `selfhost/check.py` script will live in the repo (forthcoming). It runs `pytho
 - **Which Python version are we targeting?** 3.11 syntax (`match/case`)? 3.12 (`type` statement)? 3.13 (free-threading)? Default: 3.11.
 - **What's the perf target?** Match CPython? Beat it by 2x? 5x?
 - **What error level is "incompatible"?** Hard refusal at compile time, or runtime "feature not implemented" message?
-- **What's the support window?** Are pinned Python versions a thing here, or does serpent 1.0 just freeze a feature set?
+- **What's the support window?** Are pinned Python versions a thing here, or does asmpython 1.0 just freeze a feature set?
 - **Open source strategy?** Apache 2.0? Bring up the project repo publicly?
 - **Funding model for the people doing this?** Five months full-time isn't a side project.

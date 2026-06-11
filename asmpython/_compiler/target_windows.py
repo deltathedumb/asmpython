@@ -12,6 +12,7 @@ MS_ARG_REGS = ["rcx", "rdx", "r8", "r9"]
 
 
 class WindowsCodegen(Codegen):
+    target_name = "WindowsCodegen"
     section_text = "section .text"
     section_data = "section .data"
     section_rodata = "section .rdata"
@@ -30,6 +31,7 @@ class WindowsCodegen(Codegen):
             "strstr",
             "_strdup",
             "_atoi64",
+            "strtoll",
             "atof",
             "sprintf",
             "fgets",
@@ -123,6 +125,17 @@ class WindowsCodegen(Codegen):
     def _emit_str_to_int(self) -> None:
         self.emitf("mov rcx, rax", "call _atoi64")
 
+    def _emit_str_to_int_base(self) -> None:
+        # Normalize Python's 0b prefix (strtoll base 0 doesn't grok it), then
+        # strtoll(str, endptr=NULL, base): Win64 args rcx, rdx, r8.
+        self._emit_normalize_0b_prefix()
+        self.emitf(
+            "mov r8, rbx",  # base
+            "xor rdx, rdx",  # endptr = NULL
+            "mov rcx, rax",  # str
+            "call strtoll",
+        )
+
     def _emit_input_line(self) -> None:
         self.emitf("call _runtime_input")
 
@@ -189,7 +202,7 @@ class WindowsCodegen(Codegen):
         self.emitf("mov rcx, 1", "call exit")
 
     def _emit_call_setjmp(self, buf_off: int) -> None:
-        # Use serpent's hand-rolled _runtime_setjmp. It takes the buf in rax.
+        # Use asmpython's hand-rolled _runtime_setjmp. It takes the buf in rax.
         self.emitf(f"lea rax, [rbp{buf_off:+d}]", "call _runtime_setjmp")
 
     def _emit_call_longjmp_with_buf_in_rax(self) -> None:

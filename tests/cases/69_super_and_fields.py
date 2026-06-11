@@ -4,7 +4,7 @@
 # Rex (4 legs)
 # generic sound
 class Animal:
-    # serpent uses static method dispatch (no RTTI/vtables): a method resolves
+    # asmpython uses static method dispatch (no RTTI/vtables): a method resolves
     # on the receiver's static type. This test exercises super().__init__ (a
     # subclass inheriting base fields) and super().method() (a base method
     # invoked explicitly), plus str / inherited fields read back out — none of

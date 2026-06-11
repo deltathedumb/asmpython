@@ -1,19 +1,20 @@
-"""Build serpent's runtime archive for one or both targets.
+"""Build asmpython's runtime archive for one or both targets.
 
 Usage (from repo root):
 
-    python -m serpent.runtime.build               # build for the host
-    python -m serpent.runtime.build --all         # both linux + windows
+    python -m asmpython._runtime.build               # build for the host
+    python -m asmpython._runtime.build --all         # both linux + windows
 
 Produces:
 
-    serpent/runtime/_build/libserpent_rt_linux.a
-    serpent/runtime/_build/libserpent_rt_win.a
+    asmpython/_runtime/_build/libasmpython_rt_linux.a
+    asmpython/_runtime/_build/libasmpython_rt_win.a
 
 The archive contains every `_runtime_*` symbol plus the scratch buffers
 `itoa_str_buf` and `input_buf`. User programs link against it via
-`gcc <prog>.obj -L<runtime/_build> -lserpent_rt_<target>`.
+`gcc <prog>.obj -L<_runtime/_build> -lasmpython_rt_<target>`.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -22,26 +23,42 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .. import ast_nodes as A
-from ..target_linux import LinuxCodegen
-from ..target_windows import WindowsCodegen
+from .._compiler import ast_nodes as A
+from .._compiler.target_linux import LinuxCodegen
+from .._compiler.target_windows import WindowsCodegen
 
 
 _TARGETS = {
-    "linux":   (LinuxCodegen,   "elf64", "libserpent_rt_linux.a"),
-    "windows": (WindowsCodegen, "win64", "libserpent_rt_win.a"),
+    "linux": (LinuxCodegen, "elf64", "libasmpython_rt_linux.a"),
+    "windows": (WindowsCodegen, "win64", "libasmpython_rt_win.a"),
 }
 
 # Shared-library outputs, keyed by the same target name. The build_shared
 # path uses these instead of the static archive for --onedir bundles.
 _SHARED_TARGETS = {
-    "linux":   "libserpent_rt_linux.so",
-    "windows": "libserpent_rt_win.dll",
+    "linux": "libasmpython_rt_linux.so",
+    "windows": "libasmpython_rt_win.dll",
 }
 
 
 def _build_dir() -> Path:
     return Path(__file__).resolve().parent / "_build"
+
+
+def _newest_source_mtime(target: str) -> float:
+    """Newest mtime among the files whose contents determine the runtime .asm.
+
+    The runtime body comes from the codegen + the per-target subclass (both
+    under `_compiler/`) and from this build script. If any is newer than a
+    cached archive, that archive is stale.
+    """
+    compiler_dir = Path(__file__).resolve().parent.parent / "_compiler"
+    sources = [
+        compiler_dir / "codegen.py",
+        compiler_dir / f"target_{target}.py",
+        Path(__file__).resolve(),
+    ]
+    return max(p.stat().st_mtime for p in sources)
 
 
 def _empty_module() -> A.Module:
@@ -81,10 +98,7 @@ def build_runtime(target: str, *, force: bool = False) -> Path:
 
     if archive_path.exists() and not force:
         # Check timestamps: rebuild if any source file is newer.
-        newest_src = max(
-            (Path(__file__).resolve().parent.parent / f).stat().st_mtime
-            for f in ("codegen.py", f"target_{target}.py", "runtime/build.py")
-        )
+        newest_src = _newest_source_mtime(target)
         if archive_path.stat().st_mtime >= newest_src:
             return archive_path
 
@@ -95,8 +109,15 @@ def build_runtime(target: str, *, force: bool = False) -> Path:
 
     # Assemble
     nasm = _which("nasm")
-    _run([nasm, "-f", nasm_fmt, "-w-label-redef-late",
-          str(asm_path), "-o", str(obj_path)])
+    _run([
+        nasm,
+        "-f",
+        nasm_fmt,
+        "-w-label-redef-late",
+        str(asm_path),
+        "-o",
+        str(obj_path),
+    ])
 
     # Archive with ar.
     if archive_path.exists():
@@ -130,10 +151,7 @@ def build_runtime_shared(target: str, *, force: bool = False) -> Path:
     if shared_path.exists() and not force:
         # Same staleness check as the static archive: rebuild if any source
         # file is newer.
-        newest_src = max(
-            (Path(__file__).resolve().parent.parent / f).stat().st_mtime
-            for f in ("codegen.py", f"target_{target}.py", "runtime/build.py")
-        )
+        newest_src = _newest_source_mtime(target)
         if shared_path.stat().st_mtime >= newest_src:
             return shared_path
 
@@ -148,8 +166,15 @@ def build_runtime_shared(target: str, *, force: bool = False) -> Path:
     # `-fPIC` flag; the emitted code uses `rel`-form addressing for rodata
     # references which is already position-independent on x86-64.
     nasm = _which("nasm")
-    _run([nasm, "-f", nasm_fmt, "-w-label-redef-late",
-          str(asm_path), "-o", str(obj_path)])
+    _run([
+        nasm,
+        "-f",
+        nasm_fmt,
+        "-w-label-redef-late",
+        str(asm_path),
+        "-o",
+        str(obj_path),
+    ])
 
     # Link as a shared library with gcc. On Windows the resulting .dll has
     # to export every `_runtime_*` symbol; for now we rely on
@@ -165,13 +190,19 @@ def build_runtime_shared(target: str, *, force: bool = False) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="serpent.runtime.build")
-    ap.add_argument("--target", choices=sorted(_TARGETS), default=None,
-                    help="target (default: host)")
-    ap.add_argument("--all", action="store_true",
-                    help="build all targets (linux + windows)")
-    ap.add_argument("--force", action="store_true",
-                    help="rebuild even if archive is up to date")
+    ap = argparse.ArgumentParser(prog="asmpython._runtime.build")
+    ap.add_argument(
+        "--target",
+        choices=sorted(_TARGETS),
+        default=None,
+        help="target (default: host)",
+    )
+    ap.add_argument(
+        "--all", action="store_true", help="build all targets (linux + windows)"
+    )
+    ap.add_argument(
+        "--force", action="store_true", help="rebuild even if archive is up to date"
+    )
     args = ap.parse_args(argv)
 
     if args.all:

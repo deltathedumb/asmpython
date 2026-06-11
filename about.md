@@ -1,10 +1,10 @@
-# serpent
+# asmpython
 
-**A Pixelated Dream project.** Serpent's mission is simple: take the Python code people actually write — loops, lists, dicts, math, basic classes, the occasional `import` — and turn it into a fast native executable with the least possible fuss. No virtual machine, no interpreter, no `pip install` dance, no opinions about your build system. Write `.py`, get `.exe` (or ELF).
+**A Pixelated Dream project.** asmpython's mission is simple: take the Python code people actually write — loops, lists, dicts, math, basic classes, the occasional `import` — and turn it into a fast native executable with the least possible fuss. No virtual machine, no interpreter, no `pip install` dance, no opinions about your build system. Write `.py`, get `.exe` (or ELF).
 
-Serpent is built around two goals:
+asmpython is built around two goals:
 
-- **Easiest to use.** One command (`python -m serpent foo.py`) goes from source to native binary. No project file, no toolchain manifest, no decorators or type stubs needed for things to work.
+- **Easiest to use.** One command (`python -m asmpython foo.py`) goes from source to native binary. No project file, no toolchain manifest, no decorators or type stubs needed for things to work.
 - **Compatible with what people actually write.** The supported subset deliberately tracks "what 80% of small Python programs look like": hash maps, list iteration, f-strings, math libraries, recursion, simple control flow. We don't aim for CPython parity — we aim for *your* program just working.
 
 Under the hood, source `.py` files compile to NASM, get assembled, then linked into a native executable for **Windows (PE64)** or **Linux (ELF64)**. Strings are nul-terminated; lists and dicts are heap-allocated with stable handles so reassignment isn't required after growth. Allocations come from libc `malloc`/`realloc`; runtime support comes from libc/msvcrt.
@@ -16,13 +16,25 @@ Under the hood, source `.py` files compile to NASM, get assembled, then linked i
 
 ---
 
-## 🐍 The headline goal: serpent compiles serpent — by July 2026
+## 🐍 The release goal: 1.0 with a real standard library — by March 2027
 
-The big milestone we're pointing at is **self-compilation**. Today the serpent compiler is ~5,700 lines of CPython that emits NASM. By July, that same source — `serpent/__main__.py`, `serpent/codegen.py`, the works — should compile through serpent itself and produce a working `serpent.exe` that, on the next pass, reproduces itself.
+**1.0 is the public release.** It requires two things: the first-party standard library **`asmpython.libs`**, and broad **Python compatibility (the 99.9% target)**.
 
-It's the honest version of "is this actually a Python compiler?" The answer becomes yes the day serpent stops needing CPython to ship.
+The library has three pillars:
 
-Roughly half the road there is already paved (see the status table below). The remaining work is tracked in [roadmap.md](./roadmap.md#self-host-gap-audit-what-the-compiler-source-actually-needs) — the audit names the specific features the compiler source depends on, in priority order. Most of Tiers 1–4 are on the critical path; most of Tiers 5–12 are post-bootstrap polish.
+- **`asmpython.libs.os`** — OS features (files, processes, environment, time), user-mode, backed by syscalls / the C runtime.
+- **`asmpython.libs.net`** — networking: sockets (bind / listen / connect / send / recv), cross-platform over Winsock and POSIX.
+- **`asmpython.libs.hardware`** — **ring-0 / `--freestanding` driver-grade** hardware access: code that runs as a loadable driver (`.sys` / `.ko`) or bare-metal, with no OS or libc underneath.
+
+The private FFI-binding registry (`asmpython/_stdlib/`) folds into `asmpython.libs` — `libs` becomes the single public stdlib surface.
+
+Compatibility means the [roadmap](./roadmap.md)'s 99.9% goal: idiomatic Python compiles, or fails with a clear "not implemented" message — never a silent miscompile. That's a multi-year arc and the main tension with the March 2027 date; the roadmap's "Feasibility" note tracks the open product decision (keep the date and ship the self-host-grade subset, or keep 99.9% and move the date out).
+
+The schedule driver is `hardware`. `os` and `net` are user-mode and build on the existing FFI + runtime; `hardware` at ring-0 needs a **second backend** — a `--freestanding` output mode with no libc, a custom entry point, kernel calling conventions, a non-`malloc` runtime, and (on Windows) driver signing. That backend is most of the work between here and 1.0. The `freestanding: true` flag in the [`.asmpkg` package format](asmpython/assembly/pkgformat.py) is the foundation it builds on. **March 2027 is the target; it's aggressive — it holds only if freestanding work starts soon.**
+
+### Parallel track: asmpython compiles asmpython
+
+**Self-compilation** — the compiler's own source compiling through asmpython and reproducing itself — is tracked independently and is **not a gate for 1.0**. Today the compiler is ~6,000 lines of CPython emitting NASM; the front-end gauntlet (`python -m selfhost.check`) measures the distance to it. Progress and the current frontier live in [roadmap.md](./roadmap.md#self-host-gap-audit-what-the-compiler-source-actually-needs).
 
 ---
 
@@ -45,7 +57,7 @@ Roughly half the road there is already paved (see the status table below). The r
 | 13 | Test harness | ✅ | `# expect:` / `# expect-error:` / `# stdin:` blocks |
 | 14 | Classes | ✅ | `__init__`, instance attributes, methods, single inheritance |
 | 15 | Exceptions | ✅ | `try`/`except`/`raise` with hand-rolled setjmp/longjmp |
-| 16 | Runtime library | ✅ | `--use-runtime-lib` links pre-built `libserpent_rt_<target>.a`; 47-67% smaller `.asm` per program |
+| 16 | Runtime library | ✅ | `--use-runtime-lib` links pre-built `libasmpython_rt_<target>.a`; 47-67% smaller `.asm` per program |
 
 ---
 
@@ -268,15 +280,55 @@ from math import sin, cos
 print(sin(0.0), cos(0.0))
 ```
 
-- Modules live in [serpent/stdlib/](serpent/stdlib/) as Python files that declare a `BINDINGS` dict
+- Modules live in [asmpython/_stdlib/](asmpython/_stdlib/) as Python files that declare a `BINDINGS` dict
 - Each binding is either `Func(arg_types, ret_type, c_name)` or `Const(ty, value)`
 - The compiler emits `extern <c_name>` and dispatches with the correct ABI (System V on Linux, MS x64 on Windows)
 - Int → float promotion happens at the call site
 - **Available now**:
   - `math` — sqrt, cbrt, exp, log, log2, log10, sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, floor, ceil, fabs, pow, atan2, hypot, fmod + constants pi, e, tau, inf, nan
   - `os` — system(cmd), getenv(name), _exit(code)
-- **Adding a new module**: drop `serpent/stdlib/<name>.py` with a `BINDINGS` dict; no compiler changes needed
+- **Adding a new module**: drop `asmpython/_stdlib/<name>.py` with a `BINDINGS` dict; no compiler changes needed
 - **Limitation**: only int/float/str argument and return types. Anything taking structs, varargs, or callbacks needs custom plumbing.
+
+### Inline assembly — `asmpython.assembly`
+
+```python
+from asmpython.assembly import assembly_func, include
+
+
+@assembly_func
+def add(a: int, b: int) -> int:
+    """
+    mov rax, rcx        ; Win64: args in rcx, rdx (SysV: rdi, rsi)
+    add rax, rdx
+    ret
+    """
+
+
+include("mathx")        # link mathx.asmpkg, sibling of this source file
+
+
+def main():
+    print(add(2, 3))    # routed into the inline NASM above
+    print(square(9))    # exported by the included package
+```
+
+- **`@assembly_func`** — the decorated function's docstring is raw NASM, emitted verbatim as the function body under its symbol. The Python signature is the contract: parameter and return types let call sites type-check and pick the ABI registers. Arguments arrive in the target's integer-arg registers (rdi/rsi/… on System V, rcx/rdx/… on Win64); the body returns its result in `rax`. Works on free functions and methods.
+- **`include("name")`** — pulls in an *assembly package*, a `<name>.asmpkg` directory (or single file) resolved next to the source. A package ships a `manifest.txt` (its exported symbols + signatures) and one or more `.asm` files; its NASM is concatenated into the program and its exports become callable. This is the foundation for a future `--freestanding` mode where the whole runtime is supplied as `.asmpkg` rather than linked from libc. See `asmpython/assembly/pkgformat.py` for the manifest grammar.
+- Both are **compile-time directives**. Under plain CPython they stay importable (linters and type-checkers are happy): `assembly_func` returns a stub that raises if actually called, and `include` just records the request.
+
+### Linter-only blocks — `# [compiler: ignore_start]`
+
+Code that exists only to satisfy a linter or type-checker — a placeholder class the real program supplies in assembly, say — can be fenced off so the compiler never sees it:
+
+```python
+# [compiler: ignore_start]
+class mylib:
+    def placeholder(self): ...   # type stubs, never compiled
+# [compiler: ignore_end]
+```
+
+The lexer blanks every line of the block (markers included) before tokenizing, so the fenced code can reference names asmpython doesn't know without producing errors. Blank-replacement keeps line/column numbers in diagnostics aligned with the original file.
 
 ### Diagnostics
 
@@ -353,7 +405,7 @@ These are honest gaps, listed roughly by how often they matter in real Python co
 
 ### Modules and tooling
 
-- **No real module loading** — `import foo` only resolves to serpent's hardcoded `stdlib/` directory. You can't `import` another `.py` file you wrote.
+- **No real module loading** — `import foo` only resolves to asmpython's hardcoded `stdlib/` directory. You can't `import` another `.py` file you wrote.
 - **No `if __name__ == "__main__":`** semantics — there's only one entry point per program.
 - **No interactive REPL.**
 - **No traceback** on runtime errors — `KeyError` from a dict miss just prints `KeyError: key not in dict` and exits 1.
@@ -367,7 +419,7 @@ Outside of `math` and `os`, **nothing**. Notable missing modules: `sys`, `json`,
 - **No optimization** — what you write is what you get. No constant folding, dead code elimination, register allocation, common-subexpression elimination, or inlining.
 - **No tail-call optimization** — `fact(10000)` will blow the stack.
 - **Stack allocation** for every local even when register-resident would suffice.
-- **Runtime helpers are inlined into every program** — `_runtime_dict_set`, `_runtime_hash_string`, etc., are emitted in every `.asm`. Should be extracted into `libserpent_rt.a` (planned).
+- **Runtime helpers are inlined into every program** — `_runtime_dict_set`, `_runtime_hash_string`, etc., are emitted in every `.asm`. Should be extracted into `libasmpython_rt.a` (planned).
 - **No debug info** — no DWARF, no PDB, no `--debug-asm` source-line annotations.
 
 ### Targets
@@ -381,23 +433,30 @@ Outside of `math` and `os`, **nothing**. Notable missing modules: `sys`, `json`,
 ## Architecture
 
 ```text
-serpent/
-├── lexer.py          — indent-aware tokenizer; emits INDENT/DEDENT
-├── parser.py         — recursive-descent; produces AST
-├── ast_nodes.py      — dataclass node types + static expr_type() resolver
-├── sema.py           — name resolution, arity, type sanity, import binding
-├── codegen.py        — target-agnostic emit (~1500 lines)
-│                       statements, expressions, list/dict ABI, float
-│                       arithmetic, FFI dispatch, runtime helpers
-├── target_linux.py   — Linux ELF64, System V AMD64 ABI, libc bindings
-├── target_windows.py — Windows PE64, MS x64 ABI, msvcrt bindings
-├── driver.py         — invokes NASM then gcc as linker driver
-├── __main__.py       — CLI: `python -m serpent ...`
-├── errors.py         — CompileError with source-position rendering
-└── stdlib/
-    ├── __init__.py   — Func, Const binding dataclasses
-    ├── math.py       — 22 math.h functions + 5 constants
-    └── os.py         — system, getenv, _exit
+asmpython/
+├── __init__.py         — package metadata; public version
+├── __main__.py         — `python -m asmpython ...` (delegates to _compiler)
+├── assembly/
+│   └── __init__.py     — public API: @assembly_func decorator, include()
+├── _compiler/          — private compiler front-end
+│   ├── lexer.py        — indent-aware tokenizer; emits INDENT/DEDENT
+│   ├── parser.py       — recursive-descent; produces AST
+│   ├── ast_nodes.py    — dataclass node types + static expr_type() resolver
+│   ├── sema.py         — name resolution, arity, type sanity, import binding
+│   ├── codegen.py      — target-agnostic emit; statements, expressions,
+│   │                     list/dict ABI, float arithmetic, FFI dispatch,
+│   │                     inline-asm functions, runtime helpers
+│   ├── target_linux.py   — Linux ELF64, System V AMD64 ABI, libc bindings
+│   ├── target_windows.py — Windows PE64, MS x64 ABI, msvcrt bindings
+│   ├── driver.py       — invokes NASM then gcc as linker driver
+│   ├── __main__.py     — argument parsing + compile_source entry
+│   └── errors.py       — CompileError with source-position rendering
+├── _runtime/           — pre-built native runtime archive (libasmpython_rt)
+│   └── build.py        — builds the per-target static/shared runtime
+└── _stdlib/
+    ├── __init__.py     — Func, Const binding dataclasses
+    ├── math.py         — 22 math.h functions + 5 constants
+    └── os.py           — system, getenv, _exit
 ```
 
 ### Pipeline
@@ -432,32 +491,49 @@ Headers are stable across mutations; only the underlying buffer relocates. This 
 
 ```sh
 # Compile for the host platform
-python -m serpent hello.py
+python -m asmpython hello.py
 
 # Cross-target
-python -m serpent hello.py --target linux        -o hello
-python -m serpent hello.py --target windows      -o hello.exe
+python -m asmpython hello.py --target linux        -o hello
+python -m asmpython hello.py --target windows      -o hello.exe
 
 # Stop after writing the .asm (useful for inspection)
-python -m serpent hello.py --emit-asm
+python -m asmpython hello.py --emit-asm
 
 # Keep intermediate .o / .obj files
-python -m serpent hello.py --keep
+python -m asmpython hello.py --keep
 
 # Link the pre-built runtime archive instead of inlining 400 lines of helpers.
 # Shrinks per-program .asm by 50-70%, faster NASM passes.
-python -m serpent hello.py --use-runtime-lib
+python -m asmpython hello.py --use-runtime-lib
 
 # Build the runtime archive ahead of time (auto-built on first use):
-python -m serpent.runtime.build --all          # both targets
+python -m asmpython._runtime.build --all          # both targets
 
 # Bundling modes -- mutually exclusive.
-python -m serpent hello.py --onefile  # default: single statically-linked .exe
-python -m serpent hello.py --onedir   # exe + lib/libserpent_rt_<target>.{dll,so}
+python -m asmpython hello.py --onefile  # default: single statically-linked .exe
+python -m asmpython hello.py --onedir   # exe + lib/libasmpython_rt_<target>.{dll,so}
 # Short forms: -of and -od respectively.
+
+# Output kind: an executable (default) or a shared library.
+python -m asmpython mod.py --type executable        # default
+python -m asmpython mod.py --type library -o mod.dll # shared lib (.dll / .so)
+
+# Target / architecture. 'freestanding' = bare-metal, no OS/libc (backend WIP).
+python -m asmpython hello.py --target windows
+python -m asmpython hello.py --target freestanding  # errors until the backend lands
 ```
 
-`--onedir` produces a `<stem>_onedir/` folder containing the executable, a `lib/` subfolder with the runtime shared library, and (on Windows) a side-by-side copy of the DLL next to the exe so the loader finds it. Linux builds add `-Wl,-rpath,$ORIGIN/lib` so the loader looks in the bundle's `lib/` first. Once cross-file user-module imports land, each imported `.py` will compile to its own `.dll`/`.so` in that same `lib/` folder.
+`--onedir` produces a bundle **directory** (the `-o` path is treated as the folder; default = the app name) laid out as:
+
+```text
+<bundle>/                         <bundle>/
+  myapp.exe       (Windows)         myapp.elf      (Linux)
+  resources/                        .resources/    (hidden on Linux)
+    libasmpython_rt_win.dll           libasmpython_rt_linux.so
+```
+
+The shared runtime lives in `resources/` (`.resources/` on Linux). Linux builds add `-Wl,-rpath,$ORIGIN/.resources` so the loader finds it next to the `.elf`; on Windows a side-by-side copy of the DLL is also dropped next to the `.exe` because the Windows loader doesn't search the subfolder. Once cross-file user-module imports compile to their own `.dll`/`.so`, they land in that same resources folder.
 
 Errors print to stderr with non-zero exit; success is silent except for the `wrote …` progress lines from each toolchain step.
 
@@ -510,14 +586,14 @@ The short version, in rough priority order:
 4. **Polymorphism for classes** — a vtable per class so a `Shape` parameter can dispatch to `Square.area` at runtime. Currently dispatch is static.
 5. **Mixed-type instance attributes / collection values** — let `self.name = "alice"`, `list[str]`, `dict[str, str]` work. Requires either runtime type tags or per-collection element types.
 6. **Exception classes** — `raise ValueError("msg")` and `except SpecificError:` dispatch. Builds on the existing try/except plumbing.
-7. **Runtime extraction**: ship the ~400 lines of runtime helpers as `libserpent_rt.a` instead of inlining into every program. Smaller `.asm` outputs, faster builds. ~1 day.
+7. **Runtime extraction**: ship the ~400 lines of runtime helpers as `libasmpython_rt.a` instead of inlining into every program. Smaller `.asm` outputs, faster builds. ~1 day.
 8. **More stdlib bindings**: `sys.argv`/`sys.exit`, `time.time`/`time.sleep`, `random.random`/`random.randint`. Each ~30 minutes once the right C function is identified.
 9. **macOS target** — Mach-O 64. Codegen is mostly the same as Linux (System V ABI); the differences are file format and linker invocation. Can't test from a Windows host.
 10. **A real optimizer pass** — at minimum: constant folding, dead-store elimination, peephole. Maybe 1-2 weeks for something meaningful.
 
 What's intentionally **not** on the roadmap:
 
-- CPython parity. Serpent is a compiled language wearing Python's syntax, not a Python implementation.
+- CPython parity. asmpython is a compiled language wearing Python's syntax, not a Python implementation.
 - Bignum / arbitrary precision integers — would require boxing every int, defeating the speed advantage.
 - The GIL, asyncio, generators, descriptors, metaclasses, the import hook system — these are interpreter features that don't fit the "compile to flat machine code" model.
 - A garbage collector. Memory currently leaks (lists and dicts allocate without ever freeing). Plan is either reference counting once we have a uniform value representation, or simple arena allocation for short-lived programs.

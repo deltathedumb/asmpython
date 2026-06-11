@@ -67,12 +67,12 @@ class Parser:
         body: list = []
         self._skip_newlines()
         while not self._check("EOF"):
-            # Decorators are accepted but silently dropped. Their semantics
-            # (e.g. `@dataclass` synthesising __init__) aren't modelled yet
-            # — accepting the syntax just lets source that uses them parse.
-            self._eat_decorators()
+            # Decorators are accepted; most are dropped (their semantics, e.g.
+            # `@dataclass` synthesising __init__, aren't modelled). The one we
+            # act on is `@assembly_func`, which marks a raw-NASM function body.
+            decorators = self._eat_decorators()
             if self._check("KEYWORD", "def"):
-                funcs.append(self._parse_funcdef())
+                funcs.append(self._parse_funcdef(decorators=decorators))
             elif self._check("KEYWORD", "class"):
                 classes.append(self._parse_classdef())
             else:
@@ -80,10 +80,23 @@ class Parser:
             self._skip_newlines()
         return A.Module(funcs=funcs, body=body, classes=classes)
 
-    def _eat_decorators(self) -> None:
-        """Consume zero or more `@expr` lines preceding a def/class."""
+    # Decorator names the parser treats specially.
+    _ASM_DECORATOR = "assembly_func"
+
+    def _eat_decorators(self) -> list[str]:
+        """Consume zero or more `@expr` lines preceding a def/class.
+
+        Returns the leading dotted name of each decorator (e.g. `assembly_func`
+        for `@assembly_func` or `@assembly_func(symbol="x")`). Callers inspect
+        the list for decorators that change codegen; the rest are informational.
+        """
+        names: list[str] = []
         while self._check("OP", "@"):
             self._eat()
+            # First NAME (optionally dotted) is the decorator's identity.
+            name = None
+            if self._check("NAME"):
+                name = self._peek().value
             # Eat the rest of the line as a free-form decorator expression.
             # We don't model the call so we just skip until NEWLINE, balancing
             # any `(` `[` `{` along the way.
@@ -100,7 +113,10 @@ class Parser:
                 elif t.kind == "OP" and t.value in (")", "]", "}"):
                     depth -= 1
                 self._eat()
+            if name is not None:
+                names.append(name)  # type: ignore
             self._skip_newlines()
+        return names
 
     def _parse_classdef(self) -> A.ClassDef:
         start = self._expect("KEYWORD", "class").pos
@@ -135,10 +151,10 @@ class Parser:
                 self._eat()
                 self._expect("NEWLINE")
                 continue
-            # Decorators on methods: accept but drop.
-            self._eat_decorators()
+            # Decorators on methods: mostly dropped; @assembly_func is honored.
+            decorators = self._eat_decorators()
             if self._check("KEYWORD", "def"):
-                methods.append(self._parse_funcdef())
+                methods.append(self._parse_funcdef(decorators=decorators))
             elif self._check("STRING"):
                 # Class-body string literal (docstring) — drop the line.
                 self._eat()
@@ -158,7 +174,10 @@ class Parser:
             self._skip_newlines()
         self._expect("DEDENT")
         return A.ClassDef(  # type: ignore
-            name=name, parent=parent, methods=methods, pos=start,
+            name=name,  # type: ignore
+            parent=parent,  # type: ignore
+            methods=methods,
+            pos=start,  # type: ignore
             class_vars=class_vars,
         )
 
@@ -168,7 +187,7 @@ class Parser:
 
         When the line carries a type annotation (the @dataclass field style,
         `pos: SourcePos = field(...)`), the type comes from the annotation and
-        the value is skipped — its initializer may use constructs serpent can't
+        the value is skipped — its initializer may use constructs asmpython can't
         parse (`field(default_factory=lambda: ...)`). An unannotated assignment
         (`KEYWORDS = {...}`) is a real constant, so its value is parsed so sema
         can type the attribute."""
@@ -204,7 +223,7 @@ class Parser:
                 depth -= 1
             self._eat()
 
-    def _parse_funcdef(self) -> A.FuncDef:
+    def _parse_funcdef(self, decorators: "list[str] | None" = None) -> A.FuncDef:
         start = self._peek().pos
         self._expect("KEYWORD", "def")
         name = self._expect("NAME").value
@@ -220,7 +239,7 @@ class Parser:
                 if self._check("OP", ")"):
                     break  # trailing comma
             first = False
-            # `**kwargs`: accepted so source parses; serpent doesn't model
+            # `**kwargs`: accepted so source parses; asmpython doesn't model
             # keyword-collection, so the name is discarded.
             if self._check("OP", "**"):
                 self._eat()
@@ -231,17 +250,17 @@ class Parser:
                 if self._check("NAME"):
                     # `*args`: a single list-typed parameter that absorbs the
                     # caller's surplus positional arguments.
-                    vararg = self._expect("NAME").value
+                    vararg = self._expect("NAME").value  # type: ignore
                     el = None
                     if self._check("OP", ":"):
                         self._eat()
                         inner = self._parse_type_annotation()
                         el = inner[0] if inner else None
-                    params.append(vararg)
+                    params.append(vararg)  # type: ignore
                     param_types.append(("list", el))
                     defaults.append(None)
                 else:
-                    # A bare `*` is the keyword-only marker. serpent treats the
+                    # A bare `*` is the keyword-only marker. asmpython treats the
                     # following params positionally; callers may still pass them
                     # by keyword (sema binds keyword args onto positions).
                     pass
@@ -254,6 +273,10 @@ class Parser:
             ret_type = self._parse_type_annotation()
         self._expect("OP", ":")
         body = self._parse_block()
+        asm_body = None
+        asm_symbol = None
+        if decorators and self._ASM_DECORATOR in decorators:
+            asm_body, asm_symbol = self._extract_asm_body(name, body, start)  # type: ignore[arg-type]
         return A.FuncDef(
             name=name,  # type: ignore
             params=params,
@@ -263,6 +286,30 @@ class Parser:
             param_types=param_types,
             ret_type=ret_type,
             vararg=vararg,
+            asm_body=asm_body,
+            asm_symbol=asm_symbol,
+        )
+
+    def _extract_asm_body(self, name: str, body: list, pos) -> "tuple[str, str]":
+        """Lift the raw-NASM body of an `@assembly_func` out of its docstring.
+
+        The function body must be exactly one string literal (the NASM), shaped
+        by the parser as a single `ExprStmt(StrLit)`. Returns (nasm_text,
+        symbol). The symbol defaults to the function name; callers may later
+        override it from a `@assembly_func(symbol=...)` decorator argument (not
+        modelled in the parser, which only sees the bare decorator name).
+        """
+        non_pass = [s for s in body if not isinstance(s, A.Pass)]
+        if (
+            len(non_pass) == 1
+            and isinstance(non_pass[0], A.ExprStmt)
+            and isinstance(non_pass[0].expr, A.StrLit)
+        ):
+            return non_pass[0].expr.value, name  # type: ignore[return-value]
+        raise ParseError(
+            f"@assembly_func {name!r} must have a body of exactly one "
+            f"triple-quoted string containing its NASM instructions",
+            pos,
         )
 
     def _parse_param(self, params: list, defaults: list, param_types: list) -> None:
@@ -381,7 +428,7 @@ class Parser:
                         break
                     inner.append(self._parse_annot_union())
             self._expect("OP", "]")
-        return self._normalize_annot(name, inner)
+        return self._normalize_annot(name, inner)  # type: ignore
 
     def _skip_annot_atom(self) -> tuple:
         """Consume one balanced annotation atom (balancing []/()/{}), stopping
@@ -391,7 +438,11 @@ class Parser:
             t = self._peek()
             if t.kind in ("NEWLINE", "EOF"):
                 break
-            if depth == 0 and t.kind == "OP" and t.value in (",", "]", ")", "=", ":", "|"):
+            if (
+                depth == 0
+                and t.kind == "OP"
+                and t.value in (",", "]", ")", "=", ":", "|")
+            ):
                 break
             if t.kind == "OP" and t.value in ("[", "(", "{"):
                 depth += 1
@@ -559,7 +610,7 @@ class Parser:
         self._skip_newlines()
         # One or more `except` clauses, each with an optional exception type
         # and optional `as name` binding. The type expression is parsed (so
-        # `except (A, B) as e:` is accepted) but discarded — serpent has no
+        # `except (A, B) as e:` is accepted) but discarded — asmpython has no
         # exception-class RTTI, so handlers catch everything.
         handlers: list = []  # list[(bind_name, body)]
         while self._check("KEYWORD", "except"):
@@ -604,7 +655,7 @@ class Parser:
     def _parse_raise(self) -> A.Raise:
         kw = self._expect("KEYWORD", "raise")
         value = self._parse_expr()
-        # `raise X from Y` — exception chaining. serpent doesn't model the
+        # `raise X from Y` — exception chaining. asmpython doesn't model the
         # __cause__ link, so the cause expression is parsed and discarded.
         if self._check("KEYWORD", "from"):
             self._eat()
@@ -689,20 +740,25 @@ class Parser:
     def _parse_annotated_assign(self):
         """`name: type [= value]` at statement position.
 
-        The annotation is parsed and discarded (serpent doesn't drive typing
-        off annotations yet). If a value follows, returns an Assign;
-        otherwise an ExprStmt of a no-op IntLit so the statement still has
-        a body — the variable becomes defined in the scope of the wrapping
-        block, just without a meaningful initial value.
+        The annotation is captured onto the Assign so sema can type the target
+        from the declaration (e.g. `xs: list[str] = []` pins the element kind
+        even when the initializer is an empty/opaque list). If a value follows,
+        returns an Assign; a bare `x: T` lowers to `x = 0` carrying the
+        annotation so the variable at least exists and is typed.
         """
         name_tok = self._expect("NAME")
         self._expect("OP", ":")
-        self._parse_type_annotation()
+        annot = self._parse_type_annotation()
         if self._check("OP", "="):
             self._eat()
             value = self._parse_tuple_rhs()
             self._expect("NEWLINE")
-            return A.Assign(target=name_tok.value, value=value, pos=name_tok.pos)  # type: ignore[arg-type]
+            return A.Assign(
+                target=name_tok.value,  # type: ignore
+                value=value,
+                pos=name_tok.pos,
+                annot=annot,
+            )  # type: ignore[arg-type]
         # Bare `x: int` (no initializer). Lower to `x = 0` so the variable
         # at least exists; if the source never assigns, the body still
         # reads zero, which matches CPython's behaviour for un-annotated
@@ -713,6 +769,7 @@ class Parser:
             target=name_tok.value,  # type: ignore[arg-type]
             value=A.IntLit(value=0, pos=name_tok.pos),
             pos=name_tok.pos,
+            annot=annot,
         )
 
     def _looks_like_tuple_assign(self) -> bool:
@@ -816,7 +873,7 @@ class Parser:
                 names.append(self._expect("NAME").value)
             self._expect("OP", ")")
             return names
-        return self._expect("NAME").value
+        return self._expect("NAME").value  # type: ignore
 
     def _parse_for(self) -> A.For:
         kw = self._expect("KEYWORD", "for")
@@ -863,15 +920,22 @@ class Parser:
         iter_expr = self._parse_expr()
         self._expect("OP", ":")
         body = self._parse_block()
-        return A.For(var=var, range_args=[], body=body, pos=kw.pos, iter=iter_expr, targets=multi)  # type: ignore
+        return A.For(
+            var=var,  # type: ignore
+            range_args=[],
+            body=body,
+            pos=kw.pos,
+            iter=iter_expr,
+            targets=multi,
+        )
 
     # ---- expressions -------------------------------------------------------
     # Precedence (low -> high):
     #   ternary, or, and, not, comparisons, |, ^, &, << >>, + -, * / // %, unary, primary
-    def _parse_expr(self) -> 'A.Expr':
+    def _parse_expr(self) -> "A.Expr":
         return self._parse_ternary()
 
-    def _parse_ternary(self) -> 'A.Expr':
+    def _parse_ternary(self) -> "A.Expr":
         """Conditional expression: `body if test else orelse`.
 
         Sits at the lowest precedence (above assignment, which isn't an
@@ -889,7 +953,7 @@ class Parser:
             return A.IfExp(test=test, body=body, orelse=orelse, pos=pos)
         return body
 
-    def _parse_or(self) -> 'A.Expr':
+    def _parse_or(self) -> "A.Expr":
         left = self._parse_and()
         while self._check("KEYWORD", "or"):
             pos = self._eat().pos
@@ -897,7 +961,7 @@ class Parser:
             left = A.BoolOp(op="or", left=left, right=right, pos=pos)
         return left
 
-    def _parse_and(self) -> 'A.Expr':
+    def _parse_and(self) -> "A.Expr":
         left = self._parse_not()
         while self._check("KEYWORD", "and"):
             pos = self._eat().pos
@@ -905,7 +969,7 @@ class Parser:
             left = A.BoolOp(op="and", left=left, right=right, pos=pos)
         return left
 
-    def _parse_not(self) -> 'A.Expr':
+    def _parse_not(self) -> "A.Expr":
         if self._check("KEYWORD", "not"):
             pos = self._eat().pos
             return A.UnaryOp(op="not", operand=self._parse_not(), pos=pos)
@@ -916,7 +980,7 @@ class Parser:
         Returns the normalised op string (or None). Does NOT consume tokens.
 
         Hoisted from a nested helper in `_parse_cmp` (it only ever needed
-        `self`) so the parser stays within serpent's own compilable subset —
+        `self`) so the parser stays within asmpython's own compilable subset —
         no closures."""
         if self._check("KEYWORD", "in"):
             return "in"
@@ -937,12 +1001,12 @@ class Parser:
 
     def _at_cmp_op(self) -> bool:
         """True when positioned on a relational comparison operator. Spelled out
-        (rather than splatting a tuple into `_check_any_op`) because serpent
+        (rather than splatting a tuple into `_check_any_op`) because asmpython
         doesn't support call-site argument unpacking — keeps the parser self-
         compilable."""
         return self._check_any_op("==", "!=", "<", "<=", ">", ">=")
 
-    def _parse_cmp(self) -> 'A.Expr':
+    def _parse_cmp(self) -> "A.Expr":
         """Chained comparisons: a < b < c becomes Compare([<, <], [a, b, c]).
 
         Also folds `in` / `not in` into the Compare chain so codegen sees a
@@ -976,7 +1040,7 @@ class Parser:
             operands.append(self._parse_bit_or())
         return A.Compare(ops=ops, operands=operands, pos=first_pos)
 
-    def _parse_bit_or(self) -> 'A.Expr':
+    def _parse_bit_or(self) -> "A.Expr":
         left = self._parse_bit_xor()
         while self._check_any_op("|"):
             pos = self._eat().pos
@@ -984,7 +1048,7 @@ class Parser:
             left = A.BinOp(op="|", left=left, right=right, pos=pos)
         return left
 
-    def _parse_bit_xor(self) -> 'A.Expr':
+    def _parse_bit_xor(self) -> "A.Expr":
         left = self._parse_bit_and()
         while self._check_any_op("^"):
             pos = self._eat().pos
@@ -992,7 +1056,7 @@ class Parser:
             left = A.BinOp(op="^", left=left, right=right, pos=pos)
         return left
 
-    def _parse_bit_and(self) -> 'A.Expr':
+    def _parse_bit_and(self) -> "A.Expr":
         left = self._parse_shift()
         while self._check_any_op("&"):
             pos = self._eat().pos
@@ -1000,7 +1064,7 @@ class Parser:
             left = A.BinOp(op="&", left=left, right=right, pos=pos)
         return left
 
-    def _parse_shift(self) -> 'A.Expr':
+    def _parse_shift(self) -> "A.Expr":
         left = self._parse_add()
         while self._check_any_op("<<", ">>"):
             tok = self._eat()
@@ -1008,7 +1072,7 @@ class Parser:
             left = A.BinOp(op=tok.value, left=left, right=right, pos=tok.pos)  # type: ignore
         return left
 
-    def _parse_add(self) -> 'A.Expr':
+    def _parse_add(self) -> "A.Expr":
         left = self._parse_mul()
         while self._check_any_op("+", "-"):
             tok = self._eat()
@@ -1027,7 +1091,7 @@ class Parser:
             left = A.BinOp(op=tok.value, left=left, right=right, pos=tok.pos)  # type: ignore
         return left
 
-    def _parse_unary(self) -> 'A.Expr':
+    def _parse_unary(self) -> "A.Expr":
         if self._check_any_op("-"):
             pos = self._eat().pos
             return A.UnaryOp(op="-", operand=self._parse_unary(), pos=pos)
@@ -1039,7 +1103,7 @@ class Parser:
             return A.UnaryOp(op="~", operand=self._parse_unary(), pos=pos)
         return self._parse_primary()
 
-    def _parse_primary(self) -> 'A.Expr':
+    def _parse_primary(self) -> "A.Expr":
         t = self._peek()
         if t.kind == "INT":
             self._eat()
@@ -1109,9 +1173,15 @@ class Parser:
                 if self._check("OP", "("):
                     # obj.name(...) — method call
                     self._eat()
-                    args, kwargs = self._parse_call_args()
+                    args, kwargs = self._parse_call_args()  # type: ignore
                     self._expect("OP", ")")
-                    atom = A.MethodCall(obj=atom, method=name, args=args, kwargs=kwargs, pos=dot.pos)  # type: ignore
+                    atom = A.MethodCall(
+                        obj=atom,
+                        method=name,  # type: ignore
+                        args=args,
+                        kwargs=kwargs,
+                        pos=dot.pos,  # type: ignore
+                    )
                 else:
                     # obj.name — attribute access (e.g. math.pi)
                     atom = A.Attr(obj=atom, name=name, pos=dot.pos)  # type: ignore
@@ -1214,9 +1284,7 @@ class Parser:
         across lines (common in multi-line error messages)."""
         if not (self._check("STRING") or self._check("FSTRING")):
             return atom
-        segments: list = (
-            list(atom.segments) if isinstance(atom, A.FString) else [atom]
-        )
+        segments: list = list(atom.segments) if isinstance(atom, A.FString) else [atom]
         has_fstring = isinstance(atom, A.FString)
         while self._check("STRING") or self._check("FSTRING"):
             if self._check("STRING"):
@@ -1265,10 +1333,16 @@ class Parser:
             return A.DictLit(keys=[], values=[], pos=start)
         first = self._parse_expr()
         if self._check("OP", ":"):
-            # Dict literal.
+            # Dict literal or dict comprehension. Both open `key: value`.
             self._eat()
+            first_value = self._parse_expr()
+            if self._check("KEYWORD", "for"):
+                # `{k: v for var in iter [if cond]}`.
+                comp = self._parse_dict_comprehension_tail(first, first_value, start)
+                self._expect("OP", "}")
+                return comp
             keys: list = [first]
-            values: list = [self._parse_expr()]
+            values: list = [first_value]
             while self._check("OP", ","):
                 self._eat()
                 if self._check("OP", "}"):
@@ -1325,4 +1399,29 @@ class Parser:
         if self._check("KEYWORD", "if"):
             self._eat()
             cond = self._parse_or()
-        return A.Comprehension(elt=elt, var=var, iter=iter_expr, cond=cond, pos=pos)
+        return A.Comprehension(elt=elt, var=var, iter=iter_expr, cond=cond, pos=pos)  # type: ignore
+
+    def _parse_dict_comprehension_tail(self, key, value, pos):
+        """Parse `for <var> in <iter> [if <cond>]` after `key: value`, returning
+        a DictComprehension. Same `for`/`in`/`if` grammar as the list form."""
+        self._expect("KEYWORD", "for")
+        var = self._expect("NAME").value
+        # Tuple targets parse but only the first name is bound (same limit as
+        # the list comprehension).
+        while self._check("OP", ","):
+            self._eat()
+            self._expect("NAME")
+        self._expect("KEYWORD", "in")
+        iter_expr = self._parse_or()
+        cond = None
+        if self._check("KEYWORD", "if"):
+            self._eat()
+            cond = self._parse_or()
+        return A.DictComprehension(
+            key=key,
+            value=value,
+            var=var,  # type: ignore
+            iter=iter_expr,
+            cond=cond,
+            pos=pos,  # type: ignore
+        )

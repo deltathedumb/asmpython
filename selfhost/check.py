@@ -1,6 +1,6 @@
 """Self-host progress gauntlet.
 
-The July milestone is *self-compilation*: serpent compiling serpent. This
+The July milestone is *self-compilation*: asmpython compiling asmpython. This
 script measures the distance to that goal by running each phase of the
 compiler front-end over the compiler's own source and reporting the first
 construct that chokes, per file.
@@ -11,7 +11,7 @@ It checks three gates, in order, and stops a file at the first one it fails:
     PARSE  -> the recursive-descent parser builds an AST
     SEMA   -> semantic analysis accepts the AST
 
-SEMA is run in a *lenient* mode: serpent has no cross-file module resolution
+SEMA is run in a *lenient* mode: asmpython has no cross-file module resolution
 yet, so names defined in sibling modules (`SourcePos`, `Token`, ...) would
 otherwise read as "undefined". Lenient mode seeds the scope with every
 top-level name the file *imports* and *defines* so that the analyser can get
@@ -33,27 +33,33 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from serpent.lexer import Lexer  # noqa: E402
-from serpent.parser import Parser  # noqa: E402
-from serpent.sema import analyze as sema_analyze  # noqa: E402
-from serpent.errors import CompileError  # noqa: E402
+from asmpython._compiler.lexer import Lexer  # noqa: E402
+from asmpython._compiler.parser import Parser  # noqa: E402
+from asmpython._compiler.sema import analyze as sema_analyze  # noqa: E402
+from asmpython._compiler.errors import CompileError  # noqa: E402
 
 
 # The compiler's own source, in rough dependency order (leaves first).
 TARGETS = [
-    "serpent/errors.py",
-    "serpent/ast_nodes.py",
-    "serpent/lexer.py",
-    "serpent/stdlib/__init__.py",
-    "serpent/stdlib/math.py",
-    "serpent/stdlib/os.py",
-    "serpent/parser.py",
-    "serpent/sema.py",
-    "serpent/codegen.py",
-    "serpent/target_linux.py",
-    "serpent/target_windows.py",
-    "serpent/driver.py",
-    "serpent/__main__.py",
+    "asmpython/__init__.py",
+    "asmpython/__main__.py",
+    "asmpython/assembly/__init__.py",
+    "asmpython/_stdlib/__init__.py",
+    "asmpython/_stdlib/math.py",
+    "asmpython/_stdlib/os.py",
+    "asmpython/_compiler/__init__.py",
+    "asmpython/_compiler/errors.py",
+    "asmpython/_compiler/ast_nodes.py",
+    "asmpython/_compiler/lexer.py",
+    "asmpython/_compiler/parser.py",
+    "asmpython/_compiler/sema.py",
+    "asmpython/_compiler/codegen.py",
+    "asmpython/_compiler/target_linux.py",
+    "asmpython/_compiler/target_windows.py",
+    "asmpython/_compiler/driver.py",
+    "asmpython/_compiler/__main__.py",
+    "asmpython/_runtime/__init__.py",
+    "asmpython/_runtime/build.py",
 ]
 
 

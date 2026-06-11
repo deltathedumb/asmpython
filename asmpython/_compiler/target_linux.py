@@ -15,6 +15,7 @@ SYSV_ARG_REGS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
 
 
 class LinuxCodegen(Codegen):
+    target_name = "LinuxCodegen"
     section_text = "section .text"
     section_data = "section .data"
     section_rodata = "section .rodata"
@@ -33,6 +34,7 @@ class LinuxCodegen(Codegen):
             "strstr",
             "strdup",
             "atoll",
+            "strtoll",
             "atof",
             "sprintf",
             "fgets",
@@ -115,6 +117,17 @@ class LinuxCodegen(Codegen):
     def _emit_str_to_int(self) -> None:
         self.emitf("mov rdi, rax", "call atoll")
 
+    def _emit_str_to_int_base(self) -> None:
+        # Normalize Python's 0b prefix (strtoll base 0 doesn't grok it), then
+        # strtoll(str, endptr=NULL, base): SysV args rdi, rsi, rdx.
+        self._emit_normalize_0b_prefix()
+        self.emitf(
+            "mov rdx, rbx",  # base
+            "xor rsi, rsi",  # endptr = NULL
+            "mov rdi, rax",  # str
+            "call strtoll",
+        )
+
     def _emit_input_line(self) -> None:
         self.emitf("call _runtime_input")
 
@@ -169,7 +182,7 @@ class LinuxCodegen(Codegen):
         self.emitf("mov rdi, 1", "call exit")
 
     def _emit_call_setjmp(self, buf_off: int) -> None:
-        # Use serpent's hand-rolled _runtime_setjmp (buf in rax).
+        # Use asmpython's hand-rolled _runtime_setjmp (buf in rax).
         self.emitf(f"lea rax, [rbp{buf_off:+d}]", "call _runtime_setjmp")
 
     def _emit_call_longjmp_with_buf_in_rax(self) -> None:

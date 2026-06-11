@@ -2,7 +2,7 @@
 REM ============================================================================
 REM  _download-deps.bat - Fetch any combination of NASM, GCC (MinGW-w64),
 REM                      and the embeddable Python distribution into a temp
-REM                      directory so serpent has a complete toolchain.
+REM                      directory so asmpython has a complete toolchain.
 REM
 REM  Usage:
 REM     _download-deps.bat [--nasm] [--gcc] [--python] [--all]
@@ -15,7 +15,7 @@ REM     _download-deps.bat --gcc --dest C:\tools\mingw-cache
 REM
 REM  Notes:
 REM   - Requires Windows 10+ (uses built-in curl.exe and tar.exe).
-REM   - Default destination is %TEMP%\serpent-deps\.
+REM   - Default destination is %TEMP%\asmpython-deps\.
 REM   - Existing installs are removed and re-fetched.
 REM   - URLs / versions live at the top of this file - update if newer
 REM     releases are needed.
@@ -39,7 +39,7 @@ REM ---- Arg parsing -----------------------------------------------------------
 set "DO_PYTHON=0"
 set "DO_NASM=0"
 set "DO_GCC=0"
-set "DEST=%TEMP%\serpent-deps"
+set "DEST=%TEMP%\asmpython-deps"
 
 :parse
 if "%~1"=="" goto parsed
@@ -87,13 +87,13 @@ if "%DO_NASM%"=="1"   echo   nasm:   %DEST%\nasm\nasm.exe
 if "%DO_GCC%"=="1"    echo   gcc:    %DEST%\mingw64\bin\gcc.exe
 if "%DO_PYTHON%"=="1" echo   python: %DEST%\python\python.exe
 echo.
-echo To use with serpent, pass them explicitly:
+echo To use with asmpython, pass them explicitly:
 if "%DO_NASM%"=="1"   echo   --nasm "%DEST%\nasm\nasm.exe"
 if "%DO_GCC%"=="1"    echo   --gcc  "%DEST%\mingw64\bin\gcc.exe"
 echo.
 echo Or set environment variables:
-if "%DO_NASM%"=="1"   echo   set SERPENT_NASM=%DEST%\nasm\nasm.exe
-if "%DO_GCC%"=="1"    echo   set SERPENT_GCC=%DEST%\mingw64\bin\gcc.exe
+if "%DO_NASM%"=="1"   echo   set ASMPYTHON_NASM=%DEST%\nasm\nasm.exe
+if "%DO_GCC%"=="1"    echo   set ASMPYTHON_GCC=%DEST%\mingw64\bin\gcc.exe
 exit /b 0
 
 REM ---- Subroutines -----------------------------------------------------------
@@ -158,7 +158,7 @@ exit /b 0
 echo Usage:
 echo     _download-deps.bat [TOOLS] [--dest ^<dir^>]
 echo.
-echo Fetch portable copies of the build toolchain so `serpent.bat` can
+echo Fetch portable copies of the build toolchain so `asmpython.bat` can
 echo compile without anything installed on the host.
 echo.
 echo Tools (pick any combination):
@@ -168,17 +168,17 @@ echo     --python      Embeddable Python %PY_VER%               (~ 11 MB)
 echo     --all         shorthand for --nasm --gcc --python
 echo.
 echo Other options:
-echo     --dest ^<dir^>  destination directory (default: %%TEMP%%\serpent-deps)
+echo     --dest ^<dir^>  destination directory (default: %%TEMP%%\asmpython-deps)
 echo     -h, --help    show this message and exit
 echo.
 echo Examples:
 echo     _download-deps.bat --nasm --gcc
-echo     _download-deps.bat --all --dest C:\serpent-toolchain
+echo     _download-deps.bat --all --dest C:\asmpython-toolchain
 echo.
-echo After install, plug the paths into serpent with:
+echo After install, plug the paths into asmpython with:
 echo     --nasm "%%DEST%%\nasm\nasm.exe"
 echo     --gcc  "%%DEST%%\mingw64\bin\gcc.exe"
-echo or simply rerun serpent.bat - it auto-detects .\tools\ and bootstraps
+echo or simply rerun asmpython.bat - it auto-detects .\tools\ and bootstraps
 echo any missing tools.
 exit /b 1
 

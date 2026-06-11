@@ -1,9 +1,9 @@
-"""Serpent's standard-library bindings.
+"""asmpython's standard-library bindings.
 
 Each submodule here defines a `BINDINGS` dict:
 
     BINDINGS = {
-        "name_in_serpent": Func(arg_types=(...), ret_type="...", c_name="..."),
+        "name_in_asmpython": Func(arg_types=(...), ret_type="...", c_name="..."),
         "constant_name": Const(ty="float", value=3.14),
     }
 
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Func:
-    """Foreign function: maps a serpent name to a C ABI symbol with typed args."""
+    """Foreign function: maps a asmpython name to a C ABI symbol with typed args."""
     arg_types: tuple[str, ...]   # each "int" | "float" | "str"
     ret_type: str                # "int" | "float" | "str"
     c_name: str

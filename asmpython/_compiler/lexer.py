@@ -1,4 +1,4 @@
-"""Indentation-aware lexer for the serpent Python subset.
+"""Indentation-aware lexer for the asmpython Python subset.
 
 Emits INDENT/DEDENT tokens like CPython's tokenizer. Newlines inside
 parentheses are suppressed so multi-line argument lists are legal.
@@ -7,7 +7,6 @@ parentheses are suppressed so multi-line argument lists are legal.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterator
 
 from .errors import LexError, SourcePos
 
@@ -58,6 +57,65 @@ class Token:
         return SourcePos(self.line, self.col)
 
 
+def _is_ignore_marker(line: str, which: str) -> bool:
+    """True if `line` is a `# [compiler: <which>]` directive comment.
+
+    Accepts surrounding whitespace and either spacing inside the brackets, so
+    all of these match for `which="ignore_start"`:
+        # [compiler: ignore_start]
+        #[compiler:ignore_start]
+            #  [compiler:  ignore_start]
+    """
+    s = line.strip()
+    if not s.startswith("#"):
+        return False
+    s = s[1:].strip()
+    if not (s.startswith("[") and s.endswith("]")):
+        return False
+    inner = s[1:-1]
+    colon = inner.find(":")
+    if colon < 0:
+        return False
+    key = inner[:colon].strip()
+    val = inner[colon + 1:].strip()
+    return key == "compiler" and val == which
+
+
+def _strip_fstring_spec(raw: str) -> str:
+    """Drop a trailing `!r`/`!s`/`!a` conversion and/or `:format-spec` from an
+    f-string replacement field, leaving just the expression text.
+
+    Only top-level (outside any `()[]{}`) markers count, so `{a != b}` and
+    `{d[1:2]}` keep their `!=` / slice intact. Conversions and format specs
+    aren't applied yet — they're stripped so the expression re-lexes cleanly.
+    (TODO: honour `!r` and `:.2f` once repr / format land.)
+
+    A module-level function rather than a staticmethod so the lexer stays within
+    asmpython's own compilable subset (the compiler doesn't model staticmethods).
+    """
+    depth = 0
+    n = len(raw)
+    i = 0
+    while i < n:
+        ch = raw[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0:
+            if ch == ":":
+                return raw[:i].strip()
+            if (
+                ch == "!"
+                and i + 1 < n
+                and raw[i + 1] in "rsa"
+                and (i + 2 == n or raw[i + 2] == ":")
+            ):
+                return raw[:i].strip()
+        i += 1
+    return raw.strip()
+
+
 class Lexer:
     def __init__(self, src: str) -> None:
         if not src.endswith("\n"):
@@ -69,6 +127,7 @@ class Lexer:
         self.indents: list[int] = [0]
         self.paren_depth = 0
         self.at_line_start = True
+        self.tokens: list[Token] = []
 
     def _peek(self, off: int = 0) -> str:
         p = self.pos + off
@@ -84,13 +143,48 @@ class Lexer:
             self.col += 1
         return ch
 
-    def tokenize(self) -> list[Token]:
-        return list(self._iter())
+    def _skip_ignore_block(self) -> None:
+        """Consume input from after an `ignore_start` marker through the matching
+        `ignore_end` marker (inclusive). Called from the main loop's comment
+        branch with the cursor just past the opening marker comment.
 
-    def _iter(self) -> Iterator[Token]:
+        Scans line by line: for each line, skip leading whitespace, and if what
+        follows is a `# ...ignore_end]` comment, consume that line and stop.
+        Everything else is consumed unconditionally. An unterminated block
+        (`ignore_start` with no `ignore_end`) is consumed to end-of-file.
+        """
+        while self.pos < len(self.src):
+            # We are at a line boundary (the opening marker's newline hasn't
+            # been consumed yet on the first iteration, so consume up to and
+            # including the next newline first).
+            while self._peek() and self._peek() != "\n":
+                self._advance()
+            if self._peek() == "\n":
+                self._advance()
+            # Now at the start of a fresh line. Skip indentation and inspect a
+            # leading comment, if any.
+            while self._peek() in (" ", "\t"):
+                self._advance()
+            if self._peek() == "#":
+                cstart = self.pos
+                while self._peek() and self._peek() != "\n":
+                    self._advance()
+                if _is_ignore_marker(self.src[cstart : self.pos], "ignore_end"):
+                    # Consume the end marker's line and return.
+                    if self._peek() == "\n":
+                        self._advance()
+                    return
+            # Any other line (or the rest of a non-end comment line) is consumed
+            # by the top of the next loop iteration.
+
+    def tokenize(self) -> list[Token]:
+        # Build the token list eagerly (no generators) so the lexer stays
+        # within asmpython's own compilable subset — a self-host requirement,
+        # since the compiler has no `yield` / generator support.
+        self.tokens: list[Token] = []
         while self.pos < len(self.src):
             if self.at_line_start and self.paren_depth == 0:
-                yield from self._handle_indentation()
+                self._handle_indentation()
                 self.at_line_start = False
                 if self.pos >= len(self.src):
                     break
@@ -101,15 +195,27 @@ class Lexer:
                 break
 
             if ch == "#":
+                # Read the comment text (up to, not including, the newline).
+                cstart = self.pos
                 while self._peek() and self._peek() != "\n":
                     self._advance()
+                comment = self.src[cstart : self.pos]
+                # `# [compiler: ignore_start]` opens a block of linter-only code
+                # the compiler must not see. Skip everything (respecting string
+                # context isn't a concern here: we only reach this branch with a
+                # real `#` comment outside any string) until the matching
+                # `ignore_end`. Handled inside the lexer rather than as a text
+                # pre-pass so markers appearing inside string literals — e.g. in
+                # this very file's docstrings — are never mistaken for real ones.
+                if _is_ignore_marker(comment, "ignore_start"):
+                    self._skip_ignore_block()
                 continue
 
             if ch == "\n":
                 line, col = self.line, self.col
                 self._advance()
                 if self.paren_depth == 0:
-                    yield Token("NEWLINE", "\n", line, col)
+                    self.tokens.append(Token("NEWLINE", "\n", line, col))
                     self.at_line_start = True
                 continue
 
@@ -124,29 +230,30 @@ class Lexer:
 
             # f-string prefix: f"..." or f'...'
             if ch == "f" and self._peek(1) in ('"', "'"):
-                yield self._read_fstring()
+                self.tokens.append(self._read_fstring())
                 continue
 
             if ch.isalpha() or ch == "_":
-                yield self._read_identifier()
+                self.tokens.append(self._read_identifier())
                 continue
 
             if ch.isdigit():
-                yield self._read_number()
+                self.tokens.append(self._read_number())
                 continue
 
             if ch == '"' or ch == "'":
-                yield self._read_string()
+                self.tokens.append(self._read_string())
                 continue
 
-            yield self._read_operator()
+            self.tokens.append(self._read_operator())
 
         while len(self.indents) > 1:
             self.indents.pop()
-            yield Token("DEDENT", "", self.line, 1)
-        yield Token("EOF", "", self.line, self.col)
+            self.tokens.append(Token("DEDENT", "", self.line, 1))
+        self.tokens.append(Token("EOF", "", self.line, self.col))
+        return self.tokens
 
-    def _handle_indentation(self) -> Iterator[Token]:
+    def _handle_indentation(self) -> None:
         depth = 0
         while True:
             c = self._peek()
@@ -163,11 +270,11 @@ class Lexer:
         current = self.indents[-1]
         if depth > current:
             self.indents.append(depth)
-            yield Token("INDENT", depth, self.line, 1)
+            self.tokens.append(Token("INDENT", depth, self.line, 1))
         else:
             while depth < self.indents[-1]:
                 self.indents.pop()
-                yield Token("DEDENT", "", self.line, 1)
+                self.tokens.append(Token("DEDENT", "", self.line, 1))
             if depth != self.indents[-1]:
                 raise LexError("inconsistent indentation", SourcePos(self.line, 1))
 
@@ -292,7 +399,7 @@ class Lexer:
                     else:
                         expr_chars.append(self._advance())
                 segments.append(
-                    ("expr", self._strip_fstring_spec("".join(expr_chars).strip()))
+                    ("expr", _strip_fstring_spec("".join(expr_chars).strip()))
                 )
                 continue
             if c == "}":
@@ -309,38 +416,6 @@ class Lexer:
         if text:
             segments.append(("str", "".join(text)))
         return Token("FSTRING", segments, line, col)
-
-    @staticmethod
-    def _strip_fstring_spec(raw: str) -> str:
-        """Drop a trailing `!r`/`!s`/`!a` conversion and/or `:format-spec`
-        from an f-string replacement field, leaving just the expression text.
-
-        Only top-level (outside any `()[]{}`) markers count, so `{a != b}` and
-        `{d[1:2]}` keep their `!=` / slice intact. Conversions and format
-        specs aren't applied yet — they're stripped so the expression re-lexes
-        cleanly. (TODO: honour `!r` and `:.2f` once repr / format land.)
-        """
-        depth = 0
-        n = len(raw)
-        i = 0
-        while i < n:
-            ch = raw[i]
-            if ch in "([{":
-                depth += 1
-            elif ch in ")]}":
-                depth -= 1
-            elif depth == 0:
-                if ch == ":":
-                    return raw[:i].strip()
-                if (
-                    ch == "!"
-                    and i + 1 < n
-                    and raw[i + 1] in "rsa"
-                    and (i + 2 == n or raw[i + 2] == ":")
-                ):
-                    return raw[:i].strip()
-            i += 1
-        return raw.strip()
 
     def _read_string(self) -> Token:
         line, col = self.line, self.col
@@ -417,7 +492,7 @@ class Lexer:
     def _read_operator(self) -> Token:
         line, col = self.line, self.col
         three = self.src[self.pos : self.pos + 3]
-        if three == "//=":
+        if three in ("//=", "**="):
             self._advance()
             self._advance()
             self._advance()
@@ -430,6 +505,7 @@ class Lexer:
             ">=",
             "->",
             "//",
+            "**",
             "<<",
             ">>",
             "+=",

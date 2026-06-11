@@ -9,7 +9,7 @@
 # none
 
 # `is` / `is not` lower to integer equality, so they line up with `== None`
-# / `!= None` (serpent's None is the int 0).
+# / `!= None` (asmpython's None is the int 0).
 print(int(0 is None))
 print(int(None is None))
 print(int(5 is None))
