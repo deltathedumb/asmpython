@@ -102,8 +102,8 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="{linux,windows,freestanding}",
         default=None,
         help="binary target platform / architecture (default: host platform). "
-        "'freestanding' = bare-metal / no OS or libc (replaces --freestanding; "
-        "backend not implemented yet)",
+        "'freestanding' = bare-metal Multiboot1 kernel (.bin); "
+        "boot with: qemu-system-x86_64 -kernel <output.bin>",
     )
     build_grp.add_argument(
         "--type",
@@ -255,8 +255,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.output is None:
         stem = args.source.with_suffix("")
         if args.output_type == "library":
-            # Shared library: .dll on Windows, .so elsewhere.
             args.output = stem.with_suffix(".dll" if target == "windows" else ".so")
+        elif target == "freestanding":
+            args.output = stem.with_suffix(".bin")
         else:
             args.output = stem.with_suffix(".exe") if target == "windows" else stem
 

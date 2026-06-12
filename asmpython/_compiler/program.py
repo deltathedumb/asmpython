@@ -122,6 +122,31 @@ def _resolve_absolute(module: str, root: Path) -> Path | None:
     return None
 
 
+def _resolve_user_module(module: str, importer: Path, root: Path) -> Path | None:
+    """Look for a user-written sibling module (`import utils`, `from utils import X`).
+
+    Searches the importer's own directory for `module.py` (or `module/__init__.py`),
+    accepting the result only if it lives inside the project root so we never
+    accidentally swallow a stdlib import that happens to share a filename.
+
+    This handles flat user projects where `main.py` and `utils.py` live together
+    without a package `__init__.py` structure.
+    """
+    parts = module.split(".")
+    if not parts:
+        return None
+    target = importer.parent
+    for part in parts:
+        target = target / part
+    py = Path(str(target) + ".py")
+    if py.is_file() and _within(py, root):
+        return py
+    init = target / "__init__.py"
+    if init.is_file() and _within(init, root):
+        return init
+    return None
+
+
 def _within(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
@@ -202,14 +227,22 @@ def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]
                 # asmpython.stdlib.assembly import pkgformat`). Resolve the
                 # module itself, and also try each imported name as a submodule.
                 p = _resolve_absolute(stmt.module, root)
+                if p is None:
+                    p = _resolve_user_module(stmt.module, importer, root)
                 if p is not None:
                     out.append(p)
                 for orig in (stmt.orig_names or stmt.names):
                     sub = _resolve_absolute(f"{stmt.module}.{orig}", root)
+                    if sub is None:
+                        sub = _resolve_user_module(
+                            f"{stmt.module}.{orig}", importer, root
+                        )
                     if sub is not None:
                         out.append(sub)
         elif isinstance(stmt, A.Import):
             p = _resolve_absolute(stmt.module, root)
+            if p is None:
+                p = _resolve_user_module(stmt.module, importer, root)
             if p is not None:
                 out.append(p)
     return out
@@ -512,5 +545,8 @@ def _resolve_fromimport_path(
         pkg_init = base / "__init__.py"
         return pkg_init if pkg_init.is_file() else None
     if stmt.module:
-        return _resolve_absolute(stmt.module, root)
+        p = _resolve_absolute(stmt.module, root)
+        if p is None:
+            p = _resolve_user_module(stmt.module, importer, root)
+        return p
     return None

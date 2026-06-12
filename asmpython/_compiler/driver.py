@@ -13,6 +13,7 @@ from .lexer import Lexer
 from .parser import Parser
 from .program import load_program
 from .sema import analyze as sema_analyze
+from .target_freestanding import FreestandingCodegen
 from .target_linux import LinuxCodegen
 from .target_windows import WindowsCodegen
 
@@ -130,15 +131,9 @@ def compile_source(
         nasm_fmt = "win64"
         obj_suffix = ".obj"
     elif target == "freestanding":
-        # Bare-metal / no-OS target: no libc, no `main`, a custom entry and a
-        # non-malloc runtime. The freestanding backend isn't built yet (it's a
-        # 1.0 deliverable — see roadmap.md), so fail with a clear message rather
-        # than silently producing a hosted binary.
-        raise RuntimeError(
-            "the 'freestanding' target (bare-metal / ring-0, no OS/libc) is not "
-            "implemented yet — see the 1.0 plan in roadmap.md. Use "
-            "--target windows or --target linux for hosted builds."
-        )
+        gen = FreestandingCodegen(module, use_runtime_lib=False)
+        nasm_fmt = "bin"
+        obj_suffix = ".bin"
     else:
         raise ValueError(f"unknown target {target}")
 
@@ -172,6 +167,13 @@ def compile_source(
         "-o",
         str(obj_path),
     ])
+
+    # Freestanding: -f bin produces the final binary directly; no linker needed.
+    if target == "freestanding":
+        if not keep_intermediates:
+            pass  # obj_path IS the final binary for freestanding
+        print(f"wrote {obj_path}")
+        return BuildResult(asm_path=asm_path, obj_path=obj_path, exe_path=obj_path)
 
     # Both targets now use gcc as the linker driver so the C runtime
     # (msvcrt on Windows, libc on Linux) is linked in transparently.

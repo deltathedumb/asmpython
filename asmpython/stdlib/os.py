@@ -30,6 +30,10 @@ BINDINGS = {
     # fgetc(FILE*) -> next byte (0..255), or -1 (EOF). The handle is a pointer,
     # passed as `str`; the return is a real C int.
     "fgetc":  Func(arg_types=("str",), ret_type="int", c_name="fgetc"),
+    # fputc(char, FILE*) -> char written, or EOF on error.
+    "fputc":  Func(arg_types=("int", "str"), ret_type="int", c_name="fputc"),
+    # fputs(str, FILE*) -> non-negative on success, EOF on error.
+    "fputs":  Func(arg_types=("str", "str"), ret_type="int", c_name="fputs"),
     # fclose(FILE*) -> 0 on success.
     "fclose": Func(arg_types=("str",), ret_type="int", c_name="fclose"),
     # access(path, mode) -> 0 if the path is accessible for `mode`

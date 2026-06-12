@@ -44,3 +44,7 @@ _build/
 # ── Misc logs ───────────────────────────────────────────────────────────────
 _smoke.log
 *.log
+
+
+# the thing that made me think i was being stalked for a solid couple hours
+hi.txt

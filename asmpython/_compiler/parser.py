@@ -545,6 +545,8 @@ class Parser:
                 return self._parse_raise()
             if t.value == "assert":
                 return self._parse_assert()
+            if t.value == "global":
+                return self._parse_global()
 
         # Assignment / aug-assignment vs expression statement.
         if t.kind == "NAME":
@@ -691,6 +693,15 @@ class Parser:
         negated = A.UnaryOp(op="not", operand=cond, pos=kw.pos)
         raise_stmt = A.Raise(value=msg, pos=kw.pos)
         return A.If(test=negated, then=[raise_stmt], orelse=[], pos=kw.pos)
+
+    def _parse_global(self) -> "A.Global":
+        kw = self._expect("KEYWORD", "global")
+        names = [self._expect("NAME").value]
+        while self._check("OP", ","):
+            self._eat()
+            names.append(self._expect("NAME").value)
+        self._expect("NEWLINE")
+        return A.Global(names=names, pos=kw.pos)
 
     def _parse_import(self) -> A.Import:
         kw = self._expect("KEYWORD", "import")

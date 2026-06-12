@@ -23,6 +23,7 @@ class Func:
     arg_types: tuple[str, ...]   # each "int" | "float" | "str"
     ret_type: str                # "int" | "float" | "str"
     c_name: str
+    c_name_windows: str | None = None  # override for Windows/msvcrt if symbol differs
 
 
 @dataclass(frozen=True)
@@ -42,10 +43,16 @@ class Const:
 # object with attribute access is itself an interpreter concept the compiler
 # can't lower, so we keep this file inside the compilable subset too.
 # Adding a stdlib module = add an import + one line here.
-from .math import BINDINGS as _MATH_BINDINGS  # noqa: E402
-from .os import BINDINGS as _OS_BINDINGS  # noqa: E402
+from .math   import BINDINGS as _MATH_BINDINGS    # noqa: E402
+from .os     import BINDINGS as _OS_BINDINGS      # noqa: E402
+from .sys    import BINDINGS as _SYS_BINDINGS     # noqa: E402
+from .time   import BINDINGS as _TIME_BINDINGS    # noqa: E402
+from .random import BINDINGS as _RANDOM_BINDINGS  # noqa: E402
 
 STDLIB_BINDINGS: dict[str, dict] = {
-    "math": _MATH_BINDINGS,
-    "os": _OS_BINDINGS,
+    "math":   _MATH_BINDINGS,
+    "os":     _OS_BINDINGS,
+    "sys":    _SYS_BINDINGS,
+    "time":   _TIME_BINDINGS,
+    "random": _RANDOM_BINDINGS,
 }

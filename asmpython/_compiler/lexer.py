@@ -39,6 +39,7 @@ KEYWORDS = {
     "raise",
     "is",
     "assert",
+    "global",
 }
 
 

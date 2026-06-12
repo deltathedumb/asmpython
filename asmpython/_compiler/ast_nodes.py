@@ -290,6 +290,14 @@ class Raise:
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
+@dataclass
+class Global:
+    """`global x, y` — declare names as module-level in this function."""
+
+    names: list[str] = field(default_factory=list)
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
 Stmt = (
     Assign
     | AugAssign
@@ -307,6 +315,7 @@ Stmt = (
     | AttrAssign
     | Try
     | Raise
+    | Global
 )
 # IndexAssign is also a Stmt but forward-referenced because Subscript is defined below.
 
@@ -676,6 +685,11 @@ def expr_type(e: Expr) -> str:
             return "float"
         return "int"
     if isinstance(e, UnaryOp):
+        # `not x` is a boolean (int 0/1) whatever x is; treating it as the
+        # operand's type makes `if not xs:` read the 0/1 result as a list
+        # header. `-`/`~` keep the operand's numeric type.
+        if e.op == "not":
+            return "int"
         return expr_type(e.operand)
     if isinstance(e, Compare):
         return "int"

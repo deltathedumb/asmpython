@@ -63,6 +63,9 @@ class WindowsCodegen(Codegen):
         # matching int reg. Mirror unconditionally — harmless for non-variadic.
         return True
 
+    def _platform_c_name(self, fn) -> str:
+        return getattr(fn, "c_name_windows", None) or fn.c_name
+
     # --- entry: main() -------------------------------------------------------
     def emit_entry_prologue(self, info: FuncInfo) -> None:
         self.emitf("push rbp", "mov rbp, rsp")
@@ -341,3 +344,233 @@ class WindowsCodegen(Codegen):
         self.emit_string_runtime()
         # Exception runtime (shared across targets).
         self.emit_exception_runtime()
+        # asmlib helpers (only emitted when symbols are referenced).
+        self.emit_asmlib_runtime()
+
+    # ---- asmlib runtime (Windows / x64 ABI) ---------------------------------
+    # All helpers use Windows x64 calling convention: shadow space 32 bytes,
+    # args in rcx/rdx/r8/r9, return in rax.
+    # Note: asmpython's own codegen calls user-defined functions with SysV regs
+    # (rdi/rsi/…); the FFI dispatch path converts to Windows ABI before calling
+    # any c_name symbol, so these helpers receive Windows ABI args.
+
+    _HW_STUBS = (
+        "_hw_in_byte", "_hw_out_byte", "_hw_in_word", "_hw_out_word",
+        "_hw_in_dword", "_hw_out_dword", "_hw_mmio_read8", "_hw_mmio_write8",
+        "_hw_mmio_read32", "_hw_mmio_write32", "_hw_rdtsc", "_hw_cpuid",
+        "_hw_halt", "_hw_cli", "_hw_sti", "_hw_pic_eoi", "_hw_pic_mask",
+        "_hw_pic_unmask", "_hw_pit_set_freq", "_hw_keyboard_read",
+        "_hw_keyboard_poll", "_hw_vga_set_color", "_hw_vga_set_cursor",
+        "_hw_vga_get_row", "_hw_vga_get_col",
+    )
+    _NET_SYMS = (
+        "_net_bind", "_net_connect", "_net_send", "_net_recv",
+        "_net_send_all", "_net_accept", "_net_close",
+        "_net_gethostname", "_net_errno",
+    )
+    _GUI_SYMS = (
+        "_gui_fill_rect", "_gui_draw_rect", "_gui_poll_event",
+        "_gui_wait_event", "_gui_key_scancode",
+        "_gui_mouse_x", "_gui_mouse_y", "_gui_mouse_button",
+    )
+
+    def emit_asmlib_runtime(self) -> None:
+        needs_hw  = any(s in self.ffi_externs for s in self._HW_STUBS)
+        needs_net = any(s in self.ffi_externs for s in self._NET_SYMS)
+        needs_gui = any(s in self.ffi_externs for s in self._GUI_SYMS)
+        if not (needs_hw or needs_net or needs_gui):
+            return
+
+        self.emit("")
+        self.emit("section .text")
+
+        if needs_hw:
+            for sym in self._HW_STUBS:
+                if sym in self.ffi_externs:
+                    self.label(sym)
+                    self.emitf("xor rax, rax", "ret")
+
+        # Windows Winsock2 network helpers.  Args arrive in Windows ABI regs.
+        if needs_net:
+            for sym in ("socket", "bind", "connect", "listen", "accept",
+                        "closesocket", "send", "recv", "htons", "inet_addr",
+                        "gethostname", "WSAGetLastError"):
+                self.emit(f"extern {sym}")
+
+            # _net_bind(rcx=fd, rdx=addr_cstr, r8=port) -> rax
+            if "_net_bind" in self.ffi_externs:
+                self.label("_net_bind")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
+                self.emitf("mov [rbp-8], rcx", "mov [rbp-16], rdx", "mov [rbp-24], r8")
+                # Build sockaddr_in at rbp-48 (16 bytes)
+                self.emitf("xor rax, rax",
+                           "mov [rbp-48], rax", "mov [rbp-56], rax")
+                self.emitf("mov word [rbp-48], 2")   # AF_INET
+                self.emitf("mov rcx, r8", "call htons",
+                           "mov word [rbp-48+2], ax")
+                self.emitf("mov rcx, [rbp-16]", "call inet_addr",
+                           "mov dword [rbp-48+4], eax")
+                self.emitf("mov rcx, [rbp-8]", "lea rdx, [rbp-48]",
+                           "mov r8d, 16", "call bind", "leave", "ret")
+
+            # _net_connect(rcx=fd, rdx=addr_cstr, r8=port) -> rax
+            if "_net_connect" in self.ffi_externs:
+                self.label("_net_connect")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
+                self.emitf("mov [rbp-8], rcx", "mov [rbp-16], rdx", "mov [rbp-24], r8")
+                self.emitf("xor rax, rax",
+                           "mov [rbp-48], rax", "mov [rbp-56], rax")
+                self.emitf("mov word [rbp-48], 2")
+                self.emitf("mov rcx, r8", "call htons",
+                           "mov word [rbp-48+2], ax")
+                self.emitf("mov rcx, [rbp-16]", "call inet_addr",
+                           "mov dword [rbp-48+4], eax")
+                self.emitf("mov rcx, [rbp-8]", "lea rdx, [rbp-48]",
+                           "mov r8d, 16", "call connect", "leave", "ret")
+
+            # _net_send(rcx=fd, rdx=msg_cstr, r8=flags) -> rax
+            if "_net_send" in self.ffi_externs:
+                self.emit("extern strlen")
+                self.label("_net_send")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+                self.emitf("mov [rbp-8], rcx", "mov [rbp-16], rdx", "mov [rbp-24], r8")
+                self.emitf("mov rcx, rdx", "call strlen", "mov [rbp-32], rax")
+                self.emitf("mov rcx, [rbp-8]", "mov rdx, [rbp-16]",
+                           "mov r8, [rbp-32]", "mov r9, [rbp-24]",
+                           "call send", "leave", "ret")
+
+            # _net_recv(rcx=fd, rdx=buf_size) -> rax (new string ptr)
+            if "_net_recv" in self.ffi_externs:
+                self.label("_net_recv")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+                self.emitf("mov [rbp-8], rcx", "mov [rbp-16], rdx")
+                self.emitf("lea rcx, [rdx+1]", "call malloc", "mov [rbp-24], rax")
+                self.emitf("mov rcx, [rbp-8]", "mov rdx, rax",
+                           "mov r8, [rbp-16]", "xor r9, r9",
+                           "call recv")
+                self.emitf("mov rdx, rax", "mov rax, [rbp-24]",
+                           "test rdx, rdx", "jl ._recv_err",
+                           "mov byte [rax+rdx], 0", "leave", "ret")
+                self.label("._recv_err")
+                self.emitf("mov byte [rax], 0", "leave", "ret")
+
+            # _net_send_all(rcx=fd, rdx=msg_cstr) -> rax
+            if "_net_send_all" in self.ffi_externs:
+                self.emit("extern strlen")
+                self.label("_net_send_all")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+                self.emitf("mov [rbp-8], rcx", "mov [rbp-16], rdx")
+                self.emitf("mov rcx, rdx", "call strlen", "mov [rbp-24], rax")
+                self.emitf("xor rax, rax", "mov [rbp-32], rax")
+                self.label("._sa_loop")
+                self.emitf("mov rax, [rbp-32]", "cmp rax, [rbp-24]", "jge ._sa_done")
+                self.emitf("mov rcx, [rbp-8]",
+                           "mov rdx, [rbp-16]", "add rdx, [rbp-32]",
+                           "mov r8, [rbp-24]", "sub r8, [rbp-32]",
+                           "xor r9, r9",
+                           "call send",
+                           "test rax, rax", "jle ._sa_done",
+                           "add [rbp-32], rax", "jmp ._sa_loop")
+                self.label("._sa_done")
+                self.emitf("mov rax, [rbp-32]", "leave", "ret")
+
+            # _net_accept(rcx=fd) -> rax
+            if "_net_accept" in self.ffi_externs:
+                self.label("_net_accept")
+                self.emitf("xor rdx, rdx", "xor r8, r8", "call accept", "ret")
+
+            # _net_close(rcx=fd) -> rax
+            if "_net_close" in self.ffi_externs:
+                self.label("_net_close")
+                self.emitf("call closesocket", "ret")
+
+            # _net_gethostname() -> rax
+            if "_net_gethostname" in self.ffi_externs:
+                self.emit("section .bss")
+                self.emit("_net_hostname_buf: resb 256")
+                self.emit("section .text")
+                self.label("_net_gethostname")
+                self.emitf("lea rcx, [_net_hostname_buf]", "mov edx, 255",
+                           "call gethostname",
+                           "lea rax, [_net_hostname_buf]", "ret")
+
+            # _net_errno() -> rax (Winsock2 error code)
+            if "_net_errno" in self.ffi_externs:
+                self.label("_net_errno")
+                self.emitf("call WSAGetLastError", "ret")
+
+        # SDL2 GUI helpers (Windows)
+        if needs_gui:
+            self.emit("extern SDL_PollEvent")
+            self.emit("extern SDL_WaitEvent")
+            self.emit("extern SDL_RenderFillRect")
+            self.emit("extern SDL_RenderDrawRect")
+
+            self.emit("section .bss")
+            self.emit("_gui_event_buf: resb 56")
+            self.emit("section .text")
+
+            if "_gui_fill_rect" in self.ffi_externs:
+                self.label("_gui_fill_rect")
+                # rcx=renderer, rdx=x, r8=y, r9=w, [rsp+40]=h (5th arg on stack)
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+                self.emitf("mov [rbp-8], rcx", "mov [rbp-16], rdx",
+                           "mov [rbp-24], r8", "mov [rbp-32], r9")
+                # 5th arg (h) is at [rbp+48] (shadow(32)+ret(8)+rbp(8) = 48)
+                self.emitf("mov rax, [rbp+48]", "mov [rbp-40], rax")
+                self.emitf("sub rsp, 16",
+                           "mov eax, dword [rbp-16]", "mov dword [rsp], eax",
+                           "mov eax, dword [rbp-24]", "mov dword [rsp+4], eax",
+                           "mov eax, dword [rbp-32]", "mov dword [rsp+8], eax",
+                           "mov eax, dword [rbp-40]", "mov dword [rsp+12], eax",
+                           "mov rcx, [rbp-8]", "mov rdx, rsp",
+                           "call SDL_RenderFillRect",
+                           "add rsp, 16", "leave", "ret")
+
+            if "_gui_draw_rect" in self.ffi_externs:
+                self.label("_gui_draw_rect")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+                self.emitf("mov [rbp-8], rcx", "mov [rbp-16], rdx",
+                           "mov [rbp-24], r8", "mov [rbp-32], r9")
+                self.emitf("mov rax, [rbp+48]", "mov [rbp-40], rax")
+                self.emitf("sub rsp, 16",
+                           "mov eax, dword [rbp-16]", "mov dword [rsp], eax",
+                           "mov eax, dword [rbp-24]", "mov dword [rsp+4], eax",
+                           "mov eax, dword [rbp-32]", "mov dword [rsp+8], eax",
+                           "mov eax, dword [rbp-40]", "mov dword [rsp+12], eax",
+                           "mov rcx, [rbp-8]", "mov rdx, rsp",
+                           "call SDL_RenderDrawRect",
+                           "add rsp, 16", "leave", "ret")
+
+            if "_gui_poll_event" in self.ffi_externs:
+                self.label("_gui_poll_event")
+                self.emitf("sub rsp, 32",
+                           "lea rcx, [_gui_event_buf]", "call SDL_PollEvent",
+                           "add rsp, 32",
+                           "test rax, rax", "jz ._gpe_none",
+                           "mov eax, dword [_gui_event_buf]", "ret")
+                self.label("._gpe_none")
+                self.emitf("xor rax, rax", "ret")
+
+            if "_gui_wait_event" in self.ffi_externs:
+                self.label("_gui_wait_event")
+                self.emitf("sub rsp, 32",
+                           "lea rcx, [_gui_event_buf]", "call SDL_WaitEvent",
+                           "add rsp, 32",
+                           "mov eax, dword [_gui_event_buf]", "ret")
+
+            if "_gui_key_scancode" in self.ffi_externs:
+                self.label("_gui_key_scancode")
+                self.emitf("movsx rax, dword [_gui_event_buf+16]", "ret")
+
+            if "_gui_mouse_x" in self.ffi_externs:
+                self.label("_gui_mouse_x")
+                self.emitf("movsx rax, dword [_gui_event_buf+16]", "ret")
+
+            if "_gui_mouse_y" in self.ffi_externs:
+                self.label("_gui_mouse_y")
+                self.emitf("movsx rax, dword [_gui_event_buf+20]", "ret")
+
+            if "_gui_mouse_button" in self.ffi_externs:
+                self.label("_gui_mouse_button")
+                self.emitf("movzx rax, byte [_gui_event_buf+13]", "ret")

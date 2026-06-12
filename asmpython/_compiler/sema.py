@@ -21,8 +21,127 @@ from typing import Optional
 from . import ast_nodes as A
 from .. import stdlib
 from ..stdlib import STDLIB_BINDINGS
+from ..asmlib import ASMLIB_BINDINGS
 from .errors import SemaError
 
+
+# ---------------------------------------------------------------------------
+# Assembly.* compile-time operand validation
+# ---------------------------------------------------------------------------
+
+# Every recognised x86-64 register name (lower-case). Used by sema to catch
+# typos like "rax2" or "rdx3" before they reach NASM.
+_ASM_VALID_REGS: frozenset = frozenset({
+    # 64-bit GP
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp", "rip",
+    "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15",
+    # 32-bit GP
+    "eax", "ebx", "ecx", "edx", "esi", "edi", "esp", "ebp", "eip",
+    "r8d", "r9d", "r10d","r11d","r12d","r13d","r14d","r15d",
+    # 16-bit GP
+    "ax",  "bx",  "cx",  "dx",  "si",  "di",  "sp",  "bp",  "ip",
+    "r8w", "r9w", "r10w","r11w","r12w","r13w","r14w","r15w",
+    # 8-bit GP
+    "al",  "ah",  "bl",  "bh",  "cl",  "ch",  "dl",  "dh",
+    "sil", "dil", "spl", "bpl",
+    "r8b", "r9b", "r10b","r11b","r12b","r13b","r14b","r15b",
+    # XMM
+    "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5",
+    "xmm6", "xmm7", "xmm8", "xmm9", "xmm10","xmm11",
+    "xmm12","xmm13","xmm14","xmm15",
+    # YMM
+    "ymm0", "ymm1", "ymm2", "ymm3", "ymm4", "ymm5",
+    "ymm6", "ymm7", "ymm8", "ymm9", "ymm10","ymm11",
+    "ymm12","ymm13","ymm14","ymm15",
+    # MMX
+    "mm0","mm1","mm2","mm3","mm4","mm5","mm6","mm7",
+    # Segment
+    "cs", "ds", "es", "fs", "gs", "ss",
+})
+
+# Size keywords that may prefix a memory operand ("qword [rbp-8]").
+_ASM_SIZE_KWS: frozenset = frozenset({
+    "byte", "word", "dword", "qword", "oword", "tword",
+    "xmmword", "ymmword", "zmmword",
+})
+
+
+def _asm_operand_looks_like_bad_register(s: str) -> bool:
+    """Return True iff `s` (already lower-cased) looks like an intended register
+    name but is not in the valid set.  Only fires on register-shaped tokens so
+    label names like 'my_loop' are not flagged."""
+    # Must be purely alphanumeric — no brackets, operators, spaces, underscores.
+    for ch in s:
+        if not (ch.isalpha() or ch.isdigit()):
+            return False
+    # Must start with a register-prefix pattern.
+    if s.startswith("xmm") or s.startswith("ymm") or s.startswith("zmm"):
+        return s not in _ASM_VALID_REGS
+    if len(s) >= 2 and s[0] == "r":
+        # r + digit(s) → intended as r8-r15 range
+        if s[1].isdigit():
+            return s not in _ASM_VALID_REGS
+        # rax / rbx / rcx … style: at least 2 alpha chars after 'r'
+        if s[1].isalpha():
+            return s not in _ASM_VALID_REGS
+    if len(s) >= 2 and s[0] == "e" and s[1].isalpha():
+        return s not in _ASM_VALID_REGS
+    return False
+
+
+def _check_asm_operand_lit(val: str, pos: object) -> None:
+    """Validate a single Assembly method operand that is a string literal.
+
+    Raises SemaError for:
+    - empty operands
+    - operands that look like register names but are not valid x86-64 registers
+      (e.g. "rax2", "rdx3", "eax9")
+
+    Everything else (memory refs, immediates, labels, complex expressions) is
+    accepted — NASM will catch genuine syntax errors when it assembles.
+    """
+    s = val.strip()
+    if not s:
+        raise SemaError("Assembly: operand must not be an empty string", pos)
+
+    lo = s.lower()
+
+    # Memory reference or complex expression → always accept
+    if "[" in lo or "+" in lo or "-" in lo or "*" in lo or " " in lo or ":" in lo:
+        return
+
+    # Strip a leading size keyword ("qword", "byte ptr", etc.)
+    for kw in _ASM_SIZE_KWS:
+        if lo == kw or lo.startswith(kw + " ") or lo.startswith(kw + "["):
+            return
+
+    # Numeric immediate (decimal, hex, octal, binary, possibly with leading '-')
+    stripped = lo.lstrip("-")
+    if stripped.startswith("0x") or stripped.startswith("0b") or stripped.startswith("0o"):
+        return
+    if stripped and all(c.isdigit() for c in stripped):
+        return
+
+    # Known good register → fine
+    if lo in _ASM_VALID_REGS:
+        return
+
+    # rel / abs RIP-relative prefix
+    if lo.startswith("rel") or lo.startswith("abs"):
+        return
+
+    # Flag a register-shaped name that isn't in the valid set
+    if _asm_operand_looks_like_bad_register(lo):
+        raise SemaError(
+            f"Assembly: {val!r} is not a recognised x86-64 register", pos
+        )
+
+    # Anything else (label, symbol) → accept
+
+
+# ---------------------------------------------------------------------------
+# Builtins we accept. Values describe required arg-count range.
+# ---------------------------------------------------------------------------
 
 # Builtins we accept. Values describe required arg-count range.
 BUILTINS: dict[str, tuple[int, int]] = {
@@ -42,6 +161,8 @@ BUILTINS: dict[str, tuple[int, int]] = {
     "min": (1, 64),  # min(iterable) or min(a, b, ...)
     "max": (1, 64),  # max(iterable) or max(a, b, ...)
     "abs": (1, 1),
+    "round": (1, 2),  # round(x[, ndigits]) -> int (ndigits ignored for now)
+    "pow": (2, 3),    # pow(base, exp[, mod]) -> int
     "sorted": (1, 1),  # sorted(iterable) (key/reverse via kwargs)
     "reversed": (1, 1),
     "any": (1, 1),
@@ -244,13 +365,16 @@ def _load_module(name: str) -> dict:
     # its stdlib by full path to avoid clashing with CPython's stdlib at compile
     # time; both spellings must reach the one binding set.)
     key = name
-    for prefix in ("asmpython.stdlib.", "asmpython._stdlib.", "stdlib."):
+    for prefix in ("asmpython.stdlib.", "asmpython._stdlib.", "stdlib.",
+                   "asmpython.asmlib.", "asmlib."):
         if key.startswith(prefix):
             key = key[len(prefix):]
             break
-    if key not in STDLIB_BINDINGS:
-        raise SemaError(f"no such module: {name!r}")
-    return STDLIB_BINDINGS[key]
+    if key in STDLIB_BINDINGS:
+        return STDLIB_BINDINGS[key]
+    if key in ASMLIB_BINDINGS:
+        return ASMLIB_BINDINGS[key]
+    raise SemaError(f"no such module: {name!r}")
 
 
 class SemaAnalyzer:
@@ -599,9 +723,43 @@ class SemaAnalyzer:
 
     # ---- entry --------------------------------------------------------------
 
+    def _inject_assembly_class_if_needed(self) -> None:
+        """If the module imports Assembly from asmpython.assembly, parse the
+        stdlib source and splice the Assembly ClassDef into self.mod.classes
+        so it participates in normal class collection and codegen."""
+        needed = False
+        for stmt in self.mod.body:
+            if (isinstance(stmt, A.FromImport)
+                    and stmt.level == 0
+                    and stmt.module in ("asmpython.assembly", "assembly")
+                    and "Assembly" in stmt.names):
+                needed = True
+                break
+        if not needed:
+            return
+        if any(c.name == "Assembly" for c in self.mod.classes):
+            return
+        try:
+            import os as _os
+            _here = _os.path.dirname(_os.path.abspath(__file__))
+            _root = _os.path.dirname(_here)
+            _asm_init = _os.path.join(_root, "stdlib", "assembly", "__init__.py")
+            with open(_asm_init, encoding="utf-8") as _fh:
+                _src = _fh.read()
+            from .lexer import Lexer as _Lx
+            from .parser import Parser as _Pr
+            _asm_mod = _Pr(_Lx(_src).tokenize()).parse()
+            for c in _asm_mod.classes:
+                if c.name == "Assembly":
+                    self.mod.classes.insert(0, c)
+                    return
+        except Exception:
+            pass
+
     def analyze(self) -> None:
-        import os  # DBGMARK
-        os.system("echo SA-0")  # DBGMARK
+        # Inject stdlib Assembly class if the user imported it, so the
+        # constructor and method calls resolve through the normal class path.
+        self._inject_assembly_class_if_needed()
         # First pass: collect function signatures so forward references resolve.
         for f in self.mod.funcs:
             if f.name in self.funcs:
@@ -623,7 +781,6 @@ class SemaAnalyzer:
                 vararg=f.vararg,
             )
 
-        os.system("echo SA-1-funcsigs")  # DBGMARK
         # Infer which functions return a tuple, and the shape of that tuple,
         # so call sites can unpack `q, r = f()`. Done before body analysis so
         # forward references and recursion still see the inferred shape.
@@ -632,7 +789,6 @@ class SemaAnalyzer:
             if ets is not None:
                 self.func_ret_tuple[f.name] = ets
 
-        os.system("echo SA-2-tupret")  # DBGMARK
         # Collect class signatures so methods + constructor calls resolve.
         for c in self.mod.classes:
             if c.name in self.classes or c.name in self.funcs or c.name in BUILTINS:
@@ -660,7 +816,6 @@ class SemaAnalyzer:
                 )
             self.classes[c.name] = sig
 
-        os.system("echo SA-3-classsigs")  # DBGMARK
         # Validate parents and check for cycles. A parent that isn't a
         # user-defined class is treated as an *external* base — a builtin
         # (e.g. `Exception`) or a name imported from another module
@@ -679,7 +834,6 @@ class SemaAnalyzer:
                     seen.add(cur)
                     cur = self.classes[cur].parent
 
-        os.system("echo SA-4-parents")  # DBGMARK
         # Top-level body first, so module-level names (imports and top-level
         # assignments) are recorded as globals and become visible inside
         # function/method bodies. In CPython a function reads module globals at
@@ -690,14 +844,12 @@ class SemaAnalyzer:
         # method) so every field read — including from module-level code — sees
         # the inferred field types.
         self._collect_field_types()
-        os.system("echo SA-5-fields")  # DBGMARK
 
         self.global_scope = Scope()
         # Module dunders the runtime always provides.
         self.global_scope.add("__name__", "str")
         self.global_scope.add("__file__", "str")
         self._check_block(self.mod.body, self.global_scope)
-        os.system("echo SA-6-body")  # DBGMARK
 
         # Function bodies: each has its own scope, seeded with globals then
         # params. If a param has a default literal, infer its type from the
@@ -1069,8 +1221,6 @@ class SemaAnalyzer:
                 self._collect_tuple_returns(s.handler, acc)
 
     def _check_stmt(self, s, scope: Scope) -> None:
-        import os  # DBGMARK
-        os.system("echo CS")  # DBGMARK
         if isinstance(s, A.Pass):
             return
         if isinstance(s, A.Assign):
@@ -1608,13 +1758,18 @@ class SemaAnalyzer:
                     "raise requires a string message or an exception", s.pos
                 )
             return
+        if isinstance(s, A.Global):
+            # `global x, y`: just validates that the names exist at module level.
+            # Codegen uses this to skip allocating frame slots for them.
+            for nm in s.names:
+                if nm not in scope and nm not in self.global_scope:
+                    pass  # allow forward-declared globals (assigned before use)
+            return
         raise SemaError(
             f"internal: unhandled stmt {type(s).__name__}", getattr(s, "pos", None)
         )
 
     def _check_expr(self, e, scope: Scope) -> None:
-        import os  # DBGMARK
-        os.system("echo CE")  # DBGMARK
         if isinstance(e, (A.IntLit, A.FloatLit, A.StrLit)):
             return
         if isinstance(e, A.Name):
@@ -2227,8 +2382,6 @@ class SemaAnalyzer:
                 e.pos,
             )
         if isinstance(e, A.MethodCall):
-            import os  # DBGMARK
-            os.system("echo CE-mc")  # DBGMARK
             # Interpreter-only calls (dynamic import, code-exec by string) have
             # no native lowering — reject early with a located message instead
             # of letting them reach codegen as a raw NotImplementedError.
@@ -2350,6 +2503,35 @@ class SemaAnalyzer:
                     if len(e.args) != 1:
                         raise SemaError("list.index() takes 1 argument", e.pos)
                     e.inferred_type = "int"
+                elif e.method == "sort":
+                    if e.args:
+                        raise SemaError("list.sort() takes no arguments", e.pos)
+                    e.inferred_type = "int"  # in-place, returns None ~ 0
+                elif e.method == "reverse":
+                    if e.args:
+                        raise SemaError("list.reverse() takes no arguments", e.pos)
+                    e.inferred_type = "int"
+                elif e.method == "count":
+                    if len(e.args) != 1:
+                        raise SemaError("list.count() takes 1 argument", e.pos)
+                    e.inferred_type = "int"
+                elif e.method == "clear":
+                    if e.args:
+                        raise SemaError("list.clear() takes no arguments", e.pos)
+                    e.inferred_type = "int"
+                elif e.method == "copy":
+                    if e.args:
+                        raise SemaError("list.copy() takes no arguments", e.pos)
+                    e.inferred_type = "list"
+                    e.list_el_type = el_t if el_t not in ("?", "") else "int"
+                elif e.method == "insert":
+                    if len(e.args) != 2:
+                        raise SemaError("list.insert() takes (index, value)", e.pos)
+                    e.inferred_type = "int"
+                elif e.method == "remove":
+                    if len(e.args) != 1:
+                        raise SemaError("list.remove() takes 1 argument", e.pos)
+                    e.inferred_type = "int"
                 else:
                     raise SemaError(f"list has no method {e.method!r}", e.pos)
             elif obj_t == "dict":
@@ -2407,6 +2589,23 @@ class SemaAnalyzer:
                         )
                     if A.expr_type(e.args[0]) not in ("str", "any"):
                         raise SemaError("dict.pop() key must be a str", e.pos)
+                    e.inferred_type = self._dict_value_type(e.obj, scope)
+                elif e.method == "clear":
+                    if e.args:
+                        raise SemaError("dict.clear() takes no arguments", e.pos)
+                    e.inferred_type = "int"
+                elif e.method == "copy":
+                    if e.args:
+                        raise SemaError("dict.copy() takes no arguments", e.pos)
+                    e.inferred_type = "dict"
+                    e.value_type = self._dict_value_type(e.obj, scope)
+                elif e.method == "setdefault":
+                    if not (1 <= len(e.args) <= 2):
+                        raise SemaError(
+                            "dict.setdefault() takes (key[, default])", e.pos
+                        )
+                    if A.expr_type(e.args[0]) not in ("str", "any"):
+                        raise SemaError("dict.setdefault() key must be a str", e.pos)
                     e.inferred_type = self._dict_value_type(e.obj, scope)
                 else:
                     raise SemaError(f"dict has no method {e.method!r}", e.pos)
@@ -2472,6 +2671,12 @@ class SemaAnalyzer:
                         f"{class_name}.{e.method}() takes {required}..{expected} argument(s), got {len(e.args)}",
                         e.pos,
                     )
+                # Assembly operand validation: when string literals are passed
+                # to any Assembly method, validate them at compile time.
+                if class_name == "Assembly":
+                    for _a in e.args:
+                        if isinstance(_a, A.StrLit):
+                            _check_asm_operand_lit(_a.value, _a.pos)
                 # Return type priority: an inferred `return a, b` tuple shape
                 # (so `x, y = obj.m()` unpacks), then an explicit annotation,
                 # else int.
@@ -2510,13 +2715,24 @@ class SemaAnalyzer:
                 # the result is opaque so chains keep type-checking.
                 e.inferred_type = "any"
             elif obj_t == "set":
-                # Sets model membership + mutation; mutators return None (~int),
-                # everything else stays opaque. Lenient on the argument kind.
-                e.inferred_type = (
-                    "int"
-                    if e.method in ("add", "discard", "remove", "update", "clear")
-                    else "any"
-                )
+                if e.method in ("add", "discard", "remove", "update", "clear"):
+                    e.inferred_type = "int"
+                elif e.method in ("union", "intersection", "difference"):
+                    if len(e.args) != 1:
+                        raise SemaError(
+                            f"set.{e.method}() takes 1 argument", e.pos
+                        )
+                    e.inferred_type = "set"
+                elif e.method == "copy":
+                    if e.args:
+                        raise SemaError("set.copy() takes no arguments", e.pos)
+                    e.inferred_type = "set"
+                elif e.method == "pop":
+                    if e.args:
+                        raise SemaError("set.pop() takes no arguments", e.pos)
+                    e.inferred_type = "str"
+                else:
+                    e.inferred_type = "any"
             else:
                 raise SemaError(f"{obj_t} has no method {e.method!r}", e.pos)
             return
@@ -2860,6 +3076,8 @@ class SemaAnalyzer:
                 "min": "any",
                 "max": "any",
                 "abs": "any",
+                "round": "int",
+                "pow": "int",
                 "sorted": "list",
                 "reversed": "list",
                 "any": "int",
@@ -2878,6 +3096,8 @@ class SemaAnalyzer:
                 "min",
                 "max",
                 "abs",
+                "round",
+                "pow",
                 "reversed",
                 "any",
                 "all",

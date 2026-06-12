@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "asmpython"
+version = "1.0.0"
+description = "Compile Python to native x86-64 executables via NASM"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Mabel", email = "harveydjass@gmail.com" }]
+requires-python = ">=3.11"
+keywords = ["compiler", "assembly", "x86-64", "native", "transpiler", "nasm"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Assembly",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: System :: Hardware",
+]
+
+[project.scripts]
+asmpython = "asmpython._compiler.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/mabel/asmpython"
+Documentation = "https://github.com/mabel/asmpython/blob/main/docs.html"
+Changelog = "https://github.com/mabel/asmpython/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["asmpython*"]
+
+[tool.setuptools.package-data]
+"asmpython" = ["stdlib/*.py", "asmlib/*.py", "_runtime/**/*"]
