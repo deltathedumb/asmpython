@@ -136,6 +136,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="keep the intermediate .o / .obj file after linking",
     )
+    build_grp.add_argument(
+        "--keep-assembly",
+        action="store_true",
+        dest="keep_assembly",
+        help="keep the intermediate .asm file after assembling",
+    )
 
     # Bundling
     bundle = build_grp.add_mutually_exclusive_group()
@@ -280,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
             args.output,
             emit_asm_only=args.emit_asm,
             keep_intermediates=args.keep,
+            keep_assembly=args.keep_assembly,
             use_runtime_lib=use_runtime_lib,
             nasm_path=args.nasm,
             gcc_path=args.gcc,

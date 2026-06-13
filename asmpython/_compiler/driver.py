@@ -102,6 +102,7 @@ def compile_source(
     *,
     emit_asm_only: bool = False,
     keep_intermediates: bool = False,
+    keep_assembly: bool = False,
     use_runtime_lib: bool = False,
     nasm_path: Path | None = None,
     gcc_path: Path | None = None,
@@ -170,8 +171,11 @@ def compile_source(
 
     # Freestanding: -f bin produces the final binary directly; no linker needed.
     if target == "freestanding":
-        if not keep_intermediates:
-            pass  # obj_path IS the final binary for freestanding
+        if not keep_assembly:
+            try:
+                asm_path.unlink()
+            except OSError:
+                pass
         print(f"wrote {obj_path}")
         return BuildResult(asm_path=asm_path, obj_path=obj_path, exe_path=obj_path)
 
@@ -225,6 +229,12 @@ def compile_source(
     if not keep_intermediates:
         try:
             obj_path.unlink()
+        except OSError:
+            pass
+
+    if not keep_assembly:
+        try:
+            asm_path.unlink()
         except OSError:
             pass
 

@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.0.1] — 2026-06-12
+
+### Added
+
+- **`--keep-assembly`** compiler flag — the intermediate `.asm` file is now
+  deleted after assembling by default; pass `--keep-assembly` to retain it.
+  `--emit-asm` is unaffected and still keeps the file as before.
+
+### Changed
+
+- **`build.bat`** simplified to a single purpose: self-compile asmpython with
+  itself to `build\asmpython.exe`. General compilation, `--test`, `--selfhost`,
+  and `--run` modes have been removed; use `asmpython.bat` directly for those.
+
+---
+
 ## [1.0.0] — 2026-06-12
 
 First stable release.
