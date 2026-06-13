@@ -959,11 +959,13 @@ class FreestandingCodegen(Codegen):
             for label, val in self.floats:
                 self.emit(f"{label}: dq {repr(val)}")
 
-        # Module-level global variables
+        # Module-level global variables + class-level variable constants
         self.emit("")
         self.emit("section .bss nobits")
         for name in self.global_vars:
             self.emit(f"{self._global_label(name)}: resq 1")
+        for label in self.class_var_labels.values():
+            self.emit(f"{label}: resq 1")
 
         # _load_end must be the last byte-producing address, _bss_end after BSS.
         self.emit("")
