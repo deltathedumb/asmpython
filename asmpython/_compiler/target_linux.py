@@ -155,6 +155,27 @@ class LinuxCodegen(Codegen):
             "lea rax, [itoa_str_buf]",
         )
 
+    def _emit_float_fmt(self, fmt_label: str) -> None:
+        # sprintf(buf, fmt, xmm0). SysV: al = number of vector regs used (1).
+        self.emitf(
+            "lea rdi, [itoa_str_buf]",
+            f"lea rsi, [{fmt_label}]",
+            "mov al, 1",
+            "call sprintf",
+            "lea rax, [itoa_str_buf]",
+        )
+
+    def _emit_int_fmt(self, fmt_label: str) -> None:
+        # sprintf(buf, fmt, rax). rax(value) -> rdx (3rd int arg); al = 0 vec regs.
+        self.emitf(
+            "mov rdx, rax",
+            "lea rdi, [itoa_str_buf]",
+            f"lea rsi, [{fmt_label}]",
+            "xor al, al",
+            "call sprintf",
+            "lea rax, [itoa_str_buf]",
+        )
+
     def _emit_str_to_float(self) -> None:
         self.emitf("mov rdi, rax", "call atof")
 

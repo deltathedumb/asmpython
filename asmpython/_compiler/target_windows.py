@@ -178,6 +178,26 @@ class WindowsCodegen(Codegen):
             "lea rax, [itoa_str_buf]",
         )
 
+    def _emit_float_fmt(self, fmt_label: str) -> None:
+        # sprintf(buf, fmt, xmm0). MS x64: variadic double also mirrored to r8.
+        self.emitf(
+            "movq r8, xmm0",
+            f"lea rdx, [{fmt_label}]",
+            "lea rcx, [itoa_str_buf]",
+            "call sprintf",
+            "lea rax, [itoa_str_buf]",
+        )
+
+    def _emit_int_fmt(self, fmt_label: str) -> None:
+        # sprintf(buf, fmt, rax).
+        self.emitf(
+            "mov r8, rax",
+            f"lea rdx, [{fmt_label}]",
+            "lea rcx, [itoa_str_buf]",
+            "call sprintf",
+            "lea rax, [itoa_str_buf]",
+        )
+
     def _emit_str_to_float(self) -> None:
         # atof(rax) -> xmm0
         self.emitf("mov rcx, rax", "call atof")

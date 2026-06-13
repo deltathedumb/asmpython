@@ -89,14 +89,13 @@ def _is_ignore_marker(line: str, which: str) -> bool:
     return key == "compiler" and val == which
 
 
-def _strip_fstring_spec(raw: str) -> str:
-    """Drop a trailing `!r`/`!s`/`!a` conversion and/or `:format-spec` from an
-    f-string replacement field, leaving just the expression text.
+def _split_fstring_spec(raw: str) -> tuple[str, str]:
+    """Split an f-string replacement field into (expression, format-spec).
 
-    Only top-level (outside any `()[]{}`) markers count, so `{a != b}` and
-    `{d[1:2]}` keep their `!=` / slice intact. Conversions and format specs
-    aren't applied yet — they're stripped so the expression re-lexes cleanly.
-    (TODO: honour `!r` and `:.2f` once repr / format land.)
+    A trailing `!r`/`!s`/`!a` conversion is dropped (not yet applied); a
+    top-level `:format-spec` (outside any `()[]{}`) is returned separately so
+    codegen can honour `:.2f`-style specs. `{a != b}` and `{d[1:2]}` keep their
+    `!=` / slice intact because only depth-0 markers count.
 
     A module-level function rather than a staticmethod so the lexer stays within
     asmpython's own compilable subset (the compiler doesn't model staticmethods).
@@ -112,16 +111,26 @@ def _strip_fstring_spec(raw: str) -> str:
             depth -= 1
         elif depth == 0:
             if ch == ":":
-                return raw[:i].strip()
+                return raw[:i].strip(), raw[i + 1:].strip()
             if (
                 ch == "!"
                 and i + 1 < n
                 and raw[i + 1] in "rsa"
                 and (i + 2 == n or raw[i + 2] == ":")
             ):
-                return raw[:i].strip()
+                # Drop the conversion; keep any spec that follows it.
+                rest = raw[i + 2:]
+                if rest.startswith(":"):
+                    return raw[:i].strip(), rest[1:].strip()
+                return raw[:i].strip(), ""
         i += 1
-    return raw.strip()
+    return raw.strip(), ""
+
+
+def _strip_fstring_spec(raw: str) -> str:
+    """Back-compat: just the expression text (spec dropped)."""
+    expr, _ = _split_fstring_spec(raw)
+    return expr
 
 
 class Lexer:
@@ -406,9 +415,11 @@ class Lexer:
                         expr_chars.append(self._advance())
                     else:
                         expr_chars.append(self._advance())
-                segments.append(
-                    ("expr", _strip_fstring_spec("".join(expr_chars).strip()))
-                )
+                _expr, _spec = _split_fstring_spec("".join(expr_chars).strip())
+                if _spec:
+                    segments.append(("exprspec", _expr, _spec))
+                else:
+                    segments.append(("expr", _expr))
                 continue
             if c == "}":
                 self._advance()

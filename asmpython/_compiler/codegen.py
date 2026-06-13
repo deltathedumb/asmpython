@@ -2214,11 +2214,50 @@ class Codegen:
             )
         self.emitf(f"mov rax, [rbp{acc_slot:+d}]")
 
+    def _cfmt_for_spec(self, spec: str, t: str) -> str | None:
+        """Translate a Python format spec (the part after `:`) into a C printf
+        format for a numeric value, or None if unsupported (caller falls back to
+        the default conversion). Handles the common cases:
+          float:  .Nf .Ne .Eg  ->  %.Nf etc.
+          int:    d  x  X  o  b(unsupported)  Nd(width)  0Nd(zero-pad)
+        """
+        if not spec:
+            return None
+        if t == "float":
+            # `.2f`, `.0f`, `.3e`, `.4g`; also bare `f`/`e`/`g`.
+            if spec and spec[-1] in "feEgG":
+                return "%" + spec
+            return None
+        if t == "int":
+            # `d`, `x`, `X`, `o`, width/zero-pad like `05d`, `3d`.
+            if spec and spec[-1] in "dxXo":
+                # printf needs the length modifier for 64-bit: %lld, %llx, ...
+                conv = spec[-1]
+                flags = spec[:-1]
+                return "%" + flags + "ll" + conv
+            if spec.isdigit() or (spec.startswith("0") and spec[1:].isdigit()):
+                return "%" + spec + "lld"
+            return None
+        return None
+
     def _gen_fstring_segment(self, seg, info: FuncInfo) -> None:
         """Evaluate one f-string segment and leave a str pointer in rax
         (int/float go through str(); str segments stay as-is). A plain method
         rather than a closure inside _gen_fstring, so codegen self-compiles."""
         t = A.expr_type(seg)
+        spec = getattr(seg, "fmt_spec", "")
+        if spec and t in ("int", "float"):
+            cfmt = self._cfmt_for_spec(spec, t)
+            if cfmt is not None:
+                label, _ = self.intern_string(cfmt)
+                if t == "float":
+                    self._gen_expr_as_float(seg, info, t)
+                    self._emit_float_fmt(label)
+                else:
+                    self.gen_expr(seg, info)
+                    self._emit_int_fmt(label)
+                self.emitf("call _runtime_str_concat_dup")
+                return
         self.gen_expr(seg, info)
         if t == "int":
             self._emit_int_to_str()
@@ -8282,6 +8321,12 @@ class Codegen:
     def _emit_print_value(self, expr, info: FuncInfo) -> None:
         """Emit code that prints a single typed value (no newline, no space)."""
         t = A.expr_type(expr)
+        # An f-string segment may carry a `:format-spec` (e.g. `{x:.2f}`).
+        # Route those through the spec-aware segment formatter, then print.
+        if getattr(expr, "fmt_spec", "") and t in ("int", "float"):
+            self._gen_fstring_segment(expr, info)
+            self._emit_print_str_ptr_no_newline()
+            return
         self.gen_expr(expr, info)
         if t == "str":
             self._emit_print_str_ptr_no_newline()
@@ -8381,6 +8426,15 @@ class Codegen:
 
     def _emit_float_to_str(self) -> None:
         """In: xmm0 = double. Out: rax = ptr to nul-terminated `%g` form."""
+        raise NotImplementedError
+
+    def _emit_float_fmt(self, fmt_label: str) -> None:
+        """In: xmm0 = double. Out: rax = ptr to sprintf(buf, <fmt_label>, x).
+        `fmt_label` names a .rodata C format string (e.g. `"%.2f"`)."""
+        raise NotImplementedError
+
+    def _emit_int_fmt(self, fmt_label: str) -> None:
+        """In: rax = int. Out: rax = ptr to sprintf(buf, <fmt_label>, x)."""
         raise NotImplementedError
 
     def _emit_str_to_float(self) -> None:

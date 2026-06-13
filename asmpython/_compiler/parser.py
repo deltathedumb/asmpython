@@ -1507,7 +1507,10 @@ class Parser:
     def _parse_fstring(self) -> A.FString:
         tok = self._eat()
         segments: list = []
-        for kind, text in tok.value:  # type: ignore
+        for seg in tok.value:  # type: ignore
+            kind = seg[0]
+            text = seg[1]
+            spec = seg[2] if len(seg) > 2 else ""
             if kind == "str":
                 segments.append(A.StrLit(value=text, pos=tok.pos))
             else:
@@ -1523,6 +1526,9 @@ class Parser:
                         f"unexpected tokens in f-string expression: {text!r}",
                         tok.pos,
                     )
+                # Carry a `:format-spec` (e.g. `.2f`) for codegen to honour.
+                if spec:
+                    expr.fmt_spec = spec  # type: ignore[attr-defined]
                 segments.append(expr)
         return A.FString(segments=segments, pos=tok.pos)
 
