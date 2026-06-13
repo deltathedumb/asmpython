@@ -1171,10 +1171,16 @@ class Codegen:
                 elif s.iter is not None and A.expr_type(s.iter) == "str":
                     var_ty = "str"
                 if s.targets:
-                    # `for a, b in pairs`: tuple-unpacking targets, each bound
-                    # to a slot of the per-iteration element (opaque kind).
-                    for t in self._target_names(s.targets):
-                        self._cl_define(info, t, "any")
+                    # `for a, b in pairs`: tuple-unpacking targets. sema stamps
+                    # per-target kinds (list[tuple] slots) onto target_types;
+                    # fall back to opaque "any" when shapes are untracked.
+                    ttypes = getattr(s, "target_types", [])
+                    names = self._target_names(s.targets)
+                    i = 0
+                    for t in names:
+                        ty = ttypes[i] if i < len(ttypes) else "any"
+                        self._cl_define(info, t, ty)
+                        i += 1
                 elif s.var:
                     self._cl_define(info, s.var, var_ty)
                 self._cl_define(info, f"__for_stop_{id(s)}", "int")

@@ -349,6 +349,10 @@ class Scope:
     # (list[dict] / list[list]), the common value/element kind of those nested
     # containers — so `xs[i][k]` and `for x in xs: x[k]` recover the leaf type.
     list_el_value_types: dict[str, str] = field(default_factory=dict)
+    # For names typed "list" whose elements are tuples (list[tuple]), the common
+    # per-slot element kinds of those tuples — so `xs[i][0]` and
+    # `for a, b in xs` recover the slot types. Empty when unknown.
+    list_el_tuple_types: dict[str, list[str]] = field(default_factory=dict)
     # For names typed "dict", value kind. Keys are always str in v1.
     dict_value_types: dict[str, str] = field(default_factory=dict)
     # For names typed "dict" whose value kind is itself a container, the common
@@ -374,6 +378,7 @@ class Scope:
         *,
         el_type: str | None = None,
         el_value_type: str | None = None,
+        el_tuple_types: list[str] | None = None,
         value_type: str | None = None,
         inner_value_type: str | None = None,
         value_tuple_types: list[str] | None = None,
@@ -384,6 +389,8 @@ class Scope:
             self.list_el_types[name] = el_type
         if ty == "list" and el_value_type is not None:
             self.list_el_value_types[name] = el_value_type
+        if ty == "list" and el_tuple_types:
+            self.list_el_tuple_types[name] = el_tuple_types
         if ty == "dict" and value_type is not None:
             self.dict_value_types[name] = value_type
         if ty == "dict" and inner_value_type is not None:
@@ -1252,6 +1259,21 @@ class SemaAnalyzer:
             return scope.list_el_value_types.get(e.name, "int")
         return "int"
 
+    def _list_el_tuple_types(self, e, scope: Scope) -> list[str]:
+        """For a list whose elements are tuples (list[tuple]), the common
+        per-slot kinds of those tuples. [] if unknown."""
+        if isinstance(e, A.ListLit):
+            return list(getattr(e, "el_tuple_types", []))
+        if isinstance(e, A.Comprehension):
+            return list(getattr(e, "el_tuple_types", []))
+        if isinstance(e, A.Name):
+            return list(scope.list_el_tuple_types.get(e.name, []))
+        if isinstance(e, A.MethodCall):
+            # dict.items() -> list[(str, V)]; sema stamps the pair shape on
+            # `tuple_elem_types` (the element tuple's per-slot kinds).
+            return list(getattr(e, "tuple_elem_types", []))
+        return []
+
     def _list_el_type(self, e, scope: Scope) -> str:
         """Element type of a list-valued expression. 'int' if unknown."""
         if isinstance(e, A.ListLit):
@@ -1334,6 +1356,28 @@ class SemaAnalyzer:
             elif seen != inner:
                 seen = "any"
         return seen if seen is not None else "int"
+
+    def _common_tuple_slots(self, values: list, scope: Scope) -> list[str]:
+        """Common per-slot kinds across a list of tuple expressions. Returns the
+        shared slot kinds, with a slot set to 'any' where the tuples disagree,
+        or [] if shapes differ / none are known. Used to type list[tuple]."""
+        shared: list[str] | None = None
+        for v in values:
+            slots = self._tuple_elem_types(v, scope)
+            if not slots:
+                return []
+            if shared is None:
+                shared = list(slots)
+            elif len(shared) != len(slots):
+                return []  # ragged shapes: give up
+            else:
+                merged: list[str] = []
+                i = 0
+                for s in shared:
+                    merged.append(s if s == slots[i] else "any")
+                    i += 1
+                shared = merged
+        return shared if shared is not None else []
 
     def _tuple_elem_types(self, e, scope: Scope) -> list[str]:
         """Per-slot element kinds of a tuple-valued expression, or [] if
@@ -1442,6 +1486,7 @@ class SemaAnalyzer:
                     t,
                     el_type=self._list_el_type(s.value, scope),
                     el_value_type=self._list_el_value_type(s.value, scope),
+                    el_tuple_types=self._list_el_tuple_types(s.value, scope),
                 )
             elif t == "dict":
                 scope.add(
@@ -1634,26 +1679,43 @@ class SemaAnalyzer:
                 # and tuple-of-tuples uniformly. (zip/enumerate were already
                 # handled above with precise element kinds.)
                 if s.targets and it_t in ("list", "tuple", "dict", "str", "any", "int"):
-                    # If the iterable carries a per-pair slot shape (e.g.
-                    # d.items() -> [str, value-kind]) and the targets are FLAT
-                    # names (a nested group like `for k, (a, b) in ...` consumes
-                    # one slot per group, so slot kinds don't map 1:1 onto the
-                    # flattened names), type each target from its slot;
-                    # otherwise bind leniently.
-                    shape = list(getattr(s.iter, "tuple_elem_types", []) or [])
+                    # If the iterable carries a per-pair slot shape and the
+                    # targets are FLAT names (a nested group like
+                    # `for k, (a, b) in ...` consumes one slot per group, so slot
+                    # kinds don't map 1:1 onto the flattened names), type each
+                    # target from its slot; otherwise bind leniently.
+                    #   - list[tuple]: element tuples' per-slot kinds
+                    #   - direct tuple shape (d.items(), tuple-of-tuples)
+                    if it_t == "list":
+                        shape = self._list_el_tuple_types(s.iter, scope)
+                    else:
+                        shape = list(getattr(s.iter, "tuple_elem_types", []) or [])
                     flat = True
                     for t in s.targets:
                         if not isinstance(t, str):
                             flat = False
                     names = self._flat_target_names(s.targets)
+                    ttypes: list[str] = []
                     for ti, nm in enumerate(names):
-                        if flat and ti < len(shape) and shape[ti] not in (
-                            "int",
-                            "any",
-                        ):
-                            scope.add(nm, shape[ti])
+                        # Only bind a target to a concrete kind when the slot is
+                        # str/float — the kinds that misprint as int. "int"/"any"
+                        # stay lenient (the historical behavior the self-host
+                        # build relies on, and which keeps append targets open).
+                        # Append only string literals so this stays self-host
+                        # compilable (a subscript result types as int otherwise).
+                        is_str = flat and ti < len(shape) and shape[ti] == "str"
+                        is_flt = flat and ti < len(shape) and shape[ti] == "float"
+                        if is_str:
+                            scope.add(nm, "str")
+                            ttypes.append("str")
+                        elif is_flt:
+                            scope.add(nm, "float")
+                            ttypes.append("float")
                         else:
                             scope.add(nm, "any")
+                            ttypes.append("any")
+                    if flat:
+                        s.target_types = ttypes  # codegen local typing
                     self.loop_depth += 1
                     try:
                         self._check_block(s.body, scope)
@@ -1663,11 +1725,12 @@ class SemaAnalyzer:
                 if it_t == "list":
                     el_t = self._list_el_type(s.iter, scope)
                     if el_t == "tuple":
-                        # Per-slot shape (e.g. d.values() of a tuple-valued
-                        # dict) so `pair[0]` etc. type correctly.
-                        scope.add(
-                            s.var, el_t, tuple_types=self._tuple_elem_types(s.iter, scope)
-                        )
+                        # Single-var iteration over list[tuple] (`for pair in xs`).
+                        # Multi-target unpack is handled by the branch above and
+                        # returns before reaching here. Carry the per-slot kinds
+                        # so `pair[0]` types correctly.
+                        slots = self._list_el_tuple_types(s.iter, scope)
+                        scope.add(s.var, el_t, tuple_types=slots)
                     elif el_t == "dict":
                         # list[dict]: bind the loop var as a dict carrying the
                         # tracked value kind so `x[k]` recovers the leaf type.
@@ -2339,6 +2402,10 @@ class SemaAnalyzer:
             # recover the value type one level down.
             if seen in ("dict", "list"):
                 e.el_value_type = self._common_container_inner(e.elems, scope)
+            # When elements are tuples, remember the common per-slot kinds so
+            # `xs[i][0]` and `for a, b in xs` resolve the slot types.
+            elif seen == "tuple":
+                e.el_tuple_types = self._common_tuple_slots(e.elems, scope)
             return
         if isinstance(e, A.Comprehension):
             self._check_expr(e.iter, scope)
@@ -2563,6 +2630,9 @@ class SemaAnalyzer:
                     inner = inner if inner != "int" else "any"
                     e.value_type = inner
                     e.list_el_type = inner
+                elif e.inferred_type == "tuple":
+                    # list[tuple]: carry the per-slot kinds so `xs[i][0]` types.
+                    e.tuple_elem_types = self._list_el_tuple_types(e.obj, scope)
             elif obj_t == "tuple":
                 if A.expr_type(e.index) != "int":
                     raise SemaError("tuple index must be an int", e.pos)

@@ -179,6 +179,10 @@ class For:
     # is normally a name (str); for nested unpacking like
     # `for i, (a, b) in enumerate(zip(...))` an entry may itself be a list[str].
     targets: list = field(default_factory=list)
+    # Per-target element kinds for tuple-unpack loops (`for a, b in xs`), filled
+    # by sema from the iterable's element tuple slots so codegen types each bound
+    # name. Empty -> targets are opaque ("any").
+    target_types: list = field(default_factory=list)
     # `else` clause: runs when the iterator is exhausted without a break.
     orelse: list["Stmt"] = field(default_factory=list)
 
@@ -566,6 +570,9 @@ class ListLit:
     # When el_type is a container ("dict"/"list"), the common value/element kind
     # of those nested containers (one level down). "int" when unknown.
     el_value_type: str = "int"
+    # When el_type == "tuple", the common per-slot element kinds of those tuple
+    # elements (so `xs[i][0]` / `for a, b in xs` resolve). Empty when unknown.
+    el_tuple_types: list = field(default_factory=list)
 
 
 @dataclass
