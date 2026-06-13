@@ -547,6 +547,23 @@ sq = <span class="fn">Square</span>(<span class="num">5</span>)
 <span class="fn">print</span>(<span class="fn">isinstance</span>(sq, Shape))  <span class="cmt"># 1</span></code></pre>
 
   <p>Single inheritance, <code>__init__</code>, <code>__str__</code>, <code>super()</code>, instance attributes (any type), <code>isinstance</code>, <code>hasattr</code>/<code>getattr</code>.</p>
+
+  <h3>Static methods &amp; class variables</h3>
+
+  <pre><div class="lang-tag">python</div><code><span class="kw">class</span> <span class="fn">Config</span>:
+    version = <span class="num">5</span>            <span class="cmt"># class variable (static constant)</span>
+    name = <span class="str">"app"</span>
+
+    <span class="kw">@staticmethod</span>
+    <span class="kw">def</span> <span class="fn">banner</span>(title: <span class="kw2">str</span>) -&gt; <span class="kw2">str</span>:
+        <span class="kw">return</span> <span class="fn">f</span><span class="str">"== {title} =="</span>
+
+<span class="fn">print</span>(Config.version)          <span class="cmt"># 5</span>
+<span class="fn">print</span>(Config.banner(<span class="str">"hi"</span>))     <span class="cmt"># == hi ==</span>
+Config.version += <span class="num">1</span>
+<span class="fn">print</span>(Config.version)          <span class="cmt"># 6</span></code></pre>
+
+  <p><code>@staticmethod</code> methods are called on the class (<code>Config.banner(...)</code>) with no implicit receiver. Class variables (<code>name = value</code> in the class body, on a non-<code>@dataclass</code> class) are static constants stored once and read/written through the class — <code>Config.version</code>, including augmented assignment. <code>@classmethod</code> is accepted, though a class-method body that mutates class state through <code>cls</code> is not fully supported yet.</p>
 </section>
 
 <section id="exceptions">

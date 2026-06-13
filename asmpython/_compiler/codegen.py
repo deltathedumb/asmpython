@@ -140,6 +140,24 @@ class Codegen:
         for cls in mod.classes:
             self.class_ids[cls.name] = cid
             cid += 1
+        # Class-level variables that act as static constants: `class C: x = 5`.
+        # Each maps "<Class>.<name>" -> (label, default_expr). Emitted as bss
+        # globals, initialized at startup, and read/written via ClassName.attr
+        # and cls.attr. Only plain class bodies (not @dataclass, whose class
+        # vars are per-instance fields) contribute, and only literal/simple
+        # defaults that the startup initializer can evaluate.
+        self.class_var_labels: dict[str, str] = {}
+        self.class_var_defaults: list = []  # (label, default_expr) in emit order
+        for cls in mod.classes:
+            if getattr(cls, "is_dataclass", False):
+                continue
+            for cv in getattr(cls, "class_vars", []) or []:
+                cvname, _annot, cvdefault = cv
+                if cvdefault is None:
+                    continue
+                label = f"__cv_{cls.name}__{cvname}"
+                self.class_var_labels[f"{cls.name}.{cvname}"] = label
+                self.class_var_defaults.append((label, cvdefault))
 
     # ---- emit helpers -------------------------------------------------------
 
@@ -450,10 +468,12 @@ class Codegen:
         # bss: one zero-initialized 8-byte slot per module-level variable.
         # Module-level code (`main`) writes the real value at startup; every
         # function reads it through the symbol.
-        if self.global_vars:
+        if self.global_vars or self.class_var_labels:
             self.emit("section .bss")
             for name in self.global_vars:
                 self.emit(f"{self._global_label(name)}: resq 1")
+            for label in self.class_var_labels.values():
+                self.emit(f"{label}: resq 1")
 
     # ---- entry point: top-level statements ----------------------------------
 
@@ -477,9 +497,22 @@ class Codegen:
         self.label(self.label_main)
         self.emit_entry_prologue(info)
         self._emit_build_argv_list()
+        self._emit_init_class_vars(info)
         for stmt in top.body:
             self.gen_stmt(stmt, info)
         self.emit_entry_epilogue(info)
+
+    def _emit_init_class_vars(self, info: FuncInfo) -> None:
+        """Initialize class-level variable globals from their default exprs at
+        program startup (before module-level code runs). Floats land in xmm0, so
+        store the raw bits; everything else is an 8-byte value in rax."""
+        for label, default_expr in self.class_var_defaults:
+            if A.expr_type(default_expr) == "float":
+                self._gen_expr_as_float(default_expr, info, "float")
+                self.emitf("movq rax, xmm0", f"mov [rel {label}], rax")
+            else:
+                self.gen_expr(default_expr, info)
+                self.emitf(f"mov [rel {label}], rax")
 
     def emit_entry_prologue(self, info: FuncInfo) -> None:
         raise NotImplementedError
@@ -1422,6 +1455,17 @@ class Codegen:
             )
             return
         if isinstance(stmt, A.AttrAssign):
+            # Class-level variable write: `ClassName.x = value` -> store global.
+            if isinstance(stmt.obj, A.Name):
+                cv = self.class_var_labels.get(f"{stmt.obj.name}.{stmt.name}")
+                if cv is not None:
+                    if A.expr_type(stmt.value) == "float":
+                        self._gen_expr_as_float(stmt.value, info, "float")
+                        self.emitf("movq rax, xmm0", f"mov [rel {cv}], rax")
+                    else:
+                        self.gen_expr(stmt.value, info)
+                        self.emitf(f"mov [rel {cv}], rax")
+                    return
             # obj.name = value  ->  dict_set(obj, "name", value)
             key_label, _ = self.intern_string(stmt.name)
             self.gen_expr(stmt.value, info)
@@ -2287,6 +2331,15 @@ class Codegen:
         # "str"/"any" stay as-is
 
     def _gen_attr(self, e: A.Attr, info: FuncInfo) -> None:
+        # Class-level variable read: `ClassName.x`. Loads the static global.
+        if isinstance(e.obj, A.Name):
+            cv = self.class_var_labels.get(f"{e.obj.name}.{e.name}")
+            if cv is not None:
+                if A.expr_type(e) == "float":
+                    self.emitf(f"movq xmm0, [rel {cv}]")
+                else:
+                    self.emitf(f"mov rax, [rel {cv}]")
+                return
         # Module constant access: math.pi etc.
         if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
             bindings = self.imported_modules[e.obj.name]

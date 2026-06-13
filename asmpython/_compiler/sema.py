@@ -503,6 +503,22 @@ class SemaAnalyzer:
             cur = cls.parent
         return False
 
+    def _class_var_type(self, class_name: str, var: str) -> "str | None":
+        """Static type of a class-level variable `ClassName.var` from its
+        default expression, or None if the class has no such class var. Only
+        plain classes contribute static class vars (a @dataclass's class vars
+        are per-instance fields)."""
+        for c in self.mod.classes:
+            if c.name != class_name:
+                continue
+            if getattr(c, "is_dataclass", False):
+                return None
+            for cv in getattr(c, "class_vars", []) or []:
+                cvname, _annot, cvdefault = cv
+                if cvname == var and cvdefault is not None:
+                    return A.expr_type(cvdefault)
+        return None
+
     def _resolve_method(
         self, class_name: str, method: str
     ) -> Optional[tuple[str, FuncSig]]:
@@ -1990,6 +2006,15 @@ class SemaAnalyzer:
                 raise SemaError(f"cannot index a {obj_t}", s.pos)
             return
         if isinstance(s, A.AttrAssign):
+            # Class-level variable write: `ClassName.x = v`. Allowed when the
+            # class declares `x` as a (non-dataclass) class var.
+            if (
+                isinstance(s.obj, A.Name)
+                and s.obj.name in self.classes
+                and self._class_var_type(s.obj.name, s.name) is not None
+            ):
+                self._check_expr(s.value, scope)
+                return
             self._check_expr(s.obj, scope)
             obj_t = A.expr_type(s.obj)
             if not obj_t.startswith("instance:") and obj_t not in ("any", "module", "int"):
@@ -2717,6 +2742,13 @@ class SemaAnalyzer:
                     )
             return
         if isinstance(e, A.Attr):
+            # Class-level variable read: `ClassName.x` (static constant). Type it
+            # from the class var's default expression.
+            if isinstance(e.obj, A.Name) and e.obj.name in self.classes:
+                cvt = self._class_var_type(e.obj.name, e.name)
+                if cvt is not None:
+                    e.inferred_type = cvt
+                    return
             # Special-case module attribute: math.pi, math.sqrt(...).
             if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
                 bindings = self.imported_modules[e.obj.name]

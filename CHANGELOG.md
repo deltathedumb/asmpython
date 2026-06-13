@@ -29,8 +29,21 @@ output rather than silent miscompilations.
 - **`str.format()`** with a literal format string: positional `{}`
   (auto-numbered), explicit `{0}`/`{1}` (including reuse), and escaped
   `{{`/`}}`. Previously it silently returned `0`.
+- **f-string format specs** are honored: `f"{x:.2f}"`, `f"{n:05d}"`,
+  `f"{n:x}"` (float `.Nf/.Ne/.Ng`; int `d/x/X/o` with width and zero-pad).
+  Specs were previously stripped and ignored.
+- **`@staticmethod`** methods are callable on the class
+  (`ClassName.method(args)`), with no implicit receiver. `@classmethod` is
+  accepted (call/dispatch work; class-state mutation through `cls` pending).
+- **Class variables** (`class C: x = 5`, non-`@dataclass`) are static
+  constants: read, write, and augmented assignment via `ClassName.x`.
 
 ### Fixed
+
+- **Nested-container element types are tracked** through subscript and
+  for-loop binding: `people[i]["k"]`, `for p in people: p["k"]` (list[dict]),
+  `grid[i][j]` (list[list]), and tuple unpacking `for a, b in pairs`
+  (list[tuple]) no longer print raw pointers.
 
 - **`str(int)` / `str(float)` no longer alias a shared buffer.** Storing
   several conversions (e.g. `[str(x) for x in xs]`) previously made every
