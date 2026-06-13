@@ -345,6 +345,10 @@ class Scope:
     # runtime; we currently support homogeneous lists of any of those four
     # element kinds.
     list_el_types: dict[str, str] = field(default_factory=dict)
+    # For names typed "list" whose elements are themselves containers
+    # (list[dict] / list[list]), the common value/element kind of those nested
+    # containers — so `xs[i][k]` and `for x in xs: x[k]` recover the leaf type.
+    list_el_value_types: dict[str, str] = field(default_factory=dict)
     # For names typed "dict", value kind. Keys are always str in v1.
     dict_value_types: dict[str, str] = field(default_factory=dict)
     # For names typed "dict" whose value kind is itself a container, the common
@@ -369,6 +373,7 @@ class Scope:
         ty: str = "int",
         *,
         el_type: str | None = None,
+        el_value_type: str | None = None,
         value_type: str | None = None,
         inner_value_type: str | None = None,
         value_tuple_types: list[str] | None = None,
@@ -377,6 +382,8 @@ class Scope:
         self.types[name] = ty
         if ty == "list" and el_type is not None:
             self.list_el_types[name] = el_type
+        if ty == "list" and el_value_type is not None:
+            self.list_el_value_types[name] = el_value_type
         if ty == "dict" and value_type is not None:
             self.dict_value_types[name] = value_type
         if ty == "dict" and inner_value_type is not None:
@@ -1233,6 +1240,18 @@ class SemaAnalyzer:
             return "any"
         return "int"
 
+    def _list_el_value_type(self, e, scope: Scope) -> str:
+        """For a list whose elements are themselves containers (list[dict] /
+        list[list]), the common value/element kind of those nested containers.
+        'int' if unknown. Mirrors `_dict_inner_value_type` for lists."""
+        if isinstance(e, A.ListLit):
+            return getattr(e, "el_value_type", "int")
+        if isinstance(e, A.Comprehension):
+            return getattr(e, "el_value_type", "int")
+        if isinstance(e, A.Name):
+            return scope.list_el_value_types.get(e.name, "int")
+        return "int"
+
     def _list_el_type(self, e, scope: Scope) -> str:
         """Element type of a list-valued expression. 'int' if unknown."""
         if isinstance(e, A.ListLit):
@@ -1418,7 +1437,12 @@ class SemaAnalyzer:
                         scope.add(s.target, aty)
                         return
             if t == "list":
-                scope.add(s.target, t, el_type=self._list_el_type(s.value, scope))
+                scope.add(
+                    s.target,
+                    t,
+                    el_type=self._list_el_type(s.value, scope),
+                    el_value_type=self._list_el_value_type(s.value, scope),
+                )
             elif t == "dict":
                 scope.add(
                     s.target,
@@ -1643,6 +1667,20 @@ class SemaAnalyzer:
                         # dict) so `pair[0]` etc. type correctly.
                         scope.add(
                             s.var, el_t, tuple_types=self._tuple_elem_types(s.iter, scope)
+                        )
+                    elif el_t == "dict":
+                        # list[dict]: bind the loop var as a dict carrying the
+                        # tracked value kind so `x[k]` recovers the leaf type.
+                        inner = self._list_el_value_type(s.iter, scope)
+                        scope.add(
+                            s.var, "dict", value_type=inner if inner != "int" else "any"
+                        )
+                    elif el_t == "list":
+                        # list[list]: bind as a list carrying the inner element
+                        # kind so `x[i]` recovers the leaf type.
+                        inner = self._list_el_value_type(s.iter, scope)
+                        scope.add(
+                            s.var, "list", el_type=inner if inner != "int" else "any"
                         )
                     else:
                         scope.add(s.var, el_t)
@@ -2296,6 +2334,11 @@ class SemaAnalyzer:
                     )
             # Empty literal stays "?" until the first append pins the type.
             e.el_type = seen if seen is not None else "?"
+            # When elements are nested containers (list[dict] / list[list]),
+            # remember the common leaf kind so `xs[i][k]` / `for x in xs: x[k]`
+            # recover the value type one level down.
+            if seen in ("dict", "list"):
+                e.el_value_type = self._common_container_inner(e.elems, scope)
             return
         if isinstance(e, A.Comprehension):
             self._check_expr(e.iter, scope)
@@ -2512,6 +2555,14 @@ class SemaAnalyzer:
             self._check_expr(e.index, scope)
             if obj_t == "list":
                 e.inferred_type = self._list_el_type(e.obj, scope)
+                # A nested container element (list[dict] / list[list]): carry the
+                # tracked leaf kind onto the read-out container so `xs[i][k]`
+                # recovers the value type. Falls back to "any" when untracked.
+                if e.inferred_type in ("dict", "list"):
+                    inner = self._list_el_value_type(e.obj, scope)
+                    inner = inner if inner != "int" else "any"
+                    e.value_type = inner
+                    e.list_el_type = inner
             elif obj_t == "tuple":
                 if A.expr_type(e.index) != "int":
                     raise SemaError("tuple index must be an int", e.pos)

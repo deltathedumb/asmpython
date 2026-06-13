@@ -563,6 +563,9 @@ class ListLit:
     elems: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     el_type: str = "int"
+    # When el_type is a container ("dict"/"list"), the common value/element kind
+    # of those nested containers (one level down). "int" when unknown.
+    el_value_type: str = "int"
 
 
 @dataclass
