@@ -459,6 +459,7 @@ class Codegen:
         "_runtime_input",
         "_runtime_list_append",
         "_runtime_list_pop",
+        "_runtime_list_del",
         "_runtime_list_extend",
         "_runtime_list_reverse",
         "_runtime_list_insert",
@@ -1333,6 +1334,12 @@ class Codegen:
                 if s.name is not None:
                     self._cl_define(info, s.name, A.expr_type(s.expr))
                 self._cl_walk(info, s.body)
+            elif isinstance(s, A.Del):
+                tgt = s.target
+                if isinstance(tgt, A.Subscript):
+                    self._cl_define(info, f"__del_key_{id(s)}")
+                    self._cl_walk_expr(info, tgt.obj)
+                    self._cl_walk_expr(info, tgt.index)
 
     # ---- statement codegen --------------------------------------------------
 
@@ -1581,13 +1588,19 @@ class Codegen:
                 slot = info.locals_[tgt.name]
                 self.emitf(f"mov qword [rbp{slot:+d}], 0")
             elif isinstance(tgt, A.Subscript):
-                # del d[key] — generate _runtime_dict_pop(d, key), ignore result
+                # del xs[i] -> _runtime_list_del(xs, i); del d[key] ->
+                # _runtime_dict_pop(d, key), discarding the result either way.
                 key_slot = info.locals_.get(f"__del_key_{id(stmt)}")
+                fn = (
+                    "_runtime_list_del"
+                    if A.expr_type(tgt.obj) == "list"
+                    else "_runtime_dict_pop"
+                )
                 if key_slot is not None:
                     self.gen_expr(tgt.index, info)
                     self.emitf(f"mov [rbp{key_slot:+d}], rax")
                     self.gen_expr(tgt.obj, info)
-                    self.emitf(f"mov rbx, [rbp{key_slot:+d}]", "call _runtime_dict_pop")
+                    self.emitf(f"mov rbx, [rbp{key_slot:+d}]", f"call {fn}")
                 else:
                     # Fallback: evaluate for side effects only.
                     self.gen_expr(tgt.obj, info)

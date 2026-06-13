@@ -269,7 +269,7 @@ class WindowsCodegen(Codegen):
         self.emit('fmt_flt_only: db "%g",0')
 
         if self.use_runtime_lib:
-            for sym in ("_runtime_input", "_runtime_list_append", "_runtime_list_pop"):
+            for sym in ("_runtime_input", "_runtime_list_append", "_runtime_list_pop", "_runtime_list_del"):
                 self.emit(f"extern {sym}")
             self.emit_dict_runtime()
             self.emit_string_runtime()
@@ -364,6 +364,31 @@ class WindowsCodegen(Codegen):
             "mov rax, [rdx+rcx*8]",
             "ret",
         )
+
+        # list_del(header_in_rax, index_in_rbx): remove element at index,
+        # shifting later elements down by one slot and decrementing length.
+        # Negative indices are normalized relative to length.
+        self.label("_runtime_list_del")
+        self.emitf(
+            "mov rcx, [rax+8]",  # length
+            "test rbx, rbx",
+            "jns ._ld_pos",
+            "add rbx, rcx",
+        )
+        self.label("._ld_pos")
+        self.emitf("mov rdx, [rax+16]")  # buffer ptr
+        self.label("._ld_loop")
+        self.emitf(
+            "lea r8, [rbx+1]",
+            "cmp r8, rcx",
+            "jge ._ld_done",
+            "mov r9, [rdx+r8*8]",
+            "mov [rdx+rbx*8], r9",
+            "mov rbx, r8",
+            "jmp ._ld_loop",
+        )
+        self.label("._ld_done")
+        self.emitf("dec qword [rax+8]", "ret")
 
         # Dict runtime (shared across targets).
         self.emit_dict_runtime()

@@ -124,6 +124,11 @@ output rather than silent miscompilations.
 - **`abs(float)`** returns a float again instead of printing its raw bits.
 - **`time.difftime`** is now typed `float` (C's `difftime` returns a `double`
   in `xmm0`); declaring it `int` read the wrong register and produced garbage.
+- **`del xs[i]`** now actually removes the element, shifting later elements
+  down and shrinking the list (negative indices supported). **`del d[k]`**
+  is now correctly wired up too (the dict-pop call existed but its key slot
+  was never reserved, so it silently did nothing). Previously both forms
+  compiled and ran without error but left the container unchanged.
 
 ---
 

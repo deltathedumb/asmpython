@@ -458,14 +458,14 @@ last = xs.pop()
 xs[<span class="num">0</span>] = <span class="num">10</span>
 <span class="kw">for</span> x <span class="kw">in</span> xs: <span class="fn">print</span>(x)
 <span class="fn">print</span>(xs[<span class="num">-1</span>], xs[<span class="num">1</span>:<span class="num">3</span>])</code></pre>
-  <p>Heap-allocated with stable header. Supports <code>int</code>, <code>str</code>, <code>float</code> elements (homogeneous). Negative indices, slicing with step, <code>.copy()</code>, comprehensions. <code>.sort(key=?, reverse=?)</code> sorts in place; <code>key=</code> takes a lambda (literal or name-bound) returning <code>str</code> or <code>int</code>, and <code>reverse=True</code> reverses the result.</p>
+  <p>Heap-allocated with stable header. Supports <code>int</code>, <code>str</code>, <code>float</code> elements (homogeneous). Negative indices, slicing with step, <code>.copy()</code>, comprehensions. <code>.sort(key=?, reverse=?)</code> sorts in place; <code>key=</code> takes a lambda (literal or name-bound) returning <code>str</code> or <code>int</code>, and <code>reverse=True</code> reverses the result. <code>del xs[i]</code> removes the element at <code>i</code> (negative indices supported), shifting later elements down.</p>
 
   <h3>Dicts</h3>
   <pre><div class="lang-tag">python</div><code>d = {<span class="str">"a"</span>: <span class="num">1</span>, <span class="str">"b"</span>: <span class="num">2</span>}
 d[<span class="str">"c"</span>] = <span class="num">3</span>
 val = d.get(<span class="str">"x"</span>, <span class="num">-1</span>)
 <span class="kw">for</span> k, v <span class="kw">in</span> d.items(): <span class="fn">print</span>(k, v)</code></pre>
-  <p>Open-addressed hashtable (FNV-1a), stable header, load factor 3/4. <code>str</code> keys. Methods: <code>.get</code>, <code>.contains</code>, <code>.keys()</code>, <code>.values()</code>, <code>.items()</code>, <code>.update()</code>. Dict comprehensions supported.</p>
+  <p>Open-addressed hashtable (FNV-1a), stable header, load factor 3/4. <code>str</code> keys. Methods: <code>.get</code>, <code>.contains</code>, <code>.keys()</code>, <code>.values()</code>, <code>.items()</code>, <code>.update()</code>. Dict comprehensions supported. <code>del d[k]</code> removes the entry, raising <code>KeyError</code> if absent.</p>
 
   <h3>Sets</h3>
   <pre><div class="lang-tag">python</div><code>s = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>}
@@ -1127,12 +1127,12 @@ name = <span class="fn">input</span>()
   <table>
     <tr><th>Area</th><th>Not yet supported</th></tr>
     <tr><td>Types</td><td>Bignum, <code>complex</code>, <code>Decimal</code>, <code>bytes</code></td></tr>
-    <tr><td>Collections</td><td>Mixed-type lists, nested lists/dicts, <code>del</code> on subscripts</td></tr>
+    <tr><td>Collections</td><td>Mixed-type lists, nested lists/dicts</td></tr>
     <tr><td>Functions</td><td>Keyword arguments at call sites, closures capturing mutable state, generators, <code>yield</code></td></tr>
     <tr><td>Classes</td><td>Multiple inheritance, metaclasses, most dunder methods beyond <code>__init__</code> / <code>__str__</code>, <code>@classmethod</code>, <code>@staticmethod</code>, <code>@property</code></td></tr>
     <tr><td>Exceptions</td><td>Bare <code>raise</code> (re-raise without argument)</td></tr>
     <tr><td>Control flow</td><td><code>with</code> / context managers, <code>match</code>/<code>case</code>, <code>else</code> on loops</td></tr>
-    <tr><td>Modules</td><td>User-defined module imports (only stdlib/asmlib), <code>if __name__ == "__main__":</code></td></tr>
+    <tr><td>Modules</td><td>User-defined module imports (only stdlib/asmlib)</td></tr>
     <tr><td>Stdlib</td><td><code>json</code>, <code>re</code>, <code>datetime</code>, <code>pathlib</code>, <code>threading</code>, <code>asyncio</code>, and most other modules</td></tr>
     <tr><td>Targets</td><td>macOS (Mach-O), 32-bit, ARM</td></tr>
     <tr><td>Codegen</td><td>No optimisation, no debug info (DWARF/PDB), stack allocated locals even when register-resident suffices</td></tr>
