@@ -169,7 +169,7 @@ def compile_source(
         str(obj_path),
     ])
 
-    # Freestanding: -f bin produces the final binary directly; no linker needed.
+    # Freestanding: -f bin produces the final binary directly; no gcc needed.
     if target == "freestanding":
         if not keep_assembly:
             try:
@@ -179,12 +179,7 @@ def compile_source(
         print(f"wrote {obj_path}")
         return BuildResult(asm_path=asm_path, obj_path=obj_path, exe_path=obj_path)
 
-    # Both targets now use gcc as the linker driver so the C runtime
-    # (msvcrt on Windows, libc on Linux) is linked in transparently.
     gcc = _resolve_tool("gcc", override=gcc_path, env_var="ASMPYTHON_GCC")
-    # gcc needs to find sibling tools (ld, as, collect2) — when we resolve
-    # gcc by absolute path from the bundled MinGW, its directory may not be
-    # on PATH, so add it explicitly.
     gcc_dir = str(Path(gcc).parent)
 
     if output_type == "library":
@@ -215,6 +210,10 @@ def compile_source(
         )
     else:
         link_cmd = [gcc, str(obj_path), "-o", str(exe_path)]
+        if target == "linux":
+            # The generated code uses absolute (non-PIC) relocations against
+            # libc symbols, which modern gcc rejects under its default PIE mode.
+            link_cmd.append("-no-pie")
         if use_runtime_lib:
             from .._runtime.build import build_runtime, _build_dir
 

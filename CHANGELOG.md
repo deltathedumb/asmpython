@@ -3,7 +3,30 @@
 All notable changes to asmpython are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
---
+
+## [1.0.2] — 2026-06-12
+
+### Added
+
+- **Linux self-host build on Windows** — `build.py` now produces both
+  `build\asmpython.exe` (Windows) and `build\asmpython-linux` (Linux ELF) in
+  one run. The Linux target is compiled inside WSL using its native `nasm` and
+  `gcc`. `build.bat` is now a thin wrapper that invokes `build.py`.
+
+### Changed
+
+- **Toolchain on Windows must be on PATH.** `asmpython.bat` no longer bundles
+  or downloads dependencies; it requires `python`, `nasm`, and `gcc` to be
+  available on PATH. `_download-deps.bat` now fetches w64devkit instead of the
+  WinLibs MinGW bundle.
+
+### Fixed
+
+- **Linux executables now link under modern gcc.** The Linux link step passes
+  `-no-pie`; the generated code uses absolute relocations against libc symbols,
+  which gcc's default PIE mode rejects.
+
+---
 
 ## [1.0.1-hotfix1] - 2026-06-12
 
