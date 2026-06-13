@@ -46,6 +46,28 @@ BINDINGS: dict = {
     # disable_interrupts() / enable_interrupts()
     "disable_interrupts": Func(arg_types=(),         ret_type="int",  c_name="_hw_cli"),
     "enable_interrupts":  Func(arg_types=(),         ret_type="int",  c_name="_hw_sti"),
+    # rdrand() -> int   hardware random 64-bit value (retries until valid).
+    "rdrand":       Func(arg_types=(),               ret_type="int",  c_name="_hw_rdrand"),
+    # io_wait() — tiny delay by writing the unused port 0x80 (PIC remap timing).
+    "io_wait":      Func(arg_types=(),               ret_type="int",  c_name="_hw_io_wait"),
+
+    # ---- Control / model-specific registers ---------------------------------
+    # read_cr0/cr2/cr3/cr4() -> int. cr2 holds the faulting address after a
+    # page fault; cr3 is the page-table base; cr0/cr4 hold mode bits.
+    "read_cr0":     Func(arg_types=(),               ret_type="int",  c_name="_hw_read_cr0"),
+    "read_cr2":     Func(arg_types=(),               ret_type="int",  c_name="_hw_read_cr2"),
+    "read_cr3":     Func(arg_types=(),               ret_type="int",  c_name="_hw_read_cr3"),
+    "read_cr4":     Func(arg_types=(),               ret_type="int",  c_name="_hw_read_cr4"),
+    # write_cr3(value: int) — reload the page-table base (flushes the TLB).
+    "write_cr3":    Func(arg_types=("int",),         ret_type="int",  c_name="_hw_write_cr3"),
+    # read_msr(index: int) -> int / write_msr(index, value)
+    "read_msr":     Func(arg_types=("int",),         ret_type="int",  c_name="_hw_read_msr"),
+    "write_msr":    Func(arg_types=("int", "int"),   ret_type="int",  c_name="_hw_write_msr"),
+    # invlpg(addr: int) — invalidate one page's TLB entry.
+    "invlpg":       Func(arg_types=("int",),         ret_type="int",  c_name="_hw_invlpg"),
+    # lidt(idt_ptr_addr: int) — load the Interrupt Descriptor Table register
+    # from a 6-byte (limit, base) pointer at the given address.
+    "lidt":         Func(arg_types=("int",),         ret_type="int",  c_name="_hw_lidt"),
 
     # ---- PIC (8259A) --------------------------------------------------------
     # pic_eoi(irq: int) — send end-of-interrupt signal

@@ -36,6 +36,17 @@ BINDINGS = {
     "fputs":  Func(arg_types=("str", "str"), ret_type="int", c_name="fputs"),
     # fclose(FILE*) -> 0 on success.
     "fclose": Func(arg_types=("str",), ret_type="int", c_name="fclose"),
+    # fflush(FILE*) -> 0 on success (flush buffered output).
+    "fflush": Func(arg_types=("str",), ret_type="int", c_name="fflush"),
+    # feof(FILE*) -> non-zero once end-of-file has been hit.
+    "feof":   Func(arg_types=("str",), ret_type="int", c_name="feof"),
+    # File positioning: ftell -> current offset; fseek(FILE*, off, whence) -> 0
+    # on success (whence: 0=SET, 1=CUR, 2=END); rewind resets to the start.
+    "ftell":  Func(arg_types=("str",), ret_type="int", c_name="ftell"),
+    "fseek":  Func(arg_types=("str", "int", "int"), ret_type="int", c_name="fseek"),
+    "rewind": Func(arg_types=("str",), ret_type="int", c_name="rewind"),
+    # rename(old, new) -> 0 on success (ISO C stdio; same name both platforms).
+    "rename": Func(arg_types=("str", "str"), ret_type="int", c_name="rename"),
     # access(path, mode) -> 0 if the path is accessible for `mode`
     # (mode 0 = existence). On Windows the CRT spells it `_access`; the
     # `asmpython.stdlib.ospath` helpers hide that difference.

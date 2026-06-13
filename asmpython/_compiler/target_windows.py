@@ -389,6 +389,9 @@ class WindowsCodegen(Codegen):
         "_hw_pic_unmask", "_hw_pit_set_freq", "_hw_keyboard_read",
         "_hw_keyboard_poll", "_hw_vga_set_color", "_hw_vga_set_cursor",
         "_hw_vga_get_row", "_hw_vga_get_col",
+        "_hw_rdrand", "_hw_io_wait", "_hw_read_cr0", "_hw_read_cr2",
+        "_hw_read_cr3", "_hw_read_cr4", "_hw_write_cr3", "_hw_read_msr",
+        "_hw_write_msr", "_hw_invlpg", "_hw_lidt",
     )
     _NET_SYMS = (
         "_net_bind", "_net_connect", "_net_send", "_net_recv",

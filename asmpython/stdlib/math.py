@@ -34,11 +34,27 @@ BINDINGS = {
     "tanh":  Func(arg_types=("float",), ret_type="float", c_name="tanh"),
     "floor": Func(arg_types=("float",), ret_type="float", c_name="floor"),
     "ceil":  Func(arg_types=("float",), ret_type="float", c_name="ceil"),
+    "trunc": Func(arg_types=("float",), ret_type="float", c_name="trunc"),
     "fabs":  Func(arg_types=("float",), ret_type="float", c_name="fabs"),
+    # Inverse hyperbolics and exp/log variants (C99 libm; present in msvcrt/ucrt).
+    "asinh": Func(arg_types=("float",), ret_type="float", c_name="asinh"),
+    "acosh": Func(arg_types=("float",), ret_type="float", c_name="acosh"),
+    "atanh": Func(arg_types=("float",), ret_type="float", c_name="atanh"),
+    "exp2":  Func(arg_types=("float",), ret_type="float", c_name="exp2"),
+    "expm1": Func(arg_types=("float",), ret_type="float", c_name="expm1"),
+    "log1p": Func(arg_types=("float",), ret_type="float", c_name="log1p"),
+    # Rounding to a float-valued integer (CPython's round() is the builtin; this
+    # is the libm nearbyint, handy in numeric code).
+    "nearbyint": Func(arg_types=("float",), ret_type="float", c_name="nearbyint"),
 
     # Two-argument float, float -> float
     "pow":   Func(arg_types=("float", "float"), ret_type="float", c_name="pow"),
     "atan2": Func(arg_types=("float", "float"), ret_type="float", c_name="atan2"),
     "hypot": Func(arg_types=("float", "float"), ret_type="float", c_name="hypot"),
     "fmod":  Func(arg_types=("float", "float"), ret_type="float", c_name="fmod"),
+    "copysign":  Func(arg_types=("float", "float"), ret_type="float", c_name="copysign"),
+    "remainder": Func(arg_types=("float", "float"), ret_type="float", c_name="remainder"),
+    "fdim":      Func(arg_types=("float", "float"), ret_type="float", c_name="fdim"),
+    "fmax":      Func(arg_types=("float", "float"), ret_type="float", c_name="fmax"),
+    "fmin":      Func(arg_types=("float", "float"), ret_type="float", c_name="fmin"),
 }

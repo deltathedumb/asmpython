@@ -873,6 +873,44 @@ class FreestandingCodegen(Codegen):
         self.label("_hw_sti")
         self.emitf("sti", "xor rax, rax", "ret")
 
+        # rdrand — retry until the CPU reports a valid random value (CF=1).
+        self.label("_hw_rdrand")
+        self.label("._rdr_retry")
+        self.emitf("rdrand rax", "jnc ._rdr_retry", "ret")
+
+        # io_wait — write to the unused diagnostic port 0x80 for a short delay.
+        self.label("_hw_io_wait")
+        self.emitf("xor eax, eax", "out 0x80, al", "xor rax, rax", "ret")
+
+        # Control registers.
+        self.label("_hw_read_cr0")
+        self.emitf("mov rax, cr0", "ret")
+        self.label("_hw_read_cr2")
+        self.emitf("mov rax, cr2", "ret")
+        self.label("_hw_read_cr3")
+        self.emitf("mov rax, cr3", "ret")
+        self.label("_hw_read_cr4")
+        self.emitf("mov rax, cr4", "ret")
+        self.label("_hw_write_cr3")
+        self.emitf("mov cr3, rdi", "xor rax, rax", "ret")
+
+        # MSRs: read_msr(index)->value ; write_msr(index, value).
+        self.label("_hw_read_msr")
+        self.emitf("mov ecx, edi", "rdmsr",
+                   "shl rdx, 32", "or rax, rdx", "ret")
+        self.label("_hw_write_msr")
+        self.emitf("mov ecx, edi",
+                   "mov rax, rsi", "mov rdx, rsi", "shr rdx, 32",
+                   "wrmsr", "xor rax, rax", "ret")
+
+        # invlpg(addr) — flush one TLB entry.
+        self.label("_hw_invlpg")
+        self.emitf("invlpg [rdi]", "xor rax, rax", "ret")
+
+        # lidt(ptr) — load IDTR from a 6-byte (limit:base) descriptor.
+        self.label("_hw_lidt")
+        self.emitf("lidt [rdi]", "xor rax, rax", "ret")
+
         # PIC (8259A) — master at 0x20/0x21, slave at 0xA0/0xA1
         self.label("_hw_pic_eoi")
         self.emitf("cmp rdi, 8", "jl ._piceoi_master",
