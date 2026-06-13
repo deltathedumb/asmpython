@@ -66,8 +66,15 @@ class WindowsCodegen(Codegen):
     def _platform_c_name(self, fn) -> str:
         return getattr(fn, "c_name_windows", None) or fn.c_name
 
+    def _platform_const_value(self, c):
+        override = getattr(c, "value_windows", None)
+        return override if override is not None else c.value
+
     # --- entry: main() -------------------------------------------------------
     def emit_entry_prologue(self, info: FuncInfo) -> None:
+        # main(argc, argv): Win64 passes these in rcx/rdx. Stash them before
+        # they're clobbered so sys.argv can be built from them.
+        self.emitf("mov [rel _prog_argc], rcx", "mov [rel _prog_argv], rdx")
         self.emitf("push rbp", "mov rbp, rsp")
         frame = info.frame_size + 32  # shadow space for child calls
         if frame % 16 != 0:

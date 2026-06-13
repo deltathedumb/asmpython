@@ -38,6 +38,17 @@ _ALWAYS_AVAILABLE: frozenset[str] = frozenset({
 })
 
 
+def _flatten_targets(targets: list, out: set[str]) -> None:
+    """Collect every name bound by a (possibly nested) unpack target list,
+    e.g. `["a", ["b", "c"]]` -> {"a", "b", "c"}. Mirrors sema's
+    `_flat_target_names` for the subset program.py needs."""
+    for t in targets:
+        if isinstance(t, str):
+            out.add(t)
+        elif isinstance(t, list):
+            _flatten_targets(t, out)
+
+
 def _free_names(node: object, out: set[str]) -> None:
     """Collect the bare names an expression/statement references: `Name`
     lookups and `Call`/`MethodCall` callee names. Used to decide whether a
@@ -65,6 +76,23 @@ def _free_names(node: object, out: set[str]) -> None:
     if isinstance(node, A.Attr):
         # `obj.name`: only the object is a free reference.
         _free_names(node.obj, out)
+        return
+    if isinstance(node, (A.Comprehension, A.DictComprehension)):
+        # `[elt for a, b in iter if cond]`: `var`/`targets` are loop-bound
+        # names, not free references — collect names from the rest of the
+        # node (elt/key/value/iter/cond) and drop the bound ones, so e.g.
+        # `{fwd for fwd, _rfl in DUNDER_BINOP.values()}` reports only
+        # `DUNDER_BINOP` as free, not `fwd`/`_rfl`.
+        bound: set[str] = set()
+        if node.var:
+            bound.add(node.var)
+        _flatten_targets(node.targets, bound)
+        inner: set[str] = set()
+        for f in dataclasses.fields(node):
+            if f.name in ("var", "targets"):
+                continue
+            _free_names(getattr(node, f.name), inner)
+        out |= inner - bound
         return
     if dataclasses.is_dataclass(node):
         for f in dataclasses.fields(node):
@@ -120,6 +148,22 @@ def _resolve_absolute(module: str, root: Path) -> Path | None:
     if init.is_file():
         return init
     return None
+
+
+# Stdlib modules implemented as asmpython *source* (they define real classes,
+# e.g. `pathlib.Path`, `argparse.ArgumentParser`) rather than FFI-only
+# `Func`/`Const` bindings (`os`, `sys`, `math`, ...). `import pathlib` /
+# `from argparse import ArgumentParser` resolve to these bundled files and get
+# merged like project modules, so their classes are fully type-checked.
+_BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({"pathlib", "argparse"})
+
+
+def _resolve_bundled_stdlib(module: str) -> Path | None:
+    top = module.split(".")[0]
+    if top not in _BUNDLED_SOURCE_STDLIB:
+        return None
+    py = Path(__file__).resolve().parent.parent / "stdlib" / f"{top}.py"
+    return py if py.is_file() else None
 
 
 def _resolve_user_module(module: str, importer: Path, root: Path) -> Path | None:
@@ -229,6 +273,8 @@ def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]
                 p = _resolve_absolute(stmt.module, root)
                 if p is None:
                     p = _resolve_user_module(stmt.module, importer, root)
+                if p is None:
+                    p = _resolve_bundled_stdlib(stmt.module)
                 if p is not None:
                     out.append(p)
                 for orig in (stmt.orig_names or stmt.names):
@@ -243,6 +289,8 @@ def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]
             p = _resolve_absolute(stmt.module, root)
             if p is None:
                 p = _resolve_user_module(stmt.module, importer, root)
+            if p is None:
+                p = _resolve_bundled_stdlib(stmt.module)
             if p is not None:
                 out.append(p)
     return out

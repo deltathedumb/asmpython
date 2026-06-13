@@ -40,6 +40,13 @@ KEYWORDS = {
     "is",
     "assert",
     "global",
+    "nonlocal",
+    "del",
+    "lambda",
+    "yield",
+    "with",
+    "async",
+    "await",
 }
 
 

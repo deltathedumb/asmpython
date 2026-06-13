@@ -9,6 +9,27 @@ python -m asmpython hello.py          # compile for your host platform
 
 ---
 
+## Installation
+
+```sh
+pip install asmpython
+```
+
+This installs the `asmpython` command (and `python -m asmpython`). The
+compiler itself is pure Python with no runtime dependencies — but it shells
+out to **`nasm`** and **`gcc`** to assemble and link, so make sure both are on
+your `PATH` (see [Toolchain requirements](#toolchain-requirements)). On
+Windows, `asmpython.bat` from this repo can fetch a portable NASM/MinGW for
+you instead.
+
+To install from a checkout of this repo (editable, for development):
+
+```sh
+pip install -e .
+```
+
+---
+
 ## Targets
 
 | Target | Output | Requires |

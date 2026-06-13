@@ -64,6 +64,9 @@ class FuncDef:
     # body from `body`, and sema skips analysing `body`.
     asm_body: "Optional[str]" = None
     asm_symbol: "Optional[str]" = None
+    # True for nested functions lifted to module level by the parser. Sema
+    # skips undefined-variable errors in their bodies (closure vars).
+    is_lifted: bool = False
 
 
 @dataclass
@@ -83,6 +86,12 @@ class ClassDef:
     # initializer Expr or None. Used by sema to type class attributes (e.g. a
     # set/dict constant referenced as `self.NAME`).
     class_vars: list = field(default_factory=list)
+    # Set when the class carries a @dataclass (or @dataclass(...)) decorator.
+    # Sema synthesises __init__ from class_vars when True and no explicit
+    # __init__ is defined.
+    is_dataclass: bool = False
+    # Decorator names collected by the parser (e.g. ["dataclass", "frozen"]).
+    decorators: list = field(default_factory=list)
 
 
 # ---- Statements -------------------------------------------------------------
@@ -121,6 +130,15 @@ class TupleAssign:
 
 
 @dataclass
+class MultiAssign:
+    """a = b = c = value — evaluate value once, assign to all targets."""
+
+    targets: list[str]
+    value: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
 class Return:
     value: Optional["Expr"]
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
@@ -139,6 +157,8 @@ class While:
     test: "Expr"
     body: list["Stmt"]
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    # `else` clause: runs when the loop condition becomes False without a break.
+    orelse: list["Stmt"] = field(default_factory=list)
 
 
 @dataclass
@@ -159,6 +179,8 @@ class For:
     # is normally a name (str); for nested unpacking like
     # `for i, (a, b) in enumerate(zip(...))` an entry may itself be a list[str].
     targets: list = field(default_factory=list)
+    # `else` clause: runs when the iterator is exhausted without a break.
+    orelse: list["Stmt"] = field(default_factory=list)
 
 
 @dataclass
@@ -258,6 +280,18 @@ class AttrAssign:
 
 
 @dataclass
+class With:
+    """`with expr [as name]: body` — context manager.
+    Lowered as: evaluate expr, optionally bind result to name, run body.
+    __enter__/__exit__ are not modelled; the expression result is the value."""
+
+    expr: "Expr"
+    name: "Optional[str]"
+    body: list["Stmt"]
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
 class Try:
     """`try: body (except [Type] [as name]: handler)+ [else: ...] [finally: ...]`.
 
@@ -298,9 +332,31 @@ class Global:
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
+@dataclass
+class Nonlocal:
+    """`nonlocal x, y` — tell sema the names are from an enclosing scope."""
+
+    names: list[str] = field(default_factory=list)
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class Del:
+    """`del target` — delete a variable, dict key, or list element.
+
+    `target` is:
+      - a Name node            → zero the local / global slot
+      - a Subscript node       → dict pop or list remove-by-index
+    """
+
+    target: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
 Stmt = (
     Assign
     | AugAssign
+    | MultiAssign
     | Return
     | If
     | While
@@ -314,8 +370,11 @@ Stmt = (
     | Include
     | AttrAssign
     | Try
+    | With
     | Raise
     | Global
+    | Nonlocal
+    | Del
 )
 # IndexAssign is also a Stmt but forward-referenced because Subscript is defined below.
 
@@ -443,6 +502,26 @@ class Comprehension:
     inferred_type: str = "list"
     # Element kind of the produced list (the static type of `elt`).
     list_el_type: str = "int"
+    # For `[elt for a, b in <iter>]` the unpack targets land here (len >= 2).
+    # When empty, the comprehension is single-target and `var` holds the one
+    # name. Mirrors `A.For.targets`.
+    targets: list = field(default_factory=list)
+
+
+@dataclass
+class Lambda:
+    """`lambda params: expr` — an anonymous function expression.
+
+    `params` is a list of parameter names (no defaults, no *args).
+    `body` is the single expression returned. `func_name` is filled in by
+    codegen with the generated label (e.g. `_lambda_42`) and used when the
+    lambda value is later called indirectly.
+    """
+
+    params: list[str] = field(default_factory=list)
+    body: "Optional[Expr]" = None
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    func_name: str = ""  # set by codegen
 
 
 @dataclass
@@ -464,6 +543,10 @@ class DictComprehension:
     inferred_type: str = "dict"
     # Value kind of the produced dict (the static type of `value`).
     value_type: str = "int"
+    # For `{k: v for a, b in <iter>}` the unpack targets land here (len >= 2).
+    # When empty, the comprehension is single-target and `var` holds the one
+    # name. Mirrors `A.For.targets`.
+    targets: list = field(default_factory=list)
 
 
 @dataclass
@@ -569,6 +652,11 @@ class DictLit:
     # value/element kind of those nested containers, so a chained read
     # `outer[k][k2]` recovers the leaf type. "int" when unknown / not nested.
     inner_value_type: str = "int"
+    # When `value_type == "tuple"`, the common per-slot element kinds of those
+    # tuple values (e.g. `dict[str, tuple[str, str]]` -> ["str", "str"]), so
+    # `d.values()` and `for k, v in d.items()` can type their unpack targets.
+    # Empty when unknown / the value tuples don't share a shape.
+    value_tuple_elem_types: list = field(default_factory=list)
 
 
 @dataclass
@@ -624,6 +712,7 @@ Expr = (
     | IfExp
     | Comprehension
     | DictComprehension
+    | Lambda
 )
 
 
@@ -659,10 +748,16 @@ def expr_type(e: Expr) -> str:
     if isinstance(e, Subscript):
         return getattr(e, "inferred_type", "int")
     if isinstance(e, BinOp):
+        # An operator overloaded via a dunder (`Path / "sub"` -> __truediv__)
+        # is typed from that method's return annotation, not arithmetic
+        # promotion — honor it whatever the result type.
+        if getattr(e, "dunder_owner", None) is not None:
+            return e.inferred_type  # type: ignore
         # sema may stamp a BinOp with a non-arithmetic result: a union of class
         # objects (`A | B | C`) is "type"; an opaque ("any") operand makes the
-        # result "any". Honor those so they chain.
-        if getattr(e, "inferred_type", None) in ("type", "any"):
+        # result "any"; set union/difference/intersection (|, -, &) is "set".
+        # Honor those so they chain (e.g. `(a | b) | c` for nested set unions).
+        if getattr(e, "inferred_type", None) in ("type", "any", "set"):
             return e.inferred_type  # type: ignore
         lt, rt = expr_type(e.left), expr_type(e.right)
         if e.op in ("&", "|", "^", "<<", ">>"):

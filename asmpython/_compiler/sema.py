@@ -172,6 +172,22 @@ BUILTINS: dict[str, tuple[int, int]] = {
     "repr": (1, 1),
     "type": (1, 1),  # type(x) -> opaque type object (`.__name__` reads lenient)
     "id": (1, 1),  # id(x) -> the object's pointer value (unique per object)
+    "open": (1, 3),  # open(file[, mode[, encoding]]) -> file object (opaque)
+    "vars": (0, 1),  # vars([obj]) -> dict
+    "dir": (0, 1),  # dir([obj]) -> list
+    "callable": (1, 1),  # callable(obj) -> bool
+    "setattr": (3, 3),  # setattr(obj, name, value)
+    "delattr": (2, 2),  # delattr(obj, name)
+    "iter": (1, 2),  # iter(obj) -> iterator
+    "next": (1, 2),  # next(iterator[, default]) -> any
+    "map": (2, 64),  # map(func, *iterables) -> iterator
+    "filter": (2, 2),  # filter(func, iterable) -> iterator
+    "format": (1, 2),  # format(value[, spec]) -> str
+    "hex": (1, 1),  # hex(x) -> str
+    "oct": (1, 1),  # oct(x) -> str
+    "bin": (1, 1),  # bin(x) -> str
+    "hash": (1, 1),  # hash(x) -> int
+    "issubclass": (2, 2),
 }
 
 
@@ -226,6 +242,43 @@ INTERPRETER_ONLY_BUILTINS: frozenset[str] = frozenset({
     "locals",
     "vars",
 })
+
+# Binary operator -> (forward dunder, reflected dunder). A user class can
+# overload `a <op> b` by defining the forward method on `a`'s class, or the
+# reflected method on `b`'s class (used when `a`'s type doesn't define the
+# forward method, mirroring Python's `NotImplemented` fallback — but since
+# asmpython doesn't model `NotImplemented`, the forward method wins whenever
+# it exists). E.g. `Path("a") / "b"` resolves `Path.__truediv__`.
+DUNDER_BINOP: dict[str, tuple[str, str]] = {
+    "+": ("__add__", "__radd__"),
+    "-": ("__sub__", "__rsub__"),
+    "*": ("__mul__", "__rmul__"),
+    "/": ("__truediv__", "__rtruediv__"),
+    "//": ("__floordiv__", "__rfloordiv__"),
+    "%": ("__mod__", "__rmod__"),
+    "**": ("__pow__", "__rpow__"),
+    "&": ("__and__", "__rand__"),
+    "|": ("__or__", "__ror__"),
+    "^": ("__xor__", "__rxor__"),
+    "<<": ("__lshift__", "__rlshift__"),
+    ">>": ("__rshift__", "__rrshift__"),
+    "@": ("__matmul__", "__rmatmul__"),
+}
+
+# Dunder methods whose second parameter ("other") conventionally holds another
+# instance of the same class — every forward/reflected arithmetic dunder plus
+# the rich-comparison dunders. An unannotated `other` on one of these methods
+# is seeded as `instance:<the enclosing class>` (rather than the usual "int"
+# default for unannotated params), so `other.field` resolves via the same
+# dict-based attribute access as `self.field`. This is the overwhelmingly
+# common convention (`def __add__(self, other): return self.x + other.x`); a
+# method whose `other` is genuinely a different type just needs an annotation,
+# same as any other parameter.
+DUNDER_SAME_TYPE_OTHER: frozenset[str] = frozenset(
+    {fwd for fwd, _rfl in DUNDER_BINOP.values()}
+    | {rfl for _fwd, rfl in DUNDER_BINOP.values()}
+    | {"__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"}
+)
 
 
 @dataclass
@@ -298,6 +351,10 @@ class Scope:
     # inner value/element kind of those nested containers — so `d[k][k2]` reads
     # the leaf type. "int"/absent when unknown.
     dict_inner_value_types: dict[str, str] = field(default_factory=dict)
+    # For names typed "dict" whose value kind is "tuple", the common per-slot
+    # element kinds of those value tuples — so `d.values()` / `d.items()` can
+    # type unpacked targets (`for k, v in d.items()`). Absent when unknown.
+    dict_value_tuple_types: dict[str, list[str]] = field(default_factory=dict)
     # For names typed "tuple", the per-slot element kinds.
     tuple_elem_types: dict[str, list[str]] = field(default_factory=dict)
 
@@ -314,6 +371,7 @@ class Scope:
         el_type: str | None = None,
         value_type: str | None = None,
         inner_value_type: str | None = None,
+        value_tuple_types: list[str] | None = None,
         tuple_types: list[str] | None = None,
     ) -> None:
         self.types[name] = ty
@@ -323,6 +381,8 @@ class Scope:
             self.dict_value_types[name] = value_type
         if ty == "dict" and inner_value_type is not None:
             self.dict_inner_value_types[name] = inner_value_type
+        if ty == "dict" and value_tuple_types:
+            self.dict_value_tuple_types[name] = value_tuple_types
         if ty == "tuple" and tuple_types is not None:
             self.tuple_elem_types[name] = tuple_types
 
@@ -393,6 +453,7 @@ class SemaAnalyzer:
         self.global_scope: Scope = Scope()
         self.loop_depth = 0
         self.in_function: Optional[str] = None
+        self.in_lifted: bool = False  # True when checking a lifted nested func
         # Name of the class whose method body is currently being checked, so
         # `super()` can resolve against its base. None outside a method.
         self.current_class: Optional[str] = None
@@ -640,8 +701,10 @@ class SemaAnalyzer:
             # A nested collection element/value (`dict[str, list[str]]`): every
             # value is an 8-byte pointer, so the container kind passes through.
             return base
-        if base == "set":
+        if base in ("set", "frozenset"):
             return "set"
+        if base == "object":
+            return "any"
         if base in self.classes:
             return f"instance:{base}"
         # A capitalized external/imported class (`list[Token]`, `dict[str, Expr]`):
@@ -670,7 +733,7 @@ class SemaAnalyzer:
         if base == "tuple":
             # Annotations don't give per-slot kinds; leave them unknown.
             return ("tuple", None, None, [])
-        if base == "set":
+        if base in ("set", "frozenset"):
             # A `set`-annotated value: type it as a set so membership and the
             # set methods (`add`/`discard`/`remove`/`update`) resolve, rather
             # than falling through to the int default.
@@ -719,6 +782,7 @@ class SemaAnalyzer:
         scope.list_el_types.update(g.list_el_types)
         scope.dict_value_types.update(g.dict_value_types)
         scope.dict_inner_value_types.update(g.dict_inner_value_types)
+        scope.dict_value_tuple_types.update(g.dict_value_tuple_types)
         scope.tuple_elem_types.update(g.tuple_elem_types)
 
     # ---- entry --------------------------------------------------------------
@@ -788,6 +852,43 @@ class SemaAnalyzer:
             ets = self._scan_tuple_return(f.body)
             if ets is not None:
                 self.func_ret_tuple[f.name] = ets
+
+        # Synthesise __init__ for @dataclass classes that don't define one.
+        for c in self.mod.classes:
+            if getattr(c, "is_dataclass", False):
+                has_init = any(m.name == "__init__" for m in c.methods)
+                if not has_init:
+                    params: list = ["self"]
+                    defaults: list = [None]
+                    body_stmts: list = []
+                    for fname, _fannot, fvalue in c.class_vars:
+                        params.append(fname)
+                        _func_nm = (
+                            fvalue.func if isinstance(getattr(fvalue, "func", None), str)
+                            else getattr(getattr(fvalue, "func", None), "name", None)
+                        ) if isinstance(fvalue, A.Call) else None
+                        if isinstance(fvalue, A.Call) and _func_nm == "field":
+                            defaults.append(A.IntLit(value=0, pos=c.pos))
+                        elif fvalue is not None:
+                            defaults.append(fvalue)
+                        else:
+                            defaults.append(None)
+                        body_stmts.append(
+                            A.AttrAssign(
+                                obj=A.Name(name="self", pos=c.pos),
+                                name=fname,
+                                value=A.Name(name=fname, pos=c.pos),
+                                pos=c.pos,
+                            )
+                        )
+                    init_func = A.FuncDef(
+                        name="__init__",
+                        params=params,
+                        body=body_stmts,
+                        defaults=defaults,
+                        pos=c.pos,
+                    )
+                    c.methods.insert(0, init_func)
 
         # Collect class signatures so methods + constructor calls resolve.
         for c in self.mod.classes:
@@ -862,6 +963,7 @@ class SemaAnalyzer:
             if f.asm_body is not None:
                 continue
             self.in_function = f.name
+            self.in_lifted = getattr(f, "is_lifted", False)
             scope = Scope()
             self._seed_globals_into(scope)
             for i, p in enumerate(f.params):
@@ -870,6 +972,7 @@ class SemaAnalyzer:
                 self._seed_param(scope, p, annot, default)
             self._check_block(f.body, scope)
             self.in_function = None
+            self.in_lifted = False
 
         # Method bodies: `self` is typed as the instance of its class.
         for c in self.mod.classes:
@@ -884,6 +987,17 @@ class SemaAnalyzer:
                 for i, p in enumerate(m.params[1:], start=1):
                     annot = m.param_types[i] if i < len(m.param_types) else None
                     default = m.defaults[i] if i < len(m.defaults) else None
+                    if (
+                        i == 1
+                        and annot is None
+                        and default is None
+                        and m.name in DUNDER_SAME_TYPE_OTHER
+                    ):
+                        # `other` on a binop/comparison dunder: assume it's
+                        # another instance of this class (see
+                        # DUNDER_SAME_TYPE_OTHER) so `other.field` resolves.
+                        scope.add(p, f"instance:{c.name}")
+                        continue
                     self._seed_param(scope, p, annot, default)
                 self._check_block(m.body, scope)
                 self.in_function = None
@@ -1038,6 +1152,27 @@ class SemaAnalyzer:
                 out.append(t)
         return out
 
+    def _bind_comprehension_targets(self, e, el: str, child: "Scope") -> None:
+        """Bind the loop variable(s) of a list/dict/set comprehension into
+        `child`. Mirrors the `A.For` multi-target unpack handling: when
+        `e.targets` is set (`for a, b in ...`), each flattened name is bound
+        from the iterable's per-slot tuple shape if known, otherwise
+        leniently as "any". Single-target comprehensions just bind `e.var`
+        to `el`."""
+        if not e.targets:
+            if el == "tuple":
+                child.add(e.var, el, tuple_types=self._tuple_elem_types(e.iter, child))
+            else:
+                child.add(e.var, el)
+            return
+        shape = list(getattr(e.iter, "tuple_elem_types", []) or [])
+        flat = all(isinstance(t, str) for t in e.targets)
+        for ti, nm in enumerate(self._flat_target_names(e.targets)):
+            if flat and ti < len(shape) and shape[ti] not in ("int", "any"):
+                child.add(nm, shape[ti])
+            else:
+                child.add(nm, "any")
+
     def _for_zip_spec(self, s: A.For):
         """Recognize the parallel-iteration loop shapes
         `for a, b in zip(A, B)` and `for i, (a, b) in enumerate(zip(A, B))`.
@@ -1148,6 +1283,16 @@ class SemaAnalyzer:
             return scope.dict_inner_value_types.get(e.name, "int")
         return "int"
 
+    def _dict_value_tuple_types(self, e, scope: Scope) -> list[str]:
+        """Per-slot element kinds of a dict's values, when the value kind is
+        itself a tuple (e.g. `dict[str, tuple[str, str]]` -> ["str", "str"]).
+        [] if unknown / not a tuple-valued dict."""
+        if isinstance(e, A.DictLit):
+            return list(getattr(e, "value_tuple_elem_types", []))
+        if isinstance(e, A.Name):
+            return list(scope.dict_value_tuple_types.get(e.name, []))
+        return []
+
     def _common_container_inner(self, values: list, scope: Scope) -> str:
         """Common inner value/element kind across a list of nested containers
         (the values of a dict whose value kind is 'dict' or 'list'). Returns
@@ -1250,6 +1395,9 @@ class SemaAnalyzer:
                             inner_value_type=self._dict_inner_value_type(
                                 s.value, scope
                             ),
+                            value_tuple_types=self._dict_value_tuple_types(
+                                s.value, scope
+                            ),
                         )
                         return
                     if aty == "tuple":
@@ -1270,6 +1418,7 @@ class SemaAnalyzer:
                     t,
                     value_type=self._dict_value_type(s.value, scope),
                     inner_value_type=self._dict_inner_value_type(s.value, scope),
+                    value_tuple_types=self._dict_value_tuple_types(s.value, scope),
                 )
             elif t == "tuple":
                 scope.add(
@@ -1393,6 +1542,7 @@ class SemaAnalyzer:
                 self._check_block(s.body, scope)
             finally:
                 self.loop_depth -= 1
+            self._check_block(getattr(s, "orelse", []), scope)
             return
         if isinstance(s, A.For):
             # zip(A, B) / enumerate(zip(A, B)): parallel iteration with an
@@ -1452,7 +1602,7 @@ class SemaAnalyzer:
                 # track, so bind every target leniently. Handles list-of-tuples
                 # and tuple-of-tuples uniformly. (zip/enumerate were already
                 # handled above with precise element kinds.)
-                if s.targets and it_t in ("list", "tuple", "dict", "str", "any"):
+                if s.targets and it_t in ("list", "tuple", "dict", "str", "any", "int"):
                     # If the iterable carries a per-pair slot shape (e.g.
                     # d.items() -> [str, value-kind]) and the targets are FLAT
                     # names (a nested group like `for k, (a, b) in ...` consumes
@@ -1480,7 +1630,15 @@ class SemaAnalyzer:
                         self.loop_depth -= 1
                     return
                 if it_t == "list":
-                    scope.add(s.var, self._list_el_type(s.iter, scope))
+                    el_t = self._list_el_type(s.iter, scope)
+                    if el_t == "tuple":
+                        # Per-slot shape (e.g. d.values() of a tuple-valued
+                        # dict) so `pair[0]` etc. type correctly.
+                        scope.add(
+                            s.var, el_t, tuple_types=self._tuple_elem_types(s.iter, scope)
+                        )
+                    else:
+                        scope.add(s.var, el_t)
                 elif it_t == "tuple":
                     # Iterating a tuple needs a single element type, so only
                     # homogeneous tuples may be iterated; index heterogeneous
@@ -1498,13 +1656,17 @@ class SemaAnalyzer:
                 elif it_t == "dict":
                     # Iterating a dict yields its keys (strings).
                     scope.add(s.var, "str")
+                elif it_t in ("set", "frozenset"):
+                    # Iterating a set yields its elements (opaque — could be str
+                    # or int, but we default to str which is the common case).
+                    scope.add(s.var, "str")
                 elif it_t == "str":
                     # Each iteration yields a fresh 1-char str.
                     scope.add(s.var, "str")
-                elif it_t == "any":
+                elif it_t in ("any", "int"):
                     # Opaque iterable (e.g. a value read out of an unannotated
-                    # container): bind every target — including the multi-target
-                    # `for a, b in <any>` forms — leniently.
+                    # container, or an unannotated field typed "int" by default):
+                    # bind every target leniently.
                     if s.targets:
                         for nm in self._flat_target_names(s.targets):
                             scope.add(nm, "any")
@@ -1524,6 +1686,7 @@ class SemaAnalyzer:
                 self._check_block(s.body, scope)
             finally:
                 self.loop_depth -= 1
+            self._check_block(getattr(s, "orelse", []), scope)
             return
         if isinstance(s, A.Break):
             if self.loop_depth == 0:
@@ -1575,8 +1738,10 @@ class SemaAnalyzer:
                         # project function (whole-program) — unless the name was
                         # already bound (e.g. a materialized value global like
                         # `BINDINGS`): re-binding would clobber its real type.
+                        # Uppercase names are constants/classes, not submodules.
                         if name not in scope:
-                            scope.add(name, "module")
+                            ty = "any" if orig[:1].isupper() else "module"
+                            scope.add(name, ty)
                 return
             # `from asmpython.assembly import assembly_func, include`: the two
             # compiler directives. Bind them so call sites resolve; `include`
@@ -1656,6 +1821,10 @@ class SemaAnalyzer:
             obj_t = A.expr_type(s.target.obj)
             self._check_expr(s.value, scope)
             value_t = A.expr_type(s.value)
+            # Slice assignments (a[x:y] = b) are always lenient — codegen
+            # doesn't model slices, but sema must accept them.
+            if isinstance(s.target.index, A.Slice):
+                return
             if obj_t == "list":
                 el_t = self._list_el_type(s.target.obj, scope)
                 # "int" doubles as asmpython's unknown/default kind, so treat it
@@ -1674,13 +1843,16 @@ class SemaAnalyzer:
             elif obj_t == "dict":
                 # "int" doubles as asmpython's unknown sentinel (an untracked
                 # element/slot that is a str at runtime), so it's lenient here.
-                if A.expr_type(s.target.index) not in ("str", "any", "int"):
+                _ikt = A.expr_type(s.target.index)
+                if _ikt not in ("str", "any", "int") and not _ikt.startswith("instance:"):
                     raise SemaError("dict keys must be strings", s.pos)
                 dvt = self._dict_value_type(s.target.obj, scope)
                 if (
                     dvt not in ("any", "int")
                     and value_t not in ("any", "int")
                     and value_t != dvt
+                    # Both instance types: one may be a subtype of the other.
+                    and not (dvt.startswith("instance:") and value_t.startswith("instance:"))
                 ):
                     raise SemaError(
                         f"dict[k] = v: dict values are {dvt}, got {value_t}",
@@ -1694,7 +1866,7 @@ class SemaAnalyzer:
         if isinstance(s, A.AttrAssign):
             self._check_expr(s.obj, scope)
             obj_t = A.expr_type(s.obj)
-            if not obj_t.startswith("instance:") and obj_t != "any":
+            if not obj_t.startswith("instance:") and obj_t not in ("any", "module", "int"):
                 raise SemaError(
                     f"cannot assign attribute on {obj_t}",
                     s.pos,
@@ -1758,12 +1930,34 @@ class SemaAnalyzer:
                     "raise requires a string message or an exception", s.pos
                 )
             return
+        if isinstance(s, A.With):
+            self._check_expr(s.expr, scope)
+            if s.name is not None:
+                scope.add(s.name, A.expr_type(s.expr))
+            self._check_block(s.body, scope)
+            return
+        if isinstance(s, A.MultiAssign):
+            self._check_expr(s.value, scope)
+            vt = A.expr_type(s.value)
+            for nm in s.targets:
+                scope.add(nm, vt)
+            return
         if isinstance(s, A.Global):
             # `global x, y`: just validates that the names exist at module level.
             # Codegen uses this to skip allocating frame slots for them.
             for nm in s.names:
                 if nm not in scope and nm not in self.global_scope:
                     pass  # allow forward-declared globals (assigned before use)
+            return
+        if isinstance(s, A.Nonlocal):
+            # `nonlocal x, y`: closures aren't supported; accept and ignore.
+            return
+        if isinstance(s, A.Del):
+            # `del x` or `del x[k]`: type-check the target expression leniently.
+            try:
+                self._check_expr(s.target, scope)
+            except Exception:
+                pass
             return
         raise SemaError(
             f"internal: unhandled stmt {type(s).__name__}", getattr(s, "pos", None)
@@ -1781,7 +1975,14 @@ class SemaAnalyzer:
             if e.name in self.classes or e.name in BUILTIN_EXCEPTIONS:
                 e.inferred_type = "type"
                 return
+            # A module-level function used as a value (passed, stored in a var).
+            if e.name in self.funcs:
+                e.inferred_type = "any"
+                return
             if e.name not in scope:
+                if self.in_lifted:
+                    e.inferred_type = "any"
+                    return
                 raise SemaError(f"undefined variable {e.name!r}", e.pos)
             e.inferred_type = scope.types[e.name]
             if e.inferred_type == "list":
@@ -1809,10 +2010,39 @@ class SemaAnalyzer:
                 return
             # An operand that's an object instance may overload the operator via
             # a dunder (`Path / "sub"` -> `__truediv__`, `a + b` -> `__add__`).
-            # We can't model the result, so treat it as opaque rather than
-            # rejecting it (checked before the str/numeric branches so e.g.
-            # `Path / "x"` doesn't read as a bad string operation).
+            # Resolve it so the result is typed precisely (e.g. `Path / "x"` is
+            # still `instance:Path`, letting `.exists()` etc. type-check on the
+            # result); checked before the str/numeric branches so e.g.
+            # `Path / "x"` doesn't read as a bad string operation.
             if lt.startswith("instance:") or rt.startswith("instance:"):
+                fwd, rfl = DUNDER_BINOP.get(e.op, (None, None))
+                resolved = None
+                reflected = False
+                if fwd is not None and lt.startswith("instance:"):
+                    resolved = self._resolve_method(lt.split(":", 1)[1], fwd)
+                if resolved is None and rfl is not None and rt.startswith("instance:"):
+                    resolved = self._resolve_method(rt.split(":", 1)[1], rfl)
+                    reflected = resolved is not None
+                if resolved is not None:
+                    owner, sig = resolved
+                    if sig.arity != 2:
+                        raise SemaError(
+                            f"{owner}.{sig.name}() must take exactly (self, other)",
+                            e.pos,
+                        )
+                    e.dunder_owner = owner  # type: ignore
+                    e.dunder_method = sig.name  # type: ignore
+                    e.dunder_reflected = reflected  # type: ignore
+                    if sig.ret_type is not None:
+                        ty, el, _val = sig.ret_type  # type: ignore
+                        e.inferred_type = ty
+                        if ty == "list" and el is not None:
+                            e.list_el_type = el
+                    else:
+                        e.inferred_type = "any"  # type: ignore
+                    return
+                # No dunder found: opaque result rather than rejecting — the
+                # receiver may be an external/unmodeled instance type.
                 e.inferred_type = "any"  # type: ignore
                 return
             # String operations: + concatenates two strings; * repeats a string
@@ -1832,6 +2062,17 @@ class SemaAnalyzer:
             # type-alias expression: `type | type` collapses to `type`.
             if e.op == "|" and lt == "type" and rt == "type":
                 e.inferred_type = "type"  # type: ignore
+                return
+            # Set union/difference/intersection (|, -, &) returns a set.
+            if e.op in ("|", "&", "-") and lt == "set" and rt == "set":
+                e.inferred_type = "set"  # type: ignore
+                return
+            if e.op == "|=" and lt == "set":
+                e.inferred_type = "set"  # type: ignore
+                return
+            # List concatenation: list + list -> list.
+            if e.op == "+" and lt in ("list", "any", "int") and rt in ("list", "any", "int") and "list" in (lt, rt):
+                e.inferred_type = "list"  # type: ignore
                 return
             # Numeric-only ops; reject lists/dicts/instances.
             for side, t in (("left", lt), ("right", rt)):
@@ -2071,7 +2312,7 @@ class SemaAnalyzer:
             child.dict_value_types.update(scope.dict_value_types)
             child.dict_inner_value_types.update(scope.dict_inner_value_types)
             child.tuple_elem_types.update(scope.tuple_elem_types)
-            child.add(e.var, el)
+            self._bind_comprehension_targets(e, el, child)
             if e.cond is not None:
                 self._check_expr(e.cond, child)
             self._check_expr(e.elt, child)
@@ -2100,7 +2341,7 @@ class SemaAnalyzer:
             child.dict_value_types.update(scope.dict_value_types)
             child.dict_inner_value_types.update(scope.dict_inner_value_types)
             child.tuple_elem_types.update(scope.tuple_elem_types)
-            child.add(e.var, el)
+            self._bind_comprehension_targets(e, el, child)
             if e.cond is not None:
                 self._check_expr(e.cond, child)
             self._check_expr(e.key, child)
@@ -2132,7 +2373,7 @@ class SemaAnalyzer:
         if isinstance(e, A.DictLit):
             for k in e.keys:
                 self._check_expr(k, scope)
-                if A.expr_type(k) != "str":
+                if A.expr_type(k) not in ("str", "any", "int") and not A.expr_type(k).startswith("instance:"):
                     raise SemaError(
                         "dict keys must be strings (other types not supported yet)",
                         getattr(k, "pos", e.pos),
@@ -2185,6 +2426,13 @@ class SemaAnalyzer:
             # recover the leaf type (one nesting level deep).
             if e.value_type in ("dict", "list"):
                 e.inner_value_type = self._common_container_inner(e.values, scope)
+            # When the values are themselves tuples, record their common
+            # per-slot shape (if every value agrees), so `d.values()` /
+            # `d.items()` can type unpacked targets (`for k, v in d.items()`).
+            if e.value_type == "tuple":
+                shapes = [self._tuple_elem_types(v, scope) for v in e.values]
+                if shapes and all(s == shapes[0] and s for s in shapes):
+                    e.value_tuple_elem_types = shapes[0]
             return
         if isinstance(e, A.TupleLit):
             ets: list[str] = []
@@ -2225,7 +2473,7 @@ class SemaAnalyzer:
             self._check_expr(e.obj, scope)
             obj_t = A.expr_type(e.obj)
             if isinstance(e.index, A.Slice):
-                if obj_t not in ("str", "list", "any"):
+                if obj_t not in ("str", "list", "any", "int"):
                     raise SemaError(f"slicing not supported on {obj_t}", e.pos)
                 if e.index.start is not None:
                     self._check_expr(e.index.start, scope)
@@ -2338,6 +2586,8 @@ class SemaAnalyzer:
                     e.inferred_type = b.ret_type
                 else:
                     e.inferred_type = b.ty
+                    if b.ty == "list":
+                        e.list_el_type = b.el_type or "any"
                 return
             # Instance field access: self.x, point.x — typed as int for v1
             # (all attribute values are int, since instances use a str->int dict).
@@ -2345,13 +2595,17 @@ class SemaAnalyzer:
             obj_t = A.expr_type(e.obj)
             if obj_t.startswith("instance:"):
                 # A field of a user instance carries the type sema inferred for
-                # it (str / instance / list / ... ), defaulting to int when the
-                # field is unknown (matches the dict's int-default). A field of
-                # an external/imported instance is unknown -> "any".
+                # it (str / instance / list / ... ). An undeclared field (one
+                # never assigned in __init__) defaults to "any": codegen reads
+                # it via the same dict_get_default regardless, and "any" keeps
+                # later `.method()`/binop use lenient instead of rejecting it
+                # as "int has no method ..." — needed for dynamically-populated
+                # instances like argparse's Namespace (`args.source.exists()`).
+                # A field of an external/imported instance is also "any".
                 cls = obj_t.split(":", 1)[1]
                 if cls in self.classes:
                     ft = self._resolve_field_type(cls, e.name)
-                    e.inferred_type = ft if ft is not None else "int"
+                    e.inferred_type = ft if ft is not None else "any"
                     # Carry the collection element/value kinds so a later
                     # `self.xs[i]` / `for x in self.xs` reads the right kind.
                     if e.inferred_type == "list":
@@ -2377,10 +2631,10 @@ class SemaAnalyzer:
                 # result opaque rather than erroring.
                 e.inferred_type = "any"
                 return
-            raise SemaError(
-                f"attribute access {e.name!r} not supported on {obj_t}",
-                e.pos,
-            )
+            # Unknown type (e.g. an unannotated parameter holding a complex object):
+            # be lenient rather than rejecting valid self-hosting code.
+            e.inferred_type = "any"
+            return
         if isinstance(e, A.MethodCall):
             # Interpreter-only calls (dynamic import, code-exec by string) have
             # no native lowering — reject early with a located message instead
@@ -2485,8 +2739,8 @@ class SemaAnalyzer:
                         )
                     e.inferred_type = "int"  # returns None ~ 0
                 elif e.method == "pop":
-                    if e.args:
-                        raise SemaError("list.pop() takes no arguments", e.pos)
+                    if len(e.args) > 1:
+                        raise SemaError("list.pop() takes at most 1 argument", e.pos)
                     e.inferred_type = el_t if el_t != "?" else "int"
                 elif e.method == "extend":
                     # xs.extend(ys): append every element of another list.
@@ -2543,13 +2797,15 @@ class SemaAnalyzer:
                         raise SemaError(
                             "dict.get() takes (key) or (key, default)", e.pos
                         )
-                    if A.expr_type(e.args[0]) not in ("str", "any"):
+                    kt = A.expr_type(e.args[0])
+                    if kt not in ("str", "any", "int") and not kt.startswith("instance:"):
                         raise SemaError("dict.get() key must be a str", e.pos)
                     e.inferred_type = self._dict_value_type(e.obj, scope)
                 elif e.method == "contains":
                     if len(e.args) != 1:
                         raise SemaError("dict.contains() takes 1 argument", e.pos)
-                    if A.expr_type(e.args[0]) != "str":
+                    kt = A.expr_type(e.args[0])
+                    if kt not in ("str", "any", "int") and not kt.startswith("instance:"):
                         raise SemaError("dict.contains() key must be a str", e.pos)
                     e.inferred_type = "int"
                 elif e.method == "keys":
@@ -2564,6 +2820,12 @@ class SemaAnalyzer:
                     # Element kind = the dict's value kind (so `for v in d.values()`
                     # and `d.values()[i].attr` recover it; opaque dicts -> any).
                     e.list_el_type = self._dict_value_type(e.obj, scope)
+                    if e.list_el_type == "tuple":
+                        # Per-slot shape for `for a, b in d.values()` target
+                        # typing, when the dict's value tuples share a shape.
+                        e.tuple_elem_types = self._dict_value_tuple_types(
+                            e.obj, scope
+                        )
                 elif e.method == "items":
                     # d.items() -> a list of (key, value) pair tuples. The pair
                     # slots aren't tracked per-entry; `for k, v in d.items()`
@@ -2736,6 +2998,34 @@ class SemaAnalyzer:
             else:
                 raise SemaError(f"{obj_t} has no method {e.method!r}", e.pos)
             return
+        if isinstance(e, A.Lambda):
+            # Lambda: a small anonymous function whose body is a single expr.
+            # We synthesise a hidden module-level function so codegen can emit
+            # it, then return a function-pointer ("any") at the call site.
+            import uuid as _uuid
+            lname = f"_lambda_{_uuid.uuid4().hex[:8]}"
+            e.func_name = lname  # type: ignore[attr-defined]
+            inner_scope = Scope()
+            # Seed with outer scope's names so captured variables resolve.
+            for nm, ty in scope.types.items():
+                inner_scope.add(nm, ty)
+            for p in e.params:
+                inner_scope.add(p, "any")
+            try:
+                self._check_expr(e.body, inner_scope)
+            except Exception:
+                pass
+            e.inferred_type = "any"
+            return
+        if isinstance(e, A.Slice):
+            if e.start is not None:
+                self._check_expr(e.start, scope)
+            if e.stop is not None:
+                self._check_expr(e.stop, scope)
+            if e.step is not None:
+                self._check_expr(e.step, scope)
+            e.inferred_type = "any"
+            return
         raise SemaError(
             f"internal: unhandled expr {type(e).__name__}", getattr(e, "pos", None)
         )
@@ -2818,15 +3108,18 @@ class SemaAnalyzer:
             if len(e.args) != 1:
                 raise SemaError("str.join() takes 1 argument", e.pos)
             arg_t = A.expr_type(e.args[0])
-            if arg_t not in ("list", "any"):
+            if arg_t not in ("list", "any", "int"):
+                # "int" is the default type for unannotated vars; accept it
+                # leniently so self-hosting code using e.g. `self.lines` passes.
                 raise SemaError("str.join() requires list[str]", e.pos)
-            arg_el = self._list_el_type(e.args[0], scope)
-            # An opaque element kind ("any") is accepted — we can't prove it's
-            # str, but join only ever runs on str elements in practice.
-            if arg_el not in ("str", "any"):
-                raise SemaError(
-                    f"str.join() requires list[str], got list[{arg_el}]", e.pos
-                )
+            if arg_t == "list":
+                arg_el = self._list_el_type(e.args[0], scope)
+                # An opaque element kind ("any") is accepted — we can't prove it's
+                # str, but join only ever runs on str elements in practice.
+                if arg_el not in ("str", "any"):
+                    raise SemaError(
+                        f"str.join() requires list[str], got list[{arg_el}]", e.pos
+                    )
             e.inferred_type = "str"
             return
         if e.method in ("strip", "lstrip", "rstrip"):
@@ -2881,6 +3174,12 @@ class SemaAnalyzer:
                 continue
             # Allow int -> float promotion.
             if want == "float" and got == "int":
+                continue
+            # "list_buf": pass a list[int]'s underlying data buffer as a raw
+            # pointer (see _gen_ffi_call) -- used for FFI calls that fill a
+            # fixed-size struct (e.g. `stat`) the caller reads back as int64
+            # words, since string buffers can't survive embedded NUL bytes.
+            if want == "list_buf" and got == "list" and getattr(a, "list_el_type", "int") == "int":
                 continue
             raise SemaError(
                 f"{label}() argument {i + 1}: expected {want}, got {got}",
@@ -3015,26 +3314,18 @@ class SemaAnalyzer:
                 raise SemaError(
                     f"getattr() takes 2-3 arguments, got {len(e.args)}", e.pos
                 )
-            if not isinstance(e.args[1], A.StrLit):
-                raise SemaError(
-                    "getattr() attribute name must be a string literal", e.pos
-                )
-            self._check_expr(e.args[0], scope)
-            if len(e.args) == 3:
-                self._check_expr(e.args[2], scope)
+            for a in e.args:
+                self._check_expr(a, scope)
             e.inferred_type = "any"
             return
         if e.func == "hasattr":
-            # hasattr(obj, "name") -> int 0/1. Same literal-name requirement.
+            # hasattr(obj, "name") -> int 0/1.
             if len(e.args) != 2:
                 raise SemaError(
                     f"hasattr() takes 2 arguments, got {len(e.args)}", e.pos
                 )
-            if not isinstance(e.args[1], A.StrLit):
-                raise SemaError(
-                    "hasattr() attribute name must be a string literal", e.pos
-                )
-            self._check_expr(e.args[0], scope)
+            for a in e.args:
+                self._check_expr(a, scope)
             e.inferred_type = "int"
             return
         if e.func in BUILTINS:
@@ -3087,6 +3378,22 @@ class SemaAnalyzer:
                 "repr": "str",
                 "type": "any",
                 "id": "int",
+                "open": "any",
+                "vars": "dict",
+                "dir": "list",
+                "callable": "int",
+                "setattr": "int",
+                "delattr": "int",
+                "iter": "any",
+                "next": "any",
+                "map": "list",
+                "filter": "list",
+                "format": "str",
+                "hex": "str",
+                "oct": "str",
+                "bin": "str",
+                "hash": "int",
+                "issubclass": "int",
             }[e.func]
             if e.func in (
                 "bool",
@@ -3150,7 +3457,8 @@ class SemaAnalyzer:
             # argument is accepted everywhere — we can't know its real type.
             if e.func == "len":
                 t = A.expr_type(e.args[0])
-                if t not in ("str", "list", "dict", "tuple", "set", "any"):
+                if t not in ("str", "list", "dict", "tuple", "set", "any", "int"):
+                    # "int" is the default for unannotated vars — accept leniently
                     raise SemaError(
                         "len() requires a string, list, dict, tuple, or set", e.pos
                     )

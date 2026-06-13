@@ -15,4 +15,6 @@ BINDINGS: dict = {
     # Constants
     "version":  Const(ty="str",  value="asmpython 0.1"),
     "maxsize":  Const(ty="int",  value=9223372036854775807),
+    # sys.argv -> list[str], built at program startup from argc/argv.
+    "argv":     Const(ty="list", value="__sys_argv__", el_type="str"),
 }

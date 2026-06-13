@@ -16,9 +16,7 @@ class Point:
         print(self.x)
         print(self.y)
 
-p = Point()
-p.x = 10
-p.y = 20
+p = Point(10, 20, "")
 p.show()
 print(30)
 

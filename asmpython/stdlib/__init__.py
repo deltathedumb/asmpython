@@ -30,6 +30,11 @@ class Func:
 class Const:
     ty: str
     value: object
+    # For ty == "list", the element type ("str", "int", ...). Unused otherwise.
+    el_type: str | None = None
+    # Override for Windows when the constant's value (e.g. a struct field
+    # offset/size) differs by target, mirroring Func.c_name_windows.
+    value_windows: object | None = None
 
 
 # Static registry of every stdlib module's BINDINGS, keyed by the name the

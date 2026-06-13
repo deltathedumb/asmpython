@@ -29,6 +29,7 @@ class FreestandingCodegen(Codegen):
     section_text   = "section .text"
     section_data   = "section .data"
     section_rodata = "section .rodata"
+    section_bss    = "section .bss nobits"
     label_main     = "kernel_main"
 
     # ------------------------------------------------------------------ ABI --
@@ -57,6 +58,8 @@ class FreestandingCodegen(Codegen):
     # --------------------------------------------------------- entry / exit --
 
     def emit_entry_prologue(self, info: FuncInfo) -> None:
+        # kernel_main is called with no argv; sys.argv is always [].
+        self.emitf("mov qword [rel _prog_argc], 0", "mov qword [rel _prog_argv], 0")
         self.emitf("push rbp", "mov rbp, rsp")
         frame = info.frame_size
         if frame % 16 != 0:

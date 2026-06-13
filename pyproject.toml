@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "asmpython"
@@ -31,13 +31,13 @@ classifiers = [
 asmpython = "asmpython._compiler.__main__:main"
 
 [project.urls]
-Repository = "https://github.com/mabel/asmpython"
-Documentation = "https://github.com/mabel/asmpython/blob/main/docs.html"
-Changelog = "https://github.com/mabel/asmpython/blob/main/CHANGELOG.md"
+Repository = "https://github.com/deltathedumb/asmpython"
+Documentation = "https://github.com/deltathedumb/asmpython/blob/main/docs.html"
+Changelog = "https://github.com/deltathedumb/asmpython/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["asmpython*"]
 
 [tool.setuptools.package-data]
-"asmpython" = ["stdlib/*.py", "asmlib/*.py", "_runtime/**/*"]
+"asmpython" = ["stdlib/**/*.py", "asmlib/*.py", "_runtime/**/*"]

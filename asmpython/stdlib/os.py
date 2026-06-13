@@ -5,7 +5,7 @@ opaque handles (file descriptors are fine since they're ints).
 """
 from __future__ import annotations
 
-from . import Func
+from . import Const, Func
 
 
 BINDINGS = {
@@ -40,4 +40,46 @@ BINDINGS = {
     # (mode 0 = existence). On Windows the CRT spells it `_access`; the
     # `asmpython.stdlib.ospath` helpers hide that difference.
     "_access": Func(arg_types=("str", "int"), ret_type="int", c_name="access"),
+
+    # --- filesystem mutation / queries (used by pathlib.Path) ---------------
+    # mkdir(path, mode) -> 0 on success. POSIX mkdir takes (path, mode);
+    # Windows' `_mkdir` only takes (path) and ignores the extra mode arg
+    # (it just sits unused in the register).
+    "mkdir":  Func(arg_types=("str", "int"), ret_type="int", c_name="mkdir", c_name_windows="_mkdir"),
+    # remove(path) -> 0 on success. Same name on both platforms (ISO C stdio).
+    "remove": Func(arg_types=("str",), ret_type="int", c_name="remove"),
+    # rmdir(path) -> 0 on success.
+    "rmdir":  Func(arg_types=("str",), ret_type="int", c_name="rmdir", c_name_windows="_rmdir"),
+    # opendir/closedir: used to test whether a path is a directory (opendir
+    # succeeds -> non-NULL DIR*) without needing a `stat` struct. MinGW-w64
+    # provides a dirent.h compat layer, so `opendir`/`closedir` resolve on
+    # Windows too.
+    "_opendir":  Func(arg_types=("str",), ret_type="str", c_name="opendir"),
+    "_closedir": Func(arg_types=("str",), ret_type="int", c_name="closedir"),
+    # getcwd(buf, size) -> buf on success, NULL on failure.
+    "_getcwd": Func(arg_types=("str", "int"), ret_type="str", c_name="getcwd", c_name_windows="_getcwd"),
+
+    # stat(path, buf) -> 0 on success, writing a raw `struct stat` (Linux) /
+    # `struct _stat64` (Windows) into the caller-provided buffer. `buf` is a
+    # `list[int]` whose underlying data buffer (8-byte slots) is passed as
+    # the raw pointer ("list_buf" -- see codegen._gen_ffi_call): a string
+    # buffer can't survive the struct's embedded NUL bytes (later indexing
+    # relies on strlen), but a list's int64 slots line up with the struct's
+    # 8-byte fields and can be read back directly.
+    "_stat": Func(arg_types=("str", "list_buf"), ret_type="int", c_name="stat", c_name_windows="_stat64"),
+    # Index (in 8-byte words) of the `st_mtime` field within the `_ST_BUF_WORDS`
+    # words written by `_stat`.
+    # Linux: glibc x86-64 `struct stat` (144 bytes / 18 words, st_mtim.tv_sec
+    # at byte offset 88 = word 11).
+    # Windows: MinGW `struct _stat64` (56 bytes / 7 words, st_mtime at byte
+    # offset 40 = word 5) -- verified via `offsetof`/`sizeof` against the
+    # bundled MinGW toolchain's headers.
+    "_ST_MTIME_WORD": Const(ty="int", value=11, value_windows=5),
+    "_ST_BUF_WORDS": Const(ty="int", value=18, value_windows=7),
+
+    # popen(cmd, mode) -> FILE* (pipe), like fopen; mode is "r" or "w".
+    "_popen": Func(arg_types=("str", "str"), ret_type="str", c_name="popen", c_name_windows="_popen"),
+    # pclose(FILE*) -> the child's exit status (shifted on POSIX; raw exit
+    # code on Windows), or -1 on error.
+    "_pclose": Func(arg_types=("str",), ret_type="int", c_name="pclose", c_name_windows="_pclose"),
 }

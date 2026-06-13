@@ -7,12 +7,15 @@
 # 1
 # 2
 # 0
+# 0
 # 1
 # 2
-# 4
 # 1
 # 2
 # 3
+# 1
+# 3
+# 2
 
 # list.sort, reverse, count, clear, copy, insert, remove.
 

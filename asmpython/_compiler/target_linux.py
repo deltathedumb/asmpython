@@ -69,6 +69,9 @@ class LinuxCodegen(Codegen):
     # --- entry ---------------------------------------------------------------
 
     def emit_entry_prologue(self, info: FuncInfo) -> None:
+        # main(argc, argv): SysV passes these in rdi/rsi. Stash them before
+        # they're clobbered so sys.argv can be built from them.
+        self.emitf("mov [rel _prog_argc], rdi", "mov [rel _prog_argv], rsi")
         self.emitf("push rbp", "mov rbp, rsp")
         frame = info.frame_size
         if frame % 16 != 0:
