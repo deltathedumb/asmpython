@@ -98,12 +98,14 @@ def _build_parser() -> argparse.ArgumentParser:
     build_grp = ap.add_argument_group("target / build mode")
     build_grp.add_argument(
         "--target",
-        choices=["linux", "windows", "freestanding"],
-        metavar="{linux,windows,freestanding}",
+        choices=["linux", "windows", "freestanding", "freestanding16"],
+        metavar="{linux,windows,freestanding,freestanding16}",
         default=None,
         help="binary target platform / architecture (default: host platform). "
-        "'freestanding' = bare-metal Multiboot1 kernel (.bin); "
-        "boot with: qemu-system-x86_64 -kernel <output.bin>",
+        "'freestanding' = bare-metal Multiboot1 kernel (.bin), boot with "
+        "qemu-system-x86_64 -kernel <out.bin>; 'freestanding16' = BIOS-bootable "
+        "disk image (.img) with a 16-bit boot sector, boot with "
+        "qemu-system-x86_64 -drive format=raw,file=<out.img>",
     )
     build_grp.add_argument(
         "--type",
@@ -264,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
             args.output = stem.with_suffix(".dll" if target == "windows" else ".so")
         elif target == "freestanding":
             args.output = stem.with_suffix(".bin")
+        elif target == "freestanding16":
+            args.output = stem.with_suffix(".img")
         else:
             args.output = stem.with_suffix(".exe") if target == "windows" else stem
 

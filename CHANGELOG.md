@@ -37,6 +37,11 @@ output rather than silent miscompilations.
   accepted (call/dispatch work; class-state mutation through `cls` pending).
 - **Class variables** (`class C: x = 5`, non-`@dataclass`) are static
   constants: read, write, and augmented assignment via `ClassName.x`.
+- **`--target freestanding16`** — a raw, BIOS-bootable disk image. A 16-bit
+  real-mode boot sector (ending in `0xAA55`) loads the kernel via INT 13h,
+  enables A20, and switches 16 → 32 → 64-bit long mode, then runs the same
+  64-bit kernel as `freestanding`. Verified booting under QEMU
+  (`-drive format=raw,file=out.img`). Reuses the entire freestanding runtime.
 
 ### Fixed
 

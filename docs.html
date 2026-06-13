@@ -275,6 +275,7 @@
     <li><a href="#target-windows">Windows</a></li>
     <li><a href="#target-linux">Linux</a></li>
     <li><a href="#target-freestanding">Freestanding</a></li>
+    <li><a href="#target-freestanding16">Freestanding 16-bit boot</a></li>
 
     <li class="section-head">Reference</li>
     <li><a href="#builtins">Builtins</a></li>
@@ -309,6 +310,7 @@
     <li><strong>Windows (PE64)</strong> — <code>.exe</code> linked against msvcrt</li>
     <li><strong>Linux (ELF64)</strong> — ELF binary linked against libc</li>
     <li><strong>Freestanding (Multiboot1)</strong> — bare-metal kernel binary, no OS, boots in QEMU</li>
+    <li><strong>Freestanding 16-bit boot image</strong> — raw BIOS-bootable disk image (16-bit boot sector → long mode), no bootloader</li>
   </ul>
 </section>
 
@@ -368,7 +370,7 @@ Booted successfully.</code></pre>
   <table>
     <tr><th>Option</th><th>Description</th></tr>
     <tr><td><code>-o &lt;path&gt;</code></td><td>Output path (default: source stem + platform extension)</td></tr>
-    <tr><td><code>--target &lt;t&gt;</code></td><td><code>windows</code> | <code>linux</code> | <code>freestanding</code> (auto-detected from host)</td></tr>
+    <tr><td><code>--target &lt;t&gt;</code></td><td><code>windows</code> | <code>linux</code> | <code>freestanding</code> | <code>freestanding16</code> (auto-detected from host)</td></tr>
     <tr><td><code>--emit-asm</code></td><td>Write <code>.asm</code> only — do not assemble or link</td></tr>
     <tr><td><code>--keep</code></td><td>Keep intermediate <code>.obj</code> / <code>.o</code> files</td></tr>
     <tr><td><code>--check</code></td><td>Front-end diagnostics only (lex/parse/sema), no codegen</td></tr>
@@ -965,6 +967,25 @@ python -m asmpython kernel.py --target freestanding -o kernel.bin
 qemu-system-x86_64 -kernel kernel.bin -serial stdio -display none</code></pre>
 
   <div class="note">All <code>print()</code> calls write to both the VGA framebuffer and COM1 serial. Use <code>-serial stdio</code> to see output in your terminal, or <code>-serial file:out.txt</code> to capture it.</div>
+</section>
+
+<section id="target-freestanding16">
+  <h2>Target: Freestanding 16-bit boot image <a class="anchor" href="#target-freestanding16">#</a></h2>
+  <p>Same bare-metal kernel as <code>freestanding</code>, but packaged as a raw,
+  BIOS-bootable disk image instead of a Multiboot1 kernel — no GRUB or
+  <code>-kernel</code> needed. The first 512 bytes are a real-mode (16-bit) boot
+  sector ending in the <code>0xAA55</code> signature, exactly how a PC starts.</p>
+  <ul>
+    <li>Format: <code>nasm -f bin</code> — flat <code>.img</code>, bootable from disk/USB</li>
+    <li>16-bit boot sector: loads the kernel via INT 13h (LBA), enables A20</li>
+    <li>Switches 16-bit real → 32-bit protected → 64-bit long mode, then runs the same 64-bit kernel</li>
+    <li>Identical runtime to <code>freestanding</code> (VGA + COM1, 64 KB stack, 256 KB heap)</li>
+  </ul>
+
+  <pre><div class="lang-tag">shell</div><code>python -m asmpython kernel.py --target freestanding16 -o boot.img
+qemu-system-x86_64 -drive format=raw,file=boot.img -serial stdio -display none</code></pre>
+
+  <div class="note">Reads a fixed span off the boot disk, so the build pads the image to a whole number of sectors. Under QEMU's raw disk this Just Works; for real hardware, write the <code>.img</code> to a USB stick with <code>dd</code>.</div>
 </section>
 
 <!-- ═══════════════════ REFERENCE ════════════════════════════ -->

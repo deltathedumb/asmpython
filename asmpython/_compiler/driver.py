@@ -135,6 +135,12 @@ def compile_source(
         gen = FreestandingCodegen(module, use_runtime_lib=False)
         nasm_fmt = "bin"
         obj_suffix = ".bin"
+    elif target == "freestanding16":
+        from .target_freestanding16 import Freestanding16Codegen
+
+        gen = Freestanding16Codegen(module, use_runtime_lib=False)
+        nasm_fmt = "bin"
+        obj_suffix = ".img"
     else:
         raise ValueError(f"unknown target {target}")
 
@@ -170,7 +176,17 @@ def compile_source(
     ])
 
     # Freestanding: -f bin produces the final binary directly; no gcc needed.
-    if target == "freestanding":
+    if target in ("freestanding", "freestanding16"):
+        if target == "freestanding16":
+            # The boot sector issues a fixed-size INT 13h read; INT 13h fails the
+            # whole read if any requested sector is past end-of-file, so pad the
+            # image to (1 boot + BOOT_READ_SECTORS) whole sectors.
+            from .target_freestanding16 import Freestanding16Codegen as _F16
+
+            need = (_F16.BOOT_READ_SECTORS + 1) * 512
+            data = obj_path.read_bytes()
+            if len(data) < need:
+                obj_path.write_bytes(data + b"\x00" * (need - len(data)))
         if not keep_assembly:
             try:
                 asm_path.unlink()
