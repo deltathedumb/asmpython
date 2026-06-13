@@ -1,35 +1,43 @@
 @echo off
-REM build.bat -- Self-compile asmpython with itself -> build\asmpython.exe
+REM build.bat -- Self-compile asmpython with itself for Windows and Linux.
 REM
 REM Usage:
-REM   build.bat              compile asmpython -> build\asmpython.exe
-REM   build.bat -o out.exe   compile asmpython to a named output
+REM   build.bat              build\asmpython.exe  +  build\asmpython-linux
 
 setlocal EnableDelayedExpansion
 
 set "ROOT=%~dp0"
-set "OUT="
+set "SRC=%ROOT%asmpython\__main__.py"
+set "OUT_WIN=%ROOT%build\asmpython.exe"
+set "OUT_LIN=%ROOT%build\asmpython-linux"
+set "EXTRA_FLAGS="
 
-REM ---- Parse arguments --------------------------------------------------------
+REM ---- Pass through any extra compiler flags ----------------------------------
 :parse
 if "%~1"=="" goto parsed
-if /i "%~1"=="-o" (
-    set "OUT=%~2"
-    shift & shift & goto parse
-)
-REM Everything else goes to the compiler verbatim.
 set "EXTRA_FLAGS=!EXTRA_FLAGS! %~1"
 shift & goto parse
 :parsed
 
-if "%OUT%"=="" set "OUT=%ROOT%build\asmpython.exe"
 if not exist "%ROOT%build" mkdir "%ROOT%build"
 
-echo Self-hosting: compiling asmpython -^> %OUT%
-call "%ROOT%asmpython.bat" "%ROOT%asmpython\__main__.py" -o "%OUT%"%EXTRA_FLAGS%
+REM ---- Windows build ----------------------------------------------------------
+echo Self-hosting ^(windows^): compiling asmpython -^> %OUT_WIN%
+call "%ROOT%asmpython.bat" "%SRC%" -o "%OUT_WIN%" --target windows%EXTRA_FLAGS%
 if errorlevel 1 (
     echo.
-    echo Self-host build FAILED.
+    echo Self-host build FAILED ^(windows^).
     exit /b 1
 )
-echo Self-host build OK: %OUT%
+echo Self-host build OK: %OUT_WIN%
+
+REM ---- Linux build ------------------------------------------------------------
+echo.
+echo Self-hosting ^(linux^): compiling asmpython -^> %OUT_LIN%
+call "%ROOT%asmpython.bat" "%SRC%" -o "%OUT_LIN%" --target linux%EXTRA_FLAGS%
+if errorlevel 1 (
+    echo.
+    echo Self-host build FAILED ^(linux^).
+    exit /b 1
+)
+echo Self-host build OK: %OUT_LIN%

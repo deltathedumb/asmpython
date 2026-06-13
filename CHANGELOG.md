@@ -3,6 +3,14 @@
 All notable changes to asmpython are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+--
+
+## [1.0.1-hotfix1] - 2026-06-12
+
+### Changed
+
+- **`build.bat`** changed to compile for both Linux and Windows in one run.
+
 ---
 
 ## [1.0.1] — 2026-06-12
