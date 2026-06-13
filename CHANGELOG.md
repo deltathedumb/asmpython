@@ -4,6 +4,45 @@ All notable changes to asmpython are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
+## [Unreleased]
+
+CPython-parity expansion: making common idioms compile and produce correct
+output rather than silent miscompilations.
+
+### Added
+
+- **Container repr for `print()` and `str()`.** `print(x)` / `str(x)` now
+  render Python-style output for every built-in container instead of a raw
+  pointer or compile error:
+  - lists: `[1, 2, 3]`, `['a', 'b']`
+  - dicts: `{'a': 1, 'b': 2}`
+  - tuples: `(1, 2, 3)`, `(42,)` (trailing comma for 1-tuples), mixed kinds
+  - sets: `{1, 2}` / `set()` when empty
+
+  Backed by shared `_runtime_fmt_elem` + `_runtime_{list,dict,set}_repr`
+  helpers; tuples are unrolled inline to honor per-slot element kinds.
+- **`range()` as a first-class value.** `list(range(n))`, `sum(range(...))`,
+  `len(range(...))`, and bare `range(...)` now work (materialized to a
+  `list[int]` via `_runtime_range_list`), with 1/2/3-arg and negative-step
+  forms. The `for x in range(...)` fast path is unchanged.
+- **`str(container)`** stringifies lists/dicts/tuples/sets via their repr.
+- **`str.format()`** with a literal format string: positional `{}`
+  (auto-numbered), explicit `{0}`/`{1}` (including reuse), and escaped
+  `{{`/`}}`. Previously it silently returned `0`.
+
+### Fixed
+
+- **`str(int)` / `str(float)` no longer alias a shared buffer.** Storing
+  several conversions (e.g. `[str(x) for x in xs]`) previously made every
+  element show the last value (`['3', '3', '3']`); each now gets a fresh copy.
+- **Lambdas bound to a name are now callable.** `f = lambda x: x + 1; f(41)`
+  and lambdas passed as arguments returned `0`; indirect calls through a
+  local/global/parameter function pointer now work, and a name-bound lambda's
+  call result is typed from its body (so str-returning lambdas print right).
+- **`abs(float)`** returns a float again instead of printing its raw bits.
+
+---
+
 ## [1.0.2] — 2026-06-12
 
 ### Added

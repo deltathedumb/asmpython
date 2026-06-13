@@ -448,6 +448,9 @@ class SemaAnalyzer:
         self.asm_packages: dict[str, object] = {}
         self.funcs: dict[str, FuncSig] = {}
         self.classes: dict[str, ClassSig] = {}
+        # Variable name -> return type of the lambda bound to it, so an indirect
+        # call `f(...)` on a name-bound lambda gets the right result type.
+        self.lambda_rets: dict[str, str] = {}
         # Module-level names (imports + top-level assignments). Populated by
         # analyze() before function/method bodies are checked.
         self.global_scope: Scope = Scope()
@@ -1370,6 +1373,10 @@ class SemaAnalyzer:
             return
         if isinstance(s, A.Assign):
             self._check_expr(s.value, scope)
+            # Remember a name bound directly to a lambda, so a later `name(...)`
+            # call recovers the lambda's result type instead of defaulting int.
+            if isinstance(s.value, A.Lambda):
+                self.lambda_rets[s.target] = getattr(s.value, "lambda_ret", "int")
             t = A.expr_type(s.value)
             # A declaration annotation (`name: T = value`) overrides inference
             # when it constrains the type — this is how `xs: list[str] = []`
@@ -3011,10 +3018,14 @@ class SemaAnalyzer:
                 inner_scope.add(nm, ty)
             for p in e.params:
                 inner_scope.add(p, "any")
-            try:
-                self._check_expr(e.body, inner_scope)
-            except Exception:
-                pass
+            ret_t = "int"
+            if e.body is not None:
+                try:
+                    self._check_expr(e.body, inner_scope)
+                    ret_t = A.expr_type(e.body)
+                except Exception:
+                    pass
+            e.lambda_ret = ret_t  # type: ignore[attr-defined]
             e.inferred_type = "any"
             return
         if isinstance(e, A.Slice):
@@ -3128,6 +3139,13 @@ class SemaAnalyzer:
                 raise SemaError(f"str.{e.method}() takes 0 or 1 argument", e.pos)
             if e.args and A.expr_type(e.args[0]) != "str":
                 raise SemaError(f"str.{e.method}() argument must be str", e.pos)
+            e.inferred_type = "str"
+            return
+        if e.method == "format" and isinstance(e.obj, A.StrLit):
+            # `"...".format(args)` with a literal format string: codegen lowers
+            # this to a concat chain, so the result is a real str.
+            for a in e.args:
+                self._check_expr(a, scope)
             e.inferred_type = "str"
             return
         sig = self.STR_METHODS.get(e.method)
@@ -3277,6 +3295,20 @@ class SemaAnalyzer:
                 "and cannot be compiled to native code",
                 e.pos,
             )
+        if e.func == "range":
+            # range(...) as a value materializes a list[int]. (In a `for` header
+            # the parser captures range specially and it never becomes a Call.)
+            if not (1 <= len(e.args) <= 3):
+                raise SemaError(
+                    f"range() takes 1-3 arguments, got {len(e.args)}", e.pos
+                )
+            for a in e.args:
+                self._check_expr(a, scope)
+                if A.expr_type(a) not in ("int", "any"):
+                    raise SemaError("range() arguments must be ints", e.pos)
+            e.inferred_type = "list"
+            e.list_el_type = "int"
+            return
         if e.func == "super":
             # super() — only valid inside a method, takes no args, and resolves
             # to the current class's base. The result carries a `super:<Base>`
@@ -3342,13 +3374,6 @@ class SemaAnalyzer:
                 )
             for a in e.args:
                 self._check_expr(a, scope)
-            if e.func == "print":
-                for a in e.args:
-                    if A.expr_type(a) == "tuple":
-                        raise SemaError(
-                            "cannot print a tuple directly yet; print its elements",
-                            getattr(a, "pos", e.pos),
-                        )
             # Set the static return type so codegen knows how to interpret it.
             e.inferred_type = {
                 "print": "int",
@@ -3395,6 +3420,11 @@ class SemaAnalyzer:
                 "hash": "int",
                 "issubclass": "int",
             }[e.func]
+            if e.func == "abs":
+                # abs preserves the operand's numeric type (float -> float so
+                # the result prints/operates as a float, not its raw bits).
+                e.inferred_type = "float" if A.expr_type(e.args[0]) == "float" else "int"
+                return
             if e.func in (
                 "bool",
                 "set",
@@ -3402,7 +3432,6 @@ class SemaAnalyzer:
                 "sum",
                 "min",
                 "max",
-                "abs",
                 "round",
                 "pow",
                 "reversed",
@@ -3472,14 +3501,14 @@ class SemaAnalyzer:
                     raise SemaError("float() requires str / int / float", e.pos)
             elif e.func == "str":
                 t = A.expr_type(e.args[0])
-                # int/float/str convert directly; an opaque value or an instance
-                # (which may define __str__/__repr__) is accepted leniently and
-                # yields a str. Plain collections aren't stringified yet.
-                if t not in ("int", "float", "str", "any") and not t.startswith(
-                    "instance:"
-                ):
+                # int/float/str convert directly; list/tuple/dict/set stringify
+                # via their repr; an opaque value or an instance (which may define
+                # __str__/__repr__) is accepted leniently. All yield a str.
+                if t not in (
+                    "int", "float", "str", "any", "list", "tuple", "dict", "set"
+                ) and not t.startswith("instance:"):
                     raise SemaError(
-                        "str() requires int / float / str / an object", e.pos
+                        "str() requires a scalar, container, or object", e.pos
                     )
             return
         if e.func in self.funcs:
@@ -3596,13 +3625,17 @@ class SemaAnalyzer:
         if e.func in scope:
             for a in e.args:
                 self._check_expr(a, scope)
+            # A name bound to a lambda: use the lambda's body type so the call
+            # result prints/operates correctly (e.g. a str-returning lambda).
+            if e.func in self.lambda_rets:
+                e.inferred_type = self.lambda_rets[e.func]
             # An opaque-imported callable (bound "any" — e.g. a function pulled
             # in via `from .._runtime.build import build_runtime_shared`) returns
             # an opaque value, as does a capitalized name (conventionally an
             # imported class/constructor: `Path(...)`, `Token(...)`). Either way
             # the result is "any" so attribute/method access stays lenient.
             # Anything else falls back to int.
-            if scope.types.get(e.func) == "any" or e.func[:1].isupper():
+            elif scope.types.get(e.func) == "any" or e.func[:1].isupper():
                 e.inferred_type = "any"
             else:
                 e.inferred_type = "int"
