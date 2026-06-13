@@ -325,9 +325,10 @@ class Try:
 
 @dataclass
 class Raise:
-    """`raise expr` — expr must evaluate to a str."""
+    """`raise expr` — expr must evaluate to a str. `value` is None for a
+    bare `raise` (re-raise the currently-active exception)."""
 
-    value: "Expr"
+    value: "Expr | None"
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 

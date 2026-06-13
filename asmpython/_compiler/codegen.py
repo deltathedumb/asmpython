@@ -1323,12 +1323,17 @@ class Codegen:
                 self._cl_define_bytes(info, f"__try_buf_{id(s)}", 200)
                 # Saved previous handler ptr to restore on normal exit.
                 self._cl_define(info, f"__try_parent_{id(s)}", "int")
+                # Saved _runtime_exc_msg from before this try, restored once
+                # a handler here finishes so a later bare `raise` outside any
+                # handler correctly reports "no active exception".
+                self._cl_define(info, f"__try_prev_exc_{id(s)}", "int")
                 if s.bind_name is not None:
                     self._cl_define(info, s.bind_name, "str")
                 self._cl_walk(info, s.body)
                 self._cl_walk(info, s.handler)
             elif isinstance(s, A.Raise):
-                self._cl_walk_expr(info, s.value)
+                if s.value is not None:
+                    self._cl_walk_expr(info, s.value)
             elif isinstance(s, A.With):
                 self._cl_walk_expr(info, s.expr)
                 if s.name is not None:
@@ -1552,6 +1557,24 @@ class Codegen:
             self._gen_try(stmt, info)
             return
         if isinstance(stmt, A.Raise):
+            if stmt.value is None:
+                # Bare `raise`: re-raise the currently-active exception.
+                # _runtime_exc_msg is zero until the first raise, so a bare
+                # `raise` outside any handler reports the same error CPython
+                # does (RuntimeError: No active exception to re-raise).
+                no_exc_lbl, _ = self.intern_string(
+                    "No active exception to reraise"
+                )
+                has_exc = self.fresh("reraise_has_exc")
+                self.emitf(
+                    "mov rax, [rel _runtime_exc_msg]",
+                    "test rax, rax",
+                    f"jnz {has_exc}",
+                    f"lea rax, [{no_exc_lbl}]",
+                )
+                self.label(has_exc)
+                self.emitf("call _runtime_raise")
+                return
             # `raise SystemExit(code)` is process exit, not an exception: the
             # idiom `raise SystemExit(main())` must end the process with the
             # code, and nothing catches SystemExit in compiled programs.
@@ -1807,6 +1830,7 @@ class Codegen:
             stmt.else_body = []
         buf_off = info.locals_[f"__try_buf_{orig_id}"]
         parent_off = info.locals_[f"__try_parent_{orig_id}"]
+        prev_exc_off = info.locals_[f"__try_prev_exc_{orig_id}"]
         handler_lbl = self.fresh("try_handler")
         end_lbl = self.fresh("try_end")
         has_handler = bool(stmt.handler) or stmt.bind_name is not None
@@ -1814,6 +1838,12 @@ class Codegen:
         # no nested helper — closures are outside the self-host subset.
         fin_body = stmt.finally_body or []
 
+        # Remember whatever exception (if any) was active when this try
+        # started, so a handled exception here doesn't leak as "active" once
+        # the handler completes.
+        self.emitf(
+            "mov rax, [rel _runtime_exc_msg]", f"mov [rbp{prev_exc_off:+d}], rax"
+        )
         # parent_handler = _runtime_handler_top
         self.emitf(
             "mov rax, [rel _runtime_handler_top]", f"mov [rbp{parent_off:+d}], rax"
@@ -1855,6 +1885,12 @@ class Codegen:
             # re-running this finally — CPython would; acceptable for now.)
             for fs in fin_body:
                 self.gen_stmt(fs, info)
+            # The exception is now handled: restore whatever was "active"
+            # before this try, so a bare `raise` after this point (outside
+            # any handler) reports correctly.
+            self.emitf(
+                f"mov rax, [rbp{prev_exc_off:+d}]", "mov [rel _runtime_exc_msg], rax"
+            )
         else:
             # `try/finally` with no except: run finally, then re-raise so the
             # exception keeps propagating to the enclosing handler.

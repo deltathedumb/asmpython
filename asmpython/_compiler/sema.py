@@ -2062,6 +2062,9 @@ class SemaAnalyzer:
             self._check_block(s.finally_body, scope)
             return
         if isinstance(s, A.Raise):
+            if s.value is None:
+                # Bare `raise`: re-raises the currently-active exception.
+                return
             self._check_expr(s.value, scope)
             vt = A.expr_type(s.value)
             # Accept a bare string message (asmpython's native exception payload),

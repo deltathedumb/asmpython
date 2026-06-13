@@ -752,6 +752,11 @@ class Parser:
 
     def _parse_raise(self) -> A.Raise:
         kw = self._expect("KEYWORD", "raise")
+        # Bare `raise` (no expression) re-raises the currently-active
+        # exception; only valid inside an `except` handler.
+        if self._check("NEWLINE"):
+            self._eat()
+            return A.Raise(value=None, pos=kw.pos)
         value = self._parse_expr()
         # `raise X from Y` — exception chaining. asmpython doesn't model the
         # __cause__ link, so the cause expression is parsed and discarded.

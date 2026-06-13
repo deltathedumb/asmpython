@@ -84,6 +84,11 @@ output rather than silent miscompilations.
   negative inputs.
 - **`divmod(a, b)`** — returns the `(a // b, a % b)` tuple (int operands),
   using the same floor-division semantics as `//`/`%`. Previously undefined.
+- **Bare `raise`** (re-raise the currently-active exception) inside an
+  `except` block. `_runtime_exc_msg` is saved/restored around each
+  `try`/`except` so a bare `raise` after the exception has been fully
+  handled correctly reports `RuntimeError: No active exception to reraise`,
+  matching CPython, instead of resurrecting a stale message.
 - **`%` printf-style string formatting**: `"...%s/%d/%f..." % (args)` with a
   literal format string on the left and a tuple (or single value) on the
   right. Supports `%s`, `%r`, `%d/%i/%u`, `%o/%x/%X`, `%e/%E/%f/%F/%g/%G`, and
