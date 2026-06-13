@@ -302,6 +302,8 @@ class FuncSig:
     # Per-slot kinds when the body returns a tuple (`return a, b`), so a call
     # site can unpack `x, y = obj.m()`. None when it doesn't return a tuple.
     ret_tuple: object = None
+    # Decorator identities for methods (["staticmethod"] / ["classmethod"]).
+    decorators: list = field(default_factory=list)
 
 
 @dataclass
@@ -915,11 +917,15 @@ class SemaAnalyzer:
                 )
             sig = ClassSig(name=c.name, parent=c.parent, pos=c.pos)
             for m in c.methods:
-                if not m.params or m.params[0] != "self":
-                    raise SemaError(
-                        f"method {c.name}.{m.name!r} must take 'self' as its first parameter",
-                        m.pos,
-                    )
+                deco = getattr(m, "decorators", [])
+                is_static = "staticmethod" in deco
+                is_classm = "classmethod" in deco
+                if not (is_static or is_classm):
+                    if not m.params or m.params[0] != "self":
+                        raise SemaError(
+                            f"method {c.name}.{m.name!r} must take 'self' as its first parameter",
+                            m.pos,
+                        )
                 mr = self._resolve_annot(m.ret_type)  # type: ignore
                 sig.methods[m.name] = FuncSig(
                     name=m.name,
@@ -931,6 +937,7 @@ class SemaAnalyzer:
                     param_defaults=list(m.defaults),
                     vararg=m.vararg,
                     ret_tuple=self._scan_tuple_return(m.body),
+                    decorators=list(getattr(m, "decorators", [])),
                 )
             self.classes[c.name] = sig
 
@@ -1000,8 +1007,19 @@ class SemaAnalyzer:
                 self.current_class = c.name
                 scope = Scope()
                 self._seed_globals_into(scope)
-                scope.add("self", f"instance:{c.name}")
-                for i, p in enumerate(m.params[1:], start=1):
+                mdeco = getattr(m, "decorators", [])
+                if "staticmethod" in mdeco:
+                    # No implicit receiver: every parameter is a real argument.
+                    start = 0
+                elif "classmethod" in mdeco:
+                    # First param is `cls` (opaque — asmpython has no class objs).
+                    if m.params:
+                        scope.add(m.params[0], "any")
+                    start = 1
+                else:
+                    scope.add("self", f"instance:{c.name}")
+                    start = 1
+                for i, p in enumerate(m.params[start:], start=start):
                     annot = m.param_types[i] if i < len(m.param_types) else None
                     default = m.defaults[i] if i < len(m.defaults) else None
                     if (
@@ -3123,6 +3141,45 @@ class SemaAnalyzer:
                     e.inferred_type = "str"
                 else:
                     e.inferred_type = "any"
+            elif isinstance(e.obj, A.Name) and e.obj.name in self.classes:
+                # `ClassName.method(args)`: a @staticmethod / @classmethod called
+                # on the class itself (no instance). Validate against the method
+                # signature; static methods take their args verbatim, class
+                # methods take an implicit leading `cls`.
+                cls_name = e.obj.name
+                resolved = self._resolve_method(cls_name, e.method)
+                if resolved is None:
+                    raise SemaError(
+                        f"{cls_name} has no method {e.method!r}", e.pos
+                    )
+                _owner, sig = resolved
+                deco = getattr(sig, "decorators", [])
+                if "classmethod" in deco:
+                    expected = sig.arity - 1  # drop implicit cls
+                elif "staticmethod" in deco:
+                    expected = sig.arity
+                else:
+                    raise SemaError(
+                        f"{cls_name}.{e.method}() needs an instance "
+                        "(not a @staticmethod or @classmethod)",
+                        e.pos,
+                    )
+                required = expected - sig.n_defaults
+                if not (required <= len(e.args) <= expected):
+                    raise SemaError(
+                        f"{cls_name}.{e.method}() takes {required}..{expected} "
+                        f"argument(s), got {len(e.args)}",
+                        e.pos,
+                    )
+                for a in e.args:
+                    self._check_expr(a, scope)
+                if sig.ret_type is not None:
+                    ty, el, _val = sig.ret_type  # type: ignore
+                    e.inferred_type = ty
+                    if ty == "list" and el is not None:
+                        e.list_el_type = el
+                else:
+                    e.inferred_type = "int"
             else:
                 raise SemaError(f"{obj_t} has no method {e.method!r}", e.pos)
             return

@@ -309,6 +309,7 @@ class Parser:
             vararg=vararg,
             asm_body=asm_body,
             asm_symbol=asm_symbol,
+            decorators=list(decorators) if decorators else [],
         )
 
     def _extract_asm_body(self, name: str, body: list, pos) -> "tuple[str, str]":

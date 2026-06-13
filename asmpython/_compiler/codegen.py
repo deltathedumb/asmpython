@@ -1017,10 +1017,17 @@ class Codegen:
                 # (`A.expr_type(x)`) lowers to a plain call, so it needs the
                 # same per-arg slots as an instance/super call.
                 is_module_fn = obj_t == "module" and expr.method in self.funcs
+                # `ClassName.staticmethod(args)` / `.classmethod(args)`: a plain
+                # call to the method symbol, so it needs per-arg slots too.
+                is_class_static = (
+                    isinstance(expr.obj, A.Name)
+                    and expr.obj.name in self.class_ids
+                )
                 if (
                     obj_t.startswith("instance:")
                     or obj_t.startswith("super:")
                     or is_module_fn
+                    or is_class_static
                 ):
                     for k in range(len(expr.args)):
                         self._cl_define(info, f"__callarg_{id(expr)}_{k}")
@@ -6084,6 +6091,29 @@ class Codegen:
             if b is not None and hasattr(b, "arg_types"):
                 self._gen_ffi_call(b, e.args, info)
                 return
+        # `ClassName.method(args)`: @staticmethod / @classmethod called on the
+        # class itself. Static methods take args verbatim; class methods get an
+        # implicit leading `cls` (passed as null — asmpython has no class
+        # objects, and class-method bodies that only touch class vars / call
+        # other statics don't dereference it).
+        if isinstance(e.obj, A.Name) and e.obj.name in self.class_ids:
+            cls_name = e.obj.name
+            mdef = self._find_method_def(cls_name, e.method)
+            if mdef is not None:
+                deco = getattr(mdef, "decorators", [])
+                if "classmethod" in deco:
+                    cleanup = self._emit_positional_args(e, e.args, info, start_reg=1)
+                    self.emitf(f"xor {self._arg_reg(0)}, {self._arg_reg(0)}")  # cls = null
+                    self.emit_call(self._method_symbol(cls_name, e.method))
+                    if cleanup:
+                        self.emitf(f"add rsp, {cleanup}")
+                    return
+                if "staticmethod" in deco:
+                    cleanup = self._emit_positional_args(e, e.args, info, start_reg=0)
+                    self.emit_call(self._method_symbol(cls_name, e.method))
+                    if cleanup:
+                        self.emitf(f"add rsp, {cleanup}")
+                    return
         obj_t = A.expr_type(e.obj)
         if obj_t == "module" and e.method in self.funcs:
             # `A.expr_type(x)` where `A` is a project module imported via
@@ -8090,6 +8120,17 @@ class Codegen:
         for c in self._resolve_class_chain(class_name):
             if self._class_has_method(c, method):
                 return c
+        return None
+
+    def _find_method_def(self, class_name: str, method: str):
+        """The FuncDef for `method` resolved up `class_name`'s chain, or None.
+        Used to read a method's decorators (@staticmethod / @classmethod)."""
+        for cname in self._resolve_class_chain(class_name):
+            for c in self.mod.classes:
+                if c.name == cname:
+                    for m in c.methods:
+                        if m.name == method:
+                            return m
         return None
 
     def _resolve_str_dunder(self, class_name: str) -> Optional[tuple[str, str]]:

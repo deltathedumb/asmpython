@@ -67,6 +67,9 @@ class FuncDef:
     # True for nested functions lifted to module level by the parser. Sema
     # skips undefined-variable errors in their bodies (closure vars).
     is_lifted: bool = False
+    # Decorator identities preceding the def (leading dotted names), e.g.
+    # ["staticmethod"] / ["classmethod"]. Used to relax the method `self` rule.
+    decorators: list = field(default_factory=list)
 
 
 @dataclass
