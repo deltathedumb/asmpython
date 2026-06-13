@@ -1450,12 +1450,16 @@ class Parser:
                         "positional argument follows keyword argument",
                         self._peek().pos,
                     )
-                arg = self._parse_expr()
-                # A bare generator expression as the sole argument:
-                # `sum(x for x in xs)`.
-                if self._check("KEYWORD", "for"):
-                    arg = self._parse_comprehension_tail(arg, arg.pos)
-                args.append(arg)
+                if self._check("OP", "*"):
+                    star_pos = self._eat().pos
+                    args.append(A.Starred(value=self._parse_expr(), pos=star_pos))
+                else:
+                    arg = self._parse_expr()
+                    # A bare generator expression as the sole argument:
+                    # `sum(x for x in xs)`.
+                    if self._check("KEYWORD", "for"):
+                        arg = self._parse_comprehension_tail(arg, arg.pos)
+                    args.append(arg)
             if not self._check("OP", ","):
                 break
             self._eat()
@@ -1512,6 +1516,7 @@ class Parser:
             kind = seg[0]
             text = seg[1]
             spec = seg[2] if len(seg) > 2 else ""
+            conv = seg[3] if len(seg) > 3 else ""
             if kind == "str":
                 segments.append(A.StrLit(value=text, pos=tok.pos))
             else:
@@ -1530,6 +1535,9 @@ class Parser:
                 # Carry a `:format-spec` (e.g. `.2f`) for codegen to honour.
                 if spec:
                     expr.fmt_spec = spec  # type: ignore[attr-defined]
+                # Carry a `!r`/`!s`/`!a` conversion for codegen to honour.
+                if conv:
+                    expr.conv_flag = conv  # type: ignore[attr-defined]
                 segments.append(expr)
         return A.FString(segments=segments, pos=tok.pos)
 

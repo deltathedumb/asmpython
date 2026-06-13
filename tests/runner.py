@@ -56,7 +56,13 @@ def _parse_expect(src: str, marker: str) -> str | None:
                     lines.append(rest)
             continue
         if s.startswith("#"):
-            lines.append(s.lstrip("#").lstrip())
+            # Strip the leading `#` and a single conventional space, but
+            # preserve any further leading whitespace — expected output may
+            # itself start with spaces (e.g. right-justified formatting).
+            rest = s.lstrip("#")
+            if rest.startswith(" "):
+                rest = rest[1:]
+            lines.append(rest)
         else:
             break
     if not collecting:

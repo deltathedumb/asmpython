@@ -32,6 +32,10 @@ output rather than silent miscompilations.
 - **f-string format specs** are honored: `f"{x:.2f}"`, `f"{n:05d}"`,
   `f"{n:x}"` (float `.Nf/.Ne/.Ng`; int `d/x/X/o` with width and zero-pad).
   Specs were previously stripped and ignored.
+- **f-string conversions** `!r`/`!s`/`!a`: `f"{x!r}"` formats `x` via
+  `repr()` (strings get quoted; a user class's `__repr__` takes priority over
+  `__str__`), `!a` behaves like `!r`, and `!s` is the (already-default) `str()`
+  conversion. Previously the conversion was silently dropped.
 - **`@staticmethod`** methods are callable on the class
   (`ClassName.method(args)`), with no implicit receiver. `@classmethod` is
   accepted (call/dispatch work; class-state mutation through `cls` pending).
@@ -42,9 +46,69 @@ output rather than silent miscompilations.
   enables A20, and switches 16 → 32 → 64-bit long mode, then runs the same
   64-bit kernel as `freestanding`. Verified booting under QEMU
   (`-drive format=raw,file=out.img`). Reuses the entire freestanding runtime.
+- **`stdlib.math`** gains `trunc`, `nearbyint`, `asinh`/`acosh`/`atanh`,
+  `exp2`/`expm1`/`log1p`, and the two-argument `copysign`, `remainder`,
+  `fdim`, `fmax`, `fmin` — all thin bindings over C99 libm (present in
+  msvcrt/ucrt on Windows).
+- **`stdlib.os`** gains `fflush`, `feof`, `ftell`/`fseek`/`rewind` (file
+  positioning), and `rename`.
+- **`asmlib.hardware`** gains `rdrand` (hardware RNG), `io_wait`, and a new
+  control/MSR group: `read_cr0`/`read_cr2`/`read_cr3`/`read_cr4`,
+  `write_cr3`, `read_msr`/`write_msr`, `invlpg`, and `lidt` — building blocks
+  for paging and IDT setup on `--target freestanding`.
+- **`*expr` argument unpacking at call sites** (`f(*t)`, `obj.method(*t)`).
+  `expr` must be a tuple of statically-known shape (a name, subscript, or
+  attribute bound to a tuple literal or a `list[tuple[...]]` element); sema
+  splices each slot in as its own positional argument before codegen, so no
+  runtime varargs machinery is needed. Unpacking a `Call` result directly
+  (`f(*g())`) isn't supported yet — assign it to a variable first.
+- **`str.capitalize()`, `str.swapcase()`, `str.title()`** — new runtime
+  helpers following the existing `upper`/`lower` pattern, including CPython's
+  word-boundary rules for `title()` (any non-alpha character, including
+  digits and apostrophes, starts a new word).
+- **`str.zfill(width)`, `str.ljust/rjust/center(width, fillchar=' ')`** —
+  numeric/text padding methods. `zfill` preserves a leading `+`/`-` sign when
+  inserting zeros; `center` reproduces CPython's odd-padding split
+  (`left = marg // 2 + (marg & width & 1)`).
+- **`str.rpartition(sep)`** — like `partition`, but splits at the *last*
+  occurrence of `sep`; returns `("", "", s)` when `sep` is absent (the mirror
+  of `partition`'s `(s, "", "")`).
+- **`str.removeprefix(p)`, `str.removesuffix(s)`, `str.casefold()`** —
+  `removeprefix`/`removesuffix` strip the given affix only if present
+  (otherwise return an unchanged copy); `casefold` is implemented as ASCII
+  `lower`.
+- **`hex(n)`, `oct(n)`, `bin(n)`** now actually convert (previously these were
+  accepted by sema but produced a null string at runtime, printing `(null)`).
+  Backed by a shared `_runtime_int_to_base` helper; matches CPython's
+  `"0x1a"`/`"0o32"`/`"0b11010"` formatting, including the leading `-` for
+  negative inputs.
+- **`divmod(a, b)`** — returns the `(a // b, a % b)` tuple (int operands),
+  using the same floor-division semantics as `//`/`%`. Previously undefined.
+- **`%` printf-style string formatting**: `"...%s/%d/%f..." % (args)` with a
+  literal format string on the left and a tuple (or single value) on the
+  right. Supports `%s`, `%r`, `%d/%i/%u`, `%o/%x/%X`, `%e/%E/%f/%F/%g/%G`, and
+  `%%`, with flags/width/precision (`%05d`, `%-10s`, `%.2f`, etc.), lowered to
+  the same concat-chain machinery as f-strings. `%r` formats via `repr()`
+  (same as an f-string's `!r`).
+- **`sorted()`, `list.sort()`, `min()`, `max()` now support `key=` and
+  `reverse=`.** `key=` may be a lambda literal or a name bound to a lambda
+  (returning `str` or `int`); `reverse=True` reverses the result in place
+  after sorting. `min()`/`max()` over a single iterable now report the
+  iterable's actual element type (previously always `any`) and correctly
+  compare `list[str]` elements via string comparison instead of raw pointer
+  values. `key=` on the variadic `min(a, b, ...)`/`max(a, b, ...)` form, and
+  bare function references as `key=` (e.g. `key=len`), are rejected with a
+  clear compile error rather than miscompiling.
 
 ### Fixed
 
+- **Integer `//` and `%` now floor toward `-inf` like Python**, not toward
+  zero like x86 `idiv`. Previously `-7 // 2` gave `-3` (and `-7 % 2` gave
+  `-1`); now both match CPython (`-4` and `1`). The fix is a single shared
+  adjustment in `_emit_binop_inline` (covers both binops and augmented
+  assignment): if the truncated remainder is nonzero and its sign differs
+  from the divisor's, decrement the quotient and add the divisor to the
+  remainder.
 - **Nested-container element types are tracked** through subscript and
   for-loop binding: `people[i]["k"]`, `for p in people: p["k"]` (list[dict]),
   `grid[i][j]` (list[list]), and tuple unpacking `for a, b in pairs`
@@ -58,6 +122,8 @@ output rather than silent miscompilations.
   local/global/parameter function pointer now work, and a name-bound lambda's
   call result is typed from its body (so str-returning lambdas print right).
 - **`abs(float)`** returns a float again instead of printing its raw bits.
+- **`time.difftime`** is now typed `float` (C's `difftime` returns a `double`
+  in `xmm0`); declaring it `int` read the wrong register and produced garbage.
 
 ---
 

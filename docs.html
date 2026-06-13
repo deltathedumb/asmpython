@@ -234,7 +234,7 @@
     <div class="logo-icon">ap</div>
     <div>
       <div class="logo-text">asmpython</div>
-      <div class="logo-version">v1.0.0</div>
+      <div class="logo-version">v1.1.0 - work in progress - preview</div>
     </div>
   </a>
   <ul>
@@ -292,7 +292,7 @@
 <section id="intro">
   <div class="hero">
     <div>
-      <div class="hero-badge">✦ v1.0.0 — stable release</div>
+      <div class="hero-badge">✦ v1.1.0 — work in progress — preview</div>
       <h1>asmpython</h1>
       <p>Compile Python source to native x86-64 executables via NASM — no VM, no interpreter, no pip dependencies at runtime.</p>
       <div class="hero-badges">
@@ -396,7 +396,7 @@ Booted successfully.</code></pre>
 
   <table>
     <tr><th>Type</th><th>Representation</th><th>Notes</th></tr>
-    <tr><td><code>int</code></td><td>64-bit signed integer (<code>rax</code> / stack slot)</td><td>No bignum. Hex <code>0x</code>, binary <code>0b</code>, octal <code>0o</code>, underscores.</td></tr>
+    <tr><td><code>int</code></td><td>64-bit signed integer (<code>rax</code> / stack slot)</td><td>No bignum. Hex <code>0x</code>, binary <code>0b</code>, octal <code>0o</code>, underscores. <code>//</code> and <code>%</code> floor toward <code>-inf</code> like CPython (e.g. <code>-7 // 2 == -4</code>, <code>-7 % 2 == 1</code>).</td></tr>
     <tr><td><code>float</code></td><td>IEEE-754 double (<code>xmm0</code> / stack slot)</td><td>Auto-promoted in mixed arithmetic. <code>1/2 == 0.5</code> always.</td></tr>
     <tr><td><code>str</code></td><td>Pointer to nul-terminated UTF-8</td><td>Immutable. See <a href="#strings">Strings</a>.</td></tr>
     <tr><td><code>bool</code></td><td>Alias for <code>int</code> (1 / 0)</td><td><code>True</code>, <code>False</code>.</td></tr>
@@ -408,13 +408,14 @@ Booted successfully.</code></pre>
   <h2>Strings <a class="anchor" href="#strings">#</a></h2>
 
   <h3>Literals</h3>
-  <p>Single-quoted, double-quoted, and triple-quoted (<code>"""..."""</code> / <code>'''...'''</code>). Standard escapes: <code>\n \t \r \0 \\ \' \"</code>. F-strings: <code>f"x={x}"</code>.</p>
+  <p>Single-quoted, double-quoted, and triple-quoted (<code>"""..."""</code> / <code>'''...'''</code>). Standard escapes: <code>\n \t \r \0 \\ \' \"</code>. F-strings: <code>f"x={x}"</code>, with optional format specs (<code>f"{x:.2f}"</code>, <code>f"{n:05d}"</code>, <code>f"{n:x}"</code>) and conversions (<code>f"{x!r}"</code>, <code>f"{x!s}"</code>, <code>f"{x!a}"</code>) — <code>!r</code>/<code>!a</code> use <code>repr()</code> (quoting strings, preferring a class's <code>__repr__</code> over <code>__str__</code>).</p>
 
   <h3>Operators</h3>
   <table>
     <tr><th>Operation</th><th>Example</th></tr>
     <tr><td>Concatenation</td><td><code>s1 + s2</code></td></tr>
     <tr><td>Repetition</td><td><code>"-" * 40</code></td></tr>
+    <tr><td>Printf-style formatting</td><td><code>"%s is %d" % (name, age)</code> — literal format string, RHS is a tuple (or single value); supports <code>%s</code>, <code>%r</code>, <code>%d/%i/%u</code>, <code>%o/%x/%X</code>, <code>%e/%E/%f/%F/%g/%G</code>, <code>%%</code>, with flags/width/precision (<code>%05d</code>, <code>%-10s</code>, <code>%.2f</code>)</td></tr>
     <tr><td>Equality</td><td><code>s == t</code>, <code>s != t</code></td></tr>
     <tr><td>Ordering</td><td><code>s &lt; t</code>, <code>s &gt; t</code>, <code>s &lt;= t</code>, <code>s &gt;= t</code></td></tr>
     <tr><td>Membership</td><td><code>"sub" in s</code>, <code>"sub" not in s</code></td></tr>
@@ -426,9 +427,11 @@ Booted successfully.</code></pre>
   <h3>Methods</h3>
   <table>
     <tr><th>Method</th><th>Description</th></tr>
-    <tr><td><code>upper()</code> / <code>lower()</code></td><td>Case conversion</td></tr>
+    <tr><td><code>upper()</code> / <code>lower()</code> / <code>casefold()</code></td><td>Case conversion (<code>casefold</code> is ASCII-equivalent to <code>lower</code>)</td></tr>
+    <tr><td><code>capitalize()</code> / <code>swapcase()</code> / <code>title()</code></td><td>First-letter, case-swap, and per-word capitalization</td></tr>
     <tr><td><code>strip()</code> / <code>lstrip()</code> / <code>rstrip()</code></td><td>Whitespace trimming</td></tr>
     <tr><td><code>startswith(p)</code> / <code>endswith(s)</code></td><td>Prefix / suffix check</td></tr>
+    <tr><td><code>removeprefix(p)</code> / <code>removesuffix(s)</code></td><td>Strip <code>p</code>/<code>s</code> if present, else return a copy unchanged</td></tr>
     <tr><td><code>find(needle)</code></td><td>First index or -1</td></tr>
     <tr><td><code>count(needle)</code></td><td>Non-overlapping occurrences</td></tr>
     <tr><td><code>replace(old, new)</code></td><td>All replacements, new allocation</td></tr>
@@ -436,9 +439,12 @@ Booted successfully.</code></pre>
     <tr><td><code>rsplit(sep?, maxsplit?)</code></td><td>Right-to-left split</td></tr>
     <tr><td><code>splitlines()</code></td><td>Split on <code>\n</code></td></tr>
     <tr><td><code>join(iterable)</code></td><td><code>", ".join(items)</code></td></tr>
-    <tr><td><code>partition(sep)</code></td><td>Returns <code>(before, sep, after)</code> tuple</td></tr>
+    <tr><td><code>partition(sep)</code> / <code>rpartition(sep)</code></td><td>Returns <code>(before, sep, after)</code> tuple, split at the first / last occurrence</td></tr>
     <tr><td><code>isdigit()</code> / <code>isalpha()</code> / <code>isspace()</code></td><td>Character-class predicates</td></tr>
     <tr><td><code>isupper()</code> / <code>islower()</code></td><td>Case predicates</td></tr>
+    <tr><td><code>zfill(width)</code></td><td>Left-pad with <code>'0'</code> to <code>width</code>, preserving a leading sign</td></tr>
+    <tr><td><code>ljust(width, fillchar=' ')</code> / <code>rjust(width, fillchar=' ')</code></td><td>Left/right-justify, padding with <code>fillchar</code></td></tr>
+    <tr><td><code>center(width, fillchar=' ')</code></td><td>Center within <code>width</code>, padding with <code>fillchar</code></td></tr>
   </table>
 </section>
 
@@ -452,7 +458,7 @@ last = xs.pop()
 xs[<span class="num">0</span>] = <span class="num">10</span>
 <span class="kw">for</span> x <span class="kw">in</span> xs: <span class="fn">print</span>(x)
 <span class="fn">print</span>(xs[<span class="num">-1</span>], xs[<span class="num">1</span>:<span class="num">3</span>])</code></pre>
-  <p>Heap-allocated with stable header. Supports <code>int</code>, <code>str</code>, <code>float</code> elements (homogeneous). Negative indices, slicing with step, <code>.copy()</code>, comprehensions.</p>
+  <p>Heap-allocated with stable header. Supports <code>int</code>, <code>str</code>, <code>float</code> elements (homogeneous). Negative indices, slicing with step, <code>.copy()</code>, comprehensions. <code>.sort(key=?, reverse=?)</code> sorts in place; <code>key=</code> takes a lambda (literal or name-bound) returning <code>str</code> or <code>int</code>, and <code>reverse=True</code> reverses the result.</p>
 
   <h3>Dicts</h3>
   <pre><div class="lang-tag">python</div><code>d = {<span class="str">"a"</span>: <span class="num">1</span>, <span class="str">"b"</span>: <span class="num">2</span>}
@@ -520,6 +526,8 @@ f = greet
 <span class="fn">print</span>(f(<span class="str">"hi"</span>, <span class="num">3</span>))</code></pre>
 
   <p>Default arguments (int, str, float, True, False, None literals), <code>*args</code>, type annotations (parsed, not enforced). Recursion at any depth. Decorators.</p>
+
+  <p><code>*expr</code> argument unpacking at call sites (<code>f(*t)</code>) is supported when <code>expr</code> is a tuple of statically-known shape — a name, subscript, or attribute bound to a tuple literal (or a <code>list[tuple[...]]</code> element). Each slot is spliced in as its own positional argument at compile time; there's no runtime varargs, so unpacking a <code>Call</code> result directly (<code>f(*g())</code>) isn't supported — assign it to a variable first.</p>
 </section>
 
 <section id="classes">
@@ -641,6 +649,12 @@ out_byte(<span class="num">0x3F8</span>, <span class="num">65</span>)   <span cl
     <tr><td><code>fopen(path, mode)</code></td><td>str, str → int</td><td>Returns FILE* as int</td></tr>
     <tr><td><code>fgetc(fp)</code></td><td>int → int</td><td>Read one byte; -1 = EOF</td></tr>
     <tr><td><code>fclose(fp)</code></td><td>int → int</td><td></td></tr>
+    <tr><td><code>fflush(fp)</code></td><td>int → int</td><td>Flush buffered output; 0 on success</td></tr>
+    <tr><td><code>feof(fp)</code></td><td>int → int</td><td>Non-zero once EOF has been hit</td></tr>
+    <tr><td><code>ftell(fp)</code></td><td>int → int</td><td>Current file offset</td></tr>
+    <tr><td><code>fseek(fp, offset, whence)</code></td><td>int, int, int → int</td><td><code>whence</code>: 0=SET, 1=CUR, 2=END</td></tr>
+    <tr><td><code>rewind(fp)</code></td><td>int → int</td><td>Reset position to the start</td></tr>
+    <tr><td><code>rename(old, new)</code></td><td>str, str → int</td><td>0 on success</td></tr>
     <tr><td><code>access(path, mode)</code></td><td>str, int → int</td><td>0 = exists/accessible</td></tr>
   </table>
 </section>
@@ -665,7 +679,7 @@ out_byte(<span class="num">0x3F8</span>, <span class="num">65</span>)   <span cl
     <tr><td><code>time()</code></td><td>→ int</td><td>Unix timestamp (seconds since epoch)</td></tr>
     <tr><td><code>sleep(seconds)</code></td><td>int → int</td><td>POSIX <code>sleep()</code> / MinGW compatible</td></tr>
     <tr><td><code>clock()</code></td><td>→ int</td><td>CPU clock ticks (POSIX <code>clock()</code>)</td></tr>
-    <tr><td><code>difftime(t2, t1)</code></td><td>int, int → int</td><td>Returns <code>t2 - t1</code> in seconds</td></tr>
+    <tr><td><code>difftime(t2, t1)</code></td><td>int, int → float</td><td>Returns <code>t2 - t1</code> in seconds</td></tr>
   </table>
 </section>
 
@@ -713,10 +727,22 @@ random.seed(<span class="num">42</span>)
   <table>
     <tr><th>Function</th><th>Description</th></tr>
     <tr><td><code>rdtsc()</code></td><td>Read timestamp counter (64-bit)</td></tr>
+    <tr><td><code>rdrand()</code></td><td>Hardware random 64-bit value (retries until valid)</td></tr>
     <tr><td><code>cpuid(leaf)</code></td><td>Execute CPUID; returns EAX</td></tr>
     <tr><td><code>halt()</code></td><td>HLT instruction (stops CPU until next interrupt)</td></tr>
     <tr><td><code>disable_interrupts()</code></td><td>CLI</td></tr>
     <tr><td><code>enable_interrupts()</code></td><td>STI</td></tr>
+    <tr><td><code>io_wait()</code></td><td>Tiny delay via I/O port 0x80 (PIC remap timing)</td></tr>
+  </table>
+
+  <h4>Control / model-specific registers</h4>
+  <table>
+    <tr><th>Function</th><th>Description</th></tr>
+    <tr><td><code>read_cr0()</code> / <code>read_cr2()</code> / <code>read_cr3()</code> / <code>read_cr4()</code></td><td>Read control registers (<code>cr2</code> = faulting address, <code>cr3</code> = page-table base)</td></tr>
+    <tr><td><code>write_cr3(value)</code></td><td>Reload the page-table base (flushes the TLB)</td></tr>
+    <tr><td><code>read_msr(index)</code> / <code>write_msr(index, value)</code></td><td>Read/write a model-specific register</td></tr>
+    <tr><td><code>invlpg(addr)</code></td><td>Invalidate one page's TLB entry</td></tr>
+    <tr><td><code>lidt(idt_ptr_addr)</code></td><td>Load the IDT register from a 6-byte (limit, base) pointer</td></tr>
   </table>
 
   <h4>PIC 8259A</h4>
@@ -1008,12 +1034,15 @@ qemu-system-x86_64 -drive format=raw,file=boot.img -serial stdio -display none</
     <tr><td><code>range(n)</code> / <code>range(a,b)</code> / <code>range(a,b,s)</code></td><td>→ iterable</td><td></td></tr>
     <tr><td><code>abs(x)</code></td><td>int / float → same</td><td></td></tr>
     <tr><td><code>min(a, b)</code> / <code>max(a, b)</code></td><td>int / float → same</td><td></td></tr>
+    <tr><td><code>min(iterable, key=?)</code> / <code>max(iterable, key=?)</code></td><td>list[T] → T</td><td>Result type matches the element type; <code>key=</code> takes a lambda (literal or name-bound) returning <code>str</code> or <code>int</code>. <code>key=</code> is not supported on the 2+-arg form.</td></tr>
     <tr><td><code>sum(iterable)</code></td><td>list[int] → int</td><td></td></tr>
-    <tr><td><code>sorted(iterable)</code></td><td>list → list</td><td></td></tr>
+    <tr><td><code>sorted(iterable, key=?, reverse=?)</code></td><td>list → list</td><td><code>key=</code> takes a lambda (literal or name-bound) returning <code>str</code> or <code>int</code>; <code>reverse=True</code> reverses the result</td></tr>
     <tr><td><code>reversed(iterable)</code></td><td>list → list</td><td></td></tr>
     <tr><td><code>any(iterable)</code> / <code>all(iterable)</code></td><td>list → bool</td><td></td></tr>
     <tr><td><code>chr(n)</code></td><td>int → str</td><td>1-char string</td></tr>
     <tr><td><code>ord(s)</code></td><td>str → int</td><td>First byte</td></tr>
+    <tr><td><code>hex(n)</code> / <code>oct(n)</code> / <code>bin(n)</code></td><td>int → str</td><td><code>"0x1a"</code> / <code>"0o32"</code> / <code>"0b11010"</code>; <code>-0x1a</code> etc. for negative <code>n</code></td></tr>
+    <tr><td><code>divmod(a, b)</code></td><td>int, int → tuple</td><td><code>(a // b, a % b)</code>, floor semantics (matches CPython for negative operands)</td></tr>
     <tr><td><code>enumerate(iterable)</code></td><td>→ iterable of (int, elem)</td><td></td></tr>
     <tr><td><code>zip(a, b)</code></td><td>→ iterable of (elem, elem)</td><td></td></tr>
     <tr><td><code>isinstance(obj, cls)</code></td><td>→ bool</td><td></td></tr>

@@ -186,6 +186,7 @@ BUILTINS: dict[str, tuple[int, int]] = {
     "hex": (1, 1),  # hex(x) -> str
     "oct": (1, 1),  # oct(x) -> str
     "bin": (1, 1),  # bin(x) -> str
+    "divmod": (2, 2),  # divmod(a, b) -> (a // b, a % b)
     "hash": (1, 1),  # hash(x) -> int
     "issubclass": (2, 2),
 }
@@ -2199,6 +2200,9 @@ class SemaAnalyzer:
             # String operations: + concatenates two strings; * repeats a string
             # by an int count. Anything else involving strings is rejected.
             if "str" in (lt, rt):
+                if e.op == "%" and lt == "str":
+                    self._check_pct_format(e, scope)
+                    return
                 if e.op == "+" and lt == "str" and rt == "str":
                     return
                 if e.op == "*" and (
@@ -2814,6 +2818,7 @@ class SemaAnalyzer:
             e.inferred_type = "any"
             return
         if isinstance(e, A.MethodCall):
+            e.args = self._expand_starred_args(e.args, scope)
             # Interpreter-only calls (dynamic import, code-exec by string) have
             # no native lowering — reject early with a located message instead
             # of letting them reach codegen as a raw NotImplementedError.
@@ -2938,6 +2943,7 @@ class SemaAnalyzer:
                 elif e.method == "sort":
                     if e.args:
                         raise SemaError("list.sort() takes no arguments", e.pos)
+                    self._check_sort_kwargs(e, scope)
                     e.inferred_type = "int"  # in-place, returns None ~ 0
                 elif e.method == "reverse":
                     if e.args:
@@ -3255,11 +3261,17 @@ class SemaAnalyzer:
     STR_METHODS = {
         "upper": ((), "str"),
         "lower": ((), "str"),
+        "casefold": ((), "str"),
+        "capitalize": ((), "str"),
+        "swapcase": ((), "str"),
+        "title": ((), "str"),
         "strip": ((), "str"),
         "lstrip": ((), "str"),
         "rstrip": ((), "str"),
         "startswith": (("str",), "int"),
         "endswith": (("str",), "int"),
+        "removeprefix": (("str",), "str"),
+        "removesuffix": (("str",), "str"),
         "find": (("str",), "int"),
         "count": (("str",), "int"),
         "replace": (("str", "str"), "str"),
@@ -3272,6 +3284,96 @@ class SemaAnalyzer:
         "islower": ((), "int"),
         "isidentifier": ((), "int"),
     }
+
+    def _check_pct_format(self, e: A.BinOp, scope: Scope) -> None:
+        """`"...%s..." % (args)` (or `% single_arg`) — printf-style formatting.
+
+        The format string must be a literal (codegen lowers it to a concat
+        chain, like .format()). Validates the argument count against the
+        number of conversions and that each conversion's argument type makes
+        sense (`%d`/`%x`/etc. need int, `%f`/etc. need a number; `%s`/`%r`
+        accept anything).
+        """
+        if not isinstance(e.left, A.StrLit):
+            raise SemaError(
+                "'%' string formatting requires a literal format string", e.pos
+            )
+        try:
+            pieces, nconv = A.parse_pct_format(e.left.value)
+        except ValueError as exc:
+            raise SemaError(f"bad format string: {exc}", e.pos)
+        args = e.right.elems if isinstance(e.right, A.TupleLit) else [e.right]
+        if len(args) != nconv:
+            raise SemaError(
+                f"'%' format string expects {nconv} argument(s), got {len(args)}",
+                e.pos,
+            )
+        ai = 0
+        for piece in pieces:
+            if piece[0] != "arg":
+                continue
+            conv = piece[4]
+            t = A.expr_type(args[ai])
+            if conv in "dioxX" and t not in ("int", "any"):
+                raise SemaError(f"'%{conv}' format requires an int argument", e.pos)
+            if conv in "eEfFgG" and t not in ("int", "float", "any"):
+                raise SemaError(f"'%{conv}' format requires a numeric argument", e.pos)
+            ai += 1
+        e.inferred_type = "str"  # type: ignore
+
+    def _check_sort_kwargs(self, e, scope: Scope) -> None:
+        """Validate and resolve the `key=`/`reverse=` kwargs shared by
+        `sorted()`, `min()`/`max()`, and `list.sort()`.
+
+        Only `key=<lambda literal>` and `key=<name bound to a lambda>` are
+        supported (a bare named-function reference currently segfaults via
+        the same indirect-call path used elsewhere, so it's rejected here
+        too). Stamps `e.sort_key` (Optional[expr]), `e.sort_key_ret`
+        ("str"/"int"), and `e.sort_reverse` (Optional[expr]), then clears
+        `e.kwargs` so normal call-arg checks don't see them.
+        """
+        key_expr = None
+        reverse_expr = None
+        for kname, kexpr in e.kwargs:
+            if kname == "key":
+                key_expr = kexpr
+            elif kname == "reverse":
+                reverse_expr = kexpr
+            else:
+                raise SemaError(f"unexpected keyword argument {kname!r}", e.pos)
+        if key_expr is not None:
+            self._check_expr(key_expr, scope)
+            if isinstance(key_expr, A.Lambda):
+                ret_t = getattr(key_expr, "lambda_ret", "int")
+            elif isinstance(key_expr, A.Name):
+                if key_expr.name not in self.lambda_rets:
+                    raise SemaError(
+                        "key= must be a lambda literal or a name bound to a "
+                        f"lambda (a bare function reference like {key_expr.name!r} "
+                        "isn't supported)",
+                        e.pos,
+                    )
+                ret_t = self.lambda_rets[key_expr.name]
+            else:
+                raise SemaError(
+                    "key= must be a lambda literal or a name bound to a lambda",
+                    e.pos,
+                )
+            # Lambda params are typed "any", so most non-str results (int,
+            # float-as-bits, "any") compare correctly as ints; only an
+            # explicit "str" result needs the string comparator.
+            key_ret = "str" if ret_t == "str" else "int"
+            e.sort_key = key_expr  # type: ignore[attr-defined]
+            e.sort_key_ret = key_ret  # type: ignore[attr-defined]
+        else:
+            e.sort_key = None  # type: ignore[attr-defined]
+            e.sort_key_ret = "int"  # type: ignore[attr-defined]
+        if reverse_expr is not None:
+            self._check_expr(reverse_expr, scope)
+            e.sort_reverse = reverse_expr  # type: ignore[attr-defined]
+        else:
+            e.sort_reverse = None  # type: ignore[attr-defined]
+        e.kwargs = []
 
     def _check_str_method(self, e: A.MethodCall, scope: Scope) -> None:
         # Methods with non-trivial signatures: split returns list[str]; join
@@ -3315,13 +3417,13 @@ class SemaAnalyzer:
             e.inferred_type = "list"
             e.list_el_type = "str"
             return
-        if e.method == "partition":
-            # str.partition(sep) -> (before, sep, after): always a 3-tuple of
-            # strings, so the unpack targets type as str (prints / == work).
+        if e.method in ("partition", "rpartition"):
+            # str.(r)partition(sep) -> (before, sep, after): always a 3-tuple
+            # of strings, so the unpack targets type as str (prints / == work).
             if len(e.args) != 1:
-                raise SemaError("str.partition() takes 1 argument", e.pos)
+                raise SemaError(f"str.{e.method}() takes 1 argument", e.pos)
             if A.expr_type(e.args[0]) not in ("str", "any"):
-                raise SemaError("str.partition() separator must be str", e.pos)
+                raise SemaError(f"str.{e.method}() separator must be str", e.pos)
             e.inferred_type = "tuple"
             e.tuple_elem_types = ["str", "str", "str"]
             return
@@ -3349,6 +3451,24 @@ class SemaAnalyzer:
                 raise SemaError(f"str.{e.method}() takes 0 or 1 argument", e.pos)
             if e.args and A.expr_type(e.args[0]) != "str":
                 raise SemaError(f"str.{e.method}() argument must be str", e.pos)
+            e.inferred_type = "str"
+            return
+        if e.method == "zfill":
+            if len(e.args) != 1:
+                raise SemaError("str.zfill() takes 1 argument", e.pos)
+            if A.expr_type(e.args[0]) not in ("int", "any"):
+                raise SemaError("str.zfill() argument must be an int", e.pos)
+            e.inferred_type = "str"
+            return
+        if e.method in ("ljust", "rjust", "center"):
+            # str.{ljust,rjust,center}(width[, fillchar]); fillchar defaults
+            # to a space when omitted.
+            if len(e.args) not in (1, 2):
+                raise SemaError(f"str.{e.method}() takes 1 or 2 arguments", e.pos)
+            if A.expr_type(e.args[0]) not in ("int", "any"):
+                raise SemaError(f"str.{e.method}() width must be an int", e.pos)
+            if len(e.args) == 2 and A.expr_type(e.args[1]) not in ("str", "any"):
+                raise SemaError(f"str.{e.method}() fillchar must be a str", e.pos)
             e.inferred_type = "str"
             return
         if e.method == "format" and isinstance(e.obj, A.StrLit):
@@ -3498,7 +3618,42 @@ class SemaAnalyzer:
         e.args = new_args
         e.kwargs = []
 
+    def _expand_starred_args(self, args: list, scope: Scope) -> list:
+        """Rewrite `*expr` call arguments in place into one Subscript per
+        tuple slot (`expr[0], expr[1], ...`), since asmpython has no runtime
+        varargs. Returns the (possibly unchanged) args list."""
+        if not any(isinstance(a, A.Starred) for a in args):
+            return args
+        new_args: list = []
+        for a in args:
+            if not isinstance(a, A.Starred):
+                new_args.append(a)
+                continue
+            self._check_expr(a.value, scope)
+            if not isinstance(a.value, (A.Name, A.Subscript, A.Attr)):
+                raise SemaError(
+                    "*expr argument unpacking requires a name, subscript, or "
+                    "attribute expression (assign the value to a variable "
+                    "first)",
+                    a.pos,
+                )
+            ets = self._tuple_elem_types(a.value, scope)
+            if not ets:
+                raise SemaError(
+                    "*expr argument unpacking requires a tuple with known "
+                    "element types",
+                    a.pos,
+                )
+            for i in range(len(ets)):
+                sub = A.Subscript(
+                    obj=a.value, index=A.IntLit(value=i, pos=a.pos), pos=a.pos
+                )
+                self._check_expr(sub, scope)
+                new_args.append(sub)
+        return new_args
+
     def _check_call(self, e: A.Call, scope: Scope) -> None:
+        e.args = self._expand_starred_args(e.args, scope)
         if e.func in INTERPRETER_ONLY_BUILTINS:
             raise SemaError(
                 f"{e.func}() is not supported: it requires a Python interpreter "
@@ -3627,6 +3782,7 @@ class SemaAnalyzer:
                 "hex": "str",
                 "oct": "str",
                 "bin": "str",
+                "divmod": "tuple",
                 "hash": "int",
                 "issubclass": "int",
             }[e.func]
@@ -3640,8 +3796,6 @@ class SemaAnalyzer:
                 "set",
                 "frozenset",
                 "sum",
-                "min",
-                "max",
                 "round",
                 "pow",
                 "reversed",
@@ -3654,9 +3808,33 @@ class SemaAnalyzer:
                 "id",
             ):
                 return
+            if e.func in ("min", "max"):
+                # min/max: the 1-arg "iterable" form supports key=/reverse=
+                # (reverse= is meaningless here but accepted for symmetry with
+                # sorted()'s kwarg set — codegen ignores it). The variadic
+                # scalar form (min(a, b, ...)) doesn't support key=.
+                self._check_sort_kwargs(e, scope)
+                if len(e.args) == 1:
+                    e.inferred_type = self._list_el_type(e.args[0], scope)
+                else:
+                    if e.sort_key is not None:
+                        raise SemaError(
+                            f"{e.func}(): key= is only supported for the "
+                            "single-iterable form",
+                            e.pos,
+                        )
+                    types = {A.expr_type(a) for a in e.args}
+                    if "float" in types:
+                        e.inferred_type = "float"
+                    elif "str" in types:
+                        e.inferred_type = "str"
+                    else:
+                        e.inferred_type = "int"
+                return
             if e.func == "sorted":
                 # sorted(x) -> a new list. Sets/dicts sort their (str) keys;
                 # lists/tuples keep their element kind for printing/iteration.
+                self._check_sort_kwargs(e, scope)
                 t = A.expr_type(e.args[0])
                 if t in ("set", "dict"):
                     e.list_el_type = "str"
@@ -3691,6 +3869,14 @@ class SemaAnalyzer:
                     if t not in ("dict", "any"):
                         raise SemaError("dict() requires a dict argument", e.pos)
                     e.value_type = self._dict_value_type(e.args[0], scope)
+                return
+            if e.func == "divmod":
+                # divmod(a, b) -> (a // b, a % b), both ints (floor semantics).
+                for a in e.args:
+                    t = A.expr_type(a)
+                    if t not in ("int", "any"):
+                        raise SemaError("divmod() requires int arguments", e.pos)
+                e.tuple_elem_types = ["int", "int"]
                 return
             # Argument-type sanity for builtins that care. An opaque ("any")
             # argument is accepted everywhere — we can't know its real type.

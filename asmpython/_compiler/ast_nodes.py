@@ -704,6 +704,22 @@ class SetLit:
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
+@dataclass
+class Starred:
+    """`*expr` used as a call argument, e.g. `f(*pieces[0])`.
+
+    asmpython has no runtime varargs, so sema requires `value` to be a
+    tuple-typed expression with statically-known `elem_types` (a Name,
+    Subscript, or Attr — not a Call, to avoid re-evaluating side effects) and
+    rewrites the single Starred argument into one `Subscript` per tuple slot
+    (`value[0], value[1], ...`) before codegen ever sees it. codegen has no
+    knowledge of this node at all.
+    """
+
+    value: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
 Expr = (
     IntLit
     | FloatLit
@@ -726,6 +742,7 @@ Expr = (
     | Comprehension
     | DictComprehension
     | Lambda
+    | Starred
 )
 
 
@@ -786,6 +803,9 @@ def expr_type(e: Expr) -> str:
             (lt == "str" and rt == "int") or (lt == "int" and rt == "str")
         ):
             return "str"
+        # `"...%s..." % (args)` (printf-style formatting) always yields a str.
+        if e.op == "%" and lt == "str":
+            return "str"
         # Python's true division always produces a float, even on ints.
         if e.op == "/":
             return "float"
@@ -825,3 +845,60 @@ def tuple_element_types(e: Expr) -> list[str]:
     if isinstance(e, TupleLit):
         return list(e.elem_types)
     return list(getattr(e, "tuple_elem_types", []))
+
+
+def parse_pct_format(fmt: str) -> tuple[list[tuple], int]:
+    """Parse a printf-style '%' format string into (pieces, n_conversions).
+
+    Each piece is either ("lit", text) or ("arg", flags, width, precision,
+    conv), where flags/width are the raw characters between '%' and the
+    conversion character and precision includes the leading '.' (or "" if
+    absent). "%%" becomes a literal "%". Raises ValueError on a malformed or
+    unsupported specifier. Shared by sema (validation) and codegen (lowering)
+    so the two stay in sync.
+    """
+    pieces: list[tuple] = []
+    buf = ""
+    nconv = 0
+    i = 0
+    n = len(fmt)
+    while i < n:
+        ch = fmt[i]
+        if ch != "%":
+            buf += ch
+            i += 1
+            continue
+        if i + 1 < n and fmt[i + 1] == "%":
+            buf += "%"
+            i += 2
+            continue
+        j = i + 1
+        flags = ""
+        while j < n and fmt[j] in "-+0 #":
+            flags += fmt[j]
+            j += 1
+        width = ""
+        while j < n and fmt[j].isdigit():
+            width += fmt[j]
+            j += 1
+        precision = ""
+        if j < n and fmt[j] == ".":
+            precision = "."
+            j += 1
+            while j < n and fmt[j].isdigit():
+                precision += fmt[j]
+                j += 1
+        if j >= n:
+            raise ValueError("incomplete format specifier")
+        conv = fmt[j]
+        if conv not in "rsdiouxXeEfFgG":
+            raise ValueError(f"unsupported format character {conv!r}")
+        if buf:
+            pieces.append(("lit", buf))
+            buf = ""
+        pieces.append(("arg", flags, width, precision, conv))
+        nconv += 1
+        i = j + 1
+    if buf:
+        pieces.append(("lit", buf))
+    return pieces, nconv

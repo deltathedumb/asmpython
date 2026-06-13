@@ -403,9 +403,13 @@ class Codegen:
         "_runtime_dict_items",
         "_runtime_sort_str",
         "_runtime_sort_int",
+        "_runtime_sort_pairs_str",
+        "_runtime_sort_pairs_int",
         "_runtime_list_slice",
         # String runtime
         "_runtime_str_concat",
+        "_runtime_int_to_base",
+        "_runtime_divmod",
         "_runtime_str_repeat",
         "_runtime_str_eq",
         "_runtime_str_cmp",
@@ -417,16 +421,26 @@ class Codegen:
         "_runtime_str_count",
         "_runtime_str_starts_with",
         "_runtime_str_ends_with",
+        "_runtime_str_removeprefix",
+        "_runtime_str_removesuffix",
         "_runtime_str_upper",
         "_runtime_str_lower",
+        "_runtime_str_capitalize",
+        "_runtime_str_swapcase",
+        "_runtime_str_title",
         "_runtime_str_strip",
         "_runtime_str_lstrip",
         "_runtime_str_rstrip",
+        "_runtime_str_zfill",
+        "_runtime_str_ljust",
+        "_runtime_str_rjust",
+        "_runtime_str_center",
         "_runtime_str_replace",
         "_runtime_str_split",
         "_runtime_str_splitlines",
         "_runtime_str_join",
         "_runtime_str_partition",
+        "_runtime_str_rpartition",
         "_runtime_str_rsplit",
         "_runtime_chr",
         "_runtime_str_isdigit",
@@ -934,6 +948,43 @@ class Codegen:
             if expr.func == "range":
                 self._cl_define(info, f"__range_a_{id(expr)}")
                 self._cl_define(info, f"__range_b_{id(expr)}")
+            # sorted(xs, key=..., reverse=...): a `key=` callable builds a
+            # parallel "keys" list (one slot set), `reverse=` parks the
+            # (sorted) header across evaluating the reverse condition.
+            if expr.func == "sorted" and getattr(expr, "sort_key", None) is not None:
+                self._cl_define(info, f"__sortkey_elems_{id(expr)}")
+                self._cl_define(info, f"__sortkey_fn_{id(expr)}")
+                self._cl_define(info, f"__sortkey_keys_{id(expr)}")
+                self._cl_define(info, f"__sortkey_n_{id(expr)}")
+                self._cl_define(info, f"__sortkey_i_{id(expr)}")
+            if expr.func == "sorted" and getattr(expr, "sort_reverse", None) is not None:
+                self._cl_define(info, f"__sortrev_hdr_{id(expr)}")
+            # min(xs, key=...) / max(xs, key=...) (or plain min/max over a
+            # str list, which also needs the general scan): best-(elem, key)
+            # tracking slots.
+            if expr.func in ("min", "max") and len(expr.args) == 1:
+                arg0 = expr.args[0]
+                if isinstance(arg0, A.Name):
+                    el_kind = arg0.list_el_type
+                elif isinstance(arg0, A.ListLit):
+                    el_kind = arg0.el_type
+                else:
+                    el_kind = "int"
+                if getattr(expr, "sort_key", None) is not None or el_kind == "str":
+                    self._cl_define(info, f"__mmkey_fn_{id(expr)}")
+                    self._cl_define(info, f"__mmkey_n_{id(expr)}")
+                    self._cl_define(info, f"__mmkey_i_{id(expr)}")
+                    self._cl_define(info, f"__mmkey_buf_{id(expr)}")
+                    self._cl_define(info, f"__mmkey_best_elem_{id(expr)}")
+                    self._cl_define(info, f"__mmkey_best_key_{id(expr)}")
+                    self._cl_define(info, f"__mmkey_cur_elem_{id(expr)}")
+                    self._cl_define(info, f"__mmkey_cur_key_{id(expr)}")
+            # `key=`/`reverse=` expressions may themselves need scratch slots
+            # (e.g. a name-bound key function, or a comparison reverse=).
+            if getattr(expr, "sort_key", None) is not None:
+                self._cl_walk_expr(info, expr.sort_key)
+            if getattr(expr, "sort_reverse", None) is not None:
+                self._cl_walk_expr(info, expr.sort_reverse)
             # dict() / dict(other): an empty dict (same layout as a set's),
             # plus a slot to park the source across the allocation when copying.
             if expr.func == "dict":
@@ -1031,6 +1082,19 @@ class Codegen:
                 if obj_t in ("list", "any", "int") and expr.method == "insert":
                     self._cl_define(info, f"__lm_idx_{id(expr)}")
                     self._cl_define(info, f"__lm_val_{id(expr)}")
+                if expr.method == "sort" and getattr(expr, "sort_key", None) is not None:
+                    self._cl_define(info, f"__sortkey_elems_{id(expr)}")
+                    self._cl_define(info, f"__sortkey_fn_{id(expr)}")
+                    self._cl_define(info, f"__sortkey_keys_{id(expr)}")
+                    self._cl_define(info, f"__sortkey_n_{id(expr)}")
+                    self._cl_define(info, f"__sortkey_i_{id(expr)}")
+                if expr.method == "sort" and getattr(expr, "sort_reverse", None) is not None:
+                    self._cl_define(info, f"__sortrev_hdr_{id(expr)}")
+                if expr.method == "sort":
+                    if getattr(expr, "sort_key", None) is not None:
+                        self._cl_walk_expr(info, expr.sort_key)
+                    if getattr(expr, "sort_reverse", None) is not None:
+                        self._cl_walk_expr(info, expr.sort_reverse)
                 if obj_t in ("dict", "set", "any") and expr.method in ("pop", "setdefault"):
                     self._cl_define(info, f"__dm_arg_{id(expr)}")
                     if len(getattr(expr, "args", [])) >= 2:
@@ -2303,6 +2367,7 @@ class Codegen:
         rather than a closure inside _gen_fstring, so codegen self-compiles."""
         t = A.expr_type(seg)
         spec = getattr(seg, "fmt_spec", "")
+        conv = getattr(seg, "conv_flag", "")
         if spec and t in ("int", "float"):
             cfmt = self._cfmt_for_spec(spec, t)
             if cfmt is not None:
@@ -2321,14 +2386,24 @@ class Codegen:
         elif t == "float":
             self._emit_float_to_str()
         elif t.startswith("instance:"):
-            resolved = self._resolve_str_dunder(t.split(":", 1)[1])
+            # `!r`/`!a` prefer __repr__ over __str__ (the reverse of the
+            # default order), matching repr()'s lookup priority.
+            class_name = t.split(":", 1)[1]
+            if conv in ("r", "a"):
+                resolved = self._resolve_repr_dunder(class_name)
+            else:
+                resolved = self._resolve_str_dunder(class_name)
             if resolved is not None:
                 owner, method = resolved
                 self.emitf(f"mov {self._arg_reg(0)}, rax")
                 self.emit_call(self._method_symbol(owner, method))
             else:
                 self._emit_int_to_str()
-        # "str"/"any" stay as-is
+        elif t == "str" and conv in ("r", "a"):
+            # repr()/!a of a string wraps it in quotes (matches the
+            # str-element formatting used for container reprs).
+            self.emitf("mov rbx, 1", "call _runtime_fmt_elem")
+        # "str"/"any" (without !r/!a) stay as-is
 
     def _gen_attr(self, e: A.Attr, info: FuncInfo) -> None:
         # Class-level variable read: `ClassName.x`. Loads the static global.
@@ -2413,6 +2488,8 @@ class Codegen:
                 "_runtime_dict_items",
                 "_runtime_sort_str",
                 "_runtime_sort_int",
+                "_runtime_sort_pairs_str",
+                "_runtime_sort_pairs_int",
                 "_runtime_list_extend",
                 "_runtime_list_slice",
                 "_runtime_list_reverse",
@@ -2720,6 +2797,7 @@ class Codegen:
         self._emit_dict_update_helper()
         self._emit_dict_items_helper()
         self._emit_sort_helpers()
+        self._emit_sort_pairs_helpers()
         self._emit_list_extend_helper()
         self._emit_list_slice_helper()
         self._emit_list_reverse_helper()
@@ -3030,6 +3108,103 @@ class Codegen:
                 "mov rbx, [rbp-32]",
                 "mov [rdx+rcx*8+8], rbx",  # buf[j+1] = key
                 "inc qword [rbp-16]",
+                f"jmp {outer}",
+            )
+            self.label(done)
+            self.emitf("mov rax, [rbp-8]", "leave", "ret")
+
+    def _emit_sort_pairs_helpers(self) -> None:
+        """`_runtime_sort_pairs_str` / `_runtime_sort_pairs_int`: in-place
+        insertion sort of an "elems" list, ordered by a parallel "keys" list
+        of equal length (for `sorted(xs, key=...)` / `xs.sort(key=...)`).
+        Both buffers are reordered in lockstep; the str/int variant selects
+        how *keys* compare. Returns the elems header.
+
+        In:  rax = elems list header, rbx = keys list header.
+        Out: rax = elems header (sorted; keys is left sorted too but the
+             caller discards it).
+
+        Locals [rbp-8..rbp-56] (56 bytes); 56 + 32 shadow (for
+        _runtime_str_cmp) -> rounded to 96.
+        """
+        for variant in ("str", "int"):
+            name = f"_runtime_sort_pairs_{variant}"
+            outer = self.fresh(f"sp_{variant}_outer")
+            inner = self.fresh(f"sp_{variant}_inner")
+            place = self.fresh(f"sp_{variant}_place")
+            done = self.fresh(f"sp_{variant}_done")
+            self.label(name)
+            self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 96")
+            self.emitf(
+                "mov [rbp-8], rax",  # elems header
+                "mov [rbp-16], rbx",  # keys header
+                f"mov rcx, [rax+{self.LIST_LEN_OFF}]",
+                "mov [rbp-48], rcx",  # n
+                "mov qword [rbp-24], 1",  # i
+            )
+            self.label(outer)
+            self.emitf(
+                "mov rcx, [rbp-24]",
+                "cmp rcx, [rbp-48]",
+                f"jge {done}",
+                # key_elem = elems_buf[i]; key_key = keys_buf[i]; j = i - 1
+                "mov rax, [rbp-8]",
+                f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+                "mov rax, [rdx+rcx*8]",
+                "mov [rbp-40], rax",  # key_elem
+                "mov rax, [rbp-16]",
+                f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+                "mov rax, [rdx+rcx*8]",
+                "mov [rbp-32], rax",  # key_key
+                "dec rcx",
+                "mov [rbp-56], rcx",  # j
+            )
+            self.label(inner)
+            self.emitf("mov rcx, [rbp-56]", "test rcx, rcx", f"js {place}")
+            if variant == "str":
+                self.emitf(
+                    "mov rax, [rbp-16]",
+                    f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+                    "mov rax, [rdx+rcx*8]",  # keys_buf[j]
+                    "mov rbx, [rbp-32]",  # key_key
+                    "call _runtime_str_cmp",
+                    "cmp rax, 0",
+                    f"jle {place}",
+                )
+            else:
+                self.emitf(
+                    "mov rax, [rbp-16]",
+                    f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+                    "mov rax, [rdx+rcx*8]",  # keys_buf[j]
+                    "cmp rax, [rbp-32]",
+                    f"jle {place}",
+                )
+            # shift: elems_buf[j+1] = elems_buf[j]; keys_buf[j+1] = keys_buf[j]; j--
+            self.emitf(
+                "mov rcx, [rbp-56]",
+                "mov rax, [rbp-8]",
+                f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+                "mov rax, [rdx+rcx*8]",
+                "mov [rdx+rcx*8+8], rax",
+                "mov rax, [rbp-16]",
+                f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+                "mov rax, [rdx+rcx*8]",
+                "mov [rdx+rcx*8+8], rax",
+                "dec qword [rbp-56]",
+                f"jmp {inner}",
+            )
+            self.label(place)
+            self.emitf(
+                "mov rcx, [rbp-56]",
+                "mov rax, [rbp-8]",
+                f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+                "mov rbx, [rbp-40]",
+                "mov [rdx+rcx*8+8], rbx",  # elems_buf[j+1] = key_elem
+                "mov rax, [rbp-16]",
+                f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+                "mov rbx, [rbp-32]",
+                "mov [rdx+rcx*8+8], rbx",  # keys_buf[j+1] = key_key
+                "inc qword [rbp-24]",
                 f"jmp {outer}",
             )
             self.label(done)
@@ -3514,6 +3689,8 @@ class Codegen:
         if self.use_runtime_lib:
             for sym in (
                 "_runtime_str_concat",
+                "_runtime_int_to_base",
+                "_runtime_divmod",
                 "_runtime_str_repeat",
                 "_runtime_str_eq",
                 "_runtime_str_cmp",
@@ -3525,16 +3702,26 @@ class Codegen:
                 "_runtime_str_count",
                 "_runtime_str_starts_with",
                 "_runtime_str_ends_with",
+                "_runtime_str_removeprefix",
+                "_runtime_str_removesuffix",
                 "_runtime_str_upper",
                 "_runtime_str_lower",
+                "_runtime_str_capitalize",
+                "_runtime_str_swapcase",
+                "_runtime_str_title",
                 "_runtime_str_strip",
                 "_runtime_str_lstrip",
                 "_runtime_str_rstrip",
+                "_runtime_str_zfill",
+                "_runtime_str_ljust",
+                "_runtime_str_rjust",
+                "_runtime_str_center",
                 "_runtime_str_replace",
                 "_runtime_str_split",
                 "_runtime_str_splitlines",
                 "_runtime_str_join",
                 "_runtime_str_partition",
+                "_runtime_str_rpartition",
                 "_runtime_str_rsplit",
                 "_runtime_chr",
                 "_runtime_str_isdigit",
@@ -3593,6 +3780,80 @@ class Codegen:
             "mov rbx, [rbp-24]",
             "add rbx, [rbp-32]",
             "mov byte [rax+rbx], 0",
+            "leave",
+            "ret",
+        )
+
+        # ---- _runtime_int_to_base ----------------------------------------------
+        # rax = n (signed int), rbx = base (16, 8, or 2), rcx = prefix string
+        # ptr (e.g. "0x", with no sign) -> rax = "0x1a" / "-0x1a"-style string
+        # (Python hex()/oct()/bin() semantics). 0 -> prefix + "0".
+        digits_label, _ = self.intern_string("0123456789abcdef")
+        minus_label, _ = self.intern_string("-")
+        self.label("_runtime_int_to_base")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+        self.emitf(
+            "mov [rbp-8], rax",  # n
+            "mov [rbp-16], rbx",  # base
+            "mov [rbp-24], rcx",  # prefix
+            "xor r15, r15",  # neg flag
+        )
+        self.emitf("cmp qword [rbp-8], 0", "jge ._itb_nonneg", "mov r15, 1", "neg qword [rbp-8]")
+        self.label("._itb_nonneg")
+        # 72-byte scratch digit buffer; nul-terminator fixed at offset 71.
+        self.emitf("mov rax, 72")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf("mov [rbp-32], rax", "add rax, 71", "mov byte [rax], 0", "mov rdi, rax")
+        self.emitf("mov rax, [rbp-8]", "mov rbx, [rbp-16]", "test rax, rax", "jnz ._itb_loop")
+        self.emitf("dec rdi", "mov byte [rdi], 48", "jmp ._itb_done")  # n == 0 -> "0"
+        self.label("._itb_loop")
+        self.emitf("test rax, rax", "jz ._itb_done")
+        self.emitf("xor rdx, rdx", "div rbx", "dec rdi")
+        self.emitf(f"lea r8, [rel {digits_label}]", "mov dl, [r8+rdx]", "mov [rdi], dl", "jmp ._itb_loop")
+        self.label("._itb_done")
+        self.emitf("mov [rbp-40], rdi")  # digits start (nul-terminated)
+        # with_prefix = concat(prefix, digits)
+        self.emitf("mov rax, [rbp-24]", "mov rbx, [rbp-40]", "call _runtime_str_concat")
+        self.emitf("test r15, r15", "jz ._itb_ret")
+        self.emitf("mov rbx, rax", f"lea rax, [rel {minus_label}]", "call _runtime_str_concat")
+        self.label("._itb_ret")
+        self.emitf("leave", "ret")
+
+        # ---- _runtime_divmod ---------------------------------------------------
+        # rax = a, rbx = b (signed ints) -> rax = 2-tuple (q, r) in the list
+        # [cap,len,buf] layout, where q = a // b and r = a % b using Python's
+        # floor semantics (mirrors the adjustment in _emit_binop_inline).
+        self.label("_runtime_divmod")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+        self.emitf("cqo", "idiv rbx")
+        self.emitf(
+            "test rdx, rdx",
+            "jz ._dm_done",
+            "mov rcx, rdx",
+            "xor rcx, rbx",
+            "test rcx, rcx",
+            "jns ._dm_done",
+            "dec rax",
+            "add rdx, rbx",
+        )
+        self.label("._dm_done")
+        self.emitf("mov [rbp-8], rax", "mov [rbp-16], rdx", "mov rax, 24")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf(
+            "mov [rbp-24], rax",
+            f"mov qword [rax+{self.LIST_CAP_OFF}], 2",
+            f"mov qword [rax+{self.LIST_LEN_OFF}], 2",
+            "mov rax, 16",
+        )
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf(
+            "mov rcx, [rbp-24]",
+            f"mov [rcx+{self.LIST_BUF_OFF}], rax",
+            "mov rdx, [rbp-8]",
+            "mov [rax], rdx",
+            "mov rdx, [rbp-16]",
+            "mov [rax+8], rdx",
+            "mov rax, [rbp-24]",
             "leave",
             "ret",
         )
@@ -3937,6 +4198,40 @@ class Codegen:
         self.label("._sew_no")
         self.emitf("xor rax, rax", "leave", "ret")
 
+        # ---- _runtime_str_removeprefix -----------------------------------------
+        # rax = s, rbx = prefix -> rax = s[len(prefix):] if s.startswith(prefix)
+        # else a copy of s.
+        self.label("_runtime_str_removeprefix")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax", "mov [rbp-16], rbx")
+        self.emitf("call _runtime_str_starts_with", "test rax, rax", "jz ._srmp_no")
+        self.emitf("mov rax, [rbp-16]")
+        self._emit_libc_strlen()
+        self.emitf("mov [rbp-24], rax")  # plen
+        self.emitf("mov rax, [rbp-8]")
+        self._emit_libc_strlen()
+        self.emitf("mov rcx, rax", "mov rbx, [rbp-24]", "mov rax, [rbp-8]", "call _runtime_str_slice", "leave", "ret")
+        self.label("._srmp_no")
+        self.emitf("mov rax, [rbp-8]")
+        self._emit_libc_strdup()
+        self.emitf("leave", "ret")
+
+        # ---- _runtime_str_removesuffix -----------------------------------------
+        # rax = s, rbx = suffix -> rax = s[:len(s)-len(suffix)] if
+        # s.endswith(suffix) else a copy of s.
+        self.label("_runtime_str_removesuffix")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax", "mov [rbp-16], rbx")
+        self.emitf("call _runtime_str_ends_with", "test rax, rax", "jz ._srms_no")
+        self.emitf("mov rax, [rbp-16]")
+        self._emit_libc_strlen()
+        self.emitf("mov [rbp-24], rax")  # suflen
+        self.emitf("mov rax, [rbp-8]")
+        self._emit_libc_strlen()
+        self.emitf("sub rax, [rbp-24]", "mov rcx, rax", "xor rbx, rbx", "mov rax, [rbp-8]", "call _runtime_str_slice", "leave", "ret")
+        self.label("._srms_no")
+        self.emitf("mov rax, [rbp-8]")
+        self._emit_libc_strdup()
+        self.emitf("leave", "ret")
+
         # ---- _runtime_str_upper ----------------------------------------------
         # rax = s -> rax = newly-allocated upper-case copy. ASCII only.
         self.label("_runtime_str_upper")
@@ -3996,6 +4291,91 @@ class Codegen:
         self.label("._slo_keep")
         self.emitf("mov [rdi], dl", "inc rsi", "inc rdi", "dec rcx", "jmp ._slo_loop")
         self.label("._slo_done")
+        self.emitf("mov byte [rdi], 0", "mov rax, [rbp-24]", "leave", "ret")
+
+        # ---- _runtime_str_capitalize ------------------------------------------
+        # rax = s -> rax = newly-allocated copy with the first character
+        # upper-cased and every other character lower-cased. ASCII only.
+        self.label("_runtime_str_capitalize")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax")
+        self._emit_libc_strlen()
+        self.emitf("mov [rbp-16], rax", "inc rax")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf(
+            "mov [rbp-24], rax",
+            "mov rcx, [rbp-16]",
+            "mov rsi, [rbp-8]",
+            "mov rdi, [rbp-24]",
+            "xor r8, r8",
+        )
+        self.label("._scap_loop")
+        self.emitf("test rcx, rcx", "jz ._scap_done", "mov al, [rsi]", "test r8, r8", "jnz ._scap_rest")
+        # Index 0: lower-case letter -> upper-case it.
+        self.emitf("cmp al, 97", "jl ._scap_store", "cmp al, 122", "jg ._scap_store", "sub al, 32", "jmp ._scap_store")
+        self.label("._scap_rest")
+        # Index > 0: upper-case letter -> lower-case it.
+        self.emitf("cmp al, 65", "jl ._scap_store", "cmp al, 90", "jg ._scap_store", "add al, 32")
+        self.label("._scap_store")
+        self.emitf("mov [rdi], al", "inc rsi", "inc rdi", "inc r8", "dec rcx", "jmp ._scap_loop")
+        self.label("._scap_done")
+        self.emitf("mov byte [rdi], 0", "mov rax, [rbp-24]", "leave", "ret")
+
+        # ---- _runtime_str_swapcase ---------------------------------------------
+        # rax = s -> rax = newly-allocated copy with upper/lower case swapped.
+        # ASCII only.
+        self.label("_runtime_str_swapcase")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax")
+        self._emit_libc_strlen()
+        self.emitf("mov [rbp-16], rax", "inc rax")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf(
+            "mov [rbp-24], rax",
+            "mov rcx, [rbp-16]",
+            "mov rsi, [rbp-8]",
+            "mov rdi, [rbp-24]",
+        )
+        self.label("._sswap_loop")
+        self.emitf("test rcx, rcx", "jz ._sswap_done", "mov al, [rsi]")
+        self.emitf("cmp al, 97", "jl ._sswap_upper", "cmp al, 122", "jg ._sswap_store", "sub al, 32", "jmp ._sswap_store")
+        self.label("._sswap_upper")
+        self.emitf("cmp al, 65", "jl ._sswap_store", "cmp al, 90", "jg ._sswap_store", "add al, 32")
+        self.label("._sswap_store")
+        self.emitf("mov [rdi], al", "inc rsi", "inc rdi", "dec rcx", "jmp ._sswap_loop")
+        self.label("._sswap_done")
+        self.emitf("mov byte [rdi], 0", "mov rax, [rbp-24]", "leave", "ret")
+
+        # ---- _runtime_str_title -------------------------------------------------
+        # rax = s -> rax = newly-allocated copy with the first letter of each
+        # run of letters upper-cased and the rest lower-cased. A run ends at
+        # any non-letter byte (matches CPython's ASCII str.title()).
+        self.label("_runtime_str_title")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax")
+        self._emit_libc_strlen()
+        self.emitf("mov [rbp-16], rax", "inc rax")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf(
+            "mov [rbp-24], rax",
+            "mov rcx, [rbp-16]",
+            "mov rsi, [rbp-8]",
+            "mov rdi, [rbp-24]",
+            "xor r9, r9",  # in_word flag
+        )
+        self.label("._stit_loop")
+        self.emitf("test rcx, rcx", "jz ._stit_done", "mov al, [rsi]")
+        self.emitf("cmp al, 97", "jl ._stit_check_upper", "cmp al, 122", "jg ._stit_notalpha")
+        # Lower-case letter: start-of-word -> upper-case; mid-word -> keep.
+        self.emitf("test r9, r9", "jnz ._stit_setword", "sub al, 32", "jmp ._stit_setword")
+        self.label("._stit_check_upper")
+        self.emitf("cmp al, 65", "jl ._stit_notalpha", "cmp al, 90", "jg ._stit_notalpha")
+        # Upper-case letter: start-of-word -> keep; mid-word -> lower-case.
+        self.emitf("test r9, r9", "jz ._stit_setword", "add al, 32", "jmp ._stit_setword")
+        self.label("._stit_notalpha")
+        self.emitf("xor r9, r9", "jmp ._stit_store")
+        self.label("._stit_setword")
+        self.emitf("mov r9, 1")
+        self.label("._stit_store")
+        self.emitf("mov [rdi], al", "inc rsi", "inc rdi", "dec rcx", "jmp ._stit_loop")
+        self.label("._stit_done")
         self.emitf("mov byte [rdi], 0", "mov rax, [rbp-24]", "leave", "ret")
 
         # ---- _runtime_str_lstrip ---------------------------------------------
@@ -4094,6 +4474,148 @@ class Codegen:
             "leave",
             "ret",
         )
+
+        # ---- _runtime_str_zfill -----------------------------------------------
+        # rax = s, rbx = width -> rax = newly-allocated copy of s left-padded
+        # with '0' to at least `width` bytes. A leading '+'/'-' sign (if
+        # present) stays first; zeros are inserted after it.
+        self.label("_runtime_str_zfill")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax", "mov [rbp-16], rbx")
+        self._emit_libc_strlen()
+        self.emitf("mov [rbp-24], rax")  # len
+        self.emitf(
+            "mov rcx, [rbp-16]",  # width
+            "cmp rcx, rax",
+            "jge ._szf_tot_done",
+            "mov rcx, rax",  # total = len (width < len)
+        )
+        self.label("._szf_tot_done")
+        self.emitf("mov [rbp-32], rcx")  # total
+        self.emitf("mov rax, rcx", "inc rax")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf("mov [rbp-40], rax")  # dst
+        self.emitf(
+            "mov rsi, [rbp-8]",
+            "mov rdi, [rbp-40]",
+            "xor r8, r8",  # sign-present flag
+            "mov al, [rsi]",
+            "cmp al, 43",  # '+'
+            "je ._szf_sign",
+            "cmp al, 45",  # '-'
+            "jne ._szf_nosign",
+        )
+        self.label("._szf_sign")
+        self.emitf("mov [rdi], al", "inc rsi", "inc rdi", "mov r8, 1")
+        self.label("._szf_nosign")
+        self.emitf("mov r9, [rbp-32]", "sub r9, [rbp-24]")  # pad = total - len
+        self.label("._szf_padloop")
+        self.emitf("test r9, r9", "jz ._szf_copyrest", "mov byte [rdi], 48", "inc rdi", "dec r9", "jmp ._szf_padloop")
+        self.label("._szf_copyrest")
+        self.emitf("mov rcx, [rbp-24]", "sub rcx, r8")  # remaining = len - sign
+        self.label("._szf_cploop")
+        self.emitf("test rcx, rcx", "jz ._szf_done", "mov al, [rsi]", "mov [rdi], al", "inc rsi", "inc rdi", "dec rcx", "jmp ._szf_cploop")
+        self.label("._szf_done")
+        self.emitf("mov byte [rdi], 0", "mov rax, [rbp-40]", "leave", "ret")
+
+        # ---- _runtime_str_ljust ------------------------------------------------
+        # rax = s, rbx = width, rcx = fill byte -> rax = newly-allocated copy of
+        # s, right-padded with the fill byte to at least `width` bytes.
+        self.label("_runtime_str_ljust")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64", "mov [rbp-8], rax", "mov [rbp-16], rbx", "mov [rbp-24], rcx")
+        self._emit_libc_strlen()
+        self.emitf("mov [rbp-32], rax")  # len
+        self.emitf(
+            "mov rcx, [rbp-16]",
+            "cmp rcx, rax",
+            "jge ._slj_tot_done",
+            "mov rcx, rax",
+        )
+        self.label("._slj_tot_done")
+        self.emitf("mov [rbp-40], rcx")  # total
+        self.emitf("mov rax, rcx", "inc rax")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf("mov [rbp-48], rax")  # dst
+        self.emitf("mov rsi, [rbp-8]", "mov rdi, [rbp-48]", "mov rcx, [rbp-32]")
+        self.label("._slj_cp")
+        self.emitf("test rcx, rcx", "jz ._slj_pad", "mov al, [rsi]", "mov [rdi], al", "inc rsi", "inc rdi", "dec rcx", "jmp ._slj_cp")
+        self.label("._slj_pad")
+        self.emitf("mov rcx, [rbp-40]", "sub rcx, [rbp-32]", "mov al, [rbp-24]")
+        self.label("._slj_padloop")
+        self.emitf("test rcx, rcx", "jz ._slj_done", "mov [rdi], al", "inc rdi", "dec rcx", "jmp ._slj_padloop")
+        self.label("._slj_done")
+        self.emitf("mov byte [rdi], 0", "mov rax, [rbp-48]", "leave", "ret")
+
+        # ---- _runtime_str_rjust ------------------------------------------------
+        # rax = s, rbx = width, rcx = fill byte -> rax = newly-allocated copy of
+        # s, left-padded with the fill byte to at least `width` bytes.
+        self.label("_runtime_str_rjust")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64", "mov [rbp-8], rax", "mov [rbp-16], rbx", "mov [rbp-24], rcx")
+        self._emit_libc_strlen()
+        self.emitf("mov [rbp-32], rax")  # len
+        self.emitf(
+            "mov rcx, [rbp-16]",
+            "cmp rcx, rax",
+            "jge ._srj_tot_done",
+            "mov rcx, rax",
+        )
+        self.label("._srj_tot_done")
+        self.emitf("mov [rbp-40], rcx")  # total
+        self.emitf("mov rax, rcx", "inc rax")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf("mov [rbp-48], rax")  # dst
+        self.emitf("mov rdi, [rbp-48]", "mov rcx, [rbp-40]", "sub rcx, [rbp-32]", "mov al, [rbp-24]")
+        self.label("._srj_padloop")
+        self.emitf("test rcx, rcx", "jz ._srj_cp", "mov [rdi], al", "inc rdi", "dec rcx", "jmp ._srj_padloop")
+        self.label("._srj_cp")
+        self.emitf("mov rsi, [rbp-8]", "mov rcx, [rbp-32]")
+        self.label("._srj_cploop")
+        self.emitf("test rcx, rcx", "jz ._srj_done", "mov al, [rsi]", "mov [rdi], al", "inc rsi", "inc rdi", "dec rcx", "jmp ._srj_cploop")
+        self.label("._srj_done")
+        self.emitf("mov byte [rdi], 0", "mov rax, [rbp-48]", "leave", "ret")
+
+        # ---- _runtime_str_center -----------------------------------------------
+        # rax = s, rbx = width, rcx = fill byte -> rax = newly-allocated copy of
+        # s, centered within `width` bytes using the fill byte. Matches
+        # CPython's split: left = marg/2 + (marg & width & 1), right = marg-left.
+        self.label("_runtime_str_center")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80", "mov [rbp-8], rax", "mov [rbp-16], rbx", "mov [rbp-24], rcx")
+        self._emit_libc_strlen()
+        self.emitf("mov [rbp-32], rax")  # len
+        self.emitf(
+            "mov rcx, [rbp-16]",
+            "cmp rcx, rax",
+            "jge ._scn_tot_done",
+            "mov rcx, rax",
+        )
+        self.label("._scn_tot_done")
+        self.emitf("mov [rbp-40], rcx")  # total
+        self.emitf("mov rax, rcx", "sub rax, [rbp-32]", "mov [rbp-48], rax")  # marg
+        self.emitf(
+            "mov rax, [rbp-48]",
+            "shr rax, 1",
+            "mov rdx, [rbp-48]",
+            "and rdx, [rbp-16]",
+            "and rdx, 1",
+            "add rax, rdx",
+            "mov [rbp-56], rax",  # left
+        )
+        self.emitf("mov rax, [rbp-48]", "sub rax, [rbp-56]", "mov [rbp-64], rax")  # right
+        self.emitf("mov rax, [rbp-40]", "inc rax")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf("mov [rbp-72], rax")  # dst
+        self.emitf("mov rdi, [rbp-72]", "mov al, [rbp-24]", "mov rcx, [rbp-56]")
+        self.label("._scn_lpad")
+        self.emitf("test rcx, rcx", "jz ._scn_cp", "mov [rdi], al", "inc rdi", "dec rcx", "jmp ._scn_lpad")
+        self.label("._scn_cp")
+        self.emitf("mov rsi, [rbp-8]", "mov rcx, [rbp-32]")
+        self.label("._scn_cploop")
+        self.emitf("test rcx, rcx", "jz ._scn_rpad", "mov al, [rsi]", "mov [rdi], al", "inc rsi", "inc rdi", "dec rcx", "jmp ._scn_cploop")
+        self.label("._scn_rpad")
+        self.emitf("mov al, [rbp-24]", "mov rcx, [rbp-64]")
+        self.label("._scn_rpadloop")
+        self.emitf("test rcx, rcx", "jz ._scn_done", "mov [rdi], al", "inc rdi", "dec rcx", "jmp ._scn_rpadloop")
+        self.label("._scn_done")
+        self.emitf("mov byte [rdi], 0", "mov rax, [rbp-72]", "leave", "ret")
 
         # ---- _runtime_str_replace --------------------------------------------
         # rax = s, rbx = old, rcx = new -> rax = newly-allocated copy of s with
@@ -4211,6 +4733,7 @@ class Codegen:
         self._emit_str_join_helper()
         self._emit_str_splitlines_helper()
         self._emit_str_partition_helper()
+        self._emit_str_rpartition_helper()
         self._emit_str_rsplit_helper()
         self._emit_chr_helper()
         self._emit_str_predicate_helpers()
@@ -4741,6 +5264,96 @@ class Codegen:
             "mov rdx, [rbp-48]",
             "mov [rax+16], rdx",
             "mov rax, [rbp-56]",
+            "leave",
+            "ret",
+        )
+
+    def _emit_str_rpartition_helper(self) -> None:
+        """`_runtime_str_rpartition`: `s.rpartition(sep)` -> 3-tuple.
+
+        In:  rax = s, rbx = sep.
+        Out: rax = a 3-slot tuple in the list [cap,len,buf] layout:
+             (before, sep, after) at the LAST occurrence of sep, or
+             ("", "", s) when sep doesn't occur (Python semantics — note this
+             is the mirror image of partition's not-found case).
+
+        Finds the last occurrence with a forward strstr scan advancing past
+        each hit (same approach as rsplit). Locals [rbp-8..rbp-72]; reserve
+        72 + 32 shadow = 104 -> 112 (16-aligned).
+        """
+        self.label("_runtime_str_rpartition")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 112")
+        self.emitf(
+            "mov [rbp-8], rax",  # s
+            "mov [rbp-16], rbx",  # sep
+            "mov qword [rbp-24], -1",  # last index
+            "mov [rbp-32], rax",  # scan cursor
+        )
+        self.emitf("mov rax, [rbp-16]")
+        self._emit_libc_strlen()
+        self.emitf("mov [rbp-40], rax", "test rax, rax", "jz ._srp_notfound")
+        self.label("._srp_scan")
+        self.emitf("mov rax, [rbp-32]", "mov rbx, [rbp-16]")
+        self._emit_libc_strstr()
+        self.emitf(
+            "test rax, rax",
+            "jz ._srp_scandone",
+            "mov rdx, rax",
+            "sub rdx, [rbp-8]",
+            "mov [rbp-24], rdx",  # last = hit - s
+            "add rax, [rbp-40]",  # cursor = hit + seplen (non-overlapping)
+            "mov [rbp-32], rax",
+            "jmp ._srp_scan",
+        )
+        self.label("._srp_scandone")
+        self.emitf("cmp qword [rbp-24], -1", "je ._srp_notfound")
+        # before = s[0:last]
+        self.emitf(
+            "mov rax, [rbp-8]",
+            "xor rbx, rbx",
+            "mov rcx, [rbp-24]",
+            "call _runtime_str_slice",
+            "mov [rbp-48], rax",
+        )
+        # mid = strdup(sep)
+        self.emitf("mov rax, [rbp-16]")
+        self._emit_libc_strdup()
+        self.emitf("mov [rbp-56], rax")
+        # after = strdup(s + last + seplen)
+        self.emitf("mov rax, [rbp-8]", "add rax, [rbp-24]", "add rax, [rbp-40]")
+        self._emit_libc_strdup()
+        self.emitf("mov [rbp-64], rax", "jmp ._srp_build")
+        self.label("._srp_notfound")
+        # ("", "", strdup(s))
+        self.emitf(
+            "lea rax, [rel _runtime_empty_str]",
+            "mov [rbp-48], rax",  # before = ""
+            "mov [rbp-56], rax",  # mid = ""
+            "mov rax, [rbp-8]",
+        )
+        self._emit_libc_strdup()
+        self.emitf("mov [rbp-64], rax")  # after = copy of s
+        self.label("._srp_build")
+        # Tuple header (24 bytes): cap=3, len=3, then a 3-slot buffer.
+        self.emitf("mov rax, 24")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf(
+            "mov [rbp-72], rax",
+            f"mov qword [rax+{self.LIST_CAP_OFF}], 3",
+            f"mov qword [rax+{self.LIST_LEN_OFF}], 3",
+            "mov rax, 24",
+        )
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf(
+            "mov rcx, [rbp-72]",
+            f"mov [rcx+{self.LIST_BUF_OFF}], rax",
+            "mov rdx, [rbp-48]",
+            "mov [rax], rdx",
+            "mov rdx, [rbp-56]",
+            "mov [rax+8], rdx",
+            "mov rdx, [rbp-64]",
+            "mov [rax+16], rdx",
+            "mov rax, [rbp-72]",
             "leave",
             "ret",
         )
@@ -5979,11 +6592,21 @@ class Codegen:
     STR_METHOD_RUNTIME = {
         "upper": "_runtime_str_upper",
         "lower": "_runtime_str_lower",
+        "casefold": "_runtime_str_lower",
+        "capitalize": "_runtime_str_capitalize",
+        "swapcase": "_runtime_str_swapcase",
+        "title": "_runtime_str_title",
         "strip": "_runtime_str_strip",
         "lstrip": "_runtime_str_lstrip",
         "rstrip": "_runtime_str_rstrip",
+        "zfill": "_runtime_str_zfill",
+        "ljust": "_runtime_str_ljust",
+        "rjust": "_runtime_str_rjust",
+        "center": "_runtime_str_center",
         "startswith": "_runtime_str_starts_with",
         "endswith": "_runtime_str_ends_with",
+        "removeprefix": "_runtime_str_removeprefix",
+        "removesuffix": "_runtime_str_removesuffix",
         "find": "_runtime_str_index_of",
         "count": "_runtime_str_count",
         "replace": "_runtime_str_replace",
@@ -5991,6 +6614,7 @@ class Codegen:
         "splitlines": "_runtime_str_splitlines",
         "join": "_runtime_str_join",
         "partition": "_runtime_str_partition",
+        "rpartition": "_runtime_str_rpartition",
         "rsplit": "_runtime_str_rsplit",
         "isdigit": "_runtime_str_isdigit",
         "isalpha": "_runtime_str_isalpha",
@@ -6029,23 +6653,37 @@ class Codegen:
             if e.method in ("split", "rsplit"):
                 self.emitf("mov rbx, rax", f"mov rax, [rbp{obj_slot:+d}]",
                            "xor rcx, rcx", f"call {sym}")
+            # ljust/rjust/center with no fillchar: default to a space.
+            elif e.method in ("ljust", "rjust", "center"):
+                self.emitf("mov rbx, rax", f"mov rax, [rbp{obj_slot:+d}]",
+                           "mov rcx, 0x20", f"call {sym}")
             else:
                 self.emitf("mov rbx, rax", f"mov rax, [rbp{obj_slot:+d}]", f"call {sym}")
             return
         if len(e.args) == 2:
-            # replace(old, new) or split(sep, maxsplit). Two scratch slots.
+            # replace(old, new), split(sep, maxsplit), or
+            # ljust/rjust/center(width, fillchar). Two scratch slots.
             a1_slot = info.locals_[f"__strm_a1_{id(e)}"]
             self.gen_expr(e.obj, info)
             self.emitf(f"mov [rbp{obj_slot:+d}], rax")
             self.gen_expr(e.args[0], info)
             self.emitf(f"mov [rbp{a1_slot:+d}], rax")
             self.gen_expr(e.args[1], info)
-            self.emitf(
-                "mov rcx, rax",
-                f"mov rbx, [rbp{a1_slot:+d}]",
-                f"mov rax, [rbp{obj_slot:+d}]",
-                f"call {sym}",
-            )
+            if e.method in ("ljust", "rjust", "center"):
+                # fillchar is a 1-char str: pass its first byte as rcx.
+                self.emitf(
+                    "movzx rcx, byte [rax]",
+                    f"mov rbx, [rbp{a1_slot:+d}]",
+                    f"mov rax, [rbp{obj_slot:+d}]",
+                    f"call {sym}",
+                )
+            else:
+                self.emitf(
+                    "mov rcx, rax",
+                    f"mov rbx, [rbp{a1_slot:+d}]",
+                    f"mov rax, [rbp{obj_slot:+d}]",
+                    f"call {sym}",
+                )
             return
         # Too many args for this str method (e.g. os.path.join routed here):
         # evaluate all for side effects, return 0.
@@ -6552,10 +7190,28 @@ class Codegen:
             obj_t = A.expr_type(e.obj)
             el_kind = getattr(e.obj, "list_el_type", "int") if isinstance(e.obj, A.Name) else "int"
             self.gen_expr(e.obj, info)  # rax = header
-            if el_kind == "str":
+            sort_key = getattr(e, "sort_key", None)
+            if sort_key is not None:
+                elems = info.locals_[f"__sortkey_elems_{id(e)}"]
+                self.emitf(f"mov [rbp{elems:+d}], rax")
+                self._emit_sort_keys_list(e, info)
+                sort_fn = (
+                    "_runtime_sort_pairs_str"
+                    if e.sort_key_ret == "str"
+                    else "_runtime_sort_pairs_int"
+                )
+                keys = info.locals_[f"__sortkey_keys_{id(e)}"]
+                self.emitf(
+                    f"mov rax, [rbp{elems:+d}]",
+                    f"mov rbx, [rbp{keys:+d}]",
+                    f"call {sort_fn}",
+                )
+            elif el_kind == "str":
                 self.emitf("call _runtime_sort_str")
             else:
                 self.emitf("call _runtime_sort_int")
+            if getattr(e, "sort_reverse", None) is not None:
+                self._emit_conditional_list_reverse(e, info)
             self.emitf("xor rax, rax")  # returns None ~ 0
             return
         if e.method == "reverse":
@@ -6816,6 +7472,9 @@ class Codegen:
         push/pop across a call breaks 16-byte stack alignment.
         """
         slot_off = info.locals_[f"__binstr_{id(e)}"]
+        if e.op == "%" and lt == "str":
+            self._gen_str_pct_format(e, info, slot_off)
+            return
         if e.op == "+":
             self.gen_expr(e.left, info)
             self.emitf(f"mov [rbp{slot_off:+d}], rax")
@@ -6851,6 +7510,72 @@ class Codegen:
         self.gen_expr(e.left, info)
         self.gen_expr(e.right, info)
         self.emitf("xor rax, rax")
+
+    def _gen_str_pct_format(self, e: A.BinOp, info: FuncInfo, acc_slot: int) -> None:
+        """Lower `"...%s/%d/%f..." % (args)` (literal format string, sema-
+        validated) to a concat chain over literal segments and per-arg
+        conversions — the same `_runtime_str_concat` chaining machinery as
+        f-strings and `.format()`.
+
+        `%s` reuses `_gen_fstring_segment` (str() of any type); `%d/%i/%u/
+        %o/%x/%X` and `%e/%E/%f/%F/%g/%G` go through `_emit_int_fmt`/
+        `_emit_float_fmt` with a printf format string built from the
+        flags/width/precision (translating Python's int conversions to the
+        `ll`-sized C equivalents). A `%s` with a width pads via
+        `_runtime_str_ljust`/`_runtime_str_rjust` (space fill).
+        """
+        assert isinstance(e.left, A.StrLit)
+        pieces, _ = A.parse_pct_format(e.left.value)
+        args = e.right.elems if isinstance(e.right, A.TupleLit) else [e.right]
+        arg_iter = iter(args)
+
+        def emit_piece(piece: tuple) -> None:
+            if piece[0] == "lit":
+                label, _ = self.intern_string(piece[1])
+                self.emitf(f"lea rax, [{label}]")
+                return
+            _, flags, width, precision, conv = piece
+            arg = next(arg_iter)
+            if conv in "sr":
+                if conv == "r":
+                    arg.conv_flag = "r"  # type: ignore[attr-defined]
+                self._gen_fstring_segment(arg, info)
+                if width:
+                    self.emitf(f"mov rbx, {width}", "mov rcx, 0x20")
+                    if "-" in flags:
+                        self.emitf("call _runtime_str_ljust")
+                    else:
+                        self.emitf("call _runtime_str_rjust")
+                return
+            if conv in "diouxX":
+                cconv = {"i": "d", "u": "d", "d": "d", "o": "o", "x": "x", "X": "X"}[conv]
+                cfmt = "%" + flags + width + precision + "ll" + cconv
+                label, _ = self.intern_string(cfmt)
+                self.gen_expr(arg, info)
+                self._emit_int_fmt(label)
+                return
+            # eEfFgG: Python defaults precision to 6, same as C, when omitted.
+            prec = precision if precision else ".6"
+            cfmt = "%" + flags + width + prec + conv
+            label, _ = self.intern_string(cfmt)
+            self._gen_expr_as_float(arg, info, A.expr_type(arg))
+            self._emit_float_fmt(label)
+
+        if not pieces:
+            label, _ = self.intern_string("")
+            self.emitf(f"lea rax, [{label}]")
+            return
+        emit_piece(pieces[0])
+        self.emitf(f"mov [rbp{acc_slot:+d}], rax")
+        for piece in pieces[1:]:
+            emit_piece(piece)
+            self.emitf(
+                "mov rbx, rax",
+                f"mov rax, [rbp{acc_slot:+d}]",
+                "call _runtime_str_concat",
+                f"mov [rbp{acc_slot:+d}], rax",
+            )
+        self.emitf(f"mov rax, [rbp{acc_slot:+d}]")
 
     def _gen_binop_float(self, e: A.BinOp, info: FuncInfo, lt: str, rt: str) -> None:
         # Evaluate left (promote to float if int), spill to stack, evaluate
@@ -6952,7 +7677,22 @@ class Codegen:
             self.emitf("imul rax, rbx")
         elif op in ("//", "%"):
             # IDIV uses RDX:RAX / RBX -> RAX (quot), RDX (rem). CQO sign-extends.
+            # IDIV truncates toward zero, but Python's // and % floor toward
+            # -inf, so when the (nonzero) remainder's sign differs from the
+            # divisor's, adjust: quotient -= 1, remainder += divisor.
+            done = self.fresh("floordiv_done")
             self.emitf("cqo", "idiv rbx")
+            self.emitf(
+                "test rdx, rdx",
+                f"jz {done}",
+                "mov rcx, rdx",
+                "xor rcx, rbx",
+                "test rcx, rcx",
+                f"jns {done}",
+                "dec rax",
+                "add rdx, rbx",
+            )
+            self.label(done)
             if op == "%":
                 self.emitf("mov rax, rdx")
         elif op == "&":
@@ -7693,9 +8433,11 @@ class Codegen:
             return
         if e.func in ("max", "min"):
             # max/min: the 2-arg scalar form compares directly; the 1-arg form
-            # scans a list/tuple buffer (signed int compares — float max/min
-            # would need xmm plumbing).
+            # scans a list/tuple buffer. A `key=` callable or str elements
+            # need the general scan (_emit_minmax_scan); plain int elements
+            # keep the fast cmov loop.
             cmov = "cmovl" if e.func == "max" else "cmovg"
+            sort_key = getattr(e, "sort_key", None)
             if len(e.args) == 2:
                 self.gen_expr(e.args[0], info)
                 self.emitf("push rax")
@@ -7703,7 +8445,17 @@ class Codegen:
                 self.emitf("mov rbx, rax", "pop rax", "cmp rax, rbx", f"{cmov} rax, rbx")
                 return
             if len(e.args) == 1:
-                self.gen_expr(e.args[0], info)  # list/tuple header
+                arg = e.args[0]
+                if isinstance(arg, A.Name):
+                    el_kind = arg.list_el_type
+                elif isinstance(arg, A.ListLit):
+                    el_kind = arg.el_type
+                else:
+                    el_kind = "int"
+                if sort_key is not None or el_kind == "str":
+                    self._emit_minmax_scan(e, info, el_kind)
+                    return
+                self.gen_expr(arg, info)  # rax = list/tuple header
                 loop = self.fresh("mx_loop")
                 end = self.fresh("mx_end")
                 self.emitf(
@@ -7750,7 +8502,9 @@ class Codegen:
             # sorted(x) -> a NEW sorted list. set/dict sources sort their keys
             # (str); list/tuple sources are full-copied first. Element compare
             # picks str vs int from the source's element kind (sets/dicts are
-            # str-keyed; lists use their tracked kind, default int).
+            # str-keyed; lists use their tracked kind, default int) — unless
+            # `key=` is given, in which case a parallel "keys" list (one
+            # key(elem) per element) drives the comparison instead.
             arg = e.args[0]
             arg_t = A.expr_type(arg)
             self.gen_expr(arg, info)
@@ -7771,10 +8525,28 @@ class Codegen:
                     el_kind = arg.el_type
                 else:
                     el_kind = "int"
-            if el_kind == "str":
+            sort_key = getattr(e, "sort_key", None)
+            if sort_key is not None:
+                elems = info.locals_[f"__sortkey_elems_{id(e)}"]
+                self.emitf(f"mov [rbp{elems:+d}], rax")
+                self._emit_sort_keys_list(e, info)
+                sort_fn = (
+                    "_runtime_sort_pairs_str"
+                    if e.sort_key_ret == "str"
+                    else "_runtime_sort_pairs_int"
+                )
+                keys = info.locals_[f"__sortkey_keys_{id(e)}"]
+                self.emitf(
+                    f"mov rax, [rbp{elems:+d}]",
+                    f"mov rbx, [rbp{keys:+d}]",
+                    f"call {sort_fn}",
+                )
+            elif el_kind == "str":
                 self.emitf("call _runtime_sort_str")
             else:
                 self.emitf("call _runtime_sort_int")
+            if getattr(e, "sort_reverse", None) is not None:
+                self._emit_conditional_list_reverse(e, info)
             return
         if e.func == "reversed":
             # reversed(x) -> a new reversed copy of the list/tuple.
@@ -7857,6 +8629,23 @@ class Codegen:
                 # round(int) is the identity.
                 self.gen_expr(e.args[0], info)
             return
+        if e.func in ("hex", "oct", "bin"):
+            # hex(n)/oct(n)/bin(n) -> "0x.."/"0o.."/"0b.." (with a leading '-'
+            # for negative n), via the shared _runtime_int_to_base helper.
+            self.gen_expr(e.args[0], info)
+            prefix = {"hex": "0x", "oct": "0o", "bin": "0b"}[e.func]
+            base = {"hex": 16, "oct": 8, "bin": 2}[e.func]
+            prefix_label, _ = self.intern_string(prefix)
+            self.emitf(f"mov rbx, {base}", f"lea rcx, [rel {prefix_label}]", "call _runtime_int_to_base")
+            return
+        if e.func == "divmod":
+            # divmod(a, b) -> (a // b, a % b) as a 2-tuple, via the shared
+            # _runtime_divmod helper (floor semantics, same as // and %).
+            self.gen_expr(e.args[0], info)
+            self.emitf("push rax")  # a
+            self.gen_expr(e.args[1], info)
+            self.emitf("mov rbx, rax", "pop rax", "call _runtime_divmod")
+            return
         if e.func == "pow":
             # pow(base, exp) — integer exponentiation loop.
             # Evaluate base first, save to stack, then exp.
@@ -7903,6 +8692,175 @@ class Codegen:
         self.emit_call(self._user_symbol(e.func))
         if cleanup:
             self.emitf(f"add rsp, {cleanup}")
+
+    def _emit_sort_keys_list(self, e, info: FuncInfo) -> None:
+        """Build the "keys" list — `key(elem)` for each elem of the list
+        header parked in `__sortkey_elems_{id(e)}` — into
+        `__sortkey_keys_{id(e)}`. Used by `sorted(xs, key=...)` and
+        `xs.sort(key=...)` just before `_runtime_sort_pairs_{str,int}`.
+        `e.sort_key` is a function-pointer-valued expr (a lambda literal or a
+        name bound to one); each element is passed to it via the normal
+        indirect-call convention."""
+        elems = info.locals_[f"__sortkey_elems_{id(e)}"]
+        fn = info.locals_[f"__sortkey_fn_{id(e)}"]
+        keys = info.locals_[f"__sortkey_keys_{id(e)}"]
+        n = info.locals_[f"__sortkey_n_{id(e)}"]
+        i = info.locals_[f"__sortkey_i_{id(e)}"]
+
+        self.gen_expr(e.sort_key, info)
+        self.emitf(f"mov [rbp{fn:+d}], rax")
+
+        self.emitf(
+            f"mov rax, [rbp{elems:+d}]",
+            f"mov rax, [rax+{self.LIST_LEN_OFF}]",
+            f"mov [rbp{n:+d}], rax",
+        )
+
+        # keys = empty list (cap 4), grown via _runtime_list_append.
+        cap = 4
+        self._emit_malloc(self.LIST_HEADER)
+        self.emitf(
+            f"mov qword [rax+{self.LIST_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.LIST_LEN_OFF}], 0",
+            f"mov [rbp{keys:+d}], rax",
+        )
+        self._emit_malloc(cap * 8)
+        self.emitf(f"mov rbx, [rbp{keys:+d}]", f"mov [rbx+{self.LIST_BUF_OFF}], rax")
+
+        self.emitf(f"mov qword [rbp{i:+d}], 0")
+        top = self.fresh("sortkey")
+        end = self.fresh("sortkey_end")
+        self.label(top)
+        self.emitf(
+            f"mov rax, [rbp{i:+d}]",
+            f"cmp rax, [rbp{n:+d}]",
+            f"jge {end}",
+            f"mov rcx, [rbp{elems:+d}]",
+            f"mov rcx, [rcx+{self.LIST_BUF_OFF}]",
+            f"mov {self._arg_reg(0)}, [rcx+rax*8]",
+            f"mov rax, [rbp{fn:+d}]",
+            "call rax",
+            "mov rbx, rax",  # key(elem)
+            f"mov rax, [rbp{keys:+d}]",
+            "call _runtime_list_append",
+            f"inc qword [rbp{i:+d}]",
+            f"jmp {top}",
+        )
+        self.label(end)
+
+    def _emit_conditional_list_reverse(self, e, info: FuncInfo) -> None:
+        """If `e.sort_reverse` is truthy at runtime, reverse (in place) the
+        list whose header is in rax via `_runtime_list_reverse`. Leaves the
+        (possibly-reversed) header in rax either way. Used by
+        `sorted(xs, reverse=...)` / `xs.sort(reverse=...)`."""
+        hdr = info.locals_[f"__sortrev_hdr_{id(e)}"]
+        self.emitf(f"mov [rbp{hdr:+d}], rax")
+        skip = self.fresh("sortrev_skip")
+        self._gen_truthy_test(e.sort_reverse, info, skip)
+        self.emitf(
+            f"mov rax, [rbp{hdr:+d}]",
+            "call _runtime_list_reverse",
+            f"mov [rbp{hdr:+d}], rax",
+        )
+        self.label(skip)
+        self.emitf(f"mov rax, [rbp{hdr:+d}]")
+
+    def _emit_minmax_scan(self, e, info: FuncInfo, el_kind: str) -> None:
+        """min/max over the 1-arg iterable form, when either a `key=`
+        callable is given or the elements are strings (raw pointer
+        comparison would be wrong for str). Scans the buffer tracking the
+        best (elem, key) pair: with no `key=`, key(x) is the identity, so
+        `key_ret` falls back to `el_kind`. str keys compare via
+        `_runtime_str_cmp`; int keys via a signed `cmp`. Leaves the best
+        element in rax."""
+        sort_key = getattr(e, "sort_key", None)
+        key_ret = e.sort_key_ret if sort_key is not None else el_kind
+
+        fn = info.locals_[f"__mmkey_fn_{id(e)}"]
+        n = info.locals_[f"__mmkey_n_{id(e)}"]
+        i = info.locals_[f"__mmkey_i_{id(e)}"]
+        buf = info.locals_[f"__mmkey_buf_{id(e)}"]
+        best_elem = info.locals_[f"__mmkey_best_elem_{id(e)}"]
+        best_key = info.locals_[f"__mmkey_best_key_{id(e)}"]
+        cur_elem = info.locals_[f"__mmkey_cur_elem_{id(e)}"]
+        cur_key = info.locals_[f"__mmkey_cur_key_{id(e)}"]
+
+        if sort_key is not None:
+            self.gen_expr(sort_key, info)
+            self.emitf(f"mov [rbp{fn:+d}], rax")
+
+        self.gen_expr(e.args[0], info)  # list/tuple header
+        self.emitf(
+            f"mov rcx, [rax+{self.LIST_LEN_OFF}]",
+            f"mov [rbp{n:+d}], rcx",
+            f"mov rax, [rax+{self.LIST_BUF_OFF}]",
+            f"mov [rbp{buf:+d}], rax",
+        )
+
+        def compute_key(elem_slot: int, key_slot: int) -> None:
+            if sort_key is not None:
+                self.emitf(
+                    f"mov {self._arg_reg(0)}, [rbp{elem_slot:+d}]",
+                    f"mov rax, [rbp{fn:+d}]",
+                    "call rax",
+                    f"mov [rbp{key_slot:+d}], rax",
+                )
+            else:
+                self.emitf(
+                    f"mov rax, [rbp{elem_slot:+d}]",
+                    f"mov [rbp{key_slot:+d}], rax",
+                )
+
+        # best_elem = buf[0]; best_key = key(best_elem)
+        self.emitf(
+            f"mov rax, [rbp{buf:+d}]",
+            "mov rax, [rax]",
+            f"mov [rbp{best_elem:+d}], rax",
+        )
+        compute_key(best_elem, best_key)
+        self.emitf(f"mov qword [rbp{i:+d}], 1")
+
+        top = self.fresh("mmkey")
+        end = self.fresh("mmkey_end")
+        upd = self.fresh("mmkey_update")
+        nxt = self.fresh("mmkey_next")
+        self.label(top)
+        self.emitf(
+            f"mov rax, [rbp{i:+d}]",
+            f"cmp rax, [rbp{n:+d}]",
+            f"jge {end}",
+            f"mov rcx, [rbp{buf:+d}]",
+            "mov rax, [rcx+rax*8]",
+            f"mov [rbp{cur_elem:+d}], rax",
+        )
+        compute_key(cur_elem, cur_key)
+        if key_ret == "str":
+            self.emitf(
+                f"mov rax, [rbp{cur_key:+d}]",
+                f"mov rbx, [rbp{best_key:+d}]",
+                "call _runtime_str_cmp",
+                "cmp rax, 0",
+            )
+        else:
+            self.emitf(
+                f"mov rax, [rbp{cur_key:+d}]",
+                f"cmp rax, [rbp{best_key:+d}]",
+            )
+        if e.func == "max":
+            self.emitf(f"jg {upd}", f"jmp {nxt}")
+        else:
+            self.emitf(f"jl {upd}", f"jmp {nxt}")
+        self.label(upd)
+        self.emitf(
+            f"mov rax, [rbp{cur_elem:+d}]",
+            f"mov [rbp{best_elem:+d}], rax",
+            f"mov rax, [rbp{cur_key:+d}]",
+            f"mov [rbp{best_key:+d}], rax",
+        )
+        self.label(nxt)
+        self.emitf(f"inc qword [rbp{i:+d}]", f"jmp {top}")
+        self.label(end)
+        self.emitf(f"mov rax, [rbp{best_elem:+d}]")
 
     def _fill_defaults(self, args: list, defaults: list) -> list:
         """Pad `args` with the trailing defaults whose positions weren't
@@ -8196,6 +9154,15 @@ class Codegen:
                 return owner, method
         return None
 
+    def _resolve_repr_dunder(self, class_name: str) -> Optional[tuple[str, str]]:
+        """Like `_resolve_str_dunder` but for `repr()`/`!r`/`!a`: `__repr__`
+        takes priority over `__str__` (the reverse of str()'s order)."""
+        for method in ("__repr__", "__str__"):
+            owner = self._resolve_method_owner(class_name, method)
+            if owner is not None:
+                return owner, method
+        return None
+
     def _virtual_dispatch_rows(self, class_name: str, method: str) -> list:
         """[(class_id, owner)] for every user class that is `class_name` or
         descends from it and resolves `method` somewhere on its chain.
@@ -8421,9 +9388,14 @@ class Codegen:
     def _emit_print_value(self, expr, info: FuncInfo) -> None:
         """Emit code that prints a single typed value (no newline, no space)."""
         t = A.expr_type(expr)
-        # An f-string segment may carry a `:format-spec` (e.g. `{x:.2f}`).
-        # Route those through the spec-aware segment formatter, then print.
-        if getattr(expr, "fmt_spec", "") and t in ("int", "float"):
+        spec = getattr(expr, "fmt_spec", "")
+        conv = getattr(expr, "conv_flag", "")
+        # An f-string segment may carry a `:format-spec` (e.g. `{x:.2f}`) or a
+        # `!r`/`!s`/`!a` conversion. Route those through the segment
+        # formatter (which always yields a str pointer), then print it.
+        if (spec and t in ("int", "float")) or (
+            conv and (t in ("str", "int", "float") or t.startswith("instance:"))
+        ):
             self._gen_fstring_segment(expr, info)
             self._emit_print_str_ptr_no_newline()
             return
