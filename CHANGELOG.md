@@ -11,6 +11,11 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **Multiple context managers in one `with` (`with a as x, b as y: body`).**
+  Desugars at parse time into nested `with a as x: with b as y: body`,
+  matching CPython's enter/exit ordering exactly (`a` is entered before `b`;
+  `b` is exited before `a`, even if `body` raises) -- no sema/codegen changes
+  needed beyond the single-context-manager support below.
 - **`with` statements / context managers (`__enter__`/`__exit__`).**
   `with expr as name: body` (and `with expr: body` without `as`) requires
   `expr`'s class to define both `__enter__` and `__exit__` -- a compile-time

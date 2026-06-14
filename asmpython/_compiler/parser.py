@@ -793,14 +793,29 @@ class Parser:
 
     def _parse_with(self) -> "A.With":
         kw = self._expect("KEYWORD", "with")
-        expr = self._parse_expr()
-        name: str | None = None
-        if self._check("KEYWORD", "as"):
-            self._eat()
-            name = self._expect("NAME").value
+        items: list[tuple] = []
+        while True:
+            expr = self._parse_expr()
+            name: str | None = None
+            if self._check("KEYWORD", "as"):
+                self._eat()
+                name = self._expect("NAME").value
+            items.append((expr, name))
+            if self._check("OP", ","):
+                self._eat()
+                continue
+            break
         self._expect("OP", ":")
         body = self._parse_block()
-        return A.With(expr=expr, name=name, body=body, pos=kw.pos)
+        # Desugar `with a as x, b as y: body` into nested
+        # `with a as x: with b as y: body` -- sema's A.With -> A.Try rewrite
+        # then handles each level (and each level's __enter__/__exit__) the
+        # same as a single `with`, innermost first.
+        with_stmt: A.With
+        for expr, name in reversed(items):
+            with_stmt = A.With(expr=expr, name=name, body=body, pos=kw.pos)
+            body = [with_stmt]
+        return with_stmt
 
     def _parse_raise(self) -> A.Raise:
         kw = self._expect("KEYWORD", "raise")
