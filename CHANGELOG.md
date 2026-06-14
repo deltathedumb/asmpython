@@ -89,6 +89,21 @@ output rather than silent miscompilations.
 - **f-string format specs** are honored: `f"{x:.2f}"`, `f"{n:05d}"`,
   `f"{n:x}"` (float `.Nf/.Ne/.Ng`; int `d/x/X/o` with width and zero-pad).
   Specs were previously stripped and ignored.
+- **f-string format-spec alignment/fill/width** (`[[fill]align]width`, the
+  general prefix from Python's format-spec mini-language): `align` is
+  `<`/`>`/`^` (left/right/center), with an optional `fill` character before
+  it (default space) — `f"{name:>10}"`, `f"{name:*^11}"`, `f"{n:0>5}"`.
+  Works for `str`, `int`, `float`, and `bool` segments, and combines with
+  numeric specs (`f"{pi:>10.2f}"`). A bare width with no align character on
+  a `str` segment defaults to left-alignment, matching CPython. New
+  `_split_fmt_align`/`_split_fmt_width`/`_gen_fstring_aligned` helpers
+  (codegen.py) pad the formatted value via the existing
+  `_runtime_str_{ljust,rjust,center}` runtime helpers. Also fixes
+  `print(f"...")`, which previously lowered each segment to a direct
+  `printf("%s", ...)` call that bypassed format-spec handling entirely
+  (`_emit_print_value` now routes any segment with a non-empty `fmt_spec`
+  through the shared f-string segment formatter, for `str` too, not just
+  `int`/`float`).
 - **f-string conversions** `!r`/`!s`/`!a`: `f"{x!r}"` formats `x` via
   `repr()` (strings get quoted; a user class's `__repr__` takes priority over
   `__str__`), `!a` behaves like `!r`, and `!s` is the (already-default) `str()`

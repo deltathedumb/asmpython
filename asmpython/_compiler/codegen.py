@@ -2728,6 +2728,92 @@ class Codegen:
             return None
         return None
 
+    def _split_fmt_align(self, spec: str) -> tuple[str, str | None, str]:
+        """Split an optional `[[fill]align]` prefix off a format spec.
+        Returns (fill_char, align_char_or_None, rest)."""
+        if len(spec) >= 2 and spec[1] in "<>^=":
+            return spec[0], spec[1], spec[2:]
+        if len(spec) >= 1 and spec[0] in "<>^=":
+            return " ", spec[0], spec[1:]
+        return " ", None, spec
+
+    def _split_fmt_width(self, body: str, t: str) -> tuple[int | None, str]:
+        """Split a leading width off `body` (after any `[[fill]align]`
+        prefix has been removed). For `str`, `body` must be just digits
+        optionally followed by `s`. For `int`/`float`, an optional
+        sign/`#`/zero-pad-flag prefix is preserved in `rest` (the zero-pad
+        flag itself is dropped, since explicit alignment handles fill).
+        Returns (width_or_None, rest), where `rest` is suitable for
+        `_cfmt_for_spec` (numeric types) or unused (`str`)."""
+        if t == "str":
+            i = 0
+            while i < len(body) and body[i].isdigit():
+                i += 1
+            if i > 0 and body[i:] in ("", "s"):
+                return int(body[:i]), ""
+            return None, body
+        i = 0
+        while i < len(body) and body[i] in "+- #":
+            i += 1
+        prefix = body[:i]
+        j = i
+        if j < len(body) and body[j] == "0":
+            j += 1  # zero-pad flag: irrelevant once we pad ourselves
+        k = j
+        while k < len(body) and body[k].isdigit():
+            k += 1
+        if k == j:
+            return None, body
+        return int(body[j:k]), prefix + body[k:]
+
+    def _gen_fstring_aligned(
+        self,
+        seg,
+        info: FuncInfo,
+        t: str,
+        conv: str,
+        width: int | None,
+        fill: str,
+        align: str,
+        rest: str,
+    ) -> None:
+        """Evaluate `seg` to its (unpadded) string form, then pad/justify it
+        to `width` with `fill` via the shared `_runtime_str_ljust`/`rjust`/
+        `center` helpers, which also safely dup any shared sprintf buffer
+        even when `width` doesn't exceed the value's length."""
+        if t == "str":
+            self.gen_expr(seg, info)
+            if conv in ("r", "a"):
+                self.emitf("mov rbx, 1", "call _runtime_fmt_elem")
+        elif t == "float":
+            cfmt = self._cfmt_for_spec(rest, "float") if rest else None
+            self._gen_expr_as_float(seg, info, "float")
+            if cfmt is not None:
+                label, _ = self.intern_string(cfmt)
+                self._emit_float_fmt(label)
+            else:
+                self._emit_float_to_str()
+        else:
+            # A non-empty format spec on a bool/None formats the underlying
+            # int value (0/1), not "True"/"False"/"None" -- matches CPython's
+            # int.__format__ (bool has no __format__ override, and a spec'd
+            # None is formatted as its 0 stand-in).
+            cfmt = self._cfmt_for_spec(rest, "int") if rest else None
+            self.gen_expr(seg, info)
+            if cfmt is not None:
+                label, _ = self.intern_string(cfmt)
+                self._emit_int_fmt(label)
+            else:
+                self._emit_int_to_str()
+        helper = {
+            "<": "_runtime_str_ljust",
+            ">": "_runtime_str_rjust",
+            "^": "_runtime_str_center",
+        }[align]
+        fill_byte = ord(fill[0]) if fill else 0x20
+        w = width if width is not None else 0
+        self.emitf(f"mov rbx, {w}", f"mov rcx, {fill_byte}", f"call {helper}")
+
     def _gen_fstring_segment(self, seg, info: FuncInfo) -> None:
         """Evaluate one f-string segment and leave a str pointer in rax
         (int/float go through str(); str segments stay as-is). A plain method
@@ -2735,18 +2821,30 @@ class Codegen:
         t = A.expr_type(seg)
         spec = getattr(seg, "fmt_spec", "")
         conv = getattr(seg, "conv_flag", "")
-        if spec and t in ("int", "float"):
-            cfmt = self._cfmt_for_spec(spec, t)
-            if cfmt is not None:
-                label, _ = self.intern_string(cfmt)
-                if t == "float":
-                    self._gen_expr_as_float(seg, info, t)
-                    self._emit_float_fmt(label)
-                else:
-                    self.gen_expr(seg, info)
-                    self._emit_int_fmt(label)
-                self.emitf("call _runtime_str_concat_dup")
+        if spec:
+            fill, align, body = self._split_fmt_align(spec)
+            width, rest = None, body
+            if align is not None:
+                width, rest = self._split_fmt_width(body, t)
+            elif t == "str":
+                w, r = self._split_fmt_width(spec, "str")
+                if w is not None:
+                    fill, align, width, rest = " ", "<", w, r
+            if align in ("<", ">", "^") and t in ("str", "int", "float"):
+                self._gen_fstring_aligned(seg, info, t, conv, width, fill, align, rest)
                 return
+            if t in ("int", "float"):
+                cfmt = self._cfmt_for_spec(body, t)
+                if cfmt is not None:
+                    label, _ = self.intern_string(cfmt)
+                    if t == "float":
+                        self._gen_expr_as_float(seg, info, t)
+                        self._emit_float_fmt(label)
+                    else:
+                        self.gen_expr(seg, info)
+                        self._emit_int_fmt(label)
+                    self.emitf("call _runtime_str_concat_dup")
+                    return
         self.gen_expr(seg, info)
         if t == "int":
             if A.is_bool_expr(seg):
@@ -10143,7 +10241,7 @@ class Codegen:
         # An f-string segment may carry a `:format-spec` (e.g. `{x:.2f}`) or a
         # `!r`/`!s`/`!a` conversion. Route those through the segment
         # formatter (which always yields a str pointer), then print it.
-        if (spec and t in ("int", "float")) or (
+        if (spec and t in ("int", "float", "str")) or (
             conv and (t in ("str", "int", "float") or t.startswith("instance:"))
         ):
             self._gen_fstring_segment(expr, info)
