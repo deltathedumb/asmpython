@@ -209,6 +209,15 @@ output rather than silent miscompilations.
   allocate-and-`_runtime_dict_update` pattern as `dict.copy()`; `pop` removes
   and returns the first live key from `_runtime_dict_keys`, raising
   `KeyError: 'pop from an empty set'` on an empty set.
+- **Set literals/`.add()`/`.discard()`/`.remove()` with non-`str` elements now
+  raise a compile-time `SemaError`** instead of segfaulting at runtime.
+  `{1, 2, 3}` and `seen = set(); seen.add(1)` previously crashed: sets reuse
+  the dict hash table, which hashes/compares keys as string pointers
+  (`_runtime_hash_string` + `strcmp`); a raw `int` like `1` is read back as a
+  pointer to address `0x1` and segfaults. Sets remain str-keyed in v1 — full
+  `int`/`float`/etc. set-element support needs a tagged key representation
+  (to disambiguate a boxed pointer from an inline scalar without colliding
+  with the `0`=empty / `1`=tombstone sentinels), which is a larger follow-up.
 
 ---
 

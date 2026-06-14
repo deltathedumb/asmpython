@@ -2630,9 +2630,19 @@ class SemaAnalyzer:
         if isinstance(e, A.SetLit):
             # A `{a, b, ...}` set literal. Elements are checked but their kind
             # isn't tracked (set membership is the only operation modelled);
-            # `expr_type` already reports a SetLit as "set".
+            # `expr_type` already reports a SetLit as "set". Sets are
+            # str-keyed in v1 (the backing dict's hash/equality assume a
+            # string pointer); a non-str element would hash/compare a raw
+            # int as if it were a pointer and crash at runtime.
             for el in e.elems:
                 self._check_expr(el, scope)
+                et = A.expr_type(el)
+                if et not in ("str", "any"):
+                    raise SemaError(
+                        f"set elements of type {et} are not supported yet "
+                        "(sets are str-keyed in v1)",
+                        getattr(el, "pos", e.pos),
+                    )
             return
         if isinstance(e, A.Subscript):
             self._check_expr(e.obj, scope)
@@ -3162,7 +3172,16 @@ class SemaAnalyzer:
                 # the result is opaque so chains keep type-checking.
                 e.inferred_type = "any"
             elif obj_t == "set":
-                if e.method in ("add", "discard", "remove", "update", "clear"):
+                if e.method in ("add", "discard", "remove"):
+                    arg_t = A.expr_type(e.args[0])
+                    if arg_t not in ("str", "any"):
+                        raise SemaError(
+                            f"set.{e.method}({arg_t}) is not supported yet "
+                            "(sets are str-keyed in v1)",
+                            e.args[0].pos,
+                        )
+                    e.inferred_type = "int"
+                elif e.method in ("update", "clear"):
                     e.inferred_type = "int"
                 elif e.method in ("union", "intersection", "difference"):
                     if len(e.args) != 1:
