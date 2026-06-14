@@ -160,6 +160,8 @@ _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "string", "collections", "itertools", "functools", "json",
     "ospath", "re", "io", "operator", "copy",
     "enum", "abc", "contextlib",
+    "struct", "hashlib", "heapq", "bisect", "statistics",
+    "typing", "dataclasses", "textwrap",
 })
 
 # Dotted module names that map to a differently-named file in stdlib/.
