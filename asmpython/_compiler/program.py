@@ -163,7 +163,7 @@ _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "struct", "hashlib", "heapq", "bisect", "statistics",
     "typing", "dataclasses", "textwrap", "csv", "uuid", "base64",
     "fractions", "decimal", "datetime", "warnings", "urllib",
-    "urllibparse",
+    "urllibparse", "pprint", "platform", "glob", "threading",
 })
 
 # Dotted module names that map to a differently-named file in stdlib/.
