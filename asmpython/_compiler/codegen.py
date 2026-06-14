@@ -481,6 +481,7 @@ class Codegen:
         "_runtime_str_concat",
         "_runtime_int_to_base",
         "_runtime_int_to_binary",
+        "_runtime_group_digits",
         "_runtime_divmod",
         "_runtime_str_repeat",
         "_runtime_str_eq",
@@ -2760,6 +2761,34 @@ class Codegen:
             "call _runtime_int_to_binary",
         )
 
+    def _strip_grouping_option(self, spec: str) -> tuple[str | None, str]:
+        """If `spec` contains a `,` or `_` grouping-option char (PEP
+        378/515 thousands separators for int/float format specs), remove it
+        and return `(sep_char, spec_without_it)`. Otherwise `(None, spec)`.
+
+        Grouping is applied as a post-processing step on the formatted
+        digit string by `_emit_group_digits`, since C's printf has no
+        equivalent. If the remaining spec still requests a zero-padded
+        width (e.g. `"020"` from `"020,"`), grouping is skipped entirely
+        (returns `(None, spec)` unchanged) -- combining zero-pad width with
+        grouping would require the padded width to account for the inserted
+        separators (CPython does this; not implemented here)."""
+        if "," in spec:
+            sep, rest = ",", spec.replace(",", "", 1)
+        elif "_" in spec:
+            sep, rest = "_", spec.replace("_", "", 1)
+        else:
+            return None, spec
+        if len(rest) >= 2 and rest[0] == "0" and rest[1].isdigit():
+            return None, rest
+        return sep, rest
+
+    def _emit_group_digits(self, sep: str) -> None:
+        """In/out: rax = numeric string ptr. Inserts `sep` every 3 digits in
+        the integer part (after any leading '-', before any '.'), via
+        `_runtime_group_digits` (fresh allocation)."""
+        self.emitf(f"mov rbx, {ord(sep)}", "call _runtime_group_digits")
+
     def _gen_int_value_str(self, seg, info: FuncInfo, rest: str) -> None:
         """Evaluate int-typed `seg`, leaving its formatted-string form (per
         the numeric format-spec `rest`, before any alignment/width padding)
@@ -2767,7 +2796,10 @@ class Codegen:
         empty (decimal via `_emit_int_to_str`), a printf-style spec for
         `_cfmt_for_spec` (`d`/`x`/`X`/`o`, with width/zero-pad), or a binary
         spec (`b`/`#b`, optionally zero-padded -- handled by
-        `_runtime_int_to_binary`, which returns a fresh allocation)."""
+        `_runtime_int_to_binary`, which returns a fresh allocation). A `,`/`_`
+        grouping option (e.g. `",d"`, `",}"`) is applied afterward via
+        `_emit_group_digits`."""
+        sep, rest = self._strip_grouping_option(rest)
         binspec = self._parse_binary_spec(rest) if rest else None
         if binspec is not None:
             width, prefix_flag = binspec
@@ -2781,6 +2813,8 @@ class Codegen:
             self._emit_int_fmt(label)
         else:
             self._emit_int_to_str()
+        if sep is not None:
+            self._emit_group_digits(sep)
 
     def _split_fmt_align(self, spec: str) -> tuple[str, str | None, str]:
         """Split an optional `[[fill]align]` prefix off a format spec.
@@ -2840,6 +2874,7 @@ class Codegen:
             if conv in ("r", "a"):
                 self.emitf("mov rbx, 1", "call _runtime_fmt_elem")
         elif t == "float":
+            sep, rest = self._strip_grouping_option(rest) if rest else (None, rest)
             cfmt = self._cfmt_for_spec(rest, "float") if rest else None
             self._gen_expr_as_float(seg, info, "float")
             if cfmt is not None:
@@ -2847,6 +2882,8 @@ class Codegen:
                 self._emit_float_fmt(label)
             else:
                 self._emit_float_to_str()
+            if sep is not None:
+                self._emit_group_digits(sep)
         else:
             # A non-empty format spec on a bool/None formats the underlying
             # int value (0/1), not "True"/"False"/"None" -- matches CPython's
@@ -2881,24 +2918,34 @@ class Codegen:
             if align in ("<", ">", "^") and t in ("str", "int", "float"):
                 self._gen_fstring_aligned(seg, info, t, conv, width, fill, align, rest)
                 return
-            if t == "int":
-                binspec = self._parse_binary_spec(body)
-                if binspec is not None:
-                    width, prefix_flag = binspec
-                    self.gen_expr(seg, info)
-                    self._emit_int_to_binary_str(width, prefix_flag)
-                    return
             if t in ("int", "float"):
-                cfmt = self._cfmt_for_spec(body, t)
-                if cfmt is not None:
-                    label, _ = self.intern_string(cfmt)
+                sep, body2 = self._strip_grouping_option(body)
+                if t == "int":
+                    binspec = self._parse_binary_spec(body2)
+                    if binspec is not None:
+                        width, prefix_flag = binspec
+                        self.gen_expr(seg, info)
+                        self._emit_int_to_binary_str(width, prefix_flag)
+                        return
+                cfmt = self._cfmt_for_spec(body2, t)
+                if cfmt is not None or sep is not None:
+                    label = self.intern_string(cfmt)[0] if cfmt is not None else None
                     if t == "float":
                         self._gen_expr_as_float(seg, info, t)
-                        self._emit_float_fmt(label)
+                        if cfmt is not None:
+                            self._emit_float_fmt(label)
+                        else:
+                            self._emit_float_to_str()
                     else:
                         self.gen_expr(seg, info)
-                        self._emit_int_fmt(label)
-                    self.emitf("call _runtime_str_concat_dup")
+                        if cfmt is not None:
+                            self._emit_int_fmt(label)
+                        else:
+                            self._emit_int_to_str()
+                    if sep is not None:
+                        self._emit_group_digits(sep)
+                    elif cfmt is not None:
+                        self.emitf("call _runtime_str_concat_dup")
                     return
         self.gen_expr(seg, info)
         if t == "int":
@@ -4278,6 +4325,7 @@ class Codegen:
                 "_runtime_str_concat",
                 "_runtime_int_to_base",
                 "_runtime_int_to_binary",
+                "_runtime_group_digits",
                 "_runtime_divmod",
                 "_runtime_str_repeat",
                 "_runtime_str_eq",
@@ -4458,6 +4506,77 @@ class Codegen:
         self.emitf("mov rbx, rax", f"lea rax, [rel {minus_label}]", "call _runtime_str_concat")
         self.label("._itbin_ret")
         self.emitf("leave", "ret")
+
+        # ---- _runtime_group_digits -----------------------------------------------
+        # rax = numeric string ptr, rbx = separator byte (',' or '_') -> rax =
+        # newly-allocated string with `sep` inserted every 3 digits in the
+        # integer part (PEP 378/515 thousands separators), e.g.
+        # "1234567" -> "1,234,567", "-1234567.89" -> "-1,234,567.89". An
+        # optional leading '-' is preserved as-is; everything from the first
+        # non-digit char onward (a '.' and fraction digits, for floats) is
+        # copied verbatim after the grouped integer part.
+        self.label("_runtime_group_digits")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 96")
+        self.emitf("mov [rbp-8], rax", "mov [rbp-16], rbx")
+        self._emit_libc_strlen()
+        self.emitf("mov [rbp-24], rax")  # L
+        # sign_len = (src[0] == '-') ? 1 : 0
+        self.emitf("mov rsi, [rbp-8]", "xor rcx, rcx", "cmp byte [rsi], 45", "jne ._gd_no_sign", "mov rcx, 1")
+        self.label("._gd_no_sign")
+        self.emitf("mov [rbp-32], rcx")  # sign_len
+        # intpart_len = count of ASCII-digit chars starting at sign_len
+        self.emitf("mov rdx, rcx", "xor r8, r8")
+        self.label("._gd_scan_loop")
+        self.emitf("mov al, [rsi+rdx]", "cmp al, 48", "jl ._gd_scan_done", "cmp al, 57", "jg ._gd_scan_done")
+        self.emitf("inc r8", "inc rdx", "jmp ._gd_scan_loop")
+        self.label("._gd_scan_done")
+        self.emitf("mov [rbp-40], r8")  # intpart_len
+        # num_seps = (intpart_len - 1) // 3, or 0 if intpart_len == 0
+        self.emitf("mov rax, r8", "test rax, rax", "jz ._gd_have_seps")
+        self.emitf("dec rax", "mov rcx, 3", "xor rdx, rdx", "div rcx")
+        self.label("._gd_have_seps")
+        self.emitf("mov [rbp-48], rax")  # num_seps
+        # first_group_len = intpart_len - num_seps*3
+        self.emitf("mov rcx, rax", "imul rcx, 3", "mov rdx, [rbp-40]", "sub rdx, rcx")
+        self.emitf("mov [rbp-56], rdx")  # first_group_len
+        # allocate L + num_seps + 1 bytes
+        self.emitf("mov rax, [rbp-24]", "add rax, [rbp-48]", "add rax, 1")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf("mov [rbp-64], rax")  # dst
+        # copy sign (if any); init src/dst indices
+        self.emitf("xor rcx, rcx", "xor rdx, rdx", "cmp qword [rbp-32], 0", "je ._gd_no_copy_sign")
+        self.emitf("mov rsi, [rbp-8]", "mov rdi, [rbp-64]", "mov al, [rsi]", "mov [rdi], al", "mov rcx, 1", "mov rdx, 1")
+        self.label("._gd_no_copy_sign")
+        self.emitf("mov [rbp-72], rcx", "mov [rbp-80], rdx")  # src idx, dst idx
+        # write first_group_len digits
+        self.emitf("mov r9, [rbp-56]")
+        self.label("._gd_first_group_loop")
+        self.emitf("test r9, r9", "jz ._gd_groups_init")
+        self.emitf("mov rsi, [rbp-8]", "mov rdi, [rbp-64]", "mov rcx, [rbp-72]", "mov rdx, [rbp-80]")
+        self.emitf("mov al, [rsi+rcx]", "mov [rdi+rdx], al", "inc rcx", "inc rdx")
+        self.emitf("mov [rbp-72], rcx", "mov [rbp-80], rdx", "dec r9", "jmp ._gd_first_group_loop")
+        self.label("._gd_groups_init")
+        self.emitf("mov r10, [rbp-48]")
+        self.label("._gd_groups_loop")
+        self.emitf("test r10, r10", "jz ._gd_copy_rest")
+        # write separator
+        self.emitf("mov rdi, [rbp-64]", "mov rdx, [rbp-80]", "mov al, [rbp-16]", "mov [rdi+rdx], al", "inc rdx", "mov [rbp-80], rdx")
+        # write next 3 digits
+        self.emitf("mov r9, 3")
+        self.label("._gd_group3_loop")
+        self.emitf("test r9, r9", "jz ._gd_group3_done")
+        self.emitf("mov rsi, [rbp-8]", "mov rdi, [rbp-64]", "mov rcx, [rbp-72]", "mov rdx, [rbp-80]")
+        self.emitf("mov al, [rsi+rcx]", "mov [rdi+rdx], al", "inc rcx", "inc rdx")
+        self.emitf("mov [rbp-72], rcx", "mov [rbp-80], rdx", "dec r9", "jmp ._gd_group3_loop")
+        self.label("._gd_group3_done")
+        self.emitf("dec r10", "jmp ._gd_groups_loop")
+        # copy remaining chars (decimal point + fraction, if any) + nul
+        self.label("._gd_copy_rest")
+        self.emitf("mov rsi, [rbp-8]", "mov rdi, [rbp-64]", "mov rcx, [rbp-72]", "mov rdx, [rbp-80]")
+        self.emitf("mov al, [rsi+rcx]", "mov [rdi+rdx], al", "test al, al", "jz ._gd_copy_done")
+        self.emitf("inc rcx", "inc rdx", "mov [rbp-72], rcx", "mov [rbp-80], rdx", "jmp ._gd_copy_rest")
+        self.label("._gd_copy_done")
+        self.emitf("mov rax, [rbp-64]", "leave", "ret")
 
         # ---- _runtime_divmod ---------------------------------------------------
         # rax = a, rbx = b (signed ints) -> rax = 2-tuple (q, r) in the list

@@ -113,6 +113,19 @@ output rather than silent miscompilations.
   above (`f"{n:*>10b}"`). C's `printf` has no binary conversion, so this
   required a dedicated runtime helper (unlike `d`/`x`/`X`/`o`, which map to
   printf formats).
+- **f-string grouping options `,`/`_`** (PEP 378/515 thousands separators)
+  for `int`/`float` values: `f"{1234567:,}"` -> `"1,234,567"`,
+  `f"{1234567:_}"` -> `"1_234_567"`, `f"{amount:,.2f}"` ->
+  `"1,234,567.89"`, combinable with `d` and with alignment/width
+  (`f"{n:>15,}"`). New `_runtime_group_digits` runtime helper (inserts the
+  separator every 3 digits in the integer part, after any `-` sign and
+  before any `.` fraction) and `_strip_grouping_option`/`_emit_group_digits`
+  codegen helpers. **Known gap**: combining a grouping option with a
+  zero-padded width (`f"{n:015,}"`) zero-pads to the requested digit count
+  but omits the separators (`"000000001234567"`), unlike CPython's
+  separator-aware zero-padding (`"000,001,234,567"`) -- the grouping option
+  is dropped in this combination rather than producing the wrong total
+  width.
 - **f-string conversions** `!r`/`!s`/`!a`: `f"{x!r}"` formats `x` via
   `repr()` (strings get quoted; a user class's `__repr__` takes priority over
   `__str__`), `!a` behaves like `!r`, and `!s` is the (already-default) `str()`
