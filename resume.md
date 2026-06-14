@@ -1,5 +1,11 @@
 # Resume notes — autonomous CPython-parity loop (parity-expansion branch)
 
+## Paused — 2026-06-14
+
+Session paused here. Tree is clean, 219/219 tests passing, everything
+committed and pushed to `origin/parity-expansion` (latest: `54f7505`, new
+`base64` module). Pick up from "Next steps" below.
+
 ## Status as of 2026-06-14
 
 - 219/219 tests passing (`py -m tests.runner`).
