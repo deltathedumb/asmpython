@@ -1866,7 +1866,37 @@ class Codegen:
                 return
             # Evaluate message into rax, then call _runtime_raise.
             exc_type_id = self._exc_raise_type_id(stmt.value)
-            self.gen_expr(stmt.value, info)
+            # For `raise UserExcClass(msg)`: the constructor returns an instance
+            # dict (not a string), but _runtime_raise expects a string in rax.
+            # Extract the message from the first argument directly.
+            if (
+                isinstance(stmt.value, A.Call)
+                and self._cg_is_exception_class(stmt.value.func)
+                and stmt.value.func not in BUILTIN_EXC_IDS
+            ):
+                # User exception class: extract message from first arg rather
+                # than constructing an instance (which would put a dict pointer
+                # into rax, but _runtime_raise expects a string).
+                if stmt.value.args:
+                    self.gen_expr(stmt.value.args[0], info)
+                    arg_t = A.expr_type(stmt.value.args[0])
+                    if arg_t == "int":
+                        self.emitf("call _runtime_int_to_str")
+                    elif arg_t == "float":
+                        self.emitf("call _runtime_float_to_str")
+                else:
+                    cls_lbl, _ = self.intern_string(stmt.value.func)
+                    self.emitf(f"lea rax, [{cls_lbl}]")
+            elif (
+                isinstance(stmt.value, A.Name)
+                and self._cg_is_exception_class(stmt.value.name)
+                and stmt.value.name not in BUILTIN_EXC_IDS
+            ):
+                # `raise MyError` (bare class, no args): use class name as msg.
+                cls_lbl, _ = self.intern_string(stmt.value.name)
+                self.emitf(f"lea rax, [{cls_lbl}]")
+            else:
+                self.gen_expr(stmt.value, info)
             self.emitf(f"mov rbx, {exc_type_id}", "call _runtime_raise")
             return
         if isinstance(stmt, A.With):

@@ -11,6 +11,26 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **User-defined exception classes in `raise`/`except`.** `class MyError(Exception):
+  pass` + `raise MyError("msg")` + `except MyError as e: print(e)` now works
+  end-to-end. User exception classes deriving from any builtin exception
+  (directly or transitively) already received RTTI ids and matched typed
+  `except` clauses correctly; the missing piece was the `raise` codegen path:
+  `raise MyError("msg")` previously called `_gen_constructor` which put an
+  instance dict pointer into rax, but `_runtime_raise` expects a string.
+  Fixed: for `raise UserExcClass(msg)`, codegen now evaluates the first
+  argument (the message) directly, converting int/float args to string as
+  needed. `raise UserExcClass()` (no args) uses the class name as the message.
+  `raise UserExcClass` (bare name, no call) similarly uses the class name.
+  `except MyError as e:` already stored the message string in `e` (via
+  `_runtime_exc_msg`) and `scope.add(bind_name, "str")` was already correct.
+  Subclass hierarchy works: `raise ParseError("bad input")` caught by
+  `except AppError:` (parent), and `raise MyLookupError("key")` caught by
+  `except LookupError:` (builtin parent). New test
+  `tests/cases/147_user_exceptions.py` (CPython-verified): basic raise/catch,
+  subclass caught by parent, exception deriving from builtin LookupError,
+  `finally` running through user exception propagation.
+
 - **`match`/`case` structural pattern matching (PEP 634).** Full `match
   subject: case pattern [if guard]: body ...` syntax with all core pattern
   forms: literal (`case 1:`, `case "x":`, `case True:`, `case None:`,
