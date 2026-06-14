@@ -481,6 +481,7 @@ a, b = b, a          <span class="cmt"># swap — RHS evaluated before LHS store
 xs[<span class="num">0</span>], xs[<span class="num">1</span>] = xs[<span class="num">1</span>], xs[<span class="num">0</span>]  <span class="cmt"># swap list elements</span>
 self.x, self.y = self.y, self.x  <span class="cmt"># swap instance attributes</span>
 <span class="kw">for</span> i, x <span class="kw">in</span> <span class="fn">enumerate</span>(xs): <span class="fn">print</span>(i, x)
+<span class="kw">for</span> i, x <span class="kw">in</span> <span class="fn">enumerate</span>(xs, <span class="num">1</span>): <span class="fn">print</span>(i, x)  <span class="cmt"># start counting from 1</span>
 <span class="kw">for</span> a, b <span class="kw">in</span> <span class="fn">zip</span>(xs, ys): <span class="fn">print</span>(a, b)</code></pre>
   <p>Tuple-assignment targets may be plain names, subscripts, or attributes (in any mix); every value on the right is evaluated before any store happens, so swaps work without a temporary. The single-iterable unpack form (<code>a, b = some_list</code>) requires plain-name targets.</p>
 </section>
@@ -1084,7 +1085,7 @@ qemu-system-x86_64 -drive format=raw,file=boot.img -serial stdio -display none</
     <tr><td><code>ord(s)</code></td><td>str → int</td><td>First byte</td></tr>
     <tr><td><code>hex(n)</code> / <code>oct(n)</code> / <code>bin(n)</code></td><td>int → str</td><td><code>"0x1a"</code> / <code>"0o32"</code> / <code>"0b11010"</code>; <code>-0x1a</code> etc. for negative <code>n</code></td></tr>
     <tr><td><code>divmod(a, b)</code></td><td>int, int → tuple</td><td><code>(a // b, a % b)</code>, floor semantics (matches CPython for negative operands)</td></tr>
-    <tr><td><code>enumerate(iterable)</code></td><td>→ iterable of (int, elem)</td><td></td></tr>
+    <tr><td><code>enumerate(iterable)</code> / <code>enumerate(iterable, start)</code></td><td>→ iterable of (int, elem)</td><td>Index begins at <code>start</code> (default <code>0</code>) in <code>for i, x in enumerate(xs, start)</code></td></tr>
     <tr><td><code>zip(a, b)</code></td><td>→ iterable of (elem, elem)</td><td></td></tr>
     <tr><td><code>isinstance(obj, cls)</code></td><td>→ bool</td><td></td></tr>
     <tr><td><code>hasattr(obj, name)</code></td><td>→ bool</td><td></td></tr>

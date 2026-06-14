@@ -11,6 +11,14 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **`enumerate(iterable, start)`.** The optional second argument sets the
+  initial value of the index variable, matching CPython:
+  `for i, x in enumerate(xs, 1): ...` numbers `x` from 1 instead of 0.
+  `start` may be any `int`-typed expression (literal, variable, or
+  negative). Sema now accepts 1 or 2 arguments to `enumerate()` in the
+  `for i, x in enumerate(...)` loop form; codegen evaluates `start` into a
+  fresh local once before the loop and adds it to the 0-based iteration
+  counter when writing the index variable each pass.
 - **The walrus operator `:=` (assignment expressions, PEP 572).**
   `target := value` evaluates `value`, binds it to `target` exactly like a
   plain `target = value`, and the whole expression yields that value —

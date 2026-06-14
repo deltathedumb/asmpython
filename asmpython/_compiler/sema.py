@@ -1745,8 +1745,10 @@ class SemaAnalyzer:
                 and isinstance(s.iter, A.Call)
                 and s.iter.func == "enumerate"
             ):
-                if len(s.iter.args) != 1:
-                    raise SemaError("enumerate() takes 1 argument", s.pos)
+                if len(s.iter.args) not in (1, 2):
+                    raise SemaError(
+                        "enumerate() takes 1 or 2 arguments", s.pos
+                    )
                 if len(s.targets) != 2:
                     raise SemaError(
                         "for ... in enumerate(...) needs two targets "
@@ -1755,6 +1757,14 @@ class SemaAnalyzer:
                     )
                 inner = s.iter.args[0]
                 self._check_expr(inner, scope)
+                if len(s.iter.args) == 2:
+                    start_arg = s.iter.args[1]
+                    self._check_expr(start_arg, scope)
+                    if A.expr_type(start_arg) != "int":
+                        raise SemaError(
+                            "enumerate() start argument must be an int",
+                            s.pos,
+                        )
                 scope.add(s.targets[0], "int")
                 scope.add(s.targets[1], self._iter_element_type(inner, scope))
                 self.loop_depth += 1

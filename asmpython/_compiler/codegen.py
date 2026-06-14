@@ -1314,6 +1314,9 @@ class Codegen:
                 self._cl_define(info, f"__for_stop_{id(s)}", "int")
                 self._cl_define(info, f"__for_step_{id(s)}", "int")
                 self._cl_define(info, f"__for_iter_{id(s)}", "int")
+                if len(s.iter.args) == 2:
+                    self._cl_define(info, f"__for_enum_start_{id(s)}", "int")
+                    self._cl_walk_expr(info, s.iter.args[1])
                 self._cl_walk_expr(info, inner)
                 self._cl_walk(info, s.body)
             elif isinstance(s, A.For):
@@ -2080,6 +2083,11 @@ class Codegen:
         iter_off = info.locals_[f"__for_iter_{id(stmt)}"]
         stop_off = info.locals_[f"__for_stop_{id(stmt)}"]
         step_off = info.locals_[f"__for_step_{id(stmt)}"]  # index counter
+        start_off = None
+        if len(stmt.iter.args) == 2:  # type: ignore
+            start_off = info.locals_[f"__for_enum_start_{id(stmt)}"]
+            self.gen_expr(stmt.iter.args[1], info)  # type: ignore
+            self.emitf(f"mov [rbp{start_off:+d}], rax")
 
         # Cache the iterable pointer and its length. Tuples reuse the list
         # [cap,len,buf] layout, and an opaque (`any`) iterable here is a
@@ -2105,11 +2113,12 @@ class Codegen:
         self.emitf(
             f"mov rax, [rbp{step_off:+d}]", f"cmp rax, [rbp{stop_off:+d}]", f"jge {end}"
         )
-        # index var = counter; element var = inner[counter].
-        self.emitf(
-            f"mov rax, [rbp{step_off:+d}]",
-            f"mov [rbp{idx_off:+d}], rax",
-        )
+        # index var = counter (+ start, if enumerate() was given one);
+        # element var = inner[counter].
+        self.emitf(f"mov rax, [rbp{step_off:+d}]")
+        if start_off is not None:
+            self.emitf(f"add rax, [rbp{start_off:+d}]")
+        self.emitf(f"mov [rbp{idx_off:+d}], rax")
         if is_str:
             # char_at(s, i): rax=s, rbx=i -> fresh 1-char str.
             self.emitf(
