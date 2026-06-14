@@ -506,6 +506,23 @@ class IfExp:
 
 
 @dataclass
+class NamedExpr:
+    """`target := value` — assignment expression (the "walrus operator").
+
+    Evaluates `value`, assigns it to `target` (same scope as a plain
+    `Assign` to that name would use), and the whole expression evaluates to
+    that value. `inferred_type` / `list_el_type` mirror `value`'s type and
+    are filled in by sema.
+    """
+
+    target: str
+    value: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    inferred_type: str = "int"
+    list_el_type: str = "int"
+
+
+@dataclass
 class Call:
     func: str
     args: list["Expr"] = field(default_factory=list)
@@ -775,6 +792,7 @@ Expr = (
     | DictComprehension
     | Lambda
     | Starred
+    | NamedExpr
 )
 
 
@@ -806,6 +824,8 @@ def expr_type(e: Expr) -> str:
     if isinstance(e, (Call, Name, MethodCall, Attr)):
         return e.inferred_type
     if isinstance(e, IfExp):
+        return e.inferred_type
+    if isinstance(e, NamedExpr):
         return e.inferred_type
     if isinstance(e, Subscript):
         return getattr(e, "inferred_type", "int")
@@ -887,6 +907,8 @@ def is_bool_expr(e: Expr) -> bool:
         return e.func == "bool"
     if isinstance(e, Name):
         return getattr(e, "is_bool", False)
+    if isinstance(e, NamedExpr):
+        return is_bool_expr(e.value)
     return False
 
 
@@ -898,6 +920,8 @@ def is_none_expr(e: Expr) -> bool:
         return e.is_none
     if isinstance(e, Name):
         return getattr(e, "is_none", False)
+    if isinstance(e, NamedExpr):
+        return is_none_expr(e.value)
     return False
 
 

@@ -11,6 +11,20 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **The walrus operator `:=` (assignment expressions, PEP 572).**
+  `target := value` evaluates `value`, binds it to `target` exactly like a
+  plain `target = value`, and the whole expression yields that value —
+  e.g. `if (n := len(data)) > 3:`, `while (line := f()) :`, or
+  `x if (n := len(s)) > 3 else y`. New `A.NamedExpr` AST node; the
+  `A.Assign` target-binding logic in sema is now shared via
+  `_bind_name_from_value` so `:=` infers types (including list/dict/tuple
+  element kinds, and the bool/None print flags from the bool/None fix
+  above) the same way `=` does. Inside a list/dict comprehension, the
+  walrus target binds in the *enclosing* scope rather than the
+  comprehension's own (per PEP 572) — a new `_merge_walrus_bindings` copies
+  any such new bindings out of the comprehension's child scope after
+  type-checking it, so `results = [y := v * 2 for v in vals]` leaves `y`
+  usable (and correctly typed) afterward.
 - **Container repr for `print()` and `str()`.** `print(x)` / `str(x)` now
   render Python-style output for every built-in container instead of a raw
   pointer or compile error:

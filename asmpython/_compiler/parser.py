@@ -1146,6 +1146,15 @@ class Parser:
     def _parse_expr(self) -> "A.Expr":
         if self._check("KEYWORD", "lambda"):
             return self._parse_lambda()
+        if (
+            self._check("NAME")
+            and self._peek(1).kind == "OP"
+            and self._peek(1).value == ":="
+        ):
+            name_tok = self._eat()
+            pos = self._eat().pos  # ':='
+            value = self._parse_expr()
+            return A.NamedExpr(target=name_tok.value, value=value, pos=pos)
         return self._parse_ternary()
 
     def _parse_lambda(self) -> "A.Lambda":

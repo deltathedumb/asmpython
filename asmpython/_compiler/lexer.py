@@ -537,6 +537,7 @@ class Lexer:
             "&=",
             "|=",
             "^=",
+            ":=",
         ):
             self._advance()
             self._advance()

@@ -1235,6 +1235,33 @@ class SemaAnalyzer:
             else:
                 child.add(nm, "any")
 
+    def _merge_walrus_bindings(self, scope: Scope, child: Scope, exclude: set) -> None:
+        """Copy any *new* name bindings made in `child` (a comprehension's
+        child scope) back into `scope`, except for the comprehension's own
+        loop variable(s). Implements PEP 572: a `target := value` inside a
+        comprehension binds `target` in the containing scope, not the
+        comprehension's."""
+        for name, ty in child.types.items():
+            if name in exclude or name in scope.types:
+                continue
+            scope.types[name] = ty
+            scope.bool_flags[name] = child.bool_flags.get(name, False)
+            scope.none_flags[name] = child.none_flags.get(name, False)
+            if name in child.list_el_types:
+                scope.list_el_types[name] = child.list_el_types[name]
+            if name in child.list_el_value_types:
+                scope.list_el_value_types[name] = child.list_el_value_types[name]
+            if name in child.list_el_tuple_types:
+                scope.list_el_tuple_types[name] = child.list_el_tuple_types[name]
+            if name in child.dict_value_types:
+                scope.dict_value_types[name] = child.dict_value_types[name]
+            if name in child.dict_inner_value_types:
+                scope.dict_inner_value_types[name] = child.dict_inner_value_types[name]
+            if name in child.dict_value_tuple_types:
+                scope.dict_value_tuple_types[name] = child.dict_value_tuple_types[name]
+            if name in child.tuple_elem_types:
+                scope.tuple_elem_types[name] = child.tuple_elem_types[name]
+
     def _for_zip_spec(self, s: A.For):
         """Recognize the parallel-iteration loop shapes
         `for a, b in zip(A, B)` and `for i, (a, b) in enumerate(zip(A, B))`.
@@ -1476,82 +1503,84 @@ class SemaAnalyzer:
                 self._collect_tuple_returns(s.body, acc)
                 self._collect_tuple_returns(s.handler, acc)
 
+    def _bind_name_from_value(self, target: str, value, scope: Scope, annot=None) -> None:
+        """Bind `target` in `scope` to the static type of `value`, the same
+        way a plain `target = value` assignment would. Shared by `A.Assign`
+        and `A.NamedExpr` (the walrus operator `target := value`)."""
+        # Remember a name bound directly to a lambda, so a later `name(...)`
+        # call recovers the lambda's result type instead of defaulting int.
+        if isinstance(value, A.Lambda):
+            self.lambda_rets[target] = getattr(value, "lambda_ret", "int")
+        t = A.expr_type(value)
+        # A declaration annotation (`name: T = value`) overrides inference
+        # when it constrains the type — this is how `xs: list[str] = []`
+        # pins the element kind even though the empty initializer infers
+        # nothing. Honor it only when the inferred type is the unknown
+        # default ("int") or the annotation refines a same-kind container.
+        ann = self._resolve_annot(annot)
+        if ann is not None:
+            aty, ael, aval, atup = ann
+            if t in ("int", "any") or t == aty:
+                if aty == "list":
+                    scope.add(
+                        target,
+                        "list",
+                        el_type=ael or self._list_el_type(value, scope),
+                    )
+                    return
+                if aty == "dict":
+                    scope.add(
+                        target,
+                        "dict",
+                        value_type=aval or self._dict_value_type(value, scope),
+                        inner_value_type=self._dict_inner_value_type(value, scope),
+                        value_tuple_types=self._dict_value_tuple_types(value, scope),
+                    )
+                    return
+                if aty == "tuple":
+                    scope.add(
+                        target,
+                        "tuple",
+                        tuple_types=atup or self._tuple_elem_types(value, scope),
+                    )
+                    return
+                if aty in ("str", "float", "any") or aty.startswith("instance:"):
+                    scope.add(target, aty)
+                    return
+        if t == "list":
+            scope.add(
+                target,
+                t,
+                el_type=self._list_el_type(value, scope),
+                el_value_type=self._list_el_value_type(value, scope),
+                el_tuple_types=self._list_el_tuple_types(value, scope),
+            )
+        elif t == "dict":
+            scope.add(
+                target,
+                t,
+                value_type=self._dict_value_type(value, scope),
+                inner_value_type=self._dict_inner_value_type(value, scope),
+                value_tuple_types=self._dict_value_tuple_types(value, scope),
+            )
+        elif t == "tuple":
+            scope.add(target, t, tuple_types=self._tuple_elem_types(value, scope))
+        else:
+            scope.add(
+                target,
+                t,
+                is_bool=t == "int" and A.is_bool_expr(value),
+                is_none=t == "int" and A.is_none_expr(value),
+            )
+
     def _check_stmt(self, s, scope: Scope) -> None:
         if isinstance(s, A.Pass):
             return
         if isinstance(s, A.Assign):
             self._check_expr(s.value, scope)
-            # Remember a name bound directly to a lambda, so a later `name(...)`
-            # call recovers the lambda's result type instead of defaulting int.
-            if isinstance(s.value, A.Lambda):
-                self.lambda_rets[s.target] = getattr(s.value, "lambda_ret", "int")
-            t = A.expr_type(s.value)
-            # A declaration annotation (`name: T = value`) overrides inference
-            # when it constrains the type — this is how `xs: list[str] = []`
-            # pins the element kind even though the empty initializer infers
-            # nothing. Honor it only when the inferred type is the unknown
-            # default ("int") or the annotation refines a same-kind container.
-            ann = self._resolve_annot(getattr(s, "annot", None))
-            if ann is not None:
-                aty, ael, aval, atup = ann
-                if t in ("int", "any") or t == aty:
-                    if aty == "list":
-                        scope.add(
-                            s.target,
-                            "list",
-                            el_type=ael or self._list_el_type(s.value, scope),
-                        )
-                        return
-                    if aty == "dict":
-                        scope.add(
-                            s.target,
-                            "dict",
-                            value_type=aval or self._dict_value_type(s.value, scope),
-                            inner_value_type=self._dict_inner_value_type(
-                                s.value, scope
-                            ),
-                            value_tuple_types=self._dict_value_tuple_types(
-                                s.value, scope
-                            ),
-                        )
-                        return
-                    if aty == "tuple":
-                        scope.add(
-                            s.target,
-                            "tuple",
-                            tuple_types=atup or self._tuple_elem_types(s.value, scope),
-                        )
-                        return
-                    if aty in ("str", "float", "any") or aty.startswith("instance:"):
-                        scope.add(s.target, aty)
-                        return
-            if t == "list":
-                scope.add(
-                    s.target,
-                    t,
-                    el_type=self._list_el_type(s.value, scope),
-                    el_value_type=self._list_el_value_type(s.value, scope),
-                    el_tuple_types=self._list_el_tuple_types(s.value, scope),
-                )
-            elif t == "dict":
-                scope.add(
-                    s.target,
-                    t,
-                    value_type=self._dict_value_type(s.value, scope),
-                    inner_value_type=self._dict_inner_value_type(s.value, scope),
-                    value_tuple_types=self._dict_value_tuple_types(s.value, scope),
-                )
-            elif t == "tuple":
-                scope.add(
-                    s.target, t, tuple_types=self._tuple_elem_types(s.value, scope)
-                )
-            else:
-                scope.add(
-                    s.target,
-                    t,
-                    is_bool=t == "int" and A.is_bool_expr(s.value),
-                    is_none=t == "int" and A.is_none_expr(s.value),
-                )
+            self._bind_name_from_value(
+                s.target, s.value, scope, getattr(s, "annot", None)
+            )
             return
         if isinstance(s, A.TupleAssign):
             # Resolve the RHS first so tuple-returning calls have their type
@@ -2519,6 +2548,16 @@ class SemaAnalyzer:
                     e.pos,
                 )
             return
+        if isinstance(e, A.NamedExpr):
+            # `target := value` (the walrus operator): check + type the value,
+            # bind `target` exactly as `target = value` would, and the whole
+            # expression takes on `value`'s type.
+            self._check_expr(e.value, scope)
+            self._bind_name_from_value(e.target, e.value, scope)
+            e.inferred_type = A.expr_type(e.value)
+            if e.inferred_type == "list":
+                e.list_el_type = self._list_el_type(e.value, scope)
+            return
         if isinstance(e, A.Call):
             self._check_call(e, scope)
             return
@@ -2596,11 +2635,13 @@ class SemaAnalyzer:
             child.dict_inner_value_types.update(scope.dict_inner_value_types)
             child.tuple_elem_types.update(scope.tuple_elem_types)
             self._bind_comprehension_targets(e, el, child)
+            loop_vars = set(self._flat_target_names(e.targets)) if e.targets else {e.var}
             if e.cond is not None:
                 self._check_expr(e.cond, child)
             self._check_expr(e.elt, child)
             e.inferred_type = "list"
             e.list_el_type = A.expr_type(e.elt)
+            self._merge_walrus_bindings(scope, child, loop_vars)
             return
         if isinstance(e, A.DictComprehension):
             self._check_expr(e.iter, scope)
@@ -2625,6 +2666,7 @@ class SemaAnalyzer:
             child.dict_inner_value_types.update(scope.dict_inner_value_types)
             child.tuple_elem_types.update(scope.tuple_elem_types)
             self._bind_comprehension_targets(e, el, child)
+            loop_vars = set(self._flat_target_names(e.targets)) if e.targets else {e.var}
             if e.cond is not None:
                 self._check_expr(e.cond, child)
             self._check_expr(e.key, child)
@@ -2652,6 +2694,7 @@ class SemaAnalyzer:
                 )
             e.inferred_type = "dict"
             e.value_type = vt if vt != "any" else "int"
+            self._merge_walrus_bindings(scope, child, loop_vars)
             return
         if isinstance(e, A.DictLit):
             for k in e.keys:

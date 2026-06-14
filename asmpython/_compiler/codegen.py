@@ -1228,6 +1228,9 @@ class Codegen:
             self._cl_define(info, f"__fstr_acc_{id(expr)}")
             for s in expr.segments:
                 self._cl_walk_expr(info, s)
+        elif isinstance(expr, A.NamedExpr):
+            self._cl_define(info, expr.target, A.expr_type(expr.value))
+            self._cl_walk_expr(info, expr.value)
 
     def _cl_walk(self, info: FuncInfo, stmts: list) -> None:
         for s in stmts:
@@ -2461,7 +2464,24 @@ class Codegen:
         if isinstance(expr, A.Lambda):
             self._gen_lambda(expr, info)
             return
+        if isinstance(expr, A.NamedExpr):
+            self._gen_named_expr(expr, info)
+            return
         raise NotImplementedError(f"expr {expr}")
+
+    def _gen_named_expr(self, e: "A.NamedExpr", info: FuncInfo) -> None:
+        """`target := value` — evaluate `value`, store it into `target`'s
+        slot (like an `Assign`), and leave the result in rax/xmm0 so the
+        enclosing expression can use it."""
+        ty = self._var_type(e.target, info)
+        value_t = A.expr_type(e.value)
+        mem = self._var_mem(e.target, info)
+        if ty == "float":
+            self._gen_expr_as_float(e.value, info, value_t)
+            self.emitf(f"movsd {mem}, xmm0")
+        else:
+            self.gen_expr(e.value, info)
+            self.emitf(f"mov {mem}, rax")
 
     def _gen_lambda(self, e: A.Lambda, info: FuncInfo) -> None:
         """Register a hidden top-level function for the lambda and load its address."""

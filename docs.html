@@ -518,8 +518,21 @@ self.x, self.y = self.y, self.x  <span class="cmt"># swap instance attributes</s
 <span class="cmt"># ternary</span>
 label = <span class="str">"even"</span> <span class="kw">if</span> n % <span class="num">2</span> == <span class="num">0</span> <span class="kw">else</span> <span class="str">"odd"</span>
 
+<span class="cmt"># walrus operator: assign and use the value in one expression</span>
+<span class="kw">if</span> (count := <span class="fn">len</span>(data)) &gt; <span class="num">3</span>:
+    <span class="fn">print</span>(count)
+
 <span class="cmt"># assert</span>
 <span class="kw">assert</span> x &gt; <span class="num">0</span>, <span class="str">"must be positive"</span></code></pre>
+
+  <p><code>target := value</code> (the "walrus operator") evaluates
+  <code>value</code>, assigns it to <code>target</code>, and the whole
+  expression yields that value — usable anywhere an expression is, e.g.
+  <code>while (line := f()):</code> or
+  <code>x if (n := len(s)) &gt; 3 else y</code>. Inside a list/dict
+  comprehension, the target binds in the enclosing scope (per PEP 572),
+  unlike the comprehension's own loop variable: <code>[y := v * 2 for v in
+  vals]</code> leaves <code>y</code> set to the last value afterward.</p>
 </section>
 
 <section id="functions">
