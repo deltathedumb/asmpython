@@ -50,6 +50,7 @@ class LinuxCodegen(Codegen):
             "memset",
             "exit",
             "fmod",
+            "pow",
         ):
             self.emit(f"extern {name}")
 

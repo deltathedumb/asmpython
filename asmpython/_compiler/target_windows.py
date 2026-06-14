@@ -47,6 +47,7 @@ class WindowsCodegen(Codegen):
             "memset",
             "memcpy",
             "fmod",
+            "pow",
         ):
             self.emit(f"extern {name}")
 

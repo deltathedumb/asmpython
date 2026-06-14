@@ -7736,6 +7736,10 @@ class Codegen:
             # fmod's first arg is xmm0, second is xmm1 — already in place.
             # On Windows we need shadow space + 16-aligned rsp.
             self._emit_call_libc_double_double("fmod")
+        elif op == "**":
+            # No native exponentiation; use libc pow(xmm0, xmm1) — same
+            # calling convention as fmod above.
+            self._emit_call_libc_double_double("pow")
         else:
             raise NotImplementedError(f"float binop {op!r}")
 
@@ -7795,6 +7799,8 @@ class Codegen:
                 self.emitf("roundsd xmm0, xmm0, 1")
         elif op == "%":
             self._emit_call_libc_double_double("fmod")
+        elif op == "**":
+            self._emit_call_libc_double_double("pow")
         else:
             raise NotImplementedError(f"float op {op!r}")
 

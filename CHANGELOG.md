@@ -189,6 +189,16 @@ output rather than silent miscompilations.
   float (`xmm0`-`xmm7`) counters. `_collect_locals` also now records each
   parameter's type in `local_types`, so reads of a float parameter inside the
   function body correctly use `movsd`/`xmm0` instead of `mov`/`rax`.
+- **`**` (and `**=`) on `float` operands** now works, e.g. `2.0 ** 0.5`,
+  `9.0 ** 0.5`, `x ** 2.0` for a `float` parameter `x`. Previously
+  `_gen_binop_float`/`_emit_binop_inline_float` raised
+  `NotImplementedError(f"float binop '**'")` for any non-integer base/exponent.
+  Lowered to a call to libm's `pow(double, double)` via the existing
+  `_emit_call_libc_double_double` helper (same calling convention as `fmod`
+  for `%`); `pow` added to the Windows/Linux `extern` lists. Integer `**`
+  (repeated-squaring) is unchanged. On the freestanding target, `**` with a
+  float operand still uses the pre-existing `_runtime_math_pow` stub, which
+  returns `0.0` (same known limitation as `sin`/`cos`/`exp`/etc.).
 
 ---
 
