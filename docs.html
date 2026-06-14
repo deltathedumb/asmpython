@@ -634,9 +634,16 @@ b = <span class="fn">Box</span>(<span class="num">3</span>, <span class="num">4<
 <span class="kw">except</span> ValueError <span class="kw">as</span> e:
     <span class="fn">print</span>(<span class="str">"error:"</span>, e)
 <span class="kw">finally</span>:
-    <span class="fn">print</span>(<span class="str">"done"</span>)</code></pre>
+    <span class="fn">print</span>(<span class="str">"done"</span>)
 
-  <p><code>try</code>/<code>except</code>/<code>else</code>/<code>finally</code>, typed <code>except ExcClass:</code>, <code>raise</code> (string or exception object), re-raise. Stack unwinding via <code>setjmp</code>/<code>longjmp</code> at arbitrary call depth.</p>
+<span class="kw">try</span>:
+    xs[<span class="num">99</span>]
+<span class="kw">except</span> TypeError:
+    <span class="fn">print</span>(<span class="str">"type"</span>)
+<span class="kw">except</span> (KeyError, IndexError) <span class="kw">as</span> e:
+    <span class="fn">print</span>(<span class="str">"lookup error:"</span>, e)</code></pre>
+
+  <p><code>try</code>/<code>except</code>/<code>else</code>/<code>finally</code>, <code>raise</code> (string or exception object), re-raise. Every exception carries a runtime type id, and each <code>except ExcType:</code> / <code>except (ExcType1, ExcType2):</code> clause is checked against it in source order, including builtin hierarchy (e.g. <code>except LookupError:</code> catches a raised <code>KeyError</code> or <code>IndexError</code>; <code>except ArithmeticError:</code> catches <code>ZeroDivisionError</code>). The first matching clause runs; if none match, <code>finally</code> still runs and the exception propagates to an enclosing handler (or terminates the program if uncaught). A bare <code>except:</code> matches anything, and a <code>raise</code> of a plain string always matches the first clause (typed or not), preserving the old untyped-exception behaviour. Stack unwinding via <code>setjmp</code>/<code>longjmp</code> at arbitrary call depth.</p>
 </section>
 
 <section id="imports">

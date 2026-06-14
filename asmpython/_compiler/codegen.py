@@ -23,6 +23,48 @@ from .sema import BUILTIN_EXCEPTIONS
 from .. import stdlib
 
 
+# --- Exception-type RTTI -------------------------------------------------------
+
+# Wildcard exception-type id for "untyped" raises (`raise "a string"`, or
+# raising a `str` value) -- matches *any* `except` clause, typed or not. This
+# preserves the historical "catches anything" behaviour for code that raises
+# bare strings while still allowing `except SomeType:` to correctly reject
+# exceptions of other concrete types.
+EXC_ANY = 0
+
+# Builtin exception types and their CPython parent (for `except LookupError:`
+# to also catch a raised `KeyError`, etc.). `None` marks the hierarchy root.
+BUILTIN_EXC_PARENTS: dict[str, str | None] = {
+    "BaseException": None,
+    "Exception": "BaseException",
+    "SystemExit": "BaseException",
+    "KeyboardInterrupt": "BaseException",
+    "ArithmeticError": "Exception",
+    "ZeroDivisionError": "ArithmeticError",
+    "OverflowError": "ArithmeticError",
+    "LookupError": "Exception",
+    "IndexError": "LookupError",
+    "KeyError": "LookupError",
+    "NameError": "Exception",
+    "AttributeError": "Exception",
+    "TypeError": "Exception",
+    "ValueError": "Exception",
+    "RuntimeError": "Exception",
+    "NotImplementedError": "RuntimeError",
+    "AssertionError": "Exception",
+    "ImportError": "Exception",
+    "OSError": "Exception",
+    "FileNotFoundError": "OSError",
+    "StopIteration": "Exception",
+}
+# Fixed ids 1..N in declaration order above (0 is reserved for EXC_ANY).
+BUILTIN_EXC_IDS: dict[str, int] = {
+    name: i + 1 for i, name in enumerate(BUILTIN_EXC_PARENTS)
+}
+# `IOError is OSError` in CPython 3 -- same type, same id.
+BUILTIN_EXC_IDS["IOError"] = BUILTIN_EXC_IDS["OSError"]
+
+
 # --- Function metadata --------------------------------------------------------
 
 
@@ -162,6 +204,19 @@ class Codegen:
                 label = f"__cv_{cls.name}__{cvname}"
                 self.class_var_labels[f"{cls.name}.{cvname}"] = label
                 self.class_var_defaults.append((label, cvdefault))
+        # Exception-type RTTI: builtins get the fixed ids above; user classes
+        # deriving (transitively) from a builtin exception get the next ids,
+        # assigned in declaration order so output is deterministic.
+        self._exc_ids: dict[str, int] = dict(BUILTIN_EXC_IDS)
+        self._exc_id_parent: dict[int, int | None] = {}
+        for name, parent_name in BUILTIN_EXC_PARENTS.items():
+            self._exc_id_parent[BUILTIN_EXC_IDS[name]] = (
+                BUILTIN_EXC_IDS[parent_name] if parent_name else None
+            )
+        self._exc_next_id = max(BUILTIN_EXC_IDS.values()) + 1
+        for cls in mod.classes:
+            if self._cg_is_exception_class(cls.name):
+                self._exc_type_id(cls.name)
 
     # ---- emit helpers -------------------------------------------------------
 
@@ -246,7 +301,7 @@ class Codegen:
             elif isinstance(s, A.Try):
                 self._collect_frame_bound(s.body, acc)
                 self._collect_frame_bound(s.handler, acc)
-                for _bind, hbody in s.extra_handlers:
+                for _types, _bind, hbody in s.extra_handlers:
                     self._collect_frame_bound(hbody, acc)
                 self._collect_frame_bound(s.else_body, acc)
                 self._collect_frame_bound(s.finally_body, acc)
@@ -471,6 +526,7 @@ class Codegen:
         "_runtime_raise",
         "_runtime_handler_top",
         "_runtime_exc_msg",
+        "_runtime_exc_type",
         # I/O + collection helpers
         "_runtime_input",
         "_runtime_list_append",
@@ -1402,14 +1458,22 @@ class Codegen:
                 self._cl_define_bytes(info, f"__try_buf_{id(s)}", 200)
                 # Saved previous handler ptr to restore on normal exit.
                 self._cl_define(info, f"__try_parent_{id(s)}", "int")
-                # Saved _runtime_exc_msg from before this try, restored once
-                # a handler here finishes so a later bare `raise` outside any
-                # handler correctly reports "no active exception".
+                # Saved _runtime_exc_msg / _runtime_exc_type from before this
+                # try, restored once a handler here finishes so a later bare
+                # `raise` outside any handler correctly reports "no active
+                # exception" (and re-raises propagate the right type).
                 self._cl_define(info, f"__try_prev_exc_{id(s)}", "int")
+                self._cl_define(info, f"__try_prev_exc_type_{id(s)}", "int")
                 if s.bind_name is not None:
                     self._cl_define(info, s.bind_name, "str")
                 self._cl_walk(info, s.body)
                 self._cl_walk(info, s.handler)
+                for _types, bind_name, hbody in s.extra_handlers:
+                    if bind_name is not None:
+                        self._cl_define(info, bind_name, "str")
+                    self._cl_walk(info, hbody)
+                self._cl_walk(info, s.else_body)
+                self._cl_walk(info, s.finally_body)
             elif isinstance(s, A.Raise):
                 if s.value is not None:
                     self._cl_walk_expr(info, s.value)
@@ -1757,13 +1821,18 @@ class Codegen:
                     "No active exception to reraise"
                 )
                 has_exc = self.fresh("reraise_has_exc")
+                after_lbl = self.fresh("reraise_type")
                 self.emitf(
                     "mov rax, [rel _runtime_exc_msg]",
                     "test rax, rax",
                     f"jnz {has_exc}",
                     f"lea rax, [{no_exc_lbl}]",
+                    f"mov rbx, {self._exc_type_id('RuntimeError')}",
+                    f"jmp {after_lbl}",
                 )
                 self.label(has_exc)
+                self.emitf("mov rbx, [rel _runtime_exc_type]")
+                self.label(after_lbl)
                 self.emitf("call _runtime_raise")
                 return
             # `raise SystemExit(code)` is process exit, not an exception: the
@@ -1780,8 +1849,9 @@ class Codegen:
                 self.emitf(f"mov {self._arg_reg(0)}, rax", "call exit")
                 return
             # Evaluate message into rax, then call _runtime_raise.
+            exc_type_id = self._exc_raise_type_id(stmt.value)
             self.gen_expr(stmt.value, info)
-            self.emitf("call _runtime_raise")
+            self.emitf(f"mov rbx, {exc_type_id}", "call _runtime_raise")
             return
         if isinstance(stmt, A.With):
             # Simplified: evaluate the context expr, bind to name if given.
@@ -2000,40 +2070,44 @@ class Codegen:
         self.loop_labels.pop()
 
     def _gen_try(self, stmt: A.Try, info: FuncInfo) -> None:
-        """Compile  try: body  except [as e]: handler  via setjmp/longjmp.
+        """Compile  try: body [except ...]+ [else:] [finally:]  via setjmp/longjmp.
 
         We push a fresh jmp_buf onto the global handler chain, setjmp into
-        it, and run the body. A `raise` deep in any callee invokes longjmp,
-        which transfers control to the post-setjmp return path with eax != 0;
-        we then dispatch to the handler block. On normal body exit we pop
-        the handler before continuing.
+        it, and run the body (+ `else`, on normal completion). A `raise`
+        deep in any callee invokes longjmp, which transfers control to the
+        post-setjmp return path with eax != 0. We then check the raised
+        exception's runtime type id (`_runtime_exc_type`) against each
+        `except` clause's declared type(s), in source order, and run the
+        first one that matches. If none match, `finally` runs and the
+        exception propagates (re-raised) to the enclosing handler.
         """
         orig_id = id(stmt)
-        if stmt.extra_handlers or stmt.else_body:
-            # Multiple except: use first handler body, ignore the others.
-            # else_body: append to try body (runs on no-exception path).
-            import copy
-            stmt = copy.copy(stmt)
-            if not stmt.handler and stmt.extra_handlers:
-                stmt.handler = stmt.extra_handlers[0][1]
-            stmt.extra_handlers = []
-            stmt.body = list(stmt.body) + list(stmt.else_body or [])
-            stmt.else_body = []
         buf_off = info.locals_[f"__try_buf_{orig_id}"]
         parent_off = info.locals_[f"__try_parent_{orig_id}"]
         prev_exc_off = info.locals_[f"__try_prev_exc_{orig_id}"]
+        prev_exc_type_off = info.locals_[f"__try_prev_exc_type_{orig_id}"]
         handler_lbl = self.fresh("try_handler")
         end_lbl = self.fresh("try_end")
-        has_handler = bool(stmt.handler) or stmt.bind_name is not None
-        # The finally block is emitted on both exits (normal + exceptional);
+        # The finally block is emitted on every exit path (normal +
+        # exceptional, per handler, and on no-handler-matched propagation);
         # no nested helper — closures are outside the self-host subset.
         fin_body = stmt.finally_body or []
+        # `else` runs only on normal (no-exception) completion of the body.
+        body = list(stmt.body) + list(stmt.else_body or [])
+
+        handlers: list = []
+        if stmt.handler:
+            handlers.append((stmt.handler_types, stmt.bind_name, stmt.handler))
+        handlers.extend(stmt.extra_handlers)
 
         # Remember whatever exception (if any) was active when this try
         # started, so a handled exception here doesn't leak as "active" once
         # the handler completes.
         self.emitf(
-            "mov rax, [rel _runtime_exc_msg]", f"mov [rbp{prev_exc_off:+d}], rax"
+            "mov rax, [rel _runtime_exc_msg]",
+            f"mov [rbp{prev_exc_off:+d}], rax",
+            "mov rax, [rel _runtime_exc_type]",
+            f"mov [rbp{prev_exc_type_off:+d}], rax",
         )
         # parent_handler = _runtime_handler_top
         self.emitf(
@@ -2045,10 +2119,10 @@ class Codegen:
         self._emit_call_setjmp(buf_off)
         self.emitf("test eax, eax", f"jnz {handler_lbl}")
 
-        # ---- body ----
-        for s in stmt.body:
+        # ---- body (+ else) ----
+        for s in body:
             self.gen_stmt(s, info)
-        # Normal completion: restore parent handler, run finally, skip handler.
+        # Normal completion: restore parent handler, run finally, skip handlers.
         self.emitf(
             f"mov rax, [rbp{parent_off:+d}]",
             "mov [rel _runtime_handler_top], rax",
@@ -2063,13 +2137,27 @@ class Codegen:
         self.emitf(
             f"mov rax, [rbp{parent_off:+d}]", "mov [rel _runtime_handler_top], rax"
         )
-        if has_handler:
-            if stmt.bind_name is not None:
-                exc_off = info.locals_[stmt.bind_name]
+
+        # One "check" label per handler, plus a final "no handler matched"
+        # label. A typed handler that doesn't match jumps to the next check;
+        # a bare `except:` (empty types) always matches and falls straight
+        # into its body.
+        check_lbls = [self.fresh("try_check") for _ in range(len(handlers) + 1)]
+        for i, (types, bind_name, hbody) in enumerate(handlers):
+            self.label(check_lbls[i])
+            if types:
+                run_lbl = self.fresh("try_run")
+                self.emitf("mov rax, [rel _runtime_exc_type]")
+                for mid in sorted(self._exc_matching_ids(types)):
+                    self.emitf(f"cmp rax, {mid}", f"je {run_lbl}")
+                self.emitf(f"jmp {check_lbls[i + 1]}")
+                self.label(run_lbl)
+            if bind_name is not None:
+                exc_off = info.locals_[bind_name]
                 self.emitf(
                     "mov rax, [rel _runtime_exc_msg]", f"mov [rbp{exc_off:+d}], rax"
                 )
-            for s in stmt.handler:
+            for s in hbody:
                 self.gen_stmt(s, info)
             # finally runs after the handler completes. (Caveat: a raise from
             # inside the handler/finally longjmps to the outer handler without
@@ -2080,14 +2168,24 @@ class Codegen:
             # before this try, so a bare `raise` after this point (outside
             # any handler) reports correctly.
             self.emitf(
-                f"mov rax, [rbp{prev_exc_off:+d}]", "mov [rel _runtime_exc_msg], rax"
+                f"mov rax, [rbp{prev_exc_off:+d}]",
+                "mov [rel _runtime_exc_msg], rax",
+                f"mov rax, [rbp{prev_exc_type_off:+d}]",
+                "mov [rel _runtime_exc_type], rax",
             )
-        else:
-            # `try/finally` with no except: run finally, then re-raise so the
-            # exception keeps propagating to the enclosing handler.
-            for fs in fin_body:
-                self.gen_stmt(fs, info)
-            self.emitf("mov rax, [rel _runtime_exc_msg]", "call _runtime_raise")
+            self.emitf(f"jmp {end_lbl}")
+
+        # No `except` clause matched (or there were none at all, i.e. a bare
+        # `try/finally`): run `finally`, then re-raise so the exception keeps
+        # propagating to the enclosing handler.
+        self.label(check_lbls[-1])
+        for fs in fin_body:
+            self.gen_stmt(fs, info)
+        self.emitf(
+            "mov rax, [rel _runtime_exc_msg]",
+            "mov rbx, [rel _runtime_exc_type]",
+            "call _runtime_raise",
+        )
         self.label(end_lbl)
 
     def _gen_for_dict(self, stmt: A.For, info: FuncInfo) -> None:
@@ -3767,7 +3865,11 @@ class Codegen:
         )
         # Not found: raise KeyError.
         msg, _ = self.intern_string("KeyError: key not in dict")
-        self.emitf(f"lea rax, [{msg}]", "call _runtime_raise")
+        self.emitf(
+            f"lea rax, [{msg}]",
+            f"mov rbx, {self._exc_type_id('KeyError')}",
+            "call _runtime_raise",
+        )
         self.label(found)
         # rax = slot ptr; save value, mark tombstone.
         self.emitf(
@@ -4253,7 +4355,11 @@ class Codegen:
             "ret",
         )
         self.label("._sca_oob")
-        self.emitf("lea rax, [rel _runtime_str_oob_msg]", "call _runtime_raise")
+        self.emitf(
+            "lea rax, [rel _runtime_str_oob_msg]",
+            f"mov rbx, {self._exc_type_id('IndexError')}",
+            "call _runtime_raise",
+        )
         self.emitf("leave", "ret")  # unreachable
 
         # ---- _runtime_str_slice ----------------------------------------------
@@ -6085,6 +6191,7 @@ class Codegen:
                 "_runtime_raise",
                 "_runtime_handler_top",
                 "_runtime_exc_msg",
+                "_runtime_exc_type",
             ):
                 self.emit(f"extern {sym}")
             return
@@ -6092,6 +6199,7 @@ class Codegen:
         self.emit("section .bss")
         self.emit("_runtime_handler_top: resq 1")
         self.emit("_runtime_exc_msg:     resq 1")
+        self.emit("_runtime_exc_type:    resq 1")
 
         self.emit("section .rodata")
         self.emit('_runtime_unhandled_prefix: db "Unhandled exception: ",0')
@@ -6140,8 +6248,11 @@ class Codegen:
 
         # ---- _runtime_raise --------------------------------------------------
         self.label("_runtime_raise")
-        # rax = exception message (string ptr). Stash it in the global.
-        self.emitf("mov [rel _runtime_exc_msg], rax")
+        # rax = exception message (string ptr), rbx = exception type id.
+        # Stash both in the globals.
+        self.emitf(
+            "mov [rel _runtime_exc_msg], rax", "mov [rel _runtime_exc_type], rbx"
+        )
         # If no handler installed, print and exit.
         self.emitf(
             "mov rax, [rel _runtime_handler_top]", "test rax, rax", "jnz ._rr_jump"
@@ -7475,6 +7586,7 @@ class Codegen:
                     "test rcx, rcx",
                     f"jnz {nonempty}",
                     f"lea rax, [{empty_msg}]",
+                    f"mov rbx, {self._exc_type_id('KeyError')}",
                     "call _runtime_raise",
                 )
                 self.label(nonempty)
@@ -7538,7 +7650,11 @@ class Codegen:
             self.emitf("inc r8", f"jmp {loop}")
             self.label(miss)
             msg_label, _ = self.intern_string("ValueError: value not in list")
-            self.emitf(f"lea rax, [{msg_label}]", "call _runtime_raise")
+            self.emitf(
+                f"lea rax, [{msg_label}]",
+                f"mov rbx, {self._exc_type_id('ValueError')}",
+                "call _runtime_raise",
+            )
             self.label(found)
             self.emitf("mov rax, r8")
             self.label(end)
@@ -7748,7 +7864,11 @@ class Codegen:
             self.emitf("inc rcx", f"jmp {loop}")
             self.label(miss)
             err_lbl, _ = self.intern_string("ValueError: value not in list")
-            self.emitf(f"lea rax, [{err_lbl}]", "call _runtime_raise")
+            self.emitf(
+                f"lea rax, [{err_lbl}]",
+                f"mov rbx, {self._exc_type_id('ValueError')}",
+                "call _runtime_raise",
+            )
             self.label(found)
             # Shift elements left: buf[i] = buf[i+1], ..., buf[len-2] = buf[len-1]
             self.label(shift)
@@ -9323,6 +9443,73 @@ class Codegen:
         combined = list(args)
         combined.extend(tail)
         return combined
+
+    def _cg_is_exception_class(self, name: str) -> bool:
+        """True if `name` is a builtin exception, or a user class deriving
+        (transitively) from one. Mirrors `sema._is_exception_class`."""
+        cur = name
+        seen: set[str] = set()
+        while cur is not None and cur not in seen:
+            if cur in BUILTIN_EXC_IDS:
+                return True
+            seen.add(cur)
+            sig = self.mod.classes_sig.get(cur)
+            if sig is None:
+                return False
+            cur = sig.parent
+        return False
+
+    def _exc_type_id(self, name: str) -> int:
+        """Integer RTTI id for the exception type `name`, assigning a fresh
+        id (and recording its parent for `_exc_is_a`) the first time a user
+        exception class is seen."""
+        if name not in self._exc_ids:
+            tid = self._exc_next_id
+            self._exc_next_id += 1
+            self._exc_ids[name] = tid
+            sig = self.mod.classes_sig.get(name)
+            parent = sig.parent if sig is not None else None
+            self._exc_id_parent[tid] = self._exc_type_id(parent) if parent else None
+        return self._exc_ids[name]
+
+    def _exc_is_a(self, child_id: int, ancestor_id: int) -> bool:
+        """True if `child_id` is `ancestor_id` or a (transitive) subtype of
+        it, per the parent links recorded in `self._exc_id_parent`."""
+        cur: int | None = child_id
+        seen: set[int] = set()
+        while cur is not None and cur not in seen:
+            if cur == ancestor_id:
+                return True
+            seen.add(cur)
+            cur = self._exc_id_parent.get(cur)
+        return False
+
+    def _exc_matching_ids(self, types: list[str]) -> set[int]:
+        """The full set of runtime type ids an `except (T1, T2, ...):` clause
+        should catch: each Ti, every (currently known) subtype of any Ti, and
+        EXC_ANY (untyped raises always match a typed `except`, for back-compat
+        with code that `raise`s bare strings)."""
+        ancestors = {self._exc_type_id(t) for t in types}
+        matches = {EXC_ANY} | ancestors
+        for tid in self._exc_id_parent:
+            if any(self._exc_is_a(tid, a) for a in ancestors):
+                matches.add(tid)
+        return matches
+
+    def _exc_raise_type_id(self, value: "A.Expr") -> int:
+        """The RTTI id to attach to `raise value`: the exception class's id
+        for `raise ExcType` / `raise ExcType(...)`, or EXC_ANY for anything
+        else (string messages, variables, etc.)."""
+        name = None
+        if isinstance(value, A.Call):
+            name = value.func
+        elif isinstance(value, A.Name):
+            name = value.name
+        if name is not None and (
+            name in BUILTIN_EXC_IDS or self._cg_is_exception_class(name)
+        ):
+            return self._exc_type_id(name)
+        return EXC_ANY
 
     def _subclass_ids(self, target: str) -> list[int]:
         """Class ids of `target` and every class that (transitively) descends

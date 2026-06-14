@@ -319,23 +319,27 @@ class With:
 class Try:
     """`try: body (except [Type] [as name]: handler)+ [else: ...] [finally: ...]`.
 
-    asmpython has no exception-class RTTI, so an `except` clause's type is parsed
-    but ignored: the first handler catches anything raised. `bind_name` binds
-    the exception's message string inside that first handler.
+    Each `except` clause may name one or more exception types (`except E:` or
+    `except (E1, E2):`); an empty `types` list means a bare `except:` that
+    matches anything. At runtime, the raised exception carries a type id and
+    `_gen_try` checks each handler's declared types (and their builtin/user
+    class ancestry) in source order, running the first one that matches. If
+    none match, any `finally` runs and the exception propagates.
 
-    The first handler stays in `handler` / `bind_name` for back-compat with the
-    single-handler codegen path. Any additional `except` clauses land in
-    `extra_handlers` as (bind_name, body) pairs; `else_body` / `finally_body`
-    hold the optional trailing clauses. Codegen currently implements only the
-    single-handler, no-else, no-finally shape and rejects the rest until the
-    full handler machinery lands.
+    The first handler stays in `handler` / `handler_types` / `bind_name` for
+    back-compat with the single-handler codegen path. Any additional `except`
+    clauses land in `extra_handlers` as `(types, bind_name, body)` tuples;
+    `else_body` / `finally_body` hold the optional trailing clauses.
     """
 
     body: list["Stmt"]
     handler: list["Stmt"]
     bind_name: Optional[str] = None
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
-    extra_handlers: list = field(default_factory=list)  # list[(bind_name, body)]
+    handler_types: list[str] = field(default_factory=list)
+    extra_handlers: list = field(
+        default_factory=list
+    )  # list[(types: list[str], bind_name, body)]
     else_body: list["Stmt"] = field(default_factory=list)
     finally_body: list["Stmt"] = field(default_factory=list)
 

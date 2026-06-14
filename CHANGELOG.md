@@ -139,6 +139,24 @@ output rather than silent miscompilations.
 
 ### Fixed
 
+- **`try`/`except` now dispatches on the actual exception type**, including
+  multiple `except` clauses with different types, tuples of types
+  (`except (TypeError, ValueError):`), and the builtin exception hierarchy
+  (`except LookupError:` catches a raised `KeyError` or `IndexError`;
+  `except ArithmeticError:` catches `ZeroDivisionError`/`OverflowError`,
+  etc.). Previously, when a `try` had more than one `except` clause, the
+  *first* handler's body always ran regardless of the raised exception's
+  type or whether its declared type matched — e.g. `except TypeError: ...
+  except KeyError as e: ...` would run the `TypeError` body even for a
+  raised `KeyError`. Every exception now carries a runtime type id
+  (`_runtime_exc_type`); each handler's declared type(s) are checked against
+  it in source order, and if none match, `finally` still runs and the
+  exception propagates to an enclosing handler. A bare `except:` and a
+  `raise` of a plain string continue to match unconditionally (preserving
+  prior behaviour for untyped raises). New AST fields `A.Try.handler_types`
+  / `extra_handlers: list[(types, bind_name, body)]`; sema validates each
+  `except` type name is a builtin exception or a user class deriving from
+  one.
 - **Integer `//` and `%` now floor toward `-inf` like Python**, not toward
   zero like x86 `idiv`. Previously `-7 // 2` gave `-3` (and `-7 % 2` gave
   `-1`); now both match CPython (`-4` and `1`). The fix is a single shared

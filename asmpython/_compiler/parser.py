@@ -725,21 +725,31 @@ class Parser:
         body = self._parse_block()
         self._skip_newlines()
         # One or more `except` clauses, each with an optional exception type
-        # and optional `as name` binding. The type expression is parsed (so
-        # `except (A, B) as e:` is accepted) but discarded — asmpython has no
-        # exception-class RTTI, so handlers catch everything.
-        handlers: list = []  # list[(bind_name, body)]
+        # (or tuple of types) and optional `as name` binding.
+        handlers: list = []  # list[(types, bind_name, body)]
         while self._check("KEYWORD", "except"):
-            self._eat()
+            tok = self._eat()
+            types: list[str] = []
             if not self._check("OP", ":") and not self._check("KEYWORD", "as"):
-                self._parse_expr()  # exception type — ignored
+                type_expr = self._parse_expr()
+                if isinstance(type_expr, A.Name):
+                    types = [type_expr.name]
+                elif isinstance(type_expr, A.TupleLit) and all(
+                    isinstance(e, A.Name) for e in type_expr.elems
+                ):
+                    types = [e.name for e in type_expr.elems]  # type: ignore[union-attr]
+                else:
+                    raise ParseError(
+                        "'except' type must be a name or a tuple of names",
+                        tok.pos,
+                    )
             bind_name = None
             if self._check("KEYWORD", "as"):
                 self._eat()
                 bind_name = self._expect("NAME").value
             self._expect("OP", ":")
             hbody = self._parse_block()
-            handlers.append((bind_name, hbody))
+            handlers.append((types, bind_name, hbody))
             self._skip_newlines()
         # Optional `else:` (runs when no exception fired) and `finally:`.
         else_body: list = []
@@ -757,11 +767,14 @@ class Parser:
             raise ParseError(
                 "'try' must be followed by 'except' or 'finally'", self._peek().pos
             )
-        first_bind, first_body = handlers[0] if handlers else (None, [])
+        first_types, first_bind, first_body = (
+            handlers[0] if handlers else ([], None, [])
+        )
         return A.Try(
             body=body,
             handler=first_body,
             bind_name=first_bind,  # type: ignore[arg-type]
+            handler_types=first_types,
             extra_handlers=handlers[1:],
             else_body=else_body,
             finally_body=finally_body,

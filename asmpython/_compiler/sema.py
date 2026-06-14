@@ -549,6 +549,17 @@ class SemaAnalyzer:
             cur = cls.parent
         return None
 
+    def _check_exc_type_name(self, name: str, pos) -> None:
+        """Validate that `name` (from an `except <name>:` clause) refers to a
+        builtin exception or a user class deriving from one."""
+        if name in BUILTIN_EXCEPTIONS:
+            return
+        if name in self.classes and self._is_exception_class(name):
+            return
+        raise SemaError(
+            f"'{name}' is not an exception type", pos
+        )
+
     def _is_exception_class(self, class_name: str) -> bool:
         """True if `class_name` derives (transitively) from a builtin exception.
         Such a class inherits `Exception.__init__`, so `MyError("msg")` is valid
@@ -695,7 +706,7 @@ class SemaAnalyzer:
             elif isinstance(s, A.Try):
                 self._scan_field_assigns(s.body, sig, pinfo)
                 self._scan_field_assigns(s.handler, sig, pinfo)
-                for _bind, hbody in s.extra_handlers:
+                for _types, _bind, hbody in s.extra_handlers:
                     self._scan_field_assigns(hbody, sig, pinfo)
                 self._scan_field_assigns(s.else_body, sig, pinfo)
                 self._scan_field_assigns(s.finally_body, sig, pinfo)
@@ -2151,13 +2162,17 @@ class SemaAnalyzer:
             return
         if isinstance(s, A.Try):
             self._check_block(s.body, scope)
+            for name in s.handler_types:
+                self._check_exc_type_name(name, s.pos)
             # `except ... as e` binds the caught exception's message string
             # (asmpython's native exception payload). Codegen relies on this
             # being `str` so `print(e)` prints it correctly.
             if s.bind_name is not None:
                 scope.add(s.bind_name, "str")
             self._check_block(s.handler, scope)
-            for bind_name, hbody in s.extra_handlers:
+            for types, bind_name, hbody in s.extra_handlers:
+                for name in types:
+                    self._check_exc_type_name(name, s.pos)
                 if bind_name is not None:
                     scope.add(bind_name, "str")
                 self._check_block(hbody, scope)

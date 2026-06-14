@@ -220,7 +220,7 @@ def _collect_import_stmts(module: A.Module) -> list:
             elif isinstance(s, A.Try):
                 walk(s.body)
                 walk(getattr(s, "handler", None))
-                for _bind, hbody in getattr(s, "extra_handlers", []) or []:
+                for _types, _bind, hbody in getattr(s, "extra_handlers", []) or []:
                     walk(hbody)
                 walk(getattr(s, "else_body", None))
                 walk(getattr(s, "finally_body", None))
