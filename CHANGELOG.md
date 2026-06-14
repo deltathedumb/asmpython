@@ -167,6 +167,10 @@ output rather than silent miscompilations.
   the FFI call layer now supports an `f2i` return conversion
   (`cvttsd2si`) for libm functions whose Python-visible return type narrows
   to `int`.
+- **`xs[i] = <float>` for `list[float]`** now stores the IEEE-754 bit pattern
+  correctly (same `xmm0`-vs-`rax` issue as the dict fixes above). Previously
+  `xs[1] = 9.5` corrupted the slot with whatever integer happened to be in
+  `rax`, e.g. `[1.0, 2.0, 3.0]` became `[1.0, 4.94066e-324, 3.0]`.
 
 ---
 

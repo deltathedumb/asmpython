@@ -1516,6 +1516,8 @@ class Codegen:
             self.gen_expr(stmt.target.index, info)
             self.emitf("push rax")
             self.gen_expr(stmt.value, info)
+            if A.expr_type(stmt.value) == "float":
+                self.emitf("movq rax, xmm0")  # store the raw bit pattern
             self.emitf("push rax")
             self.gen_expr(stmt.target.obj, info)  # rax = header
             pos = self.fresh("idxw_pos")
