@@ -304,6 +304,45 @@ output rather than silent miscompilations.
 
 ### Fixed
 
+- **`print(0.0)` on Windows printed `inf` instead of `0.0`.** The Windows
+  NaN/inf pre-check in `_emit_float_to_str` compared `abs(bits) ==
+  0x7FF0000000000000` with `cmp rax, <64-bit immediate>`, but `cmp r64, imm`
+  only takes a sign-extended 32-bit immediate -- NASM silently truncated the
+  inf-bit-pattern immediate to `0`, so `0.0` (whose abs bits are also `0`)
+  matched the "is infinity" branch. Fixed by loading the inf bit pattern into
+  a register (`mov r10, 0x7FF0000000000000` / `cmp rax, r10`) before
+  comparing.
+
+- **Adding a `float` to an element read out of an unannotated `list`
+  produced wrong results** (e.g. `statistics.mean`/`variance` over
+  `list`-typed data returned `0.0`). A bare `list` parameter/local has
+  element type `"any"` (unknown).
+  sema's `BinOp` type check short-circuited `float + any` (and `any + float`)
+  to result type `"any"` instead of applying normal numeric promotion to
+  `"float"`; codegen's assignment/return paths then mis-dispatched the
+  `addsd` result back through an extra `cvtsi2sd`, clobbering it. Now `<op>`
+  between a `"float"` operand and an `"any"` operand (for non-bitwise ops)
+  is typed `"float"`, matching `A.expr_type`'s general numeric-promotion
+  fallback.
+
+- **`return <int-or-any-typed expr>` from a `-> float` function didn't
+  convert to a double**, so e.g. `def median(data: list) -> float: return
+  sorted_data[n // 2]` returned a raw integer in `rax` while the caller read
+  `xmm0`, printing `0.0` (or garbage). `FuncInfo` now carries `ret_is_float`
+  (from the function's `-> float` annotation), and `return` promotes a
+  non-float result via `cvtsi2sd` when the declared return type is `float`.
+
+- **`asmpython/stdlib/textwrap.py`**: `wrap()`/`_split_words()`/
+  `_split_lines()`/`TextWrapper.wrap()` were annotated `-> list` (element
+  type `"any"`), so `print(wrap(...)[0])` printed a raw pointer instead of
+  the string. Now annotated `-> list[str]`.
+
+- Corrected several `# expect:` blocks in `tests/cases/` (146_match_case,
+  162_heapq_module, 163_bisect_module, 164_statistics_module,
+  97_import_sys) that didn't match either CPython's actual output or the
+  current `sys.version` string -- the implementations were already correct;
+  only the test expectations were stale/typo'd.
+
 - **Unannotated function/method parameters infer their type from call-site
   arguments instead of silently defaulting to `int`.** Idiomatic Python
   rarely annotates parameters (`def __init__(self, name): self.name = name`,

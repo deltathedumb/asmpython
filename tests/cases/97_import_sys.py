@@ -1,6 +1,6 @@
 # expect:
 # 9223372036854775807
-# asmpython 0.1
+# asmpython 1.0.2
 # 1
 import sys
 

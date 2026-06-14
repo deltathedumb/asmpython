@@ -4,7 +4,7 @@
 # got two or three
 # big: 100
 # unknown: 99
-# second: b
+# second: 2
 # rest: [3, 4, 5]
 # first: 10 last: 40
 # Dog named Rex

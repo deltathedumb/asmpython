@@ -90,6 +90,11 @@ class FuncInfo:
     # Names declared `global` in this function: skip frame-slot allocation and
     # access them via the module-global .bss slot instead.
     global_names: set = field(default_factory=set)
+    # True when the function's declared return annotation is `-> float`.
+    # Lets `return <expr>` promote a non-float result (e.g. an `any`/`int`
+    # element read out of an unannotated `list`) to xmm0, since callers of a
+    # float-returning function read the result from xmm0.
+    ret_is_float: bool = False
 
 
 # --- Base codegen -------------------------------------------------------------
@@ -155,6 +160,9 @@ class Codegen:
                 name=f.name,
                 params=list(f.params),
                 defaults=list(f.defaults),
+                ret_is_float=(
+                    f.ret_type is not None and f.ret_type[0] == "float"
+                ),
             )
         # Module-level variables. A top-level `name = expr` lives in a real
         # .bss slot (a global symbol) instead of the synthetic main frame, so
@@ -813,7 +821,12 @@ class Codegen:
         return None
 
     def _collect_locals(self, f: A.FuncDef) -> FuncInfo:
-        info = FuncInfo(name=f.name, params=list(f.params), defaults=list(f.defaults))
+        info = FuncInfo(
+            name=f.name,
+            params=list(f.params),
+            defaults=list(f.defaults),
+            ret_is_float=(f.ret_type is not None and f.ret_type[0] == "float"),
+        )
         # In module-level code (`main`), a write to a global name targets its
         # .bss slot, not a frame slot — so don't give those names a local.
         info.is_main = f.name == self.label_main
@@ -1720,7 +1733,16 @@ class Codegen:
             return
         if isinstance(stmt, A.Return):
             if stmt.value is not None:
-                self.gen_expr(stmt.value, info)
+                if info.ret_is_float:
+                    # Caller reads the result from xmm0. A non-"float"-typed
+                    # return expression (e.g. an "any" element read out of an
+                    # unannotated `list`, which holds a plain int at runtime)
+                    # must be promoted via cvtsi2sd.
+                    self._gen_expr_as_float(
+                        stmt.value, info, A.expr_type(stmt.value)
+                    )
+                else:
+                    self.gen_expr(stmt.value, info)
             else:
                 self.emitf("xor rax, rax")
             self.emitf(f"jmp {self.emit_func_epilogue_label}")
@@ -8797,8 +8819,10 @@ class Codegen:
     def _gen_expr_as_float(self, expr, info: FuncInfo, ty: str) -> None:
         """Evaluate expr; ensure result is in xmm0 as a float, promoting if needed."""
         self.gen_expr(expr, info)
-        if ty == "int":
-            # int → float via cvtsi2sd
+        if ty != "float":
+            # int (or an opaque "any" element from an unannotated `list`,
+            # which holds plain ints at runtime) → float via cvtsi2sd.
+            # Only a "float"-typed expr already lands its result in xmm0.
             self.emitf("cvtsi2sd xmm0, rax")
 
     def _gen_truthy_test(self, expr, info: FuncInfo, false_target: str) -> None:

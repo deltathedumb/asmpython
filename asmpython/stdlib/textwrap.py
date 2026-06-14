@@ -5,7 +5,7 @@ Pure-Python implementation for wrapping paragraphs of text to a given width.
 from __future__ import annotations
 
 
-def wrap(text: str, width: int = 70) -> list:
+def wrap(text: str, width: int = 70) -> list[str]:
     """Wrap text to at most width characters per line. Returns list of lines."""
     if width <= 0:
         width = 70
@@ -128,7 +128,7 @@ def indent(text: str, prefix: str, predicate: int = 0) -> str:
     return result
 
 
-def _split_words(text: str) -> list:
+def _split_words(text: str) -> list[str]:
     """Split text on whitespace, returning non-empty words."""
     words: list = []
     current: str = ""
@@ -147,7 +147,7 @@ def _split_words(text: str) -> list:
     return words
 
 
-def _split_lines(text: str) -> list:
+def _split_lines(text: str) -> list[str]:
     """Split text into lines (on \\n)."""
     lines: list = []
     current: str = ""
@@ -191,9 +191,9 @@ class TextWrapper:
         self.initial_indent: str = initial_indent
         self.subsequent_indent: str = subsequent_indent
 
-    def wrap(self, text: str) -> list:
-        raw: list = wrap(text, self.width - len(self.initial_indent))
-        result: list = []
+    def wrap(self, text: str) -> list[str]:
+        raw: list[str] = wrap(text, self.width - len(self.initial_indent))
+        result: list[str] = []
         i: int = 0
         while i < len(raw):
             if i == 0:

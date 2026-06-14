@@ -3051,6 +3051,13 @@ class SemaAnalyzer:
                 if e.op == "+" and "str" in (lt, rt):
                     e.inferred_type = "str"  # type: ignore
                     return
+                # `float + any` (e.g. an opaque list element added to a float
+                # accumulator): numeric promotion still applies, so the result
+                # is "float", not opaque -- otherwise codegen's int/float
+                # dispatch for the enclosing assignment mistypes the result.
+                if e.op not in ("&", "|", "^", "<<", ">>") and "float" in (lt, rt):
+                    e.inferred_type = "float"  # type: ignore
+                    return
                 e.inferred_type = "any"  # type: ignore
                 return
             # An operand that's an object instance may overload the operator via

@@ -2,10 +2,10 @@
 # 1
 # 2
 # 3
-# 10
 # 1
-# 2
+# 1
 # 3
+# 5
 
 from heapq import heappush, heappop, heapify, nsmallest
 

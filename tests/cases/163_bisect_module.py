@@ -1,7 +1,7 @@
 # expect:
+# 1
 # 2
 # 3
-# 4
 
 from bisect import bisect_left, bisect_right, insort_left
 

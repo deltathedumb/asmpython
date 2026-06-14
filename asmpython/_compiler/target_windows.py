@@ -198,10 +198,15 @@ class WindowsCodegen(Codegen):
             # Test for NaN (ucomisd with itself; parity flag set iff NaN)
             "ucomisd xmm0, xmm0",
             f"jp {is_nan}",
-            # Test for +/-inf: abs(xmm0) == inf bits
+            # Test for +/-inf: abs(xmm0) == inf bits. `cmp r64, imm` only
+            # takes a sign-extended 32-bit immediate, so the 64-bit inf
+            # pattern must be loaded into a register first (a direct `cmp
+            # rax, 0x7FF0000000000000` gets truncated to `cmp rax, 0`, which
+            # misidentifies 0.0 as infinity).
             "movq rax, xmm0",
             "and rax, 0x7FFFFFFFFFFFFFFF",
-            "cmp rax, 0x7FF0000000000000",
+            "mov r10, 0x7FF0000000000000",
+            "cmp rax, r10",
             f"jne {skip}",
             f"jmp {is_inf}",
         )
