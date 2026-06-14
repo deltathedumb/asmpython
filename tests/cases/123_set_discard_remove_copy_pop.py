@@ -1,11 +1,11 @@
 # expect:
 # 2
-# 0
+# False
 # 2
 # 1
-# 0
-# 0
-# 1
+# False
+# False
+# True
 # 1
 # 2
 # x

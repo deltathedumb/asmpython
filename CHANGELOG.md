@@ -254,6 +254,19 @@ output rather than silent miscompilations.
   (honoring inheritance, since the id is the *runtime* class). `print()`
   and `str()` of the result now match CPython's `repr()` for types. Opaque
   (`any`-typed) arguments keep the old raw-class-id fallback.
+- **`bool` and `None` values now print/format as `True`/`False`/`None`**,
+  matching CPython, instead of the underlying `1`/`0`/`0`. This covers
+  `print()`, `str()`, `repr()`, and f-string interpolation of: `True`/`False`/
+  `None` literals; variables assigned from them; comparisons (`a == b`,
+  `1 < 2`, ...); `not x`; `and`/`or` of bool operands; a conditional expression
+  (`x if c else y`) where both branches are bool; and `bool(x)`. `type(x)` for
+  these values now also reports `<class 'bool'>` / `<class 'NoneType'>`
+  (previously `<class 'int'>`). Bool/`None` remain represented as plain `int`
+  (`0`/`1`) for arithmetic and comparisons — only the *rendering* changed.
+  New `A.is_bool_expr`/`A.is_none_expr` static-analysis helpers (and
+  `is_bool`/`is_none` flags threaded through `IntLit`/`Name` and `Scope`)
+  drive the dispatch in `_emit_print_value`, `_gen_fstring_segment`, and the
+  `str()`/`repr()` builtins.
 
 ---
 

@@ -2552,7 +2552,12 @@ class Codegen:
                 return
         self.gen_expr(seg, info)
         if t == "int":
-            self._emit_int_to_str()
+            if A.is_bool_expr(seg):
+                self._emit_bool_to_str()
+            elif A.is_none_expr(seg):
+                self.emitf("lea rax, [_runtime_none_str]")
+            else:
+                self._emit_int_to_str()
         elif t == "float":
             self._emit_float_to_str()
         elif t.startswith("instance:"):
@@ -4926,6 +4931,9 @@ class Codegen:
         self.emit('_runtime_lparen_str: db "(",0')
         self.emit('_runtime_rparen_str: db ")",0')
         self.emit('_runtime_comma_rparen_str: db ",)",0')
+        self.emit('_runtime_true_str: db "True",0')
+        self.emit('_runtime_false_str: db "False",0')
+        self.emit('_runtime_none_str: db "None",0')
 
     def _emit_list_repr_helper(self) -> None:
         """Container repr helpers and the shared per-element formatter.
@@ -8556,6 +8564,11 @@ class Codegen:
                 else:
                     self._emit_int_to_str()  # rax = ptr to ASCII
                     self.emitf("call _runtime_str_concat_dup")
+            elif arg_t == "int" and A.is_bool_expr(e.args[0]):
+                self._emit_bool_to_str()
+                self.emitf("call _runtime_str_concat_dup")
+            elif arg_t == "int" and A.is_none_expr(e.args[0]):
+                self.emitf("lea rax, [_runtime_none_str]", "call _runtime_str_concat_dup")
             else:
                 self._emit_int_to_str()  # rax = ptr to ASCII (shared buffer)
                 self.emitf("call _runtime_str_concat_dup")
@@ -8797,6 +8810,10 @@ class Codegen:
                     f"lea rbx, [{q}]",
                     "call _runtime_str_concat",
                 )
+            elif arg_t == "int" and A.is_bool_expr(e.args[0]):
+                self._emit_bool_to_str()
+            elif arg_t == "int" and A.is_none_expr(e.args[0]):
+                self.emitf("lea rax, [_runtime_none_str]")
             else:
                 self._emit_int_to_str()
             return
@@ -8885,6 +8902,14 @@ class Codegen:
         if e.func == "type":
             # type(x) -> a "<class '...'>" string, matching CPython's repr.
             arg_t = A.expr_type(e.args[0])
+            if arg_t == "int" and A.is_bool_expr(e.args[0]):
+                label, _ = self.intern_string("<class 'bool'>")
+                self.emitf(f"lea rax, [{label}]")
+                return
+            if arg_t == "int" and A.is_none_expr(e.args[0]):
+                label, _ = self.intern_string("<class 'NoneType'>")
+                self.emitf(f"lea rax, [{label}]")
+                return
             if arg_t in ("int", "float", "str", "list", "dict", "tuple", "set"):
                 label, _ = self.intern_string(f"<class '{arg_t}'>")
                 self.emitf(f"lea rax, [{label}]")
@@ -9751,6 +9776,10 @@ class Codegen:
         self.gen_expr(expr, info)
         if t == "str":
             self._emit_print_str_ptr_no_newline()
+        elif t == "int" and A.is_bool_expr(expr):
+            self._emit_print_bool_no_newline()
+        elif t == "int" and A.is_none_expr(expr):
+            self._emit_print_none_no_newline()
         elif t == "float":
             self._emit_print_float_no_newline()
         elif t in ("list", "tuple", "dict", "set"):
@@ -9795,6 +9824,26 @@ class Codegen:
     def _emit_print_float_no_newline(self) -> None:
         """In: xmm0 = double. Emits the value with `%g`, no newline."""
         raise NotImplementedError
+
+    def _emit_bool_to_str(self) -> None:
+        """In: rax = 0/1. Out: rax = pointer to static "True"/"False"."""
+        false_lbl = self.fresh("booltostr_false")
+        end_lbl = self.fresh("booltostr_end")
+        self.emitf("test rax, rax", f"jz {false_lbl}")
+        self.emitf("lea rax, [_runtime_true_str]", f"jmp {end_lbl}")
+        self.label(false_lbl)
+        self.emitf("lea rax, [_runtime_false_str]")
+        self.label(end_lbl)
+
+    def _emit_print_bool_no_newline(self) -> None:
+        """In: rax = 0/1. Emits "False"/"True" to stdout, no newline."""
+        self._emit_bool_to_str()
+        self._emit_print_str_ptr_no_newline()
+
+    def _emit_print_none_no_newline(self) -> None:
+        """Emits "None" to stdout, no newline."""
+        self.emitf("lea rax, [_runtime_none_str]")
+        self._emit_print_str_ptr_no_newline()
 
     def _emit_print_space(self) -> None:
         raise NotImplementedError

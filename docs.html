@@ -399,8 +399,8 @@ Booted successfully.</code></pre>
     <tr><td><code>int</code></td><td>64-bit signed integer (<code>rax</code> / stack slot)</td><td>No bignum. Hex <code>0x</code>, binary <code>0b</code>, octal <code>0o</code>, underscores. <code>//</code> and <code>%</code> floor toward <code>-inf</code> like CPython (e.g. <code>-7 // 2 == -4</code>, <code>-7 % 2 == 1</code>).</td></tr>
     <tr><td><code>float</code></td><td>IEEE-754 double (<code>xmm0</code> / stack slot)</td><td>Auto-promoted in mixed arithmetic. <code>1/2 == 0.5</code> always.</td></tr>
     <tr><td><code>str</code></td><td>Pointer to nul-terminated UTF-8</td><td>Immutable. See <a href="#strings">Strings</a>.</td></tr>
-    <tr><td><code>bool</code></td><td>Alias for <code>int</code> (1 / 0)</td><td><code>True</code>, <code>False</code>.</td></tr>
-    <tr><td><code>None</code></td><td>Alias for 0</td><td></td></tr>
+    <tr><td><code>bool</code></td><td>Alias for <code>int</code> (1 / 0)</td><td><code>True</code>, <code>False</code>. <code>print()</code>/<code>str()</code>/<code>repr()</code>/f-strings render bool-valued expressions (literals, comparisons, <code>not</code>, <code>and</code>/<code>or</code> of bools, <code>bool(x)</code>, bool variables) as <code>True</code>/<code>False</code>, and <code>type(x)</code> gives <code>&lt;class 'bool'&gt;</code>, matching CPython.</td></tr>
+    <tr><td><code>None</code></td><td>Alias for 0</td><td><code>print()</code>/<code>str()</code>/<code>repr()</code>/f-strings render <code>None</code> as <code>None</code>, and <code>type(None)</code> gives <code>&lt;class 'NoneType'&gt;</code>.</td></tr>
   </table>
 </section>
 
@@ -1057,7 +1057,7 @@ qemu-system-x86_64 -drive format=raw,file=boot.img -serial stdio -display none</
     <tr><td><code>int(x)</code></td><td>str / float / int → int</td><td>Float truncates toward zero</td></tr>
     <tr><td><code>float(x)</code></td><td>str / int / float → float</td><td></td></tr>
     <tr><td><code>str(x)</code></td><td>int / float / str → str</td><td>Float uses <code>%g</code></td></tr>
-    <tr><td><code>bool(x)</code></td><td>any → int</td><td>0 or 1</td></tr>
+    <tr><td><code>bool(x)</code></td><td>any → int</td><td>0 or 1; prints/formats as <code>False</code>/<code>True</code></td></tr>
     <tr><td><code>input(prompt?)</code></td><td>optional str → str</td><td>Reads one line, strips <code>\n</code></td></tr>
     <tr><td><code>range(n)</code> / <code>range(a,b)</code> / <code>range(a,b,s)</code></td><td>→ iterable</td><td></td></tr>
     <tr><td><code>abs(x)</code></td><td>int / float → same</td><td></td></tr>

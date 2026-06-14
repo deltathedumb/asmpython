@@ -368,6 +368,12 @@ class Scope:
     dict_value_tuple_types: dict[str, list[str]] = field(default_factory=dict)
     # For names typed "tuple", the per-slot element kinds.
     tuple_elem_types: dict[str, list[str]] = field(default_factory=dict)
+    # For names typed "int" that were last assigned a bool-valued expression
+    # (see A.is_bool_expr) — lets print()/str()/f-strings render "True"/"False".
+    bool_flags: dict[str, bool] = field(default_factory=dict)
+    # For names typed "int" that were last assigned `None` (see A.is_none_expr)
+    # — lets print()/str()/f-strings render "None".
+    none_flags: dict[str, bool] = field(default_factory=dict)
 
     @property
     def names(self):
@@ -386,8 +392,12 @@ class Scope:
         inner_value_type: str | None = None,
         value_tuple_types: list[str] | None = None,
         tuple_types: list[str] | None = None,
+        is_bool: bool = False,
+        is_none: bool = False,
     ) -> None:
         self.types[name] = ty
+        self.bool_flags[name] = is_bool
+        self.none_flags[name] = is_none
         if ty == "list" and el_type is not None:
             self.list_el_types[name] = el_type
         if ty == "list" and el_value_type is not None:
@@ -1536,7 +1546,12 @@ class SemaAnalyzer:
                     s.target, t, tuple_types=self._tuple_elem_types(s.value, scope)
                 )
             else:
-                scope.add(s.target, t)
+                scope.add(
+                    s.target,
+                    t,
+                    is_bool=t == "int" and A.is_bool_expr(s.value),
+                    is_none=t == "int" and A.is_none_expr(s.value),
+                )
             return
         if isinstance(s, A.TupleAssign):
             # Resolve the RHS first so tuple-returning calls have their type
@@ -1634,6 +1649,10 @@ class SemaAnalyzer:
                     s.pos,
                 )
             self._check_expr(s.value, scope)
+            # `b += 1` etc. demotes a tracked bool back to a plain int, as in
+            # CPython (bool has no augmented-assign dunders of its own).
+            scope.bool_flags[s.target] = False
+            scope.none_flags[s.target] = False
             return
         if isinstance(s, A.Return):
             if self.in_function is None:
@@ -2238,6 +2257,9 @@ class SemaAnalyzer:
                 e.inner_value_type = scope.dict_inner_value_types.get(e.name, "int")
             elif e.inferred_type == "tuple":
                 e.tuple_elem_types = list(scope.tuple_elem_types.get(e.name, []))
+            elif e.inferred_type == "int":
+                e.is_bool = scope.bool_flags.get(e.name, False)
+                e.is_none = scope.none_flags.get(e.name, False)
             return
         if isinstance(e, A.UnaryOp):
             self._check_expr(e.operand, scope)

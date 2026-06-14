@@ -7,9 +7,9 @@
 # 9.0
 # 3
 # 0.5
-# 1
-# 0
-# 1
+# True
+# False
+# True
 pi = 3.14
 print(pi)
 print(pi * 2)

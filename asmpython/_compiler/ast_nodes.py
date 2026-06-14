@@ -397,6 +397,15 @@ Stmt = (
 class IntLit:
     value: int
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    # True for the literals `True`/`False` (both parse to IntLit(1)/IntLit(0)).
+    # Lets print()/str()/f-strings render "True"/"False" instead of "1"/"0"
+    # without a separate AST node or a distinct static type (bool is still
+    # "int" everywhere else: arithmetic, comparisons, etc.).
+    is_bool: bool = False
+    # True for the literal `None` (parses to IntLit(0)). Lets print()/str()/
+    # f-strings render "None" instead of "0"; `None` is still "int" (0)
+    # everywhere else (comparisons, truthiness, etc.).
+    is_none: bool = False
 
 
 @dataclass
@@ -437,6 +446,14 @@ class Name:
     # element kinds (e.g. ["int", "str"]). Tuples are heterogeneous, so
     # there's one entry per slot rather than a single element type.
     tuple_elem_types: list[str] = field(default_factory=list)
+    # Filled in by sema when inferred_type == "int" and the name was last
+    # assigned a bool-valued expression (see is_bool_expr). Lets print()/
+    # str()/f-strings render "True"/"False" for `b = x > 1; print(b)`.
+    is_bool: bool = False
+    # Filled in by sema when inferred_type == "int" and the name was last
+    # assigned `None` (see is_none_expr). Lets print()/str()/f-strings render
+    # "None" for `x = None; print(x)`.
+    is_none: bool = False
 
 
 @dataclass
@@ -849,6 +866,39 @@ def expr_type(e: Expr) -> str:
             return "float"
         return "int"
     return "int"
+
+
+def is_bool_expr(e: Expr) -> bool:
+    """True if `e` statically evaluates to a Python `bool` (True/False),
+    even though its `expr_type` is "int" (bool is int-compatible everywhere:
+    arithmetic, comparisons, indexing). Used by print()/str()/f-strings to
+    render "True"/"False" instead of "1"/"0"."""
+    if isinstance(e, IntLit):
+        return e.is_bool
+    if isinstance(e, Compare):
+        return True
+    if isinstance(e, UnaryOp):
+        return e.op == "not"
+    if isinstance(e, BoolOp):
+        return is_bool_expr(e.left) and is_bool_expr(e.right)
+    if isinstance(e, IfExp):
+        return is_bool_expr(e.body) and is_bool_expr(e.orelse)
+    if isinstance(e, Call):
+        return e.func == "bool"
+    if isinstance(e, Name):
+        return getattr(e, "is_bool", False)
+    return False
+
+
+def is_none_expr(e: Expr) -> bool:
+    """True if `e` statically evaluates to `None` (parsed as IntLit(0)), even
+    though its `expr_type` is "int". Used by print()/str()/f-strings to
+    render "None" instead of "0"."""
+    if isinstance(e, IntLit):
+        return e.is_none
+    if isinstance(e, Name):
+        return getattr(e, "is_none", False)
+    return False
 
 
 def tuple_element_types(e: Expr) -> list[str]:

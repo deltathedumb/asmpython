@@ -1,7 +1,7 @@
 # expect:
-# 1
-# 0
-# 0
+# True
+# False
+# None
 # 1
 print(True)
 print(False)

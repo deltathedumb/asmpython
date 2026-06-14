@@ -391,7 +391,12 @@ class Parser:
         if t.kind == "KEYWORD" and t.value in ("True", "False", "None"):
             self._eat()
             v = 1 if t.value == "True" else 0
-            return A.IntLit(value=v, pos=t.pos)
+            return A.IntLit(
+                value=v,
+                pos=t.pos,
+                is_bool=t.value != "None",
+                is_none=t.value == "None",
+            )
         if t.kind == "OP" and t.value == "[":
             return self._parse_default_list(t)
         if t.kind == "OP" and t.value == "{":
@@ -1348,10 +1353,10 @@ class Parser:
             atom = self._absorb_string_concat(self._parse_fstring())
         elif t.kind == "KEYWORD" and t.value in ("True", "False"):
             self._eat()
-            atom = A.IntLit(value=1 if t.value == "True" else 0, pos=t.pos)
+            atom = A.IntLit(value=1 if t.value == "True" else 0, pos=t.pos, is_bool=True)
         elif t.kind == "KEYWORD" and t.value == "None":
             self._eat()
-            atom = A.IntLit(value=0, pos=t.pos)
+            atom = A.IntLit(value=0, pos=t.pos, is_none=True)
         elif t.kind == "OP" and t.value == "(":
             atom = self._parse_paren_or_tuple()
         elif t.kind == "OP" and t.value == "[":
