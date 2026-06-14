@@ -855,9 +855,10 @@ def expr_type(e: Expr) -> str:
             return e.inferred_type  # type: ignore
         # sema may stamp a BinOp with a non-arithmetic result: a union of class
         # objects (`A | B | C`) is "type"; an opaque ("any") operand makes the
-        # result "any"; set union/difference/intersection (|, -, &) is "set".
-        # Honor those so they chain (e.g. `(a | b) | c` for nested set unions).
-        if getattr(e, "inferred_type", None) in ("type", "any", "set"):
+        # result "any"; set union/difference/intersection (|, -, &) is "set";
+        # dict union (`d1 | d2`, PEP 584) is "dict". Honor those so they chain
+        # (e.g. `(a | b) | c` for nested set/dict unions).
+        if getattr(e, "inferred_type", None) in ("type", "any", "set", "dict"):
             return e.inferred_type  # type: ignore
         lt, rt = expr_type(e.left), expr_type(e.right)
         if e.op in ("&", "|", "^", "<<", ">>"):

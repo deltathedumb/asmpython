@@ -1399,6 +1399,11 @@ class SemaAnalyzer:
             # A dict read out of an outer container: sema stamped "any" for the
             # untracked inner value kind.
             return getattr(e, "value_type", "int")
+        if isinstance(e, A.BinOp) and e.op == "|":
+            # `d1 | d2`: the merged dict's value kind, preferring whichever
+            # side has a known (non-default) value type.
+            lvt = self._dict_value_type(e.left, scope)
+            return lvt if lvt != "int" else self._dict_value_type(e.right, scope)
         return "int"
 
     def _dict_inner_value_type(self, e, scope: Scope) -> str:
@@ -1718,6 +1723,15 @@ class SemaAnalyzer:
                     s.pos,
                 )
             self._check_expr(s.value, scope)
+            # `d |= other` (PEP 584): in-place dict union, merging `other`'s
+            # entries into `d` (overwriting on key conflicts).
+            if s.op == "|" and scope.types.get(s.target) == "dict":
+                rt = A.expr_type(s.value)
+                if rt not in ("dict", "any"):
+                    raise SemaError(
+                        f"unsupported operand type for |=: dict |= {rt}", s.pos
+                    )
+                return
             # `b += 1` etc. demotes a tracked bool back to a plain int, as in
             # CPython (bool has no augmented-assign dunders of its own).
             scope.bool_flags[s.target] = False
@@ -2426,6 +2440,12 @@ class SemaAnalyzer:
                 return
             if e.op == "|=" and lt == "set":
                 e.inferred_type = "set"  # type: ignore
+                return
+            # Dict union (PEP 584): `d1 | d2` builds a new dict containing
+            # d1's entries with d2's entries merged in on top (d2 wins on
+            # key conflicts).
+            if e.op == "|" and lt == "dict" and rt == "dict":
+                e.inferred_type = "dict"  # type: ignore
                 return
             # List concatenation: list + list -> list.
             if e.op == "+" and lt in ("list", "any", "int") and rt in ("list", "any", "int") and "list" in (lt, rt):

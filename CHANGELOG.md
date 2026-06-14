@@ -11,6 +11,20 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **Dict union operators `d1 | d2` and `d1 |= d2` (PEP 584).** `d1 | d2`
+  builds a fresh dict containing `d1`'s entries with `d2`'s merged on top
+  (`d2`'s values win on conflicting keys; neither operand is mutated), and
+  chains like `{"x": 1} | {"x": 2} | {"y": 3}`. `d1 |= d2` merges `d2` into
+  `d1` in place (the dict header is unchanged). Both lower to the existing
+  `_runtime_dict_update` helper, reusing the same "build a fresh dict and
+  update twice" codegen as set union (`|` on two sets). Sema infers the
+  result's value type from whichever operand has a known (non-default) value
+  kind, so `d3 = d1 | d2` followed by `d3[k]` type-checks correctly; `d |=
+  <non-dict>` is a sema error (`unsupported operand type for |=: dict |=
+  ...`). `expr_type()` for a `BinOp` now also honors a `"dict"`
+  `inferred_type` (previously only `type`/`any`/`set` were honored, so a
+  dict-union `BinOp` fell through to the bitwise-int default and any
+  subscript on its result failed with "cannot index a int").
 - **Starred assignment unpacking `a, *rest = xs` (PEP 3132).** A single
   `*name` target may appear anywhere among a tuple-assignment's targets
   (`a, *rest = xs`, `*init, last = xs`, `first, *mid, last = xs`) when the

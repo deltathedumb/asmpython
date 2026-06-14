@@ -960,8 +960,11 @@ class Codegen:
             if lt.startswith("instance:") or rt.startswith("instance:"):
                 self._cl_define(info, f"__binop_lhs_{id(expr)}")
             # Set algebra (`|`, `&`, `-`) builds a fresh set, mirroring
-            # set.union/intersection/difference's scratch slots.
-            if lt == "set" and rt == "set" and expr.op in ("|", "&", "-"):
+            # set.union/intersection/difference's scratch slots. Dict union
+            # (`d1 | d2`, PEP 584) reuses the same "union" scratch slots.
+            if (lt == "set" and rt == "set" and expr.op in ("|", "&", "-")) or (
+                lt == "dict" and rt == "dict" and expr.op == "|"
+            ):
                 self._cl_define(info, f"__sm_other_{id(expr)}")
                 self._cl_define(info, f"__sm_new_{id(expr)}")
                 self._cl_define(info, f"__sm_keys_{id(expr)}")
@@ -1665,6 +1668,12 @@ class Codegen:
         if isinstance(stmt, A.AugAssign):
             mem = self._var_mem(stmt.target, info)
             ty = self._var_type(stmt.target, info)
+            if ty == "dict" and stmt.op == "|":
+                # `d |= other` (PEP 584): merge other's entries into d in
+                # place; the dict header pointer itself doesn't change.
+                self.gen_expr(stmt.value, info)
+                self.emitf("mov rbx, rax", f"mov rax, {mem}", "call _runtime_dict_update")
+                return
             if ty == "float":
                 self._gen_expr_as_float(stmt.value, info, A.expr_type(stmt.value))
                 self.emitf("movsd xmm1, xmm0", f"movsd xmm0, {mem}")
@@ -7902,6 +7911,12 @@ class Codegen:
         if lt == "set" and rt == "set" and e.op in ("|", "&", "-"):
             method = {"|": "union", "&": "intersection", "-": "difference"}[e.op]
             self._gen_set_setop(e.left, e.right, method, id(e), info)
+            return
+        # Dict union (`d1 | d2`, PEP 584) builds a fresh dict the same way as
+        # set union: new.update(left); new.update(right) so right's entries
+        # win on key conflicts.
+        if lt == "dict" and rt == "dict" and e.op == "|":
+            self._gen_set_setop(e.left, e.right, "union", id(e), info)
             return
         # An instance operand that overloads this operator via a dunder
         # (`Path("a") / "b"` -> `Path.__truediv__`, resolved by sema and
