@@ -325,6 +325,13 @@ output rather than silent miscompilations.
   in-memory `list[str]` rather than file objects, since asmpython has no
   file-iterator protocol to drive CPython's lazy `csv.reader(f)`. New
   `tests/cases/168_csv_module.py` (CPython-verified).
+- **`asmlib.hardware.rdtsc()`, `cpuid(leaf)`, and `rdrand()` are now real on
+  hosted targets (Windows/Linux), not just `--target freestanding`.** These
+  three are unprivileged (ring-3) instructions, unlike the rest of
+  `asmlib.hardware` (port I/O, MMIO, MSRs, control registers, PIC/PIT/
+  keyboard/VGA, `halt`/`disable_interrupts`/`enable_interrupts`), which
+  genuinely require ring 0 and remain safe zero-returning no-ops on hosted
+  targets. New `tests/cases/169_hardware_real_ops.py`.
 
 ### Fixed
 

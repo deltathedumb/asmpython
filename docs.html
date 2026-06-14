@@ -877,7 +877,7 @@ random.seed(<span class="num">42</span>)
 
 <section id="asmlib-hardware">
   <h2>asmlib.hardware <a class="anchor" href="#asmlib-hardware">#</a></h2>
-  <p>Bare-metal hardware access. On hosted targets (<code>windows</code> / <code>linux</code>) all functions return 0. On <code>--target freestanding</code> they emit real <code>in</code> / <code>out</code> / <code>wrmsr</code> instructions.</p>
+  <p>Bare-metal hardware access. <code>rdtsc()</code>, <code>cpuid(leaf)</code> and <code>rdrand()</code> are unprivileged instructions and execute for real on every target, including hosted <code>windows</code> / <code>linux</code>. Everything else here (port I/O, MMIO, MSRs, control registers, PIC/PIT/keyboard/VGA, <code>halt</code>/<code>disable_interrupts</code>/<code>enable_interrupts</code>) requires ring 0, so on hosted targets those functions are safe no-ops that return 0. On <code>--target freestanding</code> they emit real <code>in</code> / <code>out</code> / <code>wrmsr</code> / <code>cli</code> / <code>hlt</code> instructions.</p>
 
   <h4>Port I/O</h4>
   <table>
@@ -902,9 +902,9 @@ random.seed(<span class="num">42</span>)
   <h4>CPU</h4>
   <table>
     <tr><th>Function</th><th>Description</th></tr>
-    <tr><td><code>rdtsc()</code></td><td>Read timestamp counter (64-bit)</td></tr>
-    <tr><td><code>rdrand()</code></td><td>Hardware random 64-bit value (retries until valid)</td></tr>
-    <tr><td><code>cpuid(leaf)</code></td><td>Execute CPUID; returns EAX</td></tr>
+    <tr><td><code>rdtsc()</code></td><td>Read timestamp counter (64-bit). Real on all targets, including hosted.</td></tr>
+    <tr><td><code>rdrand()</code></td><td>Hardware random 64-bit value (retries until valid). Real on all targets, including hosted.</td></tr>
+    <tr><td><code>cpuid(leaf)</code></td><td>Execute CPUID; returns EAX. Real on all targets, including hosted.</td></tr>
     <tr><td><code>halt()</code></td><td>HLT instruction (stops CPU until next interrupt)</td></tr>
     <tr><td><code>disable_interrupts()</code></td><td>CLI</td></tr>
     <tr><td><code>enable_interrupts()</code></td><td>STI</td></tr>

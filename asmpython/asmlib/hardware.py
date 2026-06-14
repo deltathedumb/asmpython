@@ -1,11 +1,20 @@
 """asmlib.hardware — bare-metal hardware access.
 
-These bindings target the *freestanding* backend.  Each c_name is a
+These bindings target the *freestanding* backend, where each c_name is a
 symbol defined by FreestandingCodegen's emit_print_impls() (the `_hw_*`
-family).  On hosted targets the symbols are provided by thin C wrappers
-so the same source can be compiled for either target; on hosted builds
-the actual port-I/O instructions are unavailable to user-mode code, so
-those functions return 0 and are useful only as stubs.
+family) using real privileged instructions (in/out, MOV CRn, RDMSR/WRMSR,
+CLI/STI/HLT, LIDT, ...).
+
+On hosted targets (Windows/Linux), the same symbols are provided by small
+inline asm helpers emitted by emit_asmlib_runtime() so the same source
+compiles for either target. Most of those operations require ring 0 and
+are unavailable to user-mode code, so on hosted targets they are stubs that
+return 0 (port I/O, MMIO, MSRs, CR0-4, invlpg, lidt, cli/sti/hlt, PIC/PIT,
+keyboard, VGA text mode).
+
+`rdtsc()`, `cpuid()`, and `rdrand()` are *not* privileged -- ring-3 code can
+execute them directly -- so they have real implementations on hosted targets
+too, returning genuine CPU values rather than 0.
 """
 from __future__ import annotations
 

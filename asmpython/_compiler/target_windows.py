@@ -896,8 +896,27 @@ class WindowsCodegen(Codegen):
                            "call Sleep", "xor rax, rax", "leave", "ret")
 
         if needs_hw:
+            # rdtsc/cpuid/rdrand are unprivileged (ring-3) instructions, so
+            # unlike the rest of asmlib.hardware (port I/O, MMIO, MSRs, CRn,
+            # PIC/PIT/keyboard/VGA, cli/sti/hlt -- all ring-0-only) they have
+            # real implementations on hosted targets too, not just
+            # freestanding.
+            if "_hw_rdtsc" in self.ffi_externs:
+                self.label("_hw_rdtsc")
+                self.emitf("rdtsc", "shl rdx, 32", "or rax, rdx", "ret")
+            if "_hw_cpuid" in self.ffi_externs:
+                # arg (leaf) arrives in ecx (Win64 ABI); returns EAX after CPUID.
+                self.label("_hw_cpuid")
+                self.emitf("mov eax, ecx", "push rbx", "cpuid",
+                           "pop rbx", "movsx rax, eax", "ret")
+            if "_hw_rdrand" in self.ffi_externs:
+                self.label("_hw_rdrand")
+                self.label(".retry")
+                self.emitf("rdrand rax", "jnc .retry", "ret")
+
             for sym in self._HW_STUBS:
-                if sym in self.ffi_externs:
+                if sym in self.ffi_externs and sym not in (
+                        "_hw_rdtsc", "_hw_cpuid", "_hw_rdrand"):
                     self.label(sym)
                     self.emitf("xor rax, rax", "ret")
 
