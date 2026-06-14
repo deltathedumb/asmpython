@@ -232,6 +232,16 @@ output rather than silent miscompilations.
   `@area`); assigning to a `@property` attribute (`obj.x = v`) now raises
   `property 'x' of 'Cls' object has no setter`, matching CPython's
   `AttributeError`, instead of silently creating an unrelated instance field.
+- **Tuple-assignment targets can now be subscripts/attributes**:
+  `xs[i], xs[j] = xs[j], xs[i]`, `self.x, self.y = self.y, self.x`, and mixes
+  with plain names (`a, xs[0] = xs[0], a`) all work. Previously only bare
+  names were accepted as targets; `xs[0], xs[1] = xs[1], xs[0]` was a parse
+  error (`expected NEWLINE, got OP ','`). `TupleAssign.targets` is now a list
+  of `Name`/`Subscript`/`Attr` expressions; the parallel-assignment codegen
+  (evaluate every RHS into a scratch slot, then commit each store) reuses the
+  same store sequences as `IndexAssign`/`AttrAssign`. The single-iterable
+  unpack form (`a, b = some_list`) still requires plain-name targets and
+  raises a clear error otherwise.
 
 ---
 

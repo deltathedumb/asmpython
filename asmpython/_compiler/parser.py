@@ -643,6 +643,24 @@ class Parser:
         # "lhs.name = rhs" -> AttrAssign.
         pos = t.pos
         expr = self._parse_expr()
+        # Tuple assignment with at least one subscript/attribute target, e.g.
+        # `xs[0], xs[1] = xs[1], xs[0]` or `a, self.x = self.x, a`. Pure
+        # NAME-only sequences are handled above by `_parse_tuple_assign`.
+        if isinstance(expr, (A.Name, A.Subscript, A.Attr)) and self._check("OP", ","):
+            targets = [expr]
+            while self._check("OP", ","):
+                self._eat()
+                tgt = self._parse_expr()
+                if not isinstance(tgt, (A.Name, A.Subscript, A.Attr)):
+                    raise ParseError("cannot assign to this expression", tgt.pos)
+                targets.append(tgt)
+            self._expect("OP", "=")
+            values = [self._parse_expr()]
+            while self._check("OP", ","):
+                self._eat()
+                values.append(self._parse_expr())
+            self._expect("NEWLINE")
+            return A.TupleAssign(targets=targets, values=values, pos=pos)
         if isinstance(expr, A.Subscript) and self._check("OP", "="):
             self._eat()
             value = self._parse_expr()
@@ -962,10 +980,11 @@ class Parser:
 
     def _parse_tuple_assign(self) -> A.TupleAssign:
         first = self._expect("NAME")
-        targets = [first.value]
+        targets: list = [A.Name(name=first.value, pos=first.pos)]
         while self._check("OP", ","):
             self._eat()
-            targets.append(self._expect("NAME").value)
+            tok = self._expect("NAME")
+            targets.append(A.Name(name=tok.value, pos=tok.pos))
         self._expect("OP", "=")
         values = [self._parse_expr()]
         while self._check("OP", ","):

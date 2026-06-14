@@ -468,16 +468,21 @@ val = d.get(<span class="str">"x"</span>, <span class="num">-1</span>)
   <p>Open-addressed hashtable (FNV-1a), stable header, load factor 3/4. <code>str</code> keys. Methods: <code>.get</code>, <code>.contains</code>, <code>.keys()</code>, <code>.values()</code>, <code>.items()</code>, <code>.update()</code>. Dict comprehensions supported. <code>del d[k]</code> removes the entry, raising <code>KeyError</code> if absent.</p>
 
   <h3>Sets</h3>
-  <pre><div class="lang-tag">python</div><code>s = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>}
-s.add(<span class="num">4</span>)
-<span class="fn">print</span>(<span class="num">2</span> <span class="kw">in</span> s)
+  <pre><div class="lang-tag">python</div><code>s = {<span class="str">"a"</span>, <span class="str">"b"</span>, <span class="str">"c"</span>}
+s.add(<span class="str">"d"</span>)
+<span class="fn">print</span>(<span class="str">"b"</span> <span class="kw">in</span> s)
+s.discard(<span class="str">"a"</span>)
 fs = <span class="fn">frozenset</span>(s)</code></pre>
+  <p>Sets are <code>str</code>-keyed (backed by the same hashtable as dicts); <code>{1, 2, 3}</code> and <code>.add()</code>/<code>.discard()</code>/<code>.remove()</code> of non-<code>str</code> elements are rejected at compile time. Methods: <code>.add()</code>, <code>.discard()</code>, <code>.remove()</code>, <code>.copy()</code>, <code>.pop()</code>, <code>.union()</code>, <code>.intersection()</code>, <code>.difference()</code>, <code>.update()</code>, <code>.clear()</code>.</p>
 
   <h3>Tuples</h3>
   <pre><div class="lang-tag">python</div><code>a, b = <span class="num">1</span>, <span class="num">2</span>          <span class="cmt"># unpacking assignment</span>
 a, b = b, a          <span class="cmt"># swap — RHS evaluated before LHS stores</span>
+xs[<span class="num">0</span>], xs[<span class="num">1</span>] = xs[<span class="num">1</span>], xs[<span class="num">0</span>]  <span class="cmt"># swap list elements</span>
+self.x, self.y = self.y, self.x  <span class="cmt"># swap instance attributes</span>
 <span class="kw">for</span> i, x <span class="kw">in</span> <span class="fn">enumerate</span>(xs): <span class="fn">print</span>(i, x)
 <span class="kw">for</span> a, b <span class="kw">in</span> <span class="fn">zip</span>(xs, ys): <span class="fn">print</span>(a, b)</code></pre>
+  <p>Tuple-assignment targets may be plain names, subscripts, or attributes (in any mix); every value on the right is evaluated before any store happens, so swaps work without a temporary. The single-iterable unpack form (<code>a, b = some_list</code>) requires plain-name targets.</p>
 </section>
 
 <section id="control-flow">

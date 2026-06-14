@@ -1543,6 +1543,16 @@ class SemaAnalyzer:
             # set before we decide between unpack and parallel forms.
             for v in s.values:
                 self._check_expr(v, scope)
+            nonname_targets = [t for t in s.targets if not isinstance(t, A.Name)]
+            if nonname_targets and len(s.values) == 1:
+                # The unpack forms below (`a, b = <tuple/list/...>`) only know
+                # how to bind plain names; subscript/attribute targets need
+                # one value per target.
+                raise SemaError(
+                    "tuple assign with subscript/attribute targets requires "
+                    "the parallel form (one value per target)",
+                    s.pos,
+                )
             # Unpack form: `a, b = <single tuple expr>` (a literal, a tuple
             # variable, or a call to a tuple-returning function).
             if len(s.values) == 1 and A.expr_type(s.values[0]) == "tuple":
@@ -1559,7 +1569,7 @@ class SemaAnalyzer:
                 # lenient. A concrete scalar/instance slot keeps its kind.
                 for i, t in enumerate(s.targets):
                     slot = ets[i] if i < len(ets) else "any"
-                    scope.add(t, "any" if slot == "int" else slot)
+                    scope.add(t.name, "any" if slot == "int" else slot)
                 return
             if len(s.values) == 1 and A.expr_type(s.values[0]) in (
                 "any",
@@ -1583,7 +1593,7 @@ class SemaAnalyzer:
                 elif A.expr_type(s.values[0]) == "str":
                     el = "str"
                 for t in s.targets:
-                    scope.add(t, el)
+                    scope.add(t.name, el)
                 return
             # Parallel form: `a, b = e1, e2`.
             if len(s.targets) != len(s.values):
@@ -1598,7 +1608,7 @@ class SemaAnalyzer:
                 # live in xmm and aren't plumbed through this path yet.
                 if vt == "float":
                     raise SemaError(
-                        f"tuple assign target {t!r}: float values aren't supported in "
+                        f"tuple assign target: float values aren't supported in "
                         "parallel assignment yet (assign separately)",
                         s.pos,
                     )
@@ -1612,10 +1622,10 @@ class SemaAnalyzer:
                     "set",
                 ) and not vt.startswith("instance:"):
                     raise SemaError(
-                        f"tuple assign target {t!r}: unsupported value type {vt}",
+                        f"tuple assign target: unsupported value type {vt}",
                         s.pos,
                     )
-                scope.add(t, vt)
+                self._check_tuple_assign_target(t, vt, scope, s.pos)
             return
         if isinstance(s, A.AugAssign):
             if s.target not in scope.names:
@@ -2123,6 +2133,80 @@ class SemaAnalyzer:
         raise SemaError(
             f"internal: unhandled stmt {type(s).__name__}", getattr(s, "pos", None)
         )
+
+    def _check_tuple_assign_target(
+        self, t: "A.Expr", value_t: str, scope: Scope, pos
+    ) -> None:
+        """Validate one target of a parallel-form TupleAssign against the
+        already-checked type of its paired value, and bind `Name` targets
+        into scope. Mirrors the equivalent checks in IndexAssign/AttrAssign
+        (`xs[0], xs[1] = ...`, `self.x, self.y = ...`)."""
+        if isinstance(t, A.Name):
+            scope.add(t.name, value_t)
+            return
+        if isinstance(t, A.Subscript):
+            self._check_expr(t.obj, scope)
+            self._check_expr(t.index, scope)
+            obj_t = A.expr_type(t.obj)
+            if isinstance(t.index, A.Slice):
+                return
+            if obj_t == "list":
+                el_t = self._list_el_type(t.obj, scope)
+                if (
+                    el_t not in ("?", "any", "int")
+                    and value_t not in ("any", "int")
+                    and value_t != el_t
+                ):
+                    raise SemaError(
+                        f"list[i] = v: list element type is {el_t}, got {value_t}",
+                        pos,
+                    )
+            elif obj_t == "dict":
+                ikt = A.expr_type(t.index)
+                if ikt not in ("str", "any", "int") and not ikt.startswith("instance:"):
+                    raise SemaError("dict keys must be strings", pos)
+                dvt = self._dict_value_type(t.obj, scope)
+                if (
+                    dvt not in ("any", "int")
+                    and value_t not in ("any", "int")
+                    and value_t != dvt
+                    and not (dvt.startswith("instance:") and value_t.startswith("instance:"))
+                ):
+                    raise SemaError(
+                        f"dict[k] = v: dict values are {dvt}, got {value_t}",
+                        pos,
+                    )
+            elif obj_t == "any":
+                pass  # opaque target: accept the index assignment leniently
+            else:
+                raise SemaError(f"cannot index a {obj_t}", pos)
+            return
+        # A.Attr
+        if (
+            isinstance(t.obj, A.Name)
+            and t.obj.name in self.classes
+            and self._class_var_type(t.obj.name, t.name) is not None
+        ):
+            return
+        self._check_expr(t.obj, scope)
+        obj_t = A.expr_type(t.obj)
+        if not obj_t.startswith("instance:") and obj_t not in ("any", "module", "int"):
+            raise SemaError(f"cannot assign attribute on {obj_t}", pos)
+        if obj_t.startswith("instance:"):
+            cls_name = obj_t.split(":", 1)[1]
+            if cls_name in self.classes:
+                resolved = self._resolve_method(cls_name, t.name)
+                if resolved is not None and "property" in resolved[1].decorators:
+                    raise SemaError(
+                        f"property {t.name!r} of {cls_name!r} object has no setter",
+                        pos,
+                    )
+                sig = self.classes[cls_name]
+                if isinstance(t.obj, A.Name) and t.obj.name == "self":
+                    if t.name not in sig.fields or (
+                        sig.fields[t.name] == "int" and value_t not in ("int", "any")
+                    ):
+                        sig.fields[t.name] = value_t
 
     def _check_expr(self, e, scope: Scope) -> None:
         if isinstance(e, (A.IntLit, A.FloatLit, A.StrLit)):

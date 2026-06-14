@@ -229,7 +229,7 @@ class Codegen:
             if isinstance(s, A.MultiAssign):
                 acc.update(s.targets)
             elif isinstance(s, A.TupleAssign):
-                acc.update(s.targets)
+                acc.update(t.name for t in s.targets if isinstance(t, A.Name))
             elif isinstance(s, A.For):
                 acc.add(s.var)
                 acc.update(self._target_names(s.targets))
@@ -1237,17 +1237,24 @@ class Codegen:
                     # Unpack form: park the tuple ptr in one slot, then
                     # type each target from the tuple's element kinds (an
                     # opaque "any" tuple has unknown slots -> int/lenient).
+                    # Sema guarantees plain-name targets in this form.
                     self._cl_define(info, f"__tupunpack_{id(s)}", "int")
                     self._cl_walk_expr(info, s.values[0])
                     ets = A.tuple_element_types(s.values[0])
                     for i, t in enumerate(s.targets):
-                        self._cl_define(info, t, ets[i] if i < len(ets) else "int")
+                        self._cl_define(info, t.name, ets[i] if i < len(ets) else "int")
                 else:
                     for i, v in enumerate(s.values):
                         self._cl_walk_expr(info, v)
                         self._cl_define(info, f"__tup_tmp_{id(s)}_{i}", A.expr_type(v))
                     for t, v in zip(s.targets, s.values):
-                        self._cl_define(info, t, A.expr_type(v))
+                        if isinstance(t, A.Name):
+                            self._cl_define(info, t.name, A.expr_type(v))
+                        elif isinstance(t, A.Subscript):
+                            self._cl_walk_expr(info, t.obj)
+                            self._cl_walk_expr(info, t.index)
+                        elif isinstance(t, A.Attr):
+                            self._cl_walk_expr(info, t.obj)
             elif isinstance(s, A.For) and self._for_zip_spec(s) is not None:
                 # for a, b in zip(A, B) / for i, (a, b) in enumerate(zip):
                 # two iterables walked in lockstep. Reserve the per-buffer
@@ -1418,12 +1425,13 @@ class Codegen:
                 A.expr_type(stmt.values[0]) in ("tuple", "any")
                 or len(stmt.targets) > 1
             ):
+                # Sema guarantees plain-name targets in this form.
                 ptr_slot = info.locals_[f"__tupunpack_{id(stmt)}"]
                 ets = A.tuple_element_types(stmt.values[0])
                 self.gen_expr(stmt.values[0], info)  # rax = tuple header ptr
                 self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
                 for i, target in enumerate(stmt.targets):
-                    off = info.locals_[target]
+                    off = info.locals_[target.name]
                     el_t = ets[i] if i < len(ets) else "int"
                     self.emitf(
                         f"mov rbx, [rbp{ptr_slot:+d}]",
@@ -1444,8 +1452,60 @@ class Codegen:
                 self.emitf(f"mov [rbp{tmp:+d}], rax")
             for i, target in enumerate(stmt.targets):
                 tmp = info.locals_[f"__tup_tmp_{id(stmt)}_{i}"]
-                off = info.locals_[target]
-                self.emitf(f"mov rax, [rbp{tmp:+d}]", f"mov [rbp{off:+d}], rax")
+                if isinstance(target, A.Name):
+                    off = info.locals_[target.name]
+                    self.emitf(f"mov rax, [rbp{tmp:+d}]", f"mov [rbp{off:+d}], rax")
+                elif isinstance(target, A.Subscript):
+                    # `xs[i] = <tmp>` / `d[k] = <tmp>`, mirroring IndexAssign
+                    # codegen but reading the value out of the scratch slot
+                    # instead of re-evaluating an RHS expression.
+                    obj_t = A.expr_type(target.obj)
+                    if obj_t == "dict":
+                        self.gen_expr(target.index, info)
+                        self.emitf("push rax")
+                        self.emitf(f"mov rax, [rbp{tmp:+d}]", "push rax")
+                        self.gen_expr(target.obj, info)  # rax = header
+                        self.emitf(
+                            "pop rcx",  # rcx = value
+                            "pop rbx",  # rbx = key
+                            "call _runtime_dict_set",
+                        )
+                    else:
+                        self.gen_expr(target.index, info)
+                        self.emitf("push rax")
+                        self.emitf(f"mov rax, [rbp{tmp:+d}]", "push rax")
+                        self.gen_expr(target.obj, info)  # rax = header
+                        pos_lbl = self.fresh("tupidxw_pos")
+                        self.emitf(
+                            "pop rbx",  # rbx = value
+                            "pop rcx",  # rcx = index
+                            "test rcx, rcx",
+                            f"jns {pos_lbl}",
+                            f"add rcx, [rax+{self.LIST_LEN_OFF}]",
+                        )
+                        self.label(pos_lbl)
+                        self.emitf(
+                            f"mov rax, [rax+{self.LIST_BUF_OFF}]",
+                            "mov [rax+rcx*8], rbx",
+                        )
+                else:
+                    # A.Attr: `self.x = <tmp>` (or `ClassName.x = <tmp>` for a
+                    # class variable), mirroring AttrAssign codegen.
+                    if isinstance(target.obj, A.Name):
+                        cv = self.class_var_labels.get(f"{target.obj.name}.{target.name}")
+                        if cv is not None:
+                            self.emitf(
+                                f"mov rax, [rbp{tmp:+d}]", f"mov [rel {cv}], rax"
+                            )
+                            continue
+                    key_label, _ = self.intern_string(target.name)
+                    self.emitf(f"mov rax, [rbp{tmp:+d}]", "push rax")
+                    self.gen_expr(target.obj, info)  # rax = instance dict
+                    self.emitf(
+                        "pop rcx",  # rcx = value
+                        f"lea rbx, [{key_label}]",  # rbx = key
+                        "call _runtime_dict_set",
+                    )
             return
         if isinstance(stmt, A.AugAssign):
             mem = self._var_mem(stmt.target, info)

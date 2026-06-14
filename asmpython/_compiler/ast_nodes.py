@@ -124,10 +124,13 @@ class TupleAssign:
     """a, b, c = e1, e2, e3 -- evaluates every rhs first (into temporaries),
     then performs each store, so a, b = b, a works.
 
-    Only simple name targets are supported (no nested unpacking, no `*rest`,
-    no subscript/attr targets yet)."""
+    Targets are `Name`, `Subscript`, or `Attr` expressions (e.g.
+    `xs[0], xs[1] = xs[1], xs[0]` or `self.x, self.y = self.y, self.x`).
+    Subscript/Attr targets are only allowed in the parallel form (one value
+    per target) -- the single-iterable unpack form requires plain names
+    (no nested unpacking, no `*rest`)."""
 
-    targets: list[str] = field(default_factory=list)
+    targets: list["Expr"] = field(default_factory=list)
     values: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
