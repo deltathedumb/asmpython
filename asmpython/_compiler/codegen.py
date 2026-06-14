@@ -2199,8 +2199,8 @@ class Codegen:
         self.label(end_lbl)
 
     def _gen_for_dict(self, stmt: A.For, info: FuncInfo) -> None:
-        # Linear sweep over the slot buffer: skip empty (key==0) and
-        # tombstoned (key==1) slots, otherwise bind var = key_ptr.
+        # Walk order_buf[0..len) directly (insertion order, CPython 3.7+
+        # ordering) -- no skip logic needed since order_buf has no gaps.
         var_off = info.locals_[stmt.var]
         iter_off = info.locals_[f"__for_iter_{id(stmt)}"]
         stop_off = info.locals_[f"__for_stop_{id(stmt)}"]
@@ -2209,7 +2209,7 @@ class Codegen:
         self.gen_expr(stmt.iter, info)  # rax = header
         self.emitf(
             f"mov [rbp{iter_off:+d}], rax",
-            f"mov rbx, [rax+{self.DICT_CAP_OFF}]",
+            f"mov rbx, [rax+{self.DICT_LEN_OFF}]",
             f"mov [rbp{stop_off:+d}], rbx",
             f"mov qword [rbp{step_off:+d}], 0",
         )  # i = 0
@@ -2217,26 +2217,19 @@ class Codegen:
         top = self.fresh("for_dict")
         cont = self.fresh("for_dict_cont")
         end = self.fresh("endfor_dict")
-        body_lbl = self.fresh("for_dict_body")
         self.loop_labels.append((cont, end))
         self.label(top)
         self.emitf(
             f"mov rax, [rbp{step_off:+d}]", f"cmp rax, [rbp{stop_off:+d}]", f"jge {end}"
         )
-        # Load slot: ptr = buf + i * 16; key = [ptr]
+        # var = order_buf[i]
         self.emitf(
             f"mov rbx, [rbp{iter_off:+d}]",
-            f"mov rbx, [rbx+{self.DICT_BUF_OFF}]",
+            f"mov rbx, [rbx+{self.DICT_ORDER_OFF}]",
             f"mov rcx, [rbp{step_off:+d}]",
-            "shl rcx, 4",  # *16
-            "add rbx, rcx",
-            "mov rax, [rbx]",  # key ptr
-            "cmp rax, 1",  # tombstone or empty?
-            f"jbe {cont}",  # 0 or 1 -> skip
+            "mov rax, [rbx+rcx*8]",
             f"mov [rbp{var_off:+d}], rax",
-            f"jmp {body_lbl}",
         )
-        self.label(body_lbl)
         for s in stmt.body:
             self.gen_stmt(s, info)
         self.label(cont)
@@ -3063,6 +3056,12 @@ class Codegen:
             "mov r9, [rbp-24]",
             "mov [rcx+8], r9",  # slot.value
             "mov r9, [rbp-8]",
+            # Append the new key to the insertion-order array: order_buf[len] = key.
+            f"mov r10, [r9+{self.DICT_ORDER_OFF}]",
+            f"mov r11, [r9+{self.DICT_LEN_OFF}]",
+            "mov rcx, r11",
+            "shl rcx, 3",
+            "mov [r10+rcx], rax",
             f"inc qword [r9+{self.DICT_LEN_OFF}]",
             "leave",
             "ret",
@@ -3106,23 +3105,42 @@ class Codegen:
         # rax = header. Doubles capacity, rehashes all live entries.
         # Strategy: snapshot the old slot buffer, allocate a bigger one,
         # then walk the old slots and call dict_set for each live one.
-        # Locals span [rbp-8..rbp-48]; reserve 80 = 48 locals + 32 shadow.
+        # The order array's contents (key pointers, insertion order) don't
+        # change across a grow -- only its capacity does -- so it's just
+        # copied verbatim into a bigger buffer.
+        # Locals span [rbp-8..rbp-72]; reserve 112 = 72 locals + 32 shadow
+        # (rounded to 16).
         self.label("_runtime_dict_grow")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 112")
         self.emitf("mov [rbp-8], rax")  # header
-        # old_cap, old_buf
+        # old_cap, old_buf, old_len, old_order_buf
         self.emitf(
             f"mov rcx, [rax+{self.DICT_CAP_OFF}]",
             "mov [rbp-16], rcx",
             f"mov rcx, [rax+{self.DICT_BUF_OFF}]",
             "mov [rbp-24], rcx",
+            f"mov rcx, [rax+{self.DICT_LEN_OFF}]",
+            "mov [rbp-56], rcx",
+            f"mov rcx, [rax+{self.DICT_ORDER_OFF}]",
+            "mov [rbp-64], rcx",
         )
         # new_cap = old_cap * 2
         self.emitf("mov rax, [rbp-16]", "shl rax, 1", "mov [rbp-32], rax")  # new_cap
         # new_buf = zalloc(new_cap * 16)
         self.emitf("mov rbx, rax", "shl rbx, 4", "call _runtime_zalloc")
         self.emitf("mov [rbp-40], rax")  # new_buf
-        # Reset header: cap = new_cap; len = 0; tomb = 0; buf = new_buf.
+        # new_order_buf = zalloc(new_cap * 8); copy old_order_buf[0..old_len).
+        self.emitf("mov rax, [rbp-32]", "mov rbx, rax", "shl rbx, 3", "call _runtime_zalloc")
+        self.emitf("mov [rbp-72], rax")  # new_order_buf
+        self.emitf(
+            "mov rax, [rbp-72]",  # dst
+            "mov rbx, [rbp-64]",  # src
+            "mov rcx, [rbp-56]",  # old_len
+            "shl rcx, 3",  # bytes = old_len * 8
+        )
+        self._emit_libc_memcpy()
+        # Reset header: cap = new_cap; len = 0; tomb = 0; buf = new_buf;
+        # order_buf = new_order_buf.
         self.emitf(
             "mov r8, [rbp-8]",
             "mov r9, [rbp-32]",
@@ -3131,6 +3149,8 @@ class Codegen:
             f"mov qword [r8+{self.DICT_TOMB_OFF}], 0",
             "mov r9, [rbp-40]",
             f"mov [r8+{self.DICT_BUF_OFF}], r9",
+            "mov r9, [rbp-72]",
+            f"mov [r8+{self.DICT_ORDER_OFF}], r9",
         )
         # Walk old buffer.
         self.emitf("xor rcx, rcx")  # i
@@ -3168,8 +3188,10 @@ class Codegen:
         self.label("._gr_next")
         self.emitf("inc rcx", "jmp ._gr_loop")
         self.label("._gr_done")
-        # Free the old buffer.
+        # Free the old slot buffer and the old order array.
         self.emitf("mov rax, [rbp-24]")
+        self._emit_libc_free()
+        self.emitf("mov rax, [rbp-64]")
         self._emit_libc_free()
         self.emitf("leave", "ret")
 
@@ -3195,20 +3217,22 @@ class Codegen:
 
         In:  rax = dict header.
         Out: rax = newly-allocated list header.
-             - keys: list[str] of live key pointers.
-             - values: list[int] of value field of each live slot.
-        Live = key_ptr > 1 (0 = empty, 1 = tombstone).
+             - keys: list[str] of live key pointers, in insertion order.
+             - values: list[int] of each live key's value, in insertion order.
 
-        Locals span [rbp-8..rbp-40]; reserve 80 = 40 locals + 32 shadow so
-        malloc's shadow store can't clobber them.
+        Walks order_buf[0..len), which holds exactly the live keys in the
+        order they were first inserted (CPython 3.7+ dict ordering).
+
+        Locals span [rbp-8..rbp-32]; reserve 80 = 32 locals + 32 shadow so
+        malloc's/lookup_slot's shadow store can't clobber them.
         """
         self.label(name)
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
         # [rbp-8]  = dict header (input)
         # [rbp-16] = list header (output)
         # [rbp-24] = list buffer ptr (also stored into header)
-        # [rbp-32] = i (slot index)
-        # [rbp-40] = w (write index into list)
+        # [rbp-32] = i (order index / write index -- they're the same since
+        #             order_buf[0..len) is exactly the live keys)
         self.emitf("mov [rbp-8], rax")
         # n = dict.len
         self.emitf(f"mov rbx, [rax+{self.DICT_LEN_OFF}]")
@@ -3240,41 +3264,36 @@ class Codegen:
             "mov rdx, [rbp-16]",
             f"mov [rdx+{self.LIST_BUF_OFF}], rax",
         )
-        # Walk dict slots: for i in 0..dict.cap, if key > 1 copy out.
-        self.emitf(
-            "mov qword [rbp-32], 0",  # i = 0
-            "mov qword [rbp-40], 0",  # w = 0
-        )
+        # Walk order_buf[0..len): every entry is a live key.
+        self.emitf("mov qword [rbp-32], 0")  # i = 0
         loop = self.fresh("dkv_loop")
-        skip = self.fresh("dkv_skip")
         done = self.fresh("dkv_done")
         self.label(loop)
         self.emitf(
             "mov rax, [rbp-8]",  # dict header
-            f"mov rbx, [rax+{self.DICT_CAP_OFF}]",
+            f"mov rbx, [rax+{self.DICT_LEN_OFF}]",
             "mov rcx, [rbp-32]",
             "cmp rcx, rbx",
             f"jge {done}",
-            # slot = dict.buf + i*16
-            f"mov rdx, [rax+{self.DICT_BUF_OFF}]",
-            "mov r8, rcx",
-            "shl r8, 4",
-            "add rdx, r8",  # rdx = slot ptr
-            "mov r9, [rdx]",  # r9 = key
-            "cmp r9, 1",
-            f"jbe {skip}",  # 0 or 1 -> empty/tombstone
-            # live: write the requested field into list_buf[w*8]
-            "mov r10, [rbp-24]",  # r10 = list buf
-            "mov r11, [rbp-40]",
-            "shl r11, 3",
-            "add r10, r11",
+            # key = order_buf[i]
+            f"mov rdx, [rax+{self.DICT_ORDER_OFF}]",
+            "mov r9, [rdx+rcx*8]",  # r9 = key ptr
         )
         if value_field:
-            self.emitf("mov rax, [rdx+8]", "mov [r10], rax")
+            self.emitf(
+                "mov rbx, r9",
+                "call _runtime_dict_lookup_slot",  # rax = slot ptr
+                "mov rax, [rax+8]",  # rax = value
+                "mov r10, [rbp-24]",  # list buf
+                "mov r11, [rbp-32]",
+                "mov [r10+r11*8], rax",
+            )
         else:
-            self.emitf("mov [r10], r9")
-        self.emitf("inc qword [rbp-40]")  # w++
-        self.label(skip)
+            self.emitf(
+                "mov r10, [rbp-24]",  # list buf
+                "mov r11, [rbp-32]",
+                "mov [r10+r11*8], r9",
+            )
         self.emitf("inc qword [rbp-32]", f"jmp {loop}")
         self.label(done)
         # Return the list header.
@@ -3287,11 +3306,14 @@ class Codegen:
         In:  rax = dst dict header, rbx = src dict header.
         Out: rax = dst (so the call can leave the receiver in rax).
 
-        Walks src's slot buffer (16-byte slots: key at +0, value at +8; key <= 1
-        means empty/tombstone) and calls `_runtime_dict_set(dst, key, value)` for
-        each live entry. dst/src/i are parked in frame slots across that call
-        (it may grow dst, invalidating registers). Locals [rbp-8..rbp-24];
-        reserve 48 = 24 + 32 shadow (rounded to 16) -> 64 for malloc inside set.
+        Walks src's order_buf[0..src.len) (the live keys in src's insertion
+        order) and calls `_runtime_dict_set(dst, key, value)` for each entry,
+        so keys already in dst keep their position (only their value is
+        updated) while new keys from src are appended to dst in src's
+        insertion order -- matching CPython's `dict.update`/`|`/`{**a, **b}`.
+        dst/src/i/key are parked in frame slots across calls (lookup_slot and
+        dict_set both use r8-r11 as scratch and dict_set may grow dst).
+        Locals [rbp-8..rbp-32]; reserve 64 = 32 + 32 shadow.
         """
         self.label("_runtime_dict_update")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
@@ -3301,31 +3323,24 @@ class Codegen:
             "mov qword [rbp-24], 0",  # i
         )
         loop = self.fresh("du_loop")
-        skip = self.fresh("du_skip")
         done = self.fresh("du_done")
         self.label(loop)
         self.emitf(
-            "mov rsi, [rbp-16]",  # src header
-            f"mov rcx, [rsi+{self.DICT_CAP_OFF}]",
-            "mov rdx, [rbp-24]",  # i
-            "cmp rdx, rcx",
+            "mov rax, [rbp-16]",  # src
+            f"mov rbx, [rax+{self.DICT_LEN_OFF}]",
+            "mov rcx, [rbp-24]",  # i
+            "cmp rcx, rbx",
             f"jge {done}",
-            f"mov r8, [rsi+{self.DICT_BUF_OFF}]",
-            "mov r9, rdx",
-            "shl r9, 4",
-            "add r8, r9",  # r8 = src slot
-            "mov r9, [r8]",  # key
-            "cmp r9, 1",
-            f"jbe {skip}",  # empty/tombstone
-        )
-        # _runtime_dict_set(dst=rax, key=rbx, value=rcx).
-        self.emitf(
+            f"mov rdx, [rax+{self.DICT_ORDER_OFF}]",
+            "mov r9, [rdx+rcx*8]",  # r9 = key ptr (src.order_buf[i])
+            "mov [rbp-32], r9",  # save key ptr across the lookup call
+            "mov rbx, r9",
+            "call _runtime_dict_lookup_slot",  # rax (src) -> rax = slot ptr
+            "mov rcx, [rax+8]",  # rcx = value
             "mov rax, [rbp-8]",  # dst
-            "mov rbx, [r8]",  # key
-            "mov rcx, [r8+8]",  # value
+            "mov rbx, [rbp-32]",  # key
             "call _runtime_dict_set",
         )
-        self.label(skip)
         self.emitf("inc qword [rbp-24]", f"jmp {loop}")
         self.label(done)
         self.emitf("mov rax, [rbp-8]", "leave", "ret")
@@ -3334,7 +3349,8 @@ class Codegen:
         """`_runtime_dict_items`: d.items() -> list of (key, value) pairs.
 
         In:  rax = dict header. Out: rax = list header whose elements are
-        2-slot tuples (shared list layout) of each live entry's key and value.
+        2-slot tuples (shared list layout) of each live entry's key and value,
+        in insertion order (walks order_buf[0..len), CPython 3.7+ ordering).
         Locals [rbp-8..rbp-64]; 64 + 32 shadow = 96.
         """
         self.label("_runtime_dict_items")
@@ -3363,29 +3379,24 @@ class Codegen:
             "mov [rbp-24], rax",  # list buffer
             "mov rcx, [rbp-16]",
             f"mov [rcx+{self.LIST_BUF_OFF}], rax",
-            "mov qword [rbp-32], 0",  # i (dict slot index)
-            "mov qword [rbp-40], 0",  # w (write index)
+            "mov qword [rbp-32], 0",  # i (order index / write index)
         )
         loop = self.fresh("ditems_loop")
-        skip = self.fresh("ditems_skip")
         done = self.fresh("ditems_done")
         self.label(loop)
         self.emitf(
             "mov rax, [rbp-8]",
-            f"mov rbx, [rax+{self.DICT_CAP_OFF}]",
+            f"mov rbx, [rax+{self.DICT_LEN_OFF}]",
             "mov rcx, [rbp-32]",
             "cmp rcx, rbx",
             f"jge {done}",
-            f"mov rdx, [rax+{self.DICT_BUF_OFF}]",
-            "mov r8, rcx",
-            "shl r8, 4",
-            "add rdx, r8",  # rdx = slot
-            "mov r9, [rdx]",  # key
-            "cmp r9, 1",
-            f"jbe {skip}",
+            f"mov rdx, [rax+{self.DICT_ORDER_OFF}]",
+            "mov r9, [rdx+rcx*8]",  # key ptr
             "mov [rbp-48], r9",  # key
-            "mov r9, [rdx+8]",
-            "mov [rbp-56], r9",  # value
+            "mov rbx, r9",
+            "call _runtime_dict_lookup_slot",  # rax (dict) -> rax = slot ptr
+            "mov rax, [rax+8]",  # value
+            "mov [rbp-56], rax",  # value
         )
         # Build the pair tuple: header (cap=2, len=2) + 2-slot buffer.
         self.emitf("mov rax, 24")
@@ -3404,14 +3415,12 @@ class Codegen:
             "mov [rax], rdx",
             "mov rdx, [rbp-56]",
             "mov [rax+8], rdx",
-            # list_buf[w*8] = pair header
+            # list_buf[i*8] = pair header
             "mov rax, [rbp-24]",
-            "mov rcx, [rbp-40]",
+            "mov rcx, [rbp-32]",
             "mov rdx, [rbp-64]",
             "mov [rax+rcx*8], rdx",
-            "inc qword [rbp-40]",
         )
-        self.label(skip)
         self.emitf("inc qword [rbp-32]", f"jmp {loop}")
         self.label(done)
         self.emitf("mov rax, [rbp-16]", "leave", "ret")
@@ -3859,12 +3868,14 @@ class Codegen:
 
         In:  rax = header, rbx = key ptr.
         Out: rax = value (or calls _runtime_raise on missing key).
-        Marks the slot as tombstone, decrements len, increments tombstones.
-        Locals [rbp-8..rbp-24]; 24 + 32 shadow = 56, round up to 64.
+        Marks the slot as tombstone, decrements len, increments tombstones,
+        and compacts the removed key out of the insertion-order array (shift
+        every later entry left by one) so iteration order stays correct.
+        Locals [rbp-8..rbp-56]; 56 + 32 shadow = 88, round up to 96.
         """
         found = self.fresh("dpop_found")
         self.label("_runtime_dict_pop")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 96")
         self.emitf(
             "mov [rbp-8], rax",
             "mov [rbp-16], rbx",
@@ -3881,18 +3892,56 @@ class Codegen:
             "call _runtime_raise",
         )
         self.label(found)
-        # rax = slot ptr; save value, mark tombstone.
+        # rax = slot ptr; save value and the key ptr being removed, mark
+        # tombstone, and stash order_buf/old_len for the compaction below.
         self.emitf(
             "mov rcx, [rax+8]",    # saved value
             "mov [rbp-24], rcx",
+            "mov rcx, [rax]",      # key ptr being removed
+            "mov [rbp-32], rcx",
             "mov qword [rax], 1",  # key = tombstone
             "mov qword [rax+8], 0",
             "mov rdx, [rbp-8]",
+            f"mov rcx, [rdx+{self.DICT_LEN_OFF}]",
+            "mov [rbp-48], rcx",   # old_len
             f"dec qword [rdx+{self.DICT_LEN_OFF}]",
             f"inc qword [rdx+{self.DICT_TOMB_OFF}]",
-            "mov rax, [rbp-24]",
-            "leave", "ret",
+            f"mov rcx, [rdx+{self.DICT_ORDER_OFF}]",
+            "mov [rbp-40], rcx",   # order_buf
+            "mov qword [rbp-56], 0",  # i = 0
         )
+        # Find the removed key's index in order_buf.
+        find_loop = self.fresh("dpop_find")
+        shift_loop = self.fresh("dpop_shift")
+        shift_done = self.fresh("dpop_shift_done")
+        self.label(find_loop)
+        self.emitf(
+            "mov rax, [rbp-56]",
+            "cmp rax, [rbp-48]",
+            f"jge {shift_done}",  # not found (shouldn't happen) -> done
+            "mov rcx, [rbp-40]",
+            "mov rdx, [rbp-32]",
+            "cmp [rcx+rax*8], rdx",
+            f"je {shift_loop}",
+            "inc qword [rbp-56]",
+            f"jmp {find_loop}",
+        )
+        # Shift order_buf[i+1 .. old_len) left by one, closing the gap at i.
+        self.label(shift_loop)
+        self.emitf(
+            "mov rax, [rbp-56]",
+            "lea rax, [rax+1]",
+            "cmp rax, [rbp-48]",
+            f"jge {shift_done}",
+            "mov rcx, [rbp-40]",
+            "mov rdx, [rcx+rax*8]",  # order_buf[i+1]
+            "mov rax, [rbp-56]",
+            "mov [rcx+rax*8], rdx",  # order_buf[i] = order_buf[i+1]
+            "inc qword [rbp-56]",
+            f"jmp {shift_loop}",
+        )
+        self.label(shift_done)
+        self.emitf("mov rax, [rbp-24]", "leave", "ret")
 
     def _emit_str_slice_step_helper(self) -> None:
         """`_runtime_str_slice_step`: full s[start:stop:step].
@@ -5267,9 +5316,10 @@ class Codegen:
 
         # ---- _runtime_dict_repr ----------------------------------------------
         # In: rax = dict ptr, rbx = key kind, rcx = value kind.
-        # Out: rax = `{k: v, ...}`. Walks live slots (key > 1).
+        # Out: rax = `{k: v, ...}`. Walks order_buf[0..len) (insertion order,
+        # CPython 3.7+ ordering).
         # [rbp-8]=dict [rbp-16]=keykind [rbp-24]=valkind [rbp-32]=i
-        # [rbp-40]=acc [rbp-48]=cap [rbp-56]=buf [rbp-64]=emitted-count
+        # [rbp-40]=acc [rbp-48]=key
         self.label("_runtime_dict_repr")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 112")
         self.emitf("mov [rbp-8], rax", "mov [rbp-16], rbx", "mov [rbp-24], rcx")
@@ -5277,30 +5327,21 @@ class Codegen:
             "lea rax, [_runtime_lbrace_str]",
             "call _runtime_str_concat_dup",
             "mov [rbp-40], rax",
-        )
-        self.emitf(
-            "mov rax, [rbp-8]",
-            f"mov rbx, [rax+{self.DICT_CAP_OFF}]",
-            "mov [rbp-48], rbx",
-            f"mov rbx, [rax+{self.DICT_BUF_OFF}]",
-            "mov [rbp-56], rbx",
             "mov qword [rbp-32], 0",
-            "mov qword [rbp-64], 0",
         )
         self.label("._dr_loop")
-        self.emitf("mov rax, [rbp-32]", "cmp rax, [rbp-48]", "jge ._dr_done")
-        # slot = buf + i*16; key = slot[0]
         self.emitf(
-            "mov rax, [rbp-56]",
+            "mov rax, [rbp-8]",
+            f"mov rbx, [rax+{self.DICT_LEN_OFF}]",
             "mov rcx, [rbp-32]",
-            "shl rcx, 4",
-            "add rax, rcx",
-            "mov rdx, [rax]",  # key
-            "cmp rdx, 1",
-            "jbe ._dr_next",  # empty/tombstone
+            "cmp rcx, rbx",
+            "jge ._dr_done",
+            f"mov rdx, [rax+{self.DICT_ORDER_OFF}]",
+            "mov rax, [rdx+rcx*8]",  # key
+            "mov [rbp-48], rax",
         )
-        # separator if we've already emitted a pair
-        self.emitf("mov rax, [rbp-64]", "test rax, rax", "jz ._dr_no_sep")
+        # separator if not the first entry
+        self.emitf("cmp qword [rbp-32], 0", "jz ._dr_no_sep")
         self.emitf(
             "mov rax, [rbp-40]",
             "lea rbx, [_runtime_comma_str]",
@@ -5308,13 +5349,9 @@ class Codegen:
             "mov [rbp-40], rax",
         )
         self.label("._dr_no_sep")
-        # format key (reload slot; helpers clobber)
+        # format key
         self.emitf(
-            "mov rax, [rbp-56]",
-            "mov rcx, [rbp-32]",
-            "shl rcx, 4",
-            "add rax, rcx",
-            "mov rax, [rax]",  # key
+            "mov rax, [rbp-48]",
             "mov rbx, [rbp-16]",
             "call _runtime_fmt_elem",
             "mov rbx, rax",
@@ -5324,12 +5361,11 @@ class Codegen:
             "call _runtime_str_concat",
             "mov [rbp-40], rax",
         )
-        # format value = slot[8]
+        # fetch and format value via lookup_slot(dict, key)
         self.emitf(
-            "mov rax, [rbp-56]",
-            "mov rcx, [rbp-32]",
-            "shl rcx, 4",
-            "add rax, rcx",
+            "mov rax, [rbp-8]",
+            "mov rbx, [rbp-48]",
+            "call _runtime_dict_lookup_slot",
             "mov rax, [rax+8]",  # value
             "mov rbx, [rbp-24]",
             "call _runtime_fmt_elem",
@@ -5337,9 +5373,7 @@ class Codegen:
             "mov rax, [rbp-40]",
             "call _runtime_str_concat",
             "mov [rbp-40], rax",
-            "inc qword [rbp-64]",
         )
-        self.label("._dr_next")
         self.emitf("inc qword [rbp-32]", "jmp ._dr_loop")
         self.label("._dr_done")
         self.emitf(
@@ -6335,11 +6369,16 @@ class Codegen:
 
     # ---- Dict ABI ----------------------------------------------------------
     # Open-addressed string-keyed hashtable; values are int64.
-    # Header (32 bytes, stable):
+    # Header (40 bytes, stable):
     #   [0..8)   capacity (number of slots; always a power of 2)
     #   [8..16)  length (live entries)
     #   [16..24) tombstones (deleted slots not yet reclaimed)
     #   [24..32) slots_ptr (heap buffer of slots)
+    #   [32..40) order_ptr (heap buffer of `cap` key_ptrs, insertion order;
+    #            the first `length` entries are the live keys in the order
+    #            they were first inserted -- gives CPython 3.7+ dict
+    #            insertion-order iteration without changing the hashtable
+    #            itself)
     # Slot (16 bytes each):
     #   [0..8)   key_ptr  (0 = empty, 1 = tombstone, otherwise nul-term string)
     #   [8..16)  value
@@ -6347,8 +6386,19 @@ class Codegen:
     DICT_LEN_OFF = 8
     DICT_TOMB_OFF = 16
     DICT_BUF_OFF = 24
-    DICT_HEADER = 32
+    DICT_ORDER_OFF = 32
+    DICT_HEADER = 40
     DICT_SLOT_SIZE = 16
+
+    def _emit_dict_alloc_order_buf(self, cap: int, slot_off: int) -> None:
+        """Allocate the `cap`-entry order buffer (`cap*8` bytes, zero-filled)
+        for a freshly-created dict/set/instance header parked at `slot_off`,
+        and store it at DICT_ORDER_OFF. Call right after the slot buffer is
+        allocated and stored, mirroring that same idiom."""
+        self.emitf(f"mov rbx, {cap * 8}", "call _runtime_zalloc")
+        self.emitf(
+            f"mov rbx, [rbp{slot_off:+d}]", f"mov [rbx+{self.DICT_ORDER_OFF}], rax"
+        )
 
     def _gen_list_lit(self, e: A.ListLit, info: FuncInfo) -> None:
         # We cannot use push/pop across `call` (it breaks 16-byte stack
@@ -6501,6 +6551,7 @@ class Codegen:
         )
         self.emitf(f"mov rbx, {cap * self.DICT_SLOT_SIZE}", "call _runtime_zalloc")
         self.emitf(f"mov rbx, [rbp{res:+d}]", f"mov [rbx+{self.DICT_BUF_OFF}], rax")
+        self._emit_dict_alloc_order_buf(cap, res)
 
         # Iterate the source list.
         self.gen_expr(e.iter, info)
@@ -6697,6 +6748,7 @@ class Codegen:
             f"mov rcx, [rbp{new_slot:+d}]",
             f"mov [rcx+{self.DICT_BUF_OFF}], rax",
         )
+        self._emit_dict_alloc_order_buf(NEW_CAP, new_slot)
         if method == "union":
             # new.update(self); new.update(other)
             self.emitf(
@@ -6763,6 +6815,7 @@ class Codegen:
         self.emitf(
             f"mov rbx, [rbp{slot_off:+d}]", f"mov [rbx+{self.DICT_BUF_OFF}], rax"
         )
+        self._emit_dict_alloc_order_buf(cap, slot_off)
 
     def _gen_set_call(self, e: A.Call, info: FuncInfo) -> None:
         """`set(x)` / `frozenset(x)` -> a set (dict keyed by members).
@@ -6959,6 +7012,7 @@ class Codegen:
         self.emitf(
             f"mov rbx, [rbp{slot_off:+d}]", f"mov [rbx+{self.DICT_BUF_OFF}], rax"
         )
+        self._emit_dict_alloc_order_buf(cap, slot_off)
         # Insert each (key, value) pair via the runtime set helper. We can't
         # use `push rax / pop rbx` to stash the key across the value-eval:
         # if v_expr calls anything (e.g. a constructor), the callee's MS x64
@@ -7015,6 +7069,7 @@ class Codegen:
         self.emitf(
             f"mov rbx, [rbp{slot_off:+d}]", f"mov [rbx+{self.DICT_BUF_OFF}], rax"
         )
+        self._emit_dict_alloc_order_buf(cap, slot_off)
         key_slot = info.locals_[f"__setlit_key_{id(e)}"]
         for el in e.elems:
             self.gen_expr(el, info)  # rax = member key ptr
@@ -7485,7 +7540,10 @@ class Codegen:
                     "call _runtime_zalloc",
                     f"mov rcx, [rbp{new_slot:+d}]",
                     f"mov [rcx+{self.DICT_BUF_OFF}], rax",
-                    "mov rax, rcx",
+                )
+                self._emit_dict_alloc_order_buf(NEW_CAP, new_slot)
+                self.emitf(
+                    f"mov rax, [rbp{new_slot:+d}]",
                     f"mov rbx, [rbp{src_slot:+d}]",
                     "call _runtime_dict_update",
                     f"mov rax, [rbp{new_slot:+d}]",
@@ -7588,7 +7646,10 @@ class Codegen:
                     "call _runtime_zalloc",
                     f"mov rcx, [rbp{new_slot:+d}]",
                     f"mov [rcx+{self.DICT_BUF_OFF}], rax",
-                    "mov rax, rcx",
+                )
+                self._emit_dict_alloc_order_buf(NEW_CAP, new_slot)
+                self.emitf(
+                    f"mov rax, [rbp{new_slot:+d}]",
                     f"mov rbx, [rbp{src_slot:+d}]",
                     "call _runtime_dict_update",
                     f"mov rax, [rbp{new_slot:+d}]",
@@ -7779,8 +7840,11 @@ class Codegen:
                 self.emitf(
                     f"mov rcx, [rbp{new_slot:+d}]",
                     f"mov [rcx+{self.DICT_BUF_OFF}], rax",
+                )
+                self._emit_dict_alloc_order_buf(NEW_CAP, new_slot)
+                self.emitf(
                     # update: _runtime_dict_update(new_dict, src)
-                    "mov rax, rcx",
+                    f"mov rax, [rbp{new_slot:+d}]",
                     f"mov rbx, [rbp{src_slot:+d}]",
                     "call _runtime_dict_update",
                     f"mov rax, [rbp{new_slot:+d}]",
@@ -9628,6 +9692,7 @@ class Codegen:
         self.emitf(
             f"mov rbx, [rbp{slot_off:+d}]", f"mov [rbx+{self.DICT_BUF_OFF}], rax"
         )
+        self._emit_dict_alloc_order_buf(cap, slot_off)
 
         # Tag the instance with its class id under the reserved "__class__" key
         # so isinstance(x, Cls) can identify the runtime class. Skipped if the
@@ -9744,6 +9809,7 @@ class Codegen:
                             f"mov rax, [rbp{tmp_off:+d}]",
                             f"mov [rax+{self.DICT_BUF_OFF}], rbx",
                         )
+                        self._emit_dict_alloc_order_buf(8, tmp_off)
                     else:
                         continue  # unevaluable factory -> leave unset
                 else:

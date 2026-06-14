@@ -193,6 +193,24 @@ output rather than silent miscompilations.
   for-loop binding: `people[i]["k"]`, `for p in people: p["k"]` (list[dict]),
   `grid[i][j]` (list[list]), and tuple unpacking `for a, b in pairs`
   (list[tuple]) no longer print raw pointers.
+- **Dicts now iterate in insertion order**, matching CPython 3.7+. Previously
+  `print(d)`, `for k in d`, `.keys()`/`.values()`/`.items()`, and dict
+  comprehensions walked the open-addressed hashtable in bucket order (FNV-1a
+  slot order), which generally differed from insertion order and from
+  CPython's output. The dict/set/instance header gains a new `order_buf`
+  field (an array of `cap` key pointers; the first `len` are the live keys in
+  insertion order), bumping the header from 32 to 40 bytes.
+  `_runtime_dict_set` appends new keys to `order_buf`; `_runtime_dict_grow`
+  copies it into the larger buffer unchanged; `_runtime_dict_pop` finds and
+  removes the popped key's entry, shifting later entries left to close the
+  gap. `_runtime_dict_keys`/`_runtime_dict_values`/`_runtime_dict_items`,
+  `_runtime_dict_repr`, `_runtime_dict_update`, and `for k in dict`/`for x in
+  set` all now walk `order_buf[0..len)` instead of the hashtable's bucket
+  order. As a side effect, `_runtime_dict_update` (used by `|`/`|=` and
+  `{**a, **b}`) now merges new keys from `src` in *its* insertion order,
+  matching CPython's dict-merge semantics exactly. Set iteration order is
+  unaffected in spirit (CPython doesn't guarantee it either), but now also
+  follows each set's insertion order rather than bucket order.
 
 - **`str(int)` / `str(float)` no longer alias a shared buffer.** Storing
   several conversions (e.g. `[str(x) for x in xs]`) previously made every
