@@ -131,6 +131,15 @@ output rather than silent miscompilations.
   alignment/width and the `s` type char (`f"{name:>10.5}"`,
   `f"{name:10.5s}"`). New `_runtime_str_truncate` runtime helper and
   `_split_str_width_precision` codegen helper.
+- **`str.format()` now supports the full format-spec mini-language and
+  `!r`/`!s`/`!a` conversions**, reusing the same machinery as f-strings:
+  `"{:>10}".format(name)`, `"{0:.2f}".format(pi)`, `"{:08b}".format(n)`,
+  `"{:,}".format(1234567)`, `"{!r}".format(name)`, `"{0!r:>8}".format(name)`.
+  Each `{field}` is parsed into `(index, spec, conv)`, which are stamped
+  onto the referenced argument expression (as `fmt_spec`/`conv_flag`) before
+  delegating to `_gen_fstring_segment`. Previously a `:spec` after the field
+  index was silently discarded and `!conv` would raise a compiler error
+  (`int("0!r")`).
 - **f-string conversions** `!r`/`!s`/`!a`: `f"{x!r}"` formats `x` via
   `repr()` (strings get quoted; a user class's `__repr__` takes priority over
   `__str__`), `!a` behaves like `!r`, and `!s` is the (already-default) `str()`

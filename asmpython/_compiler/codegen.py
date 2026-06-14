@@ -7572,17 +7572,21 @@ class Codegen:
         """Lower `"...".format(args)` with a literal format string.
 
         Supports positional fields: `{}` (auto-numbered) and `{0}`/`{1}`
-        (explicit index). `{{`/`}}` are literal braces. Format specs after a
-        `:` are not supported and fall through to the str-of-the-arg. The
-        result is a chain of _runtime_str_concat over literal segments and
-        stringified arguments — the same machinery as f-strings.
+        (explicit index), an optional `!r`/`!s`/`!a` conversion, and an
+        optional `:format-spec` using the same `[[fill]align]width.precision`
+        mini-language as f-strings (reusing `_gen_fstring_segment` by
+        stamping `fmt_spec`/`conv_flag` onto the referenced arg expression
+        for each field). `{{`/`}}` are literal braces. The result is a chain
+        of _runtime_str_concat over literal segments and stringified
+        arguments — the same machinery as f-strings.
 
         The caller only dispatches here when `e.obj` is a StrLit.
         """
         assert isinstance(e.obj, A.StrLit)
         fmt = e.obj.value
-        # Parse into a flat list of ("lit", text) and ("arg", index) pieces.
-        pieces: list[tuple[str, object]] = []
+        # Parse into a flat list of ("lit", text, "", "") and
+        # ("arg", index, spec, conv) pieces.
+        pieces: list[tuple[str, object, str, str]] = []
         buf = ""
         auto = 0
         i = 0
@@ -7599,17 +7603,21 @@ class Codegen:
                 while j < n and fmt[j] != "}":
                     field += fmt[j]
                     j += 1
-                # field may carry a ":spec" we ignore; take the index part.
-                idx_part = field.split(":", 1)[0].strip()
+                name_conv, _, spec = field.partition(":")
+                if "!" in name_conv:
+                    idx_part, conv = name_conv.split("!", 1)
+                else:
+                    idx_part, conv = name_conv, ""
+                idx_part = idx_part.strip()
                 if idx_part == "":
                     idx = auto
                     auto += 1
                 else:
                     idx = int(idx_part)
                 if buf:
-                    pieces.append(("lit", buf))
+                    pieces.append(("lit", buf, "", ""))
                     buf = ""
-                pieces.append(("arg", idx))
+                pieces.append(("arg", idx, spec, conv))
                 i = j + 1
                 continue
             if ch == "}":
@@ -7623,16 +7631,19 @@ class Codegen:
             buf += ch
             i += 1
         if buf:
-            pieces.append(("lit", buf))
+            pieces.append(("lit", buf, "", ""))
 
         acc_slot = info.locals_[f"__fmt_acc_{id(e)}"]
 
-        def emit_piece(kind: object, val: object) -> None:
+        def emit_piece(kind: object, val: object, spec: str, conv: str) -> None:
             if kind == "lit":
                 label, _ = self.intern_string(val)  # type: ignore[arg-type]
                 self.emitf(f"lea rax, [{label}]")
             else:
-                self._gen_fstring_segment(e.args[val], info)  # type: ignore[index]
+                arg = e.args[val]  # type: ignore[index]
+                arg.fmt_spec = spec  # type: ignore[attr-defined]
+                arg.conv_flag = conv  # type: ignore[attr-defined]
+                self._gen_fstring_segment(arg, info)
 
         if not pieces:
             label, _ = self.intern_string("")
@@ -7640,8 +7651,8 @@ class Codegen:
             return
         emit_piece(*pieces[0])
         self.emitf(f"mov [rbp{acc_slot:+d}], rax")
-        for kind, val in pieces[1:]:
-            emit_piece(kind, val)
+        for kind, val, spec, conv in pieces[1:]:
+            emit_piece(kind, val, spec, conv)
             self.emitf(
                 "mov rbx, rax",
                 f"mov rax, [rbp{acc_slot:+d}]",
