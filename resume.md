@@ -2,9 +2,9 @@
 
 ## Status as of 2026-06-14
 
-- 213/213 tests passing (`py -m tests.runner`).
+- 214/214 tests passing (`py -m tests.runner`).
 - Branch is clean and pushed: `origin/parity-expansion` is up to date with
-  local `HEAD` (`ce9977c`).
+  local `HEAD` (`e9e9525`).
 - Recently landed (most recent last):
   - `ff6b439` — `match`/`case` structural pattern matching (PEP 634).
   - `efb3f08`..`1aa9b2f` — large stdlib breadth wave: string/collections/
@@ -23,6 +23,12 @@
     declared `-> list` (opaque) instead of `-> list[str]`.
   - `ce9977c` — `collections.Counter.__add__`/`__sub__`/`__and__`/`__or__`
     implemented (CPython multiset semantics, drop non-positive results).
+  - `e9e9525` — new `csv` module: `reader`/`Row`, `writer_row`/`writer_rows`,
+    `DictReader`. `reader()` returns `list[Row]` (not `list[list[str]]`) —
+    asmpython's flat list-element-type system can't express nested generics
+    (confirmed via `_scratch_nested.py`: `for f in row` over a
+    `list[list[str]]` element prints raw pointers, same root cause as the
+    `most_common()` segfault below).
 
 ## Standing directives (always apply)
 
@@ -134,10 +140,11 @@ by the freestanding/BIOS-boot target work from recent commits
 1. Check `.claude/issues` (empty so far).
 2. Pick the next item from the stdlib backlog above. Good next candidates,
    roughly in order of value/effort:
-   - `csv` module (new, pure string processing, no language-feature blockers
-     expected).
    - Survey `asmlib/hardware.py` in full and pick 2-3 stubs to make real.
    - The `for a, b in <list of custom-class instances>` segfault documented
      above — investigate the general fix ((b) in that section) since it
-     likely affects other stdlib methods returning `list[SomeClass]` too.
+     likely affects other stdlib methods returning `list[SomeClass]` too,
+     and the `list[list[T]]`/`list[dict[K,V]]` nested-generic gap that
+     shaped the `csv` module's API (`e9e9525`).
+   - `base64`, `uuid`, `fractions`/`decimal` from the breadth backlog below.
 3. Follow the standing per-feature workflow (above) for whatever is picked.
