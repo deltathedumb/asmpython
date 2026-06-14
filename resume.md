@@ -4,9 +4,23 @@
 
 - 218/218 tests passing (`py -m tests.runner`).
 - Branch is being pushed: `origin/parity-expansion` should track local
-  `HEAD` (latest: `for a, b in <list[CustomClass]>` segfault -> compile
-  error, on top of `1673c49`).
+  `HEAD` (latest: `list[tuple[T1,T2]]` return-annotation slot-type
+  propagation + `Counter.most_common()` -> real `list[tuple[str,int]]`, on
+  top of `35267d3`).
 - Recently landed (most recent last):
+  - (this session) — fixed the long-standing `-> list[tuple[T1,T2]]`
+    annotation gap: the parser/sema previously collapsed
+    `list[tuple[str,int]]` to a bare `("list","tuple")`, losing the per-slot
+    kinds, so `for a, b in f()` (and `f()[i][j]`) mis-typed both unpack
+    targets as `"any"` (the `str` slot printed as a raw pointer). Now
+    `parser._normalize_annot` keeps `("list", ("tuple", ["str","int"]))`,
+    `sema._resolve_annot` resolves it into `FuncSig.ret_list_tuple_types`,
+    and `A.Call`/instance `A.MethodCall` sites stamp `tuple_elem_types` on
+    the call node. This unblocked rewriting `collections.Counter.
+    most_common()` to return real `list[tuple[str,int]]` (was
+    `list[CountPair]`); `CountPair` removed. `tests/cases/
+    151_collections_module.py` extended to cover `mc[0][0]`/`mc[0][1]` and
+    `for el, cnt in c.most_common(): ...`.
   - `1673c49` — new `console_*` high-level API in `asmlib.hardware`
     (`console_clear/putc/write/set_color/set_cursor/get_row/get_col`):
     real VGA text-mode ops on `--target freestanding` (thin wrappers around
@@ -123,16 +137,12 @@ the `Pair` instance pointer as if it were a list/tuple buffer). Fixed
 is a plain user class. New
 `tests/cases_fail/for_unpack_non_iterable_instance.py`.
 
-Still open / not done: making `Counter.most_common()` itself return
-`list[tuple[str, int]]` (special-casing its return type the way
-`dict.items()` is special-cased — option (a) below) so
-`for el, cnt in c.most_common(): ...` actually *works* rather than just
-failing with a clear error. Root cause is the same general gap as the
-`_scan_tuple_return` pre-pass timing issue (sema.py ~1734-1759): there's no
-`dict.items()`-style hardcoded `tuple_elem_types` mechanism for arbitrary
-user/stdlib methods that return `list[tuple]`. `tests/cases/167_counter_
-operators.py` deliberately avoids this pattern (only tests `+`/`-`/`&`/`|`,
-not `most_common()`).
+Fixed (this session): `Counter.most_common()` now returns real
+`list[tuple[str, int]]` (see "Recently landed" above) — `for el, cnt in
+c.most_common(): ...` and `c.most_common(2)[0][0]` both work and match
+CPython. `tests/cases/167_counter_operators.py` still only tests
+`+`/`-`/`&`/`|` (not `most_common()`); `151_collections_module.py` covers
+`most_common()`.
 
 Modules CPython has that asmpython doesn't (breadth backlog, roughly
 priority order — verify each is still missing before starting, and check
@@ -187,11 +197,11 @@ functions the way hardware.py was checked).
 1. Check `.claude/issues` (empty so far).
 2. Pick the next item from the stdlib backlog above. Good next candidates,
    roughly in order of value/effort:
-   - `Counter.most_common()` returning `list[tuple[str, int]]` (option (a)
-     in the "Fixed" section above) so `for el, cnt in c.most_common(): ...`
-     actually works, not just fails cleanly — and the `list[list[T]]`/
-     `list[dict[K,V]]` nested-generic gap that shaped the `csv` module's API
-     (`e9e9525`).
+   - The `list[list[T]]`/`list[dict[K,V]]` nested-generic gap that shaped the
+     `csv` module's API (`e9e9525`) — same family as the `list[tuple[T1,T2]]`
+     gap just fixed (this session), but for `list`/`dict` element kinds
+     instead of `tuple`. Would let `csv.reader()` return `list[list[str]]`
+     directly instead of `list[Row]`.
    - `base64`, `fractions`/`decimal` from the breadth backlog below.
    - Survey `asmlib/gui.py` / `asmlib/network.py` for stub-only functions
      (not yet checked, unlike `hardware.py` which is now done).

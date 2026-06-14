@@ -294,6 +294,10 @@ class FuncSig:
     # Resolved return type as (ty, el_type, value_type), or None if the
     # function has no usable return annotation (treated as int at call sites).
     ret_type: object = None
+    # When ret_type is ("list", "tuple", ...) from a `-> list[tuple[T1,T2]]`
+    # annotation, the per-slot kinds ["T1","T2"] (else None). Lets call sites
+    # of `for a, b in <list[tuple[T1,T2]]>` type each unpack target.
+    ret_list_tuple_types: object = None
     # Parameter names and their default expressions (parallel to params,
     # including `self` for methods). Used to bind keyword arguments onto
     # positions at call sites.
@@ -991,6 +995,12 @@ class SemaAnalyzer:
         if base in ("int", "str", "float"):
             return (base, None, None, None)
         if base == "list":
+            if isinstance(el, tuple) and el[0] == "tuple":
+                # list[tuple[T1, T2, ...]]: el is ("tuple", [base1, base2, ...])
+                # (see parser._normalize_annot) -- resolve each slot's kind so
+                # `for a, b in <list[tuple[T1,T2]]>` can type each target.
+                slot_types = [self._resolve_scalar_annot(b) for b in el[1]]
+                return ("list", "tuple", None, slot_types)
             return ("list", self._resolve_scalar_annot(el), None, None)
         if base == "dict":
             return ("dict", None, self._resolve_scalar_annot(el), None)
@@ -1110,6 +1120,7 @@ class SemaAnalyzer:
                 n_defaults=_count_defaults(f.defaults),
                 pos=f.pos,
                 ret_type=(r[0], r[1], r[2]) if r is not None else None,
+                ret_list_tuple_types=(r[3] if r is not None and r[1] == "tuple" else None),
                 param_names=list(f.params),
                 param_defaults=list(f.defaults),
                 vararg=f.vararg,
@@ -1196,6 +1207,7 @@ class SemaAnalyzer:
                     n_defaults=_count_defaults(m.defaults),
                     pos=m.pos,
                     ret_type=(mr[0], mr[1], mr[2]) if mr is not None else None,
+                    ret_list_tuple_types=(mr[3] if mr is not None and mr[1] == "tuple" else None),
                     param_names=list(m.params),
                     param_defaults=list(m.defaults),
                     vararg=m.vararg,
@@ -1606,6 +1618,10 @@ class SemaAnalyzer:
         if isinstance(e, A.MethodCall):
             # dict.items() -> list[(str, V)]; sema stamps the pair shape on
             # `tuple_elem_types` (the element tuple's per-slot kinds).
+            return list(getattr(e, "tuple_elem_types", []))
+        if isinstance(e, A.Call):
+            # A user function annotated `-> list[tuple[T1,T2]]` stamps the
+            # per-slot kinds onto the call node (see _check_call).
             return list(getattr(e, "tuple_elem_types", []))
         return []
 
@@ -4183,6 +4199,8 @@ class SemaAnalyzer:
                     e.inferred_type = ty
                     if ty == "list" and el is not None:
                         e.list_el_type = el
+                        if el == "tuple" and sig.ret_list_tuple_types:
+                            e.tuple_elem_types = list(sig.ret_list_tuple_types)  # type: ignore
                 elif sig.returns_self:
                     # `def m(self): ... return self` with no annotation: the
                     # call's result is another reference to the receiver's
@@ -5040,6 +5058,8 @@ class SemaAnalyzer:
                 e.inferred_type = ty
                 if ty == "list" and el is not None:
                     e.list_el_type = el
+                    if el == "tuple" and sig.ret_list_tuple_types:
+                        e.tuple_elem_types = list(sig.ret_list_tuple_types)  # type: ignore
                 elif ty == "dict" and _val is not None:
                     # Carry the value kind so `d = f()[k]` / `f()[k].attr`
                     # reads recover it (bare `-> dict` gives value kind "any").

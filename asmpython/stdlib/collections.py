@@ -116,17 +116,6 @@ class deque:
         return "deque(" + repr(self._data) + ")"
 
 
-class CountPair:
-    """A (element, count) pair as returned by Counter.most_common()."""
-
-    def __init__(self, element: str, count: int) -> None:
-        self.element = element
-        self.count = count
-
-    def __repr__(self) -> str:
-        return "(" + repr(self.element) + ", " + str(self.count) + ")"
-
-
 class Counter:
     """Dict-like object that counts hashable items (keys must be strings)."""
 
@@ -167,13 +156,14 @@ class Counter:
                 i = i + 1
         return result
 
-    def most_common(self, n: int = -1) -> list[CountPair]:
+    def most_common(self, n: int = -1) -> list[tuple[str, int]]:
         keys: list[str] = []
         vals: list[int] = []
         for k in self._counts:
             keys.append(k)
             vals.append(self._counts[k])
-        # Insertion sort by count descending
+        # Insertion sort by count descending (stable: equal counts keep
+        # insertion order, matching CPython's most_common()).
         i = 1
         ln = len(keys)
         while i < ln:
@@ -187,11 +177,11 @@ class Counter:
             keys[j + 1] = kk
             vals[j + 1] = vv
             i = i + 1
-        result: list[CountPair] = []
+        result: list[tuple[str, int]] = []
         limit = ln if n < 0 else (n if n < ln else ln)
         i = 0
         while i < limit:
-            result.append(CountPair(keys[i], vals[i]))
+            result.append((keys[i], vals[i]))
             i = i + 1
         return result
 

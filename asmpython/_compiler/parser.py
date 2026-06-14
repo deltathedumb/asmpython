@@ -551,13 +551,19 @@ class Parser:
         if name in ("Union",):
             return ("any", None)
         if name in self._LIST_ANNOTS:
+            if inner and inner[0][0] in ("tuple", "Tuple") and inner[0][1]:
+                # list[tuple[T1, T2, ...]]: keep the per-slot base kinds so
+                # `for a, b in <list[tuple[T1,T2]]>` can type each target
+                # (instead of collapsing to the bare "tuple" element kind).
+                slot_bases = [s[0] for s in inner[0][1]]
+                return ("list", ("tuple", slot_bases))
             el = inner[0][0] if inner else None
             return ("list", el)
         if name in self._DICT_ANNOTS:
             val = inner[1][0] if len(inner) >= 2 else None
             return ("dict", val)
         if name in ("tuple", "Tuple"):
-            return ("tuple", None)
+            return ("tuple", inner)
         if name in ("set", "Set", "frozenset"):
             return ("set", None)
         # Anything else (CamelCase class, dotted module.Class) is a class-ish

@@ -358,6 +358,26 @@ output rather than silent miscompilations.
 
 ### Fixed
 
+- **`-> list[tuple[T1, T2]]` annotations lost the per-slot element kinds,
+  so `for a, b in f()` (where `f` returns `list[tuple[str, int]]`) typed
+  both unpack targets as `"any"` and printed the `str` slot as a raw
+  pointer value instead of the string.** The parser's `_normalize_annot`
+  collapsed `list[tuple[str, int]]` to plain `("list", "tuple")`, discarding
+  `["str", "int"]`; now it keeps `("list", ("tuple", ["str", "int"]))`, sema's
+  `_resolve_annot` resolves those slot kinds into a new `FuncSig.
+  ret_list_tuple_types`, and call sites (`A.Call` and instance `A.MethodCall`)
+  stamp `tuple_elem_types` on the call node so `_list_el_tuple_types` (used by
+  `for a, b in <list[tuple]>` unpacking and `xs[i][j]` indexing) sees the real
+  shape. This unblocked rewriting `collections.Counter.most_common()` (see
+  below) to return real tuples instead of a wrapper class.
+
+- **`collections.Counter.most_common()` now returns `list[tuple[str, int]]`**
+  (previously `list[CountPair]`, a wrapper class with `.element`/`.count`
+  fields), matching CPython exactly. `for el, cnt in c.most_common(): ...` and
+  `c.most_common(2)[0][0]` now work as in real Python. `CountPair` removed
+  (no longer needed). `tests/cases/151_collections_module.py` extended to
+  cover both access patterns.
+
 - **`for a, b in <list[T]>` where `T` is a plain user class (not a tuple)
   segfaulted (exit 139) instead of raising a compile error.** Multi-target
   `for`-loop unpacking over a list assumed every element was itself a
