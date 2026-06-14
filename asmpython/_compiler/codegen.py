@@ -482,6 +482,7 @@ class Codegen:
         "_runtime_int_to_base",
         "_runtime_int_to_binary",
         "_runtime_group_digits",
+        "_runtime_group_digits_zeropad",
         "_runtime_divmod",
         "_runtime_str_repeat",
         "_runtime_str_eq",
@@ -2769,19 +2770,16 @@ class Codegen:
 
         Grouping is applied as a post-processing step on the formatted
         digit string by `_emit_group_digits`, since C's printf has no
-        equivalent. If the remaining spec still requests a zero-padded
-        width (e.g. `"020"` from `"020,"`), grouping is skipped entirely
-        (returns `(None, spec)` unchanged) -- combining zero-pad width with
-        grouping would require the padded width to account for the inserted
-        separators (CPython does this; not implemented here)."""
+        equivalent. If the remaining spec still requests a zero-padded width
+        (e.g. `"015"` from `"015,"`), the `0`-flag + width are left in `rest`
+        for the caller to detect via `_split_fmt_width` and handle via
+        `_emit_group_digits_zeropad` instead of `_emit_group_digits`."""
         if "," in spec:
             sep, rest = ",", spec.replace(",", "", 1)
         elif "_" in spec:
             sep, rest = "_", spec.replace("_", "", 1)
         else:
             return None, spec
-        if len(rest) >= 2 and rest[0] == "0" and rest[1].isdigit():
-            return None, rest
         return sep, rest
 
     def _emit_group_digits(self, sep: str) -> None:
@@ -2789,6 +2787,14 @@ class Codegen:
         the integer part (after any leading '-', before any '.'), via
         `_runtime_group_digits` (fresh allocation)."""
         self.emitf(f"mov rbx, {ord(sep)}", "call _runtime_group_digits")
+
+    def _emit_group_digits_zeropad(self, sep: str, width: int) -> None:
+        """In/out: rax = numeric string ptr (already formatted, e.g.
+        "-1234567.89"). Zero-pads the integer part so the grouped result
+        reaches at least `width` chars total (CPython's zero-pad+grouping
+        combo, e.g. `f"{n:015,}"` -> `"000,001,234,567"`), then groups via
+        `_runtime_group_digits_zeropad`."""
+        self.emitf(f"mov rbx, {width}", f"mov rcx, {ord(sep)}", "call _runtime_group_digits_zeropad")
 
     def _gen_int_value_str(self, seg, info: FuncInfo, rest: str) -> None:
         """Evaluate int-typed `seg`, leaving its formatted-string form (per
@@ -2964,6 +2970,20 @@ class Codegen:
                         self.gen_expr(seg, info)
                         self._emit_int_to_binary_str(width, prefix_flag)
                         return
+                # Zero-pad width + grouping (`f"{n:015,}"`): CPython zero-pads
+                # the integer part so the *grouped* result reaches `zwidth`
+                # chars (separator-aware), e.g. -> "000,001,234,567". Strip
+                # the zero-pad width here so `cfmt` doesn't also zero-pad
+                # (that would double-count), and apply both via
+                # `_emit_group_digits_zeropad` below.
+                zwidth = None
+                if (
+                    sep is not None
+                    and len(body2) >= 2
+                    and body2[0] == "0"
+                    and body2[1].isdigit()
+                ):
+                    zwidth, body2 = self._split_fmt_width(body2, t)
                 cfmt = self._cfmt_for_spec(body2, t)
                 if cfmt is not None or sep is not None:
                     label = self.intern_string(cfmt)[0] if cfmt is not None else None
@@ -2980,7 +3000,10 @@ class Codegen:
                         else:
                             self._emit_int_to_str()
                     if sep is not None:
-                        self._emit_group_digits(sep)
+                        if zwidth is not None:
+                            self._emit_group_digits_zeropad(sep, zwidth)
+                        else:
+                            self._emit_group_digits(sep)
                     elif cfmt is not None:
                         self.emitf("call _runtime_str_concat_dup")
                     return
@@ -4363,6 +4386,7 @@ class Codegen:
                 "_runtime_int_to_base",
                 "_runtime_int_to_binary",
                 "_runtime_group_digits",
+                "_runtime_group_digits_zeropad",
                 "_runtime_divmod",
                 "_runtime_str_repeat",
                 "_runtime_str_eq",
@@ -4615,6 +4639,110 @@ class Codegen:
         self.emitf("inc rcx", "inc rdx", "mov [rbp-72], rcx", "mov [rbp-80], rdx", "jmp ._gd_copy_rest")
         self.label("._gd_copy_done")
         self.emitf("mov rax, [rbp-64]", "leave", "ret")
+
+        # ---- _runtime_group_digits_zeropad ----------------------------------------
+        # rax = numeric string ptr (e.g. "1234567" or "-1234567.89"), rbx =
+        # target total width, rcx = separator byte -> rax = newly-allocated
+        # string: the integer part is zero-padded (on the left) to the
+        # smallest digit count `ndigits` such that the *grouped* result
+        # reaches at least `width` chars total (matching CPython's
+        # zero-pad+grouping combo, e.g. f"{n:015,}" -> "000,001,234,567"),
+        # then grouped via _runtime_group_digits. An optional leading '-' and
+        # any fractional part (for floats) are preserved/counted but not
+        # padded.
+        self.label("_runtime_group_digits_zeropad")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 96")
+        self.emitf("mov [rbp-8], rax", "mov [rbp-16], rbx", "mov [rbp-24], rcx")
+        # sign_len = (src[0] == '-') ? 1 : 0
+        self.emitf(
+            "mov rsi, [rbp-8]",
+            "xor rdx, rdx",
+            "cmp byte [rsi], 45",
+            "jne ._gdz_no_sign",
+            "mov rdx, 1",
+        )
+        self.label("._gdz_no_sign")
+        self.emitf("mov [rbp-32], rdx")  # sign_len
+        # intpart_len = count of ASCII-digit chars starting at sign_len
+        self.emitf("mov rcx, rdx", "xor r9, r9")
+        self.label("._gdz_scan")
+        self.emitf(
+            "mov al, [rsi+rcx]",
+            "cmp al, 48", "jl ._gdz_scan_done",
+            "cmp al, 57", "jg ._gdz_scan_done",
+            "inc r9", "inc rcx", "jmp ._gdz_scan",
+        )
+        self.label("._gdz_scan_done")
+        self.emitf("mov [rbp-40], r9")  # intpart_len
+        # frac_len = strlen(src) - sign_len - intpart_len
+        self.emitf("mov rax, [rbp-8]")
+        self._emit_libc_strlen()
+        self.emitf(
+            "mov rcx, [rbp-32]", "add rcx, [rbp-40]",
+            "sub rax, rcx",
+            "mov [rbp-48], rax",  # frac_len
+        )
+        # ndigits = intpart_len; while sign_len+ndigits+(ndigits-1)//3+frac_len
+        # < width: ndigits += 1  (ndigits >= 1 always, so ndigits-1 >= 0)
+        self.emitf("mov r10, [rbp-40]")
+        self.label("._gdz_loop")
+        self.emitf(
+            "mov rax, r10", "dec rax",
+            "mov rcx, 3", "xor rdx, rdx", "div rcx",
+            "add rax, r10",
+            "add rax, [rbp-32]",
+            "add rax, [rbp-48]",
+            "cmp rax, [rbp-16]",
+            "jge ._gdz_loop_done",
+            "inc r10", "jmp ._gdz_loop",
+        )
+        self.label("._gdz_loop_done")
+        # pad_count = ndigits - intpart_len
+        self.emitf("mov rax, r10", "sub rax, [rbp-40]", "mov [rbp-64], rax")
+        # allocate sign_len + ndigits + frac_len + 1 bytes
+        self.emitf(
+            "mov rax, [rbp-32]", "add rax, r10", "add rax, [rbp-48]", "add rax, 1",
+        )
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf("mov [rbp-72], rax")  # dst
+        # write sign (if any); rcx = dst write index
+        self.emitf("xor rcx, rcx", "cmp qword [rbp-32], 0", "je ._gdz_no_sign2")
+        self.emitf(
+            "mov rsi, [rbp-8]", "mov rdi, [rbp-72]",
+            "mov al, [rsi]", "mov [rdi], al", "mov rcx, 1",
+        )
+        self.label("._gdz_no_sign2")
+        # write pad_count zero digits
+        self.emitf("mov r9, [rbp-64]")
+        self.label("._gdz_pad_loop")
+        self.emitf("test r9, r9", "jz ._gdz_pad_done")
+        self.emitf(
+            "mov rdi, [rbp-72]", "mov byte [rdi+rcx], 48",
+            "inc rcx", "dec r9", "jmp ._gdz_pad_loop",
+        )
+        self.label("._gdz_pad_done")
+        # copy intpart digits: src[sign_len .. sign_len+intpart_len)
+        self.emitf("mov r9, [rbp-40]", "mov r11, [rbp-32]")
+        self.label("._gdz_int_loop")
+        self.emitf("test r9, r9", "jz ._gdz_int_done")
+        self.emitf(
+            "mov rsi, [rbp-8]", "mov rdi, [rbp-72]",
+            "mov al, [rsi+r11]", "mov [rdi+rcx], al",
+            "inc r11", "inc rcx", "dec r9", "jmp ._gdz_int_loop",
+        )
+        self.label("._gdz_int_done")
+        # copy remaining chars (fraction, if any) + NUL terminator
+        self.label("._gdz_frac_loop")
+        self.emitf(
+            "mov rsi, [rbp-8]", "mov rdi, [rbp-72]",
+            "mov al, [rsi+r11]", "mov [rdi+rcx], al",
+            "test al, al", "jz ._gdz_frac_done",
+            "inc r11", "inc rcx", "jmp ._gdz_frac_loop",
+        )
+        self.label("._gdz_frac_done")
+        # group the zero-padded digit string
+        self.emitf("mov rax, [rbp-72]", "mov rbx, [rbp-24]", "call _runtime_group_digits")
+        self.emitf("leave", "ret")
 
         # ---- _runtime_divmod ---------------------------------------------------
         # rax = a, rbx = b (signed ints) -> rax = 2-tuple (q, r) in the list

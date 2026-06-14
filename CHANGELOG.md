@@ -11,6 +11,14 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **Zero-pad width + grouping for f-strings (`f"{n:015,}"`).** Combining a
+  zero-padded width with a `,`/`_` grouping option now matches CPython's
+  separator-aware zero-padding (`f"{1234567:015,}"` -> `"000,001,234,567"`),
+  for both `int` and `float` (`f"{pi:015,.2f}"`). Previously the grouping
+  option was silently dropped in this combination. New runtime helper
+  `_runtime_group_digits_zeropad` computes the smallest digit count whose
+  grouped form reaches the requested width, zero-pads to that count, then
+  reuses `_runtime_group_digits` for the actual grouping.
 - **`@property` setters (`@x.setter`).** A method decorated `@x.setter`
   (matching the name of an `@property` getter `x`) makes `obj.x = value`
   dispatch to that setter instead of writing an instance-dict field directly,
