@@ -11,6 +11,20 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **`with` statements / context managers (`__enter__`/`__exit__`).**
+  `with expr as name: body` (and `with expr: body` without `as`) requires
+  `expr`'s class to define both `__enter__` and `__exit__` -- a compile-time
+  error otherwise (`'C' object does not support the context manager protocol
+  (missing __enter__/__exit__)`). It's rewritten in place into a
+  `try`/`finally` (reusing the existing `setjmp`/`longjmp` unwinding), so
+  `__exit__` runs even if `body` raises. asmpython has no rich exception
+  objects, so `__exit__` is always called as `__exit__(None, None, None)` --
+  it can run cleanup but can't inspect or suppress the exception. Multiple
+  context managers in one `with` (`with a, b:`) is not yet supported. New
+  general `FuncSig.returns_self` inference (a method with no return
+  annotation whose only `return`s are `return self`, e.g. `__enter__`,
+  infers `instance:<ClassName>` at call sites instead of `int`) -- useful
+  for any self-returning builder-style method, not just `__enter__`.
 - **`str.format()` named fields (`"{name}".format(name="bob")`).** Named
   replacement fields now work alongside positional `{}`/`{0}` fields and the
   full `!conv`/`:format-spec` mini-language, e.g.

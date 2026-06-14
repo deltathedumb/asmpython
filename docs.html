@@ -645,6 +645,25 @@ b = <span class="fn">Box</span>(<span class="num">3</span>, <span class="num">4<
 t = <span class="fn">Temperature</span>(<span class="num">20</span>)
 t.celsius = <span class="num">100</span>  <span class="cmt"># calls the setter</span>
 <span class="fn">print</span>(t.celsius)  <span class="cmt"># 100, via the getter</span></code></pre>
+
+  <h3>Context managers (<code>with</code>)</h3>
+
+  <pre><div class="lang-tag">python</div><code><span class="kw">class</span> <span class="fn">Resource</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, name):
+        self.name = name
+
+    <span class="kw">def</span> <span class="fn">__enter__</span>(self):
+        <span class="fn">print</span>(<span class="str">"enter"</span>, self.name)
+        <span class="kw">return</span> self
+
+    <span class="kw">def</span> <span class="fn">__exit__</span>(self, exc_type, exc_value, tb):
+        <span class="fn">print</span>(<span class="str">"exit"</span>, self.name)
+
+<span class="kw">with</span> <span class="fn">Resource</span>(<span class="str">"a"</span>) <span class="kw">as</span> r:
+    <span class="fn">print</span>(<span class="str">"using"</span>, r.name)
+<span class="cmt"># enter a / using a / exit a</span></code></pre>
+
+  <p><code>with expr as name:</code> requires <code>expr</code>'s class to define both <code>__enter__</code> and <code>__exit__</code> (a compile-time error otherwise). It's rewritten to a <code>try</code>/<code>finally</code> so <code>__exit__</code> still runs if the body raises, reusing the same <code>setjmp</code>/<code>longjmp</code> unwinding as <code>try</code>/<code>finally</code>. asmpython has no rich exception objects, so <code>__exit__</code> is always called as <code>__exit__(None, None, None)</code> — it can run cleanup but can't inspect or suppress the exception. <code>with expr:</code> (no <code>as</code>) works the same way. Multiple context managers in one statement (<code>with a, b:</code>) is not yet supported — use nested <code>with</code> statements instead.</p>
 </section>
 
 <section id="exceptions">
@@ -1208,8 +1227,8 @@ name = <span class="fn">input</span>()
     <tr><td>Types</td><td>Bignum, <code>complex</code>, <code>Decimal</code>, <code>bytes</code></td></tr>
     <tr><td>Collections</td><td>Mixed-type lists, dicts with heterogeneous value types per key</td></tr>
     <tr><td>Functions</td><td>Closures capturing mutable state, generators, <code>yield</code></td></tr>
-    <tr><td>Classes</td><td>Multiple inheritance, metaclasses, most dunder methods beyond <code>__init__</code> / <code>__str__</code></td></tr>
-    <tr><td>Control flow</td><td><code>with</code> / context managers, <code>match</code>/<code>case</code></td></tr>
+    <tr><td>Classes</td><td>Multiple inheritance, metaclasses, most dunder methods beyond <code>__init__</code> / <code>__str__</code> / <code>__enter__</code> / <code>__exit__</code></td></tr>
+    <tr><td>Control flow</td><td><code>match</code>/<code>case</code>, multiple context managers in one <code>with</code> (<code>with a, b:</code>)</td></tr>
     <tr><td>Modules</td><td>User-defined module imports (only stdlib/asmlib)</td></tr>
     <tr><td>Stdlib</td><td><code>json</code>, <code>re</code>, <code>datetime</code>, <code>pathlib</code>, <code>threading</code>, <code>asyncio</code>, and most other modules</td></tr>
     <tr><td>Targets</td><td>macOS (Mach-O), 32-bit, ARM</td></tr>
