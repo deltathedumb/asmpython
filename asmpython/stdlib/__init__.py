@@ -24,6 +24,11 @@ class Func:
     ret_type: str                # "int" | "float" | "str"
     c_name: str
     c_name_windows: str | None = None  # override for Windows/msvcrt if symbol differs
+    # When the C function returns a double (in xmm0) but `ret_type` is "int"
+    # -- e.g. libm's trunc/floor/ceil, which CPython's math.trunc/floor/ceil
+    # narrow to int -- set this to "f2i" so codegen truncates xmm0 to rax via
+    # cvttsd2si instead of reading (garbage) eax/rax.
+    ret_conv: str | None = None
 
 
 @dataclass(frozen=True)

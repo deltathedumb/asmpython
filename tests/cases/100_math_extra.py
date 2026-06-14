@@ -1,11 +1,11 @@
 # expect:
 # 3
-# -5
-# 9
-# 2
-# 1024
-# 5
-# 60
+# -5.0
+# 9.0
+# 2.0
+# 1024.0
+# 5.0
+# 60.0
 import math
 import time
 print(math.trunc(3.7))

@@ -162,10 +162,10 @@ class WindowsCodegen(Codegen):
         self.emitf(f"mov rcx, {n}", "call malloc")
 
     def _emit_print_float_no_newline(self) -> None:
-        # printf("%g", value). MS x64 variadic ABI: each float arg lives in
-        # BOTH the corresponding XMM register and the general-purpose register
-        # at the same position. So we also mirror xmm0 -> rdx.
-        self.emitf("movq rdx, xmm0", "lea rcx, [fmt_flt]", "call printf")
+        # Route through _emit_float_to_str (sprintf "%g" + repr fixup) so
+        # whole numbers print as "2.0" not "2", matching CPython.
+        self._emit_float_to_str()
+        self._emit_print_str_ptr_no_newline()
 
     def _emit_float_to_str(self) -> None:
         # sprintf(buf, "%g", xmm0). xmm0 must also be mirrored to r8 for
@@ -177,6 +177,7 @@ class WindowsCodegen(Codegen):
             "call sprintf",
             "lea rax, [itoa_str_buf]",
         )
+        self._emit_float_repr_fixup()
 
     def _emit_float_fmt(self, fmt_label: str) -> None:
         # sprintf(buf, fmt, xmm0). MS x64: variadic double also mirrored to r8.

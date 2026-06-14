@@ -632,7 +632,8 @@ out_byte(<span class="num">0x3F8</span>, <span class="num">65</span>)   <span cl
     <tr><td><code>asin(x)</code> / <code>acos(x)</code> / <code>atan(x)</code></td><td>float → float</td><td></td></tr>
     <tr><td><code>sinh(x)</code> / <code>cosh(x)</code> / <code>tanh(x)</code></td><td>float → float</td><td></td></tr>
     <tr><td><code>asinh(x)</code> / <code>acosh(x)</code> / <code>atanh(x)</code></td><td>float → float</td><td>Inverse hyperbolics</td></tr>
-    <tr><td><code>floor(x)</code> / <code>ceil(x)</code> / <code>trunc(x)</code> / <code>nearbyint(x)</code></td><td>float → float</td><td></td></tr>
+    <tr><td><code>floor(x)</code> / <code>ceil(x)</code> / <code>trunc(x)</code></td><td>float → int</td><td>Matches CPython: narrows to <code>int</code></td></tr>
+    <tr><td><code>nearbyint(x)</code></td><td>float → float</td><td></td></tr>
     <tr><td><code>fabs(x)</code></td><td>float → float</td><td>Absolute value</td></tr>
     <tr><td><code>exp2(x)</code> / <code>expm1(x)</code> / <code>log1p(x)</code></td><td>float → float</td><td></td></tr>
     <tr><td><code>pow(x, y)</code></td><td>float, float → float</td><td></td></tr>

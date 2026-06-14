@@ -2261,10 +2261,13 @@ class Codegen:
             operand_t = A.expr_type(expr.operand)
             if operand_t == "float" and expr.op == "-":
                 self.gen_expr(expr.operand, info)
-                # XOR the sign bit. Easiest: subtract from 0.0.
-                zero_lbl = self.intern_float(0.0)
+                # Flip the sign bit directly so -0.0 stays -0.0 (0.0 - 0.0
+                # would give +0.0 under IEEE-754 round-to-nearest).
                 self.emitf(
-                    f"movsd xmm1, [{zero_lbl}]", "subsd xmm1, xmm0", "movsd xmm0, xmm1"
+                    "movq rax, xmm0",
+                    "mov rbx, 0x8000000000000000",
+                    "xor rax, rbx",
+                    "movq xmm0, rax",
                 )
                 return
             if operand_t == "float" and expr.op == "not":
@@ -9340,11 +9343,18 @@ class Codegen:
         if self._sysv_needs_al_count():
             self.emitf(f"mov al, {float_idx}")
         self.emit_call(self._platform_c_name(fn))
-        # C `int` is 32-bit: the callee returns it in EAX with the upper 32 bits
-        # of RAX undefined. asmpython values are full 64-bit slots, so a result
-        # like fgetc()'s -1 (EOF) would otherwise read as 0x00000000FFFFFFFF and
-        # never compare equal to -1. Sign-extend EAX into RAX for int returns.
-        if fn.ret_type == "int":
+        if getattr(fn, "ret_conv", None) == "f2i":
+            # The C function returns a double in xmm0 but asmpython's
+            # ret_type is "int" (e.g. trunc/floor/ceil, which CPython's
+            # math.trunc/floor/ceil narrow to int) -- truncate toward zero
+            # into rax instead of reading eax/rax (which holds garbage).
+            self.emitf("cvttsd2si rax, xmm0")
+        elif fn.ret_type == "int":
+            # C `int` is 32-bit: the callee returns it in EAX with the upper 32
+            # bits of RAX undefined. asmpython values are full 64-bit slots, so
+            # a result like fgetc()'s -1 (EOF) would otherwise read as
+            # 0x00000000FFFFFFFF and never compare equal to -1. Sign-extend EAX
+            # into RAX for int returns.
             self.emitf("movsxd rax, eax")
 
     def _platform_c_name(self, fn) -> str:
@@ -9604,6 +9614,52 @@ class Codegen:
     def _emit_float_to_str(self) -> None:
         """In: xmm0 = double. Out: rax = ptr to nul-terminated `%g` form."""
         raise NotImplementedError
+
+    def _emit_float_repr_fixup(self) -> None:
+        """In/out: rax = ptr to a nul-terminated `%g`-formatted float string,
+        mutated in place.
+
+        C's `%g` drops the decimal point entirely for whole numbers (`2.0`
+        -> `"2"`, `-0.0` -> `"-0"`), but CPython's float repr always shows
+        one (`"2.0"`, `"-0.0"`). Scan for a byte that already marks the value
+        as non-integral or non-finite ('.', 'e'/'E' for exponents, 'n'/'N'/
+        'i'/'I' for "nan"/"inf"/"-inf") and, if none is found before the
+        terminator, append ".0". Only `_emit_float_to_str` (the bare
+        `print(x)`/`str(x)` path) should call this -- not `_emit_float_fmt`,
+        whose explicit format specs (`.2f` etc.) already match Python."""
+        scan = self.fresh("frf_scan")
+        append = self.fresh("frf_append")
+        done = self.fresh("frf_done")
+        self.emitf("mov rbx, rax")
+        self.label(scan)
+        self.emitf(
+            "mov cl, [rbx]",
+            "test cl, cl",
+            f"jz {append}",
+            "cmp cl, '.'",
+            f"je {done}",
+            "cmp cl, 'e'",
+            f"je {done}",
+            "cmp cl, 'E'",
+            f"je {done}",
+            "cmp cl, 'n'",
+            f"je {done}",
+            "cmp cl, 'N'",
+            f"je {done}",
+            "cmp cl, 'i'",
+            f"je {done}",
+            "cmp cl, 'I'",
+            f"je {done}",
+            "inc rbx",
+            f"jmp {scan}",
+        )
+        self.label(append)
+        self.emitf(
+            "mov byte [rbx], '.'",
+            "mov byte [rbx+1], '0'",
+            "mov byte [rbx+2], 0",
+        )
+        self.label(done)
 
     def _emit_float_fmt(self, fmt_label: str) -> None:
         """In: xmm0 = double. Out: rax = ptr to sprintf(buf, <fmt_label>, x).

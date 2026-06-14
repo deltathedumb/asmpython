@@ -142,9 +142,10 @@ class LinuxCodegen(Codegen):
         self.emitf(f"mov rdi, {n}", "call malloc")
 
     def _emit_print_float_no_newline(self) -> None:
-        # printf("%g", xmm0). System V: float arg already in xmm0;
-        # AL = number of XMM args used = 1.
-        self.emitf("lea rdi, [fmt_flt]", "mov al, 1", "call printf")
+        # Route through _emit_float_to_str (sprintf "%g" + repr fixup) so
+        # whole numbers print as "2.0" not "2", matching CPython.
+        self._emit_float_to_str()
+        self._emit_print_str_ptr_no_newline()
 
     def _emit_float_to_str(self) -> None:
         self.emitf(
@@ -154,6 +155,7 @@ class LinuxCodegen(Codegen):
             "call sprintf",
             "lea rax, [itoa_str_buf]",
         )
+        self._emit_float_repr_fixup()
 
     def _emit_float_fmt(self, fmt_label: str) -> None:
         # sprintf(buf, fmt, xmm0). SysV: al = number of vector regs used (1).

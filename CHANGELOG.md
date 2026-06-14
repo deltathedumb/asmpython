@@ -151,6 +151,22 @@ output rather than silent miscompilations.
   correctly. Previously these paths copied whatever was in `rax` (not
   `xmm0`, where float results actually live) into the dict slot, so any
   `dict[str, float]` value read back as garbage.
+- **Whole-number floats print with a trailing `.0`**, matching CPython:
+  `print(2.0)` -> `2.0` (was `2`), and likewise for list/dict elements and
+  f-string interpolations. `sprintf`'s `%g` drops the decimal point for
+  integral values; a new shared `_emit_float_repr_fixup` scans the result and
+  appends `.0` unless it already contains `.`/`e`/`E` (a fraction or
+  exponent) or `n`/`i`/`N`/`I` (`nan`/`inf`/`-inf`, left as-is).
+- **`-0.0` now prints as `-0.0`, not `0.0`.** Unary `-` on a float negated by
+  computing `0.0 - x`, but IEEE-754 `0.0 - 0.0` is `+0.0`, losing the sign.
+  Negation now flips the sign bit directly (`xor` with `0x8000000000000000`).
+- **`math.floor`/`math.ceil`/`math.trunc` now return `int`, matching
+  CPython** (`math.trunc(3.7)` -> `3`, not `3.0`). Previously typed as
+  `float` (the underlying libm functions return `double`), so `print(...)`
+  the whole-number `.0` fix above would have made them mismatch CPython;
+  the FFI call layer now supports an `f2i` return conversion
+  (`cvttsd2si`) for libm functions whose Python-visible return type narrows
+  to `int`.
 
 ---
 

@@ -32,9 +32,10 @@ BINDINGS = {
     "sinh":  Func(arg_types=("float",), ret_type="float", c_name="sinh"),
     "cosh":  Func(arg_types=("float",), ret_type="float", c_name="cosh"),
     "tanh":  Func(arg_types=("float",), ret_type="float", c_name="tanh"),
-    "floor": Func(arg_types=("float",), ret_type="float", c_name="floor"),
-    "ceil":  Func(arg_types=("float",), ret_type="float", c_name="ceil"),
-    "trunc": Func(arg_types=("float",), ret_type="float", c_name="trunc"),
+    # CPython's math.floor/ceil/trunc return int (not the libm double).
+    "floor": Func(arg_types=("float",), ret_type="int", c_name="floor", ret_conv="f2i"),
+    "ceil":  Func(arg_types=("float",), ret_type="int", c_name="ceil", ret_conv="f2i"),
+    "trunc": Func(arg_types=("float",), ret_type="int", c_name="trunc", ret_conv="f2i"),
     "fabs":  Func(arg_types=("float",), ret_type="float", c_name="fabs"),
     # Inverse hyperbolics and exp/log variants (C99 libm; present in msvcrt/ucrt).
     "asinh": Func(arg_types=("float",), ret_type="float", c_name="asinh"),
