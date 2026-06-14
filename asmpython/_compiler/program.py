@@ -162,11 +162,14 @@ _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "enum", "abc", "contextlib",
     "struct", "hashlib", "heapq", "bisect", "statistics",
     "typing", "dataclasses", "textwrap", "csv", "uuid", "base64",
+    "fractions", "decimal", "datetime", "warnings", "urllib",
+    "urllibparse",
 })
 
 # Dotted module names that map to a differently-named file in stdlib/.
 _BUNDLED_DOTTED: dict[str, str] = {
-    "os.path": "ospath",
+    "os.path":      "ospath",
+    "urllib.parse": "urllibparse",
 }
 
 
