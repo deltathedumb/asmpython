@@ -2023,6 +2023,18 @@ class SemaAnalyzer:
                     f"cannot assign attribute on {obj_t}",
                     s.pos,
                 )
+            if obj_t.startswith("instance:"):
+                cls_name = obj_t.split(":", 1)[1]
+                if cls_name in self.classes:
+                    resolved = self._resolve_method(cls_name, s.name)
+                    if resolved is not None and "property" in resolved[1].decorators:
+                        # @property setters (`@x.setter`) aren't supported;
+                        # a read-only property can never be assigned, just
+                        # like in CPython.
+                        raise SemaError(
+                            f"property {s.name!r} of {cls_name!r} object has no setter",
+                            s.pos,
+                        )
             self._check_expr(s.value, scope)
             value_t = A.expr_type(s.value)
             # Instance fields hold any 8-byte value (int / str-ptr / instance /
@@ -2797,6 +2809,34 @@ class SemaAnalyzer:
                 # A field of an external/imported instance is also "any".
                 cls = obj_t.split(":", 1)[1]
                 if cls in self.classes:
+                    # `@property`: `obj.x` (no call parens) invokes the
+                    # zero-arg getter method `x`, not a field read. Rewrite
+                    # this Attr node into an equivalent no-arg MethodCall in
+                    # place, so codegen's existing method-dispatch (including
+                    # virtual dispatch for overridden properties) handles it.
+                    resolved = self._resolve_method(cls, e.name)
+                    if resolved is not None and "property" in resolved[1].decorators:
+                        _owner, sig = resolved
+                        obj_expr = e.obj
+                        e.__class__ = A.MethodCall  # type: ignore[assignment]
+                        e.obj = obj_expr  # type: ignore[attr-defined]
+                        e.method = e.name  # type: ignore[attr-defined]
+                        e.args = []  # type: ignore[attr-defined]
+                        e.kwargs = []  # type: ignore[attr-defined]
+                        e.list_el_type = "int"  # type: ignore[attr-defined]
+                        e.value_type = "int"  # type: ignore[attr-defined]
+                        e.tuple_elem_types = []  # type: ignore[attr-defined]
+                        if sig.ret_tuple is not None:
+                            e.inferred_type = "tuple"
+                            e.tuple_elem_types = list(sig.ret_tuple)  # type: ignore[attr-defined]
+                        elif sig.ret_type is not None:
+                            ty, el, _val = sig.ret_type  # type: ignore[misc]
+                            e.inferred_type = ty
+                            if ty == "list" and el is not None:
+                                e.list_el_type = el  # type: ignore[attr-defined]
+                        else:
+                            e.inferred_type = "int"
+                        return
                     ft = self._resolve_field_type(cls, e.name)
                     e.inferred_type = ft if ft is not None else "any"
                     # Carry the collection element/value kinds so a later

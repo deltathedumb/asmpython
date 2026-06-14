@@ -218,6 +218,20 @@ output rather than silent miscompilations.
   `int`/`float`/etc. set-element support needs a tagged key representation
   (to disambiguate a boxed pointer from an inline scalar without colliding
   with the `0`=empty / `1`=tombstone sentinels), which is a larger follow-up.
+- **`@property`** getters now work: `obj.x` (no call parens) where `x` is a
+  `@property`-decorated method invokes the getter, typed from its return
+  annotation. Previously `obj.x` always read an *instance field* named `x`
+  — since `@property` methods never assign `self.x`, the field was absent
+  from the class's field table and read as `0`/`any` every time (a silent
+  miscompilation). Sema now resolves `obj.x` against the class's methods
+  first; if `x` is `@property`, the `Attr` node is rewritten in place into
+  an equivalent no-arg `MethodCall`, so codegen's existing dispatch — including
+  virtual dispatch for a property overridden in a subclass — handles it for
+  free. `@x.setter` is not modelled by the parser (decorators are captured as
+  a bare dotted-name prefix, so `@area.setter` is indistinguishable from
+  `@area`); assigning to a `@property` attribute (`obj.x = v`) now raises
+  `property 'x' of 'Cls' object has no setter`, matching CPython's
+  `AttributeError`, instead of silently creating an unrelated instance field.
 
 ---
 

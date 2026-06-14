@@ -580,6 +580,22 @@ Config.version += <span class="num">1</span>
 <span class="fn">print</span>(Config.version)          <span class="cmt"># 6</span></code></pre>
 
   <p><code>@staticmethod</code> methods are called on the class (<code>Config.banner(...)</code>) with no implicit receiver. Class variables (<code>name = value</code> in the class body, on a non-<code>@dataclass</code> class) are static constants stored once and read/written through the class — <code>Config.version</code>, including augmented assignment. <code>@classmethod</code> is accepted, though a class-method body that mutates class state through <code>cls</code> is not fully supported yet.</p>
+
+  <h3>Properties</h3>
+
+  <pre><div class="lang-tag">python</div><code><span class="kw">class</span> <span class="fn">Box</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, w: <span class="kw2">int</span>, h: <span class="kw2">int</span>) -&gt; <span class="kw2">None</span>:
+        self.w = w
+        self.h = h
+
+    <span class="kw">@property</span>
+    <span class="kw">def</span> <span class="fn">area</span>(self) -&gt; <span class="kw2">int</span>:
+        <span class="kw">return</span> self.w * self.h
+
+b = <span class="fn">Box</span>(<span class="num">3</span>, <span class="num">4</span>)
+<span class="fn">print</span>(b.area)  <span class="cmt"># 12, computed on access</span></code></pre>
+
+  <p>A <code>@property</code>-decorated method is called automatically whenever its name is read as an attribute (<code>b.area</code>), including through inheritance and virtual dispatch. <code>@x.setter</code> is not supported — assigning to a read-only property raises a compile-time error, matching CPython's <code>AttributeError</code>.</p>
 </section>
 
 <section id="exceptions">
@@ -1136,7 +1152,7 @@ name = <span class="fn">input</span>()
     <tr><td>Types</td><td>Bignum, <code>complex</code>, <code>Decimal</code>, <code>bytes</code></td></tr>
     <tr><td>Collections</td><td>Mixed-type lists, dicts with heterogeneous value types per key</td></tr>
     <tr><td>Functions</td><td>Closures capturing mutable state, generators, <code>yield</code></td></tr>
-    <tr><td>Classes</td><td>Multiple inheritance, metaclasses, most dunder methods beyond <code>__init__</code> / <code>__str__</code>, <code>@classmethod</code>, <code>@staticmethod</code>, <code>@property</code></td></tr>
+    <tr><td>Classes</td><td>Multiple inheritance, metaclasses, most dunder methods beyond <code>__init__</code> / <code>__str__</code>, <code>@property</code> setters (<code>@x.setter</code>)</td></tr>
     <tr><td>Control flow</td><td><code>with</code> / context managers, <code>match</code>/<code>case</code></td></tr>
     <tr><td>Modules</td><td>User-defined module imports (only stdlib/asmlib)</td></tr>
     <tr><td>Stdlib</td><td><code>json</code>, <code>re</code>, <code>datetime</code>, <code>pathlib</code>, <code>threading</code>, <code>asyncio</code>, and most other modules</td></tr>
