@@ -1076,7 +1076,7 @@ qemu-system-x86_64 -drive format=raw,file=boot.img -serial stdio -display none</
     <tr><td><code>isinstance(obj, cls)</code></td><td>→ bool</td><td></td></tr>
     <tr><td><code>hasattr(obj, name)</code></td><td>→ bool</td><td></td></tr>
     <tr><td><code>getattr(obj, name)</code></td><td>→ int</td><td></td></tr>
-    <tr><td><code>type(x)</code></td><td>→ str</td><td>Returns type name string</td></tr>
+    <tr><td><code>type(x)</code></td><td>→ str</td><td>Returns <code>"&lt;class 'int'&gt;"</code> / <code>"&lt;class 'list'&gt;"</code> / etc. (matches CPython's <code>repr</code>); user instances give <code>"&lt;class '__main__.Name'&gt;"</code>, honoring the runtime (possibly subclass) type</td></tr>
     <tr><td><code>id(x)</code></td><td>→ int</td><td>Pointer value</td></tr>
   </table>
 </section>

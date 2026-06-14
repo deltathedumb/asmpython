@@ -242,6 +242,18 @@ output rather than silent miscompilations.
   same store sequences as `IndexAssign`/`AttrAssign`. The single-iterable
   unpack form (`a, b = some_list`) still requires plain-name targets and
   raises a clear error otherwise.
+- **`type(x)` now returns a real `"<class '...'>"` string instead of crashing
+  or printing a raw id.** Previously `type(x)` always treated `x` as an
+  instance dict and looked up its `__class__` tag — for `int`/`float`/`str`/
+  `list`/`dict`/`tuple`/`set` values (anything that isn't a dict-shaped
+  pointer), this read garbage memory and segfaulted (e.g. `b = True;
+  print(type(b))`). Now: for a statically-known builtin type, `type(x)`
+  yields an interned `"<class 'int'>"`/`"<class 'list'>"`/etc. string; for a
+  user instance it reads the RTTI class id as before and indexes a new
+  per-class `.rodata` table of `"<class '__main__.ClassName'>"` strings
+  (honoring inheritance, since the id is the *runtime* class). `print()`
+  and `str()` of the result now match CPython's `repr()` for types. Opaque
+  (`any`-typed) arguments keep the old raw-class-id fallback.
 
 ---
 

@@ -3935,6 +3935,16 @@ class SemaAnalyzer:
                 # the result prints/operates as a float, not its raw bits).
                 e.inferred_type = "float" if A.expr_type(e.args[0]) == "float" else "int"
                 return
+            if e.func == "type":
+                # type(x) -> "<class '...'>" string for any statically-known
+                # type (builtin scalar/container, or a user instance); falls
+                # back to "any" (the raw RTTI class id) for opaque values.
+                arg_t = A.expr_type(e.args[0])
+                if arg_t.startswith("instance:") or arg_t in (
+                    "int", "float", "str", "list", "dict", "tuple", "set",
+                ):
+                    e.inferred_type = "str"
+                return
             if e.func in (
                 "bool",
                 "set",
@@ -3948,7 +3958,6 @@ class SemaAnalyzer:
                 "ord",
                 "chr",
                 "repr",
-                "type",
                 "id",
             ):
                 return

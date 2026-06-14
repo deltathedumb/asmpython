@@ -140,6 +140,10 @@ class Codegen:
         for cls in mod.classes:
             self.class_ids[cls.name] = cid
             cid += 1
+        # Lazily-built .rodata table mapping each class id above to a
+        # "<class '__main__.Name'>" string, for type(instance) (see
+        # _type_name_table_label). None until first requested.
+        self.type_name_table: list[str] | None = None
         # Class-level variables that act as static constants: `class C: x = 5`.
         # Each maps "<Class>.<name>" -> (label, default_expr). Emitted as bss
         # globals, initialized at startup, and read/written via ClassName.attr
@@ -286,6 +290,18 @@ class Codegen:
         body = ",".join(parts) if parts else "0"
         self.strings.append((label, body))
         return label, len(parts)
+
+    def _type_name_table_label(self) -> str:
+        """Lazily build a .rodata table mapping each user class's RTTI id
+        (see self.class_ids) to a "<class '__main__.Name'>" string, so
+        type(instance) can index into it by runtime class id."""
+        if self.type_name_table is None:
+            table = [""] * len(self.class_ids)
+            for name, cid in self.class_ids.items():
+                label, _ = self.intern_string(f"<class '__main__.{name}'>")
+                table[cid] = label
+            self.type_name_table = table
+        return "__type_name_table"
 
     # ---- driver -------------------------------------------------------------
 
@@ -480,6 +496,8 @@ class Codegen:
             for label, val in self.floats:
                 # repr(float) round-trips to the exact bit pattern.
                 self.emit(f"{label}: dq {repr(val)}")
+            if self.type_name_table:
+                self.emit(f"__type_name_table: dq {', '.join(self.type_name_table)}")
         # bss: one zero-initialized 8-byte slot per module-level variable.
         # Module-level code (`main`) writes the real value at startup; every
         # function reads it through the symbol.
@@ -8865,10 +8883,32 @@ class Codegen:
             self.emitf("test rax, rax", "setne al", "movzx rax, al")
             return
         if e.func == "type":
-            # type(x) -> the instance's RTTI class id (the "__class__" tag the
-            # constructor stored), or 0 for an untagged value. Not a real type
-            # object — enough for identity-style uses; `type(x).__name__` style
-            # introspection needs true type objects (post-1.0).
+            # type(x) -> a "<class '...'>" string, matching CPython's repr.
+            arg_t = A.expr_type(e.args[0])
+            if arg_t in ("int", "float", "str", "list", "dict", "tuple", "set"):
+                label, _ = self.intern_string(f"<class '{arg_t}'>")
+                self.emitf(f"lea rax, [{label}]")
+                return
+            if arg_t.startswith("instance:"):
+                # Read the instance's RTTI class id (the "__class__" tag the
+                # constructor stored) and use it to index a per-class table of
+                # "<class '__main__.Name'>" strings.
+                self.gen_expr(e.args[0], info)
+                key_label, _ = self.intern_string("__class__")
+                self.emitf(
+                    f"lea rbx, [{key_label}]",
+                    "xor rcx, rcx",
+                    "call _runtime_dict_get_default",
+                )
+                table_label = self._type_name_table_label()
+                self.emitf(
+                    f"lea rbx, [{table_label}]",
+                    "mov rax, [rbx+rax*8]",
+                )
+                return
+            # Opaque ("any"): fall back to the instance's raw RTTI class id,
+            # or 0 for an untagged value. type(x).__name__-style introspection
+            # for "any" values needs true runtime type tags (post-1.0).
             self.gen_expr(e.args[0], info)
             key_label, _ = self.intern_string("__class__")
             self.emitf(
