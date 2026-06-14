@@ -1101,6 +1101,10 @@ class Codegen:
                 if obj_t == "set" and expr.method == "add":
                     # set.add(x): park the key across the receiver's eval.
                     self._cl_define(info, f"__setadd_key_{id(expr)}")
+                if obj_t == "set" and expr.method in ("discard", "remove"):
+                    # set.discard(x)/remove(x): park the key across the
+                    # receiver's (repeated) eval.
+                    self._cl_define(info, f"__setrm_key_{id(expr)}")
                 if expr.method == "update" and obj_t in ("dict", "set", "any"):
                     # dict/set.update(src): park src across the receiver's eval.
                     self._cl_define(info, f"__dictupd_{id(expr)}")
@@ -7233,6 +7237,73 @@ class Codegen:
                 return
             if e.method in ("union", "intersection", "difference"):
                 self._gen_set_setop(e.obj, e.args[0], e.method, id(e), info)
+                return
+            if e.method in ("discard", "remove"):
+                # s.discard(x): remove x if present, else no-op.
+                # s.remove(x): remove x, raising KeyError if absent (which
+                # _runtime_dict_pop already does for us).
+                key_slot = info.locals_[f"__setrm_key_{id(e)}"]
+                self.gen_expr(e.args[0], info)  # rax = member key ptr
+                self.emitf(f"mov [rbp{key_slot:+d}], rax")
+                if e.method == "discard":
+                    self.gen_expr(e.obj, info)
+                    self.emitf(f"mov rbx, [rbp{key_slot:+d}]", "call _runtime_dict_contains")
+                    done = self.fresh("sdisc_done")
+                    self.emitf("test rax, rax", f"jz {done}")
+                    self.gen_expr(e.obj, info)
+                    self.emitf(f"mov rbx, [rbp{key_slot:+d}]", "call _runtime_dict_pop")
+                    self.label(done)
+                else:
+                    self.gen_expr(e.obj, info)
+                    self.emitf(f"mov rbx, [rbp{key_slot:+d}]", "call _runtime_dict_pop")
+                self.emitf("xor rax, rax")
+                return
+            if e.method == "copy":
+                # s.copy(): a shallow copy, same as dict.copy (sets are dicts
+                # keyed by their members).
+                src_slot = info.locals_[f"__dm_src_{id(e)}"]
+                new_slot = info.locals_[f"__dm_new_{id(e)}"]
+                NEW_CAP = 8
+                self.gen_expr(e.obj, info)  # rax = src
+                self.emitf(f"mov [rbp{src_slot:+d}], rax")
+                self.emitf(f"mov rbx, {self.DICT_HEADER}", "call _runtime_zalloc")
+                self.emitf(f"mov [rbp{new_slot:+d}], rax")
+                self.emitf(
+                    f"mov qword [rax+{self.DICT_CAP_OFF}], {NEW_CAP}",
+                    f"mov rbx, {NEW_CAP * self.DICT_SLOT_SIZE}",
+                    "call _runtime_zalloc",
+                    f"mov rcx, [rbp{new_slot:+d}]",
+                    f"mov [rcx+{self.DICT_BUF_OFF}], rax",
+                    "mov rax, rcx",
+                    f"mov rbx, [rbp{src_slot:+d}]",
+                    "call _runtime_dict_update",
+                    f"mov rax, [rbp{new_slot:+d}]",
+                )
+                return
+            if e.method == "pop":
+                # s.pop(): remove and return an arbitrary member (the first
+                # live key), raising KeyError if the set is empty.
+                key_slot = info.locals_[f"__dm_arg_{id(e)}"]
+                self.gen_expr(e.obj, info)  # rax = header
+                self.emitf("call _runtime_dict_keys")  # rax = list[str] of keys
+                empty_msg, _ = self.intern_string("KeyError: 'pop from an empty set'")
+                nonempty = self.fresh("spop_nonempty")
+                self.emitf(
+                    f"mov rcx, [rax+{self.LIST_LEN_OFF}]",
+                    "test rcx, rcx",
+                    f"jnz {nonempty}",
+                    f"lea rax, [{empty_msg}]",
+                    "call _runtime_raise",
+                )
+                self.label(nonempty)
+                self.emitf(
+                    f"mov rax, [rax+{self.LIST_BUF_OFF}]",
+                    "mov rax, [rax]",  # first key ptr
+                    f"mov [rbp{key_slot:+d}], rax",
+                )
+                self.gen_expr(e.obj, info)  # rax = header again
+                self.emitf(f"mov rbx, [rbp{key_slot:+d}]", "call _runtime_dict_pop")
+                self.emitf(f"mov rax, [rbp{key_slot:+d}]")
                 return
             raise NotImplementedError(f"set.{e.method}() not implemented yet")
         if e.method == "index" and A.expr_type(e.obj) in ("list", "tuple", "any"):

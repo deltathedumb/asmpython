@@ -199,6 +199,16 @@ output rather than silent miscompilations.
   (repeated-squaring) is unchanged. On the freestanding target, `**` with a
   float operand still uses the pre-existing `_runtime_math_pow` stub, which
   returns `0.0` (same known limitation as `sin`/`cos`/`exp`/etc.).
+- **`set.discard()`, `set.remove()`, `set.copy()`, and `set.pop()`** are now
+  implemented. Sema already accepted all four (typed `discard`/`remove` as
+  `int`, `copy` as `set`, `pop` as `str`), but codegen raised
+  `NotImplementedError(f"set.{e.method}() not implemented yet")`. `discard`
+  checks membership via `_runtime_dict_contains` and removes via
+  `_runtime_dict_pop` only if present; `remove` calls `_runtime_dict_pop`
+  directly (raising `KeyError` if absent); `copy` is the same
+  allocate-and-`_runtime_dict_update` pattern as `dict.copy()`; `pop` removes
+  and returns the first live key from `_runtime_dict_keys`, raising
+  `KeyError: 'pop from an empty set'` on an empty set.
 
 ---
 
