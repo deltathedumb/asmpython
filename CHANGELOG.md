@@ -239,6 +239,21 @@ output rather than silent miscompilations.
 
 ### Fixed
 
+- **Unannotated function/method parameters infer their type from call-site
+  arguments instead of silently defaulting to `int`.** Idiomatic Python
+  rarely annotates parameters (`def __init__(self, name): self.name = name`,
+  `def greet(msg): return msg`); previously every such parameter -- and any
+  `self.x = param` field it fed -- defaulted to `int`, so e.g.
+  `Resource("a").name` printed a raw pointer value instead of `"a"`. Now,
+  when every call site that passes a syntactically-typed argument (a string/
+  float/list/dict/tuple literal, f-string, or constructor call) agrees on one
+  type, that type is adopted for the parameter (and, transitively, for
+  `self.<field>` and for the function's own return type when it returns that
+  parameter unchanged, e.g. `def greet(msg): return msg`). Parameters with no
+  such evidence, or with conflicting evidence across call sites, keep the
+  previous `int` default -- callers needing a different type still annotate
+  explicitly. New `Analyzer._infer_unannotated_params` /
+  `_infer_unannotated_returns`, run before field-type collection.
 - **`try`/`except` now dispatches on the actual exception type**, including
   multiple `except` clauses with different types, tuples of types
   (`except (TypeError, ValueError):`), and the builtin exception hierarchy

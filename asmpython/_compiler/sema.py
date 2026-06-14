@@ -15,6 +15,7 @@ flag what's clearly wrong).
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -305,6 +306,12 @@ class FuncSig:
     ret_tuple: object = None
     # Decorator identities for methods (["staticmethod"] / ["classmethod"]).
     decorators: list = field(default_factory=list)
+    # True when every reachable `return` in the body is a bare `return self`
+    # (and at least one exists), and the method has no explicit return-type
+    # annotation. Lets call sites of e.g. `__enter__` (which conventionally
+    # `return self`) infer `instance:<ClassName>` instead of defaulting to
+    # `int`. Mirrors `ret_tuple`'s body-scanning approach.
+    returns_self: bool = False
 
 
 @dataclass
@@ -501,6 +508,12 @@ class SemaAnalyzer:
         # (i.e. have a `return a, b` somewhere). Lets `q, r = f()` recover
         # the per-target types at the call site. Computed in analyze().
         self.func_ret_tuple: dict[str, list[str]] = {}
+        # (qualified_name, param_index) -> (ty, el, val, tup) for parameters
+        # with no annotation and no default, inferred from literal-typed
+        # arguments at call sites. `qualified_name` is a function's plain name,
+        # or "ClassName.method_name" for a method. See
+        # `_infer_unannotated_params`.
+        self.inferred_param_types: dict[tuple[str, int], tuple] = {}
 
     def _has_external_base(self, class_name: str) -> bool:
         """True if `class_name` or any ancestor inherits from a base that isn't
@@ -690,6 +703,10 @@ class SemaAnalyzer:
                         pinfo[p] = r
                     elif i < len(m.defaults) and m.defaults[i] is not None:
                         pinfo[p] = (A.expr_type(m.defaults[i]), None, None, None)  # type: ignore
+                    else:
+                        inferred = self.inferred_param_types.get((f"{c.name}.{m.name}", i))
+                        if inferred is not None:
+                            pinfo[p] = inferred
                 self._scan_field_assigns(m.body, sig, pinfo)
 
     def _scan_field_assigns(self, stmts: list, sig: ClassSig, pinfo: dict) -> None:
@@ -733,11 +750,12 @@ class SemaAnalyzer:
                 self._scan_field_assigns(s.else_body, sig, pinfo)
                 self._scan_field_assigns(s.finally_body, sig, pinfo)
 
-    def _static_value_info(self, value, pinfo: dict):
-        """Best-effort (ty, el, val, tuple) of an assigned value, used for field
-        inference before full body analysis (so it can't rely on stamped
-        inferred_type). Covers the dataclass-style cases that matter. `el`/`val`
-        are the list-element / dict-value kinds; `tuple` the per-slot kinds."""
+    def _literal_arg_type(self, value):
+        """(ty, el, val, tuple) for an expression whose type is knowable from
+        its syntax alone, independent of scope -- or None if it depends on a
+        name binding (e.g. a bare variable reference). Used both by
+        `_static_value_info` (for `self.x = <value>` field inference) and by
+        `_infer_unannotated_params` (for call-site argument inference)."""
         if isinstance(value, A.IntLit):
             return ("int", None, None, None)
         if isinstance(value, A.FloatLit):
@@ -750,11 +768,178 @@ class SemaAnalyzer:
             return ("dict", None, None, None)
         if isinstance(value, A.TupleLit):
             return ("tuple", None, None, None)
-        if isinstance(value, A.Name):
-            return pinfo.get(value.name, ("int", None, None, None))
         if isinstance(value, A.Call) and value.func in self.classes:
             return (f"instance:{value.func}", None, None, None)
+        return None
+
+    def _static_value_info(self, value, pinfo: dict):
+        """Best-effort (ty, el, val, tuple) of an assigned value, used for field
+        inference before full body analysis (so it can't rely on stamped
+        inferred_type). Covers the dataclass-style cases that matter. `el`/`val`
+        are the list-element / dict-value kinds; `tuple` the per-slot kinds."""
+        lit = self._literal_arg_type(value)
+        if lit is not None:
+            return lit
+        if isinstance(value, A.Name):
+            return pinfo.get(value.name, ("int", None, None, None))
         return ("int", None, None, None)
+
+    # ---- call-site argument type inference for unannotated parameters ------
+
+    def _collect_calls(self, node, out: list) -> None:
+        """Recursively collect every `A.Call`/`A.MethodCall` reachable from
+        `node` (a statement, expression, or list of either), via a generic
+        dataclass-field walk. Used by `_infer_unannotated_params` to find every
+        call site of every function/method in the module, regardless of how
+        deeply it's nested in expressions."""
+        if isinstance(node, (A.Call, A.MethodCall)):
+            out.append(node)
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            for f in dataclasses.fields(node):
+                self._collect_calls(getattr(node, f.name, None), out)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                self._collect_calls(item, out)
+
+    def _infer_unannotated_params(self) -> None:
+        """For function/method parameters with no type annotation and no
+        default, scan every call site in the module for arguments whose type
+        is knowable from syntax alone (`_literal_arg_type`: literals,
+        f-strings, constructor calls) and, if every such call site agrees on a
+        single non-int type, adopt it as the parameter's type.
+
+        Without this, idiomatic Python -- which rarely annotates parameters --
+        has every unannotated parameter (and any `self.x = param` field it
+        feeds) silently default to `int`, so e.g. `def __init__(self, name):
+        self.name = name` called as `Cls("a")` would treat `self.name` as an
+        int and print its pointer value instead of "a". A parameter with no
+        literal-typed call sites, or with conflicting literal types, keeps the
+        existing `int` default -- callers needing a different type still
+        annotate explicitly, same as before."""
+        calls: list = []
+        self._collect_calls(self.mod.body, calls)
+        for f in self.mod.funcs:
+            self._collect_calls(f.body, calls)
+        for c in self.mod.classes:
+            for m in c.methods:
+                self._collect_calls(m.body, calls)
+
+        for f in self.mod.funcs:
+            sites = [c for c in calls if isinstance(c, A.Call) and c.func == f.name]
+            self._infer_call_target_params(f.name, f, sites, start=0)
+
+        for c in self.mod.classes:
+            for m in c.methods:
+                if m.name == "__init__":
+                    sites = [
+                        c2 for c2 in calls if isinstance(c2, A.Call) and c2.func == c.name
+                    ]
+                else:
+                    # Matched by method name only (the receiver's static type
+                    # isn't known yet at this pre-pass). If another class has a
+                    # same-named method with conflicting argument types, the
+                    # mismatch just falls back to `int` as before -- no new
+                    # miscompile.
+                    sites = [
+                        mc for mc in calls
+                        if isinstance(mc, A.MethodCall) and mc.method == m.name
+                    ]
+                self._infer_call_target_params(f"{c.name}.{m.name}", m, sites, start=1)
+
+    def _infer_call_target_params(self, qualname: str, fn, sites: list, start: int) -> None:
+        """Infer types for `fn`'s parameters at index >= `start` (0 for plain
+        functions, 1 for methods to skip `self`) from `sites` (the `A.Call`/
+        `A.MethodCall` nodes invoking it), storing results in
+        `self.inferred_param_types`. See `_infer_unannotated_params`."""
+        for i, p in enumerate(fn.params):
+            if i < start:
+                continue
+            annot = fn.param_types[i] if i < len(fn.param_types) else None
+            if self._resolve_annot(annot) is not None:  # type: ignore
+                continue
+            if i < len(fn.defaults) and fn.defaults[i] is not None:
+                continue
+            candidates: set = set()
+            found_any = False
+            arg_idx = i - start
+            for site in sites:
+                args = site.args
+                if arg_idx < len(args):
+                    arg = args[arg_idx]
+                else:
+                    arg = next((v for n, v in getattr(site, "kwargs", []) if n == p), None)
+                    if arg is None:
+                        continue
+                lit = self._literal_arg_type(arg)
+                if lit is None:
+                    continue
+                found_any = True
+                candidates.add(lit)
+            if found_any and len(candidates) == 1:
+                self.inferred_param_types[(qualname, i)] = next(iter(candidates))
+
+    # ---- return-type inference for unannotated functions/methods ----------
+
+    def _infer_unannotated_returns(self) -> None:
+        """For functions/methods with no return-type annotation and no
+        inferred tuple-return shape (`ret_tuple`), scan `return` statements
+        and -- if every reachable one has a value, every value's type is
+        statically knowable, and they all agree -- adopt that as `ret_type`.
+        Mirrors `ret_tuple`'s body-scanning precedent for the scalar case,
+        e.g. `def f(x): return x` called as `f("hi")` makes `f("hi")` a str
+        result instead of defaulting to int (using the parameter type
+        `_infer_unannotated_params` just determined for `x`)."""
+        for f in self.mod.funcs:
+            sig = self.funcs[f.name]
+            if sig.ret_type is not None or sig.ret_tuple is not None:
+                continue
+            ty = self._infer_return_type(f, f.name)
+            if ty is not None:
+                sig.ret_type = ty
+        for c in self.mod.classes:
+            for m in c.methods:
+                sig = self.classes[c.name].methods[m.name]
+                if (
+                    sig.ret_type is not None
+                    or sig.ret_tuple is not None
+                    or sig.returns_self
+                ):
+                    continue
+                ty = self._infer_return_type(m, f"{c.name}.{m.name}")
+                if ty is not None:
+                    sig.ret_type = ty
+
+    def _infer_return_type(self, fn, qualname: str):
+        """(ty, el, val) for every reachable `return` in `fn.body`, if all
+        have a value and those values' types are statically knowable
+        (`_literal_arg_type`, or a reference to one of `fn`'s parameters whose
+        type is known) and agree -- else None. Helper for
+        `_infer_unannotated_returns`."""
+        returns: list = []
+        self._collect_returns(fn.body, returns)
+        if not returns:
+            return None
+        types: set = set()
+        for r in returns:
+            if r.value is None:
+                return None  # bare `return` mixed in: ambiguous
+            lit = self._literal_arg_type(r.value)
+            if lit is None and isinstance(r.value, A.Name) and r.value.name in fn.params:
+                j = fn.params.index(r.value.name)
+                annot = fn.param_types[j] if j < len(fn.param_types) else None
+                resolved = self._resolve_annot(annot)  # type: ignore
+                if resolved is not None:
+                    lit = resolved
+                elif j < len(fn.defaults) and fn.defaults[j] is not None:
+                    lit = (A.expr_type(fn.defaults[j]), None, None, None)
+                else:
+                    lit = self.inferred_param_types.get((qualname, j))
+            if lit is None:
+                return None
+            types.add((lit[0], lit[1], lit[2]))
+        if len(types) == 1:
+            return next(iter(types))
+        return None
 
     def _static_value_type(self, value, ptypes: dict) -> str:
         """Just the type half of `_static_value_info` (kept for callers that
@@ -839,18 +1024,24 @@ class SemaAnalyzer:
         # constrain; the body's usage decides what's legal.
         return None
 
-    def _seed_param(self, scope: Scope, name: str, annot, default_expr) -> None:
-        """Add a parameter to `scope`, typing it from its annotation if present,
-        otherwise from a literal default, otherwise int."""
+    def _seed_param(self, scope: Scope, name: str, annot, default_expr, inferred=None) -> None:
+        """Add a parameter to `scope`, typing it from its annotation if
+        present, otherwise from a literal default, otherwise from
+        `inferred` (a (ty, el, val, tup) tuple from
+        `_infer_unannotated_params`, or None), otherwise int."""
         resolved = self._resolve_annot(annot)
         if resolved is not None:
             ty, el, val, tup = resolved
             scope.add(name, ty, el_type=el, value_type=val, tuple_types=tup)
             return
-        ty = "int"
         if default_expr is not None:
-            ty = A.expr_type(default_expr)
-        scope.add(name, ty)
+            scope.add(name, A.expr_type(default_expr))
+            return
+        if inferred is not None:
+            ty, el, val, tup = inferred
+            scope.add(name, ty, el_type=el, value_type=val, tuple_types=tup)
+            return
+        scope.add(name, "int")
 
     def _seed_globals_into(self, scope: Scope) -> None:
         """Copy module-level names (and their tracked types) into a fresh
@@ -1010,6 +1201,7 @@ class SemaAnalyzer:
                     vararg=m.vararg,
                     ret_tuple=self._scan_tuple_return(m.body),
                     decorators=list(getattr(m, "decorators", [])),
+                    returns_self=mr is None and self._method_returns_self(m.body),
                 )
                 if setter_prop is not None:
                     sig.setters[setter_prop] = m.name
@@ -1038,6 +1230,18 @@ class SemaAnalyzer:
         # function/method bodies. In CPython a function reads module globals at
         # call time; we approximate that by seeding each body's scope with the
         # names the module level defines.
+        # Infer parameter types for unannotated, no-default parameters from
+        # literal-typed arguments at call sites (see
+        # `_infer_unannotated_params`). Done before field-type collection so
+        # `self.x = param` in `__init__` benefits too.
+        self._infer_unannotated_params()
+
+        # Infer return types for functions/methods with no return annotation
+        # and no inferred tuple-return shape, from their `return` statements
+        # (using the parameter types just inferred above). See
+        # `_infer_unannotated_returns`.
+        self._infer_unannotated_returns()
+
         # Infer instance-field types from `self.x = ...` so `obj.x` reads carry
         # the right static type. Done before any body is checked (top-level or
         # method) so every field read — including from module-level code — sees
@@ -1067,7 +1271,8 @@ class SemaAnalyzer:
             for i, p in enumerate(f.params):
                 annot = f.param_types[i] if i < len(f.param_types) else None
                 default = f.defaults[i] if i < len(f.defaults) else None
-                self._seed_param(scope, p, annot, default)
+                inferred = self.inferred_param_types.get((f.name, i))
+                self._seed_param(scope, p, annot, default, inferred)
             self._check_block(f.body, scope)
             self.in_function = None
             self.in_lifted = False
@@ -1107,7 +1312,8 @@ class SemaAnalyzer:
                         # DUNDER_SAME_TYPE_OTHER) so `other.field` resolves.
                         scope.add(p, f"instance:{c.name}")
                         continue
-                    self._seed_param(scope, p, annot, default)
+                    inferred = self.inferred_param_types.get((f"{c.name}.{m.name}", i))
+                    self._seed_param(scope, p, annot, default, inferred)
                 self._check_block(m.body, scope)
                 self.in_function = None
                 self.current_class = None
@@ -1554,6 +1760,35 @@ class SemaAnalyzer:
             elif isinstance(s, A.Try):
                 self._collect_tuple_returns(s.body, acc)
                 self._collect_tuple_returns(s.handler, acc)
+
+    def _method_returns_self(self, stmts: list) -> bool:
+        """True if every reachable `return` in `stmts` is `return self`, and
+        at least one such return exists. Mirrors `_scan_tuple_return`'s
+        body-scanning approach (see `FuncSig.returns_self`)."""
+        returns: list = []
+        self._collect_returns(stmts, returns)
+        if not returns:
+            return False
+        return all(
+            isinstance(r.value, A.Name) and r.value.name == "self" for r in returns
+        )
+
+    def _collect_returns(self, stmts: list, acc: list) -> None:
+        for s in stmts:
+            if isinstance(s, A.Return):
+                acc.append(s)
+            elif isinstance(s, A.If):
+                self._collect_returns(s.then, acc)
+                self._collect_returns(s.orelse, acc)
+            elif isinstance(s, (A.While, A.For)):
+                self._collect_returns(s.body, acc)
+            elif isinstance(s, A.Try):
+                self._collect_returns(s.body, acc)
+                self._collect_returns(s.handler, acc)
+                for _types, _bind, hbody in s.extra_handlers:
+                    self._collect_returns(hbody, acc)
+                self._collect_returns(s.else_body, acc)
+                self._collect_returns(s.finally_body, acc)
 
     def _bind_name_from_value(self, target: str, value, scope: Scope, annot=None) -> None:
         """Bind `target` in `scope` to the static type of `value`, the same
@@ -2271,6 +2506,61 @@ class SemaAnalyzer:
             return
         if isinstance(s, A.With):
             self._check_expr(s.expr, scope)
+            obj_t = A.expr_type(s.expr)
+            if obj_t.startswith("instance:"):
+                cls_name = obj_t.split(":", 1)[1]
+                enter = self._resolve_method(cls_name, "__enter__")
+                exitm = self._resolve_method(cls_name, "__exit__")
+                if enter is None or exitm is None:
+                    raise SemaError(
+                        f"{cls_name!r} object does not support the context "
+                        "manager protocol (missing __enter__/__exit__)",
+                        s.pos,
+                    )
+                # `with expr as name: body` -> rewrite *in place* into:
+                #   __cm = expr
+                #   [name = ] __cm.__enter__()
+                #   try:
+                #       body
+                #   finally:
+                #       __cm.__exit__(None, None, None)
+                # so the existing setjmp/longjmp try/finally machinery makes
+                # __exit__ run even if `body` raises. asmpython's exception
+                # model doesn't carry rich exception objects, so __exit__
+                # always sees (None, None, None) -- it can't inspect or
+                # suppress the exception, only run cleanup.
+                cm_name = f"__cm_{id(s)}"
+                cm_assign = A.Assign(target=cm_name, value=s.expr, pos=s.pos)
+                cm_ref = A.Name(name=cm_name, pos=s.pos)
+                enter_call = A.MethodCall(
+                    obj=cm_ref, method="__enter__", args=[], pos=s.pos
+                )
+                if s.name is not None:
+                    enter_stmt: A.Stmt = A.Assign(
+                        target=s.name, value=enter_call, pos=s.pos
+                    )
+                else:
+                    enter_stmt = A.ExprStmt(expr=enter_call, pos=s.pos)
+                none_args = [
+                    A.IntLit(value=0, pos=s.pos, is_none=True) for _ in range(3)
+                ]
+                exit_call = A.MethodCall(
+                    obj=A.Name(name=cm_name, pos=s.pos),
+                    method="__exit__",
+                    args=none_args,
+                    pos=s.pos,
+                )
+                body = [cm_assign, enter_stmt] + list(s.body)
+                s.__class__ = A.Try  # type: ignore[assignment]
+                s.body = body  # type: ignore[attr-defined]
+                s.handler = []  # type: ignore[attr-defined]
+                s.bind_name = None  # type: ignore[attr-defined]
+                s.handler_types = []  # type: ignore[attr-defined]
+                s.extra_handlers = []  # type: ignore[attr-defined]
+                s.else_body = []  # type: ignore[attr-defined]
+                s.finally_body = [A.ExprStmt(expr=exit_call, pos=s.pos)]  # type: ignore[attr-defined]
+                self._check_stmt(s, scope)
+                return
             if s.name is not None:
                 scope.add(s.name, A.expr_type(s.expr))
             self._check_block(s.body, scope)
@@ -3479,6 +3769,11 @@ class SemaAnalyzer:
                     e.inferred_type = ty
                     if ty == "list" and el is not None:
                         e.list_el_type = el
+                elif sig.returns_self:
+                    # `def m(self): ... return self` with no annotation: the
+                    # call's result is another reference to the receiver's
+                    # type (e.g. `__enter__` returning `self`).
+                    e.inferred_type = obj_t
                 else:
                     e.inferred_type = "int"
             elif obj_t == "module" and e.method in self.funcs:

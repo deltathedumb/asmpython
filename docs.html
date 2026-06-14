@@ -564,6 +564,8 @@ f = greet
 
   <p>Default arguments (int, str, float, True, False, None literals), <code>*args</code>, type annotations (parsed, not enforced). Recursion at any depth. Decorators.</p>
 
+  <p>Parameters and instance fields don't need type annotations: when a parameter has no annotation and no default, its type is inferred from call-site arguments (string/float/list/dict/tuple literals, f-strings, or constructor calls), and a function that returns that parameter unchanged inherits its type too. This also makes <code>self.x = param</code> in <code>__init__</code> infer the right field type. A parameter inferred this way needs every call site that gives static evidence to agree on one type; ambiguous or conflicting parameters fall back to <code>int</code> and need an explicit annotation.</p>
+
   <p><code>*expr</code> argument unpacking at call sites (<code>f(*t)</code>) is supported when <code>expr</code> is a tuple of statically-known shape — a name, subscript, or attribute bound to a tuple literal (or a <code>list[tuple[...]]</code> element). Each slot is spliced in as its own positional argument at compile time; there's no runtime varargs, so unpacking a <code>Call</code> result directly (<code>f(*g())</code>) isn't supported — assign it to a variable first.</p>
 </section>
 
