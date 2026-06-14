@@ -9,8 +9,6 @@ Implements the most commonly used CPython collections:
 
 Limitations vs CPython:
   - deque: no maxlen support
-  - Counter: most_common() returns unsorted list (no key sort yet); no
-    arithmetic operators (+, -, &, |)
   - namedtuple: field names must be plain identifiers; no defaults= support
 """
 from __future__ import annotations
@@ -209,6 +207,62 @@ class Counter:
                 self._counts[item] = self._counts[item] - 1
             else:
                 self._counts[item] = -1
+
+    def _drop_nonpositive(self) -> None:
+        to_remove: list[str] = []
+        for k in self._counts:
+            if self._counts[k] <= 0:
+                to_remove.append(k)
+        for k in to_remove:
+            del self._counts[k]
+
+    def __add__(self, other: Counter) -> Counter:
+        result = Counter([])
+        for k in self._counts:
+            result._counts[k] = self._counts[k]
+        for k in other._counts:
+            if k in result._counts:
+                result._counts[k] = result._counts[k] + other._counts[k]
+            else:
+                result._counts[k] = other._counts[k]
+        result._drop_nonpositive()
+        return result
+
+    def __sub__(self, other: Counter) -> Counter:
+        result = Counter([])
+        for k in self._counts:
+            result._counts[k] = self._counts[k]
+        for k in other._counts:
+            if k in result._counts:
+                result._counts[k] = result._counts[k] - other._counts[k]
+            else:
+                result._counts[k] = -other._counts[k]
+        result._drop_nonpositive()
+        return result
+
+    def __and__(self, other: Counter) -> Counter:
+        result = Counter([])
+        for k in self._counts:
+            if k in other._counts:
+                a = self._counts[k]
+                b = other._counts[k]
+                result._counts[k] = a if a < b else b
+        result._drop_nonpositive()
+        return result
+
+    def __or__(self, other: Counter) -> Counter:
+        result = Counter([])
+        for k in self._counts:
+            result._counts[k] = self._counts[k]
+        for k in other._counts:
+            if k in result._counts:
+                a = result._counts[k]
+                b = other._counts[k]
+                result._counts[k] = b if b > a else a
+            else:
+                result._counts[k] = other._counts[k]
+        result._drop_nonpositive()
+        return result
 
     def __repr__(self) -> str:
         return "Counter(" + repr(self._counts) + ")"

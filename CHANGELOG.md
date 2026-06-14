@@ -311,6 +311,11 @@ output rather than silent miscompilations.
   keys printed raw pointer values instead of the key strings; now declared
   `-> list[str]`. New `tests/cases/166_ordereddict_methods.py`
   (CPython-verified).
+- **`collections.Counter` arithmetic operators: `+`, `-`, `&`, `|`.** Matches
+  CPython's multiset semantics: `+` sums counts, `-` subtracts, `&` takes the
+  per-key minimum, `|` takes the per-key maximum; in all four cases any key
+  whose resulting count is `<= 0` is dropped from the result. New
+  `tests/cases/167_counter_operators.py` (CPython-verified).
 
 ### Fixed
 
