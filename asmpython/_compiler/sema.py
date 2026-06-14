@@ -1334,8 +1334,18 @@ class SemaAnalyzer:
     # ---- helpers ------------------------------------------------------------
 
     def _check_block(self, stmts: list, scope: Scope) -> None:
-        for s in stmts:
-            self._check_stmt(s, scope)
+        # Index-based so `_check_stmt` can splice extra statements (already
+        # checked) immediately before `s` -- used by the `match` rewrite to
+        # introduce a subject temp-variable assignment ahead of the `if`
+        # chain it rewrites `s` into.
+        i = 0
+        while i < len(stmts):
+            s = stmts[i]
+            extra = self._check_stmt(s, scope)
+            if extra:
+                stmts[i:i] = extra
+                i += len(extra)
+            i += 1
 
     def _is_include_stmt(self, s) -> bool:
         """True if `s` is an `include("pkg")` directive statement.
@@ -1860,7 +1870,7 @@ class SemaAnalyzer:
                 is_none=t == "int" and A.is_none_expr(value),
             )
 
-    def _check_stmt(self, s, scope: Scope) -> None:
+    def _check_stmt(self, s, scope: Scope) -> "Optional[list]":
         if isinstance(s, A.Pass):
             return
         if isinstance(s, A.Assign):

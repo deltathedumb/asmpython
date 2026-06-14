@@ -382,6 +382,96 @@ class Del:
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
+# ---- match/case patterns -----------------------------------------------------
+
+
+@dataclass
+class MatchValue:
+    """A literal pattern: `case 1:`, `case "x":`, `case 3.0:`, `case None:`,
+    `case True:`, `case -1:`. Matches when the subject equals `value`."""
+
+    value: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class MatchCapture:
+    """A capture pattern (`case x:`, binds the subject to `x`) or the
+    wildcard pattern (`case _:`, when `name == "_"`, matches anything and
+    binds nothing)."""
+
+    name: str
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class MatchOr:
+    """`case p1 | p2 | ...:` — matches if any alternative matches.
+
+    Only literal alternatives (MatchValue, or nested MatchOr of literals) are
+    supported: capture patterns inside an `or` pattern are rejected, since
+    asmpython doesn't support the cross-alternative binding-consistency rules
+    CPython enforces.
+    """
+
+    patterns: list["Pattern"] = field(default_factory=list)
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class MatchSequence:
+    """`case [p0, p1, ...]:` / `case (p0, p1, ...):` — matches a list/tuple of
+    the right shape. At most one element may be a starred capture (`*rest` /
+    `*_`); `star_index` is its position in `patterns`, or None if there's no
+    star. A starred wildcard (`*_`) still occupies a slot in `patterns`
+    (as `MatchCapture("_")`) but binds nothing."""
+
+    patterns: list["Pattern"] = field(default_factory=list)
+    star_index: Optional[int] = None
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class MatchClass:
+    """`case ClassName(p0, p1, kw=pk, ...):` — matches an instance of
+    `cls_name` (via isinstance/RTTI) whose `__match_args__`-named attributes
+    (for positional sub-patterns) and keyword-named attributes match."""
+
+    cls_name: str
+    positional: list["Pattern"] = field(default_factory=list)
+    kwargs: list = field(default_factory=list)  # list[(str, Pattern)]
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class MatchAs:
+    """`case pattern as name:` — matches if `pattern` matches, and also binds
+    the whole subject to `name`. `pattern` is None for a bare capture (`case
+    name:`) handled instead by MatchCapture; MatchAs is only built for the
+    explicit `as` form."""
+
+    pattern: "Optional[Pattern]"
+    name: str
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+Pattern = MatchValue | MatchCapture | MatchOr | MatchSequence | MatchClass | MatchAs
+
+
+@dataclass
+class Match:
+    """`match subject: case pattern [if guard]: body ...`.
+
+    Sema rewrites this *in place* into an `If`/`elif`/.../`else` chain (see
+    `Analyzer._check_stmt`), evaluating `subject` once into a synthetic temp
+    so patterns/guards can reference it without re-evaluating side effects.
+    """
+
+    subject: "Expr"
+    cases: list = field(default_factory=list)  # list[(Pattern, Optional[Expr], list[Stmt])]
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
 Stmt = (
     Assign
     | AugAssign
@@ -404,6 +494,7 @@ Stmt = (
     | Global
     | Nonlocal
     | Del
+    | Match
 )
 # IndexAssign is also a Stmt but forward-referenced because Subscript is defined below.
 

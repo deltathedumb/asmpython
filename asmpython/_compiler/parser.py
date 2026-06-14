@@ -638,6 +638,12 @@ class Parser:
                 self._expect("NEWLINE")
                 return A.Pass(pos=pos)  # yield not yet implemented: treat as pass
 
+        # `match` is a soft keyword (an ordinary NAME token): only treat it as
+        # a match statement when the lookahead confirms `match <expr>:` shape,
+        # so `match = 5` / `match(x)` / `match.foo` keep working as before.
+        if t.kind == "NAME" and t.value == "match" and self._looks_like_match_stmt():
+            return self._parse_match()
+
         # Assignment / aug-assignment vs expression statement.
         if t.kind == "NAME":
             nxt = self._peek(1)
@@ -816,6 +822,232 @@ class Parser:
             with_stmt = A.With(expr=expr, name=name, body=body, pos=kw.pos)
             body = [with_stmt]
         return with_stmt
+
+    def _looks_like_match_stmt(self) -> bool:
+        """`match` is a soft keyword: only `match <expr>:` followed by
+        NEWLINE (then an indented block of `case` clauses) is a match
+        statement. Anything else (`match = 5`, `match(x)`, `match.attr`,
+        `match[i] = v`, ...) is a normal NAME-led statement, so this
+        speculatively parses the subject expression and rewinds regardless of
+        the outcome."""
+        save = self.i
+        self._eat()  # 'match'
+        ok = False
+        try:
+            self._parse_expr()
+            ok = self._check("OP", ":") and self._peek(1).kind == "NEWLINE"
+        except ParseError:
+            ok = False
+        self.i = save
+        return ok
+
+    def _parse_match(self) -> A.Match:
+        kw = self._eat()  # 'match'
+        subject = self._parse_expr()
+        self._expect("OP", ":")
+        self._expect("NEWLINE")
+        self._skip_newlines()
+        self._expect("INDENT")
+        cases: list = []
+        while not self._check("DEDENT"):
+            self._skip_newlines()
+            if self._check("DEDENT"):
+                break
+            cases.append(self._parse_case())
+            self._skip_newlines()
+        self._expect("DEDENT")
+        return A.Match(subject=subject, cases=cases, pos=kw.pos)
+
+    def _parse_case(self) -> tuple:
+        self._expect("NAME", "case")  # soft keyword, like 'match'
+        pattern = self._parse_case_pattern()
+        guard = None
+        if self._check("KEYWORD", "if"):
+            self._eat()
+            guard = self._parse_expr()
+        self._expect("OP", ":")
+        body = self._parse_block()
+        return (pattern, guard, body)
+
+    def _parse_case_pattern(self) -> "A.Pattern":
+        """Top-level pattern of a `case` clause: a single pattern, or an
+        unparenthesized sequence pattern (`case a, b:`, `case a, *rest:`)."""
+        star_index: "int | None"
+        if self._check("OP", "*"):
+            star_index = 0
+            patterns = [self._parse_star_pattern()]
+        else:
+            first = self._parse_as_pattern()
+            if not self._check("OP", ","):
+                return first
+            patterns = [first]
+            star_index = None
+        pos = patterns[0].pos
+        while self._check("OP", ","):
+            self._eat()
+            if self._check("OP", ":") or self._check("KEYWORD", "if"):
+                break  # trailing comma
+            if self._check("OP", "*"):
+                if star_index is not None:
+                    raise ParseError(
+                        "multiple starred names in sequence pattern",
+                        self._peek().pos,
+                    )
+                star_index = len(patterns)
+                patterns.append(self._parse_star_pattern())
+            else:
+                patterns.append(self._parse_as_pattern())
+        return A.MatchSequence(patterns=patterns, star_index=star_index, pos=pos)
+
+    def _parse_star_pattern(self) -> "A.MatchCapture":
+        """`*name` / `*_` inside a sequence pattern."""
+        pos = self._expect("OP", "*").pos
+        name = self._expect("NAME").value
+        return A.MatchCapture(name=name, pos=pos)
+
+    def _parse_as_pattern(self) -> "A.Pattern":
+        pat = self._parse_or_pattern()
+        if self._check("KEYWORD", "as"):
+            pos = self._eat().pos
+            name = self._expect("NAME").value
+            return A.MatchAs(pattern=pat, name=name, pos=pos)
+        return pat
+
+    def _parse_or_pattern(self) -> "A.Pattern":
+        first = self._parse_closed_pattern()
+        if not self._check("OP", "|"):
+            return first
+        alts = [first]
+        while self._check("OP", "|"):
+            self._eat()
+            alts.append(self._parse_closed_pattern())
+        return A.MatchOr(patterns=alts, pos=first.pos)
+
+    def _parse_sequence_items(self, close: str) -> tuple:
+        """Comma-separated pattern items up to (not including) the `close`
+        OP token. Returns (patterns, star_index, saw_trailing_comma)."""
+        patterns: list = []
+        star_index: "int | None" = None
+        saw_comma = False
+        while not self._check("OP", close):
+            if self._check("OP", "*"):
+                if star_index is not None:
+                    raise ParseError(
+                        "multiple starred names in sequence pattern",
+                        self._peek().pos,
+                    )
+                star_index = len(patterns)
+                patterns.append(self._parse_star_pattern())
+            else:
+                patterns.append(self._parse_as_pattern())
+            if self._check("OP", ","):
+                self._eat()
+                saw_comma = True
+                continue
+            break
+        return patterns, star_index, saw_comma
+
+    def _parse_closed_pattern(self) -> "A.Pattern":
+        t = self._peek()
+        if t.kind == "OP" and t.value == "(":
+            pos = self._eat().pos
+            patterns, star_index, saw_comma = self._parse_sequence_items(")")
+            self._expect("OP", ")")
+            if len(patterns) == 1 and star_index is None and not saw_comma:
+                return patterns[0]  # `(pattern)` is a grouping, not a 1-sequence
+            return A.MatchSequence(patterns=patterns, star_index=star_index, pos=pos)
+        if t.kind == "OP" and t.value == "[":
+            pos = self._eat().pos
+            patterns, star_index, _ = self._parse_sequence_items("]")
+            self._expect("OP", "]")
+            return A.MatchSequence(patterns=patterns, star_index=star_index, pos=pos)
+        if t.kind == "OP" and t.value == "{":
+            raise ParseError(
+                "mapping patterns (`case {...}:`) are not supported", t.pos
+            )
+        if t.kind == "OP" and t.value == "-":
+            self._eat()
+            n = self._peek()
+            if n.kind == "INT":
+                self._eat()
+                return A.MatchValue(
+                    value=A.IntLit(value=-n.value, pos=t.pos), pos=t.pos  # type: ignore
+                )
+            if n.kind == "FLOAT":
+                self._eat()
+                return A.MatchValue(
+                    value=A.FloatLit(value=-n.value, pos=t.pos), pos=t.pos  # type: ignore
+                )
+            raise ParseError("expected a number after '-' in pattern", n.pos)
+        if t.kind == "INT":
+            self._eat()
+            return A.MatchValue(value=A.IntLit(value=t.value, pos=t.pos), pos=t.pos)  # type: ignore
+        if t.kind == "FLOAT":
+            self._eat()
+            return A.MatchValue(value=A.FloatLit(value=t.value, pos=t.pos), pos=t.pos)  # type: ignore
+        if t.kind == "STRING":
+            self._eat()
+            return A.MatchValue(value=A.StrLit(value=t.value, pos=t.pos), pos=t.pos)  # type: ignore
+        if t.kind == "KEYWORD" and t.value in ("True", "False"):
+            self._eat()
+            val = A.IntLit(value=1 if t.value == "True" else 0, pos=t.pos, is_bool=True)
+            return A.MatchValue(value=val, pos=t.pos)
+        if t.kind == "KEYWORD" and t.value == "None":
+            self._eat()
+            return A.MatchValue(
+                value=A.IntLit(value=0, pos=t.pos, is_none=True), pos=t.pos
+            )
+        if t.kind == "NAME":
+            if t.value == "_":
+                self._eat()
+                return A.MatchCapture(name="_", pos=t.pos)
+            name_tok = self._eat()
+            if self._check("OP", "."):
+                # Dotted value pattern (`case Color.RED:`) or a dotted class
+                # pattern (`case mod.ClassName(...):`, last segment is the
+                # class). Resolve once the chain ends.
+                value: A.Expr = A.Name(name=name_tok.value, pos=name_tok.pos)
+                last_name = name_tok.value
+                while self._check("OP", "."):
+                    self._eat()
+                    last_name = self._expect("NAME").value
+                    value = A.Attr(obj=value, name=last_name, pos=name_tok.pos)
+                if self._check("OP", "("):
+                    return self._parse_class_pattern(last_name, name_tok.pos)
+                return A.MatchValue(value=value, pos=name_tok.pos)
+            if self._check("OP", "("):
+                return self._parse_class_pattern(name_tok.value, name_tok.pos)
+            return A.MatchCapture(name=name_tok.value, pos=name_tok.pos)
+        raise ParseError(f"invalid pattern: unexpected {t.kind} {t.value!r}", t.pos)
+
+    def _parse_class_pattern(self, cls_name: str, pos) -> "A.MatchClass":
+        self._expect("OP", "(")
+        positional: list = []
+        kwargs: list = []
+        while not self._check("OP", ")"):
+            if (
+                self._check("NAME")
+                and self._peek(1).kind == "OP"
+                and self._peek(1).value == "="
+            ):
+                kwname = self._eat().value
+                self._eat()  # '='
+                kwargs.append((kwname, self._parse_as_pattern()))
+            else:
+                if kwargs:
+                    raise ParseError(
+                        "positional pattern follows keyword pattern",
+                        self._peek().pos,
+                    )
+                positional.append(self._parse_as_pattern())
+            if self._check("OP", ","):
+                self._eat()
+                continue
+            break
+        self._expect("OP", ")")
+        return A.MatchClass(
+            cls_name=cls_name, positional=positional, kwargs=kwargs, pos=pos
+        )
 
     def _parse_raise(self) -> A.Raise:
         kw = self._expect("KEYWORD", "raise")
