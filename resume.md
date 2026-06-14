@@ -2,12 +2,18 @@
 
 ## Status as of 2026-06-14
 
-- 218/218 tests passing (`py -m tests.runner`).
+- 219/219 tests passing (`py -m tests.runner`).
 - Branch is being pushed: `origin/parity-expansion` should track local
-  `HEAD` (latest: `list[tuple[T1,T2]]` return-annotation slot-type
-  propagation + `Counter.most_common()` -> real `list[tuple[str,int]]`, on
-  top of `35267d3`).
+  `HEAD` (latest: new `base64` module, on top of the
+  `list[tuple[T1,T2]]`/`most_common()` fix below).
 - Recently landed (most recent last):
+  - (this session) — new `base64` module (`b64encode`/`b64decode`,
+    `standard_b64encode`/`standard_b64decode`, `urlsafe_b64encode`/
+    `urlsafe_b64decode`, `b32encode`/`b32decode`, `b16encode`/`b16decode`),
+    operating on `list[int]` like `hashlib`. All verified against CPython
+    incl. every padding remainder. `a85`/`b85` not implemented (rare,
+    complex). New `tests/cases/172_base64_module.py`. Removed from the
+    breadth backlog below.
   - (this session) — fixed the long-standing `-> list[tuple[T1,T2]]`
     annotation gap: the parser/sema previously collapsed
     `list[tuple[str,int]]` to a bare `("list","tuple")`, losing the per-slot
@@ -151,16 +157,16 @@ whether it's even meaningful for a systems/assembly-targeting compiler):
 1. `datetime`/`time` extensions — `time.py` exists but is libc-wrapper only;
    a pure-Python `datetime`-like date/time arithmetic module would be real
    breadth.
-2. `base64` — pure string/byte manipulation, good fit.
-3. `fractions`/`decimal` — exact-arithmetic types; decent fit if `class`
+2. `fractions`/`decimal` — exact-arithmetic types; decent fit if `class`
    and operator-overloading dunders are solid (check `__add__` etc. coverage).
-4. `glob`/`shutil`/`tempfile` — depend on `os`/`pathlib` which already exist;
+3. `glob`/`shutil`/`tempfile` — depend on `os`/`pathlib` which already exist;
    check what os/pathlib primitives are missing first.
-5. `logging` — could be a thin wrapper over `print`/`sys.stderr`.
-6. `unittest` — large; lower priority (asmpython has its own
+4. `logging` — could be a thin wrapper over `print`/`sys.stderr`.
+5. `unittest` — large; lower priority (asmpython has its own
    `tests/runner.py` harness already).
 
-(`csv` landed in `e9e9525`, `uuid` in `462d204` — removed from this list.)
+(`csv` landed in `e9e9525`, `uuid` in `462d204`, `base64` this session —
+removed from this list.)
 
 ## asmlib / asmlib.hardware
 
@@ -202,7 +208,8 @@ functions the way hardware.py was checked).
      gap just fixed (this session), but for `list`/`dict` element kinds
      instead of `tuple`. Would let `csv.reader()` return `list[list[str]]`
      directly instead of `list[Row]`.
-   - `base64`, `fractions`/`decimal` from the breadth backlog below.
+   - `fractions`/`decimal`, `datetime`/`time` extensions from the breadth
+     backlog below.
    - Survey `asmlib/gui.py` / `asmlib/network.py` for stub-only functions
      (not yet checked, unlike `hardware.py` which is now done).
 3. Follow the standing per-feature workflow (above) for whatever is picked.

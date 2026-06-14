@@ -11,6 +11,16 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **New `base64` module**: `b64encode`/`b64decode`, `standard_b64encode`/
+  `standard_b64decode`, `urlsafe_b64encode`/`urlsafe_b64decode`,
+  `b32encode`/`b32decode`, `b16encode`/`b16decode` (RFC 4648), all operating
+  on `list[int]` (the same byte-list convention `hashlib` uses). Padding,
+  the `+`/`/` vs `-`/`_` alphabets, and base32's `=`-padding table all
+  verified against CPython's `base64` module, including every padding
+  remainder (0-4 bytes for base32, 0-2 for base64). `a85`/`b85`
+  (ascii85/base85) not implemented (rare, significantly more complex). New
+  `tests/cases/172_base64_module.py`.
+
 - **User-defined exception classes in `raise`/`except`.** `class MyError(Exception):
   pass` + `raise MyError("msg")` + `except MyError as e: print(e)` now works
   end-to-end. User exception classes deriving from any builtin exception
