@@ -249,6 +249,7 @@
     <li><a href="#strings">Strings</a></li>
     <li><a href="#collections">Collections</a></li>
     <li><a href="#control-flow">Control flow</a></li>
+    <li><a href="#match-case">Pattern matching</a></li>
     <li><a href="#functions">Functions</a></li>
     <li><a href="#classes">Classes</a></li>
     <li><a href="#exceptions">Exceptions</a></li>
@@ -546,6 +547,83 @@ label = <span class="str">"even"</span> <span class="kw">if</span> n % <span cla
   comprehension, the target binds in the enclosing scope (per PEP 572),
   unlike the comprehension's own loop variable: <code>[y := v * 2 for v in
   vals]</code> leaves <code>y</code> set to the last value afterward.</p>
+</section>
+
+<section id="match-case">
+  <h2>Pattern matching (<code>match</code>/<code>case</code>) <a class="anchor" href="#match-case">#</a></h2>
+
+  <pre><div class="lang-tag">python</div><code><span class="cmt"># Literal patterns</span>
+<span class="kw">match</span> status:
+    <span class="kw">case</span> <span class="num">200</span>:
+        <span class="fn">print</span>(<span class="str">"ok"</span>)
+    <span class="kw">case</span> <span class="num">404</span>:
+        <span class="fn">print</span>(<span class="str">"not found"</span>)
+    <span class="kw">case</span> _:
+        <span class="fn">print</span>(<span class="str">"other"</span>)
+
+<span class="cmt"># Or-patterns (literals only; captures not allowed inside)</span>
+<span class="kw">match</span> cmd:
+    <span class="kw">case</span> <span class="str">"quit"</span> | <span class="str">"exit"</span>:
+        <span class="fn">print</span>(<span class="str">"goodbye"</span>)
+    <span class="kw">case</span> s:
+        <span class="fn">print</span>(<span class="str">"command:"</span>, s)
+
+<span class="cmt"># Sequence patterns</span>
+<span class="kw">match</span> lst:
+    <span class="kw">case</span> []:
+        <span class="fn">print</span>(<span class="str">"empty"</span>)
+    <span class="kw">case</span> [x]:
+        <span class="fn">print</span>(<span class="str">"one item:"</span>, x)
+    <span class="kw">case</span> [first, *rest]:
+        <span class="fn">print</span>(<span class="str">"head:"</span>, first, <span class="str">"tail:"</span>, rest)
+
+<span class="cmt"># Guard expressions</span>
+<span class="kw">match</span> n:
+    <span class="kw">case</span> x <span class="kw">if</span> x % <span class="num">2</span> == <span class="num">0</span>:
+        <span class="fn">print</span>(<span class="str">"even:"</span>, x)
+    <span class="kw">case</span> x:
+        <span class="fn">print</span>(<span class="str">"odd:"</span>, x)
+
+<span class="cmt"># Class patterns with __match_args__</span>
+<span class="kw">class</span> <span class="fn">Point</span>:
+    __match_args__ = (<span class="str">"x"</span>, <span class="str">"y"</span>)
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="kw">self</span>, x: <span class="kw2">int</span>, y: <span class="kw2">int</span>):
+        <span class="kw">self</span>.x = x
+        <span class="kw">self</span>.y = y
+
+<span class="kw">match</span> shape:
+    <span class="kw">case</span> <span class="fn">Point</span>(x=<span class="num">0</span>, y=<span class="num">0</span>):
+        <span class="fn">print</span>(<span class="str">"origin"</span>)
+    <span class="kw">case</span> <span class="fn">Point</span>(px, py):          <span class="cmt"># positional, uses __match_args__</span>
+        <span class="fn">print</span>(<span class="str">"point at"</span>, px, py)
+
+<span class="cmt"># `case pattern as name` — bind the whole subject</span>
+<span class="kw">match</span> val:
+    <span class="kw">case</span> [_, _] <span class="kw">as</span> pair:
+        <span class="fn">print</span>(<span class="str">"pair:"</span>, pair)</code></pre>
+
+  <p><code>match</code> is a <em>soft keyword</em>: it is only a statement when
+  followed by an expression and a colon (<code>match x:</code>). Bare uses like
+  <code>match = 5</code>, <code>match(x)</code>, and <code>match.foo</code>
+  remain valid Python identifiers. Likewise <code>case</code> is only a keyword
+  inside a <code>match</code> block.</p>
+
+  <p>Supported pattern forms:</p>
+  <ul>
+    <li><strong>Literal</strong> — <code>case 1:</code>, <code>case "ok":</code>, <code>case 3.14:</code>, <code>case True:</code>, <code>case None:</code>, negative numbers <code>case -1:</code>. Matches when <code>subject == value</code>.</li>
+    <li><strong>Capture</strong> — <code>case x:</code> always matches and binds the subject to <code>x</code>.</li>
+    <li><strong>Wildcard</strong> — <code>case _:</code> always matches and binds nothing.</li>
+    <li><strong>Or-pattern</strong> — <code>case p1 | p2:</code> matches if any alternative matches. Capture patterns (<code>case x | y:</code>) are not allowed inside or-patterns (compile error), matching CPython's restriction.</li>
+    <li><strong>Sequence</strong> — <code>case [p0, p1, ...]:</code> or <code>case (p0, ...):</code>. Requires <code>len(subject) == n</code> (exact) or <code>&gt;= n_fixed</code> when a star is present. At most one <code>*name</code> (rest-capture) or <code>*_</code> (rest-wildcard); starred element binds a slice sub-list. Sub-patterns are matched positionally.</li>
+    <li><strong>Class</strong> — <code>case ClassName(kw=p):</code> or <code>case ClassName(p0, p1):</code>. Checks <code>isinstance(subject, ClassName)</code>; keyword patterns match named attributes; positional patterns use <code>__match_args__</code> to map positions to attribute names (compile error if not defined or insufficient entries).</li>
+    <li><strong>As-pattern</strong> — <code>case pattern as name:</code> matches if <code>pattern</code> matches, and also binds the whole subject to <code>name</code>.</li>
+  </ul>
+
+  <p><strong>Guards</strong> (<code>case p if expr:</code>) are supported: captured names are bound before the guard is evaluated, so <code>case x if x &gt; 0:</code> works correctly. The guard may reference any in-scope variable.</p>
+
+  <p><strong>Mapping patterns</strong> (<code>case {"key": val}:</code>) are <em>not</em> supported (compile error). Dotted value patterns (<code>case Color.RED:</code>) are supported as literal equality checks.</p>
+
+  <p>Sema rewrites each <code>match</code> into an <code>if</code>/<code>elif</code>/<code>else</code> chain, so no new codegen machinery is needed — pattern matching has zero runtime overhead beyond what the equivalent hand-written conditionals would cost.</p>
 </section>
 
 <section id="functions">
@@ -1228,7 +1306,7 @@ name = <span class="fn">input</span>()
     <tr><td>Collections</td><td>Mixed-type lists, dicts with heterogeneous value types per key</td></tr>
     <tr><td>Functions</td><td>Closures capturing mutable state, generators, <code>yield</code></td></tr>
     <tr><td>Classes</td><td>Multiple inheritance, metaclasses, most dunder methods beyond <code>__init__</code> / <code>__str__</code> / <code>__enter__</code> / <code>__exit__</code></td></tr>
-    <tr><td>Control flow</td><td><code>match</code>/<code>case</code></td></tr>
+    <tr><td>Control flow</td><td>Mapping patterns (<code>case {"key": val}:</code>), <code>OR</code>-patterns with captures</td></tr>
     <tr><td>Modules</td><td>User-defined module imports (only stdlib/asmlib)</td></tr>
     <tr><td>Stdlib</td><td><code>json</code>, <code>re</code>, <code>datetime</code>, <code>pathlib</code>, <code>threading</code>, <code>asyncio</code>, and most other modules</td></tr>
     <tr><td>Targets</td><td>macOS (Mach-O), 32-bit, ARM</td></tr>

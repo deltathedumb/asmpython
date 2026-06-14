@@ -2598,8 +2598,322 @@ class SemaAnalyzer:
             except Exception:
                 pass
             return
+        if isinstance(s, A.Match):
+            # Rewrite `match subject: case p [if g]: body ...` in place into a
+            # subject-temp assignment + an if/elif/.../else chain, then type-check
+            # the resulting if-chain. The subject is evaluated exactly once.
+            subj_name = f"__match_subj_{id(s)}"
+            subj_assign = A.Assign(target=subj_name, value=s.subject, pos=s.pos)
+            self._check_stmt(subj_assign, scope)
+
+            # Collect per-case pre-stmts (elem temps that must be in scope before
+            # each case's test), which are spliced in before the if-chain.
+            all_pre: list = [subj_assign]
+
+            orelse: list = []
+            for pattern, guard, body in reversed(s.cases):
+                pre, test, binds = self._lower_pattern(pattern, subj_name, s.pos)
+                for p in pre:
+                    self._check_stmt(p, scope)
+                all_pre.extend(pre)
+                if guard is not None:
+                    # Put binds before the guard so captured names are in scope
+                    # when the guard expression is evaluated, then nest the guard
+                    # inside the pattern-match if-arm: `if test: binds; if guard: body; else: next`
+                    inner_if = A.If(
+                        test=guard, then=list(body), orelse=orelse, pos=s.pos
+                    )
+                    if_node = A.If(
+                        test=test, then=binds + [inner_if], orelse=orelse, pos=s.pos
+                    )
+                else:
+                    if_node = A.If(
+                        test=test, then=binds + list(body), orelse=orelse, pos=s.pos
+                    )
+                orelse = [if_node]
+
+            if not orelse:
+                return all_pre[1:] or None
+
+            top = orelse[0]
+            s.__class__ = A.If  # type: ignore[assignment]
+            s.test = top.test  # type: ignore[attr-defined]
+            s.then = top.then  # type: ignore[attr-defined]
+            s.orelse = top.orelse  # type: ignore[attr-defined]
+            self._check_stmt(s, scope)
+            return all_pre
+
         raise SemaError(
             f"internal: unhandled stmt {type(s).__name__}", getattr(s, "pos", None)
+        )
+
+    # ---- match/case helpers -------------------------------------------------
+
+    def _make_name_ref(self, name: str, pos) -> A.Name:
+        """Return a fresh Name node for `name`. Must build a new node every
+        call — never reuse a node in two places in the rewritten AST tree."""
+        return A.Name(name=name, pos=pos)
+
+    def _and_chain(self, exprs: list, pos) -> A.Expr:
+        """Left-fold a non-empty list of expressions with `and`."""
+        result = exprs[0]
+        for e in exprs[1:]:
+            result = A.BoolOp(op="and", left=result, right=e, pos=pos)
+        return result
+
+    def _or_chain(self, exprs: list, pos) -> A.Expr:
+        """Left-fold a non-empty list of expressions with `or`."""
+        result = exprs[0]
+        for e in exprs[1:]:
+            result = A.BoolOp(op="or", left=result, right=e, pos=pos)
+        return result
+
+    def _lower_pattern(
+        self, pattern, subj_name: str, pos
+    ) -> tuple:
+        """Lower one pattern into (pre_stmts, test_expr, bind_stmts).
+
+        `subj_name` is the name of the synthetic subject temp variable.
+        Every call to `_make_name_ref(subj_name, pos)` produces a fresh node.
+
+        Returns:
+            pre_stmts  — list[A.Assign] that must be executed BEFORE the test
+                         (e.g. element-temp assignments for sequence sub-patterns).
+                         These are hoisted to just before the enclosing if-node.
+            test_expr  — an A.Expr that evaluates to truthy iff the pattern
+                         matches the subject (may be a fresh IntLit(1) for
+                         unconditional matches).
+            bind_stmts — list[A.Assign] that bind captured names; placed in the
+                         if-node's `then` body so they only run when the test passes.
+        """
+        _TRUE = A.IntLit(value=1, pos=pos, is_bool=True)
+
+        if isinstance(pattern, A.MatchValue):
+            test = A.Compare(
+                ops=["=="],
+                operands=[self._make_name_ref(subj_name, pos), pattern.value],
+                pos=pattern.pos,
+            )
+            return [], test, []
+
+        if isinstance(pattern, A.MatchCapture):
+            if pattern.name == "_":
+                return [], _TRUE, []
+            bind = A.Assign(
+                target=pattern.name,
+                value=self._make_name_ref(subj_name, pos),
+                pos=pattern.pos,
+            )
+            return [], _TRUE, [bind]
+
+        if isinstance(pattern, A.MatchOr):
+            for alt in pattern.patterns:
+                if isinstance(alt, A.MatchCapture) and alt.name != "_":
+                    raise SemaError(
+                        "capture patterns are not allowed inside or-patterns",
+                        alt.pos,
+                    )
+            tests = [
+                self._lower_pattern(p, subj_name, pattern.pos)[1]
+                for p in pattern.patterns
+            ]
+            return [], self._or_chain(tests, pattern.pos), []
+
+        if isinstance(pattern, A.MatchSequence):
+            seq_tests: list = []
+            seq_binds: list = []
+            seq_pre: list = []  # assigns that must happen BEFORE the test (elem temps)
+            star_index = pattern.star_index
+            n_fixed = len(pattern.patterns) - (1 if star_index is not None else 0)
+
+            # Length check: exact when no star, >= n_fixed when starred.
+            len_call = A.Call(
+                func="len",
+                args=[self._make_name_ref(subj_name, pos)],
+                pos=pattern.pos,
+            )
+            if star_index is None:
+                len_test = A.Compare(
+                    ops=["=="],
+                    operands=[len_call, A.IntLit(value=n_fixed, pos=pattern.pos)],
+                    pos=pattern.pos,
+                )
+            else:
+                len_test = A.Compare(
+                    ops=[">="],
+                    operands=[len_call, A.IntLit(value=n_fixed, pos=pattern.pos)],
+                    pos=pattern.pos,
+                )
+            seq_tests.append(len_test)
+
+            n_after = (len(pattern.patterns) - star_index - 1) if star_index is not None else 0
+
+            for i, sub in enumerate(pattern.patterns):
+                if star_index is not None and i == star_index:
+                    # Star capture: bind subj[i : len(subj)-n_after].
+                    if isinstance(sub, A.MatchCapture) and sub.name != "_":
+                        if n_after == 0:
+                            stop_node = None
+                        else:
+                            stop_node = A.BinOp(
+                                op="-",
+                                left=A.Call(
+                                    func="len",
+                                    args=[self._make_name_ref(subj_name, pos)],
+                                    pos=pattern.pos,
+                                ),
+                                right=A.IntLit(value=n_after, pos=pattern.pos),
+                                pos=pattern.pos,
+                            )
+                        slice_node = A.Slice(
+                            start=A.IntLit(value=i, pos=pattern.pos),
+                            stop=stop_node,
+                            pos=pattern.pos,
+                        )
+                        sub_ref = A.Subscript(
+                            obj=self._make_name_ref(subj_name, pos),
+                            index=slice_node,
+                            pos=pattern.pos,
+                        )
+                        seq_binds.append(A.Assign(target=sub.name, value=sub_ref, pos=sub.pos))
+                    continue
+
+                # Fixed-position element: front indices before star, back indices after.
+                if star_index is None or i < star_index:
+                    idx_expr: A.Expr = A.IntLit(value=i, pos=pattern.pos)
+                else:
+                    # How many fixed elements remain after position i (not counting i itself).
+                    remaining = len(pattern.patterns) - i - 1
+                    back_idx = -(remaining + 1)
+                    idx_expr = A.IntLit(value=back_idx, pos=pattern.pos)
+
+                elem_ref = A.Subscript(
+                    obj=self._make_name_ref(subj_name, pos),
+                    index=idx_expr,
+                    pos=pattern.pos,
+                )
+
+                # Simple sub-patterns can reference elem_ref directly, no temp needed:
+                # - MatchCapture: bind from elem_ref -> goes to binds (after test passes)
+                # - MatchWildcard: nothing to do
+                # - MatchValue: compare directly against elem_ref -> test only
+                # Complex sub-patterns need a temp allocated BEFORE the test.
+                if isinstance(sub, A.MatchCapture):
+                    if sub.name != "_":
+                        seq_binds.append(A.Assign(target=sub.name, value=elem_ref, pos=sub.pos))
+                elif isinstance(sub, A.MatchValue):
+                    elem_test = A.Compare(
+                        ops=["=="],
+                        operands=[elem_ref, sub.value],
+                        pos=sub.pos,
+                    )
+                    seq_tests.append(elem_test)
+                else:
+                    # Complex pattern: create elem temp, hoist its assignment before
+                    # the enclosing if's test so the sub-pattern can reference it.
+                    elem_name = f"__match_elem_{id(pattern)}_{i}"
+                    seq_pre.append(A.Assign(target=elem_name, value=elem_ref, pos=pattern.pos))
+                    sub_pre, sub_test, sub_binds = self._lower_pattern(sub, elem_name, pattern.pos)
+                    seq_pre.extend(sub_pre)
+                    if not (isinstance(sub_test, A.IntLit) and sub_test.value == 1):
+                        seq_tests.append(sub_test)
+                    seq_binds.extend(sub_binds)
+
+            return seq_pre, self._and_chain(seq_tests, pattern.pos), seq_binds
+
+        if isinstance(pattern, A.MatchClass):
+            cls_name = pattern.cls_name
+            # isinstance(subject, ClassName) check.
+            isinstance_call = A.Call(
+                func="isinstance",
+                args=[
+                    self._make_name_ref(subj_name, pos),
+                    A.Name(name=cls_name, pos=pattern.pos),
+                ],
+                pos=pattern.pos,
+            )
+            cls_tests: list = [isinstance_call]
+            cls_pre: list = []
+            cls_binds: list = []
+
+            # Resolve positional patterns via __match_args__.
+            if pattern.positional:
+                match_args: list = []
+                for c in self.mod.classes:
+                    if c.name != cls_name:
+                        continue
+                    for cv_name, _annot, cv_val in getattr(c, "class_vars", []) or []:
+                        if cv_name == "__match_args__" and cv_val is not None:
+                            if isinstance(cv_val, A.TupleLit):
+                                for elt in cv_val.elems:
+                                    if isinstance(elt, A.StrLit):
+                                        match_args.append(elt.value)
+                            elif isinstance(cv_val, A.ListLit):
+                                for elt in cv_val.elems:
+                                    if isinstance(elt, A.StrLit):
+                                        match_args.append(elt.value)
+                if not match_args:
+                    raise SemaError(
+                        f"class '{cls_name}' does not define __match_args__ "
+                        "for positional patterns",
+                        pattern.pos,
+                    )
+                if len(pattern.positional) > len(match_args):
+                    raise SemaError(
+                        f"too many positional patterns for '{cls_name}' "
+                        f"(__match_args__ has {len(match_args)} entries)",
+                        pattern.pos,
+                    )
+                for i, sub in enumerate(pattern.positional):
+                    attr_name = match_args[i]
+                    attr_ref = A.Attr(
+                        obj=self._make_name_ref(subj_name, pos),
+                        name=attr_name,
+                        pos=pattern.pos,
+                    )
+                    elem_name = f"__match_attr_{id(pattern)}_{attr_name}"
+                    cls_pre.append(A.Assign(target=elem_name, value=attr_ref, pos=pattern.pos))
+                    sub_pre, sub_test, sub_binds = self._lower_pattern(sub, elem_name, pattern.pos)
+                    cls_pre.extend(sub_pre)
+                    if not (isinstance(sub_test, A.IntLit) and sub_test.value == 1):
+                        cls_tests.append(sub_test)
+                    cls_binds.extend(sub_binds)
+
+            # Keyword patterns.
+            for attr_name, sub in pattern.kwargs:
+                attr_ref = A.Attr(
+                    obj=self._make_name_ref(subj_name, pos),
+                    name=attr_name,
+                    pos=pattern.pos,
+                )
+                elem_name = f"__match_kw_{id(pattern)}_{attr_name}"
+                cls_pre.append(A.Assign(target=elem_name, value=attr_ref, pos=pattern.pos))
+                sub_pre, sub_test, sub_binds = self._lower_pattern(sub, elem_name, pattern.pos)
+                cls_pre.extend(sub_pre)
+                if not (isinstance(sub_test, A.IntLit) and sub_test.value == 1):
+                    cls_tests.append(sub_test)
+                cls_binds.extend(sub_binds)
+
+            return cls_pre, self._and_chain(cls_tests, pattern.pos), cls_binds
+
+        if isinstance(pattern, A.MatchAs):
+            if pattern.pattern is None:
+                as_pre: list = []
+                as_test = _TRUE
+                as_binds: list = []
+            else:
+                as_pre, as_test, as_binds = self._lower_pattern(pattern.pattern, subj_name, pos)
+            as_binds.append(
+                A.Assign(
+                    target=pattern.name,
+                    value=self._make_name_ref(subj_name, pos),
+                    pos=pattern.pos,
+                )
+            )
+            return as_pre, as_test, as_binds
+
+        raise SemaError(
+            f"internal: unhandled pattern {type(pattern).__name__}", pos
         )
 
     def _check_tuple_assign_target(

@@ -11,6 +11,32 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **`match`/`case` structural pattern matching (PEP 634).** Full `match
+  subject: case pattern [if guard]: body ...` syntax with all core pattern
+  forms: literal (`case 1:`, `case "x":`, `case True:`, `case None:`,
+  `case -1:`), capture (`case x:` — always matches, binds subject to `x`),
+  wildcard (`case _:`), or-patterns (`case p1 | p2:`, literals only —
+  captures inside or-patterns are a compile error), sequence patterns
+  (`case [p0, p1, *rest]:`; exact-length match without a star,
+  `>= n_fixed` with a star; one `*name`/`*_` rest-capture anywhere in the
+  pattern), class patterns (`case ClassName(kw=p):` and
+  `case ClassName(p0, p1):` using `__match_args__`), and as-patterns
+  (`case pat as name:`). Guard expressions (`case p if cond:`) are supported;
+  captured names are bound before the guard is evaluated. Mapping patterns
+  (`case {"key": v}:`) are not yet supported (parse error).
+  `match` and `case` are soft keywords — `match = 5`, `match(x)`,
+  `match.foo` all remain valid identifiers. Implemented as a pure sema
+  rewrite: each `match` is lowered to a subject-temp assignment plus an
+  `if`/`elif`/`else` chain before codegen, so no codegen changes were needed.
+  New `_lower_pattern`, `_and_chain`, `_or_chain`, `_make_name_ref` helpers
+  in `Analyzer` (`sema.py`). `_check_block` was already rewritten (WIP
+  commit) to an index-based loop supporting the extra-stmt splice.
+  New test `tests/cases/146_match_case.py` (CPython-verified, 13 print lines):
+  literal patterns, or-patterns, captures, wildcards, sequence patterns with
+  `*rest` and `*_`, class patterns (positional and keyword), guards, and
+  as-patterns. New `tests/cases_fail/match_or_capture.py` for the
+  or-pattern-with-capture sema error.
+
 - **Multiple context managers in one `with` (`with a as x, b as y: body`).**
   Desugars at parse time into nested `with a as x: with b as y: body`,
   matching CPython's enter/exit ordering exactly (`a` is entered before `b`;
