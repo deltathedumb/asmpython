@@ -2,9 +2,9 @@
 
 ## Status as of 2026-06-14
 
-- 214/214 tests passing (`py -m tests.runner`).
+- 215/215 tests passing (`py -m tests.runner`).
 - Branch is clean and pushed: `origin/parity-expansion` is up to date with
-  local `HEAD` (`e9e9525`).
+  local `HEAD` (`313d977`).
 - Recently landed (most recent last):
   - `ff6b439` — `match`/`case` structural pattern matching (PEP 634).
   - `efb3f08`..`1aa9b2f` — large stdlib breadth wave: string/collections/
@@ -29,6 +29,12 @@
     (confirmed via `_scratch_nested.py`: `for f in row` over a
     `list[list[str]]` element prints raw pointers, same root cause as the
     `most_common()` segfault below).
+  - `313d977` — `asmlib.hardware.rdtsc()`/`cpuid()`/`rdrand()` now execute
+    real instructions on hosted Windows/Linux targets (previously hardcoded
+    to return 0 there, same as the genuinely ring-0-only ops like port I/O,
+    MSRs, `halt`). `target_windows.py`/`target_linux.py` emit the real
+    `rdtsc`/`cpuid`/`rdrand` sequences in `emit_asmlib_runtime`'s `needs_hw`
+    block.
 
 ## Standing directives (always apply)
 
@@ -107,44 +113,52 @@ Modules CPython has that asmpython doesn't (breadth backlog, roughly
 priority order — verify each is still missing before starting, and check
 whether it's even meaningful for a systems/assembly-targeting compiler):
 
-1. `csv` — straightforward string-processing module, good fit.
-2. `datetime`/`time` extensions — `time.py` exists but is libc-wrapper only;
+1. `datetime`/`time` extensions — `time.py` exists but is libc-wrapper only;
    a pure-Python `datetime`-like date/time arithmetic module would be real
    breadth.
-3. `base64` — pure string/byte manipulation, good fit.
-4. `uuid` — needs random bytes (random.rand exists) + hex formatting.
-5. `fractions`/`decimal` — exact-arithmetic types; decent fit if `class`
+2. `base64` — pure string/byte manipulation, good fit.
+3. `uuid` — needs random bytes (random.rand exists) + hex formatting.
+4. `fractions`/`decimal` — exact-arithmetic types; decent fit if `class`
    and operator-overloading dunders are solid (check `__add__` etc. coverage).
-6. `glob`/`shutil`/`tempfile` — depend on `os`/`pathlib` which already exist;
+5. `glob`/`shutil`/`tempfile` — depend on `os`/`pathlib` which already exist;
    check what os/pathlib primitives are missing first.
-7. `logging` — could be a thin wrapper over `print`/`sys.stderr`.
-8. `unittest` — large; lower priority (asmpython has its own
+6. `logging` — could be a thin wrapper over `print`/`sys.stderr`.
+7. `unittest` — large; lower priority (asmpython has its own
    `tests/runner.py` harness already).
+
+(`csv` landed in `e9e9525` — removed from this list.)
 
 ## asmlib / asmlib.hardware
 
-`asmpython/asmlib/{__init__,hardware,gui,network}.py`. `hardware.py` (99
-lines) docstring says "those functions return 0 and are useful only as
-stubs" — this is the literal "asmlib.hardware fully production ready" ask
-from the user. NOT yet surveyed in detail this session — next breadth
-session should read `asmlib/hardware.py` fully, figure out what real
-hardware/systems primitives (port I/O, MSRs, CPUID, interrupts — given
-`rdtsc()` is already documented in docs.html ~line 905, freestanding target
-support exists per `e9d5...`/freestanding16 commits) are stubbed vs real,
-and prioritize making the commonly-used ones real (especially anything used
-by the freestanding/BIOS-boot target work from recent commits
-`1e8a208`/`3caeb20`).
+`asmpython/asmlib/{__init__,hardware,gui,network}.py`. Surveyed in full this
+session (`313d977`): of the ~30 `_hw_*` bindings, only `rdtsc`/`cpuid`/
+`rdrand` are unprivileged (ring-3) instructions — these now execute for real
+on hosted Windows/Linux too (previously hardcoded to 0). Everything else
+(port I/O, MMIO, MSRs, CR0-4, invlpg, lidt, cli/sti/hlt, PIC/PIT, keyboard,
+VGA text mode) genuinely requires ring 0 and is **correctly** a
+zero-returning no-op on hosted targets — these are not bugs, just
+inherently freestanding-only (real implementations already exist in
+`target_freestanding.py`, exercised by the `freestanding16` BIOS-boot target
+from `1e8a208`/`3caeb20`). `asmlib.hardware` is now considered
+"production ready" for its stated scope — no further action needed unless a
+new hardware primitive is requested.
+
+`asmlib/gui.py` and `asmlib/network.py` have NOT been surveyed yet — could
+be a future breadth item if there's appetite (network.py wraps
+sockets/Winsock2, gui.py wraps a minimal framebuffer; check for stub-only
+functions the way hardware.py was checked).
 
 ## Next steps
 
 1. Check `.claude/issues` (empty so far).
 2. Pick the next item from the stdlib backlog above. Good next candidates,
    roughly in order of value/effort:
-   - Survey `asmlib/hardware.py` in full and pick 2-3 stubs to make real.
    - The `for a, b in <list of custom-class instances>` segfault documented
      above — investigate the general fix ((b) in that section) since it
      likely affects other stdlib methods returning `list[SomeClass]` too,
      and the `list[list[T]]`/`list[dict[K,V]]` nested-generic gap that
      shaped the `csv` module's API (`e9e9525`).
    - `base64`, `uuid`, `fractions`/`decimal` from the breadth backlog below.
+   - Survey `asmlib/gui.py` / `asmlib/network.py` for stub-only functions
+     (not yet checked, unlike `hardware.py` which is now done).
 3. Follow the standing per-feature workflow (above) for whatever is picked.
