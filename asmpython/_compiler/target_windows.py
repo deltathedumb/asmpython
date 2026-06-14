@@ -586,6 +586,14 @@ class WindowsCodegen(Codegen):
         "_hw_rdrand", "_hw_io_wait", "_hw_read_cr0", "_hw_read_cr2",
         "_hw_read_cr3", "_hw_read_cr4", "_hw_write_cr3", "_hw_read_msr",
         "_hw_write_msr", "_hw_invlpg", "_hw_lidt",
+        "_hw_console_clear", "_hw_console_putc", "_hw_console_write",
+        "_hw_console_set_color", "_hw_console_set_cursor",
+        "_hw_console_get_row", "_hw_console_get_col",
+    )
+    _HW_CONSOLE_SYMS = (
+        "_hw_console_clear", "_hw_console_putc", "_hw_console_write",
+        "_hw_console_set_color", "_hw_console_set_cursor",
+        "_hw_console_get_row", "_hw_console_get_col",
     )
     _NET_SYMS = (
         "_net_bind", "_net_connect", "_net_send", "_net_recv",
@@ -914,9 +922,13 @@ class WindowsCodegen(Codegen):
                 self.label(".retry")
                 self.emitf("rdrand rax", "jnc .retry", "ret")
 
+            if any(s in self.ffi_externs for s in self._HW_CONSOLE_SYMS):
+                self._emit_console_runtime()
+
             for sym in self._HW_STUBS:
                 if sym in self.ffi_externs and sym not in (
-                        "_hw_rdtsc", "_hw_cpuid", "_hw_rdrand"):
+                        ("_hw_rdtsc", "_hw_cpuid", "_hw_rdrand")
+                        + self._HW_CONSOLE_SYMS):
                     self.label(sym)
                     self.emitf("xor rax, rax", "ret")
 

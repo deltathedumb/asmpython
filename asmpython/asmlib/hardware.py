@@ -15,6 +15,16 @@ keyboard, VGA text mode).
 `rdtsc()`, `cpuid()`, and `rdrand()` are *not* privileged -- ring-3 code can
 execute them directly -- so they have real implementations on hosted targets
 too, returning genuine CPU values rather than 0.
+
+In addition to the low-level register/port/MMIO primitives above, this module
+provides a small *high-level console* layer (`console_*`): write text,
+position the cursor, and set colors. On `--target freestanding` these draw
+directly into the VGA text-mode framebuffer at 0xB8000 (the same buffer
+`print()` uses there); on hosted Windows/Linux they drive the real terminal
+via ANSI/VT100 escape sequences written to stdout. `console_get_row()` /
+`console_get_col()` return a 0-indexed cursor position tracked internally on
+every target, so simple text UIs (status lines, menus, progress bars) can be
+written once and run on both bare metal and a normal terminal.
 """
 from __future__ import annotations
 
@@ -105,4 +115,22 @@ BINDINGS: dict = {
     "vga_get_row":  Func(arg_types=(),               ret_type="int",  c_name="_hw_vga_get_row"),
     # vga_get_col() -> int
     "vga_get_col":  Func(arg_types=(),               ret_type="int",  c_name="_hw_vga_get_col"),
+
+    # ---- High-level console (real on every target) --------------------------
+    # console_clear() — clear the screen and home the cursor to (0, 0).
+    "console_clear": Func(arg_types=(),              ret_type="int",  c_name="_hw_console_clear"),
+    # console_putc(ch: int) — write one character at the cursor, advancing it
+    # (a newline char wraps to column 0 of the next row).
+    "console_putc": Func(arg_types=("int",),         ret_type="int",  c_name="_hw_console_putc"),
+    # console_write(s: str) — write a string starting at the cursor.
+    "console_write": Func(arg_types=("str",),        ret_type="int",  c_name="_hw_console_write"),
+    # console_set_color(fg: int, bg: int) — set the color used by subsequent
+    # console_putc/console_write output (fg 0-15, bg 0-7: the standard VGA
+    # 16-color text-mode palette indices).
+    "console_set_color": Func(arg_types=("int", "int"), ret_type="int", c_name="_hw_console_set_color"),
+    # console_set_cursor(row: int, col: int) — move the cursor (0-indexed).
+    "console_set_cursor": Func(arg_types=("int", "int"), ret_type="int", c_name="_hw_console_set_cursor"),
+    # console_get_row() / console_get_col() -> int — current cursor position.
+    "console_get_row": Func(arg_types=(),            ret_type="int",  c_name="_hw_console_get_row"),
+    "console_get_col": Func(arg_types=(),            ret_type="int",  c_name="_hw_console_get_col"),
 }

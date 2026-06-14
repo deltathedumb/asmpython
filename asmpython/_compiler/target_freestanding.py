@@ -1003,6 +1003,25 @@ class FreestandingCodegen(Codegen):
         self.label("_hw_vga_get_col")
         self.emitf("mov rax, [rel _vga_col]", "ret")
 
+        # ---- High-level console: thin wrappers around the VGA text-mode
+        # helpers print() already uses (_vga_clear/_vga_putchar/
+        # _runtime_print_str), and aliases of the vga_* cursor/color
+        # primitives above.
+        self.label("_hw_console_clear")
+        self.emitf("call _vga_clear", "xor rax, rax", "ret")
+        self.label("_hw_console_putc")
+        self.emitf("call _vga_putchar", "xor rax, rax", "ret")
+        self.label("_hw_console_write")
+        self.emitf("call _runtime_print_str", "xor rax, rax", "ret")
+        self.label("_hw_console_set_color")
+        self.emitf("jmp _hw_vga_set_color")
+        self.label("_hw_console_set_cursor")
+        self.emitf("jmp _hw_vga_set_cursor")
+        self.label("_hw_console_get_row")
+        self.emitf("jmp _hw_vga_get_row")
+        self.label("_hw_console_get_col")
+        self.emitf("jmp _hw_vga_get_col")
+
 
     # --------------------------------------------- emit_data_sections -----
 

@@ -341,6 +341,20 @@ output rather than silent miscompilations.
   `.bytes_le`/`.int` (asmpython has no bytes type, and ints are 64-bit — too
   narrow for a 128-bit UUID); use `.hex`/`str(u)` instead. New
   `tests/cases/170_uuid_module.py` (CPython-verified).
+- **`asmlib.hardware` gains a high-level `console_*` API** alongside its
+  low-level register/port/MMIO primitives: `console_clear()`,
+  `console_putc(ch)`, `console_write(s)`, `console_set_color(fg, bg)`,
+  `console_set_cursor(row, col)`, and `console_get_row()`/`console_get_col()`.
+  On `--target freestanding` these are thin wrappers around the VGA
+  text-mode helpers `print()` already uses (writing directly into the
+  0xB8000 framebuffer); on hosted Windows/Linux they drive the real terminal
+  via ANSI/VT100 escapes (`ESC[2J ESC[H` to clear, `ESC[<fg>m ESC[<bg>m` for
+  the 16-color VGA palette mapped to SGR/aixterm codes, `ESC[<row>;<col>H`
+  for cursor positioning). Since ANSI escapes are write-only, the cursor
+  position returned by `console_get_row`/`console_get_col` (0-indexed) is
+  tracked internally on every target, so simple text UIs (status lines,
+  menus, progress bars) can be written once and run on both bare metal and a
+  normal terminal. New `tests/cases/171_hardware_console.py`.
 
 ### Fixed
 

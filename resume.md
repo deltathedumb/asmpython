@@ -2,10 +2,25 @@
 
 ## Status as of 2026-06-14
 
-- 215/215 tests passing (`py -m tests.runner`).
-- Branch is clean and pushed: `origin/parity-expansion` is up to date with
-  local `HEAD` (`313d977`).
+- 217/217 tests passing (`py -m tests.runner`).
+- Branch is being pushed: `origin/parity-expansion` should track local
+  `HEAD` (latest: new `console_*` high-level API in `asmlib.hardware`, on
+  top of `462d204`).
 - Recently landed (most recent last):
+  - `462d204` — new `uuid` module (`UUID`, `uuid4`); fixed `repr()` on user
+    instances to dispatch `__repr__`/`__str__` (was printing a raw pointer);
+    fixed `a == b`/`a != b` between instances to dispatch a user `__eq__`
+    (was raw pointer comparison). Also fixed pre-existing env flakiness in
+    `169_hardware_real_ops.py` (`t1 > 0` -> `t1 != 0`, rdtsc's top bit can be
+    set, signed compare misreads it).
+  - (this session) — `asmlib.hardware` gains a high-level `console_*` API
+    (`console_clear/putc/write/set_color/set_cursor/get_row/get_col`):
+    real VGA text-mode ops on `--target freestanding` (thin wrappers around
+    `print()`'s existing `_vga_*` helpers), ANSI/VT100 escapes + tracked
+    cursor state on hosted Windows/Linux (new `Codegen._emit_console_runtime`
+    in `codegen.py`, shared by both hosted targets). New
+    `tests/cases/171_hardware_console.py` (output includes raw ANSI escape
+    bytes, captured from a real run).
   - `ff6b439` — `match`/`case` structural pattern matching (PEP 634).
   - `efb3f08`..`1aa9b2f` — large stdlib breadth wave: string/collections/
     itertools/functools/json, os expansion, re + raw strings + sys expansion,
@@ -142,6 +157,16 @@ inherently freestanding-only (real implementations already exist in
 from `1e8a208`/`3caeb20`). `asmlib.hardware` is now considered
 "production ready" for its stated scope — no further action needed unless a
 new hardware primitive is requested.
+
+This session, per the user's explicit request ("make sure asmlib.hardware
+has both low-level interfaces and high-level interfaces (like console
+printing handlers and basic rendering)"), added a high-level `console_*`
+layer on top of the low-level primitives above: `console_clear/putc/write/
+set_color/set_cursor/get_row/get_col`. Real everywhere — VGA text-mode on
+freestanding (wraps the same `_vga_*`/`print()` internals), ANSI/VT100
+escapes + tracked cursor state on hosted Windows/Linux. If more "basic
+rendering" is wanted later (e.g. a `console_fill_rect`/box-drawing helper),
+this is the layer to extend.
 
 `asmlib/gui.py` and `asmlib/network.py` have NOT been surveyed yet — could
 be a future breadth item if there's appetite (network.py wraps
