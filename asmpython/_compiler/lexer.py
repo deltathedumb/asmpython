@@ -253,6 +253,13 @@ class Lexer:
                 self.tokens.append(self._read_fstring())
                 continue
 
+            # r"..." raw strings: backslashes are literal (no escape processing).
+            # We reuse _read_string but strip backslash-escape processing.
+            if ch == "r" and self._peek(1) in ('"', "'"):
+                self._advance()  # consume 'r'
+                self.tokens.append(self._read_raw_string())
+                continue
+
             if ch.isalpha() or ch == "_":
                 self.tokens.append(self._read_identifier())
                 continue
@@ -437,6 +444,28 @@ class Lexer:
         if text:
             segments.append(("str", "".join(text)))
         return Token("FSTRING", segments, line, col)
+
+    def _read_raw_string(self) -> Token:
+        """Read r"..." or r'...': backslashes are literal, no escape processing."""
+        line, col = self.line, self.col
+        quote = self._advance()
+        chars: list[str] = []
+        while True:
+            c = self._peek()
+            if c == "":
+                raise LexError("unterminated raw string literal", SourcePos(line, col))
+            if c == "\n":
+                raise LexError("newline in raw string literal", SourcePos(line, col))
+            if c == quote:
+                self._advance()
+                break
+            if c == "\\" and self._peek(1) == quote:
+                # Only escaped-quote is special in raw strings (prevents closing).
+                self._advance()
+                chars.append(self._advance())
+            else:
+                chars.append(self._advance())
+        return Token("STRING", "".join(chars), line, col)
 
     def _read_string(self) -> Token:
         line, col = self.line, self.col

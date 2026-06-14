@@ -158,7 +158,7 @@ def _resolve_absolute(module: str, root: Path) -> Path | None:
 _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "pathlib", "argparse",
     "string", "collections", "itertools", "functools", "json",
-    "ospath",
+    "ospath", "re",
 })
 
 # Dotted module names that map to a differently-named file in stdlib/.
