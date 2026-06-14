@@ -1503,6 +1503,8 @@ class Codegen:
                 self.gen_expr(stmt.target.index, info)
                 self.emitf("push rax")
                 self.gen_expr(stmt.value, info)
+                if A.expr_type(stmt.value) == "float":
+                    self.emitf("movq rax, xmm0")  # store the raw bit pattern
                 self.emitf("push rax")
                 self.gen_expr(stmt.target.obj, info)  # rax = header
                 self.emitf(
@@ -4818,11 +4820,21 @@ class Codegen:
         helpers (which clobber registers freely) can be called mid-iteration.
         """
         # ---- _runtime_fmt_elem ------------------------------------------------
-        # In:  rax = value, rbx = kind (0 = int, 1 = str-quoted, 2 = float).
+        # In:  rax = value, rbx = kind. Low nibble = base kind (0 = int,
+        # 1 = str-quoted, 2 = float, 3 = list, 4 = dict); for base kinds 3/4,
+        # the high nibble is the element/value kind one level down (see
+        # _composite_repr_kind).
         # Out: rax = repr string for that value.
         self.label("_runtime_fmt_elem")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
-        self.emitf("cmp rbx, 1", "je ._fe_str", "cmp rbx, 2", "je ._fe_float")
+        self.emitf(
+            "mov rcx, rbx",  # save full kind (incl. inner-kind bits)
+            "and rbx, 0xF",  # base kind
+            "cmp rbx, 1", "je ._fe_str",
+            "cmp rbx, 2", "je ._fe_float",
+            "cmp rbx, 3", "je ._fe_list",
+            "cmp rbx, 4", "je ._fe_dict",
+        )
         self._emit_int_to_str()
         self.emitf("leave", "ret")
         self.label("._fe_str")
@@ -4840,6 +4852,24 @@ class Codegen:
         self.emitf("movq xmm0, rax")
         self._emit_float_to_str()
         self.emitf("leave", "ret")
+        self.label("._fe_list")
+        # rax = nested list ptr; rcx>>4 = element kind for _runtime_list_repr.
+        self.emitf(
+            "shr rcx, 4",
+            "mov rbx, rcx",
+            "call _runtime_list_repr",
+            "leave",
+            "ret",
+        )
+        self.label("._fe_dict")
+        # rax = nested dict ptr; keys are str (rbx=1), rcx>>4 = value kind.
+        self.emitf(
+            "shr rcx, 4",
+            "mov rbx, 1",
+            "call _runtime_dict_repr",
+            "leave",
+            "ret",
+        )
 
         # ---- _runtime_list_repr ----------------------------------------------
         # In: rax = list/tuple ptr, rbx = element kind. Out: rax = string.
@@ -6230,6 +6260,8 @@ class Codegen:
                 f"mov rbx, [rbp{key_slot:+d}]",  # rbx = key ptr
                 "call _runtime_dict_get",
             )  # raises if missing
+            if e.inferred_type == "float":
+                self.emitf("movq xmm0, rax")
             return
         if obj_t == "str":
             slot_off = info.locals_[f"__stridx_{id(e)}"]
@@ -6590,7 +6622,9 @@ class Codegen:
         for k_expr, v_expr in zip(e.keys, e.values):
             self.gen_expr(k_expr, info)  # rax = key ptr
             self.emitf(f"mov [rbp{key_slot:+d}], rax")
-            self.gen_expr(v_expr, info)  # rax = value
+            self.gen_expr(v_expr, info)  # rax/xmm0 = value
+            if A.expr_type(v_expr) == "float":
+                self.emitf("movq rax, xmm0")  # slot stores the raw bit pattern
             self.emitf(
                 "mov rcx, rax",  # rcx = value
                 f"mov rbx, [rbp{key_slot:+d}]",  # rbx = key ptr
@@ -6991,6 +7025,8 @@ class Codegen:
                 self.emitf("push rax")  # key
                 if len(e.args) >= 2:
                     self.gen_expr(e.args[1], info)
+                    if A.expr_type(e.args[1]) == "float":
+                        self.emitf("movq rax, xmm0")
                     self.emitf("push rax")  # default
                 else:
                     self.emitf("push 0")  # default = 0
@@ -7000,6 +7036,8 @@ class Codegen:
                     "pop rbx",  # rbx = key
                     "call _runtime_dict_get_default",
                 )
+                if e.inferred_type == "float":
+                    self.emitf("movq xmm0, rax")
                 return
             if e.method == "contains":
                 self.gen_expr(e.args[0], info)
@@ -9352,21 +9390,37 @@ class Codegen:
 
     def _list_repr_kind(self, expr) -> int:
         """Map a list/tuple expression's element type to the repr kind code
-        (0 = int, 1 = str, 2 = float) used by _runtime_list_repr."""
+        used by _runtime_list_repr (see _composite_repr_kind)."""
         el = "int"
+        el_val = "int"
         if isinstance(expr, A.Name):
             el = expr.list_el_type or "int"
+            el_val = expr.list_el_value_type or "int"
         elif isinstance(expr, A.ListLit):
             el = expr.el_type or "int"
+            el_val = getattr(expr, "el_value_type", "int") or "int"
         else:
             el = getattr(expr, "list_el_type", "int") or "int"
-        return {"str": 1, "float": 2}.get(el, 0)
+            el_val = getattr(expr, "list_el_value_type", "int") or "int"
+        return self._composite_repr_kind(el, el_val)
 
     _REPR_KIND = {"str": 1, "float": 2}
 
     def _value_repr_kind(self, t: str) -> int:
         """Repr kind code (0 int, 1 str, 2 float) for a scalar type name."""
         return self._REPR_KIND.get(t, 0)
+
+    def _composite_repr_kind(self, t: str, inner: str) -> int:
+        """Repr kind code for a value of static type `t`, where `inner` is
+        the one-level-deep element/value kind when `t` is itself a 'list' or
+        'dict' (so _runtime_fmt_elem can recurse via _runtime_list_repr /
+        _runtime_dict_repr). Encoding: base kind in bits 0-3 (0=int, 1=str,
+        2=float, 3=list, 4=dict), inner scalar kind in bits 4-7."""
+        if t == "list":
+            return 3 | (self._value_repr_kind(inner) << 4)
+        if t == "dict":
+            return 4 | (self._value_repr_kind(inner) << 4)
+        return self._value_repr_kind(t)
 
     def _emit_container_repr(self, expr, t: str) -> None:
         """Given a container value already in rax and its static type `t`
@@ -9377,7 +9431,9 @@ class Codegen:
             self.emitf(f"mov rbx, {self._list_repr_kind(expr)}", "call _runtime_list_repr")
         elif t == "dict":
             # Keys are str-hashed; values carry a tracked kind.
-            vk = self._value_repr_kind(getattr(expr, "value_type", "int") or "int")
+            vt = getattr(expr, "value_type", "int") or "int"
+            inner = getattr(expr, "inner_value_type", "int") or "int"
+            vk = self._composite_repr_kind(vt, inner)
             self.emitf("mov rbx, 1", f"mov rcx, {vk}", "call _runtime_dict_repr")
         elif t == "set":
             # Set elements are str-keyed in asmpython's set model.

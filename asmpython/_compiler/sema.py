@@ -2142,6 +2142,10 @@ class SemaAnalyzer:
             e.inferred_type = scope.types[e.name]
             if e.inferred_type == "list":
                 e.list_el_type = scope.list_el_types.get(e.name, "int")
+                e.list_el_value_type = scope.list_el_value_types.get(e.name, "int")
+            elif e.inferred_type == "dict":
+                e.value_type = scope.dict_value_types.get(e.name, "int")
+                e.inner_value_type = scope.dict_inner_value_types.get(e.name, "int")
             elif e.inferred_type == "tuple":
                 e.tuple_elem_types = list(scope.tuple_elem_types.get(e.name, []))
             return

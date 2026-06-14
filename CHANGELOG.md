@@ -134,6 +134,23 @@ output rather than silent miscompilations.
   is now correctly wired up too (the dict-pop call existed but its key slot
   was never reserved, so it silently did nothing). Previously both forms
   compiled and ran without error but left the container unchanged.
+- **`print()`/`str()` of nested containers** (`list[list]`, `list[dict]`,
+  `dict[str, list]`, `dict[str, dict]`, one level deep) now recurse into the
+  element/value repr instead of printing a raw pointer, e.g.
+  `print([[1, 2], [3, 4]])` -> `[[1, 2], [3, 4]]` and
+  `print({"a": [1, 2]})` -> `{'a': [1, 2]}`. `_runtime_fmt_elem` now carries
+  an inner-kind nibble so it can call back into `_runtime_list_repr` /
+  `_runtime_dict_repr` for container-typed elements.
+- **`dict[str, T]` for `T` other than `int`** (`str`, `float`, or a nested
+  container) now reprs correctly when read off a plain variable —
+  `print(d)` for `d = {"a": "x"}` previously printed the raw string pointer
+  as an integer because the value kind wasn't propagated onto the `Name`
+  node.
+- **Float values stored in dicts** (`{"a": 1.5}`, `d["a"] = 1.5`,
+  `d.get("a")` / `d.get("a", 1.5)`) now round-trip the IEEE-754 bit pattern
+  correctly. Previously these paths copied whatever was in `rax` (not
+  `xmm0`, where float results actually live) into the dict slot, so any
+  `dict[str, float]` value read back as garbage.
 
 ---
 

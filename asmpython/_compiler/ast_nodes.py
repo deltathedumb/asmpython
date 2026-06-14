@@ -419,6 +419,17 @@ class Name:
     # "str" / "float"). Lets codegen specialise iteration / indexing without
     # re-running the scope analysis.
     list_el_type: str = "int"
+    # Filled in by sema when inferred_type == "list" and list_el_type is
+    # itself a container ("list"/"dict") — the common element/value kind one
+    # level down, so repr can recurse into nested containers.
+    list_el_value_type: str = "int"
+    # Filled in by sema when inferred_type == "dict" — value kind ("int" /
+    # "str" / "float" / "list" / "dict").
+    value_type: str = "int"
+    # Filled in by sema when inferred_type == "dict" and value_type is itself
+    # a container ("list"/"dict") — the common element/value kind one level
+    # down, so repr can recurse into nested containers.
+    inner_value_type: str = "int"
     # Filled in by sema when inferred_type == "tuple": the per-position
     # element kinds (e.g. ["int", "str"]). Tuples are heterogeneous, so
     # there's one entry per slot rather than a single element type.
