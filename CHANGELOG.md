@@ -332,6 +332,15 @@ output rather than silent miscompilations.
   keyboard/VGA, `halt`/`disable_interrupts`/`enable_interrupts`), which
   genuinely require ring 0 and remain safe zero-returning no-ops on hosted
   targets. New `tests/cases/169_hardware_real_ops.py`.
+- **New `uuid` module.** `UUID(hex_str)` wraps a 32-hex-digit value (dashes
+  optional/ignored); `.hex` is the canonical lowercase 32-digit form,
+  `str(u)`/`__str__` is the dashed 8-4-4-4-12 grouping, `repr(u)`/`__repr__`
+  is `UUID('...')`, and `__eq__` compares by `.hex`. `uuid4()` generates a
+  random version-4 (variant 1) UUID via `random.randint`. No `uuid1`/`uuid3`/
+  `uuid5` (need a MAC address / namespace hashing) and no `.bytes`/
+  `.bytes_le`/`.int` (asmpython has no bytes type, and ints are 64-bit — too
+  narrow for a 128-bit UUID); use `.hex`/`str(u)` instead. New
+  `tests/cases/170_uuid_module.py` (CPython-verified).
 
 ### Fixed
 
@@ -585,6 +594,27 @@ output rather than silent miscompilations.
   `is_bool`/`is_none` flags threaded through `IntLit`/`Name` and `Scope`)
   drive the dispatch in `_emit_print_value`, `_gen_fstring_segment`, and the
   `str()`/`repr()` builtins.
+- **`repr(x)` on a user class instance printed a raw pointer value instead of
+  calling `__repr__`/`__str__`.** The `repr()` builtin's codegen had no
+  `instance:` branch (unlike `str()`, which already dispatched via
+  `_resolve_str_dunder`); it fell through to `_emit_int_to_str()`, printing
+  the instance's heap address. Now `repr()` resolves `__repr__` (falling back
+  to `__str__`) via the existing `_resolve_repr_dunder` helper, mirroring
+  `str()`'s dispatch. Found while testing the new `uuid` module
+  (`repr(UUID(...))`).
+- **`a == b` / `a != b` between two instances of a class defining `__eq__`
+  did raw pointer comparison instead of calling `__eq__`.** `Compare` had no
+  dunder-dispatch path for `==`/`!=` (unlike arithmetic operators, which
+  already resolve `__add__`/`__radd__` etc. via `DUNDER_BINOP`) — two
+  equal-by-value but distinct objects (e.g. `UUID(hex_str)` constructed twice
+  with the same hex) compared `==` as `False`. Now, for a single
+  (non-chained) `==`/`!=` comparison where either operand is a user instance,
+  sema resolves `__eq__` (mirroring `DUNDER_BINOP`'s resolution) and stamps
+  `dunder_owner`/`dunder_method`/`dunder_negate` on the node; codegen calls it
+  (parking `self` in a new `__cmpeq_lhs_*` scratch slot across the other
+  operand's evaluation, like `_gen_binop`'s `__binop_lhs_*`) and negates the
+  result for `!=` (CPython's default `__ne__` is `not __eq__`). Found while
+  testing the new `uuid` module (`UUID(a) == UUID(b)` with equal hex values).
 
 ---
 

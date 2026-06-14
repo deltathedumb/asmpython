@@ -13,7 +13,11 @@ from asmlib.hardware import rdtsc, cpuid, rdrand, in_byte, halt
 
 t1 = rdtsc()
 t2 = rdtsc()
-print(t1 > 0)
+# rdtsc() is logically a 64-bit *unsigned* cycle counter, but asmpython ints
+# are signed 64-bit -- on some hosts/hypervisors the counter's top bit is
+# already set, so `t1 > 0` can read as a (incorrect) signed-negative compare.
+# `!= 0` avoids that signedness pitfall while still asserting it's real.
+print(t1 != 0)
 print(t2 >= t1)
 
 eax = cpuid(0)

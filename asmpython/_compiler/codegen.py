@@ -1011,6 +1011,13 @@ class Codegen:
                 ):
                     self._cl_define(info, f"__strcmp_{id(expr)}")
                 elif (
+                    op in ("==", "!=")
+                    and getattr(expr, "dunder_owner", None) is not None
+                ):
+                    # `instance == instance` dispatched to a user `__eq__`:
+                    # park lhs across rhs evaluation, like a binop dunder.
+                    self._cl_define(info, f"__cmpeq_lhs_{id(expr)}")
+                elif (
                     op in ("in", "not in")
                     and lt in ("str", "any")
                     and rt == "str"
@@ -9017,6 +9024,29 @@ class Codegen:
         # literals.
         lt0 = A.expr_type(e.operands[0])
         rt0 = A.expr_type(e.operands[1])
+        # `instance == instance` (or `!=`) dispatched by sema to a
+        # user-defined `__eq__` (dunder_owner stamped on the node): park lhs
+        # across rhs evaluation like a binop dunder, call __eq__, and negate
+        # for `!=` (CPython's default `__ne__` is `not __eq__`).
+        if (
+            len(e.ops) == 1
+            and e.ops[0] in ("==", "!=")
+            and getattr(e, "dunder_owner", None) is not None
+        ):
+            owner = e.dunder_owner  # type: ignore[attr-defined]
+            method = e.dunder_method  # type: ignore[attr-defined]
+            slot_off = info.locals_[f"__cmpeq_lhs_{id(e)}"]
+            self.gen_expr(e.operands[0], info)
+            self.emitf(f"mov [rbp{slot_off:+d}], rax")
+            self.gen_expr(e.operands[1], info)
+            self.emitf(
+                f"mov {self._arg_reg(1)}, rax",
+                f"mov {self._arg_reg(0)}, [rbp{slot_off:+d}]",
+            )
+            self.emit_call(self._method_symbol(owner, method))
+            if getattr(e, "dunder_negate", False):
+                self.emitf("xor rax, 1")
+            return
         if (
             len(e.ops) == 1
             and lt0 in ("str", "any")
@@ -9759,6 +9789,14 @@ class Codegen:
                 self._emit_bool_to_str()
             elif arg_t == "int" and A.is_none_expr(e.args[0]):
                 self.emitf("lea rax, [_runtime_none_str]")
+            elif arg_t.startswith("instance:"):
+                resolved = self._resolve_repr_dunder(arg_t.split(":", 1)[1])
+                if resolved is not None:
+                    owner, method = resolved
+                    self.emitf(f"mov {self._arg_reg(0)}, rax")
+                    self.emit_call(self._method_symbol(owner, method))
+                else:
+                    self._emit_int_to_str()
             else:
                 self._emit_int_to_str()
             return

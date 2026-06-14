@@ -3235,6 +3235,33 @@ class SemaAnalyzer:
                     # therefore lowers to `x == 0`. Accept any operand types
                     # — the comparison happens at the raw 8-byte level.
                     continue
+                if op in ("==", "!=") and (
+                    lt.startswith("instance:") or rt.startswith("instance:")
+                ):
+                    # `a == b` / `a != b` where either side is a user
+                    # instance: dispatch to a user-defined `__eq__` if the
+                    # class has one, mirroring DUNDER_BINOP's resolution for
+                    # arithmetic operators. CPython's default `__ne__` is
+                    # `not __eq__`, so `!=` reuses `__eq__` and negates the
+                    # result. Only handled for a single (non-chained)
+                    # comparison, matching codegen's scratch-slot allocation.
+                    cls = (
+                        lt.split(":", 1)[1]
+                        if lt.startswith("instance:")
+                        else rt.split(":", 1)[1]
+                    )
+                    resolved = self._resolve_method(cls, "__eq__")
+                    if resolved is not None and len(e.ops) == 1:
+                        owner, sig = resolved
+                        if sig.arity != 2:
+                            raise SemaError(
+                                f"{owner}.__eq__() must take exactly (self, other)",
+                                e.pos,
+                            )
+                        e.dunder_owner = owner  # type: ignore
+                        e.dunder_method = "__eq__"  # type: ignore
+                        e.dunder_negate = (op == "!=")  # type: ignore
+                    continue
                 if "str" in (lt, rt):
                     if op not in ("==", "!=", "<", "<=", ">", ">="):
                         raise SemaError(
