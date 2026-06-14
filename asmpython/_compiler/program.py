@@ -158,14 +158,23 @@ def _resolve_absolute(module: str, root: Path) -> Path | None:
 _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "pathlib", "argparse",
     "string", "collections", "itertools", "functools", "json",
+    "ospath",
 })
+
+# Dotted module names that map to a differently-named file in stdlib/.
+_BUNDLED_DOTTED: dict[str, str] = {
+    "os.path": "ospath",
+}
 
 
 def _resolve_bundled_stdlib(module: str) -> Path | None:
-    top = module.split(".")[0]
-    if top not in _BUNDLED_SOURCE_STDLIB:
-        return None
-    py = Path(__file__).resolve().parent.parent / "stdlib" / f"{top}.py"
+    stem = _BUNDLED_DOTTED.get(module)
+    if stem is None:
+        top = module.split(".")[0]
+        if top not in _BUNDLED_SOURCE_STDLIB:
+            return None
+        stem = top
+    py = Path(__file__).resolve().parent.parent / "stdlib" / f"{stem}.py"
     return py if py.is_file() else None
 
 

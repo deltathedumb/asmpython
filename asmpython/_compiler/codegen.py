@@ -118,6 +118,7 @@ class Codegen:
         self.strings: list[tuple[str, str]] = []  # (label, bytes-literal)
         self.floats: list[tuple[str, float]] = []  # (label, value)
         self.label_counter = 0
+        self._needs_cwd_buf = False  # set when os.getcwd() is called
         # FFI surface: { asmpython_name: stdlib.Func } across all imports, used
         # for dispatching bare and module-attribute calls. Also any constants
         # imported by `from <mod> import <name>` for direct value substitution.
@@ -1157,6 +1158,14 @@ class Codegen:
                             ):
                                 self._cl_walk_expr(info, fdefault)
         elif isinstance(expr, A.MethodCall):
+            # os.getcwd() / os.listdir(path) — scratch slots for inline helpers.
+            if isinstance(expr.obj, A.Name) and expr.obj.name in self.imported_modules:
+                if expr.obj.name == "os" and expr.method == "listdir":
+                    path_arg = expr.args[0] if expr.args else None
+                    self._cl_define(info, f"__listdir_pipe_{id(path_arg)}")
+                    self._cl_define(info, f"__listdir_acc_{id(path_arg)}")
+                    self._cl_define(info, f"__listdir_line_{id(path_arg)}")
+                    self._cl_define(info, f"__listdir_char_{id(path_arg)}")
             # math.sqrt(x) — same FFI scratch reservation.
             if isinstance(expr.obj, A.Name) and expr.obj.name in self.imported_modules:
                 bindings = self.imported_modules[expr.obj.name]
@@ -7838,6 +7847,16 @@ class Codegen:
         self.emitf(f"mov rax, [rbp{acc_slot:+d}]")
 
     def _gen_method_call(self, e: A.MethodCall, info: FuncInfo) -> None:
+        # os.getcwd() / os.listdir(path) — inline helpers that need static buffers.
+        if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
+            if e.obj.name == "os" and e.method == "getcwd":
+                self._needs_cwd_buf = True
+                self._emit_os_getcwd()
+                return
+            if e.obj.name == "os" and e.method == "listdir":
+                path_arg = e.args[0] if e.args else None
+                self._emit_os_listdir(path_arg, info)
+                return
         # math.sqrt(x), math.pow(a, b) etc.
         if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
             bindings = self.imported_modules[e.obj.name]
@@ -10607,6 +10626,22 @@ class Codegen:
             # 0x00000000FFFFFFFF and never compare equal to -1. Sign-extend EAX
             # into RAX for int returns.
             self.emitf("movsxd rax, eax")
+
+    # ---- os.getcwd / os.listdir inline helpers --------------------------------
+
+    def _emit_os_getcwd(self) -> None:
+        """Emit code for os.getcwd() -> str. Result in rax."""
+        raise NotImplementedError
+
+    def _emit_os_listdir(self, path_arg, info: FuncInfo) -> None:
+        """Emit code for os.listdir(path) -> list[str]. Result in rax."""
+        raise NotImplementedError
+
+    def _emit_cwd_buf_if_needed(self) -> None:
+        """Emit the static _cwd_buf BSS slot if os.getcwd() was used."""
+        if self._needs_cwd_buf:
+            self.emit("section .bss")
+            self.emit("_cwd_buf: resb 4096")
 
     def _platform_c_name(self, fn) -> str:
         """Return the symbol name to use for this target (may differ from fn.c_name)."""

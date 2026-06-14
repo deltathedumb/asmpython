@@ -3823,6 +3823,17 @@ class SemaAnalyzer:
                 )
             # Module function call: math.sqrt(x), math.pow(a, b).
             if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
+                # os.getcwd() / os.listdir(path): inline codegen helpers not in
+                # BINDINGS (no C symbol). Give them proper types and accept args.
+                if e.obj.name == "os" and e.method == "getcwd":
+                    e.inferred_type = "str"
+                    return
+                if e.obj.name == "os" and e.method == "listdir":
+                    if e.args:
+                        self._check_expr(e.args[0], scope)
+                    e.inferred_type = "list"
+                    e.list_el_type = "str"
+                    return
                 bindings = self.imported_modules[e.obj.name]
                 if e.method not in bindings or not isinstance(
                     bindings[e.method], stdlib.Func

@@ -93,4 +93,13 @@ BINDINGS = {
     # pclose(FILE*) -> the child's exit status (shifted on POSIX; raw exit
     # code on Windows), or -1 on error.
     "_pclose": Func(arg_types=("str",), ret_type="int", c_name="pclose", c_name_windows="_pclose"),
+
+    # --- Platform constants ---------------------------------------------------
+    "sep":      Const(ty="str", value="/", value_windows="\\"),
+    "linesep":  Const(ty="str", value="\n", value_windows="\r\n"),
+    "curdir":   Const(ty="str", value="."),
+    "pardir":   Const(ty="str", value=".."),
+    "extsep":   Const(ty="str", value="."),
+    "pathsep":  Const(ty="str", value=":", value_windows=";"),
+    "devnull":  Const(ty="str", value="/dev/null", value_windows="nul"),
 }

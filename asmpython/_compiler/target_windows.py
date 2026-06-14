@@ -303,6 +303,115 @@ class WindowsCodegen(Codegen):
         # API symmetry in case future code reaches this path.
         self.emitf("mov rbx, 1", "call _runtime_longjmp")
 
+    # ---- os.getcwd / os.listdir (Windows) ------------------------------------
+
+    def _emit_os_getcwd(self) -> None:
+        self._needs_cwd_buf = True
+        fail_lbl = self.fresh("cwd_fail")
+        done_lbl = self.fresh("cwd_done")
+        empty_lbl, _ = self.intern_string("")
+        self.emitf(
+            "sub rsp, 32",
+            "lea rcx, [_cwd_buf]",
+            "mov edx, 4096",
+            "call _getcwd",
+            "add rsp, 32",
+            "test rax, rax",
+            f"jz {fail_lbl}",
+            "call _runtime_str_concat_dup",
+            f"jmp {done_lbl}",
+        )
+        self.label(fail_lbl)
+        self.emitf(f"lea rax, [{empty_lbl}]")
+        self.label(done_lbl)
+        self.ffi_externs.add("_getcwd")
+
+    def _emit_os_listdir(self, path_arg, info: FuncInfo) -> None:
+        lbl_loop = self.fresh("listdir_loop")
+        lbl_done = self.fresh("listdir_done")
+        lbl_nl   = self.fresh("listdir_nl")
+        if path_arg is not None:
+            cmd_pfx_lbl, _ = self.intern_string("dir /b ")
+            self.gen_expr(path_arg, info)
+            self.emitf("mov rbx, rax", f"lea rax, [{cmd_pfx_lbl}]",
+                       "call _runtime_str_concat")
+        else:
+            cmd_lbl, _ = self.intern_string("dir /b")
+            self.emitf(f"lea rax, [{cmd_lbl}]")
+        mode_lbl, _ = self.intern_string("r")
+        self.emitf(
+            "mov rbx, rax",
+            "sub rsp, 32",
+            f"lea rdx, [{mode_lbl}]",
+            "mov rcx, rbx",
+            "call _popen",
+            "add rsp, 32",
+        )
+        pipe_slot = info.locals_[f"__listdir_pipe_{id(path_arg)}"]
+        acc_slot  = info.locals_[f"__listdir_acc_{id(path_arg)}"]
+        line_slot = info.locals_[f"__listdir_line_{id(path_arg)}"]
+        char_slot = info.locals_[f"__listdir_char_{id(path_arg)}"]
+        empty_lbl, _ = self.intern_string("")
+        self.emitf(f"mov [rbp{pipe_slot:+d}], rax")
+        # allocate empty list header + buffer (cap=4, len=0)
+        self._emit_malloc(self.LIST_HEADER)
+        self.emitf(
+            f"mov qword [rax+{self.LIST_CAP_OFF}], 4",
+            f"mov qword [rax+{self.LIST_LEN_OFF}], 0",
+            f"mov [rbp{acc_slot:+d}], rax",
+        )
+        self._emit_malloc(32)  # 4 * 8 bytes
+        self.emitf(
+            f"mov rbx, [rbp{acc_slot:+d}]",
+            f"mov [rbx+{self.LIST_BUF_OFF}], rax",
+        )
+        # current line = empty heap string
+        self.emitf(f"lea rax, [{empty_lbl}]", "call _runtime_str_concat_dup",
+                   f"mov [rbp{line_slot:+d}], rax")
+        self.label(lbl_loop)
+        self.emitf(
+            f"mov rcx, [rbp{pipe_slot:+d}]",
+            "sub rsp, 32", "call fgetc", "add rsp, 32",
+            "movsxd rax, eax",
+            f"mov [rbp{char_slot:+d}], rax",
+            "cmp rax, -1", f"je {lbl_done}",
+            "cmp rax, 10", f"je {lbl_nl}",
+            "cmp rax, 13", f"je {lbl_loop}",
+        )
+        # append char to current line (rax already holds char code)
+        self.emitf("call _runtime_chr",
+                   "mov rbx, rax",
+                   f"mov rax, [rbp{line_slot:+d}]",
+                   "call _runtime_str_concat",
+                   f"mov [rbp{line_slot:+d}], rax",
+                   f"jmp {lbl_loop}")
+        self.label(lbl_nl)
+        skip_lbl = self.fresh("listdir_skip")
+        self.emitf(
+            f"mov rcx, [rbp{line_slot:+d}]",
+            "sub rsp, 32", "call strlen", "add rsp, 32",
+            "test rax, rax", f"jz {skip_lbl}",
+        )
+        self.emitf(
+            f"mov rax, [rbp{acc_slot:+d}]",
+            f"mov rbx, [rbp{line_slot:+d}]",
+            "call _runtime_list_append",
+        )
+        self.label(skip_lbl)
+        self.emitf(f"lea rax, [{empty_lbl}]", "call _runtime_str_concat_dup",
+                   f"mov [rbp{line_slot:+d}], rax",
+                   f"jmp {lbl_loop}")
+        self.label(lbl_done)
+        self.emitf(
+            f"mov rcx, [rbp{pipe_slot:+d}]",
+            "sub rsp, 32", "call _pclose", "add rsp, 32",
+            f"mov rax, [rbp{acc_slot:+d}]",
+        )
+        # Only CRT symbols need extern declarations; _runtime_* are defined inline.
+        for sym in ("_popen", "_pclose", "fgetc", "strlen"):
+            if sym not in self.ffi_externs and sym not in self.asm_pkg_symbols:
+                self.ffi_externs.add(sym)
+
     # ---- runtime data -------------------------------------------------------
 
     def emit_print_impls(self) -> None:
@@ -313,6 +422,7 @@ class WindowsCodegen(Codegen):
         else:
             self.emit("extern itoa_str_buf")
             self.emit("extern input_buf")
+        self._emit_cwd_buf_if_needed()
 
         self.emit("section .rdata")
         # Format strings.
