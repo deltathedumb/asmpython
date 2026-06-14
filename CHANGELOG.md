@@ -11,6 +11,13 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **`@property` setters (`@x.setter`).** A method decorated `@x.setter`
+  (matching the name of an `@property` getter `x`) makes `obj.x = value`
+  dispatch to that setter instead of writing an instance-dict field directly,
+  matching CPython. Setters participate in inheritance and virtual dispatch
+  like any other method (a subclass may also override the getter and/or
+  setter). Assigning to a property with no matching setter is still a
+  compile-time error (`property 'x' of 'C' object has no setter`).
 - **Dict literal unpacking `{**d1, "k": v, **d2}` (PEP 448).** A dict literal
   may contain zero or more `**other` spreads alongside explicit `key: value`
   pairs, in any order and any number of times; each `other` must be

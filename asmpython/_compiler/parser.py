@@ -105,6 +105,16 @@ class Parser:
             name = None
             if self._check("NAME"):
                 name = self._peek().value
+                # `@<prop>.setter` / `.getter` / `.deleter`: capture the
+                # dotted accessor form (e.g. "x.setter") so sema can match
+                # it against the property getter method of the same name.
+                if (
+                    self._peek(1).kind == "OP"
+                    and self._peek(1).value == "."
+                    and self._peek(2).kind == "NAME"
+                    and self._peek(2).value in ("setter", "getter", "deleter")
+                ):
+                    name = f"{name}.{self._peek(2).value}"
             # Eat the rest of the line as a free-form decorator expression.
             # We don't model the call so we just skip until NEWLINE, balancing
             # any `(` `[` `{` along the way.

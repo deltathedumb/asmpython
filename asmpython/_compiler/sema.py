@@ -323,6 +323,11 @@ class ClassSig:
     # "instance:<Class>"), inferred from `self.x = <value>` assignments and
     # `self.x: T` annotations. Drives the type of `obj.x` reads. Unknown fields
     # read as int (the dict's int-default).
+    # Property name -> mangled setter method name (e.g. "x" -> "x__setter"),
+    # populated for methods decorated `@x.setter`. The setter itself is also
+    # registered in `methods` under its mangled name so normal method
+    # resolution/dispatch (incl. virtual dispatch) handles it unchanged.
+    setters: dict[str, str] = field(default_factory=dict)
     fields: dict[str, str] = field(default_factory=dict)
     # Companion element-kind info for collection fields, so `self.xs[i]` and
     # `for x in self.xs` recover the kind. `field_el_types` holds the list
@@ -546,6 +551,23 @@ class SemaAnalyzer:
                 return None
             if method in cls.methods:
                 return cur, cls.methods[method]
+            cur = cls.parent
+        return None
+
+    def _resolve_setter(self, class_name: str, prop_name: str) -> Optional[str]:
+        """Walk parent chain to find a `@<prop_name>.setter` for `prop_name`.
+
+        Returns the setter's mangled method name (e.g. "x__setter"), or None.
+        """
+        cur = class_name
+        seen = set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            cls = self.classes.get(cur)
+            if cls is None:
+                return None
+            if prop_name in cls.setters:
+                return cls.setters[prop_name]
             cur = cls.parent
         return None
 
@@ -965,6 +987,18 @@ class SemaAnalyzer:
                             m.pos,
                         )
                 mr = self._resolve_annot(m.ret_type)  # type: ignore
+                # `@x.setter` methods are registered under a mangled name
+                # ("x__setter") so they don't collide in `methods`/codegen
+                # symbols with the `@property` getter of the same name "x".
+                # `ClassSig.setters` maps the property name to this mangled
+                # name so `obj.x = v` can be rewritten to dispatch to it.
+                setter_prop = None
+                for d in getattr(m, "decorators", []):
+                    if d == f"{m.name}.setter":
+                        setter_prop = m.name
+                        break
+                if setter_prop is not None:
+                    m.name = f"{setter_prop}__setter"
                 sig.methods[m.name] = FuncSig(
                     name=m.name,
                     arity=len(m.params),
@@ -977,6 +1011,8 @@ class SemaAnalyzer:
                     ret_tuple=self._scan_tuple_return(m.body),
                     decorators=list(getattr(m, "decorators", [])),
                 )
+                if setter_prop is not None:
+                    sig.setters[setter_prop] = m.name
             self.classes[c.name] = sig
 
         # Validate parents and check for cycles. A parent that isn't a
@@ -2150,13 +2186,29 @@ class SemaAnalyzer:
                 if cls_name in self.classes:
                     resolved = self._resolve_method(cls_name, s.name)
                     if resolved is not None and "property" in resolved[1].decorators:
-                        # @property setters (`@x.setter`) aren't supported;
-                        # a read-only property can never be assigned, just
-                        # like in CPython.
-                        raise SemaError(
-                            f"property {s.name!r} of {cls_name!r} object has no setter",
-                            s.pos,
+                        setter_name = self._resolve_setter(cls_name, s.name)
+                        if setter_name is None:
+                            # A read-only property can never be assigned,
+                            # just like in CPython.
+                            raise SemaError(
+                                f"property {s.name!r} of {cls_name!r} object has no setter",
+                                s.pos,
+                            )
+                        # `obj.x = value` -> `obj.x__setter(value)`: rewrite
+                        # this AttrAssign into an ExprStmt wrapping a
+                        # MethodCall, in place, so codegen's existing
+                        # method-dispatch (incl. virtual dispatch) handles it.
+                        obj_expr = s.obj
+                        value_expr = s.value
+                        s.__class__ = A.ExprStmt  # type: ignore[assignment]
+                        s.expr = A.MethodCall(  # type: ignore[attr-defined]
+                            obj=obj_expr,
+                            method=setter_name,
+                            args=[value_expr],
+                            pos=s.pos,
                         )
+                        self._check_expr(s.expr, scope)  # type: ignore[attr-defined]
+                        return
             self._check_expr(s.value, scope)
             value_t = A.expr_type(s.value)
             # Instance fields hold any 8-byte value (int / str-ptr / instance /
