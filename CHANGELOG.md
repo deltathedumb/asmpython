@@ -316,6 +316,15 @@ output rather than silent miscompilations.
   per-key minimum, `|` takes the per-key maximum; in all four cases any key
   whose resulting count is `<= 0` is dropped from the result. New
   `tests/cases/167_counter_operators.py` (CPython-verified).
+- **New `csv` module.** `reader(lines)` parses a `list[str]` of CSV records
+  into `list[Row]` (`Row.fields: list[str]`), handling quoted fields,
+  embedded commas, and doubled-quote (`""`) escapes exactly like CPython's
+  default dialect. `writer_row(fields)` / `writer_rows(rows)` format rows
+  back to CSV lines (quoting only when needed), and `DictReader` parses a
+  header row plus `.get(row, name)` for named field access. Operates on
+  in-memory `list[str]` rather than file objects, since asmpython has no
+  file-iterator protocol to drive CPython's lazy `csv.reader(f)`. New
+  `tests/cases/168_csv_module.py` (CPython-verified).
 
 ### Fixed
 
