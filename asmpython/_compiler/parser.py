@@ -644,6 +644,12 @@ class Parser:
                 if self._looks_like_tuple_assign():
                     return self._parse_tuple_assign()
 
+        # Starred unpack target: `a, *rest = xs` or `*init, last = xs`. The
+        # `*name` form can also lead the LHS, so it's not caught by the
+        # NAME-led check above.
+        if t.kind == "OP" and t.value == "*" and self._looks_like_tuple_assign():
+            return self._parse_tuple_assign()
+
         # Save state so we can detect "lhs[i] = rhs" -> IndexAssign and
         # "lhs.name = rhs" -> AttrAssign.
         pos = t.pos
@@ -964,19 +970,30 @@ class Parser:
         )
 
     def _looks_like_tuple_assign(self) -> bool:
-        """Peek ahead to see if we're at `NAME ( , NAME )+ =`. Doesn't consume."""
-        k = self.i
-        if self.toks[k].kind != "NAME":
+        """Peek ahead to see if we're at `(NAME|*NAME) ( , (NAME|*NAME) )* =`.
+        Doesn't consume."""
+
+        def _item(k: int) -> int | None:
+            if self.toks[k].kind == "OP" and self.toks[k].value == "*":
+                k += 1
+                if k >= len(self.toks) or self.toks[k].kind != "NAME":
+                    return None
+                return k + 1
+            if self.toks[k].kind == "NAME":
+                return k + 1
+            return None
+
+        k = _item(self.i)
+        if k is None:
             return False
-        k += 1
         while k < len(self.toks):
             t = self.toks[k]
             if t.kind != "OP" or t.value != ",":
                 break
-            k += 1
-            if k >= len(self.toks) or self.toks[k].kind != "NAME":
+            k2 = _item(k + 1)
+            if k2 is None:
                 return False
-            k += 1
+            k = k2
         return (
             k < len(self.toks)
             and self.toks[k].kind == "OP"
@@ -984,12 +1001,29 @@ class Parser:
         )
 
     def _parse_tuple_assign(self) -> A.TupleAssign:
-        first = self._expect("NAME")
-        targets: list = [A.Name(name=first.value, pos=first.pos)]
+        def _parse_target():
+            if self._check("OP", "*"):
+                star_tok = self._eat()
+                name_tok = self._expect("NAME")
+                return A.StarTarget(name=name_tok.value, pos=star_tok.pos)
+            tok = self._expect("NAME")
+            return A.Name(name=tok.value, pos=tok.pos)
+
+        first = _parse_target()
+        targets: list = [first]
         while self._check("OP", ","):
             self._eat()
-            tok = self._expect("NAME")
-            targets.append(A.Name(name=tok.value, pos=tok.pos))
+            targets.append(_parse_target())
+        if len(targets) == 1 and isinstance(targets[0], A.StarTarget):
+            raise ParseError(
+                "starred assignment target must be in a list or tuple",
+                targets[0].pos,
+            )
+        n_star = sum(1 for t in targets if isinstance(t, A.StarTarget))
+        if n_star > 1:
+            raise ParseError(
+                "multiple starred expressions in assignment", first.pos
+            )
         self._expect("OP", "=")
         values = [self._parse_expr()]
         while self._check("OP", ","):

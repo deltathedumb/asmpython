@@ -482,8 +482,12 @@ xs[<span class="num">0</span>], xs[<span class="num">1</span>] = xs[<span class=
 self.x, self.y = self.y, self.x  <span class="cmt"># swap instance attributes</span>
 <span class="kw">for</span> i, x <span class="kw">in</span> <span class="fn">enumerate</span>(xs): <span class="fn">print</span>(i, x)
 <span class="kw">for</span> i, x <span class="kw">in</span> <span class="fn">enumerate</span>(xs, <span class="num">1</span>): <span class="fn">print</span>(i, x)  <span class="cmt"># start counting from 1</span>
-<span class="kw">for</span> a, b <span class="kw">in</span> <span class="fn">zip</span>(xs, ys): <span class="fn">print</span>(a, b)</code></pre>
+<span class="kw">for</span> a, b <span class="kw">in</span> <span class="fn">zip</span>(xs, ys): <span class="fn">print</span>(a, b)
+a, *rest = xs        <span class="cmt"># starred unpack: rest = xs[1:]</span>
+*init, last = xs     <span class="cmt"># init = xs[:-1]</span>
+first, *mid, last = xs</code></pre>
   <p>Tuple-assignment targets may be plain names, subscripts, or attributes (in any mix); every value on the right is evaluated before any store happens, so swaps work without a temporary. The single-iterable unpack form (<code>a, b = some_list</code>) requires plain-name targets.</p>
+  <p>A single starred target (<code>*rest</code>, PEP 3132) may appear anywhere among the unpack targets and collects the leftover elements into a new list of the same element kind; this form requires the right-hand side to be a <code>list</code>.</p>
 </section>
 
 <section id="control-flow">

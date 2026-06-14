@@ -11,6 +11,16 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **Starred assignment unpacking `a, *rest = xs` (PEP 3132).** A single
+  `*name` target may appear anywhere among a tuple-assignment's targets
+  (`a, *rest = xs`, `*init, last = xs`, `first, *mid, last = xs`) when the
+  right-hand side is a `list`. The starred target binds to a fresh list of
+  the same element kind holding the leftover elements; plain targets before
+  and after it read the corresponding front/back elements directly. New
+  `A.StarTarget` AST node (parser-only; only valid as a `TupleAssign`
+  target). At most one starred target is allowed, and a lone `*name = ...`
+  is rejected (`starred assignment target must be in a list or tuple`),
+  matching CPython's `SyntaxError`s.
 - **`enumerate(iterable, start)`.** The optional second argument sets the
   initial value of the index variable, matching CPython:
   `for i, x in enumerate(xs, 1): ...` numbers `x` from 1 instead of 0.

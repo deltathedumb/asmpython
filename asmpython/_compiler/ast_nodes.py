@@ -120,15 +120,29 @@ class AugAssign:
 
 
 @dataclass
+class StarTarget:
+    """`*name` as one target of a TupleAssign (PEP 3132 starred assignment),
+    e.g. `a, *rest = xs` or `first, *mid, last = xs`. At most one per
+    TupleAssign, and only valid when the single right-hand value is a
+    `list`-typed expression -- `rest`/`mid`/etc. is bound to a fresh list
+    holding the "leftover" middle elements (same element kind as the
+    right-hand list)."""
+
+    name: str
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
 class TupleAssign:
     """a, b, c = e1, e2, e3 -- evaluates every rhs first (into temporaries),
     then performs each store, so a, b = b, a works.
 
-    Targets are `Name`, `Subscript`, or `Attr` expressions (e.g.
-    `xs[0], xs[1] = xs[1], xs[0]` or `self.x, self.y = self.y, self.x`).
-    Subscript/Attr targets are only allowed in the parallel form (one value
-    per target) -- the single-iterable unpack form requires plain names
-    (no nested unpacking, no `*rest`)."""
+    Targets are `Name`, `Subscript`, `Attr`, or (single-iterable unpack form
+    only) `StarTarget` expressions (e.g. `xs[0], xs[1] = xs[1], xs[0]`,
+    `self.x, self.y = self.y, self.x`, or `a, *rest = xs`). Subscript/Attr
+    targets are only allowed in the parallel form (one value per target) --
+    the single-iterable unpack form requires plain names (and at most one
+    `*rest`, no nested unpacking)."""
 
     targets: list["Expr"] = field(default_factory=list)
     values: list["Expr"] = field(default_factory=list)

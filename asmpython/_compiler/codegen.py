@@ -1250,6 +1250,20 @@ class Codegen:
             elif isinstance(s, A.AugAssign):
                 self._cl_define(info, s.target, A.expr_type(s.value))
                 self._cl_walk_expr(info, s.value)
+            elif isinstance(s, A.TupleAssign) and any(
+                isinstance(t, A.StarTarget) for t in s.targets
+            ):
+                # `a, *rest = xs` (xs: list[T]). `rest` is a fresh list[T];
+                # plain targets get T directly. Sema guarantees a single
+                # list-typed RHS and at most one StarTarget.
+                self._cl_define(info, f"__tupunpack_{id(s)}", "int")
+                self._cl_walk_expr(info, s.values[0])
+                el_t = self._list_expr_el_kind(s.values[0])
+                for t in s.targets:
+                    if isinstance(t, A.StarTarget):
+                        self._cl_define(info, t.name, "list")
+                    else:
+                        self._cl_define(info, t.name, el_t)
             elif isinstance(s, A.TupleAssign):
                 if len(s.values) == 1 and (
                     A.expr_type(s.values[0]) in ("tuple", "any")
@@ -1438,6 +1452,59 @@ class Codegen:
             else:
                 self.gen_expr(stmt.value, info)
                 self.emitf(f"mov {mem}, rax")
+            return
+        if isinstance(stmt, A.TupleAssign) and any(
+            isinstance(t, A.StarTarget) for t in stmt.targets
+        ):
+            # `a, *rest = xs` / `*init, last = xs` / `a, *mid, b = xs`
+            # (xs: list[T]). Evaluate xs once; plain targets before the star
+            # read xs[0..n_before-1], plain targets after the star read from
+            # the end (xs[len-n_after..len-1]), and the star target becomes
+            # _runtime_list_slice(xs, n_before, len - n_after).
+            star_i = next(
+                i for i, t in enumerate(stmt.targets) if isinstance(t, A.StarTarget)
+            )
+            n_before = star_i
+            n_after = len(stmt.targets) - star_i - 1
+            ptr_slot = info.locals_[f"__tupunpack_{id(stmt)}"]
+            el_t = self._list_expr_el_kind(stmt.values[0])
+            self.gen_expr(stmt.values[0], info)  # rax = list header ptr
+            self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+            for i in range(n_before):
+                off = info.locals_[stmt.targets[i].name]
+                self.emitf(
+                    f"mov rbx, [rbp{ptr_slot:+d}]",
+                    f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+                )
+                if el_t == "float":
+                    self.emitf(
+                        f"movsd xmm0, [rbx+{i * 8}]", f"movsd [rbp{off:+d}], xmm0"
+                    )
+                else:
+                    self.emitf(f"mov rax, [rbx+{i * 8}]", f"mov [rbp{off:+d}], rax")
+            for j in range(n_after):
+                off = info.locals_[stmt.targets[star_i + 1 + j].name]
+                self.emitf(
+                    f"mov rcx, [rbp{ptr_slot:+d}]",
+                    f"mov rax, [rcx+{self.LIST_LEN_OFF}]",
+                    f"sub rax, {n_after - j}",
+                    f"mov rbx, [rcx+{self.LIST_BUF_OFF}]",
+                )
+                if el_t == "float":
+                    self.emitf(
+                        "movsd xmm0, [rbx+rax*8]", f"movsd [rbp{off:+d}], xmm0"
+                    )
+                else:
+                    self.emitf("mov rax, [rbx+rax*8]", f"mov [rbp{off:+d}], rax")
+            rest_off = info.locals_[stmt.targets[star_i].name]
+            self.emitf(
+                f"mov rax, [rbp{ptr_slot:+d}]",  # src header
+                f"mov rcx, [rax+{self.LIST_LEN_OFF}]",
+                f"sub rcx, {n_after}",  # stop = len - n_after
+                f"mov rbx, {n_before}",  # start = n_before
+                "call _runtime_list_slice",
+                f"mov [rbp{rest_off:+d}], rax",
+            )
             return
         if isinstance(stmt, A.TupleAssign):
             # Unpack form: `a, b = <tuple>`. Evaluate the tuple once, park its

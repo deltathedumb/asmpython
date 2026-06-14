@@ -1587,6 +1587,35 @@ class SemaAnalyzer:
             # set before we decide between unpack and parallel forms.
             for v in s.values:
                 self._check_expr(v, scope)
+            star_targets = [t for t in s.targets if isinstance(t, A.StarTarget)]
+            if star_targets:
+                # `a, *rest = xs` / `*init, last = xs` / `a, *mid, b = xs`
+                # (PEP 3132). Only the single-iterable unpack form of a
+                # `list`-typed RHS is supported: `rest`/`init`/`mid` becomes a
+                # fresh list of the same element kind, holding whichever
+                # elements aren't claimed by the plain targets on either side
+                # of the star.
+                if len(s.values) != 1:
+                    raise SemaError(
+                        "starred assignment requires a single list on the "
+                        "right-hand side",
+                        s.pos,
+                    )
+                rhs_t = A.expr_type(s.values[0])
+                if rhs_t != "list":
+                    raise SemaError(
+                        f"starred assignment requires a list on the "
+                        f"right-hand side, got {rhs_t}",
+                        s.pos,
+                    )
+                el = self._list_el_type(s.values[0], scope)
+                el_bound = el if el != "int" else "any"
+                for t in s.targets:
+                    if isinstance(t, A.StarTarget):
+                        scope.add(t.name, "list", el_type=el)
+                    else:
+                        scope.add(t.name, el_bound)
+                return
             nonname_targets = [t for t in s.targets if not isinstance(t, A.Name)]
             if nonname_targets and len(s.values) == 1:
                 # The unpack forms below (`a, b = <tuple/list/...>`) only know
