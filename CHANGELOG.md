@@ -11,6 +11,15 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **`str.format()` named fields (`"{name}".format(name="bob")`).** Named
+  replacement fields now work alongside positional `{}`/`{0}` fields and the
+  full `!conv`/`:format-spec` mini-language, e.g.
+  `"{name} is {age}".format(name="bob", age=5)`,
+  `"{val:,}".format(val=1234567)`. Referencing an undefined keyword name, or
+  a positional index beyond the given positional arguments, is now a
+  semantic error instead of crashing the compiler. Attribute/index access in
+  fields (`{0.attr}`, `{0[0]}`) remains unsupported and now raises a clear
+  semantic error rather than being silently misparsed.
 - **Zero-pad width + grouping for f-strings (`f"{n:015,}"`).** Combining a
   zero-padded width with a `,`/`_` grouping option now matches CPython's
   separator-aware zero-padding (`f"{1234567:015,}"` -> `"000,001,234,567"`),

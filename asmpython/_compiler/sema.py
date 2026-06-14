@@ -3830,6 +3830,31 @@ class SemaAnalyzer:
             # this to a concat chain, so the result is a real str.
             for a in e.args:
                 self._check_expr(a, scope)
+            for _, a in e.kwargs:
+                self._check_expr(a, scope)
+            kwarg_names = {name for name, _ in e.kwargs}
+            for kind, val, _spec, _conv in A.parse_format_fields(e.obj.value):
+                if kind != "arg":
+                    continue
+                if isinstance(val, str):
+                    if "." in val or "[" in val:
+                        raise SemaError(
+                            "str.format() attribute/index access in "
+                            f"fields (e.g. '{{0.attr}}', '{{0[0]}}') is not "
+                            "supported",
+                            e.pos,
+                        )
+                    if val not in kwarg_names:
+                        raise SemaError(
+                            f"str.format() got an unexpected field name {val!r}",
+                            e.pos,
+                        )
+                elif val >= len(e.args):
+                    raise SemaError(
+                        f"str.format() field index {val} out of range "
+                        f"({len(e.args)} positional argument(s))",
+                        e.pos,
+                    )
             e.inferred_type = "str"
             return
         sig = self.STR_METHODS.get(e.method)

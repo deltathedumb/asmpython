@@ -1016,3 +1016,68 @@ def parse_pct_format(fmt: str) -> tuple[list[tuple], int]:
     if buf:
         pieces.append(("lit", buf))
     return pieces, nconv
+
+
+def parse_format_fields(fmt: str) -> list[tuple]:
+    """Parse a str.format()-style format string into a flat list of pieces.
+
+    Each piece is either ("lit", text, "", "") for literal text (with `{{`/
+    `}}` collapsed to literal `{`/`}`), or ("arg", index_or_name, spec, conv)
+    for a `{field}` replacement: `index_or_name` is an `int` for an
+    auto-numbered (`{}`) or explicit-index (`{0}`) field, or a `str` for a
+    named field (`{name}`); `spec` is the optional `:format-spec` (without
+    the leading `:`); `conv` is the optional `!r`/`!s`/`!a` conversion
+    (without the leading `!`). Auto-numbering only advances for `{}` fields,
+    matching CPython. Shared by sema (validation) and codegen (lowering) so
+    the two stay in sync.
+    """
+    pieces: list[tuple] = []
+    buf = ""
+    auto = 0
+    i = 0
+    n = len(fmt)
+    while i < n:
+        ch = fmt[i]
+        if ch == "{":
+            if i + 1 < n and fmt[i + 1] == "{":
+                buf += "{"
+                i += 2
+                continue
+            j = i + 1
+            field = ""
+            while j < n and fmt[j] != "}":
+                field += fmt[j]
+                j += 1
+            name_conv, _, spec = field.partition(":")
+            if "!" in name_conv:
+                idx_part, conv = name_conv.split("!", 1)
+            else:
+                idx_part, conv = name_conv, ""
+            idx_part = idx_part.strip()
+            idx: object
+            if idx_part == "":
+                idx = auto
+                auto += 1
+            elif idx_part.isdigit():
+                idx = int(idx_part)
+            else:
+                idx = idx_part
+            if buf:
+                pieces.append(("lit", buf, "", ""))
+                buf = ""
+            pieces.append(("arg", idx, spec, conv))
+            i = j + 1
+            continue
+        if ch == "}":
+            if i + 1 < n and fmt[i + 1] == "}":
+                buf += "}"
+                i += 2
+                continue
+            buf += "}"
+            i += 1
+            continue
+        buf += ch
+        i += 1
+    if buf:
+        pieces.append(("lit", buf, "", ""))
+    return pieces

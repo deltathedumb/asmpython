@@ -1248,6 +1248,8 @@ class Codegen:
                 self._cl_walk_expr(info, expr.obj)
             for a in expr.args:
                 self._cl_walk_expr(info, a)
+            for _kn, kv in getattr(expr, "kwargs", []) or []:
+                self._cl_walk_expr(info, kv)
         elif isinstance(expr, A.Subscript):
             if isinstance(expr.index, A.Slice):
                 # slice needs scratch slots for obj/start (always) plus
@@ -7713,53 +7715,9 @@ class Codegen:
         assert isinstance(e.obj, A.StrLit)
         fmt = e.obj.value
         # Parse into a flat list of ("lit", text, "", "") and
-        # ("arg", index, spec, conv) pieces.
-        pieces: list[tuple[str, object, str, str]] = []
-        buf = ""
-        auto = 0
-        i = 0
-        n = len(fmt)
-        while i < n:
-            ch = fmt[i]
-            if ch == "{":
-                if i + 1 < n and fmt[i + 1] == "{":
-                    buf += "{"
-                    i += 2
-                    continue
-                j = i + 1
-                field = ""
-                while j < n and fmt[j] != "}":
-                    field += fmt[j]
-                    j += 1
-                name_conv, _, spec = field.partition(":")
-                if "!" in name_conv:
-                    idx_part, conv = name_conv.split("!", 1)
-                else:
-                    idx_part, conv = name_conv, ""
-                idx_part = idx_part.strip()
-                if idx_part == "":
-                    idx = auto
-                    auto += 1
-                else:
-                    idx = int(idx_part)
-                if buf:
-                    pieces.append(("lit", buf, "", ""))
-                    buf = ""
-                pieces.append(("arg", idx, spec, conv))
-                i = j + 1
-                continue
-            if ch == "}":
-                if i + 1 < n and fmt[i + 1] == "}":
-                    buf += "}"
-                    i += 2
-                    continue
-                buf += "}"
-                i += 1
-                continue
-            buf += ch
-            i += 1
-        if buf:
-            pieces.append(("lit", buf, "", ""))
+        # ("arg", index_or_name, spec, conv) pieces (shared with sema's
+        # validation pass, so the two stay in sync).
+        pieces = A.parse_format_fields(fmt)
 
         acc_slot = info.locals_[f"__fmt_acc_{id(e)}"]
 
@@ -7768,7 +7726,10 @@ class Codegen:
                 label, _ = self.intern_string(val)  # type: ignore[arg-type]
                 self.emitf(f"lea rax, [{label}]")
             else:
-                arg = e.args[val]  # type: ignore[index]
+                if isinstance(val, str):
+                    arg = next(a for name, a in e.kwargs if name == val)
+                else:
+                    arg = e.args[val]  # type: ignore[index]
                 arg.fmt_spec = spec  # type: ignore[attr-defined]
                 arg.conv_flag = conv  # type: ignore[attr-defined]
                 self._gen_fstring_segment(arg, info)
