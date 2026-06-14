@@ -722,9 +722,15 @@ class DictLit:
     """{key: value, ...} literal. Keys must be str. Values may be any of int /
     str / float / instance:<Class>, but the dict is homogeneous in value kind
     (sema rejects mixed-value dicts). `value_type` is set by sema and lets
-    codegen / iteration recover the right per-element kind."""
+    codegen / iteration recover the right per-element kind.
 
-    keys: list["Expr"] = field(default_factory=list)
+    PEP 448 dict unpacking (`{**other, "k": v}`) is represented by a `None`
+    entry in `keys` paired with the spread expression (which must be
+    dict-typed) at the same index in `values`; codegen merges that dict's
+    entries in via `_runtime_dict_update` in source order, so later entries
+    (whether spreads or explicit keys) win on key conflicts."""
+
+    keys: list["Expr | None"] = field(default_factory=list)
     values: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     value_type: str = "int"

@@ -11,6 +11,17 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **Dict literal unpacking `{**d1, "k": v, **d2}` (PEP 448).** A dict literal
+  may contain zero or more `**other` spreads alongside explicit `key: value`
+  pairs, in any order and any number of times; each `other` must be
+  dict-typed (sema error `dict unpacking requires a dict (got ...)` otherwise).
+  Entries are merged in source order via `_runtime_dict_update`, so later
+  entries (whether spreads or explicit keys) win on key conflicts, matching
+  CPython exactly; `{**d1}` is a shallow copy and no operand (literal or
+  spread source) is mutated. Represented in the AST as a `None` entry in
+  `DictLit.keys` paired with the spread expression at the same index in
+  `DictLit.values`. The parser treats a leading `**` inside `{...}` as
+  unambiguously a dict literal, since set literals cannot contain `**expr`.
 - **Dict union operators `d1 | d2` and `d1 |= d2` (PEP 584).** `d1 | d2`
   builds a fresh dict containing `d1`'s entries with `d2`'s merged on top
   (`d2`'s values win on conflicting keys; neither operand is mutated), and

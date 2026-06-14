@@ -933,7 +933,8 @@ class Codegen:
             self._cl_define(info, f"__dictlit_{id(expr)}")
             self._cl_define(info, f"__dictlit_key_{id(expr)}")
             for k in expr.keys:
-                self._cl_walk_expr(info, k)
+                if k is not None:
+                    self._cl_walk_expr(info, k)
             for v in expr.values:
                 self._cl_walk_expr(info, v)
         elif isinstance(expr, A.SetLit):
@@ -6965,6 +6966,17 @@ class Codegen:
         # Use the pre-reserved frame slot instead.
         key_slot = info.locals_[f"__dictlit_key_{id(e)}"]
         for k_expr, v_expr in zip(e.keys, e.values):
+            if k_expr is None:
+                # `**other` (PEP 448): merge other's entries in, in source
+                # order, so later entries (spreads or explicit keys) win on
+                # key conflicts.
+                self.gen_expr(v_expr, info)  # rax = other dict header
+                self.emitf(
+                    "mov rbx, rax",
+                    f"mov rax, [rbp{slot_off:+d}]",
+                    "call _runtime_dict_update",
+                )
+                continue
             self.gen_expr(k_expr, info)  # rax = key ptr
             self.emitf(f"mov [rbp{key_slot:+d}], rax")
             self.gen_expr(v_expr, info)  # rax/xmm0 = value

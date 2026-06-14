@@ -2771,7 +2771,18 @@ class SemaAnalyzer:
             self._merge_walrus_bindings(scope, child, loop_vars)
             return
         if isinstance(e, A.DictLit):
-            for k in e.keys:
+            for k, v in zip(e.keys, e.values):
+                if k is None:
+                    # `**other` (PEP 448 dict unpacking): `other` must itself
+                    # be dict-typed (or opaque).
+                    self._check_expr(v, scope)
+                    vt = A.expr_type(v)
+                    if vt not in ("dict", "any"):
+                        raise SemaError(
+                            f"dict unpacking requires a dict (got {vt})",
+                            getattr(v, "pos", e.pos),
+                        )
+                    continue
                 self._check_expr(k, scope)
                 if A.expr_type(k) not in ("str", "any", "int") and not A.expr_type(k).startswith("instance:"):
                     raise SemaError(
@@ -2785,23 +2796,31 @@ class SemaAnalyzer:
             # value kind is tracked on the DictLit so codegen / iteration / a
             # chained read (`d[k][k2]`) can recover it.
             seen_v: str | None = None
-            for v in e.values:
-                self._check_expr(v, scope)
-                vt = A.expr_type(v)
-                if vt not in (
-                    "int",
-                    "str",
-                    "float",
-                    "any",
-                    "tuple",
-                    "dict",
-                    "list",
-                    "set",
-                ) and not vt.startswith("instance:"):
-                    raise SemaError(
-                        f"dict value of type {vt} is not supported yet",
-                        getattr(v, "pos", e.pos),
-                    )
+            for k, v in zip(e.keys, e.values):
+                if k is None:
+                    # A `**other` spread contributes `other`'s value kind too,
+                    # so e.g. `{**d1, "x": 1}` where `d1: dict[str, str]` and
+                    # the literal key is `int` collapses to "any" below, same
+                    # as any other value-kind mismatch. An opaque `other`
+                    # ("any"-typed dict) is compatible with any value kind.
+                    vt = "any" if A.expr_type(v) == "any" else self._dict_value_type(v, scope)
+                else:
+                    self._check_expr(v, scope)
+                    vt = A.expr_type(v)
+                    if vt not in (
+                        "int",
+                        "str",
+                        "float",
+                        "any",
+                        "tuple",
+                        "dict",
+                        "list",
+                        "set",
+                    ) and not vt.startswith("instance:"):
+                        raise SemaError(
+                            f"dict value of type {vt} is not supported yet",
+                            getattr(v, "pos", e.pos),
+                        )
                 if vt == "any":
                     continue  # opaque value: compatible with any value kind
                 if seen_v is None or seen_v == "any":

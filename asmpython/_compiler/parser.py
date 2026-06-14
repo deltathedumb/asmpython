@@ -1629,13 +1629,36 @@ class Parser:
     def _parse_brace(self):
         """Parse a `{...}` literal — either a dict or a set.
 
-        `{}` is the empty dict (matching Python). Otherwise the first element
-        decides: a `key: value` colon makes it a dict, anything else a set.
+        `{}` is the empty dict (matching Python). A leading `**` (PEP 448
+        dict unpacking) is unambiguously a dict literal, since sets can't
+        contain `**expr`. Otherwise the first element decides: a `key: value`
+        colon makes it a dict, anything else a set.
         """
         start = self._expect("OP", "{").pos
         if self._check("OP", "}"):
             self._eat()
             return A.DictLit(keys=[], values=[], pos=start)
+        if self._check("OP", "**"):
+            # `{**d1, "k": v, **d2, ...}`.
+            keys: list = []
+            values: list = []
+            while True:
+                if self._check("OP", "**"):
+                    self._eat()
+                    keys.append(None)
+                    values.append(self._parse_expr())
+                else:
+                    k = self._parse_expr()
+                    self._expect("OP", ":")
+                    keys.append(k)
+                    values.append(self._parse_expr())
+                if not self._check("OP", ","):
+                    break
+                self._eat()
+                if self._check("OP", "}"):
+                    break  # trailing comma
+            self._expect("OP", "}")
+            return A.DictLit(keys=keys, values=values, pos=start)
         first = self._parse_expr()
         if self._check("OP", ":"):
             # Dict literal or dict comprehension. Both open `key: value`.
@@ -1646,12 +1669,18 @@ class Parser:
                 comp = self._parse_dict_comprehension_tail(first, first_value, start)
                 self._expect("OP", "}")
                 return comp
-            keys: list = [first]
-            values: list = [first_value]
+            keys = [first]
+            values = [first_value]
             while self._check("OP", ","):
                 self._eat()
                 if self._check("OP", "}"):
                     break  # trailing comma
+                if self._check("OP", "**"):
+                    # `{"k": v, **other, ...}` — merge another dict in here.
+                    self._eat()
+                    keys.append(None)
+                    values.append(self._parse_expr())
+                    continue
                 keys.append(self._parse_expr())
                 self._expect("OP", ":")
                 values.append(self._parse_expr())
