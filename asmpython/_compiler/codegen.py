@@ -376,8 +376,11 @@ class Codegen:
             stripped = line.strip()
             if stripped.startswith("extern"):
                 already.append(stripped.split()[-1])
+        # Symbols defined inline by emit_asmlib_runtime must not also be
+        # declared `extern` — that would conflict with their label definition.
+        inline = self._asmlib_inline_syms()
         for sym in sorted(self.ffi_externs):
-            if sym not in already:
+            if sym not in already and sym not in inline:
                 self.emit(f"extern {sym}")
         self.emit(self.section_text)
         self.emit_entry()
@@ -1098,6 +1101,9 @@ class Codegen:
                 self._cl_walk_expr(info, expr.sort_key)
             if getattr(expr, "sort_reverse", None) is not None:
                 self._cl_walk_expr(info, expr.sort_reverse)
+            # round(x, ndigits): needs a slot to spill x across pow() call.
+            if expr.func == "round" and len(expr.args) >= 2:
+                self._cl_define(info, f"__round_nd_{id(expr)}")
             # dict() / dict(other): an empty dict (same layout as a set's),
             # plus a slot to park the source across the allocation when copying.
             if expr.func == "dict":
@@ -1273,6 +1279,15 @@ class Codegen:
                     self._cl_walk_expr(info, expr.index.step)
             elif A.expr_type(expr.obj) == "str":
                 self._cl_define(info, f"__stridx_{id(expr)}")
+                self._cl_walk_expr(info, expr.obj)
+                self._cl_walk_expr(info, expr.index)
+            elif getattr(expr, "_getitem_class", None) is not None:
+                # Instance __getitem__: synthesized method call needs receiver
+                # slot and one arg slot (the index). We park them under
+                # __gi_self_<id> / __gi_arg_<id> so they don't collide with
+                # normal subscript or callarg slots.
+                self._cl_define(info, f"__gi_self_{id(expr)}")
+                self._cl_define(info, f"__gi_arg_{id(expr)}")
                 self._cl_walk_expr(info, expr.obj)
                 self._cl_walk_expr(info, expr.index)
             else:
@@ -1763,6 +1778,27 @@ class Codegen:
                 self.gen_expr(stmt.value, info)
                 return
             obj_t = A.expr_type(stmt.target.obj)
+            if getattr(stmt.target, "_setitem_class", None) is not None:
+                cls_name = stmt.target._setitem_class  # type: ignore[attr-defined]
+                owner = self._resolve_method_owner(cls_name, "__setitem__")
+                if owner is not None:
+                    # __setitem__(self, key, value) -> 3 args
+                    self.gen_expr(stmt.target.obj, info)
+                    self.emitf("push rax")  # push self
+                    self.gen_expr(stmt.target.index, info)
+                    self.emitf("push rax")  # push key
+                    self.gen_expr(stmt.value, info)
+                    if A.expr_type(stmt.value) == "float":
+                        self.emitf("movq rax, xmm0")
+                    self.emitf(
+                        f"mov {self._arg_reg(2)}, rax",  # arg2 = value
+                        "pop rax",
+                        f"mov {self._arg_reg(1)}, rax",  # arg1 = key
+                        "pop rax",
+                        f"mov {self._arg_reg(0)}, rax",  # arg0 = self
+                    )
+                    self.emit_call(self._method_symbol(owner, "__setitem__"))
+                return
             if obj_t == "dict":
                 # Stack order: push key, push value, eval header, then call.
                 self.gen_expr(stmt.target.index, info)
@@ -7178,6 +7214,27 @@ class Codegen:
             else:
                 self._gen_str_slice(e, info)
             return
+        # Instance `__getitem__`: dispatch to `obj.__getitem__(index)`.
+        if getattr(e, "_getitem_class", None) is not None:
+            cls_name = e._getitem_class  # type: ignore[attr-defined]
+            owner = self._resolve_method_owner(cls_name, "__getitem__")
+            if owner is not None:
+                recv_slot = info.locals_[f"__gi_self_{id(e)}"]
+                arg_slot = info.locals_[f"__gi_arg_{id(e)}"]
+                # Evaluate receiver then index into their slots.
+                self.gen_expr(e.obj, info)
+                self.emitf(f"mov [rbp{recv_slot:+d}], rax")
+                self.gen_expr(e.index, info)
+                self.emitf(f"mov [rbp{arg_slot:+d}], rax")
+                # Load self into arg0, index into arg1.
+                self.emitf(
+                    f"mov {self._arg_reg(0)}, [rbp{recv_slot:+d}]",
+                    f"mov {self._arg_reg(1)}, [rbp{arg_slot:+d}]",
+                )
+                self.emit_call(self._method_symbol(owner, "__getitem__"))
+            else:
+                self.emitf("xor rax, rax")
+            return
         obj_t = A.expr_type(e.obj)
         # An opaque receiver indexed by a STRING is a dict lookup — a str key
         # can never be a list index, and treating the pointer as an index
@@ -9355,6 +9412,14 @@ class Codegen:
             elif t in ("dict", "set"):
                 # Sets are dict-backed; len lives at DICT_LEN_OFF.
                 self.emitf(f"mov rax, [rax+{self.DICT_LEN_OFF}]")
+            elif t.startswith("instance:"):
+                cls_name = t.split(":", 1)[1]
+                owner = self._resolve_method_owner(cls_name, "__len__")
+                if owner is not None:
+                    self.emitf(f"mov {self._arg_reg(0)}, rax")
+                    self.emit_call(self._method_symbol(owner, "__len__"))
+                else:
+                    self.emitf("xor rax, rax")
             else:
                 self._emit_strlen()  # rax = length (string)
             return
@@ -9413,6 +9478,25 @@ class Codegen:
             return
         if e.func == "float":
             arg_t = A.expr_type(e.args[0])
+            # float("nan") / float("inf") / float("-inf"): emit bit patterns
+            # directly so the result is correct regardless of libc strtod quirks.
+            if isinstance(e.args[0], A.StrLit):
+                s = e.args[0].value.strip().lower()
+                if s == "nan":
+                    self.emitf(
+                        "mov rax, 0x7FF8000000000000", "movq xmm0, rax"
+                    )
+                    return
+                if s in ("inf", "+inf", "infinity", "+infinity"):
+                    self.emitf(
+                        "mov rax, 0x7FF0000000000000", "movq xmm0, rax"
+                    )
+                    return
+                if s in ("-inf", "-infinity"):
+                    self.emitf(
+                        "mov rax, 0xFFF0000000000000", "movq xmm0, rax"
+                    )
+                    return
             self.gen_expr(e.args[0], info)
             if arg_t == "str":
                 self._emit_str_to_float()  # xmm0 = parsed
@@ -9788,7 +9872,28 @@ class Codegen:
             return
         if e.func == "round":
             arg_t = A.expr_type(e.args[0])
-            if arg_t == "float":
+            if len(e.args) >= 2:
+                # round(x, ndigits) -> float: scale by 10^ndigits, roundsd, unscale.
+                # We use the pow helper for 10^ndigits (float via cvtsi2sd + pow).
+                nd_slot = info.locals_[f"__round_nd_{id(e)}"]
+                self._gen_expr_as_float(e.args[0], info, arg_t)
+                self.emitf("movq rax, xmm0", f"mov [rbp{nd_slot:+d}], rax")
+                self.gen_expr(e.args[1], info)  # rax = ndigits (int)
+                # Compute 10.0^ndigits via pow
+                self.emitf("cvtsi2sd xmm1, rax")  # xmm1 = (double)ndigits
+                # xmm0 = 10.0
+                scale_lbl, _ = self.intern_string("10.0")
+                self.emitf(
+                    "mov rax, 0x4024000000000000",  # 10.0 bit pattern
+                    "movq xmm0, rax",
+                )
+                self._emit_call_libc_double_double("pow")  # xmm0 = 10^n
+                self.emitf("movq rax, xmm0", f"movq xmm1, rax",
+                           f"movq xmm0, [rbp{nd_slot:+d}]")
+                self.emitf("mulsd xmm0, xmm1")     # xmm0 = x * 10^n
+                self.emitf("roundsd xmm0, xmm0, 0")  # round
+                self.emitf("divsd xmm0, xmm1")     # xmm0 = rounded / 10^n
+            elif arg_t == "float":
                 self._gen_expr_as_float(e.args[0], info, arg_t)
                 # round to nearest even (banker's rounding, mode 0), then to int.
                 self.emitf("roundsd xmm0, xmm0, 0", "cvtsd2si rax, xmm0")
@@ -10690,6 +10795,15 @@ class Codegen:
 
     def emit_print_impls(self) -> None:
         raise NotImplementedError
+
+    def _asmlib_inline_syms(self) -> set:
+        """Return symbols that this target defines inline via emit_asmlib_runtime.
+
+        These must NOT be declared `extern` in the output assembly — emitting
+        both `extern X` and the label `X:` in the same file is a NASM error.
+        The base implementation returns an empty set; hosted targets override.
+        """
+        return set()
 
     def emit_asmlib_runtime(self) -> None:
         """Emit inline helper bodies for asmlib symbols that have no libc equivalent.

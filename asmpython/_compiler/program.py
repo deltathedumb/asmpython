@@ -155,7 +155,10 @@ def _resolve_absolute(module: str, root: Path) -> Path | None:
 # `Func`/`Const` bindings (`os`, `sys`, `math`, ...). `import pathlib` /
 # `from argparse import ArgumentParser` resolve to these bundled files and get
 # merged like project modules, so their classes are fully type-checked.
-_BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({"pathlib", "argparse"})
+_BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
+    "pathlib", "argparse",
+    "string", "collections", "itertools", "functools", "json",
+})
 
 
 def _resolve_bundled_stdlib(module: str) -> Path | None:

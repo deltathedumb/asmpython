@@ -2406,6 +2406,17 @@ class SemaAnalyzer:
                     )
             elif obj_t == "any":
                 pass  # opaque target: accept the index assignment leniently
+            elif obj_t.startswith("instance:"):
+                cls_name = obj_t.split(":", 1)[1]
+                cls_sig = self.classes.get(cls_name)
+                msig = None
+                if cls_sig is not None:
+                    msig = cls_sig.methods.get("__setitem__")
+                if msig is None:
+                    raise SemaError(
+                        f"'{cls_name}' object does not support index assignment", s.pos
+                    )
+                s.target._setitem_class = cls_name  # type: ignore[attr-defined]
             else:
                 raise SemaError(f"cannot index a {obj_t}", s.pos)
             return
@@ -3661,6 +3672,25 @@ class SemaAnalyzer:
             elif obj_t == "any":
                 # Indexing an opaque value stays opaque.
                 e.inferred_type = "any"
+            elif obj_t.startswith("instance:"):
+                cls_name = obj_t.split(":", 1)[1]
+                cls_sig = self.classes.get(cls_name)
+                msig = None
+                if cls_sig is not None:
+                    msig = cls_sig.methods.get("__getitem__")
+                if msig is None:
+                    raise SemaError(
+                        f"'{cls_name}' object does not support indexing", e.pos
+                    )
+                # Mark so codegen translates this subscript into a __getitem__ call.
+                e._getitem_class = cls_name  # type: ignore[attr-defined]
+                if msig.ret_type is not None:
+                    ty, el, _val = msig.ret_type  # type: ignore[misc]
+                    e.inferred_type = ty
+                    if ty == "list" and el is not None:
+                        e.list_el_type = el  # type: ignore[attr-defined]
+                else:
+                    e.inferred_type = "int"
             else:
                 raise SemaError(f"cannot index a {obj_t}", e.pos)
             return
@@ -4755,7 +4785,7 @@ class SemaAnalyzer:
                 "min": "any",
                 "max": "any",
                 "abs": "any",
-                "round": "int",
+                "round": "float" if len(e.args) >= 2 else "int",
                 "pow": "int",
                 "sorted": "list",
                 "reversed": "list",
@@ -4889,7 +4919,7 @@ class SemaAnalyzer:
             # argument is accepted everywhere — we can't know its real type.
             if e.func == "len":
                 t = A.expr_type(e.args[0])
-                if t not in ("str", "list", "dict", "tuple", "set", "any", "int"):
+                if t not in ("str", "list", "dict", "tuple", "set", "any", "int") and not t.startswith("instance:"):
                     # "int" is the default for unannotated vars — accept leniently
                     raise SemaError(
                         "len() requires a string, list, dict, tuple, or set", e.pos

@@ -376,16 +376,311 @@ class LinuxCodegen(Codegen):
         "_gui_wait_event", "_gui_key_scancode",
         "_gui_mouse_x", "_gui_mouse_y", "_gui_mouse_button",
     )
+    _MATH_SYMS = (
+        "_math_isnan", "_math_isinf", "_math_isfinite",
+        "_math_degrees", "_math_radians",
+        "_math_gcd", "_math_lcm",
+        "_math_factorial", "_math_comb", "_math_perm",
+        "_math_log_base",
+        "_math_modf_frac", "_math_modf_int",
+        "_math_frexp_m", "_math_frexp_e",
+        "_math_ldexp",
+    )
+    _RANDOM_SYMS = (
+        "_random_random", "_random_randint",
+        "_random_uniform", "_random_randrange",
+    )
+    _TIME_SYMS = (
+        "_time_perf_counter", "_time_time_ns", "_time_sleep_ms",
+    )
+
+    def _asmlib_inline_syms(self) -> set:
+        return (set(self._HW_STUBS) | set(self._NET_SYMS) | set(self._GUI_SYMS)
+                | set(self._MATH_SYMS) | set(self._RANDOM_SYMS) | set(self._TIME_SYMS))
 
     def emit_asmlib_runtime(self) -> None:
-        needs_hw  = any(s in self.ffi_externs for s in self._HW_STUBS)
-        needs_net = any(s in self.ffi_externs for s in self._NET_SYMS)
-        needs_gui = any(s in self.ffi_externs for s in self._GUI_SYMS)
-        if not (needs_hw or needs_net or needs_gui):
+        needs_hw   = any(s in self.ffi_externs for s in self._HW_STUBS)
+        needs_net  = any(s in self.ffi_externs for s in self._NET_SYMS)
+        needs_gui  = any(s in self.ffi_externs for s in self._GUI_SYMS)
+        needs_math   = any(s in self.ffi_externs for s in self._MATH_SYMS)
+        needs_random = any(s in self.ffi_externs for s in self._RANDOM_SYMS)
+        needs_time   = any(s in self.ffi_externs for s in self._TIME_SYMS)
+        if not (needs_hw or needs_net or needs_gui or needs_math or needs_random or needs_time):
             return
 
         self.emit("")
         self.emit("section .text")
+
+        # ---- math helpers (ABI-neutral x87/SSE2 implementations) ------------
+        if needs_math:
+            self.emit("extern log")
+            self.emit("extern modf")
+            self.emit("extern frexp")
+            self.emit("section .rodata")
+            self.emit("_math_deg_factor:  dq 57.29577951308232")   # 180/pi
+            self.emit("_math_rad_factor:  dq 0.017453292519943295")  # pi/180
+            needs_inf_consts = any(s in self.ffi_externs for s in (
+                "_math_isinf", "_math_isfinite"))
+            if needs_inf_consts:
+                self.emit("section .rodata")
+                self.emit("_math_inf_bits:  dq 0x7FF0000000000000")
+                self.emit("_math_abs_mask:  dq 0x7FFFFFFFFFFFFFFF")
+            self.emit("section .text")
+
+            # _math_isnan(xmm0=x) -> rax: 1 if NaN (NaN is the only float where x!=x)
+            if "_math_isnan" in self.ffi_externs:
+                self.label("_math_isnan")
+                self.emitf("ucomisd xmm0, xmm0", "setp al", "movzx rax, al", "ret")
+
+            # _math_isinf(xmm0=x) -> rax: 1 if +inf or -inf
+            if "_math_isinf" in self.ffi_externs:
+                self.label("_math_isinf")
+                self.emitf(
+                    "movsd xmm1, [rel _math_abs_mask]",
+                    "andpd xmm0, xmm1",
+                    "movsd xmm1, [rel _math_inf_bits]",
+                    "ucomisd xmm0, xmm1",
+                    "sete al", "setnp cl",
+                    "and al, cl",
+                    "movzx rax, al", "ret",
+                )
+
+            # _math_isfinite(xmm0=x) -> rax: 1 if finite
+            if "_math_isfinite" in self.ffi_externs:
+                self.label("_math_isfinite")
+                self.emitf(
+                    "ucomisd xmm0, xmm0",
+                    "jp ._mif_no",
+                    "movsd xmm1, [rel _math_abs_mask]",
+                    "andpd xmm0, xmm1",
+                    "movsd xmm1, [rel _math_inf_bits]",
+                    "ucomisd xmm0, xmm1",
+                    "jb ._mif_yes",
+                )
+                self.label("._mif_no")
+                self.emitf("xor rax, rax", "ret")
+                self.label("._mif_yes")
+                self.emitf("mov rax, 1", "ret")
+
+            # _math_degrees(xmm0=radians) -> xmm0=degrees
+            if "_math_degrees" in self.ffi_externs:
+                self.label("_math_degrees")
+                self.emitf("mulsd xmm0, [rel _math_deg_factor]", "ret")
+
+            # _math_radians(xmm0=degrees) -> xmm0=radians
+            if "_math_radians" in self.ffi_externs:
+                self.label("_math_radians")
+                self.emitf("mulsd xmm0, [rel _math_rad_factor]", "ret")
+
+            # _math_gcd(rdi=a, rsi=b) -> rax=gcd  (Euclidean, always positive)
+            if "_math_gcd" in self.ffi_externs:
+                self.label("_math_gcd")
+                self.emitf(
+                    "mov rax, rdi", "mov rcx, rsi",
+                    # abs(a)
+                    "test rax, rax", "jns ._mg_apos", "neg rax",
+                )
+                self.label("._mg_apos")
+                self.emitf("test rcx, rcx", "jns ._mg_bpos", "neg rcx")
+                self.label("._mg_bpos")
+                # Euclid: while b != 0: a, b = b, a % b
+                self.label("._mg_loop")
+                self.emitf("test rcx, rcx", "jz ._mg_done")
+                self.emitf("xor rdx, rdx", "div rcx", "mov rax, rcx", "mov rcx, rdx",
+                           "jmp ._mg_loop")
+                self.label("._mg_done")
+                self.emitf("ret")
+
+            # _math_lcm(rdi=a, rsi=b) -> rax=lcm  (|a*b| / gcd(a,b))
+            if "_math_lcm" in self.ffi_externs:
+                self.label("_math_lcm")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi")
+                self.emitf("call _math_gcd")
+                self.emitf("test rax, rax", "jz ._mlcm_zero")
+                self.emitf("mov rcx, rax")
+                self.emitf("mov rax, [rbp-8]", "test rax, rax", "jns ._mlcm_apos", "neg rax")
+                self.label("._mlcm_apos")
+                self.emitf("xor rdx, rdx", "div rcx")  # a/gcd
+                self.emitf("mov rcx, [rbp-16]", "test rcx, rcx", "jns ._mlcm_bpos", "neg rcx")
+                self.label("._mlcm_bpos")
+                self.emitf("imul rax, rcx", "leave", "ret")
+                self.label("._mlcm_zero")
+                self.emitf("xor rax, rax", "leave", "ret")
+
+            # _math_factorial(rdi=n) -> rax=n!
+            if "_math_factorial" in self.ffi_externs:
+                self.label("_math_factorial")
+                self.emitf("mov rax, 1", "cmp rdi, 1", "jle ._mf_done")
+                self.label("._mf_loop")
+                self.emitf("imul rax, rdi", "dec rdi", "cmp rdi, 1", "jg ._mf_loop")
+                self.label("._mf_done")
+                self.emitf("ret")
+
+            # _math_comb(rdi=n, rsi=k) -> rax=C(n,k)
+            # C(n,k) = n! / (k! * (n-k)!) computed iteratively to avoid overflow
+            if "_math_comb" in self.ffi_externs:
+                self.label("_math_comb")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi")
+                # if k > n-k: k = n-k
+                self.emitf("mov rax, rdi", "sub rax, rsi", "cmp rsi, rax", "jle ._mc_kset")
+                self.emitf("mov [rbp-16], rax")
+                self.label("._mc_kset")
+                self.emitf("mov rax, 1", "mov rcx, 1")
+                self.label("._mc_loop")
+                self.emitf("cmp rcx, [rbp-16]", "jg ._mc_done")
+                self.emitf("mov rdx, [rbp-8]", "sub rdx, [rbp-16]", "add rdx, rcx")
+                self.emitf("imul rax, rdx", "xor rdx, rdx", "div rcx")
+                self.emitf("inc rcx", "jmp ._mc_loop")
+                self.label("._mc_done")
+                self.emitf("leave", "ret")
+
+            # _math_perm(rdi=n, rsi=k) -> rax=P(n,k) = n! / (n-k)!
+            if "_math_perm" in self.ffi_externs:
+                self.label("_math_perm")
+                self.emitf("push rbp", "mov rbp, rsp")
+                # product of n * (n-1) * ... * (n-k+1)
+                self.emitf("mov rax, 1", "mov rcx, 0")
+                self.label("._mp_loop")
+                self.emitf("cmp rcx, rsi", "jge ._mp_done")
+                self.emitf("mov rdx, rdi", "sub rdx, rcx", "imul rax, rdx", "inc rcx",
+                           "jmp ._mp_loop")
+                self.label("._mp_done")
+                self.emitf("pop rbp", "ret")
+
+            # _math_log_base(xmm0=x, xmm1=base) -> xmm0=log(x)/log(base)
+            if "_math_log_base" in self.ffi_externs:
+                self.label("_math_log_base")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("movsd [rbp-8], xmm1")   # save base
+                # log(x) -> xmm0
+                self.emitf("mov al, 1", "call log")
+                self.emitf("movsd [rbp-16], xmm0")  # save log(x)
+                # log(base) -> xmm0
+                self.emitf("movsd xmm0, [rbp-8]", "mov al, 1", "call log")
+                # log(x) / log(base)
+                self.emitf("movsd xmm1, xmm0", "movsd xmm0, [rbp-16]",
+                           "divsd xmm0, xmm1", "leave", "ret")
+
+            # _math_modf_frac(xmm0=x) -> xmm0=fractional part  (via modf)
+            if "_math_modf_frac" in self.ffi_externs:
+                self.label("_math_modf_frac")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("lea rdi, [rbp-8]", "mov al, 1", "call modf")
+                # xmm0 = fractional part (modf returns frac in xmm0, int via ptr)
+                self.emitf("leave", "ret")
+
+            # _math_modf_int(xmm0=x) -> xmm0=integer part  (via modf)
+            if "_math_modf_int" in self.ffi_externs:
+                self.label("_math_modf_int")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("lea rdi, [rbp-8]", "mov al, 1", "call modf")
+                self.emitf("movsd xmm0, [rbp-8]", "leave", "ret")
+
+            # _math_frexp_m(xmm0=x) -> xmm0=mantissa  (frexp; [0.5,1))
+            if "_math_frexp_m" in self.ffi_externs:
+                self.label("_math_frexp_m")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("lea rsi, [rbp-8]", "mov al, 1", "call frexp")
+                self.emitf("leave", "ret")
+
+            # _math_frexp_e(xmm0=x) -> rax=exponent  (int)
+            if "_math_frexp_e" in self.ffi_externs:
+                self.label("_math_frexp_e")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("lea rsi, [rbp-8]", "mov al, 1", "call frexp")
+                self.emitf("movsxd rax, dword [rbp-8]", "leave", "ret")
+
+            # _math_ldexp(xmm0=x, rdi=n) -> xmm0  (just forwards to libc ldexp)
+            if "_math_ldexp" in self.ffi_externs:
+                self.emit("extern ldexp")
+                self.label("_math_ldexp")
+                # SysV: xmm0=x already, rdi=n already — ldexp(double,int) is exact match
+                self.emitf("mov al, 1", "call ldexp", "ret")
+
+        # ---- random helpers (SysV ABI) ----------------------------------------
+        if needs_random:
+            self.emit("extern rand")
+            self.emit("section .rodata")
+            self.emit("_rand_inv:  dq 3.0517578125e-05")   # 1.0 / (RAND_MAX+1) = 1/32768
+            self.emit("section .text")
+
+            # _random_random() -> xmm0 in [0.0, 1.0)
+            if "_random_random" in self.ffi_externs:
+                self.label("_random_random")
+                self.emitf("xor eax, eax", "call rand")
+                self.emitf("cvtsi2sd xmm0, rax", "mulsd xmm0, [rel _rand_inv]", "ret")
+
+            # _random_randint(rdi=a, rsi=b) -> rax  in [a, b] inclusive
+            if "_random_randint" in self.ffi_externs:
+                self.label("_random_randint")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi")
+                self.emitf("call rand")
+                # range = b - a + 1
+                self.emitf("mov rcx, [rbp-16]", "sub rcx, [rbp-8]", "inc rcx")
+                self.emitf("xor rdx, rdx", "div rcx")       # rdx = rand % range
+                self.emitf("add rdx, [rbp-8]", "mov rax, rdx", "leave", "ret")
+
+            # _random_uniform(xmm0=a, xmm1=b) -> xmm0 in [a, b]
+            if "_random_uniform" in self.ffi_externs:
+                self.label("_random_uniform")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("movsd [rbp-8], xmm0", "movsd [rbp-16], xmm1")
+                self.emitf("call rand")
+                self.emitf("cvtsi2sd xmm0, rax", "mulsd xmm0, [rel _rand_inv]")
+                # result = a + r * (b - a)
+                self.emitf("movsd xmm1, [rbp-16]", "subsd xmm1, [rbp-8]",
+                           "mulsd xmm0, xmm1", "addsd xmm0, [rbp-8]", "leave", "ret")
+
+            # _random_randrange(rdi=stop) -> rax in [0, stop)
+            if "_random_randrange" in self.ffi_externs:
+                self.label("_random_randrange")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("mov [rbp-8], rdi")
+                self.emitf("call rand")
+                self.emitf("xor rdx, rdx", "div qword [rbp-8]", "mov rax, rdx",
+                           "leave", "ret")
+
+        # ---- time helpers (Linux / SysV ABI) ---------------------------------
+        # clock_gettime(CLOCK_MONOTONIC=1, &timespec) gives ns resolution.
+        if needs_time:
+            self.emit("extern clock_gettime")
+            self.emit("section .bss")
+            self.emit("_time_ts: resq 2")   # struct timespec: tv_sec(8) + tv_nsec(8)
+            self.emit("section .rodata")
+            self.emit("_time_1e9:  dq 1000000000.0")
+            self.emit("section .text")
+
+            # _time_perf_counter() -> xmm0 seconds as float
+            if "_time_perf_counter" in self.ffi_externs:
+                self.label("_time_perf_counter")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("mov edi, 1", "lea rsi, [rel _time_ts]",
+                           "call clock_gettime")
+                # result = tv_sec + tv_nsec / 1e9
+                self.emitf("cvtsi2sd xmm0, qword [rel _time_ts]")   # tv_sec
+                self.emitf("cvtsi2sd xmm1, qword [rel _time_ts+8]")  # tv_nsec
+                self.emitf("divsd xmm1, [rel _time_1e9]", "addsd xmm0, xmm1",
+                           "leave", "ret")
+
+            # _time_time_ns() -> rax (ns since epoch via clock_gettime REALTIME=0)
+            if "_time_time_ns" in self.ffi_externs:
+                self.label("_time_time_ns")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("xor edi, edi", "lea rsi, [rel _time_ts]",
+                           "call clock_gettime")
+                # rax = tv_sec * 1e9 + tv_nsec
+                self.emitf("mov rax, [rel _time_ts]")    # tv_sec
+                self.emitf("mov rcx, 1000000000", "imul rax, rcx")
+                self.emitf("add rax, [rel _time_ts+8]", "leave", "ret")
+
+            # _time_sleep_ms(rdi=ms) — usleep(ms * 1000) on Linux
+            if "_time_sleep_ms" in self.ffi_externs:
+                self.emit("extern usleep")
+                self.label("_time_sleep_ms")
+                self.emitf("imul rdi, rdi, 1000", "call usleep", "xor rax, rax", "ret")
 
         # ---- hardware stubs: ring-0 ops are unavailable in user mode ---------
         if needs_hw:
