@@ -12,7 +12,6 @@ Limitations vs CPython:
   - Counter: most_common() returns unsorted list (no key sort yet); no
     arithmetic operators (+, -, &, |)
   - namedtuple: field names must be plain identifiers; no defaults= support
-  - OrderedDict: move_to_end() / popitem() not implemented
 """
 from __future__ import annotations
 
@@ -261,7 +260,7 @@ class defaultdict:
     def get(self, key: str, default: object = 0) -> object:
         return self._data.get(key, default)
 
-    def keys(self) -> list:
+    def keys(self) -> list[str]:
         return list(self._data.keys())
 
     def values(self) -> list:
@@ -288,7 +287,7 @@ class OrderedDict:
     """Dict that remembers insertion order.
 
     In asmpython all dicts preserve insertion order already; this class adds
-    the CPython-compatible API surface (move_to_end is not yet implemented).
+    the CPython-compatible API surface.
     """
 
     def __init__(self) -> None:
@@ -306,7 +305,7 @@ class OrderedDict:
     def get(self, key: str, default: object = 0) -> object:
         return self._data.get(key, default)
 
-    def keys(self) -> list:
+    def keys(self) -> list[str]:
         return list(self._data.keys())
 
     def values(self) -> list:
@@ -332,6 +331,36 @@ class OrderedDict:
 
     def __len__(self) -> int:
         return len(self._data)
+
+    def move_to_end(self, key: str, last: int = 1) -> None:
+        """Move an existing key to either end of the ordered dict.
+
+        Re-inserting a key naturally moves it to the end (asmpython dicts
+        append new keys to their insertion-order buffer); moving to the
+        front requires rebuilding the dict with that key first.
+        """
+        v = self._data[key]
+        del self._data[key]
+        if last:
+            self._data[key] = v
+        else:
+            new_data: dict = {key: v}
+            for k in self._data:
+                new_data[k] = self._data[k]
+            self._data = new_data
+
+    def popitem(self, last: int = 1) -> tuple:
+        """Remove and return a (key, value) pair, LIFO order by default."""
+        if len(self._data) == 0:
+            raise KeyError("popitem(): dictionary is empty")
+        keys: list[str] = list(self._data.keys())
+        if last:
+            k = keys[len(keys) - 1]
+        else:
+            k = keys[0]
+        v = self._data[k]
+        del self._data[k]
+        return (k, v)
 
     def __repr__(self) -> str:
         return "OrderedDict(" + repr(self._data) + ")"

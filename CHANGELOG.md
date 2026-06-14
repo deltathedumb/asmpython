@@ -301,6 +301,16 @@ output rather than silent miscompilations.
   values. `key=` on the variadic `min(a, b, ...)`/`max(a, b, ...)` form, and
   bare function references as `key=` (e.g. `key=len`), are rejected with a
   clear compile error rather than miscompiling.
+- **`collections.OrderedDict.move_to_end()` and `.popitem()`.** `move_to_end(key,
+  last=True)` re-inserts the key at the end of the underlying dict (insertion
+  order is preserved automatically), or rebuilds the dict with the key first
+  when `last=False`. `popitem(last=True)` removes and returns the last (or
+  first, with `last=False`) `(key, value)` pair, raising `KeyError` on an
+  empty dict. Also fixed `OrderedDict.keys()` / `defaultdict.keys()`, which
+  were declared `-> list` (opaque element type), so iterating the returned
+  keys printed raw pointer values instead of the key strings; now declared
+  `-> list[str]`. New `tests/cases/166_ordereddict_methods.py`
+  (CPython-verified).
 
 ### Fixed
 
