@@ -104,6 +104,15 @@ output rather than silent miscompilations.
   (`_emit_print_value` now routes any segment with a non-empty `fmt_spec`
   through the shared f-string segment formatter, for `str` too, not just
   `int`/`float`).
+- **f-string binary format spec `b`/`#b`** for `int` values: `f"{n:b}"`,
+  `f"{n:#b}"` (with a `0b` prefix), and zero-padded widths like
+  `f"{n:#010b}"` (`-0b00101010`-style, with sign and prefix counted toward
+  the width, matching CPython). New `_runtime_int_to_binary` runtime helper
+  and `_parse_binary_spec`/`_gen_int_value_str`/`_emit_int_to_binary_str`
+  codegen helpers; combines with the `[[fill]align]width` alignment support
+  above (`f"{n:*>10b}"`). C's `printf` has no binary conversion, so this
+  required a dedicated runtime helper (unlike `d`/`x`/`X`/`o`, which map to
+  printf formats).
 - **f-string conversions** `!r`/`!s`/`!a`: `f"{x!r}"` formats `x` via
   `repr()` (strings get quoted; a user class's `__repr__` takes priority over
   `__str__`), `!a` behaves like `!r`, and `!s` is the (already-default) `str()`

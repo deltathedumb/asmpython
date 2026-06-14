@@ -480,6 +480,7 @@ class Codegen:
         # String runtime
         "_runtime_str_concat",
         "_runtime_int_to_base",
+        "_runtime_int_to_binary",
         "_runtime_divmod",
         "_runtime_str_repeat",
         "_runtime_str_eq",
@@ -2728,6 +2729,59 @@ class Codegen:
             return None
         return None
 
+    def _parse_binary_spec(self, body: str) -> tuple[int, bool] | None:
+        """If `body` (an int format-spec, after any `[[fill]align]` prefix
+        has been removed) requests binary (`b`) formatting, return
+        `(min_total_width, prefix_flag)` -- `prefix_flag` is True for `#b`
+        (adds a `0b` prefix, counted in `min_total_width`). Otherwise None.
+        A leading sign flag (`+`/`-`/` `) is accepted but ignored (negative
+        values always get a `-` sign; positive values never do, matching the
+        default `-` sign behavior -- explicit `+`/` ` sign-forcing on binary
+        specs isn't supported)."""
+        if not body.endswith("b"):
+            return None
+        rest = body[:-1]
+        if rest and rest[0] in "+- ":
+            rest = rest[1:]
+        prefix_flag = rest.startswith("#")
+        if prefix_flag:
+            rest = rest[1:]
+        if rest and not rest.isdigit():
+            return None
+        return (int(rest) if rest else 0), prefix_flag
+
+    def _emit_int_to_binary_str(self, width: int, prefix_flag: bool) -> None:
+        """In: rax = int. Out: rax = binary-format string (fresh allocation),
+        via `_runtime_int_to_binary`. `width` is the total zero-padded width
+        (0 = none); `prefix_flag` adds a `0b` prefix."""
+        self.emitf(
+            f"mov rbx, {width}",
+            f"mov rcx, {1 if prefix_flag else 0}",
+            "call _runtime_int_to_binary",
+        )
+
+    def _gen_int_value_str(self, seg, info: FuncInfo, rest: str) -> None:
+        """Evaluate int-typed `seg`, leaving its formatted-string form (per
+        the numeric format-spec `rest`, before any alignment/width padding)
+        in rax as a freshly-allocated or shared-buffer string. `rest` may be
+        empty (decimal via `_emit_int_to_str`), a printf-style spec for
+        `_cfmt_for_spec` (`d`/`x`/`X`/`o`, with width/zero-pad), or a binary
+        spec (`b`/`#b`, optionally zero-padded -- handled by
+        `_runtime_int_to_binary`, which returns a fresh allocation)."""
+        binspec = self._parse_binary_spec(rest) if rest else None
+        if binspec is not None:
+            width, prefix_flag = binspec
+            self.gen_expr(seg, info)
+            self._emit_int_to_binary_str(width, prefix_flag)
+            return
+        cfmt = self._cfmt_for_spec(rest, "int") if rest else None
+        self.gen_expr(seg, info)
+        if cfmt is not None:
+            label, _ = self.intern_string(cfmt)
+            self._emit_int_fmt(label)
+        else:
+            self._emit_int_to_str()
+
     def _split_fmt_align(self, spec: str) -> tuple[str, str | None, str]:
         """Split an optional `[[fill]align]` prefix off a format spec.
         Returns (fill_char, align_char_or_None, rest)."""
@@ -2798,13 +2852,7 @@ class Codegen:
             # int value (0/1), not "True"/"False"/"None" -- matches CPython's
             # int.__format__ (bool has no __format__ override, and a spec'd
             # None is formatted as its 0 stand-in).
-            cfmt = self._cfmt_for_spec(rest, "int") if rest else None
-            self.gen_expr(seg, info)
-            if cfmt is not None:
-                label, _ = self.intern_string(cfmt)
-                self._emit_int_fmt(label)
-            else:
-                self._emit_int_to_str()
+            self._gen_int_value_str(seg, info, rest)
         helper = {
             "<": "_runtime_str_ljust",
             ">": "_runtime_str_rjust",
@@ -2833,6 +2881,13 @@ class Codegen:
             if align in ("<", ">", "^") and t in ("str", "int", "float"):
                 self._gen_fstring_aligned(seg, info, t, conv, width, fill, align, rest)
                 return
+            if t == "int":
+                binspec = self._parse_binary_spec(body)
+                if binspec is not None:
+                    width, prefix_flag = binspec
+                    self.gen_expr(seg, info)
+                    self._emit_int_to_binary_str(width, prefix_flag)
+                    return
             if t in ("int", "float"):
                 cfmt = self._cfmt_for_spec(body, t)
                 if cfmt is not None:
@@ -4222,6 +4277,7 @@ class Codegen:
             for sym in (
                 "_runtime_str_concat",
                 "_runtime_int_to_base",
+                "_runtime_int_to_binary",
                 "_runtime_divmod",
                 "_runtime_str_repeat",
                 "_runtime_str_eq",
@@ -4349,6 +4405,58 @@ class Codegen:
         self.emitf("test r15, r15", "jz ._itb_ret")
         self.emitf("mov rbx, rax", f"lea rax, [rel {minus_label}]", "call _runtime_str_concat")
         self.label("._itb_ret")
+        self.emitf("leave", "ret")
+
+        # ---- _runtime_int_to_binary ---------------------------------------------
+        # rax = n (signed int), rbx = min total width (0 = none), rcx = 1 to
+        # prepend "0b" else 0 -> rax = binary string for f-string `b`/`#b`
+        # format specs, e.g. f"{42:b}" -> "101010", f"{42:#010b}" ->
+        # "0b00101010", f"{-5:08b}" -> "-0000101". Zero-padding (from `rbx`)
+        # is applied to the digits only, after accounting for the sign and
+        # "0b" prefix (matching CPython's width semantics).
+        zerob_label, _ = self.intern_string("0b")
+        self.label("_runtime_int_to_binary")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+        self.emitf(
+            "mov [rbp-8], rax",  # n
+            "mov [rbp-16], rbx",  # width
+            "mov [rbp-24], rcx",  # prefix flag
+            "xor r15, r15",  # neg flag
+        )
+        self.emitf("cmp qword [rbp-8], 0", "jge ._itbin_nonneg", "mov r15, 1", "neg qword [rbp-8]")
+        self.label("._itbin_nonneg")
+        # 72-byte scratch digit buffer; nul-terminator fixed at offset 71.
+        self.emitf("mov rax, 72")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf("mov [rbp-32], rax", "add rax, 71", "mov byte [rax], 0", "mov rdi, rax")
+        # avail = max(0, width - (neg ? 1 : 0) - (prefix ? 2 : 0)): minimum
+        # number of digits to emit (zero-padding the rest).
+        self.emitf("mov rax, [rbp-16]", "sub rax, r15")
+        self.emitf("mov rcx, [rbp-24]", "add rcx, rcx", "sub rax, rcx")
+        self.emitf("test rax, rax", "jge ._itbin_avail_ok", "xor rax, rax")
+        self.label("._itbin_avail_ok")
+        self.emitf("mov [rbp-40], rax")  # avail (remaining min-digit count)
+        self.emitf("mov rax, [rbp-8]", "test rax, rax", "jnz ._itbin_loop")
+        self.emitf("dec rdi", "mov byte [rdi], 48", "dec qword [rbp-40]", "jmp ._itbin_pad")
+        self.label("._itbin_loop")
+        self.emitf("test rax, rax", "jz ._itbin_pad")
+        self.emitf("mov rdx, rax", "and rdx, 1", "shr rax, 1", "add dl, 48")
+        self.emitf("dec rdi", "mov [rdi], dl", "dec qword [rbp-40]", "jmp ._itbin_loop")
+        self.label("._itbin_pad")
+        self.emitf("cmp qword [rbp-40], 0", "jle ._itbin_digits_done")
+        self.label("._itbin_pad_loop")
+        self.emitf("dec rdi", "mov byte [rdi], 48", "dec qword [rbp-40]")
+        self.emitf("cmp qword [rbp-40], 0", "jg ._itbin_pad_loop")
+        self.label("._itbin_digits_done")
+        self.emitf("mov [rbp-48], rdi")  # digits start (nul-terminated)
+        self.emitf("cmp qword [rbp-24], 0", "je ._itbin_no_prefix")
+        self.emitf(f"lea rax, [rel {zerob_label}]", "mov rbx, [rbp-48]", "call _runtime_str_concat", "jmp ._itbin_have_body")
+        self.label("._itbin_no_prefix")
+        self.emitf("mov rax, [rbp-48]")
+        self.label("._itbin_have_body")
+        self.emitf("test r15, r15", "jz ._itbin_ret")
+        self.emitf("mov rbx, rax", f"lea rax, [rel {minus_label}]", "call _runtime_str_concat")
+        self.label("._itbin_ret")
         self.emitf("leave", "ret")
 
         # ---- _runtime_divmod ---------------------------------------------------
