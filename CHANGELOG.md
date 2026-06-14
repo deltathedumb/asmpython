@@ -126,6 +126,11 @@ output rather than silent miscompilations.
   separator-aware zero-padding (`"000,001,234,567"`) -- the grouping option
   is dropped in this combination rather than producing the wrong total
   width.
+- **f-string `.precision` for `str` segments**: `f"{name:.5}"` truncates to
+  the first 5 characters (a no-op if shorter), combinable with
+  alignment/width and the `s` type char (`f"{name:>10.5}"`,
+  `f"{name:10.5s}"`). New `_runtime_str_truncate` runtime helper and
+  `_split_str_width_precision` codegen helper.
 - **f-string conversions** `!r`/`!s`/`!a`: `f"{x!r}"` formats `x` via
   `repr()` (strings get quoted; a user class's `__repr__` takes priority over
   `__str__`), `!a` behaves like `!r`, and `!s` is the (already-default) `str()`

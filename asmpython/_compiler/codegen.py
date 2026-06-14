@@ -508,6 +508,7 @@ class Codegen:
         "_runtime_str_ljust",
         "_runtime_str_rjust",
         "_runtime_str_center",
+        "_runtime_str_truncate",
         "_runtime_str_replace",
         "_runtime_str_split",
         "_runtime_str_splitlines",
@@ -2854,6 +2855,32 @@ class Codegen:
             return None, body
         return int(body[j:k]), prefix + body[k:]
 
+    def _split_str_width_precision(self, body: str) -> tuple[int | None, int | None]:
+        """Parse a `str` format-spec `body` (after any `[[fill]align]`
+        prefix has been removed) of the form `[width][.precision][s]`.
+        Returns `(width_or_None, precision_or_None)`, or `(None, None)` if
+        `body` doesn't fully match that grammar (caller leaves the value
+        unmodified, matching the pre-existing fallback for unsupported
+        specs)."""
+        i = 0
+        while i < len(body) and body[i].isdigit():
+            i += 1
+        width = int(body[:i]) if i > 0 else None
+        j = i
+        precision = None
+        if j < len(body) and body[j] == ".":
+            k = j + 1
+            while k < len(body) and body[k].isdigit():
+                k += 1
+            if k > j + 1:
+                precision = int(body[j + 1 : k])
+                j = k
+        if j < len(body) and body[j] == "s":
+            j += 1
+        if j != len(body):
+            return None, None
+        return width, precision
+
     def _gen_fstring_aligned(
         self,
         seg,
@@ -2864,6 +2891,7 @@ class Codegen:
         fill: str,
         align: str,
         rest: str,
+        precision: int | None = None,
     ) -> None:
         """Evaluate `seg` to its (unpadded) string form, then pad/justify it
         to `width` with `fill` via the shared `_runtime_str_ljust`/`rjust`/
@@ -2873,6 +2901,8 @@ class Codegen:
             self.gen_expr(seg, info)
             if conv in ("r", "a"):
                 self.emitf("mov rbx, 1", "call _runtime_fmt_elem")
+            if precision is not None:
+                self.emitf(f"mov rbx, {precision}", "call _runtime_str_truncate")
         elif t == "float":
             sep, rest = self._strip_grouping_option(rest) if rest else (None, rest)
             cfmt = self._cfmt_for_spec(rest, "float") if rest else None
@@ -2908,15 +2938,22 @@ class Codegen:
         conv = getattr(seg, "conv_flag", "")
         if spec:
             fill, align, body = self._split_fmt_align(spec)
-            width, rest = None, body
-            if align is not None:
+            width, rest, precision = None, body, None
+            if t == "str":
+                width, precision = self._split_str_width_precision(body)
+                rest = ""
+                if align is None and width is not None:
+                    fill, align = " ", "<"
+            elif align is not None:
                 width, rest = self._split_fmt_width(body, t)
-            elif t == "str":
-                w, r = self._split_fmt_width(spec, "str")
-                if w is not None:
-                    fill, align, width, rest = " ", "<", w, r
             if align in ("<", ">", "^") and t in ("str", "int", "float"):
-                self._gen_fstring_aligned(seg, info, t, conv, width, fill, align, rest)
+                self._gen_fstring_aligned(seg, info, t, conv, width, fill, align, rest, precision)
+                return
+            if t == "str" and precision is not None:
+                self.gen_expr(seg, info)
+                if conv in ("r", "a"):
+                    self.emitf("mov rbx, 1", "call _runtime_fmt_elem")
+                self.emitf(f"mov rbx, {precision}", "call _runtime_str_truncate")
                 return
             if t in ("int", "float"):
                 sep, body2 = self._strip_grouping_option(body)
@@ -4352,6 +4389,7 @@ class Codegen:
                 "_runtime_str_ljust",
                 "_runtime_str_rjust",
                 "_runtime_str_center",
+                "_runtime_str_truncate",
                 "_runtime_str_replace",
                 "_runtime_str_split",
                 "_runtime_str_splitlines",
@@ -5379,6 +5417,24 @@ class Codegen:
         self.emitf("test rcx, rcx", "jz ._scn_done", "mov [rdi], al", "inc rdi", "dec rcx", "jmp ._scn_rpadloop")
         self.label("._scn_done")
         self.emitf("mov byte [rdi], 0", "mov rax, [rbp-72]", "leave", "ret")
+
+        # ---- _runtime_str_truncate ----------------------------------------------
+        # rax = s, rbx = max length n -> rax = newly-allocated copy of s,
+        # truncated to min(len(s), n) bytes (for f-string `.precision` on str).
+        self.label("_runtime_str_truncate")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax", "mov [rbp-16], rbx")
+        self._emit_libc_strlen()
+        self.emitf("mov rcx, [rbp-16]", "cmp rcx, rax", "jle ._strn_tot_done", "mov rcx, rax")
+        self.label("._strn_tot_done")
+        self.emitf("mov [rbp-24], rcx")  # copy_len
+        self.emitf("mov rax, rcx", "inc rax")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf("mov [rbp-40], rax")  # dst
+        self.emitf("mov rsi, [rbp-8]", "mov rdi, [rbp-40]", "mov rcx, [rbp-24]")
+        self.label("._strn_cp")
+        self.emitf("test rcx, rcx", "jz ._strn_done", "mov al, [rsi]", "mov [rdi], al", "inc rsi", "inc rdi", "dec rcx", "jmp ._strn_cp")
+        self.label("._strn_done")
+        self.emitf("mov byte [rdi], 0", "mov rax, [rbp-40]", "leave", "ret")
 
         # ---- _runtime_str_replace --------------------------------------------
         # rax = s, rbx = old, rcx = new -> rax = newly-allocated copy of s with
