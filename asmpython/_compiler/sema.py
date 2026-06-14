@@ -2117,6 +2117,21 @@ class SemaAnalyzer:
                 # and tuple-of-tuples uniformly. (zip/enumerate were already
                 # handled above with precise element kinds.)
                 if s.targets and it_t in ("list", "tuple", "dict", "str", "any", "int"):
+                    # `for a, b in <list[T]>` where each element is a plain
+                    # user-class instance (T not itself a tuple/list/dict)
+                    # has no list/tuple buffer to unpack: codegen's
+                    # _gen_for_list would dereference the instance pointer as
+                    # if it were a list header and segfault. CPython rejects
+                    # this at runtime with "cannot unpack non-iterable X
+                    # object"; reject it at compile time instead.
+                    if it_t == "list":
+                        el_t = self._list_el_type(s.iter, scope)
+                        if el_t.startswith("instance:"):
+                            cls = el_t.split(":", 1)[1]
+                            raise SemaError(
+                                f"cannot unpack non-iterable {cls} object",
+                                s.pos,
+                            )
                     # If the iterable carries a per-pair slot shape and the
                     # targets are FLAT names (a nested group like
                     # `for k, (a, b) in ...` consumes one slot per group, so slot

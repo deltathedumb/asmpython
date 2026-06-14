@@ -2,18 +2,12 @@
 
 ## Status as of 2026-06-14
 
-- 217/217 tests passing (`py -m tests.runner`).
+- 218/218 tests passing (`py -m tests.runner`).
 - Branch is being pushed: `origin/parity-expansion` should track local
-  `HEAD` (latest: new `console_*` high-level API in `asmlib.hardware`, on
-  top of `462d204`).
+  `HEAD` (latest: `for a, b in <list[CustomClass]>` segfault -> compile
+  error, on top of `1673c49`).
 - Recently landed (most recent last):
-  - `462d204` — new `uuid` module (`UUID`, `uuid4`); fixed `repr()` on user
-    instances to dispatch `__repr__`/`__str__` (was printing a raw pointer);
-    fixed `a == b`/`a != b` between instances to dispatch a user `__eq__`
-    (was raw pointer comparison). Also fixed pre-existing env flakiness in
-    `169_hardware_real_ops.py` (`t1 > 0` -> `t1 != 0`, rdtsc's top bit can be
-    set, signed compare misreads it).
-  - (this session) — `asmlib.hardware` gains a high-level `console_*` API
+  - `1673c49` — new `console_*` high-level API in `asmlib.hardware`
     (`console_clear/putc/write/set_color/set_cursor/get_row/get_col`):
     real VGA text-mode ops on `--target freestanding` (thin wrappers around
     `print()`'s existing `_vga_*` helpers), ANSI/VT100 escapes + tracked
@@ -21,6 +15,17 @@
     in `codegen.py`, shared by both hosted targets). New
     `tests/cases/171_hardware_console.py` (output includes raw ANSI escape
     bytes, captured from a real run).
+  - (this session) — fixed the `for a, b in <list of custom-class
+    instances>` segfault documented below: now a compile-time
+    `cannot unpack non-iterable {ClassName} object` `SemaError`, mirroring
+    CPython's `TypeError`. New
+    `tests/cases_fail/for_unpack_non_iterable_instance.py`.
+  - `462d204` — new `uuid` module (`UUID`, `uuid4`); fixed `repr()` on user
+    instances to dispatch `__repr__`/`__str__` (was printing a raw pointer);
+    fixed `a == b`/`a != b` between instances to dispatch a user `__eq__`
+    (was raw pointer comparison). Also fixed pre-existing env flakiness in
+    `169_hardware_real_ops.py` (`t1 > 0` -> `t1 != 0`, rdtsc's top bit can be
+    set, signed compare misreads it).
   - `ff6b439` — `match`/`case` structural pattern matching (PEP 634).
   - `efb3f08`..`1aa9b2f` — large stdlib breadth wave: string/collections/
     itertools/functools/json, os expansion, re + raw strings + sys expansion,
@@ -103,26 +108,31 @@ Thin / stub-heavy, candidates for expansion:
   `namedtuple` has no `defaults=`. (`+`/`-`/`&`/`|` operators landed in
   `ce9977c`.)
 
-### Known compiler bug: `for a, b in <list of custom-class instances>` segfaults
+### Fixed: `for a, b in <list of custom-class instances>` segfault -> compile error
 
 Discovered while testing `Counter.most_common()`: CPython's real
 `Counter.most_common()` returns a `list[tuple[str, int]]`, so
 `for el, cnt in c.most_common(): ...` unpacks tuples. asmpython's
 `most_common()` returns `list[CountPair]` (a plain class, see
 `collections.py`'s `CountPair`), and `for el, cnt in <list[CountPair]>: ...`
-**segfaults (exit 139)** when compiled, instead of either working (treating
-it like an iterable-unpack via `__iter__`/`__getitem__`) or raising a clear
-compile error. Root cause is the same general gap as the `_scan_tuple_return`
-pre-pass timing issue (sema.py ~1734-1759): there's no `dict.items()`-style
-hardcoded `tuple_elem_types` mechanism for arbitrary user/stdlib methods that
-return `list[tuple]`. Two possible fixes: (a) special-case
-`Counter.most_common()`'s return type the way `dict.items()` is special-cased,
-or (b) make `for a, b in <list[T]>` either a compile error when `T` isn't a
-tuple type, or correctly call `T.__iter__`/unpack via `__getitem__(0)`/
-`__getitem__(1)` — (b) is the general fix and more in the spirit of "extend,
-don't special-case". Not fixed yet; `tests/cases/167_counter_operators.py`
-deliberately avoids this pattern (only tests `+`/`-`/`&`/`|`, not
-`most_common()`).
+used to **segfault (exit 139)** when compiled (`_gen_for_list` dereferenced
+the `Pair` instance pointer as if it were a list/tuple buffer). Fixed
+(this session, part (b) of the two options below): sema now raises
+`cannot unpack non-iterable {ClassName} object` (matching CPython's
+`TypeError`) at compile time whenever `for a, b in <list[T]>` has a `T` that
+is a plain user class. New
+`tests/cases_fail/for_unpack_non_iterable_instance.py`.
+
+Still open / not done: making `Counter.most_common()` itself return
+`list[tuple[str, int]]` (special-casing its return type the way
+`dict.items()` is special-cased — option (a) below) so
+`for el, cnt in c.most_common(): ...` actually *works* rather than just
+failing with a clear error. Root cause is the same general gap as the
+`_scan_tuple_return` pre-pass timing issue (sema.py ~1734-1759): there's no
+`dict.items()`-style hardcoded `tuple_elem_types` mechanism for arbitrary
+user/stdlib methods that return `list[tuple]`. `tests/cases/167_counter_
+operators.py` deliberately avoids this pattern (only tests `+`/`-`/`&`/`|`,
+not `most_common()`).
 
 Modules CPython has that asmpython doesn't (breadth backlog, roughly
 priority order — verify each is still missing before starting, and check
@@ -132,16 +142,15 @@ whether it's even meaningful for a systems/assembly-targeting compiler):
    a pure-Python `datetime`-like date/time arithmetic module would be real
    breadth.
 2. `base64` — pure string/byte manipulation, good fit.
-3. `uuid` — needs random bytes (random.rand exists) + hex formatting.
-4. `fractions`/`decimal` — exact-arithmetic types; decent fit if `class`
+3. `fractions`/`decimal` — exact-arithmetic types; decent fit if `class`
    and operator-overloading dunders are solid (check `__add__` etc. coverage).
-5. `glob`/`shutil`/`tempfile` — depend on `os`/`pathlib` which already exist;
+4. `glob`/`shutil`/`tempfile` — depend on `os`/`pathlib` which already exist;
    check what os/pathlib primitives are missing first.
-6. `logging` — could be a thin wrapper over `print`/`sys.stderr`.
-7. `unittest` — large; lower priority (asmpython has its own
+5. `logging` — could be a thin wrapper over `print`/`sys.stderr`.
+6. `unittest` — large; lower priority (asmpython has its own
    `tests/runner.py` harness already).
 
-(`csv` landed in `e9e9525` — removed from this list.)
+(`csv` landed in `e9e9525`, `uuid` in `462d204` — removed from this list.)
 
 ## asmlib / asmlib.hardware
 
@@ -178,12 +187,12 @@ functions the way hardware.py was checked).
 1. Check `.claude/issues` (empty so far).
 2. Pick the next item from the stdlib backlog above. Good next candidates,
    roughly in order of value/effort:
-   - The `for a, b in <list of custom-class instances>` segfault documented
-     above — investigate the general fix ((b) in that section) since it
-     likely affects other stdlib methods returning `list[SomeClass]` too,
-     and the `list[list[T]]`/`list[dict[K,V]]` nested-generic gap that
-     shaped the `csv` module's API (`e9e9525`).
-   - `base64`, `uuid`, `fractions`/`decimal` from the breadth backlog below.
+   - `Counter.most_common()` returning `list[tuple[str, int]]` (option (a)
+     in the "Fixed" section above) so `for el, cnt in c.most_common(): ...`
+     actually works, not just fails cleanly — and the `list[list[T]]`/
+     `list[dict[K,V]]` nested-generic gap that shaped the `csv` module's API
+     (`e9e9525`).
+   - `base64`, `fractions`/`decimal` from the breadth backlog below.
    - Survey `asmlib/gui.py` / `asmlib/network.py` for stub-only functions
      (not yet checked, unlike `hardware.py` which is now done).
 3. Follow the standing per-feature workflow (above) for whatever is picked.

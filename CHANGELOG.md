@@ -358,6 +358,17 @@ output rather than silent miscompilations.
 
 ### Fixed
 
+- **`for a, b in <list[T]>` where `T` is a plain user class (not a tuple)
+  segfaulted (exit 139) instead of raising a compile error.** Multi-target
+  `for`-loop unpacking over a list assumed every element was itself a
+  list/tuple buffer (`_gen_for_list` dereferenced `[element + LIST_BUF_OFF]`
+  to get the per-slot values); for `list[Pair]` the element is a pointer
+  directly to a `Pair` instance, so this read and dereferenced a garbage
+  "buffer pointer" from inside the instance's fields. CPython rejects this at
+  runtime with `TypeError: cannot unpack non-iterable Pair object`; sema now
+  raises the same message at compile time when a `list[T]` element type `T`
+  is a plain class. New `tests/cases_fail/for_unpack_non_iterable_instance.py`.
+
 - **`print(0.0)` on Windows printed `inf` instead of `0.0`.** The Windows
   NaN/inf pre-check in `_emit_float_to_str` compared `abs(bits) ==
   0x7FF0000000000000` with `cmp rax, <64-bit immediate>`, but `cmp r64, imm`
