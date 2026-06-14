@@ -171,6 +171,24 @@ output rather than silent miscompilations.
   correctly (same `xmm0`-vs-`rax` issue as the dict fixes above). Previously
   `xs[1] = 9.5` corrupted the slot with whatever integer happened to be in
   `rax`, e.g. `[1.0, 2.0, 3.0]` became `[1.0, 4.94066e-324, 3.0]`.
+- **Functions/methods with more than one `float` parameter, or a mix of
+  `int`/pointer and `float` parameters, now compute correct results.**
+  `def add(x: float, y: float) -> float: return x + y` called as
+  `add(3.0, 4.0)` previously returned `8.0` instead of `7.0`; a class
+  `__init__(self, x: float, y: float)` corrupted `self.x`/`self.y`. The
+  caller side passed every argument — including floats — through the integer
+  ABI registers (`rcx`/`rdx`/`r8`/`r9` or `rdi`/`rsi`/...), and the callee's
+  prologue spilled them the same way, so float params never round-tripped
+  through `xmm0`-`xmm3`/`xmm0`-`xmm7`. A single-float-param function "worked"
+  only by accident (leftover `xmm0` state from the caller's last `movsd`
+  survived the `call`). Both call sites and prologues now compute each
+  argument's ABI register via a new shared `_assign_arg_regs`: Win64 assigns
+  registers positionally (slot *N* is `xmmN` or the *N*th of
+  `rcx,rdx,r8,r9`, depending on that argument's type), while SysV
+  (Linux/freestanding) keeps separate integer (`rdi,rsi,rdx,rcx,r8,r9`) and
+  float (`xmm0`-`xmm7`) counters. `_collect_locals` also now records each
+  parameter's type in `local_types`, so reads of a float parameter inside the
+  function body correctly use `movsd`/`xmm0` instead of `mov`/`rax`.
 
 ---
 

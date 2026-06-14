@@ -58,6 +58,22 @@ class WindowsCodegen(Codegen):
     def _int_arg_regs(self):
         return list(MS_ARG_REGS)
 
+    def _assign_arg_regs(self, types: list) -> list:
+        # Win64: argument position N always occupies register slot N --
+        # either the Nth integer register (rcx, rdx, r8, r9) or xmmN,
+        # depending on that argument's type. Positions >= 4 spill to the
+        # stack regardless of type.
+        result: list = []
+        for i, ty in enumerate(types):
+            if i < len(MS_ARG_REGS):
+                if ty == "float":
+                    result.append((f"xmm{i}", True))
+                else:
+                    result.append((MS_ARG_REGS[i], False))
+            else:
+                result.append(None)
+        return result
+
     def _needs_xmm_mirror_to_int(self):
         # Win64 variadic ABI puts each float arg in BOTH xmm<i> and the
         # matching int reg. Mirror unconditionally — harmless for non-variadic.

@@ -2026,16 +2026,10 @@ class SemaAnalyzer:
             self._check_expr(s.value, scope)
             value_t = A.expr_type(s.value)
             # Instance fields hold any 8-byte value (int / str-ptr / instance /
-            # list / dict / tuple). Floats are the exception: they'd need xmm
-            # spilling into the dict slot, which the field codegen doesn't do.
+            # list / dict / tuple / float bit pattern).
             user_instance = obj_t.startswith("instance:") and (
                 obj_t.split(":", 1)[1] in self.classes
             )
-            if user_instance and value_t == "float":
-                raise SemaError(
-                    "float instance attributes are not supported yet",
-                    s.pos,
-                )
             # Keep the class's field table in sync with assignments made after
             # the inference pass (e.g. a field first assigned in a later method).
             if user_instance and isinstance(s.obj, A.Name) and s.obj.name == "self":

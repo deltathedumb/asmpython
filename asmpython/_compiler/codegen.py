@@ -639,26 +639,27 @@ class Codegen:
         self._spill_incoming_args(info)
 
     def _spill_incoming_args(self, info: FuncInfo) -> None:
-        """Move each incoming argument into its frame slot: the first
-        `_n_int_arg_regs()` from the ABI registers, the rest read off the
-        caller's stack frame (args passed on the stack). Shared by both
-        targets' prologues; the stack offset is target-specific."""
-        n_reg = self._n_int_arg_regs()
-        for i, p in enumerate(info.params):
+        """Move each incoming argument into its frame slot, per
+        `_assign_arg_regs`: register-passed args are spilled directly
+        (`movsd` for float, `mov` for int/pointer); stack-passed args are
+        read off the caller's frame first. Shared by both targets'
+        prologues; the stack offset is target-specific."""
+        types = [info.local_types.get(p, "int") for p in info.params]
+        stack_index = 0
+        for p, assign in zip(info.params, self._assign_arg_regs(types)):
             off = info.locals_[p]
-            if info.local_types.get(p) == "float":
-                # Float arguments arrive in xmm registers, not the integer
-                # ABI registers. Not wired up yet — fail loudly rather than
-                # spill the wrong register.
-                raise NotImplementedError("float parameters are not supported yet")
-            reg = self._arg_reg(i)
-            if reg is not None:
-                self.emitf(f"mov [rbp{off:+d}], {reg}")
-            else:
+            if assign is None:
                 # Stack-passed: read from the caller's frame, then store into
                 # our local slot. rax is free here (prologue, before any code).
-                src = self._incoming_stack_arg_offset(i - n_reg)
+                src = self._incoming_stack_arg_offset(stack_index)
+                stack_index += 1
                 self.emitf(f"mov rax, [rbp+{src}]", f"mov [rbp{off:+d}], rax")
+            else:
+                reg, is_xmm = assign
+                if is_xmm:
+                    self.emitf(f"movsd [rbp{off:+d}], {reg}")
+                else:
+                    self.emitf(f"mov [rbp{off:+d}], {reg}")
 
     def emit_func_epilogue(self, info: FuncInfo) -> None:
         self.emitf("mov rsp, rbp", "pop rbp", "ret")
@@ -666,10 +667,38 @@ class Codegen:
     def _arg_reg(self, i: int) -> Optional[str]:
         raise NotImplementedError
 
-    def _n_int_arg_regs(self) -> int:
-        """How many integer arguments are passed in registers before the stack
-        is used (4 on Win64, 6 on SysV)."""
-        return len(self._int_arg_regs())
+    def _assign_arg_regs(self, types: list) -> list:
+        """Assign each parameter/argument position (0-based, in declaration
+        or call order) to an ABI register or the stack.
+
+        Returns a list parallel to `types`: each entry is `(reg, is_xmm)`
+        for a register-passed slot, or `None` for a stack-passed slot.
+
+        This is the SysV / freestanding scheme: integer/pointer args and
+        float args are counted independently, consuming `_int_arg_regs()`
+        (rdi, rsi, rdx, rcx, r8, r9) and xmm0-xmm7 respectively. Win64
+        overrides this with its positional scheme, where argument position
+        N always occupies register slot N (either the Nth integer register
+        or xmmN, depending on that argument's type)."""
+        int_regs = self._int_arg_regs()
+        float_regs = [f"xmm{n}" for n in range(8)]
+        result: list = []
+        int_idx = 0
+        float_idx = 0
+        for ty in types:
+            if ty == "float":
+                if float_idx < len(float_regs):
+                    result.append((float_regs[float_idx], True))
+                    float_idx += 1
+                else:
+                    result.append(None)
+            else:
+                if int_idx < len(int_regs):
+                    result.append((int_regs[int_idx], False))
+                    int_idx += 1
+                else:
+                    result.append(None)
+        return result
 
     def _incoming_stack_arg_offset(self, stack_index: int) -> int:
         """Callee-side RBP offset of the `stack_index`-th stack-passed argument
@@ -720,6 +749,7 @@ class Codegen:
                 ty = "int"
                 if i < len(f.defaults) and f.defaults[i] is not None:
                     ty = A.expr_type(f.defaults[i])  # type: ignore
+            info.local_types[p] = ty
 
         # Walk the body for any name that becomes bound. The walkers below are
         # instance methods (not closures) that thread state through `info` —
@@ -1549,6 +1579,8 @@ class Codegen:
             # obj.name = value  ->  dict_set(obj, "name", value)
             key_label, _ = self.intern_string(stmt.name)
             self.gen_expr(stmt.value, info)
+            if A.expr_type(stmt.value) == "float":
+                self.emitf("movq rax, xmm0")  # store the raw bit pattern
             self.emitf("push rax")
             self.gen_expr(stmt.obj, info)  # rax = instance dict
             self.emitf(
@@ -2496,6 +2528,8 @@ class Codegen:
                 "xor rcx, rcx",  # default = 0
                 "call _runtime_dict_get_default",
             )
+            if A.expr_type(e) == "float":
+                self.emitf("movq xmm0, rax")  # bit pattern -> double
             return
         if obj_t == "module" and e.name in self.class_ids:
             # `A.Call` used as a value: whole-program merging flattened the
@@ -6982,7 +7016,12 @@ class Codegen:
                 "mov r10, rax",
             )
             cleanup = self._load_call_operands(
-                e, offs, info, start_reg=1, receiver_slot=recv_slot
+                e,
+                offs,
+                info,
+                start_reg=1,
+                receiver_slot=recv_slot,
+                arg_types=[A.expr_type(a) for a in e.args],
             )
             end_lbl = self.fresh("vdisp_end")
             owner_labels: dict = {}
@@ -8180,7 +8219,12 @@ class Codegen:
             e, args, info, receiver_expr=receiver_expr, receiver_slot=receiver_slot
         )
         return self._load_call_operands(
-            e, offs, info, start_reg=start_reg, receiver_slot=receiver_slot
+            e,
+            offs,
+            info,
+            start_reg=start_reg,
+            receiver_slot=receiver_slot,
+            arg_types=[A.expr_type(a) for a in args],
         )
 
     def _eval_call_operands(
@@ -8217,21 +8261,28 @@ class Codegen:
         *,
         start_reg,
         receiver_slot=None,
+        arg_types: Optional[list] = None,
     ) -> int:
         # All evaluation done — no more `call`s until the real one, so it's safe
         # to adjust rsp and load the argument registers.
-        n_reg = self._n_int_arg_regs()
-        # Plain loops (not enumerate/tuple-target comprehensions — those are
-        # outside the compilable subset, and this file is on the self-host path).
+        if arg_types is None:
+            arg_types = ["int"] * len(offs)
+        # Per-position types: positions [0, start_reg) are the receiver/cls
+        # slot (always a pointer, "int"), followed by the real arguments.
+        # _assign_arg_regs maps each position to its ABI register (or None
+        # for stack-passed), mirroring how _spill_incoming_args places the
+        # callee's params.
+        assigns = self._assign_arg_regs(["int"] * start_reg + list(arg_types))
+
         stack_offs: list = []
-        reg_only: list = []
-        argpos = start_reg
-        for off in offs:
-            if argpos >= n_reg:
+        reg_loads: list = []  # (reg, is_xmm, off)
+        for pos, off in enumerate(offs, start=start_reg):
+            assign = assigns[pos]
+            if assign is None:
                 stack_offs.append(off)
             else:
-                reg_only.append((argpos, off))
-            argpos = argpos + 1
+                reg, is_xmm = assign
+                reg_loads.append((reg, is_xmm, off))
 
         # Stack-passed arguments first (they use rax as scratch): reserve a
         # 16-aligned area (Win64 also needs 32 bytes of shadow space below the
@@ -8253,9 +8304,13 @@ class Codegen:
                 )
 
         if receiver_slot is not None:
-            self.emitf(f"mov {self._arg_reg(0)}, [rbp{receiver_slot:+d}]")
-        for argpos, off in reg_only:
-            self.emitf(f"mov {self._arg_reg(argpos)}, [rbp{off:+d}]")
+            reg, _is_xmm = assigns[0]  # receiver is always a pointer
+            self.emitf(f"mov {reg}, [rbp{receiver_slot:+d}]")
+        for reg, is_xmm, off in reg_loads:
+            if is_xmm:
+                self.emitf(f"movsd {reg}, [rbp{off:+d}]")
+            else:
+                self.emitf(f"mov {reg}, [rbp{off:+d}]")
         return cleanup
 
     def _caller_shadow_space(self) -> int:
