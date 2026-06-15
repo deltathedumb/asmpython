@@ -303,3 +303,77 @@ def getcwd() -> str:
     if result == "":
         return "."
     return result
+
+
+class PurePath:
+    """Pure path base — no filesystem I/O, string manipulation only."""
+
+    def __init__(self, p: str = "") -> None:
+        self._p: str = p
+
+    def __str__(self) -> str:
+        return self._p
+
+    def __truediv__(self, other: str) -> PurePath:
+        if self._p == "" or self._p == ".":
+            return PurePath(other)
+        return PurePath(self._p + "/" + other)
+
+    def as_posix(self) -> str:
+        result: str = ""
+        for ch in self._p:
+            if ch == "\\":
+                result = result + "/"
+            else:
+                result = result + ch
+        return result
+
+    def name(self) -> str:
+        p: str = self.as_posix()
+        i: int = len(p) - 1
+        while i >= 0 and p[i] != "/":
+            i = i - 1
+        return p[i + 1:]
+
+    def suffix(self) -> str:
+        n: str = self.name()
+        i: int = len(n) - 1
+        while i >= 0 and n[i] != ".":
+            i = i - 1
+        if i <= 0:
+            return ""
+        return n[i:]
+
+    def stem(self) -> str:
+        n: str = self.name()
+        suf: str = self.suffix()
+        return n[:len(n) - len(suf)]
+
+    def parent(self) -> PurePath:
+        p: str = self.as_posix()
+        i: int = len(p) - 1
+        while i > 0 and p[i] == "/":
+            i = i - 1
+        while i >= 0 and p[i] != "/":
+            i = i - 1
+        if i < 0:
+            return PurePath(".")
+        return PurePath(p[:i] if i > 0 else "/")
+
+
+class PurePosixPath(PurePath):
+    """PurePath variant using POSIX (forward-slash) paths."""
+    pass
+
+
+class PureWindowsPath(PurePath):
+    """PurePath variant using Windows (backslash) paths."""
+
+    def as_posix(self) -> str:
+        result: str = ""
+        for ch in self._p:
+            if ch == "\\":
+                result = result + "/"
+            else:
+                result = result + ch
+        return result

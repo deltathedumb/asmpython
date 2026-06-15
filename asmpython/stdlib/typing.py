@@ -140,3 +140,23 @@ Never: int = 0
 NoReturn: int = 0
 Self: int = 0
 TYPE_CHECKING: int = 0
+
+
+def get_type_hints(obj: int, globalns: int = 0, localns: int = 0) -> int:
+    """Return type hints for a function or class (stub: returns 0)."""
+    return 0
+
+
+def get_args(tp: int) -> list:
+    """Return arguments of a generic alias (stub: returns empty list)."""
+    return []
+
+
+def get_origin(tp: int) -> int:
+    """Return the __origin__ of a generic alias (stub: returns 0)."""
+    return 0
+
+
+def is_typeddict(tp: int) -> int:
+    """Return True if tp is a TypedDict type (stub: always False)."""
+    return 0

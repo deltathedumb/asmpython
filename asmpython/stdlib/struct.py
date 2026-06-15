@@ -233,6 +233,108 @@ def unpack_from(fmt: str, buf: list, offset: int = 0) -> list:
     return unpack(fmt, sliced)
 
 
+def pack_into(fmt: str, buf: list, offset: int, values: list) -> None:
+    """Pack values (list of ints) into buf starting at offset (in-place).
+
+    Note: CPython takes *args here; asmpython uses a list instead since
+    varargs re-unpacking (`pack(fmt, *args)`) is not supported by the compiler.
+    """
+    packed: list = []
+    specs: list = _parse_fmt(fmt)
+    arg_idx: int = 0
+    spec_idx: int = 0
+    while spec_idx < len(specs):
+        spec: _FmtSpec = specs[spec_idx]
+        repeat: int = spec.repeat
+        code: int = spec.code
+        rep: int = 0
+        while rep < repeat:
+            if code == 120:
+                packed.append(0)
+            elif arg_idx < len(values):
+                v: int = values[arg_idx]
+                if code == 66:
+                    packed.append(v & 0xFF)
+                    arg_idx = arg_idx + 1
+                elif code == 98:
+                    if v < 0:
+                        v = v + 256
+                    packed.append(v & 0xFF)
+                    arg_idx = arg_idx + 1
+                elif code == 63:
+                    packed.append(1 if v else 0)
+                    arg_idx = arg_idx + 1
+                elif code == 72:
+                    vh: int = v & 0xFFFF
+                    packed.append(vh & 0xFF)
+                    packed.append((vh >> 8) & 0xFF)
+                    arg_idx = arg_idx + 1
+                elif code == 104:
+                    if v < 0:
+                        v = v + 65536
+                    v = v & 0xFFFF
+                    packed.append(v & 0xFF)
+                    packed.append((v >> 8) & 0xFF)
+                    arg_idx = arg_idx + 1
+                elif code == 73:
+                    vi: int = v & 0xFFFFFFFF
+                    packed.append(vi & 0xFF)
+                    packed.append((vi >> 8) & 0xFF)
+                    packed.append((vi >> 16) & 0xFF)
+                    packed.append((vi >> 24) & 0xFF)
+                    arg_idx = arg_idx + 1
+                elif code == 105:
+                    if v < 0:
+                        v = v + 4294967296
+                    v = v & 0xFFFFFFFF
+                    packed.append(v & 0xFF)
+                    packed.append((v >> 8) & 0xFF)
+                    packed.append((v >> 16) & 0xFF)
+                    packed.append((v >> 24) & 0xFF)
+                    arg_idx = arg_idx + 1
+                elif code == 81 or code == 113:
+                    packed.append(v & 0xFF)
+                    packed.append((v >> 8) & 0xFF)
+                    packed.append((v >> 16) & 0xFF)
+                    packed.append((v >> 24) & 0xFF)
+                    packed.append((v >> 32) & 0xFF)
+                    packed.append((v >> 40) & 0xFF)
+                    packed.append((v >> 48) & 0xFF)
+                    packed.append((v >> 56) & 0xFF)
+                    arg_idx = arg_idx + 1
+                else:
+                    packed.append(v & 0xFF)
+                    arg_idx = arg_idx + 1
+            rep = rep + 1
+        spec_idx = spec_idx + 1
+    i: int = 0
+    while i < len(packed):
+        buf[offset + i] = packed[i]
+        i = i + 1
+
+
+def iter_unpack(fmt: str, buf: list) -> list:
+    """Unpack repeatedly from buf; returns list of unpacked sublists."""
+    size: int = calcsize(fmt)
+    result: list = []
+    offset: int = 0
+    n: int = len(buf)
+    while offset + size <= n:
+        result.append(unpack_from(fmt, buf, offset))
+        offset = offset + size
+    return result
+
+
+class error(Exception):
+    """Exception raised for struct errors."""
+
+    def __init__(self, msg: str = "") -> None:
+        self.msg: str = msg
+
+    def __str__(self) -> str:
+        return "struct.error: " + self.msg
+
+
 class Struct:
     """Pre-compiled struct format object for repeated unpack operations."""
 
@@ -240,8 +342,18 @@ class Struct:
         self.format: str = fmt
         self.size: int = calcsize(fmt)
 
+    def pack(self, a0: int = 0, a1: int = 0, a2: int = 0, a3: int = 0,
+             a4: int = 0, a5: int = 0, a6: int = 0, a7: int = 0) -> list:
+        return pack(self.format, a0, a1, a2, a3, a4, a5, a6, a7)
+
+    def pack_into(self, buf: list, offset: int, values: list) -> None:
+        pack_into(self.format, buf, offset, values)
+
     def unpack(self, data: list) -> list:
         return unpack(self.format, data)
 
     def unpack_from(self, buf: list, offset: int = 0) -> list:
         return unpack_from(self.format, buf, offset)
+
+    def iter_unpack(self, buf: list) -> list:
+        return iter_unpack(self.format, buf)

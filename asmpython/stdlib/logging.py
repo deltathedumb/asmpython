@@ -258,3 +258,13 @@ def addLevelName(level: int, levelName: str) -> None:
 def makeLogRecord(d: int) -> Logger:
     """Create a Logger from a dict (stub)."""
     return _root_logger
+
+
+def captureWarnings(capture: int) -> None:
+    """Route warnings to the logging system (stub, no-op)."""
+    pass
+
+
+def shutdown() -> None:
+    """Flush and close all handlers (stub, no-op)."""
+    pass

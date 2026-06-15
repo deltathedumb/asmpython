@@ -130,6 +130,63 @@ def writer_rows(rows: list[Row]) -> list[str]:
     return result
 
 
+QUOTE_MINIMAL: int = 0
+QUOTE_ALL: int = 1
+QUOTE_NONNUMERIC: int = 2
+QUOTE_NONE: int = 3
+
+
+_dialects: list = []
+_dialect_names: list = []
+
+
+class Dialect:
+    """CSV dialect descriptor."""
+
+    def __init__(self, name: str = "excel", delimiter: str = ",",
+                 quotechar: str = '"', quoting: int = 0,
+                 lineterminator: str = "\r\n", doublequote: int = 1,
+                 skipinitialspace: int = 0, strict: int = 0) -> None:
+        self.name: str = name
+        self.delimiter: str = delimiter
+        self.quotechar: str = quotechar
+        self.quoting: int = quoting
+        self.lineterminator: str = lineterminator
+        self.doublequote: int = doublequote
+        self.skipinitialspace: int = skipinitialspace
+        self.strict: int = strict
+
+
+def register_dialect(name: str, dialect: Dialect) -> None:
+    """Register a Dialect under name."""
+    i: int = 0
+    while i < len(_dialect_names):
+        if _dialect_names[i] == name:
+            _dialects[i] = dialect
+            return
+        i = i + 1
+    _dialect_names.append(name)
+    _dialects.append(dialect)
+
+
+def get_dialect(name: str) -> Dialect:
+    """Return the Dialect registered under name."""
+    i: int = 0
+    while i < len(_dialect_names):
+        if _dialect_names[i] == name:
+            return _dialects[i]
+        i = i + 1
+    return Dialect(name)
+
+
+def list_dialects() -> list:
+    """Return list of registered dialect names."""
+    result: list[str] = []
+    for n in _dialect_names:
+        result.append(n)
+    return result
+
+
 class DictReader:
     """Parse `lines` using the first row as field names.
 

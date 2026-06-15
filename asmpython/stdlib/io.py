@@ -163,22 +163,6 @@ class BytesIO:
         return len(self._buf)
 
 
-class RawIOBase:
-    """Abstract base for raw binary I/O (stub)."""
-
-    def read(self, n: int = -1) -> list:
-        return []
-
-    def readall(self) -> list:
-        return []
-
-    def write(self, data: list) -> int:
-        return 0
-
-    def close(self) -> None:
-        pass
-
-
 class UnsupportedOperation(Exception):
     """Raised when an I/O operation is not supported (stub)."""
 
@@ -190,3 +174,180 @@ class UnsupportedOperation(Exception):
 
 
 DEFAULT_BUFFER_SIZE: int = 8192
+
+
+class RawIOBase:
+    """Base class for raw binary I/O (stub)."""
+
+    def read(self, size: int = -1) -> str:
+        return ""
+
+    def readinto(self, b: list) -> int:
+        return 0
+
+    def write(self, b: str) -> int:
+        return 0
+
+    def readable(self) -> int:
+        return 0
+
+    def writable(self) -> int:
+        return 0
+
+    def seekable(self) -> int:
+        return 0
+
+
+class FileIO(RawIOBase):
+    """Raw file I/O backed by C stdio FILE*."""
+
+    def __init__(self, name: str, mode: str = "r", closefd: int = 1) -> None:
+        import os
+        self._name: str = name
+        self._mode: str = mode
+        self._fp: str = os.fopen(name, mode)
+        self._closed: int = 0
+
+    def read(self, size: int = -1) -> str:
+        import os
+        if self._closed:
+            return ""
+        result: str = ""
+        c: int = os.fgetc(self._fp)
+        count: int = 0
+        while c != -1:
+            result = result + chr(c)
+            count = count + 1
+            if size > 0 and count >= size:
+                break
+            c = os.fgetc(self._fp)
+        return result
+
+    def write(self, b: str) -> int:
+        import os
+        if self._closed:
+            return 0
+        return os.fputs(b, self._fp)
+
+    def close(self) -> None:
+        import os
+        if not self._closed:
+            os.fclose(self._fp)
+            self._closed = 1
+
+    def readable(self) -> int:
+        return 1 if "r" in self._mode else 0
+
+    def writable(self) -> int:
+        return 1 if "w" in self._mode or "a" in self._mode else 0
+
+    def seekable(self) -> int:
+        return 1
+
+    def seek(self, pos: int, whence: int = 0) -> int:
+        import os
+        return os.fseek(self._fp, pos, whence)
+
+    def tell(self) -> int:
+        import os
+        return os.ftell(self._fp)
+
+    def __enter__(self) -> FileIO:
+        return self
+
+    def __exit__(self, exc_type: int, exc_val: int, exc_tb: int) -> int:
+        self.close()
+        return 0
+
+
+class BufferedReader:
+    """Buffered binary reader wrapping a RawIOBase (stub: reads via read())."""
+
+    def __init__(self, raw: FileIO, buffer_size: int = 8192) -> None:
+        self._raw: FileIO = raw
+        self._buf: str = ""
+        self._pos: int = 0
+
+    def read(self, size: int = -1) -> str:
+        return self._raw.read(size)
+
+    def readline(self) -> str:
+        result: str = ""
+        c: str = self._raw.read(1)
+        while c != "" and c != "\n":
+            result = result + c
+            c = self._raw.read(1)
+        if c == "\n":
+            result = result + "\n"
+        return result
+
+    def close(self) -> None:
+        self._raw.close()
+
+    def __enter__(self) -> BufferedReader:
+        return self
+
+    def __exit__(self, exc_type: int, exc_val: int, exc_tb: int) -> int:
+        self.close()
+        return 0
+
+
+class BufferedWriter:
+    """Buffered binary writer wrapping a RawIOBase."""
+
+    def __init__(self, raw: FileIO, buffer_size: int = 8192) -> None:
+        self._raw: FileIO = raw
+
+    def write(self, b: str) -> int:
+        return self._raw.write(b)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self._raw.close()
+
+    def __enter__(self) -> BufferedWriter:
+        return self
+
+    def __exit__(self, exc_type: int, exc_val: int, exc_tb: int) -> int:
+        self.close()
+        return 0
+
+
+class TextIOWrapper:
+    """Text mode wrapper around a binary stream."""
+
+    def __init__(self, buffer: FileIO, encoding: str = "utf-8",
+                 errors: str = "strict", newline: str = "") -> None:
+        self._buf: FileIO = buffer
+        self.encoding: str = encoding
+
+    def read(self, size: int = -1) -> str:
+        return self._buf.read(size)
+
+    def readline(self) -> str:
+        result: str = ""
+        c: str = self._buf.read(1)
+        while c != "" and c != "\n":
+            result = result + c
+            c = self._buf.read(1)
+        if c == "\n":
+            result = result + "\n"
+        return result
+
+    def write(self, s: str) -> int:
+        return self._buf.write(s)
+
+    def close(self) -> None:
+        self._buf.close()
+
+    def flush(self) -> None:
+        pass
+
+    def __enter__(self) -> TextIOWrapper:
+        return self
+
+    def __exit__(self, exc_type: int, exc_val: int, exc_tb: int) -> int:
+        self.close()
+        return 0

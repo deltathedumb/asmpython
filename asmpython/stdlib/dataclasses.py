@@ -58,3 +58,21 @@ class InitVar:
     """Pseudo-field for __init__ only (stub)."""
     def __init__(self, t: int) -> None:
         self.type: int = t
+
+
+class _MISSING_TYPE:
+    """Sentinel for missing default values."""
+    pass
+
+
+MISSING: _MISSING_TYPE = _MISSING_TYPE()
+
+
+class FrozenInstanceError(Exception):
+    """Raised when a frozen dataclass field is assigned."""
+
+    def __init__(self, msg: str = "cannot assign to field") -> None:
+        self.msg: str = msg
+
+    def __str__(self) -> str:
+        return self.msg
