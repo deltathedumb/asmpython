@@ -23,7 +23,7 @@ from . import ast_nodes as A
 from .. import stdlib
 from ..stdlib import STDLIB_BINDINGS
 from ..asmlib import ASMLIB_BINDINGS
-from .errors import SemaError
+from .errors import ErrorCode, SemaError
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ def _check_asm_operand_lit(val: str, pos: object) -> None:
     """
     s = val.strip()
     if not s:
-        raise SemaError("Assembly: operand must not be an empty string", pos)
+        raise SemaError("Assembly: operand must not be an empty string", pos, ErrorCode.E_ASM_OPERAND)
 
     lo = s.lower()
 
@@ -134,7 +134,8 @@ def _check_asm_operand_lit(val: str, pos: object) -> None:
     # Flag a register-shaped name that isn't in the valid set
     if _asm_operand_looks_like_bad_register(lo):
         raise SemaError(
-            f"Assembly: {val!r} is not a recognised x86-64 register", pos
+            f"Assembly: {val!r} is not a recognised x86-64 register", pos,
+            ErrorCode.E_ASM_REGISTER,
         )
 
     # Anything else (label, symbol) → accept
@@ -479,7 +480,7 @@ def _load_module(name: str) -> dict:
         return STDLIB_BINDINGS[key]
     if key in ASMLIB_BINDINGS:
         return ASMLIB_BINDINGS[key]
-    raise SemaError(f"no such module: {name!r}")
+    raise SemaError(f"no such module: {name!r}", code=ErrorCode.E_NO_SUCH_MODULE)
 
 
 class SemaAnalyzer:
@@ -598,7 +599,8 @@ class SemaAnalyzer:
         if name in self.classes and self._is_exception_class(name):
             return
         raise SemaError(
-            f"'{name}' is not an exception type", pos
+            f"'{name}' is not an exception type", pos,
+            ErrorCode.E_NOT_AN_EXCEPTION,
         )
 
     def _is_exception_class(self, class_name: str) -> bool:
@@ -1126,7 +1128,7 @@ class SemaAnalyzer:
         # First pass: collect function signatures so forward references resolve.
         for f in self.mod.funcs:
             if f.name in self.funcs:
-                raise SemaError(f"function {f.name!r} redefined", f.pos)
+                raise SemaError(f"function {f.name!r} redefined", f.pos, ErrorCode.E_REDEFINED_FUNC)
             if f.name in BUILTINS:
                 raise SemaError(
                     f"cannot redefine builtin {f.name!r}",
@@ -1402,10 +1404,10 @@ class SemaAnalyzer:
         from asmpython.stdlib.assembly import pkgformat
 
         if len(call.args) != 1 or call.kwargs:
-            raise SemaError("include() takes exactly one package-name string", call.pos)
+            raise SemaError("include() takes exactly one package-name string", call.pos, ErrorCode.E_INCLUDE_ARG)
         arg = call.args[0]
         if not isinstance(arg, A.StrLit):
-            raise SemaError("include() argument must be a string literal", call.pos)
+            raise SemaError("include() argument must be a string literal", call.pos, ErrorCode.E_INCLUDE_ARG)
         name = arg.value
         if name in self.asm_packages:
             return  # already included
@@ -2056,7 +2058,7 @@ class SemaAnalyzer:
             return
         if isinstance(s, A.Return):
             if self.in_function is None:
-                raise SemaError("'return' outside of a function", s.pos)
+                raise SemaError("'return' outside of a function", s.pos, ErrorCode.E_RETURN_OUTSIDE_FUNC)
             if s.value is not None:
                 self._check_expr(s.value, scope)
             return
@@ -2097,7 +2099,7 @@ class SemaAnalyzer:
                 if A.expr_type(a_expr) not in ("list", "tuple", "any") or A.expr_type(
                     b_expr
                 ) not in ("list", "tuple", "any"):
-                    raise SemaError("zip() arguments must be lists or tuples", s.pos)
+                    raise SemaError("zip() arguments must be lists or tuples", s.pos, ErrorCode.E_ZIP_ARGS)
                 if idx_name is not None:
                     scope.add(idx_name, "int")
                 scope.add(a_name, self._iter_element_type(a_expr, scope))
@@ -2287,11 +2289,11 @@ class SemaAnalyzer:
             return
         if isinstance(s, A.Break):
             if self.loop_depth == 0:
-                raise SemaError("'break' outside a loop", s.pos)
+                raise SemaError("'break' outside a loop", s.pos, ErrorCode.E_BREAK_OUTSIDE_LOOP)
             return
         if isinstance(s, A.Continue):
             if self.loop_depth == 0:
-                raise SemaError("'continue' outside a loop", s.pos)
+                raise SemaError("'continue' outside a loop", s.pos, ErrorCode.E_CONTINUE_OUTSIDE_LOOP)
             return
         if isinstance(s, A.Import):
             # Dotted path: bind the leading segment ("os.path" -> "os"). Real
@@ -2470,11 +2472,12 @@ class SemaAnalyzer:
                     msig = cls_sig.methods.get("__setitem__")
                 if msig is None:
                     raise SemaError(
-                        f"'{cls_name}' object does not support index assignment", s.pos
+                        f"'{cls_name}' object does not support index assignment", s.pos,
+                        ErrorCode.E_INDEX_ASSIGN,
                     )
                 s.target._setitem_class = cls_name  # type: ignore[attr-defined]
             else:
-                raise SemaError(f"cannot index a {obj_t}", s.pos)
+                raise SemaError(f"cannot index a {obj_t}", s.pos, ErrorCode.E_INDEX_OBJECT_TYPE)
             return
         if isinstance(s, A.AttrAssign):
             # Class-level variable write: `ClassName.x = v`. Allowed when the
@@ -3028,7 +3031,7 @@ class SemaAnalyzer:
             elif obj_t == "any":
                 pass  # opaque target: accept the index assignment leniently
             else:
-                raise SemaError(f"cannot index a {obj_t}", pos)
+                raise SemaError(f"cannot index a {obj_t}", pos, ErrorCode.E_INDEX_OBJECT_TYPE)
             return
         # A.Attr
         if (
@@ -3080,7 +3083,7 @@ class SemaAnalyzer:
                 if self.in_lifted:
                     e.inferred_type = "any"
                     return
-                raise SemaError(f"undefined variable {e.name!r}", e.pos)
+                raise SemaError(f"undefined variable {e.name!r}", e.pos, ErrorCode.E_UNDEFINED_NAME)
             e.inferred_type = scope.types[e.name]
             if e.inferred_type == "list":
                 e.list_el_type = scope.list_el_types.get(e.name, "int")
@@ -3288,6 +3291,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"'{op}' not supported between {lt} and {rt}",
                         e.pos,
+                        ErrorCode.E_BINARY_OP_TYPE,
                     )
                 if op in ("is", "is not"):
                     # asmpython has no `None`-as-distinct-value yet. `x is None`
@@ -3470,7 +3474,7 @@ class SemaAnalyzer:
             elif it_t == "any":
                 el = "any"
             else:
-                raise SemaError(f"cannot iterate a {it_t} in a comprehension", e.pos)
+                raise SemaError(f"cannot iterate a {it_t} in a comprehension", e.pos, ErrorCode.E_ITER_TYPE)
             # A child scope so the loop variable doesn't leak.
             child = Scope()
             child.types.update(scope.types)
@@ -3785,7 +3789,7 @@ class SemaAnalyzer:
                 else:
                     e.inferred_type = "int"
             else:
-                raise SemaError(f"cannot index a {obj_t}", e.pos)
+                raise SemaError(f"cannot index a {obj_t}", e.pos, ErrorCode.E_INDEX_OBJECT_TYPE)
             return
         if isinstance(e, A.FString):
             for seg in e.segments:
@@ -3797,6 +3801,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"f-string segment cannot be a {t}",
                         getattr(seg, "pos", e.pos),
+                        ErrorCode.E_FSTRING_SEGMENT_TYPE,
                     )
             return
         if isinstance(e, A.Attr):
@@ -4209,6 +4214,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"{class_name}.{e.method}() takes {required}..{expected} argument(s), got {len(e.args)}",
                         e.pos,
+                        ErrorCode.E_ARG_COUNT,
                     )
                 # Assembly operand validation: when string literals are passed
                 # to any Assembly method, validate them at compile time.
@@ -4416,6 +4422,7 @@ class SemaAnalyzer:
             raise SemaError(
                 f"'%' format string expects {nconv} argument(s), got {len(args)}",
                 e.pos,
+                ErrorCode.E_FORMAT_ARG_COUNT,
             )
         ai = 0
         for piece in pieces:
@@ -4424,9 +4431,9 @@ class SemaAnalyzer:
             conv = piece[4]
             t = A.expr_type(args[ai])
             if conv in "dioxX" and t not in ("int", "any"):
-                raise SemaError(f"'%{conv}' format requires an int argument", e.pos)
+                raise SemaError(f"'%{conv}' format requires an int argument", e.pos, ErrorCode.E_FORMAT_ARG_TYPE)
             if conv in "eEfFgG" and t not in ("int", "float", "any"):
-                raise SemaError(f"'%{conv}' format requires a numeric argument", e.pos)
+                raise SemaError(f"'%{conv}' format requires a numeric argument", e.pos, ErrorCode.E_FORMAT_ARG_TYPE)
             ai += 1
         e.inferred_type = "str"  # type: ignore
 
@@ -4449,7 +4456,7 @@ class SemaAnalyzer:
             elif kname == "reverse":
                 reverse_expr = kexpr
             else:
-                raise SemaError(f"unexpected keyword argument {kname!r}", e.pos)
+                raise SemaError(f"unexpected keyword argument {kname!r}", e.pos, ErrorCode.E_ARG_COUNT)
         if key_expr is not None:
             self._check_expr(key_expr, scope)
             if isinstance(key_expr, A.Lambda):
@@ -4810,7 +4817,7 @@ class SemaAnalyzer:
             for a in e.args:
                 self._check_expr(a, scope)
                 if A.expr_type(a) not in ("int", "any"):
-                    raise SemaError("range() arguments must be ints", e.pos)
+                    raise SemaError("range() arguments must be ints", e.pos, ErrorCode.E_ARG_TYPE)
             e.inferred_type = "list"
             e.list_el_type = "int"
             return
@@ -4819,9 +4826,9 @@ class SemaAnalyzer:
             # to the current class's base. The result carries a `super:<Base>`
             # marker so the enclosing MethodCall dispatches against the base.
             if e.args:
-                raise SemaError("super() takes no arguments", e.pos)
+                raise SemaError("super() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
             if self.current_class is None:
-                raise SemaError("super() outside a method", e.pos)
+                raise SemaError("super() outside a method", e.pos, ErrorCode.E_SUPER_NO_CLASS)
             parent = self.classes[self.current_class].parent
             if parent is None:
                 raise SemaError(
@@ -5026,7 +5033,7 @@ class SemaAnalyzer:
                 for a in e.args:
                     t = A.expr_type(a)
                     if t not in ("int", "any"):
-                        raise SemaError("divmod() requires int arguments", e.pos)
+                        raise SemaError("divmod() requires int arguments", e.pos, ErrorCode.E_ARG_TYPE)
                 e.tuple_elem_types = ["int", "int"]
                 return
             # Argument-type sanity for builtins that care. An opaque ("any")
@@ -5149,10 +5156,12 @@ class SemaAnalyzer:
                             raise SemaError(
                                 f"{e.func}() takes {expected} argument(s), got {len(e.args)}",
                                 e.pos,
+                                ErrorCode.E_ARG_COUNT,
                             )
                         raise SemaError(
                             f"{e.func}() takes {required}-{expected} arguments, got {len(e.args)}",
                             e.pos,
+                            ErrorCode.E_ARG_COUNT,
                         )
                 self._bind_args(
                     e,
@@ -5195,7 +5204,7 @@ class SemaAnalyzer:
             else:
                 e.inferred_type = "int"
             return
-        raise SemaError(f"undefined function {e.func!r}", e.pos)
+        raise SemaError(f"undefined function {e.func!r}", e.pos, ErrorCode.E_UNDEFINED_FUNC)
 
 
 def analyze(mod: A.Module, *, source_dir=None) -> None:

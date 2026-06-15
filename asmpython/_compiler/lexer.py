@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .errors import LexError, SourcePos
+from .errors import ErrorCode, LexError, SourcePos
 
 
 KEYWORDS = {
@@ -310,7 +310,7 @@ class Lexer:
                 self.indents.pop()
                 self.tokens.append(Token("DEDENT", "", self.line, 1))
             if depth != self.indents[-1]:
-                raise LexError("inconsistent indentation", SourcePos(self.line, 1))
+                raise LexError("inconsistent indentation", SourcePos(self.line, 1), ErrorCode.L_INCONSISTENT_INDENT)
 
     def _read_identifier(self) -> Token:
         line, col = self.line, self.col
@@ -359,7 +359,7 @@ class Lexer:
             try:
                 return Token("FLOAT", float(text), line, col)
             except ValueError:
-                raise LexError(f"invalid float literal {text!r}", SourcePos(line, col))
+                raise LexError(f"invalid float literal {text!r}", SourcePos(line, col), ErrorCode.L_INVALID_FLOAT)
         return Token("INT", int(text), line, col)
 
     def _read_fstring(self) -> Token:
@@ -378,9 +378,9 @@ class Lexer:
         while True:
             c = self._peek()
             if c == "":
-                raise LexError("unterminated f-string", SourcePos(line, col))
+                raise LexError("unterminated f-string", SourcePos(line, col), ErrorCode.L_UNTERMINATED_FSTRING)
             if c == "\n":
-                raise LexError("newline in f-string", SourcePos(line, col))
+                raise LexError("newline in f-string", SourcePos(line, col), ErrorCode.L_NEWLINE_IN_FSTRING)
             if c == quote:
                 self._advance()
                 break
@@ -460,9 +460,9 @@ class Lexer:
         while True:
             c = self._peek()
             if c == "":
-                raise LexError("unterminated raw string literal", SourcePos(line, col))
+                raise LexError("unterminated raw string literal", SourcePos(line, col), ErrorCode.L_UNTERMINATED_RAW)
             if c == "\n":
-                raise LexError("newline in raw string literal", SourcePos(line, col))
+                raise LexError("newline in raw string literal", SourcePos(line, col), ErrorCode.L_NEWLINE_IN_STRING)
             if c == quote:
                 self._advance()
                 break
@@ -488,9 +488,9 @@ class Lexer:
         while True:
             c = self._peek()
             if c == "":
-                raise LexError("unterminated string literal", SourcePos(line, col))
+                raise LexError("unterminated string literal", SourcePos(line, col), ErrorCode.L_UNTERMINATED_STRING)
             if c == "\n":
-                raise LexError("newline in string literal", SourcePos(line, col))
+                raise LexError("newline in string literal", SourcePos(line, col), ErrorCode.L_NEWLINE_IN_STRING)
             if c == quote:
                 self._advance()
                 break
@@ -585,4 +585,4 @@ class Lexer:
             self.paren_depth -= 1
         if ch in "+-*/%<>=,:()[]{}&|^~.@":
             return Token("OP", ch, line, col)
-        raise LexError(f"unexpected character {ch!r}", SourcePos(line, col))
+        raise LexError(f"unexpected character {ch!r}", SourcePos(line, col), ErrorCode.L_UNEXPECTED_CHAR)

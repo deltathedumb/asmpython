@@ -1,5 +1,51 @@
 # Resume notes — autonomous CPython-parity loop (parity-expansion branch)
 
+## Paused — 2026-06-15
+
+Session fixed self-hosting and added the error code system.  Tree is clean,
+committed and pushed to `origin/parity-expansion`.
+
+### This session (2026-06-15)
+
+**Self-hosting fix** (commit `68331ed5`):
+- `build.bat` (restored to `python build.py` last session) was correctly calling
+  CPython, but `python build.py` still failed with `[E014] f-string segment
+  cannot be a type` on `from ._compiler.__main__ import main`.
+- Root cause: `typing.py` defines `class override` (PEP 698 decorator stub).
+  Because `typing` is in `_BUNDLED_SOURCE_STDLIB`, the whole-program loader
+  merges all its classes into the global namespace.  The global name `override`
+  (type `"type"`) shadowed the local parameter `override: str` in
+  `driver.py:_find_tool()`, which uses it in `f"--{name} {override}"`.
+  Sema rejected the f-string segment because its inferred type was `"type"`.
+- Fix: changed `class override` → `def override(func: int) -> int` (a no-op
+  function stub).  Functions type as `"int"` in global scope; no collision.
+- `python build.py` and `build.bat` both produce `build/asmpython.exe` and
+  `build/asmpython-linux` successfully after this fix.
+
+**Error code system** (multiple commits):
+- `errors.py`: added `ErrorCode` class (namespace of int constants), code-label
+  formatter (`_code_label`), `explain()` function, and human-readable
+  `ERROR_DESCRIPTIONS` dict covering all 40+ distinct error categories.
+- `CompileError` / `LexError` / `ParseError` / `SemaError` all accept an
+  optional `code: int` argument; `format()` renders it as `[E014]` inline.
+- Added codes to ~30 high-value raise sites in `sema.py`, `lexer.py`,
+  `parser.py` covering: undefined name/function, redefined function/class,
+  f-string segment type, binary op type, break/continue/return outside loop,
+  arg count (user functions + methods), assembly operands, format string,
+  cannot-index, cannot-iterate, not-an-exception, include() arg.
+- CLI: `--explain <CODE>` flag prints the full description and exits.
+  `--check --json` output now includes a `"code"` field.
+- Docs: new `docs/error-codes.md` — complete reference with tables, examples,
+  and fix suggestions for every code.  `README.md` updated with `--explain`
+  flag and a link to the doc.
+
+### Test and stdlib status
+
+Previous test count was 219/219.  New stdlib modules added this session
+(subprocess, atexit, tempfile, types, signal) have not yet had test cases
+added (the loop was interrupted to fix self-hosting first).  Run
+`py -m tests.runner` to confirm the baseline is still green before continuing.
+
 ## Paused — 2026-06-14
 
 Session paused here. Tree is clean, 219/219 tests passing, everything

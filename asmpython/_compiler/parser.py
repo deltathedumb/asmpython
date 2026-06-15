@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .lexer import Token, Lexer
-from .errors import ParseError
+from .errors import ErrorCode, ParseError
 from . import ast_nodes as A
 
 
@@ -46,7 +46,7 @@ class Parser:
         t = self.toks[self.i]
         if t.kind != kind or (value is not None and t.value != value):
             want = f"{kind} {value!r}" if value is not None else kind
-            raise ParseError(f"expected {want}, got {t.kind} {t.value!r}", t.pos)
+            raise ParseError(f"expected {want}, got {t.kind} {t.value!r}", t.pos, ErrorCode.P_EXPECTED_TOKEN)
         self.i += 1
         return t
 
@@ -394,7 +394,7 @@ class Parser:
                 t.pos,
             )
         if neg:
-            raise ParseError("unary '-' only allowed before numeric default", eq.pos)
+            raise ParseError("unary '-' only allowed before numeric default", eq.pos, ErrorCode.P_INVALID_DEFAULT)
         if t.kind == "STRING":
             self._eat()
             return A.StrLit(value=t.value, pos=t.pos)  # type: ignore
@@ -701,7 +701,7 @@ class Parser:
                 self._eat()
                 tgt = self._parse_expr()
                 if not isinstance(tgt, (A.Name, A.Subscript, A.Attr)):
-                    raise ParseError("cannot assign to this expression", tgt.pos)
+                    raise ParseError("cannot assign to this expression", tgt.pos, ErrorCode.P_INVALID_ASSIGN_TARGET)
                 targets.append(tgt)
             self._expect("OP", "=")
             values = [self._parse_expr()]
@@ -1162,7 +1162,7 @@ class Parser:
                 module = f"{module}.{self._expect('NAME').value}"
         elif level == 0:
             # `from import ...` with no module name is invalid.
-            raise ParseError("expected module name after 'from'", self._peek().pos)
+            raise ParseError("expected module name after 'from'", self._peek().pos, ErrorCode.P_MISSING_MODULE)
         self._expect("KEYWORD", "import")
         # `names` holds the locally-bound name (the alias when `as` is present);
         # `orig_names` holds the exported name as the source module spells it.
@@ -1716,7 +1716,7 @@ class Parser:
             else:
                 atom = A.Name(name=t.value, pos=t.pos)  # type: ignore
         else:
-            raise ParseError(f"unexpected token {t.kind} {t.value!r}", t.pos)
+            raise ParseError(f"unexpected token {t.kind} {t.value!r}", t.pos, ErrorCode.P_UNEXPECTED_TOKEN)
 
         # Trailing subscripts and method calls chain off any primary.
         return self._parse_trailers(atom)

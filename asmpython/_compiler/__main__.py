@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .driver import compile_source, detect_default_target
-from .errors import CompileError
+from .errors import CompileError, explain as _explain_code
 from .. import __version__
 
 
@@ -205,6 +205,12 @@ def _build_parser() -> argparse.ArgumentParser:
         version=f"asmpython {__version__}",
         help="show version and exit",
     )
+    meta_grp.add_argument(
+        "--explain",
+        metavar="CODE",
+        default=None,
+        help="print a detailed description of an error code (e.g. E014, L003, P002) and exit",
+    )
     return ap
 
 
@@ -230,11 +236,13 @@ def _run_check(src: str, source_path, *, source_dir, as_json: bool) -> int:
         sema_analyze(module, source_dir=source_dir)
     except CompileError as e:
         if as_json:
+            from .errors import _code_label
             diag = {
                 "phase": e.phase,
                 "message": e.message,
                 "line": e.pos.line if e.pos else 1,
                 "col": e.pos.col if e.pos else 1,
+                "code": _code_label(e.code) if e.code is not None else None,
             }
             print(json.dumps([diag]))
         else:
@@ -248,6 +256,14 @@ def _run_check(src: str, source_path, *, source_dir, as_json: bool) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = _build_parser()
     args = ap.parse_args(argv)
+
+    if args.explain is not None:
+        desc = _explain_code(args.explain)
+        if desc:
+            print(desc)
+            return 0
+        print(f"asmpython: unknown error code {args.explain!r}", file=sys.stderr)
+        return 1
 
     if args.source is None:
         ap.print_usage(sys.stderr)

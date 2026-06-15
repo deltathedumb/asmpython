@@ -79,12 +79,17 @@ python -m asmpython <source.py> [options]
   --keep             keep intermediate .obj / .o files
   --check            front-end diagnostics only (no codegen)
   --json             machine-readable JSON diagnostics on stderr
+  --explain <CODE>   print description for an error code (e.g. E014) and exit
   --use-runtime-lib  link pre-built libasmpython_rt instead of inlining helpers
   --onefile          single statically-linked binary (default)
   --onedir           exe + shared runtime library in a bundle directory
   --type executable  produce a binary (default)
   --type library     produce a shared library (.dll / .so)
 ```
+
+Every diagnostic the compiler emits includes an error code in brackets (e.g.
+`[E002]`).  See [docs/error-codes.md](docs/error-codes.md) for the full
+reference and `asmpython --explain <CODE>` for inline descriptions.
 
 ---
 
