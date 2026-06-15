@@ -560,8 +560,16 @@ class Parser:
             if inner and inner[0][0] in self._LIST_ANNOTS:
                 # list[list[T]]: preserve the inner element kind so
                 # `for row in matrix: row[i]` knows the leaf type.
-                inner_el = inner[0][1][0][0] if inner[0][1] else None
+                # inner[0] is already the normalized ("list", el_kind) tuple.
+                inner_el = inner[0][1]
                 return ("list", ("list", inner_el))
+            if inner and inner[0][0] in self._DICT_ANNOTS:
+                # list[dict[K,V]]: preserve the value kind so
+                # `for d in dicts: d[key]` knows the value type.
+                # inner[0] is already the normalized ("dict", val_kind) tuple
+                # produced by the recursive _normalize_annot call for the dict.
+                val_el = inner[0][1]
+                return ("list", ("dict", val_el))
             el = inner[0][0] if inner else None
             return ("list", el)
         if name in self._DICT_ANNOTS:

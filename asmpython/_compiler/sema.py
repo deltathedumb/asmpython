@@ -1009,6 +1009,12 @@ class SemaAnalyzer:
                 # `for row in matrix: row[i]` recovers the element type.
                 inner_el = self._resolve_scalar_annot(el[1])
                 return ("list", "list", None, None, inner_el)
+            if isinstance(el, tuple) and el[0] == "dict":
+                # list[dict[K,V]]: el is ("dict", val_el_name)
+                # Propagate the value kind via el_value_type so
+                # `for d in dicts: d[key]` recovers the value type.
+                inner_val = self._resolve_scalar_annot(el[1])
+                return ("list", "dict", None, None, inner_val)
             return ("list", self._resolve_scalar_annot(el), None, None, None)
         if base == "dict":
             return ("dict", None, self._resolve_scalar_annot(el), None, None)
