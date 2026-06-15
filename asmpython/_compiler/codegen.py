@@ -699,8 +699,15 @@ class Codegen:
             for label, body in self.strings:
                 self.emit(f"{label}: db {body},0")
             for label, val in self.floats:
-                # repr(float) round-trips to the exact bit pattern.
-                self.emit(f"{label}: dq {repr(val)}")
+                # repr(float) round-trips; special values need hex bit patterns.
+                if val != val:  # nan
+                    self.emit(f"{label}: dq 0x7ff8000000000000")
+                elif val > 0 and val + 1 == val:  # +inf
+                    self.emit(f"{label}: dq 0x7ff0000000000000")
+                elif val < 0 and val - 1 == val:  # -inf
+                    self.emit(f"{label}: dq 0xfff0000000000000")
+                else:
+                    self.emit(f"{label}: dq {repr(val)}")
             if self.type_name_table:
                 self.emit(f"__type_name_table: dq {', '.join(self.type_name_table)}")
         # bss: one zero-initialized 8-byte slot per module-level variable.
