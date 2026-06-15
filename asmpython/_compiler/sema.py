@@ -503,6 +503,10 @@ class SemaAnalyzer:
         # Name of the class whose method body is currently being checked, so
         # `super()` can resolve against its base. None outside a method.
         self.current_class: Optional[str] = None
+        # Name of the `cls` parameter inside a @classmethod body (e.g. "cls").
+        # Used to rewrite `cls.field` → `ClassName.field` so the existing
+        # class-var read/write codegen path handles it instead of null-ptr deref.
+        self.classmethod_cls_param: Optional[str] = None
         # Imported FFI: bindings either bound under a module prefix or
         # lifted directly into the namespace via from-import.
         self.imported_modules: dict[str, dict] = {}
@@ -1326,6 +1330,7 @@ class SemaAnalyzer:
                     # First param is `cls` (opaque — asmpython has no class objs).
                     if m.params:
                         scope.add(m.params[0], "any")
+                        self.classmethod_cls_param = m.params[0]
                     start = 1
                 else:
                     scope.add("self", f"instance:{c.name}")
@@ -1349,6 +1354,7 @@ class SemaAnalyzer:
                 self._check_block(m.body, scope)
                 self.in_function = None
                 self.current_class = None
+                self.classmethod_cls_param = None
 
         # Hand resolved tables to codegen via the Module.
         self.mod.imported_modules = self.imported_modules
@@ -2433,6 +2439,14 @@ class SemaAnalyzer:
                 raise SemaError(f"cannot index a {obj_t}", s.pos, ErrorCode.E_INDEX_OBJECT_TYPE)
             return
         if isinstance(s, A.AttrAssign):
+            # cls.field = v inside a @classmethod → rewrite to ClassName.field = v
+            if (
+                isinstance(s.obj, A.Name)
+                and self.classmethod_cls_param is not None
+                and s.obj.name == self.classmethod_cls_param
+                and self.current_class is not None
+            ):
+                s.obj.name = self.current_class
             # Class-level variable write: `ClassName.x = v`. Allowed when the
             # class declares `x` as a (non-dataclass) class var.
             if (
@@ -3768,6 +3782,14 @@ class SemaAnalyzer:
                     )
             return
         if isinstance(e, A.Attr):
+            # cls.field inside a @classmethod body → rewrite to ClassName.field
+            if (
+                isinstance(e.obj, A.Name)
+                and self.classmethod_cls_param is not None
+                and e.obj.name == self.classmethod_cls_param
+                and self.current_class is not None
+            ):
+                e.obj.name = self.current_class
             # Class-level variable read: `ClassName.x` (static constant). Type it
             # from the class var's default expression.
             if isinstance(e.obj, A.Name) and e.obj.name in self.classes:
