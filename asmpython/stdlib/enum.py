@@ -89,3 +89,25 @@ class Flag(Enum):
 class IntFlag(Flag):
     """Flag enumeration that is also an integer."""
     pass
+
+
+def unique(enumclass: int) -> int:
+    """Decorator to ensure all enum values are unique (stub: returns enum unchanged)."""
+    return enumclass
+
+
+class EnumMeta:
+    """Metaclass stub for Enum. Provides iteration over known member lists."""
+    pass
+
+
+class StrEnum(Enum):
+    """Enumeration where members are also strings."""
+
+    def __str__(self) -> str:
+        return self.value
+
+
+CONFORM: int = 0
+EJECT: int = 1
+KEEP: int = 2

@@ -278,6 +278,44 @@ class ConfigParser:
                     self.set(current_section, key, val)
             i = i + 1
 
+    def read(self, filenames: str) -> list:
+        """Read and parse configuration from a filename or list of filenames.
+
+        filenames may be a single string (one file). Returns list of
+        successfully read filenames.
+        """
+        import os
+        fp = os.fopen(filenames, "r")
+        if fp == 0:
+            return []
+        content: str = ""
+        c: int = os.fgetc(fp)
+        while c != -1:
+            content = content + chr(c)
+            c = os.fgetc(fp)
+        os.fclose(fp)
+        self.read_string(content)
+        result: list[str] = [filenames]
+        return result
+
+    def read_file(self, fp: str) -> None:
+        """Read configuration from a file object (stub: fp treated as filename)."""
+        self.read(fp)
+
+    def read_dict(self, dictionary: int) -> None:
+        """Load configuration from a mapping (stub: no-op)."""
+        pass
+
+    def write(self, fp: str, space_around_delimiters: int = 1) -> None:
+        """Write configuration to a file object (stub: fp treated as filename)."""
+        import os
+        content: str = self.write_string()
+        f = os.fopen(fp, "w")
+        if f == 0:
+            return
+        os.fputs(content, f)
+        os.fclose(f)
+
     def write_string(self) -> str:
         """Return configuration as a string."""
         result: str = ""

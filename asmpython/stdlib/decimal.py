@@ -284,14 +284,41 @@ class Decimal:
         return self._truediv_trunc(other).__int__()
 
 
-def getcontext() -> int:
-    """Return the current decimal context (stub)."""
-    return _DEFAULT_PREC
+class Context:
+    """Decimal arithmetic context (precision, rounding mode, traps)."""
+
+    def __init__(self, prec: int = 28, rounding: str = "ROUND_HALF_EVEN",
+                 Emin: int = 0, Emax: int = 999999) -> None:
+        self.prec: int = prec
+        self.rounding: str = rounding
+        self.Emin: int = Emin
+        self.Emax: int = Emax
+
+    def __str__(self) -> str:
+        return "Context(prec=" + str(self.prec) + ", rounding=" + self.rounding + ")"
 
 
-def setcontext(prec: int) -> None:
-    """Set the decimal context precision (stub, no-op)."""
+_context: Context = Context()
+
+
+def getcontext() -> Context:
+    """Return the current decimal context."""
+    return _context
+
+
+def setcontext(ctx: Context) -> None:
+    """Set the current decimal context (stub: no-op)."""
     pass
+
+
+def localcontext(ctx: int = 0) -> Context:
+    """Return the context (stub)."""
+    return _context
+
+
+DefaultContext: Context = Context(28, "ROUND_HALF_EVEN")
+ExtendedContext: Context = Context(9, "ROUND_HALF_EVEN")
+BasicContext: Context = Context(9, "ROUND_UP")
 
 
 ROUND_UP: str = "ROUND_UP"
