@@ -171,6 +171,7 @@ _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "logging", "secrets", "shutil", "traceback", "inspect",
     "fnmatch", "queue", "weakref", "gc",
     "configparser", "locale",
+    "subprocess", "atexit", "tempfile", "types", "signal",
 })
 
 # Dotted module names that map to a differently-named file in stdlib/.

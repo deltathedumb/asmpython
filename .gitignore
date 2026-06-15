@@ -46,5 +46,6 @@ _smoke.log
 *.log
 
 
-# the thing that made me think i was being stalked for a solid couple hours
+# Unit test artifacts
 hi.txt
+test.zip

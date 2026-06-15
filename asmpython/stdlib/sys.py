@@ -16,7 +16,7 @@ BINDINGS: dict = {
     # sys.abort() — unrecoverable crash
     "abort": Func(arg_types=(), ret_type="int", c_name="abort"),
     # Constants
-    "version": Const(ty="str", value="asmpython 1.1.0-beta"),
+    "version": Const(ty="str", value="asmpython 1.1.0-0.1"),
     "maxsize": Const(ty="int", value=9223372036854775807),
     "byteorder": Const(ty="str", value="little"),
     "platform": Const(ty="str", value="linux", value_windows="win32"),
