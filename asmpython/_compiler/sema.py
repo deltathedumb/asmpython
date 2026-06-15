@@ -4629,13 +4629,15 @@ class SemaAnalyzer:
                 f"str.{e.method}() takes {len(arg_types)} argument(s), got {len(e.args)}",
                 e.pos,
             )
-        for i, (a, want) in enumerate(zip(e.args, arg_types)):
+        _si = 0
+        for a, want in zip(e.args, arg_types):
             got = A.expr_type(a)
             if got != want:
                 raise SemaError(
-                    f"str.{e.method}() argument {i + 1}: expected {want}, got {got}",
+                    f"str.{e.method}() argument {_si + 1}: expected {want}, got {got}",
                     e.pos,
                 )
+            _si = _si + 1
         e.inferred_type = ret
 
     def _check_ffi_call(
@@ -4649,22 +4651,26 @@ class SemaAnalyzer:
                 f"{label}() takes {len(fn.arg_types)} argument(s), got {len(args)}",
                 pos,
             )
-        for i, (a, want) in enumerate(zip(args, fn.arg_types)):
+        _ffi_i = 0
+        for a, want in zip(args, fn.arg_types):
             self._check_expr(a, scope)
             got = A.expr_type(a)
             if got == want:
+                _ffi_i = _ffi_i + 1
                 continue
             # Allow int -> float promotion.
             if want == "float" and got == "int":
+                _ffi_i = _ffi_i + 1
                 continue
             # "list_buf": pass a list[int]'s underlying data buffer as a raw
             # pointer (see _gen_ffi_call) -- used for FFI calls that fill a
             # fixed-size struct (e.g. `stat`) the caller reads back as int64
             # words, since string buffers can't survive embedded NUL bytes.
             if want == "list_buf" and got == "list" and getattr(a, "list_el_type", "int") == "int":
+                _ffi_i = _ffi_i + 1
                 continue
             raise SemaError(
-                f"{label}() argument {i + 1}: expected {want}, got {got}",
+                f"{label}() argument {_ffi_i + 1}: expected {want}, got {got}",
                 pos,
             )
 

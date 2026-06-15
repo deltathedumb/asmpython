@@ -57,12 +57,32 @@ BUILTIN_EXC_PARENTS: dict[str, str | None] = {
     "FileNotFoundError": "OSError",
     "StopIteration": "Exception",
 }
-# Fixed ids 1..N in declaration order above (0 is reserved for EXC_ANY).
+# Fixed ids 1..N in the same order as BUILTIN_EXC_PARENTS (0 reserved for EXC_ANY).
+# Written as a literal so _merge_import_bindings can materialize it as a global.
 BUILTIN_EXC_IDS: dict[str, int] = {
-    name: i + 1 for i, name in enumerate(BUILTIN_EXC_PARENTS)
+    "BaseException": 1,
+    "Exception": 2,
+    "SystemExit": 3,
+    "KeyboardInterrupt": 4,
+    "ArithmeticError": 5,
+    "ZeroDivisionError": 6,
+    "OverflowError": 7,
+    "LookupError": 8,
+    "IndexError": 9,
+    "KeyError": 10,
+    "NameError": 11,
+    "AttributeError": 12,
+    "TypeError": 13,
+    "ValueError": 14,
+    "RuntimeError": 15,
+    "NotImplementedError": 16,
+    "AssertionError": 17,
+    "ImportError": 18,
+    "OSError": 19,
+    "FileNotFoundError": 20,
+    "StopIteration": 21,
+    "IOError": 19,  # alias for OSError (same id)
 }
-# `IOError is OSError` in CPython 3 -- same type, same id.
-BUILTIN_EXC_IDS["IOError"] = BUILTIN_EXC_IDS["OSError"]
 
 
 # --- Function metadata --------------------------------------------------------
@@ -223,11 +243,11 @@ class Codegen:
         # deriving (transitively) from a builtin exception get the next ids,
         # assigned in declaration order so output is deterministic.
         self._exc_ids: dict[str, int] = dict(BUILTIN_EXC_IDS)
-        self._exc_id_parent: dict[int, int | None] = {}
+        self._exc_id_parent: dict[str, int] = {}  # str(child_id) -> parent_id or -1
         for name, parent_name in BUILTIN_EXC_PARENTS.items():
-            self._exc_id_parent[BUILTIN_EXC_IDS[name]] = (
-                BUILTIN_EXC_IDS[parent_name] if parent_name else None
-            )
+            child_id = BUILTIN_EXC_IDS[name]
+            parent_id = BUILTIN_EXC_IDS[parent_name] if parent_name else -1
+            self._exc_id_parent[str(child_id)] = parent_id
         self._exc_next_id = max(BUILTIN_EXC_IDS.values()) + 1
         for cls in mod.classes:
             if self._cg_is_exception_class(cls.name):
@@ -469,7 +489,11 @@ class Codegen:
         (see self.class_ids) to a "<class '__main__.Name'>" string, so
         type(instance) can index into it by runtime class id."""
         if self.type_name_table is None:
-            table = [""] * len(self.class_ids)
+            table = []
+            _tnt_i = 0
+            while _tnt_i < len(self.class_ids):
+                table.append("")
+                _tnt_i += 1
             for name, cid in self.class_ids.items():
                 label, _ = self.intern_string(f"<class '__main__.{name}'>")
                 table[cid] = label
@@ -697,6 +721,16 @@ class Codegen:
         top = A.FuncDef(name=self.label_main, params=[], body=list(self.mod.body))
         # Reuse the function emitter, but with custom prologue/epilogue.
         info = self._collect_locals(top)
+        # Class-variable default expressions are emitted by _emit_init_class_vars
+        # using the entry `info`, but _collect_locals only walks mod.body.
+        # Walk the defaults here so their scratch slots get allocated.
+        for _cv_label, _cv_expr in self.class_var_defaults:
+            self._cl_walk_expr(info, _cv_expr)
+        # Re-align frame after extra slots.
+        _frame2 = -info.offset
+        if _frame2 % 16:
+            _frame2 += 16 - (_frame2 % 16)
+        info.frame_size = _frame2
         self.funcs[self.label_main] = info
         # Scratch globals for sys.argv: emit_entry_prologue stashes the
         # incoming argc/argv here (or zeroes them on targets with no argv),
@@ -1704,9 +1738,11 @@ class Codegen:
             # read xs[0..n_before-1], plain targets after the star read from
             # the end (xs[len-n_after..len-1]), and the star target becomes
             # _runtime_list_slice(xs, n_before, len - n_after).
-            star_i = next(
-                i for i, t in enumerate(stmt.targets) if isinstance(t, A.StarTarget)
-            )
+            star_i = -1
+            for _si, _st in enumerate(stmt.targets):
+                if isinstance(_st, A.StarTarget):
+                    star_i = _si
+                    break
             n_before = star_i
             n_after = len(stmt.targets) - star_i - 1
             ptr_slot = info.locals_[f"__tupunpack_{id(stmt)}"]
@@ -2388,7 +2424,10 @@ class Codegen:
         # a bare `except:` (empty types) always matches and falls straight
         # into its body.
         check_lbls = [self.fresh("try_check") for _ in range(len(handlers) + 1)]
-        for i, (types, bind_name, hbody) in enumerate(handlers):
+        _hi = 0
+        for types, bind_name, hbody in handlers:
+            i = _hi
+            _hi = _hi + 1
             self.label(check_lbls[i])
             if types:
                 run_lbl = self.fresh("try_run")
@@ -3006,9 +3045,11 @@ class Codegen:
         for the caller to detect via `_split_fmt_width` and handle via
         `_emit_group_digits_zeropad` instead of `_emit_group_digits`."""
         if "," in spec:
-            sep, rest = ",", spec.replace(",", "", 1)
+            _idx = spec.find(",")
+            sep, rest = ",", spec[:_idx] + spec[_idx + 1:]
         elif "_" in spec:
-            sep, rest = "_", spec.replace("_", "", 1)
+            _idx2 = spec.find("_")
+            sep, rest = "_", spec[:_idx2] + spec[_idx2 + 1:]
         else:
             return None, spec
         return sep, rest
@@ -7977,7 +8018,11 @@ class Codegen:
                 self.emitf(f"lea rax, [{label}]")
             else:
                 if isinstance(val, str):
-                    arg = next(a for name, a in e.kwargs if name == val)
+                    arg = None
+                    for _kw_name, _kw_arg in e.kwargs:
+                        if _kw_name == val:
+                            arg = _kw_arg
+                            break
                 else:
                     arg = e.args[val]  # type: ignore[index]
                 arg.fmt_spec = spec  # type: ignore[attr-defined]
@@ -7988,7 +8033,8 @@ class Codegen:
             label, _ = self.intern_string("")
             self.emitf(f"lea rax, [{label}]")
             return
-        emit_piece(*pieces[0])
+        _p0 = pieces[0]
+        emit_piece(_p0[0], _p0[1], _p0[2], _p0[3])
         self.emitf(f"mov [rbp{acc_slot:+d}], rax")
         for kind, val, spec, conv in pieces[1:]:
             emit_piece(kind, val, spec, conv)
@@ -8866,7 +8912,7 @@ class Codegen:
         args = e.right.elems if isinstance(e.right, A.TupleLit) else [e.right]
         arg_iter = iter(args)
 
-        def emit_piece(piece: tuple) -> None:
+        def emit_pct_piece(piece: tuple) -> None:
             if piece[0] == "lit":
                 label, _ = self.intern_string(piece[1])
                 self.emitf(f"lea rax, [{label}]")
@@ -8902,10 +8948,10 @@ class Codegen:
             label, _ = self.intern_string("")
             self.emitf(f"lea rax, [{label}]")
             return
-        emit_piece(pieces[0])
+        emit_pct_piece(pieces[0])
         self.emitf(f"mov [rbp{acc_slot:+d}], rax")
         for piece in pieces[1:]:
-            emit_piece(piece)
+            emit_pct_piece(piece)
             self.emitf(
                 "mov rbx, rax",
                 f"mov rax, [rbp{acc_slot:+d}]",
@@ -9503,13 +9549,22 @@ class Codegen:
         # All evaluation done — no more `call`s until the real one, so it's safe
         # to adjust rsp and load the argument registers.
         if arg_types is None:
-            arg_types = ["int"] * len(offs)
+            arg_types = []
+            _at_i = 0
+            while _at_i < len(offs):
+                arg_types.append("int")
+                _at_i = _at_i + 1
         # Per-position types: positions [0, start_reg) are the receiver/cls
         # slot (always a pointer, "int"), followed by the real arguments.
         # _assign_arg_regs maps each position to its ABI register (or None
         # for stack-passed), mirroring how _spill_incoming_args places the
         # callee's params.
-        assigns = self._assign_arg_regs(["int"] * start_reg + list(arg_types))
+        _reg_types: list[str] = []
+        _rr = 0
+        while _rr < start_reg:
+            _reg_types.append("int")
+            _rr = _rr + 1
+        assigns = self._assign_arg_regs(_reg_types + list(arg_types))
 
         stack_offs: list = []
         reg_loads: list = []  # (reg, is_xmm, off)
@@ -10482,31 +10537,40 @@ class Codegen:
             self._exc_ids[name] = tid
             sig = self.mod.classes_sig.get(name)
             parent = sig.parent if sig is not None else None
-            self._exc_id_parent[tid] = self._exc_type_id(parent) if parent else None
+            parent_id = self._exc_type_id(parent) if parent else -1
+            self._exc_id_parent[str(tid)] = parent_id
         return self._exc_ids[name]
 
     def _exc_is_a(self, child_id: int, ancestor_id: int) -> bool:
         """True if `child_id` is `ancestor_id` or a (transitive) subtype of
         it, per the parent links recorded in `self._exc_id_parent`."""
-        cur: int | None = child_id
-        seen: set[int] = set()
-        while cur is not None and cur not in seen:
+        cur: int = child_id
+        seen: list[int] = []
+        while cur >= 0 and cur not in seen:
             if cur == ancestor_id:
                 return True
-            seen.add(cur)
-            cur = self._exc_id_parent.get(cur)
+            seen.append(cur)
+            cur = self._exc_id_parent.get(str(cur), -1)
         return False
 
-    def _exc_matching_ids(self, types: list[str]) -> set[int]:
+    def _exc_matching_ids(self, types: list[str]) -> list[int]:
         """The full set of runtime type ids an `except (T1, T2, ...):` clause
         should catch: each Ti, every (currently known) subtype of any Ti, and
         EXC_ANY (untyped raises always match a typed `except`, for back-compat
         with code that `raise`s bare strings)."""
-        ancestors = {self._exc_type_id(t) for t in types}
-        matches = {EXC_ANY} | ancestors
-        for tid in self._exc_id_parent:
-            if any(self._exc_is_a(tid, a) for a in ancestors):
-                matches.add(tid)
+        ancestors: list[int] = []
+        for t in types:
+            ancestors.append(self._exc_type_id(t))
+        matches: list[int] = [EXC_ANY]
+        for a in ancestors:
+            if a not in matches:
+                matches.append(a)
+        for tid_str in self._exc_id_parent:
+            tid = int(tid_str)
+            for a in ancestors:
+                if self._exc_is_a(tid, a) and tid not in matches:
+                    matches.append(tid)
+                    break
         return matches
 
     def _exc_raise_type_id(self, value: "A.Expr") -> int:

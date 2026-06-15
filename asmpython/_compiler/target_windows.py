@@ -1126,8 +1126,7 @@ class WindowsCodegen(Codegen):
 
             for sym in self._HW_STUBS:
                 if sym in self.ffi_externs and sym not in (
-                        ("_hw_rdtsc", "_hw_cpuid", "_hw_rdrand")
-                        + self._HW_CONSOLE_SYMS):
+                        "_hw_rdtsc", "_hw_cpuid", "_hw_rdrand") and sym not in self._HW_CONSOLE_SYMS:
                     self.label(sym)
                     self.emitf("xor rax, rax", "ret")
 
