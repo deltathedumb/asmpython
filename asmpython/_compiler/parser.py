@@ -765,6 +765,19 @@ class Parser:
         self._expect("NEWLINE")
         return A.ExprStmt(expr=expr, pos=pos)
 
+    @staticmethod
+    def _exc_type_name(e) -> str | None:
+        """The exception class name for an `except` clause's type expression:
+        a bare name (`ValueError`) or a dotted attribute (`subprocess.
+        CalledProcessError`, `pkg.mod.MyError`) -- in both cases asmpython's
+        flat whole-program class namespace only cares about the final
+        component. Returns `None` for any other expression shape."""
+        if isinstance(e, A.Name):
+            return e.name
+        if isinstance(e, A.Attr):
+            return e.name
+        return None
+
     def _parse_try(self) -> A.Try:
         kw = self._expect("KEYWORD", "try")
         self._expect("OP", ":")
@@ -778,15 +791,17 @@ class Parser:
             types: list[str] = []
             if not self._check("OP", ":") and not self._check("KEYWORD", "as"):
                 type_expr = self._parse_expr()
-                if isinstance(type_expr, A.Name):
-                    types = [type_expr.name]
+                name = self._exc_type_name(type_expr)
+                if name is not None:
+                    types = [name]
                 elif isinstance(type_expr, A.TupleLit) and all(
-                    isinstance(e, A.Name) for e in type_expr.elems
+                    self._exc_type_name(e) is not None for e in type_expr.elems
                 ):
-                    types = [e.name for e in type_expr.elems]  # type: ignore[union-attr]
+                    types = [self._exc_type_name(e) for e in type_expr.elems]  # type: ignore[misc]
                 else:
                     raise ParseError(
-                        "'except' type must be a name or a tuple of names",
+                        "'except' type must be a name, a dotted name, or a "
+                        "tuple of names",
                         tok.pos,
                     )
             bind_name = None

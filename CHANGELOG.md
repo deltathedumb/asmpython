@@ -371,6 +371,16 @@ output rather than silent miscompilations.
 
 ### Fixed
 
+- **`except module.ExceptionClass as e:` (a dotted exception type) now
+  parses and matches correctly**, instead of "'except' type must be a name
+  or a tuple of names". asmpython's whole-program merge keeps a single flat
+  class namespace, so `_parse_try` now accepts an `A.Attr` (dotted name)
+  expression — alone or inside an `except (a.B, C) as e:` tuple — and uses
+  just the final component (`ExceptionClass`/`B`) as the match name, the
+  same name the class is registered under regardless of which module
+  defines it. New `tests/cases/304_dotted_except_type.py`
+  (`except subprocess.CalledProcessError as e:` and a mixed
+  `(subprocess.CalledProcessError, ValueError)` tuple).
 - **Quoted forward-reference annotations (PEP 484), e.g. `def parent(self) ->
   "Path": ...` or `def f() -> "list[int]": ...`, now resolve to the real
   type instead of degrading to unconstrained `any`.** `_parse_annot_unit`
