@@ -382,6 +382,7 @@ Booted successfully.</code></pre>
     <tr><td><code>--onedir</code></td><td>Bundle directory: exe + shared runtime library</td></tr>
     <tr><td><code>--type executable</code></td><td>Produce an executable binary (default)</td></tr>
     <tr><td><code>--type library</code></td><td>Produce a shared library (<code>.dll</code> / <code>.so</code>)</td></tr>
+    <tr><td><code>--icon &lt;path.ico&gt;</code></td><td>Embed <code>path.ico</code> as the <code>.exe</code>'s icon resource (<code>--target windows</code> only; uses <code>windres</code> from the gcc toolchain)</td></tr>
   </table>
 
   <h3>Diagnostics</h3>
@@ -1019,6 +1020,14 @@ close(fd)</code></pre>
     <tr><td><code>destroy_window(win)</code></td><td></td></tr>
     <tr><td><code>create_renderer(win, index, flags)</code></td><td>Returns renderer handle (int)</td></tr>
     <tr><td><code>destroy_renderer(ren)</code></td><td></td></tr>
+  </table>
+
+  <h4>Surfaces &amp; window icons</h4>
+  <table>
+    <tr><th>Function</th><th>Description</th></tr>
+    <tr><td><code>load_bmp(path)</code></td><td>SDL_LoadBMP — returns a surface handle (int), or 0 on failure. BMP is the only format loadable without SDL_image; convert icons with e.g. ImageMagick (<code>convert icon.png icon.bmp</code>).</td></tr>
+    <tr><td><code>set_window_icon(win, surface)</code></td><td>SDL_SetWindowIcon — sets the titlebar/taskbar icon for <code>win</code> from a surface returned by <code>load_bmp</code>.</td></tr>
+    <tr><td><code>free_surface(surface)</code></td><td>SDL_FreeSurface — release a surface returned by <code>load_bmp</code>.</td></tr>
   </table>
 
   <h4>Drawing</h4>

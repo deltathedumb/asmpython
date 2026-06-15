@@ -34,6 +34,18 @@ BINDINGS: dict = {
     "destroy_window":   Func(arg_types=("int",),                   ret_type="int", c_name="SDL_DestroyWindow"),
     # set_window_title(handle, title)
     "set_window_title": Func(arg_types=("int", "str"),              ret_type="int", c_name="SDL_SetWindowTitle"),
+    # set_window_icon(window, surface) — give the window's titlebar / taskbar
+    # entry a custom icon (SDL_SetWindowIcon). `surface` is a handle returned
+    # by load_bmp().
+    "set_window_icon":  Func(arg_types=("int","int"),               ret_type="int", c_name="SDL_SetWindowIcon"),
+
+    # ---- Surfaces (for window icons etc.) ------------------------------------
+    # load_bmp(path) -> surface handle int, or 0 on failure. SDL2 has no
+    # built-in loader for arbitrary image formats without SDL_image, but BMP
+    # loading is always available — convert your icon to .bmp for set_window_icon.
+    "load_bmp":         Func(arg_types=("str",),                    ret_type="int", c_name="_gui_load_bmp"),
+    # free_surface(surface) — release a surface returned by load_bmp()
+    "free_surface":     Func(arg_types=("int",),                    ret_type="int", c_name="SDL_FreeSurface"),
 
     # ---- Renderer -----------------------------------------------------------
     # create_renderer(window, index, flags) -> renderer handle

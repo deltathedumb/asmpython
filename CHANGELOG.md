@@ -11,6 +11,35 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **`--icon <path.ico>` CLI flag** (`--target windows` only): embeds an
+  `.ico` file as the executable's Windows icon resource via `windres` from
+  the gcc toolchain, so the built `.exe` shows a custom icon in Explorer and
+  the taskbar. A generated `.icon.rc`/`.icon.o` are compiled and linked
+  alongside the program's object file (and cleaned up unless `--keep` is
+  passed); non-Windows targets print a warning and proceed without
+  embedding. Verified via `objdump -h` showing a populated `.rsrc` section
+  in the output binary.
+
+- **`asmlib.gui` window-icon bindings**: `load_bmp(path)` (SDL_LoadBMP, via
+  an inline `SDL_RWFromFile`/`SDL_LoadBMP_RW` wrapper since `SDL_LoadBMP` is
+  a macro, not an exported symbol), `set_window_icon(win, surface)`
+  (SDL_SetWindowIcon), and `free_surface(surface)` (SDL_FreeSurface), for
+  both `--target linux` and `--target windows`.
+
+- **Fixed a pre-existing FFI codegen bug**: any `asmlib.gui` call with more
+  than 4 integer arguments (`create_window`, `set_draw_color`, `draw_line`,
+  `fill_rect`, `draw_rect`) crashed the compiler with `IndexError` on
+  `--target windows`, because Win64 has only 4 integer argument registers
+  and the old FFI dispatch indexed blindly into them. `_gen_ffi_call` now
+  uses the same `_assign_arg_regs`/shadow-space stack-argument machinery
+  already used for user-defined function calls, correctly spilling
+  positions 5+ to the stack on Windows (SysV's 6 integer registers cover all
+  current FFI signatures, so Linux was unaffected). As part of this fix,
+  `math.ldexp`'s Windows helper (`_math_ldexp`) was updated: the new caller
+  convention places `(float, int)` args as `xmm0=x, rdx=n` — already an
+  exact match for libc's `ldexp(double, int)` — so the old `mov rdx, rcx`
+  shuffle (written for the previous, non-positional convention) is removed.
+
 - **New `base64` module**: `b64encode`/`b64decode`, `standard_b64encode`/
   `standard_b64decode`, `urlsafe_b64encode`/`urlsafe_b64decode`,
   `b32encode`/`b32decode`, `b16encode`/`b16decode` (RFC 4648), all operating
@@ -371,6 +400,47 @@ output rather than silent miscompilations.
 
 ### Fixed
 
+- **Division/modulo by zero now raises `ZeroDivisionError("division by zero")`**
+  (matching CPython 3.13+'s unified message) instead of faulting the CPU.
+  Previously `idiv` with a zero divisor executed unconditionally for `//`/`%`
+  on ints (codegen's `_emit_binop_inline` and the `_runtime_divmod` helper
+  used by `divmod()`), producing a `#DE` (divide error) — on the hosted
+  targets this is a SIGFPE/crash, and on `--target freestanding` (no IDT
+  installed) it cascades into a triple fault with no diagnostic at all. Both
+  sites now check the divisor and raise via `_runtime_raise` first. Float
+  `/`, `//` and `%` had a related but different gap: SSE division by zero
+  doesn't fault (it produces `inf`/`nan`), so `5.0 / 0.0` silently returned
+  `inf` instead of raising — new `_emit_check_float_nonzero_divisor` (called
+  from `_emit_binop_inline_float`) checks the RHS against `0.0` via `ucomisd`
+  and raises `ZeroDivisionError` first (NaN divisors are left alone, matching
+  IEEE-754/Python semantics for `nan` operands). `_gen_binop_float` — a
+  separate, duplicated float-binop implementation used for `BinOp`
+  expressions — was refactored to call the shared `_emit_binop_inline_float`
+  so both paths get the fix. New `tests/cases/305_zero_division.py`
+  (CPython-verified: int `//`/`%`, float `/`/`//`/`%`, and `divmod()`, all
+  caught as `ZeroDivisionError` with message `"division by zero"`).
+
+- **`--target freestanding`: unhandled exceptions and panics now show a
+  flashing red error screen and warm-reboot after 5 seconds**, instead of
+  printing to the normal-color VGA text and halting forever (`hlt`/`jmp`
+  spin loop, requiring a hard power cycle). New `_emit_set_error_color` hook
+  on `Codegen` (no-op on hosted targets) is called from `_runtime_raise`'s
+  unhandled-exception path; the freestanding override sets `_vga_attr` to
+  `0x8C` (blinking bright red on black). `_runtime_panic` was rewritten:
+  it sets the red/blink attribute, prints "KERNEL PANIC" only if
+  `_runtime_exc_msg` is still unset (i.e. a direct panic from OOM or
+  `os._exit`/`sys.exit`, not an unhandled `raise`), then prints "Rebooting
+  in 5 seconds...", calls a new best-effort `_runtime_delay_5s` busy-wait,
+  and jumps to a new `_runtime_reboot` (8042 keyboard-controller pulse-reset).
+  Also fixed a **pre-existing freestanding bug where any floating-point
+  instruction (`movsd`/`addsd`/`divsd`/...) triple-faulted**: kernel init
+  enabled `CR4.PAE` but never set `CR4.OSFXSR`/`CR4.OSXMMEXCPT`, so SSE
+  instructions raised `#UD`, which (with no IDT installed) cascaded straight
+  to a triple fault. Verified under QEMU (`-serial stdio -no-reboot`): basic
+  float arithmetic, an unhandled `raise`, and `1 // 0`/`1.0 / 0.0` all now
+  print the expected message followed by the red-screen reboot countdown,
+  while a `try`/`except ZeroDivisionError` around the same division still
+  prints "caught"/the message/"after" normally (handler path unaffected).
 - **`except module.ExceptionClass as e:` (a dotted exception type) now
   parses and matches correctly**, instead of "'except' type must be a name
   or a tuple of names". asmpython's whole-program merge keeps a single flat

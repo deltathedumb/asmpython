@@ -5056,6 +5056,14 @@ class Codegen:
         # floor semantics (mirrors the adjustment in _emit_binop_inline).
         self.label("_runtime_divmod")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+        self.emitf(
+            "test rbx, rbx",
+            "jnz ._dm_nonzero",
+            "lea rax, [rel _runtime_zerodiv_msg]",
+            f"mov rbx, {self._exc_type_id('ZeroDivisionError')}",
+            "call _runtime_raise",
+        )
+        self.label("._dm_nonzero")
         self.emitf("cqo", "idiv rbx")
         self.emitf(
             "test rdx, rdx",
@@ -5994,6 +6002,9 @@ class Codegen:
 
         self.emit("section .rodata")
         self.emit('_runtime_str_oob_msg: db "string index out of range",0')
+        # CPython (3.13+) uses the same message "division by zero" for all
+        # of int //, int %, float /, float //, float % and divmod().
+        self.emit('_runtime_zerodiv_msg: db "division by zero",0')
         self.emit("_runtime_nl_str: db 10,0")  # "\n" for splitlines
         self.emit("_runtime_empty_str: db 0")  # "" for partition's not-found arms
         self.emit('_runtime_lbrack_str: db "[",0')
@@ -7121,8 +7132,9 @@ class Codegen:
             "push rbp",
             "mov rbp, rsp",
             "sub rsp, 32",
-            "lea rax, [rel _runtime_unhandled_prefix]",
         )
+        self._emit_set_error_color()
+        self.emitf("lea rax, [rel _runtime_unhandled_prefix]")
         self._emit_print_str_ptr_no_newline()
         self.emitf("mov rax, [rel _runtime_exc_msg]")
         self._emit_print_str_ptr_no_newline()
@@ -7139,6 +7151,12 @@ class Codegen:
         """rax = nul-terminated message ptr -> print and exit(1)."""
         self._emit_print_str_ptr_no_newline()
         self._emit_exit_one()
+
+    def _emit_set_error_color(self) -> None:
+        """Hook called just before an unhandled exception's message is
+        printed, so text-mode targets can switch to an attention-grabbing
+        color. No-op for targets without a text display."""
+        pass
 
     def _emit_exit_one(self) -> None:
         raise NotImplementedError
@@ -9002,32 +9020,7 @@ class Codegen:
         self.emitf("sub rsp, 8", "movsd [rsp], xmm0")
         self._gen_expr_as_float(e.right, info, rt)
         self.emitf("movsd xmm1, xmm0", "movsd xmm0, [rsp]", "add rsp, 8")
-        op = e.op
-        if op == "+":
-            self.emitf("addsd xmm0, xmm1")
-        elif op == "-":
-            self.emitf("subsd xmm0, xmm1")
-        elif op == "*":
-            self.emitf("mulsd xmm0, xmm1")
-        elif op in ("//", "/"):
-            # Both Python's / and // on floats give a float; for // Python
-            # does a floor. We use a true div here for /, and divsd + floor
-            # for //.
-            self.emitf("divsd xmm0, xmm1")
-            if op == "//":
-                # Floor via roundsd; SSE4.1. Mode 1 = round toward -inf.
-                self.emitf("roundsd xmm0, xmm0, 1")
-        elif op == "%":
-            # No native sd-mod; use libc fmod(xmm0, xmm1). System V/Win64:
-            # fmod's first arg is xmm0, second is xmm1 — already in place.
-            # On Windows we need shadow space + 16-aligned rsp.
-            self._emit_call_libc_double_double("fmod")
-        elif op == "**":
-            # No native exponentiation; use libc pow(xmm0, xmm1) — same
-            # calling convention as fmod above.
-            self._emit_call_libc_double_double("pow")
-        else:
-            raise NotImplementedError(f"float binop {op!r}")
+        self._emit_binop_inline_float(e.op)
 
     def _gen_expr_as_float(self, expr, info: FuncInfo, ty: str) -> None:
         """Evaluate expr; ensure result is in xmm0 as a float, promoting if needed."""
@@ -9073,6 +9066,27 @@ class Codegen:
         self.gen_expr(expr, info)
         self.emitf("test rax, rax", f"jz {false_target}")
 
+    def _emit_check_float_nonzero_divisor(self) -> None:
+        """Raise ZeroDivisionError("division by zero") if xmm1 == 0.0.
+
+        SSE division by zero is masked by default (it produces inf/nan, not
+        a fault), but Python raises ZeroDivisionError for `/`, `//` and `%`
+        with a zero float RHS. NaN divisors are left alone (ucomisd reports
+        them as unordered, which we treat as "not zero").
+        """
+        ok = self.fresh("fdiv_nonzero")
+        zero_lbl = self.intern_float(0.0)
+        self.emitf(
+            f"movsd xmm2, [{zero_lbl}]",
+            "ucomisd xmm1, xmm2",
+            f"jp {ok}",  # unordered (NaN divisor): not zero, proceed
+            f"jne {ok}",
+            "lea rax, [rel _runtime_zerodiv_msg]",
+            f"mov rbx, {self._exc_type_id('ZeroDivisionError')}",
+            "call _runtime_raise",
+        )
+        self.label(ok)
+
     def _emit_binop_inline_float(self, op: str) -> None:
         """xmm0 (LHS), xmm1 (RHS) -> xmm0 = LHS op RHS."""
         if op == "+":
@@ -9081,11 +9095,15 @@ class Codegen:
             self.emitf("subsd xmm0, xmm1")
         elif op == "*":
             self.emitf("mulsd xmm0, xmm1")
-        elif op == "/" or op == "//":
+        elif op == "/":
+            self._emit_check_float_nonzero_divisor()
             self.emitf("divsd xmm0, xmm1")
-            if op == "//":
-                self.emitf("roundsd xmm0, xmm0, 1")
+        elif op == "//":
+            self._emit_check_float_nonzero_divisor()
+            self.emitf("divsd xmm0, xmm1")
+            self.emitf("roundsd xmm0, xmm0, 1")
         elif op == "%":
+            self._emit_check_float_nonzero_divisor()
             self._emit_call_libc_double_double("fmod")
         elif op == "**":
             self._emit_call_libc_double_double("pow")
@@ -9101,6 +9119,18 @@ class Codegen:
         elif op == "*":
             self.emitf("imul rax, rbx")
         elif op in ("//", "%"):
+            # A zero RHS would fault IDIV (#DE), which on freestanding has no
+            # handler and triple-faults. Raise ZeroDivisionError instead,
+            # matching CPython's "division by zero".
+            nonzero = self.fresh("idiv_nonzero")
+            self.emitf(
+                "test rbx, rbx",
+                f"jnz {nonzero}",
+                "lea rax, [rel _runtime_zerodiv_msg]",
+                f"mov rbx, {self._exc_type_id('ZeroDivisionError')}",
+                "call _runtime_raise",
+            )
+            self.label(nonzero)
             # IDIV uses RDX:RAX / RBX -> RAX (quot), RDX (rem). CQO sign-extends.
             # IDIV truncates toward zero, but Python's // and % floor toward
             # -inf, so when the (nonzero) remainder's sign differs from the
@@ -10972,32 +11002,52 @@ class Codegen:
                 slot = info.locals_[f"__ffi_arg_{id(fn)}_{i}"]
                 self.emitf(f"mov [rbp{slot:+d}], rax")
                 slot_offs.append(slot)
-        # Now load each arg into the ABI register slot.
-        int_regs = self._int_arg_regs()
-        # Per System V we pass each float in a distinct XMM register. We do
-        # the same on Windows (it also uses xmm0..xmm3 for the first 4 args).
+        # Now load each arg into the ABI register slot, or onto the stack for
+        # positions beyond the register count (Win64: 4 int + 8 xmm regs,
+        # positionally assigned; SysV: 6 int + 8 xmm regs, assigned
+        # independently per type — all our FFI signatures fit in SysV's
+        # registers, but a >4-int-arg call like gui.create_window overflows
+        # Win64's 4 integer argument registers).
+        assigns = self._assign_arg_regs(list(fn.arg_types))
+        stack_positions = [i for i, a in enumerate(assigns) if a is None]
+        cleanup = 0
+        if stack_positions:
+            shadow = self._caller_shadow_space()
+            area = shadow + 8 * len(stack_positions)
+            if area % 16:
+                area += 16 - (area % 16)
+            cleanup = area
+            self.emitf(f"sub rsp, {area}")
+            for k, i in enumerate(stack_positions):
+                self.emitf(
+                    f"mov rax, [rbp{slot_offs[i]:+d}]",
+                    f"mov [rsp+{shadow + 8 * k}], rax",
+                )
         float_idx = 0
-        int_idx = 0
-        for i, (want, slot) in enumerate(zip(fn.arg_types, slot_offs)):
-            if want == "float":
-                self.emitf(f"movsd xmm{float_idx}, [rbp{slot:+d}]")
+        for i, slot in enumerate(slot_offs):
+            assign = assigns[i]
+            if assign is None:
+                continue
+            reg, is_xmm = assign
+            if is_xmm:
+                self.emitf(f"movsd {reg}, [rbp{slot:+d}]")
                 float_idx += 1
                 # Windows: variadic functions also need the value mirrored
                 # into the integer register; non-variadic functions don't
                 # care. We mirror unconditionally on Windows because the
                 # cost is one mov and the simplicity is worth it.
-                if self._needs_xmm_mirror_to_int():
+                if self._needs_xmm_mirror_to_int() and i < len(self._int_arg_regs()):
                     int_reg = self._int_arg_regs()[i]
-                    self.emitf(f"movq {int_reg}, xmm{float_idx - 1}")
+                    self.emitf(f"movq {int_reg}, {reg}")
             else:
-                reg = int_regs[int_idx]
-                int_idx += 1
                 self.emitf(f"mov {reg}, [rbp{slot:+d}]")
         # System V variadic ABI requires AL = number of xmm args used.
         # Non-variadic libc functions ignore AL. Setting it is harmless.
         if self._sysv_needs_al_count():
             self.emitf(f"mov al, {float_idx}")
         self.emit_call(self._platform_c_name(fn))
+        if cleanup:
+            self.emitf(f"add rsp, {cleanup}")
         if getattr(fn, "ret_conv", None) == "f2i":
             # The C function returns a double in xmm0 but asmpython's
             # ret_type is "int" (e.g. trunc/floor/ceil, which CPython's

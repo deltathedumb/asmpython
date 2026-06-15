@@ -616,6 +616,7 @@ class WindowsCodegen(Codegen):
         "_gui_fill_rect", "_gui_draw_rect", "_gui_poll_event",
         "_gui_wait_event", "_gui_key_scancode",
         "_gui_mouse_x", "_gui_mouse_y", "_gui_mouse_button",
+        "_gui_load_bmp",
     )
     _MATH_SYMS = (
         "_math_isnan", "_math_isinf", "_math_isfinite",
@@ -826,16 +827,14 @@ class WindowsCodegen(Codegen):
                 self.emitf("lea rdx, [rbp-8]", "call frexp")
                 self.emitf("movsxd rax, dword [rbp-8]", "leave", "ret")
 
-            # _math_ldexp(xmm0=x, rdx=n) -> xmm0  (Windows: slot1=rdx for the int)
-            # _gen_ffi_call puts: float at xmm0 (mirrored to rcx), int at rcx (int_idx=0)
-            # But we need the int in rdx for ldexp(double, int) on Windows.
-            # So we move from rcx to rdx before calling ldexp.
+            # _math_ldexp(xmm0=x, rdx=n) -> xmm0  (Windows: slot1=rdx for the
+            # int, per the positional Win64 ABI _gen_ffi_call now follows) --
+            # already an exact match for ldexp(double, int), so just forward.
             if "_math_ldexp" in self.ffi_externs:
                 self.emit("extern ldexp")
                 self.label("_math_ldexp")
-                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
-                # xmm0 has x; rcx has the int n (put there by _gen_ffi_call's int reg 0)
-                self.emitf("mov rdx, rcx", "call ldexp", "leave", "ret")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("call ldexp", "leave", "ret")
 
             # _math_isqrt(rcx=n) -> rax: integer square root (floor(sqrt(n)))
             if "_math_isqrt" in self.ffi_externs:
@@ -1285,6 +1284,27 @@ class WindowsCodegen(Codegen):
             self.emit("section .bss")
             self.emit("_gui_event_buf: resb 56")
             self.emit("section .text")
+
+            # _gui_load_bmp(rcx=path) -> rax (SDL_Surface* handle, or 0 on failure)
+            # SDL_LoadBMP is a macro for SDL_LoadBMP_RW(SDL_RWFromFile(path, "rb"), 1).
+            if "_gui_load_bmp" in self.ffi_externs:
+                self.emit("extern SDL_RWFromFile")
+                self.emit("extern SDL_LoadBMP_RW")
+                self.emit("section .rdata")
+                self.emit('_gui_bmp_mode_rb: db "rb",0')
+                self.emit("section .text")
+                self.label("_gui_load_bmp")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("mov [rbp-8], rcx",
+                           "lea rdx, [rel _gui_bmp_mode_rb]",
+                           "mov rcx, [rbp-8]",
+                           "call SDL_RWFromFile",
+                           "test rax, rax", "jz ._glb_fail",
+                           "mov rcx, rax", "mov rdx, 1",
+                           "call SDL_LoadBMP_RW",
+                           "leave", "ret")
+                self.label("._glb_fail")
+                self.emitf("xor rax, rax", "leave", "ret")
 
             if "_gui_fill_rect" in self.ffi_externs:
                 self.label("_gui_fill_rect")
