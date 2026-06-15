@@ -385,7 +385,7 @@ Booted successfully.</code></pre>
       <tr><td><code>--onedir</code></td><td>Bundle directory: exe + shared runtime library</td></tr>
       <tr><td><code>--type executable</code></td><td>Produce an executable binary (default)</td></tr>
       <tr><td><code>--type library</code></td><td>Produce a shared library (<code>.dll</code>/<code>.so</code>)</td></tr>
-      <tr><td><code>--icon &lt;path.ico&gt;</code></td><td>Embed icon as the <code>.exe</code>'s resource (Windows only; uses <code>windres</code>)</td></tr>
+      <tr><td><code>--icon &lt;path&gt;</code></td><td>Embed <code>.ico</code> or <code>.png</code> as the <code>.exe</code>'s icon resource (Windows only). PNG is auto-converted to ICO using Pillow if installed, or a minimal ICO wrapper otherwise.</td></tr>
       <tr><td><code>--nasm &lt;path&gt;</code></td><td>Override nasm executable path</td></tr>
       <tr><td><code>--gcc &lt;path&gt;</code></td><td>Override gcc executable path</td></tr>
     </tbody>
@@ -1065,8 +1065,9 @@ python -m asmpython install mylib.asmpkg</code></pre>
 <section id="target-windows">
   <h2>Windows target <a class="anc" href="#target-windows">#</a></h2>
   <pre><div class="lang">shell</div><code>python -m asmpython hello.py --target windows -o hello.exe
-python -m asmpython hello.py --target windows --icon app.ico</code></pre>
-  <p>Produces a PE64 executable linked against <code>msvcrt.dll</code>. MinGW <code>gcc</code> is used as the linker. The <code>--icon</code> flag embeds an <code>.ico</code> file as the executable's icon resource using <code>windres</code> from the MinGW toolchain.</p>
+python -m asmpython hello.py --target windows --icon app.ico
+python -m asmpython hello.py --target windows --icon icon.png</code></pre>
+  <p>Produces a PE64 executable linked against <code>msvcrt.dll</code>. MinGW <code>gcc</code> is used as the linker. The <code>--icon</code> flag embeds an <code>.ico</code> or <code>.png</code> file as the executable's icon resource using <code>windres</code>. PNG files are auto-converted to ICO using Pillow if installed, or a minimal ICO wrapper (Vista+ compatible) otherwise.</p>
 </section>
 
 <section id="target-linux">

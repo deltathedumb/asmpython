@@ -95,27 +95,87 @@ def _run(cmd: list[str], extra_path_dirs: list[str] | None = None) -> None:
         raise RuntimeError(f"{cmd[0]} exited {proc.returncode}")
 
 
+def _png_to_ico(png_path: Path, ico_path: Path) -> None:
+    """Convert a PNG file to an ICO file.
+
+    Tries Pillow first for high-quality multi-size ICO output.
+    Falls back to a minimal ICO wrapper that embeds the PNG data directly
+    (supported by Windows Vista+ and all modern browsers/toolchains).
+    """
+    try:
+        from PIL import Image  # type: ignore
+        img = Image.open(png_path).convert("RGBA")
+        sizes = [(s, s) for s in (16, 32, 48, 64, 128, 256) if s <= img.width and s <= img.height]
+        if not sizes:
+            sizes = [(img.width, img.height)]
+        img.save(str(ico_path), format="ICO", sizes=sizes)
+        return
+    except ImportError:
+        pass
+
+    # Pillow not available — embed PNG verbatim as a single ICO image.
+    # The ICO format allows PNG-compressed images in the image directory
+    # when the size is 256×256 (the PNG is stored as-is).
+    import struct as _struct
+    png_data = png_path.read_bytes()
+
+    # Parse PNG IHDR to get width/height
+    width = height = 0
+    if len(png_data) >= 24 and png_data[:8] == b'\x89PNG\r\n\x1a\n':
+        width  = _struct.unpack(">I", png_data[16:20])[0]
+        height = _struct.unpack(">I", png_data[20:24])[0]
+    if width == 0 or height == 0:
+        raise RuntimeError(f"--icon: could not parse PNG dimensions from {png_path}")
+
+    # ICO header: reserved(2) + type(2=ICO) + count(2)
+    ico_header = _struct.pack("<HHH", 0, 1, 1)
+    # Image directory entry: width(1) height(1) palette(1) reserved(1)
+    #   planes(2) bitcount(2) bytes_in_res(4) offset(4)
+    # Width/height = 0 means 256 in ICO format
+    w_byte = 0 if width >= 256 else width
+    h_byte = 0 if height >= 256 else height
+    entry_offset = 6 + 16  # header + one entry
+    dir_entry = _struct.pack(
+        "<BBBBHHII",
+        w_byte, h_byte,  # width, height
+        0,               # palette colors (0 = no palette)
+        0,               # reserved
+        1,               # color planes
+        32,              # bits per pixel
+        len(png_data),   # bytes in resource
+        entry_offset,    # offset from start of file
+    )
+    ico_path.write_bytes(ico_header + dir_entry + png_data)
+
+
 def _build_icon_resource(icon_path: Path, stem: Path, gcc: str) -> Path:
     """Compile `icon_path` into a COFF object containing a Windows ICON
     resource (resource id 1), suitable for linking straight into a PE
     executable or DLL so it shows a custom icon in Explorer/the taskbar.
 
-    Uses `windres` from the same toolchain directory as `gcc` (mingw-w64
-    ships both side by side).
+    Accepts .ico directly or .png (auto-converted to .ico). Uses `windres`
+    from the same toolchain directory as `gcc` (mingw-w64 ships both).
     """
     if not icon_path.is_file():
         raise RuntimeError(f"--icon file not found: {icon_path}")
-    if icon_path.suffix.lower() != ".ico":
+
+    actual_icon = icon_path
+    if icon_path.suffix.lower() == ".png":
+        converted = stem.with_suffix(".icon.ico")
+        _png_to_ico(icon_path, converted)
+        actual_icon = converted
+    elif icon_path.suffix.lower() != ".ico":
         print(
             f"asmpython: warning: --icon {icon_path} does not have a .ico "
             "extension; Windows expects the ICO format for executable icons",
             file=sys.stderr,
         )
+
     rc_path = stem.with_suffix(".icon.rc")
     res_obj = stem.with_suffix(".icon.o")
     # Forward slashes are accepted (and unambiguous) inside .rc string literals
     # on Windows, avoiding backslash-escaping headaches.
-    icon_posix = icon_path.resolve().as_posix()
+    icon_posix = actual_icon.resolve().as_posix()
     rc_path.write_text(f'1 ICON "{icon_posix}"\n', encoding="utf-8")
     windres_dir = Path(gcc).parent
     windres = "windres"

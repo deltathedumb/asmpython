@@ -48,8 +48,9 @@ Examples:
   Keep intermediate .o / .obj for inspection:
       asmpython hello.py --keep
 
-  Give the .exe a custom icon:
+  Give the .exe a custom icon (.ico or .png):
       asmpython hello.py --target windows --icon app.ico
+      asmpython hello.py --target windows --icon icon.png
 
 Toolchain auto-discovery searches, in order:
     1.  --nasm / --gcc CLI flags
@@ -152,8 +153,9 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         type=Path,
         default=None,
-        help="embed PATH (a .ico file) as the executable's icon resource "
-        "(--target windows only; uses windres from the gcc toolchain)",
+        help="embed PATH (.ico or .png) as the executable's icon resource "
+        "(--target windows only; PNG auto-converted to ICO via Pillow or "
+        "a built-in minimal ICO wrapper; uses windres from the gcc toolchain)",
     )
 
     # Bundling
