@@ -371,6 +371,18 @@ output rather than silent miscompilations.
 
 ### Fixed
 
+- **Quoted forward-reference annotations (PEP 484), e.g. `def parent(self) ->
+  "Path": ...` or `def f() -> "list[int]": ...`, now resolve to the real
+  type instead of degrading to unconstrained `any`.** `_parse_annot_unit`
+  used to consume a `STRING` annotation token and return `("any", None)`
+  outright ("re-lex isn't worth it"); it now re-lexes the string's contents
+  with a fresh `Lexer`/`Parser` and parses them as a normal annotation via
+  the new `_parse_annot_from_string` (falling back to `any` only if the
+  contents aren't a parseable type expression). This makes genuine
+  forward references to a class defined later in the same file resolve
+  correctly (sema's two-pass class registration already supports this for
+  bare names; only the quoting broke it). New
+  `tests/cases/303_quoted_forward_ref.py` (CPython-verified).
 - **`ospath.isdir`/`ospath.isfile` (and `pathlib.Path.is_dir`/`.is_file`) were
   wrong on Windows: `isdir` always returned `1` for any existing path
   (including regular files), so `isfile` always returned `0`.** Root cause:

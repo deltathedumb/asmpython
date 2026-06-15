@@ -476,11 +476,13 @@ class Parser:
         if t.kind == "KEYWORD" and t.value == "None":
             self._eat()
             return ("none", None)
-        # A quoted forward reference like `"Expr"` — re-lex isn't worth it;
-        # treat as unconstrained.
+        # A quoted forward reference like `"Expr"` (PEP 484): re-lex the
+        # string's contents as a type expression, e.g. `"Path"` -> `Path`,
+        # `"list[Foo]"` -> `list[Foo]`. Falls back to unconstrained `any` if
+        # the contents aren't a parseable annotation.
         if t.kind == "STRING":
             self._eat()
-            return ("any", None)
+            return self._parse_annot_from_string(t.value)
         if t.kind != "NAME":
             # Unexpected shape (e.g. the `[int]` inside `Callable[[int], str]`).
             # Skip a balanced atom so we don't misparse the enclosing list.
@@ -501,6 +503,18 @@ class Parser:
                     inner.append(self._parse_annot_union())
             self._expect("OP", "]")
         return self._normalize_annot(name, inner)  # type: ignore
+
+    def _parse_annot_from_string(self, src: str) -> tuple:
+        """Re-lex and parse a quoted forward-reference annotation's contents
+        (e.g. the `Path` in `-> "Path"`) as a normal type expression, by
+        running it through a fresh `Lexer`/`Parser` pair. Any lex/parse
+        failure (the string isn't actually a type expression) falls back to
+        unconstrained `any`, matching the previous behaviour."""
+        try:
+            sub = Parser(Lexer(src).tokenize())
+            return sub._parse_annot_union()
+        except Exception:
+            return ("any", None)
 
     def _skip_annot_atom(self) -> tuple:
         """Consume one balanced annotation atom (balancing []/()/{}), stopping
