@@ -17,7 +17,7 @@ FATAL: int = 50
 NOTSET: int = 0
 
 
-_root_level: int = WARNING
+_root_level: int = 30
 _format: str = "%(levelname)s:%(name)s:%(message)s"
 
 
@@ -44,7 +44,7 @@ def _format_record(name: str, level: int, msg: str) -> str:
     return result
 
 
-def basicConfig(level: int = WARNING, format: str = "") -> None:
+def basicConfig(level: int = 30, format: str = "") -> None:
     """Configure the root logger."""
     global _root_level
     global _format
@@ -61,7 +61,7 @@ def getLevelName(level: int) -> str:
 class Handler:
     """Base handler class (outputs to stdout)."""
 
-    def __init__(self, level: int = NOTSET) -> None:
+    def __init__(self, level: int = 0) -> None:
         self.level: int = level
 
     def emit(self, name: str, level: int, msg: str) -> None:
@@ -84,7 +84,7 @@ class FileHandler(Handler):
     """Handler that writes to a file (stub: writes to stdout)."""
 
     def __init__(self, filename: str, mode: str = "a",
-                 level: int = NOTSET) -> None:
+                 level: int = 0) -> None:
         self.filename: str = filename
         self.mode: str = mode
         self.level = level
@@ -126,7 +126,7 @@ class Filter:
 class Logger:
     """A named logging channel."""
 
-    def __init__(self, name: str, level: int = NOTSET) -> None:
+    def __init__(self, name: str, level: int = 0) -> None:
         self.name: str = name
         self.level: int = level
         self._handlers: list = []
@@ -198,7 +198,7 @@ class Logger:
 _loggers: list = []
 _logger_names: list = []
 
-_root_logger: Logger = Logger("root", WARNING)
+_root_logger: Logger = Logger("root", 30)
 
 
 def getLogger(name: str = "root") -> Logger:
@@ -244,7 +244,7 @@ def log(level: int, msg: str) -> None:
     _root_logger.log(level, msg)
 
 
-def disable(level: int = CRITICAL) -> None:
+def disable(level: int = 50) -> None:
     """Disable all logging calls of severity <= level."""
     global _root_level
     _root_level = level + 1

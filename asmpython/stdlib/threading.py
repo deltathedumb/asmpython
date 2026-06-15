@@ -41,7 +41,7 @@ class Lock:
     def __init__(self) -> None:
         self._locked: int = 0
 
-    def acquire(self, blocking: int = 1, timeout: float = -1.0) -> int:
+    def acquire(self, blocking: int = 1, timeout: int = -1) -> int:
         self._locked = 1
         return 1
 
@@ -80,7 +80,7 @@ class Event:
     def clear(self) -> None:
         self._flag = 0
 
-    def wait(self, timeout: float = -1.0) -> int:
+    def wait(self, timeout: int = -1) -> int:
         return self._flag
 
 
@@ -90,7 +90,7 @@ class Semaphore:
     def __init__(self, value: int = 1) -> None:
         self._value: int = value
 
-    def acquire(self, blocking: int = 1, timeout: float = -1.0) -> int:
+    def acquire(self, blocking: int = 1, timeout: int = -1) -> int:
         if self._value > 0:
             self._value = self._value - 1
             return 1
@@ -116,17 +116,17 @@ class BoundedSemaphore(Semaphore):
 class Condition:
     """A condition variable (stub)."""
 
-    def __init__(self, lock: Lock = Lock()) -> None:
-        self._lock: Lock = lock
+    def __init__(self, lock: int = 0) -> None:
+        self._lock: int = lock
         self._waiters: int = 0
 
     def acquire(self) -> int:
-        return self._lock.acquire()
+        return 1
 
     def release(self) -> None:
-        self._lock.release()
+        pass
 
-    def wait(self, timeout: float = -1.0) -> int:
+    def wait(self, timeout: int = -1) -> int:
         return 1
 
     def notify(self, n: int = 1) -> None:
@@ -147,11 +147,11 @@ class Condition:
 class Barrier:
     """A barrier primitive (stub)."""
 
-    def __init__(self, parties: int, timeout: float = -1.0) -> None:
+    def __init__(self, parties: int, timeout: int = -1) -> None:
         self.parties: int = parties
         self._count: int = 0
 
-    def wait(self, timeout: float = -1.0) -> int:
+    def wait(self, timeout: int = -1) -> int:
         self._count = self._count + 1
         if self._count >= self.parties:
             self._count = 0
@@ -179,7 +179,7 @@ class Timer:
     def cancel(self) -> None:
         pass
 
-    def join(self, timeout: float = -1.0) -> None:
+    def join(self, timeout: int = -1) -> None:
         pass
 
     def is_alive(self) -> int:
@@ -200,7 +200,7 @@ class Thread:
     def start(self) -> None:
         self._alive = 1
 
-    def join(self, timeout: float = -1.0) -> None:
+    def join(self, timeout: int = -1) -> None:
         self._alive = 0
 
     def is_alive(self) -> int:

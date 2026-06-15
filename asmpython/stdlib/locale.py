@@ -22,7 +22,7 @@ def setlocale(category: int, locale: str = "") -> str:
     return "C"
 
 
-def getlocale(category: int = LC_CTYPE) -> list:
+def getlocale(category: int = 0) -> list:
     """Return current locale (stub, returns ['en_US', 'UTF-8'])."""
     result: list = []
     result.append("en_US")
@@ -96,7 +96,7 @@ def localeconv() -> int:
     return 0
 
 
-def resetlocale(category: int = LC_ALL) -> None:
+def resetlocale(category: int = 6) -> None:
     """Reset locale to default (no-op)."""
     pass
 
