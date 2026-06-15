@@ -87,6 +87,20 @@ BINDINGS = {
     # bundled MinGW toolchain's headers.
     "_ST_MTIME_WORD": Const(ty="int", value=11, value_windows=5),
     "_ST_BUF_WORDS": Const(ty="int", value=18, value_windows=7),
+    # Index (in 8-byte words) of the word containing the `st_mode` field.
+    # Linux: glibc `struct stat` has `st_mode` (4 bytes) at byte offset 24 ->
+    # word 3 (the low 32 bits of that word).
+    # Windows: MinGW `struct _stat64` has `st_mode` (2 bytes, unsigned short)
+    # at byte offset 6 -> the high 16 bits of word 0 -- verified via
+    # `offsetof`/`sizeof` against the bundled MinGW toolchain's headers.
+    "_ST_MODE_WORD": Const(ty="int", value=3, value_windows=0),
+
+    # st_mode file-type bitmask and the two type bits `ospath.isdir`/`isfile`
+    # care about. Values are the POSIX-standard bit patterns, shared by
+    # glibc and MSVCRT/MinGW alike.
+    "S_IFMT":  Const(ty="int", value=0xF000),
+    "S_IFDIR": Const(ty="int", value=0x4000),
+    "S_IFREG": Const(ty="int", value=0x8000),
 
     # popen(cmd, mode) -> FILE* (pipe), like fopen; mode is "r" or "w".
     "_popen": Func(arg_types=("str", "str"), ret_type="str", c_name="popen", c_name_windows="_popen"),

@@ -14,6 +14,7 @@ gets full constructor/field/method checking.
 from __future__ import annotations
 
 import os
+import ospath
 
 
 class StatResult:
@@ -148,16 +149,10 @@ class Path:
         return int(os._access(self.p, 0) == 0)
 
     def is_dir(self) -> int:
-        d = os._opendir(self.p)
-        if d == 0:
-            return 0
-        os._closedir(d)
-        return 1
+        return ospath.isdir(self.p)
 
     def is_file(self) -> int:
-        if self.exists() == 0:
-            return 0
-        return int(self.is_dir() == 0)
+        return ospath.isfile(self.p)
 
     def mkdir(self, mode: int = 511, parents: int = 0, exist_ok: int = 0) -> int:
         if parents == 1:

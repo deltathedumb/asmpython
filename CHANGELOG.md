@@ -371,6 +371,19 @@ output rather than silent miscompilations.
 
 ### Fixed
 
+- **`ospath.isdir`/`ospath.isfile` (and `pathlib.Path.is_dir`/`.is_file`) were
+  wrong on Windows: `isdir` always returned `1` for any existing path
+  (including regular files), so `isfile` always returned `0`.** Root cause:
+  they used `os._opendir`/`os._closedir` (MinGW `opendir()`), which returns a
+  non-NULL `DIR*` for regular files too, without checking `S_ISDIR`. Rewrote
+  both to call `os._stat` and inspect the `st_mode` file-type bits directly:
+  new `os.S_IFMT`/`S_IFDIR`/`S_IFREG` constants and `os._ST_MODE_WORD` (the
+  word index of `st_mode` within the `_stat` buffer — word 3 on Linux's
+  glibc `struct stat`, the high 16 bits of word 0 on Windows' MinGW
+  `struct _stat64`, offsets verified against the bundled MinGW headers).
+  `pathlib.Path.is_dir`/`.is_file` now delegate to `ospath.isdir`/`isfile`.
+  New `tests/cases/301_ospath_isdir_isfile.py` and
+  `tests/cases/302_pathlib_isdir_isfile.py` (CPython-verified).
 - **Float-default arguments (`def f(x: float = 0.0):`) now parse correctly**
   instead of raising "float default arguments aren't supported yet".
   `_parse_default_literal` gained an `A.FloatLit` case alongside its existing

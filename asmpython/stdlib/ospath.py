@@ -18,6 +18,7 @@ in C stdio paths.
 from __future__ import annotations
 
 import os
+import sys
 
 
 def join(a: str, b: str) -> str:
@@ -91,22 +92,43 @@ def getcwd() -> str:
     return result
 
 
+def _stat_buf(p: str) -> list[int]:
+    """Run `os._stat(p)` into a fresh word buffer; [] if `p` doesn't exist."""
+    buf: list[int] = []
+    i: int = 0
+    while i < os._ST_BUF_WORDS:
+        buf.append(0)
+        i = i + 1
+    if os._stat(p, buf) != 0:
+        return []
+    return buf
+
+
+def _st_mode(buf: list[int]) -> int:
+    """Extract the `st_mode` field (file-type + permission bits) from a
+    buffer filled by `_stat_buf`."""
+    word: int = buf[os._ST_MODE_WORD]
+    if sys.platform == "win32":
+        # MinGW `struct _stat64`: st_mode is the high 16 bits of word 0.
+        return (word >> 48) & 0xFFFF
+    # glibc `struct stat`: st_mode is the low 32 bits of word 3.
+    return word & 0xFFFFFFFF
+
+
 def isdir(p: str) -> int:
     """1 if p is a directory, else 0."""
-    d = os._opendir(p)
-    if d == "":
+    buf: list[int] = _stat_buf(p)
+    if len(buf) == 0:
         return 0
-    os._closedir(d)
-    return 1
+    return int((_st_mode(buf) & os.S_IFMT) == os.S_IFDIR)
 
 
 def isfile(p: str) -> int:
     """1 if p is a regular file (exists and is not a directory), else 0."""
-    if not exists(p):
+    buf: list[int] = _stat_buf(p)
+    if len(buf) == 0:
         return 0
-    if isdir(p):
-        return 0
-    return 1
+    return int((_st_mode(buf) & os.S_IFMT) == os.S_IFREG)
 
 
 def splitext(p: str) -> list:
