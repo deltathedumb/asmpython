@@ -371,6 +371,47 @@ output rather than silent miscompilations.
 
 ### Fixed
 
+- **Division/modulo by zero now raises `ZeroDivisionError("division by zero")`**
+  (matching CPython 3.13+'s unified message) instead of faulting the CPU.
+  Previously `idiv` with a zero divisor executed unconditionally for `//`/`%`
+  on ints (codegen's `_emit_binop_inline` and the `_runtime_divmod` helper
+  used by `divmod()`), producing a `#DE` (divide error) — on the hosted
+  targets this is a SIGFPE/crash, and on `--target freestanding` (no IDT
+  installed) it cascades into a triple fault with no diagnostic at all. Both
+  sites now check the divisor and raise via `_runtime_raise` first. Float
+  `/`, `//` and `%` had a related but different gap: SSE division by zero
+  doesn't fault (it produces `inf`/`nan`), so `5.0 / 0.0` silently returned
+  `inf` instead of raising — new `_emit_check_float_nonzero_divisor` (called
+  from `_emit_binop_inline_float`) checks the RHS against `0.0` via `ucomisd`
+  and raises `ZeroDivisionError` first (NaN divisors are left alone, matching
+  IEEE-754/Python semantics for `nan` operands). `_gen_binop_float` — a
+  separate, duplicated float-binop implementation used for `BinOp`
+  expressions — was refactored to call the shared `_emit_binop_inline_float`
+  so both paths get the fix. New `tests/cases/305_zero_division.py`
+  (CPython-verified: int `//`/`%`, float `/`/`//`/`%`, and `divmod()`, all
+  caught as `ZeroDivisionError` with message `"division by zero"`).
+
+- **`--target freestanding`: unhandled exceptions and panics now show a
+  flashing red error screen and warm-reboot after 5 seconds**, instead of
+  printing to the normal-color VGA text and halting forever (`hlt`/`jmp`
+  spin loop, requiring a hard power cycle). New `_emit_set_error_color` hook
+  on `Codegen` (no-op on hosted targets) is called from `_runtime_raise`'s
+  unhandled-exception path; the freestanding override sets `_vga_attr` to
+  `0x8C` (blinking bright red on black). `_runtime_panic` was rewritten:
+  it sets the red/blink attribute, prints "KERNEL PANIC" only if
+  `_runtime_exc_msg` is still unset (i.e. a direct panic from OOM or
+  `os._exit`/`sys.exit`, not an unhandled `raise`), then prints "Rebooting
+  in 5 seconds...", calls a new best-effort `_runtime_delay_5s` busy-wait,
+  and jumps to a new `_runtime_reboot` (8042 keyboard-controller pulse-reset).
+  Also fixed a **pre-existing freestanding bug where any floating-point
+  instruction (`movsd`/`addsd`/`divsd`/...) triple-faulted**: kernel init
+  enabled `CR4.PAE` but never set `CR4.OSFXSR`/`CR4.OSXMMEXCPT`, so SSE
+  instructions raised `#UD`, which (with no IDT installed) cascaded straight
+  to a triple fault. Verified under QEMU (`-serial stdio -no-reboot`): basic
+  float arithmetic, an unhandled `raise`, and `1 // 0`/`1.0 / 0.0` all now
+  print the expected message followed by the red-screen reboot countdown,
+  while a `try`/`except ZeroDivisionError` around the same division still
+  prints "caught"/the message/"after" normally (handler path unaffected).
 - **`except module.ExceptionClass as e:` (a dotted exception type) now
   parses and matches correctly**, instead of "'except' type must be a name
   or a tuple of names". asmpython's whole-program merge keeps a single flat

@@ -164,6 +164,11 @@ class FreestandingCodegen(Codegen):
     def _emit_exit_one(self) -> None:
         self.emitf("call _runtime_panic")
 
+    def _emit_set_error_color(self) -> None:
+        # Blinking bright red on black (VGA text attribute byte: bit7 =
+        # blink, bits4-6 = background, bits0-3 = foreground).
+        self.emitf("mov byte [rel _vga_attr], 0x8C")
+
     def _emit_call_setjmp(self, buf_off: int) -> None:
         self.emitf(f"lea rax, [rbp{buf_off:+d}]", "call _runtime_setjmp")
 
@@ -277,8 +282,10 @@ class FreestandingCodegen(Codegen):
         self.emitf("cli")
         self.emitf("mov esp, _boot_stack_top")
         self.emitf("lgdt [_gdt_ptr]")
-        # Enable PAE (CR4 bit 5)
-        self.emitf("mov eax, cr4", "or eax, 0x20", "mov cr4, eax")
+        # Enable PAE (CR4 bit 5) and SSE (CR4.OSFXSR bit 9, CR4.OSXMMEXCPT
+        # bit 10) -- without OSFXSR, SSE instructions like MOVSD/ADDSD/UCOMISD
+        # raise #UD, which (with no IDT installed) immediately triple-faults.
+        self.emitf("mov eax, cr4", "or eax, 0x20 | 0x200 | 0x400", "mov cr4, eax")
         # Load PML4 address into CR3
         self.emitf("mov eax, _pml4", "mov cr3, eax")
         # Enable long mode (EFER.LME = 1)
@@ -331,6 +338,7 @@ class FreestandingCodegen(Codegen):
         self.emit("section .data")
         self.emit('_str_oom:    db "OUT OF MEMORY",10,0')
         self.emit('_str_panic:  db "KERNEL PANIC",10,0')
+        self.emit('_str_rebooting: db "Rebooting in 5 seconds...",10,0')
         self.emit('_str_nan:    db "nan",0')
         self.emit('_str_inf:    db "inf",0')
         self.emit('_str_neginf: db "-inf",0')
@@ -433,11 +441,41 @@ class FreestandingCodegen(Codegen):
         self.label("._rps_done")
         self.emitf("pop rbx", "ret")
 
-        # --- _runtime_panic: print panic message and halt ------------------
+        # --- _runtime_panic: flash a red error screen, then reboot ---------
+        # If _runtime_exc_msg is still zero, _runtime_raise's unhandled path
+        # never ran (this is a direct panic from OOM or os._exit/sys.exit),
+        # so print "KERNEL PANIC" as a generic banner. Either way, switch to
+        # the red/blink error color, show a countdown, and warm-reboot.
         self.label("_runtime_panic")
+        self.emitf("mov byte [rel _vga_attr], 0x8C")
+        self.emitf("mov rax, [rel _runtime_exc_msg]", "test rax, rax",
+                   "jnz ._panic_have_msg")
         self.emitf("lea rdi, [rel _str_panic]", "call _runtime_print_str")
-        self.label("._panic_halt")
-        self.emitf("hlt", "jmp ._panic_halt")
+        self.label("._panic_have_msg")
+        self.emitf("lea rdi, [rel _str_rebooting]", "call _runtime_print_str")
+        self.emitf("call _runtime_delay_5s")
+        self.emitf("jmp _runtime_reboot")
+
+        # --- _runtime_delay_5s: approximate busy-wait delay -----------------
+        # No IDT/PIT calibration is set up, so this is a best-effort spin
+        # loop (roughly seconds on typical hardware/QEMU), not a precise
+        # timer.
+        self.label("_runtime_delay_5s")
+        self.emitf("push rbx", "push rcx", "mov rbx, 5")
+        self.label("._delay_secs")
+        self.emitf("mov rcx, 100000000")
+        self.label("._delay_inner")
+        self.emitf("dec rcx", "jnz ._delay_inner")
+        self.emitf("dec rbx", "jnz ._delay_secs")
+        self.emitf("pop rcx", "pop rbx", "ret")
+
+        # --- _runtime_reboot: warm-reboot via 8042 keyboard controller ------
+        self.label("_runtime_reboot")
+        self.label("._reboot_wait")
+        self.emitf("in al, 0x64", "test al, 0x02", "jnz ._reboot_wait")
+        self.emitf("mov al, 0xFE", "out 0x64, al")
+        self.label("._reboot_halt")
+        self.emitf("hlt", "jmp ._reboot_halt")
 
         # --- _runtime_input: stub — returns empty string -------------------
         self.label("_runtime_input")
@@ -604,6 +642,7 @@ class FreestandingCodegen(Codegen):
                    "add rax, 8",                    # return ptr past header
                    "pop rcx", "pop rbx", "ret")
         self.label("._ma_oom")
+        self.emitf("mov byte [rel _vga_attr], 0x8C")
         self.emitf("lea rdi, [rel _str_oom]", "call _runtime_print_str",
                    "call _runtime_panic")
 
