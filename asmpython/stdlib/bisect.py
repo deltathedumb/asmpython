@@ -54,5 +54,11 @@ def insort_right(a: list, x: int, lo: int = 0, hi: int = -1) -> None:
     a[pos] = x
 
 
-bisect = bisect_right
-insort = insort_right
+def bisect(a: list, x: int, lo: int = 0, hi: int = -1) -> int:
+    """Alias for bisect_right."""
+    return bisect_right(a, x, lo, hi)
+
+
+def insort(a: list, x: int, lo: int = 0, hi: int = -1) -> None:
+    """Alias for insort_right."""
+    insort_right(a, x, lo, hi)

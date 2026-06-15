@@ -85,6 +85,64 @@ def dumps(obj: object, indent: int = 0) -> str:
     return _dumps_val(obj, indent, 0)
 
 
+def _val_to_json(v: str) -> str:
+    """Convert a stringified value to its JSON form (string values need quoting)."""
+    if v == "None":
+        return "null"
+    if v == "True":
+        return "true"
+    if v == "False":
+        return "false"
+    if len(v) == 0:
+        return '""'
+    c: str = v[0]
+    if c == "-" or (c >= "0" and c <= "9"):
+        return v
+    return _dumps_str(v)
+
+
+def dumps_dict(obj: dict[str, str], indent: int = 0) -> str:
+    """Serialize a dict[str, str] to a JSON string."""
+    if len(obj) == 0:
+        return "{}"
+    kv: list[str] = []
+    for k in obj:
+        val: str = obj[k]
+        kv.append(_dumps_str(k) + ": " + _dumps_str(val))
+    return "{" + ", ".join(kv) + "}"
+
+
+def dumps_dict_int(obj: dict[str, int], indent: int = 0) -> str:
+    """Serialize a dict[str, int] to a JSON string."""
+    if len(obj) == 0:
+        return "{}"
+    kv: list[str] = []
+    for k in obj:
+        val: int = obj[k]
+        kv.append(_dumps_str(k) + ": " + str(val))
+    return "{" + ", ".join(kv) + "}"
+
+
+def dumps_list(obj: list[str], indent: int = 0) -> str:
+    """Serialize a list[str] to a JSON string."""
+    if len(obj) == 0:
+        return "[]"
+    parts: list[str] = []
+    for item in obj:
+        parts.append(_dumps_str(item))
+    return "[" + ", ".join(parts) + "]"
+
+
+def dumps_list_int(obj: list[int], indent: int = 0) -> str:
+    """Serialize a list[int] to a JSON string."""
+    if len(obj) == 0:
+        return "[]"
+    parts: list[str] = []
+    for item in obj:
+        parts.append(str(item))
+    return "[" + ", ".join(parts) + "]"
+
+
 # --- loads -------------------------------------------------------------------
 # Parser state is threaded via an index variable. To avoid returning mixed
 # (value, int) pairs, each _parse_* function writes its result into the
