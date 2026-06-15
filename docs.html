@@ -282,6 +282,7 @@
     <li><a href="#builtins">Builtins</a></li>
     <li><a href="#architecture">Architecture</a></li>
     <li><a href="#tests">Tests</a></li>
+    <li><a href="#error-codes">Error codes</a></li>
     <li><a href="#limitations">Limitations</a></li>
   </ul>
 </nav>
@@ -384,10 +385,14 @@ Booted successfully.</code></pre>
   </table>
 
   <h3>Diagnostics</h3>
-  <pre><div class="lang-tag">output</div><code>examples/broken.py:2:7: semantic error: undefined variable 'oops'
-  print(oops)
-        ^</code></pre>
+  <pre><div class="lang-tag">output</div><code>examples/broken.py:2:7: semantic error: [E002] undefined function 'greet'
+  greet("world")
+  ^</code></pre>
   <p>Errors go to stderr with a non-zero exit code. Success is silent except for <em>wrote …</em> progress lines.</p>
+  <p>Every diagnostic carries an <strong>error code</strong> in brackets (<code>[E002]</code>). Pass it to <code>--explain</code> for a full description:</p>
+  <pre><div class="lang-tag">shell</div><code>asmpython --explain E002
+# [E002] Call to an undefined function. The function may not be imported …</code></pre>
+  <p>With <code>--check --json</code> the output includes a <code>"code"</code> field for editor integration. See <a href="#error-codes">Error codes</a> for the full reference.</p>
 </section>
 
 <!-- ═══════════════════ LANGUAGE ════════════════════════════ -->
@@ -1293,6 +1298,135 @@ qemu-system-x86_64 -drive format=raw,file=boot.img -serial stdio -display none</
 <span class="cmt"># Alice</span>
 name = <span class="fn">input</span>()
 <span class="fn">print</span>(<span class="str">"hello"</span>, name)</code></pre>
+</section>
+
+<section id="error-codes">
+  <h2>Error codes <a class="anchor" href="#error-codes">#</a></h2>
+
+  <p>Every compiler diagnostic includes a short code in brackets that identifies the exact error category. Use <code>asmpython --explain &lt;CODE&gt;</code> to look up the description from the command line.</p>
+
+  <pre><div class="lang-tag">output</div><code>hello.py:5:3: semantic error: [E031] 'break' outside a loop
+    break
+    ^</code></pre>
+
+  <h3>Lex errors (L001 – L010)</h3>
+  <p>Detected while tokenising the source file, before any parsing.</p>
+  <table>
+    <tr><th>Code</th><th>Name</th><th>When it fires</th></tr>
+    <tr><td><code>L001</code></td><td>Inconsistent indentation</td><td>Indentation level does not match any enclosing block.</td></tr>
+    <tr><td><code>L002</code></td><td>Unexpected character</td><td>A character that cannot start any valid token.</td></tr>
+    <tr><td><code>L003</code></td><td>Unterminated string</td><td>Closing quote missing before end-of-line or end-of-file.</td></tr>
+    <tr><td><code>L004</code></td><td>Newline in string</td><td>Single-quoted string spans more than one line. Use triple quotes.</td></tr>
+    <tr><td><code>L005</code></td><td>Unterminated f-string</td><td>Closing quote of an f-string is missing.</td></tr>
+    <tr><td><code>L006</code></td><td>Newline in f-string</td><td>F-string spans more than one line. F-strings must fit on one line.</td></tr>
+    <tr><td><code>L007</code></td><td>Invalid float literal</td><td>Text does not represent a valid floating-point number.</td></tr>
+    <tr><td><code>L008</code></td><td>Invalid escape sequence</td><td>Unrecognised <code>\X</code> escape inside a string.</td></tr>
+    <tr><td><code>L009</code></td><td>Invalid integer literal</td><td>Malformed <code>0x</code>, <code>0o</code>, or <code>0b</code> prefix.</td></tr>
+    <tr><td><code>L010</code></td><td>Unterminated raw string</td><td>Closing quote of a raw string (<code>r"…"</code>) is missing.</td></tr>
+  </table>
+
+  <h3>Parse errors (P001 – P009)</h3>
+  <p>Detected while structuring the token stream into an AST.</p>
+  <table>
+    <tr><th>Code</th><th>Name</th><th>When it fires</th></tr>
+    <tr><td><code>P001</code></td><td>Unexpected token</td><td>Token does not fit any valid syntax rule at this position.</td></tr>
+    <tr><td><code>P002</code></td><td>Expected token</td><td>A specific keyword, operator, or punctuation was required but not found.</td></tr>
+    <tr><td><code>P003</code></td><td>Invalid assign target</td><td>Left-hand side of <code>=</code> is not a name, subscript, or attribute path.</td></tr>
+    <tr><td><code>P004</code></td><td>Invalid decorator</td><td>Decorator expression uses unsupported syntax.</td></tr>
+    <tr><td><code>P005</code></td><td>Invalid pattern</td><td>A <code>match</code>/<code>case</code> pattern uses an unsupported construct.</td></tr>
+    <tr><td><code>P006</code></td><td>Missing module name</td><td><code>from import …</code> with no module name between the two keywords.</td></tr>
+    <tr><td><code>P007</code></td><td>Invalid default arg</td><td>Only literals and simple names are valid default parameter values.</td></tr>
+    <tr><td><code>P008</code></td><td>Invalid annotation</td><td>Type annotation uses syntax the compiler cannot handle.</td></tr>
+    <tr><td><code>P009</code></td><td>Multi-line import</td><td><code>from X import (a, b)</code> — use separate <code>from X import Y</code> lines.</td></tr>
+  </table>
+
+  <h3>Semantic errors (E001 – E099)</h3>
+  <p>Detected after the AST is built: name resolution, type checking, and structural constraints.</p>
+
+  <p><strong>Name resolution (E001 – E005)</strong></p>
+  <table>
+    <tr><th>Code</th><th>Name</th><th>When it fires</th></tr>
+    <tr><td><code>E001</code></td><td>Undefined name</td><td>A bare name used but never defined or imported in scope.</td></tr>
+    <tr><td><code>E002</code></td><td>Undefined function</td><td>Call to a function that has not been defined anywhere reachable.</td></tr>
+    <tr><td><code>E003</code></td><td>Function redefined</td><td>Two <code>def</code> statements with the same name at the same scope level.</td></tr>
+    <tr><td><code>E004</code></td><td>Class redefined</td><td>Two <code>class</code> statements with the same name at the same scope level.</td></tr>
+    <tr><td><code>E005</code></td><td>No such module</td><td>Import of an unknown or unsupported module.</td></tr>
+  </table>
+
+  <p><strong>Type errors (E011 – E019)</strong></p>
+  <table>
+    <tr><th>Code</th><th>Name</th><th>When it fires</th></tr>
+    <tr><td><code>E011</code></td><td>Type mismatch</td><td>Expression type is incompatible with what is expected.</td></tr>
+    <tr><td><code>E012</code></td><td>Binary op type</td><td>Operator not supported between the given operand types (e.g. <code>int + str</code>).</td></tr>
+    <tr><td><code>E013</code></td><td>Unary op type</td><td>Unary operator applied to an incompatible type.</td></tr>
+    <tr><td><code>E014</code></td><td>F-string segment type</td><td>An <code>f"…{expr}…"</code> slot has a non-scalar type (<code>type</code>, <code>module</code>, …). Fix: convert to <code>str</code> first.</td></tr>
+    <tr><td><code>E015</code></td><td>Return type mismatch</td><td>Returned value type does not match the declared <code>-&gt; T</code>.</td></tr>
+    <tr><td><code>E016</code></td><td>Index type</td><td>Index value has the wrong type.</td></tr>
+    <tr><td><code>E017</code></td><td>Index object type</td><td>Subscripting a value that does not support indexing.</td></tr>
+    <tr><td><code>E018</code></td><td>Iter type</td><td>Iterating over a value that is not a list, tuple, or other iterable.</td></tr>
+    <tr><td><code>E019</code></td><td>Assignment type</td><td>Right-hand side is not compatible with the target's declared type.</td></tr>
+  </table>
+
+  <p><strong>Call errors (E021 – E027)</strong></p>
+  <table>
+    <tr><th>Code</th><th>Name</th><th>When it fires</th></tr>
+    <tr><td><code>E021</code></td><td>Wrong arg count</td><td>Number of positional arguments does not match the function signature.</td></tr>
+    <tr><td><code>E022</code></td><td>Wrong arg type</td><td>An argument's type is not compatible with the parameter.</td></tr>
+    <tr><td><code>E023</code></td><td>Varargs unpack</td><td><code>func(*args)</code> where element types are not known at compile time.</td></tr>
+    <tr><td><code>E024</code></td><td>Not callable</td><td>A value that is not a function or class is called like one.</td></tr>
+    <tr><td><code>E025</code></td><td>Format arg count</td><td><code>"%s %s" % (a,)</code> — conversion count does not match tuple length.</td></tr>
+    <tr><td><code>E026</code></td><td>Format arg type</td><td><code>%d</code> / <code>%f</code> conversion receives wrong argument type.</td></tr>
+    <tr><td><code>E027</code></td><td>Format literal</td><td>Left-hand side of <code>%</code> must be a string literal.</td></tr>
+  </table>
+
+  <p><strong>Control flow (E031 – E033)</strong></p>
+  <table>
+    <tr><th>Code</th><th>Name</th><th>When it fires</th></tr>
+    <tr><td><code>E031</code></td><td>Break outside loop</td><td><code>break</code> appears outside any <code>while</code> or <code>for</code> loop.</td></tr>
+    <tr><td><code>E032</code></td><td>Continue outside loop</td><td><code>continue</code> appears outside any loop.</td></tr>
+    <tr><td><code>E033</code></td><td>Return outside function</td><td><code>return</code> at module top-level or inside a class body.</td></tr>
+  </table>
+
+  <p><strong>Class / attribute (E041 – E045)</strong></p>
+  <table>
+    <tr><th>Code</th><th>Name</th><th>When it fires</th></tr>
+    <tr><td><code>E041</code></td><td>No attribute</td><td><code>obj.x</code> where the object's type has no field or method named <code>x</code>.</td></tr>
+    <tr><td><code>E042</code></td><td>Not an exception</td><td><code>raise</code> expression is not an exception class or instance.</td></tr>
+    <tr><td><code>E043</code></td><td>Index assignment</td><td><code>obj[k] = v</code> where the type does not define <code>__setitem__</code>.</td></tr>
+    <tr><td><code>E044</code></td><td>super() outside class</td><td><code>super()</code> used in a function that is not a method.</td></tr>
+    <tr><td><code>E045</code></td><td>@staticmethod outside class</td><td><code>@staticmethod</code> applied to a top-level function.</td></tr>
+  </table>
+
+  <p><strong>Collection / structural (E051 – E055)</strong></p>
+  <table>
+    <tr><th>Code</th><th>Name</th><th>When it fires</th></tr>
+    <tr><td><code>E051</code></td><td>Heterogeneous list</td><td>List literal contains elements of mixed types. asmpython lists must be homogeneous.</td></tr>
+    <tr><td><code>E052</code></td><td>Heterogeneous tuple (in)</td><td><code>x in (a, b)</code> where the tuple elements have mixed types.</td></tr>
+    <tr><td><code>E053</code></td><td>Unpack count mismatch</td><td><code>a, b = expr</code> where <code>expr</code> does not have exactly two elements.</td></tr>
+    <tr><td><code>E054</code></td><td>Dict key type</td><td>Dict operation requires a <code>str</code> key but received something else.</td></tr>
+    <tr><td><code>E055</code></td><td>Set element type</td><td>Set elements must be strings in asmpython v1.</td></tr>
+  </table>
+
+  <p><strong>Assembly directives (E061 – E063)</strong></p>
+  <table>
+    <tr><th>Code</th><th>Name</th><th>When it fires</th></tr>
+    <tr><td><code>E061</code></td><td>Invalid asm operand</td><td>Operand string passed to an <code>Assembly.*</code> method is empty or malformed.</td></tr>
+    <tr><td><code>E062</code></td><td>Unrecognised register</td><td>Operand looks like a register name but is not a valid x86-64 register.</td></tr>
+    <tr><td><code>E063</code></td><td>include() argument</td><td><code>include()</code> requires a string literal package name as its only argument.</td></tr>
+  </table>
+
+  <p><strong>Miscellaneous (E071 – E073)</strong></p>
+  <table>
+    <tr><th>Code</th><th>Name</th><th>When it fires</th></tr>
+    <tr><td><code>E071</code></td><td>zip() args type</td><td><code>zip()</code> arguments must be lists or tuples.</td></tr>
+    <tr><td><code>E072</code></td><td>enumerate() arg type</td><td><code>enumerate()</code> argument must be a list.</td></tr>
+    <tr><td><code>E073</code></td><td>Match pattern</td><td>Unsupported <code>match</code>/<code>case</code> pattern construct.</td></tr>
+  </table>
+
+  <h3>Editor integration</h3>
+  <p>With <code>--check --json</code> the JSON diagnostic object includes a <code>"code"</code> field:</p>
+  <pre><div class="lang-tag">json</div><code>[{"phase": "semantic", "message": "undefined function 'greet'", "line": 5, "col": 3, "code": "E002"}]</code></pre>
+  <p>A clean file produces <code>[]</code>.</p>
 </section>
 
 <section id="limitations">
