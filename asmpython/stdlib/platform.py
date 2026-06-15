@@ -5,12 +5,12 @@ the platform is 'windows'; on Linux it is 'linux'.
 """
 from __future__ import annotations
 
-import sys as _sys
+import sys
 
 
 def system() -> str:
     """Return OS name: 'Windows', 'Linux', or 'Unknown'."""
-    p: str = _sys.platform
+    p: str = sys.platform
     if p == "win32":
         return "Windows"
     if p == "linux":
@@ -45,7 +45,7 @@ def processor() -> str:
 
 def architecture() -> list:
     """Return [bits, linkage] e.g. ['64bit', 'ELF']."""
-    p: str = _sys.platform
+    p: str = sys.platform
     if p == "win32":
         return ["64bit", "WindowsPE"]
     return ["64bit", "ELF"]
@@ -53,7 +53,7 @@ def architecture() -> list:
 
 def python_version() -> str:
     """Return the asmpython version string."""
-    return _sys.version
+    return sys.version
 
 
 def python_implementation() -> str:
