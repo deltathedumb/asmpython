@@ -198,7 +198,7 @@ class Logger:
 _loggers: list = []
 _logger_names: list = []
 
-_root_logger: Logger = Logger("root", 30)
+_root_logger: Logger = Logger("root", 0)
 
 
 def getLogger(name: str = "root") -> Logger:
