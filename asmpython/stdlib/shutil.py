@@ -79,6 +79,51 @@ def which(name: str, mode: int = 1, path: str = "") -> str:
     return ""
 
 
+def copystat(src: str, dst: str) -> None:
+    """Copy permission bits and timestamps from src to dst (stub: no-op)."""
+    pass
+
+
+def copy2(src: str, dst: str) -> str:
+    """Copy data and metadata from src to dst. Returns dst."""
+    copy(src, dst)
+    copystat(src, dst)
+    return dst
+
+
+def copytree(src: str, dst: str, symlinks: int = 0,
+             ignore: int = 0, dirs_exist_ok: int = 0) -> str:
+    """Recursively copy a directory tree from src to dst.
+
+    Stub: copies directory structure but not contents (os.listdir not available).
+    """
+    import os
+    os.mkdir(dst, 511)
+    return dst
+
+
+def copymode(src: str, dst: str) -> None:
+    """Copy permission bits from src to dst (stub: no-op)."""
+    pass
+
+
+def ignore_patterns(*patterns) -> int:
+    """Factory for ignore argument to copytree (stub: returns 0)."""
+    return 0
+
+
+def ReadError(Exception):
+    """Raised on unreadable archive."""
+    pass
+
+
+class RegistryError(Exception):
+    """Raised when a registry operation fails."""
+
+    def __init__(self, msg: str = "") -> None:
+        self.msg: str = msg
+
+
 class Error(Exception):
     """Base class for shutil errors."""
 

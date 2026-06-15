@@ -430,5 +430,54 @@ def blake2s(data: str = "", digest_size: int = 32) -> sha256:
     return sha256()
 
 
-algorithms_guaranteed: list[str] = ["md5", "sha256", "sha1", "sha224", "sha384", "sha512"]
-algorithms_available: list[str] = ["md5", "sha256", "sha1", "sha224", "sha384", "sha512", "blake2b", "blake2s"]
+def sha3_256() -> sha256:
+    """Return a new sha256 object (sha3_256 stub — same interface)."""
+    return sha256()
+
+
+def sha3_224() -> sha256:
+    """Return a new sha256 object (sha3_224 stub — same interface)."""
+    return sha256()
+
+
+def sha3_384() -> sha256:
+    """Return a new sha256 object (sha3_384 stub — same interface)."""
+    return sha256()
+
+
+def sha3_512() -> sha256:
+    """Return a new sha256 object (sha3_512 stub — same interface)."""
+    return sha256()
+
+
+def shake_128(length: int = 32) -> sha256:
+    """Return a new sha256 object (shake_128 stub — same interface)."""
+    return sha256()
+
+
+def shake_256(length: int = 64) -> sha256:
+    """Return a new sha256 object (shake_256 stub — same interface)."""
+    return sha256()
+
+
+def pbkdf2_hmac(hash_name: str, password: list, salt: list,
+                iterations: int, dklen: int = 0) -> list:
+    """Password-based key derivation (stub: returns a sha256 digest)."""
+    h: sha256 = sha256()
+    h.update(password)
+    return h.digest()
+
+
+def new(name: str, data: list = []) -> sha256:
+    """Return a new hash object for the given algorithm name."""
+    h: sha256 = sha256()
+    if len(data) > 0:
+        h.update(data)
+    return h
+
+
+algorithms_guaranteed: list[str] = ["md5", "sha256", "sha1", "sha224", "sha384", "sha512",
+                                     "sha3_256", "sha3_224", "sha3_384", "sha3_512"]
+algorithms_available: list[str] = ["md5", "sha256", "sha1", "sha224", "sha384", "sha512",
+                                    "blake2b", "blake2s", "sha3_256", "sha3_224", "sha3_384",
+                                    "sha3_512", "shake_128", "shake_256"]

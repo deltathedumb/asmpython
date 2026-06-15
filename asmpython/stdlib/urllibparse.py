@@ -360,3 +360,49 @@ def urljoin(base: str, url: str, allow_fragments: int = 1) -> str:
         else:
             path = "/" + path
     return urlunparse(ParseResult(scheme, netloc, path, up.params, query, fragment))
+
+
+def parse_qs(qs: str, keep_blank_values: int = 0,
+             strict_parsing: int = 0) -> list:
+    """Parse a query string given as a string.
+
+    Returns a list of [key, value] pairs (one per unique key).
+    CPython returns a dict; we return a list of pairs since asmpython
+    dicts must have homogeneous value types.
+    """
+    pairs: list = parse_qsl(qs, keep_blank_values)
+    result: list = []
+    keys: list[str] = []
+    vals: list = []
+    for pair in pairs:
+        k: str = pair[0]
+        v: str = pair[1]
+        found: int = 0
+        i: int = 0
+        while i < len(keys):
+            if keys[i] == k:
+                found = 1
+                break
+            i = i + 1
+        if found == 0:
+            keys.append(k)
+            entry: list[str] = [k, v]
+            vals.append(entry)
+            result.append(entry)
+        else:
+            vals[i].append(v)
+    return result
+
+
+def urldefrag(url: str) -> list:
+    """Remove any fragment from a URL, returning [defraged_url, fragment]."""
+    idx: int = -1
+    i: int = 0
+    while i < len(url):
+        if url[i] == "#":
+            idx = i
+            break
+        i = i + 1
+    if idx < 0:
+        return [url, ""]
+    return [url[:idx], url[idx + 1:]]

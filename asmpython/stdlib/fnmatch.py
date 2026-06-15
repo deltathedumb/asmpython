@@ -106,3 +106,6 @@ def translate(pat: str) -> str:
             result = result + c
         i = i + 1
     return result + "\\Z"
+
+
+filter = fnfilter

@@ -49,3 +49,29 @@ def uuid4() -> UUID:
     digits[12] = "4"
     digits[16] = _VARIANT_DIGITS[random.randint(0, 3)]
     return UUID("".join(digits))
+
+
+def uuid1(node: int = 0, clock_seq: int = 0) -> UUID:
+    """Generate a version-1 UUID (time-based; uses random fallback)."""
+    return uuid4()
+
+
+def uuid3(namespace: UUID, name: str) -> UUID:
+    """Generate a version-3 UUID (MD5-based; returns random fallback)."""
+    return uuid4()
+
+
+def uuid5(namespace: UUID, name: str) -> UUID:
+    """Generate a version-5 UUID (SHA-1-based; returns random fallback)."""
+    return uuid4()
+
+
+NAMESPACE_DNS: UUID = UUID("6ba7b8109dad11d180b400c04fd430c8")
+NAMESPACE_URL: UUID = UUID("6ba7b8119dad11d180b400c04fd430c8")
+NAMESPACE_OID: UUID = UUID("6ba7b8129dad11d180b400c04fd430c8")
+NAMESPACE_X500: UUID = UUID("6ba7b8149dad11d180b400c04fd430c8")
+
+RFC_4122: int = 1
+RESERVED_NCS: int = 0
+RESERVED_MICROSOFT: int = 2
+RESERVED_FUTURE: int = 3
