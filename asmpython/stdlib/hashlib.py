@@ -99,7 +99,7 @@ def _bytes_to_hex(data: list) -> str:
     result: str = ""
     i: int = 0
     while i < len(data):
-        b: int = data[i] & 0xFF
+        b: int = int(data[i]) & 0xFF
         result = result + hex_chars[b >> 4] + hex_chars[b & 0xF]
         i = i + 1
     return result
