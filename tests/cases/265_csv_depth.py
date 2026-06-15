@@ -10,12 +10,12 @@
 import csv
 
 lines: list[str] = ["name,age", "alice,30", "bob,25"]
-rows: list = csv.reader(lines)
+rows: list[list[str]] = csv.reader(lines)
 print(len(rows))
-r0: csv.Row = rows[0]
+r0: list[str] = rows[0]
 print(r0[0])
 print(r0[1])
-r1: csv.Row = rows[1]
+r1: list[str] = rows[1]
 print(r1[0])
 print(len(r1))
 

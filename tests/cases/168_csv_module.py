@@ -23,21 +23,21 @@ lines = [
     "Alice,30,\"New York\"",
 ]
 
-rows = reader(lines)
+rows: list[list[str]] = reader(lines)
 for row in rows:
-    print(len(row.fields))
-    for f in row.fields:
+    print(len(row))
+    for f in row:
         print(f)
 
 print("---")
 print(writer_row(["a", "b,c", "d\"e"]))
 
 print("---")
-print(writer_row(rows[0].fields))
-print(writer_row(rows[1].fields))
+print(writer_row(rows[0]))
+print(writer_row(rows[1]))
 
 print("---")
 dr = DictReader(lines)
-data_row = dr.rows[0]
+data_row: list[str] = dr.rows[0]
 print(dr.get(data_row, "name"), dr.get(data_row, "city"))
-print(len(reader([""])[0].fields))
+print(len(reader([""])[0]))

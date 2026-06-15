@@ -301,6 +301,11 @@ class FuncSig:
     # annotation, the per-slot kinds ["T1","T2"] (else None). Lets call sites
     # of `for a, b in <list[tuple[T1,T2]]>` type each unpack target.
     ret_list_tuple_types: object = None
+    # When ret_type is ("list", "list"/"dict", ...) from a `-> list[list[T]]`
+    # or `-> list[dict[K,V]]` annotation, the inner element/value kind ("str",
+    # "int", etc.) — else None. Lets call sites stamp el_value_type so
+    # `for row in rows: row[i]` recovers the leaf type.
+    ret_inner_el_type: object = None
     # Parameter names and their default expressions (parallel to params,
     # including `self` for methods). Used to bind keyword arguments onto
     # positions at call sites.
@@ -1142,6 +1147,7 @@ class SemaAnalyzer:
                 pos=f.pos,
                 ret_type=(r[0], r[1], r[2]) if r is not None else None,
                 ret_list_tuple_types=(r[3] if r is not None and r[1] == "tuple" else None),
+                ret_inner_el_type=(r[4] if r is not None and r[1] in ("list", "dict") else None),
                 param_names=list(f.params),
                 param_defaults=list(f.defaults),
                 vararg=f.vararg,
@@ -1229,6 +1235,7 @@ class SemaAnalyzer:
                     pos=m.pos,
                     ret_type=(mr[0], mr[1], mr[2]) if mr is not None else None,
                     ret_list_tuple_types=(mr[3] if mr is not None and mr[1] == "tuple" else None),
+                    ret_inner_el_type=(mr[4] if mr is not None and mr[1] in ("list", "dict") else None),
                     param_names=list(m.params),
                     param_defaults=list(m.defaults),
                     vararg=m.vararg,
@@ -1625,6 +1632,10 @@ class SemaAnalyzer:
             return getattr(e, "el_value_type", "int")
         if isinstance(e, A.Name):
             return scope.list_el_value_types.get(e.name, "int")
+        if isinstance(e, (A.Call, A.MethodCall)):
+            return getattr(e, "el_value_type", "int")
+        if isinstance(e, A.Attr):
+            return getattr(e, "el_value_type", "int")
         return "int"
 
     def _list_el_tuple_types(self, e, scope: Scope) -> list[str]:
@@ -4184,6 +4195,8 @@ class SemaAnalyzer:
                     e.inferred_type = ty
                     if ty == "list" and el is not None:
                         e.list_el_type = el
+                        if el in ("list", "dict") and sig.ret_inner_el_type:
+                            e.el_value_type = sig.ret_inner_el_type
                 else:
                     e.inferred_type = "int"
                 return
@@ -4235,6 +4248,8 @@ class SemaAnalyzer:
                         e.list_el_type = el
                         if el == "tuple" and sig.ret_list_tuple_types:
                             e.tuple_elem_types = list(sig.ret_list_tuple_types)  # type: ignore
+                        elif el in ("list", "dict") and sig.ret_inner_el_type:
+                            e.el_value_type = sig.ret_inner_el_type
                 elif sig.returns_self:
                     # `def m(self): ... return self` with no annotation: the
                     # call's result is another reference to the receiver's
@@ -4256,6 +4271,8 @@ class SemaAnalyzer:
                     e.inferred_type = mty
                     if mty == "list" and mel is not None:
                         e.list_el_type = mel
+                        if mel in ("list", "dict") and msig.ret_inner_el_type:
+                            e.el_value_type = msig.ret_inner_el_type
                     elif mty == "dict" and mval is not None:
                         e.value_type = mval
                 else:
@@ -5109,6 +5126,10 @@ class SemaAnalyzer:
                     e.list_el_type = el
                     if el == "tuple" and sig.ret_list_tuple_types:
                         e.tuple_elem_types = list(sig.ret_list_tuple_types)  # type: ignore
+                    elif el in ("list", "dict") and sig.ret_inner_el_type:
+                        # list[list[T]] / list[dict[K,V]]: carry the leaf kind
+                        # so `for row in rows: row[i]` recovers T.
+                        e.el_value_type = sig.ret_inner_el_type
                 elif ty == "dict" and _val is not None:
                     # Carry the value kind so `d = f()[k]` / `f()[k].attr`
                     # reads recover it (bare `-> dict` gives value kind "any").
