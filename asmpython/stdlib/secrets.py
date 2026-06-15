@@ -44,7 +44,7 @@ def token_bytes(nbytes: int = 32) -> list:
 
 def token_hex(nbytes: int = 32) -> str:
     """Return a hex string of nbytes random bytes."""
-    data: list = token_bytes(nbytes)
+    data: list[int] = token_bytes(nbytes)
     result: str = ""
     i: int = 0
     while i < len(data):
@@ -56,7 +56,7 @@ def token_hex(nbytes: int = 32) -> str:
 
 def token_urlsafe(nbytes: int = 32) -> str:
     """Return a URL-safe base64 token of nbytes bytes."""
-    data: list = token_bytes(nbytes)
+    data: list[int] = token_bytes(nbytes)
     _B64URL: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
     result: str = ""
     i: int = 0
