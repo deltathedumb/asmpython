@@ -6,7 +6,7 @@
 # 3/8
 # 2/3
 # 0
-# 1
+# True
 
 from fractions import Fraction
 
