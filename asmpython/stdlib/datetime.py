@@ -261,7 +261,7 @@ def _strftime_date(fmt: str, year: int, month: int, day: int,
                         "July", "August", "September", "October", "November", "December"]
     _MON_SHORT: list = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    wd: int = _ymd_to_ordinal(year, month, day) % 7
+    wd: int = (_ymd_to_ordinal(year, month, day) + 6) % 7
     result: str = ""
     i: int = 0
     while i < len(fmt):
