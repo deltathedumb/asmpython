@@ -494,6 +494,11 @@ class LinuxCodegen(Codegen):
         "_net_bind", "_net_connect", "_net_send", "_net_recv",
         "_net_send_all", "_net_accept", "_net_close",
         "_net_gethostname", "_net_errno",
+        "_net_setsockopt", "_net_getsockopt_int",
+        # Raw POSIX socket symbols used directly from socket BINDINGS
+        "socket", "bind", "connect", "listen", "accept", "close",
+        "send", "recv", "htons", "htonl", "ntohs", "ntohl",
+        "inet_addr", "gethostname", "errno", "setsockopt", "getsockopt", "shutdown",
     )
     _GUI_SYMS = (
         "_gui_fill_rect", "_gui_draw_rect", "_gui_poll_event",
@@ -524,6 +529,10 @@ class LinuxCodegen(Codegen):
     def _asmlib_inline_syms(self) -> set:
         return (set(self._HW_STUBS) | set(self._NET_SYMS) | set(self._GUI_SYMS)
                 | set(self._MATH_SYMS) | set(self._RANDOM_SYMS) | set(self._TIME_SYMS))
+
+    @property
+    def needs_net(self) -> bool:
+        return any(s in self.ffi_externs for s in self._NET_SYMS)
 
     def emit_asmlib_runtime(self) -> None:
         needs_hw   = any(s in self.ffi_externs for s in self._HW_STUBS)
@@ -1133,6 +1142,33 @@ class LinuxCodegen(Codegen):
             if "_net_errno" in self.ffi_externs:
                 self.label("_net_errno")
                 self.emitf("mov rax, [errno]", "ret")
+
+            # _net_setsockopt(rdi=fd, rsi=level, rdx=optname, rcx=value) -> rax
+            if "_net_setsockopt" in self.ffi_externs:
+                self.emit("extern setsockopt")
+                self.label("_net_setsockopt")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+                self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi",
+                           "mov [rbp-24], rdx", "mov [rbp-32], rcx")
+                self.emitf("mov dword [rbp-36], ecx")  # int opt_val
+                self.emitf("mov rdi, [rbp-8]", "mov rsi, [rbp-16]",
+                           "mov rdx, [rbp-24]", "lea rcx, [rbp-36]",
+                           "mov r8d, 4",               # optlen=4
+                           "call setsockopt", "leave", "ret")
+
+            # _net_getsockopt_int(rdi=fd, rsi=level, rdx=optname) -> rax (int value)
+            if "_net_getsockopt_int" in self.ffi_externs:
+                self.emit("extern getsockopt")
+                self.label("_net_getsockopt_int")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+                self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi", "mov [rbp-24], rdx")
+                self.emitf("xor rax, rax", "mov [rbp-32], rax")   # opt_val=0
+                self.emitf("mov dword [rbp-40], 4")               # optlen=4
+                self.emitf("mov rdi, [rbp-8]", "mov rsi, [rbp-16]",
+                           "mov rdx, [rbp-24]", "lea rcx, [rbp-32]",
+                           "lea r8, [rbp-40]",                    # &optlen
+                           "call getsockopt",
+                           "mov eax, dword [rbp-32]", "leave", "ret")
 
         # ---- SDL2 / GUI helpers ----------------------------------------------
         # SDL_Rect is { int x,y,w,h } = 16 bytes.  We keep a static event

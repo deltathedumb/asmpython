@@ -166,7 +166,7 @@ _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "urllibparse", "pprint", "platform", "glob", "threading",
     "logging", "secrets", "shutil", "traceback", "inspect",
     "fnmatch", "queue", "weakref", "gc",
-    "configparser", "locale", "socket",
+    "configparser", "locale",
 })
 
 # Dotted module names that map to a differently-named file in stdlib/.

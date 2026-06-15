@@ -58,6 +58,7 @@ from .os     import BINDINGS as _OS_BINDINGS      # noqa: E402
 from .sys    import BINDINGS as _SYS_BINDINGS     # noqa: E402
 from .time   import BINDINGS as _TIME_BINDINGS    # noqa: E402
 from .random import BINDINGS as _RANDOM_BINDINGS  # noqa: E402
+from .socket import BINDINGS as _SOCKET_BINDINGS  # noqa: E402
 
 STDLIB_BINDINGS: dict[str, dict] = {
     "math":   _MATH_BINDINGS,
@@ -65,4 +66,5 @@ STDLIB_BINDINGS: dict[str, dict] = {
     "sys":    _SYS_BINDINGS,
     "time":   _TIME_BINDINGS,
     "random": _RANDOM_BINDINGS,
+    "socket": _SOCKET_BINDINGS,
 }

@@ -239,6 +239,8 @@ def compile_source(
                 f"-L{_build_dir()}",
                 f"-lasmpython_rt_{'win' if target == 'windows' else 'linux'}",
             ]
+        if target == "windows" and getattr(gen, "needs_net", False):
+            link_cmd.append("-lws2_32")
         _run(link_cmd, extra_path_dirs=[gcc_dir])
 
     if not keep_intermediates:

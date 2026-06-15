@@ -599,6 +599,12 @@ class WindowsCodegen(Codegen):
         "_net_bind", "_net_connect", "_net_send", "_net_recv",
         "_net_send_all", "_net_accept", "_net_close",
         "_net_gethostname", "_net_errno",
+        "_net_setsockopt", "_net_getsockopt_int",
+        # Raw Winsock2 symbols used directly from socket BINDINGS
+        "socket", "bind", "connect", "listen", "accept", "closesocket",
+        "send", "recv", "htons", "htonl", "ntohs", "ntohl",
+        "inet_addr", "gethostname", "WSAGetLastError", "WSAStartup",
+        "setsockopt", "getsockopt", "shutdown",
     )
     _GUI_SYMS = (
         "_gui_fill_rect", "_gui_draw_rect", "_gui_poll_event",
@@ -629,6 +635,10 @@ class WindowsCodegen(Codegen):
     def _asmlib_inline_syms(self) -> set:
         return (set(self._HW_STUBS) | set(self._NET_SYMS) | set(self._GUI_SYMS)
                 | set(self._MATH_SYMS) | set(self._RANDOM_SYMS) | set(self._TIME_SYMS))
+
+    @property
+    def needs_net(self) -> bool:
+        return any(s in self.ffi_externs for s in self._NET_SYMS)
 
     def emit_asmlib_runtime(self) -> None:
         needs_hw     = any(s in self.ffi_externs for s in self._HW_STUBS)
@@ -1229,6 +1239,33 @@ class WindowsCodegen(Codegen):
             if "_net_errno" in self.ffi_externs:
                 self.label("_net_errno")
                 self.emitf("call WSAGetLastError", "ret")
+
+            # _net_setsockopt(rcx=fd, rdx=level, r8=optname, r9=value) -> rax
+            if "_net_setsockopt" in self.ffi_externs:
+                self.emit("extern setsockopt")
+                self.label("_net_setsockopt")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
+                self.emitf("mov [rbp-8], rcx", "mov [rbp-16], rdx",
+                           "mov [rbp-24], r8", "mov [rbp-32], r9")
+                self.emitf("mov dword [rbp-40], r9d")  # int opt_val on stack
+                self.emitf("mov rcx, [rbp-8]", "mov rdx, [rbp-16]",
+                           "mov r8, [rbp-24]", "lea r9, [rbp-40]",
+                           "mov dword [rsp+32], 4",   # optlen=4 (5th arg)
+                           "call setsockopt", "leave", "ret")
+
+            # _net_getsockopt_int(rcx=fd, rdx=level, r8=optname) -> rax (int value)
+            if "_net_getsockopt_int" in self.ffi_externs:
+                self.emit("extern getsockopt")
+                self.label("_net_getsockopt_int")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
+                self.emitf("mov [rbp-8], rcx", "mov [rbp-16], rdx", "mov [rbp-24], r8")
+                self.emitf("xor rax, rax", "mov [rbp-32], rax")      # opt_val=0
+                self.emitf("mov dword [rbp-40], 4")                   # optlen=4
+                self.emitf("mov rcx, [rbp-8]", "mov rdx, [rbp-16]",
+                           "mov r8, [rbp-24]", "lea r9, [rbp-32]",
+                           "lea rax, [rbp-40]", "mov [rsp+32], rax",  # &optlen (5th arg)
+                           "call getsockopt",
+                           "mov eax, dword [rbp-32]", "leave", "ret")
 
         # SDL2 GUI helpers (Windows)
         if needs_gui:
