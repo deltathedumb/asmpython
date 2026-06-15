@@ -16,7 +16,7 @@ committed and pushed to `origin/parity-expansion`.
   merges all its classes into the global namespace.  The global name `override`
   (type `"type"`) shadowed the local parameter `override: str` in
   `driver.py:_find_tool()`, which uses it in `f"--{name} {override}"`.
-  Sema rejected the f-string segment because its inferred type was `"type"`.
+  Sema rejected the f-string segment because its inferrcan ed type was `"type"`.
 - Fix: changed `class override` → `def override(func: int) -> int` (a no-op
   function stub).  Functions type as `"int"` in global scope; no collision.
 - `python build.py` and `build.bat` both produce `build/asmpython.exe` and
