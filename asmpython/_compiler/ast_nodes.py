@@ -33,6 +33,10 @@ class Module:
     # by sema from the loaded `.asmpkg` manifests; codegen emits their NASM and
     # treats their exports as callable symbols.
     asm_packages: list = field(default_factory=list)  # list[pkgformat.AsmPackage]
+    # `from module import orig as local` aliases for bundled-source stdlib funcs.
+    # Maps local_name -> original_name so codegen can resolve the real symbol.
+    # Populated by sema during FromImport analysis.
+    func_aliases: dict = field(default_factory=dict)  # local -> original
 
 
 @dataclass

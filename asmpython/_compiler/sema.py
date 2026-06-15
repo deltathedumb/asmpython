@@ -2382,9 +2382,14 @@ class SemaAnalyzer:
                 # import (`from asmpython._compiler.sema import STDLIB_BINDINGS`)
                 # refers to a value the whole-program loader already
                 # materialized with its REAL type.
-                for name in s.names:
-                    if name not in scope:
-                        scope.add(name, "any")
+                # For `from bundled_module import orig as local`, register the
+                # alias so codegen can resolve `local` to the merged `orig` symbol.
+                orig_names = s.orig_names or s.names
+                for local, orig in zip(s.names, orig_names):
+                    if local != orig:
+                        self.mod.func_aliases[local] = orig
+                    if local not in scope:
+                        scope.add(local, "any")
                 return
             for name in s.names:
                 if name not in bindings:
@@ -3065,7 +3070,10 @@ class SemaAnalyzer:
                 e.inferred_type = "type"
                 return
             # A module-level function used as a value (passed, stored in a var).
-            if e.name in self.funcs:
+            # Scope binding takes priority: if the user named a variable the same
+            # as a merged stdlib function (e.g. `log = logging.getLogger(...)`
+            # shadowing `logging.log`), the variable's type wins.
+            if e.name in self.funcs and e.name not in scope:
                 e.inferred_type = "any"
                 return
             if e.name not in scope:
@@ -5044,6 +5052,12 @@ class SemaAnalyzer:
                         "str() requires a scalar, container, or object", e.pos
                     )
             return
+        # Resolve import alias (from mod import orig as local) for bundled-source
+        # stdlib functions so type-checking and inference use the real FuncSig.
+        if e.func in self.mod.func_aliases and e.func not in self.funcs:
+            resolved = self.mod.func_aliases[e.func]
+            if resolved in self.funcs:
+                e.func = resolved
         if e.func in self.funcs:
             sig = self.funcs[e.func]
             # Plain positional calls keep the precise arity diagnostics; calls

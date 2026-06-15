@@ -130,6 +130,8 @@ class Codegen:
         self.ffi_funcs: dict = dict(mod.ffi_funcs)
         self.ffi_consts: dict = dict(mod.ffi_consts)
         self.imported_modules: dict = dict(mod.imported_modules)
+        # `from module import orig as local` aliases for bundled-source funcs.
+        self.func_aliases: dict = dict(getattr(mod, "func_aliases", {}))
         # Symbols supplied by included assembly packages. These are defined in
         # *this* .asm (the package's NASM is concatenated in), so they must not
         # also be declared `extern`.
@@ -164,6 +166,10 @@ class Codegen:
                     f.ret_type is not None and f.ret_type[0] == "float"
                 ),
             )
+        # Rewrite all Call nodes whose func is an import alias so pre-alloc and
+        # emit use the same resolved name (mutates AST func field in place).
+        if self.func_aliases:
+            self._apply_func_aliases(mod)
         # Module-level variables. A top-level `name = expr` lives in a real
         # .bss slot (a global symbol) instead of the synthetic main frame, so
         # every function can read it — not just module-level code. name -> type.
@@ -288,6 +294,109 @@ class Codegen:
                 continue
             t_off = info.locals_[t]
             self.emitf(f"mov rax, [rdx+{j * 8}]", f"mov [rbp{t_off:+d}], rax")
+
+    def _apply_func_aliases(self, mod: A.Module) -> None:
+        """Rewrite all A.Call.func fields that are import aliases to the
+        original function name.  Done once before pre-allocation so that slot
+        IDs are stable and _cl_walk_expr / _gen_call see the resolved name."""
+        aliases = self.func_aliases
+        if not aliases:
+            return
+
+        def _walk_expr(e) -> None:
+            if e is None:
+                return
+            if isinstance(e, A.Call):
+                if e.func in aliases:
+                    orig = aliases[e.func]
+                    if orig in self.funcs or orig in self.ffi_funcs:
+                        e.func = orig
+                for a in e.args:
+                    _walk_expr(a)
+                for _kn, kv in (e.kwargs or []):
+                    _walk_expr(kv)
+            elif isinstance(e, A.BinOp):
+                _walk_expr(e.left)
+                _walk_expr(e.right)
+            elif isinstance(e, A.Compare):
+                for sub in e.operands:
+                    _walk_expr(sub)
+            elif isinstance(e, A.BoolOp):
+                _walk_expr(e.left)
+                _walk_expr(e.right)
+            elif isinstance(e, A.UnaryOp):
+                _walk_expr(e.operand)
+            elif isinstance(e, A.IfExp):
+                _walk_expr(e.test)
+                _walk_expr(e.body)
+                _walk_expr(e.orelse)
+            elif isinstance(e, (A.ListLit, A.TupleLit, A.SetLit)):
+                for el in e.elems:
+                    _walk_expr(el)
+            elif isinstance(e, A.DictLit):
+                for k in e.keys:
+                    if k is not None:
+                        _walk_expr(k)
+                for v in e.values:
+                    _walk_expr(v)
+            elif isinstance(e, A.Comprehension):
+                _walk_expr(e.iter)
+                _walk_expr(e.elt)
+                if e.cond is not None:
+                    _walk_expr(e.cond)
+            elif isinstance(e, A.DictComprehension):
+                _walk_expr(e.iter)
+                _walk_expr(e.key)
+                _walk_expr(e.value)
+                if e.cond is not None:
+                    _walk_expr(e.cond)
+            elif isinstance(e, A.MethodCall):
+                _walk_expr(e.obj)
+                for a in e.args:
+                    _walk_expr(a)
+            elif isinstance(e, A.Attr):
+                _walk_expr(e.obj)
+            elif isinstance(e, A.Subscript):
+                _walk_expr(e.obj)
+                _walk_expr(e.index)
+
+        def _walk_stmts(stmts) -> None:
+            for s in stmts:
+                if isinstance(s, A.Assign):
+                    _walk_expr(s.value)
+                elif isinstance(s, A.ExprStmt):
+                    _walk_expr(s.expr)
+                elif isinstance(s, A.IndexAssign):
+                    _walk_expr(s.target)
+                    _walk_expr(s.value)
+                elif isinstance(s, A.Return):
+                    if s.value is not None:
+                        _walk_expr(s.value)
+                elif isinstance(s, A.If):
+                    _walk_expr(s.test)
+                    _walk_stmts(s.then)
+                    _walk_stmts(s.orelse)
+                elif isinstance(s, A.While):
+                    _walk_expr(s.test)
+                    _walk_stmts(s.body)
+                elif isinstance(s, A.For):
+                    _walk_expr(s.iter)
+                    _walk_stmts(s.body)
+                elif isinstance(s, A.Try):
+                    _walk_stmts(s.body)
+                    _walk_stmts(s.handler)
+                    for _types, _bind, hbody in s.extra_handlers:
+                        _walk_stmts(hbody)
+                    _walk_stmts(s.else_body)
+                    _walk_stmts(s.finally_body)
+                elif isinstance(s, A.MultiAssign):
+                    _walk_expr(s.value)
+                elif isinstance(s, A.AugAssign):
+                    _walk_expr(s.value)
+
+        _walk_stmts(mod.body)
+        for f in mod.funcs:
+            _walk_stmts(f.body)
 
     def _collect_frame_bound(self, stmts: list, acc: set) -> None:
         """Collect names bound by a for-loop variable or tuple-unpack target
