@@ -2979,7 +2979,20 @@ class Codegen:
                 # Python truthiness mirrors _gen_truthy_test: containers test
                 # their length (an empty list is a non-NULL pointer), strings
                 # their first byte; scalars/pointers the raw value.
-                if operand_t in ("list", "tuple", "dict", "set"):
+                if operand_t.startswith("instance:"):
+                    cls_name = operand_t.split(":", 1)[1]
+                    for mname in ("__bool__", "__len__"):
+                        owner = self._resolve_method_owner(cls_name, mname)
+                        if owner is not None:
+                            reg0 = self._arg_reg(0)
+                            self.emitf(f"mov {reg0}, rax")
+                            self.emit_call(self._method_symbol(owner, mname))
+                            break
+                    else:
+                        # No __bool__/__len__: live instance is always truthy.
+                        self.emitf("mov rax, 0")
+                        return
+                elif operand_t in ("list", "tuple", "dict", "set"):
                     self.emitf("mov rax, [rax+8]")
                 elif operand_t == "str":
                     self.emitf("movzx rax, byte [rax]")
@@ -9132,6 +9145,21 @@ class Codegen:
                 f"je {false_target}",
             )
             self.label(past_nan)
+            return
+        if t.startswith("instance:"):
+            cls_name = t.split(":", 1)[1]
+            # __bool__ takes precedence over __len__ (matches CPython).
+            for mname in ("__bool__", "__len__"):
+                owner = self._resolve_method_owner(cls_name, mname)
+                if owner is not None:
+                    self.gen_expr(expr, info)
+                    reg0 = self._arg_reg(0)
+                    self.emitf(f"mov {reg0}, rax")
+                    self.emit_call(self._method_symbol(owner, mname))
+                    self.emitf("test rax, rax", f"jz {false_target}")
+                    return
+            # No __bool__ / __len__: any non-null instance pointer is truthy.
+            # A live instance is always non-null, so no branch needed.
             return
         if t in ("list", "tuple", "dict", "set"):
             # Container truthiness is its LENGTH (an empty list is a valid,
