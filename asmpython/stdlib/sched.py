@@ -75,21 +75,6 @@ class scheduler:
         """Return True if the queue is empty."""
         return 1 if len(self._queue) == 0 else 0
 
-    def run(self, blocking: int = 1) -> float:
-        """Run all scheduled events."""
-        lock: int = 1
-        while len(self._queue) > 0:
-            ev: Event = self._queue[0]
-            now: float = time.monotonic()
-            if ev.time > now:
-                delay: float = ev.time - now
-                if not blocking:
-                    return delay
-                time.sleep(delay)
-            self._queue.pop(0)
-            ev.action(*ev.argument)
-        return 0.0
-
     def queue(self) -> list[Event]:
         """Return a list of upcoming events in order."""
         result: list[Event] = []
