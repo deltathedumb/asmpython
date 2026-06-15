@@ -22,7 +22,6 @@ from typing import Optional
 from . import ast_nodes as A
 from .. import stdlib
 from ..stdlib import STDLIB_BINDINGS
-from ..asmlib import ASMLIB_BINDINGS
 from .errors import ErrorCode, SemaError
 
 
@@ -483,20 +482,13 @@ def _load_module(name: str) -> dict:
             break
     if key in STDLIB_BINDINGS:
         return STDLIB_BINDINGS[key]
-    if key in ASMLIB_BINDINGS:
-        return ASMLIB_BINDINGS[key]
     raise SemaError(f"no such module: {name!r}", code=ErrorCode.E_NO_SUCH_MODULE)
 
 
 class SemaAnalyzer:
     def __init__(self, mod: A.Module, *, source_dir=None) -> None:
         self.mod = mod
-        # Directory of the source file, for resolving include("pkg") against a
-        # sibling `<pkg>.asmpkg`. None outside a real compile.
         self.source_dir = source_dir
-        # Loaded assembly packages, keyed by package name (dedup repeated
-        # includes). Their exports become callable symbols.
-        self.asm_packages: dict[str, object] = {}
         self.funcs: dict[str, FuncSig] = {}
         self.classes: dict[str, ClassSig] = {}
         # Variable name -> return type of the lambda bound to it, so an indirect
@@ -1364,12 +1356,6 @@ class SemaAnalyzer:
         self.mod.ffi_consts = self.ffi_consts
         # Codegen needs to look up methods by class chain for dispatch.
         self.mod.classes_sig = self.classes
-        # Assembly packages pulled in via include(), in load order.
-        self.mod.asm_packages = list(self.asm_packages.values())
-        # Drop the `include(...)` directive statements from the module body so
-        # codegen never tries to emit a runtime call for them. They were fully
-        # consumed above (package loaded, exports registered).
-        self.mod.body = [s for s in self.mod.body if not self._is_include_stmt(s)]
 
     # ---- helpers ------------------------------------------------------------
 
@@ -1386,62 +1372,6 @@ class SemaAnalyzer:
                 stmts[i:i] = extra
                 i += len(extra)
             i += 1
-
-    def _is_include_stmt(self, s) -> bool:
-        """True if `s` is an `include("pkg")` directive statement.
-
-        Matched structurally on the ExprStmt/Call shape; `include` having been
-        bound as an asmdirective was already verified when it was handled, so
-        any leftover `include(...)` ExprStmt in the module body is a directive.
-        """
-        return (
-            isinstance(s, A.ExprStmt)
-            and isinstance(s.expr, A.Call)
-            and s.expr.func == "include"
-        )
-
-    def _handle_include(self, call: A.Call) -> None:
-        """Resolve and load an `include("pkg")` directive.
-
-        Validates the argument is a single string literal, finds the matching
-        `<pkg>.asmpkg` on the search path, loads it, registers each export as a
-        callable FFI-style symbol, and records the package on the Module so
-        codegen can emit its NASM. Duplicate includes are ignored.
-        """
-        from asmpython.stdlib.assembly import pkgformat
-
-        if len(call.args) != 1 or call.kwargs:
-            raise SemaError("include() takes exactly one package-name string", call.pos, ErrorCode.E_INCLUDE_ARG)
-        arg = call.args[0]
-        if not isinstance(arg, A.StrLit):
-            raise SemaError("include() argument must be a string literal", call.pos, ErrorCode.E_INCLUDE_ARG)
-        name = arg.value
-        if name in self.asm_packages:
-            return  # already included
-
-        # Search path: the source file's directory, then the CWD as a fallback.
-        # Plain string directory paths (not pathlib) so this stays in the
-        # compilable subset for self-host; pkgformat resolves them with string
-        # ops + the os file-I/O FFI.
-        search: list = []
-        if self.source_dir is not None:
-            search.append(str(self.source_dir))
-        search.append(".")
-        try:
-            pkg_path = pkgformat.find_package(name, search)
-            pkg = pkgformat.load_package(pkg_path)
-        except pkgformat.AsmPkgError as e:
-            raise SemaError(str(e), call.pos) from e
-
-        self.asm_packages[name] = pkg
-        # Register exports so call sites resolve. We reuse the FFI Func surface:
-        # an exported symbol is just a foreign function with a known signature.
-        for exp in pkg.exports.values():
-            self.ffi_funcs[exp.symbol] = stdlib.Func(
-                arg_types=tuple(exp.arg_types),
-                ret_type=exp.ret_type,
-                c_name=exp.symbol,
-            )
 
     def _narrow_type_of(self, te) -> str:
         """The type a variable narrows to inside an `isinstance(x, te)` guard.
@@ -2343,8 +2273,8 @@ class SemaAnalyzer:
                         scope.add(name, "module")
                     except SemaError:
                         # A stdlib *submodule* that isn't an FFI binding set
-                        # (e.g. `ospath`, `assembly.pkgformat`). Bind it as a
-                        # module so `name.func(...)` dispatches to the merged
+                        # (e.g. `ospath`). Bind it as a module so `name.func(...)`
+                        # dispatches to the merged
                         # project function (whole-program) — unless the name was
                         # already bound (e.g. a materialized value global like
                         # `BINDINGS`): re-binding would clobber its real type.
@@ -2353,18 +2283,12 @@ class SemaAnalyzer:
                             ty = "any" if orig[:1].isupper() else "module"
                             scope.add(name, ty)
                 return
-            # `from asmpython.assembly import assembly_func, include`: the two
-            # compiler directives. Bind them so call sites resolve; `include`
-            # is acted on when called, `assembly_func` is consumed at parse time
-            # as a decorator (its name in scope is just a marker here).
+            # `from asmpython.assembly import assembly_func, include`: compiler
+            # directives. `assembly_func` is consumed at parse time as a
+            # decorator. Bind all names from the package as opaque markers.
             if s.module in ("asmpython.assembly", "assembly") and s.level == 0:
                 for name in s.names:
-                    # Only the two directives are special; anything else from
-                    # the package (e.g. `pkgformat`) is an ordinary opaque name.
-                    if name in ("assembly_func", "include"):
-                        scope.add(name, "asmdirective")
-                    else:
-                        scope.add(name, "any")
+                    scope.add(name, "asmdirective")
                 return
             # Relative import or unknown module: accept the syntax and bind
             # each imported name as a dummy int. Self-host needs every source
@@ -2418,16 +2342,6 @@ class SemaAnalyzer:
                     scope.add(name, b.ty)
             return
         if isinstance(s, A.ExprStmt):
-            # `include("pkg")` — an assembly-package directive. Recognised only
-            # when `include` came from `asmpython.assembly` (bound as
-            # "asmdirective") so a user function named `include` still works.
-            if (
-                isinstance(s.expr, A.Call)
-                and s.expr.func == "include"
-                and scope.types.get("include") == "asmdirective"
-            ):
-                self._handle_include(s.expr)
-                return
             self._check_expr(s.expr, scope)
             return
         if isinstance(s, A.IndexAssign):
@@ -3959,7 +3873,7 @@ class SemaAnalyzer:
                 return
             # `module.Thing(args)` where `module` is a merged *project* module
             # (not an FFI registry module) and `Thing` is a merged class or
-            # top-level function (`stdlib.Func(...)`, `pkgformat.load_package(p)`):
+            # top-level function (`stdlib.Func(...)`, `ospath.join(a, b)`):
             # whole-program compilation flattens the namespace, so this IS a
             # plain call to the merged symbol. Rewrite the node into an A.Call
             # in place and run the ordinary call checker — constructors get the
@@ -4259,7 +4173,7 @@ class SemaAnalyzer:
                     e.inferred_type = "int"
             elif obj_t == "module" and e.method in self.funcs:
                 # A module-qualified call to a merged project function
-                # (`pkgformat.load_package(p)`, `ospath.join(a, b)`): adopt the
+                # (`ospath.join(a, b)`, etc.): adopt the
                 # function's signature so the result is typed like a plain call
                 # (codegen dispatches it to the merged symbol).
                 msig = self.funcs[e.method]
@@ -5231,9 +5145,8 @@ class SemaAnalyzer:
 def analyze(mod: A.Module, *, source_dir=None) -> None:
     """Run semantic analysis over `mod`.
 
-    `source_dir` is the directory of the source file (a Path or None). It seeds
-    the search path for `include("pkg")` so a `<pkg>.asmpkg` next to the source
-    is found. None disables file-relative package resolution (used by the
-    self-host gauntlet and tests that analyse in isolation).
+    `source_dir` is the directory of the source file (a Path or None). Used for
+    resolving relative imports and project-local module references. None for
+    isolation (used by the self-host gauntlet and tests).
     """
     SemaAnalyzer(mod, source_dir=source_dir).analyze()

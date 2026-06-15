@@ -175,6 +175,7 @@ _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "html", "keyword", "shlex", "calendar", "difflib",
     "ipaddress", "numbers", "hmac", "timeit", "getpass",
     "gzip", "zipfile", "pickle",
+    "colorsys", "cmath", "sched",
 })
 
 # Dotted module names that map to a differently-named file in stdlib/.
@@ -230,9 +231,7 @@ def _within(path: Path, root: Path) -> bool:
 
 def _collect_import_stmts(module: A.Module) -> list:
     """Every Import / FromImport in the module — including those nested inside
-    function and method bodies (the compiler uses function-local imports, e.g.
-    `_handle_include`'s `from asmpython.stdlib.assembly import pkgformat`) and
-    control-flow blocks."""
+    function and method bodies and control-flow blocks."""
     found: list = []
 
     def walk(stmts) -> None:
@@ -296,8 +295,7 @@ def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]
                             out.append(pkg_init)
             elif stmt.module:
                 # `from asmpython.pkg import X`: X may be a name defined in the
-                # package's module/__init__, OR a *submodule* (`from
-                # asmpython.stdlib.assembly import pkgformat`). Resolve the
+                # package's module/__init__, OR a *submodule*. Resolve the
                 # module itself, and also try each imported name as a submodule.
                 p = _resolve_absolute(stmt.module, root)
                 if p is None:
@@ -510,7 +508,7 @@ def _merge_import_bindings(
                 # `if sys.platform == "win32": ...`) can depend on it.
                 available.add(stmt.module.split(".")[0])
         # A merged module's own top-level constant assignments (e.g.
-        # `ASMPKG_SUFFIX = ".asmpkg"`) are used by its functions, so they must
+        # `STDLIB_BINDINGS = {...}`) are used by its functions, so they must
         # become program globals too. Skip a constant whose initializer needs a
         # name we can't provide here (e.g. `STDLIB_BINDINGS = {... _MATH_BINDINGS
         # ...}`, which depends on a cross-module value import) — the dependency-

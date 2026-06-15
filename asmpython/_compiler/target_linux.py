@@ -331,7 +331,7 @@ class LinuxCodegen(Codegen):
         )
         self.emitf(f"mov rax, [rbp{acc_slot:+d}]")
         for sym in ("popen", "pclose", "fgetc", "strlen"):
-            if sym not in self.ffi_externs and sym not in self.asm_pkg_symbols:
+            if sym not in self.ffi_externs:
                 self.ffi_externs.add(sym)
 
     # ---- runtime data + helpers --------------------------------------------

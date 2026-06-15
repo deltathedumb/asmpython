@@ -84,7 +84,6 @@ class Freestanding16Codegen(FreestandingCodegen):
                     ),
                 )
                 self.emit_function(mangled)
-        self.emit_asm_packages()
         self.emit_print_impls()
         self.emit_data_sections()
 

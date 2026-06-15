@@ -220,9 +220,6 @@ class FreestandingCodegen(Codegen):
                 )
                 self.emit_function(mangled)
 
-        # Assembly packages
-        self.emit_asm_packages()
-
         # 3. Runtime helpers + data + BSS
         self.emit_print_impls()
         self.emit_data_sections()

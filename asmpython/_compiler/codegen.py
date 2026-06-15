@@ -152,25 +152,16 @@ class Codegen:
         self.imported_modules: dict = dict(mod.imported_modules)
         # `from module import orig as local` aliases for bundled-source funcs.
         self.func_aliases: dict = dict(getattr(mod, "func_aliases", {}))
-        # Symbols supplied by included assembly packages. These are defined in
-        # *this* .asm (the package's NASM is concatenated in), so they must not
-        # also be declared `extern`.
-        self.asm_pkg_symbols: set[str] = set()
-        for pkg in getattr(mod, "asm_packages", []):
-            for exp in getattr(pkg, "exports", {}).values():
-                self.asm_pkg_symbols.add(exp.symbol)
         # Set of c_name symbols we'll need `extern` declarations for.
         self.ffi_externs: set[str] = set()
         for fn in self.ffi_funcs.values():
             sym = self._platform_c_name(fn)
-            if sym not in self.asm_pkg_symbols:
-                self.ffi_externs.add(sym)
+            self.ffi_externs.add(sym)
         for mod_bindings in self.imported_modules.values():
             for b in mod_bindings.values():
                 if hasattr(b, "c_name"):
                     sym = self._platform_c_name(b)
-                    if sym not in self.asm_pkg_symbols:
-                        self.ffi_externs.add(sym)
+                    self.ffi_externs.add(sym)
         self.funcs: dict[str, FuncInfo] = {}
         # Stack of (continue_label, break_label) pairs for the loop currently
         # being generated. Push on loop entry, pop on exit.
@@ -568,28 +559,9 @@ class Codegen:
                     ),
                 )
                 self.emit_function(mangled)
-        # NASM contributed by included assembly packages, verbatim.
-        self.emit_asm_packages()
         self.emit_print_impls()
         self.emit_data_sections()
         return "\n".join(self.lines) + "\n"
-
-    def emit_asm_packages(self) -> None:
-        """Emit the NASM body of every included `.asmpkg`, in load order.
-
-        The text is reproduced verbatim (it already lives in the right section
-        directives or is section-agnostic). Each package's exported symbols are
-        also referenced as FFI funcs, so call sites resolve through the normal
-        foreign-call path.
-        """
-        for pkg in getattr(self.mod, "asm_packages", []):
-            text = getattr(pkg, "asm_text", "")
-            if not text.strip():
-                continue
-            self.emit()
-            self.emit(f"; ==== assembly package: {getattr(pkg, 'name', '?')} ====")
-            for line in text.splitlines():
-                self.emit(line)
 
     def generate_runtime_only(self) -> str:
         """Emit a freestanding `.asm` containing the asmpython runtime helpers and

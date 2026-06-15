@@ -29,10 +29,6 @@ class Module:
     ffi_funcs: dict = field(default_factory=dict)
     ffi_consts: dict = field(default_factory=dict)
     classes_sig: dict = field(default_factory=dict)  # name -> sema.ClassSig
-    # Assembly packages requested via include(...), in source order. Populated
-    # by sema from the loaded `.asmpkg` manifests; codegen emits their NASM and
-    # treats their exports as callable symbols.
-    asm_packages: list = field(default_factory=list)  # list[pkgformat.AsmPackage]
     # `from module import orig as local` aliases for bundled-source stdlib funcs.
     # Maps local_name -> original_name so codegen can resolve the real symbol.
     # Populated by sema during FromImport analysis.
@@ -237,21 +233,6 @@ class Import:
     """import math  (the module name remains visible as a prefix)."""
 
     module: str
-    pos: SourcePos = field(default_factory=lambda: _NO_POS)
-
-
-@dataclass
-class Include:
-    """include("name") — pull in an assembly package (`<name>.asmpkg`).
-
-    Built from a top-level `include(...)` call (the function imported from
-    `asmpython.assembly`). The package's exported symbols become callable; its
-    NASM is concatenated into the program's output. `name` is the literal
-    package name. Resolution + loading happen in sema/codegen via
-    `asmpython.assembly.pkgformat`.
-    """
-
-    name: str
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
@@ -490,7 +471,6 @@ Stmt = (
     | Pass
     | Import
     | FromImport
-    | Include
     | AttrAssign
     | Try
     | With
