@@ -236,3 +236,36 @@ def ilshift(a: int, b: int) -> int:
 
 def irshift(a: int, b: int) -> int:
     return a >> b
+
+
+def itruediv(a: int, b: int) -> float:
+    return float(a) / float(b)
+
+
+def ipow(a: int, b: int) -> int:
+    return a ** b
+
+
+def iconcat(a: str, b: str) -> str:
+    return a + b
+
+
+def call(func: int, arg: int = 0) -> int:
+    return func(arg)
+
+
+def countOf(container: list, item: int) -> int:
+    count: int = 0
+    for x in container:
+        if x == item:
+            count = count + 1
+    return count
+
+
+def indexOf(container: list, item: int) -> int:
+    i: int = 0
+    while i < len(container):
+        if container[i] == item:
+            return i
+        i = i + 1
+    raise ValueError("sequence.index(x): x not in sequence")
