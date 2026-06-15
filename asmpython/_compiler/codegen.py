@@ -11002,32 +11002,52 @@ class Codegen:
                 slot = info.locals_[f"__ffi_arg_{id(fn)}_{i}"]
                 self.emitf(f"mov [rbp{slot:+d}], rax")
                 slot_offs.append(slot)
-        # Now load each arg into the ABI register slot.
-        int_regs = self._int_arg_regs()
-        # Per System V we pass each float in a distinct XMM register. We do
-        # the same on Windows (it also uses xmm0..xmm3 for the first 4 args).
+        # Now load each arg into the ABI register slot, or onto the stack for
+        # positions beyond the register count (Win64: 4 int + 8 xmm regs,
+        # positionally assigned; SysV: 6 int + 8 xmm regs, assigned
+        # independently per type — all our FFI signatures fit in SysV's
+        # registers, but a >4-int-arg call like gui.create_window overflows
+        # Win64's 4 integer argument registers).
+        assigns = self._assign_arg_regs(list(fn.arg_types))
+        stack_positions = [i for i, a in enumerate(assigns) if a is None]
+        cleanup = 0
+        if stack_positions:
+            shadow = self._caller_shadow_space()
+            area = shadow + 8 * len(stack_positions)
+            if area % 16:
+                area += 16 - (area % 16)
+            cleanup = area
+            self.emitf(f"sub rsp, {area}")
+            for k, i in enumerate(stack_positions):
+                self.emitf(
+                    f"mov rax, [rbp{slot_offs[i]:+d}]",
+                    f"mov [rsp+{shadow + 8 * k}], rax",
+                )
         float_idx = 0
-        int_idx = 0
-        for i, (want, slot) in enumerate(zip(fn.arg_types, slot_offs)):
-            if want == "float":
-                self.emitf(f"movsd xmm{float_idx}, [rbp{slot:+d}]")
+        for i, slot in enumerate(slot_offs):
+            assign = assigns[i]
+            if assign is None:
+                continue
+            reg, is_xmm = assign
+            if is_xmm:
+                self.emitf(f"movsd {reg}, [rbp{slot:+d}]")
                 float_idx += 1
                 # Windows: variadic functions also need the value mirrored
                 # into the integer register; non-variadic functions don't
                 # care. We mirror unconditionally on Windows because the
                 # cost is one mov and the simplicity is worth it.
-                if self._needs_xmm_mirror_to_int():
+                if self._needs_xmm_mirror_to_int() and i < len(self._int_arg_regs()):
                     int_reg = self._int_arg_regs()[i]
-                    self.emitf(f"movq {int_reg}, xmm{float_idx - 1}")
+                    self.emitf(f"movq {int_reg}, {reg}")
             else:
-                reg = int_regs[int_idx]
-                int_idx += 1
                 self.emitf(f"mov {reg}, [rbp{slot:+d}]")
         # System V variadic ABI requires AL = number of xmm args used.
         # Non-variadic libc functions ignore AL. Setting it is harmless.
         if self._sysv_needs_al_count():
             self.emitf(f"mov al, {float_idx}")
         self.emit_call(self._platform_c_name(fn))
+        if cleanup:
+            self.emitf(f"add rsp, {cleanup}")
         if getattr(fn, "ret_conv", None) == "f2i":
             # The C function returns a double in xmm0 but asmpython's
             # ret_type is "int" (e.g. trunc/floor/ceil, which CPython's

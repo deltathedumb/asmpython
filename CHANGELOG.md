@@ -11,6 +11,35 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **`--icon <path.ico>` CLI flag** (`--target windows` only): embeds an
+  `.ico` file as the executable's Windows icon resource via `windres` from
+  the gcc toolchain, so the built `.exe` shows a custom icon in Explorer and
+  the taskbar. A generated `.icon.rc`/`.icon.o` are compiled and linked
+  alongside the program's object file (and cleaned up unless `--keep` is
+  passed); non-Windows targets print a warning and proceed without
+  embedding. Verified via `objdump -h` showing a populated `.rsrc` section
+  in the output binary.
+
+- **`asmlib.gui` window-icon bindings**: `load_bmp(path)` (SDL_LoadBMP, via
+  an inline `SDL_RWFromFile`/`SDL_LoadBMP_RW` wrapper since `SDL_LoadBMP` is
+  a macro, not an exported symbol), `set_window_icon(win, surface)`
+  (SDL_SetWindowIcon), and `free_surface(surface)` (SDL_FreeSurface), for
+  both `--target linux` and `--target windows`.
+
+- **Fixed a pre-existing FFI codegen bug**: any `asmlib.gui` call with more
+  than 4 integer arguments (`create_window`, `set_draw_color`, `draw_line`,
+  `fill_rect`, `draw_rect`) crashed the compiler with `IndexError` on
+  `--target windows`, because Win64 has only 4 integer argument registers
+  and the old FFI dispatch indexed blindly into them. `_gen_ffi_call` now
+  uses the same `_assign_arg_regs`/shadow-space stack-argument machinery
+  already used for user-defined function calls, correctly spilling
+  positions 5+ to the stack on Windows (SysV's 6 integer registers cover all
+  current FFI signatures, so Linux was unaffected). As part of this fix,
+  `math.ldexp`'s Windows helper (`_math_ldexp`) was updated: the new caller
+  convention places `(float, int)` args as `xmm0=x, rdx=n` — already an
+  exact match for libc's `ldexp(double, int)` — so the old `mov rdx, rcx`
+  shuffle (written for the previous, non-positional convention) is removed.
+
 - **New `base64` module**: `b64encode`/`b64decode`, `standard_b64encode`/
   `standard_b64decode`, `urlsafe_b64encode`/`urlsafe_b64decode`,
   `b32encode`/`b32decode`, `b16encode`/`b16decode` (RFC 4648), all operating

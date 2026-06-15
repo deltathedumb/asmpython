@@ -48,6 +48,9 @@ Examples:
   Keep intermediate .o / .obj for inspection:
       asmpython hello.py --keep
 
+  Give the .exe a custom icon:
+      asmpython hello.py --target windows --icon app.ico
+
 Toolchain auto-discovery searches, in order:
     1.  --nasm / --gcc CLI flags
     2.  $ASMPYTHON_NASM / $ASMPYTHON_GCC env vars
@@ -143,6 +146,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="keep_assembly",
         help="keep the intermediate .asm file after assembling",
+    )
+    build_grp.add_argument(
+        "--icon",
+        metavar="PATH",
+        type=Path,
+        default=None,
+        help="embed PATH (a .ico file) as the executable's icon resource "
+        "(--target windows only; uses windres from the gcc toolchain)",
     )
 
     # Bundling
@@ -314,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
             source_dir=args.source.resolve().parent,
             entry_path=args.source.resolve(),
             output_type=args.output_type,
+            icon_path=args.icon,
         )
     except CompileError as e:
         print(e.format(src, str(args.source)), file=sys.stderr)

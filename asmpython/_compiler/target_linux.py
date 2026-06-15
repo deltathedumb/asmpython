@@ -510,6 +510,7 @@ class LinuxCodegen(Codegen):
         "_gui_fill_rect", "_gui_draw_rect", "_gui_poll_event",
         "_gui_wait_event", "_gui_key_scancode",
         "_gui_mouse_x", "_gui_mouse_y", "_gui_mouse_button",
+        "_gui_load_bmp",
     )
     _MATH_SYMS = (
         "_math_isnan", "_math_isinf", "_math_isfinite",
@@ -1191,6 +1192,29 @@ class LinuxCodegen(Codegen):
             self.emit("section .bss")
             self.emit("_gui_event_buf: resb 56")
             self.emit("section .text")
+
+            # _gui_load_bmp(rdi=path) -> rax (SDL_Surface* handle, or 0 on failure)
+            # SDL2 has no format-agnostic image loader without SDL_image, but
+            # BMP loading (SDL_LoadBMP) is always available. SDL_LoadBMP is a
+            # macro for SDL_LoadBMP_RW(SDL_RWFromFile(path, "rb"), 1).
+            if "_gui_load_bmp" in self.ffi_externs:
+                self.emit("extern SDL_RWFromFile")
+                self.emit("extern SDL_LoadBMP_RW")
+                self.emit("section .rodata")
+                self.emit('_gui_bmp_mode_rb: db "rb",0')
+                self.emit("section .text")
+                self.label("_gui_load_bmp")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("mov [rbp-8], rdi",
+                           "lea rsi, [rel _gui_bmp_mode_rb]",
+                           "mov rdi, [rbp-8]",
+                           "call SDL_RWFromFile",
+                           "test rax, rax", "jz ._glb_fail",
+                           "mov rdi, rax", "mov rsi, 1",
+                           "call SDL_LoadBMP_RW",
+                           "leave", "ret")
+                self.label("._glb_fail")
+                self.emitf("xor rax, rax", "leave", "ret")
 
             # _gui_fill_rect(rdi=renderer, rsi=x, rdx=y, rcx=w, r8=h) -> rax
             if "_gui_fill_rect" in self.ffi_externs:

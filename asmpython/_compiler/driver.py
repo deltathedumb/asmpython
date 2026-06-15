@@ -95,6 +95,39 @@ def _run(cmd: list[str], extra_path_dirs: list[str] | None = None) -> None:
         raise RuntimeError(f"{cmd[0]} exited {proc.returncode}")
 
 
+def _build_icon_resource(icon_path: Path, stem: Path, gcc: str) -> Path:
+    """Compile `icon_path` into a COFF object containing a Windows ICON
+    resource (resource id 1), suitable for linking straight into a PE
+    executable or DLL so it shows a custom icon in Explorer/the taskbar.
+
+    Uses `windres` from the same toolchain directory as `gcc` (mingw-w64
+    ships both side by side).
+    """
+    if not icon_path.is_file():
+        raise RuntimeError(f"--icon file not found: {icon_path}")
+    if icon_path.suffix.lower() != ".ico":
+        print(
+            f"asmpython: warning: --icon {icon_path} does not have a .ico "
+            "extension; Windows expects the ICO format for executable icons",
+            file=sys.stderr,
+        )
+    rc_path = stem.with_suffix(".icon.rc")
+    res_obj = stem.with_suffix(".icon.o")
+    # Forward slashes are accepted (and unambiguous) inside .rc string literals
+    # on Windows, avoiding backslash-escaping headaches.
+    icon_posix = icon_path.resolve().as_posix()
+    rc_path.write_text(f'1 ICON "{icon_posix}"\n', encoding="utf-8")
+    windres_dir = Path(gcc).parent
+    windres = "windres"
+    for suffix in ("", ".exe"):
+        cand = windres_dir / f"windres{suffix}"
+        if cand.is_file():
+            windres = str(cand)
+            break
+    _run([windres, str(rc_path), "-O", "coff", "-o", str(res_obj)])
+    return res_obj
+
+
 def compile_source(
     src: str,
     target: str,
@@ -111,6 +144,7 @@ def compile_source(
     entry_path: Path | None = None,
     whole_program: bool = True,
     output_type: str = "executable",
+    icon_path: Path | None = None,
 ) -> BuildResult:
     # Whole-program compilation: when we know the entry file, follow its imports
     # and merge every reachable project module's classes/functions into one unit
@@ -160,6 +194,14 @@ def compile_source(
     if emit_asm_only:
         return BuildResult(asm_path=asm_path, obj_path=None, exe_path=None)
 
+    if icon_path is not None and target != "windows":
+        print(
+            f"asmpython: --icon is only supported for --target windows; "
+            f"ignoring {icon_path}",
+            file=sys.stderr,
+        )
+        icon_path = None
+
     nasm = _resolve_tool("nasm", override=nasm_path, env_var="ASMPYTHON_NASM")
     # `-w-label-redef-late`: NASM 2.16+ promotes "label changed between
     # passes" to an error by default. We hit this in the dict runtime when
@@ -198,12 +240,19 @@ def compile_source(
     gcc = _resolve_tool("gcc", override=gcc_path, env_var="ASMPYTHON_GCC")
     gcc_dir = str(Path(gcc).parent)
 
+    icon_obj: Path | None = None
+    if icon_path is not None:
+        icon_obj = _build_icon_resource(icon_path, stem, gcc)
+
     if output_type == "library":
         # Emit a shared library (.dll / .so) instead of an executable: link the
         # object with `gcc -shared`. The output path is given the platform's
         # shared-library extension if the caller didn't already.
         exe_path = _shared_lib_path(exe_path, target)
-        link_cmd = [gcc, "-shared", str(obj_path), "-o", str(exe_path)]
+        link_cmd = [gcc, "-shared", str(obj_path)]
+        if icon_obj is not None:
+            link_cmd.append(str(icon_obj))
+        link_cmd += ["-o", str(exe_path)]
         if target == "windows":
             # Export everything so the library's symbols are usable by loaders.
             link_cmd += ["-Wl,--export-all-symbols"]
@@ -223,9 +272,13 @@ def compile_source(
             out_path=exe_path,
             gcc=gcc,
             gcc_dir=gcc_dir,
+            icon_obj=icon_obj,
         )
     else:
-        link_cmd = [gcc, str(obj_path), "-o", str(exe_path)]
+        link_cmd = [gcc, str(obj_path)]
+        if icon_obj is not None:
+            link_cmd.append(str(icon_obj))
+        link_cmd += ["-o", str(exe_path)]
         if target == "linux":
             # The generated code uses absolute (non-PIC) relocations against
             # libc symbols, which modern gcc rejects under its default PIE mode.
@@ -251,6 +304,12 @@ def compile_source(
             obj_path.unlink()
         except OSError:
             pass
+        if icon_obj is not None:
+            try:
+                icon_obj.unlink()
+                icon_obj.with_suffix(".rc").unlink()
+            except OSError:
+                pass
 
     if not keep_assembly:
         try:
@@ -263,7 +322,13 @@ def compile_source(
 
 
 def _link_onedir(
-    *, target: str, obj_path: Path, out_path: Path, gcc: str, gcc_dir: str | None = None
+    *,
+    target: str,
+    obj_path: Path,
+    out_path: Path,
+    gcc: str,
+    gcc_dir: str | None = None,
+    icon_obj: Path | None = None,
 ) -> Path:
     """Produce a bundle directory containing the executable plus a resources
     sub-folder holding the shared libraries (the runtime, and eventually one
@@ -302,14 +367,10 @@ def _link_onedir(
     # Link against the shared library by short name. On Linux use rpath/$ORIGIN
     # so the loader looks in the resources dir next to the executable.
     short = "asmpython_rt_" + ("win" if target == "windows" else "linux")
-    link_cmd = [
-        gcc,
-        str(obj_path),
-        "-o",
-        str(exe_path),
-        f"-L{res_dir}",
-        f"-l{short}",
-    ]
+    link_cmd = [gcc, str(obj_path)]
+    if icon_obj is not None:
+        link_cmd.append(str(icon_obj))
+    link_cmd += ["-o", str(exe_path), f"-L{res_dir}", f"-l{short}"]
     if target == "linux":
         link_cmd += [f"-Wl,-rpath,$ORIGIN/{res_name}"]
     _run(link_cmd, extra_path_dirs=[gcc_dir] if gcc_dir else None)
