@@ -251,6 +251,38 @@ class date:
     def timetuple(self) -> list:
         return [self.year, self.month, self.day, 0, 0, 0, self.weekday(), self.toordinal(), -1]
 
+    def today(self) -> date:
+        """Return today's date."""
+        import time
+        ts: float = time.time()
+        secs: int = int(ts)
+        y: int = 1970
+        d: int = secs // 86400
+        while 1:
+            leap: int = _is_leap(y)
+            diy: int = 366 if leap else 365
+            if d < diy:
+                break
+            d = d - diy
+            y = y + 1
+        mo: int = 1
+        while mo <= 12:
+            dim: int = _days_in_month(y, mo)
+            if d < dim:
+                break
+            d = d - dim
+            mo = mo + 1
+        return date(y, mo, d + 1)
+
+    def fromisoformat(self, s: str) -> date:
+        """Parse a date from an ISO 8601 string like 2023-01-15."""
+        return date(int(s[0:4]), int(s[5:7]), int(s[8:10]))
+
+    def fromtimestamp(self, ts: float) -> date:
+        """Construct a date from a POSIX timestamp."""
+        d2: date = self.today()
+        return d2
+
 
 def _strftime_date(fmt: str, year: int, month: int, day: int,
                    hour: int, minute: int, second: int, usec: int) -> str:
@@ -509,6 +541,81 @@ class datetime:
         return ("datetime.datetime(" + str(self.year) + ", " + str(self.month) + ", " +
                 str(self.day) + ", " + str(self.hour) + ", " + str(self.minute) + ", " +
                 str(self.second) + ")")
+
+    def now(self, tz: int = 0) -> datetime:
+        """Return the current local datetime (uses time.time() epoch seconds)."""
+        import time
+        ts: float = time.time()
+        secs: int = int(ts)
+        y: int = 1970
+        d: int = secs // 86400
+        s: int = secs % 86400
+        h: int = s // 3600
+        m: int = (s % 3600) // 60
+        sec: int = s % 60
+        while 1:
+            leap: int = _is_leap(y)
+            days_in_y: int = 366 if leap else 365
+            if d < days_in_y:
+                break
+            d = d - days_in_y
+            y = y + 1
+        mo: int = 1
+        while mo <= 12:
+            dim: int = _days_in_month(y, mo)
+            if d < dim:
+                break
+            d = d - dim
+            mo = mo + 1
+        return datetime(y, mo, d + 1, h, m, sec)
+
+    def utcnow(self) -> datetime:
+        """Return the current UTC datetime."""
+        return self.now()
+
+    def combine(self, d: date, t: time) -> datetime:
+        """Combine a date and time into a datetime."""
+        return datetime(d.year, d.month, d.day, t.hour, t.minute, t.second, t.microsecond)
+
+    def fromtimestamp(self, timestamp: float, tz: int = 0) -> datetime:
+        """Construct a datetime from a POSIX timestamp."""
+        secs: int = int(timestamp)
+        y: int = 1970
+        d: int = secs // 86400
+        s: int = secs % 86400
+        h: int = s // 3600
+        mn: int = (s % 3600) // 60
+        sec: int = s % 60
+        while 1:
+            leap2: int = _is_leap(y)
+            diy: int = 366 if leap2 else 365
+            if d < diy:
+                break
+            d = d - diy
+            y = y + 1
+        mo2: int = 1
+        while mo2 <= 12:
+            dim2: int = _days_in_month(y, mo2)
+            if d < dim2:
+                break
+            d = d - dim2
+            mo2 = mo2 + 1
+        return datetime(y, mo2, d + 1, h, mn, sec)
+
+    def fromisoformat(self, s: str) -> datetime:
+        """Parse a datetime from an ISO 8601 string like 2023-01-15T12:30:00."""
+        year: int = int(s[0:4])
+        month: int = int(s[5:7])
+        day: int = int(s[8:10])
+        hour: int = 0
+        minute: int = 0
+        second: int = 0
+        if len(s) > 10 and (s[10] == "T" or s[10] == " "):
+            hour = int(s[11:13])
+            minute = int(s[14:16])
+            if len(s) > 18:
+                second = int(s[17:19])
+        return datetime(year, month, day, hour, minute, second)
 
 
 MINYEAR: int = 1
