@@ -69,3 +69,29 @@ class UnicodeWarning:
 
 class BytesWarning:
     pass
+
+
+class catch_warnings:
+    """Context manager that saves and restores warning filters."""
+
+    def __init__(self, record: int = 0) -> None:
+        self._record: int = record
+        self._log: list = []
+
+    def __enter__(self) -> catch_warnings:
+        return self
+
+    def __exit__(self, exc_type: int, exc_val: int, exc_tb: int) -> int:
+        return 0
+
+
+def formatwarning(message: str, category: str, filename: str,
+                  lineno: int, line: str = "") -> str:
+    """Format a warning for display."""
+    return filename + ":" + str(lineno) + ": " + category + ": " + message + "\n"
+
+
+def showwarning(message: str, category: str, filename: str,
+                lineno: int, file: int = 0, line: str = "") -> None:
+    """Write a warning to stdout."""
+    print(formatwarning(message, category, filename, lineno, line))

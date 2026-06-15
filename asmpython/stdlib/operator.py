@@ -132,3 +132,107 @@ class _ItemGetter:
 
 def itemgetter(key: int) -> _ItemGetter:
     return _ItemGetter(key)
+
+
+def invert(a: int) -> int:
+    return ~a
+
+
+def inv(a: int) -> int:
+    return ~a
+
+
+def is_(a: int, b: int) -> int:
+    return 1 if a is b else 0
+
+
+def is_not(a: int, b: int) -> int:
+    return 0 if a is b else 1
+
+
+class _AttrGetter:
+    def __init__(self, attr: str) -> None:
+        self._attr: str = attr
+
+    def __call__(self, obj: int) -> int:
+        return getattr(obj, self._attr)
+
+
+def attrgetter(attr: str) -> _AttrGetter:
+    return _AttrGetter(attr)
+
+
+class _MethodCaller:
+    def __init__(self, name: str, arg: int = 0) -> None:
+        self._name: str = name
+        self._arg: int = arg
+        self._has_arg: int = 0
+
+    def set_arg(self, arg: int) -> None:
+        self._arg = arg
+        self._has_arg = 1
+
+    def __call__(self, obj: int) -> int:
+        m: int = getattr(obj, self._name)
+        if self._has_arg:
+            return m(self._arg)
+        return m()
+
+
+def methodcaller(name: str, arg: int = 0, has_arg: int = 0) -> _MethodCaller:
+    mc: _MethodCaller = _MethodCaller(name)
+    if has_arg:
+        mc.set_arg(arg)
+    return mc
+
+
+def index(a: int) -> int:
+    return a
+
+
+def setitem(obj: list, key: int, value: int) -> None:
+    obj[key] = value
+
+
+def delitem(obj: list, key: int) -> None:
+    obj.pop(key)
+
+
+def ior(a: int, b: int) -> int:
+    return a | b
+
+
+def iand(a: int, b: int) -> int:
+    return a & b
+
+
+def ixor(a: int, b: int) -> int:
+    return a ^ b
+
+
+def iadd(a: int, b: int) -> int:
+    return a + b
+
+
+def isub(a: int, b: int) -> int:
+    return a - b
+
+
+def imul(a: int, b: int) -> int:
+    return a * b
+
+
+def ifloordiv(a: int, b: int) -> int:
+    return a // b
+
+
+def imod(a: int, b: int) -> int:
+    return a % b
+
+
+def ilshift(a: int, b: int) -> int:
+    return a << b
+
+
+def irshift(a: int, b: int) -> int:
+    return a >> b

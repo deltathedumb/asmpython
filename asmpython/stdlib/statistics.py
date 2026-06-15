@@ -8,6 +8,16 @@ from __future__ import annotations
 import math
 
 
+class StatisticsError(Exception):
+    """Exception for invalid statistical operations."""
+
+    def __init__(self, msg: str = "") -> None:
+        self.msg: str = msg
+
+    def __str__(self) -> str:
+        return self.msg
+
+
 def mean(data: list) -> float:
     """Return the arithmetic mean of the data."""
     n: int = len(data)

@@ -81,3 +81,15 @@ def partial(func: int, arg0: int = 0, arg1: int = 0, arg2: int = 0) -> int:
     the compiler supports higher-order calls.
     """
     return func
+
+
+def update_wrapper(wrapper: int, wrapped: int) -> int:
+    """Update wrapper's attributes to match wrapped (stub: returns wrapper)."""
+    return wrapper
+
+
+def partialmethod(func: int, arg0: int = 0, arg1: int = 0) -> int:
+    """Like partial but for use with descriptors/methods (stub)."""
+    return func
+
+
