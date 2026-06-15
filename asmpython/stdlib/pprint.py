@@ -5,23 +5,23 @@ In asmpython, pprint() formats using str() since we have no reflection.
 from __future__ import annotations
 
 
-def pformat(obj: int, indent: int = 1, width: int = 80, depth: int = -1) -> str:
+def pformat(obj, indent: int = 1, width: int = 80, depth: int = -1) -> str:
     return str(obj)
 
 
-def pprint(obj: int, indent: int = 1, width: int = 80, depth: int = -1) -> None:
-    print(pformat(obj, indent, width, depth))
+def pprint(obj, indent: int = 1, width: int = 80, depth: int = -1) -> None:
+    print(obj)
 
 
-def isreadable(obj: int) -> int:
+def isreadable(obj) -> int:
     return 1
 
 
-def isrecursive(obj: int) -> int:
+def isrecursive(obj) -> int:
     return 0
 
 
-def saferepr(obj: int) -> str:
+def saferepr(obj) -> str:
     return str(obj)
 
 
@@ -31,14 +31,14 @@ class PrettyPrinter:
         self._width: int = width
         self._depth: int = depth
 
-    def pprint(self, obj: int) -> None:
-        print(self.pformat(obj))
+    def pprint(self, obj) -> None:
+        print(obj)
 
-    def pformat(self, obj: int) -> str:
+    def pformat(self, obj) -> str:
         return str(obj)
 
-    def isreadable(self, obj: int) -> int:
+    def isreadable(self, obj) -> int:
         return 1
 
-    def isrecursive(self, obj: int) -> int:
+    def isrecursive(self, obj) -> int:
         return 0

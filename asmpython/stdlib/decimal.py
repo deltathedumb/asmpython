@@ -6,7 +6,7 @@ value equals coefficient * 10^exponent. Precision defaults to 28 digits.
 from __future__ import annotations
 
 
-_DEFAULT_PREC: int = 28
+_DEFAULT_PREC: int = 15
 
 
 def _int_pow10(n: int) -> int:
