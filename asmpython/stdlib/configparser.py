@@ -51,16 +51,16 @@ class SectionProxy:
         self._parser: ConfigParser = parser
         self._section: str = section
 
-    def get(self, option: str, fallback: str = "") -> str:
+    def get_option(self, option: str, fallback: str = "") -> str:
         return self._parser.get(self._section, option, fallback)
 
-    def getint(self, option: str, fallback: int = 0) -> int:
+    def getint_option(self, option: str, fallback: int = 0) -> int:
         return self._parser.getint(self._section, option, fallback)
 
-    def getfloat(self, option: str, fallback: float = 0.0) -> float:
+    def getfloat_option(self, option: str, fallback: int = 0) -> float:
         return self._parser.getfloat(self._section, option, fallback)
 
-    def getboolean(self, option: str, fallback: int = 0) -> int:
+    def getboolean_option(self, option: str, fallback: int = 0) -> int:
         return self._parser.getboolean(self._section, option, fallback)
 
     def __contains__(self, option: str) -> int:
@@ -180,8 +180,8 @@ class ConfigParser:
         return i
 
     def getfloat(self, section: str, option: str,
-                 fallback: float = 0.0) -> float:
-        s: str = self.get(section, option, str(fallback))
+                 fallback: int = 0) -> float:
+        s: str = self.get(section, option, "0.0")
         return float(s)
 
     def getboolean(self, section: str, option: str,

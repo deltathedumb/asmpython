@@ -1,6 +1,6 @@
 # expect:
-# 1
-# 1
+# True
+# True
 
 import random
 

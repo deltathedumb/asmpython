@@ -14,4 +14,5 @@ print(cfg.get("section1", "key1"))
 print(cfg.getint("section1", "num"))
 
 secs = cfg.sections()
-print(secs[0])
+sec: str = secs[0]
+print(sec)
