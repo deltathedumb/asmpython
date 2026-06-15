@@ -1177,12 +1177,17 @@ class Codegen:
                     self._cl_define(info, f"__dictin_{id(expr)}")
                 elif (
                     op in ("in", "not in")
+                    and getattr(expr, "dunder_contains_owner", None) is not None
+                ):
+                    # `x in obj` dispatched to __contains__: park needle
+                    # across container eval.
+                    self._cl_define(info, f"__contains_needle_{id(expr)}")
+                elif (
+                    op in ("in", "not in")
                     and (rt in ("any", "int") or rt.startswith("instance:"))
                     and lt in ("str", "any", "int")
                 ):
-                    # Membership against an opaque/instance (dict-backed) value:
-                    # lowered via the dict-membership helper, so it needs the
-                    # same scratch slot.
+                    # Membership against an opaque (dict-backed) value.
                     self._cl_define(info, f"__dictin_{id(expr)}")
                 elif op in ("in", "not in"):
                     # Catch-all: allocate a dict-in slot for any remaining
@@ -9310,6 +9315,22 @@ class Codegen:
     def _gen_compare(self, e: A.Compare, info: FuncInfo) -> None:
         # `needle in haystack` where haystack is a list or dict.
         if len(e.ops) == 1 and e.ops[0] in ("in", "not in"):
+            # User instance with __contains__: dispatch to the method.
+            if getattr(e, "dunder_contains_owner", None) is not None:
+                owner = e.dunder_contains_owner  # type: ignore[attr-defined]
+                negate = getattr(e, "dunder_contains_negate", False)
+                needle_off = info.locals_[f"__contains_needle_{id(e)}"]
+                self.gen_expr(e.operands[0], info)            # needle -> rax
+                self.emitf(f"mov [rbp{needle_off:+d}], rax")
+                self.gen_expr(e.operands[1], info)            # container -> rax
+                self.emitf(
+                    f"mov {self._arg_reg(1)}, [rbp{needle_off:+d}]",
+                    f"mov {self._arg_reg(0)}, rax",
+                )
+                self.emit_call(self._method_symbol(owner, "__contains__"))
+                if negate:
+                    self.emitf("xor rax, 1")
+                return
             rt = A.expr_type(e.operands[1])
             if rt in ("list", "tuple"):
                 # Tuples share the list [cap,len,buf] layout, so the linear
@@ -9324,13 +9345,8 @@ class Codegen:
             if (rt in ("any", "int") or rt.startswith("instance:")) and A.expr_type(
                 e.operands[0]
             ) in ("str", "any", "int"):
-                # Membership against an opaque value (`any`), the unknown-`int`
-                # sentinel, or a user instance (e.g. `x in scope`, where Scope
-                # defines `__contains__`). All are dict-backed in this compiler
-                # (dicts, sets, instances share the dict layout), so a str-key
-                # `dict_contains` lookup is the right general lowering. Without
-                # this, `x not in <such>` would fall through to the scalar
-                # compare path, which has no setcc for 'in'/'not in'.
+                # Membership against an opaque value (`any`) or the unknown-`int`
+                # sentinel: dict-backed lowering.
                 self._gen_dict_in(e, info)
                 return
         # String compare: ==/!= and in/not in dispatch to runtime helpers.

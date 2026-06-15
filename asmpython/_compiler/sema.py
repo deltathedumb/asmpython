@@ -1436,6 +1436,10 @@ class SemaAnalyzer:
             else:
                 scope.types.pop(name, None)
 
+    def _method_symbol_name(self, cls_name: str, method_name: str) -> str:
+        """Return the mangled symbol name for a class method (matches codegen)."""
+        return f"{cls_name}__{method_name}"
+
     def _flat_target_names(self, targets: list) -> list:
         """Flatten a for-loop target list (entries may be names or nested name
         groups) into the bare names it binds."""
@@ -2203,6 +2207,30 @@ class SemaAnalyzer:
                 elif it_t == "str":
                     # Each iteration yields a fresh 1-char str.
                     scope.add(s.var, "str")
+                elif it_t.startswith("instance:"):
+                    # User-defined iterable: class must have __iter__ and __next__.
+                    cls_name = it_t.split(":", 1)[1]
+                    cls_sig = self.classes.get(cls_name)
+                    if cls_sig is None:
+                        raise SemaError(
+                            f"cannot iterate over {cls_name!r}: unknown class",
+                            s.pos,
+                        )
+                    cls_methods = cls_sig.methods
+                    if "__iter__" not in cls_methods or "__next__" not in cls_methods:
+                        raise SemaError(
+                            f"cannot iterate over {cls_name!r}: "
+                            f"class must define __iter__ and __next__",
+                            s.pos,
+                        )
+                    # Determine element type from __next__'s declared return type.
+                    next_sig = cls_methods.get("__next__")
+                    el_t = "any"
+                    if next_sig is not None and next_sig.ret_type is not None:
+                        el_t = next_sig.ret_type[0]
+                    # Mark the For node so codegen uses the iterator protocol path.
+                    s.iter_is_instance = cls_name
+                    scope.add(s.var, el_t)
                 elif it_t in ("any", "int"):
                     # Opaque iterable (e.g. a value read out of an unannotated
                     # container, or an unannotated field typed "int" by default):
@@ -3204,14 +3232,24 @@ class SemaAnalyzer:
                         # `x in {…}`: sets only model membership; the element
                         # kind isn't tracked, so accept any needle.
                         continue
-                    if rt in ("any", "int") or rt.startswith("instance:"):
-                        # Membership against an opaque value (`any`), the unknown-
-                        # `int` sentinel, or a user instance — e.g. a property/
-                        # field asmpython can't model (`x in scope.names`) or an
-                        # instance with `__contains__` (`x in scope`). All are
-                        # dict-backed at runtime, so codegen lowers this via dict
-                        # membership; stay lenient rather than erroring on a
-                        # container we couldn't type precisely.
+                    if rt in ("any", "int"):
+                        # Membership against an opaque value (`any`) or the
+                        # unknown-`int` sentinel: dict-backed at runtime.
+                        continue
+                    if rt.startswith("instance:"):
+                        # `x in obj` on a user instance: dispatch to __contains__
+                        # if the class defines it; error otherwise.
+                        cls_name = rt.split(":", 1)[1]
+                        resolved = self._resolve_method(cls_name, "__contains__")
+                        if resolved is not None and len(e.ops) == 1:
+                            owner, sig = resolved
+                            e.dunder_contains_owner = owner  # type: ignore[attr-defined]
+                            e.dunder_contains_negate = (op == "not in")  # type: ignore[attr-defined]
+                        else:
+                            raise SemaError(
+                                f"'{op}': {cls_name} does not define __contains__",
+                                e.pos,
+                            )
                         continue
                     raise SemaError(
                         f"'{op}' not supported between {lt} and {rt}",
