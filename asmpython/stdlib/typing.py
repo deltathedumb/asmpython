@@ -215,9 +215,9 @@ def dataclass_transform(eq_default: int = 1, order_default: int = 0,
     return 0
 
 
-class override:
+def override(func: int) -> int:
     """PEP 698 @override decorator (stub: no-op)."""
-    pass
+    return func
 
 
 LiteralString: int = 0
