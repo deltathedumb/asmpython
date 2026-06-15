@@ -93,6 +93,11 @@ class AbstractAsyncContextManager(AbstractContextManager):
     pass
 
 
+def redirect_stdin(new_target: int) -> int:
+    """Redirect stdin to new_target within a with block (stub)."""
+    return new_target
+
+
 def redirect_stdout(new_target: int) -> int:
     """Redirect stdout (stub, returns 0)."""
     return 0

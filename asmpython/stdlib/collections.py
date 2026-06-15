@@ -654,3 +654,33 @@ class UserString:
 
     def endswith(self, suffix: str) -> int:
         return 1 if self.data.endswith(suffix) else 0
+
+
+class _NamedTupleBase:
+    """Base class returned by namedtuple(). Fields accessed by index."""
+
+    def __init__(self, f0: str = "", f1: str = "", f2: str = "",
+                 f3: str = "", f4: str = "", f5: str = "") -> None:
+        self._fields: list[str] = [f0, f1, f2, f3, f4, f5]
+
+    def __getitem__(self, i: int) -> str:
+        return self._fields[i]
+
+    def __len__(self) -> int:
+        return len(self._fields)
+
+    def _asdict(self) -> list:
+        return self._fields
+
+    def _replace(self, f0: str = "", f1: str = "", f2: str = "",
+                 f3: str = "", f4: str = "", f5: str = "") -> _NamedTupleBase:
+        return _NamedTupleBase(f0, f1, f2, f3, f4, f5)
+
+
+def namedtuple(typename: str, field_names: str) -> _NamedTupleBase:
+    """Return a _NamedTupleBase class (stub: field names ignored at runtime).
+
+    In CPython this creates a dynamic class with named attributes.
+    In asmpython, fields are accessed positionally via [] or ._fields.
+    """
+    return _NamedTupleBase

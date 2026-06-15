@@ -160,3 +160,66 @@ def get_origin(tp: int) -> int:
 def is_typeddict(tp: int) -> int:
     """Return True if tp is a TypedDict type (stub: always False)."""
     return 0
+
+
+class ParamSpec:
+    """PEP 612 Parameter Specification Variable (stub)."""
+
+    def __init__(self, name: str) -> None:
+        self.__name__: str = name
+
+    def __str__(self) -> str:
+        return self.__name__
+
+
+class TypeVarTuple:
+    """PEP 646 TypeVarTuple (stub)."""
+
+    def __init__(self, name: str) -> None:
+        self.__name__: str = name
+
+
+def TypeAlias(t: int) -> int:
+    """PEP 613 TypeAlias annotation (stub: returns unchanged)."""
+    return t
+
+
+def Concatenate(*args) -> int:
+    """PEP 612 Concatenate (stub)."""
+    return 0
+
+
+def Unpack(t: int) -> int:
+    """PEP 646 Unpack (stub)."""
+    return t
+
+
+def assert_never(arg: int) -> int:
+    """Assert that a branch is unreachable (stub)."""
+    return 0
+
+
+def assert_type(val: int, typ: int) -> int:
+    """Assert that val has type typ at type check time (stub: returns val)."""
+    return val
+
+
+def reveal_type(obj: int) -> int:
+    """Reveal the inferred type of obj (stub: returns obj)."""
+    return obj
+
+
+def dataclass_transform(eq_default: int = 1, order_default: int = 0,
+                        frozen_default: int = 0) -> int:
+    """PEP 681 dataclass_transform decorator (stub)."""
+    return 0
+
+
+class override:
+    """PEP 698 @override decorator (stub: no-op)."""
+    pass
+
+
+LiteralString: int = 0
+Required: int = 0
+NotRequired: int = 0
