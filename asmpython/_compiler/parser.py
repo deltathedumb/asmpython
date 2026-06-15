@@ -557,6 +557,11 @@ class Parser:
                 # (instead of collapsing to the bare "tuple" element kind).
                 slot_bases = [s[0] for s in inner[0][1]]
                 return ("list", ("tuple", slot_bases))
+            if inner and inner[0][0] in self._LIST_ANNOTS:
+                # list[list[T]]: preserve the inner element kind so
+                # `for row in matrix: row[i]` knows the leaf type.
+                inner_el = inner[0][1][0][0] if inner[0][1] else None
+                return ("list", ("list", inner_el))
             el = inner[0][0] if inner else None
             return ("list", el)
         if name in self._DICT_ANNOTS:

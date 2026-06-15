@@ -44,7 +44,7 @@ class Queue:
             return 0
         return 1 if len(self._data) >= self.maxsize else 0
 
-    def put(self, item: int, block: int = 1, timeout: float = -1.0) -> None:
+    def put(self, item: int, block: int = 1, timeout: int = -1) -> None:
         """Put an item into the queue."""
         if self.maxsize > 0 and len(self._data) >= self.maxsize:
             return
@@ -53,7 +53,7 @@ class Queue:
     def put_nowait(self, item: int) -> None:
         self.put(item, 0)
 
-    def get(self, block: int = 1, timeout: float = -1.0) -> int:
+    def get(self, block: int = 1, timeout: int = -1) -> int:
         """Remove and return an item from the queue."""
         if len(self._data) == 0:
             return 0
@@ -79,7 +79,11 @@ class Queue:
 class LifoQueue(Queue):
     """A LIFO queue (stack)."""
 
-    def get(self, block: int = 1, timeout: float = -1.0) -> int:
+    def __init__(self, maxsize: int = 0) -> None:
+        self.maxsize: int = maxsize
+        self._data: list = []
+
+    def get(self, block: int = 1, timeout: int = -1) -> int:
         if len(self._data) == 0:
             return 0
         n: int = len(self._data)
@@ -96,7 +100,11 @@ class LifoQueue(Queue):
 class PriorityQueue(Queue):
     """A priority queue (min-heap by value)."""
 
-    def put(self, item: int, block: int = 1, timeout: float = -1.0) -> None:
+    def __init__(self, maxsize: int = 0) -> None:
+        self.maxsize: int = maxsize
+        self._data: list = []
+
+    def put(self, item: int, block: int = 1, timeout: int = -1) -> None:
         if self.maxsize > 0 and len(self._data) >= self.maxsize:
             return
         self._data.append(item)
@@ -111,7 +119,7 @@ class PriorityQueue(Queue):
             else:
                 break
 
-    def get(self, block: int = 1, timeout: float = -1.0) -> int:
+    def get(self, block: int = 1, timeout: int = -1) -> int:
         n: int = len(self._data)
         if n == 0:
             return 0
@@ -154,13 +162,13 @@ class SimpleQueue:
     def empty(self) -> int:
         return 1 if len(self._data) == 0 else 0
 
-    def put(self, item: int, block: int = 1, timeout: float = -1.0) -> None:
+    def put(self, item: int, block: int = 1, timeout: int = -1) -> None:
         self._data.append(item)
 
     def put_nowait(self, item: int) -> None:
         self._data.append(item)
 
-    def get(self, block: int = 1, timeout: float = -1.0) -> int:
+    def get(self, block: int = 1, timeout: int = -1) -> int:
         if len(self._data) == 0:
             return 0
         item: int = self._data[0]

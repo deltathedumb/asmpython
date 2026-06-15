@@ -683,7 +683,7 @@ class SemaAnalyzer:
                 cname, cannot, cvalue = cv
                 r = self._resolve_annot(cannot)
                 if r is not None:
-                    ty, el, val, _tup = r
+                    ty, el, val, _tup, _elval = r
                 elif cvalue is not None:
                     ty, el, val = A.expr_type(cvalue), None, None
                 else:
@@ -706,7 +706,7 @@ class SemaAnalyzer:
                     if r is not None:
                         pinfo[p] = r
                     elif i < len(m.defaults) and m.defaults[i] is not None:
-                        pinfo[p] = (A.expr_type(m.defaults[i]), None, None, None)  # type: ignore
+                        pinfo[p] = (A.expr_type(m.defaults[i]), None, None, None, None)  # type: ignore
                     else:
                         inferred = self.inferred_param_types.get((f"{c.name}.{m.name}", i))
                         if inferred is not None:
@@ -725,9 +725,11 @@ class SemaAnalyzer:
                 # can't. Otherwise fall back to the value's static type.
                 r = self._resolve_annot(getattr(s, "annot", None))  # type: ignore
                 if r is not None:
-                    ty, el, val, tup = r
+                    ty, el, val, tup, _elval = r
                 else:
-                    ty, el, val, tup = self._static_value_info(s.value, pinfo)
+                    raw = self._static_value_info(s.value, pinfo)
+                    ty, el, val, tup = raw[0], raw[1], raw[2], raw[3]
+                    _elval = raw[4] if len(raw) > 4 else None
                 existing = sig.fields.get(s.name)
                 # Don't let a later `= 0` reset placeholder downgrade a field we
                 # already typed more precisely.
@@ -935,7 +937,7 @@ class SemaAnalyzer:
                 if resolved is not None:
                     lit = resolved
                 elif j < len(fn.defaults) and fn.defaults[j] is not None:
-                    lit = (A.expr_type(fn.defaults[j]), None, None, None)
+                    lit = (A.expr_type(fn.defaults[j]), None, None, None, None)
                 else:
                     lit = self.inferred_param_types.get((qualname, j))
             if lit is None:
@@ -986,42 +988,48 @@ class SemaAnalyzer:
 
     def _resolve_annot(self, annot):
         """Turn a parser annotation descriptor (base, el) into
-        (ty, el_type, value_type, tuple_types), or None if it doesn't
-        constrain the type (so the caller falls back to default inference).
-        `annot` is a (base, el) tuple or None."""
+        (ty, el_type, value_type, tuple_types, el_value_type), or None if it
+        doesn't constrain the type (so the caller falls back to default
+        inference). `annot` is a (base, el) tuple or None."""
         if annot is None:
             return None
         base, el = annot
         if base in ("int", "str", "float"):
-            return (base, None, None, None)
+            return (base, None, None, None, None)
         if base == "list":
             if isinstance(el, tuple) and el[0] == "tuple":
                 # list[tuple[T1, T2, ...]]: el is ("tuple", [base1, base2, ...])
                 # (see parser._normalize_annot) -- resolve each slot's kind so
                 # `for a, b in <list[tuple[T1,T2]]>` can type each target.
                 slot_types = [self._resolve_scalar_annot(b) for b in el[1]]
-                return ("list", "tuple", None, slot_types)
-            return ("list", self._resolve_scalar_annot(el), None, None)
+                return ("list", "tuple", None, slot_types, None)
+            if isinstance(el, tuple) and el[0] == "list":
+                # list[list[T]]: el is ("list", inner_el_name)
+                # Propagate the leaf kind via el_value_type so
+                # `for row in matrix: row[i]` recovers the element type.
+                inner_el = self._resolve_scalar_annot(el[1])
+                return ("list", "list", None, None, inner_el)
+            return ("list", self._resolve_scalar_annot(el), None, None, None)
         if base == "dict":
-            return ("dict", None, self._resolve_scalar_annot(el), None)
+            return ("dict", None, self._resolve_scalar_annot(el), None, None)
         if base == "tuple":
             # Annotations don't give per-slot kinds; leave them unknown.
-            return ("tuple", None, None, [])
+            return ("tuple", None, None, [], None)
         if base in ("set", "frozenset"):
             # A `set`-annotated value: type it as a set so membership and the
             # set methods (`add`/`discard`/`remove`/`update`) resolve, rather
             # than falling through to the int default.
-            return ("set", None, None, None)
+            return ("set", None, None, None, None)
         if base == "any":
             # An explicit opaque annotation (`object`, `Any`, or a genuine
             # multi-type union the parser collapsed to "any"): constrain the
             # value to the lenient "any" type rather than leaving it to default
             # to int. Lets a `-> str | list` method type its result usefully.
-            return ("any", None, None, None)
+            return ("any", None, None, None, None)
         if base == "none":
             return None
         if base in self.classes:
-            return (f"instance:{base}", None, None, None)
+            return (f"instance:{base}", None, None, None, None)
         # An external / imported class annotation (`Token`, `A.IntLit`,
         # `FuncInfo`). We can't see its methods or fields, so model it as an
         # opaque instance: attribute and method access against it are checked
@@ -1029,7 +1037,7 @@ class SemaAnalyzer:
         # a dotted path is the class-ish name.
         leaf = base.split(".")[-1]
         if leaf[:1].isupper():
-            return (f"instance:{leaf}", None, None, None)
+            return (f"instance:{leaf}", None, None, None, None)
         # A lowercase unknown name (a type alias we don't model) — don't
         # constrain; the body's usage decides what's legal.
         return None
@@ -1041,15 +1049,18 @@ class SemaAnalyzer:
         `_infer_unannotated_params`, or None), otherwise int."""
         resolved = self._resolve_annot(annot)
         if resolved is not None:
-            ty, el, val, tup = resolved
-            scope.add(name, ty, el_type=el, value_type=val, tuple_types=tup)
+            ty, el, val, tup, elval = resolved
+            scope.add(name, ty, el_type=el, value_type=val, tuple_types=tup,
+                      el_value_type=elval)
             return
         if default_expr is not None:
             scope.add(name, A.expr_type(default_expr))
             return
         if inferred is not None:
-            ty, el, val, tup = inferred
-            scope.add(name, ty, el_type=el, value_type=val, tuple_types=tup)
+            ty, el, val, tup = inferred[:4]
+            elval = inferred[4] if len(inferred) > 4 else None
+            scope.add(name, ty, el_type=el, value_type=val, tuple_types=tup,
+                      el_value_type=elval)
             return
         scope.add(name, "int")
 
@@ -1832,13 +1843,14 @@ class SemaAnalyzer:
         # default ("int") or the annotation refines a same-kind container.
         ann = self._resolve_annot(annot)
         if ann is not None:
-            aty, ael, aval, atup = ann
+            aty, ael, aval, atup, aelval = ann
             if t in ("int", "any") or t == aty:
                 if aty == "list":
                     scope.add(
                         target,
                         "list",
                         el_type=ael or self._list_el_type(value, scope),
+                        el_value_type=aelval,
                     )
                     return
                 if aty == "dict":

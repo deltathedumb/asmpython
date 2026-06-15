@@ -8047,6 +8047,7 @@ class Codegen:
         if obj_t == "dict" or (
             obj_t == "any"
             and e.method in ("get", "contains", "keys", "values", "items", "update")
+            and not (e.method == "get" and len(e.args) == 0)
         ):
             # Known dict methods on an opaque receiver dispatch to the dict
             # runtime too — the value is dict-backed at runtime.
