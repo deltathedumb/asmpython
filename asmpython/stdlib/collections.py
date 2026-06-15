@@ -408,3 +408,249 @@ class OrderedDict:
 
     def __repr__(self) -> str:
         return "OrderedDict(" + repr(self._data) + ")"
+
+
+class ChainMap:
+    """A group of dicts (or mappings) searched in order.
+
+    ChainMap(m1, m2, ...) looks up keys in m1 first, then m2, etc.
+    Writes always go to the first map.
+    """
+
+    def __init__(self, first: dict = {}, second: dict = {}, third: dict = {}) -> None:
+        self._maps: list = [first, second, third]
+
+    def __getitem__(self, key: str) -> object:
+        for m in self._maps:
+            if key in m:
+                return m[key]
+        raise KeyError(key)
+
+    def __setitem__(self, key: str, value: object) -> None:
+        self._maps[0][key] = value
+
+    def __contains__(self, key: str) -> int:
+        for m in self._maps:
+            if key in m:
+                return 1
+        return 0
+
+    def get(self, key: str, default: object = 0) -> object:
+        for m in self._maps:
+            if key in m:
+                return m[key]
+        return default
+
+    def keys(self) -> list:
+        seen: dict = {}
+        result: list[str] = []
+        for m in self._maps:
+            for k in m.keys():
+                if k not in seen:
+                    seen[k] = 1
+                    result.append(k)
+        return result
+
+    def new_child(self, m: dict = {}) -> ChainMap:
+        return ChainMap(m, self._maps[0], self._maps[1])
+
+    @property
+    def parents(self) -> ChainMap:
+        return ChainMap(self._maps[1], self._maps[2], {})
+
+
+class UserDict:
+    """A dict wrapper that can be subclassed."""
+
+    def __init__(self, initial: dict = {}) -> None:
+        self.data: dict = {}
+        for k in initial.keys():
+            self.data[k] = initial[k]
+
+    def __getitem__(self, key: str) -> object:
+        return self.data[key]
+
+    def __setitem__(self, key: str, value: object) -> None:
+        self.data[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self.data[key]
+
+    def __contains__(self, key: str) -> int:
+        return 1 if key in self.data else 0
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def get(self, key: str, default: object = 0) -> object:
+        if key in self.data:
+            return self.data[key]
+        return default
+
+    def keys(self) -> list:
+        return self.data.keys()
+
+    def values(self) -> list:
+        return self.data.values()
+
+    def items(self) -> list:
+        return self.data.items()
+
+    def update(self, other: dict = {}) -> None:
+        for k in other.keys():
+            self.data[k] = other[k]
+
+    def pop(self, key: str, default: object = 0) -> object:
+        if key in self.data:
+            v = self.data[key]
+            del self.data[key]
+            return v
+        return default
+
+    def setdefault(self, key: str, default: object = 0) -> object:
+        if key not in self.data:
+            self.data[key] = default
+        return self.data[key]
+
+    def __repr__(self) -> str:
+        return "UserDict(" + repr(self.data) + ")"
+
+
+class UserList:
+    """A list wrapper that can be subclassed."""
+
+    def __init__(self, initial: list = []) -> None:
+        self.data: list = []
+        for x in initial:
+            self.data.append(x)
+
+    def __getitem__(self, idx: int) -> object:
+        return self.data[idx]
+
+    def __setitem__(self, idx: int, value: object) -> None:
+        self.data[idx] = value
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __contains__(self, item: object) -> int:
+        for x in self.data:
+            if x == item:
+                return 1
+        return 0
+
+    def append(self, item: object) -> None:
+        self.data.append(item)
+
+    def extend(self, other: list) -> None:
+        for x in other:
+            self.data.append(x)
+
+    def insert(self, i: int, item: object) -> None:
+        self.data.insert(i, item)
+
+    def remove(self, item: object) -> None:
+        i: int = 0
+        for x in self.data:
+            if x == item:
+                del self.data[i]
+                return
+            i = i + 1
+
+    def pop(self, i: int = -1) -> object:
+        if i < 0:
+            i = len(self.data) - 1
+        v = self.data[i]
+        del self.data[i]
+        return v
+
+    def index(self, item: object) -> int:
+        i: int = 0
+        for x in self.data:
+            if x == item:
+                return i
+            i = i + 1
+        return -1
+
+    def count(self, item: object) -> int:
+        n: int = 0
+        for x in self.data:
+            if x == item:
+                n = n + 1
+        return n
+
+    def sort(self) -> None:
+        n: int = len(self.data)
+        i: int = 0
+        while i < n - 1:
+            j: int = i + 1
+            while j < n:
+                if self.data[j] < self.data[i]:
+                    tmp = self.data[i]
+                    self.data[i] = self.data[j]
+                    self.data[j] = tmp
+                j = j + 1
+            i = i + 1
+
+    def reverse(self) -> None:
+        n: int = len(self.data)
+        i: int = 0
+        while i < n // 2:
+            tmp = self.data[i]
+            self.data[i] = self.data[n - 1 - i]
+            self.data[n - 1 - i] = tmp
+            i = i + 1
+
+    def copy(self) -> UserList:
+        result: UserList = UserList()
+        for x in self.data:
+            result.data.append(x)
+        return result
+
+    def __repr__(self) -> str:
+        return "UserList(" + repr(self.data) + ")"
+
+
+class UserString:
+    """A str wrapper that can be subclassed."""
+
+    def __init__(self, s: str = "") -> None:
+        self.data: str = s
+
+    def __str__(self) -> str:
+        return self.data
+
+    def __repr__(self) -> str:
+        return "UserString(" + repr(self.data) + ")"
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __contains__(self, sub: str) -> int:
+        return 1 if sub in self.data else 0
+
+    def __add__(self, other: str) -> UserString:
+        result: UserString = UserString(self.data + other)
+        return result
+
+    def upper(self) -> str:
+        return self.data.upper()
+
+    def lower(self) -> str:
+        return self.data.lower()
+
+    def strip(self) -> str:
+        return self.data.strip()
+
+    def split(self, sep: str = " ") -> list:
+        return self.data.split(sep)
+
+    def replace(self, old: str, new: str) -> UserString:
+        result: UserString = UserString(self.data.replace(old, new))
+        return result
+
+    def startswith(self, prefix: str) -> int:
+        return 1 if self.data.startswith(prefix) else 0
+
+    def endswith(self, suffix: str) -> int:
+        return 1 if self.data.endswith(suffix) else 0

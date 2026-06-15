@@ -415,6 +415,102 @@ def split(pattern: str, string: str) -> list:
     return parts
 
 
-def compile(pattern: str) -> str:
+def compile(pattern: str, flags: int = 0) -> str:
     """Return the pattern unchanged (no pre-compilation needed)."""
     return pattern
+
+
+def subn(pattern: str, repl: str, string: str) -> list:
+    """Replace non-overlapping matches; return [new_string, count_str].
+
+    Note: count is returned as str (asmpython list type constraint).
+    """
+    result: str = ""
+    count: int = 0
+    n: int = len(string)
+    i: int = 0
+    pat: str = pattern
+    if len(pat) > 0 and pat[0] == "^":
+        pat = pat[1:]
+    while i <= n:
+        end6: int = _try_match(pat, 0, string, i)
+        if end6 >= 0 and i < n:
+            result = result + repl
+            count = count + 1
+            if end6 > i:
+                i = end6
+            else:
+                result = result + string[i]
+                i = i + 1
+        else:
+            if i < n:
+                result = result + string[i]
+            i = i + 1
+    return [result, str(count)]
+
+
+def finditer(pattern: str, string: str) -> list:
+    """Return list of Match objects for all non-overlapping matches."""
+    results: list = []
+    n: int = len(string)
+    i: int = 0
+    pat: str = pattern
+    if len(pat) > 0 and pat[0] == "^":
+        pat = pat[1:]
+    while i < n:
+        end7: int = _try_match(pat, 0, string, i)
+        if end7 >= 0:
+            m: Match = Match(i, end7, string)
+            results.append(m)
+            if end7 > i:
+                i = end7
+            else:
+                i = i + 1
+        else:
+            i = i + 1
+    return results
+
+
+def escape(pattern: str) -> str:
+    """Escape special regex metacharacters in pattern."""
+    special: str = r"\.^$*+?{}[]|()"
+    result: str = ""
+    for ch in pattern:
+        if ch in special:
+            result = result + "\\" + ch
+        else:
+            result = result + ch
+    return result
+
+
+def purge() -> None:
+    """Clear the regex cache (no-op: no cache in this implementation)."""
+    pass
+
+
+IGNORECASE: int = 2
+I: int = 2
+MULTILINE: int = 8
+M: int = 8
+DOTALL: int = 16
+S: int = 16
+VERBOSE: int = 64
+X: int = 64
+ASCII: int = 256
+A: int = 256
+UNICODE: int = 32
+U: int = 32
+LOCALE: int = 4
+L: int = 4
+
+
+class error(Exception):
+    """Exception raised for invalid regular expressions."""
+
+    def __init__(self, msg: str = "", pattern: str = "", pos: int = 0) -> None:
+        self.msg: str = msg
+        self.pattern: str = pattern
+        self.pos: int = pos
+
+    def __str__(self) -> str:
+        return self.msg

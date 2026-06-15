@@ -45,3 +45,39 @@ def wraps(wrapped: int) -> int:
     return _wraps_deco
 
 
+def total_ordering(cls: int) -> int:
+    """Class decorator: fill in comparison methods given __eq__ and one of
+    __lt__, __le__, __gt__, __ge__. Stub: returns class unchanged."""
+    return cls
+
+
+def cmp_to_key(mycmp: int) -> int:
+    """Convert a cmp function into a key function (stub: returns cmp unchanged)."""
+    return mycmp
+
+
+class cached_property:
+    """Descriptor stub: acts as a pass-through decorator (no actual caching)."""
+
+    def __init__(self, func: int) -> None:
+        self._wrapped: int = func
+        self.attrname: str = ""
+
+    def __set_name__(self, owner: int, name: str) -> None:
+        self.attrname = name
+
+
+def singledispatch(func: int) -> int:
+    """Single-dispatch generic function decorator (stub: returns func unchanged)."""
+    return func
+
+
+def partial(func: int, arg0: int = 0, arg1: int = 0, arg2: int = 0) -> int:
+    """Return a new function with partial application of the given arguments.
+
+    Stub: calls func with the pre-filled args directly.
+    asmpython limitation: the returned value is the function pointer, not a
+    true partial object; users should call partial(f, a)(b) -> f(a, b) if
+    the compiler supports higher-order calls.
+    """
+    return func

@@ -267,3 +267,112 @@ def zip_longest(a: list, b: list, fillvalue: object = 0) -> list:
         result.append([va, vb])
         i = i + 1
     return result
+
+
+def dropwhile(pred: int, iterable: list) -> list:
+    """Drop leading elements while pred(element) is true; yield the rest."""
+    result: list = []
+    dropping: int = 1
+    for x in iterable:
+        if dropping:
+            if not pred(x):
+                dropping = 0
+                result.append(x)
+        else:
+            result.append(x)
+    return result
+
+
+def takewhile(pred: int, iterable: list) -> list:
+    """Return leading elements while pred(element) is true."""
+    result: list = []
+    for x in iterable:
+        if pred(x):
+            result.append(x)
+        else:
+            break
+    return result
+
+
+def filterfalse(pred: int, iterable: list) -> list:
+    """Return elements for which pred(element) is false."""
+    result: list = []
+    for x in iterable:
+        if not pred(x):
+            result.append(x)
+    return result
+
+
+def starmap(func: int, iterable: list) -> list:
+    """Apply func(*args) for each args tuple in iterable."""
+    result: list = []
+    for args in iterable:
+        val = func(args[0], args[1])
+        result.append(val)
+    return result
+
+
+def count(start: int = 0, step: int = 1, stop: int = 100) -> list:
+    """Return list of evenly spaced values (bounded at stop)."""
+    result: list = []
+    i: int = start
+    while i < stop:
+        result.append(i)
+        i = i + step
+    return result
+
+
+def pairwise(iterable: list) -> list:
+    """Return successive overlapping pairs: pairwise([1,2,3]) -> [(1,2),(2,3)]."""
+    result: list[list] = []
+    i: int = 0
+    n: int = len(iterable) - 1
+    while i < n:
+        pair: list = [iterable[i], iterable[i + 1]]
+        result.append(pair)
+        i = i + 1
+    return result
+
+
+def batched(iterable: list, n: int) -> list:
+    """Batch data into lists of length n (last batch may be shorter)."""
+    result: list[list] = []
+    batch: list = []
+    i: int = 0
+    for x in iterable:
+        batch.append(x)
+        i = i + 1
+        if i == n:
+            result.append(batch)
+            batch = []
+            i = 0
+    if i > 0:
+        result.append(batch)
+    return result
+
+
+def groupby(iterable: list[str], key: int = 0) -> list:
+    """Group consecutive equal str elements.
+
+    Returns list-of-lists where each inner list is [key, ...group_members].
+    """
+    result: list[list] = []
+    if len(iterable) == 0:
+        return result
+    cur_key: str = iterable[0]
+    cur_group: list[str] = [cur_key]
+    i: int = 1
+    n: int = len(iterable)
+    while i < n:
+        k: str = iterable[i]
+        if k == cur_key:
+            cur_group.append(k)
+        else:
+            grp: list[str] = [cur_key] + cur_group
+            result.append(grp)
+            cur_key = k
+            cur_group = [k]
+        i = i + 1
+    grp2: list[str] = [cur_key] + cur_group
+    result.append(grp2)
+    return result

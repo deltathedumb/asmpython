@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -153,24 +154,46 @@ def _diff(expected: str, got: str) -> str:
 
 def main() -> int:
     global _use_runtime_lib
-    _use_runtime_lib = "--use-runtime-lib" in sys.argv[1:]
+    args = sys.argv[1:]
+    _use_runtime_lib = "--use-runtime-lib" in args
+    # -j N or --jobs N overrides parallelism; default = CPU count (capped at 8)
+    workers = min(os.cpu_count() or 4, 8)
+    for i, a in enumerate(args):
+        if a in ("-j", "--jobs") and i + 1 < len(args):
+            try:
+                workers = int(args[i + 1])
+            except ValueError:
+                pass
+        elif a.startswith("-j") and len(a) > 2:
+            try:
+                workers = int(a[2:])
+            except ValueError:
+                pass
     target = _detect_target()
     mode = " (runtime-lib)" if _use_runtime_lib else ""
-    print(f"asmpython test runner (target={target}){mode}")
+    print(f"asmpython test runner (target={target}, workers={workers}){mode}")
 
-    results: list[TestResult] = []
+    tasks: list[tuple] = []
     if CASES.is_dir():
         for case in sorted(CASES.glob("*.py")):
-            try:
-                results.append(run_positive(case, target))
-            except Exception as exc:
-                results.append(TestResult(case.name, False, f"runner error: {exc}"))
+            tasks.append((run_positive, case, target))
     if CASES_FAIL.is_dir():
         for case in sorted(CASES_FAIL.glob("*.py")):
-            try:
-                results.append(run_negative(case, target))
-            except Exception as exc:
-                results.append(TestResult(case.name, False, f"runner error: {exc}"))
+            tasks.append((run_negative, case, target))
+
+    # Run tests in parallel; collect results in submission order.
+    result_map: dict[str, TestResult] = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_name = {}
+        for fn, case, tgt in tasks:
+            fut = pool.submit(_safe_run, fn, case, tgt)
+            future_to_name[fut] = case.name
+        for fut in as_completed(future_to_name):
+            result_map[future_to_name[fut]] = fut.result()
+
+    # Re-sort results by original task order so output is deterministic.
+    ordered_names = [case.name for _, case, _ in tasks]
+    results = [result_map[n] for n in ordered_names]
 
     fails = [r for r in results if not r.ok]
     for r in results:
@@ -181,6 +204,13 @@ def main() -> int:
                 print(f"        {line}")
     print(f"\n{len(results) - len(fails)}/{len(results)} passed")
     return 0 if not fails else 1
+
+
+def _safe_run(fn, case: Path, target: str) -> TestResult:
+    try:
+        return fn(case, target)
+    except Exception as exc:
+        return TestResult(case.name, False, f"runner error: {exc}")
 
 
 if __name__ == "__main__":

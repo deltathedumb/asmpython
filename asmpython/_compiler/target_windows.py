@@ -595,6 +595,12 @@ class WindowsCodegen(Codegen):
         "_hw_console_set_color", "_hw_console_set_cursor",
         "_hw_console_get_row", "_hw_console_get_col",
     )
+    _THREAD_SYMS = (
+        "_threading_create", "_threading_join", "_threading_is_alive",
+        "_threading_lock_init", "_threading_lock_acquire",
+        "_threading_lock_release", "_threading_lock_destroy",
+        "_threading_get_ident", "_threading_active_count",
+    )
     _NET_SYMS = (
         "_net_bind", "_net_connect", "_net_send", "_net_recv",
         "_net_send_all", "_net_accept", "_net_close",
@@ -634,20 +640,23 @@ class WindowsCodegen(Codegen):
 
     def _asmlib_inline_syms(self) -> set:
         return (set(self._HW_STUBS) | set(self._NET_SYMS) | set(self._GUI_SYMS)
-                | set(self._MATH_SYMS) | set(self._RANDOM_SYMS) | set(self._TIME_SYMS))
+                | set(self._MATH_SYMS) | set(self._RANDOM_SYMS) | set(self._TIME_SYMS)
+                | set(self._THREAD_SYMS))
 
     @property
     def needs_net(self) -> bool:
         return any(s in self.ffi_externs for s in self._NET_SYMS)
 
     def emit_asmlib_runtime(self) -> None:
-        needs_hw     = any(s in self.ffi_externs for s in self._HW_STUBS)
-        needs_net    = any(s in self.ffi_externs for s in self._NET_SYMS)
-        needs_gui    = any(s in self.ffi_externs for s in self._GUI_SYMS)
-        needs_math   = any(s in self.ffi_externs for s in self._MATH_SYMS)
-        needs_random = any(s in self.ffi_externs for s in self._RANDOM_SYMS)
-        needs_time   = any(s in self.ffi_externs for s in self._TIME_SYMS)
-        if not (needs_hw or needs_net or needs_gui or needs_math or needs_random or needs_time):
+        needs_hw      = any(s in self.ffi_externs for s in self._HW_STUBS)
+        needs_net     = any(s in self.ffi_externs for s in self._NET_SYMS)
+        needs_gui     = any(s in self.ffi_externs for s in self._GUI_SYMS)
+        needs_math    = any(s in self.ffi_externs for s in self._MATH_SYMS)
+        needs_random  = any(s in self.ffi_externs for s in self._RANDOM_SYMS)
+        needs_time    = any(s in self.ffi_externs for s in self._TIME_SYMS)
+        needs_thread  = any(s in self.ffi_externs for s in self._THREAD_SYMS)
+        if not (needs_hw or needs_net or needs_gui or needs_math or needs_random
+                or needs_time or needs_thread):
             return
 
         self.emit("")
@@ -1341,3 +1350,138 @@ class WindowsCodegen(Codegen):
             if "_gui_mouse_button" in self.ffi_externs:
                 self.label("_gui_mouse_button")
                 self.emitf("movzx rax, byte [_gui_event_buf+13]", "ret")
+
+        # ---- real Win32 threading helpers ------------------------------------
+        # All helpers use Win64 ABI: args in rcx/rdx/r8/r9, shadow space 32B.
+        # Thread objects are asmpython dicts; we store the HANDLE in "._handle".
+        # Lock  objects store a heap-alloc'd CRITICAL_SECTION* in "._cs".
+        if needs_thread:
+            self.emit("extern CreateThread")
+            self.emit("extern WaitForSingleObject")
+            self.emit("extern CloseHandle")
+            self.emit("extern InitializeCriticalSection")
+            self.emit("extern EnterCriticalSection")
+            self.emit("extern LeaveCriticalSection")
+            self.emit("extern DeleteCriticalSection")
+            self.emit("extern GetCurrentThreadId")
+            self.emit("section .rodata")
+            # Intern the field-name strings needed by the trampoline.
+            _target_lbl, _ = self.intern_string("target")
+            _handle_lbl, _ = self.intern_string("_handle")
+            _cs_lbl, _     = self.intern_string("_cs")
+            self.emit("section .text")
+
+            # _threading_trampoline(rcx=fn_ptr) -> rax=0
+            # Called by Win32 on the new thread. rcx is the target function pointer.
+            # Must match LPTHREAD_START_ROUTINE signature.
+            self.label("_threading_trampoline")
+            self.emitf(
+                "push rbp", "mov rbp, rsp", "sub rsp, 48",
+                "mov [rbp-8], rcx",          # save fn ptr
+                "test rcx, rcx",
+                "jz ._tt_done",
+                "call rcx",                  # call target() with no args
+            )
+            self.label("._tt_done")
+            self.emitf("xor rax, rax", "leave", "ret")
+
+            # _threading_create(rcx=fn_ptr) -> rax=handle (HANDLE, 64-bit)
+            if "_threading_create" in self.ffi_externs:
+                self.label("_threading_create")
+                self.emitf(
+                    "push rbp", "mov rbp, rsp", "sub rsp, 80",
+                    "mov [rbp-8], rcx",      # save fn_ptr
+                    # CreateThread(NULL, 0, trampoline, fn_ptr, 0, NULL)
+                    "xor rcx, rcx",          # lpThreadAttributes = NULL
+                    "xor rdx, rdx",          # dwStackSize = 0
+                    "lea r8, [_threading_trampoline]",  # lpStartAddress
+                    "mov r9, [rbp-8]",       # lpParameter = fn_ptr (passed to trampoline as rcx)
+                    "mov qword [rsp+32], 0", # dwCreationFlags = 0
+                    "mov qword [rsp+40], 0", # lpThreadId = NULL
+                    "call CreateThread",
+                    "leave", "ret",
+                )
+
+            # _threading_join(rcx=handle) -> rax=0
+            if "_threading_join" in self.ffi_externs:
+                self.label("_threading_join")
+                self.emitf(
+                    "push rbp", "mov rbp, rsp", "sub rsp, 48",
+                    "mov [rbp-8], rcx",
+                    "mov edx, 0xFFFFFFFF",   # INFINITE (32-bit, zero-extended to rdx)
+                    "call WaitForSingleObject",
+                    "mov rcx, [rbp-8]",
+                    "call CloseHandle",
+                    "xor rax, rax", "leave", "ret",
+                )
+
+            # _threading_is_alive(rcx=handle) -> rax: 1 if still running, 0 if done
+            if "_threading_is_alive" in self.ffi_externs:
+                self.emit("extern GetExitCodeThread")
+                self.label("_threading_is_alive")
+                self.emitf(
+                    "push rbp", "mov rbp, rsp", "sub rsp, 48",
+                    "mov [rbp-8], rcx",
+                    "xor rdx, rdx",
+                    "mov qword [rbp-16], 0",
+                    "lea rdx, [rbp-16]",
+                    "call GetExitCodeThread",
+                    "mov rax, [rbp-16]",
+                    # STILL_ACTIVE = 259 (0x103); alive if exit code == 259
+                    "cmp rax, 259",
+                    "sete al", "movzx rax, al",
+                    "leave", "ret",
+                )
+
+            # _threading_get_ident() -> rax = thread id (DWORD, zero-extended)
+            if "_threading_get_ident" in self.ffi_externs:
+                self.label("_threading_get_ident")
+                self.emitf("sub rsp, 32", "call GetCurrentThreadId",
+                           "mov eax, eax", "add rsp, 32", "ret")
+
+            # _threading_active_count() -> rax (stub: always 1, no global tracking)
+            if "_threading_active_count" in self.ffi_externs:
+                self.label("_threading_active_count")
+                self.emitf("mov rax, 1", "ret")
+
+            # _threading_lock_init(rcx=lock_obj_ptr) -> rax=cs_ptr
+            # Allocates a CRITICAL_SECTION (40 bytes on Win64), inits it, returns ptr.
+            if "_threading_lock_init" in self.ffi_externs:
+                self.label("_threading_lock_init")
+                self.emitf(
+                    "push rbp", "mov rbp, rsp", "sub rsp, 48",
+                    "mov rcx, 40",   # sizeof(CRITICAL_SECTION) on Win64
+                    "call malloc",
+                    "mov [rbp-8], rax",
+                    "mov rcx, rax",
+                    "call InitializeCriticalSection",
+                    "mov rax, [rbp-8]",
+                    "leave", "ret",
+                )
+
+            # _threading_lock_acquire(rcx=cs_ptr) -> rax=1
+            if "_threading_lock_acquire" in self.ffi_externs:
+                self.label("_threading_lock_acquire")
+                self.emitf(
+                    "push rbp", "mov rbp, rsp", "sub rsp, 32",
+                    "call EnterCriticalSection",
+                    "mov rax, 1", "leave", "ret",
+                )
+
+            # _threading_lock_release(rcx=cs_ptr) -> rax=0
+            if "_threading_lock_release" in self.ffi_externs:
+                self.label("_threading_lock_release")
+                self.emitf(
+                    "push rbp", "mov rbp, rsp", "sub rsp, 32",
+                    "call LeaveCriticalSection",
+                    "xor rax, rax", "leave", "ret",
+                )
+
+            # _threading_lock_destroy(rcx=cs_ptr)
+            if "_threading_lock_destroy" in self.ffi_externs:
+                self.label("_threading_lock_destroy")
+                self.emitf(
+                    "push rbp", "mov rbp, rsp", "sub rsp, 32",
+                    "call DeleteCriticalSection",
+                    "leave", "ret",
+                )

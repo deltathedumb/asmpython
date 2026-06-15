@@ -82,6 +82,84 @@ def read_file(path: str) -> str:
     return out
 
 
+def getcwd() -> str:
+    """Return current working directory path."""
+    buf: str = "                                                                "
+    result: str = os._getcwd(buf, 64)
+    if result == "":
+        return "."
+    return result
+
+
+def isdir(p: str) -> int:
+    """1 if p is a directory, else 0."""
+    d = os._opendir(p)
+    if d == "":
+        return 0
+    os._closedir(d)
+    return 1
+
+
+def isfile(p: str) -> int:
+    """1 if p is a regular file (exists and is not a directory), else 0."""
+    if not exists(p):
+        return 0
+    if isdir(p):
+        return 0
+    return 1
+
+
+def splitext(p: str) -> list:
+    """Split path into (root, ext) where ext starts with '.'."""
+    dot: int = -1
+    i: int = 0
+    n: int = len(p)
+    while i < n:
+        if p[i] == ".":
+            dot = i
+        i = i + 1
+    if dot < 0:
+        return [p, ""]
+    return [p[0:dot], p[dot:]]
+
+
+def split(p: str) -> list:
+    """Split path into (head, tail) like dirname/basename."""
+    return [dirname(p), basename(p)]
+
+
+def abspath(p: str) -> str:
+    """Return absolute path (best-effort; prepends cwd for relative paths)."""
+    if len(p) == 0:
+        return getcwd()
+    first: str = p[0:1]
+    if first == "/" or first == "\\":
+        return p
+    if len(p) >= 2 and p[1:2] == ":":
+        return p
+    cwd: str = getcwd()
+    return join(cwd, p)
+
+
+def normpath(p: str) -> str:
+    """Normalize path by collapsing redundant separators (basic)."""
+    result: str = ""
+    i: int = 0
+    n: int = len(p)
+    prev_sep: int = 0
+    while i < n:
+        ch: str = p[i:i + 1]
+        if ch == "/" or ch == "\\":
+            if not prev_sep:
+                result = result + "/"
+            prev_sep = 1
+        else:
+            result = result + ch
+            prev_sep = 0
+        i = i + 1
+    return result
+
+
 # Under CPython, swap in native implementations of the I/O helpers (the FFI
 # names above don't exist there). Under asmpython this import is skipped: the
 # host module is deliberately outside the compilable subset, and the loader

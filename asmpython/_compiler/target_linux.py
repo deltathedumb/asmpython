@@ -490,6 +490,12 @@ class LinuxCodegen(Codegen):
         "_hw_console_set_color", "_hw_console_set_cursor",
         "_hw_console_get_row", "_hw_console_get_col",
     )
+    _THREAD_SYMS = (
+        "_threading_create", "_threading_join", "_threading_is_alive",
+        "_threading_lock_init", "_threading_lock_acquire",
+        "_threading_lock_release", "_threading_lock_destroy",
+        "_threading_get_ident", "_threading_active_count",
+    )
     _NET_SYMS = (
         "_net_bind", "_net_connect", "_net_send", "_net_recv",
         "_net_send_all", "_net_accept", "_net_close",
@@ -528,20 +534,23 @@ class LinuxCodegen(Codegen):
 
     def _asmlib_inline_syms(self) -> set:
         return (set(self._HW_STUBS) | set(self._NET_SYMS) | set(self._GUI_SYMS)
-                | set(self._MATH_SYMS) | set(self._RANDOM_SYMS) | set(self._TIME_SYMS))
+                | set(self._MATH_SYMS) | set(self._RANDOM_SYMS) | set(self._TIME_SYMS)
+                | set(self._THREAD_SYMS))
 
     @property
     def needs_net(self) -> bool:
         return any(s in self.ffi_externs for s in self._NET_SYMS)
 
     def emit_asmlib_runtime(self) -> None:
-        needs_hw   = any(s in self.ffi_externs for s in self._HW_STUBS)
-        needs_net  = any(s in self.ffi_externs for s in self._NET_SYMS)
-        needs_gui  = any(s in self.ffi_externs for s in self._GUI_SYMS)
+        needs_hw     = any(s in self.ffi_externs for s in self._HW_STUBS)
+        needs_net    = any(s in self.ffi_externs for s in self._NET_SYMS)
+        needs_gui    = any(s in self.ffi_externs for s in self._GUI_SYMS)
         needs_math   = any(s in self.ffi_externs for s in self._MATH_SYMS)
         needs_random = any(s in self.ffi_externs for s in self._RANDOM_SYMS)
         needs_time   = any(s in self.ffi_externs for s in self._TIME_SYMS)
-        if not (needs_hw or needs_net or needs_gui or needs_math or needs_random or needs_time):
+        needs_thread = any(s in self.ffi_externs for s in self._THREAD_SYMS)
+        if not (needs_hw or needs_net or needs_gui or needs_math or needs_random
+                or needs_time or needs_thread):
             return
 
         self.emit("")
@@ -1246,3 +1255,124 @@ class LinuxCodegen(Codegen):
                 # SDL_MouseButtonEvent: button at offset 13 (1 byte)
                 self.label("_gui_mouse_button")
                 self.emitf("movzx rax, byte [_gui_event_buf+13]", "ret")
+
+        # ---- real pthread threading helpers (SysV AMD64 ABI) ----------------
+        # Linked with -lpthread via the gcc driver.
+        # Thread objects are asmpython dicts; HANDLE stored as integer under "._handle".
+        # Lock objects store a heap-alloc'd pthread_mutex_t* under "._cs".
+        if needs_thread:
+            self.emit("extern pthread_create")
+            self.emit("extern pthread_join")
+            self.emit("extern pthread_self")
+            self.emit("extern pthread_mutex_init")
+            self.emit("extern pthread_mutex_lock")
+            self.emit("extern pthread_mutex_unlock")
+            self.emit("extern pthread_mutex_destroy")
+            self.emit("section .rodata")
+            _target_lbl, _ = self.intern_string("target")
+            _handle_lbl, _ = self.intern_string("_handle")
+            _cs_lbl, _     = self.intern_string("_cs")
+            self.emit("section .text")
+
+            # _threading_trampoline(rdi=thread_obj_ptr) -> rax=NULL
+            # pthread_create start routine: void* fn(void* arg)
+            self.label("_threading_trampoline")
+            self.emitf(
+                "push rbp", "mov rbp, rsp", "sub rsp, 32",
+                "mov [rbp-8], rdi",          # save thread-obj ptr
+                # load target fn ptr: dict_get_default(obj, "target", 0)
+                "mov rax, rdi",              # obj ptr already in rax for dict_get_default ABI
+                f"lea rbx, [{_target_lbl}]",
+                "xor rcx, rcx",
+                "call _runtime_dict_get_default",
+                "mov [rbp-16], rax",
+                "test rax, rax",
+                "jz ._tt_done",
+                "call rax",
+            )
+            self.label("._tt_done")
+            self.emitf("xor rax, rax", "leave", "ret")
+
+            # _threading_create(rdi=thread_obj_ptr) -> rax=thread_id (pthread_t)
+            if "_threading_create" in self.ffi_externs:
+                self.label("_threading_create")
+                self.emitf(
+                    "push rbp", "mov rbp, rsp", "sub rsp, 32",
+                    "mov [rbp-8], rdi",      # save obj ptr (also trampoline arg)
+                    "sub rsp, 8",            # space for pthread_t
+                    "mov rdi, rsp",          # &tid
+                    "xor rsi, rsi",          # attr = NULL
+                    "lea rdx, [_threading_trampoline]",  # start fn
+                    "mov rcx, [rbp-8]",      # arg = thread-obj ptr
+                    "call pthread_create",
+                    "mov rax, [rsp]",        # load tid
+                    "add rsp, 8",
+                    "leave", "ret",
+                )
+
+            # _threading_join(rdi=tid) -> rax=0
+            if "_threading_join" in self.ffi_externs:
+                self.label("_threading_join")
+                self.emitf(
+                    "push rbp", "mov rbp, rsp", "sub rsp, 16",
+                    "xor rsi, rsi",          # retval = NULL
+                    "call pthread_join",
+                    "xor rax, rax", "leave", "ret",
+                )
+
+            # _threading_is_alive: no portable pthread check; return 0 (joined = dead)
+            if "_threading_is_alive" in self.ffi_externs:
+                self.label("_threading_is_alive")
+                self.emitf("xor rax, rax", "ret")
+
+            # _threading_get_ident() -> rax = pthread_t (opaque, fits int64)
+            if "_threading_get_ident" in self.ffi_externs:
+                self.label("_threading_get_ident")
+                self.emitf("call pthread_self", "ret")
+
+            # _threading_active_count() -> 1 (no global tracking)
+            if "_threading_active_count" in self.ffi_externs:
+                self.label("_threading_active_count")
+                self.emitf("mov rax, 1", "ret")
+
+            # _threading_lock_init(rdi=lock_obj_ptr) -> rax=mutex_ptr
+            if "_threading_lock_init" in self.ffi_externs:
+                self.label("_threading_lock_init")
+                self.emitf(
+                    "push rbp", "mov rbp, rsp", "sub rsp, 16",
+                    "mov rdi, 40",   # sizeof(pthread_mutex_t) >= 40 on Linux x86-64
+                    "call malloc",
+                    "mov [rbp-8], rax",
+                    "mov rdi, rax",
+                    "xor rsi, rsi",  # NULL attr = default mutex
+                    "call pthread_mutex_init",
+                    "mov rax, [rbp-8]",
+                    "leave", "ret",
+                )
+
+            # _threading_lock_acquire(rdi=mutex_ptr) -> rax=1
+            if "_threading_lock_acquire" in self.ffi_externs:
+                self.label("_threading_lock_acquire")
+                self.emitf(
+                    "push rbp", "mov rbp, rsp", "sub rsp, 16",
+                    "call pthread_mutex_lock",
+                    "mov rax, 1", "leave", "ret",
+                )
+
+            # _threading_lock_release(rdi=mutex_ptr) -> rax=0
+            if "_threading_lock_release" in self.ffi_externs:
+                self.label("_threading_lock_release")
+                self.emitf(
+                    "push rbp", "mov rbp, rsp", "sub rsp, 16",
+                    "call pthread_mutex_unlock",
+                    "xor rax, rax", "leave", "ret",
+                )
+
+            # _threading_lock_destroy(rdi=mutex_ptr)
+            if "_threading_lock_destroy" in self.ffi_externs:
+                self.label("_threading_lock_destroy")
+                self.emitf(
+                    "push rbp", "mov rbp, rsp", "sub rsp, 16",
+                    "call pthread_mutex_destroy",
+                    "leave", "ret",
+                )

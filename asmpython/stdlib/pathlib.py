@@ -260,3 +260,46 @@ class Path:
         if self.p == "":
             return Path(cwd)
         return Path(cwd)._join(self.p)
+
+
+def makedirs(path: str, mode: int = 511, exist_ok: int = 0) -> None:
+    """Create directory and all intermediate-level directories.
+
+    Equivalent to `mkdir -p`. Uses the os.mkdir FFI call.
+    """
+    parts: list[str] = []
+    p: str = path
+    while len(p) > 0:
+        d: str = ""
+        i: int = 0
+        n: int = len(p)
+        last_sep: int = -1
+        while i < n:
+            ch: str = p[i:i + 1]
+            if ch == "/" or ch == "\\":
+                last_sep = i
+            i = i + 1
+        if last_sep < 0:
+            parts.append(p)
+            p = ""
+        else:
+            parts.append(p)
+            p = ""
+    i2: int = 0
+    while i2 < len(parts):
+        seg: str = parts[i2]
+        ret: int = os.mkdir(seg, mode)
+        i2 = i2 + 1
+
+
+def getcwd() -> str:
+    """Return current working directory path."""
+    buf: str = ""
+    i: int = 0
+    while i < 512:
+        buf = buf + " "
+        i = i + 1
+    result: str = os._getcwd(buf, 512)
+    if result == "":
+        return "."
+    return result

@@ -513,3 +513,36 @@ class datetime:
 
 MINYEAR: int = 1
 MAXYEAR: int = 9999
+
+
+class timezone:
+    """Fixed-offset timezone. Only UTC (offset=0) is commonly needed."""
+
+    def __init__(self, offset: int = 0, name: str = "") -> None:
+        self._offset: int = offset
+        self._name: str = name
+
+    def utcoffset(self, dt: int = 0) -> int:
+        return self._offset
+
+    def tzname(self, dt: int = 0) -> str:
+        if self._name != "":
+            return self._name
+        if self._offset == 0:
+            return "UTC"
+        hours: int = self._offset // 3600
+        mins: int = (self._offset % 3600) // 60
+        sign: str = "+" if hours >= 0 else "-"
+        if hours < 0:
+            hours = -hours
+        return "UTC" + sign + str(hours) + ":" + str(mins).zfill(2)
+
+    def __repr__(self) -> str:
+        return "datetime.timezone(" + str(self._offset) + ")"
+
+    def __str__(self) -> str:
+        return self.tzname()
+
+
+# Pre-built UTC constant
+timezone_utc: timezone = timezone(0, "UTC")

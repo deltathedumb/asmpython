@@ -241,6 +241,9 @@ def compile_source(
             ]
         if target == "windows" and getattr(gen, "needs_net", False):
             link_cmd.append("-lws2_32")
+        if target == "linux" and any(s in getattr(gen, "ffi_externs", set())
+                                     for s in getattr(gen, "_THREAD_SYMS", ())):
+            link_cmd.append("-lpthread")
         _run(link_cmd, extra_path_dirs=[gcc_dir])
 
     if not keep_intermediates:

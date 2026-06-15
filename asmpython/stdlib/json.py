@@ -340,3 +340,54 @@ def loads_list(s: str) -> list[str]:
         if s[i] != ',':
             raise ValueError("expected ',' in array at " + str(i))
         i = i + 1
+
+
+class JSONDecodeError(Exception):
+    """Exception raised by json.loads on invalid input."""
+
+    def __init__(self, msg: str = "", doc: str = "", pos: int = 0) -> None:
+        self.msg: str = msg
+        self.doc: str = doc
+        self.pos: int = pos
+
+    def __str__(self) -> str:
+        return self.msg + " at position " + str(self.pos)
+
+
+class JSONEncoder:
+    """Extensible JSON encoder.  Subclass and override default() for custom types."""
+
+    def __init__(self, indent: int = 0, sort_keys: int = 0) -> None:
+        self.indent: int = indent
+        self.sort_keys: int = sort_keys
+
+    def encode(self, obj: object) -> str:
+        return dumps(obj, self.indent)
+
+    def default(self, obj: object) -> str:
+        raise TypeError("Object of type " + str(type(obj)) + " is not JSON serializable")
+
+
+class JSONDecoder:
+    """Extensible JSON decoder."""
+
+    def decode(self, s: str) -> str:
+        return loads(s)
+
+
+def dump(obj: object, fp: str, indent: int = 0) -> None:
+    """Serialize obj to a JSON-formatted string and write to fp (FILE*)."""
+    import os
+    s: str = dumps(obj, indent)
+    os.fputs(s, fp)
+
+
+def load(fp: str) -> str:
+    """Read a JSON document from fp (FILE*) and return the decoded object."""
+    import os
+    s: str = ""
+    c: int = os.fgetc(fp)
+    while c != -1:
+        s = s + chr(c)
+        c = os.fgetc(fp)
+    return loads(s)
