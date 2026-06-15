@@ -90,7 +90,8 @@ def getsource(obj: int) -> str:
 
 def getsourcelines(obj: int) -> list:
     """Return source lines (stub, empty)."""
-    return [[], 0]
+    lines: list = []
+    return lines
 
 
 def getsourcefile(obj: int) -> str:
@@ -130,7 +131,7 @@ def trace(context: int = 1) -> list:
 
 def getframeinfo(frame: int, context: int = 1) -> list:
     """Get info about a frame (stub, returns empty list)."""
-    return ["<unknown>", 0, "<unknown>", [], 0]
+    return []
 
 
 def getinnerframes(tb: int, context: int = 1) -> list:
@@ -142,11 +143,11 @@ def getouterframes(frame: int, context: int = 1) -> list:
 
 
 def getargs(co: int) -> list:
-    return [[], [], ""]
+    return []
 
 
 def getargvalues(frame: int) -> list:
-    return [[], [], "", {}]
+    return []
 
 
 def formatargvalues(args: list, varargs: str, varkw: str,

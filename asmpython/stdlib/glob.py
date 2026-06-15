@@ -118,7 +118,7 @@ def escape(pathname: str) -> str:
     i: int = 0
     while i < len(pathname):
         c: str = pathname[i]
-        if c == "*" or c == "?" or c == "[":
+        if c == "*" or c == "?" or c == "[" or c == "]":
             result = result + "[" + c + "]"
         else:
             result = result + c
