@@ -618,6 +618,7 @@ class WindowsCodegen(Codegen):
     _RANDOM_SYMS = (
         "_random_random", "_random_randint",
         "_random_uniform", "_random_randrange",
+        "_random_choice", "_random_shuffle",
     )
     _TIME_SYMS = (
         "_time_perf_counter", "_time_time_ns", "_time_sleep_ms",
@@ -858,6 +859,50 @@ class WindowsCodegen(Codegen):
                 self.emitf("call rand")
                 self.emitf("xor rdx, rdx", "div qword [rbp-8]", "mov rax, rdx",
                            "leave", "ret")
+
+            # _random_choice(rcx=list_hdr) -> rax = element at random index
+            # List layout: [hdr+0]=cap, [hdr+8]=len, [hdr+16]=buf_ptr
+            # Frame: push+56=64 bytes total → 16-byte aligned for rand() call.
+            if "_random_choice" in self.ffi_externs:
+                self.label("_random_choice")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 56")
+                self.emitf("mov [rbp-8], rcx")           # save list header
+                self.emitf("mov rax, [rcx+8]")           # rax = len (offset 8)
+                self.emitf("mov [rbp-16], rax")          # save len
+                self.emitf("call rand")                  # rax = rand()
+                self.emitf("xor rdx, rdx", "div qword [rbp-16]")  # rdx = rand % len
+                self.emitf("mov rcx, rdx")               # rcx = index (save before load)
+                self.emitf("mov rax, [rbp-8]")           # rax = list header
+                self.emitf("mov rax, [rax+16]")          # rax = buf_ptr (offset 16)
+                self.emitf("mov rax, [rax+rcx*8]")       # rax = buf[index]
+                self.emitf("leave", "ret")
+
+            # _random_shuffle(rcx=list_hdr) — Fisher-Yates shuffle in-place
+            # Frame: push+72=80 bytes total → 16-byte aligned for rand() call.
+            if "_random_shuffle" in self.ffi_externs:
+                lbl_loop = self.fresh("shuffle_loop")
+                lbl_done = self.fresh("shuffle_done")
+                self.label("_random_shuffle")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 72")
+                self.emitf("mov [rbp-8], rcx")           # save list header
+                self.emitf("mov rax, [rcx+8]")           # rax = n (len at offset 8)
+                self.emitf("mov [rbp-16], rax")          # i = n (count down)
+                self.label(lbl_loop)
+                self.emitf(f"cmp qword [rbp-16], 1", f"jle {lbl_done}")
+                self.emitf("call rand")
+                self.emitf("xor rdx, rdx", "div qword [rbp-16]")  # rdx = j
+                self.emitf("mov [rbp-24], rdx")           # save j
+                # swap buf[i-1] and buf[j]
+                self.emitf("mov r8, [rbp-8]", "mov r8, [r8+16]")  # r8 = buf (offset 16)
+                self.emitf("mov r9, [rbp-16]", "dec r9")  # r9 = i-1
+                self.emitf("mov rax, [r8+r9*8]")          # rax = buf[i-1]
+                self.emitf("mov rcx, [rbp-24]")            # rcx = j
+                self.emitf("mov rbx, [r8+rcx*8]")          # rbx = buf[j]
+                self.emitf("mov [r8+r9*8], rbx")           # buf[i-1] = buf[j]
+                self.emitf("mov [r8+rcx*8], rax")          # buf[j] = buf[i-1]
+                self.emitf("dec qword [rbp-16]", f"jmp {lbl_loop}")
+                self.label(lbl_done)
+                self.emitf("xor rax, rax", "leave", "ret")
 
         # ---- time helpers (Windows x64 ABI) ----------------------------------
         # QueryPerformanceCounter / QueryPerformanceFrequency for perf_counter.
