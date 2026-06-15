@@ -385,14 +385,8 @@ class Parser:
             self._eat()
             return A.IntLit(value=-t.value if neg else t.value, pos=t.pos)  # type: ignore
         if t.kind == "FLOAT":
-            # Float defaults need extra plumbing (xmm0 vs rax dispatch through
-            # the call site). Not supported in the MVP; punt for now with a
-            # clear error so the user knows the gap.
-            raise ParseError(
-                "float default arguments aren't supported yet; "
-                "use an int default and convert inside the body",
-                t.pos,
-            )
+            self._eat()
+            return A.FloatLit(value=-t.value if neg else t.value, pos=t.pos)  # type: ignore
         if neg:
             raise ParseError("unary '-' only allowed before numeric default", eq.pos, ErrorCode.P_INVALID_DEFAULT)
         if t.kind == "STRING":

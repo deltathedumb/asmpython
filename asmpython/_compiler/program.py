@@ -423,6 +423,39 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
     return entry
 
 
+def _simple_const_if_targets(stmt: "A.If", available: set[str]) -> set[str] | None:
+    """If `stmt` is a top-level `if/elif/.../else` chain whose every branch
+    consists solely of simple constant assigns (e.g. the platform-conditional
+    `if sys.platform == "win32": SIGABRT: int = 22 else: SIGABRT: int = 6`
+    pattern), return the set of every name assigned across all branches so the
+    caller can hoist the whole `If` into the entry body as a program global.
+
+    Returns None if the `If` doesn't fit this shape (left for the
+    value-import / lenient-fallback machinery to handle as before).
+    """
+    free: set = set()
+    _free_names(stmt.test, free)
+    if not free <= available:
+        return None
+    targets: set[str] = set()
+    for branch in (stmt.then, stmt.orelse):
+        for s in branch or []:
+            if isinstance(s, A.If):
+                sub = _simple_const_if_targets(s, available)
+                if sub is None:
+                    return None
+                targets |= sub
+                continue
+            if not (isinstance(s, A.Assign) and isinstance(s.target, str)):
+                return None
+            bfree: set = set()
+            _free_names(s.value, bfree)
+            if not bfree <= available:
+                return None
+            targets.add(s.target)
+    return targets
+
+
 def _merge_import_bindings(
     entry: A.Module, parsed: dict[str, A.Module], discovery_order: list[str]
 ) -> None:
@@ -467,6 +500,12 @@ def _merge_import_bindings(
                 continue
             seen_keys.add(k)
             extra.append(stmt)
+            if isinstance(stmt, A.Import):
+                # `import sys` binds `sys`; `import a.b.c` binds `a`. Once
+                # replayed into the entry body this name is a valid global
+                # reference, so platform-conditional constants below (e.g.
+                # `if sys.platform == "win32": ...`) can depend on it.
+                available.add(stmt.module.split(".")[0])
         # A merged module's own top-level constant assignments (e.g.
         # `ASMPKG_SUFFIX = ".asmpkg"`) are used by its functions, so they must
         # become program globals too. Skip a constant whose initializer needs a
@@ -485,6 +524,14 @@ def _merge_import_bindings(
                     continue
                 available.add(stmt.target)
                 extra.append(stmt)
+            elif isinstance(stmt, A.If):
+                # Platform-conditional top-level constants (e.g. signal.py's
+                # `if sys.platform == "win32": SIGABRT: int = 22 else: SIGABRT: int = 6`).
+                # Hoist the whole `If` so codegen evaluates the right branch.
+                targets = _simple_const_if_targets(stmt, available)
+                if targets is not None and not (targets & available):
+                    available |= targets
+                    extra.append(stmt)
     if extra:
         entry.body[:0] = extra
 

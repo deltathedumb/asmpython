@@ -206,6 +206,8 @@ class Codegen:
                 and s.target not in bound_in_frame
             ):
                 self.global_vars[s.target] = A.expr_type(s.value)
+            elif isinstance(s, A.If):
+                self._collect_if_globals(s, bound_in_frame, self.global_vars)
         # RTTI: each user class gets a small integer id. Instances are tagged
         # with their id (a hidden `__class__` dict entry) at construction, and
         # isinstance walks the `__class_parents` table to honour inheritance.
@@ -443,6 +445,23 @@ class Codegen:
                     self._collect_frame_bound(hbody, acc)
                 self._collect_frame_bound(s.else_body, acc)
                 self._collect_frame_bound(s.finally_body, acc)
+
+    def _collect_if_globals(self, stmt: A.If, bound_in_frame: set, out: dict) -> None:
+        """Top-level platform-conditional constants (e.g. signal.py's
+        `if sys.platform == "win32": SIGABRT: int = 22 else: SIGABRT: int = 6`)
+        live in .bss like any other module global, so `signal.SIGABRT` can read
+        them via `_gen_attr`'s global_vars lookup. Recurses for elif chains."""
+        for branch in (stmt.then, stmt.orelse):
+            for s in branch:
+                if (
+                    isinstance(s, A.Assign)
+                    and isinstance(s.target, str)
+                    and s.target not in bound_in_frame
+                    and s.target not in out
+                ):
+                    out[s.target] = A.expr_type(s.value)
+                elif isinstance(s, A.If):
+                    self._collect_if_globals(s, bound_in_frame, out)
 
     def emit(self, line: str = "") -> None:
         self.lines.append(line)
@@ -2123,9 +2142,9 @@ class Codegen:
                     self.gen_expr(stmt.value.args[0], info)
                     arg_t = A.expr_type(stmt.value.args[0])
                     if arg_t == "int":
-                        self.emitf("call _runtime_int_to_str")
+                        self._emit_int_to_str()
                     elif arg_t == "float":
-                        self.emitf("call _runtime_float_to_str")
+                        self._emit_float_to_str()
                 else:
                     cls_lbl, _ = self.intern_string(stmt.value.func)
                     self.emitf(f"lea rax, [{cls_lbl}]")
@@ -2820,6 +2839,14 @@ class Codegen:
                 self.emitf(f"lea rax, [{lbl}]")
                 return
             if expr.name not in info.locals_ and expr.name not in self.global_vars:
+                # A bare reference to a top-level function (not a call): used
+                # as a callback value, e.g. `atexit.register(my_handler, ...)`
+                # or `signal.signal(SIGINT, handler)`. Evaluate to the
+                # function's address so it can be stored in an int slot and
+                # called indirectly later.
+                if any(f.name == expr.name for f in self.mod.funcs):
+                    self.emitf(f"lea rax, [rel {self._user_symbol(expr.name)}]")
+                    return
                 # A module name (from `import X`) isn't a real heap variable —
                 # represent it as null (0). Attribute access on it falls through
                 # to the lenient module/any path in _gen_attr.

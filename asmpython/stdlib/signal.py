@@ -6,14 +6,30 @@ SIG_DFL/SIG_IGN so that `from signal import SIGINT, signal` works.
 """
 from __future__ import annotations
 
+import sys
 
-SIGABRT: int = 6
+
+# Values shared by the Windows and POSIX CRTs (CPython exposes these on
+# both platforms with identical numbers).
 SIGFPE: int = 8
 SIGILL: int = 4
 SIGINT: int = 2
 SIGSEGV: int = 11
 SIGTERM: int = 15
-SIGBREAK: int = 21
+
+# SIGABRT and NSIG differ between the Windows CRT and POSIX/glibc; match
+# whichever real CPython would report on this platform.
+if sys.platform == "win32":
+    SIGABRT: int = 22
+    NSIG: int = 23
+    # Windows-only console control events (no POSIX equivalent).
+    CTRL_C_EVENT: int = 0
+    CTRL_BREAK_EVENT: int = 1
+else:
+    SIGABRT: int = 6
+    NSIG: int = 65
+
+# POSIX-only signals (CPython only defines these on non-Windows platforms).
 SIGHUP: int = 1
 SIGQUIT: int = 3
 SIGKILL: int = 9
@@ -27,6 +43,9 @@ SIGSTOP: int = 19
 SIGTSTP: int = 20
 SIGTTIN: int = 21
 SIGTTOU: int = 22
+
+# Windows-only signal (raised on Ctrl+Break / console close).
+SIGBREAK: int = 21
 SIGWINCH: int = 28
 
 SIG_DFL: int = 0
@@ -89,5 +108,3 @@ def getitimer(which: int) -> list:
 ITIMER_REAL: int = 0
 ITIMER_VIRTUAL: int = 1
 ITIMER_PROF: int = 2
-
-NSIG: int = 64

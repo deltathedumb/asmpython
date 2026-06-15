@@ -365,8 +365,39 @@ output rather than silent miscompilations.
   tracked internally on every target, so simple text UIs (status lines,
   menus, progress bars) can be written once and run on both bare metal and a
   normal terminal. New `tests/cases/171_hardware_console.py`.
+- **Test coverage for the `atexit`, `signal`, and `subprocess` bundled
+  stdlib modules.** New CPython-verified `tests/cases/298_atexit_module.py`,
+  `tests/cases/299_signal_module.py`, and `tests/cases/300_subprocess_module.py`.
 
 ### Fixed
+
+- **Float-default arguments (`def f(x: float = 0.0):`) now parse correctly**
+  instead of raising "float default arguments aren't supported yet".
+  `_parse_default_literal` gained an `A.FloatLit` case alongside its existing
+  int/str/bool/None cases, so float defaults flow through the same
+  substitution path as explicit float call arguments. This unblocks
+  `signal.setitimer(which, seconds, interval: float = 0.0)` and similar
+  bundled-stdlib signatures.
+- **Platform-conditional top-level constants (e.g. `signal.py`'s
+  `if sys.platform == "win32": SIGABRT: int = 22 ... else: SIGABRT: int = 6`)
+  are now visible as module attributes (`signal.SIGABRT`, `signal.NSIG`,
+  etc.) instead of reading back as `0`.** Two parts: `program.py`'s
+  `_merge_import_bindings` now hoists "simple constant if/else" blocks of
+  top-level assigns into the entry module's body (new
+  `_simple_const_if_targets` helper), and codegen's `global_vars` collection
+  (used by module-attribute reads) now recurses into top-level `if`/`elif`/
+  `else` chains via a new `_collect_if_globals` method.
+- **`raise UserExcClass(n)` where `n` is an `int`/`float` no longer fails to
+  assemble on the Windows and Linux targets** (symbol `_runtime_int_to_str`
+  not defined). The `raise` codegen path now calls the target-agnostic
+  `_emit_int_to_str()`/`_emit_float_to_str()` helpers instead of raw
+  freestanding-only runtime labels.
+- **`subprocess.getstatusoutput` now returns a `tuple[int, str]`** (matching
+  CPython's `(status, output)`), instead of a `list` containing mixed `int`
+  and `str` elements (a combination sema rejects as "mixed list element
+  types").
+- **`docs.html`** now points at the project's actual repository,
+  `https://github.com/deltathedumb/asmpython`, instead of a stale clone URL.
 
 - **`-> list[tuple[T1, T2]]` annotations lost the per-slot element kinds,
   so `for a, b in f()` (where `f` returns `list[tuple[str, int]]`) typed

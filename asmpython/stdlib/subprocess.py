@@ -141,10 +141,10 @@ def check_output(args: str, stdin: int = 0, stderr: int = 0,
     return ""
 
 
-def getstatusoutput(cmd: str) -> list:
+def getstatusoutput(cmd: str) -> tuple:
     """Return (status, output) of running cmd in shell (stub)."""
     rc: int = os.system(cmd)
-    return [rc, ""]
+    return (rc, "")
 
 
 def getoutput(cmd: str) -> str:
