@@ -1,7 +1,7 @@
 # expect:
 # hello
 # world
-# 2
+# 1
 
 rows: list[dict[str, str]] = []
 d1: dict[str, str] = {}

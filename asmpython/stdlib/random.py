@@ -30,4 +30,8 @@ BINDINGS: dict = {
     "choice":   Func(arg_types=("list",),         ret_type="any",   c_name="_random_choice"),
     # random.shuffle(seq) -> None: shuffle seq in-place (Fisher-Yates)
     "shuffle":  Func(arg_types=("list",),         ret_type="int",   c_name="_random_shuffle"),
+    # random.sample(population, k) -> list: k unique random elements
+    "sample":   Func(arg_types=("list", "int"),   ret_type="list",  c_name="_random_sample"),
+    # random.getrandbits(k) -> int: k random bits (1-64)
+    "getrandbits": Func(arg_types=("int",),        ret_type="int",   c_name="_random_getrandbits"),
 }

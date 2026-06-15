@@ -614,11 +614,13 @@ class WindowsCodegen(Codegen):
         "_math_modf_frac", "_math_modf_int",
         "_math_frexp_m", "_math_frexp_e",
         "_math_ldexp",
+        "_math_isqrt", "_math_isclose",
     )
     _RANDOM_SYMS = (
         "_random_random", "_random_randint",
         "_random_uniform", "_random_randrange",
         "_random_choice", "_random_shuffle",
+        "_random_sample", "_random_getrandbits",
     )
     _TIME_SYMS = (
         "_time_perf_counter", "_time_time_ns", "_time_sleep_ms",
@@ -816,6 +818,54 @@ class WindowsCodegen(Codegen):
                 # xmm0 has x; rcx has the int n (put there by _gen_ffi_call's int reg 0)
                 self.emitf("mov rdx, rcx", "call ldexp", "leave", "ret")
 
+            # _math_isqrt(rcx=n) -> rax: integer square root (floor(sqrt(n)))
+            if "_math_isqrt" in self.ffi_externs:
+                self.emit("extern sqrt")
+                self.label("_math_isqrt")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+                self.emitf("cvtsi2sd xmm0, rcx", "call sqrt")
+                self.emitf("cvttsd2si rax, xmm0", "leave", "ret")
+
+            # _math_isclose(xmm0=a, xmm1=b, xmm2=rel_tol, xmm3=abs_tol) -> rax 0/1
+            # |a-b| <= max(rel_tol * max(|a|,|b|), abs_tol)
+            if "_math_isclose" in self.ffi_externs:
+                self.emit("extern fabs")
+                lbl_ic_yes = self.fresh("isclose_yes")
+                lbl_ic_no  = self.fresh("isclose_no")
+                lbl_ic_end = self.fresh("isclose_end")
+                self.label("_math_isclose")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
+                # save all 4 float args
+                self.emitf("movsd [rbp-8],  xmm0",   # a
+                           "movsd [rbp-16], xmm1",   # b
+                           "movsd [rbp-24], xmm2",   # rel_tol
+                           "movsd [rbp-32], xmm3")   # abs_tol
+                # diff = |a - b|
+                self.emitf("movsd xmm0, [rbp-8]", "subsd xmm0, [rbp-16]",
+                           "call fabs", "movsd [rbp-40], xmm0")  # diff
+                # max_ab = max(|a|, |b|)
+                self.emitf("movsd xmm0, [rbp-8]", "call fabs",
+                           "movsd [rbp-48], xmm0")   # |a|
+                self.emitf("movsd xmm0, [rbp-16]", "call fabs")  # |b|
+                self.emitf("movsd xmm1, [rbp-48]",
+                           "maxsd xmm0, xmm1",
+                           "movsd [rbp-56], xmm0")   # max_ab
+                # tol = max(rel_tol * max_ab, abs_tol)
+                self.emitf("movsd xmm0, [rbp-24]", "mulsd xmm0, [rbp-56]",  # rel_tol*max_ab
+                           "movsd xmm1, [rbp-32]",
+                           "maxsd xmm0, xmm1",
+                           "movsd [rbp-64], xmm0")   # tol
+                # compare diff <= tol
+                self.emitf("movsd xmm0, [rbp-40]", "movsd xmm1, [rbp-64]",
+                           "ucomisd xmm0, xmm1")
+                self.emitf(f"ja {lbl_ic_no}")
+                self.label(lbl_ic_yes)
+                self.emitf("mov rax, 1", f"jmp {lbl_ic_end}")
+                self.label(lbl_ic_no)
+                self.emitf("xor rax, rax")
+                self.label(lbl_ic_end)
+                self.emitf("leave", "ret")
+
         # ---- random helpers (Windows x64 ABI) --------------------------------
         if needs_random:
             self.emit("extern rand")
@@ -903,6 +953,100 @@ class WindowsCodegen(Codegen):
                 self.emitf("dec qword [rbp-16]", f"jmp {lbl_loop}")
                 self.label(lbl_done)
                 self.emitf("xor rax, rax", "leave", "ret")
+
+            # _random_sample(rcx=list_hdr, rdx=k) -> rax = new list of k unique elements
+            # Strategy: copy source buf, do k-step partial Fisher-Yates, return first k.
+            # Frame layout (offsets from rbp): -8=src_hdr, -16=n, -24=k, -32=copy_buf,
+            #   -40=i, -48=result_hdr, -56=result_buf, -64=j_scratch
+            if "_random_sample" in self.ffi_externs:
+                self.emit("extern malloc")
+                lbl_s_cp = self.fresh("sample_cp")
+                lbl_s_cp_end = self.fresh("sample_cp_end")
+                lbl_s_fy = self.fresh("sample_fy")
+                lbl_s_fy_end = self.fresh("sample_fy_end")
+                lbl_s_fill = self.fresh("sample_fill")
+                lbl_s_fill_end = self.fresh("sample_fill_end")
+                self.label("_random_sample")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 96")
+                self.emitf("mov [rbp-8], rcx")    # src_hdr
+                self.emitf("mov [rbp-24], rdx")   # k
+                self.emitf("mov rax, [rcx+8]", "mov [rbp-16], rax")  # n = src.len
+                # allocate copy buf (n * 8 bytes)
+                self.emitf("mov rcx, rax", "shl rcx, 3", "call malloc",
+                           "mov [rbp-32], rax")   # copy_buf
+                # memcpy source buf into copy_buf
+                self.emitf("mov rsi, [rbp-8]", "mov rsi, [rsi+16]")  # src buf
+                self.emitf("mov rdi, [rbp-32]")
+                self.emitf("mov rcx, [rbp-16]")   # count
+                self.emitf("xor rax, rax")
+                self.label(lbl_s_cp)
+                self.emitf(f"cmp rax, rcx", f"jge {lbl_s_cp_end}",
+                           "mov rbx, [rsi+rax*8]", "mov [rdi+rax*8], rbx",
+                           "inc rax", f"jmp {lbl_s_cp}")
+                self.label(lbl_s_cp_end)
+                # partial Fisher-Yates: i from n-1 down to n-k
+                self.emitf("mov rax, [rbp-16]", "mov [rbp-40], rax")  # i = n
+                self.label(lbl_s_fy)
+                self.emitf("mov rax, [rbp-40]", "mov rbx, [rbp-16]",
+                           "sub rbx, [rbp-24]",   # n - k
+                           f"cmp rax, rbx", f"jle {lbl_s_fy_end}")
+                # pick j = rand() % i (i is loop counter = number of candidates left)
+                self.emitf("push rdi", "call rand", "pop rdi")
+                self.emitf("xor rdx, rdx", "div qword [rbp-40]", "mov [rbp-64], rdx")  # j
+                # swap copy_buf[i-1] and copy_buf[j]
+                self.emitf("mov rdi, [rbp-32]")
+                self.emitf("mov r9, [rbp-40]", "dec r9")              # i-1
+                self.emitf("mov rcx, [rbp-64]")                        # j
+                self.emitf("mov rax, [rdi+r9*8]", "mov rbx, [rdi+rcx*8]",
+                           "mov [rdi+r9*8], rbx", "mov [rdi+rcx*8], rax")
+                self.emitf("dec qword [rbp-40]", f"jmp {lbl_s_fy}")
+                self.label(lbl_s_fy_end)
+                # allocate result list header
+                self.emitf("push rdi", "mov rcx, 24", "call malloc", "pop rdi",
+                           "mov [rbp-48], rax")   # result_hdr
+                self.emitf("mov rbx, [rbp-24]",
+                           "mov [rax+0], rbx", "mov [rax+8], rbx")  # cap=len=k
+                # allocate result buf (k * 8)
+                self.emitf("push rdi", "mov rcx, [rbp-24]", "shl rcx, 3",
+                           "call malloc", "pop rdi", "mov [rbp-56], rax")
+                self.emitf("mov rcx, [rbp-48]", "mov [rcx+16], rax")  # hdr.buf = result_buf
+                # copy first k elements from copy_buf tail (indices n-k..n-1) to result
+                # The selected elements end up at positions [n-k .. n-1] after partial FY
+                self.emitf("mov rax, [rbp-16]", "sub rax, [rbp-24]")  # start = n-k
+                self.emitf("mov [rbp-40], rax")   # reuse as fill index
+                self.emitf("xor rbx, rbx")        # result index
+                self.label(lbl_s_fill)
+                self.emitf("mov rcx, [rbp-16]",   # n
+                           f"cmp rbx, [rbp-24]",  # rbx < k
+                           f"jge {lbl_s_fill_end}")
+                self.emitf("mov rdi, [rbp-32]")   # copy_buf
+                self.emitf("mov rax, [rbp-40]", "add rax, rbx")  # index = start + rbx
+                self.emitf("mov r8, [rdi+rax*8]")  # val = copy_buf[start+rbx]
+                self.emitf("mov rdi, [rbp-56]")    # result_buf
+                self.emitf("mov [rdi+rbx*8], r8")  # result_buf[rbx] = val
+                self.emitf("inc rbx", f"jmp {lbl_s_fill}")
+                self.label(lbl_s_fill_end)
+                self.emitf("mov rax, [rbp-48]", "leave", "ret")
+
+            # _random_getrandbits(rcx=k) -> rax: k random bits (1-64)
+            if "_random_getrandbits" in self.ffi_externs:
+                lbl_gb_loop = self.fresh("grb_loop")
+                lbl_gb_done = self.fresh("grb_done")
+                self.label("_random_getrandbits")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+                self.emitf("mov [rbp-8], rcx")    # k (bit count)
+                self.emitf("xor rbx, rbx")        # result = 0
+                self.emitf("xor r12, r12")        # bits_filled = 0
+                self.label(lbl_gb_loop)
+                self.emitf(f"cmp r12, [rbp-8]", f"jge {lbl_gb_done}")
+                self.emitf("call rand")            # rax = 0..32767 (15 bits)
+                self.emitf("shl rbx, 15", "or rbx, rax", "add r12, 15",
+                           f"jmp {lbl_gb_loop}")
+                self.label(lbl_gb_done)
+                # mask to k bits
+                self.emitf("mov rcx, [rbp-8]")
+                self.emitf("mov rax, 1", "shl rax, cl", "dec rax")  # mask = (1<<k)-1
+                self.emitf("and rax, rbx", "leave", "ret")
 
         # ---- time helpers (Windows x64 ABI) ----------------------------------
         # QueryPerformanceCounter / QueryPerformanceFrequency for perf_counter.

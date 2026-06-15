@@ -509,11 +509,13 @@ class LinuxCodegen(Codegen):
         "_math_modf_frac", "_math_modf_int",
         "_math_frexp_m", "_math_frexp_e",
         "_math_ldexp",
+        "_math_isqrt", "_math_isclose",
     )
     _RANDOM_SYMS = (
         "_random_random", "_random_randint",
         "_random_uniform", "_random_randrange",
         "_random_choice", "_random_shuffle",
+        "_random_sample", "_random_getrandbits",
     )
     _TIME_SYMS = (
         "_time_perf_counter", "_time_time_ns", "_time_sleep_ms",
@@ -724,6 +726,47 @@ class LinuxCodegen(Codegen):
                 # SysV: xmm0=x already, rdi=n already — ldexp(double,int) is exact match
                 self.emitf("mov al, 1", "call ldexp", "ret")
 
+            # _math_isqrt(rdi=n) -> rax = floor(sqrt(n))
+            if "_math_isqrt" in self.ffi_externs:
+                self.emit("extern sqrt")
+                self.label("_math_isqrt")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+                self.emitf("cvtsi2sd xmm0, rdi", "mov al, 1", "call sqrt")
+                self.emitf("cvttsd2si rax, xmm0", "leave", "ret")
+
+            # _math_isclose(xmm0=a, xmm1=b, xmm2=rel_tol, xmm3=abs_tol) -> rax: 1 if close
+            if "_math_isclose" in self.ffi_externs:
+                lbl_ic_yes = self.fresh("isclose_yes")
+                lbl_ic_no  = self.fresh("isclose_no")
+                self.emit("section .rodata")
+                self.emit("_ic_abs_mask_l:  dq 0x7FFFFFFFFFFFFFFF")
+                self.emit("section .text")
+                self.label("_math_isclose")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+                self.emitf("movsd [rbp-8],  xmm0",   # a
+                           "movsd [rbp-16], xmm1",   # b
+                           "movsd [rbp-24], xmm2",   # rel_tol
+                           "movsd [rbp-32], xmm3")   # abs_tol
+                # diff = |a - b|
+                self.emitf("movsd xmm0, [rbp-8]", "subsd xmm0, [rbp-16]")
+                self.emitf("movsd xmm1, [rel _ic_abs_mask_l]", "andpd xmm0, xmm1",
+                           "movsd [rbp-40], xmm0")   # diff
+                # max_ab = max(|a|, |b|)
+                self.emitf("movsd xmm0, [rbp-8]",  "andpd xmm0, xmm1",  # |a|
+                           "movsd xmm2, [rbp-16]", "andpd xmm2, xmm1")  # |b|
+                self.emitf("maxsd xmm0, xmm2", "movsd [rbp-48], xmm0")  # max_ab
+                # tol = max(rel_tol * max_ab, abs_tol)
+                self.emitf("movsd xmm1, [rbp-24]", "mulsd xmm1, [rbp-48]",
+                           "movsd xmm2, [rbp-32]", "maxsd xmm1, xmm2",
+                           "movsd [rbp-56], xmm1")   # tol
+                # result = diff <= tol
+                self.emitf("movsd xmm0, [rbp-40]", "ucomisd xmm0, [rbp-56]")
+                self.emitf(f"ja {lbl_ic_no}")
+                self.label(lbl_ic_yes)
+                self.emitf("mov rax, 1", "leave", "ret")
+                self.label(lbl_ic_no)
+                self.emitf("xor rax, rax", "leave", "ret")
+
         # ---- random helpers (SysV ABI) ----------------------------------------
         if needs_random:
             self.emit("extern rand")
@@ -810,6 +853,92 @@ class LinuxCodegen(Codegen):
                 self.emitf("dec qword [rbp-16]", f"jmp {lbl_loop}")
                 self.label(lbl_done)
                 self.emitf("xor rax, rax", "leave", "ret")
+
+            # _random_sample(rdi=list_hdr, rsi=k) -> rax = new list of k unique elements
+            # SysV: rdi=src_hdr, rsi=k. Frame offsets from rbp:
+            # -8=src_hdr, -16=n, -24=k, -32=copy_buf, -40=i, -48=result_hdr, -56=result_buf
+            if "_random_sample" in self.ffi_externs:
+                self.emit("extern malloc")
+                lbl_s_cp = self.fresh("sample_cp")
+                lbl_s_cp_end = self.fresh("sample_cp_end")
+                lbl_s_fy = self.fresh("sample_fy")
+                lbl_s_fy_end = self.fresh("sample_fy_end")
+                lbl_s_fill = self.fresh("sample_fill")
+                lbl_s_fill_end = self.fresh("sample_fill_end")
+                self.label("_random_sample")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 96")
+                self.emitf("mov [rbp-8], rdi")   # src_hdr
+                self.emitf("mov [rbp-24], rsi")  # k
+                self.emitf("mov rax, [rdi+8]", "mov [rbp-16], rax")  # n = src.len
+                # allocate copy buf (n * 8 bytes)
+                self.emitf("mov rdi, rax", "shl rdi, 3", "call malloc",
+                           "mov [rbp-32], rax")  # copy_buf
+                # memcpy source buf into copy_buf
+                self.emitf("mov rsi, [rbp-8]", "mov rsi, [rsi+16]")  # src buf
+                self.emitf("mov rdi, [rbp-32]")
+                self.emitf("mov rcx, [rbp-16]", "xor rax, rax")
+                self.label(lbl_s_cp)
+                self.emitf(f"cmp rax, rcx", f"jge {lbl_s_cp_end}",
+                           "mov rbx, [rsi+rax*8]", "mov [rdi+rax*8], rbx",
+                           "inc rax", f"jmp {lbl_s_cp}")
+                self.label(lbl_s_cp_end)
+                # partial Fisher-Yates: i from n down to n-k+1
+                self.emitf("mov rax, [rbp-16]", "mov [rbp-40], rax")  # i = n
+                self.label(lbl_s_fy)
+                self.emitf("mov rax, [rbp-40]", "mov rbx, [rbp-16]",
+                           "sub rbx, [rbp-24]",
+                           f"cmp rax, rbx", f"jle {lbl_s_fy_end}")
+                self.emitf("call rand")
+                self.emitf("xor rdx, rdx", "div qword [rbp-40]")  # rdx = j
+                # swap copy_buf[i-1] and copy_buf[j]
+                self.emitf("mov rdi, [rbp-32]")
+                self.emitf("mov r9, [rbp-40]", "dec r9")   # i-1
+                self.emitf("mov rcx, rdx")                  # j
+                self.emitf("mov rax, [rdi+r9*8]", "mov rbx, [rdi+rcx*8]",
+                           "mov [rdi+r9*8], rbx", "mov [rdi+rcx*8], rax")
+                self.emitf("dec qword [rbp-40]", f"jmp {lbl_s_fy}")
+                self.label(lbl_s_fy_end)
+                # allocate result list header (24 bytes)
+                self.emitf("mov rdi, 24", "call malloc", "mov [rbp-48], rax")
+                self.emitf("mov rbx, [rbp-24]",
+                           "mov [rax+0], rbx", "mov [rax+8], rbx")  # cap=len=k
+                # allocate result buf (k * 8)
+                self.emitf("mov rdi, [rbp-24]", "shl rdi, 3", "call malloc",
+                           "mov [rbp-56], rax")
+                self.emitf("mov rcx, [rbp-48]", "mov [rcx+16], rax")  # hdr.buf = result_buf
+                # copy selected elements (tail of copy_buf, indices n-k .. n-1)
+                self.emitf("mov rax, [rbp-16]", "sub rax, [rbp-24]",
+                           "mov [rbp-40], rax")  # start = n-k
+                self.emitf("xor rbx, rbx")       # result index
+                self.label(lbl_s_fill)
+                self.emitf(f"cmp rbx, [rbp-24]", f"jge {lbl_s_fill_end}")
+                self.emitf("mov rdi, [rbp-32]")
+                self.emitf("mov rax, [rbp-40]", "add rax, rbx",
+                           "mov r8, [rdi+rax*8]")
+                self.emitf("mov rdi, [rbp-56]", "mov [rdi+rbx*8], r8")
+                self.emitf("inc rbx", f"jmp {lbl_s_fill}")
+                self.label(lbl_s_fill_end)
+                self.emitf("mov rax, [rbp-48]", "leave", "ret")
+
+            # _random_getrandbits(rdi=k) -> rax: k random bits (1-64)
+            if "_random_getrandbits" in self.ffi_externs:
+                lbl_gb_loop = self.fresh("grb_loop")
+                lbl_gb_done = self.fresh("grb_done")
+                self.label("_random_getrandbits")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+                self.emitf("mov [rbp-8], rdi")   # k
+                self.emitf("xor rbx, rbx")        # result = 0
+                self.emitf("xor r12, r12")        # bits_filled = 0
+                self.label(lbl_gb_loop)
+                self.emitf(f"cmp r12, [rbp-8]", f"jge {lbl_gb_done}")
+                self.emitf("call rand")
+                self.emitf("shl rbx, 15", "or rbx, rax", "add r12, 15",
+                           f"jmp {lbl_gb_loop}")
+                self.label(lbl_gb_done)
+                # mask to k bits: mask = (1 << k) - 1
+                self.emitf("mov rcx, [rbp-8]")
+                self.emitf("mov rax, 1", "shl rax, cl", "dec rax")
+                self.emitf("and rax, rbx", "leave", "ret")
 
         # ---- time helpers (Linux / SysV ABI) ---------------------------------
         # clock_gettime(CLOCK_MONOTONIC=1, &timespec) gives ns resolution.

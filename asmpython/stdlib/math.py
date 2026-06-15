@@ -102,6 +102,12 @@ BINDINGS = {
     # ldexp(x, i) -> x * 2**i  (inline helper avoids mixed float/int ABI issues)
     "ldexp":    Func(arg_types=("float", "int"), ret_type="float", c_name="_math_ldexp"),
 
+    # isqrt(n) -> int: floor(sqrt(n)) for non-negative integers
+    "isqrt":    Func(arg_types=("int",),  ret_type="int",   c_name="_math_isqrt"),
+
+    # isclose(a, b, rel_tol, abs_tol) -> bool: True if a ≈ b within tolerances
+    "isclose":  Func(arg_types=("float", "float", "float", "float"), ret_type="int", c_name="_math_isclose"),
+
     # erf / erfc (error function, C99)
     "erf":      Func(arg_types=("float",), ret_type="float", c_name="erf"),
     "erfc":     Func(arg_types=("float",), ret_type="float", c_name="erfc"),
