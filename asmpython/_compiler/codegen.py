@@ -1125,6 +1125,22 @@ class Codegen:
             # round(x, ndigits): needs a slot to spill x across pow() call.
             if expr.func == "round" and len(expr.args) >= 2:
                 self._cl_define(info, f"__round_nd_{id(expr)}")
+            # bytes()/bytearray(): always builds a list[int].
+            # str-arg case: needs a list-header slot, a str-save slot, and an
+            # index slot.  int-arg case: list-header + count slot.
+            if expr.func in ("bytes", "bytearray"):
+                if not expr.args:
+                    pass  # empty list, no scratch needed
+                else:
+                    at = A.expr_type(expr.args[0]) if expr.args else None
+                    if at == "str":
+                        self._cl_define(info, f"__bytes_list_{id(expr)}")
+                        self._cl_define(info, f"__bytes_str_{id(expr)}")
+                        self._cl_define(info, f"__bytes_idx_{id(expr)}")
+                    elif at != "list":
+                        # int n
+                        self._cl_define(info, f"__bytes_list_{id(expr)}")
+                        self._cl_define(info, f"__bytes_cnt_{id(expr)}")
             # dict() / dict(other): an empty dict (same layout as a set's),
             # plus a slot to park the source across the allocation when copying.
             if expr.func == "dict":
@@ -9628,6 +9644,105 @@ class Codegen:
             return
         if e.func == "isinstance":
             self._gen_isinstance(e, info)
+            return
+        if e.func in ("bytes", "bytearray"):
+            # bytes()/bytearray() -> list[int] of character codes.
+            # bytes()            -> empty list
+            # bytes(lst: list)   -> shallow copy (passthrough via list slice)
+            # bytes(s: str)      -> list of ord values (inline loop)
+            # bytes(n: int)      -> n zeros (inline loop)
+            if not e.args:
+                # bytes() -> empty list
+                self._emit_malloc(self.LIST_HEADER)
+                self.emitf(
+                    "mov qword [rax], 0",
+                    "mov qword [rax+8], 0",
+                    "mov qword [rax+16], 0",
+                )
+            else:
+                arg = e.args[0]
+                at = A.expr_type(arg)
+                if at == "list":
+                    # Already a list[int] - copy it via full slice
+                    SENTINEL_MIN = "0x8000000000000000"
+                    SENTINEL_MAX = "0x7fffffffffffffff"
+                    self.gen_expr(arg, info)
+                    self.emitf(
+                        f"mov rbx, {SENTINEL_MIN}",
+                        f"mov rcx, {SENTINEL_MAX}",
+                        "call _runtime_list_slice",
+                    )
+                elif at == "str":
+                    # bytes(str) -> list of ord values via inline loop.
+                    # Strings are plain C strings (null-terminated, no header),
+                    # so use strlen to get the count, then walk byte-by-byte.
+                    list_slot = info.locals_[f"__bytes_list_{id(e)}"]
+                    str_slot = info.locals_[f"__bytes_str_{id(e)}"]
+                    idx_slot = info.locals_[f"__bytes_idx_{id(e)}"]
+                    lbl_loop = self.fresh("bytes_str_loop")
+                    lbl_done = self.fresh("bytes_str_done")
+                    # Allocate empty list header
+                    self._emit_malloc(self.LIST_HEADER)
+                    self.emitf(
+                        "mov qword [rax], 0",
+                        "mov qword [rax+8], 0",
+                        "mov qword [rax+16], 0",
+                        f"mov [rbp{list_slot:+d}], rax",
+                    )
+                    # Evaluate string arg (a plain C-string pointer), save it
+                    self.gen_expr(arg, info)
+                    self.emitf(f"mov [rbp{str_slot:+d}], rax")
+                    # Get string length; _emit_libc_strlen expects rax = ptr,
+                    # returns length in rax.
+                    self._emit_libc_strlen()         # rax = strlen(str)
+                    # Store remaining count in idx_slot (counts down to 0)
+                    self.emitf(f"mov [rbp{idx_slot:+d}], rax")
+                    # Walk: advance str_slot pointer, appending byte values
+                    self.emitf(f"{lbl_loop}:")
+                    self.emitf(
+                        f"cmp qword [rbp{idx_slot:+d}], 0",
+                        f"jle {lbl_done}",
+                        f"mov rdx, [rbp{str_slot:+d}]",
+                        "movzx rbx, byte [rdx]",    # rbx = next byte
+                        "inc rdx",
+                        f"mov [rbp{str_slot:+d}], rdx",
+                        f"dec qword [rbp{idx_slot:+d}]",
+                        f"mov rax, [rbp{list_slot:+d}]",
+                        "call _runtime_list_append",
+                        f"jmp {lbl_loop}",
+                    )
+                    self.emitf(f"{lbl_done}:")
+                    self.emitf(f"mov rax, [rbp{list_slot:+d}]")
+                else:
+                    # bytes(n: int) -> list of n zeros
+                    list_slot = info.locals_[f"__bytes_list_{id(e)}"]
+                    cnt_slot = info.locals_[f"__bytes_cnt_{id(e)}"]
+                    lbl_loop = self.fresh("bytes_int_loop")
+                    lbl_done = self.fresh("bytes_int_done")
+                    # Allocate empty list
+                    self._emit_malloc(self.LIST_HEADER)
+                    self.emitf(
+                        "mov qword [rax], 0",
+                        "mov qword [rax+8], 0",
+                        "mov qword [rax+16], 0",
+                        f"mov [rbp{list_slot:+d}], rax",
+                    )
+                    # Evaluate n and save
+                    self.gen_expr(arg, info)
+                    self.emitf(f"mov [rbp{cnt_slot:+d}], rax")
+                    # Loop n times appending 0
+                    self.emitf(f"{lbl_loop}:")
+                    self.emitf(
+                        f"cmp qword [rbp{cnt_slot:+d}], 0",
+                        f"jle {lbl_done}",
+                        f"mov rax, [rbp{list_slot:+d}]",
+                        "mov rbx, 0",
+                        "call _runtime_list_append",
+                        f"dec qword [rbp{cnt_slot:+d}]",
+                        f"jmp {lbl_loop}",
+                    )
+                    self.emitf(f"{lbl_done}:")
+                    self.emitf(f"mov rax, [rbp{list_slot:+d}]")
             return
         if e.func in ("list", "tuple"):
             # tuple(x) and list(x) share the copy: same heap layout.

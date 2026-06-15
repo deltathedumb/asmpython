@@ -260,6 +260,13 @@ class Lexer:
                 self.tokens.append(self._read_raw_string())
                 continue
 
+            # b"..." / b'...' byte literals: emit as BYTES token (list[int]).
+            if ch == "b" and self._peek(1) in ('"', "'"):
+                self._advance()  # consume 'b'
+                tok = self._read_string()
+                self.tokens.append(Token("BYTES", tok.value, tok.pos.line, tok.pos.col))
+                continue
+
             if ch.isalpha() or ch == "_":
                 self.tokens.append(self._read_identifier())
                 continue

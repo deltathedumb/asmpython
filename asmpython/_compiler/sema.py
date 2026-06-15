@@ -190,6 +190,8 @@ BUILTINS: dict[str, tuple[int, int]] = {
     "divmod": (2, 2),  # divmod(a, b) -> (a // b, a % b)
     "hash": (1, 1),  # hash(x) -> int
     "issubclass": (2, 2),
+    "bytes": (0, 2),     # bytes() / bytes(n) / bytes(str) -> list[int]
+    "bytearray": (0, 2), # bytearray() / bytearray(n) / bytearray(str) -> list[int]
 }
 
 
@@ -4909,6 +4911,8 @@ class SemaAnalyzer:
                 "divmod": "tuple",
                 "hash": "int",
                 "issubclass": "int",
+                "bytes": "list",
+                "bytearray": "list",
             }[e.func]
             if e.func == "abs":
                 # abs preserves the operand's numeric type (float -> float so

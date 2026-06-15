@@ -544,8 +544,11 @@ class Parser:
             return ("float", None)
         if name in ("None", "none"):
             return ("none", None)
-        if name in ("object", "Any", "bytes"):
+        if name in ("object", "Any"):
             return ("any", None)
+        if name in ("bytes", "bytearray"):
+            # Treat bytes/bytearray as list[int] — same memory layout, int elements.
+            return ("list", "int")
         if name in ("Optional",):
             return inner[0] if inner else ("any", None)
         if name in ("Union",):
@@ -1678,6 +1681,14 @@ class Parser:
         elif t.kind == "FLOAT":
             self._eat()
             atom = A.FloatLit(value=t.value, pos=t.pos)  # type: ignore
+        elif t.kind == "BYTES":
+            # b"..." literal: expand to list[int] of character codes.
+            self._eat()
+            byte_elems: list = [
+                A.IntLit(value=ord(c), pos=t.pos)
+                for c in t.value  # type: ignore
+            ]
+            atom = A.ListLit(elems=byte_elems, pos=t.pos, el_type="int")
         elif t.kind == "STRING":
             self._eat()
             atom = self._absorb_string_concat(A.StrLit(value=t.value, pos=t.pos))  # type: ignore
