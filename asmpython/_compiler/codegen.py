@@ -1641,6 +1641,13 @@ class Codegen:
                         info, f"__for_iter_{id(s)}", "int"
                     )  # ptr; treat as int slot
                     self._cl_walk_expr(info, s.iter)
+                    # Instance-iterable: allocate setjmp buf + saved exception
+                    # slots for the internal StopIteration catch in _gen_for_iter.
+                    if getattr(s, "iter_is_instance", None) is not None:
+                        self._cl_define_bytes(info, f"__for_iter_buf_{id(s)}", 200)
+                        self._cl_define(info, f"__for_iter_parent_{id(s)}", "int")
+                        self._cl_define(info, f"__for_iter_prev_exc_{id(s)}", "int")
+                        self._cl_define(info, f"__for_iter_prev_exc_type_{id(s)}", "int")
                 else:
                     for a in s.range_args:
                         self._cl_walk_expr(info, a)
@@ -2257,6 +2264,11 @@ class Codegen:
             return
         if stmt.iter is not None:
             iter_t = A.expr_type(stmt.iter)
+            if getattr(stmt, "iter_is_instance", None) is not None:
+                self._gen_for_iter(stmt, info)
+                for s in orelse_stmts:
+                    self.gen_stmt(s, info)
+                return
             if iter_t in ("dict", "set"):
                 # Sets are dict-backed (members live as keys); a plain sweep
                 # over the slot buffer yields the members, same as a dict's
@@ -2710,6 +2722,102 @@ class Codegen:
             self.gen_stmt(s, info)
         self.label(cont)
         self.emitf(f"inc qword [rbp{step_off:+d}]", f"jmp {top}")
+        self.label(end)
+        self.loop_labels.pop()
+
+    def _gen_for_iter(self, stmt: A.For, info: FuncInfo) -> None:
+        """`for x in obj` where obj is a user class with __iter__/__next__.
+
+        Lowers as:
+            iterator = obj.__iter__()           ; call __iter__, store result
+            loop:
+                setjmp(buf) — returns 0 normally, 1 if exception raised
+                if exception: if StopIteration -> goto end; else re-raise
+                result = iterator.__next__()    ; result in rax
+                var = result
+                body
+                jmp loop
+            end:
+        """
+        cls_name = stmt.iter_is_instance
+        var_off = info.locals_[stmt.var]
+        iter_off = info.locals_[f"__for_iter_{id(stmt)}"]
+        buf_off = info.locals_[f"__for_iter_buf_{id(stmt)}"]
+        parent_off = info.locals_[f"__for_iter_parent_{id(stmt)}"]
+        prev_exc_off = info.locals_[f"__for_iter_prev_exc_{id(stmt)}"]
+        prev_exc_type_off = info.locals_[f"__for_iter_prev_exc_type_{id(stmt)}"]
+
+        # 1. Evaluate the iterable object -> rax (pointer to instance dict).
+        self.gen_expr(stmt.iter, info)
+        self.emitf(f"mov [rbp{iter_off:+d}], rax")
+
+        # 2. Call __iter__(obj) -> iterator (may return self, or a new object).
+        self.emitf(f"mov {self._arg_reg(0)}, [rbp{iter_off:+d}]")
+        self.emit_call(self._method_symbol(cls_name, "__iter__"))
+        # rax now holds the iterator object; store it back (may differ from obj).
+        self.emitf(f"mov [rbp{iter_off:+d}], rax")
+
+        top = self.fresh("for_iter")
+        end = self.fresh("endfor_iter")
+        cont = self.fresh("for_iter_cont")
+        self.loop_labels.append((cont, end))
+        self.label(top)
+
+        # 3. Save previous exception state and install a fresh handler.
+        self.emitf(
+            "mov rax, [rel _runtime_exc_msg]",
+            f"mov [rbp{prev_exc_off:+d}], rax",
+            "mov rax, [rel _runtime_exc_type]",
+            f"mov [rbp{prev_exc_type_off:+d}], rax",
+            "mov rax, [rel _runtime_handler_top]",
+            f"mov [rbp{parent_off:+d}], rax",
+        )
+        self.emitf(f"lea rax, [rbp{buf_off:+d}]", "mov [rel _runtime_handler_top], rax")
+        self._emit_call_setjmp(buf_off)
+        handler_lbl = self.fresh("for_iter_handler")
+        self.emitf("test eax, eax", f"jnz {handler_lbl}")
+
+        # Normal path: call __next__(iterator).
+        self.emitf(f"mov {self._arg_reg(0)}, [rbp{iter_off:+d}]")
+        self.emit_call(self._method_symbol(cls_name, "__next__"))
+        # rax = value returned by __next__; store in var.
+        self.emitf(f"mov [rbp{var_off:+d}], rax")
+
+        # Restore handler chain and saved exception state (normal path).
+        self.emitf(
+            f"mov rax, [rbp{parent_off:+d}]",
+            "mov [rel _runtime_handler_top], rax",
+            f"mov rax, [rbp{prev_exc_off:+d}]",
+            "mov [rel _runtime_exc_msg], rax",
+            f"mov rax, [rbp{prev_exc_type_off:+d}]",
+            "mov [rel _runtime_exc_type], rax",
+        )
+
+        # Run the loop body.
+        for s in stmt.body:
+            self.gen_stmt(s, info)
+        self.label(cont)
+        self.emitf(f"jmp {top}")
+
+        # Handler: restore handler chain, check for StopIteration.
+        self.label(handler_lbl)
+        self.emitf(
+            f"mov rax, [rbp{parent_off:+d}]",
+            "mov [rel _runtime_handler_top], rax",
+        )
+        # _runtime_exc_type == 21 means StopIteration (see EXCEPTION_TYPES).
+        self.emitf(
+            "mov rax, [rel _runtime_exc_type]",
+            "cmp rax, 21",
+            f"je {end}",
+        )
+        # Not StopIteration: re-raise so outer try handlers catch it.
+        self.emitf(
+            "mov rax, [rel _runtime_exc_msg]",
+            "mov rbx, [rel _runtime_exc_type]",
+            "call _runtime_raise",
+        )
+
         self.label(end)
         self.loop_labels.pop()
 
