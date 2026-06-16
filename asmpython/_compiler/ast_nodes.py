@@ -1017,6 +1017,12 @@ def is_bool_expr(e: Expr) -> bool:
         return is_bool_expr(e.body) and is_bool_expr(e.orelse)
     if isinstance(e, Call):
         return e.func in ("bool", "isinstance", "any", "all")
+    if isinstance(e, MethodCall):
+        return e.method in (
+            "isdigit", "isalpha", "isalnum", "isspace",
+            "isupper", "islower", "isdecimal", "isidentifier",
+            "startswith", "endswith",
+        )
     if isinstance(e, Name):
         return getattr(e, "is_bool", False)
     if isinstance(e, NamedExpr):
