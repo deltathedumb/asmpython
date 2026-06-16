@@ -547,7 +547,9 @@ class Parser:
     _DICT_ANNOTS = {"dict", "Dict", "Mapping", "MutableMapping"}
 
     def _normalize_annot(self, name: str, inner: list) -> tuple:
-        if name in ("int", "bool"):
+        if name == "bool":
+            return ("bool", None)
+        if name == "int":
             return ("int", None)
         if name in ("str",):
             return ("str", None)

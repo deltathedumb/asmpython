@@ -333,6 +333,9 @@ class FuncSig:
     # `return self`) infer `instance:<ClassName>` instead of defaulting to
     # `int`. Mirrors `ret_tuple`'s body-scanning approach.
     returns_self: bool = False
+    # True when the function has an explicit `-> bool` annotation (so call
+    # sites can render the return value as True/False in print/str/f-string).
+    ret_bool: bool = False
 
 
 @dataclass
@@ -994,6 +997,8 @@ class SemaAnalyzer:
             return "any"
         if base in ("int", "str", "float"):
             return base
+        if base == "bool":
+            return "int"
         if base in ("list", "dict", "tuple"):
             # A nested collection element/value (`dict[str, list[str]]`): every
             # value is an 8-byte pointer, so the container kind passes through.
@@ -1021,8 +1026,8 @@ class SemaAnalyzer:
         if annot is None:
             return None
         base, el = annot
-        if base in ("int", "str", "float"):
-            return (base, None, None, None, None)
+        if base in ("int", "str", "float", "bool"):
+            return ("int" if base == "bool" else base, None, None, None, None)
         if base == "list":
             if isinstance(el, tuple) and el[0] == "tuple":
                 # list[tuple[T1, T2, ...]]: el is ("tuple", [base1, base2, ...])
@@ -1177,6 +1182,7 @@ class SemaAnalyzer:
                     f.pos,
                 )
             r = self._resolve_annot(f.ret_type)  # type: ignore
+            _raw_ret_base = f.ret_type[0] if f.ret_type else None
             self.funcs[f.name] = FuncSig(
                 name=f.name,
                 arity=len(f.params),
@@ -1189,6 +1195,7 @@ class SemaAnalyzer:
                 param_defaults=list(f.defaults),
                 vararg=f.vararg,
                 kwarg=f.kwarg,
+                ret_bool=(_raw_ret_base == "bool"),
             )
 
         # Infer which functions return a tuple, and the shape of that tuple,
@@ -1266,6 +1273,7 @@ class SemaAnalyzer:
                         break
                 if setter_prop is not None:
                     m.name = f"{setter_prop}__setter"
+                _raw_mret_base = m.ret_type[0] if m.ret_type else None
                 sig.methods[m.name] = FuncSig(
                     name=m.name,
                     arity=len(m.params),
@@ -1281,6 +1289,7 @@ class SemaAnalyzer:
                     ret_tuple=self._scan_tuple_return(m.body),
                     decorators=list(getattr(m, "decorators", [])),
                     returns_self=mr is None and self._method_returns_self(m.body),
+                    ret_bool=(_raw_mret_base == "bool"),
                 )
                 if setter_prop is not None:
                     sig.setters[setter_prop] = m.name
@@ -4424,6 +4433,8 @@ class SemaAnalyzer:
                 elif sig.ret_type is not None:
                     ty, el, _val = sig.ret_type  # type: ignore
                     e.inferred_type = ty
+                    if sig.ret_bool:
+                        e.is_bool = True
                     if ty == "list" and el is not None:
                         e.list_el_type = el
                         if el == "tuple" and sig.ret_list_tuple_types:
@@ -5355,6 +5366,8 @@ class SemaAnalyzer:
             elif sig.ret_type is not None:
                 ty, el, _val = sig.ret_type  # type: ignore
                 e.inferred_type = ty
+                if sig.ret_bool:
+                    e.is_bool = True
                 if ty == "list" and el is not None:
                     e.list_el_type = el
                     if el == "tuple" and sig.ret_list_tuple_types:
