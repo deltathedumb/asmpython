@@ -1731,6 +1731,10 @@ class Codegen:
                 self._cl_walk_expr(info, s.target.obj)
                 self._cl_walk_expr(info, s.target.index)
                 self._cl_walk_expr(info, s.value)
+                if A.expr_type(s.target.obj) == "dict":
+                    # dict[key] = value: park key in a frame slot so that complex
+                    # value expressions (DictLit, etc.) don't misalign the stack.
+                    self._cl_define(info, f"__dictset_key_{id(s)}")
             elif isinstance(s, A.AttrAssign):
                 self._cl_walk_expr(info, s.obj)
                 self._cl_walk_expr(info, s.value)
@@ -2067,17 +2071,20 @@ class Codegen:
                     self.emit_call(self._method_symbol(owner, "__setitem__"))
                 return
             if obj_t == "dict":
-                # Stack order: push key, push value, eval header, then call.
+                # Eval key, save to frame slot; eval value, save to frame slot;
+                # eval header, then call. Frame slots avoid stack misalignment
+                # when value is a DictLit or other complex expression that calls.
+                key_slot = info.locals_[f"__dictset_key_{id(stmt)}"]
                 self.gen_expr(stmt.target.index, info)
-                self.emitf("push rax")
+                self.emitf(f"mov [rbp{key_slot:+d}], rax")
                 self.gen_expr(stmt.value, info)
                 if A.expr_type(stmt.value) == "float":
-                    self.emitf("movq rax, xmm0")  # store the raw bit pattern
-                self.emitf("push rax")
+                    self.emitf("movq rax, xmm0")
+                self.emitf("push rax")  # value on stack (after key is safe)
                 self.gen_expr(stmt.target.obj, info)  # rax = header
                 self.emitf(
-                    "pop rcx",  # rcx = value
-                    "pop rbx",  # rbx = key
+                    "pop rcx",                         # rcx = value
+                    f"mov rbx, [rbp{key_slot:+d}]",   # rbx = key
                     "call _runtime_dict_set",
                 )
                 return
