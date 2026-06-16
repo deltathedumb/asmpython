@@ -11,6 +11,20 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **`yield` inside `for` loops**: generator functions whose loop body is a
+  `for` loop (including `for i in range(n)` and `for x in list_expr`) now
+  transform correctly. The generator class materialises the iterable as a
+  list in `__init__`, then advances an index counter each `__next__` call.
+  Body statements before the `yield` (e.g. a local assignment) are emitted
+  before the return; body statements after the `yield` are emitted between
+  the return-value capture and the index advance.
+
+- **`--onedir` implies `--use-runtime-lib`**: the `compile_source` driver
+  function now enforces this invariant at the API level (not just the CLI
+  layer), so callers that pass `bundle_mode="onedir"` without explicitly
+  setting `use_runtime_lib=True` still get the correct shared-library
+  codegen path.
+
 - **`io.StringIO` / `io.BytesIO` context managers**: both classes now implement
   `__enter__` / `__exit__` so they work in `with` blocks. Added `readable()`,
   `writable()`, and `seekable()` returning 1 on both classes. Added

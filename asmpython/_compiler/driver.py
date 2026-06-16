@@ -207,6 +207,10 @@ def compile_source(
     icon_path: Path | None = None,
     all_errors: bool = False,
 ) -> BuildResult:
+    # --onedir always links against the shared runtime library.
+    if bundle_mode == "onedir":
+        use_runtime_lib = True
+
     # Whole-program compilation: when we know the entry file, follow its imports
     # and merge every reachable project module's classes/functions into one unit
     # so cross-file constructors (`SourcePos(...)`) and inherited methods resolve.

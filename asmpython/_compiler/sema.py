@@ -1401,68 +1401,146 @@ class SemaAnalyzer:
         # go in __next__ with a _done-guard. For now, skip pre-stmts since
         # the common case (i = 0) is handled in __init__.
 
+        result_name = "_genresult"
+
         if isinstance(loop_stmt, A.While):
             cond = loop_stmt.test
             body = loop_stmt.body
-        else:  # For loop
-            # for var in iter: body → convert to while equivalent
-            # We handle this by not supporting for-loop generators for now.
-            return None
 
-        # Split body at YieldStmt.
-        body_before: list = []
-        body_after: list = []
-        yield_val = None
-        past_yield = False
-        for s in body:
-            if not past_yield:
-                if isinstance(s, A.YieldStmt):
-                    yield_val = s.value
-                    past_yield = True
+            # Split body at the first top-level YieldStmt.
+            body_before: list = []
+            body_after: list = []
+            yield_val = None
+            past_yield = False
+            for s in body:
+                if not past_yield:
+                    if isinstance(s, A.YieldStmt):
+                        yield_val = s.value
+                        past_yield = True
+                    else:
+                        body_before.append(s)
                 else:
-                    body_before.append(s)
+                    body_after.append(s)
+
+            if yield_val is None:
+                return None
+
+            renamed_cond = self._rename_expr(cond, all_names)
+            renamed_before = self._rename_stmts(body_before, all_names, pos)
+            renamed_yield_val = self._rename_expr(yield_val, all_names)
+            renamed_after = self._rename_stmts(body_after, all_names, pos)
+
+            # __next__: if not cond → StopIteration; body; return result
+            next_body = [
+                A.If(
+                    test=A.UnaryOp(op="not", operand=renamed_cond, pos=pos),
+                    then=[A.Raise(value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos)],
+                    orelse=[],
+                    pos=pos,
+                ),
+            ] + renamed_before + [
+                A.Assign(target=result_name, value=renamed_yield_val, pos=pos),
+            ] + renamed_after + [
+                A.Return(value=A.Name(name=result_name, pos=pos), pos=pos),
+            ]
+
+        else:  # For loop
+            # Tuple-unpacking for-loop generators are not yet supported.
+            if getattr(loop_stmt, 'targets', []):
+                return None
+            loop_var = loop_stmt.var
+            if not isinstance(loop_var, str):
+                return None
+
+            # Build the iter expression: range_args → range(...), else use iter.
+            if loop_stmt.iter is not None:
+                iter_expr = loop_stmt.iter
+            elif loop_stmt.range_args:
+                iter_expr = A.Call(func="range", args=list(loop_stmt.range_args), pos=pos)
             else:
-                body_after.append(s)
+                return None
 
-        if yield_val is None:
-            return None
+            body = loop_stmt.body
 
-        # Rename everything using self.X.
-        import copy
+            # Split body at the first top-level YieldStmt.
+            body_before_fl: list = []
+            body_after_fl: list = []
+            yield_val_fl = None
+            past_yield_fl = False
+            for s in body:
+                if not past_yield_fl:
+                    if isinstance(s, A.YieldStmt):
+                        yield_val_fl = s.value
+                        past_yield_fl = True
+                    else:
+                        body_before_fl.append(s)
+                else:
+                    body_after_fl.append(s)
 
-        def make_self():
-            return A.Name(name="self", pos=pos)
+            if yield_val_fl is None:
+                return None
 
-        def fix_name(e):
-            """Replace Name(x) with Attr(self, x) for x in all_names."""
-            if isinstance(e, A.Name) and e.name in all_names:
-                return A.Attr(obj=make_self(), name=e.name, pos=e.pos)
-            return e
+            renamed_iter = self._rename_expr(iter_expr, all_names)
+            renamed_before = self._rename_stmts(body_before_fl, all_names, pos)
+            renamed_yield_val = self._rename_expr(yield_val_fl, all_names)
+            renamed_after = self._rename_stmts(body_after_fl, all_names, pos)
 
-        renamed_cond = self._rename_expr(cond, all_names)
-        renamed_before = self._rename_stmts(body_before, all_names, pos)
-        renamed_yield_val = self._rename_expr(yield_val, all_names)
-        renamed_after = self._rename_stmts(body_after, all_names, pos)
-
-        # __next__ body:
-        #   if not cond: raise StopIteration
-        #   body_before
-        #   _result = yield_val
-        #   body_after
-        #   return _result
-        result_name = "_genresult"
-        next_body = [
-            A.If(
-                test=A.UnaryOp(op="not", operand=renamed_cond, pos=pos),
-                then=[A.Raise(value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos)],
-                orelse=[],
+            # Store the materialized list and index on self in __init__.
+            init_body.append(A.AttrAssign(
+                obj=A.Name(name="self", pos=pos), name="_genlist",
+                value=A.Call(func="list", args=[renamed_iter], pos=pos),
                 pos=pos,
-            ),
-        ] + renamed_before + [
-            A.Assign(target=result_name, value=renamed_yield_val, pos=pos),
-        ] + renamed_after + [
-            A.Return(value=A.Name(name=result_name, pos=pos), pos=pos),
-        ]
+            ))
+            init_body.append(A.AttrAssign(
+                obj=A.Name(name="self", pos=pos), name="_idx",
+                value=A.IntLit(value=0, pos=pos),
+                pos=pos,
+            ))
+
+            # __next__: if _idx >= len(_genlist) → StopIteration; bind loop
+            # var; body; advance index; return result.
+            next_body = [
+                A.If(
+                    test=A.Compare(
+                        ops=[">="],
+                        operands=[
+                            A.Attr(obj=A.Name(name="self", pos=pos), name="_idx", pos=pos),
+                            A.Call(func="len", args=[
+                                A.Attr(obj=A.Name(name="self", pos=pos), name="_genlist", pos=pos),
+                            ], pos=pos),
+                        ],
+                        pos=pos,
+                    ),
+                    then=[A.Raise(value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos)],
+                    orelse=[],
+                    pos=pos,
+                ),
+                A.AttrAssign(
+                    obj=A.Name(name="self", pos=pos),
+                    name=loop_var,
+                    value=A.Subscript(
+                        obj=A.Attr(obj=A.Name(name="self", pos=pos), name="_genlist", pos=pos),
+                        index=A.Attr(obj=A.Name(name="self", pos=pos), name="_idx", pos=pos),
+                        pos=pos,
+                    ),
+                    pos=pos,
+                ),
+            ] + renamed_before + [
+                A.Assign(target=result_name, value=renamed_yield_val, pos=pos),
+            ] + renamed_after + [
+                A.AttrAssign(
+                    obj=A.Name(name="self", pos=pos),
+                    name="_idx",
+                    value=A.BinOp(
+                        op="+",
+                        left=A.Attr(obj=A.Name(name="self", pos=pos), name="_idx", pos=pos),
+                        right=A.IntLit(value=1, pos=pos),
+                        pos=pos,
+                    ),
+                    pos=pos,
+                ),
+                A.Return(value=A.Name(name=result_name, pos=pos), pos=pos),
+            ]
 
         # Determine the yield value's return type from original function annotation,
         # or default to int.
