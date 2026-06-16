@@ -84,9 +84,62 @@ The compiler now collects every sema error in a file before exiting. All sema er
 
 All 19 compiler source files pass lex → parse → sema without error. Fixes include: `@staticmethod` arity handling in `_maybe_bind_method_args`; `set{tuple}` replaced with list-based deduplication; `dict` spread keys use `A.Name(name="**")` sentinel instead of `None` for homogeneous list typing; `_parse_star_pattern` return type widened to `A.Pattern`.
 
+#### Additional language improvements — done
+
+A broad set of language and stdlib improvements shipped alongside the core
+1.1.0 milestones:
+
+- **Generators** — `yield` inside `while` loops compiles to a heap-allocated
+  state-machine coroutine; `for x in gen():` and manual `next()` calls both
+  work.
+- **Closures and `nonlocal`** — inner functions can capture and mutate
+  enclosing-scope variables via heap-boxed cells.
+- **In-place dunder dispatch** — `obj += x` calls `__iadd__` when defined;
+  all in-place arithmetic and bitwise operators follow the same pattern.
+- **`match` mapping patterns** — `case {"key": val}:` on a dict.
+- **Tuple comprehensions** — `tuple(x for x in xs)` produces a fixed-width
+  tuple; `for a, b in tuple_list` unpacks correctly.
+- **Nested list comprehensions** — `[f(x) for row in matrix for x in row]`.
+- **List/str augmented assignment** — `xs += ys` and `s += t` both work.
+- **Subscript augmented assignment** — `xs[i] += n` and `d[k] += n`.
+- **List slice assignment** — `xs[a:b] = ys` replaces a slice in-place.
+- **List slice step** — `xs[::2]`, `xs[1::2]`, `xs[::-1]`.
+- **List repetition** — `xs * n` and `n * xs`.
+- **`print(sep=, end=)`** — keyword arguments respected.
+- **`format(n, spec)`** — integer format specs `b`, `x`, `o`, `d`.
+- **`dict(list_of_pairs)`** constructor.
+- **Catchable `KeyError`** — `d[missing_key]` raises `KeyError` instead of
+  panicking; the exception is catchable with `except KeyError:`.
+- **List bounds checking** — `xs[i]` raises `IndexError` on out-of-bounds;
+  catchable with `except IndexError:`.
+- **`int()` raises `ValueError`** on non-numeric strings.
+- **`isinstance()` for primitive types** — `isinstance(x, int)`,
+  `isinstance(x, str)`, `isinstance(x, float)`.
+- **`filter(None, xs)`** — filters falsy values without a predicate.
+- **`list(zip(...))`** and **`list(filter(lambda, xs))`** constructors.
+- **`max`/`min` variadic** — `max(a, b, c, ...)` with two or more arguments.
+- **N-way `zip`** — `zip(A, B, C)` with three or more iterables.
+- **`enumerate(start=N)`** — start offset supported.
+- **`enumerate` in dict comprehensions** — `{i: x for i, x in enumerate(xs)}`.
+- **`any`/`all` return `True`/`False`** strings instead of `1`/`0`.
+- **`str.split()` with no arguments** — splits on whitespace.
+- **`str.find(sub, start)`**, **`str.rfind`**, **`str.expandtabs`**.
+- **String unpack** — `a, b, c = "abc"` binds each character.
+- **`sum(xs, start)`** — initial-value argument.
+- **`dict.get(k)` returns `None`** when the key is absent.
+- **`dict` comp from `zip(A, B)`** — `{k: v for k, v in zip(keys, vals)}`.
+- **`dict` of `dict`** — nested dict subscript assignment.
+- **Bool return annotations** tracked through `FuncSig`; functions declared
+  `-> bool` print `True`/`False` instead of `1`/`0`.
+- **`is`/`is not` on floats** — comparison against `None` works correctly.
+- **`@dataclass` float fields** — field default params typed correctly.
+- **`**kwargs` type annotation** — `**kwargs: str` accepted in signatures.
+- **Int-keyed sets** — `{1, 2, 3}`, `s.add(n)`, `n in s` all work; int keys
+  are stored as their decimal string form using the existing FNV-1a backend.
+
 #### Test count
 
-381/381 passing (was 369 at 1.0.0).
+446/446 passing (was 369 at 1.0.0).
 
 ---
 
