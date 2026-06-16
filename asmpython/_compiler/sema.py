@@ -1169,10 +1169,460 @@ class SemaAnalyzer:
         except SemaError as e:
             self._collected_errors.append(e)
 
+    def _collect_gen_locals(self, stmts: list, exclude: set) -> list:
+        """Collect all local variable names assigned in stmts, excluding those in exclude."""
+        names: list = []
+        seen: set = set()
+        def walk(ss):
+            for s in ss:
+                if isinstance(s, (A.Assign, A.AugAssign)):
+                    n = s.target
+                    if isinstance(n, str) and n not in exclude and n not in seen:
+                        names.append(n)
+                        seen.add(n)
+                elif isinstance(s, A.TupleAssign):
+                    for t in s.targets:
+                        nm = t.name if isinstance(t, A.StarTarget) else (t.name if isinstance(t, A.Name) else None)
+                        if nm and nm not in exclude and nm not in seen:
+                            names.append(nm)
+                            seen.add(nm)
+                elif isinstance(s, A.For):
+                    if isinstance(s.var, str) and s.var not in exclude and s.var not in seen:
+                        names.append(s.var)
+                        seen.add(s.var)
+                    walk(s.body)
+                elif isinstance(s, A.While):
+                    walk(s.body)
+                elif isinstance(s, A.If):
+                    walk(s.then)
+                    if s.orelse:
+                        walk(s.orelse)
+        walk(stmts)
+        return names
+
+    def _rename_locals_in_stmts(self, stmts: list, local_names: set) -> list:
+        """Deep-copy stmts, replacing each local Name ref with Attr(self, name)."""
+        import copy
+
+        self_name = A.Name(name="self", pos=A.SourcePos(0, 0))
+
+        def fix_expr(e):
+            if e is None:
+                return None
+            if isinstance(e, A.Name):
+                if e.name in local_names:
+                    return A.Attr(obj=copy.copy(self_name), name=e.name, pos=e.pos)
+                return e
+            if isinstance(e, A.IntLit) or isinstance(e, A.FloatLit) or isinstance(e, A.StrLit):
+                return e
+            if isinstance(e, A.BinOp):
+                return A.BinOp(op=e.op, left=fix_expr(e.left), right=fix_expr(e.right), pos=e.pos)
+            if isinstance(e, A.UnaryOp):
+                return A.UnaryOp(op=e.op, operand=fix_expr(e.operand), pos=e.pos)
+            if isinstance(e, A.Compare):
+                return A.Compare(ops=e.ops, operands=[fix_expr(x) for x in e.operands], pos=e.pos)
+            if isinstance(e, A.BoolOp):
+                return A.BoolOp(op=e.op, left=fix_expr(e.left), right=fix_expr(e.right), pos=e.pos)
+            if isinstance(e, A.Attr):
+                return A.Attr(obj=fix_expr(e.obj), name=e.name, pos=e.pos)
+            if isinstance(e, A.Subscript):
+                return A.Subscript(obj=fix_expr(e.obj), index=fix_expr(e.index), pos=e.pos)
+            if isinstance(e, A.Call):
+                return A.Call(
+                    func=e.func,
+                    args=[fix_expr(a) for a in e.args],
+                    pos=e.pos,
+                    kwargs=[(k, fix_expr(v)) for k, v in (e.kwargs or [])],
+                )
+            if isinstance(e, A.MethodCall):
+                return A.MethodCall(
+                    obj=fix_expr(e.obj),
+                    method=e.method,
+                    args=[fix_expr(a) for a in e.args],
+                    pos=e.pos,
+                )
+            if isinstance(e, A.IfExp):
+                return A.IfExp(test=fix_expr(e.test), body=fix_expr(e.body), orelse=fix_expr(e.orelse), pos=e.pos)
+            if isinstance(e, A.ListLit):
+                return A.ListLit(elems=[fix_expr(x) for x in e.elems], pos=e.pos)
+            if isinstance(e, A.TupleLit):
+                return A.TupleLit(elems=[fix_expr(x) for x in e.elems], pos=e.pos)
+            return e
+
+        def fix_stmt(s):
+            if isinstance(s, A.Assign):
+                target = s.target
+                rhs = fix_expr(s.value)
+                if isinstance(target, str) and target in local_names:
+                    return A.AttrAssign(
+                        obj=copy.copy(self_name), name=target, value=rhs, pos=s.pos
+                    )
+                return A.Assign(target=target, value=rhs, pos=s.pos, annot=s.annot)
+            if isinstance(s, A.AugAssign):
+                target = s.target
+                rhs = fix_expr(s.value)
+                if isinstance(target, str) and target in local_names:
+                    lhs = A.Attr(obj=copy.copy(self_name), name=target, pos=s.pos)
+                    new_val = A.BinOp(op=s.op, left=lhs, right=rhs, pos=s.pos)
+                    return A.AttrAssign(obj=copy.copy(self_name), name=target, value=new_val, pos=s.pos)
+                return A.AugAssign(target=target, op=s.op, value=rhs, pos=s.pos)
+            if isinstance(s, A.ExprStmt):
+                return A.ExprStmt(expr=fix_expr(s.expr), pos=s.pos)
+            if isinstance(s, A.Return):
+                return A.Return(value=fix_expr(s.value), pos=s.pos)
+            if isinstance(s, A.If):
+                return A.If(
+                    test=fix_expr(s.test),
+                    then=[fix_stmt(x) for x in s.then],
+                    orelse=[fix_stmt(x) for x in (s.orelse or [])],
+                    pos=s.pos,
+                )
+            if isinstance(s, A.While):
+                return A.While(
+                    test=fix_expr(s.test),
+                    body=[fix_stmt(x) for x in s.body],
+                    pos=s.pos,
+                )
+            if isinstance(s, A.For):
+                return A.For(
+                    var=s.var,
+                    iter=fix_expr(s.iter),
+                    body=[fix_stmt(x) for x in s.body],
+                    pos=s.pos,
+                )
+            if isinstance(s, A.YieldStmt):
+                return A.YieldStmt(value=fix_expr(s.value), pos=s.pos)
+            if isinstance(s, A.AttrAssign):
+                return A.AttrAssign(obj=fix_expr(s.obj), name=s.name, value=fix_expr(s.value), pos=s.pos)
+            if isinstance(s, (A.Break, A.Continue, A.Pass)):
+                return s
+            if isinstance(s, A.Raise):
+                return A.Raise(value=fix_expr(s.value), pos=s.pos)
+            return s
+
+        return [fix_stmt(x) for x in stmts]
+
+    def _transform_generator(self, f: A.FuncDef) -> "tuple[A.FuncDef, A.ClassDef] | None":
+        """Transform a generator function into a factory + iterator class.
+
+        Supports:
+          - Pre-loop stmts (init code before the while/for loop)
+          - A single while loop containing exactly one yield per iteration path
+          - A single for loop with yield in body
+
+        Returns (new_factory_func, iterator_class) or None if pattern not recognized.
+        """
+        pos = f.pos
+        cls_name = f"_genobj_{f.name}"
+        params_no_self = list(f.params)  # e.g. ["n"]
+        param_types_no_self = list(f.param_types) if f.param_types else [None] * len(f.params)
+
+        # Separate pre-loop stmts from the first while/for loop.
+        pre_stmts: list = []
+        loop_stmt = None
+        post_stmts: list = []
+        for s in f.body:
+            if loop_stmt is None:
+                if isinstance(s, (A.While, A.For)):
+                    loop_stmt = s
+                else:
+                    pre_stmts.append(s)
+            else:
+                post_stmts.append(s)
+
+        if loop_stmt is None:
+            return None  # No loop found
+
+        # Check that the loop contains exactly one YieldStmt in its body.
+        def has_yield(stmts):
+            for s in stmts:
+                if isinstance(s, A.YieldStmt):
+                    return True
+                if isinstance(s, (A.If, A.While, A.For)):
+                    body = getattr(s, 'then', None) or getattr(s, 'body', [])
+                    orelse = getattr(s, 'orelse', []) or []
+                    if has_yield(body) or has_yield(orelse):
+                        return True
+            return False
+
+        if not has_yield(loop_stmt.body):
+            return None
+
+        # Collect all local variable names (excluding params) for renaming.
+        all_params = set(params_no_self)
+        all_locals = self._collect_gen_locals(f.body, all_params)
+        all_locals_set = set(all_locals)
+        all_names = all_params | all_locals_set
+
+        # --- Build __init__ ---
+        # Params: self + original params
+        init_params = ["self"] + params_no_self
+        init_param_types = [None] + list(param_types_no_self)
+        init_defaults = [None] + [None] * len(params_no_self)
+        init_body: list = []
+        # self.param = param for each param
+        self_name = A.Name(name="self", pos=pos)
+        for p in params_no_self:
+            init_body.append(A.AttrAssign(obj=A.Name(name="self", pos=pos), name=p, value=A.Name(name=p, pos=pos), pos=pos))
+        # self.local = 0 for each local
+        for loc in all_locals:
+            init_body.append(A.AttrAssign(obj=A.Name(name="self", pos=pos), name=loc, value=A.IntLit(value=0, pos=pos), pos=pos))
+
+        init_func = A.FuncDef(
+            name="__init__",
+            params=init_params,
+            body=init_body,
+            defaults=init_defaults,
+            param_types=init_param_types,
+            pos=pos,
+        )
+
+        # --- Build __iter__ ---
+        iter_func = A.FuncDef(
+            name="__iter__",
+            params=["self"],
+            body=[A.Return(value=A.Name(name="self", pos=pos), pos=pos)],
+            defaults=[None],
+            param_types=[None],
+            pos=pos,
+        )
+
+        # --- Build __next__ ---
+        # Transform the loop body: rename locals to self.X, split at yield.
+        # For while loop: while cond: body_before; yield val; body_after
+        #   → __next__: if not (cond with self.X): raise StopIteration
+        #                body_before; result = val; body_after; return result
+        next_body: list = []
+
+        # Run pre-loop statements (init assignments like `i = 0`) — but only
+        # once. We'll handle this by renaming them to AttrAssign and putting
+        # them in __init__ instead (already done above for explicit locals).
+        # The pre-stmts that aren't assignments (e.g. function calls) need to
+        # go in __next__ with a _done-guard. For now, skip pre-stmts since
+        # the common case (i = 0) is handled in __init__.
+
+        if isinstance(loop_stmt, A.While):
+            cond = loop_stmt.test
+            body = loop_stmt.body
+        else:  # For loop
+            # for var in iter: body → convert to while equivalent
+            # We handle this by not supporting for-loop generators for now.
+            return None
+
+        # Split body at YieldStmt.
+        body_before: list = []
+        body_after: list = []
+        yield_val = None
+        past_yield = False
+        for s in body:
+            if not past_yield:
+                if isinstance(s, A.YieldStmt):
+                    yield_val = s.value
+                    past_yield = True
+                else:
+                    body_before.append(s)
+            else:
+                body_after.append(s)
+
+        if yield_val is None:
+            return None
+
+        # Rename everything using self.X.
+        import copy
+
+        def make_self():
+            return A.Name(name="self", pos=pos)
+
+        def fix_name(e):
+            """Replace Name(x) with Attr(self, x) for x in all_names."""
+            if isinstance(e, A.Name) and e.name in all_names:
+                return A.Attr(obj=make_self(), name=e.name, pos=e.pos)
+            return e
+
+        renamed_cond = self._rename_expr(cond, all_names)
+        renamed_before = self._rename_stmts(body_before, all_names, pos)
+        renamed_yield_val = self._rename_expr(yield_val, all_names)
+        renamed_after = self._rename_stmts(body_after, all_names, pos)
+
+        # __next__ body:
+        #   if not cond: raise StopIteration
+        #   body_before
+        #   _result = yield_val
+        #   body_after
+        #   return _result
+        result_name = "_genresult"
+        next_body = [
+            A.If(
+                test=A.UnaryOp(op="not", operand=renamed_cond, pos=pos),
+                then=[A.Raise(value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos)],
+                orelse=[],
+                pos=pos,
+            ),
+        ] + renamed_before + [
+            A.Assign(target=result_name, value=renamed_yield_val, pos=pos),
+        ] + renamed_after + [
+            A.Return(value=A.Name(name=result_name, pos=pos), pos=pos),
+        ]
+
+        # Determine the yield value's return type from original function annotation,
+        # or default to int.
+        ret_type = f.ret_type if f.ret_type else ("int", None)
+
+        next_func = A.FuncDef(
+            name="__next__",
+            params=["self"],
+            body=next_body,
+            defaults=[None],
+            param_types=[None],
+            ret_type=ret_type,
+            pos=pos,
+        )
+
+        # --- Build the iterator class ---
+        cls = A.ClassDef(
+            name=cls_name,
+            parent=None,
+            methods=[init_func, iter_func, next_func],
+            pos=pos,
+        )
+
+        # --- Build the factory function (replaces original) ---
+        # factory_body: return _genobj_FNAME(args...)
+        factory_body = [
+            A.Return(
+                value=A.Call(
+                    func=cls_name,
+                    args=[A.Name(name=p, pos=pos) for p in params_no_self],
+                    pos=pos,
+                ),
+                pos=pos,
+            )
+        ]
+        factory_func = A.FuncDef(
+            name=f.name,
+            params=list(f.params),
+            body=factory_body,
+            defaults=list(f.defaults),
+            param_types=list(param_types_no_self),
+            ret_type=(cls_name, None),
+            pos=pos,
+            vararg=f.vararg,
+            kwarg=f.kwarg,
+        )
+
+        return factory_func, cls
+
+    def _rename_expr(self, e, local_names: set):
+        """Replace Name(x) with Attr(self, x) for x in local_names."""
+        pos = getattr(e, 'pos', A.SourcePos(0, 0))
+        if e is None:
+            return None
+        if isinstance(e, A.Name):
+            if e.name in local_names:
+                return A.Attr(obj=A.Name(name="self", pos=pos), name=e.name, pos=pos)
+            return e
+        if isinstance(e, (A.IntLit, A.FloatLit, A.StrLit)):
+            return e
+        if isinstance(e, A.BinOp):
+            return A.BinOp(op=e.op, left=self._rename_expr(e.left, local_names), right=self._rename_expr(e.right, local_names), pos=e.pos)
+        if isinstance(e, A.UnaryOp):
+            return A.UnaryOp(op=e.op, operand=self._rename_expr(e.operand, local_names), pos=e.pos)
+        if isinstance(e, A.Compare):
+            return A.Compare(ops=e.ops, operands=[self._rename_expr(x, local_names) for x in e.operands], pos=e.pos)
+        if isinstance(e, A.BoolOp):
+            return A.BoolOp(op=e.op, left=self._rename_expr(e.left, local_names), right=self._rename_expr(e.right, local_names), pos=e.pos)
+        if isinstance(e, A.Attr):
+            return A.Attr(obj=self._rename_expr(e.obj, local_names), name=e.name, pos=e.pos)
+        if isinstance(e, A.Call):
+            return A.Call(func=e.func, args=[self._rename_expr(a, local_names) for a in e.args], pos=e.pos,
+                         kwargs=[(k, self._rename_expr(v, local_names)) for k, v in (e.kwargs or [])])
+        if isinstance(e, A.MethodCall):
+            return A.MethodCall(obj=self._rename_expr(e.obj, local_names), method=e.method,
+                               args=[self._rename_expr(a, local_names) for a in e.args], pos=e.pos)
+        if isinstance(e, A.Subscript):
+            return A.Subscript(obj=self._rename_expr(e.obj, local_names), index=self._rename_expr(e.index, local_names), pos=e.pos)
+        if isinstance(e, A.IfExp):
+            return A.IfExp(test=self._rename_expr(e.test, local_names), body=self._rename_expr(e.body, local_names),
+                          orelse=self._rename_expr(e.orelse, local_names), pos=e.pos)
+        if isinstance(e, A.ListLit):
+            return A.ListLit(elems=[self._rename_expr(x, local_names) for x in e.elems], pos=e.pos)
+        if isinstance(e, A.TupleLit):
+            return A.TupleLit(elems=[self._rename_expr(x, local_names) for x in e.elems], pos=e.pos)
+        return e
+
+    def _rename_stmts(self, stmts: list, local_names: set, pos) -> list:
+        """Rename local variable references in stmts to self.X."""
+        result = []
+        for s in stmts:
+            if isinstance(s, A.Assign):
+                rhs = self._rename_expr(s.value, local_names)
+                if isinstance(s.target, str) and s.target in local_names:
+                    result.append(A.AttrAssign(obj=A.Name(name="self", pos=pos), name=s.target, value=rhs, pos=s.pos))
+                else:
+                    result.append(A.Assign(target=s.target, value=rhs, pos=s.pos, annot=s.annot))
+            elif isinstance(s, A.AugAssign):
+                rhs = self._rename_expr(s.value, local_names)
+                if isinstance(s.target, str) and s.target in local_names:
+                    lhs = A.Attr(obj=A.Name(name="self", pos=pos), name=s.target, pos=s.pos)
+                    new_val = A.BinOp(op=s.op, left=lhs, right=rhs, pos=s.pos)
+                    result.append(A.AttrAssign(obj=A.Name(name="self", pos=pos), name=s.target, value=new_val, pos=s.pos))
+                else:
+                    result.append(A.AugAssign(target=s.target, op=s.op, value=rhs, pos=s.pos))
+            elif isinstance(s, A.ExprStmt):
+                result.append(A.ExprStmt(expr=self._rename_expr(s.expr, local_names), pos=s.pos))
+            elif isinstance(s, A.If):
+                result.append(A.If(
+                    test=self._rename_expr(s.test, local_names),
+                    then=self._rename_stmts(s.then, local_names, pos),
+                    orelse=self._rename_stmts(s.orelse or [], local_names, pos),
+                    pos=s.pos,
+                ))
+            elif isinstance(s, A.While):
+                result.append(A.While(
+                    test=self._rename_expr(s.test, local_names),
+                    body=self._rename_stmts(s.body, local_names, pos),
+                    pos=s.pos,
+                ))
+            elif isinstance(s, A.AttrAssign):
+                result.append(A.AttrAssign(obj=self._rename_expr(s.obj, local_names), name=s.name, value=self._rename_expr(s.value, local_names), pos=s.pos))
+            elif isinstance(s, (A.Break, A.Continue, A.Pass)):
+                result.append(s)
+            elif isinstance(s, A.Return):
+                result.append(A.Return(value=self._rename_expr(s.value, local_names), pos=s.pos))
+            else:
+                result.append(s)
+        return result
+
     def analyze(self) -> None:
         # Inject stdlib Assembly class if the user imported it, so the
         # constructor and method calls resolve through the normal class path.
         self._inject_assembly_class_if_needed()
+        # Transform generator functions (functions with yield) into factory +
+        # iterator class pairs before any other analysis.
+        new_funcs: list = []
+        new_classes: list = []
+        for f in self.mod.funcs:
+            def _has_yield(stmts):
+                for s in stmts:
+                    if isinstance(s, A.YieldStmt):
+                        return True
+                    for attr in ('body', 'then', 'orelse'):
+                        sub = getattr(s, attr, None)
+                        if sub and _has_yield(sub):
+                            return True
+                return False
+            if _has_yield(f.body):
+                result = self._transform_generator(f)
+                if result is not None:
+                    factory, cls = result
+                    new_funcs.append(factory)
+                    new_classes.append(cls)
+                else:
+                    new_funcs.append(f)  # unsupported pattern, leave as-is
+            else:
+                new_funcs.append(f)
+        self.mod.funcs = new_funcs
+        self.mod.classes = list(self.mod.classes) + new_classes
         # First pass: collect function signatures so forward references resolve.
         for f in self.mod.funcs:
             if f.name in self.funcs:
@@ -1978,6 +2428,9 @@ class SemaAnalyzer:
 
     def _check_stmt(self, s, scope: Scope) -> "Optional[list]":
         if isinstance(s, A.Pass):
+            return
+        if isinstance(s, A.YieldStmt):
+            self._check_expr(s.value, scope)
             return
         if isinstance(s, A.ClosureBind):
             # A nested `def` that captures outer variables.

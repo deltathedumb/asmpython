@@ -757,12 +757,13 @@ class Parser:
             if t.value == "del":
                 return self._parse_del()
             if t.value == "yield":
-                # `yield expr` as a statement (bare yield-as-expression)
                 pos = self._eat().pos
-                if not self._check("NEWLINE"):
-                    self._parse_expr()  # consume the value but discard
+                if self._check("NEWLINE"):
+                    val: A.Expr = A.IntLit(value=0, pos=pos)  # bare yield
+                else:
+                    val = self._parse_expr()
                 self._expect("NEWLINE")
-                return A.Pass(pos=pos)  # yield not yet implemented: treat as pass
+                return A.YieldStmt(value=val, pos=pos)
 
         # `match` is a soft keyword (an ordinary NAME token): only treat it as
         # a match statement when the lookahead confirms `match <expr>:` shape,

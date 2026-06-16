@@ -385,6 +385,14 @@ class Del:
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
+@dataclass
+class YieldStmt:
+    """`yield expr` — suspends a generator function and produces one value."""
+
+    value: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
 # ---- match/case patterns -----------------------------------------------------
 
 
@@ -509,6 +517,7 @@ Stmt = (
     | Nonlocal
     | Del
     | Match
+    | YieldStmt
 )
 # IndexAssign is also a Stmt but forward-referenced because Subscript is defined below.
 
