@@ -12790,21 +12790,49 @@ class Codegen:
     # `print()` just emits a newline.
 
     def _gen_print(self, e: A.Call, info: FuncInfo) -> None:
+        # Extract sep= / end= kwargs (all optional; defaults: " ", "\n").
+        # file= is accepted but ignored for routing purposes — print always
+        # goes to stdout in the current implementation.
+        kwargs = {kn: kv for kn, kv in (getattr(e, "kwargs", None) or [])}
+        sep_expr = kwargs.get("sep")
+        end_expr = kwargs.get("end")
         if not e.args:
-            self._emit_print_newline()
+            if end_expr is not None and isinstance(end_expr, A.StrLit):
+                end_str = end_expr.value
+                if end_str:
+                    end_lbl, _ = self.intern_string(end_str)
+                    self.emitf(f"lea rax, [rel {end_lbl}]")
+                    self._emit_print_str_ptr_no_newline()
+            else:
+                self._emit_print_newline()
             return
         for i, arg in enumerate(e.args):
             if isinstance(arg, A.FString):
-                # f-string segments are printed contiguously (no inter-
-                # segment space). Each segment is either a StrLit or any
-                # expression typed int/str.
                 for seg in arg.segments:
                     self._emit_print_value(seg, info)
             else:
                 self._emit_print_value(arg, info)
             if i < len(e.args) - 1:
-                self._emit_print_space()
-        self._emit_print_newline()
+                if sep_expr is not None and isinstance(sep_expr, A.StrLit):
+                    sep_str = sep_expr.value
+                    if sep_str:
+                        sep_lbl, _ = self.intern_string(sep_str)
+                        self.emitf(f"lea rax, [rel {sep_lbl}]")
+                        self._emit_print_str_ptr_no_newline()
+                    # sep="" → no separator at all
+                else:
+                    self._emit_print_space()
+        if end_expr is not None and isinstance(end_expr, A.StrLit):
+            end_str = end_expr.value
+            if end_str == "\n":
+                self._emit_print_newline()
+            elif end_str:
+                end_lbl, _ = self.intern_string(end_str)
+                self.emitf(f"lea rax, [rel {end_lbl}]")
+                self._emit_print_str_ptr_no_newline()
+            # end="" → no terminator
+        else:
+            self._emit_print_newline()
 
     def _list_repr_kind(self, expr) -> int:
         """Map a list/tuple expression's element type to the repr kind code
