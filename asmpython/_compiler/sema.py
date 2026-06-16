@@ -3657,6 +3657,8 @@ class SemaAnalyzer:
             self._check_expr(e.elt, child)
             e.inferred_type = "list"
             e.list_el_type = A.expr_type(e.elt)
+            if e.list_el_type == "tuple":
+                e.el_tuple_types = self._tuple_elem_types(e.elt, child)
             self._merge_walrus_bindings(scope, child, loop_vars)
             return
         if isinstance(e, A.DictComprehension):
