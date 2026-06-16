@@ -143,23 +143,30 @@ class _Arg:
 
 
 class Namespace:
+    """Parsed values live as real dynamic attributes (via `setattr`/`getattr`
+    against this instance's own field dict — asmpython instances are
+    str-keyed dicts under the hood), not a separate `dict` field. This lets
+    CPython-argparse-style call sites (`args.source`, `args.output = ...`)
+    work identically whether this module or real CPython argparse is in use,
+    instead of only supporting the `.get()`-style accessors below."""
+
     def __init__(self) -> None:
-        self.values: dict[str, str] = {}
+        pass
 
     def get(self, key: str, default: str = "") -> str:
-        return self.values.get(key, default)
+        return getattr(self, key, default)
 
     def get_int(self, key: str, default: int = 0) -> int:
-        v = self.values.get(key, "")
+        v = getattr(self, key, "")
         if v == "":
             return default
         return int(v)
 
     def get_flag(self, key: str) -> int:
-        return int(self.values.get(key, "0") == "1")
+        return int(getattr(self, key, "0") == "1")
 
     def get_path(self, key: str, default: str = "") -> Path:
-        return Path(self.values.get(key, default))
+        return Path(getattr(self, key, default))
 
 
 class _MutexGroup:
@@ -235,6 +242,15 @@ class ArgumentParser:
                       required: int = 0, dest: str = "", version: str = "",
                       const: str = "", metavar: str = "", nargs: str = "",
                       type: int = 0) -> _Arg:
+        # CPython argparse accepts either flag-name order:
+        # `add_argument("-o", "--output")` or `add_argument("--output", "-o")`.
+        # Both `name` and `short` arrive as plain positionals here (asmpython
+        # has no *args), so normalize: whichever of the two is the long form
+        # (`--xxx`) becomes the canonical `name`; the other (if also a flag)
+        # becomes `short`. Single-flag and positional calls pass through.
+        if name.startswith("-") == 1 and short.startswith("-") == 1:
+            if name.startswith("--") == 0 and short.startswith("--") == 1:
+                name, short = short, name
         is_positional = int(name.startswith("-") == 0)
         if dest == "":
             if is_positional == 1:
@@ -334,13 +350,20 @@ class ArgumentParser:
         ns = Namespace()
         for a in self.specs:
             if a.action == "store_true" or a.action == "count":
-                ns.values[a.dest] = "0"
+                setattr(ns, a.dest, "0")
             elif a.action == "store_false":
-                ns.values[a.dest] = "1"
+                setattr(ns, a.dest, "1")
+            elif a.is_positional == 1 and a.nargs == "?" and a.default == "":
+                # An optional positional with no explicit default behaves like
+                # CPython's `default=None`: leave the field unset so it reads
+                # back as the dict-default 0, matching how an explicit
+                # `default=None` flag is stored (see add_argument above) —
+                # this is what lets `args.source is None` work when absent.
+                pass
             else:
-                ns.values[a.dest] = a.default
+                setattr(ns, a.dest, a.default)
         if self._default_bundle_mode != "":
-            ns.values["bundle_mode"] = self._default_bundle_mode
+            setattr(ns, "bundle_mode", self._default_bundle_mode)
 
         positionals: list[_Arg] = []
         for a in self.specs:
@@ -382,13 +405,13 @@ class ArgumentParser:
                     self.error("unrecognized argument: " + tok)
                 matched = self.specs[matched_i]
                 if matched.action == "store_true":
-                    ns.values[matched.dest] = "1"
+                    setattr(ns, matched.dest, "1")
                 elif matched.action == "store_false":
-                    ns.values[matched.dest] = "0"
+                    setattr(ns, matched.dest, "0")
                 elif matched.action == "count":
-                    ns.values[matched.dest] = str(ns.get_int(matched.dest, 0) + 1)
+                    setattr(ns, matched.dest, str(ns.get_int(matched.dest, 0) + 1))
                 elif matched.action == "store_const":
-                    ns.values[matched.dest] = matched.const
+                    setattr(ns, matched.dest, matched.const)
                 elif matched.action == "help":
                     self.print_help()
                     sys.exit(0)
@@ -403,7 +426,7 @@ class ArgumentParser:
                         value = argv[i]
                     if matched._in_choices(value) == 0:
                         self.error("argument " + key + ": invalid choice: '" + value + "' (choose from " + matched._choices_str() + ")")
-                    ns.values[matched.dest] = value
+                    setattr(ns, matched.dest, value)
                 seen[matched.dest] = 1
                 i = i + 1
                 continue
@@ -411,7 +434,7 @@ class ArgumentParser:
                 a = positionals[pos_i]
                 if a._in_choices(tok) == 0:
                     self.error("argument " + a.name + ": invalid choice: '" + tok + "' (choose from " + a._choices_str() + ")")
-                ns.values[a.dest] = tok
+                setattr(ns, a.dest, tok)
                 seen[a.dest] = 1
                 pos_i = pos_i + 1
             else:

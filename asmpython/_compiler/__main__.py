@@ -405,8 +405,16 @@ def main(argv: list[str] | None = None) -> int:
 
     target = args.target or detect_default_target()
 
+    src = args.source.read_text(encoding="utf-8")
+
+    # --check: front-end only (lex / parse / sema). Fast, no toolchain.
+    all_errors = not args.one_error
+    if args.check:
+        return _run_check(src, args.source, source_dir=args.source.resolve().parent,
+                          as_json=args.json, all_errors=all_errors)
+
     if args.output is None:
-        stem = args.source.with_suffix("")
+        stem = Path("build") / args.source.with_suffix("").name
         if args.output_type == "library":
             args.output = stem.with_suffix(".dll" if target == "windows" else ".so")
         elif target == "freestanding":
@@ -415,14 +423,7 @@ def main(argv: list[str] | None = None) -> int:
             args.output = stem.with_suffix(".img")
         else:
             args.output = stem.with_suffix(".exe") if target == "windows" else stem
-
-    src = args.source.read_text(encoding="utf-8")
-
-    # --check: front-end only (lex / parse / sema). Fast, no toolchain.
-    all_errors = not args.one_error
-    if args.check:
-        return _run_check(src, args.source, source_dir=args.source.resolve().parent,
-                          as_json=args.json, all_errors=all_errors)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
 
     # --onedir implies --use-runtime-lib so the codegen emits `extern`
     # references that resolve against the shared runtime library.

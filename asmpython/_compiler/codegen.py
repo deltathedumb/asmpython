@@ -1322,6 +1322,13 @@ class Codegen:
             # object's evaluation (which may itself call).
             if expr.func == "getattr" and len(expr.args) == 3:
                 self._cl_define(info, f"__getattr_def_{id(expr)}")
+            # getattr/hasattr/setattr park the (possibly dynamic) name across
+            # the object's (and for setattr, the value's) evaluation.
+            if expr.func in ("getattr", "hasattr"):
+                self._cl_define(info, f"__{expr.func}_name_{id(expr)}")
+            if expr.func == "setattr":
+                self._cl_define(info, f"__setattr_name_{id(expr)}")
+                self._cl_define(info, f"__setattr_val_{id(expr)}")
             # int(s, base) parks the base across the string's evaluation.
             if expr.func == "int" and len(expr.args) == 2:
                 self._cl_define(info, f"__int_base_{id(expr)}")
@@ -11827,17 +11834,19 @@ class Codegen:
             self._emit_input_line()  # rax = ptr to read buffer
             return
         if e.func == "getattr":
-            # getattr(obj, "name"[, default]) -> dict_get_default(obj, "name",
+            # getattr(obj, name[, default]) -> dict_get_default(obj, name,
             # default-or-0). Instances are dicts keyed by field name, so this is
             # the same helper that plain `obj.name` uses, just with a caller-
-            # supplied default. The name arg is a string literal (sema-checked).
-            if not isinstance(e.args[1], A.StrLit):
-                # Dynamic getattr (non-literal key): evaluate args, return 0.
-                for a in e.args:
-                    self.gen_expr(a, info)
-                self.emitf("xor rax, rax")
-                return
-            key_label, _ = self.intern_string(e.args[1].value)  # type: ignore
+            # supplied default. A literal name is interned like `obj.name`; a
+            # dynamic (runtime string) name is hashed the same way by the dict
+            # backend, so it works identically — just evaluated, not interned.
+            name_slot = info.locals_[f"__getattr_name_{id(e)}"]
+            if isinstance(e.args[1], A.StrLit):
+                key_label, _ = self.intern_string(e.args[1].value)
+                self.emitf(f"lea rax, [{key_label}]", f"mov [rbp{name_slot:+d}], rax")
+            else:
+                self.gen_expr(e.args[1], info)
+                self.emitf(f"mov [rbp{name_slot:+d}], rax")
             if len(e.args) == 3:
                 dslot = info.locals_[f"__getattr_def_{id(e)}"]
                 self.gen_expr(e.args[2], info)
@@ -11846,26 +11855,58 @@ class Codegen:
                 self.emitf(f"mov [rbp{dslot:+d}], rax")
                 self.gen_expr(e.args[0], info)  # rax = instance dict
                 self.emitf(
-                    f"lea rbx, [{key_label}]",
+                    f"mov rbx, [rbp{name_slot:+d}]",
                     f"mov rcx, [rbp{dslot:+d}]",
                     "call _runtime_dict_get_default",
                 )
             else:
                 self.gen_expr(e.args[0], info)  # rax = instance dict
                 self.emitf(
-                    f"lea rbx, [{key_label}]",
+                    f"mov rbx, [rbp{name_slot:+d}]",
                     "xor rcx, rcx",
                     "call _runtime_dict_get_default",
                 )
             return
         if e.func == "hasattr":
-            # hasattr(obj, "name") -> dict_contains(obj, "name") (0/1).
-            key_label, _ = self.intern_string(e.args[1].value)  # type: ignore
+            # hasattr(obj, name) -> dict_contains(obj, name) (0/1). Name may be
+            # a literal or a runtime string, same as getattr above.
+            name_slot = info.locals_[f"__hasattr_name_{id(e)}"]
+            if isinstance(e.args[1], A.StrLit):
+                key_label, _ = self.intern_string(e.args[1].value)
+                self.emitf(f"lea rax, [{key_label}]", f"mov [rbp{name_slot:+d}], rax")
+            else:
+                self.gen_expr(e.args[1], info)
+                self.emitf(f"mov [rbp{name_slot:+d}], rax")
             self.gen_expr(e.args[0], info)  # rax = instance dict
             self.emitf(
-                f"lea rbx, [{key_label}]",
+                f"mov rbx, [rbp{name_slot:+d}]",
                 "call _runtime_dict_contains",
             )
+            return
+        if e.func == "setattr":
+            # setattr(obj, name, value) -> dict_set(obj, name, value); result
+            # (Python's None) is the int 0. Name may be a literal or a runtime
+            # string; the dict backend hashes either the same way `obj.name = v`
+            # would for a literal field name.
+            name_slot = info.locals_[f"__setattr_name_{id(e)}"]
+            val_slot = info.locals_[f"__setattr_val_{id(e)}"]
+            if isinstance(e.args[1], A.StrLit):
+                key_label, _ = self.intern_string(e.args[1].value)
+                self.emitf(f"lea rax, [{key_label}]", f"mov [rbp{name_slot:+d}], rax")
+            else:
+                self.gen_expr(e.args[1], info)
+                self.emitf(f"mov [rbp{name_slot:+d}], rax")
+            self.gen_expr(e.args[2], info)
+            if A.expr_type(e.args[2]) == "float":
+                self.emitf("movq rax, xmm0")
+            self.emitf(f"mov [rbp{val_slot:+d}], rax")
+            self.gen_expr(e.args[0], info)  # rax = instance dict
+            self.emitf(
+                f"mov rbx, [rbp{name_slot:+d}]",
+                f"mov rcx, [rbp{val_slot:+d}]",
+                "call _runtime_dict_set",
+            )
+            self.emitf("xor rax, rax")
             return
         if e.func == "isinstance":
             self._gen_isinstance(e, info)
