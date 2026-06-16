@@ -87,7 +87,6 @@ python -m asmpython <source.py> [options]
   --type executable      produce an executable (default)
   --type library         produce a shared library (.dll / .so)
   --icon <path>          embed .ico/.png as exe icon resource (Windows only)
-  --selfhost             compile the compiler with itself
   --nasm <path>          override nasm executable path
   --gcc <path>           override gcc executable path
 ```

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -10,6 +12,81 @@ from .driver import compile_source, detect_default_target
 from .errors import CompileError, explain as _explain_code
 from .. import __version__
 
+
+# ── ANSI color helpers ─────────────────────────────────────────────────────────
+
+def _want_color() -> bool:
+    if os.environ.get("NO_COLOR") or os.environ.get("ASMPYTHON_NO_COLOR"):
+        return False
+    if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleMode(  # type: ignore[attr-defined]
+                ctypes.windll.kernel32.GetStdHandle(-11), 7)  # type: ignore[attr-defined]
+        except Exception:
+            return False
+    return True
+
+
+_R  = "\x1b[0m"    # reset
+_BD = "\x1b[1m"    # bold
+_DM = "\x1b[2m"    # dim
+_GN = "\x1b[92m"   # bright green  — option flags
+_YL = "\x1b[93m"   # bright yellow — metavars / choices
+_CY = "\x1b[96m"   # bright cyan   — example shell commands
+_BL = "\x1b[94m"   # bright blue   — section group headers
+_MG = "\x1b[95m"   # bright magenta — usage label
+
+
+def _colorize_help(text: str) -> str:
+    """Apply ANSI colors to argparse-formatted help text."""
+    lines: list[str] = []
+    in_examples = False
+
+    for raw in text.splitlines():
+        s = raw.lstrip()
+
+        # Examples / epilog block
+        if s.startswith("Examples:"):
+            in_examples = True
+            lines.append(f"{_BD}{raw}{_R}")
+            continue
+
+        if in_examples:
+            if s.startswith("asmpython"):
+                indent = raw[: len(raw) - len(s)]
+                lines.append(f"{indent}{_CY}{s}{_R}")
+            elif s.endswith(":") and s:
+                indent = raw[: len(raw) - len(s)]
+                lines.append(f"{indent}{_DM}{s}{_R}")
+            else:
+                lines.append(raw)
+            continue
+
+        # Argparse section group headers (e.g. "input / output:")
+        if re.match(r'^[a-z][a-z 0-9/_-]+:$', s):
+            lines.append(f"\n{_BD}{_BL}{raw}{_R}")
+            continue
+
+        # "usage:" label
+        if s.startswith("usage:"):
+            raw = re.sub(r'^(\s*usage:)', f"{_MG}\\1{_R}", raw)
+
+        # Option flags: -x and --xxx
+        raw = re.sub(r'(?<!\w)(--?[a-zA-Z][\w-]*)', f"{_GN}\\1{_R}", raw)
+
+        # Metavars: ALL_CAPS (≥2 chars) and {choice,sets}
+        raw = re.sub(r'\b([A-Z][A-Z0-9_]{1,})\b', f"{_YL}\\1{_R}", raw)
+        raw = re.sub(r'(\{[a-z][a-z0-9,]+\})', f"{_YL}\\1{_R}", raw)
+
+        lines.append(raw)
+
+    return "\n".join(lines)
+
+
+# ── Argument parser ─────────────────────────────────────────────────────────────
 
 _USAGE = "asmpython <source.py> [-o <output>] [--target win|linux] [options]"
 
@@ -71,8 +148,22 @@ class _AsmPythonHelp(argparse.RawDescriptionHelpFormatter):
         super().__init__(prog, max_help_position=28, width=88)
 
 
+class _ColorParser(argparse.ArgumentParser):
+    """ArgumentParser that colorizes --help output when stdout is a TTY."""
+
+    def print_help(self, file=None) -> None:  # type: ignore[override]
+        if file is None:
+            file = sys.stdout
+        text = self.format_help()
+        if _want_color():
+            text = _colorize_help(text)
+        file.write(text)
+        if not text.endswith("\n"):
+            file.write("\n")
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(
+    ap = _ColorParser(
         prog="asmpython",
         usage=_USAGE,
         description=_DESCRIPTION,
