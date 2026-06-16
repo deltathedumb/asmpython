@@ -375,6 +375,9 @@ class Parser:
             if self._check("OP", "**"):
                 self._eat()
                 kwarg = self._expect("NAME").value
+                if self._check("OP", ":"):
+                    self._eat()
+                    self._parse_type_annotation()  # value-type annotation; dict[str, T] either way
                 params.append(kwarg)
                 param_types.append(("dict", None))
                 defaults.append(None)
