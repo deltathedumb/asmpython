@@ -1961,6 +1961,17 @@ class Codegen:
                 self.gen_expr(stmt.value, info)
                 self.emitf("mov rbx, rax", f"mov rax, {mem}", "call _runtime_dict_update")
                 return
+            if ty == "list" and stmt.op == "+":
+                # `xs += other` → extend xs in-place.
+                self.gen_expr(stmt.value, info)
+                self.emitf("mov rbx, rax", f"mov rax, {mem}", "call _runtime_list_extend")
+                return
+            if ty == "str" and stmt.op == "+":
+                # `s += other` → concat and rebind.
+                self.gen_expr(stmt.value, info)
+                self.emitf("mov rbx, rax", f"mov rax, {mem}", "call _runtime_str_concat")
+                self.emitf(f"mov {mem}, rax")
+                return
             if ty == "float":
                 self._gen_expr_as_float(stmt.value, info, A.expr_type(stmt.value))
                 self.emitf("movsd xmm1, xmm0", f"movsd xmm0, {mem}")

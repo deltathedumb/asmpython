@@ -951,7 +951,7 @@ def expr_type(e: Expr) -> str:
         # result "any"; set union/difference/intersection (|, -, &) is "set";
         # dict union (`d1 | d2`, PEP 584) is "dict". Honor those so they chain
         # (e.g. `(a | b) | c` for nested set/dict unions).
-        if getattr(e, "inferred_type", None) in ("type", "any", "set", "dict"):
+        if getattr(e, "inferred_type", None) in ("type", "any", "set", "dict", "list", "str"):
             return e.inferred_type  # type: ignore
         lt, rt = expr_type(e.left), expr_type(e.right)
         if e.op in ("&", "|", "^", "<<", ">>"):
