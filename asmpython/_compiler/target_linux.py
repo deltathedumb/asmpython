@@ -123,7 +123,7 @@ class LinuxCodegen(Codegen):
         )
 
     def _emit_str_to_int(self) -> None:
-        self.emitf("mov rdi, rax", "call atoll")
+        self.emitf("call _runtime_str_to_int")
 
     def _emit_str_to_int_base(self) -> None:
         # Normalize Python's 0b prefix (strtoll base 0 doesn't grok it), then
@@ -132,6 +132,16 @@ class LinuxCodegen(Codegen):
         self.emitf(
             "mov rdx, rbx",  # base
             "xor rsi, rsi",  # endptr = NULL
+            "mov rdi, rax",  # str
+            "call strtoll",
+        )
+
+    def _emit_strtoll_endptr(self) -> None:
+        # In: rax=str, rbx=&endptr_storage, rcx=base. Out: rax=int64, *rbx=endptr.
+        # SysV: strtoll(rdi=str, rsi=endptr_addr, rdx=base).
+        self.emitf(
+            "mov rdx, rcx",  # base
+            "mov rsi, rbx",  # endptr address (rbx preserved by callee)
             "mov rdi, rax",  # str
             "call strtoll",
         )

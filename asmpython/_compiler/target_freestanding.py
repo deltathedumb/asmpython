@@ -117,6 +117,16 @@ class FreestandingCodegen(Codegen):
         self.emitf("mov rdx, rbx", "xor rsi, rsi", "mov rdi, rax",
                    "call _runtime_strtoll")
 
+    def _emit_strtoll_endptr(self) -> None:
+        # In: rax=str, rbx=&endptr_storage, rcx=base. Out: rax=int64, *rbx=endptr.
+        # Freestanding uses SysV-like calling convention via _runtime_strtoll.
+        self.emitf(
+            "mov rdx, rcx",  # base
+            "mov rsi, rbx",  # endptr address
+            "mov rdi, rax",  # str
+            "call _runtime_strtoll",
+        )
+
     def _emit_float_to_str(self) -> None:
         self.emitf("call _runtime_float_to_str")
 

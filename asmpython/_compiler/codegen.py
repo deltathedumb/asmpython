@@ -615,6 +615,7 @@ class Codegen:
         "_runtime_list_slice",
         "_runtime_list_slice_step",
         # String runtime
+        "_runtime_str_to_int",
         "_runtime_str_concat",
         "_runtime_int_to_base",
         "_runtime_int_to_binary",
@@ -5091,7 +5092,69 @@ class Codegen:
             ):
                 self.emit(f"extern {sym}")
             return
+        self.emit("section .rodata")
+        self.emit('_runtime_str_to_int_err: db "invalid literal for int() with base 10",0')
         self.emit("section .text")
+
+        # ---- _runtime_str_to_int ---------------------------------------------
+        # rax = str ptr -> rax = int64, or raises ValueError if not a valid
+        # decimal integer literal.  Leading/trailing whitespace is stripped
+        # (matching Python's int() semantics). Uses strtoll with an endptr to
+        # detect leftover characters after the number.
+        # Frame: [rbp-8]=result, [rbp-16]=endptr storage. +32 shadow on Win64.
+        self.label("_runtime_str_to_int")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+        _sti_skip_ws   = self.fresh("sti_skip_ws")
+        _sti_adv_ws    = self.fresh("sti_adv_ws")
+        _sti_ws_done   = self.fresh("sti_ws_done")
+        _sti_trail     = self.fresh("sti_trail")
+        _sti_adv_trail = self.fresh("sti_adv_trail")
+        _sti_trail_ok  = self.fresh("sti_trail_ok")
+        _sti_ok        = self.fresh("sti_ok")
+        # Skip leading whitespace
+        self.label(_sti_skip_ws)
+        self.emitf("movzx rcx, byte [rax]")
+        self.emitf(f"cmp rcx, ' '",  f"je {_sti_adv_ws}")
+        self.emitf(f"cmp rcx, 9",    f"je {_sti_adv_ws}")
+        self.emitf(f"cmp rcx, 10",   f"je {_sti_adv_ws}")
+        self.emitf(f"cmp rcx, 13",   f"je {_sti_adv_ws}")
+        self.emitf(f"jmp {_sti_ws_done}")
+        self.label(_sti_adv_ws)
+        self.emitf("inc rax", f"jmp {_sti_skip_ws}")
+        self.label(_sti_ws_done)
+        # Empty or all-whitespace → raise
+        self.emitf(
+            "test rcx, rcx",
+        )
+        _sti_raise = self.fresh("sti_raise")
+        self.emitf(f"jz {_sti_raise}")
+        # strtoll(rax, &[rbp-16], 10)
+        self.emitf("lea rbx, [rbp-16]", "mov rcx, 10")
+        self._emit_strtoll_endptr()
+        self.emitf("mov [rbp-8], rax")
+        # Skip trailing whitespace in endptr
+        self.emitf("mov rax, [rbp-16]")
+        self.label(_sti_trail)
+        self.emitf("movzx rcx, byte [rax]")
+        self.emitf(f"cmp rcx, ' '",  f"je {_sti_adv_trail}")
+        self.emitf(f"cmp rcx, 9",    f"je {_sti_adv_trail}")
+        self.emitf(f"cmp rcx, 10",   f"je {_sti_adv_trail}")
+        self.emitf(f"cmp rcx, 13",   f"je {_sti_adv_trail}")
+        self.emitf(f"jmp {_sti_trail_ok}")
+        self.label(_sti_adv_trail)
+        self.emitf("inc rax", f"jmp {_sti_trail}")
+        self.label(_sti_trail_ok)
+        # *endptr == '\0' → valid; else raise
+        self.emitf("test rcx, rcx", f"jz {_sti_ok}")
+        self.label(_sti_raise)
+        self.emitf(
+            "lea rax, [rel _runtime_str_to_int_err]",
+            f"mov rbx, {self._exc_type_id('ValueError')}",
+            "leave",
+            "jmp _runtime_raise",
+        )
+        self.label(_sti_ok)
+        self.emitf("mov rax, [rbp-8]", "leave", "ret")
 
         # ---- _runtime_str_concat ---------------------------------------------
         # rax = a (str ptr), rbx = b (str ptr) -> rax = newly-allocated concat.
@@ -12851,6 +12914,12 @@ class Codegen:
         raise NotImplementedError
 
     # I/O ------------------------------------------------------------------
+    def _emit_strtoll_endptr(self) -> None:
+        """In: rax = str ptr, rbx = ptr to char* storage for endptr, rcx = base.
+        Out: rax = int64 result; *rbx = first unconsumed character ptr.
+        Implementations must preserve rbx so the caller can load from it."""
+        raise NotImplementedError
+
     def _emit_input_line(self) -> None:
         """Out: rax = ptr to the most recent input buffer (\\n stripped)."""
         raise NotImplementedError

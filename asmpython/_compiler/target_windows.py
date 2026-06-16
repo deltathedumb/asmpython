@@ -160,7 +160,7 @@ class WindowsCodegen(Codegen):
         )
 
     def _emit_str_to_int(self) -> None:
-        self.emitf("mov rcx, rax", "call _atoi64")
+        self.emitf("call _runtime_str_to_int")
 
     def _emit_str_to_int_base(self) -> None:
         # Normalize Python's 0b prefix (strtoll base 0 doesn't grok it), then
@@ -169,6 +169,16 @@ class WindowsCodegen(Codegen):
         self.emitf(
             "mov r8, rbx",  # base
             "xor rdx, rdx",  # endptr = NULL
+            "mov rcx, rax",  # str
+            "call strtoll",
+        )
+
+    def _emit_strtoll_endptr(self) -> None:
+        # In: rax=str, rbx=&endptr_storage, rcx=base. Out: rax=int64, *rbx=endptr.
+        # Win64: strtoll(rcx=str, rdx=endptr_addr, r8=base).
+        self.emitf(
+            "mov r8, rcx",   # base
+            "mov rdx, rbx",  # endptr address (rbx preserved by callee)
             "mov rcx, rax",  # str
             "call strtoll",
         )
