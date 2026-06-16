@@ -3330,6 +3330,35 @@ class SemaAnalyzer:
                         e.dunder_method = "__eq__"  # type: ignore
                         e.dunder_negate = (op == "!=")  # type: ignore
                     continue
+                if op in ("<", "<=", ">", ">=") and (
+                    lt.startswith("instance:") or rt.startswith("instance:")
+                ):
+                    # Ordering comparisons dispatch to __lt__/__le__/__gt__/__ge__
+                    # with reflected fallback, like DUNDER_BINOP's resolution.
+                    _DUNDER_CMP: dict = {
+                        "<": ("__lt__", "__gt__"),
+                        "<=": ("__le__", "__ge__"),
+                        ">": ("__gt__", "__lt__"),
+                        ">=": ("__ge__", "__le__"),
+                    }
+                    fwd_m, rfl_m = _DUNDER_CMP[op]
+                    cmp_resolved = None
+                    cmp_reflected = False
+                    if lt.startswith("instance:"):
+                        cmp_resolved = self._resolve_method(
+                            lt.split(":", 1)[1], fwd_m
+                        )
+                    if cmp_resolved is None and rt.startswith("instance:"):
+                        cmp_resolved = self._resolve_method(
+                            rt.split(":", 1)[1], rfl_m
+                        )
+                        cmp_reflected = cmp_resolved is not None
+                    if cmp_resolved is not None and len(e.ops) == 1:
+                        owner, _ = cmp_resolved
+                        e.dunder_owner = owner  # type: ignore
+                        e.dunder_method = rfl_m if cmp_reflected else fwd_m  # type: ignore
+                        e.dunder_reflected = cmp_reflected  # type: ignore
+                    continue
                 if "str" in (lt, rt):
                     if op not in ("==", "!=", "<", "<=", ">", ">="):
                         raise SemaError(

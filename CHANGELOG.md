@@ -24,6 +24,17 @@ output rather than silent miscompilations.
   `nullcontext` is now a class that returns `enter_result` from `__enter__`.
   `closing.__exit__` now correctly calls `self.thing.close()`.
 
+- **Ordering comparison dunder dispatch** (`__lt__`, `__le__`, `__gt__`,
+  `__ge__`): `a < b` and friends on user class instances now call the
+  corresponding dunder method (with reflected fallback, e.g. `a < b` tries
+  `a.__lt__(b)` then `b.__gt__(a)`). Only single comparisons dispatch via
+  dunder (chained `a < b < c` still uses integer comparison). This makes
+  `Fraction.__lt__` et al. work, enabling ordered fraction comparisons.
+
+- **`fractions.Fraction` arithmetic now works**: `+`, `-`, `*`, `/`, `**`,
+  `abs()`, unary `-` and `+` all produce correct results now that binary
+  and unary dunder dispatch is wired end-to-end.
+
 - **`abs()` and `hash()` dispatch to `__abs__` / `__hash__`**: calling
   `abs(obj)` or `hash(obj)` on a user class instance now calls `__abs__`
   or `__hash__` when defined. `hash(str)` calls the same FNV-1a hasher

@@ -1159,6 +1159,12 @@ class Codegen:
                     # park lhs across rhs evaluation, like a binop dunder.
                     self._cl_define(info, f"__cmpeq_lhs_{id(expr)}")
                 elif (
+                    op in ("<", "<=", ">", ">=")
+                    and getattr(expr, "dunder_owner", None) is not None
+                ):
+                    # `a < b` etc. dispatched to user __lt__/__le__/__gt__/__ge__
+                    self._cl_define(info, f"__cmpord_lhs_{id(expr)}")
+                elif (
                     op in ("in", "not in")
                     and lt in ("str", "any")
                     and rt == "str"
@@ -9411,6 +9417,27 @@ class Codegen:
             self.emit_call(self._method_symbol(owner, method))
             if getattr(e, "dunder_negate", False):
                 self.emitf("xor rax, 1")
+            return
+        if (
+            len(e.ops) == 1
+            and e.ops[0] in ("<", "<=", ">", ">=")
+            and getattr(e, "dunder_owner", None) is not None
+        ):
+            # Ordering compare dispatched to __lt__/__le__/__gt__/__ge__.
+            owner = e.dunder_owner  # type: ignore[attr-defined]
+            method = e.dunder_method  # type: ignore[attr-defined]
+            reflected = getattr(e, "dunder_reflected", False)
+            slot_off = info.locals_[f"__cmpord_lhs_{id(e)}"]
+            self_expr = e.operands[1] if reflected else e.operands[0]
+            other_expr = e.operands[0] if reflected else e.operands[1]
+            self.gen_expr(self_expr, info)
+            self.emitf(f"mov [rbp{slot_off:+d}], rax")
+            self.gen_expr(other_expr, info)
+            self.emitf(
+                f"mov {self._arg_reg(1)}, rax",
+                f"mov {self._arg_reg(0)}, [rbp{slot_off:+d}]",
+            )
+            self.emit_call(self._method_symbol(owner, method))
             return
         if (
             len(e.ops) == 1
