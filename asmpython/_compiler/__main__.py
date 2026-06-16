@@ -219,15 +219,15 @@ def _build_parser() -> argparse.ArgumentParser:
     build_grp.add_argument(
         "--check",
         action="store_true",
-        help="only run the front-end (lex / parse / sema) and report the first "
-        "diagnostic; no codegen, no toolchain needed. Editor-friendly.",
+        help="only run the front-end (lex / parse / sema) and report diagnostics; "
+        "no codegen, no toolchain needed. Editor-friendly.",
     )
     build_grp.add_argument(
-        "--all-errors",
+        "--one-error",
         action="store_true",
-        dest="all_errors",
-        help="report every sema error in the file instead of stopping at the "
-        "first one. Parse errors still stop early. Works with or without --check.",
+        dest="one_error",
+        help="stop at the first sema error instead of reporting all of them. "
+        "Parse errors always stop early regardless.",
     )
     build_grp.add_argument(
         "--json",
@@ -419,15 +419,14 @@ def main(argv: list[str] | None = None) -> int:
     src = args.source.read_text(encoding="utf-8")
 
     # --check: front-end only (lex / parse / sema). Fast, no toolchain.
+    all_errors = not args.one_error
     if args.check:
         return _run_check(src, args.source, source_dir=args.source.resolve().parent,
-                          as_json=args.json, all_errors=args.all_errors)
+                          as_json=args.json, all_errors=all_errors)
 
     # --onedir implies --use-runtime-lib so the codegen emits `extern`
     # references that resolve against the shared runtime library.
     use_runtime_lib = args.use_runtime_lib or args.bundle_mode == "onedir"
-
-    all_errors = args.all_errors
     try:
         compile_source(
             src,
