@@ -1,121 +1,140 @@
-# Resume — parity-expansion autonomous loop
+# Session Resume — parity-expansion branch
 
-**Branch:** `parity-expansion`  
-**Standing directives:** push after every commit, breadth over depth, full implementations (no stubs), never use `-> "ClassName"` quoted forward-ref annotations.
+## What was just committed
 
----
-
-## What was just completed this session
-
-### 1. `for x in custom_object` — `__iter__`/`__next__` protocol (DONE, pushed)
-- **Sema** (`sema.py`): detects `instance:ClassName` on For iter; verifies class has `__iter__` and `__next__`; stamps `iter_is_instance = cls_name` on the For node.
-- **Codegen** (`codegen.py`): allocates jmpbuf slots in `_collect_locals`; new `_gen_for_iter()` method calls `__iter__`, then loops calling `__next__` with setjmp protection, jumps to end on StopIteration (type 21), re-raises on anything else.
-- **Bug fixed this session:** instance pointer was going into `rax` before method calls instead of `_arg_reg(0)` (rcx/rdi). Fixed both the `__iter__` and `__next__` call sites.
-- **Test:** `tests/cases/366_custom_iter.py` — passes.
-
-### 2. `x in obj` / `x not in obj` via `__contains__` (DONE, pushed)
-- **Sema** (`sema.py` line ~3235): when rhs is `instance:ClassName`, checks for `__contains__`; stamps `dunder_contains_owner` and `dunder_contains_negate` on the Compare node; raises `SemaError` if no `__contains__` defined.
-- **Codegen** (`codegen.py`): `_collect_locals` allocates `__contains_needle_<id>` slot; `_gen_compare` dispatches to `__contains__(container, needle)` via platform ABI.
-- **Tests:** `tests/cases/367_custom_contains.py` (passes), `tests/cases_fail/for_unpack_non_contains_instance.py` (passes).
+`__call__` dunder dispatch — commit `554cbad5`.
+`obj(args)` on a typed instance variable now calls `__call__`. 380/380
+tests pass. Everything through dunder unary/binary/compare/abs/hash/call
+is complete.
 
 ---
 
-## In progress at pause point
+## Roadmap updates (uncommitted)
 
-### `@classmethod` with `cls.field` access — SEGFAULTS (not yet fixed)
+- `roadmap.md` 1.1.0: "Callable instances" marked **done**; test count
+  updated to 380/380; **Show-all-errors mode** added as a planned item.
+- `roadmap.md` 1.3.0: ARM64 and macOS headings promoted from bold to `####`;
+  new **Performance and optimisation** section added (constant folding,
+  peephole, register allocation, type specialisation).
 
-**The bug:** When a `@classmethod` is called, codegen passes `null` (0) as `cls` (codegen.py line ~8216):
-```asm
-xor rcx, rcx   ; cls = null
-call Counter__get_total
-```
-Inside the classmethod, `cls.total` tries to dereference `rcx` (0) → segfault.
+Commit these together with the selfhost fixes below, or separately.
 
-**What we know:**
-- Class-level variables are stored as static globals with labels like `_cv_Counter.total` in `self.class_var_labels` (codegen.py line ~223).
-- Reading `ClassName.total` directly already works — `_gen_attr` checks `class_var_labels` and emits `mov rax, [rel _cv_Counter.total]`.
-- The problem is `cls.total` inside a classmethod body — `cls` is treated as an instance dict pointer, so `_gen_attr` falls through to instance dict access on a null pointer.
+---
 
-**Proposed fix (NOT yet implemented):**
-In sema, when inside a `@classmethod` body, track `cls_name` (the enclosing class). When sema sees `cls.fieldname` (where `cls` is the first param of a classmethod), resolve it to the class variable `ClassName.fieldname` — rewrite the AST node at sema time to `A.Attr(obj=A.Name(cls_name), name=fieldname)`, so codegen sees `ClassName.fieldname` and hits the existing `class_var_labels` path.
+## Self-host status: 15/19 files pass sema
 
-The same rewrite must apply to `cls.field = value` (AttrAssign), so write also hits the static storage path.
+Four remaining blockers, in order (`py -m selfhost.check --verbose`):
 
-**Test to write after fix:**
+### 1 — parser.py:230 — imported exception class rejected
+
 ```python
-# tests/cases/368_classmethod_cls_field.py
-# expect:
-# 0
-# 3
+except ParseError:
+```
 
-class Counter:
-    total: int = 0
+Sema's `_check_exc_type_name` only accepts names in `BUILTIN_EXCEPTIONS`
+or classes defined in the same file that derive from a builtin. `ParseError`
+is imported from `.errors` so `self.classes` does not contain it.
 
-    @classmethod
-    def increment(cls) -> None:
-        cls.total = cls.total + 1
+**Fix in:** `asmpython/_compiler/sema.py` — `_check_exc_type_name`
 
-    @classmethod
-    def get_total(cls) -> int:
-        return cls.total
+Add a third early-return: if the name is not in `self.classes` at all
+(imported, not defined here), accept it — we can't verify the import's
+hierarchy at sema time.
 
-print(Counter.get_total())
-Counter.increment()
-Counter.increment()
-Counter.increment()
-print(Counter.get_total())
+```python
+def _check_exc_type_name(self, name: str, pos) -> None:
+    if name in BUILTIN_EXCEPTIONS:
+        return
+    if name in self.classes and self._is_exception_class(name):
+        return
+    if name not in self.classes:   # imported — can't verify, accept
+        return
+    raise SemaError(
+        f"'{name}' is not an exception type", pos,
+        ErrorCode.E_NOT_AN_EXCEPTION,
+    )
 ```
 
 ---
 
-## Planned next features (in rough priority order)
+### 2 — sema.py:234 — tuple elements in frozenset literal
 
-### A. Fix `@classmethod` `cls.field` (immediate next)
-As described above.
+```python
+INTERPRETER_ONLY_METHODS: frozenset[tuple[str, str]] = frozenset({
+    ("importlib", "import_module"),
+    ...
+})
+```
 
-### B. `__bool__` — instance truthiness
-`if obj:` / `while obj:` on user instances currently just checks pointer != 0 (always true). Should dispatch to `__bool__` or fall back to `__len__`. Needs:
-- Sema: detect `if instance_typed_expr:` and stamp `dunder_bool_owner` if class has `__bool__` or `__len__`
-- Codegen: before the branch, call `__bool__()` or `__len__()`, test rax
+Error: "set elements of type tuple are not supported yet".
 
-### C. `try/except/else` — the `else` block
-Currently `try/except/else` likely silently drops the `else` block. Should run when no exception was raised. Needs a flag local + check after the setjmp block exits normally.
+**Fix in:** `asmpython/_compiler/sema.py` — element-type check for set/frozenset
+literals (grep: "set elements of type").
 
-### D. `**kwargs` capture in function definitions
-`def f(**kwargs):` — collect keyword arguments into a dict. Currently only named kwargs at call sites are matched against known params. Full `**kwargs` capture for variadic keyword args is missing.
+Extend the check to allow tuple elements: record the set as type `set` without
+erroring. Codegen doesn't need to emit tuple-sets yet; we only need sema to
+pass.
 
-### E. Stdlib gaps to fill (breadth over depth)
-- `io.py` — ~35/61 implemented
-- `contextlib.py` — ~13/21 implemented
-- `inspect.py` — ~16/35 implemented
-- `struct.py` — 7/16 real
-- `fractions.py` — ~14/38 implemented
-
-### F. Other protocol methods
-- **`__hash__`** — user classes as dict keys
-- **`__len__` in bool context** — `if mylist:` when mylist is user class
+After this fix, run the gauntlet again — sema.py may have additional blockers.
 
 ---
 
-## Recent commits (this session)
-```
-f75d19ae  Add __contains__ dispatch for 'x in obj' on user-class instances
-19f2e77e  Add for-x-in-obj iteration via __iter__/__next__ protocol
+### 3 — codegen.py:11201 — `enumerate` in list comprehension
+
+```python
+stack_positions = [i for i, a in enumerate(assigns) if a is None]
 ```
 
-## Key file locations
-- `asmpython/_compiler/sema.py` — type checker / semantic analysis
-- `asmpython/_compiler/codegen.py` — code generation (~11,000 lines)
-- `asmpython/_compiler/ast_nodes.py` — AST node definitions
-- `asmpython/_compiler/target_windows.py` — Windows-specific codegen overrides
-- `asmpython/stdlib/__init__.py` — STDLIB_BINDINGS registry
-- `tests/cases/` — positive test cases (numbered)
-- `tests/cases_fail/` — negative/error test cases
-- `tests/runner.py` — test runner (`python -m tests.runner`)
+Error: `undefined function 'enumerate'`. `enumerate` is only recognised as a
+special form in bare `for` loops, not inside list comprehension generators.
 
-## How to run tests
+**Fix in:** `asmpython/_compiler/sema.py` — `ListComp` handling (or wherever
+comprehension generators are checked).
+
+When the comprehension generator's `iter` is `enumerate(xs)`, apply the same
+two-variable binding logic used for `for i, x in enumerate(xs):`. Alternatively,
+register `enumerate` as a known builtin in the global scope so the
+"undefined function" error doesn't fire.
+
+---
+
+### 4 — `__main__.py`:166 — stdlib-inherited `__init__` not found
+
+```python
+ap = _ColorParser(prog="asmpython", ..., add_help=False)
 ```
-cd C:\Users\Harvey Jass\Downloads\asmpython
-python -m tests.runner
-```
-All 367 tests currently pass.
+
+`_ColorParser` subclasses `argparse.ArgumentParser`. Error: "`_ColorParser()`
+has no `__init__` and takes no arguments" — because the parent's `__init__`
+is in the stdlib binding, not user code.
+
+**Fix in:** `asmpython/_compiler/sema.py` — the constructor-call check for
+classes with no `__init__` in the user-defined chain.
+
+When a class has no `__init__` anywhere in its user-defined parent chain AND
+its outermost parent is a name not in `self.classes` (a stdlib import), skip
+the argument-count check and return `any`. The simplest gate:
+`if cls.parent is not None and cls.parent not in self.classes: return`.
+
+---
+
+## After 19/19 sema — next gates
+
+Once all 19 files pass sema, the next gates for true self-compilation are:
+
+- **Codegen gate:** actually compile each file through codegen. Known hard
+  blocker: set{tuple} elements (codegen can't emit runtime sets of tuples).
+  These need real codegen support, not just sema leniency.
+- **Link gate:** all 19 `.asm` files assembled and linked into a single
+  `asmpython.exe` that can compile a hello-world.
+
+---
+
+## Next steps (ordered)
+
+1. Fix the four sema blockers above (sema.py changes only, each is small).
+2. `py -m selfhost.check` — confirm 19/19.
+3. Commit + push roadmap.md and selfhost fixes.
+4. Start the codegen gate: `py -m asmpython asmpython/_compiler/lexer.py
+   --check` and chase the first codegen error.
+5. Continue 1.1.0 parity items — show-all-errors mode is next on the list.

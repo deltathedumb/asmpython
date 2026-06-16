@@ -50,7 +50,7 @@ All binary arithmetic, comparison, and unary operators now dispatch to the appro
 | Comparison | `__eq__` / `__ne__`, `__lt__` / `__le__` / `__gt__` / `__ge__` (with reflected fallback) |
 | Builtins | `__abs__` (via `abs()`), `__hash__` (via `hash()`), `__bool__` (via truthiness), `__len__` (via `len()` and truthiness) |
 
-#### Callable instances — in progress
+#### Callable instances — done
 
 `obj(args)` where `obj` is a user instance with `__call__` dispatches to the method. Sema normalises the argument list against the `__call__` signature (same default-filling and kwargs-packing as any other call); codegen loads `self` into arg register 0 and the user args into registers 1+.
 
@@ -64,9 +64,13 @@ Functions declared with `**kwargs` receive excess keyword arguments as a live `d
 - `io.StringIO` / `BytesIO`: context manager protocol (`__enter__`/`__exit__`), `readable()`, `writable()`, `seekable()`, `io.text_open()`.
 - `contextlib`: `suppress` and `nullcontext` are now real classes; `closing.__exit__` calls `.close()` correctly.
 
+#### Show-all-errors mode — planned
+
+Currently the compiler stops at the first error it encounters in a file. The planned behaviour is to collect every sema error in the file and report them all before exiting. This makes the compile-fix loop faster for files with multiple type or name errors. Only sema errors are batched; parse errors still stop early because later tokens may be meaningless after a parse failure.
+
 #### Test count
 
-379/379 passing (was 369 at 1.0.0).
+380/380 passing (was 369 at 1.0.0).
 
 ---
 
@@ -91,25 +95,47 @@ This release makes asmpython viable for games, demos, embedded displays, and bar
 
 A platform-expansion release that broadens asmpython beyond x86-64 Windows/Linux. The version number (1.3.0 vs 2.0.0) will be decided based on how much of the existing codegen needs restructuring.
 
-**ARM64 support**
+#### ARM64 support
 
 - New `--target linux-arm64` and `--target windows-arm64` targets.
 - AArch64 instruction backend — a second ISA alongside the current x86-64 NASM backend.
 - ARM64 ABI (AAPCS64 on Linux, Microsoft ARM64 ABI on Windows).
-- The existing runtime helpers (`_runtime_dict_*`, `_runtime_str_*`, etc.) are ISA-agnostic logic — they will be retargeted or regenerated for AArch64.
-- Freestanding ARM64: bare-metal Raspberry Pi 4 / 5 target (AArch64, no OS, UART output, device-tree-less boot).
+- The existing runtime helpers (`_runtime_dict_*`, `_runtime_str_*`, etc.)
+  are ISA-agnostic logic — they will be retargeted or regenerated for AArch64.
+- Freestanding ARM64: bare-metal Raspberry Pi 4 / 5 target (AArch64, no OS,
+  UART output, device-tree-less boot).
 
-**macOS support**
+#### macOS support
 
 - `--target macos-x64` (Intel Macs) and `--target macos-arm64` (Apple Silicon).
 - Mach-O object format; `ld` as the linker driver.
 - macOS system call conventions and dynamic linker (`dyld`) integration.
-- Code-signing: `--codesign` flag wraps the output in an ad-hoc signature so it runs on modern macOS without developer tools.
-- `asmlib.gui` on macOS: Cocoa (AppKit) window via Objective-C runtime calls from assembly.
+- Code-signing: `--codesign` flag wraps the output in an ad-hoc signature so
+  it runs on modern macOS without developer tools.
+- `asmlib.gui` on macOS: Cocoa (AppKit) window via Objective-C runtime calls
+  from assembly.
 
-**Scope decision: 1.3.0 vs 2.0.0**
+#### Performance and optimisation
 
-If adding the ARM64 ISA backend requires restructuring codegen into a proper IR (intermediate representation) layer that the x86-64 backend also targets, the version will be 2.0.0 — that would be a meaningful internal architecture change even if the Python-level API is unchanged. If it can be done as a parallel target alongside the existing codegen, 1.3.0.
+This release is also the point at which the x86-64 backend gets a proper
+optimisation pass:
+
+- **Constant folding** — arithmetic on literal values reduced at sema time.
+- **Peephole optimiser** — redundant `mov`/`push`/`pop` pairs and
+  dead-store elimination over short windows of emitted instructions.
+- **Register allocation** — short-lived temporaries kept in registers
+  instead of round-tripping through the stack; reduces memory traffic in
+  tight numeric loops.
+- **Type specialisation** — hot integer paths avoid the generic boxing
+  overhead that the runtime incurs for `any`-typed values.
+
+#### Scope decision: 1.3.0 vs 2.0.0
+
+If adding the ARM64 ISA backend requires restructuring codegen into a
+proper IR (intermediate representation) layer that the x86-64 backend
+also targets, the version will be 2.0.0 — a meaningful internal
+architecture change even if the Python-level API is unchanged. If it
+can be done as a parallel target alongside the existing codegen, 1.3.0.
 
 ---
 
