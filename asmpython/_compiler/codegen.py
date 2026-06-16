@@ -1990,6 +1990,21 @@ class Codegen:
             ):
                 # Sema guarantees plain-name targets in this form.
                 ptr_slot = info.locals_[f"__tupunpack_{id(stmt)}"]
+                rhs_t = A.expr_type(stmt.values[0])
+                # String unpack: `a, b, c = "abc"` — extract each char as a
+                # one-char heap string using _runtime_str_getitem.
+                if rhs_t == "str":
+                    self.gen_expr(stmt.values[0], info)
+                    self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+                    for i, target in enumerate(stmt.targets):
+                        off = info.locals_[target.name]
+                        self.emitf(
+                            f"mov rax, [rbp{ptr_slot:+d}]",
+                            f"mov rbx, {i}",
+                            "call _runtime_str_char_at",
+                            f"mov [rbp{off:+d}], rax",
+                        )
+                    return
                 ets = A.tuple_element_types(stmt.values[0])
                 self.gen_expr(stmt.values[0], info)  # rax = tuple header ptr
                 self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
