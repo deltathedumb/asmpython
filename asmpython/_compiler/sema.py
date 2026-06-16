@@ -2916,10 +2916,15 @@ class SemaAnalyzer:
                 # rather than erroring as operations on an int.
                 bind_ty = "module" if not s.module else "any"
                 for name in s.names:
-                    # Don't clobber a name the whole-program loader already
-                    # materialized with its real type (`from .._stdlib import
-                    # STDLIB_BINDINGS` after the dict global was prepended).
-                    if name not in scope:
+                    # Module-alias imports (`from . import X as Y`, bind_ty ==
+                    # "module") always win — they must not be shadowed by a
+                    # constant from an unrelated stdlib module that happens to
+                    # share the alias name (e.g. re.py's `A: int = 256` vs the
+                    # compiler's `from . import ast_nodes as A`).
+                    # For relative *name* imports (`from .mod import X`,
+                    # bind_ty == "any"), preserve a concrete type already set by
+                    # the whole-program loader (e.g. a materialized dict global).
+                    if bind_ty == "module" or name not in scope:
                         scope.add(name, bind_ty)
                 return
             try:

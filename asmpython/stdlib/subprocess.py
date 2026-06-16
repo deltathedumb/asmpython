@@ -107,7 +107,8 @@ class Popen:
 
 def run(args: str, stdin: int = 0, stdout: int = 0, stderr: int = 0,
         shell: int = 0, check: int = 0, timeout: float = 0.0,
-        cwd: str = "", capture_output: int = 0) -> CompletedProcess:
+        cwd: str = "", capture_output: int = 0, text: int = 0,
+        env: int = 0) -> CompletedProcess:
     """Run a command, wait for it to complete, return CompletedProcess."""
     rc: int = os.system(args)
     cp: CompletedProcess = CompletedProcess(args, rc)

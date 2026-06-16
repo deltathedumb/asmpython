@@ -507,6 +507,13 @@ def _merge_import_bindings(
                 # reference, so platform-conditional constants below (e.g.
                 # `if sys.platform == "win32": ...`) can depend on it.
                 available.add(stmt.module.split(".")[0])
+            elif isinstance(stmt, A.FromImport):
+                # Track locally-bound names so subsequent constant assignments
+                # in later (or same) modules don't shadow import-bound aliases.
+                # Example: `from . import ast_nodes as A` must not be clobbered
+                # by `re.py`'s `A: int = 256`.
+                for _n in stmt.names:
+                    available.add(_n)
         # A merged module's own top-level constant assignments (e.g.
         # `STDLIB_BINDINGS = {...}`) are used by its functions, so they must
         # become program globals too. Skip a constant whose initializer needs a
