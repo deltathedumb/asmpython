@@ -3877,10 +3877,7 @@ class SemaAnalyzer:
                     e.inferred_type = "any"
                     return
                 if obj_t == "list":
-                    # List slice preserves element type. We don't support step
-                    # for lists yet — it'd require a non-contiguous copy loop.
-                    if e.index.step is not None:
-                        raise SemaError("list slice does not support a step yet", e.pos)
+                    # List slice preserves element type.
                     e.inferred_type = "list"
                     # Propagate element type onto the Subscript so codegen and
                     # downstream `_list_el_type` see the right kind.

@@ -613,6 +613,7 @@ class Codegen:
         "_runtime_sort_pairs_str",
         "_runtime_sort_pairs_int",
         "_runtime_list_slice",
+        "_runtime_list_slice_step",
         # String runtime
         "_runtime_str_concat",
         "_runtime_int_to_base",
@@ -1514,6 +1515,8 @@ class Codegen:
                 if A.expr_type(expr.obj) == "list":
                     self._cl_define(info, f"__lstsl_obj_{id(expr)}")
                     self._cl_define(info, f"__lstsl_start_{id(expr)}")
+                    if expr.index.step is not None:
+                        self._cl_define(info, f"__lstsl_step_{id(expr)}")
                 self._cl_walk_expr(info, expr.obj)
                 if expr.index.start is not None:
                     self._cl_walk_expr(info, expr.index.start)
@@ -3941,6 +3944,7 @@ class Codegen:
         self._emit_sort_pairs_helpers()
         self._emit_list_extend_helper()
         self._emit_list_slice_helper()
+        self._emit_list_slice_step_helper()
         self._emit_list_reverse_helper()
         self._emit_list_insert_helper()
         self._emit_dict_clear_helper()
@@ -4472,6 +4476,159 @@ class Codegen:
         self._emit_libc_memcpy()
         self.label(skip_copy)
         self.emitf("mov rax, [rbp-72]", "leave", "ret")
+
+    def _emit_list_slice_step_helper(self) -> None:
+        """`_runtime_list_slice_step`: xs[start:stop:step] -> new list.
+
+        In:  rax=src, rbx=start(sentinel INT64_MIN=omit), rcx=stop(sentinel
+             INT64_MAX=omit), rdx=step (non-zero).
+        Out: rax = new list header.
+
+        Frame slots (rbp-relative):
+          -8=src, -16=start_raw, -24=stop_raw, -32=step,
+          -40=slen, -48=eff_start, -56=eff_stop, -64=n, -72=cap, -80=hdr,
+          -88=i (loop index), -96=out_idx.
+        Total locals=96, add 32 shadow = 128 (already 16-byte aligned).
+        """
+        INT64_MIN = "0x8000000000000000"
+        INT64_MAX = "0x7fffffffffffffff"
+        self.label("_runtime_list_slice_step")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 128")
+        self.emitf(
+            "mov [rbp-8], rax",
+            "mov [rbp-16], rbx",
+            "mov [rbp-24], rcx",
+            "mov [rbp-32], rdx",
+        )
+        # slen = src.len
+        self.emitf(f"mov rax, [rax+{self.LIST_LEN_OFF}]", "mov [rbp-40], rax")
+
+        # -- Normalize start -----------------------------------------------
+        no_start = self.fresh("lss_no_start")
+        has_start = self.fresh("lss_has_start")
+        s_pos = self.fresh("lss_s_pos")
+        s_nn = self.fresh("lss_s_nn")
+        s_lt = self.fresh("lss_s_lt")
+        self.emitf(f"mov rax, [rbp-16]", f"mov rbx, {INT64_MIN}", "cmp rax, rbx",
+                   f"jne {has_start}")
+        self.label(no_start)
+        # default: step<0 → len-1, else → 0
+        self.emitf("mov rcx, [rbp-32]", "test rcx, rcx", f"jns {has_start}",
+                   "mov rax, [rbp-40]", "dec rax", f"jmp {s_nn}")
+        self.label(has_start)
+        # rax = raw start; wrap negatives
+        self.emitf("test rax, rax", f"jns {s_pos}", "add rax, [rbp-40]")
+        self.label(s_pos)
+        self.emitf("test rax, rax", f"jns {s_nn}", "xor rax, rax")
+        self.label(s_nn)
+        # step>0: clamp to len; step<0: clamp to len-1
+        self.emitf("mov rcx, [rbp-32]", "test rcx, rcx", f"jns {s_lt}")
+        self.emitf("cmp rax, [rbp-40]", f"jl {s_lt}", "mov rax, [rbp-40]", "dec rax")
+        self.label(s_lt)
+        self.emitf("mov [rbp-48], rax")
+
+        # -- Normalize stop -------------------------------------------------
+        no_stop = self.fresh("lss_no_stop")
+        has_stop = self.fresh("lss_has_stop")
+        t_pos = self.fresh("lss_t_pos")
+        t_nn = self.fresh("lss_t_nn")
+        t_lt = self.fresh("lss_t_lt")
+        t_neg1ok = self.fresh("lss_t_neg1ok")
+        self.emitf(f"mov rax, [rbp-24]", f"mov rbx, {INT64_MAX}", "cmp rax, rbx",
+                   f"jne {has_stop}")
+        self.label(no_stop)
+        # default: step<0 → -1 (exclusive before 0), else → len
+        self.emitf("mov rcx, [rbp-32]", "test rcx, rcx", f"jns {has_stop}",
+                   "mov rax, -1", f"jmp {t_neg1ok}")
+        self.label(has_stop)
+        # For step<0: -1 is a legal exclusive sentinel; don't wrap it.
+        self.emitf("mov rcx, [rbp-32]", "test rcx, rcx", f"jns {t_pos}")
+        self.emitf("cmp rax, -1", f"je {t_neg1ok}")
+        # fall-through: wrap negative stop for neg step too
+        self.label(t_pos)
+        self.emitf("test rax, rax", f"jns {t_nn}", "add rax, [rbp-40]")
+        self.label(t_nn)
+        self.emitf("test rax, rax", f"jns {t_lt}", "xor rax, rax")
+        self.label(t_lt)
+        self.emitf("cmp rax, [rbp-40]", f"jle {t_neg1ok}", "mov rax, [rbp-40]")
+        self.label(t_neg1ok)
+        self.emitf("mov [rbp-56], rax")  # eff_stop
+
+        # -- Count n (pass 1) -----------------------------------------------
+        # i = eff_start; n=0
+        # while (step>0 ? i<stop : i>stop): n++, i+=step
+        cnt_loop = self.fresh("lss_cnt_loop")
+        cnt_done = self.fresh("lss_cnt_done")
+        cnt_pos = self.fresh("lss_cnt_pos")
+        cnt_neg = self.fresh("lss_cnt_neg")
+        self.emitf("mov rax, [rbp-48]", "mov [rbp-88], rax")  # i = start
+        self.emitf("xor rax, rax", "mov [rbp-64], rax")  # n = 0
+        self.label(cnt_loop)
+        self.emitf("mov rcx, [rbp-32]", "test rcx, rcx", f"js {cnt_neg}")
+        self.label(cnt_pos)
+        self.emitf("mov rax, [rbp-88]", "cmp rax, [rbp-56]", f"jge {cnt_done}")
+        self.emitf(f"jmp {cnt_pos}_body")
+        self.label(cnt_neg)
+        self.emitf("mov rax, [rbp-88]", "cmp rax, [rbp-56]", f"jle {cnt_done}")
+        cnt_body = self.fresh("lss_cnt_body")
+        self.emitf(f"jmp {cnt_body}")
+        self.label(f"{cnt_pos}_body")
+        self.label(cnt_body)
+        self.emitf("inc qword [rbp-64]",
+                   "mov rax, [rbp-88]", "add rax, [rbp-32]", "mov [rbp-88], rax",
+                   f"jmp {cnt_loop}")
+        self.label(cnt_done)
+        # n = [rbp-64]
+
+        # -- Allocate header + buffer (pass 2) --------------------------------
+        # cap = max(n, 4)
+        cap_ok = self.fresh("lss_cap_ok")
+        self.emitf("mov rax, [rbp-64]", "cmp rax, 4", f"jge {cap_ok}", "mov rax, 4")
+        self.label(cap_ok)
+        self.emitf("mov [rbp-72], rax")
+        self.emitf("mov rcx, 24", "call malloc", "mov [rbp-80], rax")
+        self.emitf(
+            "mov rdx, [rbp-80]",
+            "mov rax, [rbp-72]",
+            f"mov [rdx+{self.LIST_CAP_OFF}], rax",
+            "mov rax, [rbp-64]",
+            f"mov [rdx+{self.LIST_LEN_OFF}], rax",
+        )
+        self.emitf("mov rcx, [rbp-72]", "shl rcx, 3", "call malloc")
+        self.emitf("mov rdx, [rbp-80]", f"mov [rdx+{self.LIST_BUF_OFF}], rax")
+
+        # -- Fill loop (pass 2) -----------------------------------------------
+        # i = eff_start; out_idx = 0
+        fill_loop = self.fresh("lss_fill_loop")
+        fill_done = self.fresh("lss_fill_done")
+        fill_neg = self.fresh("lss_fill_neg")
+        fill_body = self.fresh("lss_fill_body")
+        self.emitf("mov rax, [rbp-48]", "mov [rbp-88], rax")
+        self.emitf("xor rax, rax", "mov [rbp-96], rax")  # out_idx = 0
+        self.label(fill_loop)
+        self.emitf("mov rcx, [rbp-32]", "test rcx, rcx", f"js {fill_neg}")
+        self.emitf("mov rax, [rbp-88]", "cmp rax, [rbp-56]", f"jge {fill_done}")
+        self.emitf(f"jmp {fill_body}")
+        self.label(fill_neg)
+        self.emitf("mov rax, [rbp-88]", "cmp rax, [rbp-56]", f"jle {fill_done}")
+        self.label(fill_body)
+        # new_buf[out_idx] = src_buf[i]
+        self.emitf(
+            "mov rbx, [rbp-8]",
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+            "mov rcx, [rbp-88]",
+            "mov rax, [rbx+rcx*8]",
+            # store into dest buf
+            "mov rbx, [rbp-80]",
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+            "mov rcx, [rbp-96]",
+            "mov [rbx+rcx*8], rax",
+        )
+        self.emitf("inc qword [rbp-96]")
+        self.emitf("mov rax, [rbp-88]", "add rax, [rbp-32]", "mov [rbp-88], rax")
+        self.emitf(f"jmp {fill_loop}")
+        self.label(fill_done)
+        self.emitf("mov rax, [rbp-80]", "leave", "ret")
 
     def _emit_list_reverse_helper(self) -> None:
         """`_runtime_list_reverse`: in-place reverse of a list.
@@ -8544,11 +8701,7 @@ class Codegen:
         self.emitf(f"mov rax, [rbp{res:+d}]")
 
     def _gen_list_slice(self, e: A.Subscript, info: FuncInfo) -> None:
-        """`xs[start:stop]` -> _runtime_list_slice(xs, start, stop).
-
-        Uses INT64_MIN for missing start and INT64_MAX for missing stop;
-        the runtime fills in 0 and len respectively.
-        """
+        """`xs[start:stop[:step]]` -> _runtime_list_slice or _runtime_list_slice_step."""
         sl: A.Slice = e.index  # type: ignore[assignment]
         obj_slot = info.locals_[f"__lstsl_obj_{id(e)}"]
         start_slot = info.locals_[f"__lstsl_start_{id(e)}"]
@@ -8562,16 +8715,32 @@ class Codegen:
         else:
             self.gen_expr(sl.start, info)
             self.emitf(f"mov [rbp{start_slot:+d}], rax")
-        if sl.stop is None:
-            self.emitf(f"mov rcx, {SENTINEL_MAX}")
+        if sl.step is not None:
+            step_slot = info.locals_[f"__lstsl_step_{id(e)}"]
+            if sl.stop is None:
+                self.emitf(f"mov rax, {SENTINEL_MAX}", f"mov [rbp{step_slot:+d}], rax")
+            else:
+                self.gen_expr(sl.stop, info)
+                self.emitf(f"mov [rbp{step_slot:+d}], rax")
+            self.gen_expr(sl.step, info)
+            self.emitf(
+                f"mov rdx, rax",
+                f"mov rax, [rbp{obj_slot:+d}]",
+                f"mov rbx, [rbp{start_slot:+d}]",
+                f"mov rcx, [rbp{step_slot:+d}]",
+                "call _runtime_list_slice_step",
+            )
         else:
-            self.gen_expr(sl.stop, info)
-            self.emitf("mov rcx, rax")
-        self.emitf(
-            f"mov rax, [rbp{obj_slot:+d}]",
-            f"mov rbx, [rbp{start_slot:+d}]",
-            "call _runtime_list_slice",
-        )
+            if sl.stop is None:
+                self.emitf(f"mov rcx, {SENTINEL_MAX}")
+            else:
+                self.gen_expr(sl.stop, info)
+                self.emitf("mov rcx, rax")
+            self.emitf(
+                f"mov rax, [rbp{obj_slot:+d}]",
+                f"mov rbx, [rbp{start_slot:+d}]",
+                "call _runtime_list_slice",
+            )
 
     def _gen_str_slice(self, e: A.Subscript, info: FuncInfo) -> None:
         """s[start:stop[:step]] dispatch.
