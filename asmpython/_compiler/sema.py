@@ -5232,10 +5232,21 @@ class SemaAnalyzer:
                 e.list_el_type = "tuple"
                 e.tuple_elem_types = [self._iter_element_type(a, scope) for a in e.args]
                 return
+            if e.func in ("set", "frozenset"):
+                # For set comprehensions, validate the element type: sets use
+                # string hashing and int elements would crash at runtime.
+                if e.args and isinstance(e.args[0], A.Comprehension):
+                    comp = e.args[0]
+                    et = A.expr_type(comp.elt)
+                    if et not in ("str", "any", "tuple"):
+                        raise SemaError(
+                            f"set elements of type {et} are not supported yet "
+                            "(sets are str-keyed in v1)",
+                            e.pos,
+                        )
+                return
             if e.func in (
                 "bool",
-                "set",
-                "frozenset",
                 "sum",
                 "round",
                 "pow",
