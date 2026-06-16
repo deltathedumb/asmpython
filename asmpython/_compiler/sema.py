@@ -5308,11 +5308,15 @@ class SemaAnalyzer:
             if e.func == "dict":
                 # dict() / dict(other) -> a (shallow-copied) dict. Carry the
                 # source's value kind so later reads recover it.
+                # Also accepts a list of 2-tuples: dict([(k, v), ...]).
                 if e.args:
                     t = A.expr_type(e.args[0])
-                    if t not in ("dict", "any"):
-                        raise SemaError("dict() requires a dict argument", e.pos)
-                    e.value_type = self._dict_value_type(e.args[0], scope)
+                    if t not in ("dict", "any", "list", "tuple"):
+                        raise SemaError("dict() requires a dict or list-of-pairs argument", e.pos)
+                    if t == "dict":
+                        e.value_type = self._dict_value_type(e.args[0], scope)
+                    else:
+                        e.dict_from_pairs = True
                 return
             if e.func == "divmod":
                 # divmod(a, b) -> (a // b, a % b), both ints (floor semantics).

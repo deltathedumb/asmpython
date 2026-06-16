@@ -1355,6 +1355,11 @@ class Codegen:
                 self._cl_define(info, f"__dictcall_res_{id(expr)}")
                 if expr.args:
                     self._cl_define(info, f"__dictcall_src_{id(expr)}")
+                if getattr(expr, "dict_from_pairs", False):
+                    self._cl_define(info, f"__dictpairs_it_{id(expr)}")
+                    self._cl_define(info, f"__dictpairs_stop_{id(expr)}")
+                    self._cl_define(info, f"__dictpairs_idx_{id(expr)}")
+                    self._cl_define(info, f"__dictpairs_key_{id(expr)}")
             # list(filter(...)): truthy-filter loop needs 5 scratch slots.
             # list(map(lambda, xs)): map loop needs the same 5 scratch slots.
             if expr.func in ("list", "tuple") and expr.args:
@@ -11491,8 +11496,52 @@ class Codegen:
         if e.func == "dict":
             # dict() -> fresh empty dict; dict(other) -> empty + merge other in
             # (a shallow copy via the same helper dict.update uses).
+            # dict(list_of_pairs) -> iterate pairs and insert each (k, v).
             res = info.locals_[f"__dictcall_res_{id(e)}"]
-            if e.args:
+            if e.args and getattr(e, "dict_from_pairs", False):
+                # Build from list of 2-element tuples/lists.
+                it_slot = info.locals_[f"__dictpairs_it_{id(e)}"]
+                stop_slot = info.locals_[f"__dictpairs_stop_{id(e)}"]
+                idx_slot = info.locals_[f"__dictpairs_idx_{id(e)}"]
+                key_slot = info.locals_[f"__dictpairs_key_{id(e)}"]
+                self.gen_expr(e.args[0], info)
+                self.emitf(
+                    f"mov [rbp{it_slot:+d}], rax",
+                    f"mov rbx, [rax+{self.LIST_LEN_OFF}]",
+                    f"mov [rbp{stop_slot:+d}], rbx",
+                    f"mov qword [rbp{idx_slot:+d}], 0",
+                )
+                self._emit_empty_set(res)
+                self.emitf(f"mov rax, [rbp{res:+d}]")
+                top = self.fresh("dfrpairs")
+                end = self.fresh("enddfrpairs")
+                self.label(top)
+                self.emitf(
+                    f"mov rax, [rbp{idx_slot:+d}]",
+                    f"cmp rax, [rbp{stop_slot:+d}]",
+                    f"jge {end}",
+                )
+                # pair = it.buf[idx] -> a tuple/list header
+                self.emitf(
+                    f"mov rbx, [rbp{it_slot:+d}]",
+                    f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+                    f"mov rcx, [rbp{idx_slot:+d}]",
+                    "mov rax, [rbx+rcx*8]",
+                )
+                # key = pair.buf[0], val = pair.buf[1]
+                self.emitf(
+                    f"mov rbx, [rax+{self.LIST_BUF_OFF}]",
+                    "mov rcx, [rbx]",        # key = buf[0]
+                    f"mov [rbp{key_slot:+d}], rcx",
+                    "mov rcx, [rbx+8]",      # val = buf[1]
+                    f"mov rbx, [rbp{key_slot:+d}]",
+                    f"mov rax, [rbp{res:+d}]",
+                    "call _runtime_dict_set",
+                )
+                self.emitf(f"inc qword [rbp{idx_slot:+d}]", f"jmp {top}")
+                self.label(end)
+                self.emitf(f"mov rax, [rbp{res:+d}]")
+            elif e.args:
                 src_slot = info.locals_[f"__dictcall_src_{id(e)}"]
                 self.gen_expr(e.args[0], info)
                 self.emitf(f"mov [rbp{src_slot:+d}], rax")
