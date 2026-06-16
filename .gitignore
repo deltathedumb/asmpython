@@ -49,8 +49,6 @@ _smoke.log
 # Unit test artifacts
 hi.txt
 test.zip
-_scratch_proto.py
-_scratch_hash.py
-_scratch_dunder_ops.py
-_scratch_cmpord.py
-_scratch_fractions.py
+_scratch*.*
+_probe*.*
+_tmp*.*
