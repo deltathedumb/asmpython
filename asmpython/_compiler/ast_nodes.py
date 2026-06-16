@@ -238,11 +238,14 @@ class ClosureBind:
     Emitted by the parser when a nested `def` is found; replaces the old
     `Pass` placeholder.  `func_name` is the inner function's name; `free_vars`
     is the list of outer-scope variable names that the body references.
+    `nonlocal_vars` is the subset of free_vars declared `nonlocal` in the inner
+    body (these are captured by box/reference so the inner function can mutate them).
     Codegen allocates a list [CLOSURE_MAGIC, fn_ptr, var1, var2, ...].
     """
 
     func_name: str
     free_vars: list
+    nonlocal_vars: list = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 

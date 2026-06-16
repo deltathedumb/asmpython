@@ -110,6 +110,9 @@ class FuncInfo:
     # Names declared `global` in this function: skip frame-slot allocation and
     # access them via the module-global .bss slot instead.
     global_names: set = field(default_factory=set)
+    # Nonlocal vars: maps var name -> box-ptr slot name (__nl_box_<name>).
+    # Reads/writes to these names go through one pointer indirection.
+    nonlocal_boxes: dict = field(default_factory=dict)
     # True when the function's declared return annotation is `-> float`.
     # Lets `return <expr>` promote a non-float result (e.g. an `any`/`int`
     # element read out of an unannotated `list`) to xmm0, since callers of a
@@ -979,6 +982,11 @@ class Codegen:
         # In module-level code (`main`), a write to a global name targets its
         # .bss slot, not a frame slot — so don't give those names a local.
         info.is_main = f.name == self.label_main
+        # Nonlocal vars in this lifted inner function: param holds a box ptr;
+        # reads/writes go through one pointer indirection.
+        nonlocal_set: set = set(getattr(f, "nonlocal_vars", []))
+        for n in nonlocal_set:
+            info.nonlocal_boxes[n] = n  # same slot, just mark for indirection
         # Each local (incl. params) gets an 8-byte slot at a negative RBP offset.
         info.offset = 0
         for i, p in enumerate(f.params):
@@ -993,6 +1001,10 @@ class Codegen:
                 ty = "int"
                 if i < len(f.defaults) and f.defaults[i] is not None:
                     ty = A.expr_type(f.defaults[i])  # type: ignore
+            # Nonlocal params hold a box pointer, not the actual value — treat
+            # as int (pointer) regardless of the annotation.
+            if p in nonlocal_set:
+                ty = "int"
             info.local_types[p] = ty
 
         # Walk the body for any name that becomes bound. The walkers below are
@@ -1890,15 +1902,39 @@ class Codegen:
                 f"lea rax, [{fn_label}]",
                 f"mov [rcx+8], rax",
             )
-            # [2..] = captured variable values
+            # [2..] = captured variable values (or box ptrs for nonlocal vars)
+            nl_set = set(getattr(stmt, "nonlocal_vars", []))
             for i, fv in enumerate(stmt.free_vars):
                 fv_mem = self._var_mem(fv, info)
-                self.emitf(
-                    f"mov rax, {fv_mem}",
-                    f"mov rbx, {mem}",
-                    f"mov rdx, [rbx+{self.LIST_BUF_OFF}]",
-                    f"mov [rdx+{(i + 2) * 8}], rax",
-                )
+                if fv in nl_set:
+                    # Nonlocal: allocate an 8-byte box, write current value,
+                    # store the box ptr in the closure slot.
+                    box_slot = f"__nl_box_{fv}_{id(stmt)}"
+                    self._cl_define(info, box_slot)
+                    box_mem = self._var_mem(box_slot, info)
+                    # malloc(8) for the box
+                    self._emit_malloc(8)
+                    self.emitf(f"mov {box_mem}, rax")
+                    # write current value into box
+                    self.emitf(
+                        f"mov rbx, {fv_mem}",
+                        f"mov rax, {box_mem}",
+                        "mov [rax], rbx",
+                    )
+                    # store box ptr in closure slot
+                    self.emitf(
+                        f"mov rax, {box_mem}",
+                        f"mov rbx, {mem}",
+                        f"mov rdx, [rbx+{self.LIST_BUF_OFF}]",
+                        f"mov [rdx+{(i + 2) * 8}], rax",
+                    )
+                else:
+                    self.emitf(
+                        f"mov rax, {fv_mem}",
+                        f"mov rbx, {mem}",
+                        f"mov rdx, [rbx+{self.LIST_BUF_OFF}]",
+                        f"mov [rdx+{(i + 2) * 8}], rax",
+                    )
             return
         if isinstance(stmt, A.Global):
             return  # handled at _cl_walk time
@@ -1915,7 +1951,11 @@ class Codegen:
             ty = self._var_type(stmt.target, info)
             value_t = A.expr_type(stmt.value)
             mem = self._var_mem(stmt.target, info)
-            if ty == "float":
+            if isinstance(stmt.target, str) and stmt.target in info.nonlocal_boxes:
+                # Nonlocal: param slot holds box ptr; store value through it.
+                self.gen_expr(stmt.value, info)
+                self.emitf(f"mov rbx, {mem}", "mov [rbx], rax")
+            elif ty == "float":
                 # Slot expects a float; promote int RHS to float.
                 self._gen_expr_as_float(stmt.value, info, value_t)
                 self.emitf(f"movsd {mem}, xmm0")
@@ -2086,6 +2126,17 @@ class Codegen:
                     )
             return
         if isinstance(stmt, A.AugAssign):
+            if stmt.target in info.nonlocal_boxes:
+                # Nonlocal: target is a box ptr; read → op → write through ptr.
+                box_mem = self._var_mem(stmt.target, info)
+                # Read current value from box.
+                self.emitf(f"mov rax, {box_mem}", "mov rax, [rax]", "push rax")
+                self.gen_expr(stmt.value, info)
+                self.emitf("mov rbx, rax", "pop rax")
+                self._emit_binop_inline(stmt.op)
+                # Write result back through box ptr.
+                self.emitf(f"mov rbx, {box_mem}", "mov [rbx], rax")
+                return
             mem = self._var_mem(stmt.target, info)
             ty = self._var_type(stmt.target, info)
             if ty == "dict" and stmt.op == "|":
@@ -3219,7 +3270,10 @@ class Codegen:
                 raise NameError(f"undefined variable {expr.name}")
             mem = self._var_mem(expr.name, info)
             ty = self._var_type(expr.name, info)
-            if ty == "float":
+            if expr.name in info.nonlocal_boxes:
+                # Nonlocal: param slot holds a box ptr; deref to get the value.
+                self.emitf(f"mov rax, {mem}", "mov rax, [rax]")
+            elif ty == "float":
                 self.emitf(f"movsd xmm0, {mem}")
             else:
                 self.emitf(f"mov rax, {mem}")

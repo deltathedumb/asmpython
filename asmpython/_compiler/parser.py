@@ -66,24 +66,37 @@ class Parser:
 
     # ---- top level ---------------------------------------------------------
 
-    def _find_free_vars(self, fdef: A.FuncDef) -> list:
-        """Return outer-scope names referenced in fdef's body that are not
-        locally bound (i.e. not in params and not assigned inside the body).
-        These are candidates for closure capture."""
+    def _find_free_vars(self, fdef: A.FuncDef) -> tuple:
+        """Return (free_vars, nonlocal_vars) for fdef.
+
+        free_vars: outer-scope names referenced in fdef's body that are not
+        locally bound (params / non-nonlocal assigns).
+        nonlocal_vars: subset of free_vars declared `nonlocal` in the body;
+        these must be captured by reference (boxed cell) so mutations are shared."""
         local_names: set = set(fdef.params)
         if fdef.vararg:
             local_names.add(fdef.vararg)
         if fdef.kwarg:
             local_names.add(fdef.kwarg)
-        # Collect names that are assigned (bound) inside the body.
+        # Collect names declared `nonlocal` — exclude them from local_names so
+        # they appear in free_vars even when assigned inside the body.
+        nonlocal_names: set = set()
+        def _collect_nonlocal(stmts: list) -> None:
+            for s in stmts:
+                if isinstance(s, A.Nonlocal):
+                    nonlocal_names.update(s.names)
+        _collect_nonlocal(fdef.body)
+        # Collect names that are assigned (bound) inside the body (skip nonlocal).
         def _collect_assigned(stmts: list) -> None:
             for s in stmts:
                 if isinstance(s, A.Assign):
-                    local_names.add(s.target)
+                    if s.target not in nonlocal_names:
+                        local_names.add(s.target)
                 elif isinstance(s, A.AugAssign):
-                    local_names.add(s.target)
+                    if s.target not in nonlocal_names:
+                        local_names.add(s.target)
                 elif isinstance(s, A.For):
-                    if isinstance(s.var, str):
+                    if isinstance(s.var, str) and s.var not in nonlocal_names:
                         local_names.add(s.var)
                 elif isinstance(s, A.If):
                     _collect_assigned(s.then)
@@ -150,7 +163,9 @@ class Parser:
             "ZeroDivisionError", "NotImplementedError", "OverflowError",
             "True", "False", "None",
         }
-        return [n for n in sorted(referenced - local_names) if n not in BUILTINS]
+        free = [n for n in sorted(referenced - local_names) if n not in BUILTINS]
+        nl = [n for n in free if n in nonlocal_names]
+        return free, nl
 
     def parse(self) -> A.Module:
         funcs: list[A.FuncDef] = []
@@ -732,11 +747,17 @@ class Parser:
                 decorators = self._eat_decorators()
                 fdef = self._parse_funcdef(decorators=decorators)
                 fdef.is_lifted = True
-                free_vars = self._find_free_vars(fdef)
+                free_vars, nonlocal_vars = self._find_free_vars(fdef)
                 fdef.free_vars = free_vars
+                fdef.nonlocal_vars = nonlocal_vars
                 self._nested_funcs.append(fdef)
                 if free_vars:
-                    return A.ClosureBind(func_name=fdef.name, free_vars=free_vars, pos=fdef.pos)
+                    return A.ClosureBind(
+                        func_name=fdef.name,
+                        free_vars=free_vars,
+                        nonlocal_vars=nonlocal_vars,
+                        pos=fdef.pos,
+                    )
                 return A.Pass(pos=fdef.pos)
             if t.value == "import":
                 return self._parse_import()
