@@ -312,6 +312,8 @@ class FuncSig:
     param_defaults: list = field(default_factory=list)
     # Name of the `*args` parameter (the trailing list slot), or None.
     vararg: Optional[str] = None
+    # Name of the `**kwargs` parameter (the trailing dict slot), or None.
+    kwarg: Optional[str] = None
     # Per-slot kinds when the body returns a tuple (`return a, b`), so a call
     # site can unpack `x, y = obj.m()`. None when it doesn't return a tuple.
     ret_tuple: object = None
@@ -1147,6 +1149,7 @@ class SemaAnalyzer:
                 param_names=list(f.params),
                 param_defaults=list(f.defaults),
                 vararg=f.vararg,
+                kwarg=f.kwarg,
             )
 
         # Infer which functions return a tuple, and the shape of that tuple,
@@ -1235,6 +1238,7 @@ class SemaAnalyzer:
                     param_names=list(m.params),
                     param_defaults=list(m.defaults),
                     vararg=m.vararg,
+                    kwarg=m.kwarg,
                     ret_tuple=self._scan_tuple_return(m.body),
                     decorators=list(getattr(m, "decorators", [])),
                     returns_self=mr is None and self._method_returns_self(m.body),
@@ -4692,6 +4696,7 @@ class SemaAnalyzer:
             sig.vararg,
             e.pos,
             e.method,
+            kwarg=sig.kwarg,
         )
 
     def _bind_args(
@@ -4702,6 +4707,7 @@ class SemaAnalyzer:
         vararg,
         pos,
         label,
+        kwarg=None,
     ) -> None:
         """Rewrite a call's (positional, keyword) arguments into a single
         positional list matching `names`, so codegen sees an ordinary call.
@@ -4710,9 +4716,13 @@ class SemaAnalyzer:
         Keyword args are matched onto positions by name; omitted params fall
         back to their default. With a `*args` parameter (the trailing slot),
         surplus positionals are packed into a ListLit passed in that slot.
+        With a `**kwargs` parameter, excess keyword arguments are packed into
+        a DictLit passed as a final trailing dict-typed slot.
         """
-        fixed_names = names[:-1] if vararg is not None else names
-        fixed_defaults = defaults[:-1] if vararg is not None else defaults
+        # Strip trailing special slots (*args and/or **kwargs) from the fixed param list.
+        tail = (1 if vararg is not None else 0) + (1 if kwarg is not None else 0)
+        fixed_names = names[:-tail] if tail else names
+        fixed_defaults = defaults[:-tail] if tail else defaults
         nfixed = len(fixed_names)
         # Pre-size the slot list with None placeholders. Built with an explicit
         # loop rather than `[None] * nfixed` so this stays self-compilable
@@ -4730,17 +4740,22 @@ class SemaAnalyzer:
                 raise SemaError(
                     f"{label}() takes {nfixed} argument(s), got {len(e.args)}", pos
                 )
+        excess_kw: list = []
         for kname, kexpr in e.kwargs:
             if kname not in fixed_names:
-                raise SemaError(
-                    f"{label}() got an unexpected keyword argument {kname!r}", pos
-                )
-            idx = fixed_names.index(kname)
-            if slots[idx] is not None:
-                raise SemaError(
-                    f"{label}() got multiple values for argument {kname!r}", pos
-                )
-            slots[idx] = kexpr
+                if kwarg is not None:
+                    excess_kw.append((kname, kexpr))
+                else:
+                    raise SemaError(
+                        f"{label}() got an unexpected keyword argument {kname!r}", pos
+                    )
+            else:
+                idx = fixed_names.index(kname)
+                if slots[idx] is not None:
+                    raise SemaError(
+                        f"{label}() got multiple values for argument {kname!r}", pos
+                    )
+                slots[idx] = kexpr
         for i in range(nfixed):
             if slots[i] is None:
                 if fixed_defaults[i] is not None:
@@ -4753,6 +4768,13 @@ class SemaAnalyzer:
         new_args = list(slots)
         if vararg is not None:
             new_args.append(A.ListLit(elems=extra, pos=pos))
+        if kwarg is not None:
+            kw_keys: list = []
+            kw_vals: list = []
+            for kname, kexpr in excess_kw:
+                kw_keys.append(A.StrLit(value=kname, pos=pos))
+                kw_vals.append(kexpr)
+            new_args.append(A.DictLit(keys=kw_keys, values=kw_vals, pos=pos, value_type="any"))
         e.args = new_args
         e.kwargs = []
 
@@ -5067,7 +5089,7 @@ class SemaAnalyzer:
             # Plain positional calls keep the precise arity diagnostics; calls
             # with keyword args or to a `*args` function are validated by the
             # binder instead.
-            if sig.vararg is None and not e.kwargs:
+            if sig.vararg is None and sig.kwarg is None and not e.kwargs:
                 required = sig.arity - sig.n_defaults
                 if not (required <= len(e.args) <= sig.arity):
                     if required == sig.arity:
@@ -5083,7 +5105,8 @@ class SemaAnalyzer:
             # (defaults filled, keyword args placed, varargs packed) so codegen
             # always sees a fixed-shape call.
             self._bind_args(
-                e, sig.param_names, sig.param_defaults, sig.vararg, e.pos, e.func
+                e, sig.param_names, sig.param_defaults, sig.vararg, e.pos, e.func,
+                kwarg=sig.kwarg,
             )
             for a in e.args:
                 self._check_expr(a, scope)
@@ -5144,7 +5167,7 @@ class SemaAnalyzer:
             else:
                 _, sig = init
                 expected = sig.arity - 1
-                if sig.vararg is None and not e.kwargs:
+                if sig.vararg is None and sig.kwarg is None and not e.kwargs:
                     required = expected - sig.n_defaults
                     if not (required <= len(e.args) <= expected):
                         if required == expected:
@@ -5165,6 +5188,7 @@ class SemaAnalyzer:
                     sig.vararg,
                     e.pos,
                     e.func,
+                    kwarg=sig.kwarg,
                 )
             for a in e.args:
                 self._check_expr(a, scope)

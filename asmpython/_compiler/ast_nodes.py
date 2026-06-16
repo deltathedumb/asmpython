@@ -57,6 +57,9 @@ class FuncDef:
     # positional arguments into a list and pass it there, so the callee and the
     # register-spill prologue treat it as an ordinary (list) parameter.
     vararg: "Optional[str]" = None
+    # Name of the `**kwargs` parameter, or None. Call sites pack excess keyword
+    # arguments into a DictLit passed as a trailing dict-typed slot.
+    kwarg: "Optional[str]" = None
     # Set when the function was marked `@assembly_func`: `asm_body` is the raw
     # NASM lifted from the docstring (emitted verbatim as the body) and
     # `asm_symbol` is the label to define (defaults to `name`). When `asm_body`

@@ -11,6 +11,15 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **`**kwargs` capture**: excess keyword arguments at call sites are now packed
+  into a `dict` and passed as a trailing argument to the callee. Functions
+  declared with `**kwargs` receive the overflow as a live `dict[str, any]`
+  parameter — key iteration (`for k in kwargs:`), containment (`"x" in kwargs`),
+  and `len(kwargs)` all work. Value subscript access (`kwargs["key"]`) returns
+  `any`-typed values; typed reads require an annotated variable (`x: int = kwargs["key"]`
+  once annotated assignment lands). The `kwarg` slot is represented as an
+  ordinary parameter at the end of the param list so codegen requires no changes.
+
 - **Docs restructured into `docs/` directory**: `docs/index.html` covers
   language, asmlib, assembly, targets, and reference; `docs/stdlib.html`
   covers all stdlib modules including the `asmlib.*` modules (now part of the

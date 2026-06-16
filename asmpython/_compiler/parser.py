@@ -263,6 +263,7 @@ class Parser:
         defaults: list = []  # parallel to params; None means required
         param_types: list = []  # parallel to params; None means unannotated
         vararg: str | None = None
+        kwarg: str | None = None
         first = True
         while not self._check("OP", ")"):
             if not first:
@@ -270,11 +271,12 @@ class Parser:
                 if self._check("OP", ")"):
                     break  # trailing comma
             first = False
-            # `**kwargs`: accepted so source parses; asmpython doesn't model
-            # keyword-collection, so the name is discarded.
             if self._check("OP", "**"):
                 self._eat()
-                self._expect("NAME")
+                kwarg = self._expect("NAME").value
+                params.append(kwarg)
+                param_types.append(("dict", None))
+                defaults.append(None)
                 continue
             if self._check("OP", "*"):
                 self._eat()
@@ -317,6 +319,7 @@ class Parser:
             param_types=param_types,
             ret_type=ret_type,
             vararg=vararg,
+            kwarg=kwarg,
             asm_body=asm_body,
             asm_symbol=asm_symbol,
             decorators=list(decorators) if decorators else [],
