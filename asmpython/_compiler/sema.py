@@ -4290,6 +4290,8 @@ class SemaAnalyzer:
                     if kt not in ("str", "any", "int") and not kt.startswith("instance:"):
                         raise SemaError("dict.get() key must be a str", e.pos)
                     e.inferred_type = self._dict_value_type(e.obj, scope)
+                    if len(e.args) == 1:
+                        e.dict_get_none_default = True
                 elif e.method == "contains":
                     if len(e.args) != 1:
                         raise SemaError("dict.contains() takes 1 argument", e.pos)

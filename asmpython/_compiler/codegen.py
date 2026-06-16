@@ -1295,6 +1295,8 @@ class Codegen:
             # min(xs, key=...) / max(xs, key=...) (or plain min/max over a
             # str list, which also needs the general scan): best-(elem, key)
             # tracking slots.
+            if expr.func in ("min", "max") and len(expr.args) >= 3:
+                self._cl_define(info, f"__mmvar_best_{id(expr)}")
             if expr.func in ("min", "max") and len(expr.args) == 1:
                 arg0 = expr.args[0]
                 if isinstance(arg0, A.Name):
@@ -11478,6 +11480,24 @@ class Codegen:
                 self.gen_expr(e.args[1], info)
                 self.emitf("mov rbx, rax", "pop rax", "cmp rax, rbx", f"{cmov} rax, rbx")
                 return
+            if len(e.args) >= 3:
+                best_slot = info.locals_[f"__mmvar_best_{id(e)}"]
+                # cmov meaning changes when we do cmp rax,rbx (candidate,best):
+                # for max: cmovl rax,rbx → if candidate < best, take best
+                # for min: cmovg rax,rbx → if candidate > best, take best
+                cmov_var = "cmovl" if e.func == "max" else "cmovg"
+                self.gen_expr(e.args[0], info)
+                self.emitf(f"mov [rbp{best_slot:+d}], rax")
+                for arg in e.args[1:]:
+                    self.gen_expr(arg, info)
+                    self.emitf(
+                        f"mov rbx, [rbp{best_slot:+d}]",
+                        "cmp rax, rbx",
+                        f"{cmov_var} rax, rbx",
+                        f"mov [rbp{best_slot:+d}], rax",
+                    )
+                self.emitf(f"mov rax, [rbp{best_slot:+d}]")
+                return
             if len(e.args) == 1:
                 arg = e.args[0]
                 if isinstance(arg, A.Name):
@@ -12699,6 +12719,29 @@ class Codegen:
             self._emit_print_str_ptr_no_newline()
             return
         self.gen_expr(expr, info)
+        if getattr(expr, "dict_get_none_default", False):
+            # dict.get(k) with no explicit default: 0 means "key missing" → None
+            _dg_nonzero = self.fresh("dg_nonzero")
+            _dg_done = self.fresh("dg_done")
+            if t == "float":
+                # float zero is 0x0000...0 in IEEE754, so test rax works
+                self.emitf(f"test rax, rax", f"jnz {_dg_nonzero}")
+                self._emit_print_none_no_newline()
+                self.emitf(f"jmp {_dg_done}")
+                self.label(_dg_nonzero)
+                self.emitf("movq xmm0, rax")
+                self._emit_print_float_no_newline()
+            else:
+                self.emitf(f"test rax, rax", f"jnz {_dg_nonzero}")
+                self._emit_print_none_no_newline()
+                self.emitf(f"jmp {_dg_done}")
+                self.label(_dg_nonzero)
+                if t == "str":
+                    self._emit_print_str_ptr_no_newline()
+                else:
+                    self._emit_print_int_no_newline()
+            self.label(_dg_done)
+            return
         if t == "str":
             self._emit_print_str_ptr_no_newline()
         elif t == "int" and A.is_bool_expr(expr):
