@@ -3873,18 +3873,21 @@ class Codegen:
             "ret",
         )
 
-        # ---- _runtime_dict_get: panic if missing.
+        # ---- _runtime_dict_get: raise KeyError if missing.
         # rax = header, rbx = key -> rax = value
+        _ke_msg, _ = self.intern_string("KeyError: key not in dict")
         self.label("_runtime_dict_get")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
         self.emitf("call _runtime_dict_lookup_slot")
         self.emitf(
             "test rax, rax",
             "jnz ._dg_found",
-            # Missing key -> abort. Print a friendly message and exit.
-            "lea rax, [_runtime_dict_key_error_msg]",
+            # Missing key -> raise catchable KeyError.
+            f"lea rax, [rel {_ke_msg}]",
+            f"mov rbx, {self._exc_type_id('KeyError')}",
+            "leave",
+            "jmp _runtime_raise",
         )
-        self._emit_panic_message()
         self.label("._dg_found")
         self.emitf("mov rax, [rax+8]", "leave", "ret")
 
