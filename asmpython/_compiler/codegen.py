@@ -679,6 +679,7 @@ class Codegen:
         "_runtime_list_pop",
         "_runtime_list_del",
         "_runtime_list_extend",
+        "_runtime_list_repeat",
         "_runtime_list_reverse",
         "_runtime_list_insert",
         "_runtime_dict_clear",
@@ -1157,6 +1158,9 @@ class Codegen:
             # the right operand is evaluated (right eval may contain calls).
             if expr.op == "+" and "list" in (lt, rt):
                 self._cl_define(info, f"__listcat_{id(expr)}")
+            # List repeat (list * int) needs a slot for the list operand.
+            if expr.op == "*" and "list" in (lt, rt):
+                self._cl_define(info, f"__listrep_{id(expr)}")
             # An instance operand may overload the operator via a dunder
             # method (`Path / "sub"` -> __truediv__): park `self` across the
             # other operand's evaluation (which may itself call).
@@ -3969,6 +3973,7 @@ class Codegen:
         self._emit_sort_helpers()
         self._emit_sort_pairs_helpers()
         self._emit_list_extend_helper()
+        self._emit_list_repeat_helper()
         self._emit_list_slice_helper()
         self._emit_list_slice_step_helper()
         self._emit_list_reverse_helper()
@@ -4401,6 +4406,54 @@ class Codegen:
         )
         self.label(done)
         self.emitf("mov rax, [rbp-8]", "leave", "ret")
+
+    def _emit_list_repeat_helper(self) -> None:
+        """`_runtime_list_repeat`: [x, y] * n -> new list with src repeated n times.
+
+        In:  rax = src list/tuple header, rbx = count (int64).
+        Out: rax = new list header (len = src.len * n, or empty if n <= 0).
+
+        Strategy: loop count times, calling _runtime_list_extend each iteration
+        to append a full copy of src to the result list.
+        Frame: [rbp-8]=src, [rbp-16]=count, [rbp-24]=result, [rbp-32]=i.
+        +32 bytes shadow = 80; round up to 96 (multiple of 16).
+        """
+        self.label("_runtime_list_repeat")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 96")
+        self.emitf(
+            "mov [rbp-8], rax",   # src header
+            "mov [rbp-16], rbx",  # count
+        )
+        # Allocate empty result list (cap 4)
+        self.emitf("mov rcx, 24", "call malloc")
+        self.emitf(
+            "mov qword [rax+0], 4",   # cap
+            "mov qword [rax+8], 0",   # len
+            "mov [rbp-24], rax",      # result
+        )
+        self.emitf("mov rcx, 32", "call malloc")  # 4 * 8 = 32 bytes initial buffer
+        self.emitf(
+            "mov rbx, [rbp-24]",
+            "mov [rbx+16], rax",  # LIST_BUF_OFF = 16
+        )
+        # Loop count times, extending result with src each pass.
+        self.emitf("mov qword [rbp-32], 0")  # i = 0
+        _lrep_top = self.fresh("lrep_top")
+        _lrep_done = self.fresh("lrep_done")
+        self.label(_lrep_top)
+        self.emitf(
+            "mov rax, [rbp-32]",
+            "cmp rax, [rbp-16]",
+            f"jge {_lrep_done}",
+            "mov rax, [rbp-24]",  # dst
+            "mov rbx, [rbp-8]",   # src
+            "call _runtime_list_extend",
+            "mov [rbp-24], rax",  # update result (may have reallocated)
+            "inc qword [rbp-32]",
+            f"jmp {_lrep_top}",
+        )
+        self.label(_lrep_done)
+        self.emitf("mov rax, [rbp-24]", "leave", "ret")
 
     def _emit_list_slice_helper(self) -> None:
         """`_runtime_list_slice`: `xs[start:stop]` -> new list (no step yet).
@@ -10146,6 +10199,20 @@ class Codegen:
                 "mov rbx, rax",
                 f"mov rax, [rbp{slot:+d}]",
                 "call _runtime_list_extend",  # rax = copy with right appended
+            )
+            return
+        # List repetition: list * int  or  int * list  -> _runtime_list_repeat.
+        if e.op == "*" and "list" in (lt, rt):
+            slot = info.locals_[f"__listrep_{id(e)}"]
+            list_expr = e.left if lt == "list" else e.right
+            count_expr = e.right if lt == "list" else e.left
+            self.gen_expr(list_expr, info)
+            self.emitf(f"mov [rbp{slot:+d}], rax")
+            self.gen_expr(count_expr, info)
+            self.emitf(
+                "mov rbx, rax",
+                f"mov rax, [rbp{slot:+d}]",
+                "call _runtime_list_repeat",
             )
             return
         self.gen_expr(e.left, info)

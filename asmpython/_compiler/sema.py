@@ -3244,6 +3244,15 @@ class SemaAnalyzer:
             if e.op == "+" and lt in ("list", "any", "int") and rt in ("list", "any", "int") and "list" in (lt, rt):
                 e.inferred_type = "list"  # type: ignore
                 return
+            # List repetition: [x] * n  or  n * [x]  -> list.
+            if e.op == "*" and (
+                (lt == "list" and rt in ("int", "any")) or
+                (rt == "list" and lt in ("int", "any"))
+            ):
+                e.inferred_type = "list"  # type: ignore
+                list_side = e.left if lt == "list" else e.right
+                e.list_el_type = self._list_el_type(list_side, scope)  # type: ignore
+                return
             # Numeric-only ops; reject lists/dicts/instances.
             for side, t in (("left", lt), ("right", rt)):
                 if t not in ("int", "float"):
