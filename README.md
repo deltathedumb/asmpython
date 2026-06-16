@@ -1,11 +1,16 @@
 # asmpython
 
-**A Pixelated Dream project.** asmpython compiles Python source to native x86-64 executables via NASM — no VM, no interpreter, no pip dependencies at runtime. Write `.py`, get `.exe` or ELF.
+**A Pixelated Dream project.** asmpython compiles Python source to native
+x86-64 executables via NASM — no VM, no interpreter, no pip dependencies at
+runtime. Write `.py`, get `.exe` or ELF.
 
 ```sh
 python -m asmpython hello.py          # compile for your host platform
 ./hello                               # or hello.exe on Windows
 ```
+
+Current release: **1.0.2** — 1.1.0 (CPython parity expansion) in development.
+See [roadmap.md](roadmap.md) for the full version plan.
 
 ---
 
@@ -17,8 +22,8 @@ pip install asmpython
 
 This installs the `asmpython` command (and `python -m asmpython`). The
 compiler itself is pure Python with no runtime dependencies — but it shells
-out to **`nasm`** and **`gcc`** to assemble and link, so make sure both are on
-your `PATH` (see [Toolchain requirements](#toolchain-requirements)). On
+out to **`nasm`** and **`gcc`** to assemble and link, so make sure both are
+on your `PATH` (see [Toolchain requirements](#toolchain-requirements)). On
 Windows, `asmpython.bat` from this repo can fetch a portable NASM/MinGW for
 you instead.
 
@@ -37,9 +42,13 @@ pip install -e .
 | `windows` (default on Windows) | PE64 `.exe` | nasm, gcc (MinGW) |
 | `linux` (default on Linux) | ELF64 | nasm, gcc |
 | `freestanding` | Multiboot1 flat binary | nasm only — boots in QEMU |
-| `freestanding16` | Raw 512-byte BIOS MBR + payload | nasm only — no bootloader needed |
+| `freestanding16` | Raw 512-byte BIOS MBR + payload | nasm only |
 
-The freestanding target produces a bare-metal kernel binary with no libc, no OS, and no linker step. It includes a VGA text-mode runtime, COM1 serial output, a bump allocator, and a long-mode setup stub. The `freestanding16` target writes a raw BIOS MBR image that transitions real mode → protected mode → long mode entirely in the output binary.
+The freestanding target produces a bare-metal kernel binary with no libc, no
+OS, and no linker step. It includes a VGA text-mode runtime, COM1 serial
+output, a bump allocator, and a long-mode setup stub. The `freestanding16`
+target writes a raw BIOS MBR image that transitions real mode → protected
+mode → long mode entirely in the output binary.
 
 ---
 
@@ -92,8 +101,8 @@ python -m asmpython <source.py> [options]
 ```
 
 Every diagnostic includes an error code in brackets (e.g. `[E002]`). Pass it
-to `asmpython --explain <CODE>` for a full description, or use `--check --json`
-for machine-readable output in editor integrations.
+to `asmpython --explain <CODE>` for a full description, or use `--check
+--json` for machine-readable output in editor integrations.
 
 ---
 
@@ -103,15 +112,26 @@ for machine-readable output in editor integrations.
 
 | Module | Key symbols |
 | ------ | ----------- |
-| `math` | `sqrt`, `sin`, `cos`, `log`, `pow`, `pi`, `e`, … (22 functions + 5 constants) |
+| `math` | `sqrt`, `sin`, `cos`, `log`, `pow`, `pi`, `e`, … (22 functions) |
 | `os` | `system`, `getenv`, `_exit`, `fopen`/`fgetc`/`fclose`, `access` |
 | `sys` | `exit`, `getpid`, `getenv`, `abort`, `version`, `maxsize` |
 | `time` | `time`, `sleep`, `clock`, `difftime` |
 | `random` | `seed`, `rand`, `RAND_MAX` |
+| `io` | `StringIO`, `BytesIO`, `FileIO`, `TextIOWrapper` |
+| `pathlib` | `Path` (`.exists`, `.read_text`, `.write_text`, `/` operator, …) |
+| `json` | `loads`, `dumps` |
+| `struct` | `pack`, `unpack`, `calcsize` |
+| `enum` | `Enum`, `IntEnum`, `IntFlag`, `auto` |
+| `fractions` | `Fraction` (full arithmetic via dunder dispatch) |
+| `contextlib` | `suppress`, `nullcontext`, `closing`, `ExitStack` |
+| `collections` | `deque`, `Counter`, `defaultdict`, `OrderedDict` |
+| `statistics` | `mean`, `median`, `stdev`, `variance` |
+| `uuid` | `uuid4` |
+| `argparse` | `ArgumentParser`, `add_argument`, `parse_args` (partial) |
 
 ### asmlib — hardware, network, and GUI
 
-`asmlib` is now part of the standard library. Import its modules directly:
+`asmlib` is part of the standard library. Import its modules directly:
 
 ```python
 from asmlib import hardware, network, gui
@@ -119,8 +139,8 @@ from asmlib import hardware, network, gui
 
 #### `asmlib.hardware`
 
-Low-level hardware access for freestanding targets: console I/O, CPUID, RDTSC,
-memory-mapped I/O, and port-mapped I/O.
+Low-level hardware access for freestanding targets: console I/O, CPUID,
+RDTSC, memory-mapped I/O, and port-mapped I/O.
 
 ```python
 from asmlib import hardware
@@ -169,40 +189,84 @@ while win.is_open():
 ### Types
 
 - **`int`** — 64-bit signed
-- **`float`** — IEEE-754 double; auto-promoted in mixed arithmetic; true division always returns float
-- **`str`** — nul-terminated UTF-8; supports concat (`+`), repeat (`*`), comparison (`==`/`!=`), ordering (`<`/`>`/`<=`/`>=`), indexing, slicing (step supported), `in` / `not in`, and iteration
-- **`bool`** / **`None`** — aliases for 1 / 0 / 0
+- **`float`** — IEEE-754 double; auto-promoted in mixed arithmetic; true
+  division always returns float
+- **`str`** — nul-terminated UTF-8; supports concat (`+`), repeat (`*`),
+  comparison, ordering, indexing, slicing (with step), `in`/`not in`,
+  iteration, and all common methods
+- **`bool`** / **`None`** — aliases for `1` / `0`
 
 ### String methods
 
-`upper`, `lower`, `strip` / `lstrip` / `rstrip`, `startswith`, `endswith`, `find`, `count`, `replace`, `split` (with optional `sep` and `maxsplit`), `rsplit`, `join`, `splitlines`, `partition`, `isdigit`, `isalpha`, `isspace`, `isupper`, `islower`
+`upper`, `lower`, `strip`/`lstrip`/`rstrip`, `startswith`, `endswith`,
+`find`, `count`, `replace`, `split` (with optional `sep` and `maxsplit`),
+`rsplit`, `join`, `splitlines`, `partition`, `isdigit`, `isalpha`, `isspace`,
+`isupper`, `islower`
 
 ### Collections
 
-- **`list`** — heap-allocated, dynamic capacity; supports `int`, `str`, `float` elements; `.append`, `.pop`, `.copy`, indexing, slicing, negative indices, iteration, comprehensions
-- **`dict`** — open-addressed hashtable; supports `str` keys; `.get`, `.contains`, `.keys`, `.values`, `.items`, `.update`, iteration, comprehensions
-- **`set`** — membership testing, `.add`, `frozenset`
-- **Tuples** — unpacking assignment, `for k, v in pairs:`, `enumerate`, `zip`
+- **`list`** — dynamic capacity; `int`, `str`, `float`, and instance
+  elements; `.append`, `.pop`, `.copy`, indexing, slicing, negative indices,
+  iteration, comprehensions, `*` unpack in calls
+- **`dict`** — open-addressed hashtable; `str` keys; `.get`, `.keys`,
+  `.values`, `.items`, `.update`, `.pop`, iteration, comprehensions
+- **`set`** — membership testing, `.add`, `.remove`, `frozenset`, set
+  operators (`|`, `&`, `-`, `^`)
+- **Tuples** — unpacking assignment, `for k, v in pairs:`, `enumerate`,
+  `zip`, heterogeneous-element tuples as return values
 
 ### Control flow
 
-`if`/`elif`/`else`, `while`, `for … in range/list/dict/str/tuple/enumerate/zip`, `break`, `continue`, `pass`, ternary expressions (`a if c else b`)
+`if`/`elif`/`else`, `while`, `for … in range/list/dict/str/tuple/enumerate/
+zip/custom-iter`, `break`, `continue`, `pass`, ternary `a if c else b`,
+`match`/`case` (structural pattern matching)
 
 ### Functions
 
-Default arguments, `*args`, `**kwargs`, type annotations (parsed, not enforced), closures, `lambda`, decorators, first-class functions
+Default arguments, `*args`, `**kwargs`, type annotations (parsed, not
+enforced), closures, `lambda`, decorators, first-class functions, `super()`
 
 ### Classes
 
-Single inheritance, `__init__`, instance attributes (any type), method dispatch, `super()`, `isinstance`, `hasattr`/`getattr`, `__str__`
+Single inheritance, `__init__`, instance attributes (any type), method
+dispatch, `@classmethod`, `@staticmethod`, `@property` (getter + setter),
+`isinstance`, `hasattr`/`getattr`/`setattr`, `super()`
+
+#### Dunder / operator protocol
+
+All standard dunder methods dispatch to user-defined implementations when
+the class defines them:
+
+- **Arithmetic** — `__add__`/`__radd__`, `__sub__`/`__rsub__`,
+  `__mul__`/`__rmul__`, `__truediv__`/`__rtruediv__`, `__floordiv__`,
+  `__mod__`, `__pow__`, `__matmul__` (all with reflected variants)
+- **Bitwise** — `__and__`, `__or__`, `__xor__`, `__lshift__`,
+  `__rshift__` (+ reflected)
+- **Unary** — `__neg__`, `__pos__`, `__invert__`;
+  `__abs__` via `abs()`; `__hash__` via `hash()`
+- **Comparison** — `__eq__`/`__ne__`, `__lt__`/`__le__`/`__gt__`/`__ge__`
+  (with reflected fallback)
+- **Containers** — `__len__`, `__contains__`, `__getitem__`, `__setitem__`
+- **Iteration** — `__iter__` + `__next__` (`for x in obj:` calls both)
+- **Callable** — `__call__` (`obj(args)` dispatches here)
+- **Context manager** — `__enter__`, `__exit__` (`with obj:` works)
+- **Truthiness** — `__bool__` or `__len__` (in `if obj:` / `while obj:`)
+- **Stringify** — `__str__` (print/str/f-strings), `__repr__`
 
 ### Exceptions
 
-`try`/`except`/`else`/`finally`, typed `except ValueError:`, `raise`, re-raise, `assert`
+`try`/`except`/`else`/`finally`, typed `except ValueError:`, `raise`,
+bare re-raise inside a handler, `assert`
+
+### Context managers
+
+`with obj as x:` — calls `__enter__` and `__exit__`. Works with `io.StringIO`,
+`io.BytesIO`, `open()`, and any class that defines the two methods.
 
 ### Modules
 
-`import`, `from … import`, relative imports, inline assembly (`@assembly_func`, `include("pkg.asmpkg")`)
+`import`, `from … import`, relative imports, inline assembly (`@assembly_func`,
+`include("pkg.asmpkg")`)
 
 ### Inline assembly
 
@@ -217,13 +281,15 @@ def popcnt(x: int) -> int:
     """
 ```
 
-The docstring is raw NASM emitted verbatim as the function body. Arguments arrive in the platform's integer-arg registers.
+The docstring is raw NASM emitted verbatim as the function body. Arguments
+arrive in the platform's integer-arg registers.
 
 ---
 
 ## Assembly class
 
-`from asmpython.assembly import Assembly` gives a chainable builder for generating NASM programmatically:
+`from asmpython.assembly import Assembly` gives a chainable builder for
+generating NASM programmatically:
 
 ```python
 from asmpython.assembly import Assembly
@@ -233,7 +299,8 @@ a.mov("rax", 0).xor("rbx", "rbx").label("loop").inc("rax").dec("rbx").jnz("loop"
 print(a.emit())
 ```
 
-Supports 150+ instructions: full integer ALU, SSE/AVX, atomics, system calls, all directives.
+Supports 150+ instructions: full integer ALU, SSE/AVX, atomics, system calls,
+all directives.
 
 ---
 
@@ -251,7 +318,9 @@ Supports 150+ instructions: full integer ALU, SSE/AVX, atomics, system calls, al
 python -m tests.runner
 ```
 
-The harness reads `tests/cases/*.py` (positive: must compile and produce matching stdout) and `tests/cases_fail/*.py` (negative: must fail with a matching error substring).
+The harness reads `tests/cases/*.py` (positive: must compile and produce
+matching stdout) and `tests/cases_fail/*.py` (negative: must fail with a
+matching error substring).
 
 ```python
 # expect:
@@ -278,17 +347,18 @@ asmpython/
 ├── __init__.py         package version
 ├── __main__.py         python -m asmpython entry
 ├── assembly/           @assembly_func, Assembly builder, include()
-├── stdlib/             math, os, sys, time, random bindings
+├── stdlib/             math, os, sys, time, random, io, fractions, …
 ├── asmlib/             hardware, network, gui bindings
 └── _compiler/
     ├── lexer.py        indent-aware tokenizer
     ├── parser.py       recursive-descent parser
     ├── ast_nodes.py    AST dataclasses + expr_type()
     ├── sema.py         name resolution, type inference, import binding
-    ├── codegen.py      target-agnostic code generation
+    ├── codegen.py      target-agnostic code generation (~11 000 lines)
     ├── target_windows.py  PE64, MS x64 ABI
     ├── target_linux.py    ELF64, System V AMD64 ABI
-    ├── target_freestanding.py  Multiboot1 flat binary, bare-metal runtime
+    ├── target_freestanding.py  Multiboot1, bare-metal runtime
+    ├── target_freestanding16.py  BIOS MBR + 16-bit bootstrap
     └── driver.py       invokes nasm + gcc
 ```
 
@@ -298,4 +368,5 @@ asmpython/
 
 ## License
 
-MIT. See [CHANGELOG.md](CHANGELOG.md) for version history.
+MIT. See [CHANGELOG.md](CHANGELOG.md) for version history and
+[roadmap.md](roadmap.md) for planned releases.
