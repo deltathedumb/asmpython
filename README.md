@@ -37,8 +37,9 @@ pip install -e .
 | `windows` (default on Windows) | PE64 `.exe` | nasm, gcc (MinGW) |
 | `linux` (default on Linux) | ELF64 | nasm, gcc |
 | `freestanding` | Multiboot1 flat binary | nasm only — boots in QEMU |
+| `freestanding16` | Raw 512-byte BIOS MBR + payload | nasm only — no bootloader needed |
 
-The freestanding target produces a bare-metal kernel binary with no libc, no OS, and no linker step. It includes a VGA text-mode runtime, COM1 serial output, a bump allocator, and a long-mode setup stub.
+The freestanding target produces a bare-metal kernel binary with no libc, no OS, and no linker step. It includes a VGA text-mode runtime, COM1 serial output, a bump allocator, and a long-mode setup stub. The `freestanding16` target writes a raw BIOS MBR image that transitions real mode → protected mode → long mode entirely in the output binary.
 
 ---
 
@@ -73,23 +74,27 @@ qemu-system-x86_64 -kernel kernel.bin -serial stdio -display none
 ```text
 python -m asmpython <source.py> [options]
 
-  -o <path>          output path (default: source stem + .exe/.elf/.bin)
-  --target <t>       windows | linux | freestanding  (auto-detected)
-  --emit-asm         write .asm only, do not assemble
-  --keep             keep intermediate .obj / .o files
-  --check            front-end diagnostics only (no codegen)
-  --json             machine-readable JSON diagnostics on stderr
-  --explain <CODE>   print description for an error code (e.g. E014) and exit
-  --use-runtime-lib  link pre-built libasmpython_rt instead of inlining helpers
-  --onefile          single statically-linked binary (default)
-  --onedir           exe + shared runtime library in a bundle directory
-  --type executable  produce a binary (default)
-  --type library     produce a shared library (.dll / .so)
+  -o <path>              output path (default: source stem + platform ext)
+  --target <t>           windows | linux | freestanding | freestanding16
+  --emit-asm             write .asm only, do not assemble or link
+  --keep                 keep intermediate .obj / .o files
+  --check                front-end diagnostics only (no codegen)
+  --json                 machine-readable JSON diagnostics on stderr
+  --explain <CODE>       print error-code description and exit
+  --use-runtime-lib      link pre-built libasmpython_rt (smaller .asm)
+  --onefile              single statically-linked binary (default)
+  --onedir               exe + shared runtime library in a bundle directory
+  --type executable      produce an executable (default)
+  --type library         produce a shared library (.dll / .so)
+  --icon <path>          embed .ico/.png as exe icon resource (Windows only)
+  --selfhost             compile the compiler with itself
+  --nasm <path>          override nasm executable path
+  --gcc <path>           override gcc executable path
 ```
 
-Every diagnostic the compiler emits includes an error code in brackets (e.g.
-`[E002]`).  See [docs/error-codes.md](docs/error-codes.md) for the full
-reference and `asmpython --explain <CODE>` for inline descriptions.
+Every diagnostic includes an error code in brackets (e.g. `[E002]`). Pass it
+to `asmpython --explain <CODE>` for a full description, or use `--check --json`
+for machine-readable output in editor integrations.
 
 ---
 
@@ -107,7 +112,7 @@ reference and `asmpython --explain <CODE>` for inline descriptions.
 
 ### asmlib — hardware, network, and GUI
 
-`asmlib` provides bindings for hardware, network, and GUI that go well beyond what the C runtime offers.
+`asmlib` is now part of the standard library. Import its modules directly:
 
 ```python
 from asmlib import hardware, network, gui
@@ -115,52 +120,47 @@ from asmlib import hardware, network, gui
 
 #### `asmlib.hardware`
 
-Bare-metal port I/O, MMIO, RDTSC, CPUID, halt, interrupt control, PIC 8259A, PIT, PS/2 keyboard, and VGA color/cursor helpers. On hosted targets all functions stub-return 0; on `--target freestanding` they emit real `in`/`out`/`wrmsr` instructions.
+Low-level hardware access for freestanding targets: console I/O, CPUID, RDTSC,
+memory-mapped I/O, and port-mapped I/O.
 
 ```python
-from asmlib.hardware import out_byte, in_byte, halt, disable_interrupts
+from asmlib import hardware
 
-out_byte(0x3F8, ord('A'))   # write byte to COM1
-c = in_byte(0x60)           # read PS/2 scan code
-disable_interrupts()
-halt()
+hardware.console.clear()
+hardware.console.print_at(5, 5, "Hello!")
+tsc = hardware.cpu.rdtsc()
+hardware.port.out8(0x3F8, 0x41)   # write byte to COM1
 ```
 
 #### `asmlib.network`
 
-BSD-socket API: `socket`, `bind`, `connect`, `listen`, `accept`, `close`, `send`, `recv`, `send_all`, byte-order helpers (`htons`, `htonl`, `ntohs`, `ntohl`), `inet_addr`, `gethostname`, `errno`. Constants: `AF_INET`, `SOCK_STREAM`, `SOCK_DGRAM`, `PORT_HTTP`, `PORT_HTTPS`, `PORT_FTP`, `PORT_SSH`, `PORT_SMTP`, `INADDR_ANY`.
+TCP client/server using OS sockets.
 
 ```python
-from asmlib.network import socket, connect, send, recv, close
-from asmlib.network import AF_INET, SOCK_STREAM, PORT_HTTP
+from asmlib.network import TcpClient
 
-fd = socket(AF_INET, SOCK_STREAM, 0)
-connect(fd, "93.184.216.34", PORT_HTTP)
-send(fd, "GET / HTTP/1.0\r\n\r\n", 0)
-data = recv(fd, 4096)
-print(data)
-close(fd)
+client = TcpClient("example.com", 80)
+client.send("GET / HTTP/1.0\r\n\r\n")
+resp = client.recv(4096)
+client.close()
 ```
 
 #### `asmlib.gui`
 
-SDL2 bindings: window and renderer lifecycle, draw calls (`draw_point`, `draw_line`, `fill_rect`, `draw_rect`), event pump, keyboard and mouse state, timing. Constants: `INIT_VIDEO`, `WINDOW_SHOWN`, `EVENT_QUIT`, `EVENT_KEYDOWN`, `KEY_*`, `BUTTON_LEFT`, etc.
+Win32 native window with a software renderer — no SDL, no Qt.
 
 ```python
-from asmlib.gui import (init, create_window, create_renderer,
-                        set_draw_color, clear, present,
-                        fill_rect, poll_event, delay,
-                        INIT_VIDEO, WINDOW_SHOWN, EVENT_QUIT)
+from asmlib import gui
 
-init(INIT_VIDEO)
-win = create_window("demo", 640, 480, WINDOW_SHOWN)
-ren = create_renderer(win, -1, 0)
-set_draw_color(ren, 30, 30, 30, 255)
-clear(ren)
-set_draw_color(ren, 200, 80, 80, 255)
-fill_rect(ren, 100, 100, 200, 150)
-present(ren)
-delay(2000)
+win = gui.Window("My App", 800, 600)
+win.set_icon("app.ico")
+
+while win.is_open():
+    ev = win.poll_event()
+    win.clear(0x1E1E2E)
+    win.draw_rect(10, 10, 100, 50, 0xFF4444)
+    win.draw_text("Hello GUI", 20, 20, 0xFFFFFF)
+    win.present()
 ```
 
 ---

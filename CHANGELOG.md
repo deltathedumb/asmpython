@@ -11,6 +11,26 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **Docs restructured into `docs/` directory**: `docs/index.html` covers
+  language, asmlib, assembly, targets, and reference; `docs/stdlib.html`
+  covers all stdlib modules including the `asmlib.*` modules (now part of the
+  standard library). The root `docs.html` redirects to `docs/index.html` for
+  backwards compatibility. Cross-page nav links and per-page scroll-spy are
+  fully wired.
+
+- **`@classmethod` `cls.field` access**: reading and writing class variables
+  via `cls.field` inside a `@classmethod` body now works correctly. Previously
+  codegen passed `null` as `cls`, causing a segfault on any field access. Fixed
+  at sema level: the `cls` parameter name is tracked while checking a classmethod
+  body, and any `cls.attr` read or write is rewritten in-place to
+  `ClassName.attr`, hitting the existing class-variable static-storage path.
+
+- **Instance truthiness via `__bool__` / `__len__`**: `if obj:`, `while obj:`,
+  and `not obj` now dispatch to `__bool__` (preferred) or `__len__` (fallback)
+  on user-class instances. Classes with neither dunder remain unconditionally
+  truthy (pointer ≠ null). Dispatches through the platform ABI just like a
+  normal method call.
+
 - **`--icon <path.ico>` CLI flag** (`--target windows` only): embeds an
   `.ico` file as the executable's Windows icon resource via `windres` from
   the gcc toolchain, so the built `.exe` shows a custom icon in Explorer and

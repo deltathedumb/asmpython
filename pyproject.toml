@@ -32,7 +32,7 @@ asmpython = "asmpython._compiler.__main__:main"
 
 [project.urls]
 Repository = "https://github.com/deltathedumb/asmpython"
-Documentation = "https://github.com/deltathedumb/asmpython/blob/main/docs.html"
+Documentation = "https://github.com/deltathedumb/asmpython/blob/main/docs/index.html"
 Changelog = "https://github.com/deltathedumb/asmpython/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]

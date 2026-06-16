@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>asmpython — Standard Library</title>
+<style>
+:root {
+  --bg:       #0a0d11;
+  --surface:  #111418;
+  --surface2: #181c22;
+  --border:   #2a2f38;
+  --accent:   #4d94ff;
+  --accent2:  #82b4ff;
+  --green:    #2ea043;
+  --green2:   #56d364;
+  --orange:   #d4a520;
+  --red:      #f85149;
+  --purple:   #c083ff;
+  --muted:    #7a828e;
+  --text:     #bdc5cf;
+  --heading:  #e8edf3;
+  --code-bg:  #0d1117;
+  --tag-bg:   rgba(77,148,255,.10);
+  --nav-w:    260px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 16px; scroll-behavior: smooth; scroll-padding-top: 20px; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.7;
+  display: flex;
+  min-height: 100vh;
+}
+
+/* ── Nav ─────────────────────────────────── */
+nav {
+  width: var(--nav-w);
+  min-width: var(--nav-w);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 0 0 60px;
+  flex-shrink: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+nav::-webkit-scrollbar { width: 4px; }
+nav::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.nav-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 18px 18px;
+  border-bottom: 1px solid var(--border);
+  text-decoration: none;
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 10;
+}
+.nav-icon {
+  width: 34px; height: 34px;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--purple) 100%);
+  border-radius: 9px;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 13px; color: #fff; letter-spacing: -.5px;
+  flex-shrink: 0;
+}
+.nav-title { font-weight: 700; font-size: 14px; color: var(--heading); line-height: 1.2; }
+.nav-ver   { font-size: 10.5px; color: var(--muted); margin-top: 1px; }
+
+nav ul { list-style: none; padding: 8px 0; }
+nav li.sep {
+  font-size: 10px; font-weight: 700; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted);
+  padding: 16px 18px 4px; margin-top: 4px;
+}
+nav li a {
+  display: block;
+  padding: 4px 18px 4px 20px;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 13px;
+  border-left: 2px solid transparent;
+  transition: color .12s, border-color .12s, background .12s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+nav li a:hover { color: var(--accent2); background: rgba(255,255,255,.04); }
+nav li a.active { color: var(--accent); border-left-color: var(--accent); background: var(--tag-bg); }
+
+/* ── Main ─────────────────────────────────── */
+main {
+  flex: 1;
+  max-width: 900px;
+  padding: 52px 60px 120px;
+  min-width: 0;
+}
+
+/* ── Typography ───────────────────────────── */
+h1 { font-size: 2.2rem; color: var(--heading); font-weight: 800; line-height: 1.15; letter-spacing: -.02em; }
+h2 {
+  font-size: 1.3rem; color: var(--heading); font-weight: 700;
+  margin-top: 56px; padding-top: 22px;
+  border-top: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+h3 { font-size: 1rem; color: var(--heading); font-weight: 600; margin-top: 30px; }
+h4 { font-size: .82rem; color: var(--accent2); font-weight: 700; margin-top: 22px; text-transform: uppercase; letter-spacing: .08em; }
+p  { margin-top: 12px; }
+ul, ol { margin-top: 10px; padding-left: 24px; }
+li { margin-top: 5px; }
+a  { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { color: var(--heading); font-weight: 600; }
+em { font-style: italic; color: var(--accent2); }
+
+code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: .855em;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--accent2);
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 22px;
+  overflow-x: auto;
+  margin-top: 14px;
+  font-size: .815rem;
+  line-height: 1.7;
+  position: relative;
+}
+pre code { background: none; border: none; padding: 0; color: var(--text); font-size: inherit; }
+.lang { position: absolute; top: 9px; right: 12px; font-size: 9.5px; color: var(--muted);
+        font-family: "SFMono-Regular", Menlo, monospace; text-transform: uppercase; letter-spacing: .06em; }
+
+/* Syntax */
+.kw  { color: #ff7b72; }
+.kw2 { color: #f0883e; }
+.fn  { color: #d2a8ff; }
+.str { color: #a5d6ff; }
+.num { color: #f2cc60; }
+.cmt { color: #6e7681; font-style: italic; }
+.ty  { color: #79c0ff; }
+.asm { color: #56d364; }
+.err { color: #ff7b72; font-style: italic; }
+
+/* ── Tables ──────────────────────────────── */
+.table-wrap { overflow-x: auto; margin-top: 14px; border-radius: 8px; border: 1px solid var(--border); }
+table { border-collapse: collapse; width: 100%; font-size: .86rem; }
+th { background: var(--surface); color: var(--heading); font-weight: 600; text-align: left; padding: 9px 14px; }
+th:not(:last-child), td:not(:last-child) { border-right: 1px solid var(--border); }
+thead tr { border-bottom: 1px solid var(--border); }
+td { padding: 7px 14px; vertical-align: top; }
+tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
+tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+
+/* ── Callouts ────────────────────────────── */
+.note, .warn, .tip {
+  border-radius: 0 8px 8px 0;
+  padding: 12px 16px;
+  margin-top: 16px;
+  font-size: .9rem;
+  border-left: 3px solid;
+}
+.note { background: rgba(77,148,255,.10); border-color: var(--accent); }
+.warn { background: rgba(212,165,32,.12); border-color: var(--orange); }
+.tip  { background: rgba(46,160,67,.10);  border-color: var(--green2); }
+
+/* ── Section anchors ─────────────────────── */
+h2 .anc, h3 .anc { color: var(--muted); font-size: .75em; font-weight: 400; opacity: 0; transition: opacity .15s; }
+h2:hover .anc, h3:hover .anc { opacity: 1; }
+
+/* ── Stdlib grid ─────────────────────────── */
+.mod-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-top: 14px; }
+.mod-card {
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 7px;
+  padding: 9px 12px; font-size: .8rem; color: var(--text); text-decoration: none;
+  transition: border-color .15s, background .15s;
+}
+.mod-card:hover { border-color: var(--accent); background: var(--tag-bg); color: var(--accent2); text-decoration: none; }
+.mod-card .mod-name { font-family: "SFMono-Regular", Menlo, monospace; font-size: .82rem; font-weight: 600; color: var(--heading); }
+.mod-card .mod-desc { font-size: .74rem; color: var(--muted); margin-top: 3px; }
+
+/* ── Responsive ──────────────────────────── */
+@media (max-width: 800px) {
+  nav { display: none; }
+  main { padding: 28px 22px 80px; }
+  h1 { font-size: 1.6rem; }
+  h2 { font-size: 1.15rem; }
+}
+</style>
+</head>
+<body>
+
+<!-- ══ SIDEBAR ═══════════════════════════════════════════════════ -->
+<nav>
+  <a href="index.html#intro" class="nav-logo">
+    <div class="nav-icon">ap</div>
+    <div>
+      <div class="nav-title">asmpython</div>
+      <div class="nav-ver">v1.1.0 · preview</div>
+    </div>
+  </a>
+  <ul>
+    <li class="sep">Getting Started</li>
+    <li><a href="index.html#intro">Introduction</a></li>
+    <li><a href="index.html#install">Installation</a></li>
+    <li><a href="index.html#quickstart">Quick start</a></li>
+    <li><a href="index.html#cli">CLI reference</a></li>
+
+    <li class="sep">Language</li>
+    <li><a href="index.html#types">Types</a></li>
+    <li><a href="index.html#strings">Strings</a></li>
+    <li><a href="index.html#collections">Collections</a></li>
+    <li><a href="index.html#control-flow">Control flow</a></li>
+    <li><a href="index.html#match-case">Pattern matching</a></li>
+    <li><a href="index.html#functions">Functions</a></li>
+    <li><a href="index.html#classes">Classes</a></li>
+    <li><a href="index.html#exceptions">Exceptions</a></li>
+    <li><a href="index.html#imports">Imports &amp; modules</a></li>
+
+    <li class="sep">Standard Library</li>
+    <li><a href="#stdlib">Overview</a></li>
+    <li><a href="#stdlib-math">math</a></li>
+    <li><a href="#stdlib-os">os / sys</a></li>
+    <li><a href="#stdlib-re">re</a></li>
+    <li><a href="#stdlib-io">io / json / csv</a></li>
+    <li><a href="#stdlib-datetime">datetime</a></li>
+    <li><a href="#stdlib-collections">collections</a></li>
+    <li><a href="#stdlib-net">network / web</a></li>
+    <li><a href="#asmlib-hardware">asmlib.hardware</a></li>
+    <li><a href="#asmlib-network">asmlib.network</a></li>
+    <li><a href="#asmlib-gui">asmlib.gui</a></li>
+
+    <li class="sep">Assembly</li>
+    <li><a href="index.html#inline-asm">Inline assembly</a></li>
+    <li><a href="index.html#asm-builder">Assembly builder</a></li>
+    <li><a href="index.html#asmpkg">Packages (.asmpkg)</a></li>
+
+    <li class="sep">Targets</li>
+    <li><a href="index.html#target-windows">Windows</a></li>
+    <li><a href="index.html#target-linux">Linux</a></li>
+    <li><a href="index.html#target-freestanding">Freestanding</a></li>
+    <li><a href="index.html#target-freestanding16">16-bit boot</a></li>
+
+    <li class="sep">Reference</li>
+    <li><a href="index.html#builtins">Builtins</a></li>
+    <li><a href="index.html#architecture">Architecture</a></li>
+    <li><a href="index.html#error-codes">Error codes</a></li>
+    <li><a href="index.html#limitations">Limitations</a></li>
+  </ul>
+</nav>
+
+<!-- ══ MAIN ══════════════════════════════════════════════════════ -->
+<main>
+
+<section id="stdlib">
+  <h2>Standard library overview <a class="anc" href="#stdlib">#</a></h2>
+  <p>All modules below are fully implemented in asmpython's pure-Python stdlib (no stubs). Click a card to jump to details.</p>
+
+  <h3>Data &amp; text</h3>
+  <div class="mod-grid">
+    <a href="#stdlib-math"    class="mod-card"><div class="mod-name">math</div><div class="mod-desc">Numeric functions</div></a>
+    <a href="#stdlib-re"      class="mod-card"><div class="mod-name">re</div><div class="mod-desc">Regular expressions</div></a>
+    <a href="#stdlib-io"      class="mod-card"><div class="mod-name">json</div><div class="mod-desc">JSON encode/decode</div></a>
+    <a href="#stdlib-io"      class="mod-card"><div class="mod-name">csv</div><div class="mod-desc">CSV reader/writer</div></a>
+    <a href="#stdlib-collections" class="mod-card"><div class="mod-name">string</div><div class="mod-desc">String constants</div></a>
+    <a href="#stdlib-collections" class="mod-card"><div class="mod-name">textwrap</div><div class="mod-desc">Text wrapping</div></a>
+    <div class="mod-card"><div class="mod-name">html</div><div class="mod-desc">HTML escape/unescape</div></div>
+    <div class="mod-card"><div class="mod-name">difflib</div><div class="mod-desc">Sequence diffs</div></div>
+    <div class="mod-card"><div class="mod-name">shlex</div><div class="mod-desc">Shell lexer</div></div>
+  </div>
+
+  <h3>Collections &amp; algorithms</h3>
+  <div class="mod-grid">
+    <a href="#stdlib-collections" class="mod-card"><div class="mod-name">collections</div><div class="mod-desc">deque, Counter, etc.</div></a>
+    <div class="mod-card"><div class="mod-name">bisect</div><div class="mod-desc">Sorted-list ops</div></div>
+    <div class="mod-card"><div class="mod-name">heapq</div><div class="mod-desc">Heap queue</div></div>
+    <div class="mod-card"><div class="mod-name">itertools</div><div class="mod-desc">Iterator combinators</div></div>
+    <div class="mod-card"><div class="mod-name">functools</div><div class="mod-desc">Higher-order funcs</div></div>
+    <div class="mod-card"><div class="mod-name">operator</div><div class="mod-desc">Operator functions</div></div>
+    <div class="mod-card"><div class="mod-name">copy</div><div class="mod-desc">Shallow/deep copy</div></div>
+    <div class="mod-card"><div class="mod-name">enum</div><div class="mod-desc">Enumerations</div></div>
+    <div class="mod-card"><div class="mod-name">dataclasses</div><div class="mod-desc">Data classes</div></div>
+  </div>
+
+  <h3>File system &amp; OS</h3>
+  <div class="mod-grid">
+    <a href="#stdlib-os" class="mod-card"><div class="mod-name">os</div><div class="mod-desc">OS interface</div></a>
+    <a href="#stdlib-os" class="mod-card"><div class="mod-name">os.path</div><div class="mod-desc">Path utilities</div></a>
+    <div class="mod-card"><div class="mod-name">pathlib</div><div class="mod-desc">Path objects</div></div>
+    <div class="mod-card"><div class="mod-name">glob</div><div class="mod-desc">File globbing</div></div>
+    <div class="mod-card"><div class="mod-name">shutil</div><div class="mod-desc">File operations</div></div>
+    <div class="mod-card"><div class="mod-name">tempfile</div><div class="mod-desc">Temp files/dirs</div></div>
+    <div class="mod-card"><div class="mod-name">subprocess</div><div class="mod-desc">Run processes</div></div>
+  </div>
+
+  <h3>Date, time &amp; math</h3>
+  <div class="mod-grid">
+    <a href="#stdlib-datetime" class="mod-card"><div class="mod-name">datetime</div><div class="mod-desc">Date &amp; time</div></a>
+    <div class="mod-card"><div class="mod-name">calendar</div><div class="mod-desc">Calendar ops</div></div>
+    <div class="mod-card"><div class="mod-name">time</div><div class="mod-desc">Wall/CPU time</div></div>
+    <div class="mod-card"><div class="mod-name">timeit</div><div class="mod-desc">Timing utility</div></div>
+    <div class="mod-card"><div class="mod-name">decimal</div><div class="mod-desc">Decimal arith.</div></div>
+    <div class="mod-card"><div class="mod-name">fractions</div><div class="mod-desc">Rational numbers</div></div>
+    <div class="mod-card"><div class="mod-name">statistics</div><div class="mod-desc">Stats functions</div></div>
+    <div class="mod-card"><div class="mod-name">random</div><div class="mod-desc">Random numbers</div></div>
+  </div>
+
+  <h3>Crypto &amp; encoding</h3>
+  <div class="mod-grid">
+    <div class="mod-card"><div class="mod-name">hashlib</div><div class="mod-desc">Hash algorithms</div></div>
+    <div class="mod-card"><div class="mod-name">hmac</div><div class="mod-desc">HMAC auth codes</div></div>
+    <div class="mod-card"><div class="mod-name">secrets</div><div class="mod-desc">Secure random</div></div>
+    <div class="mod-card"><div class="mod-name">base64</div><div class="mod-desc">Base64 codec</div></div>
+    <div class="mod-card"><div class="mod-name">struct</div><div class="mod-desc">Binary packing</div></div>
+    <div class="mod-card"><div class="mod-name">uuid</div><div class="mod-desc">UUID generation</div></div>
+  </div>
+
+  <h3>Networking &amp; web</h3>
+  <div class="mod-grid">
+    <a href="#stdlib-net" class="mod-card"><div class="mod-name">urllib</div><div class="mod-desc">URL handling</div></a>
+    <a href="#stdlib-net" class="mod-card"><div class="mod-name">urllib.parse</div><div class="mod-desc">URL parsing</div></a>
+    <div class="mod-card"><div class="mod-name">socket</div><div class="mod-desc">Network sockets</div></div>
+    <div class="mod-card"><div class="mod-name">ipaddress</div><div class="mod-desc">IP address ops</div></div>
+  </div>
+
+  <h3>Diagnostics &amp; system</h3>
+  <div class="mod-grid">
+    <a href="#stdlib-os" class="mod-card"><div class="mod-name">sys</div><div class="mod-desc">System interface</div></a>
+    <div class="mod-card"><div class="mod-name">logging</div><div class="mod-desc">Logging framework</div></div>
+    <div class="mod-card"><div class="mod-name">traceback</div><div class="mod-desc">Traceback utils</div></div>
+    <div class="mod-card"><div class="mod-name">warnings</div><div class="mod-desc">Warning control</div></div>
+    <div class="mod-card"><div class="mod-name">inspect</div><div class="mod-desc">Introspection</div></div>
+    <div class="mod-card"><div class="mod-name">gc</div><div class="mod-desc">GC interface</div></div>
+    <div class="mod-card"><div class="mod-name">atexit</div><div class="mod-desc">Exit handlers</div></div>
+    <div class="mod-card"><div class="mod-name">signal</div><div class="mod-desc">Signal handling</div></div>
+    <div class="mod-card"><div class="mod-name">argparse</div><div class="mod-desc">CLI argument parser</div></div>
+    <div class="mod-card"><div class="mod-name">keyword</div><div class="mod-desc">Keyword lists</div></div>
+    <div class="mod-card"><div class="mod-name">numbers</div><div class="mod-desc">Numeric ABCs</div></div>
+    <div class="mod-card"><div class="mod-name">abc</div><div class="mod-desc">Abstract base classes</div></div>
+    <div class="mod-card"><div class="mod-name">types</div><div class="mod-desc">Built-in types</div></div>
+    <div class="mod-card"><div class="mod-name">typing</div><div class="mod-desc">Type annotations</div></div>
+    <div class="mod-card"><div class="mod-name">io</div><div class="mod-desc">I/O streams</div></div>
+    <div class="mod-card"><div class="mod-name">contextlib</div><div class="mod-desc">Context managers</div></div>
+    <div class="mod-card"><div class="mod-name">queue</div><div class="mod-desc">Thread-safe queues</div></div>
+    <div class="mod-card"><div class="mod-name">threading</div><div class="mod-desc">Threading primitives</div></div>
+    <div class="mod-card"><div class="mod-name">weakref</div><div class="mod-desc">Weak references</div></div>
+    <div class="mod-card"><div class="mod-name">getpass</div><div class="mod-desc">Password prompt</div></div>
+    <div class="mod-card"><div class="mod-name">platform</div><div class="mod-desc">Platform info</div></div>
+    <div class="mod-card"><div class="mod-name">locale</div><div class="mod-desc">Locale settings</div></div>
+    <div class="mod-card"><div class="mod-name">configparser</div><div class="mod-desc">INI config files</div></div>
+    <div class="mod-card"><div class="mod-name">pprint</div><div class="mod-desc">Pretty printing</div></div>
+  </div>
+
+  <h3>Hardware &amp; GUI (asmlib)</h3>
+  <div class="mod-grid">
+    <a href="#asmlib-hardware" class="mod-card"><div class="mod-name">asmlib.hardware</div><div class="mod-desc">Low-level HW access</div></a>
+    <a href="#asmlib-network"  class="mod-card"><div class="mod-name">asmlib.network</div><div class="mod-desc">TCP sockets</div></a>
+    <a href="#asmlib-gui"      class="mod-card"><div class="mod-name">asmlib.gui</div><div class="mod-desc">Native GUI window</div></a>
+  </div>
+</section>
+
+<section id="stdlib-math">
+  <h2>math <a class="anc" href="#stdlib-math">#</a></h2>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> math
+<span class="fn">print</span>(math.sqrt(<span class="num">2.0</span>))    <span class="cmt"># 1.4142135623730951</span>
+<span class="fn">print</span>(math.floor(<span class="num">3.7</span>))   <span class="cmt"># 3</span>
+<span class="fn">print</span>(math.log(<span class="fn">math</span>.e))  <span class="cmt"># 1.0</span></code></pre>
+  <p>Constants: <code>math.pi</code>, <code>math.e</code>, <code>math.tau</code>, <code>math.inf</code>, <code>math.nan</code>. Functions: <code>sqrt</code>, <code>floor</code>, <code>ceil</code>, <code>round</code>, <code>abs</code>, <code>pow</code>, <code>log</code>, <code>log2</code>, <code>log10</code>, <code>exp</code>, <code>sin</code>, <code>cos</code>, <code>tan</code>, <code>asin</code>, <code>acos</code>, <code>atan</code>, <code>atan2</code>, <code>sinh</code>, <code>cosh</code>, <code>tanh</code>, <code>degrees</code>, <code>radians</code>, <code>hypot</code>, <code>gcd</code>, <code>lcm</code>, <code>factorial</code>, <code>isfinite</code>, <code>isinf</code>, <code>isnan</code>, <code>copysign</code>, <code>fabs</code>, <code>fmod</code>, <code>trunc</code>, <code>modf</code>, <code>ldexp</code>, <code>frexp</code>, <code>comb</code>, <code>perm</code>.</p>
+</section>
+
+<section id="stdlib-os">
+  <h2>os / sys <a class="anc" href="#stdlib-os">#</a></h2>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> os, sys
+
+<span class="fn">print</span>(os.getcwd())
+os.chdir(<span class="str">"/tmp"</span>)
+os.makedirs(<span class="str">"a/b/c"</span>, exist_ok=<span class="kw">True</span>)
+files = os.listdir(<span class="str">"."</span>)
+env = os.getenv(<span class="str">"HOME"</span>, <span class="str">""</span>)
+code = os.system(<span class="str">"ls"</span>)
+
+<span class="fn">print</span>(sys.argv)
+<span class="fn">print</span>(sys.platform)
+sys.exit(<span class="num">0</span>)</code></pre>
+  <p><code>os</code>: <code>getcwd</code>, <code>chdir</code>, <code>listdir</code>, <code>makedirs</code>, <code>remove</code>, <code>rename</code>, <code>stat</code>, <code>path.*</code>, <code>getenv</code>, <code>environ</code>, <code>system</code>, <code>getpid</code>, <code>getppid</code>, <code>cpu_count</code>, <code>urandom</code>.</p>
+  <p><code>sys</code>: <code>argv</code>, <code>exit</code>, <code>platform</code>, <code>version</code>, <code>stdin</code>/<code>stdout</code>/<code>stderr</code>, <code>path</code>, <code>maxsize</code>, <code>byteorder</code>.</p>
+</section>
+
+<section id="stdlib-re">
+  <h2>re <a class="anc" href="#stdlib-re">#</a></h2>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> re
+
+m = re.match(<span class="str">r"\d+"</span>, <span class="str">"123abc"</span>)
+<span class="kw">if</span> m:
+    <span class="fn">print</span>(m.group(<span class="num">0</span>))     <span class="cmt"># "123"</span>
+
+parts = re.split(<span class="str">r",\s*"</span>, <span class="str">"a, b, c"</span>)
+out   = re.sub(<span class="str">r"\d"</span>, <span class="str">"#"</span>, <span class="str">"a1b2"</span>)  <span class="cmt"># "a#b#"</span>
+all_n = re.findall(<span class="str">r"\d+"</span>, <span class="str">"1 22 333"</span>)
+
+pat = re.compile(<span class="str">r"(\w+)\s+(\w+)"</span>)
+m2  = pat.search(<span class="str">"hello world"</span>)
+<span class="fn">print</span>(m2.group(<span class="num">1</span>), m2.group(<span class="num">2</span>))</code></pre>
+  <p>Supports: <code>.</code>, <code>*</code>, <code>+</code>, <code>?</code>, <code>|</code>, <code>^</code>, <code>$</code>, <code>[...]</code>, <code>\d\w\s</code> and their uppercase complements, <code>{n,m}</code>, <code>(?:...)</code> non-capturing groups, capturing groups <code>(...)</code>. Flags: <code>re.IGNORECASE</code>, <code>re.MULTILINE</code>, <code>re.DOTALL</code>.</p>
+</section>
+
+<section id="stdlib-io">
+  <h2>io / json / csv <a class="anc" href="#stdlib-io">#</a></h2>
+
+  <h3>json</h3>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> json
+
+data = json.loads(<span class="str">'{"name":"alice","age":30}'</span>)
+<span class="fn">print</span>(data[<span class="str">"name"</span>])
+
+out: <span class="ty">str</span> = json.dumps({<span class="str">"x"</span>: <span class="num">1</span>, <span class="str">"y"</span>: <span class="num">2</span>})
+pretty: <span class="ty">str</span> = json.dumps(data, indent=<span class="num">2</span>)</code></pre>
+
+  <h3>csv</h3>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> csv
+
+lines: <span class="ty">list</span>[<span class="ty">str</span>] = [<span class="str">"name,age"</span>, <span class="str">"alice,30"</span>, <span class="str">"bob,25"</span>]
+rows: <span class="ty">list</span>[<span class="ty">list</span>[<span class="ty">str</span>]] = csv.reader(lines)
+<span class="kw">for</span> row <span class="kw">in</span> rows:
+    <span class="fn">print</span>(row[<span class="num">0</span>], row[<span class="num">1</span>])
+
+line: <span class="ty">str</span> = csv.writer_row([<span class="str">"alice"</span>, <span class="str">"30"</span>])
+
+dr = csv.DictReader(lines)
+data_row: <span class="ty">list</span>[<span class="ty">str</span>] = dr.rows[<span class="num">0</span>]
+<span class="fn">print</span>(dr.get(data_row, <span class="str">"name"</span>))</code></pre>
+  <p><code>csv.reader(lines)</code> returns <code>list[list[str]]</code> — each row is a plain list of fields. <code>csv.writer_row(fields)</code> formats one row. <code>csv.writer_rows(rows)</code> formats a <code>list[list[str]]</code>. <code>DictReader</code> parses headers.</p>
+
+  <h3>io</h3>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> io
+
+buf = io.StringIO()
+buf.write(<span class="str">"hello"</span>)
+<span class="fn">print</span>(buf.getvalue())
+
+bbuf = io.BytesIO(<span class="str">""</span>)
+bbuf.write(<span class="str">"data"</span>)
+bbuf.seek(<span class="num">0</span>)</code></pre>
+</section>
+
+<section id="stdlib-datetime">
+  <h2>datetime <a class="anc" href="#stdlib-datetime">#</a></h2>
+  <pre><div class="lang">python</div><code><span class="kw2">from</span> datetime <span class="kw2">import</span> date, datetime, timedelta
+
+today = date.today()
+<span class="fn">print</span>(today.year, today.month, today.day)
+
+now = datetime.now()
+<span class="fn">print</span>(now.strftime(<span class="str">"%Y-%m-%d %H:%M:%S"</span>))
+
+d1 = date(<span class="num">2024</span>, <span class="num">1</span>, <span class="num">1</span>)
+d2 = date(<span class="num">2024</span>, <span class="num">12</span>, <span class="num">31</span>)
+delta = d2 - d1
+<span class="fn">print</span>(delta.days)   <span class="cmt"># 365</span></code></pre>
+  <p>Classes: <code>date</code>, <code>time</code>, <code>datetime</code>, <code>timedelta</code>, <code>timezone</code>. Methods: <code>today()</code>, <code>now()</code>, <code>strftime()</code>, <code>strptime()</code>, arithmetic with <code>timedelta</code>, <code>isoformat()</code>, <code>fromisoformat()</code>, <code>weekday()</code>, <code>timestamp()</code>.</p>
+</section>
+
+<section id="stdlib-collections">
+  <h2>collections <a class="anc" href="#stdlib-collections">#</a></h2>
+  <pre><div class="lang">python</div><code><span class="kw2">from</span> collections <span class="kw2">import</span> deque, Counter, defaultdict, OrderedDict
+
+dq = <span class="fn">deque</span>([<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>])
+dq.appendleft(<span class="num">0</span>)
+dq.popleft()
+
+cnt = <span class="fn">Counter</span>([<span class="str">"a"</span>, <span class="str">"b"</span>, <span class="str">"a"</span>, <span class="str">"c"</span>, <span class="str">"a"</span>])
+<span class="fn">print</span>(cnt[<span class="str">"a"</span>])      <span class="cmt"># 3</span>
+top = cnt.most_common(<span class="num">2</span>)
+
+dd = <span class="fn">defaultdict</span>(<span class="ty">int</span>)
+dd[<span class="str">"k"</span>] += <span class="num">1</span>
+
+od = <span class="fn">OrderedDict</span>()
+od[<span class="str">"a"</span>] = <span class="num">1</span>
+od.move_to_end(<span class="str">"a"</span>)</code></pre>
+  <p>Also available: <code>namedtuple</code>, <code>ChainMap</code>, <code>UserDict</code>, <code>UserList</code>, <code>UserString</code>.</p>
+</section>
+
+<section id="stdlib-net">
+  <h2>Network &amp; web <a class="anc" href="#stdlib-net">#</a></h2>
+  <pre><div class="lang">python</div><code><span class="kw2">from</span> urllib.parse <span class="kw2">import</span> urlparse, urlencode, quote, unquote
+
+result = <span class="fn">urlparse</span>(<span class="str">"https://example.com/path?q=1"</span>)
+<span class="fn">print</span>(result.scheme, result.netloc, result.path)
+
+qs = <span class="fn">urlencode</span>({<span class="str">"q"</span>: <span class="str">"hello world"</span>, <span class="str">"n"</span>: <span class="num">5</span>})
+safe = <span class="fn">quote</span>(<span class="str">"hello world"</span>)</code></pre>
+
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> ipaddress
+
+addr = ipaddress.ip_address(<span class="str">"192.168.1.1"</span>)
+<span class="fn">print</span>(addr.is_private)   <span class="cmt"># 1</span>
+net  = ipaddress.ip_network(<span class="str">"10.0.0.0/8"</span>)
+<span class="fn">print</span>(net.num_addresses)  <span class="cmt"># 16777216</span></code></pre>
+</section>
+
+<!-- ═══════════════════ ASMLIB ═══════════════════════════════ -->
+
+<section id="asmlib-hardware">
+  <h2>asmlib.hardware <a class="anc" href="#asmlib-hardware">#</a></h2>
+  <pre><div class="lang">python</div><code><span class="kw2">from</span> asmlib <span class="kw2">import</span> hardware
+
+hardware.console.clear()
+hardware.console.set_cursor(x=<span class="num">0</span>, y=<span class="num">0</span>)
+hardware.console.set_color(fg=<span class="num">0x0A</span>, bg=<span class="num">0x00</span>)
+hardware.console.print_at(<span class="num">5</span>, <span class="num">5</span>, <span class="str">"Hello!"</span>)
+
+info = hardware.cpu.info()
+<span class="fn">print</span>(info.vendor, info.cores)
+tsc = hardware.cpu.rdtsc()
+
+hardware.memory.write8(<span class="num">0xB8000</span>, <span class="num">0x41</span>)
+val = hardware.memory.read8(<span class="num">0xB8000</span>)
+
+hardware.port.out8(<span class="num">0x3F8</span>, <span class="num">0x41</span>)
+byte = hardware.port.in8(<span class="num">0x3F8</span>)</code></pre>
+  <p>Low-level hardware access for freestanding targets. Wraps direct NASM instructions for console I/O, CPU feature detection, memory-mapped I/O, and port-mapped I/O.</p>
+</section>
+
+<section id="asmlib-network">
+  <h2>asmlib.network <a class="anc" href="#asmlib-network">#</a></h2>
+  <pre><div class="lang">python</div><code><span class="kw2">from</span> asmlib.network <span class="kw2">import</span> TcpClient, TcpServer, HttpRequest
+
+client = <span class="fn">TcpClient</span>(<span class="str">"example.com"</span>, <span class="num">80</span>)
+client.send(<span class="str">"GET / HTTP/1.0\r\n\r\n"</span>)
+resp = client.recv(<span class="num">4096</span>)
+client.close()
+
+server = <span class="fn">TcpServer</span>(<span class="str">"0.0.0.0"</span>, <span class="num">8080</span>)
+conn = server.accept()
+data = conn.recv(<span class="num">1024</span>)
+conn.send(<span class="str">"HTTP/1.0 200 OK\r\n\r\nHello"</span>)</code></pre>
+</section>
+
+<section id="asmlib-gui">
+  <h2>asmlib.gui <a class="anc" href="#asmlib-gui">#</a></h2>
+  <pre><div class="lang">python</div><code><span class="kw2">from</span> asmlib <span class="kw2">import</span> gui
+
+win = gui.<span class="fn">Window</span>(<span class="str">"My App"</span>, <span class="num">800</span>, <span class="num">600</span>)
+win.set_icon(<span class="str">"icon.ico"</span>)
+
+<span class="kw">while</span> win.is_open():
+    ev = win.poll_event()
+    win.clear(<span class="num">0x1E1E2E</span>)
+    win.<span class="fn">draw_rect</span>(<span class="num">10</span>, <span class="num">10</span>, <span class="num">100</span>, <span class="num">50</span>, <span class="num">0xFF4444</span>)
+    win.draw_text(<span class="str">"Hello GUI"</span>, <span class="num">20</span>, <span class="num">20</span>, <span class="num">0xFFFFFF</span>)
+    win.present()</code></pre>
+  <p>Win32 native window with software renderer (no SDL/Qt). Draw primitives: <code>draw_rect</code>, <code>draw_circle</code>, <code>draw_line</code>, <code>draw_text</code>, <code>draw_image</code>. Events: keyboard, mouse, resize, close.</p>
+
+  <h3>Surfaces &amp; window icons</h3>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> gui
+
+<span class="cmt"># Load a BMP surface (returns an opaque handle)</span>
+surf = gui.load_bmp(<span class="str">"icon.bmp"</span>)
+
+<span class="cmt"># Set the window's taskbar / title-bar icon from a surface</span>
+gui.set_window_icon(win, surf)
+
+<span class="cmt"># Free the surface when no longer needed</span>
+gui.free_surface(surf)</code></pre>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Function</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>gui.load_bmp(path)</code></td><td>Load a BMP file from disk; returns a surface handle (<code>int</code>)</td></tr>
+      <tr><td><code>gui.set_window_icon(win, surf)</code></td><td>Set the Win32 window icon from a surface handle</td></tr>
+      <tr><td><code>gui.free_surface(surf)</code></td><td>Release the surface memory</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note">The high-level <code>Window.set_icon(path)</code> method accepts an <code>.ico</code> path directly and handles load + set internally.</div>
+</section>
+
+</main>
+
+<script>
+(function() {
+  const links = document.querySelectorAll('nav li a');
+  const sections = [];
+  links.forEach(a => {
+    const href = a.getAttribute('href');
+    if (!href.startsWith('#')) return;
+    const id = href.slice(1);
+    const el = document.getElementById(id);
+    if (el) sections.push({ el, a });
+  });
+
+  function update() {
+    let active = null;
+    const top = window.scrollY + 80;
+    for (const s of sections) {
+      if (s.el.offsetTop <= top) active = s;
+    }
+    links.forEach(a => a.classList.remove('active'));
+    if (active) active.a.classList.add('active');
+  }
+
+  window.addEventListener('scroll', update, { passive: true });
+  update();
+})();
+</script>
+</body>
+</html>

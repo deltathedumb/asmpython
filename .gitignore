@@ -49,3 +49,4 @@ _smoke.log
 # Unit test artifacts
 hi.txt
 test.zip
+_scratch_proto.py
