@@ -11225,10 +11225,13 @@ class Codegen:
         # Determine if any operand is a float — if so, all comparisons in the
         # chain are float (with int promotion). For simplicity we treat the
         # whole chain as float if any one operand is float; otherwise int.
+        # `is`/`is not` are identity (pointer) comparisons and must always use
+        # the integer path regardless of operand type.
         is_float = False
-        for o in e.operands:
-            if A.expr_type(o) == "float":
-                is_float = True
+        if not any(op in ("is", "is not") for op in e.ops):
+            for o in e.operands:
+                if A.expr_type(o) == "float":
+                    is_float = True
 
         if len(e.ops) == 1:
             # Unhandled in/not in (e.g. list-in-list, or unusual LHS types):
