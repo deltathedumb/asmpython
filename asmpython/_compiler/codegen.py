@@ -1486,6 +1486,18 @@ class Codegen:
                             ):
                                 self._cl_walk_expr(info, fdefault)
         elif isinstance(expr, A.MethodCall):
+            # os.environ.get(key[, default]) — lowers to getenv(key); reserve
+            # its one FFI scratch slot (see the matching codegen in
+            # _gen_method_call).
+            if (
+                isinstance(expr.obj, A.Attr)
+                and isinstance(expr.obj.obj, A.Name)
+                and expr.obj.obj.name == "os"
+                and expr.obj.name == "environ"
+                and expr.method == "get"
+            ):
+                fn = stdlib.os.BINDINGS["getenv"]
+                self._cl_define(info, f"__ffi_arg_{id(fn)}_0", "int")
             # os.getcwd() / os.listdir(path) — scratch slots for inline helpers.
             if isinstance(expr.obj, A.Name) and expr.obj.name in self.imported_modules:
                 if expr.obj.name == "os" and expr.method == "listdir":
@@ -10027,6 +10039,31 @@ class Codegen:
         self.emitf(f"mov rax, [rbp{acc_slot:+d}]")
 
     def _gen_method_call(self, e: A.MethodCall, info: FuncInfo) -> None:
+        # os.environ.get(key) / os.environ.get(key, default): `os.environ`
+        # itself has no real binding (it falls through to the generic
+        # "unknown module attribute" stub, which evaluates to a null
+        # pointer) — special-case the one supported access pattern here and
+        # lower straight to libc getenv(), substituting an empty string (the
+        # codebase's normal falsy-string sentinel — see _gen_truthy_test)
+        # when the variable is unset, since getenv can return NULL and
+        # nothing downstream expects a literal null string pointer.
+        if (
+            isinstance(e.obj, A.Attr)
+            and isinstance(e.obj.obj, A.Name)
+            and e.obj.obj.name == "os"
+            and e.obj.name == "environ"
+            and e.method == "get"
+        ):
+            self._gen_ffi_call(stdlib.os.BINDINGS["getenv"], e.args[:1], info)
+            end = self.fresh("environ_get_end")
+            self.emitf("test rax, rax", f"jnz {end}")
+            if len(e.args) > 1:
+                self.gen_expr(e.args[1], info)
+            else:
+                label, _ = self.intern_string("")
+                self.emitf(f"lea rax, [{label}]")
+            self.label(end)
+            return
         # os.getcwd() / os.listdir(path) — inline helpers that need static buffers.
         if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
             if e.obj.name == "os" and e.method == "getcwd":

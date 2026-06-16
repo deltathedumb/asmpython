@@ -151,15 +151,11 @@ class _AsmPythonHelp(argparse.RawDescriptionHelpFormatter):
 class _ColorParser(argparse.ArgumentParser):
     """ArgumentParser that colorizes --help output when stdout is a TTY."""
 
-    def print_help(self, file=None) -> None:  # type: ignore[override]
-        if file is None:
-            file = sys.stdout
+    def print_help(self) -> None:  # type: ignore[override]
         text = self.format_help()
         if _want_color():
             text = _colorize_help(text)
-        file.write(text)
-        if not text.endswith("\n"):
-            file.write("\n")
+        print(text)
 
 
 def _build_parser() -> argparse.ArgumentParser:

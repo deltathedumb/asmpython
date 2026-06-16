@@ -125,80 +125,6 @@ class ErrorCode:
     E_MATCH_PATTERN         = 273  # E073: unsupported match pattern
 
 
-# Human-readable description for each code (used by --explain).
-ERROR_DESCRIPTIONS: dict[int, str] = {
-    # Lex
-    ErrorCode.L_INCONSISTENT_INDENT:   "Inconsistent indentation: the indentation level does not match any enclosing block.",
-    ErrorCode.L_UNEXPECTED_CHAR:       "Unexpected character: the source contains a character that is not part of any valid token.",
-    ErrorCode.L_UNTERMINATED_STRING:   "Unterminated string literal: the closing quote is missing before end-of-line or end-of-file.",
-    ErrorCode.L_NEWLINE_IN_STRING:     "Newline inside a single-quoted string literal.  Use a multi-line string (triple quotes) instead.",
-    ErrorCode.L_UNTERMINATED_FSTRING:  "Unterminated f-string: the closing quote is missing.",
-    ErrorCode.L_NEWLINE_IN_FSTRING:    "Newline inside an f-string.  F-strings must fit on one line.",
-    ErrorCode.L_INVALID_FLOAT:         "Invalid floating-point literal.",
-    ErrorCode.L_INVALID_ESCAPE:        "Invalid escape sequence inside a string literal.",
-    ErrorCode.L_INVALID_INT:           "Invalid integer literal (e.g. a malformed hex, octal, or binary prefix).",
-    ErrorCode.L_UNTERMINATED_RAW:      "Unterminated raw string literal.",
-    # Parse
-    ErrorCode.P_UNEXPECTED_TOKEN:      "Unexpected token: the parser encountered a token that does not fit any valid syntax rule here.",
-    ErrorCode.P_EXPECTED_TOKEN:        "Expected a specific token (keyword, operator, or punctuation) but found something else.",
-    ErrorCode.P_INVALID_ASSIGN_TARGET: "Cannot assign to this expression.  Only names, subscripts, and attribute paths are valid assignment targets.",
-    ErrorCode.P_INVALID_DECORATOR:     "Invalid decorator expression.",
-    ErrorCode.P_INVALID_PATTERN:       "Invalid match/case pattern.",
-    ErrorCode.P_MISSING_MODULE:        "Expected a module name after 'from' in an import statement.",
-    ErrorCode.P_INVALID_DEFAULT:       "Invalid default argument value.  Only literals and simple names are supported as defaults.",
-    ErrorCode.P_INVALID_ANNOTATION:    "Invalid type annotation.",
-    ErrorCode.P_MULTILINE_IMPORT:      "Multi-line parenthesised imports are not supported.  Use one 'from X import Y' per line.",
-    # Semantic – name resolution
-    ErrorCode.E_UNDEFINED_NAME:        "Name is not defined in the current scope.  Check for typos or missing imports.",
-    ErrorCode.E_UNDEFINED_FUNC:        "Call to an undefined function.  The function may not be imported or may be defined after the call site.",
-    ErrorCode.E_REDEFINED_FUNC:        "Function is defined more than once in the same scope.  Each function name must be unique.",
-    ErrorCode.E_REDEFINED_CLASS:       "Class is defined more than once in the same scope.",
-    ErrorCode.E_NO_SUCH_MODULE:        "Import of an unknown or unsupported module.",
-    # Semantic – types
-    ErrorCode.E_TYPE_MISMATCH:         "Type mismatch: the expression type does not match what is expected here.",
-    ErrorCode.E_BINARY_OP_TYPE:        "Binary operator not supported between the given operand types.",
-    ErrorCode.E_UNARY_OP_TYPE:         "Unary operator applied to an incompatible type.",
-    ErrorCode.E_FSTRING_SEGMENT_TYPE:  "F-string segment has a non-scalar type.  Only int, float, str, or class instances can appear inside f-strings.",
-    ErrorCode.E_RETURN_TYPE:           "Return value type does not match the declared return type.",
-    ErrorCode.E_INDEX_TYPE:            "Index operand has the wrong type.",
-    ErrorCode.E_INDEX_OBJECT_TYPE:     "Indexing a value that does not support subscript access.",
-    ErrorCode.E_ITER_TYPE:             "Iterating over a value that is not iterable.",
-    ErrorCode.E_ASSIGN_TYPE:           "Assignment type mismatch: the right-hand side type is not compatible with the target.",
-    # Semantic – calls
-    ErrorCode.E_ARG_COUNT:             "Wrong number of arguments passed to function or method.",
-    ErrorCode.E_ARG_TYPE:              "Argument has the wrong type.",
-    ErrorCode.E_VARARGS_UNPACK:        "*args re-unpacking requires a tuple with known element types at compile time.",
-    ErrorCode.E_NOT_CALLABLE:          "Attempting to call a value that is not a function or class.",
-    ErrorCode.E_FORMAT_ARG_COUNT:      "% format string expects a different number of arguments than were provided.",
-    ErrorCode.E_FORMAT_ARG_TYPE:       "% format conversion requires a different argument type.",
-    ErrorCode.E_FORMAT_LITERAL:        "% string formatting requires a literal format string.",
-    # Semantic – control flow
-    ErrorCode.E_BREAK_OUTSIDE_LOOP:    "'break' used outside a loop.",
-    ErrorCode.E_CONTINUE_OUTSIDE_LOOP: "'continue' used outside a loop.",
-    ErrorCode.E_RETURN_OUTSIDE_FUNC:   "'return' used outside a function definition.",
-    # Semantic – class / attribute
-    ErrorCode.E_NO_ATTR:               "The object does not have the referenced attribute.",
-    ErrorCode.E_NOT_AN_EXCEPTION:      "The raised expression is not an exception type.",
-    ErrorCode.E_INDEX_ASSIGN:          "The object does not support index assignment.",
-    ErrorCode.E_SUPER_NO_CLASS:        "super() used outside a class method.",
-    ErrorCode.E_STATIC_NO_CLASS:       "@staticmethod used outside a class.",
-    # Semantic – collections
-    ErrorCode.E_HETEROGENEOUS_LIST:    "List literal contains elements of mixed types.  asmpython lists must be homogeneous.",
-    ErrorCode.E_HETEROGENEOUS_TUPLE:   "'in' on a tuple with mixed element types is not supported.",
-    ErrorCode.E_UNPACK_COUNT:          "Unpacking assignment count mismatch.",
-    ErrorCode.E_DICT_KEY_TYPE:         "Dict operation requires a str key.",
-    ErrorCode.E_SET_KEY_TYPE:          "Set elements must be strings in asmpython v1.",
-    # Semantic – assembly
-    ErrorCode.E_ASM_OPERAND:           "Invalid assembly operand string.",
-    ErrorCode.E_ASM_REGISTER:          "Unrecognised x86-64 register name.",
-    ErrorCode.E_INCLUDE_ARG:           "include() argument must be a string literal package name.",
-    # Semantic – misc
-    ErrorCode.E_ZIP_ARGS:              "zip() arguments must be lists or tuples.",
-    ErrorCode.E_ENUMERATE_ARG:         "enumerate() argument must be a list.",
-    ErrorCode.E_MATCH_PATTERN:         "Unsupported match/case pattern construct.",
-}
-
-
 def _code_label(code: int) -> str:
     """Return the human-readable code label, e.g. 1 -> 'L001', 212 -> 'E012'."""
     if code < 100:
@@ -206,6 +132,85 @@ def _code_label(code: int) -> str:
     if code < 200:
         return f"P{code - 100:03d}"
     return f"E{code - 200:03d}"
+
+
+# Human-readable description for each code (used by --explain). Keyed by the
+# string label (e.g. "L001") rather than the raw int: asmpython's runtime
+# dict implementation always hashes keys as strings, so an int-keyed literal
+# this large silently corrupts (every key gets truncated to a tiny integer
+# treated as a garbage string pointer, crashing the first dict op against it
+# at runtime) — see the self-host segfault this table caused.
+ERROR_DESCRIPTIONS: dict[str, str] = {
+    # Lex
+    _code_label(ErrorCode.L_INCONSISTENT_INDENT):   "Inconsistent indentation: the indentation level does not match any enclosing block.",
+    _code_label(ErrorCode.L_UNEXPECTED_CHAR):       "Unexpected character: the source contains a character that is not part of any valid token.",
+    _code_label(ErrorCode.L_UNTERMINATED_STRING):   "Unterminated string literal: the closing quote is missing before end-of-line or end-of-file.",
+    _code_label(ErrorCode.L_NEWLINE_IN_STRING):     "Newline inside a single-quoted string literal.  Use a multi-line string (triple quotes) instead.",
+    _code_label(ErrorCode.L_UNTERMINATED_FSTRING):  "Unterminated f-string: the closing quote is missing.",
+    _code_label(ErrorCode.L_NEWLINE_IN_FSTRING):    "Newline inside an f-string.  F-strings must fit on one line.",
+    _code_label(ErrorCode.L_INVALID_FLOAT):         "Invalid floating-point literal.",
+    _code_label(ErrorCode.L_INVALID_ESCAPE):        "Invalid escape sequence inside a string literal.",
+    _code_label(ErrorCode.L_INVALID_INT):           "Invalid integer literal (e.g. a malformed hex, octal, or binary prefix).",
+    _code_label(ErrorCode.L_UNTERMINATED_RAW):      "Unterminated raw string literal.",
+    # Parse
+    _code_label(ErrorCode.P_UNEXPECTED_TOKEN):      "Unexpected token: the parser encountered a token that does not fit any valid syntax rule here.",
+    _code_label(ErrorCode.P_EXPECTED_TOKEN):        "Expected a specific token (keyword, operator, or punctuation) but found something else.",
+    _code_label(ErrorCode.P_INVALID_ASSIGN_TARGET): "Cannot assign to this expression.  Only names, subscripts, and attribute paths are valid assignment targets.",
+    _code_label(ErrorCode.P_INVALID_DECORATOR):     "Invalid decorator expression.",
+    _code_label(ErrorCode.P_INVALID_PATTERN):       "Invalid match/case pattern.",
+    _code_label(ErrorCode.P_MISSING_MODULE):        "Expected a module name after 'from' in an import statement.",
+    _code_label(ErrorCode.P_INVALID_DEFAULT):       "Invalid default argument value.  Only literals and simple names are supported as defaults.",
+    _code_label(ErrorCode.P_INVALID_ANNOTATION):    "Invalid type annotation.",
+    _code_label(ErrorCode.P_MULTILINE_IMPORT):      "Multi-line parenthesised imports are not supported.  Use one 'from X import Y' per line.",
+    # Semantic – name resolution
+    _code_label(ErrorCode.E_UNDEFINED_NAME):        "Name is not defined in the current scope.  Check for typos or missing imports.",
+    _code_label(ErrorCode.E_UNDEFINED_FUNC):        "Call to an undefined function.  The function may not be imported or may be defined after the call site.",
+    _code_label(ErrorCode.E_REDEFINED_FUNC):        "Function is defined more than once in the same scope.  Each function name must be unique.",
+    _code_label(ErrorCode.E_REDEFINED_CLASS):       "Class is defined more than once in the same scope.",
+    _code_label(ErrorCode.E_NO_SUCH_MODULE):        "Import of an unknown or unsupported module.",
+    # Semantic – types
+    _code_label(ErrorCode.E_TYPE_MISMATCH):         "Type mismatch: the expression type does not match what is expected here.",
+    _code_label(ErrorCode.E_BINARY_OP_TYPE):        "Binary operator not supported between the given operand types.",
+    _code_label(ErrorCode.E_UNARY_OP_TYPE):         "Unary operator applied to an incompatible type.",
+    _code_label(ErrorCode.E_FSTRING_SEGMENT_TYPE):  "F-string segment has a non-scalar type.  Only int, float, str, or class instances can appear inside f-strings.",
+    _code_label(ErrorCode.E_RETURN_TYPE):           "Return value type does not match the declared return type.",
+    _code_label(ErrorCode.E_INDEX_TYPE):            "Index operand has the wrong type.",
+    _code_label(ErrorCode.E_INDEX_OBJECT_TYPE):     "Indexing a value that does not support subscript access.",
+    _code_label(ErrorCode.E_ITER_TYPE):             "Iterating over a value that is not iterable.",
+    _code_label(ErrorCode.E_ASSIGN_TYPE):           "Assignment type mismatch: the right-hand side type is not compatible with the target.",
+    # Semantic – calls
+    _code_label(ErrorCode.E_ARG_COUNT):             "Wrong number of arguments passed to function or method.",
+    _code_label(ErrorCode.E_ARG_TYPE):              "Argument has the wrong type.",
+    _code_label(ErrorCode.E_VARARGS_UNPACK):        "*args re-unpacking requires a tuple with known element types at compile time.",
+    _code_label(ErrorCode.E_NOT_CALLABLE):          "Attempting to call a value that is not a function or class.",
+    _code_label(ErrorCode.E_FORMAT_ARG_COUNT):      "% format string expects a different number of arguments than were provided.",
+    _code_label(ErrorCode.E_FORMAT_ARG_TYPE):       "% format conversion requires a different argument type.",
+    _code_label(ErrorCode.E_FORMAT_LITERAL):        "% string formatting requires a literal format string.",
+    # Semantic – control flow
+    _code_label(ErrorCode.E_BREAK_OUTSIDE_LOOP):    "'break' used outside a loop.",
+    _code_label(ErrorCode.E_CONTINUE_OUTSIDE_LOOP): "'continue' used outside a loop.",
+    _code_label(ErrorCode.E_RETURN_OUTSIDE_FUNC):   "'return' used outside a function definition.",
+    # Semantic – class / attribute
+    _code_label(ErrorCode.E_NO_ATTR):               "The object does not have the referenced attribute.",
+    _code_label(ErrorCode.E_NOT_AN_EXCEPTION):      "The raised expression is not an exception type.",
+    _code_label(ErrorCode.E_INDEX_ASSIGN):          "The object does not support index assignment.",
+    _code_label(ErrorCode.E_SUPER_NO_CLASS):        "super() used outside a class method.",
+    _code_label(ErrorCode.E_STATIC_NO_CLASS):       "@staticmethod used outside a class.",
+    # Semantic – collections
+    _code_label(ErrorCode.E_HETEROGENEOUS_LIST):    "List literal contains elements of mixed types.  asmpython lists must be homogeneous.",
+    _code_label(ErrorCode.E_HETEROGENEOUS_TUPLE):   "'in' on a tuple with mixed element types is not supported.",
+    _code_label(ErrorCode.E_UNPACK_COUNT):          "Unpacking assignment count mismatch.",
+    _code_label(ErrorCode.E_DICT_KEY_TYPE):         "Dict operation requires a str key.",
+    _code_label(ErrorCode.E_SET_KEY_TYPE):          "Set elements must be strings in asmpython v1.",
+    # Semantic – assembly
+    _code_label(ErrorCode.E_ASM_OPERAND):           "Invalid assembly operand string.",
+    _code_label(ErrorCode.E_ASM_REGISTER):          "Unrecognised x86-64 register name.",
+    _code_label(ErrorCode.E_INCLUDE_ARG):           "include() argument must be a string literal package name.",
+    # Semantic – misc
+    _code_label(ErrorCode.E_ZIP_ARGS):              "zip() arguments must be lists or tuples.",
+    _code_label(ErrorCode.E_ENUMERATE_ARG):         "enumerate() argument must be a list.",
+    _code_label(ErrorCode.E_MATCH_PATTERN):         "Unsupported match/case pattern construct.",
+}
 
 
 class CompileError(Exception):
@@ -310,18 +315,13 @@ def explain(code_label: str) -> str:
         n = int(label[1:])
     except ValueError:
         return ""
-    if prefix == "L":
-        key = n
-    elif prefix == "P":
-        key = n + 100
-    elif prefix == "E":
-        key = n + 200
-    else:
+    if prefix not in ("L", "P", "E"):
         return ""
-    desc = ERROR_DESCRIPTIONS.get(key)
+    norm_label = f"{prefix}{n:03d}"
+    desc = ERROR_DESCRIPTIONS.get(norm_label)
     if desc is None:
         return ""
-    return f"[{label}] {desc}"
+    return f"[{norm_label}] {desc}"
 
 
 def _get_line(source: str, lineno: int) -> Optional[str]:

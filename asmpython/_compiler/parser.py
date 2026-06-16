@@ -149,8 +149,8 @@ class Parser:
                 for op in node.operands:
                     _collect_refs_expr(op)
             elif isinstance(node, A.BoolOp):
-                for v in node.values:
-                    _collect_refs_expr(v)
+                _collect_refs_expr(node.left)
+                _collect_refs_expr(node.right)
         _collect_refs(fdef.body)
         # Free vars = referenced names that are not locally bound.
         BUILTINS = {
@@ -245,11 +245,13 @@ class Parser:
         if self._check("OP", "("):
             self._eat()
             if not self._check("OP", ")"):
-                # First base class, possibly dotted (`module.Base`).
+                # First base class, possibly dotted (`module.Base`). Every
+                # consumer (sema's class table, codegen's chain walker) keys
+                # by bare class name, so only the leaf survives.
                 parent = self._expect("NAME").value
                 while self._check("OP", "."):
                     self._eat()
-                    parent = f"{parent}.{self._expect('NAME').value}"
+                    parent = self._expect("NAME").value
                 # Extra bases / keyword bases (multiple inheritance, metaclass=)
                 # aren't modelled — single inheritance only. Skip the rest so
                 # the source still parses.

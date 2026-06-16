@@ -1010,11 +1010,15 @@ class SemaAnalyzer:
             return "any"
         if base in self.classes:
             return f"instance:{base}"
-        # A capitalized external/imported class (`list[Token]`, `dict[str, Expr]`):
-        # model the element as an opaque instance so attribute/method access on
-        # elements read out of the container stays lenient (mirrors
-        # _resolve_annot's handling of a bare external annotation).
+        # A capitalized external/imported class (`list[Token]`, `dict[str, Expr]`),
+        # or a dotted reference to a class we do model (`list[argparse.Namespace]`).
+        # Prefer the modeled class if the leaf matches one; otherwise fall back to
+        # an opaque instance so attribute/method access on elements read out of
+        # the container stays lenient (mirrors _resolve_annot's handling of a
+        # bare external annotation).
         leaf = base.split(".")[-1] if isinstance(base, str) else ""
+        if leaf in self.classes:
+            return f"instance:{leaf}"
         if leaf[:1].isupper():
             return f"instance:{leaf}"
         return "int"
@@ -1069,12 +1073,20 @@ class SemaAnalyzer:
             return None
         if base in self.classes:
             return (f"instance:{base}", None, None, None, None)
+        # A dotted reference to a class we do model (`module.ClassName`, e.g.
+        # `argparse.ArgumentParser`): match on the leaf so the annotation
+        # resolves to the real class (with its known methods/fields) instead
+        # of falling through to the opaque/external branch below, which would
+        # silently break the inheritance chain for any subclass returned
+        # through a base-class-annotated function.
+        leaf = base.split(".")[-1]
+        if leaf in self.classes:
+            return (f"instance:{leaf}", None, None, None, None)
         # An external / imported class annotation (`Token`, `A.IntLit`,
         # `FuncInfo`). We can't see its methods or fields, so model it as an
         # opaque instance: attribute and method access against it are checked
         # leniently (see _check_expr's Attr / MethodCall handling). The leaf of
         # a dotted path is the class-ish name.
-        leaf = base.split(".")[-1]
         if leaf[:1].isupper():
             return (f"instance:{leaf}", None, None, None, None)
         # A lowercase unknown name (a type alias we don't model) — don't
@@ -3017,17 +3029,29 @@ class SemaAnalyzer:
                 # *name* import (`from .x import Y`) binds an opaque value
                 # ("any") so `Y(...)` / `Y.method()` / `Y.attr` all stay lenient
                 # rather than erroring as operations on an int.
-                bind_ty = "module" if not s.module else "any"
+                if not s.module:
+                    # No module name at all after the dots: either a sibling-
+                    # module import (`from . import ast_nodes as A`, always
+                    # aliased in this codebase since the bare name would
+                    # collide with the file itself being imported elsewhere),
+                    # or a bare value pulled from a package's __init__.py
+                    # (`from .. import __version__`, never aliased — there's
+                    # nothing to alias away from). Use that to tell them apart:
+                    # an `as`-aliased name is the module case; an unaliased
+                    # name is the value case, whose real type the whole-program
+                    # loader's _materialize_value_imports already prepended as
+                    # a real `Assign` ahead of this statement, so scope[name]
+                    # must not be clobbered back to "module".
+                    orig_names = s.orig_names or s.names
+                    for name, orig in zip(s.names, orig_names):
+                        if name != orig:
+                            scope.add(name, "module")
+                        elif name not in scope:
+                            scope.add(name, "any")
+                    return
+                bind_ty = "any"
                 for name in s.names:
-                    # Module-alias imports (`from . import X as Y`, bind_ty ==
-                    # "module") always win — they must not be shadowed by a
-                    # constant from an unrelated stdlib module that happens to
-                    # share the alias name (e.g. re.py's `A: int = 256` vs the
-                    # compiler's `from . import ast_nodes as A`).
-                    # For relative *name* imports (`from .mod import X`,
-                    # bind_ty == "any"), preserve a concrete type already set by
-                    # the whole-program loader (e.g. a materialized dict global).
-                    if bind_ty == "module" or name not in scope:
+                    if name not in scope:
                         scope.add(name, bind_ty)
                 return
             try:
