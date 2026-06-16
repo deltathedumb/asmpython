@@ -50,8 +50,10 @@ def run_linux() -> None:
     # unavailable or the conversion fails so callers can skip gracefully.
     def wsl_path(p: Path) -> str | None:
         try:
+            # WSL 1 drops backslashes from subprocess args; use forward slashes.
+            arg = str(p).replace("\\", "/")
             r = subprocess.run(
-                ["wsl", "wslpath", "-u", str(p)],
+                ["wsl", "wslpath", "-u", arg],
                 capture_output=True, text=True,
             )
             val = r.stdout.strip()
