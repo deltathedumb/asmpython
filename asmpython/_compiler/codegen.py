@@ -1068,7 +1068,22 @@ class Codegen:
                 for nm in self._target_names(expr.targets):
                     self._cl_define(info, nm, "any")
             else:
-                self._cl_define(info, expr.var, var_ty)
+                # If the loop variable name shadows a module global, _cl_define
+                # would skip allocation (globals live in .bss). Force-allocate
+                # a mangled slot instead, then temporarily expose it under the
+                # original name during body evaluation (done in _gen_comprehension).
+                if info.is_main and expr.var in self.global_vars:
+                    mangle = f"__compvar_{id(expr)}_{expr.var}"
+                    if mangle not in info.locals_:
+                        info.offset -= 8
+                        info.locals_[mangle] = info.offset
+                        info.local_types[mangle] = var_ty
+                    expr._comp_var_slot = mangle
+                    expr._comp_var_shadows_global = True
+                else:
+                    self._cl_define(info, expr.var, var_ty)
+                    expr._comp_var_slot = expr.var
+                    expr._comp_var_shadows_global = False
             self._cl_walk_expr(info, expr.iter)
             ef_vars = getattr(expr, "extra_for_vars", [])
             ef_targets_l = getattr(expr, "extra_for_targets", [])
@@ -8121,7 +8136,14 @@ class Codegen:
         stop = info.locals_[f"__comp_stop_{id(e)}"]
         idx = info.locals_[f"__comp_idx_{id(e)}"]
         val = info.locals_[f"__comp_val_{id(e)}"]
-        var = info.locals_[e.var] if not e.targets else 0
+        var_slot_key = getattr(e, "_comp_var_slot", e.var)
+        var = info.locals_[var_slot_key] if not e.targets else 0
+        # If the loop var shadows a module global, temporarily inject it into
+        # info.locals_ so gen_expr(Name(e.var)) resolves the local slot.
+        _shadows_global = getattr(e, "_comp_var_shadows_global", False)
+        _saved_var_local = info.locals_.get(e.var) if not e.targets else None
+        if _shadows_global and not e.targets:
+            info.locals_[e.var] = var
 
         # result = empty list (cap 4)
         cap = 4
@@ -8257,6 +8279,12 @@ class Codegen:
         self.emitf(f"inc qword [rbp{idx:+d}]", f"jmp {top}")
         self.label(end)
         self.emitf(f"mov rax, [rbp{res:+d}]")  # result value
+        # Restore info.locals_ after shadowing a global with the loop var.
+        if _shadows_global and not e.targets:
+            if _saved_var_local is None:
+                info.locals_.pop(e.var, None)
+            else:
+                info.locals_[e.var] = _saved_var_local
 
     def _gen_comprehension_enumerate(self, e: A.Comprehension, info: FuncInfo) -> None:
         """`[elt for i, x in enumerate(xs)]` — iterate xs by index, bind the
@@ -8529,7 +8557,8 @@ class Codegen:
         stop = info.locals_[f"__dcomp_stop_{id(e)}"]
         idx = info.locals_[f"__dcomp_idx_{id(e)}"]
         key_slot = info.locals_[f"__dcomp_key_{id(e)}"]
-        var = info.locals_[e.var] if not e.targets else 0
+        var_slot_key = getattr(e, "_comp_var_slot", e.var)
+        var = info.locals_[var_slot_key] if not e.targets else 0
 
         # result = empty dict (cap 8), mirroring _gen_dict_lit's n=0 case.
         cap = 8
