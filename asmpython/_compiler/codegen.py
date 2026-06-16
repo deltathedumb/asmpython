@@ -648,6 +648,7 @@ class Codegen:
         "_runtime_str_truncate",
         "_runtime_str_replace",
         "_runtime_str_split",
+        "_runtime_str_split_ws",
         "_runtime_str_splitlines",
         "_runtime_str_join",
         "_runtime_str_partition",
@@ -6128,6 +6129,7 @@ class Codegen:
         self.emitf("leave", "ret")
 
         self._emit_str_split_helper()
+        self._emit_str_split_ws_helper()
         self._emit_str_join_helper()
         self._emit_str_splitlines_helper()
         self._emit_str_partition_helper()
@@ -7011,6 +7013,200 @@ class Codegen:
         )
         self.label(end)
         self.emitf("mov rax, [rbp-48]", "leave", "ret")
+
+    def _emit_str_split_ws_helper(self) -> None:
+        """`_runtime_str_split_ws`: `s.split()` — split on runs of whitespace.
+
+        In:  rax = s.  Out: rax = list header.
+
+        Algorithm: single pass, grow list dynamically (initial cap 4).
+        For each word: save cur to word_start ([rbp-48]), scan to end,
+        temporarily NUL-terminate at end, strdup(word_start), restore byte,
+        append ptr to list, grow list buf if needed.
+
+        Frame slots:
+          [rbp-8]  = s
+          [rbp-16] = list header ptr
+          [rbp-24] = list buf ptr
+          [rbp-32] = len (# words stored)
+          [rbp-40] = cap
+          [rbp-48] = cursor (char*)
+          [rbp-56] = word_start
+          [rbp-64] = saved byte (for restore after NUL)
+        Total locals = 64; frame = 64+32+8 = 104 (16-byte aligned after push rbp).
+        """
+        # whitespace chars: space(0x20) tab(0x09) newline(0x0A) CR(0x0D) FF(0x0C) VT(0x0B)
+        def _is_ws_jmp(jmp_if_ws: str, jmp_if_not_ws: str) -> None:
+            # rax holds the byte value (zero-extended)
+            self.emitf(
+                f"cmp rax, 0x20", f"je {jmp_if_ws}",
+                f"cmp rax, 0x09", f"je {jmp_if_ws}",
+                f"cmp rax, 0x0A", f"je {jmp_if_ws}",
+                f"cmp rax, 0x0D", f"je {jmp_if_ws}",
+                f"cmp rax, 0x0C", f"je {jmp_if_ws}",
+                f"cmp rax, 0x0B", f"je {jmp_if_ws}",
+                f"jmp {jmp_if_not_ws}",
+            )
+
+        self.label("_runtime_str_split_ws")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 104")
+        self.emitf("mov [rbp-8], rax")
+
+        # Allocate initial list: header + buf of 4 slots
+        self.emitf(
+            "mov rcx, 24", "call malloc", "mov [rbp-16], rax",
+            f"mov qword [rax+{self.LIST_CAP_OFF}], 4",
+            f"mov qword [rax+{self.LIST_LEN_OFF}], 0",
+        )
+        self.emitf(
+            "mov rcx, 32", "call malloc", "mov [rbp-24], rax",
+            "mov rdx, [rbp-16]",
+            f"mov [rdx+{self.LIST_BUF_OFF}], rax",
+        )
+        self.emitf(
+            "mov qword [rbp-32], 0",   # len
+            "mov qword [rbp-40], 4",   # cap
+            "mov rax, [rbp-8]",
+            "mov [rbp-48], rax",       # cursor = s
+        )
+
+        top = self.fresh("ssw_top")
+        end = self.fresh("ssw_end")
+        found_word = self.fresh("ssw_word")
+        skip_ws_lbl = self.fresh("ssw_skipws")
+        not_ws1 = self.fresh("ssw_nws1")
+        scan_word_lbl = self.fresh("ssw_scan")
+        not_ws2 = self.fresh("ssw_nws2")
+        is_ws2 = self.fresh("ssw_ws2")
+
+        # Loop: skip whitespace, then extract word
+        self.label(top)
+        self.emitf(
+            "mov rax, [rbp-48]",
+            "movzx rax, byte [rax]",
+            f"test rax, rax",
+            f"jz {end}",
+        )
+        _is_ws_jmp(skip_ws_lbl, not_ws1)
+        self.label(skip_ws_lbl)
+        self.emitf(
+            "mov rax, [rbp-48]",
+            "inc rax",
+            "mov [rbp-48], rax",
+            f"jmp {top}",
+        )
+        # Not whitespace: start of word
+        self.label(not_ws1)
+        # word_start = cursor
+        self.emitf(
+            "mov rax, [rbp-48]",
+            "mov [rbp-56], rax",
+        )
+        # Scan to end of word (stop at ws or NUL)
+        self.label(scan_word_lbl)
+        self.emitf(
+            "mov rax, [rbp-48]",
+            "inc rax",
+            "mov [rbp-48], rax",
+            "movzx rax, byte [rax]",
+            f"test rax, rax",
+            f"jz {found_word}",
+        )
+        _is_ws_jmp(is_ws2, not_ws2)
+        self.label(is_ws2)
+        self.emitf(f"jmp {found_word}")
+        self.label(not_ws2)
+        self.emitf(f"jmp {scan_word_lbl}")
+
+        self.label(found_word)
+        # cursor points to the byte after the last word char (ws or NUL).
+        # Allocate word_len+1 bytes and copy — do NOT write into the source
+        # string, which may be in read-only .rdata memory.
+        # Layout: [rbp-56]=word_start(src), [rbp-48]=cursor(end), [rbp-64]=word_len
+        # RDI and RSI are callee-saved on Windows x64.
+        copy_lp = self.fresh("ssw_cp")
+        copy_end = self.fresh("ssw_cpend")
+        self.emitf(
+            # word_len = cursor - word_start
+            "mov rax, [rbp-48]",       # rax = cursor (one past last word char)
+            "sub rax, [rbp-56]",       # rax = word_len
+            "mov [rbp-64], rax",       # [rbp-64] = word_len
+            # malloc(word_len + 1) for NUL
+            "inc rax",
+            "mov rcx, rax",
+            "call malloc",             # rax = dst buf
+            # Save dst; use callee-saved RDI and RSI (preserved across calls)
+            "push rdi",
+            "push rsi",
+            "mov rdi, rax",            # rdi = dst (advancing)
+            "mov rsi, [rbp-56]",       # rsi = src = word_start
+            "mov rcx, [rbp-64]",       # rcx = word_len
+        )
+        self.label(copy_lp)
+        self.emitf(
+            "test rcx, rcx",
+            f"jz {copy_end}",
+            "movzx rax, byte [rsi]",
+            "mov [rdi], al",
+            "inc rsi",
+            "inc rdi",
+            "dec rcx",
+            f"jmp {copy_lp}",
+        )
+        self.label(copy_end)
+        self.emitf(
+            "mov byte [rdi], 0",       # NUL terminate
+            # dst_base = rdi - word_len = &buf[0]
+            "sub rdi, [rbp-64]",
+            "mov [rbp-56], rdi",       # [rbp-56] = word dup ptr
+            "pop rsi",                 # restore rsi
+            "pop rdi",                 # restore rdi
+        )
+        # Grow list if len == cap
+        no_grow = self.fresh("ssw_nogrow")
+        self.emitf(
+            "mov rax, [rbp-32]",
+            "cmp rax, [rbp-40]",
+            f"jl {no_grow}",
+        )
+        # Double cap: new_cap = cap*2; realloc buf
+        # Windows x64 realloc(ptr, size): rcx=ptr, rdx=new_size
+        self.emitf(
+            "mov rax, [rbp-40]",
+            "shl rax, 1",
+            "mov [rbp-40], rax",      # save new cap
+            "shl rax, 3",             # bytes = new_cap * 8
+            "mov rdx, rax",           # rdx = new size in bytes
+            "mov rcx, [rbp-24]",      # rcx = old buf ptr
+            "call realloc",
+            "mov [rbp-24], rax",      # save new buf
+            "mov rdx, [rbp-16]",
+            f"mov [rdx+{self.LIST_BUF_OFF}], rax",
+            "mov rax, [rbp-40]",
+            "mov rdx, [rbp-16]",
+            f"mov [rdx+{self.LIST_CAP_OFF}], rax",
+        )
+        self.label(no_grow)
+        # buf[len] = word_dup; len++
+        self.emitf(
+            "mov rax, [rbp-32]",
+            "mov rdx, [rbp-24]",
+            "mov rcx, [rbp-56]",
+            "mov [rdx+rax*8], rcx",
+            "inc qword [rbp-32]",
+        )
+        self.emitf(f"jmp {top}")
+
+        self.label(end)
+        # Set list len in header
+        self.emitf(
+            "mov rax, [rbp-32]",
+            "mov rdx, [rbp-16]",
+            f"mov [rdx+{self.LIST_LEN_OFF}], rax",
+            "mov rax, rdx",
+            "leave",
+            "ret",
+        )
 
     def _emit_str_splitlines_helper(self) -> None:
         """`_runtime_str_splitlines`: `s.splitlines()` -> list[str].
@@ -8281,7 +8477,10 @@ class Codegen:
         obj_slot = info.locals_[f"__strm_obj_{id(e)}"]
         if len(e.args) == 0:
             self.gen_expr(e.obj, info)
-            self.emitf(f"call {sym}")
+            if e.method == "split":
+                self.emitf("call _runtime_str_split_ws")
+            else:
+                self.emitf(f"call {sym}")
             return
         if len(e.args) == 1:
             self.gen_expr(e.obj, info)
