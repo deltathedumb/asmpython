@@ -1,10 +1,10 @@
 # expect:
-# 1
-# 1
-# 0
-# 0
-# 1
-# 1
+# True
+# True
+# False
+# False
+# True
+# True
 
 # isinstance(x, Cls): checks the instance's runtime class id against Cls and its
 # subclasses. Instances are tagged with their class id at construction.
