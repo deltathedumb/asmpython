@@ -5267,6 +5267,8 @@ class SemaAnalyzer:
                 self._check_sort_kwargs(e, scope)
                 if len(e.args) == 1:
                     e.inferred_type = self._list_el_type(e.args[0], scope)
+                    if e.inferred_type == "tuple":
+                        e.tuple_elem_types = self._list_el_tuple_types(e.args[0], scope)
                 else:
                     if e.sort_key is not None:
                         raise SemaError(
