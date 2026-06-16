@@ -6888,6 +6888,7 @@ class Codegen:
 
         self.emit("section .rodata")
         self.emit('_runtime_str_oob_msg: db "string index out of range",0')
+        self.emit('_runtime_list_oob_msg: db "list index out of range",0')
         # CPython (3.13+) uses the same message "division by zero" for all
         # of int //, int %, float /, float //, float % and divmod().
         self.emit('_runtime_zerodiv_msg: db "division by zero",0')
@@ -9082,6 +9083,14 @@ class Codegen:
             f"add rcx, [rax+{self.LIST_LEN_OFF}]",
         )
         self.label(pos)
+        # Bounds check: 0 <= rcx < len.  rax = header, rcx = normalised index.
+        oob = self.fresh("list_oob")
+        self.emitf(
+            "test rcx, rcx",
+            f"js {oob}",
+            f"cmp rcx, [rax+{self.LIST_LEN_OFF}]",
+            f"jge {oob}",
+        )
         self.emitf(f"mov rax, [rax+{self.LIST_BUF_OFF}]")
         # If this list holds floats, drop the 8-byte slot into xmm0; otherwise
         # keep it in rax (int / str-ptr both 8-byte integers).
@@ -9089,6 +9098,15 @@ class Codegen:
             self.emitf("movsd xmm0, [rax+rcx*8]")
         else:
             self.emitf("mov rax, [rax+rcx*8]")
+        after = self.fresh("list_after")
+        self.emitf(f"jmp {after}")
+        self.label(oob)
+        self.emitf(
+            "lea rax, [rel _runtime_list_oob_msg]",
+            f"mov rbx, {self._exc_type_id('IndexError')}",
+            "call _runtime_raise",
+        )
+        self.label(after)
 
     def _gen_list_call(self, e: A.Call, info: FuncInfo) -> None:
         """`list(x)` -> a fresh list holding x's elements (shallow copy).
