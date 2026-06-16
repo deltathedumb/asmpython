@@ -947,7 +947,7 @@ class Parser:
                 patterns.append(self._parse_as_pattern())
         return A.MatchSequence(patterns=patterns, star_index=star_index, pos=pos)
 
-    def _parse_star_pattern(self) -> "A.MatchCapture":
+    def _parse_star_pattern(self) -> "A.Pattern":
         """`*name` / `*_` inside a sequence pattern."""
         pos = self._expect("OP", "*").pos
         name = self._expect("NAME").value
@@ -1957,8 +1957,8 @@ class Parser:
             values: list = []
             while True:
                 if self._check("OP", "**"):
-                    self._eat()
-                    keys.append(None)
+                    op = self._eat()
+                    keys.append(A.Name(name="**", pos=op.pos))
                     values.append(self._parse_expr())
                 else:
                     k = self._parse_expr()
@@ -1990,8 +1990,8 @@ class Parser:
                     break  # trailing comma
                 if self._check("OP", "**"):
                     # `{"k": v, **other, ...}` — merge another dict in here.
-                    self._eat()
-                    keys.append(None)
+                    op = self._eat()
+                    keys.append(A.Name(name="**", pos=op.pos))
                     values.append(self._parse_expr())
                     continue
                 keys.append(self._parse_expr())

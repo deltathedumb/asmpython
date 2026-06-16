@@ -8080,7 +8080,7 @@ class Codegen:
         # Use the pre-reserved frame slot instead.
         key_slot = info.locals_[f"__dictlit_key_{id(e)}"]
         for k_expr, v_expr in zip(e.keys, e.values):
-            if k_expr is None:
+            if isinstance(k_expr, A.Name) and k_expr.name == "**":
                 # `**other` (PEP 448): merge other's entries in, in source
                 # order, so later entries (spreads or explicit keys) win on
                 # key conflicts.

@@ -533,7 +533,7 @@ class SemaAnalyzer:
         # arguments at call sites. `qualified_name` is a function's plain name,
         # or "ClassName.method_name" for a method. See
         # `_infer_unannotated_params`.
-        self.inferred_param_types: dict[tuple[str, int], tuple] = {}
+        self.inferred_param_types: dict[str, tuple] = {}
 
     def _has_external_base(self, class_name: str) -> bool:
         """True if `class_name` or any ancestor inherits from a base that isn't
@@ -732,7 +732,7 @@ class SemaAnalyzer:
                     elif i < len(m.defaults) and m.defaults[i] is not None:
                         pinfo[p] = (A.expr_type(m.defaults[i]), None, None, None, None)  # type: ignore
                     else:
-                        inferred = self.inferred_param_types.get((f"{c.name}.{m.name}", i))
+                        inferred = self.inferred_param_types.get(f"{c.name}.{m.name}:{i}")
                         if inferred is not None:
                             pinfo[p] = inferred
                 self._scan_field_assigns(m.body, sig, pinfo)
@@ -753,7 +753,7 @@ class SemaAnalyzer:
                 else:
                     raw = self._static_value_info(s.value, pinfo)
                     ty, el, val, tup = raw[0], raw[1], raw[2], raw[3]
-                    _elval = raw[4] if len(raw) > 4 else None
+                    _elval = None
                 existing = sig.fields.get(s.name)
                 # Don't let a later `= 0` reset placeholder downgrade a field we
                 # already typed more precisely.
@@ -889,7 +889,7 @@ class SemaAnalyzer:
                 continue
             if i < len(fn.defaults) and fn.defaults[i] is not None:
                 continue
-            candidates: set = set()
+            candidates: list = []
             found_any = False
             arg_idx = i - start
             for site in sites:
@@ -904,9 +904,10 @@ class SemaAnalyzer:
                 if lit is None:
                     continue
                 found_any = True
-                candidates.add(lit)
+                if lit not in candidates:
+                    candidates.append(lit)
             if found_any and len(candidates) == 1:
-                self.inferred_param_types[(qualname, i)] = next(iter(candidates))
+                self.inferred_param_types[f"{qualname}:{i}"] = candidates[0]
 
     # ---- return-type inference for unannotated functions/methods ----------
 
@@ -949,7 +950,7 @@ class SemaAnalyzer:
         self._collect_returns(fn.body, returns)
         if not returns:
             return None
-        types: set = set()
+        types: list = []
         for r in returns:
             if r.value is None:
                 return None  # bare `return` mixed in: ambiguous
@@ -963,12 +964,14 @@ class SemaAnalyzer:
                 elif j < len(fn.defaults) and fn.defaults[j] is not None:
                     lit = (A.expr_type(fn.defaults[j]), None, None, None, None)
                 else:
-                    lit = self.inferred_param_types.get((qualname, j))
+                    lit = self.inferred_param_types.get(f"{qualname}:{j}")
             if lit is None:
                 return None
-            types.add((lit[0], lit[1], lit[2]))
+            entry = (lit[0], lit[1], lit[2])
+            if entry not in types:
+                types.append(entry)
         if len(types) == 1:
-            return next(iter(types))
+            return types[0]
         return None
 
     def _static_value_type(self, value, ptypes: dict) -> str:
@@ -1087,12 +1090,14 @@ class SemaAnalyzer:
             scope.add(name, A.expr_type(default_expr))
             return
         if inferred is not None:
-            ty, el, val, tup = inferred[:4]
-            elval = inferred[4] if len(inferred) > 4 else None
-            scope.add(name, ty, el_type=el, value_type=val, tuple_types=tup,
-                      el_value_type=elval)
+            self._seed_param_from_inferred(scope, name, inferred)
             return
         scope.add(name, "int")
+
+    def _seed_param_from_inferred(self, scope: Scope, name: str, inferred: tuple) -> None:
+        """Unpack an inferred (ty, el, val, tup) 4-tuple and seed `scope`."""
+        ty, el, val, tup = inferred[0], inferred[1], inferred[2], inferred[3]
+        scope.add(name, ty, el_type=el, value_type=val, tuple_types=tup)
 
     def _seed_globals_into(self, scope: Scope) -> None:
         """Copy module-level names (and their tracked types) into a fresh
@@ -1339,7 +1344,7 @@ class SemaAnalyzer:
             for i, p in enumerate(f.params):
                 annot = f.param_types[i] if i < len(f.param_types) else None
                 default = f.defaults[i] if i < len(f.defaults) else None
-                inferred = self.inferred_param_types.get((f.name, i))
+                inferred = self.inferred_param_types.get(f"{f.name}:{i}")
                 self._seed_param(scope, p, annot, default, inferred)
             self._try_check_block(f.body, scope)
             self.in_function = None
@@ -1381,7 +1386,7 @@ class SemaAnalyzer:
                         # DUNDER_SAME_TYPE_OTHER) so `other.field` resolves.
                         scope.add(p, f"instance:{c.name}")
                         continue
-                    inferred = self.inferred_param_types.get((f"{c.name}.{m.name}", i))
+                    inferred = self.inferred_param_types.get(f"{c.name}.{m.name}:{i}")
                     self._seed_param(scope, p, annot, default, inferred)
                 self._try_check_block(m.body, scope)
                 self.in_function = None
@@ -1392,7 +1397,7 @@ class SemaAnalyzer:
         if self._collected_errors:
             from .errors import MultiSemaError
             if len(self._collected_errors) == 1:
-                raise self._collected_errors[0]
+                raise MultiSemaError(self._collected_errors)
             raise MultiSemaError(self._collected_errors)
 
         # Hand resolved tables to codegen via the Module.
@@ -3638,7 +3643,7 @@ class SemaAnalyzer:
             return
         if isinstance(e, A.DictLit):
             for k, v in zip(e.keys, e.values):
-                if k is None:
+                if isinstance(k, A.Name) and k.name == "**":
                     # `**other` (PEP 448 dict unpacking): `other` must itself
                     # be dict-typed (or opaque).
                     self._check_expr(v, scope)
@@ -3663,7 +3668,7 @@ class SemaAnalyzer:
             # chained read (`d[k][k2]`) can recover it.
             seen_v: str | None = None
             for k, v in zip(e.keys, e.values):
-                if k is None:
+                if isinstance(k, A.Name) and k.name == "**":
                     # A `**other` spread contributes `other`'s value kind too,
                     # so e.g. `{**d1, "x": 1}` where `d1: dict[str, str]` and
                     # the literal key is `int` collapses to "any" below, same
@@ -4310,14 +4315,17 @@ class SemaAnalyzer:
                     )
                 _, sig = resolved
                 # Method arity counts self; user passed args don't include self.
-                expected = sig.arity - 1
+                # @staticmethod has no implicit self so don't subtract 1.
+                is_static_m = "staticmethod" in getattr(sig, "decorators", [])
+                expected = sig.arity if is_static_m else sig.arity - 1
                 required = expected - sig.n_defaults
-                if not (required <= len(e.args) <= expected):
-                    raise SemaError(
-                        f"{class_name}.{e.method}() takes {required}..{expected} argument(s), got {len(e.args)}",
-                        e.pos,
-                        ErrorCode.E_ARG_COUNT,
-                    )
+                if sig.vararg is None and sig.kwarg is None and not e.kwargs:
+                    if not (required <= len(e.args) <= expected):
+                        raise SemaError(
+                            f"{class_name}.{e.method}() takes {required}..{expected} argument(s), got {len(e.args)}",
+                            e.pos,
+                            ErrorCode.E_ARG_COUNT,
+                        )
                 # Assembly operand validation: when string literals are passed
                 # to any Assembly method, validate them at compile time.
                 if class_name == "Assembly":
@@ -4800,10 +4808,12 @@ class SemaAnalyzer:
             sig = r[1] if r else None
         if sig is None:
             return
+        is_static_m = "staticmethod" in getattr(sig, "decorators", [])
+        skip = 0 if is_static_m else 1
         self._bind_args(
             e,
-            sig.param_names[1:],
-            sig.param_defaults[1:],
+            sig.param_names[skip:],
+            sig.param_defaults[skip:],
             sig.vararg,
             e.pos,
             e.method,
