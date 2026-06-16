@@ -1038,6 +1038,13 @@ class Codegen:
             self._cl_define(info, f"__comp_stop_{id(expr)}")
             self._cl_define(info, f"__comp_idx_{id(expr)}")
             self._cl_define(info, f"__comp_val_{id(expr)}")
+            # enumerate(xs) in comprehension needs an extra counter slot.
+            if (
+                isinstance(expr.iter, A.Call)
+                and expr.iter.func == "enumerate"
+                and expr.targets
+            ):
+                self._cl_define(info, f"__comp_enum_ctr_{id(expr)}", "int")
             # Loop variable inherits the iterable's element kind.
             var_ty = "int"
             if A.expr_type(expr.iter) == "list":
@@ -7379,6 +7386,17 @@ class Codegen:
 
         Like _gen_list_lit, this never uses push/pop across a call (it parks
         intermediate pointers in frame slots), keeping rsp 16-byte aligned."""
+        # `[elt for i, x in enumerate(xs)]` — special case: iterate xs by index,
+        # bind the index counter to the first target and the element to the second.
+        if (
+            isinstance(e.iter, A.Call)
+            and e.iter.func == "enumerate"
+            and len(e.iter.args) >= 1
+            and e.targets
+            and len(e.targets) == 2
+        ):
+            self._gen_comprehension_enumerate(e, info)
+            return
         iter_t = A.expr_type(e.iter)
         if iter_t not in ("list", "tuple", "any", "int", "set", "str"):
             # Tuples share the list layout; an opaque iterable is a list/tuple
@@ -7462,6 +7480,85 @@ class Codegen:
         self.emitf(f"inc qword [rbp{idx:+d}]", f"jmp {top}")
         self.label(end)
         self.emitf(f"mov rax, [rbp{res:+d}]")  # result value
+
+    def _gen_comprehension_enumerate(self, e: A.Comprehension, info: FuncInfo) -> None:
+        """`[elt for i, x in enumerate(xs)]` — iterate xs by index, bind the
+        running counter to targets[0] and the element to targets[1]."""
+        inner = e.iter.args[0]  # type: ignore[union-attr]
+        res = info.locals_[f"__comp_res_{id(e)}"]
+        it = info.locals_[f"__comp_iter_{id(e)}"]
+        stop = info.locals_[f"__comp_stop_{id(e)}"]
+        idx = info.locals_[f"__comp_idx_{id(e)}"]
+        val = info.locals_[f"__comp_val_{id(e)}"]
+        ctr = info.locals_[f"__comp_enum_ctr_{id(e)}"]
+        idx_name = e.targets[0] if isinstance(e.targets[0], str) else None
+        el_name = e.targets[1] if isinstance(e.targets[1], str) else None
+        idx_slot = info.locals_.get(idx_name) if idx_name else None
+        el_slot = info.locals_.get(el_name) if el_name else None
+
+        # result = empty list
+        cap = 4
+        self._emit_malloc(self.LIST_HEADER)
+        self.emitf(
+            f"mov qword [rax+{self.LIST_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.LIST_LEN_OFF}], 0",
+            f"mov [rbp{res:+d}], rax",
+        )
+        self._emit_malloc(cap * 8)
+        self.emitf(f"mov rbx, [rbp{res:+d}]", f"mov [rbx+{self.LIST_BUF_OFF}], rax")
+
+        # Evaluate inner iterable once; cache pointer, length, counter.
+        self.gen_expr(inner, info)
+        self.emitf(
+            f"mov [rbp{it:+d}], rax",
+            f"mov rbx, [rax+{self.LIST_LEN_OFF}]",
+            f"mov [rbp{stop:+d}], rbx",
+            f"mov qword [rbp{idx:+d}], 0",
+            f"mov qword [rbp{ctr:+d}], 0",
+        )
+
+        top = self.fresh("comp_enum")
+        end = self.fresh("endcomp_enum")
+
+        self.label(top)
+        self.emitf(f"mov rax, [rbp{idx:+d}]", f"cmp rax, [rbp{stop:+d}]", f"jge {end}")
+        # Load element.
+        self.emitf(
+            f"mov rbx, [rbp{it:+d}]",
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+            f"mov rcx, [rbp{idx:+d}]",
+            "mov rax, [rbx+rcx*8]",
+        )
+        if el_slot is not None:
+            self.emitf(f"mov [rbp{el_slot:+d}], rax")
+        if idx_slot is not None:
+            self.emitf(f"mov rax, [rbp{ctr:+d}]", f"mov [rbp{idx_slot:+d}], rax")
+
+        # Optional filter.
+        skip = None
+        if e.cond is not None:
+            skip = self.fresh("comp_enum_skip")
+            self._gen_truthy_test(e.cond, info, skip)
+
+        # Append elt.
+        self.gen_expr(e.elt, info)
+        if e.list_el_type == "float":
+            self.emitf("movq rax, xmm0")
+        self.emitf(
+            f"mov [rbp{val:+d}], rax",
+            f"mov rax, [rbp{res:+d}]",
+            f"mov rbx, [rbp{val:+d}]",
+            "call _runtime_list_append",
+        )
+        if skip is not None:
+            self.label(skip)
+        self.emitf(
+            f"inc qword [rbp{idx:+d}]",
+            f"inc qword [rbp{ctr:+d}]",
+            f"jmp {top}",
+        )
+        self.label(end)
+        self.emitf(f"mov rax, [rbp{res:+d}]")
 
     def _gen_dict_comprehension(self, e: A.DictComprehension, info: FuncInfo) -> None:
         """{key: value for var in iter (if cond)} -> build an empty dict, iterate

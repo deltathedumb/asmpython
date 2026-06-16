@@ -205,6 +205,7 @@ def compile_source(
     whole_program: bool = True,
     output_type: str = "executable",
     icon_path: Path | None = None,
+    all_errors: bool = False,
 ) -> BuildResult:
     # Whole-program compilation: when we know the entry file, follow its imports
     # and merge every reachable project module's classes/functions into one unit
@@ -215,7 +216,7 @@ def compile_source(
     else:
         tokens = Lexer(src).tokenize()
         module = Parser(tokens).parse()
-    sema_analyze(module, source_dir=source_dir)
+    sema_analyze(module, source_dir=source_dir, collect_errors=all_errors)
 
     if target == "linux":
         gen = LinuxCodegen(module, use_runtime_lib=use_runtime_lib)

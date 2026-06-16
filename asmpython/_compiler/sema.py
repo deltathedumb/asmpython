@@ -496,9 +496,11 @@ def _load_module(name: str) -> dict:
 
 
 class SemaAnalyzer:
-    def __init__(self, mod: A.Module, *, source_dir=None) -> None:
+    def __init__(self, mod: A.Module, *, source_dir=None, collect_errors: bool = False) -> None:
         self.mod = mod
         self.source_dir = source_dir
+        self.collect_errors = collect_errors
+        self._collected_errors: list = []
         self.funcs: dict[str, FuncSig] = {}
         self.classes: dict[str, ClassSig] = {}
         # Variable name -> return type of the lambda bound to it, so an indirect
@@ -602,13 +604,20 @@ class SemaAnalyzer:
             cur = cls.parent
         return None
 
-    def _check_exc_type_name(self, name: str, pos) -> None:
+    def _check_exc_type_name(self, name: str, pos, scope: "Scope | None" = None) -> None:
         """Validate that `name` (from an `except <name>:` clause) refers to a
         builtin exception or a user class deriving from one."""
         if name in BUILTIN_EXCEPTIONS:
             return
         if name in self.classes and self._is_exception_class(name):
             return
+        if name not in self.classes:
+            # Not a locally-defined class. If it's in scope (imported from
+            # another module), accept leniently — we can't verify the
+            # hierarchy at sema time. If it's not in scope at all, it's a
+            # genuinely unknown name and we reject it.
+            if scope is None or name in scope:
+                return
         raise SemaError(
             f"'{name}' is not an exception type", pos,
             ErrorCode.E_NOT_AN_EXCEPTION,
@@ -1132,6 +1141,17 @@ class SemaAnalyzer:
         except Exception:
             pass
 
+    def _try_check_block(self, stmts: list, scope: "Scope") -> None:
+        """Run `_check_block` and, in collect-errors mode, stash any SemaError
+        instead of propagating it so analysis continues in other bodies."""
+        if not self.collect_errors:
+            self._check_block(stmts, scope)
+            return
+        try:
+            self._check_block(stmts, scope)
+        except SemaError as e:
+            self._collected_errors.append(e)
+
     def analyze(self) -> None:
         # Inject stdlib Assembly class if the user imported it, so the
         # constructor and method calls resolve through the normal class path.
@@ -1300,7 +1320,7 @@ class SemaAnalyzer:
         # Module dunders the runtime always provides.
         self.global_scope.add("__name__", "str")
         self.global_scope.add("__file__", "str")
-        self._check_block(self.mod.body, self.global_scope)
+        self._try_check_block(self.mod.body, self.global_scope)
 
         # Function bodies: each has its own scope, seeded with globals then
         # params. If a param has a default literal, infer its type from the
@@ -1321,7 +1341,7 @@ class SemaAnalyzer:
                 default = f.defaults[i] if i < len(f.defaults) else None
                 inferred = self.inferred_param_types.get((f.name, i))
                 self._seed_param(scope, p, annot, default, inferred)
-            self._check_block(f.body, scope)
+            self._try_check_block(f.body, scope)
             self.in_function = None
             self.in_lifted = False
 
@@ -1363,10 +1383,17 @@ class SemaAnalyzer:
                         continue
                     inferred = self.inferred_param_types.get((f"{c.name}.{m.name}", i))
                     self._seed_param(scope, p, annot, default, inferred)
-                self._check_block(m.body, scope)
+                self._try_check_block(m.body, scope)
                 self.in_function = None
                 self.current_class = None
                 self.classmethod_cls_param = None
+
+        # Raise all collected errors now that every body has been checked.
+        if self._collected_errors:
+            from .errors import MultiSemaError
+            if len(self._collected_errors) == 1:
+                raise self._collected_errors[0]
+            raise MultiSemaError(self._collected_errors)
 
         # Hand resolved tables to codegen via the Module.
         self.mod.imported_modules = self.imported_modules
@@ -2523,7 +2550,7 @@ class SemaAnalyzer:
         if isinstance(s, A.Try):
             self._check_block(s.body, scope)
             for name in s.handler_types:
-                self._check_exc_type_name(name, s.pos)
+                self._check_exc_type_name(name, s.pos, scope)
             # `except ... as e` binds the caught exception's message string
             # (asmpython's native exception payload). Codegen relies on this
             # being `str` so `print(e)` prints it correctly.
@@ -2532,7 +2559,7 @@ class SemaAnalyzer:
             self._check_block(s.handler, scope)
             for types, bind_name, hbody in s.extra_handlers:
                 for name in types:
-                    self._check_exc_type_name(name, s.pos)
+                    self._check_exc_type_name(name, s.pos, scope)
                 if bind_name is not None:
                     scope.add(bind_name, "str")
                 self._check_block(hbody, scope)
@@ -3495,6 +3522,37 @@ class SemaAnalyzer:
                 e.el_tuple_types = self._common_tuple_slots(e.elems, scope)
             return
         if isinstance(e, A.Comprehension):
+            # `[elt for i, x in enumerate(xs) ...]` — treat like the For-loop
+            # enumerate special case: bind index as int, element from xs.
+            if (
+                isinstance(e.iter, A.Call)
+                and e.iter.func == "enumerate"
+                and len(e.iter.args) >= 1
+                and e.targets
+                and len(e.targets) == 2
+            ):
+                inner = e.iter.args[0]
+                self._check_expr(inner, scope)
+                child = Scope()
+                child.types.update(scope.types)
+                child.list_el_types.update(scope.list_el_types)
+                child.dict_value_types.update(scope.dict_value_types)
+                child.dict_inner_value_types.update(scope.dict_inner_value_types)
+                child.tuple_elem_types.update(scope.tuple_elem_types)
+                idx_name = e.targets[0] if isinstance(e.targets[0], str) else None
+                el_name = e.targets[1] if isinstance(e.targets[1], str) else None
+                if idx_name:
+                    child.add(idx_name, "int")
+                if el_name:
+                    child.add(el_name, self._iter_element_type(inner, scope))
+                loop_vars = {n for n in (idx_name, el_name) if n}
+                if e.cond is not None:
+                    self._check_expr(e.cond, child)
+                self._check_expr(e.elt, child)
+                e.inferred_type = "list"
+                e.list_el_type = A.expr_type(e.elt)
+                self._merge_walrus_bindings(scope, child, loop_vars)
+                return
             self._check_expr(e.iter, scope)
             it_t = A.expr_type(e.iter)
             # Element type the loop variable takes from the iterable.
@@ -3699,7 +3757,7 @@ class SemaAnalyzer:
             for el in e.elems:
                 self._check_expr(el, scope)
                 et = A.expr_type(el)
-                if et not in ("str", "any"):
+                if et not in ("str", "any", "tuple"):
                     raise SemaError(
                         f"set elements of type {et} are not supported yet "
                         "(sets are str-keyed in v1)",
@@ -5217,10 +5275,14 @@ class SemaAnalyzer:
                 # synthesized init — accept the call leniently (full
                 # field/keyword validation is post-bootstrap). A class with no
                 # fields really does take no arguments.
+                cls_sig = self.classes[e.func]
+                parent = getattr(cls_sig, "parent", None)
+                parent_is_external = parent is not None and parent not in self.classes
                 if (
                     (e.args or e.kwargs)
-                    and not self.classes[e.func].fields
+                    and not cls_sig.fields
                     and not self._is_exception_class(e.func)
+                    and not parent_is_external
                 ):
                     raise SemaError(
                         f"{e.func}() has no __init__ and takes no arguments",
@@ -5322,11 +5384,14 @@ class SemaAnalyzer:
         raise SemaError(f"undefined function {e.func!r}", e.pos, ErrorCode.E_UNDEFINED_FUNC)
 
 
-def analyze(mod: A.Module, *, source_dir=None) -> None:
+def analyze(mod: A.Module, *, source_dir=None, collect_errors: bool = False) -> None:
     """Run semantic analysis over `mod`.
 
     `source_dir` is the directory of the source file (a Path or None). Used for
     resolving relative imports and project-local module references. None for
     isolation (used by the self-host gauntlet and tests).
+
+    When `collect_errors` is True, sema continues past the first error and
+    raises `MultiSemaError` at the end with every diagnostic collected.
     """
-    SemaAnalyzer(mod, source_dir=source_dir).analyze()
+    SemaAnalyzer(mod, source_dir=source_dir, collect_errors=collect_errors).analyze()

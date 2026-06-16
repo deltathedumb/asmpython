@@ -277,6 +277,26 @@ class SemaError(CompileError):
         super().__init__("semantic", message, pos, code)
 
 
+class MultiSemaError(Exception):
+    """Raised when --all-errors mode collects more than one sema error.
+
+    `errors` is a non-empty list of SemaError instances in source order.
+    The first error is also available as `errors[0]` for callers that want
+    to surface a single representative diagnostic.
+    """
+
+    def __init__(self, errors: "list[SemaError]") -> None:
+        self.errors = errors
+        super().__init__(f"{len(errors)} semantic error(s)")
+
+    def format_all(self, src: str, filename: str) -> str:
+        """Format every collected error, separated by blank lines."""
+        parts: list[str] = []
+        for e in self.errors:
+            parts.append(e.format(src, filename))
+        return "\n".join(parts)
+
+
 def explain(code_label: str) -> str:
     """Return the description for a code label like 'E014' or 'L001'.
 

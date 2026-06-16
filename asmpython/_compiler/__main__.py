@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from .driver import compile_source, detect_default_target
-from .errors import CompileError, explain as _explain_code
+from .errors import CompileError, MultiSemaError, explain as _explain_code
 from .. import __version__
 
 
@@ -223,6 +223,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "diagnostic; no codegen, no toolchain needed. Editor-friendly.",
     )
     build_grp.add_argument(
+        "--all-errors",
+        action="store_true",
+        dest="all_errors",
+        help="report every sema error in the file instead of stopping at the "
+        "first one. Parse errors still stop early. Works with or without --check.",
+    )
+    build_grp.add_argument(
         "--json",
         action="store_true",
         help="with --check, print diagnostics as a JSON array on stdout "
@@ -318,18 +325,20 @@ def _build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _run_check(src: str, source_path, *, source_dir, as_json: bool) -> int:
-    """Front-end-only check (lex / parse / sema). Returns 0 if clean, 1 if a
+def _run_check(
+    src: str, source_path, *, source_dir, as_json: bool, all_errors: bool = False
+) -> int:
+    """Front-end-only check (lex / parse / sema). Returns 0 if clean, 1 if any
     diagnostic was found. With `as_json`, prints a JSON array of diagnostics on
-    stdout; otherwise prints the human-readable formatted error to stderr.
+    stdout; otherwise prints human-readable formatted errors to stderr.
 
-    The JSON shape (one object per diagnostic — currently at most one, since the
-    front-end stops at the first error) is what the VS Code extension consumes:
+    The JSON shape is what the VS Code extension consumes:
         [{"phase": "...", "message": "...", "line": N, "col": N}]
     A clean file prints `[]`.
     """
     import json
 
+    from .errors import MultiSemaError
     from .lexer import Lexer
     from .parser import Parser
     from .sema import analyze as sema_analyze
@@ -337,7 +346,23 @@ def _run_check(src: str, source_path, *, source_dir, as_json: bool) -> int:
     try:
         tokens = Lexer(src).tokenize()
         module = Parser(tokens).parse()
-        sema_analyze(module, source_dir=source_dir)
+        sema_analyze(module, source_dir=source_dir, collect_errors=all_errors)
+    except MultiSemaError as me:
+        if as_json:
+            from .errors import _code_label
+            diags = []
+            for e in me.errors:
+                diags.append({
+                    "phase": e.phase,
+                    "message": e.message,
+                    "line": e.pos.line if e.pos else 1,
+                    "col": e.pos.col if e.pos else 1,
+                    "code": _code_label(e.code) if e.code is not None else None,
+                })
+            print(json.dumps(diags))
+        else:
+            print(me.format_all(src, str(source_path)), file=sys.stderr)
+        return 1
     except CompileError as e:
         if as_json:
             from .errors import _code_label
@@ -394,15 +419,15 @@ def main(argv: list[str] | None = None) -> int:
     src = args.source.read_text(encoding="utf-8")
 
     # --check: front-end only (lex / parse / sema). Fast, no toolchain.
-    # Surfaces the first diagnostic — as JSON with --json, else human-readable.
     if args.check:
         return _run_check(src, args.source, source_dir=args.source.resolve().parent,
-                          as_json=args.json)
+                          as_json=args.json, all_errors=args.all_errors)
 
     # --onedir implies --use-runtime-lib so the codegen emits `extern`
     # references that resolve against the shared runtime library.
     use_runtime_lib = args.use_runtime_lib or args.bundle_mode == "onedir"
 
+    all_errors = args.all_errors
     try:
         compile_source(
             src,
@@ -419,7 +444,11 @@ def main(argv: list[str] | None = None) -> int:
             entry_path=args.source.resolve(),
             output_type=args.output_type,
             icon_path=args.icon,
+            all_errors=all_errors,
         )
+    except MultiSemaError as me:
+        print(me.format_all(src, str(args.source)), file=sys.stderr)
+        return 1
     except CompileError as e:
         print(e.format(src, str(args.source)), file=sys.stderr)
         return 1
