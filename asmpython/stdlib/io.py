@@ -71,6 +71,22 @@ class StringIO:
     def close(self) -> None:
         pass
 
+    def readable(self) -> int:
+        return 1
+
+    def writable(self) -> int:
+        return 1
+
+    def seekable(self) -> int:
+        return 1
+
+    def __enter__(self) -> StringIO:
+        return self
+
+    def __exit__(self, exc_type: int, exc_val: int, exc_tb: int) -> int:
+        self.close()
+        return 0
+
     def __str__(self) -> str:
         return self._buf
 
@@ -158,6 +174,22 @@ class BytesIO:
 
     def close(self) -> None:
         pass
+
+    def readable(self) -> int:
+        return 1
+
+    def writable(self) -> int:
+        return 1
+
+    def seekable(self) -> int:
+        return 1
+
+    def __enter__(self) -> BytesIO:
+        return self
+
+    def __exit__(self, exc_type: int, exc_val: int, exc_tb: int) -> int:
+        self.close()
+        return 0
 
     def __len__(self) -> int:
         return len(self._buf)
@@ -351,3 +383,14 @@ class TextIOWrapper:
     def __exit__(self, exc_type: int, exc_val: int, exc_tb: int) -> int:
         self.close()
         return 0
+
+
+def text_open(file: str, mode: str = "r", encoding: str = "utf-8") -> TextIOWrapper:
+    """Open a file as text and return a TextIOWrapper.
+
+    Equivalent to the builtin open() in text mode. Provided so callers that
+    want an explicit io.TextIOWrapper can use io.text_open() instead of the
+    builtin open(), which already works for the common case.
+    """
+    raw: FileIO = FileIO(file, mode)
+    return TextIOWrapper(raw, encoding=encoding)

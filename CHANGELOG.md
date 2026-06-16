@@ -11,6 +11,19 @@ output rather than silent miscompilations.
 
 ### Added
 
+- **`io.StringIO` / `io.BytesIO` context managers**: both classes now implement
+  `__enter__` / `__exit__` so they work in `with` blocks. Added `readable()`,
+  `writable()`, and `seekable()` returning 1 on both classes. Added
+  `io.text_open(file, mode, encoding)` as a named alternative to the builtin
+  `open()` that returns a `TextIOWrapper` (the builtin `open` is unchanged).
+
+- **`contextlib` improvements**: `suppress` is now a real class (was a stub
+  function returning 0) — it implements `__enter__` / `__exit__`, suppressing
+  any exception that propagates through the block (exception type filtering is
+  not yet supported since class types can't be passed as arguments in asmpython).
+  `nullcontext` is now a class that returns `enter_result` from `__enter__`.
+  `closing.__exit__` now correctly calls `self.thing.close()`.
+
 - **`**kwargs` capture**: excess keyword arguments at call sites are now packed
   into a `dict` and passed as a trailing argument to the callee. Functions
   declared with `**kwargs` receive the overflow as a live `dict[str, any]`

@@ -11,14 +11,35 @@ def contextmanager(func: str) -> str:
     return func
 
 
-def suppress(*exceptions) -> int:
-    """Return a context manager that suppresses specified exceptions (stub)."""
-    return 0
+class suppress:
+    """Context manager that suppresses specified exceptions.
+
+    In asmpython, exception type matching is not inspectable at runtime,
+    so __exit__ returns 1 to suppress any exception that was raised.
+    Pass exception types positionally: with suppress(ValueError, KeyError):
+    """
+
+    def __init__(self) -> None:
+        pass
+
+    def __enter__(self) -> suppress:
+        return self
+
+    def __exit__(self, exc_type: int, exc_val: int, exc_tb: int) -> int:
+        return 1 if exc_type != 0 else 0
 
 
-def nullcontext(enter_result: int = 0) -> int:
-    """Return a no-op context manager (stub)."""
-    return enter_result
+class nullcontext:
+    """A context manager that does nothing (returns enter_result from __enter__)."""
+
+    def __init__(self, enter_result: int = 0) -> None:
+        self.enter_result: int = enter_result
+
+    def __enter__(self) -> int:
+        return self.enter_result
+
+    def __exit__(self, exc_type: int, exc_val: int, exc_tb: int) -> int:
+        return 0
 
 
 class closing:
@@ -31,6 +52,7 @@ class closing:
         return self.thing
 
     def __exit__(self, exc_type: int, exc_val: int, exc_tb: int) -> int:
+        self.thing.close()
         return 0
 
 
