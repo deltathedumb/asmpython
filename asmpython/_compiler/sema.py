@@ -1083,8 +1083,14 @@ class SemaAnalyzer:
         resolved = self._resolve_annot(annot)
         if resolved is not None:
             ty, el, val, tup, elval = resolved
-            scope.add(name, ty, el_type=el, value_type=val, tuple_types=tup,
-                      el_value_type=elval)
+            if ty == "list" and tup:
+                # list[tuple[T1,T2,...]]: slot types go into el_tuple_types so
+                # `for a, b in pairs` can type each target correctly.
+                scope.add(name, ty, el_type=el, value_type=val,
+                          el_tuple_types=tup, el_value_type=elval)
+            else:
+                scope.add(name, ty, el_type=el, value_type=val, tuple_types=tup,
+                          el_value_type=elval)
             return
         if default_expr is not None:
             scope.add(name, A.expr_type(default_expr))
@@ -1514,7 +1520,9 @@ class SemaAnalyzer:
             else:
                 child.add(e.var, el)
             return
-        shape = list(getattr(e.iter, "tuple_elem_types", []) or [])
+        shape = self._list_el_tuple_types(e.iter, child) or list(
+            getattr(e.iter, "tuple_elem_types", []) or []
+        )
         flat = all(isinstance(t, str) for t in e.targets)
         for ti, nm in enumerate(self._flat_target_names(e.targets)):
             if flat and ti < len(shape) and shape[ti] not in ("int", "any"):
@@ -1856,6 +1864,7 @@ class SemaAnalyzer:
                         "list",
                         el_type=ael or self._list_el_type(value, scope),
                         el_value_type=aelval,
+                        el_tuple_types=atup or None,
                     )
                     return
                 if aty == "dict":
@@ -3542,6 +3551,7 @@ class SemaAnalyzer:
                 child = Scope()
                 child.types.update(scope.types)
                 child.list_el_types.update(scope.list_el_types)
+                child.list_el_tuple_types.update(scope.list_el_tuple_types)
                 child.dict_value_types.update(scope.dict_value_types)
                 child.dict_inner_value_types.update(scope.dict_inner_value_types)
                 child.tuple_elem_types.update(scope.tuple_elem_types)
@@ -3577,6 +3587,7 @@ class SemaAnalyzer:
             child = Scope()
             child.types.update(scope.types)
             child.list_el_types.update(scope.list_el_types)
+            child.list_el_tuple_types.update(scope.list_el_tuple_types)
             child.dict_value_types.update(scope.dict_value_types)
             child.dict_inner_value_types.update(scope.dict_inner_value_types)
             child.tuple_elem_types.update(scope.tuple_elem_types)
@@ -3643,6 +3654,7 @@ class SemaAnalyzer:
                 child = Scope()
                 child.types.update(scope.types)
                 child.list_el_types.update(scope.list_el_types)
+                child.list_el_tuple_types.update(scope.list_el_tuple_types)
                 child.dict_value_types.update(scope.dict_value_types)
                 child.dict_inner_value_types.update(scope.dict_inner_value_types)
                 child.tuple_elem_types.update(scope.tuple_elem_types)
@@ -3680,6 +3692,7 @@ class SemaAnalyzer:
             child = Scope()
             child.types.update(scope.types)
             child.list_el_types.update(scope.list_el_types)
+            child.list_el_tuple_types.update(scope.list_el_tuple_types)
             child.dict_value_types.update(scope.dict_value_types)
             child.dict_inner_value_types.update(scope.dict_inner_value_types)
             child.tuple_elem_types.update(scope.tuple_elem_types)
