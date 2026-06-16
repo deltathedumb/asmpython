@@ -1,140 +1,81 @@
 # Session Resume — parity-expansion branch
 
-## What was just committed
+## Standing directives (apply to all future work on this branch)
 
-`__call__` dunder dispatch — commit `554cbad5`.
-`obj(args)` on a typed instance variable now calls `__call__`. 380/380
-tests pass. Everything through dunder unary/binary/compare/abs/hash/call
-is complete.
+- Push after every commit.
+- Prefer breadth over depth — fill many small stdlib/language gaps rather
+  than going deep on one feature.
+- Ship full implementations; no stubs or partial work.
+- Never use `-> "ClassName"` quoted forward-reference annotations.
+- Delete all temporary/scratch test files (`_tmp*.py/.asm/.obj/.exe`) after
+  use — don't leave them in the repo or commit them. `.gitignore` already
+  covers `_scratch*.*`, `_probe*.*`, `_tmp*.*`.
 
----
+## In progress: int-keyed sets (uncommitted, not yet test-suite-verified)
 
-## Roadmap updates (uncommitted)
+Sets are dicts keyed by string. This session extended them to accept `int`
+elements by converting ints to their decimal string form at codegen time
+(reusing the existing FNV-1a string-hash dict backend — no new runtime
+needed). Pattern used throughout: `gen_expr` the int into `rax`, then
+`self._emit_int_to_str()` followed by `self.emitf("call _runtime_str_concat_dup")`
+to get a persistent heap string pointer, used as the dict key. This mirrors
+the existing `str(int)` builtin codegen (codegen.py ~line 11737-11738).
 
-- `roadmap.md` 1.1.0: "Callable instances" marked **done**; test count
-  updated to 380/380; **Show-all-errors mode** added as a planned item.
-- `roadmap.md` 1.3.0: ARM64 and macOS headings promoted from bold to `####`;
-  new **Performance and optimisation** section added (constant folding,
-  peephole, register allocation, type specialisation).
+### sema.py changes (done)
+Three set-related restriction sites now accept `int` alongside `str`/`any`/`tuple`,
+with error text changed to "(sets are str/int-keyed in v1)":
+1. `A.SetLit` element check (~line 4431)
+2. `set.add/discard/remove` arg check (~line 5060)
+3. `set()`/`frozenset()` comprehension element check (~line 5806)
 
-Commit these together with the selfhost fixes below, or separately.
+### codegen.py changes (done, smoke-tested, NOT yet run through full suite)
+- `_gen_set_lit` (~9755): int elements converted to string before
+  `_runtime_dict_set`.
+- `set.add` method codegen (~10341): same conversion before storing key.
+- `set.discard`/`set.remove` method codegen (~10359): same conversion
+  (dup'd for safety even though the key isn't persisted).
+- `_gen_dict_in` (~11460): when rhs is a `set` and the needle is `int`,
+  convert before `_runtime_dict_contains` lookup. Covers `x in s`.
+- `_gen_set_call` (~9516, handles `set(x)`/`frozenset(x)`): now inspects
+  the source list/tuple/comprehension's element type (same pattern as
+  `_gen_list_in`: check `A.tuple_element_types`, `ListLit.el_type`,
+  `Comprehension.list_el_type` / `Name.list_el_type`) and converts int
+  elements while copying into the new set.
 
----
+Manually verified via a throwaway `_tmp_intset.py` (since deleted) covering:
+literal int set membership, `.add`, `.discard`, `set([...])` from an int
+list, and `{x for x in range(5)}` — all 8 expected True/False lines matched.
 
-## Self-host status: 15/19 files pass sema
+### Still TODO before this is "done"
+1. **Run `python -m tests.runner` for the full suite** — was about to do
+   this when interrupted. Has not been run since these codegen edits.
+2. Added `tests/cases/449_int_set.py` (new, untracked) — positive test
+   covering the same scenarios as the manual smoke test.
+3. Deleted the three now-contradicted negative tests:
+   `tests/cases_fail/set_add_int.py`, `set_int_comp.py`, `set_int_element.py`
+   (they asserted int-rejection, which is no longer correct behavior).
+4. Once the suite passes cleanly: `git add`, commit, push (per standing
+   directive — push after every commit).
 
-Four remaining blockers, in order (`py -m selfhost.check --verbose`):
-
-### 1 — parser.py:230 — imported exception class rejected
-
-```python
-except ParseError:
+Current `git status --short`:
+```
+ M asmpython/_compiler/codegen.py
+ M asmpython/_compiler/sema.py
+ D tests/cases_fail/set_add_int.py
+ D tests/cases_fail/set_int_comp.py
+ D tests/cases_fail/set_int_element.py
+?? tests/cases/449_int_set.py
 ```
 
-Sema's `_check_exc_type_name` only accepts names in `BUILTIN_EXCEPTIONS`
-or classes defined in the same file that derive from a builtin. `ParseError`
-is imported from `.errors` so `self.classes` does not contain it.
+## Other known gaps not yet started (for the next breadth pass)
 
-**Fix in:** `asmpython/_compiler/sema.py` — `_check_exc_type_name`
+- `yield` inside `for` loops (generators currently only support `while`-loop
+  bodies).
+- `yield` inside `if` branches.
+- Dict comprehensions with non-string keys.
+- Nested tuple unpacking `(a, b), c = ...`.
 
-Add a third early-return: if the name is not in `self.classes` at all
-(imported, not defined here), accept it — we can't verify the import's
-hierarchy at sema time.
+## Immediate next step
 
-```python
-def _check_exc_type_name(self, name: str, pos) -> None:
-    if name in BUILTIN_EXCEPTIONS:
-        return
-    if name in self.classes and self._is_exception_class(name):
-        return
-    if name not in self.classes:   # imported — can't verify, accept
-        return
-    raise SemaError(
-        f"'{name}' is not an exception type", pos,
-        ErrorCode.E_NOT_AN_EXCEPTION,
-    )
-```
-
----
-
-### 2 — sema.py:234 — tuple elements in frozenset literal
-
-```python
-INTERPRETER_ONLY_METHODS: frozenset[tuple[str, str]] = frozenset({
-    ("importlib", "import_module"),
-    ...
-})
-```
-
-Error: "set elements of type tuple are not supported yet".
-
-**Fix in:** `asmpython/_compiler/sema.py` — element-type check for set/frozenset
-literals (grep: "set elements of type").
-
-Extend the check to allow tuple elements: record the set as type `set` without
-erroring. Codegen doesn't need to emit tuple-sets yet; we only need sema to
-pass.
-
-After this fix, run the gauntlet again — sema.py may have additional blockers.
-
----
-
-### 3 — codegen.py:11201 — `enumerate` in list comprehension
-
-```python
-stack_positions = [i for i, a in enumerate(assigns) if a is None]
-```
-
-Error: `undefined function 'enumerate'`. `enumerate` is only recognised as a
-special form in bare `for` loops, not inside list comprehension generators.
-
-**Fix in:** `asmpython/_compiler/sema.py` — `ListComp` handling (or wherever
-comprehension generators are checked).
-
-When the comprehension generator's `iter` is `enumerate(xs)`, apply the same
-two-variable binding logic used for `for i, x in enumerate(xs):`. Alternatively,
-register `enumerate` as a known builtin in the global scope so the
-"undefined function" error doesn't fire.
-
----
-
-### 4 — `__main__.py`:166 — stdlib-inherited `__init__` not found
-
-```python
-ap = _ColorParser(prog="asmpython", ..., add_help=False)
-```
-
-`_ColorParser` subclasses `argparse.ArgumentParser`. Error: "`_ColorParser()`
-has no `__init__` and takes no arguments" — because the parent's `__init__`
-is in the stdlib binding, not user code.
-
-**Fix in:** `asmpython/_compiler/sema.py` — the constructor-call check for
-classes with no `__init__` in the user-defined chain.
-
-When a class has no `__init__` anywhere in its user-defined parent chain AND
-its outermost parent is a name not in `self.classes` (a stdlib import), skip
-the argument-count check and return `any`. The simplest gate:
-`if cls.parent is not None and cls.parent not in self.classes: return`.
-
----
-
-## After 19/19 sema — next gates
-
-Once all 19 files pass sema, the next gates for true self-compilation are:
-
-- **Codegen gate:** actually compile each file through codegen. Known hard
-  blocker: set{tuple} elements (codegen can't emit runtime sets of tuples).
-  These need real codegen support, not just sema leniency.
-- **Link gate:** all 19 `.asm` files assembled and linked into a single
-  `asmpython.exe` that can compile a hello-world.
-
----
-
-## Next steps (ordered)
-
-1. Fix the four sema blockers above (sema.py changes only, each is small).
-2. `py -m selfhost.check` — confirm 19/19.
-3. Commit + push roadmap.md and selfhost fixes.
-4. Start the codegen gate: `py -m asmpython asmpython/_compiler/lexer.py
-   --check` and chase the first codegen error.
-5. Continue 1.1.0 parity items — show-all-errors mode is next on the list.
+Run `python -m tests.runner`, confirm the int-set work didn't regress
+anything and that `449_int_set.py` passes, then commit and push.

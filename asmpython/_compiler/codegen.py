@@ -9548,6 +9548,16 @@ class Codegen:
             f"mov [rbp{stop:+d}], rbx",
             f"mov qword [rbp{idx:+d}], 0",
         )
+        src_arg = e.args[0]
+        if A.expr_type(src_arg) == "tuple":
+            ets = [t for t in A.tuple_element_types(src_arg) if t != "any"]
+            src_el_t = ets[0] if ets else "int"
+        elif isinstance(src_arg, A.ListLit):
+            src_el_t = src_arg.el_type
+        elif isinstance(src_arg, (A.Comprehension, A.Name)):
+            src_el_t = getattr(src_arg, "list_el_type", "int")
+        else:
+            src_el_t = "int"
         top = self.fresh("setcall")
         end = self.fresh("endsetcall")
         self.label(top)
@@ -9557,6 +9567,11 @@ class Codegen:
             f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
             f"mov rcx, [rbp{idx:+d}]",
             "mov rax, [rbx+rcx*8]",  # element (key ptr)
+        )
+        if src_el_t == "int":
+            self._emit_int_to_str()
+            self.emitf("call _runtime_str_concat_dup")
+        self.emitf(
             f"mov [rbp{key_slot:+d}], rax",
             "mov rcx, 1",  # dummy value
             f"mov rbx, [rbp{key_slot:+d}]",
@@ -9780,7 +9795,13 @@ class Codegen:
         self._emit_dict_alloc_order_buf(cap, slot_off)
         key_slot = info.locals_[f"__setlit_key_{id(e)}"]
         for el in e.elems:
-            self.gen_expr(el, info)  # rax = member key ptr
+            self.gen_expr(el, info)  # rax = member key
+            if A.expr_type(el) == "int":
+                # Int elements: convert to their decimal string so they share
+                # the str-keyed dict backend. _emit_int_to_str uses a shared
+                # scratch buffer — dup it so the key is independently stable.
+                self._emit_int_to_str()
+                self.emitf("call _runtime_str_concat_dup")
             self.emitf(
                 f"mov [rbp{key_slot:+d}], rax",
                 "mov rcx, 1",  # dummy value — only membership matters
@@ -10334,7 +10355,10 @@ class Codegen:
                 return
             if e.method == "add":
                 key_slot = info.locals_[f"__setadd_key_{id(e)}"]
-                self.gen_expr(e.args[0], info)  # rax = member key ptr
+                self.gen_expr(e.args[0], info)  # rax = member key
+                if A.expr_type(e.args[0]) == "int":
+                    self._emit_int_to_str()
+                    self.emitf("call _runtime_str_concat_dup")
                 self.emitf(f"mov [rbp{key_slot:+d}], rax")
                 self.gen_expr(e.obj, info)  # rax = set (dict) header
                 self.emitf(
@@ -10355,7 +10379,10 @@ class Codegen:
                 # s.remove(x): remove x, raising KeyError if absent (which
                 # _runtime_dict_pop already does for us).
                 key_slot = info.locals_[f"__setrm_key_{id(e)}"]
-                self.gen_expr(e.args[0], info)  # rax = member key ptr
+                self.gen_expr(e.args[0], info)  # rax = member key
+                if A.expr_type(e.args[0]) == "int":
+                    self._emit_int_to_str()
+                    self.emitf("call _runtime_str_concat_dup")
                 self.emitf(f"mov [rbp{key_slot:+d}], rax")
                 if e.method == "discard":
                     self.gen_expr(e.obj, info)
@@ -11449,11 +11476,16 @@ class Codegen:
         """`key in dict` / `key not in dict`.
 
         Wraps the existing `_runtime_dict_contains` helper. The needle
-        must be a str (sema enforces).
+        must be a str (sema enforces) — except for int-keyed sets, whose
+        members are stored as their decimal string form (see `_gen_set_lit`),
+        so an int needle is converted the same way before lookup.
         """
         op = e.ops[0]
         slot_off = info.locals_[f"__dictin_{id(e)}"]
         self.gen_expr(e.operands[0], info)  # rax = key ptr
+        if A.expr_type(e.operands[1]) == "set" and A.expr_type(e.operands[0]) == "int":
+            self._emit_int_to_str()
+            self.emitf("call _runtime_str_concat_dup")
         self.emitf(f"mov [rbp{slot_off:+d}], rax")
         self.gen_expr(e.operands[1], info)  # rax = dict header
         self.emitf(

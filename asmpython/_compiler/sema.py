@@ -4431,17 +4431,16 @@ class SemaAnalyzer:
         if isinstance(e, A.SetLit):
             # A `{a, b, ...}` set literal. Elements are checked but their kind
             # isn't tracked (set membership is the only operation modelled);
-            # `expr_type` already reports a SetLit as "set". Sets are
-            # str-keyed in v1 (the backing dict's hash/equality assume a
-            # string pointer); a non-str element would hash/compare a raw
-            # int as if it were a pointer and crash at runtime.
+            # `expr_type` already reports a SetLit as "set". The backing store
+            # is a str-keyed dict; `int` elements are accepted by converting
+            # to their decimal string at codegen time (see _gen_set_lit).
             for el in e.elems:
                 self._check_expr(el, scope)
                 et = A.expr_type(el)
-                if et not in ("str", "any", "tuple"):
+                if et not in ("str", "int", "any", "tuple"):
                     raise SemaError(
                         f"set elements of type {et} are not supported yet "
-                        "(sets are str-keyed in v1)",
+                        "(sets are str/int-keyed in v1)",
                         getattr(el, "pos", e.pos),
                     )
             return
@@ -5060,10 +5059,10 @@ class SemaAnalyzer:
             elif obj_t == "set":
                 if e.method in ("add", "discard", "remove"):
                     arg_t = A.expr_type(e.args[0])
-                    if arg_t not in ("str", "any"):
+                    if arg_t not in ("str", "int", "any"):
                         raise SemaError(
                             f"set.{e.method}({arg_t}) is not supported yet "
-                            "(sets are str-keyed in v1)",
+                            "(sets are str/int-keyed in v1)",
                             e.args[0].pos,
                         )
                     e.inferred_type = "int"
@@ -5804,15 +5803,14 @@ class SemaAnalyzer:
                 e.tuple_elem_types = [self._iter_element_type(a, scope) for a in e.args]
                 return
             if e.func in ("set", "frozenset"):
-                # For set comprehensions, validate the element type: sets use
-                # string hashing and int elements would crash at runtime.
+                # For set comprehensions, validate the element type.
                 if e.args and isinstance(e.args[0], A.Comprehension):
                     comp = e.args[0]
                     et = A.expr_type(comp.elt)
-                    if et not in ("str", "any", "tuple"):
+                    if et not in ("str", "int", "any", "tuple"):
                         raise SemaError(
                             f"set elements of type {et} are not supported yet "
-                            "(sets are str-keyed in v1)",
+                            "(sets are str/int-keyed in v1)",
                             e.pos,
                         )
                 return
