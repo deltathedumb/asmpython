@@ -11,71 +11,46 @@
   use — don't leave them in the repo or commit them. `.gitignore` already
   covers `_scratch*.*`, `_probe*.*`, `_tmp*.*`.
 
-## In progress: int-keyed sets (uncommitted, not yet test-suite-verified)
+## Current status
 
-Sets are dicts keyed by string. This session extended them to accept `int`
-elements by converting ints to their decimal string form at codegen time
-(reusing the existing FNV-1a string-hash dict backend — no new runtime
-needed). Pattern used throughout: `gen_expr` the int into `rax`, then
-`self._emit_int_to_str()` followed by `self.emitf("call _runtime_str_concat_dup")`
-to get a persistent heap string pointer, used as the dict key. This mirrors
-the existing `str(int)` builtin codegen (codegen.py ~line 11737-11738).
+- 446/446 tests passing.
+- Self-host Windows build passes (`build.py` → `asmpython.exe` compiles clean).
+- Linux cross-build via WSL fails unrelated to our work (WSL not available).
 
-### sema.py changes (done)
-Three set-related restriction sites now accept `int` alongside `str`/`any`/`tuple`,
-with error text changed to "(sets are str/int-keyed in v1)":
-1. `A.SetLit` element check (~line 4431)
-2. `set.add/discard/remove` arg check (~line 5060)
-3. `set()`/`frozenset()` comprehension element check (~line 5806)
+## Fixes landed this session (commit e8e4a3ce)
 
-### codegen.py changes (done, smoke-tested, NOT yet run through full suite)
-- `_gen_set_lit` (~9755): int elements converted to string before
-  `_runtime_dict_set`.
-- `set.add` method codegen (~10341): same conversion before storing key.
-- `set.discard`/`set.remove` method codegen (~10359): same conversion
-  (dup'd for safety even though the key isn't persisted).
-- `_gen_dict_in` (~11460): when rhs is a `set` and the needle is `int`,
-  convert before `_runtime_dict_contains` lookup. Covers `x in s`.
-- `_gen_set_call` (~9516, handles `set(x)`/`frozenset(x)`): now inspects
-  the source list/tuple/comprehension's element type (same pattern as
-  `_gen_list_in`: check `A.tuple_element_types`, `ListLit.el_type`,
-  `Comprehension.list_el_type` / `Name.list_el_type`) and converts int
-  elements while copying into the new set.
+### Self-host sema errors — all resolved
 
-Manually verified via a throwaway `_tmp_intset.py` (since deleted) covering:
-literal int set membership, `.add`, `.discard`, `set([...])` from an int
-list, and `{x for x in range(5)}` — all 8 expected True/False lines matched.
+Three root causes fixed:
 
-### Still TODO before this is "done"
-1. **Run `python -m tests.runner` for the full suite** — was about to do
-   this when interrupted. Has not been run since these codegen edits.
-2. Added `tests/cases/449_int_set.py` (new, untracked) — positive test
-   covering the same scenarios as the manual smoke test.
-3. Deleted the three now-contradicted negative tests:
-   `tests/cases_fail/set_add_int.py`, `set_int_comp.py`, `set_int_element.py`
-   (they asserted int-rejection, which is no longer correct behavior).
-4. Once the suite passes cleanly: `git add`, commit, push (per standing
-   directive — push after every commit).
+1. **`subprocess.run()` missing `text`/`env` kwargs** — added `text: int = 0`
+   and `env: int = 0` to `stdlib/subprocess.py`'s `run()` stub so `driver.py`
+   and `_runtime/build.py` don't get "unexpected keyword argument" errors.
 
-Current `git status --short`:
-```
- M asmpython/_compiler/codegen.py
- M asmpython/_compiler/sema.py
- D tests/cases_fail/set_add_int.py
- D tests/cases_fail/set_int_comp.py
- D tests/cases_fail/set_int_element.py
-?? tests/cases/449_int_set.py
-```
+2. **Module alias "A" shadowed by `re.py`'s `A: int = 256`** — the
+   whole-program loader materialised `re.py`'s single-letter regex flag
+   constants as globals before `from . import ast_nodes as A` could bind "A"
+   as a module alias. Fixed in two places:
+   - `sema.py`: `from . import X` (no module, bind_ty="module") now
+     ALWAYS overrides any prior binding, so stale int constants can't
+     shadow module aliases.
+   - `program.py`: `FromImport` bound names are now added to `available`
+     after each import is collected, preventing later constant-assignment
+     scans from claiming the same name first.
 
-## Other known gaps not yet started (for the next breadth pass)
+## Fixes landed this session (commit 8b49d79e)
 
-- `yield` inside `for` loops (generators currently only support `while`-loop
-  bodies).
-- `yield` inside `if` branches.
+- `yield` in `for` loops — generator transform now handles both `range_args`
+  and `iter` for-loops. Materialises iterable as list in `__init__` + `_idx`
+  counter; `__next__` bounds-checks, binds loop var, runs body, returns.
+- `--onedir` implies `--use-runtime-lib` at the `compile_source` API level.
+
+## Other known gaps not yet started (for next breadth pass)
+
+- `yield` inside `if` branches (yield not at top level of loop body).
 - Dict comprehensions with non-string keys.
 - Nested tuple unpacking `(a, b), c = ...`.
 
 ## Immediate next step
 
-Run `python -m tests.runner`, confirm the int-set work didn't regress
-anything and that `449_int_set.py` passes, then commit and push.
+Pick any item from the breadth backlog above and implement it.

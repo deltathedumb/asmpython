@@ -9,7 +9,7 @@ python -m asmpython hello.py          # compile for your host platform
 ./hello                               # or hello.exe on Windows
 ```
 
-Current release: **1.0.2** — 1.1.0 (CPython parity expansion) in development.
+Current release: **1.1.0**.
 See [roadmap.md](roadmap.md) for the full version plan.
 
 ---

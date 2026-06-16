@@ -9,4 +9,4 @@ verbatim). The compiler internals live under the private `_compiler`,
 `_runtime`, and `_stdlib` subpackages.
 """
 
-__version__ = "1.1.0-0.1"
+__version__ = "1.1.0"
