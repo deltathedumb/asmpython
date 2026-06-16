@@ -658,6 +658,15 @@ class Comprehension:
     # When empty, the comprehension is single-target and `var` holds the one
     # name. Mirrors `A.For.targets`.
     targets: list = field(default_factory=list)
+    # Additional `for` clauses: `[x for a in A for b in B]`.
+    # Parallel lists: extra_for_vars[i] is str (single name) or "" (multi-target),
+    # extra_for_targets[i] is list of names when multi-unpack, else [],
+    # extra_for_iters[i] is the iterable expr,
+    # extra_for_conds[i] is the filter expr or None.
+    extra_for_vars: list = field(default_factory=list)
+    extra_for_targets: list = field(default_factory=list)
+    extra_for_iters: list = field(default_factory=list)
+    extra_for_conds: list = field(default_factory=list)
 
 
 @dataclass

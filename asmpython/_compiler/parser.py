@@ -2058,7 +2058,31 @@ class Parser:
         if self._check("KEYWORD", "if"):
             self._eat()
             cond = self._parse_or()
-        return A.Comprehension(elt=elt, var=var, iter=iter_expr, cond=cond, pos=pos, targets=multi)  # type: ignore
+        ef_vars: list = []
+        ef_targets: list = []
+        ef_iters: list = []
+        ef_conds: list = []
+        while self._check("KEYWORD", "for"):
+            self._eat()
+            etargets = [self._parse_for_target()]
+            while self._check("OP", ","):
+                self._eat()
+                if self._check("KEYWORD", "in"):
+                    break
+                etargets.append(self._parse_for_target())
+            evar2: str = etargets[0] if len(etargets) == 1 and isinstance(etargets[0], str) else ""
+            emulti2: list = [] if len(etargets) == 1 and isinstance(etargets[0], str) else etargets
+            self._expect("KEYWORD", "in")
+            eiter2 = self._parse_or()
+            econd2 = None
+            if self._check("KEYWORD", "if"):
+                self._eat()
+                econd2 = self._parse_or()
+            ef_vars.append(evar2)
+            ef_targets.append(emulti2)
+            ef_iters.append(eiter2)
+            ef_conds.append(econd2)
+        return A.Comprehension(elt=elt, var=var, iter=iter_expr, cond=cond, pos=pos, targets=multi, extra_for_vars=ef_vars, extra_for_targets=ef_targets, extra_for_iters=ef_iters, extra_for_conds=ef_conds)  # type: ignore
 
     def _parse_dict_comprehension_tail(self, key, value, pos):
         """Parse `for <var> in <iter> [if <cond>]` after `key: value`, returning

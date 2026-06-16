@@ -1063,6 +1063,27 @@ class Codegen:
             else:
                 self._cl_define(info, expr.var, var_ty)
             self._cl_walk_expr(info, expr.iter)
+            ef_vars = getattr(expr, "extra_for_vars", [])
+            ef_targets_l = getattr(expr, "extra_for_targets", [])
+            ef_iters = getattr(expr, "extra_for_iters", [])
+            ef_conds_l = getattr(expr, "extra_for_conds", [])
+            for ef_idx in range(len(ef_iters)):
+                ef_evar = ef_vars[ef_idx] if ef_idx < len(ef_vars) else ""
+                ef_emulti = ef_targets_l[ef_idx] if ef_idx < len(ef_targets_l) else []
+                ef_iter = ef_iters[ef_idx]
+                ef_cond = ef_conds_l[ef_idx] if ef_idx < len(ef_conds_l) else None
+                self._cl_define(info, f"__comp_ef_it_{id(expr)}_{ef_idx}")
+                self._cl_define(info, f"__comp_ef_stop_{id(expr)}_{ef_idx}")
+                self._cl_define(info, f"__comp_ef_idx_{id(expr)}_{ef_idx}")
+                if ef_emulti:
+                    for nm in self._target_names(ef_emulti):
+                        if nm not in info.locals_:
+                            self._cl_define(info, nm, "any")
+                elif ef_evar and ef_evar not in info.locals_:
+                    self._cl_define(info, ef_evar)
+                self._cl_walk_expr(info, ef_iter)
+                if ef_cond is not None:
+                    self._cl_walk_expr(info, ef_cond)
             self._cl_walk_expr(info, expr.elt)
             if expr.cond is not None:
                 self._cl_walk_expr(info, expr.cond)
@@ -7460,21 +7481,84 @@ class Codegen:
                 "mov rax, [rbx+rcx*8]",
             )
             self._emit_comp_target_bind(e.targets, var, info)
-        # Optional filter.
+        # Optional filter on the outer loop.
         skip = None
         if e.cond is not None:
             skip = self.fresh("comp_skip")
             self._gen_truthy_test(e.cond, info, skip)
-        # Append elt to result: rax = header, rbx = value.
-        self.gen_expr(e.elt, info)
-        if e.list_el_type == "float":
-            self.emitf("movq rax, xmm0")
-        self.emitf(
-            f"mov [rbp{val:+d}], rax",
-            f"mov rax, [rbp{res:+d}]",
-            f"mov rbx, [rbp{val:+d}]",
-            "call _runtime_list_append",
-        )
+        ef_iters_g = getattr(e, "extra_for_iters", [])
+        if ef_iters_g:
+            ef_vars_g = getattr(e, "extra_for_vars", [])
+            ef_tgts_g = getattr(e, "extra_for_targets", [])
+            ef_conds_g = getattr(e, "extra_for_conds", [])
+            # Nested for-clauses: emit inner loops, then append at innermost.
+            # We track (top, end, idx_slot, skip) for each inner loop so we can
+            # close them in reverse order after the append.
+            inner_loops: list = []
+            for ef_n in range(len(ef_iters_g)):
+                ef_evar = ef_vars_g[ef_n] if ef_n < len(ef_vars_g) else ""
+                ef_emulti = ef_tgts_g[ef_n] if ef_n < len(ef_tgts_g) else []
+                ef_iter = ef_iters_g[ef_n]
+                ef_cond = ef_conds_g[ef_n] if ef_n < len(ef_conds_g) else None
+                ef_it = info.locals_[f"__comp_ef_it_{id(e)}_{ef_n}"]
+                ef_stop = info.locals_[f"__comp_ef_stop_{id(e)}_{ef_n}"]
+                ef_idx_slot = info.locals_[f"__comp_ef_idx_{id(e)}_{ef_n}"]
+                self.gen_expr(ef_iter, info)
+                self.emitf(
+                    f"mov [rbp{ef_it:+d}], rax",
+                    f"mov rbx, [rax+{self.LIST_LEN_OFF}]",
+                    f"mov [rbp{ef_stop:+d}], rbx",
+                    f"mov qword [rbp{ef_idx_slot:+d}], 0",
+                )
+                ef_top = self.fresh("ef_comp")
+                ef_end = self.fresh("ef_endcomp")
+                self.label(ef_top)
+                self.emitf(
+                    f"mov rax, [rbp{ef_idx_slot:+d}]",
+                    f"cmp rax, [rbp{ef_stop:+d}]",
+                    f"jge {ef_end}",
+                    f"mov rbx, [rbp{ef_it:+d}]",
+                    f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+                    f"mov rcx, [rbp{ef_idx_slot:+d}]",
+                    "mov rax, [rbx+rcx*8]",
+                )
+                if ef_emulti:
+                    self._emit_comp_target_bind(ef_emulti, 0, info)
+                elif ef_evar:
+                    ef_slot = info.locals_.get(ef_evar, 0)
+                    if ef_slot:
+                        self.emitf(f"mov [rbp{ef_slot:+d}], rax")
+                ef_skip = None
+                if ef_cond is not None:
+                    ef_skip = self.fresh("ef_comp_skip")
+                    self._gen_truthy_test(ef_cond, info, ef_skip)
+                inner_loops.append((ef_top, ef_end, ef_idx_slot, ef_skip))
+            # Innermost body: append elt.
+            self.gen_expr(e.elt, info)
+            if e.list_el_type == "float":
+                self.emitf("movq rax, xmm0")
+            self.emitf(
+                f"mov [rbp{val:+d}], rax",
+                f"mov rax, [rbp{res:+d}]",
+                f"mov rbx, [rbp{val:+d}]",
+                "call _runtime_list_append",
+            )
+            # Close inner loops in reverse order.
+            for ef_top, ef_end, ef_idx_slot, ef_skip in reversed(inner_loops):
+                if ef_skip is not None:
+                    self.label(ef_skip)
+                self.emitf(f"inc qword [rbp{ef_idx_slot:+d}]", f"jmp {ef_top}")
+                self.label(ef_end)
+        else:
+            self.gen_expr(e.elt, info)
+            if e.list_el_type == "float":
+                self.emitf("movq rax, xmm0")
+            self.emitf(
+                f"mov [rbp{val:+d}], rax",
+                f"mov rax, [rbp{res:+d}]",
+                f"mov rbx, [rbp{val:+d}]",
+                "call _runtime_list_append",
+            )
         if skip is not None:
             self.label(skip)
         self.emitf(f"inc qword [rbp{idx:+d}]", f"jmp {top}")

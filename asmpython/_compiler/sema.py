@@ -3580,9 +3580,49 @@ class SemaAnalyzer:
             child.dict_inner_value_types.update(scope.dict_inner_value_types)
             child.tuple_elem_types.update(scope.tuple_elem_types)
             self._bind_comprehension_targets(e, el, child)
+            # When the outer element is itself a list (list[list[T]]), propagate
+            # the inner element type so `_list_el_type(var, child)` returns T.
+            if el == "list" and not e.targets:
+                inner_el = self._list_el_value_type(e.iter, scope)
+                if inner_el != "int":
+                    child.list_el_types[e.var] = inner_el
             loop_vars = set(self._flat_target_names(e.targets)) if e.targets else {e.var}
             if e.cond is not None:
                 self._check_expr(e.cond, child)
+            ef_vars = getattr(e, "extra_for_vars", [])
+            ef_targets_list = getattr(e, "extra_for_targets", [])
+            ef_iters = getattr(e, "extra_for_iters", [])
+            ef_conds = getattr(e, "extra_for_conds", [])
+            for ef_n in range(len(ef_iters)):
+                ef_evar = ef_vars[ef_n] if ef_n < len(ef_vars) else ""
+                ef_emulti = ef_targets_list[ef_n] if ef_n < len(ef_targets_list) else []
+                ef_iter = ef_iters[ef_n]
+                ef_cond = ef_conds[ef_n] if ef_n < len(ef_conds) else None
+                self._check_expr(ef_iter, child)
+                ef_it_t = A.expr_type(ef_iter)
+                if ef_it_t == "list":
+                    ef_el = self._list_el_type(ef_iter, child)
+                elif ef_it_t in ("str", "dict"):
+                    ef_el = "str"
+                elif ef_it_t == "any":
+                    ef_el = "any"
+                else:
+                    ef_el = "int"
+                if ef_emulti:
+                    for tgt in ef_emulti:
+                        if isinstance(tgt, str):
+                            child.add(tgt, ef_el)
+                            loop_vars.add(tgt)
+                elif ef_evar:
+                    child.add(ef_evar, ef_el)
+                    loop_vars.add(ef_evar)
+                    # Propagate inner element type for list[list[T]] case
+                    if ef_el == "list":
+                        ef_inner = self._list_el_value_type(ef_iter, child)
+                        if ef_inner != "int":
+                            child.list_el_types[ef_evar] = ef_inner
+                if ef_cond is not None:
+                    self._check_expr(ef_cond, child)
             self._check_expr(e.elt, child)
             e.inferred_type = "list"
             e.list_el_type = A.expr_type(e.elt)
