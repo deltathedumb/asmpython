@@ -614,6 +614,7 @@ class Codegen:
         "_runtime_sort_pairs_int",
         "_runtime_list_slice",
         "_runtime_list_slice_step",
+        "_runtime_list_slice_assign",
         # String runtime
         "_runtime_str_to_int",
         "_runtime_str_concat",
@@ -1789,9 +1790,11 @@ class Codegen:
                 self._cl_walk_expr(info, s.target.index)
                 self._cl_walk_expr(info, s.value)
                 if A.expr_type(s.target.obj) == "dict":
-                    # dict[key] = value: park key in a frame slot so that complex
-                    # value expressions (DictLit, etc.) don't misalign the stack.
                     self._cl_define(info, f"__dictset_key_{id(s)}")
+                elif isinstance(s.target.index, A.Slice):
+                    # Slice assign: park dst and src pointers across evals.
+                    self._cl_define(info, f"__slcasgn_dst_{id(s)}")
+                    self._cl_define(info, f"__slcasgn_src_{id(s)}")
             elif isinstance(s, A.AttrAssign):
                 self._cl_walk_expr(info, s.obj)
                 self._cl_walk_expr(info, s.value)
@@ -2110,11 +2113,37 @@ class Codegen:
             self.emitf(f"jmp {self.loop_labels[-1][0]}")
             return
         if isinstance(stmt, A.IndexAssign):
-            # Slice assignment (e.g. lst[:0] = other) is too complex for the
-            # current runtime; evaluate both sides for side-effects and skip.
+            # Slice assignment: dst[start:stop] = src_list (in-place, same size).
             if isinstance(stmt.target.index, A.Slice):
+                sl: A.Slice = stmt.target.index
+                dst_slot = info.locals_[f"__slcasgn_dst_{id(stmt)}"]
+                src_slot = info.locals_[f"__slcasgn_src_{id(stmt)}"]
+                INT64_MIN = "0x8000000000000000"
+                INT64_MAX = "0x7fffffffffffffff"
+                # evaluate dst
                 self.gen_expr(stmt.target.obj, info)
+                self.emitf(f"mov [rbp{dst_slot:+d}], rax")
+                # evaluate src
                 self.gen_expr(stmt.value, info)
+                self.emitf(f"mov [rbp{src_slot:+d}], rax")
+                # start
+                if sl.start is not None:
+                    self.gen_expr(sl.start, info)
+                else:
+                    self.emitf(f"mov rax, {INT64_MIN}")
+                self.emitf("mov rcx, rax")  # rcx = start
+                # stop
+                if sl.stop is not None:
+                    self.gen_expr(sl.stop, info)
+                else:
+                    self.emitf(f"mov rax, {INT64_MAX}")
+                self.emitf("mov rdx, rax")  # rdx = stop
+                # call
+                self.emitf(
+                    f"mov rax, [rbp{dst_slot:+d}]",
+                    f"mov rbx, [rbp{src_slot:+d}]",
+                    "call _runtime_list_slice_assign",
+                )
                 return
             obj_t = A.expr_type(stmt.target.obj)
             if getattr(stmt.target, "_setitem_class", None) is not None:
@@ -4014,6 +4043,7 @@ class Codegen:
         self._emit_list_repeat_helper()
         self._emit_list_slice_helper()
         self._emit_list_slice_step_helper()
+        self._emit_list_slice_assign_helper()
         self._emit_list_reverse_helper()
         self._emit_list_insert_helper()
         self._emit_dict_clear_helper()
@@ -4746,6 +4776,96 @@ class Codegen:
         self.emitf(f"jmp {fill_loop}")
         self.label(fill_done)
         self.emitf("mov rax, [rbp-80]", "leave", "ret")
+
+    def _emit_list_slice_assign_helper(self) -> None:
+        """`_runtime_list_slice_assign`: dst[start:stop] = src (in-place).
+
+        In:  rax=dst header, rbx=src header, rcx=start (sentinel INT64_MIN=0),
+             rdx=stop (sentinel INT64_MAX=len(dst)).
+        Out: nothing (rax trashed).
+
+        Copies min(stop-start, len(src)) elements from src into dst starting at
+        the normalized start index. Does NOT resize dst.
+        Frame slots:
+          [rbp- 8] = dst header
+          [rbp-16] = src header
+          [rbp-24] = eff_start (normalized)
+          [rbp-32] = dst.len
+          [rbp-40] = count (elements to copy)
+          [rbp-48] = loop i (src index, 0..count-1)
+        """
+        INT64_MIN = "0x8000000000000000"
+        INT64_MAX = "0x7fffffffffffffff"
+        self.label("_runtime_list_slice_assign")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+        self.emitf(
+            "mov [rbp-8], rax",   # dst
+            "mov [rbp-16], rbx",  # src
+        )
+        # dstlen = dst.len
+        self.emitf(f"mov rax, [rax+{self.LIST_LEN_OFF}]", "mov [rbp-32], rax")
+        # srclen = src.len
+        self.emitf("mov rax, [rbp-16]", f"mov rax, [rax+{self.LIST_LEN_OFF}]")
+        # normalize start (rcx)
+        ns_have = self.fresh("lsa_s_have")
+        ns_pos = self.fresh("lsa_s_pos")
+        ns_ge0 = self.fresh("lsa_s_ge0")
+        ns_lel = self.fresh("lsa_s_lel")
+        self.emitf(f"mov r8, {INT64_MIN}", "cmp rcx, r8", f"jne {ns_have}", "xor rcx, rcx")
+        self.label(ns_have)
+        self.emitf("test rcx, rcx", f"jns {ns_pos}", "add rcx, [rbp-32]")
+        self.label(ns_pos)
+        self.emitf("test rcx, rcx", f"jns {ns_ge0}", "xor rcx, rcx")
+        self.label(ns_ge0)
+        self.emitf("cmp rcx, [rbp-32]", f"jle {ns_lel}", "mov rcx, [rbp-32]")
+        self.label(ns_lel)
+        self.emitf("mov [rbp-24], rcx")  # eff_start
+        # normalize stop (rdx) -> compute count = min(stop-start, srclen)
+        nt_have = self.fresh("lsa_t_have")
+        nt_pos = self.fresh("lsa_t_pos")
+        nt_ge0 = self.fresh("lsa_t_ge0")
+        nt_lel = self.fresh("lsa_t_lel")
+        self.emitf(f"mov r8, {INT64_MAX}", "cmp rdx, r8", f"jne {nt_have}", "mov rdx, [rbp-32]")
+        self.label(nt_have)
+        self.emitf("test rdx, rdx", f"jns {nt_pos}", "add rdx, [rbp-32]")
+        self.label(nt_pos)
+        self.emitf("test rdx, rdx", f"jns {nt_ge0}", "xor rdx, rdx")
+        self.label(nt_ge0)
+        self.emitf("cmp rdx, [rbp-32]", f"jle {nt_lel}", "mov rdx, [rbp-32]")
+        self.label(nt_lel)
+        # count = min(rdx - eff_start, srclen)
+        self.emitf("sub rdx, [rbp-24]")   # rdx = stop - start (may be <= 0)
+        lo_lbl = self.fresh("lsa_lo")
+        nonneg = self.fresh("lsa_nn")
+        self.emitf("test rdx, rdx", f"jns {nonneg}", "xor rdx, rdx")
+        self.label(nonneg)
+        self.emitf("cmp rdx, rax", f"jle {lo_lbl}", "mov rdx, rax")  # rax=srclen
+        self.label(lo_lbl)
+        self.emitf("mov [rbp-40], rdx")  # count
+        # loop: i = 0 to count-1
+        self.emitf("xor rax, rax", "mov [rbp-48], rax")  # i = 0
+        lp = self.fresh("lsa_loop")
+        le = self.fresh("lsa_done")
+        self.label(lp)
+        self.emitf("mov rax, [rbp-48]", "cmp rax, [rbp-40]", f"jge {le}")
+        # src.buf[i]
+        self.emitf(
+            "mov rcx, rax",
+            "mov rbx, [rbp-16]",
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+            "mov rbx, [rbx+rcx*8]",   # rbx = src.buf[i]
+        )
+        # dst.buf[start + i] = rbx
+        self.emitf(
+            "mov rdx, [rbp-24]",       # start
+            "add rdx, rcx",            # start + i
+            "mov rcx, [rbp-8]",
+            f"mov rcx, [rcx+{self.LIST_BUF_OFF}]",
+            "mov [rcx+rdx*8], rbx",
+        )
+        self.emitf("inc qword [rbp-48]", f"jmp {lp}")
+        self.label(le)
+        self.emitf("leave", "ret")
 
     def _emit_list_reverse_helper(self) -> None:
         """`_runtime_list_reverse`: in-place reverse of a list.
