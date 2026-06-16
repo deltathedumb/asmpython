@@ -11870,6 +11870,28 @@ class Codegen:
                 # round(int) is the identity.
                 self.gen_expr(e.args[0], info)
             return
+        if e.func == "format" and len(e.args) >= 1:
+            # format(value[, spec]) -> str. Handles "b", "x", "o", "d" specs
+            # for integer values; no spec or "s" -> str(value).
+            spec = ""
+            if len(e.args) >= 2 and isinstance(e.args[1], A.StrLit):
+                spec = e.args[1].value
+            self.gen_expr(e.args[0], info)
+            if spec in ("b", "x", "o"):
+                empty_label, _ = self.intern_string("")
+                base = {"b": 2, "x": 16, "o": 8}[spec]
+                self.emitf(
+                    f"mov rbx, {base}",
+                    f"lea rcx, [rel {empty_label}]",
+                    "call _runtime_int_to_base",
+                )
+            elif spec == "d" or spec == "":
+                self._emit_int_to_str()
+            elif spec == "s":
+                pass  # already a str or int-to-str fallthrough
+            else:
+                self._emit_int_to_str()
+            return
         if e.func in ("hex", "oct", "bin"):
             # hex(n)/oct(n)/bin(n) -> "0x.."/"0o.."/"0b.." (with a leading '-'
             # for negative n), via the shared _runtime_int_to_base helper.
