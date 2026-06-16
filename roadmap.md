@@ -64,13 +64,29 @@ Functions declared with `**kwargs` receive excess keyword arguments as a live `d
 - `io.StringIO` / `BytesIO`: context manager protocol (`__enter__`/`__exit__`), `readable()`, `writable()`, `seekable()`, `io.text_open()`.
 - `contextlib`: `suppress` and `nullcontext` are now real classes; `closing.__exit__` calls `.close()` correctly.
 
-#### Show-all-errors mode — planned
+#### Custom iteration protocol — done
 
-Currently the compiler stops at the first error it encounters in a file. The planned behaviour is to collect every sema error in the file and report them all before exiting. This makes the compile-fix loop faster for files with multiple type or name errors. Only sema errors are batched; parse errors still stop early because later tokens may be meaningless after a parse failure.
+`for x in obj:` where `obj` is a user instance dispatches to `__iter__` / `__next__`. Sema verifies both methods exist on the class; codegen calls `__iter__` to obtain an iterator then loops `__next__` inside a setjmp frame that catches `StopIteration` (type 21) as the loop exit signal.
+
+#### `x in obj` / `x not in obj` — done
+
+The `in` and `not in` operators dispatch to `__contains__(container, needle)` when the right-hand side is a user class instance. Sema stamps `dunder_contains_owner` / `dunder_contains_negate` on the Compare node; codegen emits the method call with correct ABI register ordering.
+
+#### `enumerate` in list comprehensions — done
+
+`[i for i, x in enumerate(xs)]` is now supported. Sema recognises the two-target `enumerate(xs)` pattern and binds the index as `int`; codegen iterates the inner list by index, maintaining a counter slot, and produces a new list with the (index, element) pairs bound to the two targets.
+
+#### Show-all-errors mode — done (default)
+
+The compiler now collects every sema error in a file before exiting. All sema errors are reported together; parse errors still stop early. The `--one-error` flag restores the old stop-at-first-error behaviour. In `--check` mode a JSON array of all diagnostics is emitted, suitable for editor integration.
+
+#### Selfhost gauntlet — 19/19
+
+All 19 compiler source files pass lex → parse → sema without error. Fixes include: `@staticmethod` arity handling in `_maybe_bind_method_args`; `set{tuple}` replaced with list-based deduplication; `dict` spread keys use `A.Name(name="**")` sentinel instead of `None` for homogeneous list typing; `_parse_star_pattern` return type widened to `A.Pattern`.
 
 #### Test count
 
-380/380 passing (was 369 at 1.0.0).
+381/381 passing (was 369 at 1.0.0).
 
 ---
 
