@@ -5274,6 +5274,34 @@ class SemaAnalyzer:
             e.inferred_type = f"instance:{e.func}"
             return
         if e.func in scope:
+            # A name bound to a user instance with __call__: dispatch to the
+            # method. Normalize args against __call__'s sig (skip self).
+            _inst_t = scope.types.get(e.func, "")
+            if _inst_t.startswith("instance:"):
+                _cls = _inst_t.split(":", 1)[1]
+                _call_resolved = self._resolve_method(_cls, "__call__")
+                if _call_resolved is not None:
+                    _owner, _sig = _call_resolved
+                    self._bind_args(
+                        e,
+                        _sig.param_names[1:],
+                        _sig.param_defaults[1:],
+                        _sig.vararg,
+                        e.pos,
+                        f"{_cls}.__call__",
+                        kwarg=_sig.kwarg,
+                    )
+                    for _a in e.args:
+                        self._check_expr(_a, scope)
+                    e.dunder_call_owner = _owner  # type: ignore
+                    if _sig.ret_type is not None:
+                        _ty, _el, _val = _sig.ret_type  # type: ignore
+                        e.inferred_type = _ty
+                        if _ty == "list" and _el is not None:
+                            e.list_el_type = _el  # type: ignore
+                    else:
+                        e.inferred_type = "any"
+                    return
             for a in e.args:
                 self._check_expr(a, scope)
             # A name bound to a lambda: use the lambda's body type so the call

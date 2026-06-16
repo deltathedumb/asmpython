@@ -10544,6 +10544,16 @@ class Codegen:
             self._gen_constructor(e, info)
             return
         if e.func not in self.funcs:
+            # `obj(args)` where obj is a user instance with __call__: load self
+            # into arg0, place user args into arg1+, call the method.
+            if getattr(e, "dunder_call_owner", None) is not None:
+                owner = e.dunder_call_owner  # type: ignore[attr-defined]
+                cleanup = self._emit_positional_args(e, e.args, info, start_reg=1)
+                self.emitf(f"mov {self._arg_reg(0)}, {self._var_mem(e.func, info)}")
+                self.emit_call(self._method_symbol(owner, "__call__"))
+                if cleanup:
+                    self.emitf(f"add rsp, {cleanup}")
+                return
             # Calling through a variable that holds a function pointer (a lambda
             # bound to a name, a function passed as a parameter, or a global).
             # Place the args, then load the pointer into rax (not an arg
