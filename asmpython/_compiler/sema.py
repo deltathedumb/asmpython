@@ -183,6 +183,7 @@ BUILTINS: dict[str, tuple[int, int]] = {
     "next": (1, 2),  # next(iterator[, default]) -> any
     "map": (2, 64),  # map(func, *iterables) -> iterator
     "filter": (2, 2),  # filter(func, iterable) -> iterator
+    "zip": (2, 64),    # zip(*iterables) -> iterator of tuples
     "format": (1, 2),  # format(value[, spec]) -> str
     "hex": (1, 1),  # hex(x) -> str
     "oct": (1, 1),  # oct(x) -> str
@@ -5170,6 +5171,7 @@ class SemaAnalyzer:
                 "next": "any",
                 "map": "list",
                 "filter": "list",
+                "zip": "list",
                 "format": "str",
                 "hex": "str",
                 "oct": "str",
@@ -5209,6 +5211,15 @@ class SemaAnalyzer:
                     "int", "float", "str", "list", "dict", "tuple", "set",
                 ):
                     e.inferred_type = "str"
+                return
+            if e.func == "zip":
+                # zip(*iterables) -> list of tuples; each arg must be a list/tuple.
+                for a in e.args:
+                    t = A.expr_type(a)
+                    if t not in ("list", "tuple", "any"):
+                        raise SemaError("zip() arguments must be lists or tuples", e.pos, ErrorCode.E_ZIP_ARGS)
+                e.list_el_type = "tuple"
+                e.tuple_elem_types = [self._iter_element_type(a, scope) for a in e.args]
                 return
             if e.func in (
                 "bool",
@@ -5278,6 +5289,10 @@ class SemaAnalyzer:
                         "list() requires a list, tuple, dict, or string", e.pos
                     )
                 e.list_el_type = self._list_el_type(e.args[0], scope)
+                # Propagate per-slot tuple types so `for a, b in list(zip(...))` works.
+                tup_types = self._list_el_tuple_types(e.args[0], scope)
+                if tup_types:
+                    e.tuple_elem_types = tup_types
                 return
             if e.func == "dict":
                 # dict() / dict(other) -> a (shallow-copied) dict. Carry the

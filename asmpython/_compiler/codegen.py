@@ -1352,6 +1352,15 @@ class Codegen:
                         lam = a0.args[0]
                         for p in lam.params:
                             self._cl_define(info, p)
+                # list(zip(A, B, ...)): result list + per-iterable pointer + stop + idx.
+                if isinstance(a0, A.Call) and a0.func == "zip":
+                    n = len(a0.args)
+                    self._cl_define(info, f"__lzip_res_{id(expr)}")
+                    self._cl_define(info, f"__lzip_stop_{id(expr)}")
+                    self._cl_define(info, f"__lzip_idx_{id(expr)}")
+                    self._cl_define(info, f"__lzip_tup_{id(expr)}")
+                    for k in range(n):
+                        self._cl_define(info, f"__lzip_it{k}_{id(expr)}")
             # set()/frozenset(): an empty set needs a header slot; building
             # from a list/tuple additionally needs iteration-cursor slots.
             if expr.func in ("set", "frozenset"):
@@ -8496,6 +8505,10 @@ class Codegen:
         ):
             self._gen_list_map(e, arg0, info)
             return
+        # list(zip(A, B, ...))
+        if isinstance(arg0, A.Call) and arg0.func == "zip":
+            self._gen_list_zip(e, arg0, info)
+            return
         src_t = A.expr_type(arg0)
         if src_t in ("list", "tuple", "any"):
             SENTINEL_MIN = "0x8000000000000000"
@@ -8619,6 +8632,96 @@ class Codegen:
             f"mov [rbp{val_slot:+d}], rax",
             f"mov rax, [rbp{res_slot:+d}]",
             f"mov rbx, [rbp{val_slot:+d}]",
+            "call _runtime_list_append",
+            f"mov [rbp{res_slot:+d}], rax",
+        )
+        self.emitf(f"inc qword [rbp{idx_slot:+d}]", f"jmp {top}")
+        self.label(end)
+        self.emitf(f"mov rax, [rbp{res_slot:+d}]")
+
+    def _gen_list_zip(self, outer: A.Call, zip_call: A.Call, info: FuncInfo) -> None:
+        """Lower `list(zip(A, B, ...))` to a tuple-building loop.
+
+        Each iteration allocates a fresh N-element tuple header+buffer, fills
+        its slots from the parallel iterables, then appends the tuple pointer
+        to the result list.  All volatile state lives in frame slots so that
+        inner malloc/call calls cannot clobber it.
+        """
+        n = len(zip_call.args)
+        res_slot = info.locals_[f"__lzip_res_{id(outer)}"]
+        stop_slot = info.locals_[f"__lzip_stop_{id(outer)}"]
+        idx_slot = info.locals_[f"__lzip_idx_{id(outer)}"]
+        tup_slot = info.locals_[f"__lzip_tup_{id(outer)}"]
+        it_slots = [info.locals_[f"__lzip_it{k}_{id(outer)}"] for k in range(n)]
+
+        cap = 4
+        self._emit_malloc(self.LIST_HEADER)
+        self.emitf(
+            f"mov qword [rax+{self.LIST_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.LIST_LEN_OFF}], 0",
+            f"mov [rbp{res_slot:+d}], rax",
+        )
+        self._emit_malloc(cap * 8)
+        self.emitf(f"mov rbx, [rbp{res_slot:+d}]", f"mov [rbx+{self.LIST_BUF_OFF}], rax")
+
+        # Evaluate each iterable, cache pointer; compute min length.
+        for k, ze in enumerate(zip_call.args):
+            self.gen_expr(ze, info)
+            self.emitf(f"mov [rbp{it_slots[k]:+d}], rax")
+
+        self.emitf(
+            f"mov rax, [rbp{it_slots[0]:+d}]",
+            f"mov rax, [rax+{self.LIST_LEN_OFF}]",
+            f"mov [rbp{stop_slot:+d}], rax",
+        )
+        for k in range(1, n):
+            self.emitf(
+                f"mov rax, [rbp{stop_slot:+d}]",
+                f"mov rbx, [rbp{it_slots[k]:+d}]",
+                f"mov rbx, [rbx+{self.LIST_LEN_OFF}]",
+                "cmp rax, rbx",
+                "cmovg rax, rbx",
+                f"mov [rbp{stop_slot:+d}], rax",
+            )
+        self.emitf(f"mov qword [rbp{idx_slot:+d}], 0")
+
+        top = self.fresh("lzip_top")
+        end = self.fresh("lzip_end")
+        self.label(top)
+        self.emitf(
+            f"mov rax, [rbp{idx_slot:+d}]",
+            f"cmp rax, [rbp{stop_slot:+d}]",
+            f"jge {end}",
+        )
+
+        # Allocate tuple header; save to frame slot across the buffer malloc.
+        self._emit_malloc(self.LIST_HEADER)
+        self.emitf(
+            f"mov qword [rax+{self.LIST_CAP_OFF}], {n}",
+            f"mov qword [rax+{self.LIST_LEN_OFF}], {n}",
+            f"mov [rbp{tup_slot:+d}], rax",
+        )
+        self._emit_malloc(n * 8)
+        # rax = tuple buffer; wire it into the tuple header.
+        self.emitf(
+            f"mov rbx, [rbp{tup_slot:+d}]",
+            f"mov [rbx+{self.LIST_BUF_OFF}], rax",
+        )
+
+        # Fill tuple buffer: for each k, load it_k.buf[idx] into buf[k].
+        # rax = tuple buffer.
+        for k in range(n):
+            self.emitf(
+                f"mov rcx, [rbp{it_slots[k]:+d}]",
+                f"mov rcx, [rcx+{self.LIST_BUF_OFF}]",
+                f"mov rdx, [rbp{idx_slot:+d}]",
+                "mov rdx, [rcx+rdx*8]",
+                f"mov [rax+{k*8}], rdx",
+            )
+        # Append tuple header to result list.
+        self.emitf(
+            f"mov rbx, [rbp{tup_slot:+d}]",
+            f"mov rax, [rbp{res_slot:+d}]",
             "call _runtime_list_append",
             f"mov [rbp{res_slot:+d}], rax",
         )
