@@ -4975,7 +4975,22 @@ class SemaAnalyzer:
             if e.func == "abs":
                 # abs preserves the operand's numeric type (float -> float so
                 # the result prints/operates as a float, not its raw bits).
-                e.inferred_type = "float" if A.expr_type(e.args[0]) == "float" else "int"
+                arg_t = A.expr_type(e.args[0])
+                if arg_t.startswith("instance:"):
+                    resolved = self._resolve_method(arg_t.split(":", 1)[1], "__abs__")
+                    if resolved is not None:
+                        _, sig = resolved
+                        if sig.ret_type is not None:
+                            ty, el, _val = sig.ret_type  # type: ignore
+                            e.inferred_type = ty  # type: ignore
+                            if ty == "list" and el is not None:
+                                e.list_el_type = el  # type: ignore
+                        else:
+                            e.inferred_type = "any"  # type: ignore
+                    else:
+                        e.inferred_type = "int"  # type: ignore
+                else:
+                    e.inferred_type = "float" if arg_t == "float" else "int"  # type: ignore
                 return
             if e.func == "type":
                 # type(x) -> "<class '...'>" string for any statically-known

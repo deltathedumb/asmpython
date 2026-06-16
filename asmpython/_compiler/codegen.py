@@ -10419,10 +10419,33 @@ class Codegen:
                     "and rax, rbx",
                     "movq xmm0, rax",
                 )
+            elif arg_t.startswith("instance:"):
+                cls_name = arg_t.split(":", 1)[1]
+                owner = self._resolve_method_owner(cls_name, "__abs__")
+                self.gen_expr(e.args[0], info)
+                if owner is not None:
+                    self.emitf(f"mov {self._arg_reg(0)}, rax")
+                    self.emit_call(self._method_symbol(owner, "__abs__"))
+                # else: return the pointer as-is (no-op, rax already set)
             else:
                 self.gen_expr(e.args[0], info)
                 # Branchless abs: t = rax >> 63; rax = (rax ^ t) - t
                 self.emitf("mov rbx, rax", "sar rbx, 63", "xor rax, rbx", "sub rax, rbx")
+            return
+        if e.func == "hash":
+            arg_t = A.expr_type(e.args[0])
+            self.gen_expr(e.args[0], info)
+            if arg_t.startswith("instance:"):
+                cls_name = arg_t.split(":", 1)[1]
+                owner = self._resolve_method_owner(cls_name, "__hash__")
+                if owner is not None:
+                    self.emitf(f"mov {self._arg_reg(0)}, rax")
+                    self.emit_call(self._method_symbol(owner, "__hash__"))
+                # else: identity hash — pointer value already in rax
+            elif arg_t == "str":
+                # String hash: FNV-1a hasher shared with the dict runtime.
+                self.emitf("call _runtime_hash_string")
+            # int/float/bool: value is already in rax (identity hash)
             return
         if e.func == "round":
             arg_t = A.expr_type(e.args[0])

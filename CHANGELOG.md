@@ -24,6 +24,12 @@ output rather than silent miscompilations.
   `nullcontext` is now a class that returns `enter_result` from `__enter__`.
   `closing.__exit__` now correctly calls `self.thing.close()`.
 
+- **`abs()` and `hash()` dispatch to `__abs__` / `__hash__`**: calling
+  `abs(obj)` or `hash(obj)` on a user class instance now calls `__abs__`
+  or `__hash__` when defined. `hash(str)` calls the same FNV-1a hasher
+  used internally by the dict runtime. `abs(instance)` sets its return
+  type from the `__abs__` signature so the result is correctly typed.
+
 - **Dunder operator dispatch** (`__add__`, `__sub__`, `__mul__`,
   `__neg__`, `__pos__`, `__invert__`, and all `DUNDER_BINOP` entries):
   binary ops (`a + b`, `a * n`, etc.) and unary ops (`-a`, `+a`, `~a`)
