@@ -1604,20 +1604,17 @@ class Codegen:
                         elif isinstance(t, A.Attr):
                             self._cl_walk_expr(info, t.obj)
             elif isinstance(s, A.For) and self._for_zip_spec(s) is not None:
-                # for a, b in zip(A, B) / for i, (a, b) in enumerate(zip):
-                # two iterables walked in lockstep. Reserve the per-buffer
-                # pointers, the bound, the counter, and the target slots.
-                zidx, za, zb, zae, zbe = self._for_zip_spec(s)  # type: ignore
+                # for a, b[, c...] in zip(A, B[, C...]) / enumerate(zip(...)): N-way lockstep.
+                zidx, znames, zexprs = self._for_zip_spec(s)  # type: ignore
                 if zidx is not None:
                     self._cl_define(info, zidx, "int")
-                self._cl_define(info, za, self._list_expr_el_kind(zae))
-                self._cl_define(info, zb, self._list_expr_el_kind(zbe))
-                self._cl_define(info, f"__zip_a_{id(s)}", "int")
-                self._cl_define(info, f"__zip_b_{id(s)}", "int")
+                for i, (zn, ze) in enumerate(zip(znames, zexprs)):
+                    self._cl_define(info, zn, self._list_expr_el_kind(ze))
+                    self._cl_define(info, f"__zip_{i}_{id(s)}", "int")
                 self._cl_define(info, f"__zip_stop_{id(s)}", "int")
                 self._cl_define(info, f"__zip_i_{id(s)}", "int")
-                self._cl_walk_expr(info, zae)
-                self._cl_walk_expr(info, zbe)
+                for ze in zexprs:
+                    self._cl_walk_expr(info, ze)
                 self._cl_walk(info, s.body)
             elif (
                 isinstance(s, A.For)
@@ -1641,9 +1638,17 @@ class Codegen:
                 self._cl_define(info, f"__for_stop_{id(s)}", "int")
                 self._cl_define(info, f"__for_step_{id(s)}", "int")
                 self._cl_define(info, f"__for_iter_{id(s)}", "int")
+                _enum_start_expr = None
                 if len(s.iter.args) == 2:
+                    _enum_start_expr = s.iter.args[1]
+                else:
+                    for _kn, _kv in s.iter.kwargs:
+                        if _kn == "start":
+                            _enum_start_expr = _kv
+                            break
+                if _enum_start_expr is not None:
                     self._cl_define(info, f"__for_enum_start_{id(s)}", "int")
-                    self._cl_walk_expr(info, s.iter.args[1])
+                    self._cl_walk_expr(info, _enum_start_expr)
                 self._cl_walk_expr(info, inner)
                 self._cl_walk(info, s.body)
             elif isinstance(s, A.For):
@@ -2251,21 +2256,22 @@ class Codegen:
         return getattr(expr, "list_el_type", "int")
 
     def _for_zip_spec(self, s: A.For):
-        """Recognize `for a, b in zip(A, B)` and
-        `for i, (a, b) in enumerate(zip(A, B))`. Returns
-        (idx_name_or_None, a_name, b_name, a_expr, b_expr) or None. Mirrors the
-        analyzer's detection so codegen and sema agree on the loop shape."""
+        """Recognize `for a, b[, c...] in zip(A, B[, C...])` and
+        `for i, (a, b[, c...]) in enumerate(zip(A, B[, C...]))`.
+
+        Returns (idx_name_or_None, names_list, exprs_list) or None.
+        Mirrors the analyzer's detection so codegen and sema agree on the loop shape."""
         it = s.iter
         if it is None or not isinstance(it, A.Call):
             return None
         if it.func == "zip":
+            n = len(it.args)
             if (
-                len(it.args) == 2
-                and len(s.targets) == 2
-                and isinstance(s.targets[0], str)
-                and isinstance(s.targets[1], str)
+                n >= 2
+                and len(s.targets) == n
+                and all(isinstance(t, str) for t in s.targets)
             ):
-                return (None, s.targets[0], s.targets[1], it.args[0], it.args[1])
+                return (None, list(s.targets), list(it.args))
             return None
         if (
             it.func == "enumerate"
@@ -2274,19 +2280,18 @@ class Codegen:
             and it.args[0].func == "zip"
         ):
             z = it.args[0]
+            n = len(z.args)
             if (
-                len(z.args) == 2
+                n >= 2
                 and len(s.targets) == 2
                 and isinstance(s.targets[0], str)
                 and isinstance(s.targets[1], list)
-                and len(s.targets[1]) == 2
+                and len(s.targets[1]) == n
             ):
                 return (
                     s.targets[0],
-                    s.targets[1][0],
-                    s.targets[1][1],
-                    z.args[0],
-                    z.args[1],
+                    list(s.targets[1]),
+                    list(z.args),
                 )
             return None
         return None
@@ -2582,9 +2587,17 @@ class Codegen:
         stop_off = info.locals_[f"__for_stop_{id(stmt)}"]
         step_off = info.locals_[f"__for_step_{id(stmt)}"]  # index counter
         start_off = None
+        _start_expr = None
         if len(stmt.iter.args) == 2:  # type: ignore
+            _start_expr = stmt.iter.args[1]  # type: ignore
+        else:
+            for _kn, _kv in getattr(stmt.iter, "kwargs", []):
+                if _kn == "start":
+                    _start_expr = _kv
+                    break
+        if _start_expr is not None:
             start_off = info.locals_[f"__for_enum_start_{id(stmt)}"]
-            self.gen_expr(stmt.iter.args[1], info)  # type: ignore
+            self.gen_expr(_start_expr, info)
             self.emitf(f"mov [rbp{start_off:+d}], rax")
 
         # Cache the iterable pointer and its length. Tuples reuse the list
@@ -2641,38 +2654,38 @@ class Codegen:
         self.loop_labels.pop()
 
     def _gen_for_zip(self, stmt: A.For, info: FuncInfo, zspec) -> None:
-        """`for a, b in zip(A, B)` / `for i, (a, b) in enumerate(zip(A, B))`.
+        """`for a, b[, c...] in zip(A, B[, C...])` / enumerate(zip(...)).
 
-        Walks both list buffers in lockstep, stopping at the shorter (Python's
-        zip semantics) via min(len A, len B). Each iteration binds a = A[i],
-        b = B[i], and the optional index. Tuples reuse the list layout, so the
-        same buffer arithmetic works for either A/B being a list or a tuple.
-        Values are copied as raw 8-byte slots, which is correct for any element
-        kind (int/str/ptr/float bits)."""
-        idx_name, a_name, b_name, a_expr, b_expr = zspec
-        iter_a = info.locals_[f"__zip_a_{id(stmt)}"]
-        iter_b = info.locals_[f"__zip_b_{id(stmt)}"]
+        Walks N list buffers in lockstep, stopping at the shortest (Python's
+        zip semantics). Values are copied as raw 8-byte slots."""
+        idx_name, znames, zexprs = zspec
+        n = len(znames)
         stop_off = info.locals_[f"__zip_stop_{id(stmt)}"]
         i_off = info.locals_[f"__zip_i_{id(stmt)}"]
-        a_off = info.locals_[a_name]
-        b_off = info.locals_[b_name]
+        iter_offs = [info.locals_[f"__zip_{k}_{id(stmt)}"] for k in range(n)]
+        var_offs = [info.locals_[znames[k]] for k in range(n)]
 
-        # Evaluate both iterables (header pointers), cache them and the loop
-        # bound = min(lenA, lenB).
-        self.gen_expr(a_expr, info)
-        self.emitf(f"mov [rbp{iter_a:+d}], rax")
-        self.gen_expr(b_expr, info)
-        self.emitf(f"mov [rbp{iter_b:+d}], rax")
+        # Evaluate all N iterables, cache pointers; compute min length.
+        for k, (ze, it_off) in enumerate(zip(zexprs, iter_offs)):
+            self.gen_expr(ze, info)
+            self.emitf(f"mov [rbp{it_off:+d}], rax")
+
+        # Initialise stop = len(first), then fold min over the rest.
         self.emitf(
-            f"mov rax, [rbp{iter_a:+d}]",
+            f"mov rax, [rbp{iter_offs[0]:+d}]",
             f"mov rax, [rax+{self.LIST_LEN_OFF}]",
-            f"mov rbx, [rbp{iter_b:+d}]",
-            f"mov rbx, [rbx+{self.LIST_LEN_OFF}]",
-            "cmp rax, rbx",
-            "cmovg rax, rbx",  # rax = min(lenA, lenB)
             f"mov [rbp{stop_off:+d}], rax",
-            f"mov qword [rbp{i_off:+d}], 0",
         )
+        for k in range(1, n):
+            self.emitf(
+                f"mov rax, [rbp{stop_off:+d}]",
+                f"mov rbx, [rbp{iter_offs[k]:+d}]",
+                f"mov rbx, [rbx+{self.LIST_LEN_OFF}]",
+                "cmp rax, rbx",
+                "cmovg rax, rbx",  # rax = min(cur_stop, len_k)
+                f"mov [rbp{stop_off:+d}], rax",
+            )
+        self.emitf(f"mov qword [rbp{i_off:+d}], 0")
 
         top = self.fresh("for_zip")
         cont = self.fresh("for_zip_cont")
@@ -2682,19 +2695,15 @@ class Codegen:
         self.emitf(
             f"mov rax, [rbp{i_off:+d}]", f"cmp rax, [rbp{stop_off:+d}]", f"jge {end}"
         )
-        # a = A.buf[i]; b = B.buf[i] (reload buffers each step in case a body
-        # append reallocated one of them).
-        self.emitf(
-            f"mov rbx, [rbp{iter_a:+d}]",
-            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
-            f"mov rcx, [rbp{i_off:+d}]",
-            "mov rax, [rbx+rcx*8]",
-            f"mov [rbp{a_off:+d}], rax",
-            f"mov rbx, [rbp{iter_b:+d}]",
-            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
-            "mov rax, [rbx+rcx*8]",
-            f"mov [rbp{b_off:+d}], rax",
-        )
+        # Bind each var: var_k = iters[k].buf[i]  (reload each step for realloc safety).
+        for k, (it_off, v_off) in enumerate(zip(iter_offs, var_offs)):
+            self.emitf(
+                f"mov rbx, [rbp{it_off:+d}]",
+                f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+                f"mov rcx, [rbp{i_off:+d}]",
+                "mov rax, [rbx+rcx*8]",
+                f"mov [rbp{v_off:+d}], rax",
+            )
         if idx_name is not None:
             idx_off = info.locals_[idx_name]
             self.emitf(f"mov rax, [rbp{i_off:+d}]", f"mov [rbp{idx_off:+d}], rax")
@@ -11350,6 +11359,36 @@ class Codegen:
                     targets.append(el.name)
                 elif isinstance(el, A.Attr):
                     targets.append(el.name)
+
+        # For primitive types (int, str, float, bool, list, dict, tuple, set),
+        # resolve statically from the sema-computed type of arg[0].
+        PRIM_MAP = {
+            "int": ("int",),
+            "str": ("str",),
+            "float": ("float",),
+            "bool": ("int",),   # bool is a subtype of int
+            "list": ("list",),
+            "dict": ("dict",),
+            "tuple": ("tuple",),
+            "set": ("set",),
+        }
+        arg0_type = A.expr_type(e.args[0])
+        has_prim_target = False
+        prim_match = False
+        for t in targets:
+            if t in PRIM_MAP:
+                has_prim_target = True
+                if arg0_type in PRIM_MAP[t]:
+                    prim_match = True
+        if has_prim_target:
+            # Evaluate arg0 for side effects (it may be a call).
+            self.gen_expr(e.args[0], info)
+            if prim_match:
+                self.emitf("mov rax, 1")
+            else:
+                self.emitf("xor rax, rax")
+            return
+
         # Build the accepted-id set across all targets.
         accept: list[int] = []
         for t in targets:

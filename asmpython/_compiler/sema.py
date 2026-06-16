@@ -1550,23 +1550,24 @@ class SemaAnalyzer:
                 scope.tuple_elem_types[name] = child.tuple_elem_types[name]
 
     def _for_zip_spec(self, s: A.For):
-        """Recognize the parallel-iteration loop shapes
-        `for a, b in zip(A, B)` and `for i, (a, b) in enumerate(zip(A, B))`.
+        """Recognize `for a, b[, c...] in zip(A, B[, C...])` and
+        `for i, (a, b[, c...]) in enumerate(zip(A, B[, C...]))`.
 
-        Returns (idx_name_or_None, a_name, b_name, a_expr, b_expr) when `s`
-        matches, otherwise None (so the caller falls back to ordinary handling).
+        Returns (idx_name_or_None, names_list, exprs_list) when `s` matches,
+        otherwise None (so the caller falls back to ordinary handling).
+        Names and exprs are parallel lists of N >= 2 items.
         """
         it = s.iter
         if it is None or not isinstance(it, A.Call):
             return None
         if it.func == "zip":
+            n = len(it.args)
             if (
-                len(it.args) == 2
-                and len(s.targets) == 2
-                and isinstance(s.targets[0], str)
-                and isinstance(s.targets[1], str)
+                n >= 2
+                and len(s.targets) == n
+                and all(isinstance(t, str) for t in s.targets)
             ):
-                return (None, s.targets[0], s.targets[1], it.args[0], it.args[1])
+                return (None, list(s.targets), list(it.args))
             return None
         if (
             it.func == "enumerate"
@@ -1575,19 +1576,18 @@ class SemaAnalyzer:
             and it.args[0].func == "zip"
         ):
             z = it.args[0]
+            n = len(z.args)
             if (
-                len(z.args) == 2
+                n >= 2
                 and len(s.targets) == 2
                 and isinstance(s.targets[0], str)
                 and isinstance(s.targets[1], list)
-                and len(s.targets[1]) == 2
+                and len(s.targets[1]) == n
             ):
                 return (
                     s.targets[0],
-                    s.targets[1][0],
-                    s.targets[1][1],
-                    z.args[0],
-                    z.args[1],
+                    list(s.targets[1]),
+                    list(z.args),
                 )
             return None
         return None
@@ -2086,19 +2086,15 @@ class SemaAnalyzer:
             # optional index. Recognized before the plain-enumerate handler.
             zspec = self._for_zip_spec(s)
             if zspec is not None:
-                idx_name, a_name, b_name, a_expr, b_expr = zspec
-                self._check_expr(a_expr, scope)
-                self._check_expr(b_expr, scope)
-                # zip operands must be iterable: lists or tuples (which share the
-                # list layout) — or opaque, which we trust leniently.
-                if A.expr_type(a_expr) not in ("list", "tuple", "any") or A.expr_type(
-                    b_expr
-                ) not in ("list", "tuple", "any"):
-                    raise SemaError("zip() arguments must be lists or tuples", s.pos, ErrorCode.E_ZIP_ARGS)
+                idx_name, znames, zexprs = zspec
+                for ze in zexprs:
+                    self._check_expr(ze, scope)
+                    if A.expr_type(ze) not in ("list", "tuple", "any"):
+                        raise SemaError("zip() arguments must be lists or tuples", s.pos, ErrorCode.E_ZIP_ARGS)
                 if idx_name is not None:
                     scope.add(idx_name, "int")
-                scope.add(a_name, self._iter_element_type(a_expr, scope))
-                scope.add(b_name, self._iter_element_type(b_expr, scope))
+                for zn, ze in zip(znames, zexprs):
+                    scope.add(zn, self._iter_element_type(ze, scope))
                 self.loop_depth += 1
                 try:
                     self._check_block(s.body, scope)
@@ -2113,7 +2109,12 @@ class SemaAnalyzer:
                 and isinstance(s.iter, A.Call)
                 and s.iter.func == "enumerate"
             ):
-                if len(s.iter.args) not in (1, 2):
+                _enum_start_kwarg = None
+                for _kn, _kv in getattr(s.iter, "kwargs", []):
+                    if _kn == "start":
+                        _enum_start_kwarg = _kv
+                _enum_n_args = len(s.iter.args) + (1 if _enum_start_kwarg else 0)
+                if _enum_n_args not in (1, 2):
                     raise SemaError(
                         "enumerate() takes 1 or 2 arguments", s.pos
                     )
@@ -2125,10 +2126,10 @@ class SemaAnalyzer:
                     )
                 inner = s.iter.args[0]
                 self._check_expr(inner, scope)
-                if len(s.iter.args) == 2:
-                    start_arg = s.iter.args[1]
-                    self._check_expr(start_arg, scope)
-                    if A.expr_type(start_arg) != "int":
+                _start_arg = s.iter.args[1] if len(s.iter.args) == 2 else _enum_start_kwarg
+                if _start_arg is not None:
+                    self._check_expr(_start_arg, scope)
+                    if A.expr_type(_start_arg) != "int":
                         raise SemaError(
                             "enumerate() start argument must be an int",
                             s.pos,
