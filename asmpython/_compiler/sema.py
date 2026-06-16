@@ -2922,6 +2922,47 @@ class SemaAnalyzer:
 
             return seq_pre, self._and_chain(seq_tests, pattern.pos), seq_binds
 
+        if isinstance(pattern, A.MatchMapping):
+            map_tests: list = []
+            map_pre: list = []
+            map_binds: list = []
+            subj_ref = self._make_name_ref(subj_name, pos)
+            for key, sub in zip(pattern.keys, pattern.patterns):
+                key_node = A.StrLit(value=key, pos=pattern.pos)
+                # key in subject
+                in_test = A.Compare(
+                    ops=["in"],
+                    operands=[key_node, subj_ref],
+                    pos=pattern.pos,
+                )
+                map_tests.append(in_test)
+                val_ref = A.Subscript(
+                    obj=subj_ref,
+                    index=key_node,
+                    pos=pattern.pos,
+                )
+                if isinstance(sub, A.MatchCapture):
+                    if sub.name != "_":
+                        map_binds.append(A.Assign(target=sub.name, value=val_ref, pos=sub.pos))
+                elif isinstance(sub, A.MatchValue):
+                    val_test = A.Compare(
+                        ops=["=="],
+                        operands=[val_ref, sub.value],
+                        pos=sub.pos,
+                    )
+                    if isinstance(sub.value, A.StrLit):
+                        val_test._map_val_str_cmp = True  # type: ignore[attr-defined]
+                    map_tests.append(val_test)
+                else:
+                    elem_name = f"__match_map_{id(pattern)}_{key}"
+                    map_pre.append(A.Assign(target=elem_name, value=val_ref, pos=pattern.pos))
+                    sub_pre, sub_test, sub_binds = self._lower_pattern(sub, elem_name, pattern.pos)
+                    map_pre.extend(sub_pre)
+                    if not (isinstance(sub_test, A.IntLit) and sub_test.value == 1):
+                        map_tests.append(sub_test)
+                    map_binds.extend(sub_binds)
+            return map_pre, self._and_chain(map_tests, pattern.pos), map_binds
+
         if isinstance(pattern, A.MatchClass):
             cls_name = pattern.cls_name
             # isinstance(subject, ClassName) check.

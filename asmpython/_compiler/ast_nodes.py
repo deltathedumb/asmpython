@@ -443,7 +443,18 @@ class MatchAs:
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
-Pattern = MatchValue | MatchCapture | MatchOr | MatchSequence | MatchClass | MatchAs
+@dataclass
+class MatchMapping:
+    """`case {"key1": p1, "key2": p2, ...}:` — matches a dict with at least
+    the listed keys present, checking each sub-pattern against the value.
+    Only string literal keys are supported."""
+
+    keys: list  # list[str]
+    patterns: list  # list[Pattern]
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+Pattern = MatchValue | MatchCapture | MatchOr | MatchSequence | MatchClass | MatchAs | MatchMapping
 
 
 @dataclass

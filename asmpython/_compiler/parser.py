@@ -1018,9 +1018,27 @@ class Parser:
             self._expect("OP", "]")
             return A.MatchSequence(patterns=patterns, star_index=star_index, pos=pos)
         if t.kind == "OP" and t.value == "{":
-            raise ParseError(
-                "mapping patterns (`case {...}:`) are not supported", t.pos
-            )
+            pos = self._eat().pos
+            keys: list = []
+            patterns_map: list = []
+            if not (self._peek().kind == "OP" and self._peek().value == "}"):
+                while True:
+                    key_tok = self._peek()
+                    if key_tok.kind != "STRING":
+                        raise ParseError(
+                            "mapping pattern keys must be string literals", key_tok.pos
+                        )
+                    self._eat()
+                    keys.append(key_tok.value)
+                    self._expect("OP", ":")
+                    patterns_map.append(self._parse_or_pattern())
+                    if not (self._peek().kind == "OP" and self._peek().value == ","):
+                        break
+                    self._eat()
+                    if self._peek().kind == "OP" and self._peek().value == "}":
+                        break
+            self._expect("OP", "}")
+            return A.MatchMapping(keys=keys, patterns=patterns_map, pos=pos)
         if t.kind == "OP" and t.value == "-":
             self._eat()
             n = self._peek()

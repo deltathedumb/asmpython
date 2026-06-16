@@ -1219,6 +1219,9 @@ class Codegen:
                     and lt in ("str", "any")
                     and rt in ("str", "any")
                     and "str" in (lt, rt)
+                ) or (
+                    op in ("==", "!=")
+                    and getattr(expr, "_map_val_str_cmp", False)
                 ):
                     self._cl_define(info, f"__strcmp_{id(expr)}")
                 elif (
@@ -2029,6 +2032,42 @@ class Codegen:
                 self.emitf("mov rbx, rax", f"mov rax, {mem}", "call _runtime_str_concat")
                 self.emitf(f"mov {mem}, rax")
                 return
+            if ty.startswith("instance:"):
+                cls_name = ty.split(":", 1)[1]
+                _INPLACE_DUNDERS: dict = {
+                    "+": ("__iadd__", "__add__"),
+                    "-": ("__isub__", "__sub__"),
+                    "*": ("__imul__", "__mul__"),
+                    "/": ("__itruediv__", "__truediv__"),
+                    "//": ("__ifloordiv__", "__floordiv__"),
+                    "%": ("__imod__", "__mod__"),
+                    "**": ("__ipow__", "__pow__"),
+                    "&": ("__iand__", "__and__"),
+                    "|": ("__ior__", "__or__"),
+                    "^": ("__ixor__", "__xor__"),
+                    "<<": ("__ilshift__", "__lshift__"),
+                    ">>": ("__irshift__", "__rshift__"),
+                    "@": ("__imatmul__", "__matmul__"),
+                }
+                inplace_m, fallback_m = _INPLACE_DUNDERS.get(stmt.op, (None, None))
+                owner = None
+                method = None
+                if inplace_m is not None:
+                    owner = self._resolve_method_owner(cls_name, inplace_m)
+                    method = inplace_m
+                if owner is None and fallback_m is not None:
+                    owner = self._resolve_method_owner(cls_name, fallback_m)
+                    method = fallback_m
+                if owner is not None:
+                    self.gen_expr(stmt.value, info)
+                    self.emitf(
+                        f"mov {self._arg_reg(1)}, rax",
+                        f"mov {self._arg_reg(0)}, {mem}",
+                    )
+                    self.emit_call(self._method_symbol(owner, method))
+                    self.emitf(f"mov {mem}, rax")
+                    return
+                # No dunder found: fall through to integer arithmetic.
             if ty == "float":
                 self._gen_expr_as_float(stmt.value, info, A.expr_type(stmt.value))
                 self.emitf("movsd xmm1, xmm0", f"movsd xmm0, {mem}")
@@ -10941,9 +10980,10 @@ class Codegen:
             return
         if (
             len(e.ops) == 1
-            and lt0 in ("str", "any")
-            and rt0 in ("str", "any")
-            and ("str" in (lt0, rt0))
+            and (
+                (lt0 in ("str", "any") and rt0 in ("str", "any") and "str" in (lt0, rt0))
+                or getattr(e, "_map_val_str_cmp", False)
+            )
         ):
             op = e.ops[0]
             if op in ("==", "!="):
