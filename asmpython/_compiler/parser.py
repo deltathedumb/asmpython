@@ -728,6 +728,12 @@ class Parser:
             value = self._parse_expr()
             self._expect("NEWLINE")
             return A.IndexAssign(target=expr, value=value, pos=pos)
+        if isinstance(expr, A.Subscript) and self._peek().kind == "OP" and self._peek().value in AUG_OPS:
+            op_tok = self._eat()
+            rhs = self._parse_expr()
+            self._expect("NEWLINE")
+            combined = A.BinOp(op=AUG_OPS[op_tok.value], left=expr, right=rhs, pos=op_tok.pos)
+            return A.IndexAssign(target=expr, value=combined, pos=pos)
         if isinstance(expr, A.Attr) and self._check("OP", "="):
             self._eat()
             value = self._parse_expr()
