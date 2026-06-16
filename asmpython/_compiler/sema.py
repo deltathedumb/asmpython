@@ -1214,9 +1214,11 @@ class SemaAnalyzer:
                 if not has_init:
                     params: list = ["self"]
                     defaults: list = [None]
+                    param_types: list = [None]  # self has no annotation
                     body_stmts: list = []
                     for fname, _fannot, fvalue in c.class_vars:
                         params.append(fname)
+                        param_types.append(_fannot)  # carry class-var annotation
                         _func_nm = (
                             fvalue.func if isinstance(getattr(fvalue, "func", None), str)
                             else getattr(getattr(fvalue, "func", None), "name", None)
@@ -1240,6 +1242,7 @@ class SemaAnalyzer:
                         params=params,
                         body=body_stmts,
                         defaults=defaults,
+                        param_types=param_types,
                         pos=c.pos,
                     )
                     c.methods.insert(0, init_func)
