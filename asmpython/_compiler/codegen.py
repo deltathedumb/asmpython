@@ -1086,6 +1086,13 @@ class Codegen:
                     expr._comp_var_slot = expr.var
                     expr._comp_var_shadows_global = False
             self._cl_walk_expr(info, expr.iter)
+            # Instance-iterable comprehension: needs setjmp buffer + saved
+            # exception slots, mirroring the For instance-iter path.
+            if A.expr_type(expr.iter).startswith("instance:"):
+                self._cl_define_bytes(info, f"__comp_inst_buf_{id(expr)}", 200)
+                self._cl_define(info, f"__comp_inst_parent_{id(expr)}", "int")
+                self._cl_define(info, f"__comp_inst_prev_exc_{id(expr)}", "int")
+                self._cl_define(info, f"__comp_inst_prev_exc_type_{id(expr)}", "int")
             ef_vars = getattr(expr, "extra_for_vars", [])
             ef_targets_l = getattr(expr, "extra_for_targets", [])
             ef_iters = getattr(expr, "extra_for_iters", [])
@@ -1430,6 +1437,14 @@ class Codegen:
             ):
                 for k in range(len(expr.args)):
                     self._cl_define(info, f"__callarg_{id(expr)}_{k}")
+            # Closure call: allocate per-arg scratch slots to park evaluated args
+            # while we load the closure buf pointer (which may clobber registers).
+            if (
+                isinstance(expr.func, str)
+                and self._var_type(expr.func, info) == "closure"
+            ):
+                for k in range(len(expr.args)):
+                    self._cl_define(info, f"__closure_arg_{id(expr)}_{k}")
             for a in expr.args:
                 self._cl_walk_expr(info, a)
             # Keyword args (kept un-normalized for @dataclass-style ctors) and
@@ -1836,11 +1851,54 @@ class Codegen:
                     self._cl_define(info, f"__del_key_{id(s)}")
                     self._cl_walk_expr(info, tgt.obj)
                     self._cl_walk_expr(info, tgt.index)
+            elif isinstance(s, A.ClosureBind):
+                # The closure object is stored under the function name.
+                self._cl_define(info, s.func_name, "closure")
 
     # ---- statement codegen --------------------------------------------------
 
     def gen_stmt(self, stmt, info: FuncInfo) -> None:
         if isinstance(stmt, A.Pass):
+            return
+        if isinstance(stmt, A.ClosureBind):
+            # Allocate a closure list: [CLOSURE_MAGIC, fn_ptr, fv1, fv2, ...]
+            # where CLOSURE_MAGIC=0xC105E distinguishes closures from plain lists.
+            CLOSURE_MAGIC = 0xC105E
+            n_items = 2 + len(stmt.free_vars)
+            cap = max(4, n_items)
+            self._emit_malloc(self.LIST_HEADER)
+            self.emitf(
+                f"mov qword [rax+{self.LIST_CAP_OFF}], {cap}",
+                f"mov qword [rax+{self.LIST_LEN_OFF}], {n_items}",
+            )
+            mem = self._var_mem(stmt.func_name, info)
+            self.emitf(f"mov {mem}, rax")
+            self._emit_malloc(cap * 8)
+            self.emitf(
+                f"mov rbx, {mem}",
+                f"mov [rbx+{self.LIST_BUF_OFF}], rax",
+            )
+            # [0] = CLOSURE_MAGIC
+            self.emitf(
+                f"mov rbx, {mem}",
+                f"mov rcx, [rbx+{self.LIST_BUF_OFF}]",
+                f"mov qword [rcx], {CLOSURE_MAGIC}",
+            )
+            # [1] = function pointer (the address of the lifted function label)
+            fn_label = stmt.func_name
+            self.emitf(
+                f"lea rax, [{fn_label}]",
+                f"mov [rcx+8], rax",
+            )
+            # [2..] = captured variable values
+            for i, fv in enumerate(stmt.free_vars):
+                fv_mem = self._var_mem(fv, info)
+                self.emitf(
+                    f"mov rax, {fv_mem}",
+                    f"mov rbx, {mem}",
+                    f"mov rdx, [rbx+{self.LIST_BUF_OFF}]",
+                    f"mov [rdx+{(i + 2) * 8}], rax",
+                )
             return
         if isinstance(stmt, A.Global):
             return  # handled at _cl_walk time
@@ -8289,6 +8347,9 @@ class Codegen:
             self._gen_comprehension_enumerate(e, info)
             return
         iter_t = A.expr_type(e.iter)
+        if iter_t.startswith("instance:"):
+            self._gen_comprehension_instance_iter(e, info)
+            return
         if iter_t not in ("list", "tuple", "any", "int", "set", "str"):
             # Tuples share the list layout; an opaque iterable is a list/tuple
             # at runtime. Dict sources would need different element walks.
@@ -8442,6 +8503,124 @@ class Codegen:
         self.label(end)
         self.emitf(f"mov rax, [rbp{res:+d}]")  # result value
         # Restore info.locals_ after shadowing a global with the loop var.
+        if _shadows_global and not e.targets:
+            if _saved_var_local is None:
+                info.locals_.pop(e.var, None)
+            else:
+                info.locals_[e.var] = _saved_var_local
+
+    def _gen_comprehension_instance_iter(self, e: A.Comprehension, info: FuncInfo) -> None:
+        """`[elt for x in obj]` where obj is a user class with __iter__/__next__.
+
+        Mirrors _gen_for_instance_iter but appends elt to a result list
+        instead of running body statements."""
+        iter_t = A.expr_type(e.iter)
+        cls_name = iter_t.split(":", 1)[1]
+        res = info.locals_[f"__comp_res_{id(e)}"]
+        it = info.locals_[f"__comp_iter_{id(e)}"]
+        buf_off = info.locals_[f"__comp_inst_buf_{id(e)}"]
+        parent_off = info.locals_[f"__comp_inst_parent_{id(e)}"]
+        prev_exc_off = info.locals_[f"__comp_inst_prev_exc_{id(e)}"]
+        prev_exc_type_off = info.locals_[f"__comp_inst_prev_exc_type_{id(e)}"]
+        var_slot_key = getattr(e, "_comp_var_slot", e.var)
+        var = info.locals_[var_slot_key] if not e.targets else 0
+        _shadows_global = getattr(e, "_comp_var_shadows_global", False)
+        _saved_var_local = info.locals_.get(e.var) if not e.targets else None
+        if _shadows_global and not e.targets:
+            info.locals_[e.var] = var
+
+        # Build empty result list.
+        cap = 4
+        self._emit_malloc(self.LIST_HEADER)
+        self.emitf(
+            f"mov qword [rax+{self.LIST_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.LIST_LEN_OFF}], 0",
+            f"mov [rbp{res:+d}], rax",
+        )
+        self._emit_malloc(cap * 8)
+        self.emitf(f"mov rbx, [rbp{res:+d}]", f"mov [rbx+{self.LIST_BUF_OFF}], rax")
+
+        # Evaluate iterable and call __iter__.
+        self.gen_expr(e.iter, info)
+        self.emitf(f"mov [rbp{it:+d}], rax")
+        self.emitf(f"mov {self._arg_reg(0)}, [rbp{it:+d}]")
+        self.emit_call(self._method_symbol(cls_name, "__iter__"))
+        self.emitf(f"mov [rbp{it:+d}], rax")
+
+        top = self.fresh("comp_inst")
+        end = self.fresh("endcomp_inst")
+        self.label(top)
+
+        # Save exception state and install handler.
+        self.emitf(
+            "mov rax, [rel _runtime_exc_msg]",
+            f"mov [rbp{prev_exc_off:+d}], rax",
+            "mov rax, [rel _runtime_exc_type]",
+            f"mov [rbp{prev_exc_type_off:+d}], rax",
+            "mov rax, [rel _runtime_handler_top]",
+            f"mov [rbp{parent_off:+d}], rax",
+        )
+        self.emitf(f"lea rax, [rbp{buf_off:+d}]", "mov [rel _runtime_handler_top], rax")
+        self._emit_call_setjmp(buf_off)
+        handler_lbl = self.fresh("comp_inst_handler")
+        self.emitf("test eax, eax", f"jnz {handler_lbl}")
+
+        # Normal path: call __next__(iterator).
+        self.emitf(f"mov {self._arg_reg(0)}, [rbp{it:+d}]")
+        self.emit_call(self._method_symbol(cls_name, "__next__"))
+        if not e.targets:
+            self.emitf(f"mov [rbp{var:+d}], rax")
+        else:
+            self._emit_comp_target_bind(e.targets, 0, info)
+
+        # Restore handler chain (normal path).
+        self.emitf(
+            f"mov rax, [rbp{parent_off:+d}]",
+            "mov [rel _runtime_handler_top], rax",
+            f"mov rax, [rbp{prev_exc_off:+d}]",
+            "mov [rel _runtime_exc_msg], rax",
+            f"mov rax, [rbp{prev_exc_type_off:+d}]",
+            "mov [rel _runtime_exc_type], rax",
+        )
+
+        # Optional filter.
+        skip = None
+        if e.cond is not None:
+            skip = self.fresh("comp_inst_skip")
+            self._gen_truthy_test(e.cond, info, skip)
+
+        # Append elt to result list.
+        self.gen_expr(e.elt, info)
+        self.emitf(
+            "mov rbx, rax",
+            f"mov rax, [rbp{res:+d}]",
+            "call _runtime_list_append",
+        )
+
+        if skip is not None:
+            self.label(skip)
+        self.emitf(f"jmp {top}")
+
+        # Handler: restore handler chain, check StopIteration.
+        self.label(handler_lbl)
+        self.emitf(
+            f"mov rax, [rbp{parent_off:+d}]",
+            "mov [rel _runtime_handler_top], rax",
+        )
+        self.emitf(
+            "mov rax, [rel _runtime_exc_type]",
+            "cmp rax, 21",
+            f"je {end}",
+        )
+        self.emitf(
+            "mov rax, [rel _runtime_exc_msg]",
+            "mov rbx, [rel _runtime_exc_type]",
+            "call _runtime_raise",
+        )
+
+        self.label(end)
+        self.emitf(f"mov rax, [rbp{res:+d}]")
+
         if _shadows_global and not e.targets:
             if _saved_var_local is None:
                 info.locals_.pop(e.var, None)
@@ -11973,6 +12152,24 @@ class Codegen:
             # length (list/tuple and dict share a len field at +8), strings
             # test the first byte, scalars/pointers test the raw value.
             arg_t = A.expr_type(e.args[0])
+            if arg_t.startswith("instance:"):
+                cls_name = arg_t.split(":", 1)[1]
+                owner = self._resolve_method_owner(cls_name, "__bool__")
+                if owner is None:
+                    owner = self._resolve_method_owner(cls_name, "__len__")
+                    method = "__len__"
+                else:
+                    method = "__bool__"
+                if owner is not None:
+                    self.gen_expr(e.args[0], info)
+                    self.emitf(f"mov {self._arg_reg(0)}, rax")
+                    self.emit_call(self._method_symbol(owner, method))
+                    self.emitf("test rax, rax", "setne al", "movzx rax, al")
+                    return
+                # No __bool__/__len__: non-null pointer is truthy.
+                self.gen_expr(e.args[0], info)
+                self.emitf("test rax, rax", "setne al", "movzx rax, al")
+                return
             self.gen_expr(e.args[0], info)
             if arg_t in ("list", "tuple", "dict", "set"):
                 self.emitf("mov rax, [rax+8]")  # LIST_LEN_OFF == DICT_LEN_OFF
@@ -12187,6 +12384,84 @@ class Codegen:
             # Place the args, then load the pointer into rax (not an arg
             # register on either ABI) and call indirectly.
             if e.func in info.locals_ or e.func in self.global_vars:
+                # Detect closure call: variable type is "closure".
+                if self._var_type(e.func, info) == "closure":
+                    # Find the inner function to know the number of free vars.
+                    # e.func is the variable name (e.g. "add5"), not the inner func
+                    # name (e.g. "adder"). Look through module stmts for any Assign
+                    # `e.func = factory_call(...)`, then find the factory's ClosureBind
+                    # to get the inner function's free_vars count.
+                    n_free = 0
+                    # Direct match: e.func is a lifted function name with free_vars
+                    for ff in self.mod.funcs:
+                        if ff.name == e.func and getattr(ff, "is_lifted", False):
+                            n_free = len(getattr(ff, "free_vars", []))
+                            break
+                    if n_free == 0:
+                        # Indirect: e.func was assigned from a factory call.
+                        # Find the factory name from module body assignments.
+                        factory_name = None
+                        all_stmts = list(self.mod.body) + [
+                            s for f in self.mod.funcs for s in f.body
+                        ]
+                        for s in all_stmts:
+                            if (
+                                isinstance(s, A.Assign)
+                                and s.target == e.func
+                                and isinstance(s.value, A.Call)
+                            ):
+                                factory_name = s.value.func
+                                break
+                        if factory_name:
+                            # Find the factory function's ClosureBind to get n_free
+                            for ff in self.mod.funcs:
+                                if ff.name == factory_name:
+                                    for fs in ff.body:
+                                        if isinstance(fs, A.ClosureBind):
+                                            n_free = len(fs.free_vars)
+                                            break
+                                    break
+                    # closure = [MAGIC, fn_ptr, fv0, fv1, ...]
+                    # Build synthetic args: [fv0, fv1, ..., explicit_args...]
+                    # We emit args in reverse (stack grows down) by reversing.
+                    # Use the list-based scratch: load closure buf pointer.
+                    # Strategy: load captured vars + explicit args using arg regs.
+                    # Since there can be at most a few args total, use direct load.
+                    closure_mem = self._var_mem(e.func, info)
+                    # Evaluate explicit args and push them temporarily.
+                    arg_temps: list = []
+                    slot_base = info.locals_.get(f"__closure_arg_{id(e)}_0")
+                    for i, arg_expr in enumerate(e.args):
+                        slot = info.locals_.get(f"__closure_arg_{id(e)}_{i}")
+                        if slot is not None:
+                            self.gen_expr(arg_expr, info)
+                            self.emitf(f"mov [rbp{slot:+d}], rax")
+                        else:
+                            # Fallback: push on stack
+                            self.gen_expr(arg_expr, info)
+                            self.emitf("push rax")
+                        arg_temps.append(slot)
+                    # Load closure buf.
+                    self.emitf(
+                        f"mov rax, {closure_mem}",
+                        f"mov rcx, [rax+{self.LIST_BUF_OFF}]",
+                        # fn_ptr at buf+8
+                        "mov r10, [rcx+8]",
+                    )
+                    # Place captured vars into arg regs 0..n_free-1.
+                    for i in range(n_free):
+                        reg = self._arg_reg(i)
+                        self.emitf(f"mov {reg}, [rcx+{(i + 2) * 8}]")
+                    # Place explicit args into arg regs n_free..n_free+len(args)-1.
+                    for i, (arg_expr, slot) in enumerate(zip(e.args, arg_temps)):
+                        reg = self._arg_reg(n_free + i)
+                        if slot is not None:
+                            self.emitf(f"mov {reg}, [rbp{slot:+d}]")
+                        else:
+                            # Was pushed; pop in reverse order (but we pushed in order)
+                            pass
+                    self.emitf("call r10")
+                    return
                 cleanup = self._emit_positional_args(e, e.args, info, start_reg=0)
                 self.emitf(f"mov rax, {self._var_mem(e.func, info)}", "call rax")
                 if cleanup:

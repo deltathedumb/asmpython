@@ -232,6 +232,21 @@ class Pass:
 
 
 @dataclass
+class ClosureBind:
+    """Bind a name to a closure object wrapping a lifted inner function.
+
+    Emitted by the parser when a nested `def` is found; replaces the old
+    `Pass` placeholder.  `func_name` is the inner function's name; `free_vars`
+    is the list of outer-scope variable names that the body references.
+    Codegen allocates a list [CLOSURE_MAGIC, fn_ptr, var1, var2, ...].
+    """
+
+    func_name: str
+    free_vars: list
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
 class Import:
     """import math  (the module name remains visible as a prefix)."""
 
@@ -483,6 +498,7 @@ Stmt = (
     | Continue
     | ExprStmt
     | Pass
+    | ClosureBind
     | Import
     | FromImport
     | AttrAssign

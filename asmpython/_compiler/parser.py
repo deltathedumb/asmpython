@@ -66,6 +66,92 @@ class Parser:
 
     # ---- top level ---------------------------------------------------------
 
+    def _find_free_vars(self, fdef: A.FuncDef) -> list:
+        """Return outer-scope names referenced in fdef's body that are not
+        locally bound (i.e. not in params and not assigned inside the body).
+        These are candidates for closure capture."""
+        local_names: set = set(fdef.params)
+        if fdef.vararg:
+            local_names.add(fdef.vararg)
+        if fdef.kwarg:
+            local_names.add(fdef.kwarg)
+        # Collect names that are assigned (bound) inside the body.
+        def _collect_assigned(stmts: list) -> None:
+            for s in stmts:
+                if isinstance(s, A.Assign):
+                    local_names.add(s.target)
+                elif isinstance(s, A.AugAssign):
+                    local_names.add(s.target)
+                elif isinstance(s, A.For):
+                    if isinstance(s.var, str):
+                        local_names.add(s.var)
+                elif isinstance(s, A.If):
+                    _collect_assigned(s.then)
+                    _collect_assigned(s.orelse)
+                elif isinstance(s, A.While):
+                    _collect_assigned(s.body)
+                elif isinstance(s, A.Try):
+                    _collect_assigned(s.body)
+                    _collect_assigned(s.handler)
+        _collect_assigned(fdef.body)
+        # Collect all Name references in the body.
+        referenced: set = set()
+        def _collect_refs(stmts: list) -> None:
+            for s in stmts:
+                _collect_refs_expr(s)
+        def _collect_refs_expr(node) -> None:
+            if isinstance(node, A.Name):
+                referenced.add(node.name)
+            elif isinstance(node, A.BinOp):
+                _collect_refs_expr(node.left)
+                _collect_refs_expr(node.right)
+            elif isinstance(node, A.UnaryOp):
+                _collect_refs_expr(node.operand)
+            elif isinstance(node, A.Call):
+                for a in node.args:
+                    _collect_refs_expr(a)
+            elif isinstance(node, A.Assign):
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.AugAssign):
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.Return):
+                if node.value is not None:
+                    _collect_refs_expr(node.value)
+            elif isinstance(node, A.If):
+                _collect_refs_expr(node.test)
+                _collect_refs(node.then)
+                _collect_refs(node.orelse)
+            elif isinstance(node, A.While):
+                _collect_refs_expr(node.test)
+                _collect_refs(node.body)
+            elif isinstance(node, A.For):
+                if node.iter is not None:
+                    _collect_refs_expr(node.iter)
+                _collect_refs(node.body)
+            elif isinstance(node, A.ExprStmt):
+                _collect_refs_expr(node.expr)
+            elif isinstance(node, A.Attr):
+                _collect_refs_expr(node.obj)
+            elif isinstance(node, A.Compare):
+                for op in node.operands:
+                    _collect_refs_expr(op)
+            elif isinstance(node, A.BoolOp):
+                for v in node.values:
+                    _collect_refs_expr(v)
+        _collect_refs(fdef.body)
+        # Free vars = referenced names that are not locally bound.
+        BUILTINS = {
+            "print", "len", "range", "str", "int", "float", "bool", "list",
+            "dict", "tuple", "set", "abs", "min", "max", "sum", "sorted",
+            "isinstance", "type", "enumerate", "zip", "map", "filter",
+            "hasattr", "getattr", "setattr", "repr", "hash", "id",
+            "StopIteration", "ValueError", "TypeError", "KeyError",
+            "IndexError", "AttributeError", "RuntimeError", "Exception",
+            "ZeroDivisionError", "NotImplementedError", "OverflowError",
+            "True", "False", "None",
+        }
+        return [n for n in sorted(referenced - local_names) if n not in BUILTINS]
+
     def parse(self) -> A.Module:
         funcs: list[A.FuncDef] = []
         classes: list[A.ClassDef] = []
@@ -639,13 +725,18 @@ class Parser:
                 self._expect("NEWLINE")
                 return A.Continue(pos=pos)
             if t.value == "def":
-                # Nested function definition: lift to module level so calls to
-                # it resolve in sema. Closures aren't modelled; captured vars
-                # become opaque. The call site sees a regular top-level func.
+                # Nested function definition: lift to module level. Detect
+                # free variables (names referenced in the body but not in the
+                # inner params or locally assigned) so codegen can build a
+                # closure object bundling the captured values.
                 decorators = self._eat_decorators()
                 fdef = self._parse_funcdef(decorators=decorators)
                 fdef.is_lifted = True
+                free_vars = self._find_free_vars(fdef)
+                fdef.free_vars = free_vars
                 self._nested_funcs.append(fdef)
+                if free_vars:
+                    return A.ClosureBind(func_name=fdef.name, free_vars=free_vars, pos=fdef.pos)
                 return A.Pass(pos=fdef.pos)
             if t.value == "import":
                 return self._parse_import()

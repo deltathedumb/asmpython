@@ -1343,6 +1343,17 @@ class SemaAnalyzer:
         self.global_scope.add("__file__", "str")
         self._try_check_block(self.mod.body, self.global_scope)
 
+        # Lifted (closure) functions: prepend captured free-variable names as
+        # extra params so the body can reference them.  The outer function's
+        # ClosureBind emits a closure list at runtime that passes these values.
+        for f in self.mod.funcs:
+            free_vars = getattr(f, "free_vars", [])
+            if free_vars and getattr(f, "is_lifted", False):
+                # Prepend free vars as params (before the original params).
+                f.params = free_vars + list(f.params)
+                f.param_types = [None] * len(free_vars) + list(f.param_types)
+                f.defaults = [None] * len(free_vars) + list(f.defaults)
+
         # Function bodies: each has its own scope, seeded with globals then
         # params. If a param has a default literal, infer its type from the
         # default (so `def greet(p="hi")` makes p a str in the body).
@@ -1415,6 +1426,46 @@ class SemaAnalyzer:
             if len(self._collected_errors) == 1:
                 raise MultiSemaError(self._collected_errors)
             raise MultiSemaError(self._collected_errors)
+
+        # For functions that contain a ClosureBind and return that closure,
+        # upgrade their FuncSig ret_type to "closure" so call sites get the
+        # right type and codegen dispatches correctly.
+        def _body_has_closure_bind(body: list, name: str) -> bool:
+            for s in body:
+                if isinstance(s, A.ClosureBind) and s.func_name == name:
+                    return True
+            return False
+        closure_factories: set = set()
+        for f in self.mod.funcs:
+            if getattr(f, "is_lifted", False):
+                continue
+            sig = self.funcs.get(f.name)
+            if sig is None or sig.ret_type is not None:
+                continue
+            # Check if the function returns a name that is a ClosureBind.
+            for s in f.body:
+                if isinstance(s, A.Return) and s.value is not None:
+                    if (
+                        isinstance(s.value, A.Name)
+                        and _body_has_closure_bind(f.body, s.value.name)
+                    ):
+                        sig.ret_type = ("closure", None, None, None, None)
+                        closure_factories.add(f.name)
+                        break
+        # Re-type Call nodes in the module body that target closure factories.
+        def _retype_closure_calls(stmts: list) -> None:
+            for s in stmts:
+                if isinstance(s, A.Assign) and isinstance(s.value, A.Call):
+                    if s.value.func in closure_factories:
+                        s.value.inferred_type = "closure"
+                elif isinstance(s, A.For):
+                    _retype_closure_calls(s.body)
+                elif isinstance(s, A.If):
+                    _retype_closure_calls(s.then)
+                    _retype_closure_calls(s.orelse)
+                elif isinstance(s, A.While):
+                    _retype_closure_calls(s.body)
+        _retype_closure_calls(self.mod.body)
 
         # Hand resolved tables to codegen via the Module.
         self.mod.imported_modules = self.imported_modules
@@ -1924,6 +1975,15 @@ class SemaAnalyzer:
 
     def _check_stmt(self, s, scope: Scope) -> "Optional[list]":
         if isinstance(s, A.Pass):
+            return
+        if isinstance(s, A.ClosureBind):
+            # A nested `def` that captures outer variables.
+            # Validate that each free variable is in scope.
+            for fv in s.free_vars:
+                if fv not in scope.names and fv not in self.global_scope.names:
+                    pass  # Accept unknown names; may be a global defined later.
+            # Type is "closure" so codegen can distinguish from plain lists.
+            scope.add(s.func_name, "closure")
             return
         if isinstance(s, A.Assign):
             self._check_expr(s.value, scope)
@@ -3641,6 +3701,18 @@ class SemaAnalyzer:
                 el = ets[0] if ets else "int"
             elif it_t == "any":
                 el = "any"
+            elif it_t.startswith("instance:"):
+                cls_name = it_t.split(":", 1)[1]
+                cls_sig = self.classes.get(cls_name)
+                if cls_sig is None or "__iter__" not in cls_sig.methods or "__next__" not in cls_sig.methods:
+                    raise SemaError(
+                        f"cannot iterate a {it_t} in a comprehension: "
+                        f"class must define __iter__ and __next__",
+                        e.pos,
+                        ErrorCode.E_ITER_TYPE,
+                    )
+                next_sig = cls_sig.methods.get("__next__")
+                el = (next_sig.ret_type[0] if next_sig and next_sig.ret_type else "any")
             else:
                 raise SemaError(f"cannot iterate a {it_t} in a comprehension", e.pos, ErrorCode.E_ITER_TYPE)
             # A child scope so the loop variable doesn't leak.
