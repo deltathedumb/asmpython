@@ -11,13 +11,15 @@ output rather than silent miscompilations.
 
 ### Added
 
-- **`yield` inside `for` loops**: generator functions whose loop body is a
-  `for` loop (including `for i in range(n)` and `for x in list_expr`) now
-  transform correctly. The generator class materialises the iterable as a
-  list in `__init__`, then advances an index counter each `__next__` call.
-  Body statements before the `yield` (e.g. a local assignment) are emitted
-  before the return; body statements after the `yield` are emitted between
-  the return-value capture and the index advance.
+- **`yield` inside `if` branches and `for` loops**: the generator
+  transformation now uses a "loop-in-next" approach with a recursive body
+  transformer (`_gen_body_transform`) that handles yields at any nesting
+  depth. `for`-loop generators advance the index before the body so any
+  yield-induced return leaves the index on the next element; `while`-loop
+  generators embed the transformed body inside a `while cond:` loop and
+  raise `StopIteration` after it exits. Both `then` and `else` branches can
+  contain yields; non-yielding branches receive the same continuation stmts
+  so every iteration path does the same post-yield work.
 
 - **`--onedir` implies `--use-runtime-lib`**: the `compile_source` driver
   function now enforces this invariant at the API level (not just the CLI

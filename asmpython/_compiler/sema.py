@@ -1404,44 +1404,22 @@ class SemaAnalyzer:
         result_name = "_genresult"
 
         if isinstance(loop_stmt, A.While):
-            cond = loop_stmt.test
-            body = loop_stmt.body
-
-            # Split body at the first top-level YieldStmt.
-            body_before: list = []
-            body_after: list = []
-            yield_val = None
-            past_yield = False
-            for s in body:
-                if not past_yield:
-                    if isinstance(s, A.YieldStmt):
-                        yield_val = s.value
-                        past_yield = True
-                    else:
-                        body_before.append(s)
-                else:
-                    body_after.append(s)
-
-            if yield_val is None:
-                return None
-
-            renamed_cond = self._rename_expr(cond, all_names)
-            renamed_before = self._rename_stmts(body_before, all_names, pos)
-            renamed_yield_val = self._rename_expr(yield_val, all_names)
-            renamed_after = self._rename_stmts(body_after, all_names, pos)
-
-            # __next__: if not cond → StopIteration; body; return result
+            # Loop-in-next: `while cond: <transformed body>; raise StopIteration`.
+            # _gen_body_transform recursively replaces every `yield val` with:
+            #   _genresult = val; <continuation>; return _genresult
+            # where the continuation carries all stmts that must still run
+            # (e.g. `i += 1` after the yield) before state is saved.
             next_body = [
-                A.If(
-                    test=A.UnaryOp(op="not", operand=renamed_cond, pos=pos),
-                    then=[A.Raise(value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos)],
-                    orelse=[],
+                A.While(
+                    test=self._rename_expr(loop_stmt.test, all_names),
+                    body=self._gen_body_transform(
+                        loop_stmt.body, [], all_names, pos, result_name
+                    ),
                     pos=pos,
                 ),
-            ] + renamed_before + [
-                A.Assign(target=result_name, value=renamed_yield_val, pos=pos),
-            ] + renamed_after + [
-                A.Return(value=A.Name(name=result_name, pos=pos), pos=pos),
+                A.Raise(
+                    value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
+                ),
             ]
 
         else:  # For loop
@@ -1460,32 +1438,9 @@ class SemaAnalyzer:
             else:
                 return None
 
-            body = loop_stmt.body
-
-            # Split body at the first top-level YieldStmt.
-            body_before_fl: list = []
-            body_after_fl: list = []
-            yield_val_fl = None
-            past_yield_fl = False
-            for s in body:
-                if not past_yield_fl:
-                    if isinstance(s, A.YieldStmt):
-                        yield_val_fl = s.value
-                        past_yield_fl = True
-                    else:
-                        body_before_fl.append(s)
-                else:
-                    body_after_fl.append(s)
-
-            if yield_val_fl is None:
-                return None
-
             renamed_iter = self._rename_expr(iter_expr, all_names)
-            renamed_before = self._rename_stmts(body_before_fl, all_names, pos)
-            renamed_yield_val = self._rename_expr(yield_val_fl, all_names)
-            renamed_after = self._rename_stmts(body_after_fl, all_names, pos)
 
-            # Store the materialized list and index on self in __init__.
+            # Store the materialised list and index on self in __init__.
             init_body.append(A.AttrAssign(
                 obj=A.Name(name="self", pos=pos), name="_genlist",
                 value=A.Call(func="list", args=[renamed_iter], pos=pos),
@@ -1497,24 +1452,10 @@ class SemaAnalyzer:
                 pos=pos,
             ))
 
-            # __next__: if _idx >= len(_genlist) → StopIteration; bind loop
-            # var; body; advance index; return result.
-            next_body = [
-                A.If(
-                    test=A.Compare(
-                        ops=[">="],
-                        operands=[
-                            A.Attr(obj=A.Name(name="self", pos=pos), name="_idx", pos=pos),
-                            A.Call(func="len", args=[
-                                A.Attr(obj=A.Name(name="self", pos=pos), name="_genlist", pos=pos),
-                            ], pos=pos),
-                        ],
-                        pos=pos,
-                    ),
-                    then=[A.Raise(value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos)],
-                    orelse=[],
-                    pos=pos,
-                ),
+            # Loop-in-next: advance _idx BEFORE the body so that any
+            # yield-induced return leaves _idx pointing at the next element.
+            # _gen_body_transform with empty continuation handles nested yields.
+            loop_body_prefix = [
                 A.AttrAssign(
                     obj=A.Name(name="self", pos=pos),
                     name=loop_var,
@@ -1525,9 +1466,6 @@ class SemaAnalyzer:
                     ),
                     pos=pos,
                 ),
-            ] + renamed_before + [
-                A.Assign(target=result_name, value=renamed_yield_val, pos=pos),
-            ] + renamed_after + [
                 A.AttrAssign(
                     obj=A.Name(name="self", pos=pos),
                     name="_idx",
@@ -1539,7 +1477,27 @@ class SemaAnalyzer:
                     ),
                     pos=pos,
                 ),
-                A.Return(value=A.Name(name=result_name, pos=pos), pos=pos),
+            ]
+            next_body = [
+                A.While(
+                    test=A.Compare(
+                        ops=["<"],
+                        operands=[
+                            A.Attr(obj=A.Name(name="self", pos=pos), name="_idx", pos=pos),
+                            A.Call(func="len", args=[
+                                A.Attr(obj=A.Name(name="self", pos=pos), name="_genlist", pos=pos),
+                            ], pos=pos),
+                        ],
+                        pos=pos,
+                    ),
+                    body=loop_body_prefix + self._gen_body_transform(
+                        loop_stmt.body, [], all_names, pos, result_name
+                    ),
+                    pos=pos,
+                ),
+                A.Raise(
+                    value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
+                ),
             ]
 
         # Determine the yield value's return type from original function annotation,
@@ -1669,6 +1627,73 @@ class SemaAnalyzer:
                 result.append(A.Return(value=self._rename_expr(s.value, local_names), pos=s.pos))
             else:
                 result.append(s)
+        return result
+
+    def _gen_body_transform(self, stmts, continuation, all_names, pos, result_name):
+        """Transform a generator loop body for __next__.
+
+        Replaces every `yield val` with:
+            _genresult = val
+            <renamed continuation stmts>
+            return _genresult
+
+        `continuation` is a list of RAW (unrenammed) stmts from the outer
+        context that must execute after the yield point.  For every `If`
+        that contains a nested yield, the non-yielding branch also receives
+        the continuation so both paths complete the same "iteration work"
+        before falling through to the outer while loop's next check.
+        """
+        def _hw(ss):
+            for s in ss:
+                if isinstance(s, A.YieldStmt):
+                    return True
+                if isinstance(s, A.If) and (_hw(s.then) or _hw(s.orelse or [])):
+                    return True
+            return False
+
+        result = []
+        for i, s in enumerate(stmts):
+            local_remaining = stmts[i + 1:]
+            full_cont = local_remaining + list(continuation)
+
+            if isinstance(s, A.YieldStmt):
+                result.append(A.Assign(
+                    target=result_name,
+                    value=self._rename_expr(s.value, all_names),
+                    pos=pos,
+                ))
+                result.extend(self._rename_stmts(full_cont, all_names, pos))
+                result.append(A.Return(
+                    value=A.Name(name=result_name, pos=pos), pos=pos
+                ))
+                break
+
+            elif isinstance(s, A.If):
+                then_hw = _hw(s.then)
+                orelse_hw = _hw(s.orelse or [])
+                if then_hw or orelse_hw:
+                    renamed_full = self._rename_stmts(full_cont, all_names, pos)
+                    new_then = (
+                        self._gen_body_transform(s.then, full_cont, all_names, pos, result_name)
+                        if then_hw
+                        else self._rename_stmts(s.then, all_names, pos) + renamed_full
+                    )
+                    new_orelse = (
+                        self._gen_body_transform(s.orelse or [], full_cont, all_names, pos, result_name)
+                        if orelse_hw
+                        else self._rename_stmts(s.orelse or [], all_names, pos) + renamed_full
+                    )
+                    result.append(A.If(
+                        test=self._rename_expr(s.test, all_names),
+                        then=new_then,
+                        orelse=new_orelse,
+                        pos=s.pos,
+                    ))
+                    break  # full_cont is injected inside branches
+                else:
+                    result.extend(self._rename_stmts([s], all_names, pos))
+            else:
+                result.extend(self._rename_stmts([s], all_names, pos))
         return result
 
     def analyze(self) -> None:
