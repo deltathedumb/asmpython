@@ -3629,6 +3629,38 @@ class SemaAnalyzer:
             self._merge_walrus_bindings(scope, child, loop_vars)
             return
         if isinstance(e, A.DictComprehension):
+            # enumerate(iterable) special case: `{k: i for i, k in enumerate(xs)}`
+            if (
+                isinstance(e.iter, A.Call)
+                and e.iter.func == "enumerate"
+                and len(e.iter.args) >= 1
+                and e.targets
+                and len(e.targets) == 2
+            ):
+                inner = e.iter.args[0]
+                self._check_expr(inner, scope)
+                child = Scope()
+                child.types.update(scope.types)
+                child.list_el_types.update(scope.list_el_types)
+                child.dict_value_types.update(scope.dict_value_types)
+                child.dict_inner_value_types.update(scope.dict_inner_value_types)
+                child.tuple_elem_types.update(scope.tuple_elem_types)
+                idx_name = e.targets[0] if isinstance(e.targets[0], str) else None
+                el_name = e.targets[1] if isinstance(e.targets[1], str) else None
+                if idx_name:
+                    child.add(idx_name, "int")
+                if el_name:
+                    child.add(el_name, self._iter_element_type(inner, scope))
+                loop_vars = {n for n in (idx_name, el_name) if n}
+                if e.cond is not None:
+                    self._check_expr(e.cond, child)
+                self._check_expr(e.key, child)
+                self._check_expr(e.value, child)
+                vt = A.expr_type(e.value)
+                e.inferred_type = "dict"
+                e.value_type = vt if vt != "any" else "int"
+                self._merge_walrus_bindings(scope, child, loop_vars)
+                return
             self._check_expr(e.iter, scope)
             it_t = A.expr_type(e.iter)
             if it_t == "list":

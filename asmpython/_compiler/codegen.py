@@ -1096,6 +1096,12 @@ class Codegen:
             self._cl_define(info, f"__dcomp_stop_{id(expr)}")
             self._cl_define(info, f"__dcomp_idx_{id(expr)}")
             self._cl_define(info, f"__dcomp_key_{id(expr)}")
+            # enumerate(xs) in dict comprehension needs extra counter slot.
+            if (
+                isinstance(expr.iter, A.Call)
+                and getattr(expr.iter, "func", None) == "enumerate"
+            ):
+                self._cl_define(info, f"__dcomp_enum_ctr_{id(expr)}")
             var_ty = "int"
             if A.expr_type(expr.iter) == "list":
                 if isinstance(expr.iter, A.Name):
@@ -7840,6 +7846,80 @@ class Codegen:
         self.label(end)
         self.emitf(f"mov rax, [rbp{res:+d}]")
 
+    def _gen_dict_comprehension_enumerate(self, e: A.DictComprehension, info: FuncInfo) -> None:
+        """{key: value for i, el in enumerate(xs)} — dict comp with enumerate."""
+        inner = e.iter.args[0]  # type: ignore[union-attr]
+        res = info.locals_[f"__dcomp_res_{id(e)}"]
+        it = info.locals_[f"__dcomp_iter_{id(e)}"]
+        stop = info.locals_[f"__dcomp_stop_{id(e)}"]
+        idx = info.locals_[f"__dcomp_idx_{id(e)}"]
+        key_slot = info.locals_[f"__dcomp_key_{id(e)}"]
+        ctr = info.locals_[f"__dcomp_enum_ctr_{id(e)}"]
+        idx_name = e.targets[0] if isinstance(e.targets[0], str) else None
+        el_name = e.targets[1] if isinstance(e.targets[1], str) else None
+        idx_slot = info.locals_.get(idx_name) if idx_name else None
+        el_slot = info.locals_.get(el_name) if el_name else None
+
+        # result = empty dict (cap 8)
+        cap = 8
+        self._emit_malloc(self.DICT_HEADER)
+        self.emitf(
+            f"mov qword [rax+{self.DICT_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.DICT_LEN_OFF}], 0",
+            f"mov qword [rax+{self.DICT_TOMB_OFF}], 0",
+            f"mov [rbp{res:+d}], rax",
+        )
+        self.emitf(f"mov rbx, {cap * self.DICT_SLOT_SIZE}", "call _runtime_zalloc")
+        self.emitf(f"mov rbx, [rbp{res:+d}]", f"mov [rbx+{self.DICT_BUF_OFF}], rax")
+        self._emit_dict_alloc_order_buf(cap, res)
+
+        self.gen_expr(inner, info)
+        self.emitf(
+            f"mov [rbp{it:+d}], rax",
+            f"mov rbx, [rax+{self.LIST_LEN_OFF}]",
+            f"mov [rbp{stop:+d}], rbx",
+            f"mov qword [rbp{idx:+d}], 0",
+            f"mov qword [rbp{ctr:+d}], 0",
+        )
+        top = self.fresh("dcomp_enum")
+        end = self.fresh("enddcomp_enum")
+        self.label(top)
+        self.emitf(f"mov rax, [rbp{idx:+d}]", f"cmp rax, [rbp{stop:+d}]", f"jge {end}")
+        self.emitf(
+            f"mov rbx, [rbp{it:+d}]",
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+            f"mov rcx, [rbp{idx:+d}]",
+            "mov rax, [rbx+rcx*8]",
+        )
+        if el_slot is not None:
+            self.emitf(f"mov [rbp{el_slot:+d}], rax")
+        if idx_slot is not None:
+            self.emitf(f"mov rax, [rbp{ctr:+d}]", f"mov [rbp{idx_slot:+d}], rax")
+        skip = None
+        if e.cond is not None:
+            skip = self.fresh("dcomp_enum_skip")
+            self._gen_truthy_test(e.cond, info, skip)
+        self.gen_expr(e.key, info)
+        self.emitf(f"mov [rbp{key_slot:+d}], rax")
+        self.gen_expr(e.value, info)
+        if e.value_type == "float":
+            self.emitf("movq rax, xmm0")
+        self.emitf(
+            "mov rcx, rax",
+            f"mov rbx, [rbp{key_slot:+d}]",
+            f"mov rax, [rbp{res:+d}]",
+            "call _runtime_dict_set",
+        )
+        if skip is not None:
+            self.label(skip)
+        self.emitf(
+            f"inc qword [rbp{idx:+d}]",
+            f"inc qword [rbp{ctr:+d}]",
+            f"jmp {top}",
+        )
+        self.label(end)
+        self.emitf(f"mov rax, [rbp{res:+d}]")
+
     def _gen_dict_comprehension(self, e: A.DictComprehension, info: FuncInfo) -> None:
         """{key: value for var in iter (if cond)} -> build an empty dict, iterate
         the (list-typed) iterable, and insert key->value for each element that
@@ -7848,6 +7928,16 @@ class Codegen:
         Mirrors `_gen_comprehension` for the loop, and `_gen_dict_lit` for the
         empty-dict allocation and per-pair `_runtime_dict_set` inserts. Parks all
         intermediates in frame slots — no push/pop across calls."""
+        # enumerate(xs) special case: {k: i for i, k in enumerate(xs)}
+        if (
+            isinstance(e.iter, A.Call)
+            and getattr(e.iter, "func", None) == "enumerate"
+            and len(e.iter.args) >= 1
+            and e.targets
+            and len(e.targets) == 2
+        ):
+            self._gen_dict_comprehension_enumerate(e, info)
+            return
         if A.expr_type(e.iter) not in ("list", "tuple", "any"):
             raise NotImplementedError(
                 "dict comprehension iterable must be a list for now"
