@@ -1338,15 +1338,20 @@ class Codegen:
                 self._cl_define(info, f"__dictcall_res_{id(expr)}")
                 if expr.args:
                     self._cl_define(info, f"__dictcall_src_{id(expr)}")
-            # list(filter(None, xs)): truthy-filter loop needs 5 scratch slots.
+            # list(filter(...)): truthy-filter loop needs 5 scratch slots.
+            # list(map(lambda, xs)): map loop needs the same 5 scratch slots.
             if expr.func in ("list", "tuple") and expr.args:
                 a0 = expr.args[0]
-                if isinstance(a0, A.Call) and a0.func == "filter" and len(a0.args) == 2:
+                if isinstance(a0, A.Call) and a0.func in ("filter", "map") and len(a0.args) == 2:
                     self._cl_define(info, f"__listcall_res_{id(expr)}")
                     self._cl_define(info, f"__listcall_it_{id(expr)}")
                     self._cl_define(info, f"__listcall_stop_{id(expr)}")
                     self._cl_define(info, f"__listcall_idx_{id(expr)}")
                     self._cl_define(info, f"__listcall_val_{id(expr)}")
+                    if isinstance(a0, A.Call) and a0.func in ("filter", "map") and isinstance(a0.args[0], A.Lambda):
+                        lam = a0.args[0]
+                        for p in lam.params:
+                            self._cl_define(info, p)
             # set()/frozenset(): an empty set needs a header slot; building
             # from a list/tuple additionally needs iteration-cursor slots.
             if expr.func in ("set", "frozenset"):
@@ -8474,13 +8479,22 @@ class Codegen:
         argument is a list/tuple/str/dict/any and stamped `list_el_type`.
         """
         arg0 = e.args[0]
-        # list(filter(None, xs)): truthy filter — equivalent to [x for x in xs if x].
+        # list(filter(pred, xs))
         if (
             isinstance(arg0, A.Call)
             and arg0.func == "filter"
             and len(arg0.args) == 2
         ):
             self._gen_list_filter(e, arg0, info)
+            return
+        # list(map(lambda x: expr, xs))
+        if (
+            isinstance(arg0, A.Call)
+            and arg0.func == "map"
+            and len(arg0.args) == 2
+            and isinstance(arg0.args[0], A.Lambda)
+        ):
+            self._gen_list_map(e, arg0, info)
             return
         src_t = A.expr_type(arg0)
         if src_t in ("list", "tuple", "any"):
@@ -8498,13 +8512,12 @@ class Codegen:
         raise NotImplementedError(f"list() from {src_t} source")
 
     def _gen_list_filter(self, outer: A.Call, filter_call: A.Call, info: FuncInfo) -> None:
-        """Lower `list(filter(None, xs))` to a truthy-filter loop.
-        Only `filter(None, iterable)` is supported; a function predicate
-        requires first-class function pointers (not yet implemented)."""
+        """Lower `list(filter(pred, xs))`.
+        pred=None → truthy filter; pred=Lambda → inline lambda body as condition."""
         pred = filter_call.args[0]
         xs_expr = filter_call.args[1]
-        # Only filter(None, xs) is supported; function predicates need first-class fns.
-        if not A.is_none_expr(pred):
+        is_lambda = isinstance(pred, A.Lambda)
+        if not A.is_none_expr(pred) and not is_lambda:
             raise NotImplementedError("filter() with a function predicate is not yet supported")
         res_slot = info.locals_[f"__listcall_res_{id(outer)}"]
         it_slot = info.locals_[f"__listcall_it_{id(outer)}"]
@@ -8512,7 +8525,6 @@ class Codegen:
         idx_slot = info.locals_[f"__listcall_idx_{id(outer)}"]
         val_slot = info.locals_[f"__listcall_val_{id(outer)}"]
         cap = 4
-        # Build empty result list.
         self._emit_malloc(self.LIST_HEADER)
         self.emitf(
             f"mov qword [rax+{self.LIST_CAP_OFF}], {cap}",
@@ -8521,7 +8533,6 @@ class Codegen:
         )
         self._emit_malloc(cap * 8)
         self.emitf(f"mov rbx, [rbp{res_slot:+d}]", f"mov [rbx+{self.LIST_BUF_OFF}], rax")
-        # Cache iterable.
         self.gen_expr(xs_expr, info)
         self.emitf(
             f"mov [rbp{it_slot:+d}], rax",
@@ -8541,11 +8552,17 @@ class Codegen:
             f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
             "mov rax, [rbx+rax*8]",
             f"mov [rbp{val_slot:+d}], rax",
-            # Test truthiness: 0 is falsy, anything else is truthy.
-            "test rax, rax",
-            f"jz {skip}",
-            # Append to result.
         )
+        if is_lambda:
+            # Bind lambda parameter, eval body as condition.
+            lam: A.Lambda = pred  # type: ignore[assignment]
+            if lam.params:
+                p_slot = info.locals_[lam.params[0]]
+                self.emitf(f"mov [rbp{p_slot:+d}], rax")
+            self.gen_expr(lam.body, info)
+            self.emitf("test rax, rax", f"jz {skip}")
+        else:
+            self.emitf("test rax, rax", f"jz {skip}")
         self.emitf(
             f"mov rax, [rbp{res_slot:+d}]",
             f"mov rbx, [rbp{val_slot:+d}]",
@@ -8553,6 +8570,58 @@ class Codegen:
             f"mov [rbp{res_slot:+d}], rax",
         )
         self.label(skip)
+        self.emitf(f"inc qword [rbp{idx_slot:+d}]", f"jmp {top}")
+        self.label(end)
+        self.emitf(f"mov rax, [rbp{res_slot:+d}]")
+
+    def _gen_list_map(self, outer: A.Call, map_call: A.Call, info: FuncInfo) -> None:
+        """Lower `list(map(lambda x: expr, xs))` to a map loop."""
+        lam: A.Lambda = map_call.args[0]  # type: ignore[assignment]
+        xs_expr = map_call.args[1]
+        res_slot = info.locals_[f"__listcall_res_{id(outer)}"]
+        it_slot = info.locals_[f"__listcall_it_{id(outer)}"]
+        stop_slot = info.locals_[f"__listcall_stop_{id(outer)}"]
+        idx_slot = info.locals_[f"__listcall_idx_{id(outer)}"]
+        val_slot = info.locals_[f"__listcall_val_{id(outer)}"]
+        cap = 4
+        self._emit_malloc(self.LIST_HEADER)
+        self.emitf(
+            f"mov qword [rax+{self.LIST_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.LIST_LEN_OFF}], 0",
+            f"mov [rbp{res_slot:+d}], rax",
+        )
+        self._emit_malloc(cap * 8)
+        self.emitf(f"mov rbx, [rbp{res_slot:+d}]", f"mov [rbx+{self.LIST_BUF_OFF}], rax")
+        self.gen_expr(xs_expr, info)
+        self.emitf(
+            f"mov [rbp{it_slot:+d}], rax",
+            f"mov rbx, [rax+{self.LIST_LEN_OFF}]",
+            f"mov [rbp{stop_slot:+d}], rbx",
+            f"mov qword [rbp{idx_slot:+d}], 0",
+        )
+        top = self.fresh("lm_top")
+        end = self.fresh("lm_end")
+        self.label(top)
+        self.emitf(
+            f"mov rax, [rbp{idx_slot:+d}]",
+            f"cmp rax, [rbp{stop_slot:+d}]",
+            f"jge {end}",
+            f"mov rbx, [rbp{it_slot:+d}]",
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+            "mov rax, [rbx+rax*8]",
+        )
+        if lam.params:
+            p_slot = info.locals_[lam.params[0]]
+            self.emitf(f"mov [rbp{p_slot:+d}], rax")
+        # Evaluate lambda body → result value.
+        self.gen_expr(lam.body, info)
+        self.emitf(
+            f"mov [rbp{val_slot:+d}], rax",
+            f"mov rax, [rbp{res_slot:+d}]",
+            f"mov rbx, [rbp{val_slot:+d}]",
+            "call _runtime_list_append",
+            f"mov [rbp{res_slot:+d}], rax",
+        )
         self.emitf(f"inc qword [rbp{idx_slot:+d}]", f"jmp {top}")
         self.label(end)
         self.emitf(f"mov rax, [rbp{res_slot:+d}]")
