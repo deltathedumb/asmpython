@@ -628,6 +628,9 @@ class Codegen:
         "_runtime_str_slice_step",
         "_runtime_str_contains",
         "_runtime_str_index_of",
+        "_runtime_str_index_of_start",
+        "_runtime_str_rindex_of",
+        "_runtime_str_expandtabs",
         "_runtime_str_count",
         "_runtime_str_starts_with",
         "_runtime_str_ends_with",
@@ -5470,6 +5473,151 @@ class Codegen:
         self.label("._sio_notfound")
         self.emitf("mov rax, -1", "leave", "ret")
 
+        # ---- _runtime_str_index_of_start ------------------------------------
+        # rax = haystack, rbx = needle, rcx = start_pos -> rax = index or -1.
+        # Advances haystack by start_pos bytes before calling strstr, then adds
+        # start_pos back to the returned offset so the result is absolute.
+        self.label("_runtime_str_index_of_start")
+        self.emitf(
+            "push rbp", "mov rbp, rsp", "sub rsp, 48",
+            "mov [rbp-8], rax",   # save original haystack base
+            "mov [rbp-16], rcx",  # save start_pos
+            "add rax, rcx",       # rax = haystack + start_pos
+        )
+        self._emit_libc_strstr()
+        self.emitf(
+            "test rax, rax", f"jz ._siost_notfound",
+            "sub rax, [rbp-8]",  # absolute index from base
+            "leave", "ret",
+        )
+        self.label("._siost_notfound")
+        self.emitf("mov rax, -1", "leave", "ret")
+
+        # ---- _runtime_str_rindex_of -----------------------------------------
+        # rax = haystack, rbx = needle -> rax = last index or -1.
+        # Scans forward keeping track of the latest match found.
+        self.label("_runtime_str_rindex_of")
+        self.emitf(
+            "push rbp", "mov rbp, rsp", "sub rsp, 64",
+            "mov [rbp-8], rax",   # cursor
+            "mov [rbp-16], rbx",  # needle
+            "mov qword [rbp-24], -1",  # best = -1
+            "mov [rbp-32], rax",  # base
+        )
+        # nlen = strlen(needle); if 0, return -1
+        self.emitf("mov rax, [rbp-16]")
+        self._emit_libc_strlen()
+        self.emitf("mov [rbp-40], rax", "test rax, rax", "jz ._srif_done")
+        self.label("._srif_loop")
+        self.emitf("mov rax, [rbp-8]", "mov rbx, [rbp-16]")
+        self._emit_libc_strstr()
+        self.emitf(
+            "test rax, rax", "jz ._srif_done",
+            "mov rbx, rax",
+            "sub rbx, [rbp-32]",
+            "mov [rbp-24], rbx",  # best = current index
+            "mov rbx, [rbp-40]",
+            "add rax, rbx",       # advance cursor past this match
+            "mov [rbp-8], rax",
+            "jmp ._srif_loop",
+        )
+        self.label("._srif_done")
+        self.emitf("mov rax, [rbp-24]", "leave", "ret")
+
+        # ---- _runtime_str_expandtabs ----------------------------------------
+        # rax = str, rbx = tabsize -> rax = new str with tabs expanded.
+        # Scans source; copies non-tab chars; for each \t emits spaces to align
+        # to next tabstop (col rounded up to next multiple of tabsize).
+        self.label("_runtime_str_expandtabs")
+        self.emitf(
+            "push rbp", "mov rbp, rsp", "sub rsp, 80",
+            "push rdi", "push rsi", "push r12", "push r13", "push r14",
+            "mov [rbp-8], rax",   # src ptr
+            "mov [rbp-16], rbx",  # tabsize
+        )
+        # Compute output length: walk src, count spaces needed for tabs
+        self.emitf(
+            "mov rdi, rax",       # rdi = src cursor
+            "xor r12, r12",       # r12 = output length
+            "xor r13, r13",       # r13 = current col
+        )
+        etab_slen_loop = self.fresh("etab_slen")
+        etab_slen_end = self.fresh("etab_slen_end")
+        etab_slen_tab = self.fresh("etab_slen_tab")
+        self.label(etab_slen_loop)
+        self.emitf(
+            "movzx rax, byte [rdi]",
+            "test al, al", f"jz {etab_slen_end}",
+            "cmp al, 9",
+            f"je {etab_slen_tab}",
+            # normal char
+            "inc r12", "inc r13", "inc rdi",
+            f"jmp {etab_slen_loop}",
+        )
+        self.label(etab_slen_tab)
+        # spaces = tabsize - (col % tabsize); if tabsize==0, drop the tab
+        etab_slen_skip = self.fresh("etab_slen_skip")
+        self.emitf(
+            "mov rax, [rbp-16]",
+            "test rax, rax",
+            f"jz {etab_slen_skip}",  # tabsize==0: drop tab, continue
+        )
+        self.emitf(
+            "mov rdx, 0", "mov rax, r13", "div qword [rbp-16]",
+            # rdx = col % tabsize; spaces = tabsize - rdx
+            "mov rax, [rbp-16]", "sub rax, rdx",
+            "add r12, rax",   # output_len += spaces
+            "add r13, rax",   # col += spaces
+        )
+        self.label(etab_slen_skip)
+        self.emitf("inc rdi", f"jmp {etab_slen_loop}")
+        self.label(etab_slen_end)
+        # malloc(output_len + 1): size in rax for _emit_libc_malloc_size_in_rax
+        self.emitf("lea rax, [r12+1]")
+        self._emit_libc_malloc_size_in_rax()
+        self.emitf(
+            "mov [rbp-24], rax",  # out buffer
+            "mov rdi, [rbp-8]",   # reset src cursor
+            "mov r14, rax",       # out cursor
+            "xor r13, r13",       # col = 0
+        )
+        etab_copy_loop = self.fresh("etab_copy")
+        etab_copy_end = self.fresh("etab_copy_end")
+        etab_copy_tab = self.fresh("etab_copy_tab")
+        etab_copy_sp = self.fresh("etab_copy_sp")
+        self.label(etab_copy_loop)
+        self.emitf(
+            "movzx rax, byte [rdi]",
+            "test al, al", f"jz {etab_copy_end}",
+            "cmp al, 9", f"je {etab_copy_tab}",
+            "mov byte [r14], al", "inc r14", "inc r13", "inc rdi",
+            f"jmp {etab_copy_loop}",
+        )
+        self.label(etab_copy_tab)
+        # emit spaces to fill to next tabstop; if tabsize==0, drop the tab
+        etab_copy_skip = self.fresh("etab_copy_skip")
+        self.emitf(
+            "inc rdi",  # advance past \t
+            "mov rax, [rbp-16]", "test rax, rax", f"jz {etab_copy_loop}",
+            "mov rdx, 0", "mov rax, r13", "div qword [rbp-16]",
+            "mov rax, [rbp-16]", "sub rax, rdx",  # rax = spaces needed
+            "mov [rbp-32], rax",  # save count
+        )
+        self.label(etab_copy_sp)
+        self.emitf(
+            "cmp qword [rbp-32], 0", f"jle {etab_copy_loop}",
+            "mov byte [r14], 0x20", "inc r14", "inc r13",
+            "dec qword [rbp-32]",
+            f"jmp {etab_copy_sp}",
+        )
+        self.label(etab_copy_end)
+        self.emitf(
+            "mov byte [r14], 0",  # NUL-terminate
+            "pop r14", "pop r13", "pop r12", "pop rsi", "pop rdi",
+            "mov rax, [rbp-24]",
+            "leave", "ret",
+        )
+
         # ---- _runtime_str_count ----------------------------------------------
         # rax = haystack, rbx = needle -> rax = non-overlapping occurrence count.
         # Empty needle returns 0 (CPython would return len+1; we simplify).
@@ -8542,6 +8690,8 @@ class Codegen:
         "removeprefix": "_runtime_str_removeprefix",
         "removesuffix": "_runtime_str_removesuffix",
         "find": "_runtime_str_index_of",
+        "rfind": "_runtime_str_rindex_of",
+        "expandtabs": "_runtime_str_expandtabs",
         "count": "_runtime_str_count",
         "replace": "_runtime_str_replace",
         "split": "_runtime_str_split",
@@ -8578,6 +8728,8 @@ class Codegen:
             self.gen_expr(e.obj, info)
             if e.method == "split":
                 self.emitf("call _runtime_str_split_ws")
+            elif e.method == "expandtabs":
+                self.emitf("mov rbx, 8", f"call {sym}")
             else:
                 self.emitf(f"call {sym}")
             return
@@ -8598,8 +8750,8 @@ class Codegen:
                 self.emitf("mov rbx, rax", f"mov rax, [rbp{obj_slot:+d}]", f"call {sym}")
             return
         if len(e.args) == 2:
-            # replace(old, new), split(sep, maxsplit), or
-            # ljust/rjust/center(width, fillchar). Two scratch slots.
+            # replace(old, new), split(sep, maxsplit), ljust/rjust/center(width,
+            # fillchar), or find/rfind(sub, start). Two scratch slots.
             a1_slot = info.locals_[f"__strm_a1_{id(e)}"]
             self.gen_expr(e.obj, info)
             self.emitf(f"mov [rbp{obj_slot:+d}], rax")
@@ -8610,6 +8762,21 @@ class Codegen:
                 # fillchar is a 1-char str: pass its first byte as rcx.
                 self.emitf(
                     "movzx rcx, byte [rax]",
+                    f"mov rbx, [rbp{a1_slot:+d}]",
+                    f"mov rax, [rbp{obj_slot:+d}]",
+                    f"call {sym}",
+                )
+            elif e.method in ("find", "index"):
+                # rax=start, rbx=sub, rax=haystack -> call _runtime_str_index_of_start
+                self.emitf(
+                    "mov rcx, rax",
+                    f"mov rbx, [rbp{a1_slot:+d}]",
+                    f"mov rax, [rbp{obj_slot:+d}]",
+                    "call _runtime_str_index_of_start",
+                )
+            elif e.method in ("rfind", "rindex"):
+                self.emitf(
+                    "mov rcx, rax",
                     f"mov rbx, [rbp{a1_slot:+d}]",
                     f"mov rax, [rbp{obj_slot:+d}]",
                     f"call {sym}",

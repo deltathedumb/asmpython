@@ -4574,7 +4574,6 @@ class SemaAnalyzer:
         "endswith": (("str",), "int"),
         "removeprefix": (("str",), "str"),
         "removesuffix": (("str",), "str"),
-        "find": (("str",), "int"),
         "count": (("str",), "int"),
         "replace": (("str", "str"), "str"),
         # Character-class predicates (0-arg, bool result) used by the lexer.
@@ -4772,6 +4771,24 @@ class SemaAnalyzer:
                 raise SemaError(f"str.{e.method}() width must be an int", e.pos)
             if len(e.args) == 2 and A.expr_type(e.args[1]) not in ("str", "any"):
                 raise SemaError(f"str.{e.method}() fillchar must be a str", e.pos)
+            e.inferred_type = "str"
+            return
+        if e.method in ("find", "rfind", "index", "rindex"):
+            # str.find(sub[, start[, end]]): asmpython supports 1- or 2-arg form.
+            if len(e.args) not in (1, 2):
+                raise SemaError(f"str.{e.method}() takes 1 or 2 arguments", e.pos)
+            if A.expr_type(e.args[0]) not in ("str", "any"):
+                raise SemaError(f"str.{e.method}() sub must be a str", e.pos)
+            if len(e.args) == 2 and A.expr_type(e.args[1]) not in ("int", "any"):
+                raise SemaError(f"str.{e.method}() start must be an int", e.pos)
+            e.inferred_type = "int"
+            return
+        if e.method == "expandtabs":
+            # str.expandtabs([tabsize=8])
+            if len(e.args) > 1:
+                raise SemaError("str.expandtabs() takes 0 or 1 argument", e.pos)
+            if e.args and A.expr_type(e.args[0]) not in ("int", "any"):
+                raise SemaError("str.expandtabs() tabsize must be an int", e.pos)
             e.inferred_type = "str"
             return
         if e.method == "format" and isinstance(e.obj, A.StrLit):
