@@ -1378,6 +1378,9 @@ class Codegen:
                     self._cl_define(info, f"__setcall_stop_{id(expr)}")
                     self._cl_define(info, f"__setcall_idx_{id(expr)}")
                     self._cl_define(info, f"__setcall_key_{id(expr)}")
+            # sum(xs, start): park the start value across the list eval.
+            if expr.func == "sum" and len(expr.args) == 2:
+                self._cl_define(info, f"__sum_start_{id(expr)}")
             # User function / constructor calls pass arguments through
             # frame slots (alignment-safe). One slot per positional arg.
             # Indirect calls (`f(...)` where f is a local function pointer, e.g.
@@ -9243,7 +9246,9 @@ class Codegen:
         "removeprefix": "_runtime_str_removeprefix",
         "removesuffix": "_runtime_str_removesuffix",
         "find": "_runtime_str_index_of",
+        "index": "_runtime_str_index_of",
         "rfind": "_runtime_str_rindex_of",
+        "rindex": "_runtime_str_rindex_of",
         "expandtabs": "_runtime_str_expandtabs",
         "count": "_runtime_str_count",
         "replace": "_runtime_str_replace",
@@ -9301,6 +9306,17 @@ class Codegen:
                            "mov rcx, 0x20", f"call {sym}")
             else:
                 self.emitf("mov rbx, rax", f"mov rax, [rbp{obj_slot:+d}]", f"call {sym}")
+            # str.index / str.rindex raise ValueError when the substring is not found.
+            if e.method in ("index", "rindex"):
+                _notfound = self.fresh("strm_idx_notfound")
+                self.emitf("cmp rax, -1", f"jne {_notfound}")
+                _notfound_msg, _ = self.intern_string("substring not found")
+                self.emitf(
+                    f"lea rax, [rel {_notfound_msg}]",
+                    f"mov rbx, {self._exc_type_id('ValueError')}",
+                    "call _runtime_raise",
+                )
+                self.label(_notfound)
             return
         if len(e.args) == 2:
             # replace(old, new), split(sep, maxsplit), ljust/rjust/center(width,
@@ -9341,6 +9357,17 @@ class Codegen:
                     f"mov rax, [rbp{obj_slot:+d}]",
                     f"call {sym}",
                 )
+            # index/rindex with start: raise ValueError on not-found.
+            if e.method in ("index", "rindex"):
+                _nf2 = self.fresh("strm_idx2_nf")
+                self.emitf("cmp rax, -1", f"jne {_nf2}")
+                _nf2_msg, _ = self.intern_string("substring not found")
+                self.emitf(
+                    f"lea rax, [rel {_nf2_msg}]",
+                    f"mov rbx, {self._exc_type_id('ValueError')}",
+                    "call _runtime_raise",
+                )
+                self.label(_nf2)
             return
         # Too many args for this str method (e.g. os.path.join routed here):
         # evaluate all for side effects, return 0.
@@ -11410,9 +11437,13 @@ class Codegen:
             return
         if e.func == "sum":
             # sum(xs[, start]): integer accumulation over a list/tuple buffer.
+            # Use a frame slot for `start` to avoid push/pop misaligning rsp
+            # across the list-literal malloc calls inside gen_expr(xs).
+            start_slot = info.locals_.get(f"__sum_start_{id(e)}")
             if len(e.args) == 2:
                 self.gen_expr(e.args[1], info)
-                self.emitf("push rax")
+                if start_slot is not None:
+                    self.emitf(f"mov [rbp{start_slot:+d}], rax")
             self.gen_expr(e.args[0], info)
             loop = self.fresh("sum_loop")
             end = self.fresh("sum_end")
@@ -11431,8 +11462,8 @@ class Codegen:
                 f"jmp {loop}",
             )
             self.label(end)
-            if len(e.args) == 2:
-                self.emitf("pop rbx", "add rax, rbx")
+            if len(e.args) == 2 and start_slot is not None:
+                self.emitf(f"add rax, [rbp{start_slot:+d}]")
             return
         if e.func in ("max", "min"):
             # max/min: the 2-arg scalar form compares directly; the 1-arg form
