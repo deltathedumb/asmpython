@@ -1535,7 +1535,7 @@ class SemaAnalyzer:
         )
         flat = all(isinstance(t, str) for t in e.targets)
         for ti, nm in enumerate(self._flat_target_names(e.targets)):
-            if flat and ti < len(shape) and shape[ti] not in ("int", "any"):
+            if flat and ti < len(shape):
                 child.add(nm, shape[ti])
             else:
                 child.add(nm, "any")
