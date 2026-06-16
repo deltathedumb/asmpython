@@ -1108,6 +1108,16 @@ class Codegen:
                 and getattr(expr.iter, "func", None) == "enumerate"
             ):
                 self._cl_define(info, f"__dcomp_enum_ctr_{id(expr)}")
+            # zip(A, B, ...) in dict comprehension: per-iterable pointer + stop + idx.
+            if (
+                isinstance(expr.iter, A.Call)
+                and getattr(expr.iter, "func", None) == "zip"
+            ):
+                nz = len(expr.iter.args)
+                self._cl_define(info, f"__dcomp_zip_stop_{id(expr)}")
+                self._cl_define(info, f"__dcomp_zip_i_{id(expr)}")
+                for _k in range(nz):
+                    self._cl_define(info, f"__dcomp_zip_{_k}_{id(expr)}")
             var_ty = "int"
             if A.expr_type(expr.iter) == "list":
                 if isinstance(expr.iter, A.Name):
@@ -8396,6 +8406,88 @@ class Codegen:
         self.label(end)
         self.emitf(f"mov rax, [rbp{res:+d}]")
 
+    def _gen_dict_comprehension_zip(self, e: A.DictComprehension, info: FuncInfo) -> None:
+        """{key: val for a, b in zip(A, B)} — walks N lists in lockstep."""
+        zip_call = e.iter
+        nz = len(zip_call.args)
+        res = info.locals_[f"__dcomp_res_{id(e)}"]
+        key_slot = info.locals_[f"__dcomp_key_{id(e)}"]
+        stop = info.locals_[f"__dcomp_zip_stop_{id(e)}"]
+        i_off = info.locals_[f"__dcomp_zip_i_{id(e)}"]
+        iter_offs = [info.locals_[f"__dcomp_zip_{k}_{id(e)}"] for k in range(nz)]
+
+        # result = empty dict (cap 8)
+        cap = 8
+        self._emit_malloc(self.DICT_HEADER)
+        self.emitf(
+            f"mov qword [rax+{self.DICT_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.DICT_LEN_OFF}], 0",
+            f"mov qword [rax+{self.DICT_TOMB_OFF}], 0",
+            f"mov [rbp{res:+d}], rax",
+        )
+        self.emitf(f"mov rbx, {cap * self.DICT_SLOT_SIZE}", "call _runtime_zalloc")
+        self.emitf(f"mov rbx, [rbp{res:+d}]", f"mov [rbx+{self.DICT_BUF_OFF}], rax")
+        self._emit_dict_alloc_order_buf(cap, res)
+
+        # Cache all iterable pointers and compute min length.
+        for k, (ze, it_off) in enumerate(zip(zip_call.args, iter_offs)):
+            self.gen_expr(ze, info)
+            self.emitf(f"mov [rbp{it_off:+d}], rax")
+        self.emitf(
+            f"mov rax, [rbp{iter_offs[0]:+d}]",
+            f"mov rax, [rax+{self.LIST_LEN_OFF}]",
+            f"mov [rbp{stop:+d}], rax",
+        )
+        for k in range(1, nz):
+            self.emitf(
+                f"mov rax, [rbp{stop:+d}]",
+                f"mov rbx, [rbp{iter_offs[k]:+d}]",
+                f"mov rbx, [rbx+{self.LIST_LEN_OFF}]",
+                "cmp rax, rbx",
+                "cmovg rax, rbx",
+                f"mov [rbp{stop:+d}], rax",
+            )
+        self.emitf(f"mov qword [rbp{i_off:+d}], 0")
+
+        top = self.fresh("dcomp_zip")
+        end = self.fresh("enddcomp_zip")
+        self.label(top)
+        self.emitf(f"mov rax, [rbp{i_off:+d}]", f"cmp rax, [rbp{stop:+d}]", f"jge {end}")
+
+        # Bind each target name to the k-th iterable's current element.
+        for k, (it_off, tname) in enumerate(zip(iter_offs, e.targets)):
+            if isinstance(tname, str):
+                v_off = info.locals_.get(tname, 0)
+                if v_off:
+                    self.emitf(
+                        f"mov rbx, [rbp{it_off:+d}]",
+                        f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",
+                        f"mov rcx, [rbp{i_off:+d}]",
+                        "mov rax, [rbx+rcx*8]",
+                        f"mov [rbp{v_off:+d}], rax",
+                    )
+
+        skip = None
+        if e.cond is not None:
+            skip = self.fresh("dcomp_zip_skip")
+            self._gen_truthy_test(e.cond, info, skip)
+        self.gen_expr(e.key, info)
+        self.emitf(f"mov [rbp{key_slot:+d}], rax")
+        self.gen_expr(e.value, info)
+        if e.value_type == "float":
+            self.emitf("movq rax, xmm0")
+        self.emitf(
+            "mov rcx, rax",
+            f"mov rbx, [rbp{key_slot:+d}]",
+            f"mov rax, [rbp{res:+d}]",
+            "call _runtime_dict_set",
+        )
+        if skip is not None:
+            self.label(skip)
+        self.emitf(f"inc qword [rbp{i_off:+d}]", f"jmp {top}")
+        self.label(end)
+        self.emitf(f"mov rax, [rbp{res:+d}]")
+
     def _gen_dict_comprehension(self, e: A.DictComprehension, info: FuncInfo) -> None:
         """{key: value for var in iter (if cond)} -> build an empty dict, iterate
         the (list-typed) iterable, and insert key->value for each element that
@@ -8413,6 +8505,15 @@ class Codegen:
             and len(e.targets) == 2
         ):
             self._gen_dict_comprehension_enumerate(e, info)
+            return
+        # zip(A, B, ...) special case: iterate in lock-step (no temporary list).
+        if (
+            isinstance(e.iter, A.Call)
+            and getattr(e.iter, "func", None) == "zip"
+            and e.targets
+            and len(e.targets) == len(e.iter.args)
+        ):
+            self._gen_dict_comprehension_zip(e, info)
             return
         if A.expr_type(e.iter) not in ("list", "tuple", "any"):
             raise NotImplementedError(
