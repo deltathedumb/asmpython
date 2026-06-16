@@ -24,6 +24,14 @@ output rather than silent miscompilations.
   `nullcontext` is now a class that returns `enter_result` from `__enter__`.
   `closing.__exit__` now correctly calls `self.thing.close()`.
 
+- **Dunder operator dispatch** (`__add__`, `__sub__`, `__mul__`,
+  `__neg__`, `__pos__`, `__invert__`, and all `DUNDER_BINOP` entries):
+  binary ops (`a + b`, `a * n`, etc.) and unary ops (`-a`, `+a`, `~a`)
+  on user class instances now dispatch to the corresponding dunder method
+  when one is defined. Sema resolves the method via the parent chain and
+  stamps `dunder_owner`/`dunder_method` on the AST node; codegen emits a
+  direct method call instead of the raw integer instruction.
+
 - **`**kwargs` capture**: excess keyword arguments at call sites are now packed
   into a `dict` and passed as a trailing argument to the callee. Functions
   declared with `**kwargs` receive the overflow as a live `dict[str, any]`

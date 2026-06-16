@@ -269,6 +269,14 @@ DUNDER_BINOP: dict[str, tuple[str, str]] = {
     "@": ("__matmul__", "__rmatmul__"),
 }
 
+# Unary operator → dunder method name for instance dispatch.
+DUNDER_UNARY: dict[str, str] = {
+    "-": "__neg__",
+    "+": "__pos__",
+    "~": "__invert__",
+    "abs": "__abs__",
+}
+
 # Dunder methods whose second parameter ("other") conventionally holds another
 # instance of the same class — every forward/reflected arithmetic dunder plus
 # the rich-comparison dunders. An unannotated `other` on one of these methods
@@ -3070,6 +3078,22 @@ class SemaAnalyzer:
             return
         if isinstance(e, A.UnaryOp):
             self._check_expr(e.operand, scope)
+            ot = A.expr_type(e.operand)
+            if ot.startswith("instance:") and e.op in DUNDER_UNARY:
+                mname = DUNDER_UNARY[e.op]
+                cls_name = ot.split(":", 1)[1]
+                resolved = self._resolve_method(cls_name, mname)
+                if resolved is not None:
+                    owner, sig = resolved
+                    e.dunder_owner = owner  # type: ignore
+                    e.dunder_method = mname  # type: ignore
+                    if sig.ret_type is not None:
+                        ty, el, _val = sig.ret_type  # type: ignore
+                        e.inferred_type = ty  # type: ignore
+                        if ty == "list" and el is not None:
+                            e.list_el_type = el  # type: ignore
+                    else:
+                        e.inferred_type = "any"  # type: ignore
             return
         if isinstance(e, A.BinOp):
             self._check_expr(e.left, scope)

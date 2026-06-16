@@ -2971,7 +2971,12 @@ class Codegen:
                 )
                 return
             self.gen_expr(expr.operand, info)
-            if expr.op == "-":
+            if expr.op in ("-", "~", "+") and getattr(expr, "dunder_owner", None) is not None:
+                owner = expr.dunder_owner  # type: ignore[attr-defined]
+                method = expr.dunder_method  # type: ignore[attr-defined]
+                self.emitf(f"mov {self._arg_reg(0)}, rax")
+                self.emit_call(self._method_symbol(owner, method))
+            elif expr.op == "-":
                 self.emitf("neg rax")
             elif expr.op == "~":
                 self.emitf("not rax")
