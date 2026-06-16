@@ -46,16 +46,28 @@ def run_windows() -> None:
 def run_linux() -> None:
     print(f"Self-hosting (linux): compiling asmpython -> {OUT_LIN}")
 
-    # Convert Windows paths to WSL paths.
-    def wsl_path(p: Path) -> str:
-        r = subprocess.run(
-            ["wsl", "wslpath", "-u", str(p)], capture_output=True, text=True
-        )
-        return r.stdout.strip()
+    # Convert Windows paths to WSL paths.  Returns None when WSL is
+    # unavailable or the conversion fails so callers can skip gracefully.
+    def wsl_path(p: Path) -> str | None:
+        try:
+            r = subprocess.run(
+                ["wsl", "wslpath", "-u", str(p)],
+                capture_output=True, text=True,
+            )
+            val = r.stdout.strip()
+            return val if (r.returncode == 0 and val) else None
+        except (FileNotFoundError, OSError, ValueError):
+            return None
 
     wsl_src = wsl_path(SRC)
+    if wsl_src is None:
+        print("WSL not available or wslpath failed — skipping Linux self-host build.\n")
+        return
     wsl_out = wsl_path(OUT_LIN)
     wsl_root = wsl_path(ROOT)
+    if not wsl_out or not wsl_root:
+        print("WSL path conversion failed — skipping Linux self-host build.\n")
+        return
 
     r = subprocess.run([
         "wsl",
@@ -85,5 +97,5 @@ run_windows()
 run_linux()
 
 # Check if we are in a batch script
-if not os.getenv("ASMPYTHON_BUILD_BATCH") == "1":
+if not os.getenv("ASMPYTHON_BUILD_BATCH") == "1" and sys.stdin.isatty():
     input("Press Enter to exit . . .")
