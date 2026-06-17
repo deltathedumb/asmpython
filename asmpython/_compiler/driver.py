@@ -220,18 +220,20 @@ def _run_backend(
     bundle_mode: str = "onefile",
     output_type: str = "executable",
     icon_path: Path | None = None,
+    entry_path: Path | None = None,
     _asm_stem_suffix: str = "",
 ) -> BuildResult:
     """Target-specific back-end: codegen -> nasm -> gcc."""
     if bundle_mode == "onedir":
         use_runtime_lib = True
 
+    entry_path_str = str(entry_path) if entry_path is not None else None
     if target == "linux":
-        gen = LinuxCodegen(module, use_runtime_lib=use_runtime_lib)
+        gen = LinuxCodegen(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
         nasm_fmt = "elf64"
         obj_suffix = ".o"
     elif target == "windows":
-        gen = WindowsCodegen(module, use_runtime_lib=use_runtime_lib)
+        gen = WindowsCodegen(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
         nasm_fmt = "win64"
         obj_suffix = ".obj"
     elif target == "freestanding":
@@ -457,6 +459,7 @@ def compile_source(
         bundle_mode=bundle_mode,
         output_type=output_type,
         icon_path=icon_path,
+        entry_path=entry_path,
     )
 
 
@@ -507,6 +510,7 @@ def compile_targets(
             bundle_mode=bundle_mode,
             output_type=output_type,
             icon_path=icon_path,
+            entry_path=entry_path,
             _asm_stem_suffix=f"-{target}",
         ))
     return results

@@ -138,10 +138,16 @@ class Codegen:
     # self-host subset).
     target_name: str = "Codegen"
 
-    def __init__(self, mod: A.Module, *, use_runtime_lib: bool = False) -> None:
+    def __init__(
+        self, mod: A.Module, *, use_runtime_lib: bool = False, entry_path: str | None = None
+    ) -> None:
         self.mod = mod
         # If True, skip emitting runtime bodies and assume libasmpython_rt is linked.
         self.use_runtime_lib = use_runtime_lib
+        # The compiled program's own source path, for the __file__ dunder.
+        # None when compiling a string with no real file (e.g. some test
+        # harnesses) -- __file__ then falls back to "".
+        self.entry_path = entry_path
         self.lines: list[str] = []
         self.strings: list[tuple[str, str]] = []  # (label, bytes-literal)
         self.floats: list[tuple[str, float]] = []  # (label, value)
@@ -3273,14 +3279,15 @@ class Codegen:
                 return
             # Module dunders the runtime provides as string constants. A
             # compiled program is its own entry point, so __name__ is
-            # "__main__"; __file__ is the source path (not tracked here, so the
-            # empty string — enough for `if __name__ == "__main__":` guards).
+            # "__main__"; __file__ is the entry source file's resolved path
+            # (threaded in from the driver), or "" if compiling from a
+            # string with no real file.
             if expr.name == "__name__":
                 label, _ = self.intern_string("__main__")
                 self.emitf(f"lea rax, [{label}]")
                 return
             if expr.name == "__file__":
-                label, _ = self.intern_string("")
+                label, _ = self.intern_string(self.entry_path or "")
                 self.emitf(f"lea rax, [{label}]")
                 return
             # A bare class name used as a value (`Stmt = Assign | AugAssign`,
