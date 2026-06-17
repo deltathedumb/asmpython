@@ -30,6 +30,10 @@ Linux cross-build from Windows via WSL in a single `build.py` run.
 
 Linux executables now link correctly under modern gcc (`-no-pie`). Toolchain must be on PATH; `_download-deps.bat` updated to fetch w64devkit.
 
+### 1.1.0 — 2026-06-16 — CPython parity expansion
+
+Focus: close the gap between what asmpython compiles and what idiomatic Python actually looks like. The core theme is **operator protocol completion** — every standard dunder method now dispatches correctly — plus **stdlib depth** and **`__call__` support for callable instances**.
+
 ### 1.2.0 — 2026-06-17 — Graphics everywhere
 
 Complete, batteries-included graphics library for all targets.
@@ -45,10 +49,6 @@ Complete, batteries-included graphics library for all targets.
 **Tests:** 450/450 passing.
 
 ---
-
-### 1.1.0 — 2026-06-16 — CPython parity expansion
-
-Focus: close the gap between what asmpython compiles and what idiomatic Python actually looks like. The core theme is **operator protocol completion** — every standard dunder method now dispatches correctly — plus **stdlib depth** and **`__call__` support for callable instances**.
 
 #### Operator protocol — done
 
@@ -156,6 +156,7 @@ A broad set of language and stdlib improvements shipped alongside the core
 ---
 
 ## Planned
+` Any listed implementations may change on release. `
 
 ### 1.3.0 / 2.0.0 — Compatibility overhaul: ARM and macOS
 

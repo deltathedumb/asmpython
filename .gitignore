@@ -1,5 +1,6 @@
 # ── Editor / tooling ────────────────────────────────────────────────────────
 /.claude/
+/memory/
 /.vscode/
 /.idea/
 *.swp
