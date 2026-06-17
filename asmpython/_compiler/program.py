@@ -733,7 +733,8 @@ def _materialize_value_imports(
     # in the flat program, so resolution is idempotent across modules.
     empty_stack: set[str] = set()
     for mod_path_str in reversed(discovery_order):
-        for local, (src_str, orig) in value_import_edges(mod_path_str).items():
+        edges: dict[str, tuple[str, str]] = value_import_edges(mod_path_str)
+        for local, (src_str, orig) in edges.items():
             resolve(local, src_str, orig, empty_stack)
 
     if prepend:

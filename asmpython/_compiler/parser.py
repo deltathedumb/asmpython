@@ -144,9 +144,6 @@ class Parser:
         # (rather than reassigning a set) so nested comprehensions compose
         # without needing `nonlocal`.
         comp_suppressed: list = []
-        def _collect_refs(stmts: list) -> None:
-            for s in stmts:
-                _collect_refs_expr(s)
         def _collect_refs_expr(node) -> None:
             if isinstance(node, A.Name):
                 if node.name not in comp_suppressed:
@@ -315,6 +312,9 @@ class Parser:
                 _collect_refs(node.body)
             elif isinstance(node, A.ExprStmt):
                 _collect_refs_expr(node.expr)
+        def _collect_refs(stmts: list) -> None:
+            for s in stmts:
+                _collect_refs_expr(s)
         _collect_refs(fdef.body)
         # Free vars = referenced names that are not locally bound.
         BUILTINS = {

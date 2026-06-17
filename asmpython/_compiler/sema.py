@@ -2955,7 +2955,7 @@ class SemaAnalyzer:
                 # track, so bind every target leniently. Handles list-of-tuples
                 # and tuple-of-tuples uniformly. (zip/enumerate were already
                 # handled above with precise element kinds.)
-                if s.targets and it_t in ("list", "tuple", "dict", "str", "any", "int"):
+                if s.targets and it_t in ("list", "tuple", "dict", "str", "set", "any", "int"):
                     # `for a, b in <list[T]>` where each element is a plain
                     # user-class instance (T not itself a tuple/list/dict)
                     # has no list/tuple buffer to unpack: codegen's
@@ -4432,8 +4432,8 @@ class SemaAnalyzer:
             # Element type the loop variable takes from the iterable.
             if it_t == "list":
                 el = self._list_el_type(e.iter, scope)
-            elif it_t in ("str", "dict"):
-                el = "str"  # str chars / dict keys
+            elif it_t in ("str", "dict", "set"):
+                el = "str" if it_t in ("str", "dict") else "any"  # str chars / dict keys / set members (any)
             elif it_t == "tuple":
                 ets = A.tuple_element_types(e.iter)
                 el = ets[0] if ets else "int"
