@@ -4,17 +4,8 @@ All notable changes to asmpython are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
-## [Unreleased]
-
-### Added
-
-- **Multi-target `--target windows,linux`**: compile for multiple platforms in a
-  single invocation. Lex/parse/sema runs once and is shared; a separate
-  codegen+assemble+link pass runs per target. Intermediate files are named with
-  a `-<target>` suffix (e.g. `build/hello-windows.asm`) to avoid collisions.
-  freestanding and OS targets can be mixed freely. Single-target builds are
-  unchanged.
-
+## [1.2.0] - preview - 2026-06-17
+### Coming soon!
 
 ## [1.1.0] — 2026-06-16
 
@@ -22,6 +13,7 @@ CPython-parity expansion: making common idioms compile and produce correct outpu
 
 ### Added
 
+- **Multi-target `--target windows,linux`**: compile for multiple targets at once
 - **`yield` in `for` loops and `if` branches**: generator transform uses loop-in-next + `_gen_body_transform`; yields work at any nesting depth in while/for generators.
 - **`--onedir` implies `--use-runtime-lib`** at the `compile_source` API level, not just the CLI.
 - **`io.StringIO` / `io.BytesIO` context managers**: `__enter__`/`__exit__`, `readable()`/`writable()`/`seekable()`, and `io.text_open()`.
