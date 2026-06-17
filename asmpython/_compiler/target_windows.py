@@ -105,7 +105,7 @@ class WindowsCodegen(Codegen):
         # they're clobbered so sys.argv can be built from them.
         self.emitf("mov [rel _prog_argc], rcx", "mov [rel _prog_argv], rdx")
         self.emitf("push rbp", "mov rbp, rsp")
-        frame = info.frame_size + 32  # shadow space for child calls
+        frame = max(info.frame_size + 32, 48)  # shadow space for child calls
         if frame % 16 != 0:
             frame += 16 - (frame % 16)
         info.frame_size = frame
