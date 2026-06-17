@@ -1,0 +1,5 @@
+title: asmpython
+description: A direct Python compiler to x86-64 native executables
+theme: jekyll-theme-slate
+markdown: kramdown
+show_downloads: false

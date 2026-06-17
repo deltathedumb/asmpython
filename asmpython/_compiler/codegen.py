@@ -157,6 +157,12 @@ class Codegen:
         self.func_aliases: dict = dict(getattr(mod, "func_aliases", {}))
         # Set of c_name symbols we'll need `extern` declarations for.
         self.ffi_externs: set[str] = set()
+        # Set of c_name symbols that are ACTUALLY CALLED in this program.
+        # Used by emit_asmlib_runtime / needs_gui to decide which helpers to
+        # emit and whether to link against optional libraries (SDL2, etc.).
+        # ffi_externs may be a superset (all imported Func c_names); ffi_called
+        # contains only those reached by _gen_ffi_call during codegen.
+        self.ffi_called: set[str] = set()
         for fn in self.ffi_funcs.values():
             sym = self._platform_c_name(fn)
             self.ffi_externs.add(sym)
@@ -13440,7 +13446,9 @@ class Codegen:
         # Non-variadic libc functions ignore AL. Setting it is harmless.
         if self._sysv_needs_al_count():
             self.emitf(f"mov al, {float_idx}")
-        self.emit_call(self._platform_c_name(fn))
+        _ffi_sym = self._platform_c_name(fn)
+        self.ffi_called.add(_ffi_sym)
+        self.emit_call(_ffi_sym)
         if cleanup:
             self.emitf(f"add rsp, {cleanup}")
         if getattr(fn, "ret_conv", None) == "f2i":

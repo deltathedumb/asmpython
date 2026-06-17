@@ -336,8 +336,21 @@ def _run_backend(
                 f"-L{_build_dir()}",
                 f"-lasmpython_rt_{'win' if target == 'windows' else 'linux'}",
             ]
+        if getattr(gen, "needs_gui", False):
+            link_cmd.append("-lSDL2")
+        if getattr(gen, "needs_audio", False):
+            link_cmd.append("-lSDL2_mixer")
+        if getattr(gen, "needs_ttf", False):
+            link_cmd.append("-lSDL2_ttf")
         _run(link_cmd, extra_path_dirs=[gcc_dir])
     elif bundle_mode == "onedir":
+        _onedir_extra: list = []
+        if getattr(gen, "needs_gui", False):
+            _onedir_extra.append("-lSDL2")
+        if getattr(gen, "needs_audio", False):
+            _onedir_extra.append("-lSDL2_mixer")
+        if getattr(gen, "needs_ttf", False):
+            _onedir_extra.append("-lSDL2_ttf")
         exe_path = _link_onedir(
             target=target,
             obj_path=obj_path,
@@ -345,6 +358,7 @@ def _run_backend(
             gcc=gcc,
             gcc_dir=gcc_dir,
             icon_obj=icon_obj,
+            extra_libs=_onedir_extra,
         )
     else:
         link_cmd = [gcc, str(obj_path)]
@@ -374,6 +388,12 @@ def _run_backend(
         if target == "linux" and any(s in getattr(gen, "ffi_externs", set())
                                      for s in getattr(gen, "_THREAD_SYMS", ())):
             link_cmd.append("-lpthread")
+        if getattr(gen, "needs_gui", False):
+            link_cmd.append("-lSDL2")
+        if getattr(gen, "needs_audio", False):
+            link_cmd.append("-lSDL2_mixer")
+        if getattr(gen, "needs_ttf", False):
+            link_cmd.append("-lSDL2_ttf")
         _run(link_cmd, extra_path_dirs=[gcc_dir])
 
     if not keep_intermediates:
@@ -500,6 +520,7 @@ def _link_onedir(
     gcc: str,
     gcc_dir: str | None = None,
     icon_obj: Path | None = None,
+    extra_libs: list | None = None,
 ) -> Path:
     """Produce a bundle directory containing the executable plus a resources
     sub-folder holding the shared libraries (the runtime, and eventually one
@@ -544,6 +565,8 @@ def _link_onedir(
     link_cmd += ["-o", str(exe_path), f"-L{res_dir}", f"-l{short}"]
     if target == "linux":
         link_cmd += [f"-Wl,-rpath,$ORIGIN/{res_name}"]
+    if extra_libs:
+        link_cmd.extend(extra_libs)
     _run(link_cmd, extra_path_dirs=[gcc_dir] if gcc_dir else None)
 
     # On Windows the loader searches the .exe's own directory and PATH, not an
