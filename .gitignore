@@ -45,6 +45,10 @@ _build/
 # ── Misc logs ───────────────────────────────────────────────────────────────
 _smoke.log
 *.log
+*log*
+!*/logging.*
+nasm*.log
+nasm*.txt
 
 
 # Unit test artifacts

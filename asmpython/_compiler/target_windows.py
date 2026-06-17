@@ -472,7 +472,7 @@ class WindowsCodegen(Codegen):
         # return rax = ptr.
         self.emit("section .text")
         self.label("_runtime_input")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
         self.emitf(
             "mov ecx, 0",  # stdin
             "call __acrt_iob_func",

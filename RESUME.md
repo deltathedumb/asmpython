@@ -62,9 +62,18 @@ This ensures 48 bytes of locals + 32 bytes of shadow space = 80 bytes total.
 ## 1.3.0 Scope (from user)
 Per user's message: 1.3.0 must also include **ARM support, Android support, Mac support, garbage collector, and optimizations** — none of these are implemented yet. Current blocker is the selfhost crash.
 
-## Pending After Selfhost Fix
-1. Commit + push 1.3.0 to `origin/beta`
-2. Implement ARM/Android/Mac target support
-3. Implement garbage collector
-4. Implement optimizations
-5. Update `roadmap.md` and documentation
+## Status
+- ✓ Root cause identified: Win64 shadow space corruption in runtime helpers
+- ✓ Fix applied: all `sub rsp, 48` → `sub rsp, 80` (15 functions)
+- ✓ Commits: 647aa998, 70541b31
+- ✓ Pushed to beta
+- ⏳ Testing: rebuilt selfhost binary, waiting for test results
+
+## Pending After Selfhost Verification
+1. Verify selfhost successfully compiles Python files
+2. Run full test suite with new selfhost
+3. Tag 1.3.0 release
+4. Implement ARM/Android/Mac target support
+5. Implement garbage collector
+6. Implement optimizations
+7. Add CODE_OF_CONDUCT.md, CONTRIBUTING.md, SECURITY.md, issue templates
