@@ -46,7 +46,9 @@ sub rsp, 80
 
 This ensures 48 bytes of locals + 32 bytes of shadow space = 80 bytes total.
 
-**Also check**: All other runtime helpers that call C functions (strlen, memcpy, fopen, fgetc, fclose, etc.) may have the same issue.
+**The Complete Fix**: In `asmpython/_compiler/codegen.py`, replaced ALL instances of `sub rsp, 48` with `sub rsp, 80` (15 total replacements). This ensures every runtime helper has sufficient shadow space when calling C functions.
+
+**Commit**: 647aa998 "Fix selfhost crash: increase shadow space in _runtime_chr"
 
 ## Key Files
 - `asmpython/_compiler/target_windows.py` — stack probe fix

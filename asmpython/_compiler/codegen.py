@@ -5176,7 +5176,7 @@ class Codegen:
         loop = self.fresh("dcl_loop")
         done = self.fresh("dcl_done")
         self.label("_runtime_dict_clear")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
         self.emitf(
             "mov [rbp-8], rax",
             f"mov qword [rax+{self.DICT_LEN_OFF}], 0",
@@ -5982,7 +5982,7 @@ class Codegen:
         # is None is ordinary Python (False, not a crash). Both NULL compares
         # equal (None == None); exactly one NULL compares unequal.
         self.label("_runtime_str_eq")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
         self.emitf("test rax, rax", "jnz ._se_a_ok")
         # a == NULL: equal iff b is NULL too.
         self.emitf("test rbx, rbx", "sete al", "movzx rax, al", "leave", "ret")
@@ -5996,7 +5996,7 @@ class Codegen:
         # ---- _runtime_str_cmp ------------------------------------------------
         # rax = a, rbx = b -> rax = -1/0/+1 (signed compare result).
         self.label("_runtime_str_cmp")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
         self._emit_libc_strcmp()
         # Normalize result to -1/0/+1.
         self.emitf(
@@ -6132,7 +6132,7 @@ class Codegen:
         # rax = haystack, rbx = needle -> rax = 1 if needle is a substring.
         # Uses libc strstr.
         self.label("_runtime_str_contains")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
         self._emit_libc_strstr()
         self.emitf("test rax, rax", "setne al", "movzx rax, al", "leave", "ret")
 
@@ -7022,7 +7022,7 @@ class Codegen:
         # _composite_repr_kind).
         # Out: rax = repr string for that value.
         self.label("_runtime_fmt_elem")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
         self.emitf(
             "mov rcx, rbx",  # save full kind (incl. inner-kind bits)
             "and rbx, 0xF",  # base kind
