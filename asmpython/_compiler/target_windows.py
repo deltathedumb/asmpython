@@ -884,7 +884,7 @@ class WindowsCodegen(Codegen):
             if "_math_ldexp" in self.ffi_called:
                 self.emit("extern ldexp")
                 self.label("_math_ldexp")
-                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
                 self.emitf("call ldexp", "leave", "ret")
 
             # _math_isqrt(rcx=n) -> rax: integer square root (floor(sqrt(n)))
@@ -945,7 +945,7 @@ class WindowsCodegen(Codegen):
             # _random_random() -> xmm0 in [0.0, 1.0)
             if "_random_random" in self.ffi_called:
                 self.label("_random_random")
-                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
                 self.emitf("call rand")
                 self.emitf("cvtsi2sd xmm0, rax", "mulsd xmm0, [rel _rand_inv]",
                            "leave", "ret")
@@ -1158,7 +1158,7 @@ class WindowsCodegen(Codegen):
             if "_time_sleep_ms" in self.ffi_called:
                 self.emit("extern Sleep")
                 self.label("_time_sleep_ms")
-                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32",
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48",
                            "call Sleep", "xor rax, rax", "leave", "ret")
 
         if needs_hw:
@@ -1348,7 +1348,7 @@ class WindowsCodegen(Codegen):
                 self.emit('_gui_bmp_mode_rb: db "rb",0')
                 self.emit("section .text")
                 self.label("_gui_load_bmp")
-                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
                 self.emitf("mov [rbp-8], rcx",
                            "lea rdx, [rel _gui_bmp_mode_rb]",
                            "mov rcx, [rbp-8]",
@@ -1577,7 +1577,7 @@ class WindowsCodegen(Codegen):
             if "_gui_joystick_axis" in self.ffi_called:
                 self.emit("extern SDL_JoystickGetAxis")
                 self.label("_gui_joystick_axis")
-                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
                 self.emitf("call SDL_JoystickGetAxis",
                            "movsx rax, ax",
                            "leave", "ret")
@@ -1586,7 +1586,7 @@ class WindowsCodegen(Codegen):
             if "_gui_joystick_button" in self.ffi_called:
                 self.emit("extern SDL_JoystickGetButton")
                 self.label("_gui_joystick_button")
-                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
                 self.emitf("call SDL_JoystickGetButton",
                            "movzx rax, al",
                            "leave", "ret")
@@ -1601,7 +1601,7 @@ class WindowsCodegen(Codegen):
                 self.emit('_audio_wav_mode_rb: db "rb",0')
                 self.emit("section .text")
                 self.label("_audio_load_wav")
-                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
                 self.emitf("mov [rbp-8], rcx",
                            "lea rdx, [rel _audio_wav_mode_rb]",
                            "mov rcx, [rbp-8]",
@@ -1775,7 +1775,7 @@ class WindowsCodegen(Codegen):
             if "_threading_lock_acquire" in self.ffi_called:
                 self.label("_threading_lock_acquire")
                 self.emitf(
-                    "push rbp", "mov rbp, rsp", "sub rsp, 32",
+                    "push rbp", "mov rbp, rsp", "sub rsp, 48",
                     "call EnterCriticalSection",
                     "mov rax, 1", "leave", "ret",
                 )
@@ -1784,7 +1784,7 @@ class WindowsCodegen(Codegen):
             if "_threading_lock_release" in self.ffi_called:
                 self.label("_threading_lock_release")
                 self.emitf(
-                    "push rbp", "mov rbp, rsp", "sub rsp, 32",
+                    "push rbp", "mov rbp, rsp", "sub rsp, 48",
                     "call LeaveCriticalSection",
                     "xor rax, rax", "leave", "ret",
                 )
@@ -1793,7 +1793,7 @@ class WindowsCodegen(Codegen):
             if "_threading_lock_destroy" in self.ffi_called:
                 self.label("_threading_lock_destroy")
                 self.emitf(
-                    "push rbp", "mov rbp, rsp", "sub rsp, 32",
+                    "push rbp", "mov rbp, rsp", "sub rsp, 48",
                     "call DeleteCriticalSection",
                     "leave", "ret",
                 )

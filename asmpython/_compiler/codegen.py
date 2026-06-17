@@ -3369,9 +3369,23 @@ class Codegen:
                         self.emitf("mov rax, 0")
                         return
                 elif operand_t in ("list", "tuple", "dict", "set"):
-                    self.emitf("mov rax, [rax+8]")
+                    # An Optional container can be a NULL pointer; None is
+                    # falsy too, so skip the length-read when rax is 0.
+                    skip_lbl = self.fresh("not_container_null")
+                    self.emitf(
+                        "test rax, rax", f"jz {skip_lbl}",
+                        "mov rax, [rax+8]",
+                    )
+                    self.label(skip_lbl)
                 elif operand_t == "str":
-                    self.emitf("movzx rax, byte [rax]")
+                    # A `str | None` value can be a NULL pointer; None is
+                    # falsy too, so skip the byte-read when rax is already 0.
+                    skip_lbl = self.fresh("not_str_null")
+                    self.emitf(
+                        "test rax, rax", f"jz {skip_lbl}",
+                        "movzx rax, byte [rax]",
+                    )
+                    self.label(skip_lbl)
                 # rax = (rax == 0) ? 1 : 0
                 self.emitf("test rax, rax", "sete al", "movzx rax, al")
             return
@@ -8305,7 +8319,7 @@ class Codegen:
         self.emitf(
             "push rbp",
             "mov rbp, rsp",
-            "sub rsp, 32",
+            "sub rsp, 48",
         )
         self._emit_set_error_color()
         self.emitf("lea rax, [rel _runtime_unhandled_prefix]")
@@ -11071,15 +11085,24 @@ class Codegen:
         if t in ("list", "tuple", "dict", "set"):
             # Container truthiness is its LENGTH (an empty list is a valid,
             # non-NULL pointer — testing the pointer would make `if []` true).
-            # Lists/tuples and dicts/sets all keep their length at +8.
+            # Lists/tuples and dicts/sets all keep their length at +8. An
+            # Optional container can be a NULL pointer (None is falsy too),
+            # so check for NULL before dereferencing it for the length.
             self.gen_expr(expr, info)
-            self.emitf("mov rax, [rax+8]", "test rax, rax", f"jz {false_target}")
+            self.emitf(
+                "test rax, rax", f"jz {false_target}",
+                "mov rax, [rax+8]", "test rax, rax", f"jz {false_target}",
+            )
             return
         if t == "str":
             # An empty string is falsy: test the first byte, not the pointer.
+            # A `str | None` value can be a NULL pointer (e.g. an unset
+            # Optional[str] field) — None is also falsy, so check for NULL
+            # before dereferencing to read the first byte.
             self.gen_expr(expr, info)
             self.emitf(
-                "movzx rax, byte [rax]", "test rax, rax", f"jz {false_target}"
+                "test rax, rax", f"jz {false_target}",
+                "movzx rax, byte [rax]", "test rax, rax", f"jz {false_target}",
             )
             return
         # Default: int or pointer; non-zero is truthy.
@@ -12392,9 +12415,23 @@ class Codegen:
                 return
             self.gen_expr(e.args[0], info)
             if arg_t in ("list", "tuple", "dict", "set"):
-                self.emitf("mov rax, [rax+8]")  # LIST_LEN_OFF == DICT_LEN_OFF
+                # An Optional container can be a NULL pointer; None is falsy
+                # too, so skip the length-read when rax is already 0.
+                skip_lbl = self.fresh("bool_container_null")
+                self.emitf(
+                    "test rax, rax", f"jz {skip_lbl}",
+                    "mov rax, [rax+8]",  # LIST_LEN_OFF == DICT_LEN_OFF
+                )
+                self.label(skip_lbl)
             elif arg_t == "str":
-                self.emitf("movzx rax, byte [rax]")
+                # A `str | None` value can be a NULL pointer; None is falsy
+                # too, so skip the byte-read when rax is already 0.
+                skip_lbl = self.fresh("bool_str_null")
+                self.emitf(
+                    "test rax, rax", f"jz {skip_lbl}",
+                    "movzx rax, byte [rax]",
+                )
+                self.label(skip_lbl)
             elif arg_t == "float":
                 self.emitf(
                     "xorpd xmm1, xmm1",
