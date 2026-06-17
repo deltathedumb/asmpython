@@ -3917,7 +3917,7 @@ class Codegen:
 
         # ---- _runtime_zalloc: malloc rbx bytes, zero-fill, return rax.
         self.label("_runtime_zalloc")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
         self.emitf("mov [rbp-8], rbx")
         # malloc(size)
         self.emitf("mov rax, rbx")
@@ -4111,7 +4111,7 @@ class Codegen:
         # rax = header, rbx = key -> rax = value
         _ke_msg, _ = self.intern_string("KeyError: key not in dict")
         self.label("_runtime_dict_get")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
         self.emitf("call _runtime_dict_lookup_slot")
         self.emitf(
             "test rax, rax",
@@ -4128,7 +4128,7 @@ class Codegen:
         # ---- _runtime_dict_get_default
         # rax = header, rbx = key, rcx = default -> rax = value or default
         self.label("_runtime_dict_get_default")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
         self.emitf("mov [rbp-8], rcx")  # save default
         self.emitf("call _runtime_dict_lookup_slot")
         self.emitf(
@@ -4140,7 +4140,7 @@ class Codegen:
         # ---- _runtime_dict_contains
         # rax = header, rbx = key -> rax = 0/1
         self.label("_runtime_dict_contains")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
         self.emitf("call _runtime_dict_lookup_slot")
         self.emitf("test rax, rax", "setne al", "movzx rax, al", "leave", "ret")
 
@@ -5081,7 +5081,7 @@ class Codegen:
         done = self.fresh("lrev_done")
         loop = self.fresh("lrev_loop")
         self.label("_runtime_list_reverse")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
         self.emitf(
             "mov [rbp-8], rax",
             f"mov rcx, [rax+{self.LIST_LEN_OFF}]",
@@ -6689,7 +6689,7 @@ class Codegen:
         self.emitf(
             "push rbp",
             "mov rbp, rsp",
-            "sub rsp, 32",
+            "sub rsp, 48",
             "call _runtime_str_rstrip",
             "call _runtime_str_lstrip",
             "leave",
@@ -8060,7 +8060,7 @@ class Codegen:
         uses). Bare CR / CRLF aren't special-cased.
         """
         self.label("_runtime_str_splitlines")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
         # split(s, "\n")
         self.emitf(
             "lea rbx, [_runtime_nl_str]",

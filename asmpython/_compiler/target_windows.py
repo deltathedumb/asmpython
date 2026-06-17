@@ -117,7 +117,7 @@ class WindowsCodegen(Codegen):
 
     def emit_func_prologue(self, info: FuncInfo) -> None:
         self.emitf("push rbp", "mov rbp, rsp")
-        frame = info.frame_size + 32
+        frame = max(info.frame_size + 32, 48)
         if frame % 16 != 0:
             frame += 16 - (frame % 16)
         info.frame_size = frame
