@@ -560,6 +560,29 @@ def _merge_import_bindings(
             return "import:" + stmt.module
         return "from:" + str(stmt.level) + ":" + stmt.module + ":" + ",".join(stmt.names)
 
+    # Names any merged module pulls in via a relative value import (`from ..
+    # import __version__`, `from .sys import BINDINGS as _SYS_BINDINGS`).
+    # `_materialize_value_imports` (which runs after this pass) places each
+    # of these — and their own transitive dependencies — in dependency order
+    # ahead of whatever needs them. If this pass also naively hoists the
+    # *defining* module's own copy of the same name (its free names are
+    # trivially satisfiable, e.g. a bare string literal has none), it can
+    # land that definition in `entry.body` at a position later than a
+    # dependent statement that got hoisted earlier in this same pass —
+    # `_materialize_value_imports` then sees the name already present and
+    # skips re-ordering it, leaving the dependent before its definition.
+    # Skip hoisting any such name here so only the dependency-aware pass
+    # ever places it.
+    value_import_targets: set[str] = set()
+    for mod_path in discovery_order:
+        mod = parsed.get(mod_path)
+        if mod is None:
+            continue
+        for stmt in mod.body:
+            if isinstance(stmt, A.FromImport) and stmt.level > 0:
+                for orig in stmt.orig_names or stmt.names:
+                    value_import_targets.add(orig)
+
     extra: list = []
     # Names already bound at entry top-level, so a merged module's own global
     # doesn't shadow/duplicate one the entry (or an earlier merge) defined.
@@ -607,6 +630,13 @@ def _merge_import_bindings(
                 and isinstance(stmt.target, str)
                 and stmt.target not in available
             ):
+                if stmt.target in value_import_targets:
+                    # Some merged module imports this exact name as a value
+                    # (e.g. `from .. import __version__`); leave it for
+                    # `_materialize_value_imports`, which places it ahead of
+                    # every dependent rather than wherever this single-pass
+                    # walk happens to be.
+                    continue
                 free: set = set()
                 _free_names(stmt.value, free)
                 if not free <= available:
