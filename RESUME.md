@@ -1,72 +1,45 @@
-# Self-Host Build Resume - Final Status
+# Selfhost Debug Resume
 
-## Current Status
-Self-host build reached NASM assembly phase but failed with linker errors. Root cause identified: asmpython doesn't properly handle nested functions with closures when codegen'ing.
+## Current State
+Debugging why `asmpython-1.3.0-x86_64.exe` (selfhost binary) crashes when actually compiling Python source files.
 
-## Progress Summary
-Successfully fixed multiple compiler issues to get past semantic analysis:
-1. ✅ Set iteration support in comprehensions and for-loops
-2. ✅ Dict/set comprehension conversion to explicit loops  
-3. ✅ Type inference for nested function return types
-4. ✅ Eliminated forward references in `_collect_refs_expr`
+## What's Working
+- `--help`, `--version`: ✓
+- Missing file error (`asmpython: source file not found: ...`): ✓
+- Crash happens AFTER `args.source.exists()` succeeds but DURING compilation of any real `.py` file
 
-Build reached NASM assembly (asmpython-1.2.asm, ~400K lines) before failing at the linker stage.
+## Fixes Already In (committed to branch `parity-expansion`)
+1. **`program.py` `_dedupe_lifted_funcs`** — was mutating shared `taken_names`, dropping all lifted functions from imported modules. Fixed with `local_names` set.
+2. **`target_windows.py` `___chkstk_ms` stack probe** — any frame > 4096 bytes on Windows needs `___chkstk_ms` probe before `sub rsp, N`. Added `_emit_stack_probe_if_needed()` called from both `emit_entry_prologue` and `emit_func_prologue`. 13 large frames in selfhost ASM now all have probes.
+3. **Version bumped to 1.3.0**, CHANGELOG updated.
 
-## Final Blocker: Nested Functions with Closures
+## Current Investigation
+Tracing the crash in `build/asmpython-selfhost-debug.asm` (fresh build with `--keep-assembly`).
 
-The compiler source code has several classes with nested helper functions that use closures (accessing outer scope variables):
+- `main:` entry at line 64
+- `userfn_main:` at line 40827 — frame is only 1200 bytes (no stack probe needed)
+- `ArgumentParser__parse_args` call at line 40840 — works (file-not-found branch proven)
+- `Path__exists` call at line 40931 — works
+- `detect_default_target` call at line ~40972 — to be verified
+- `Path__read_text` call at line ~40988 — suspect crash site
 
-**Examples:**
-- `Parser._find_free_vars()` contains 3 nested functions:
-  - `_collect_nonlocal()` 
-  - `_collect_assigned()` — recursive, accesses `nonlocal_names`, `local_names`
-  - `_collect_refs_expr()` — recursive, accesses `referenced`, `comp_suppressed`
+Next step: read lines 40945–41100 of `build/asmpython-selfhost-debug.asm` to trace the path after the file-exists check, find where the crash occurs.
 
-- Similar patterns in other parser and codegen methods
+## Key Files
+- `asmpython/_compiler/target_windows.py` — stack probe fix
+- `asmpython/_compiler/program.py` — `_dedupe_lifted_funcs` fix
+- `asmpython/stdlib/argparse.py` — `_convert()`/`parse_args()` being inspected
+- `asmpython/stdlib/pathlib.py` — `Path.read_text` at line 177
+- `build/asmpython-selfhost-debug.asm` — fresh selfhost ASM, `userfn_main` at line 40827
+- `build/asmpython-selfhost-debug.exe` — crashing selfhost binary
+- `build/asmpython-selfhost3.asm` — older selfhost ASM for reference
 
-**The Problem:**
-When asmpython codegen's these nested functions, it tries to emit them as top-level symbols but:
-1. They're nested inside methods, not top-level
-2. They use closure variables from the enclosing scope
-3. Asmpython doesn't handle closure codegen properly
-4. Result: linker finds undefined symbols like `_collect_refs_expr`, `_collect_assigned`, etc.
+## 1.3.0 Scope (from user)
+Per user's message: 1.3.0 must also include **ARM support, Android support, Mac support, garbage collector, and optimizations** — none of these are implemented yet. Current blocker is the selfhost crash.
 
-**Why It's Hard to Fix:**
-Option A (fix asmpython codegen to handle closures):
-- Would require implementing full closure/cell semantics in asmpython
-- Major compiler feature
-
-Option B (refactor the compiler source to avoid nested functions):
-- `_find_free_vars` has ~250 lines of complex recursive logic
-- Large refactoring throughout codebase
-- High error risk
-
-## Conclusion
-**Self-hosting is NOT feasible with asmpython's current feature set.**
-
-The compiler source code fundamentally relies on nested functions with closures, which asmpython doesn't support.
-
-## What Was Accomplished
-- Identified root causes of all compilation failures  
-- Fixed compiler semantics for set iteration support
-- Removed set/dict comprehensions from compiler source
-- Got the build to NASM stage (semantic analysis passing)
-- Documented the architectural blocker clearly
-
-## Recommendation
-- Mark self-hosting as "not supported"
-- Compiler runs perfectly fine in regular Python
-- 453/453 tests pass with regular Python execution
-- Focus on other features
-
-## Files Modified (This Session)
-- `asmpython/_compiler/sema.py` — set iteration support
-- `asmpython/_compiler/codegen.py` — comprehension to loop
-- `asmpython/_compiler/program.py` — comprehension to loops + type inference
-- `asmpython/_compiler/parser.py` — attempted nested function refactoring
-- `RESUME.md` — this file
-
-## Commits Made
-1. `7b17e2b1` - Remove set/dict comprehensions from compiler source
-2. `ae4713c3` - Fix compiler for self-hosting: set iteration, nested functions, type inference
-3. (Next: document closure limitation and commit final state)
+## Pending After Selfhost Fix
+1. Commit + push 1.3.0 to `origin/beta`
+2. Implement ARM/Android/Mac target support
+3. Implement garbage collector
+4. Implement optimizations
+5. Update `roadmap.md` and documentation

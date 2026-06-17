@@ -10,6 +10,12 @@ from .codegen import Codegen, FuncInfo
 
 MS_ARG_REGS = ["rcx", "rdx", "r8", "r9"]
 
+# Windows requires stack probing for any frame > one page (4096 bytes).
+# Without it, `sub rsp, N` skips over uncommitted guard pages and causes an
+# immediate STATUS_ACCESS_VIOLATION.  ___chkstk_ms (MinGW libgcc) probes each
+# page between rsp and rsp-rax without modifying rsp itself.
+_WIN_STACK_PAGE = 4096
+
 
 class WindowsCodegen(Codegen):
     target_name = "WindowsCodegen"
@@ -49,6 +55,7 @@ class WindowsCodegen(Codegen):
             "memcpy",
             "fmod",
             "pow",
+            "___chkstk_ms",
         ):
             self.emit(f"extern {name}")
 
@@ -88,6 +95,10 @@ class WindowsCodegen(Codegen):
         override = getattr(c, "value_windows", None)
         return override if override is not None else c.value
 
+    def _emit_stack_probe_if_needed(self, frame: int) -> None:
+        if frame > _WIN_STACK_PAGE:
+            self.emitf(f"mov rax, {frame}", "call ___chkstk_ms")
+
     # --- entry: main() -------------------------------------------------------
     def emit_entry_prologue(self, info: FuncInfo) -> None:
         # main(argc, argv): Win64 passes these in rcx/rdx. Stash them before
@@ -98,6 +109,7 @@ class WindowsCodegen(Codegen):
         if frame % 16 != 0:
             frame += 16 - (frame % 16)
         info.frame_size = frame
+        self._emit_stack_probe_if_needed(frame)
         self.emitf(f"sub rsp, {frame}")
 
     def emit_entry_epilogue(self, info: FuncInfo) -> None:
@@ -110,6 +122,7 @@ class WindowsCodegen(Codegen):
             frame += 16 - (frame % 16)
         info.frame_size = frame
         if frame:
+            self._emit_stack_probe_if_needed(frame)
             self.emitf(f"sub rsp, {frame}")
         self._spill_incoming_args(info)
 

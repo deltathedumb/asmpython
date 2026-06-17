@@ -287,35 +287,45 @@ class Parser:
                     _collect_refs_expr(node.value)
             elif isinstance(node, A.If):
                 _collect_refs_expr(node.test)
-                _collect_refs(node.then)
-                _collect_refs(node.orelse or [])
+                for _s in node.then:
+                    _collect_refs_expr(_s)
+                for _s in (node.orelse or []):
+                    _collect_refs_expr(_s)
             elif isinstance(node, A.While):
                 _collect_refs_expr(node.test)
-                _collect_refs(node.body)
-                _collect_refs(node.orelse or [])
+                for _s in node.body:
+                    _collect_refs_expr(_s)
+                for _s in (node.orelse or []):
+                    _collect_refs_expr(_s)
             elif isinstance(node, A.For):
                 for ra in node.range_args:
                     _collect_refs_expr(ra)
                 if node.iter is not None:
                     _collect_refs_expr(node.iter)
-                _collect_refs(node.body)
-                _collect_refs(node.orelse or [])
+                for _s in node.body:
+                    _collect_refs_expr(_s)
+                for _s in (node.orelse or []):
+                    _collect_refs_expr(_s)
             elif isinstance(node, A.Try):
-                _collect_refs(node.body)
-                _collect_refs(node.handler)
+                for _s in node.body:
+                    _collect_refs_expr(_s)
+                for _s in node.handler:
+                    _collect_refs_expr(_s)
                 for _types, _bind, eh_body in (node.extra_handlers or []):
-                    _collect_refs(eh_body)
-                _collect_refs(node.else_body or [])
-                _collect_refs(node.finally_body or [])
+                    for _s in eh_body:
+                        _collect_refs_expr(_s)
+                for _s in (node.else_body or []):
+                    _collect_refs_expr(_s)
+                for _s in (node.finally_body or []):
+                    _collect_refs_expr(_s)
             elif isinstance(node, A.With):
                 _collect_refs_expr(node.expr)
-                _collect_refs(node.body)
+                for _s in node.body:
+                    _collect_refs_expr(_s)
             elif isinstance(node, A.ExprStmt):
                 _collect_refs_expr(node.expr)
-        def _collect_refs(stmts: list) -> None:
-            for s in stmts:
-                _collect_refs_expr(s)
-        _collect_refs(fdef.body)
+        for _stmt in fdef.body:
+            _collect_refs_expr(_stmt)
         # Free vars = referenced names that are not locally bound.
         BUILTINS = {
             "print", "len", "range", "str", "int", "float", "bool", "list",

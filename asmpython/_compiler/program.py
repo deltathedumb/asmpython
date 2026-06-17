@@ -314,18 +314,19 @@ def _dedupe_lifted_funcs(module: "A.Module", taken_names: set[str]) -> None:
     earlier one (first definition wins), which is the desired behavior there.
     """
     renames: dict[str, str] = {}
+    local_names: set[str] = set()
     for f in module.funcs:
         if not getattr(f, "is_lifted", False):
             continue
-        if f.name in taken_names:
+        if f.name in taken_names or f.name in local_names:
             new_name = f.name
             n = 0
-            while new_name in taken_names or new_name in renames.values():
+            while new_name in taken_names or new_name in local_names:
                 n += 1
                 new_name = f"{f.name}__lifted{n}"
             renames[f.name] = new_name
             f.name = new_name
-        taken_names.add(f.name)
+        local_names.add(f.name)
     if renames:
         _rename_call_targets(module.body, renames)
         for f in module.funcs:

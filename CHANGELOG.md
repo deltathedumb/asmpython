@@ -4,6 +4,31 @@ All notable changes to asmpython are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
+## [1.3.0] — 2026-06-17 — Self-hosting
+
+asmpython can now compile itself.
+
+### Fixed
+
+- **Self-hosting** (`python build.py`): lifted (nested) functions from imported
+  modules were silently dropped from the merged program. `_dedupe_lifted_funcs`
+  was adding each module's lifted-function names to the shared `taken_names`/
+  `func_names` set before the merge loop ran, so the subsequent
+  `if f.name not in func_names` check always evaluated false for lifted funcs —
+  they were present in `module.funcs` but never appended to `entry.funcs`.
+  Fix: use a module-local `local_names` set for within-module collision
+  detection; `taken_names` (the cross-module set) is no longer mutated.
+  Result: all nested functions in the compiler source (`_collect_nonlocal`,
+  `_collect_assigned`, `_collect_refs_expr`, `walk`, `fix_expr`, `fix_stmt`,
+  etc.) are now correctly emitted as top-level NASM labels, and the self-host
+  build produces a working `build/asmpython-<version>-x86_64.exe`.
+
+- **`parser.py` mutual-recursion sema error**: `_collect_refs_expr` called
+  `_collect_refs` (defined later in the same scope), which asmpython's sema
+  couldn't forward-resolve. Inlined `_collect_refs` (a one-liner `for`-loop)
+  at every call site and deleted the function.
+
+
 ## [1.2.0] — 2026-06-17 — Graphics everywhere
 
 A complete, batteries-included graphics library for both hosted (SDL2) and
