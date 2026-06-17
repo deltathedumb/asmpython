@@ -188,8 +188,26 @@ def _build_icon_resource(icon_path: Path, stem: Path, gcc: str) -> Path:
     return res_obj
 
 
-def compile_source(
+def _compile_program(
     src: str,
+    *,
+    source_dir: Path | None,
+    entry_path: Path | None,
+    whole_program: bool,
+    all_errors: bool,
+):
+    """Lex / parse / sema (target-independent front-end). Returns the typed module."""
+    if whole_program and entry_path is not None:
+        module = load_program(src, entry_path)
+    else:
+        tokens = Lexer(src).tokenize()
+        module = Parser(tokens).parse()
+    sema_analyze(module, source_dir=source_dir, collect_errors=all_errors)
+    return module
+
+
+def _run_backend(
+    module,
     target: str,
     out_path: Path,
     *,
@@ -200,27 +218,13 @@ def compile_source(
     nasm_path: Path | None = None,
     gcc_path: Path | None = None,
     bundle_mode: str = "onefile",
-    source_dir: Path | None = None,
-    entry_path: Path | None = None,
-    whole_program: bool = True,
     output_type: str = "executable",
     icon_path: Path | None = None,
-    all_errors: bool = False,
+    _asm_stem_suffix: str = "",
 ) -> BuildResult:
-    # --onedir always links against the shared runtime library.
+    """Target-specific back-end: codegen -> nasm -> gcc."""
     if bundle_mode == "onedir":
         use_runtime_lib = True
-
-    # Whole-program compilation: when we know the entry file, follow its imports
-    # and merge every reachable project module's classes/functions into one unit
-    # so cross-file constructors (`SourcePos(...)`) and inherited methods resolve.
-    # Falls back to single-file parse when no entry path is available.
-    if whole_program and entry_path is not None:
-        module = load_program(src, entry_path)
-    else:
-        tokens = Lexer(src).tokenize()
-        module = Parser(tokens).parse()
-    sema_analyze(module, source_dir=source_dir, collect_errors=all_errors)
 
     if target == "linux":
         gen = LinuxCodegen(module, use_runtime_lib=use_runtime_lib)
@@ -245,11 +249,14 @@ def compile_source(
 
     asm = gen.generate()
 
-    # Decide where intermediates go.
+    # Decide where intermediates go.  When building multiple targets in one
+    # pass, `_asm_stem_suffix` (e.g. "-windows", "-linux") disambiguates the
+    # intermediate files so they don't collide when targets share a stem.
     out_path = out_path.resolve()
     stem = out_path.with_suffix("")
-    asm_path = stem.with_suffix(".asm")
-    obj_path = stem.with_suffix(obj_suffix)
+    int_base = stem.with_name(stem.name + _asm_stem_suffix) if _asm_stem_suffix else stem
+    asm_path = int_base.with_suffix(".asm")
+    obj_path = int_base.with_suffix(obj_suffix)
     exe_path = out_path
 
     asm_path.parent.mkdir(parents=True, exist_ok=True)
@@ -307,7 +314,7 @@ def compile_source(
 
     icon_obj: Path | None = None
     if icon_path is not None:
-        icon_obj = _build_icon_resource(icon_path, stem, gcc)
+        icon_obj = _build_icon_resource(icon_path, int_base, gcc)
 
     if output_type == "library":
         # Emit a shared library (.dll / .so) instead of an executable: link the
@@ -389,6 +396,100 @@ def compile_source(
 
     print(f"wrote {exe_path}")
     return BuildResult(asm_path=asm_path, obj_path=obj_path, exe_path=exe_path)
+
+
+def compile_source(
+    src: str,
+    target: str,
+    out_path: Path,
+    *,
+    emit_asm_only: bool = False,
+    keep_intermediates: bool = False,
+    keep_assembly: bool = False,
+    use_runtime_lib: bool = False,
+    nasm_path: Path | None = None,
+    gcc_path: Path | None = None,
+    bundle_mode: str = "onefile",
+    source_dir: Path | None = None,
+    entry_path: Path | None = None,
+    whole_program: bool = True,
+    output_type: str = "executable",
+    icon_path: Path | None = None,
+    all_errors: bool = False,
+) -> BuildResult:
+    module = _compile_program(
+        src,
+        source_dir=source_dir,
+        entry_path=entry_path,
+        whole_program=whole_program,
+        all_errors=all_errors,
+    )
+    return _run_backend(
+        module,
+        target,
+        out_path,
+        emit_asm_only=emit_asm_only,
+        keep_intermediates=keep_intermediates,
+        keep_assembly=keep_assembly,
+        use_runtime_lib=use_runtime_lib,
+        nasm_path=nasm_path,
+        gcc_path=gcc_path,
+        bundle_mode=bundle_mode,
+        output_type=output_type,
+        icon_path=icon_path,
+    )
+
+
+def compile_targets(
+    src: str,
+    targets: list[str],
+    out_paths: list[Path],
+    *,
+    emit_asm_only: bool = False,
+    keep_intermediates: bool = False,
+    keep_assembly: bool = False,
+    use_runtime_lib: bool = False,
+    nasm_path: Path | None = None,
+    gcc_path: Path | None = None,
+    bundle_mode: str = "onefile",
+    source_dir: Path | None = None,
+    entry_path: Path | None = None,
+    whole_program: bool = True,
+    output_type: str = "executable",
+    icon_path: Path | None = None,
+    all_errors: bool = False,
+) -> list[BuildResult]:
+    """Compile src for multiple targets, sharing the front-end (lex/parse/sema).
+
+    Each target gets its own codegen, nasm, and link step.  Intermediate files
+    get a ``-<target>`` suffix (e.g. ``hello-windows.asm``) to avoid collisions
+    when two targets share the same output stem.
+    """
+    module = _compile_program(
+        src,
+        source_dir=source_dir,
+        entry_path=entry_path,
+        whole_program=whole_program,
+        all_errors=all_errors,
+    )
+    results: list[BuildResult] = []
+    for target, out_path in zip(targets, out_paths):
+        results.append(_run_backend(
+            module,
+            target,
+            out_path,
+            emit_asm_only=emit_asm_only,
+            keep_intermediates=keep_intermediates,
+            keep_assembly=keep_assembly,
+            use_runtime_lib=use_runtime_lib,
+            nasm_path=nasm_path,
+            gcc_path=gcc_path,
+            bundle_mode=bundle_mode,
+            output_type=output_type,
+            icon_path=icon_path,
+            _asm_stem_suffix=f"-{target}",
+        ))
+    return results
 
 
 def _link_onedir(
