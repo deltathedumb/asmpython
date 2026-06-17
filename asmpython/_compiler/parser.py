@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 from .lexer import Token, Lexer
 from .errors import ErrorCode, ParseError
 from . import ast_nodes as A
@@ -135,12 +137,20 @@ class Parser:
         _collect_assigned(fdef.body)
         # Collect all Name references in the body.
         referenced: set = set()
+        # Names currently bound by an enclosing comprehension's own `for`
+        # clause(s) — Python scopes these to the comprehension itself, not
+        # the surrounding function, so a `Name` read while this is non-empty
+        # must not be recorded as a free-var reference. A list-as-stack
+        # (rather than reassigning a set) so nested comprehensions compose
+        # without needing `nonlocal`.
+        comp_suppressed: list = []
         def _collect_refs(stmts: list) -> None:
             for s in stmts:
                 _collect_refs_expr(s)
         def _collect_refs_expr(node) -> None:
             if isinstance(node, A.Name):
-                referenced.add(node.name)
+                if node.name not in comp_suppressed:
+                    referenced.add(node.name)
             elif isinstance(node, A.BinOp):
                 _collect_refs_expr(node.left)
                 _collect_refs_expr(node.right)
@@ -205,7 +215,25 @@ class Parser:
                 if node.body is not None:
                     _collect_refs_expr(node.body)
             elif isinstance(node, A.Comprehension):
+                # `iter` (the outermost `for x in <iter>`) runs in the
+                # *enclosing* scope in real Python, so walk it before any
+                # suppression is pushed.
                 _collect_refs_expr(node.iter)
+                _comp_vars: list = []
+                if node.var:
+                    _comp_vars.append(node.var)
+                for _t in (node.targets or []):
+                    if isinstance(_t, str):
+                        _comp_vars.append(_t)
+                for _ev in (node.extra_for_vars or []):
+                    if _ev:
+                        _comp_vars.append(_ev)
+                for _etl in (node.extra_for_targets or []):
+                    for _t in _etl:
+                        if isinstance(_t, str):
+                            _comp_vars.append(_t)
+                for _cv in _comp_vars:
+                    comp_suppressed.append(_cv)
                 _collect_refs_expr(node.elt)
                 if node.cond is not None:
                     _collect_refs_expr(node.cond)
@@ -214,12 +242,24 @@ class Parser:
                 for c in node.extra_for_conds:
                     if c is not None:
                         _collect_refs_expr(c)
+                for _cv in _comp_vars:
+                    comp_suppressed.remove(_cv)
             elif isinstance(node, A.DictComprehension):
                 _collect_refs_expr(node.iter)
+                _comp_vars = []
+                if node.var:
+                    _comp_vars.append(node.var)
+                for _t in (node.targets or []):
+                    if isinstance(_t, str):
+                        _comp_vars.append(_t)
+                for _cv in _comp_vars:
+                    comp_suppressed.append(_cv)
                 _collect_refs_expr(node.key)
                 _collect_refs_expr(node.value)
                 if node.cond is not None:
                     _collect_refs_expr(node.cond)
+                for _cv in _comp_vars:
+                    comp_suppressed.remove(_cv)
             elif isinstance(node, A.Assign):
                 _collect_refs_expr(node.value)
             elif isinstance(node, A.AugAssign):
@@ -310,8 +350,65 @@ class Parser:
             self._skip_newlines()
         # Add any nested functions parsed inside function bodies (lifted to
         # module level so calls to them resolve in sema).
+        Parser._propagate_transitive_free_vars(self._nested_funcs)
         funcs.extend(self._nested_funcs)
         return A.Module(funcs=funcs, body=body, classes=classes)
+
+    @staticmethod
+    def _collect_called_names(node, out: set) -> None:
+        """Collect every `A.Call.func` name reachable inside `node`. Generic
+        over node type via dataclass introspection (see `_dedupe_lifted_funcs`
+        in program.py for the same pattern and its rationale)."""
+        if isinstance(node, A.Call):
+            out.add(node.func)
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            for f in dataclasses.fields(node):
+                Parser._collect_called_names(getattr(node, f.name), out)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                Parser._collect_called_names(item, out)
+
+    @staticmethod
+    def _propagate_transitive_free_vars(nested_funcs: list) -> None:
+        """`_find_free_vars` (used for every nested `def`) only sees variables
+        a function references *directly* — it has no notion that calling a
+        sibling nested function (also lifted to module scope) might require
+        forwarding free vars *that sibling* needs but the caller never
+        touches itself. E.g. a `walk(stmts)` helper that does nothing but
+        `for s in stmts: walk_expr(s)` has no free vars of its own, but
+        `walk_expr` might close over `found`/`results` from their shared
+        enclosing scope — `walk` must still receive and forward them, since
+        sema prepends free vars as the lifted function's leading params and
+        codegen passes a direct-by-name call's free vars from the *caller's*
+        own scope (see codegen.py's `_gen_call`).
+
+        Fixed-point over the whole nested-function batch: repeatedly union in
+        any callee's free vars (minus names the caller already locally binds,
+        i.e. params/vararg/kwarg) until nothing changes. Bounded by the
+        number of nested functions, so this always terminates."""
+        by_name = {f.name: f for f in nested_funcs}
+        changed = True
+        while changed:
+            changed = False
+            for f in nested_funcs:
+                called: set = set()
+                Parser._collect_called_names(f.body, called)
+                own_locals = set(f.params)
+                if f.vararg:
+                    own_locals.add(f.vararg)
+                if f.kwarg:
+                    own_locals.add(f.kwarg)
+                for callee_name in called:
+                    callee = by_name.get(callee_name)
+                    if callee is None or callee is f:
+                        continue
+                    for fv in callee.free_vars:
+                        if fv in own_locals or fv in f.free_vars:
+                            continue
+                        f.free_vars.append(fv)
+                        if fv in callee.nonlocal_vars and fv not in f.nonlocal_vars:
+                            f.nonlocal_vars.append(fv)
+                        changed = True
 
     # Decorator names the parser treats specially.
     _ASM_DECORATOR = "assembly_func"

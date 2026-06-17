@@ -262,6 +262,78 @@ def _collect_import_stmts(module: A.Module) -> list:
     return found
 
 
+def _rename_call_targets(node, renames: dict[str, str]) -> None:
+    """Recursively rewrite every `A.Call.func` and `A.ClosureBind.func_name`
+    in `node` (and anything nested inside it — other dataclass fields, lists,
+    tuples) per `renames`.
+
+    `ClosureBind.func_name` has to move in lockstep with the call-site rename:
+    sema keys its captured-free-var-type table (`_fv_types`) by this same
+    string (see `_prescan_fv_types`/`scan_closurebinds`), and codegen uses it
+    both as the local variable the closure object is bound to and as the
+    label baked into the closure's function pointer. Leaving it as the old
+    name after renaming the `FuncDef` left `_fv_types` keyed under a name sema
+    never looks up again, silently dropping the captured types (free vars
+    defaulted back to `int`).
+
+    Generic over every AST node type via dataclass introspection rather than
+    enumerating each node kind by hand, so it can't silently miss a branch the
+    way a hand-written walker can (see the `_cl_walk_expr`/`for...else` bug).
+    """
+    if isinstance(node, A.Call) and node.func in renames:
+        node.func = renames[node.func]
+    elif isinstance(node, A.ClosureBind) and node.func_name in renames:
+        node.func_name = renames[node.func_name]
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        for f in dataclasses.fields(node):
+            _rename_call_targets(getattr(node, f.name), renames)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            _rename_call_targets(item, renames)
+
+
+def _dedupe_lifted_funcs(module: "A.Module", taken_names: set[str]) -> None:
+    """Rename any of `module`'s lifted (nested-function-turned-top-level)
+    funcs whose bare name collides with `taken_names`, fixing up every call
+    site within `module` to match.
+
+    `taken_names` must NOT include any of `module`'s own funcs (lifted or
+    not) — only names already claimed by *other* modules / by `module`'s
+    surrounding context before this call. Passing `module`'s own names in
+    would make every lifted func look like it collides with itself.
+
+    Nested `def`s are lifted to module scope under their original source name
+    (see `Parser._parse_stmt`'s `def` branch). That name is just the variable
+    the closure happens to be bound to in its *own* file — it carries no
+    cross-file meaning, so two unrelated files both nesting a helper named
+    `walk` must not collide once whole-program merge puts every module's
+    functions into one flat `entry.funcs` list. Plain (non-lifted) top-level
+    functions are intentionally left alone: `load_program`'s merge treats a
+    same-named top-level function in a later module as already-provided by an
+    earlier one (first definition wins), which is the desired behavior there.
+    """
+    renames: dict[str, str] = {}
+    for f in module.funcs:
+        if not getattr(f, "is_lifted", False):
+            continue
+        if f.name in taken_names:
+            new_name = f.name
+            n = 0
+            while new_name in taken_names or new_name in renames.values():
+                n += 1
+                new_name = f"{f.name}__lifted{n}"
+            renames[f.name] = new_name
+            f.name = new_name
+        taken_names.add(f.name)
+    if renames:
+        _rename_call_targets(module.body, renames)
+        for f in module.funcs:
+            _rename_call_targets(f.body, renames)
+        for c in module.classes:
+            for m in c.methods:
+                _rename_call_targets(m.body, renames)
+
+
 def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]:
     """Every project `.py` file the module imports (relative or absolute),
     scanning top-level *and* nested (function-local) import statements."""
@@ -380,6 +452,7 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
 
     seen: list[str] = [str(entry_path)]
     # Names already defined so merges don't duplicate (first definition wins).
+    _dedupe_lifted_funcs(entry, set())
     func_names = {f.name for f in entry.funcs}
     class_names = {c.name for c in entry.classes}
 
@@ -406,6 +479,7 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
             continue
         parsed[mod_path_str] = mod
         discovery_order.append(mod_path_str)
+        _dedupe_lifted_funcs(mod, set(func_names))
         for f in mod.funcs:
             if f.name not in func_names:
                 func_names.add(f.name)

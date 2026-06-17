@@ -542,6 +542,28 @@ class SemaAnalyzer:
         # populated by _prescan_fv_types() before the main analysis loops.
         self._fv_types: dict = {}
 
+    def _resolve_class_chain(self, name: str) -> list:
+        """[name, parent, grandparent, ...] for a user-defined class."""
+        out: list = []
+        cur = name
+        while cur is not None and cur not in out:
+            out.append(cur)
+            cls = self.classes.get(cur)
+            cur = cls.parent if cls is not None else None
+        return out
+
+    def _common_class_ancestor(self, a: str, b: str) -> "str | None":
+        """Nearest common ancestor of two user-defined classes, e.g. for
+        `WindowsCodegen` and `Freestanding16Codegen` both descending from
+        `Codegen`. Returns None if they share no modeled ancestor (siblings
+        with only an external/unmodeled base, or unrelated classes)."""
+        chain_a = self._resolve_class_chain(a)
+        chain_b = set(self._resolve_class_chain(b))
+        for cls_name in chain_a:
+            if cls_name in chain_b:
+                return cls_name
+        return None
+
     def _has_external_base(self, class_name: str) -> bool:
         """True if `class_name` or any ancestor inherits from a base that isn't
         a user-defined class (a builtin like Exception, or a name imported from
@@ -2651,6 +2673,20 @@ class SemaAnalyzer:
         elif t == "tuple":
             scope.add(target, t, tuple_types=self._tuple_elem_types(value, scope))
         else:
+            # A name re-assigned to a sibling class instance across `if`/`elif`
+            # branches that share scope (`gen = WindowsCodegen(...)` in one
+            # branch, `gen = Freestanding16Codegen(...)` in another) must widen
+            # to their common ancestor rather than let the last-checked branch
+            # win outright — code after the merge point calls methods on `gen`
+            # expecting virtual dispatch across all the branches' classes, not
+            # just whichever one happened to be assigned last in source order.
+            if t.startswith("instance:") and target in scope.types:
+                prev_t = scope.types[target]
+                if prev_t.startswith("instance:") and prev_t != t:
+                    prev_cls, new_cls = prev_t[len("instance:"):], t[len("instance:"):]
+                    common = self._common_class_ancestor(prev_cls, new_cls)
+                    if common is not None:
+                        t = f"instance:{common}"
             scope.add(
                 target,
                 t,

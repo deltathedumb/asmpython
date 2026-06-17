@@ -65,6 +65,7 @@ class Path:
             return 1
         return 0
 
+    @property
     def name(self) -> str:
         p = self.p
         start = 0
@@ -77,6 +78,7 @@ class Path:
             i = i + 1
         return p[start:]
 
+    @property
     def parent(self) -> Path:
         p = self.p
         cut = -1
@@ -93,8 +95,9 @@ class Path:
             return Path(p[0:1])
         return Path(p[0:cut])
 
+    @property
     def suffix(self) -> str:
-        nm = self.name()
+        nm = self.name
         cut = -1
         i = 0
         n = len(nm)
@@ -106,8 +109,9 @@ class Path:
             return ""
         return nm[cut:]
 
+    @property
     def stem(self) -> str:
-        nm = self.name()
+        nm = self.name
         cut = -1
         i = 0
         n = len(nm)
@@ -120,7 +124,7 @@ class Path:
         return nm[0:cut]
 
     def with_suffix(self, suffix: str) -> Path:
-        nm = self.name()
+        nm = self.name
         cut = -1
         i = 0
         n = len(nm)
@@ -132,13 +136,13 @@ class Path:
             base = nm
         else:
             base = nm[0:cut]
-        par = self.parent()
+        par = self.parent
         if par.p == "":
             return Path(base + suffix)
         return par._join(base + suffix)
 
     def with_name(self, name: str) -> Path:
-        par = self.parent()
+        par = self.parent
         if par.p == "":
             return Path(name)
         return par._join(name)
@@ -156,7 +160,7 @@ class Path:
 
     def mkdir(self, mode: int = 511, parents: int = 0, exist_ok: int = 0) -> int:
         if parents == 1:
-            par = self.parent()
+            par = self.parent
             if par.p != "" and par.exists() == 0:
                 par.mkdir(mode, 1, 1)
         rc = os.mkdir(self.p, mode)
@@ -323,6 +327,7 @@ class PurePath:
                 result = result + ch
         return result
 
+    @property
     def name(self) -> str:
         p: str = self.as_posix()
         i: int = len(p) - 1
@@ -330,8 +335,9 @@ class PurePath:
             i = i - 1
         return p[i + 1:]
 
+    @property
     def suffix(self) -> str:
-        n: str = self.name()
+        n: str = self.name
         i: int = len(n) - 1
         while i >= 0 and n[i] != ".":
             i = i - 1
@@ -339,11 +345,13 @@ class PurePath:
             return ""
         return n[i:]
 
+    @property
     def stem(self) -> str:
-        n: str = self.name()
-        suf: str = self.suffix()
+        n: str = self.name
+        suf: str = self.suffix
         return n[:len(n) - len(suf)]
 
+    @property
     def parent(self) -> PurePath:
         p: str = self.as_posix()
         i: int = len(p) - 1

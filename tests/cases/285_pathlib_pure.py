@@ -11,5 +11,5 @@ print(str(p))
 
 p2 = p / "baz.txt"
 print(str(p2))
-print(p2.name())
-print(p2.suffix())
+print(p2.name)
+print(p2.suffix)

@@ -1456,6 +1456,17 @@ class Codegen:
             ):
                 for k in range(len(expr.args)):
                     self._cl_define(info, f"__callarg_{id(expr)}_{k}")
+            # Direct-by-name call to a lifted closure body (self-recursion, or
+            # a call from within the function that originally enclosed the
+            # nested `def`): reserve scratch slots for the free vars sema
+            # prepends as its leading params, so _gen_call can evaluate them
+            # through the same register/stack-spill machinery as ordinary
+            # args instead of assuming they all fit in registers.
+            for ff in self.mod.funcs:
+                if ff.name == expr.func and getattr(ff, "is_lifted", False):
+                    for k in range(len(getattr(ff, "free_vars", []) or [])):
+                        self._cl_define(info, f"__fvarg_{id(expr)}_{k}")
+                    break
             # Closure call: allocate per-arg scratch slots to park evaluated args
             # while we load the closure buf pointer (which may clobber registers).
             if (
@@ -1735,6 +1746,7 @@ class Codegen:
                 for ze in zexprs:
                     self._cl_walk_expr(info, ze)
                 self._cl_walk(info, s.body)
+                self._cl_walk(info, s.orelse)
             elif (
                 isinstance(s, A.For)
                 and s.iter is not None
@@ -1770,6 +1782,7 @@ class Codegen:
                     self._cl_walk_expr(info, _enum_start_expr)
                 self._cl_walk_expr(info, inner)
                 self._cl_walk(info, s.body)
+                self._cl_walk(info, s.orelse)
             elif isinstance(s, A.For):
                 # Loop var inherits the iterable's element type so the
                 # later Name load picks the right register class.
@@ -1822,6 +1835,7 @@ class Codegen:
                     for a in s.range_args:
                         self._cl_walk_expr(info, a)
                 self._cl_walk(info, s.body)
+                self._cl_walk(info, s.orelse)
             elif isinstance(s, A.If):
                 self._cl_walk_expr(info, s.test)
                 self._cl_walk(info, s.then)
@@ -12674,6 +12688,65 @@ class Codegen:
             for a in e.args:
                 self.gen_expr(a, info)
             self.emitf("xor rax, rax")
+            return
+        # Direct-by-name call to a lifted (nested-function) closure body. Sema
+        # prepends the captured free vars as leading params on the lifted
+        # FuncDef itself (see sema.py's free-var-param-prepending pass). The
+        # bare name is only in scope, unqualified, in two places: (a) inside
+        # the lifted function's own body (true self-recursion — its own
+        # params ARE the free vars), or (b) inside the enclosing function that
+        # originally contained the nested `def` (the factory), before the
+        # `ClosureBind` rewrote it away — e.g. `_collect_import_stmts` calling
+        # its own nested `walk(...)` directly. In case (b) the free vars are
+        # whatever locals in *this* scope share the free var's name (that's
+        # what "free variable" means — same name resolves in both scopes).
+        # Either way, look the free var names up in the current `info`'s own
+        # scope rather than assuming they sit in `info.params`.
+        # (External callers outside both of these go through the
+        # ClosureBind-bound variable instead — the
+        # `_var_type(e.func, info) == "closure"` branch above.)
+        free_var_names: list = []
+        for ff in self.mod.funcs:
+            if ff.name == e.func and getattr(ff, "is_lifted", False):
+                free_var_names = list(getattr(ff, "free_vars", []) or [])
+                break
+        if free_var_names:
+            # Free vars + explicit args can together exceed the ABI's
+            # register count (e.g. a helper with several captured vars and
+            # several params), so they must go through the same
+            # register/stack-spill assignment as an ordinary call rather
+            # than assuming every free var fits in a register — route both
+            # through the reserved `__fvarg_`/`__callarg_` slots and a single
+            # _load_call_operands call covering the combined operand list.
+            fv_offs: list[int] = []
+            fv_types: list = []
+            for i, fv_name in enumerate(free_var_names):
+                # The free var's type is whatever it is in *this* (the
+                # calling) scope — same variable, same value, same type in
+                # both scopes by definition. More reliable than reading the
+                # callee's own FuncInfo.local_types, which is only populated
+                # once that function's own codegen pass runs (and a lifted
+                # sibling may be emitted *after* this call site).
+                fv_ty = self._var_type(fv_name, info)
+                fv_types.append(fv_ty)
+                if fv_ty == "float":
+                    self.emitf(f"movsd xmm0, {self._var_mem(fv_name, info)}")
+                    off = info.locals_[f"__fvarg_{id(e)}_{i}"]
+                    self.emitf(f"movsd [rbp{off:+d}], xmm0")
+                else:
+                    self.emitf(f"mov rax, {self._var_mem(fv_name, info)}")
+                    off = info.locals_[f"__fvarg_{id(e)}_{i}"]
+                    self.emitf(f"mov [rbp{off:+d}], rax")
+                fv_offs.append(off)
+            arg_offs = self._eval_call_operands(e, e.args, info)
+            offs = fv_offs + arg_offs
+            arg_types = fv_types + [A.expr_type(a) for a in e.args]
+            cleanup = self._load_call_operands(
+                e, offs, info, start_reg=0, arg_types=arg_types
+            )
+            self.emit_call(self._user_symbol(e.func))
+            if cleanup:
+                self.emitf(f"add rsp, {cleanup}")
             return
         # Sema has normalized e.args to a complete positional list (defaults
         # filled, keyword args placed, varargs packed), so no _fill_defaults.
