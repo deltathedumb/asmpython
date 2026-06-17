@@ -268,7 +268,7 @@ class Codegen:
             return f"[rbp{info.locals_[name]:+d}]"
         if name in self.global_vars:
             return f"[rel {self._global_label(name)}]"
-        raise NameError(f"undefined variable {name} in func {info.name}")
+        raise NameError(f"undefined variable {name}")
 
     def _var_type(self, name: str, info: "FuncInfo") -> str:
         if name in info.locals_:

@@ -348,6 +348,11 @@ def compile_source(
             # The generated code uses absolute (non-PIC) relocations against
             # libc symbols, which modern gcc rejects under its default PIE mode.
             link_cmd.append("-no-pie")
+        if target == "windows":
+            # Force console subsystem so the CRT calls main() not WinMain().
+            # Newer mingw-w64/w64devkit (gcc 16+) no longer infers this from
+            # the presence of main vs WinMain and may default to GUI.
+            link_cmd.append("-mconsole")
         if use_runtime_lib:
             from .._runtime.build import build_runtime, _build_dir
 

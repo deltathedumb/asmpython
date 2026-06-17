@@ -75,6 +75,12 @@ CPython-parity expansion: making common idioms compile and produce correct outpu
 
 ### Fixed
 
+- **Windows link step with gcc 16+ / w64devkit**: added `-mconsole` to the Windows link command in `driver.py`; gcc 16 no longer infers the console subsystem CRT from the presence of `main`, defaulting to the GUI CRT (`crtexewin.o`) which requires `WinMain`. This unblocks `--selfhost` builds on updated toolchains.
+- **Self-host: lifted-closure free-var forwarding**: comprehension loop variables (e.g. `a` in `[fix_expr(a) for a in args]`) were incorrectly included in `referenced` but not in `local_names`, causing a spurious `undefined variable` error during self-host codegen; fixed via `comp_suppressed` stack in `_find_free_vars`.
+- **Self-host: transitive free-var propagation** across nested-function call chains now correctly threads free vars from the originating closure through intermediate lifted helpers.
+- **Self-host: lifted-function name deduplication** across merged modules via `program.py`; avoids duplicate NASM labels when multiple source files define closures with the same lifted name.
+- **Self-host: class-type widening**: reassignment to a sibling subclass instance now widens the variable type to the nearest common ancestor, preventing sema from misidentifying the method set and emitting wrong virtual calls.
+- **pathlib `Path` properties** (`name`, `parent`, `suffix`, `stem`) now emit via `@property` dispatch rather than a non-existent plain getter; fixes self-host compilation of `pathlib`-using code.
 - **Division/modulo by zero raises `ZeroDivisionError`** instead of CPU fault; float `/`/`//`/`%` by zero also raises instead of returning `inf`.
 - **`--target freestanding` unhandled exceptions** now show a flashing red screen and warm-reboot after 5 seconds; SSE triple-fault fixed (`CR4.OSFXSR`/`CR4.OSXMMEXCPT` now set).
 - **`except module.ExcClass as e:`** (dotted exception type) now parses and matches correctly.
