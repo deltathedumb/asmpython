@@ -1,8 +1,9 @@
 """gui — complete 2D graphics package for hosted (SDL2) targets.
 
-One import gets you everything: window management, hardware-accelerated
-drawing, texture loading, event handling, named colors, and keyboard/mouse
-constants.
+Part of Lumen, asmpython's graphics/audio/input ecosystem (gui + framebuffer
++ audio). One import gets you everything: window management, hardware-
+accelerated drawing, texture loading, TrueType and bitmap text, event
+handling, named colors, and keyboard/mouse constants.
 
 SDL2 must be installed:
   Linux:   sudo apt install libsdl2-dev
@@ -23,6 +24,7 @@ Quick start::
 from __future__ import annotations
 
 import _gui_sdl
+import _gui_ttf
 import _font8x8
 
 
@@ -69,6 +71,38 @@ class Image:
     def free(self) -> int:
         _gui_sdl.destroy_texture(self._tex)
         self._tex = 0
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# Font — SDL2_ttf TrueType font wrapper
+# ---------------------------------------------------------------------------
+
+class Font:
+    """TrueType font loaded via SDL2_ttf.
+
+    Renders smooth, anti-aliased text at any size/style, unlike the built-in
+    8x8 bitmap font used by Canvas.text(). Requires SDL2_ttf to be installed
+    (Linux: sudo apt install libsdl2-ttf-dev; Windows: SDL2_ttf.dll next to
+    the executable). Free with font.close() when no longer needed.
+    """
+
+    def __init__(self, path: str, ptsize: int) -> int:
+        _gui_ttf.init()
+        self._font: int = _gui_ttf.open_font(path, ptsize)
+        return 0
+
+    def set_style(self, style: int) -> int:
+        """style is one of the gui.FONT_STYLE_* constants (OR-able)."""
+        return _gui_ttf.set_font_style(self._font, style)
+
+    def size(self, text: str) -> tuple[int, int]:
+        """Return the (width, height) in pixels text would occupy if rendered."""
+        return (_gui_ttf.size_text_w(self._font, text), _gui_ttf.size_text_h(self._font, text))
+
+    def close(self) -> int:
+        _gui_ttf.close_font(self._font)
+        self._font = 0
         return 0
 
 
@@ -303,6 +337,19 @@ class Canvas:
         _gui_sdl.render_copy(self._ren, img._tex, x, y, w, h)
         return 0
 
+    def draw_ttf(self, font: Font, x: int, y: int, text: str, color: int) -> int:
+        """Draw anti-aliased TrueType text at (x, y) using a Font and a packed
+        0xRRGGBB color (see gui.r()/g()/b() or the named color constants).
+        """
+        surf: int = _gui_ttf.render_blended(font._font, text, r(color), g(color), b(color))
+        tex: int = _gui_sdl.create_texture(self._ren, surf)
+        _gui_sdl.free_surface(surf)
+        w: int = _gui_ttf.size_text_w(font._font, text)
+        h: int = _gui_ttf.size_text_h(font._font, text)
+        _gui_sdl.render_copy(self._ren, tex, x, y, w, h)
+        _gui_sdl.destroy_texture(tex)
+        return 0
+
     def poll(self) -> int:
         """Return the next event type (0 = no event)."""
         return _gui_sdl.poll_event()
@@ -347,6 +394,48 @@ class Canvas:
     def btn(self) -> int:
         """Return the last mouse button pressed (BUTTON_* constant)."""
         return self._mbtn
+
+    def key_down(self, scancode: int) -> int:
+        """Return non-zero if the given KEY_* scancode is currently held down."""
+        return _gui_sdl.is_key_down(scancode)
+
+    def mouse_dx(self) -> int:
+        """Return relative mouse motion (x) since the last call to mouse_dx/mouse_dy."""
+        return _gui_sdl.mouse_dx()
+
+    def mouse_dy(self) -> int:
+        """Return relative mouse motion (y) since the last call to mouse_dx/mouse_dy."""
+        return _gui_sdl.mouse_dy()
+
+    def relative_mouse(self, enabled: int) -> int:
+        """Enable (1) or disable (0) relative mouse mode (hides cursor, captures input)."""
+        return _gui_sdl.set_relative_mouse(enabled)
+
+    def show_cursor(self, visible: int) -> int:
+        """Show (1) or hide (0) the mouse cursor."""
+        return _gui_sdl.show_cursor(visible)
+
+    def fullscreen(self, enabled: int) -> int:
+        """Toggle fullscreen. Pass FULLSCREEN_DESKTOP-style truthy/falsy enabled flag."""
+        flags: int = 0
+        if enabled:
+            flags = WINDOW_FULLSCREEN_DESKTOP
+        return _gui_sdl.set_fullscreen(self._win, flags)
+
+    def resize(self, w: int, h: int) -> int:
+        """Resize the window at runtime."""
+        _gui_sdl.set_window_size(self._win, w, h)
+        self._w = w
+        self._h = h
+        return 0
+
+    def set_clipboard(self, text: str) -> int:
+        """Set the system clipboard text."""
+        return _gui_sdl.set_clipboard_text(text)
+
+    def get_clipboard(self) -> str:
+        """Get the system clipboard text."""
+        return _gui_sdl.get_clipboard_text()
 
     def delay(self, ms: int) -> int:
         """Sleep for ms milliseconds."""
@@ -438,7 +527,16 @@ INIT_EVERYTHING:        int = 0x0000FFFF
 WINDOW_SHOWN:           int = 0x00000004
 WINDOW_RESIZABLE:       int = 0x00000020
 WINDOW_FULLSCREEN:      int = 0x00000001
+WINDOW_FULLSCREEN_DESKTOP: int = 0x00001001
 WINDOW_CENTERED:        int = 0x2FFF0000
+
+# ---------------------------------------------------------------------------
+# TrueType font style flags (OR-able, see Font.set_style)
+# ---------------------------------------------------------------------------
+FONT_STYLE_NORMAL:      int = 0x00
+FONT_STYLE_BOLD:        int = 0x01
+FONT_STYLE_ITALIC:      int = 0x02
+FONT_STYLE_UNDERLINE:   int = 0x04
 
 # ---------------------------------------------------------------------------
 # Renderer creation flags

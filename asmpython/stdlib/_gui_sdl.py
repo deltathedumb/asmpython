@@ -51,6 +51,21 @@ BINDINGS: dict = {
     "mouse_y":          Func(arg_types=(),                         ret_type="int", c_name="_gui_mouse_y"),
     "mouse_button":     Func(arg_types=(),                         ret_type="int", c_name="_gui_mouse_button"),
 
+    # ---- Live input state -----------------------------------------------------
+    "is_key_down":      Func(arg_types=("int",),                   ret_type="int", c_name="_gui_is_key_down"),
+    "mouse_dx":         Func(arg_types=(),                         ret_type="int", c_name="_gui_mouse_dx"),
+    "mouse_dy":         Func(arg_types=(),                         ret_type="int", c_name="_gui_mouse_dy"),
+    "set_relative_mouse": Func(arg_types=("int",),                 ret_type="int", c_name="SDL_SetRelativeMouseMode"),
+    "show_cursor":      Func(arg_types=("int",),                   ret_type="int", c_name="SDL_ShowCursor"),
+
+    # ---- Window control ------------------------------------------------------
+    "set_fullscreen":   Func(arg_types=("int","int"),               ret_type="int", c_name="SDL_SetWindowFullscreen"),
+    "set_window_size":  Func(arg_types=("int","int","int"),         ret_type="int", c_name="SDL_SetWindowSize"),
+
+    # ---- Clipboard ------------------------------------------------------------
+    "set_clipboard_text": Func(arg_types=("str",),                  ret_type="int", c_name="SDL_SetClipboardText"),
+    "get_clipboard_text": Func(arg_types=(),                        ret_type="str", c_name="SDL_GetClipboardText"),
+
     # ---- Timing -------------------------------------------------------------
     "delay":            Func(arg_types=("int",),                   ret_type="int", c_name="SDL_Delay"),
     "get_ticks":        Func(arg_types=(),                         ret_type="int", c_name="SDL_GetTicks"),
@@ -65,6 +80,7 @@ BINDINGS: dict = {
     "WINDOW_SHOWN":         Const(ty="int", value=0x00000004),
     "WINDOW_RESIZABLE":     Const(ty="int", value=0x00000020),
     "WINDOW_FULLSCREEN":    Const(ty="int", value=0x00000001),
+    "WINDOW_FULLSCREEN_DESKTOP": Const(ty="int", value=0x00001001),
     "WINDOW_CENTERED":      Const(ty="int", value=0x2FFF0000),
 
     # ---- Renderer flags -----------------------------------------------------

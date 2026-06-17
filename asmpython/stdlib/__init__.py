@@ -61,6 +61,7 @@ from .random        import BINDINGS as _RANDOM_BINDINGS        # noqa: E402
 from .socket        import BINDINGS as _SOCKET_BINDINGS        # noqa: E402
 from ._threadingffi import BINDINGS as _THREADINGFFI_BINDINGS  # noqa: E402
 from ._gui_sdl      import BINDINGS as _GUI_BINDINGS           # noqa: E402
+from ._gui_ttf      import BINDINGS as _TTF_BINDINGS           # noqa: E402
 from ._audio_sdl    import BINDINGS as _AUDIO_BINDINGS         # noqa: E402
 from .network       import BINDINGS as _NETWORK_BINDINGS       # noqa: E402
 from .hardware      import BINDINGS as _HARDWARE_BINDINGS      # noqa: E402
@@ -74,6 +75,7 @@ STDLIB_BINDINGS: dict[str, dict] = {
     "socket":        _SOCKET_BINDINGS,
     "_threadingffi": _THREADINGFFI_BINDINGS,
     "_gui_sdl":      _GUI_BINDINGS,
+    "_gui_ttf":      _TTF_BINDINGS,
     "_audio_sdl":    _AUDIO_BINDINGS,
     "network":       _NETWORK_BINDINGS,
     "hardware":      _HARDWARE_BINDINGS,

@@ -1,8 +1,9 @@
 """framebuffer — software pixel rendering for bare-metal and UEFI targets.
 
-Provides a Framebuffer class that writes pixels directly to a linear memory-
-mapped framebuffer using hardware.mmio_write32 / mmio_write8.  No OS, no
-SDL2, no dependencies beyond the hardware module.
+Part of Lumen, asmpython's graphics/audio/input ecosystem (gui + framebuffer
++ audio). Provides a Framebuffer class that writes pixels directly to a
+linear memory-mapped framebuffer using hardware.mmio_write32 / mmio_write8.
+No OS, no SDL2, no dependencies beyond the hardware module.
 
 Typical UEFI GOP setup::
 

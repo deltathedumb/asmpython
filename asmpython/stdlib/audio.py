@@ -1,7 +1,8 @@
 """audio — SDL2_mixer sound playback for hosted targets.
 
-Provides simple WAV chunk and streaming music playback without requiring
-any SDL2 knowledge.  SDL2_mixer must be installed alongside SDL2:
+Part of Lumen, asmpython's graphics/audio/input ecosystem (gui + framebuffer
++ audio). Provides simple WAV chunk and streaming music playback without
+requiring any SDL2 knowledge.  SDL2_mixer must be installed alongside SDL2:
 
   Linux:   sudo apt install libsdl2-mixer-dev
   Windows: place SDL2_mixer.dll next to the executable (or in PATH)

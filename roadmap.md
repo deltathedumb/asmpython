@@ -46,7 +46,15 @@ Complete, batteries-included graphics library for all targets.
 
 **`ffi_called` tracking** — codegen tracks which FFI c_names are actually called (not just imported). Runtime helper blocks emitted only on demand; constant-only SDL2 imports no longer force SDL2 linkage.
 
-**Tests:** 450/450 passing.
+**`audio` module** — SDL2_mixer-backed sound and music (`import audio`): `Sound`/`Music`, auto-linked via `needs_audio`.
+
+**Bitmap font rendering** — built-in 8×8 font wired into `framebuffer.Framebuffer.draw_char/draw_text` and `gui.Canvas.char/text`.
+
+**Lumen** — the `gui` + `framebuffer` + `audio` ecosystem now has a name.
+
+**Gap-filling in `gui`** — live key state (`Canvas.key_down`), relative mouse motion and capture (`mouse_dx`/`mouse_dy`/`relative_mouse`), cursor show/hide, runtime fullscreen/resize, clipboard text, and `gui.Font` (SDL2_ttf TrueType rendering via `Canvas.draw_ttf`) auto-linked via `needs_ttf`.
+
+**Tests:** 451/451 passing.
 
 ---
 
@@ -216,5 +224,5 @@ These are on the radar but not pinned to a specific release:
 - **`asyncio`** — async/await. Requires coroutine frames (same as generators) plus an event loop.
 - **Windows ARM64 freestanding** — bare-metal on Windows Dev Kit / Snapdragon laptops.
 - ~~**Audio**~~ — done: `audio` module (SDL2_mixer) with `Sound`/`Music`, auto-linked via `needs_audio`.
-- ~~**Font rendering**~~ — done: built-in 8×8 bitmap font wired into `framebuffer.Framebuffer.draw_char/draw_text` and `gui.Canvas.char/text`. TTF via SDL_ttf on `gui` and PSF2 loading remain open if richer fonts are needed later.
+- ~~**Font rendering**~~ — done: built-in 8×8 bitmap font wired into `framebuffer.Framebuffer.draw_char/draw_text` and `gui.Canvas.char/text`; plus `gui.Font` (SDL_ttf) for smooth/anti-aliased TrueType text via `Canvas.draw_ttf`. PSF2 loading for `framebuffer` remains open if richer freestanding fonts are needed later.
 - **Bare-metal PC speaker / AC97 audio** — SDL2_mixer covers hosted targets; freestanding audio output is still open.

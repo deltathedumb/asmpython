@@ -522,9 +522,13 @@ class LinuxCodegen(Codegen):
         "_gui_mouse_x", "_gui_mouse_y", "_gui_mouse_button",
         "_gui_load_bmp",
         "_gui_render_copy", "_gui_query_texture_w", "_gui_query_texture_h",
+        "_gui_is_key_down", "_gui_mouse_dx", "_gui_mouse_dy",
     )
     _AUDIO_SYMS = (
         "_audio_load_wav",
+    )
+    _TTF_SYMS = (
+        "_ttf_render_blended", "_ttf_size_text_w", "_ttf_size_text_h",
     )
     _MATH_SYMS = (
         "_math_isnan", "_math_isinf", "_math_isfinite",
@@ -549,7 +553,7 @@ class LinuxCodegen(Codegen):
 
     def _asmlib_inline_syms(self) -> set:
         return (set(self._HW_STUBS) | set(self._NET_SYMS) | set(self._GUI_SYMS)
-                | set(self._AUDIO_SYMS)
+                | set(self._AUDIO_SYMS) | set(self._TTF_SYMS)
                 | set(self._MATH_SYMS) | set(self._RANDOM_SYMS) | set(self._TIME_SYMS)
                 | set(self._THREAD_SYMS))
 
@@ -567,17 +571,23 @@ class LinuxCodegen(Codegen):
         return (any(s in self.ffi_called for s in self._AUDIO_SYMS) or
                 any(s.startswith("Mix_") for s in self.ffi_called))
 
+    @property
+    def needs_ttf(self) -> bool:
+        return (any(s in self.ffi_called for s in self._TTF_SYMS) or
+                any(s.startswith("TTF_") for s in self.ffi_called))
+
     def emit_asmlib_runtime(self) -> None:
         needs_hw     = any(s in self.ffi_called for s in self._HW_STUBS)
         needs_net    = any(s in self.ffi_called for s in self._NET_SYMS)
         needs_gui    = any(s in self.ffi_called for s in self._GUI_SYMS)
         needs_audio  = any(s in self.ffi_called for s in self._AUDIO_SYMS)
+        needs_ttf    = any(s in self.ffi_called for s in self._TTF_SYMS)
         needs_math   = any(s in self.ffi_called for s in self._MATH_SYMS)
         needs_random = any(s in self.ffi_called for s in self._RANDOM_SYMS)
         needs_time   = any(s in self.ffi_called for s in self._TIME_SYMS)
         needs_thread = any(s in self.ffi_called for s in self._THREAD_SYMS)
-        if not (needs_hw or needs_net or needs_gui or needs_audio or needs_math
-                or needs_random or needs_time or needs_thread):
+        if not (needs_hw or needs_net or needs_gui or needs_audio or needs_ttf
+                or needs_math or needs_random or needs_time or needs_thread):
             return
 
         self.emit("")
@@ -1346,6 +1356,44 @@ class LinuxCodegen(Codegen):
                            "movsx rax, dword [_gui_tex_dim+4]",
                            "leave", "ret")
 
+            # _gui_is_key_down(rdi=scancode) -> rax (0 or 1)
+            # SDL_GetKeyboardState(NULL) returns Uint8* indexed by scancode.
+            if "_gui_is_key_down" in self.ffi_called:
+                self.emit("extern SDL_GetKeyboardState")
+                self.label("_gui_is_key_down")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("mov [rbp-8], rdi",
+                           "xor rdi, rdi",
+                           "call SDL_GetKeyboardState",
+                           "mov rcx, [rbp-8]",
+                           "movzx rax, byte [rax + rcx]",
+                           "leave", "ret")
+
+            # _gui_mouse_dx/dy() -> rax (relative motion since last call)
+            # SDL_GetRelativeMouseState(&dx, &dy); we cache both ints and
+            # return whichever component was asked for.
+            if "_gui_mouse_dx" in self.ffi_called or "_gui_mouse_dy" in self.ffi_called:
+                self.emit("extern SDL_GetRelativeMouseState")
+                self.emit("section .bss")
+                self.emit("_gui_rel_dim: resd 2")
+                self.emit("section .text")
+            if "_gui_mouse_dx" in self.ffi_called:
+                self.label("_gui_mouse_dx")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("lea rdi, [_gui_rel_dim]",
+                           "lea rsi, [_gui_rel_dim+4]",
+                           "call SDL_GetRelativeMouseState",
+                           "movsx rax, dword [_gui_rel_dim]",
+                           "leave", "ret")
+            if "_gui_mouse_dy" in self.ffi_called:
+                self.label("_gui_mouse_dy")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("lea rdi, [_gui_rel_dim]",
+                           "lea rsi, [_gui_rel_dim+4]",
+                           "call SDL_GetRelativeMouseState",
+                           "movsx rax, dword [_gui_rel_dim+4]",
+                           "leave", "ret")
+
         # ---- SDL2_mixer / audio helpers ---------------------------------------
         if needs_audio:
             # _audio_load_wav(rdi=path) -> rax (Mix_Chunk* handle, or 0 on failure)
@@ -1368,6 +1416,54 @@ class LinuxCodegen(Codegen):
                            "leave", "ret")
                 self.label("._alw_fail")
                 self.emitf("xor rax, rax", "leave", "ret")
+
+        # ---- SDL2_ttf font rendering helpers -----------------------------------
+        # SDL_Color {r,g,b,a} (4 bytes) is passed by value in a single GP
+        # register under SysV; we pack r/g/b (alpha fixed at 255) ourselves.
+        if needs_ttf:
+            self.emit("extern TTF_RenderText_Blended")
+            self.emit("extern TTF_SizeText")
+            self.emit("section .bss")
+            self.emit("_ttf_size_dim: resd 2")
+            self.emit("section .text")
+
+            # _ttf_render_blended(rdi=font, rsi=text, rdx=r, rcx=g, r8=b) -> rax (SDL_Surface*)
+            # Real C call is TTF_RenderText_Blended(font, text, SDL_Color fg) --
+            # only 3 args; fg is a 4-byte struct passed by value in one register.
+            if "_ttf_render_blended" in self.ffi_called:
+                self.label("_ttf_render_blended")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi")
+                # Pack SDL_Color {r,g,b,a=255} into one 32-bit value: r | g<<8 | b<<16 | 255<<24
+                self.emitf("movzx rax, dl",      # r
+                           "movzx r9, cl",       # g
+                           "shl r9, 8", "or rax, r9",
+                           "movzx r9, r8b",       # b
+                           "shl r9, 16", "or rax, r9",
+                           "mov r9, 255",
+                           "shl r9, 24", "or rax, r9")
+                self.emitf("mov rdi, [rbp-8]", "mov rsi, [rbp-16]",
+                           "mov edx, eax",   # fg (3rd real arg)
+                           "call TTF_RenderText_Blended",
+                           "leave", "ret")
+
+            # _ttf_size_text_w/h(rdi=font, rsi=text) -> rax (pixel width/height)
+            if "_ttf_size_text_w" in self.ffi_called:
+                self.label("_ttf_size_text_w")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("lea rdx, [_ttf_size_dim]",
+                           "lea rcx, [_ttf_size_dim+4]",
+                           "call TTF_SizeText",
+                           "movsx rax, dword [_ttf_size_dim]",
+                           "leave", "ret")
+            if "_ttf_size_text_h" in self.ffi_called:
+                self.label("_ttf_size_text_h")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("lea rdx, [_ttf_size_dim]",
+                           "lea rcx, [_ttf_size_dim+4]",
+                           "call TTF_SizeText",
+                           "movsx rax, dword [_ttf_size_dim+4]",
+                           "leave", "ret")
 
         # ---- real pthread threading helpers (SysV AMD64 ABI) ----------------
         # Linked with -lpthread via the gcc driver.

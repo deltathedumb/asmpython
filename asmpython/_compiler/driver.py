@@ -340,6 +340,8 @@ def _run_backend(
             link_cmd.append("-lSDL2")
         if getattr(gen, "needs_audio", False):
             link_cmd.append("-lSDL2_mixer")
+        if getattr(gen, "needs_ttf", False):
+            link_cmd.append("-lSDL2_ttf")
         _run(link_cmd, extra_path_dirs=[gcc_dir])
     elif bundle_mode == "onedir":
         _onedir_extra: list = []
@@ -347,6 +349,8 @@ def _run_backend(
             _onedir_extra.append("-lSDL2")
         if getattr(gen, "needs_audio", False):
             _onedir_extra.append("-lSDL2_mixer")
+        if getattr(gen, "needs_ttf", False):
+            _onedir_extra.append("-lSDL2_ttf")
         exe_path = _link_onedir(
             target=target,
             obj_path=obj_path,
@@ -388,6 +392,8 @@ def _run_backend(
             link_cmd.append("-lSDL2")
         if getattr(gen, "needs_audio", False):
             link_cmd.append("-lSDL2_mixer")
+        if getattr(gen, "needs_ttf", False):
+            link_cmd.append("-lSDL2_ttf")
         _run(link_cmd, extra_path_dirs=[gcc_dir])
 
     if not keep_intermediates:
