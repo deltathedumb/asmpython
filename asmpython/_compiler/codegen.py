@@ -7704,7 +7704,7 @@ class Codegen:
         In: rax = int (0..255 meaningful). Out: rax = 2-byte heap string.
         """
         self.label("_runtime_chr")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
         self.emitf("mov [rbp-8], rax", "mov rax, 2")
         self._emit_libc_malloc_size_in_rax()
         self.emitf(
