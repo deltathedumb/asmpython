@@ -98,11 +98,11 @@ def _parse_targets(val: str) -> list[str]:
     targets = [t.strip() for t in val.replace(",", " ").split()]
     for t in targets:
         if t not in _VALID_TARGETS:
-            raise argparse.ArgumentTypeError(
+            raise ValueError(
                 f"invalid target {t!r}; choose from {', '.join(sorted(_VALID_TARGETS))}"
             )
     if not targets:
-        raise argparse.ArgumentTypeError("--target requires at least one target")
+        raise ValueError("--target requires at least one target")
     return targets
 
 
@@ -457,27 +457,42 @@ def main(argv: list[str] | None = None) -> int:
     # --onedir implies --use-runtime-lib so the codegen emits `extern`
     # references that resolve against the shared runtime library.
     use_runtime_lib = args.use_runtime_lib or args.bundle_mode == "onedir"
-
-    kwargs = dict(
-        emit_asm_only=args.emit_asm,
-        keep_intermediates=args.keep,
-        keep_assembly=args.keep_assembly,
-        use_runtime_lib=use_runtime_lib,
-        nasm_path=args.nasm,
-        gcc_path=args.gcc,
-        bundle_mode=args.bundle_mode,
-        source_dir=args.source.resolve().parent,
-        entry_path=args.source.resolve(),
-        output_type=args.output_type,
-        icon_path=args.icon,
-        all_errors=all_errors,
-    )
+    _source_dir = args.source.resolve().parent
+    _entry_path = args.source.resolve()
 
     try:
         if single:
-            compile_source(src, targets[0], out_paths[0], **kwargs)
+            compile_source(
+                src, targets[0], out_paths[0],
+                emit_asm_only=args.emit_asm,
+                keep_intermediates=args.keep,
+                keep_assembly=args.keep_assembly,
+                use_runtime_lib=use_runtime_lib,
+                nasm_path=args.nasm,
+                gcc_path=args.gcc,
+                bundle_mode=args.bundle_mode,
+                source_dir=_source_dir,
+                entry_path=_entry_path,
+                output_type=args.output_type,
+                icon_path=args.icon,
+                all_errors=all_errors,
+            )
         else:
-            compile_targets(src, targets, out_paths, **kwargs)
+            compile_targets(
+                src, targets, out_paths,
+                emit_asm_only=args.emit_asm,
+                keep_intermediates=args.keep,
+                keep_assembly=args.keep_assembly,
+                use_runtime_lib=use_runtime_lib,
+                nasm_path=args.nasm,
+                gcc_path=args.gcc,
+                bundle_mode=args.bundle_mode,
+                source_dir=_source_dir,
+                entry_path=_entry_path,
+                output_type=args.output_type,
+                icon_path=args.icon,
+                all_errors=all_errors,
+            )
     except MultiSemaError as me:
         print(me.format_all(src, str(args.source)), file=sys.stderr)
         return 1
