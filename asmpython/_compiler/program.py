@@ -176,6 +176,7 @@ _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "ipaddress", "numbers", "hmac", "timeit", "getpass",
     "gzip", "zipfile", "pickle",
     "colorsys", "cmath", "sched",
+    "gui", "framebuffer",
 })
 
 # Dotted module names that map to a differently-named file in stdlib/.

@@ -341,7 +341,7 @@ class LinuxCodegen(Codegen):
         )
         self.emitf(f"mov rax, [rbp{acc_slot:+d}]")
         for sym in ("popen", "pclose", "fgetc", "strlen"):
-            if sym not in self.ffi_externs:
+            if sym not in self.ffi_called:
                 self.ffi_externs.add(sym)
 
     # ---- runtime data + helpers --------------------------------------------
@@ -521,6 +521,7 @@ class LinuxCodegen(Codegen):
         "_gui_wait_event", "_gui_key_scancode",
         "_gui_mouse_x", "_gui_mouse_y", "_gui_mouse_button",
         "_gui_load_bmp",
+        "_gui_render_copy", "_gui_query_texture_w", "_gui_query_texture_h",
     )
     _MATH_SYMS = (
         "_math_isnan", "_math_isinf", "_math_isfinite",
@@ -550,16 +551,21 @@ class LinuxCodegen(Codegen):
 
     @property
     def needs_net(self) -> bool:
-        return any(s in self.ffi_externs for s in self._NET_SYMS)
+        return any(s in self.ffi_called for s in self._NET_SYMS)
+
+    @property
+    def needs_gui(self) -> bool:
+        return (any(s in self.ffi_called for s in self._GUI_SYMS) or
+                any(s.startswith("SDL_") for s in self.ffi_called))
 
     def emit_asmlib_runtime(self) -> None:
-        needs_hw     = any(s in self.ffi_externs for s in self._HW_STUBS)
-        needs_net    = any(s in self.ffi_externs for s in self._NET_SYMS)
-        needs_gui    = any(s in self.ffi_externs for s in self._GUI_SYMS)
-        needs_math   = any(s in self.ffi_externs for s in self._MATH_SYMS)
-        needs_random = any(s in self.ffi_externs for s in self._RANDOM_SYMS)
-        needs_time   = any(s in self.ffi_externs for s in self._TIME_SYMS)
-        needs_thread = any(s in self.ffi_externs for s in self._THREAD_SYMS)
+        needs_hw     = any(s in self.ffi_called for s in self._HW_STUBS)
+        needs_net    = any(s in self.ffi_called for s in self._NET_SYMS)
+        needs_gui    = any(s in self.ffi_called for s in self._GUI_SYMS)
+        needs_math   = any(s in self.ffi_called for s in self._MATH_SYMS)
+        needs_random = any(s in self.ffi_called for s in self._RANDOM_SYMS)
+        needs_time   = any(s in self.ffi_called for s in self._TIME_SYMS)
+        needs_thread = any(s in self.ffi_called for s in self._THREAD_SYMS)
         if not (needs_hw or needs_net or needs_gui or needs_math or needs_random
                 or needs_time or needs_thread):
             return
@@ -575,7 +581,7 @@ class LinuxCodegen(Codegen):
             self.emit("section .rodata")
             self.emit("_math_deg_factor:  dq 57.29577951308232")   # 180/pi
             self.emit("_math_rad_factor:  dq 0.017453292519943295")  # pi/180
-            needs_inf_consts = any(s in self.ffi_externs for s in (
+            needs_inf_consts = any(s in self.ffi_called for s in (
                 "_math_isinf", "_math_isfinite"))
             if needs_inf_consts:
                 self.emit("section .rodata")
@@ -584,12 +590,12 @@ class LinuxCodegen(Codegen):
             self.emit("section .text")
 
             # _math_isnan(xmm0=x) -> rax: 1 if NaN (NaN is the only float where x!=x)
-            if "_math_isnan" in self.ffi_externs:
+            if "_math_isnan" in self.ffi_called:
                 self.label("_math_isnan")
                 self.emitf("ucomisd xmm0, xmm0", "setp al", "movzx rax, al", "ret")
 
             # _math_isinf(xmm0=x) -> rax: 1 if +inf or -inf
-            if "_math_isinf" in self.ffi_externs:
+            if "_math_isinf" in self.ffi_called:
                 self.label("_math_isinf")
                 self.emitf(
                     "movsd xmm1, [rel _math_abs_mask]",
@@ -602,7 +608,7 @@ class LinuxCodegen(Codegen):
                 )
 
             # _math_isfinite(xmm0=x) -> rax: 1 if finite
-            if "_math_isfinite" in self.ffi_externs:
+            if "_math_isfinite" in self.ffi_called:
                 self.label("_math_isfinite")
                 self.emitf(
                     "ucomisd xmm0, xmm0",
@@ -619,17 +625,17 @@ class LinuxCodegen(Codegen):
                 self.emitf("mov rax, 1", "ret")
 
             # _math_degrees(xmm0=radians) -> xmm0=degrees
-            if "_math_degrees" in self.ffi_externs:
+            if "_math_degrees" in self.ffi_called:
                 self.label("_math_degrees")
                 self.emitf("mulsd xmm0, [rel _math_deg_factor]", "ret")
 
             # _math_radians(xmm0=degrees) -> xmm0=radians
-            if "_math_radians" in self.ffi_externs:
+            if "_math_radians" in self.ffi_called:
                 self.label("_math_radians")
                 self.emitf("mulsd xmm0, [rel _math_rad_factor]", "ret")
 
             # _math_gcd(rdi=a, rsi=b) -> rax=gcd  (Euclidean, always positive)
-            if "_math_gcd" in self.ffi_externs:
+            if "_math_gcd" in self.ffi_called:
                 self.label("_math_gcd")
                 self.emitf(
                     "mov rax, rdi", "mov rcx, rsi",
@@ -648,7 +654,7 @@ class LinuxCodegen(Codegen):
                 self.emitf("ret")
 
             # _math_lcm(rdi=a, rsi=b) -> rax=lcm  (|a*b| / gcd(a,b))
-            if "_math_lcm" in self.ffi_externs:
+            if "_math_lcm" in self.ffi_called:
                 self.label("_math_lcm")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
                 self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi")
@@ -665,7 +671,7 @@ class LinuxCodegen(Codegen):
                 self.emitf("xor rax, rax", "leave", "ret")
 
             # _math_factorial(rdi=n) -> rax=n!
-            if "_math_factorial" in self.ffi_externs:
+            if "_math_factorial" in self.ffi_called:
                 self.label("_math_factorial")
                 self.emitf("mov rax, 1", "cmp rdi, 1", "jle ._mf_done")
                 self.label("._mf_loop")
@@ -675,7 +681,7 @@ class LinuxCodegen(Codegen):
 
             # _math_comb(rdi=n, rsi=k) -> rax=C(n,k)
             # C(n,k) = n! / (k! * (n-k)!) computed iteratively to avoid overflow
-            if "_math_comb" in self.ffi_externs:
+            if "_math_comb" in self.ffi_called:
                 self.label("_math_comb")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
                 self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi")
@@ -693,7 +699,7 @@ class LinuxCodegen(Codegen):
                 self.emitf("leave", "ret")
 
             # _math_perm(rdi=n, rsi=k) -> rax=P(n,k) = n! / (n-k)!
-            if "_math_perm" in self.ffi_externs:
+            if "_math_perm" in self.ffi_called:
                 self.label("_math_perm")
                 self.emitf("push rbp", "mov rbp, rsp")
                 # product of n * (n-1) * ... * (n-k+1)
@@ -706,7 +712,7 @@ class LinuxCodegen(Codegen):
                 self.emitf("pop rbp", "ret")
 
             # _math_log_base(xmm0=x, xmm1=base) -> xmm0=log(x)/log(base)
-            if "_math_log_base" in self.ffi_externs:
+            if "_math_log_base" in self.ffi_called:
                 self.label("_math_log_base")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
                 self.emitf("movsd [rbp-8], xmm1")   # save base
@@ -720,7 +726,7 @@ class LinuxCodegen(Codegen):
                            "divsd xmm0, xmm1", "leave", "ret")
 
             # _math_modf_frac(xmm0=x) -> xmm0=fractional part  (via modf)
-            if "_math_modf_frac" in self.ffi_externs:
+            if "_math_modf_frac" in self.ffi_called:
                 self.label("_math_modf_frac")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
                 self.emitf("lea rdi, [rbp-8]", "mov al, 1", "call modf")
@@ -728,35 +734,35 @@ class LinuxCodegen(Codegen):
                 self.emitf("leave", "ret")
 
             # _math_modf_int(xmm0=x) -> xmm0=integer part  (via modf)
-            if "_math_modf_int" in self.ffi_externs:
+            if "_math_modf_int" in self.ffi_called:
                 self.label("_math_modf_int")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
                 self.emitf("lea rdi, [rbp-8]", "mov al, 1", "call modf")
                 self.emitf("movsd xmm0, [rbp-8]", "leave", "ret")
 
             # _math_frexp_m(xmm0=x) -> xmm0=mantissa  (frexp; [0.5,1))
-            if "_math_frexp_m" in self.ffi_externs:
+            if "_math_frexp_m" in self.ffi_called:
                 self.label("_math_frexp_m")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
                 self.emitf("lea rsi, [rbp-8]", "mov al, 1", "call frexp")
                 self.emitf("leave", "ret")
 
             # _math_frexp_e(xmm0=x) -> rax=exponent  (int)
-            if "_math_frexp_e" in self.ffi_externs:
+            if "_math_frexp_e" in self.ffi_called:
                 self.label("_math_frexp_e")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
                 self.emitf("lea rsi, [rbp-8]", "mov al, 1", "call frexp")
                 self.emitf("movsxd rax, dword [rbp-8]", "leave", "ret")
 
             # _math_ldexp(xmm0=x, rdi=n) -> xmm0  (just forwards to libc ldexp)
-            if "_math_ldexp" in self.ffi_externs:
+            if "_math_ldexp" in self.ffi_called:
                 self.emit("extern ldexp")
                 self.label("_math_ldexp")
                 # SysV: xmm0=x already, rdi=n already — ldexp(double,int) is exact match
                 self.emitf("mov al, 1", "call ldexp", "ret")
 
             # _math_isqrt(rdi=n) -> rax = floor(sqrt(n))
-            if "_math_isqrt" in self.ffi_externs:
+            if "_math_isqrt" in self.ffi_called:
                 self.emit("extern sqrt")
                 self.label("_math_isqrt")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
@@ -764,7 +770,7 @@ class LinuxCodegen(Codegen):
                 self.emitf("cvttsd2si rax, xmm0", "leave", "ret")
 
             # _math_isclose(xmm0=a, xmm1=b, xmm2=rel_tol, xmm3=abs_tol) -> rax: 1 if close
-            if "_math_isclose" in self.ffi_externs:
+            if "_math_isclose" in self.ffi_called:
                 lbl_ic_yes = self.fresh("isclose_yes")
                 lbl_ic_no  = self.fresh("isclose_no")
                 self.emit("section .rodata")
@@ -804,13 +810,13 @@ class LinuxCodegen(Codegen):
             self.emit("section .text")
 
             # _random_random() -> xmm0 in [0.0, 1.0)
-            if "_random_random" in self.ffi_externs:
+            if "_random_random" in self.ffi_called:
                 self.label("_random_random")
                 self.emitf("xor eax, eax", "call rand")
                 self.emitf("cvtsi2sd xmm0, rax", "mulsd xmm0, [rel _rand_inv]", "ret")
 
             # _random_randint(rdi=a, rsi=b) -> rax  in [a, b] inclusive
-            if "_random_randint" in self.ffi_externs:
+            if "_random_randint" in self.ffi_called:
                 self.label("_random_randint")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
                 self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi")
@@ -821,7 +827,7 @@ class LinuxCodegen(Codegen):
                 self.emitf("add rdx, [rbp-8]", "mov rax, rdx", "leave", "ret")
 
             # _random_uniform(xmm0=a, xmm1=b) -> xmm0 in [a, b]
-            if "_random_uniform" in self.ffi_externs:
+            if "_random_uniform" in self.ffi_called:
                 self.label("_random_uniform")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
                 self.emitf("movsd [rbp-8], xmm0", "movsd [rbp-16], xmm1")
@@ -832,7 +838,7 @@ class LinuxCodegen(Codegen):
                            "mulsd xmm0, xmm1", "addsd xmm0, [rbp-8]", "leave", "ret")
 
             # _random_randrange(rdi=stop) -> rax in [0, stop)
-            if "_random_randrange" in self.ffi_externs:
+            if "_random_randrange" in self.ffi_called:
                 self.label("_random_randrange")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
                 self.emitf("mov [rbp-8], rdi")
@@ -843,7 +849,7 @@ class LinuxCodegen(Codegen):
             # _random_choice(rdi=list_hdr) -> rax = element at random index
             # List layout: [hdr+0]=cap, [hdr+8]=len, [hdr+16]=buf_ptr
             # Frame: push+40=48 bytes total → 16-byte aligned for rand() call.
-            if "_random_choice" in self.ffi_externs:
+            if "_random_choice" in self.ffi_called:
                 self.label("_random_choice")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 40")
                 self.emitf("mov [rbp-8], rdi")           # save list header
@@ -859,7 +865,7 @@ class LinuxCodegen(Codegen):
 
             # _random_shuffle(rdi=list_hdr) — Fisher-Yates shuffle in-place
             # Frame: push+56=64 bytes total → 16-byte aligned for rand() call.
-            if "_random_shuffle" in self.ffi_externs:
+            if "_random_shuffle" in self.ffi_called:
                 lbl_loop = self.fresh("shuffle_loop")
                 lbl_done = self.fresh("shuffle_done")
                 self.label("_random_shuffle")
@@ -886,7 +892,7 @@ class LinuxCodegen(Codegen):
             # _random_sample(rdi=list_hdr, rsi=k) -> rax = new list of k unique elements
             # SysV: rdi=src_hdr, rsi=k. Frame offsets from rbp:
             # -8=src_hdr, -16=n, -24=k, -32=copy_buf, -40=i, -48=result_hdr, -56=result_buf
-            if "_random_sample" in self.ffi_externs:
+            if "_random_sample" in self.ffi_called:
                 self.emit("extern malloc")
                 lbl_s_cp = self.fresh("sample_cp")
                 lbl_s_cp_end = self.fresh("sample_cp_end")
@@ -950,7 +956,7 @@ class LinuxCodegen(Codegen):
                 self.emitf("mov rax, [rbp-48]", "leave", "ret")
 
             # _random_getrandbits(rdi=k) -> rax: k random bits (1-64)
-            if "_random_getrandbits" in self.ffi_externs:
+            if "_random_getrandbits" in self.ffi_called:
                 lbl_gb_loop = self.fresh("grb_loop")
                 lbl_gb_done = self.fresh("grb_done")
                 self.label("_random_getrandbits")
@@ -980,7 +986,7 @@ class LinuxCodegen(Codegen):
             self.emit("section .text")
 
             # _time_perf_counter() -> xmm0 seconds as float
-            if "_time_perf_counter" in self.ffi_externs:
+            if "_time_perf_counter" in self.ffi_called:
                 self.label("_time_perf_counter")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
                 self.emitf("mov edi, 1", "lea rsi, [rel _time_ts]",
@@ -992,7 +998,7 @@ class LinuxCodegen(Codegen):
                            "leave", "ret")
 
             # _time_time_ns() -> rax (ns since epoch via clock_gettime REALTIME=0)
-            if "_time_time_ns" in self.ffi_externs:
+            if "_time_time_ns" in self.ffi_called:
                 self.label("_time_time_ns")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
                 self.emitf("xor edi, edi", "lea rsi, [rel _time_ts]",
@@ -1003,7 +1009,7 @@ class LinuxCodegen(Codegen):
                 self.emitf("add rax, [rel _time_ts+8]", "leave", "ret")
 
             # _time_sleep_ms(rdi=ms) — usleep(ms * 1000) on Linux
-            if "_time_sleep_ms" in self.ffi_externs:
+            if "_time_sleep_ms" in self.ffi_called:
                 self.emit("extern usleep")
                 self.label("_time_sleep_ms")
                 self.emitf("imul rdi, rdi, 1000", "call usleep", "xor rax, rax", "ret")
@@ -1015,24 +1021,24 @@ class LinuxCodegen(Codegen):
             # PIC/PIT/keyboard/VGA, cli/sti/hlt -- all ring-0-only) they have
             # real implementations on hosted targets too, not just
             # freestanding.
-            if "_hw_rdtsc" in self.ffi_externs:
+            if "_hw_rdtsc" in self.ffi_called:
                 self.label("_hw_rdtsc")
                 self.emitf("rdtsc", "shl rdx, 32", "or rax, rdx", "ret")
-            if "_hw_cpuid" in self.ffi_externs:
+            if "_hw_cpuid" in self.ffi_called:
                 # arg (leaf) arrives in edi (SysV ABI); returns EAX after CPUID.
                 self.label("_hw_cpuid")
                 self.emitf("mov eax, edi", "push rbx", "cpuid",
                            "pop rbx", "movsx rax, eax", "ret")
-            if "_hw_rdrand" in self.ffi_externs:
+            if "_hw_rdrand" in self.ffi_called:
                 self.label("_hw_rdrand")
                 self.label(".retry")
                 self.emitf("rdrand rax", "jnc .retry", "ret")
 
-            if any(s in self.ffi_externs for s in self._HW_CONSOLE_SYMS):
+            if any(s in self.ffi_called for s in self._HW_CONSOLE_SYMS):
                 self._emit_console_runtime()
 
             for sym in self._HW_STUBS:
-                if sym in self.ffi_externs and sym not in (
+                if sym in self.ffi_called and sym not in (
                         "_hw_rdtsc", "_hw_cpuid", "_hw_rdrand") and sym not in self._HW_CONSOLE_SYMS:
                     self.label(sym)
                     self.emitf("xor rax, rax", "ret")
@@ -1057,7 +1063,7 @@ class LinuxCodegen(Codegen):
             self.emit("extern errno")
 
             # _net_bind(rdi=fd, rsi=addr_cstr, rdx=port) -> rax
-            if "_net_bind" in self.ffi_externs:
+            if "_net_bind" in self.ffi_called:
                 self.label("_net_bind")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
                 # Save args
@@ -1074,7 +1080,7 @@ class LinuxCodegen(Codegen):
                            "call bind", "leave", "ret")
 
             # _net_connect(rdi=fd, rsi=addr_cstr, rdx=port) -> rax
-            if "_net_connect" in self.ffi_externs:
+            if "_net_connect" in self.ffi_called:
                 self.label("_net_connect")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
                 self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi", "mov [rbp-24], rdx")
@@ -1087,7 +1093,7 @@ class LinuxCodegen(Codegen):
                            "call connect", "leave", "ret")
 
             # _net_send(rdi=fd, rsi=msg_cstr, rdx=flags) -> rax (bytes sent)
-            if "_net_send" in self.ffi_externs:
+            if "_net_send" in self.ffi_called:
                 self.emit("extern strlen")
                 self.label("_net_send")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
@@ -1100,7 +1106,7 @@ class LinuxCodegen(Codegen):
                            "call send", "leave", "ret")
 
             # _net_recv(rdi=fd, rsi=buf_size) -> rax (new string ptr)
-            if "_net_recv" in self.ffi_externs:
+            if "_net_recv" in self.ffi_called:
                 self.label("_net_recv")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
                 self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi")
@@ -1118,7 +1124,7 @@ class LinuxCodegen(Codegen):
                 self.emitf("mov byte [rax], 0", "leave", "ret")
 
             # _net_send_all(rdi=fd, rsi=msg_cstr) -> rax (total bytes sent)
-            if "_net_send_all" in self.ffi_externs:
+            if "_net_send_all" in self.ffi_called:
                 self.emit("extern strlen")
                 self.label("_net_send_all")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
@@ -1138,17 +1144,17 @@ class LinuxCodegen(Codegen):
                 self.emitf("mov rax, [rbp-32]", "leave", "ret")
 
             # _net_accept(rdi=fd) -> rax (new fd)
-            if "_net_accept" in self.ffi_externs:
+            if "_net_accept" in self.ffi_called:
                 self.label("_net_accept")
                 self.emitf("xor rsi, rsi", "xor rdx, rdx", "call accept", "ret")
 
             # _net_close(rdi=fd) -> rax
-            if "_net_close" in self.ffi_externs:
+            if "_net_close" in self.ffi_called:
                 self.label("_net_close")
                 self.emitf("call close", "ret")
 
             # _net_gethostname() -> rax (ptr to static 256-byte buffer)
-            if "_net_gethostname" in self.ffi_externs:
+            if "_net_gethostname" in self.ffi_called:
                 self.emit("section .bss")
                 self.emit("_net_hostname_buf: resb 256")
                 self.emit("section .text")
@@ -1158,12 +1164,12 @@ class LinuxCodegen(Codegen):
                            "lea rax, [_net_hostname_buf]", "ret")
 
             # _net_errno() -> rax
-            if "_net_errno" in self.ffi_externs:
+            if "_net_errno" in self.ffi_called:
                 self.label("_net_errno")
                 self.emitf("mov rax, [errno]", "ret")
 
             # _net_setsockopt(rdi=fd, rsi=level, rdx=optname, rcx=value) -> rax
-            if "_net_setsockopt" in self.ffi_externs:
+            if "_net_setsockopt" in self.ffi_called:
                 self.emit("extern setsockopt")
                 self.label("_net_setsockopt")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
@@ -1176,7 +1182,7 @@ class LinuxCodegen(Codegen):
                            "call setsockopt", "leave", "ret")
 
             # _net_getsockopt_int(rdi=fd, rsi=level, rdx=optname) -> rax (int value)
-            if "_net_getsockopt_int" in self.ffi_externs:
+            if "_net_getsockopt_int" in self.ffi_called:
                 self.emit("extern getsockopt")
                 self.label("_net_getsockopt_int")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
@@ -1197,17 +1203,19 @@ class LinuxCodegen(Codegen):
             self.emit("extern SDL_WaitEvent")
             self.emit("extern SDL_RenderFillRect")
             self.emit("extern SDL_RenderDrawRect")
+            self.emit("extern SDL_RenderCopy")
+            self.emit("extern SDL_QueryTexture")
 
-            # Static state: last SDL_Event (56 bytes) + SDL_Rect scratch (16 bytes)
             self.emit("section .bss")
             self.emit("_gui_event_buf: resb 56")
+            self.emit("_gui_tex_dim: resd 2")
             self.emit("section .text")
 
             # _gui_load_bmp(rdi=path) -> rax (SDL_Surface* handle, or 0 on failure)
             # SDL2 has no format-agnostic image loader without SDL_image, but
             # BMP loading (SDL_LoadBMP) is always available. SDL_LoadBMP is a
             # macro for SDL_LoadBMP_RW(SDL_RWFromFile(path, "rb"), 1).
-            if "_gui_load_bmp" in self.ffi_externs:
+            if "_gui_load_bmp" in self.ffi_called:
                 self.emit("extern SDL_RWFromFile")
                 self.emit("extern SDL_LoadBMP_RW")
                 self.emit("section .rodata")
@@ -1227,7 +1235,7 @@ class LinuxCodegen(Codegen):
                 self.emitf("xor rax, rax", "leave", "ret")
 
             # _gui_fill_rect(rdi=renderer, rsi=x, rdx=y, rcx=w, r8=h) -> rax
-            if "_gui_fill_rect" in self.ffi_externs:
+            if "_gui_fill_rect" in self.ffi_called:
                 self.label("_gui_fill_rect")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
                 # Build SDL_Rect on stack: x=rsi, y=rdx, w=rcx, h=r8
@@ -1242,7 +1250,7 @@ class LinuxCodegen(Codegen):
                            "add rsp, 16", "leave", "ret")
 
             # _gui_draw_rect(rdi=renderer, rsi=x, rdx=y, rcx=w, r8=h) -> rax
-            if "_gui_draw_rect" in self.ffi_externs:
+            if "_gui_draw_rect" in self.ffi_called:
                 self.label("_gui_draw_rect")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
                 self.emitf("push r8",
@@ -1256,7 +1264,7 @@ class LinuxCodegen(Codegen):
                            "add rsp, 16", "leave", "ret")
 
             # _gui_poll_event() -> rax (event type; 0 = none)
-            if "_gui_poll_event" in self.ffi_externs:
+            if "_gui_poll_event" in self.ffi_called:
                 self.label("_gui_poll_event")
                 self.emitf("lea rdi, [_gui_event_buf]", "call SDL_PollEvent",
                            "test rax, rax", "jz ._gpe_none",
@@ -1265,30 +1273,68 @@ class LinuxCodegen(Codegen):
                 self.emitf("xor rax, rax", "ret")
 
             # _gui_wait_event() -> rax (event type)
-            if "_gui_wait_event" in self.ffi_externs:
+            if "_gui_wait_event" in self.ffi_called:
                 self.label("_gui_wait_event")
                 self.emitf("lea rdi, [_gui_event_buf]", "call SDL_WaitEvent",
                            "mov eax, dword [_gui_event_buf]", "ret")
 
             # _gui_key_scancode() -> rax  (SDL_KeyboardEvent.keysym.scancode at +16)
-            if "_gui_key_scancode" in self.ffi_externs:
+            if "_gui_key_scancode" in self.ffi_called:
                 self.label("_gui_key_scancode")
                 self.emitf("movsx rax, dword [_gui_event_buf+16]", "ret")
 
             # _gui_mouse_x/y/button from SDL_MouseMotionEvent / SDL_MouseButtonEvent
             # SDL_MouseMotionEvent: type(0) windowID(4) which(8) state(12) x(16) y(20)
-            if "_gui_mouse_x" in self.ffi_externs:
+            if "_gui_mouse_x" in self.ffi_called:
                 self.label("_gui_mouse_x")
                 self.emitf("movsx rax, dword [_gui_event_buf+16]", "ret")
 
-            if "_gui_mouse_y" in self.ffi_externs:
+            if "_gui_mouse_y" in self.ffi_called:
                 self.label("_gui_mouse_y")
                 self.emitf("movsx rax, dword [_gui_event_buf+20]", "ret")
 
-            if "_gui_mouse_button" in self.ffi_externs:
+            if "_gui_mouse_button" in self.ffi_called:
                 # SDL_MouseButtonEvent: button at offset 13 (1 byte)
                 self.label("_gui_mouse_button")
                 self.emitf("movzx rax, byte [_gui_event_buf+13]", "ret")
+
+            # _gui_render_copy(rdi=renderer, rsi=texture, rdx=x, rcx=y, r8=w, r9=h)
+            # Builds SDL_Rect{x,y,w,h} on stack, calls SDL_RenderCopy(ren,tex,NULL,&rect).
+            if "_gui_render_copy" in self.ffi_called:
+                self.label("_gui_render_copy")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi")
+                # Build SDL_Rect at [rbp-32]; args: rdx=x, rcx=y, r8=w, r9=h
+                self.emitf("mov dword [rbp-32], edx",   # rect.x
+                           "mov dword [rbp-28], ecx",   # rect.y
+                           "mov dword [rbp-24], r8d",   # rect.w
+                           "mov dword [rbp-20], r9d")   # rect.h
+                self.emitf("mov rdi, [rbp-8]", "mov rsi, [rbp-16]",
+                           "xor rdx, rdx",
+                           "lea rcx, [rbp-32]",
+                           "call SDL_RenderCopy",
+                           "leave", "ret")
+
+            # _gui_query_texture_w/h(rdi=texture) -> rax (width or height)
+            # Calls SDL_QueryTexture(tex, NULL, NULL, &w, &h) and returns one dim.
+            if "_gui_query_texture_w" in self.ffi_called:
+                self.label("_gui_query_texture_w")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("xor rsi, rsi", "xor rdx, rdx",
+                           "lea rcx, [_gui_tex_dim]",
+                           "lea r8, [_gui_tex_dim+4]",
+                           "call SDL_QueryTexture",
+                           "movsx rax, dword [_gui_tex_dim]",
+                           "leave", "ret")
+            if "_gui_query_texture_h" in self.ffi_called:
+                self.label("_gui_query_texture_h")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("xor rsi, rsi", "xor rdx, rdx",
+                           "lea rcx, [_gui_tex_dim]",
+                           "lea r8, [_gui_tex_dim+4]",
+                           "call SDL_QueryTexture",
+                           "movsx rax, dword [_gui_tex_dim+4]",
+                           "leave", "ret")
 
         # ---- real pthread threading helpers (SysV AMD64 ABI) ----------------
         # Linked with -lpthread via the gcc driver.
@@ -1328,7 +1374,7 @@ class LinuxCodegen(Codegen):
             self.emitf("xor rax, rax", "leave", "ret")
 
             # _threading_create(rdi=thread_obj_ptr) -> rax=thread_id (pthread_t)
-            if "_threading_create" in self.ffi_externs:
+            if "_threading_create" in self.ffi_called:
                 self.label("_threading_create")
                 self.emitf(
                     "push rbp", "mov rbp, rsp", "sub rsp, 32",
@@ -1345,7 +1391,7 @@ class LinuxCodegen(Codegen):
                 )
 
             # _threading_join(rdi=tid) -> rax=0
-            if "_threading_join" in self.ffi_externs:
+            if "_threading_join" in self.ffi_called:
                 self.label("_threading_join")
                 self.emitf(
                     "push rbp", "mov rbp, rsp", "sub rsp, 16",
@@ -1355,22 +1401,22 @@ class LinuxCodegen(Codegen):
                 )
 
             # _threading_is_alive: no portable pthread check; return 0 (joined = dead)
-            if "_threading_is_alive" in self.ffi_externs:
+            if "_threading_is_alive" in self.ffi_called:
                 self.label("_threading_is_alive")
                 self.emitf("xor rax, rax", "ret")
 
             # _threading_get_ident() -> rax = pthread_t (opaque, fits int64)
-            if "_threading_get_ident" in self.ffi_externs:
+            if "_threading_get_ident" in self.ffi_called:
                 self.label("_threading_get_ident")
                 self.emitf("call pthread_self", "ret")
 
             # _threading_active_count() -> 1 (no global tracking)
-            if "_threading_active_count" in self.ffi_externs:
+            if "_threading_active_count" in self.ffi_called:
                 self.label("_threading_active_count")
                 self.emitf("mov rax, 1", "ret")
 
             # _threading_lock_init(rdi=lock_obj_ptr) -> rax=mutex_ptr
-            if "_threading_lock_init" in self.ffi_externs:
+            if "_threading_lock_init" in self.ffi_called:
                 self.label("_threading_lock_init")
                 self.emitf(
                     "push rbp", "mov rbp, rsp", "sub rsp, 16",
@@ -1385,7 +1431,7 @@ class LinuxCodegen(Codegen):
                 )
 
             # _threading_lock_acquire(rdi=mutex_ptr) -> rax=1
-            if "_threading_lock_acquire" in self.ffi_externs:
+            if "_threading_lock_acquire" in self.ffi_called:
                 self.label("_threading_lock_acquire")
                 self.emitf(
                     "push rbp", "mov rbp, rsp", "sub rsp, 16",
@@ -1394,7 +1440,7 @@ class LinuxCodegen(Codegen):
                 )
 
             # _threading_lock_release(rdi=mutex_ptr) -> rax=0
-            if "_threading_lock_release" in self.ffi_externs:
+            if "_threading_lock_release" in self.ffi_called:
                 self.label("_threading_lock_release")
                 self.emitf(
                     "push rbp", "mov rbp, rsp", "sub rsp, 16",
@@ -1403,7 +1449,7 @@ class LinuxCodegen(Codegen):
                 )
 
             # _threading_lock_destroy(rdi=mutex_ptr)
-            if "_threading_lock_destroy" in self.ffi_externs:
+            if "_threading_lock_destroy" in self.ffi_called:
                 self.label("_threading_lock_destroy")
                 self.emitf(
                     "push rbp", "mov rbp, rsp", "sub rsp, 16",

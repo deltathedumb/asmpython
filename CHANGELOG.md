@@ -4,8 +4,68 @@ All notable changes to asmpython are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
-## [1.2.0] - preview - 2026-06-17
-### Coming soon!
+## [1.2.0] — 2026-06-17 — Graphics everywhere
+
+A complete, batteries-included graphics library for both hosted (SDL2) and
+freestanding (framebuffer) targets.
+
+### Added
+
+- **`gui` module** — high-level graphics package (`import gui`). Single import
+  provides everything: `Canvas` window class, `Image` sprite class, 30+ named
+  color constants (`BLACK`, `WHITE`, `RED`, …), full SDL2 init/window/renderer
+  constants, and all keyboard/event/button constants. No need to touch SDL2
+  directly for common cases.
+
+  - `Canvas(title, w, h)` — hardware-accelerated SDL2 window+renderer.
+    - `.color(packed, a=255)` — set draw color from 0xRRGGBB + alpha.
+    - `.clear(c=0)` — fill canvas.
+    - `.line(x0, y0, x1, y1)`, `.rect(x, y, w, h)`, `.filled_rect(x, y, w, h)` — drawing primitives.
+    - `.circle(cx, cy, r)`, `.disc(cx, cy, r)` — Bresenham circle and filled disc.
+    - `.ftriangle(x1, y1, x2, y2, x3, y3)` — scanline-rasterized filled triangle.
+    - `.image(path)` — load a BMP file; returns an `Image` handle.
+    - `.blit(img, x, y)` — draw an `Image` at (x, y) using full-window dest rect.
+    - `.update()` — present frame and drain event queue; returns `1` while running.
+    - `.poll()` — drain one event; returns event type or 0.
+    - `.key()` — last keyboard scancode from current event buffer.
+    - `.mouse_x()`, `.mouse_y()`, `.mouse_button()` — mouse state.
+    - `.delay(ms)` — SDL_Delay wrapper.
+    - `.close()` — destroy renderer + window.
+
+  - `Image` — sprite loaded from disk; `.w()`, `.h()`, `.free()`.
+  - All SDL2 init/window/renderer constants: `INIT_VIDEO`, `WINDOW_SHOWN`, `WINDOW_CENTERED`, `RENDERER_ACCELERATED`, etc.
+  - Full keyboard coverage: `KEY_A`–`KEY_Z`, `KEY_0`–`KEY_9`, `KEY_F1`–`KEY_F12`, `KEY_ESCAPE`, `KEY_SPACE`, `KEY_RETURN`, `KEY_TAB`, `KEY_BACKSPACE`, `KEY_DELETE`, `KEY_INSERT`, `KEY_HOME`, `KEY_END`, `KEY_PAGEUP`, `KEY_PAGEDOWN`, arrow keys, all modifiers (`LCTRL`/`LSHIFT`/`LALT`/`RCTRL`/`RSHIFT`/`RALT`).
+  - Mouse events: `EVENT_MOUSEBUTTONDOWN`, `EVENT_MOUSEBUTTONUP`, `EVENT_MOUSEMOTION`, `EVENT_MOUSEWHEEL`, `BUTTON_LEFT`, `BUTTON_RIGHT`, `BUTTON_MIDDLE`.
+  - Blend modes: `BLEND_NONE`, `BLEND_ALPHA`, `BLEND_ADD`, `BLEND_MOD`; `Canvas.set_blend(mode)` and `Canvas.set_alpha(a)` for per-image alpha control.
+
+- **`framebuffer` module** — software pixel rendering for bare-metal and UEFI
+  targets (`import framebuffer`). No OS, no SDL2, no dependencies beyond
+  `hardware.mmio_write32`/`mmio_write8`.
+
+  - `Framebuffer(addr, width, height, pitch, bpp)` — wraps a linear memory-mapped
+    framebuffer; supports 32 bpp and 8 bpp modes.
+    - `.put_pixel(x, y, color)` — bounds-checked pixel write.
+    - `.clear(color=0)` — fill entire framebuffer.
+    - `.fill_rect(x, y, w, h, color)` — clipped filled rectangle.
+    - `.draw_rect(x, y, w, h, color)` — outlined rectangle (4 edge lines).
+    - `.draw_line(x0, y0, x1, y1, color)` — Bresenham line.
+    - `.draw_circle(cx, cy, r, color)` — midpoint circle algorithm.
+    - `.fill_circle(cx, cy, r, color)` — scanline filled circle.
+    - `.draw_triangle(x1, y1, x2, y2, x3, y3, color)` — outlined triangle.
+    - `.fill_triangle(x1, y1, x2, y2, x3, y3, color)` — scanline filled triangle.
+  - `rgb(r, g, b)` — pack as 0x00RRGGBB (UEFI BGR wire format).
+  - `bgr(r, g, b)` — pack as 0x00BBGGRR for RGB-byte-order screens.
+  - Named colors: `BLACK`, `WHITE`, `RED`, `GREEN`, `BLUE`, `YELLOW`, `CYAN`, `MAGENTA`, `ORANGE`, `PURPLE`, `GRAY`, `DARK_GRAY`, `LIGHT_GRAY`, `PINK`, `BROWN`, `SKY`, `NAVY`, `LIME`, `TEAL`, `GOLD`, `CRIMSON`.
+
+- **Texture/sprite support in `_gui_sdl`**: `create_texture`, `destroy_texture`, `query_texture_w/h`, `render_copy`, `set_texture_blend`, `set_texture_alpha`, `set_draw_blend` FFI bindings.
+
+- **SDL2 auto-linkage**: both Windows and Linux targets detect SDL2 usage via a `needs_gui` property and automatically append `-lSDL2` to the link command — no manual flag needed.
+
+- **`ffi_called` precision tracking**: codegen now tracks which FFI c_names are actually called (not just imported). Helper runtime blocks (`needs_gui`, `needs_math`, etc.) are emitted only when the corresponding functions are actually called, preventing spurious SDL2 linkage for constant-only imports.
+
+### Tests
+
+450/450 passing (was 448 at 1.1.0).
 
 ## [1.1.0] — 2026-06-16
 

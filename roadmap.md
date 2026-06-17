@@ -30,6 +30,22 @@ Linux cross-build from Windows via WSL in a single `build.py` run.
 
 Linux executables now link correctly under modern gcc (`-no-pie`). Toolchain must be on PATH; `_download-deps.bat` updated to fetch w64devkit.
 
+### 1.2.0 — 2026-06-17 — Graphics everywhere
+
+Complete, batteries-included graphics library for all targets.
+
+**`gui` module** — high-level SDL2 wrapper (`import gui`). `Canvas` window/renderer class with drawing primitives (line, rect, filled rect, circle, disc, filled triangle), sprite support via `Image` (load BMP → texture), `.update()` game loop, keyboard/mouse polling. Full SDL2 constant coverage: 26 letter keys, 10 digit keys, F1–F12, navigation, modifiers, all event types, mouse buttons, blend modes. 30+ named colors. Single import, no SDL2 knowledge required.
+
+**`framebuffer` module** — software pixel rendering for bare-metal and UEFI (`import framebuffer`). `Framebuffer(addr, width, height, pitch, bpp)` with `put_pixel`, `clear`, `fill_rect`, `draw_rect`, `draw_line`, `draw_circle`, `fill_circle`, `draw_triangle`, `fill_triangle`. `rgb()`/`bgr()` color pack helpers. No OS, no SDL2, no runtime dependencies.
+
+**SDL2 auto-linkage** — both targets detect SDL2 usage via a `needs_gui` property; `-lSDL2` added automatically only when SDL2 is actually called.
+
+**`ffi_called` tracking** — codegen tracks which FFI c_names are actually called (not just imported). Runtime helper blocks emitted only on demand; constant-only SDL2 imports no longer force SDL2 linkage.
+
+**Tests:** 450/450 passing.
+
+---
+
 ### 1.1.0 — 2026-06-16 — CPython parity expansion
 
 Focus: close the gap between what asmpython compiles and what idiomatic Python actually looks like. The core theme is **operator protocol completion** — every standard dunder method now dispatches correctly — plus **stdlib depth** and **`__call__` support for callable instances**.
@@ -141,21 +157,6 @@ A broad set of language and stdlib improvements shipped alongside the core
 
 ## Planned
 
-### 1.2.0 — Comprehensive graphics library
-
-A new first-party graphics module (`asmlib.graphics` or a top-level `graphics`) that works across **all targets** — both hosted (Windows, Linux) and freestanding (bare-metal VGA/framebuffer).
-
-Planned scope:
-
-- **Hosted (Windows/Linux):** hardware-accelerated 2D via OpenGL or Direct2D; software fallback using the existing Win32 GDI / X11 paths. Sprites, tilemaps, drawing primitives, font rendering, input (keyboard + mouse + gamepad), audio.
-- **Freestanding:** VGA mode 13h and VESA linear framebuffer support; primitives (lines, rects, circles, blits); PSF2 font rendering; no OS required.
-- **Unified API:** the same Python-level `graphics.*` calls compile correctly for both target families. The compiler selects the backend based on `--target`.
-- **Integration with `asmlib.gui`:** the existing `gui.Window` / software-renderer surface in `asmlib.gui` merges into or aligns with the new library.
-
-This release makes asmpython viable for games, demos, embedded displays, and bare-metal graphical tools without any third-party dependency.
-
----
-
 ### 1.3.0 / 2.0.0 — Compatibility overhaul: ARM and macOS
 
 A platform-expansion release that broadens asmpython beyond x86-64 Windows/Linux. The version number (1.3.0 vs 2.0.0) will be decided based on how much of the existing codegen needs restructuring.
@@ -208,13 +209,10 @@ can be done as a parallel target alongside the existing codegen, 1.3.0.
 
 These are on the radar but not pinned to a specific release:
 
-- **Self-compilation** — asmpython compiles asmpython. Requires: `list[instance]`, `dict[str, instance]`, `@dataclass` synthesis, `subprocess.run`, `sys.argv`. Currently 12/19 compiler files pass sema.
+- **Self-compilation** — asmpython compiles asmpython. Requires: `list[instance]`, `dict[str, instance]`, `@dataclass` synthesis, `subprocess.run`, `sys.argv`. Currently 19/19 compiler files pass sema (lex+parse+sema); full self-host blocked on argparse API gap.
 - **Memory management** — reference counting so heap objects are freed. Currently all allocations leak (fine for short-lived scripts; not for long-running processes).
-- **Exception classes** — `raise MyError(msg)` with structured data. Currently exceptions carry string messages only.
-- **Generators / `yield`** — lazy iterators. Requires heap-allocated coroutine frames.
-- **Multi-file projects / packages** — `import mymodule` resolving to `mymodule.py` in the project. Currently all code must be in one file (plus stdlib imports).
-- **`@dataclass`** — synthesized `__init__`, `__repr__`, `__eq__` from field declarations. Parser already accepts `@dataclass`; the decorator currently does nothing.
 - **`re` module** — regular expressions. Requires an NFA/DFA engine; ~1 week of focused work.
 - **`asyncio`** — async/await. Requires coroutine frames (same as generators) plus an event loop.
 - **Windows ARM64 freestanding** — bare-metal on Windows Dev Kit / Snapdragon laptops.
-- **Performance** — constant folding, peephole optimizer, register allocation, type specialization for tight numeric loops.
+- **Audio** — SDL2 audio mixer binding in `gui`; bare-metal PC speaker / AC97 on freestanding.
+- **Font rendering** — PSF2 bitmap font blitting on `framebuffer`; TTF via SDL_ttf on `gui`.
