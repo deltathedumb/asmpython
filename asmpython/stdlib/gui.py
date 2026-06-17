@@ -23,6 +23,7 @@ Quick start::
 from __future__ import annotations
 
 import _gui_sdl
+import _font8x8
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +241,44 @@ class Canvas:
                     xr = tmp
                 _gui_sdl.fill_rect(self._ren, xl, dy, xr - xl + 1, 1)
                 dy = dy + 1
+        return 0
+
+    def char(self, x: int, y: int, ch: str, scale: int = 1) -> int:
+        """Draw one character from the built-in 8x8 bitmap font, using the current draw color."""
+        code: int = ord(ch)
+        if code < 32:
+            return 0
+        if code > 126:
+            return 0
+        base: int = (code - 32) * 8
+        row: int = 0
+        while row < 8:
+            bits: int = _font8x8._FONT[base + row]
+            col: int = 0
+            while col < 8:
+                if (bits >> (7 - col)) & 1:
+                    if scale == 1:
+                        _gui_sdl.draw_point(self._ren, x + col, y + row)
+                    else:
+                        _gui_sdl.fill_rect(self._ren, x + col * scale, y + row * scale, scale, scale)
+                col = col + 1
+            row = row + 1
+        return 0
+
+    def text(self, x: int, y: int, s: str, scale: int = 1) -> int:
+        """Draw a string using the built-in 8x8 bitmap font, using the current draw color."""
+        i: int = 0
+        cx: int = x
+        cw: int = 8 * scale
+        while i < len(s):
+            ch: str = s[i]
+            if ch == "\n":
+                cx = x
+                y = y + cw
+            else:
+                self.char(cx, y, ch, scale)
+                cx = cx + cw
+            i = i + 1
         return 0
 
     def image(self, path: str) -> Image:

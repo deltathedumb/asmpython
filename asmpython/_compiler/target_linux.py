@@ -523,6 +523,9 @@ class LinuxCodegen(Codegen):
         "_gui_load_bmp",
         "_gui_render_copy", "_gui_query_texture_w", "_gui_query_texture_h",
     )
+    _AUDIO_SYMS = (
+        "_audio_load_wav",
+    )
     _MATH_SYMS = (
         "_math_isnan", "_math_isinf", "_math_isfinite",
         "_math_degrees", "_math_radians",
@@ -546,6 +549,7 @@ class LinuxCodegen(Codegen):
 
     def _asmlib_inline_syms(self) -> set:
         return (set(self._HW_STUBS) | set(self._NET_SYMS) | set(self._GUI_SYMS)
+                | set(self._AUDIO_SYMS)
                 | set(self._MATH_SYMS) | set(self._RANDOM_SYMS) | set(self._TIME_SYMS)
                 | set(self._THREAD_SYMS))
 
@@ -558,16 +562,22 @@ class LinuxCodegen(Codegen):
         return (any(s in self.ffi_called for s in self._GUI_SYMS) or
                 any(s.startswith("SDL_") for s in self.ffi_called))
 
+    @property
+    def needs_audio(self) -> bool:
+        return (any(s in self.ffi_called for s in self._AUDIO_SYMS) or
+                any(s.startswith("Mix_") for s in self.ffi_called))
+
     def emit_asmlib_runtime(self) -> None:
         needs_hw     = any(s in self.ffi_called for s in self._HW_STUBS)
         needs_net    = any(s in self.ffi_called for s in self._NET_SYMS)
         needs_gui    = any(s in self.ffi_called for s in self._GUI_SYMS)
+        needs_audio  = any(s in self.ffi_called for s in self._AUDIO_SYMS)
         needs_math   = any(s in self.ffi_called for s in self._MATH_SYMS)
         needs_random = any(s in self.ffi_called for s in self._RANDOM_SYMS)
         needs_time   = any(s in self.ffi_called for s in self._TIME_SYMS)
         needs_thread = any(s in self.ffi_called for s in self._THREAD_SYMS)
-        if not (needs_hw or needs_net or needs_gui or needs_math or needs_random
-                or needs_time or needs_thread):
+        if not (needs_hw or needs_net or needs_gui or needs_audio or needs_math
+                or needs_random or needs_time or needs_thread):
             return
 
         self.emit("")
@@ -1335,6 +1345,29 @@ class LinuxCodegen(Codegen):
                            "call SDL_QueryTexture",
                            "movsx rax, dword [_gui_tex_dim+4]",
                            "leave", "ret")
+
+        # ---- SDL2_mixer / audio helpers ---------------------------------------
+        if needs_audio:
+            # _audio_load_wav(rdi=path) -> rax (Mix_Chunk* handle, or 0 on failure)
+            # Mix_LoadWAV is a macro for Mix_LoadWAV_RW(SDL_RWFromFile(path, "rb"), 1).
+            if "_audio_load_wav" in self.ffi_called:
+                self.emit("extern SDL_RWFromFile")
+                self.emit("extern Mix_LoadWAV_RW")
+                self.emit("section .rodata")
+                self.emit('_audio_wav_mode_rb: db "rb",0')
+                self.emit("section .text")
+                self.label("_audio_load_wav")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("mov [rbp-8], rdi",
+                           "lea rsi, [rel _audio_wav_mode_rb]",
+                           "mov rdi, [rbp-8]",
+                           "call SDL_RWFromFile",
+                           "test rax, rax", "jz ._alw_fail",
+                           "mov rdi, rax", "mov rsi, 1",
+                           "call Mix_LoadWAV_RW",
+                           "leave", "ret")
+                self.label("._alw_fail")
+                self.emitf("xor rax, rax", "leave", "ret")
 
         # ---- real pthread threading helpers (SysV AMD64 ABI) ----------------
         # Linked with -lpthread via the gcc driver.

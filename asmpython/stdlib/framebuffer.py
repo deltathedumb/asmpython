@@ -20,6 +20,7 @@ For UEFI GOP use bgr() to pack colors for the wire format.
 from __future__ import annotations
 
 import hardware
+import _font8x8
 
 
 def _fb_isqrt(n: int) -> int:
@@ -195,6 +196,44 @@ class Framebuffer:
             dx: int = _fb_isqrt(r * r - dy * dy)
             self._hline(cx - dx, cx + dx, cy + dy, color)
             dy = dy + 1
+        return 0
+
+    def draw_char(self, x: int, y: int, ch: str, color: int, scale: int = 1) -> int:
+        """Draw one character from the built-in 8x8 bitmap font at (x, y)."""
+        code: int = ord(ch)
+        if code < 32:
+            return 0
+        if code > 126:
+            return 0
+        base: int = (code - 32) * 8
+        row: int = 0
+        while row < 8:
+            bits: int = _font8x8._FONT[base + row]
+            col: int = 0
+            while col < 8:
+                if (bits >> (7 - col)) & 1:
+                    if scale == 1:
+                        self.put_pixel(x + col, y + row, color)
+                    else:
+                        self.fill_rect(x + col * scale, y + row * scale, scale, scale, color)
+                col = col + 1
+            row = row + 1
+        return 0
+
+    def draw_text(self, x: int, y: int, text: str, color: int, scale: int = 1) -> int:
+        """Draw a string using the built-in 8x8 bitmap font, left to right."""
+        i: int = 0
+        cx: int = x
+        cw: int = 8 * scale
+        while i < len(text):
+            ch: str = text[i]
+            if ch == "\n":
+                cx = x
+                y = y + cw
+            else:
+                self.draw_char(cx, y, ch, color, scale)
+                cx = cx + cw
+            i = i + 1
         return 0
 
     def draw_triangle(self, x1: int, y1: int, x2: int, y2: int, x3: int, y3: int, color: int) -> int:

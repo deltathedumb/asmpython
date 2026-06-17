@@ -4,6 +4,26 @@ All notable changes to asmpython are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
+## [Unreleased]
+
+### Added
+
+- **`audio` module** — SDL2_mixer-backed sound and music (`import audio`).
+  - `init(freq=44100, channels=2, chunk=2048)` / `quit()` — open/close the mixer.
+  - `Sound(path)` — loads a WAV; `.play(loops=0)`, `.play_on(channel, loops=0)`, `.stop()`, `.volume(vol)`, `.playing(channel=-1)`, `.free()`.
+  - `Music(path)` — streamed background music; `.play(loops=-1)`, `.stop()`, `.volume(vol)`, `.playing()`, `.free()`.
+  - Constants: `MAX_VOL`, `DEFAULT_FREQ`, `DEFAULT_FORMAT`, `DEFAULT_CHANNELS`.
+  - `-lSDL2_mixer` is auto-linked via a `needs_audio` property (mirrors `needs_gui`'s `ffi_called`-based precision tracking) — only linked when audio is actually used.
+  - `_audio_load_wav` inline helper expands the `Mix_LoadWAV` macro (`SDL_RWFromFile` + `Mix_LoadWAV_RW`) by hand in both Windows (Win64 ABI) and Linux (SysV ABI) targets.
+
+- **Bitmap font rendering** — built-in 8×8 font (`_font8x8`, printable ASCII 32–126) wired into both graphics backends:
+  - `framebuffer.Framebuffer.draw_char(x, y, ch, color, scale=1)` / `.draw_text(x, y, text, color, scale=1)` — bitmap text directly on a memory-mapped framebuffer, with `\n` support and integer pixel scaling.
+  - `gui.Canvas.char(x, y, ch, scale=1)` / `.text(x, y, s, scale=1)` — same, rendered with SDL2 `draw_point`/`fill_rect` using the canvas's current draw color.
+
+### Fixed
+
+- `_BUNDLED_SOURCE_STDLIB` was missing `"audio"`, so `import audio` silently compiled to dead code (no error, no real calls) instead of merging the real module source. Added `"audio"` and `"_font8x8"` to the bundled-source stdlib list.
+
 ## [1.2.0] — 2026-06-17 — Graphics everywhere
 
 A complete, batteries-included graphics library for both hosted (SDL2) and

@@ -215,5 +215,6 @@ These are on the radar but not pinned to a specific release:
 - **`re` module** — regular expressions. Requires an NFA/DFA engine; ~1 week of focused work.
 - **`asyncio`** — async/await. Requires coroutine frames (same as generators) plus an event loop.
 - **Windows ARM64 freestanding** — bare-metal on Windows Dev Kit / Snapdragon laptops.
-- **Audio** — SDL2 audio mixer binding in `gui`; bare-metal PC speaker / AC97 on freestanding.
-- **Font rendering** — PSF2 bitmap font blitting on `framebuffer`; TTF via SDL_ttf on `gui`.
+- ~~**Audio**~~ — done: `audio` module (SDL2_mixer) with `Sound`/`Music`, auto-linked via `needs_audio`.
+- ~~**Font rendering**~~ — done: built-in 8×8 bitmap font wired into `framebuffer.Framebuffer.draw_char/draw_text` and `gui.Canvas.char/text`. TTF via SDL_ttf on `gui` and PSF2 loading remain open if richer fonts are needed later.
+- **Bare-metal PC speaker / AC97 audio** — SDL2_mixer covers hosted targets; freestanding audio output is still open.
