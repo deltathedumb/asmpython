@@ -247,6 +247,18 @@ class Codegen:
                 label = f"__cv_{cls.name}__{cvname}"
                 self.class_var_labels[f"{cls.name}.{cvname}"] = label
                 self.class_var_defaults.append((label, cvdefault))
+        # import_binary()/.imported dynamic-loading: map each handle variable
+        # name to the list of (func_name, FuncDef) decorated `@handle.imported`
+        # for it. A handle's import_binary(path) call site resolves every
+        # function in its list via GetProcAddress/dlsym immediately, storing
+        # each pointer keyed by name on the handle instance — see
+        # _gen_constructor-adjacent dynamic-import codegen.
+        self.imported_funcs: dict[str, list[tuple[str, A.FuncDef]]] = {}
+        for f in mod.funcs:
+            for deco in f.decorators:
+                if deco.endswith(".imported"):
+                    handle_name = deco[: -len(".imported")]
+                    self.imported_funcs.setdefault(handle_name, []).append((f.name, f))
         # Exception-type RTTI: builtins get the fixed ids above; user classes
         # deriving (transitively) from a builtin exception get the next ids,
         # assigned in declaration order so output is deterministic.
@@ -1547,7 +1559,30 @@ class Codegen:
                             f"__ffi_arg_{id(b)}_{k}",
                             "float" if b.arg_types[k] == "float" else "int",
                         )
-            else:
+            # handle.func(args) where handle = import_binary(path) and func
+            # is @handle.imported: scratch slots for each marshaled arg plus
+            # the resolved function pointer (see _gen_dynamic_call).
+            if isinstance(expr.obj, A.Name) and expr.obj.name in self.imported_funcs:
+                _funcdef = None
+                for _fname, _fdef in self.imported_funcs[expr.obj.name]:
+                    if _fname == expr.method:
+                        _funcdef = _fdef
+                        break
+                if _funcdef is not None:
+                    for k in range(len(expr.args)):
+                        annot = (
+                            _funcdef.param_types[k]
+                            if k < len(_funcdef.param_types)
+                            else None
+                        )
+                        base = annot[0] if annot else "int"
+                        self._cl_define(
+                            info,
+                            f"__dyncall_arg_{id(expr)}_{k}",
+                            "float" if base == "float" else "int",
+                        )
+                    self._cl_define(info, f"__dyncall_ptr_{id(expr)}")
+            if not (isinstance(expr.obj, A.Name) and expr.obj.name in self.imported_modules):
                 # String methods spill the object pointer (and one extra
                 # for replace's 2-arg signature) across argument eval. An
                 # opaque receiver calling a known str method is dispatched to
@@ -1709,6 +1744,15 @@ class Codegen:
 
                 self._cl_define(info, s.target, ty_wa)
                 self._cl_walk_expr(info, s.value)
+                if (
+                    isinstance(s.target, str)
+                    and isinstance(s.value, A.Call)
+                    and s.value.func == "import_binary"
+                ):
+                    # Scratch slot to hold the loaded handle across the
+                    # sequence of GetProcAddress/dlsym calls that resolve
+                    # each @<target>.imported function (each clobbers rax).
+                    self._cl_define(info, f"__importbin_handle_{id(s)}", "int")
             elif isinstance(s, A.AugAssign):
                 self._cl_define(info, s.target, A.expr_type(s.value))
                 self._cl_walk_expr(info, s.value)
@@ -2003,6 +2047,13 @@ class Codegen:
             ty = self._var_type(stmt.target, info)
             value_t = A.expr_type(stmt.value)
             mem = self._var_mem(stmt.target, info)
+            if (
+                isinstance(stmt.target, str)
+                and isinstance(stmt.value, A.Call)
+                and stmt.value.func == "import_binary"
+            ):
+                self._gen_import_binary(stmt, info, mem)
+                return
             if isinstance(stmt.target, str) and stmt.target in info.nonlocal_boxes:
                 # Nonlocal: param slot holds box ptr; store value through it.
                 self.gen_expr(stmt.value, info)
@@ -10129,6 +10180,23 @@ class Codegen:
             if b is not None and hasattr(b, "arg_types"):
                 self._gen_ffi_call(b, e.args, info)
                 return
+        # `handle.func(args)` where `handle = import_binary(path)` and `func`
+        # is `@handle.imported`-decorated: indirect call through the function
+        # pointer GetProcAddress/dlsym already resolved into the handle dict
+        # at the import_binary() call site (see _gen_import_binary). Marshal
+        # args exactly like a normal FFI call, but call through a register
+        # holding the looked-up pointer instead of a static `extern` symbol —
+        # the same shape as a closure call (see the lambda/sorted-key call
+        # sites elsewhere in this file).
+        if isinstance(e.obj, A.Name) and e.obj.name in self.imported_funcs:
+            funcdef = None
+            for fname, fdef in self.imported_funcs[e.obj.name]:
+                if fname == e.method:
+                    funcdef = fdef
+                    break
+            if funcdef is not None:
+                self._gen_dynamic_call(e, funcdef, info)
+                return
         # `ClassName.method(args)`: @staticmethod / @classmethod called on the
         # class itself. Static methods take args verbatim; class methods get an
         # implicit leading `cls` (passed as null — asmpython has no class
@@ -13171,6 +13239,66 @@ class Codegen:
         self.emitf("mov rax, 1")
         self.label(done)
 
+    def _gen_import_binary(self, stmt: A.Assign, info: FuncInfo, mem: str) -> None:
+        """`handle = import_binary(path)`.
+
+        Loads the binary via LoadLibraryA (Windows) / dlopen (Linux), then
+        immediately resolves every function the program declares with
+        `@<handle>.imported` for this exact handle variable (collected from
+        the whole program into `self.imported_funcs` at Codegen construction)
+        via GetProcAddress/dlsym, storing each resolved pointer in a dict
+        keyed by function name — the same instance representation every
+        user class uses, so `handle.some_func(...)` reads it back through
+        the ordinary attribute-dict-get path. `_handle` itself is stored too
+        (unused today, but keeps the handle alive / available for a future
+        close_binary()).
+        """
+        e = stmt.value  # the import_binary(path) Call
+        handle_slot = info.locals_[f"__importbin_handle_{id(stmt)}"]
+        cap = 8
+        self._emit_malloc(self.DICT_HEADER)
+        self.emitf(
+            f"mov qword [rax+{self.DICT_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.DICT_LEN_OFF}], 0",
+            f"mov qword [rax+{self.DICT_TOMB_OFF}], 0",
+            f"mov {mem}, rax",
+        )
+        self.emitf(f"mov rbx, {cap * self.DICT_SLOT_SIZE}", "call _runtime_zalloc")
+        self.emitf(f"mov rbx, {mem}", f"mov [rbx+{self.DICT_BUF_OFF}], rax")
+        dict_slot_off = None
+        # _emit_dict_alloc_order_buf wants a frame slot, not a memory operand;
+        # reuse the handle scratch slot (not live yet at this point) to avoid
+        # reserving a second one just for this call.
+        self.emitf(f"mov rax, {mem}", f"mov [rbp{handle_slot:+d}], rax")
+        self._emit_dict_alloc_order_buf(cap, handle_slot)
+
+        # Load the library; keep the handle in its scratch slot across every
+        # GetProcAddress/dlsym call (each clobbers rax/rbx).
+        self.gen_expr(e.args[0], info)  # rax = path string
+        self._emit_load_library()  # rax = handle
+        self.emitf(f"mov [rbp{handle_slot:+d}], rax")
+
+        handle_key, _ = self.intern_string("_handle")
+        self.emitf(
+            f"mov rcx, [rbp{handle_slot:+d}]",
+            f"lea rbx, [{handle_key}]",
+            f"mov rax, {mem}",
+            "call _runtime_dict_set",
+        )
+        for func_name, _funcdef in self.imported_funcs.get(stmt.target, []):
+            name_label, _ = self.intern_string(func_name)
+            self.emitf(
+                f"mov rax, [rbp{handle_slot:+d}]",
+                f"lea rbx, [{name_label}]",
+            )
+            self._emit_get_proc_addr()  # rax = function ptr
+            self.emitf(
+                "mov rcx, rax",
+                f"lea rbx, [{name_label}]",
+                f"mov rax, {mem}",
+                "call _runtime_dict_set",
+            )
+
     def _gen_constructor(self, e: A.Call, info: FuncInfo) -> None:
         """ClassName(args)  ->  rax = pointer to new instance.
 
@@ -13523,6 +13651,84 @@ class Codegen:
             # a result like fgetc()'s -1 (EOF) would otherwise read as
             # 0x00000000FFFFFFFF and never compare equal to -1. Sign-extend EAX
             # into RAX for int returns.
+            self.emitf("movsxd rax, eax")
+
+    def _gen_dynamic_call(self, e: A.MethodCall, funcdef: A.FuncDef, info: FuncInfo) -> None:
+        """`handle.func(args)` for a `@handle.imported` function: marshal args
+        exactly like `_gen_ffi_call`, but call through the function pointer
+        GetProcAddress/dlsym already resolved into the handle dict (keyed by
+        `func`'s name) instead of a static `extern` symbol.
+
+        Only scalar (int/float/str-as-pointer) parameters are supported —
+        the foreign function's real signature isn't introspectable, so the
+        stub's own annotations are the only contract; an unannotated or
+        container-typed parameter has no defined ABI mapping here.
+        """
+        arg_types: list[str] = []
+        for i in range(len(e.args)):
+            annot = funcdef.param_types[i] if i < len(funcdef.param_types) else None
+            base = annot[0] if annot else "int"
+            if base not in ("int", "float", "str"):
+                raise NotImplementedError(
+                    f"@{e.obj.name}.imported function {funcdef.name!r}: "
+                    f"parameter type {base!r} is not supported (only int/float/str)"
+                )
+            arg_types.append(base)
+        slot_offs: list[int] = []
+        for i, (arg, want) in enumerate(zip(e.args, arg_types)):
+            got = A.expr_type(arg)
+            slot = info.locals_[f"__dyncall_arg_{id(e)}_{i}"]
+            if want == "float":
+                self._gen_expr_as_float(arg, info, got)
+                self.emitf(f"movsd [rbp{slot:+d}], xmm0")
+            else:
+                self.gen_expr(arg, info)
+                self.emitf(f"mov [rbp{slot:+d}], rax")
+            slot_offs.append(slot)
+        assigns = self._assign_arg_regs(arg_types)
+        stack_positions = [i for i, a in enumerate(assigns) if a is None]
+        cleanup = 0
+        if stack_positions:
+            shadow = self._caller_shadow_space()
+            area = shadow + 8 * len(stack_positions)
+            if area % 16:
+                area += 16 - (area % 16)
+            cleanup = area
+            self.emitf(f"sub rsp, {area}")
+            for k, i in enumerate(stack_positions):
+                self.emitf(
+                    f"mov rax, [rbp{slot_offs[i]:+d}]",
+                    f"mov [rsp+{shadow + 8 * k}], rax",
+                )
+        # Look up the resolved function pointer (stored by name in the
+        # handle dict at import_binary() time) before loading arg registers,
+        # so the lookup's own calls don't clobber them.
+        ptr_slot = info.locals_[f"__dyncall_ptr_{id(e)}"]
+        name_label, _ = self.intern_string(funcdef.name)
+        self.gen_expr(e.obj, info)  # rax = handle dict
+        self.emitf(f"lea rbx, [{name_label}]", "xor rcx, rcx", "call _runtime_dict_get_default")
+        self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+        float_idx = 0
+        for i, slot in enumerate(slot_offs):
+            assign = assigns[i]
+            if assign is None:
+                continue
+            reg, is_xmm = assign
+            if is_xmm:
+                self.emitf(f"movsd {reg}, [rbp{slot:+d}]")
+                float_idx += 1
+                if self._needs_xmm_mirror_to_int() and i < len(self._int_arg_regs()):
+                    int_reg = self._int_arg_regs()[i]
+                    self.emitf(f"movq {int_reg}, {reg}")
+            else:
+                self.emitf(f"mov {reg}, [rbp{slot:+d}]")
+        if self._sysv_needs_al_count():
+            self.emitf(f"mov al, {float_idx}")
+        self.emitf(f"mov rax, [rbp{ptr_slot:+d}]", "call rax")
+        if cleanup:
+            self.emitf(f"add rsp, {cleanup}")
+        ret_base = funcdef.ret_type[0] if funcdef.ret_type else "int"
+        if ret_base == "int":
             self.emitf("movsxd rax, eax")
 
     # ---- os.getcwd / os.listdir inline helpers --------------------------------

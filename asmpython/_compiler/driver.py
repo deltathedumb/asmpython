@@ -390,6 +390,9 @@ def _run_backend(
         if target == "linux" and any(s in getattr(gen, "ffi_externs", set())
                                      for s in getattr(gen, "_THREAD_SYMS", ())):
             link_cmd.append("-lpthread")
+        if target == "linux" and getattr(gen, "imported_funcs", None):
+            # dlopen/dlsym: pre-2.34 glibc ships them in libdl, not libc.
+            link_cmd.append("-ldl")
         if getattr(gen, "needs_gui", False):
             link_cmd.append("-lSDL2")
         if getattr(gen, "needs_audio", False):

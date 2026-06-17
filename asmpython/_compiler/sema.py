@@ -6004,6 +6004,25 @@ class SemaAnalyzer:
                 self._check_expr(a, scope)
             e.inferred_type = "int"
             return
+        if e.func == "import_binary":
+            # import_binary(path) -> a dynamic-module handle (a real runtime
+            # LoadLibraryW/dlopen handle). Codegen resolves which functions
+            # belong to it from `@<assigned-name>.imported` decorators found
+            # elsewhere in the program (Codegen.imported_funcs, built from
+            # the whole-program AST) — sema only needs to type the call's
+            # result so `handle.some_func(...)` type-checks as a method call
+            # on an instance, the same path every other class uses.
+            if len(e.args) != 1:
+                raise SemaError(
+                    f"import_binary() takes 1 argument, got {len(e.args)}", e.pos
+                )
+            self._check_expr(e.args[0], scope)
+            if A.expr_type(e.args[0]) != "str":
+                raise SemaError(
+                    "import_binary() path argument must be a str", e.pos, ErrorCode.E_ARG_TYPE
+                )
+            e.inferred_type = "instance:DynamicModule"
+            return
         if e.func in BUILTINS:
             lo, hi = BUILTINS[e.func]
             if not (lo <= len(e.args) <= hi):

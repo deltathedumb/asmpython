@@ -121,19 +121,33 @@ features it depends on that asmpython doesn't fully implement yet
 (this session found two: `Path.parents`, real `__file__`).
 
 Paused here per user direction — selfhosting is a stretch goal, not
-committed 2.0.0 scope. Resume this loop only when asked; the real
-priority is `import_binary` (see [[project-import-binary]]) and the
-platform/optimization roadmap.
+committed 2.0.0 scope. Resume this loop only when asked; `import_binary`
+(below) shipped in this same session, so the real remaining priority is
+the platform/optimization roadmap.
+
+## Done since last update
+**`import_binary` / `@handle.imported`** — full runtime dynamic-loading
+support shipped (see project-1.3-dynamic-import in assistant memory for
+the full design notes). `from asmpython import import_binary`,
+`handle = import_binary("path.dll")`, `@handle.imported` on a stub
+function (its own annotations are the only contract — int/float/str
+params only, no containers), `handle.func(args)` calls through the
+resolved pointer. LoadLibraryA+GetProcAddress on Windows, dlopen+dlsym
+on Linux (`-ldl` added to the link command). Verified end-to-end against
+`msvcrt.dll`'s `toupper` on Windows; test at
+`tests/cases/299_import_binary.py` also covers the Linux path via
+`libc.so.6` (untested on this machine — Windows-only environment).
+Known gap: no `symbol=` override yet (unlike `@asm_func(symbol=...)`),
+so the Python function name must exactly match the real exported C
+symbol; only scalar parameter types are supported.
 
 ## Pending
-1. `import_binary` / `@module.imported` — dynamic runtime DLL/.so loading,
-   actively being designed/implemented now (see [[project-import-binary]])
-2. Continue selfhost debugging (non-blocking bonus, not release scope)
-3. ARM64 codegen (IR layer) — blocks Pi, Apple Silicon, most of Android
-4. macOS Intel x86_64 (medium-large, reuses target_linux.py's SysV/libc approach)
-5. Garbage collector (refcounting — large, self-contained to x64 targets)
-6. Optimizations: NASM `-Ox` is already default (confirmed no-op to add
+1. Continue selfhost debugging (non-blocking bonus, not release scope)
+2. ARM64 codegen (IR layer) — blocks Pi, Apple Silicon, most of Android
+3. macOS Intel x86_64 (medium-large, reuses target_linux.py's SysV/libc approach)
+4. Garbage collector (refcounting — large, self-contained to x64 targets)
+5. Optimizations: NASM `-Ox` is already default (confirmed no-op to add
    explicitly); peephole pass on emitted instructions is genuinely new and
    cheap (found ~1,905 safe dead-store `mov`-then-`mov`-same-register pairs
    in the selfhost asm as a concrete starting pattern)
-7. Add CODE_OF_CONDUCT.md, CONTRIBUTING.md, SECURITY.md, issue templates
+6. Add CODE_OF_CONDUCT.md, CONTRIBUTING.md, SECURITY.md, issue templates

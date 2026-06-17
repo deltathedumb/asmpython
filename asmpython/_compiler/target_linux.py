@@ -51,6 +51,8 @@ class LinuxCodegen(Codegen):
             "exit",
             "fmod",
             "pow",
+            "dlopen",
+            "dlsym",
         ):
             self.emit(f"extern {name}")
 
@@ -209,6 +211,16 @@ class LinuxCodegen(Codegen):
 
     def _emit_libc_strlen(self) -> None:
         self.emitf("mov rdi, rax", "call strlen")
+
+    def _emit_load_library(self) -> None:
+        # rax = path (C string) -> rax = handle, or NULL.
+        # RTLD_NOW (2): resolve all symbols immediately, surfacing a missing
+        # symbol as a load failure rather than deferring it to first use.
+        self.emitf("mov rdi, rax", "mov esi, 2", "call dlopen")
+
+    def _emit_get_proc_addr(self) -> None:
+        # rax = handle, rbx = name (C string) -> rax = function ptr, or NULL.
+        self.emitf("mov rdi, rax", "mov rsi, rbx", "call dlsym")
 
     def _emit_libc_memcpy(self) -> None:
         self.emitf("mov rdx, rcx", "mov rsi, rbx", "mov rdi, rax", "call memcpy")

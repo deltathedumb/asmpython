@@ -56,6 +56,8 @@ class WindowsCodegen(Codegen):
             "fmod",
             "pow",
             "___chkstk_ms",
+            "LoadLibraryA",
+            "GetProcAddress",
         ):
             self.emit(f"extern {name}")
 
@@ -306,6 +308,14 @@ class WindowsCodegen(Codegen):
     def _emit_libc_strlen(self) -> None:
         # rax = ptr -> rax = length
         self.emitf("mov rcx, rax", "call strlen")
+
+    def _emit_load_library(self) -> None:
+        # rax = path (ANSI/UTF-8 C string) -> rax = HMODULE handle, or NULL.
+        self.emitf("mov rcx, rax", "call LoadLibraryA")
+
+    def _emit_get_proc_addr(self) -> None:
+        # rax = handle, rbx = name (C string) -> rax = function ptr, or NULL.
+        self.emitf("mov rcx, rax", "mov rdx, rbx", "call GetProcAddress")
 
     def _emit_libc_memcpy(self) -> None:
         # rax = dst, rbx = src, rcx = n
