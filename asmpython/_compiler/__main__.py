@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from .driver import compile_source, detect_default_target
+from .driver import compile_source, compile_targets, detect_default_target
 from .errors import CompileError, MultiSemaError, explain as _explain_code
 from .. import __version__
 
@@ -88,7 +88,35 @@ def _colorize_help(text: str) -> str:
 
 # ── Argument parser ─────────────────────────────────────────────────────────────
 
-_USAGE = "asmpython <source.py> [-o <output>] [--target win|linux] [options]"
+_USAGE = "asmpython <source.py> [-o <output>] [--target win|linux[,...]] [options]"
+
+
+_VALID_TARGETS = {"linux", "windows", "freestanding", "freestanding16"}
+
+
+def _parse_targets(val: str) -> list[str]:
+    targets = [t.strip() for t in val.replace(",", " ").split()]
+    for t in targets:
+        if t not in _VALID_TARGETS:
+            raise ValueError(
+                f"invalid target {t!r}; choose from {', '.join(sorted(_VALID_TARGETS))}"
+            )
+    if not targets:
+        raise ValueError("--target requires at least one target")
+    return targets
+
+
+def _target_out(stem: Path, target: str, output_type: str) -> Path:
+    """Derive output path for *target* from a base *stem* (no extension)."""
+    if output_type == "library":
+        return stem.with_suffix(".dll" if target == "windows" else ".so")
+    if target == "freestanding":
+        return stem.with_suffix(".bin")
+    if target == "freestanding16":
+        return stem.with_suffix(".img")
+    if target == "windows":
+        return stem.with_suffix(".exe")
+    return stem  # linux: no extension
 
 _DESCRIPTION = """\
 Compile a Python source file to a native executable.
@@ -189,14 +217,14 @@ def _build_parser() -> argparse.ArgumentParser:
     build_grp = ap.add_argument_group("target / build mode")
     build_grp.add_argument(
         "--target",
-        choices=["linux", "windows", "freestanding", "freestanding16"],
-        metavar="{linux,windows,freestanding,freestanding16}",
+        type=_parse_targets,
+        metavar="{linux,windows,freestanding,freestanding16}[,...]",
         default=None,
-        help="binary target platform / architecture (default: host platform). "
-        "'freestanding' = bare-metal Multiboot1 kernel (.bin), boot with "
-        "qemu-system-x86_64 -kernel <out.bin>; 'freestanding16' = BIOS-bootable "
-        "disk image (.img) with a 16-bit boot sector, boot with "
-        "qemu-system-x86_64 -drive format=raw,file=<out.img>",
+        help="target platform(s), comma-separated for multi-target builds "
+        "(e.g. --target windows,linux). Default: host platform. "
+        "Multi-target shares lex/parse/sema and runs a separate codegen+link "
+        "per target. 'freestanding' = bare-metal Multiboot1 kernel (.bin); "
+        "'freestanding16' = BIOS-bootable disk image (.img).",
     )
     build_grp.add_argument(
         "--type",
@@ -399,7 +427,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"asmpython: source file not found: {args.source}", file=sys.stderr)
         return 1
 
-    target = args.target or detect_default_target()
+    # args.target is now a list[str] (or None for auto-detect).
+    targets: list[str] = args.target or [detect_default_target()]
 
     src = args.source.read_text(encoding="utf-8")
 
@@ -409,39 +438,61 @@ def main(argv: list[str] | None = None) -> int:
         return _run_check(src, args.source, source_dir=args.source.resolve().parent,
                           as_json=args.json, all_errors=all_errors)
 
+    # Derive output path(s).
+    base_stem = Path("build") / args.source.with_suffix("").name
+    single = len(targets) == 1
+
     if args.output is None:
-        stem = Path("build") / args.source.with_suffix("").name
-        if args.output_type == "library":
-            args.output = stem.with_suffix(".dll" if target == "windows" else ".so")
-        elif target == "freestanding":
-            args.output = stem.with_suffix(".bin")
-        elif target == "freestanding16":
-            args.output = stem.with_suffix(".img")
+        base_stem.parent.mkdir(parents=True, exist_ok=True)
+        out_paths = [_target_out(base_stem, t, args.output_type) for t in targets]
+    else:
+        stem = args.output.with_suffix("")
+        if single:
+            out_paths = [args.output]
         else:
-            args.output = stem.with_suffix(".exe") if target == "windows" else stem
-        args.output.parent.mkdir(parents=True, exist_ok=True)
+            out_paths = [_target_out(stem, t, args.output_type) for t in targets]
+        for p in out_paths:
+            p.parent.mkdir(parents=True, exist_ok=True)
 
     # --onedir implies --use-runtime-lib so the codegen emits `extern`
     # references that resolve against the shared runtime library.
     use_runtime_lib = args.use_runtime_lib or args.bundle_mode == "onedir"
+    _source_dir = args.source.resolve().parent
+    _entry_path = args.source.resolve()
+
     try:
-        compile_source(
-            src,
-            target,
-            args.output,
-            emit_asm_only=args.emit_asm,
-            keep_intermediates=args.keep,
-            keep_assembly=args.keep_assembly,
-            use_runtime_lib=use_runtime_lib,
-            nasm_path=args.nasm,
-            gcc_path=args.gcc,
-            bundle_mode=args.bundle_mode,
-            source_dir=args.source.resolve().parent,
-            entry_path=args.source.resolve(),
-            output_type=args.output_type,
-            icon_path=args.icon,
-            all_errors=all_errors,
-        )
+        if single:
+            compile_source(
+                src, targets[0], out_paths[0],
+                emit_asm_only=args.emit_asm,
+                keep_intermediates=args.keep,
+                keep_assembly=args.keep_assembly,
+                use_runtime_lib=use_runtime_lib,
+                nasm_path=args.nasm,
+                gcc_path=args.gcc,
+                bundle_mode=args.bundle_mode,
+                source_dir=_source_dir,
+                entry_path=_entry_path,
+                output_type=args.output_type,
+                icon_path=args.icon,
+                all_errors=all_errors,
+            )
+        else:
+            compile_targets(
+                src, targets, out_paths,
+                emit_asm_only=args.emit_asm,
+                keep_intermediates=args.keep,
+                keep_assembly=args.keep_assembly,
+                use_runtime_lib=use_runtime_lib,
+                nasm_path=args.nasm,
+                gcc_path=args.gcc,
+                bundle_mode=args.bundle_mode,
+                source_dir=_source_dir,
+                entry_path=_entry_path,
+                output_type=args.output_type,
+                icon_path=args.icon,
+                all_errors=all_errors,
+            )
     except MultiSemaError as me:
         print(me.format_all(src, str(args.source)), file=sys.stderr)
         return 1
