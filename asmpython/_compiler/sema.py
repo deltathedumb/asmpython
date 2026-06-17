@@ -287,11 +287,13 @@ DUNDER_UNARY: dict[str, str] = {
 # common convention (`def __add__(self, other): return self.x + other.x`); a
 # method whose `other` is genuinely a different type just needs an annotation,
 # same as any other parameter.
-DUNDER_SAME_TYPE_OTHER: frozenset[str] = frozenset(
-    {fwd for fwd, _rfl in DUNDER_BINOP.values()}
-    | {rfl for _fwd, rfl in DUNDER_BINOP.values()}
-    | {"__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"}
-)
+_dunder_same = set()
+for fwd, _rfl in DUNDER_BINOP.values():
+    _dunder_same.add(fwd)
+for _fwd, rfl in DUNDER_BINOP.values():
+    _dunder_same.add(rfl)
+_dunder_same |= {"__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"}
+DUNDER_SAME_TYPE_OTHER: frozenset[str] = frozenset(_dunder_same)
 
 
 @dataclass
@@ -4413,7 +4415,11 @@ class SemaAnalyzer:
                     child.add(idx_name, "int")
                 if el_name:
                     child.add(el_name, self._iter_element_type(inner, scope))
-                loop_vars = {n for n in (idx_name, el_name) if n}
+                loop_vars = set()
+                if idx_name:
+                    loop_vars.add(idx_name)
+                if el_name:
+                    loop_vars.add(el_name)
                 if e.cond is not None:
                     self._check_expr(e.cond, child)
                 self._check_expr(e.elt, child)
@@ -4530,7 +4536,11 @@ class SemaAnalyzer:
                     child.add(idx_name, "int")
                 if el_name:
                     child.add(el_name, self._iter_element_type(inner, scope))
-                loop_vars = {n for n in (idx_name, el_name) if n}
+                loop_vars = set()
+                if idx_name:
+                    loop_vars.add(idx_name)
+                if el_name:
+                    loop_vars.add(el_name)
                 if e.cond is not None:
                     self._check_expr(e.cond, child)
                 self._check_expr(e.key, child)
@@ -5677,7 +5687,9 @@ class SemaAnalyzer:
                 self._check_expr(a, scope)
             for _, a in e.kwargs:
                 self._check_expr(a, scope)
-            kwarg_names = {name for name, _ in e.kwargs}
+            kwarg_names = set()
+            for name, _ in e.kwargs:
+                kwarg_names.add(name)
             for kind, val, _spec, _conv in A.parse_format_fields(e.obj.value):
                 if kind != "arg":
                     continue
@@ -6121,7 +6133,9 @@ class SemaAnalyzer:
                             "single-iterable form",
                             e.pos,
                         )
-                    types = {A.expr_type(a) for a in e.args}
+                    types = set()
+                    for a in e.args:
+                        types.add(A.expr_type(a))
                     if "float" in types:
                         e.inferred_type = "float"
                     elif "str" in types:

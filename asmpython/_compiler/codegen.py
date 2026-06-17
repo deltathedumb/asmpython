@@ -13509,7 +13509,9 @@ class Codegen:
         # Extract sep= / end= kwargs (all optional; defaults: " ", "\n").
         # file= is accepted but ignored for routing purposes — print always
         # goes to stdout in the current implementation.
-        kwargs = {kn: kv for kn, kv in (getattr(e, "kwargs", None) or [])}
+        kwargs = {}
+        for kn, kv in (getattr(e, "kwargs", None) or []):
+            kwargs[kn] = kv
         sep_expr = kwargs.get("sep")
         end_expr = kwargs.get("end")
         if not e.args:

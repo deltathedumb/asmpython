@@ -386,7 +386,9 @@ class Parser:
         any callee's free vars (minus names the caller already locally binds,
         i.e. params/vararg/kwarg) until nothing changes. Bounded by the
         number of nested functions, so this always terminates."""
-        by_name = {f.name: f for f in nested_funcs}
+        by_name = {}
+        for f in nested_funcs:
+            by_name[f.name] = f
         changed = True
         while changed:
             changed = False

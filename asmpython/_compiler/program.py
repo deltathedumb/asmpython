@@ -454,8 +454,12 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
     seen: list[str] = [str(entry_path)]
     # Names already defined so merges don't duplicate (first definition wins).
     _dedupe_lifted_funcs(entry, set())
-    func_names = {f.name for f in entry.funcs}
-    class_names = {c.name for c in entry.classes}
+    func_names = set()
+    for f in entry.funcs:
+        func_names.add(f.name)
+    class_names = set()
+    for c in entry.classes:
+        class_names.add(c.name)
 
     # Per-module parsed AST + the top-level value assigns it exports, recorded
     # in discovery order so the materialization pass can resolve cross-module
@@ -480,7 +484,7 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
             continue
         parsed[mod_path_str] = mod
         discovery_order.append(mod_path_str)
-        _dedupe_lifted_funcs(mod, set(func_names))
+        _dedupe_lifted_funcs(mod, func_names)
         for f in mod.funcs:
             if f.name not in func_names:
                 func_names.add(f.name)
@@ -558,13 +562,14 @@ def _merge_import_bindings(
     extra: list = []
     # Names already bound at entry top-level, so a merged module's own global
     # doesn't shadow/duplicate one the entry (or an earlier merge) defined.
-    available: set = {
-        s.target
-        for s in entry.body
-        if isinstance(s, A.Assign) and isinstance(s.target, str)
-    }
-    available |= {f.name for f in entry.funcs}
-    available |= {c.name for c in entry.classes}
+    available: set = set()
+    for s in entry.body:
+        if isinstance(s, A.Assign) and isinstance(s.target, str):
+            available.add(s.target)
+    for f in entry.funcs:
+        available.add(f.name)
+    for c in entry.classes:
+        available.add(c.name)
     available |= _ALWAYS_AVAILABLE
     for mod_path in discovery_order[1:]:
         mod = parsed.get(mod_path)
@@ -646,13 +651,14 @@ def _materialize_value_imports(
     """
     # Names available without materialization: merged classes/funcs, the entry's
     # own module-level assigns, and the builtins the compiler always provides.
-    base_available: set[str] = {f.name for f in entry.funcs}
-    base_available |= {c.name for c in entry.classes}
-    base_available |= {
-        s.target
-        for s in entry.body
-        if isinstance(s, A.Assign) and isinstance(s.target, str)
-    }
+    base_available: set[str] = set()
+    for f in entry.funcs:
+        base_available.add(f.name)
+    for c in entry.classes:
+        base_available.add(c.name)
+    for s in entry.body:
+        if isinstance(s, A.Assign) and isinstance(s.target, str):
+            base_available.add(s.target)
     base_available |= _ALWAYS_AVAILABLE
 
     # Map each module's locally-imported value name -> (source module str path,

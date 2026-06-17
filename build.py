@@ -5,11 +5,12 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import asmpython
 
 ROOT = Path(__file__).parent.resolve()
 SRC = ROOT / "asmpython" / "__main__.py"
-OUT_WIN = ROOT / "build" / "asmpython.exe"
-OUT_LIN = ROOT / "build" / "asmpython-linux"
+OUT_WIN = ROOT / "build" / f"asmpython-{asmpython.__version__}-x86_64.exe"
+OUT_LIN = ROOT / "build" / f"asmpython-{asmpython.__version__}-x86_64-linux"
 
 
 def base_env() -> dict:
@@ -54,7 +55,8 @@ def run_linux() -> None:
             arg = str(p).replace("\\", "/")
             r = subprocess.run(
                 ["wsl", "wslpath", "-u", arg],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
             val = r.stdout.strip()
             return val if (r.returncode == 0 and val) else None
