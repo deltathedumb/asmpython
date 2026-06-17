@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,7 +28,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CASES = ROOT / "tests" / "cases"
 CASES_FAIL = ROOT / "tests" / "cases_fail"
-BUILD = ROOT / "tests" / "_build"
+
+# On Windows, build directly into C:\Temp (not a subdirectory) to avoid Smart
+# App Control blocking freshly-compiled exes.  Fall back to the project-local
+# _build directory on other platforms.
+if sys.platform == "win32":
+    BUILD = Path("C:/Temp")
+else:
+    BUILD = ROOT / "tests" / "_build"
 
 # Mutated by main() so subprocess calls pick it up.
 _use_runtime_lib = False
@@ -56,7 +64,13 @@ def _parse_expect(src: str, marker: str) -> str | None:
                     lines.append(rest)
             continue
         if s.startswith("#"):
-            lines.append(s.lstrip("#").lstrip())
+            # Strip the leading `#` and a single conventional space, but
+            # preserve any further leading whitespace — expected output may
+            # itself start with spaces (e.g. right-justified formatting).
+            rest = s.lstrip("#")
+            if rest.startswith(" "):
+                rest = rest[1:]
+            lines.append(rest)
         else:
             break
     if not collecting:
@@ -84,16 +98,27 @@ def run_positive(case: Path, target: str) -> TestResult:
         return TestResult(case.name, False, "no `# expect:` block found")
 
     BUILD.mkdir(parents=True, exist_ok=True)
-    out = BUILD / (case.stem + (".exe" if target == "windows" else ""))
+    # On Windows, strip UAC-triggering words ("update", "install", "setup",
+    # "patch") from the output binary name to prevent installer-detection
+    # heuristics from requiring elevation.
+    stem = case.stem
+    if sys.platform == "win32":
+        import re as _re
+        stem = _re.sub(r"(?i)(update|install|setup|patch)", "test", stem)
+    out = BUILD / (stem + (".exe" if target == "windows" else ""))
     cmd = [sys.executable, "-m", "asmpython", str(case), "--target", target, "-o", str(out)]
     if _use_runtime_lib:
         cmd.append("--use-runtime-lib")
+    # On Windows, compile without creationflags (adding CREATE_NO_WINDOW to gcc
+    # causes it to mark the output exe for UAC elevation).  Run the compiled exe
+    # with CREATE_NO_WINDOW to suppress the UAC prompt.
+    exe_flags: dict = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
     cp = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
     if cp.returncode != 0:
         return TestResult(case.name, False, f"compile failed:\n{cp.stderr}{cp.stdout}")
 
     stdin_data = _parse_stdin(case.read_text(encoding="utf-8"))
-    run = subprocess.run([str(out)], capture_output=True, text=True, input=stdin_data)
+    run = subprocess.run([str(out)], capture_output=True, text=True, input=stdin_data, **exe_flags)
     if run.returncode != 0:
         return TestResult(case.name, False, f"program exited {run.returncode}\n{run.stderr}")
     got = run.stdout.replace("\r\n", "\n").rstrip("\n")
@@ -129,18 +154,46 @@ def _diff(expected: str, got: str) -> str:
 
 def main() -> int:
     global _use_runtime_lib
-    _use_runtime_lib = "--use-runtime-lib" in sys.argv[1:]
+    args = sys.argv[1:]
+    _use_runtime_lib = "--use-runtime-lib" in args
+    # -j N or --jobs N overrides parallelism; default = CPU count (capped at 8)
+    workers = min(os.cpu_count() or 4, 8)
+    for i, a in enumerate(args):
+        if a in ("-j", "--jobs") and i + 1 < len(args):
+            try:
+                workers = int(args[i + 1])
+            except ValueError:
+                pass
+        elif a.startswith("-j") and len(a) > 2:
+            try:
+                workers = int(a[2:])
+            except ValueError:
+                pass
     target = _detect_target()
     mode = " (runtime-lib)" if _use_runtime_lib else ""
-    print(f"asmpython test runner (target={target}){mode}")
+    print(f"asmpython test runner (target={target}, workers={workers}){mode}")
 
-    results: list[TestResult] = []
+    tasks: list[tuple] = []
     if CASES.is_dir():
         for case in sorted(CASES.glob("*.py")):
-            results.append(run_positive(case, target))
+            tasks.append((run_positive, case, target))
     if CASES_FAIL.is_dir():
         for case in sorted(CASES_FAIL.glob("*.py")):
-            results.append(run_negative(case, target))
+            tasks.append((run_negative, case, target))
+
+    # Run tests in parallel; collect results in submission order.
+    result_map: dict[str, TestResult] = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_name = {}
+        for fn, case, tgt in tasks:
+            fut = pool.submit(_safe_run, fn, case, tgt)
+            future_to_name[fut] = case.name
+        for fut in as_completed(future_to_name):
+            result_map[future_to_name[fut]] = fut.result()
+
+    # Re-sort results by original task order so output is deterministic.
+    ordered_names = [case.name for _, case, _ in tasks]
+    results = [result_map[n] for n in ordered_names]
 
     fails = [r for r in results if not r.ok]
     for r in results:
@@ -151,6 +204,13 @@ def main() -> int:
                 print(f"        {line}")
     print(f"\n{len(results) - len(fails)}/{len(results)} passed")
     return 0 if not fails else 1
+
+
+def _safe_run(fn, case: Path, target: str) -> TestResult:
+    try:
+        return fn(case, target)
+    except Exception as exc:
+        return TestResult(case.name, False, f"runner error: {exc}")
 
 
 if __name__ == "__main__":

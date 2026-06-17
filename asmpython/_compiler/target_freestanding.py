@@ -117,6 +117,16 @@ class FreestandingCodegen(Codegen):
         self.emitf("mov rdx, rbx", "xor rsi, rsi", "mov rdi, rax",
                    "call _runtime_strtoll")
 
+    def _emit_strtoll_endptr(self) -> None:
+        # In: rax=str, rbx=&endptr_storage, rcx=base. Out: rax=int64, *rbx=endptr.
+        # Freestanding uses SysV-like calling convention via _runtime_strtoll.
+        self.emitf(
+            "mov rdx, rcx",  # base
+            "mov rsi, rbx",  # endptr address
+            "mov rdi, rax",  # str
+            "call _runtime_strtoll",
+        )
+
     def _emit_float_to_str(self) -> None:
         self.emitf("call _runtime_float_to_str")
 
@@ -163,6 +173,11 @@ class FreestandingCodegen(Codegen):
 
     def _emit_exit_one(self) -> None:
         self.emitf("call _runtime_panic")
+
+    def _emit_set_error_color(self) -> None:
+        # Blinking bright red on black (VGA text attribute byte: bit7 =
+        # blink, bits4-6 = background, bits0-3 = foreground).
+        self.emitf("mov byte [rel _vga_attr], 0x8C")
 
     def _emit_call_setjmp(self, buf_off: int) -> None:
         self.emitf(f"lea rax, [rbp{buf_off:+d}]", "call _runtime_setjmp")
@@ -214,9 +229,6 @@ class FreestandingCodegen(Codegen):
                     ),
                 )
                 self.emit_function(mangled)
-
-        # Assembly packages
-        self.emit_asm_packages()
 
         # 3. Runtime helpers + data + BSS
         self.emit_print_impls()
@@ -277,8 +289,10 @@ class FreestandingCodegen(Codegen):
         self.emitf("cli")
         self.emitf("mov esp, _boot_stack_top")
         self.emitf("lgdt [_gdt_ptr]")
-        # Enable PAE (CR4 bit 5)
-        self.emitf("mov eax, cr4", "or eax, 0x20", "mov cr4, eax")
+        # Enable PAE (CR4 bit 5) and SSE (CR4.OSFXSR bit 9, CR4.OSXMMEXCPT
+        # bit 10) -- without OSFXSR, SSE instructions like MOVSD/ADDSD/UCOMISD
+        # raise #UD, which (with no IDT installed) immediately triple-faults.
+        self.emitf("mov eax, cr4", "or eax, 0x20 | 0x200 | 0x400", "mov cr4, eax")
         # Load PML4 address into CR3
         self.emitf("mov eax, _pml4", "mov cr3, eax")
         # Enable long mode (EFER.LME = 1)
@@ -331,6 +345,7 @@ class FreestandingCodegen(Codegen):
         self.emit("section .data")
         self.emit('_str_oom:    db "OUT OF MEMORY",10,0')
         self.emit('_str_panic:  db "KERNEL PANIC",10,0')
+        self.emit('_str_rebooting: db "Rebooting in 5 seconds...",10,0')
         self.emit('_str_nan:    db "nan",0')
         self.emit('_str_inf:    db "inf",0')
         self.emit('_str_neginf: db "-inf",0')
@@ -433,11 +448,41 @@ class FreestandingCodegen(Codegen):
         self.label("._rps_done")
         self.emitf("pop rbx", "ret")
 
-        # --- _runtime_panic: print panic message and halt ------------------
+        # --- _runtime_panic: flash a red error screen, then reboot ---------
+        # If _runtime_exc_msg is still zero, _runtime_raise's unhandled path
+        # never ran (this is a direct panic from OOM or os._exit/sys.exit),
+        # so print "KERNEL PANIC" as a generic banner. Either way, switch to
+        # the red/blink error color, show a countdown, and warm-reboot.
         self.label("_runtime_panic")
+        self.emitf("mov byte [rel _vga_attr], 0x8C")
+        self.emitf("mov rax, [rel _runtime_exc_msg]", "test rax, rax",
+                   "jnz ._panic_have_msg")
         self.emitf("lea rdi, [rel _str_panic]", "call _runtime_print_str")
-        self.label("._panic_halt")
-        self.emitf("hlt", "jmp ._panic_halt")
+        self.label("._panic_have_msg")
+        self.emitf("lea rdi, [rel _str_rebooting]", "call _runtime_print_str")
+        self.emitf("call _runtime_delay_5s")
+        self.emitf("jmp _runtime_reboot")
+
+        # --- _runtime_delay_5s: approximate busy-wait delay -----------------
+        # No IDT/PIT calibration is set up, so this is a best-effort spin
+        # loop (roughly seconds on typical hardware/QEMU), not a precise
+        # timer.
+        self.label("_runtime_delay_5s")
+        self.emitf("push rbx", "push rcx", "mov rbx, 5")
+        self.label("._delay_secs")
+        self.emitf("mov rcx, 100000000")
+        self.label("._delay_inner")
+        self.emitf("dec rcx", "jnz ._delay_inner")
+        self.emitf("dec rbx", "jnz ._delay_secs")
+        self.emitf("pop rcx", "pop rbx", "ret")
+
+        # --- _runtime_reboot: warm-reboot via 8042 keyboard controller ------
+        self.label("_runtime_reboot")
+        self.label("._reboot_wait")
+        self.emitf("in al, 0x64", "test al, 0x02", "jnz ._reboot_wait")
+        self.emitf("mov al, 0xFE", "out 0x64, al")
+        self.label("._reboot_halt")
+        self.emitf("hlt", "jmp ._reboot_halt")
 
         # --- _runtime_input: stub — returns empty string -------------------
         self.label("_runtime_input")
@@ -604,6 +649,7 @@ class FreestandingCodegen(Codegen):
                    "add rax, 8",                    # return ptr past header
                    "pop rcx", "pop rbx", "ret")
         self.label("._ma_oom")
+        self.emitf("mov byte [rel _vga_attr], 0x8C")
         self.emitf("lea rdi, [rel _str_oom]", "call _runtime_print_str",
                    "call _runtime_panic")
 
@@ -802,6 +848,27 @@ class FreestandingCodegen(Codegen):
                    "mov rax, [rdx+rcx*8]",
                    "ret")
 
+        # list_del(header_in_rax, index_in_rbx): remove element at index,
+        # shifting later elements down by one slot and decrementing length.
+        # Negative indices are normalized relative to length.
+        self.label("_runtime_list_del")
+        self.emitf("mov rcx, [rax+8]",  # length
+                   "test rbx, rbx",
+                   "jns ._ld_pos",
+                   "add rbx, rcx")
+        self.label("._ld_pos")
+        self.emitf("mov rdx, [rax+16]")  # buffer ptr
+        self.label("._ld_loop")
+        self.emitf("lea r8, [rbx+1]",
+                   "cmp r8, rcx",
+                   "jge ._ld_done",
+                   "mov r9, [rdx+r8*8]",
+                   "mov [rdx+rbx*8], r9",
+                   "mov rbx, r8",
+                   "jmp ._ld_loop")
+        self.label("._ld_done")
+        self.emitf("dec qword [rax+8]", "ret")
+
         # Shared runtimes (dict, string methods, exceptions)
         self.emit_dict_runtime()
         self.emit_string_runtime()
@@ -872,6 +939,44 @@ class FreestandingCodegen(Codegen):
         self.emitf("cli", "xor rax, rax", "ret")
         self.label("_hw_sti")
         self.emitf("sti", "xor rax, rax", "ret")
+
+        # rdrand — retry until the CPU reports a valid random value (CF=1).
+        self.label("_hw_rdrand")
+        self.label("._rdr_retry")
+        self.emitf("rdrand rax", "jnc ._rdr_retry", "ret")
+
+        # io_wait — write to the unused diagnostic port 0x80 for a short delay.
+        self.label("_hw_io_wait")
+        self.emitf("xor eax, eax", "out 0x80, al", "xor rax, rax", "ret")
+
+        # Control registers.
+        self.label("_hw_read_cr0")
+        self.emitf("mov rax, cr0", "ret")
+        self.label("_hw_read_cr2")
+        self.emitf("mov rax, cr2", "ret")
+        self.label("_hw_read_cr3")
+        self.emitf("mov rax, cr3", "ret")
+        self.label("_hw_read_cr4")
+        self.emitf("mov rax, cr4", "ret")
+        self.label("_hw_write_cr3")
+        self.emitf("mov cr3, rdi", "xor rax, rax", "ret")
+
+        # MSRs: read_msr(index)->value ; write_msr(index, value).
+        self.label("_hw_read_msr")
+        self.emitf("mov ecx, edi", "rdmsr",
+                   "shl rdx, 32", "or rax, rdx", "ret")
+        self.label("_hw_write_msr")
+        self.emitf("mov ecx, edi",
+                   "mov rax, rsi", "mov rdx, rsi", "shr rdx, 32",
+                   "wrmsr", "xor rax, rax", "ret")
+
+        # invlpg(addr) — flush one TLB entry.
+        self.label("_hw_invlpg")
+        self.emitf("invlpg [rdi]", "xor rax, rax", "ret")
+
+        # lidt(ptr) — load IDTR from a 6-byte (limit:base) descriptor.
+        self.label("_hw_lidt")
+        self.emitf("lidt [rdi]", "xor rax, rax", "ret")
 
         # PIC (8259A) — master at 0x20/0x21, slave at 0xA0/0xA1
         self.label("_hw_pic_eoi")
@@ -944,6 +1049,25 @@ class FreestandingCodegen(Codegen):
         self.label("_hw_vga_get_col")
         self.emitf("mov rax, [rel _vga_col]", "ret")
 
+        # ---- High-level console: thin wrappers around the VGA text-mode
+        # helpers print() already uses (_vga_clear/_vga_putchar/
+        # _runtime_print_str), and aliases of the vga_* cursor/color
+        # primitives above.
+        self.label("_hw_console_clear")
+        self.emitf("call _vga_clear", "xor rax, rax", "ret")
+        self.label("_hw_console_putc")
+        self.emitf("call _vga_putchar", "xor rax, rax", "ret")
+        self.label("_hw_console_write")
+        self.emitf("call _runtime_print_str", "xor rax, rax", "ret")
+        self.label("_hw_console_set_color")
+        self.emitf("jmp _hw_vga_set_color")
+        self.label("_hw_console_set_cursor")
+        self.emitf("jmp _hw_vga_set_cursor")
+        self.label("_hw_console_get_row")
+        self.emitf("jmp _hw_vga_get_row")
+        self.label("_hw_console_get_col")
+        self.emitf("jmp _hw_vga_get_col")
+
 
     # --------------------------------------------- emit_data_sections -----
 
@@ -959,11 +1083,13 @@ class FreestandingCodegen(Codegen):
             for label, val in self.floats:
                 self.emit(f"{label}: dq {repr(val)}")
 
-        # Module-level global variables
+        # Module-level global variables + class-level variable constants
         self.emit("")
         self.emit("section .bss nobits")
         for name in self.global_vars:
             self.emit(f"{self._global_label(name)}: resq 1")
+        for label in self.class_var_labels.values():
+            self.emit(f"{label}: resq 1")
 
         # _load_end must be the last byte-producing address, _bss_end after BSS.
         self.emit("")

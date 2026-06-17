@@ -1,16 +1,16 @@
 # expect:
-# 1
-# 0
-# 1
-# 0
-# 1
-# 0
-# 1
-# 0
-# 1
-# 0
-# 1
-# 0
+# True
+# False
+# True
+# False
+# True
+# False
+# True
+# False
+# True
+# False
+# True
+# False
 
 # Character-class predicates. Empty string is False for all of them; the cased
 # predicates require at least one cased char.

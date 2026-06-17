@@ -3,13 +3,90 @@
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import sys
 from pathlib import Path
 
 from .driver import compile_source, detect_default_target
-from .errors import CompileError
+from .errors import CompileError, MultiSemaError, explain as _explain_code
 from .. import __version__
 
+
+# ── ANSI color helpers ─────────────────────────────────────────────────────────
+
+def _want_color() -> bool:
+    if os.environ.get("NO_COLOR") or os.environ.get("ASMPYTHON_NO_COLOR"):
+        return False
+    if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleMode(  # type: ignore[attr-defined]
+                ctypes.windll.kernel32.GetStdHandle(-11), 7)  # type: ignore[attr-defined]
+        except Exception:
+            return False
+    return True
+
+
+_R  = "\x1b[0m"    # reset
+_BD = "\x1b[1m"    # bold
+_DM = "\x1b[2m"    # dim
+_GN = "\x1b[92m"   # bright green  — option flags
+_YL = "\x1b[93m"   # bright yellow — metavars / choices
+_CY = "\x1b[96m"   # bright cyan   — example shell commands
+_BL = "\x1b[94m"   # bright blue   — section group headers
+_MG = "\x1b[95m"   # bright magenta — usage label
+
+
+def _colorize_help(text: str) -> str:
+    """Apply ANSI colors to argparse-formatted help text."""
+    lines: list[str] = []
+    in_examples = False
+
+    for raw in text.splitlines():
+        s = raw.lstrip()
+
+        # Examples / epilog block
+        if s.startswith("Examples:"):
+            in_examples = True
+            lines.append(f"{_BD}{raw}{_R}")
+            continue
+
+        if in_examples:
+            if s.startswith("asmpython"):
+                indent = raw[: len(raw) - len(s)]
+                lines.append(f"{indent}{_CY}{s}{_R}")
+            elif s.endswith(":") and s:
+                indent = raw[: len(raw) - len(s)]
+                lines.append(f"{indent}{_DM}{s}{_R}")
+            else:
+                lines.append(raw)
+            continue
+
+        # Argparse section group headers (e.g. "input / output:")
+        if re.match(r'^[a-z][a-z 0-9/_-]+:$', s):
+            lines.append(f"\n{_BD}{_BL}{raw}{_R}")
+            continue
+
+        # "usage:" label
+        if s.startswith("usage:"):
+            raw = re.sub(r'^(\s*usage:)', f"{_MG}\\1{_R}", raw)
+
+        # Option flags: -x and --xxx
+        raw = re.sub(r'(?<!\w)(--?[a-zA-Z][\w-]*)', f"{_GN}\\1{_R}", raw)
+
+        # Metavars: ALL_CAPS (≥2 chars) and {choice,sets}
+        raw = re.sub(r'\b([A-Z][A-Z0-9_]{1,})\b', f"{_YL}\\1{_R}", raw)
+        raw = re.sub(r'(\{[a-z][a-z0-9,]+\})', f"{_YL}\\1{_R}", raw)
+
+        lines.append(raw)
+
+    return "\n".join(lines)
+
+
+# ── Argument parser ─────────────────────────────────────────────────────────────
 
 _USAGE = "asmpython <source.py> [-o <output>] [--target win|linux] [options]"
 
@@ -48,6 +125,10 @@ Examples:
   Keep intermediate .o / .obj for inspection:
       asmpython hello.py --keep
 
+  Give the .exe a custom icon (.ico or .png):
+      asmpython hello.py --target windows --icon app.ico
+      asmpython hello.py --target windows --icon icon.png
+
 Toolchain auto-discovery searches, in order:
     1.  --nasm / --gcc CLI flags
     2.  $ASMPYTHON_NASM / $ASMPYTHON_GCC env vars
@@ -67,8 +148,18 @@ class _AsmPythonHelp(argparse.RawDescriptionHelpFormatter):
         super().__init__(prog, max_help_position=28, width=88)
 
 
+class _ColorParser(argparse.ArgumentParser):
+    """ArgumentParser that colorizes --help output when stdout is a TTY."""
+
+    def print_help(self) -> None:  # type: ignore[override]
+        text = self.format_help()
+        if _want_color():
+            text = _colorize_help(text)
+        print(text)
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(
+    ap = _ColorParser(
         prog="asmpython",
         usage=_USAGE,
         description=_DESCRIPTION,
@@ -98,12 +189,14 @@ def _build_parser() -> argparse.ArgumentParser:
     build_grp = ap.add_argument_group("target / build mode")
     build_grp.add_argument(
         "--target",
-        choices=["linux", "windows", "freestanding"],
-        metavar="{linux,windows,freestanding}",
+        choices=["linux", "windows", "freestanding", "freestanding16"],
+        metavar="{linux,windows,freestanding,freestanding16}",
         default=None,
         help="binary target platform / architecture (default: host platform). "
-        "'freestanding' = bare-metal Multiboot1 kernel (.bin); "
-        "boot with: qemu-system-x86_64 -kernel <output.bin>",
+        "'freestanding' = bare-metal Multiboot1 kernel (.bin), boot with "
+        "qemu-system-x86_64 -kernel <out.bin>; 'freestanding16' = BIOS-bootable "
+        "disk image (.img) with a 16-bit boot sector, boot with "
+        "qemu-system-x86_64 -drive format=raw,file=<out.img>",
     )
     build_grp.add_argument(
         "--type",
@@ -122,8 +215,15 @@ def _build_parser() -> argparse.ArgumentParser:
     build_grp.add_argument(
         "--check",
         action="store_true",
-        help="only run the front-end (lex / parse / sema) and report the first "
-        "diagnostic; no codegen, no toolchain needed. Editor-friendly.",
+        help="only run the front-end (lex / parse / sema) and report diagnostics; "
+        "no codegen, no toolchain needed. Editor-friendly.",
+    )
+    build_grp.add_argument(
+        "--one-error",
+        action="store_true",
+        dest="one_error",
+        help="stop at the first sema error instead of reporting all of them. "
+        "Parse errors always stop early regardless.",
     )
     build_grp.add_argument(
         "--json",
@@ -141,6 +241,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="keep_assembly",
         help="keep the intermediate .asm file after assembling",
+    )
+    build_grp.add_argument(
+        "--icon",
+        metavar="PATH",
+        type=Path,
+        default=None,
+        help="embed PATH (.ico or .png) as the executable's icon resource "
+        "(--target windows only; PNG auto-converted to ICO via Pillow or "
+        "a built-in minimal ICO wrapper; uses windres from the gcc toolchain)",
     )
 
     # Bundling
@@ -203,21 +312,29 @@ def _build_parser() -> argparse.ArgumentParser:
         version=f"asmpython {__version__}",
         help="show version and exit",
     )
+    meta_grp.add_argument(
+        "--explain",
+        metavar="CODE",
+        default=None,
+        help="print a detailed description of an error code (e.g. E014, L003, P002) and exit",
+    )
     return ap
 
 
-def _run_check(src: str, source_path, *, source_dir, as_json: bool) -> int:
-    """Front-end-only check (lex / parse / sema). Returns 0 if clean, 1 if a
+def _run_check(
+    src: str, source_path, *, source_dir, as_json: bool, all_errors: bool = False
+) -> int:
+    """Front-end-only check (lex / parse / sema). Returns 0 if clean, 1 if any
     diagnostic was found. With `as_json`, prints a JSON array of diagnostics on
-    stdout; otherwise prints the human-readable formatted error to stderr.
+    stdout; otherwise prints human-readable formatted errors to stderr.
 
-    The JSON shape (one object per diagnostic — currently at most one, since the
-    front-end stops at the first error) is what the VS Code extension consumes:
+    The JSON shape is what the VS Code extension consumes:
         [{"phase": "...", "message": "...", "line": N, "col": N}]
     A clean file prints `[]`.
     """
     import json
 
+    from .errors import MultiSemaError
     from .lexer import Lexer
     from .parser import Parser
     from .sema import analyze as sema_analyze
@@ -225,14 +342,32 @@ def _run_check(src: str, source_path, *, source_dir, as_json: bool) -> int:
     try:
         tokens = Lexer(src).tokenize()
         module = Parser(tokens).parse()
-        sema_analyze(module, source_dir=source_dir)
+        sema_analyze(module, source_dir=source_dir, collect_errors=all_errors)
+    except MultiSemaError as me:
+        if as_json:
+            from .errors import _code_label
+            diags = []
+            for e in me.errors:
+                diags.append({
+                    "phase": e.phase,
+                    "message": e.message,
+                    "line": e.pos.line if e.pos else 1,
+                    "col": e.pos.col if e.pos else 1,
+                    "code": _code_label(e.code) if e.code is not None else None,
+                })
+            print(json.dumps(diags))
+        else:
+            print(me.format_all(src, str(source_path)), file=sys.stderr)
+        return 1
     except CompileError as e:
         if as_json:
+            from .errors import _code_label
             diag = {
                 "phase": e.phase,
                 "message": e.message,
                 "line": e.pos.line if e.pos else 1,
                 "col": e.pos.col if e.pos else 1,
+                "code": _code_label(e.code) if e.code is not None else None,
             }
             print(json.dumps([diag]))
         else:
@@ -247,6 +382,14 @@ def main(argv: list[str] | None = None) -> int:
     ap = _build_parser()
     args = ap.parse_args(argv)
 
+    if args.explain is not None:
+        desc = _explain_code(args.explain)
+        if desc:
+            print(desc)
+            return 0
+        print(f"asmpython: unknown error code {args.explain!r}", file=sys.stderr)
+        return 1
+
     if args.source is None:
         ap.print_usage(sys.stderr)
         print("asmpython: error: no source file given (try `asmpython --help`)", file=sys.stderr)
@@ -258,27 +401,29 @@ def main(argv: list[str] | None = None) -> int:
 
     target = args.target or detect_default_target()
 
+    src = args.source.read_text(encoding="utf-8")
+
+    # --check: front-end only (lex / parse / sema). Fast, no toolchain.
+    all_errors = not args.one_error
+    if args.check:
+        return _run_check(src, args.source, source_dir=args.source.resolve().parent,
+                          as_json=args.json, all_errors=all_errors)
+
     if args.output is None:
-        stem = args.source.with_suffix("")
+        stem = Path("build") / args.source.with_suffix("").name
         if args.output_type == "library":
             args.output = stem.with_suffix(".dll" if target == "windows" else ".so")
         elif target == "freestanding":
             args.output = stem.with_suffix(".bin")
+        elif target == "freestanding16":
+            args.output = stem.with_suffix(".img")
         else:
             args.output = stem.with_suffix(".exe") if target == "windows" else stem
-
-    src = args.source.read_text(encoding="utf-8")
-
-    # --check: front-end only (lex / parse / sema). Fast, no toolchain.
-    # Surfaces the first diagnostic — as JSON with --json, else human-readable.
-    if args.check:
-        return _run_check(src, args.source, source_dir=args.source.resolve().parent,
-                          as_json=args.json)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
 
     # --onedir implies --use-runtime-lib so the codegen emits `extern`
     # references that resolve against the shared runtime library.
     use_runtime_lib = args.use_runtime_lib or args.bundle_mode == "onedir"
-
     try:
         compile_source(
             src,
@@ -294,7 +439,12 @@ def main(argv: list[str] | None = None) -> int:
             source_dir=args.source.resolve().parent,
             entry_path=args.source.resolve(),
             output_type=args.output_type,
+            icon_path=args.icon,
+            all_errors=all_errors,
         )
+    except MultiSemaError as me:
+        print(me.format_all(src, str(args.source)), file=sys.stderr)
+        return 1
     except CompileError as e:
         print(e.format(src, str(args.source)), file=sys.stderr)
         return 1

@@ -1,8 +1,8 @@
 # expect:
 # 1
+# False
 # 0
-# 0
-# 1
+# True
 # 0
 # 10
 # 1
@@ -15,9 +15,9 @@
 d = {"a": 1, "b": 2}
 v = d.pop("a")
 print(v)              # 1
-print("a" in d)       # 0
+print("a" in d)       # False
 print(d.pop("x", 0))  # 0  (default for missing key)
-print("b" in d)       # 1
+print("b" in d)       # True
 
 d2 = {"x": 10}
 e = d2.copy()

@@ -36,6 +36,17 @@ BINDINGS = {
     "fputs":  Func(arg_types=("str", "str"), ret_type="int", c_name="fputs"),
     # fclose(FILE*) -> 0 on success.
     "fclose": Func(arg_types=("str",), ret_type="int", c_name="fclose"),
+    # fflush(FILE*) -> 0 on success (flush buffered output).
+    "fflush": Func(arg_types=("str",), ret_type="int", c_name="fflush"),
+    # feof(FILE*) -> non-zero once end-of-file has been hit.
+    "feof":   Func(arg_types=("str",), ret_type="int", c_name="feof"),
+    # File positioning: ftell -> current offset; fseek(FILE*, off, whence) -> 0
+    # on success (whence: 0=SET, 1=CUR, 2=END); rewind resets to the start.
+    "ftell":  Func(arg_types=("str",), ret_type="int", c_name="ftell"),
+    "fseek":  Func(arg_types=("str", "int", "int"), ret_type="int", c_name="fseek"),
+    "rewind": Func(arg_types=("str",), ret_type="int", c_name="rewind"),
+    # rename(old, new) -> 0 on success (ISO C stdio; same name both platforms).
+    "rename": Func(arg_types=("str", "str"), ret_type="int", c_name="rename"),
     # access(path, mode) -> 0 if the path is accessible for `mode`
     # (mode 0 = existence). On Windows the CRT spells it `_access`; the
     # `asmpython.stdlib.ospath` helpers hide that difference.
@@ -76,10 +87,33 @@ BINDINGS = {
     # bundled MinGW toolchain's headers.
     "_ST_MTIME_WORD": Const(ty="int", value=11, value_windows=5),
     "_ST_BUF_WORDS": Const(ty="int", value=18, value_windows=7),
+    # Index (in 8-byte words) of the word containing the `st_mode` field.
+    # Linux: glibc `struct stat` has `st_mode` (4 bytes) at byte offset 24 ->
+    # word 3 (the low 32 bits of that word).
+    # Windows: MinGW `struct _stat64` has `st_mode` (2 bytes, unsigned short)
+    # at byte offset 6 -> the high 16 bits of word 0 -- verified via
+    # `offsetof`/`sizeof` against the bundled MinGW toolchain's headers.
+    "_ST_MODE_WORD": Const(ty="int", value=3, value_windows=0),
+
+    # st_mode file-type bitmask and the two type bits `ospath.isdir`/`isfile`
+    # care about. Values are the POSIX-standard bit patterns, shared by
+    # glibc and MSVCRT/MinGW alike.
+    "S_IFMT":  Const(ty="int", value=0xF000),
+    "S_IFDIR": Const(ty="int", value=0x4000),
+    "S_IFREG": Const(ty="int", value=0x8000),
 
     # popen(cmd, mode) -> FILE* (pipe), like fopen; mode is "r" or "w".
     "_popen": Func(arg_types=("str", "str"), ret_type="str", c_name="popen", c_name_windows="_popen"),
     # pclose(FILE*) -> the child's exit status (shifted on POSIX; raw exit
     # code on Windows), or -1 on error.
     "_pclose": Func(arg_types=("str",), ret_type="int", c_name="pclose", c_name_windows="_pclose"),
+
+    # --- Platform constants ---------------------------------------------------
+    "sep":      Const(ty="str", value="/", value_windows="\\"),
+    "linesep":  Const(ty="str", value="\n", value_windows="\r\n"),
+    "curdir":   Const(ty="str", value="."),
+    "pardir":   Const(ty="str", value=".."),
+    "extsep":   Const(ty="str", value="."),
+    "pathsep":  Const(ty="str", value=":", value_windows=";"),
+    "devnull":  Const(ty="str", value="/dev/null", value_windows="nul"),
 }

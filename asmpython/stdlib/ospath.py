@@ -18,6 +18,7 @@ in C stdio paths.
 from __future__ import annotations
 
 import os
+import sys
 
 
 def join(a: str, b: str) -> str:
@@ -80,6 +81,105 @@ def read_file(path: str) -> str:
         c = os.fgetc(f)
     os.fclose(f)
     return out
+
+
+def getcwd() -> str:
+    """Return current working directory path."""
+    buf: str = "                                                                "
+    result: str = os._getcwd(buf, 64)
+    if result == "":
+        return "."
+    return result
+
+
+def _stat_buf(p: str) -> list[int]:
+    """Run `os._stat(p)` into a fresh word buffer; [] if `p` doesn't exist."""
+    buf: list[int] = []
+    i: int = 0
+    while i < os._ST_BUF_WORDS:
+        buf.append(0)
+        i = i + 1
+    if os._stat(p, buf) != 0:
+        return []
+    return buf
+
+
+def _st_mode(buf: list[int]) -> int:
+    """Extract the `st_mode` field (file-type + permission bits) from a
+    buffer filled by `_stat_buf`."""
+    word: int = buf[os._ST_MODE_WORD]
+    if sys.platform == "win32":
+        # MinGW `struct _stat64`: st_mode is the high 16 bits of word 0.
+        return (word >> 48) & 0xFFFF
+    # glibc `struct stat`: st_mode is the low 32 bits of word 3.
+    return word & 0xFFFFFFFF
+
+
+def isdir(p: str) -> int:
+    """1 if p is a directory, else 0."""
+    buf: list[int] = _stat_buf(p)
+    if len(buf) == 0:
+        return 0
+    return int((_st_mode(buf) & os.S_IFMT) == os.S_IFDIR)
+
+
+def isfile(p: str) -> int:
+    """1 if p is a regular file (exists and is not a directory), else 0."""
+    buf: list[int] = _stat_buf(p)
+    if len(buf) == 0:
+        return 0
+    return int((_st_mode(buf) & os.S_IFMT) == os.S_IFREG)
+
+
+def splitext(p: str) -> list:
+    """Split path into (root, ext) where ext starts with '.'."""
+    dot: int = -1
+    i: int = 0
+    n: int = len(p)
+    while i < n:
+        if p[i] == ".":
+            dot = i
+        i = i + 1
+    if dot < 0:
+        return [p, ""]
+    return [p[0:dot], p[dot:]]
+
+
+def split(p: str) -> list:
+    """Split path into (head, tail) like dirname/basename."""
+    return [dirname(p), basename(p)]
+
+
+def abspath(p: str) -> str:
+    """Return absolute path (best-effort; prepends cwd for relative paths)."""
+    if len(p) == 0:
+        return getcwd()
+    first: str = p[0:1]
+    if first == "/" or first == "\\":
+        return p
+    if len(p) >= 2 and p[1:2] == ":":
+        return p
+    cwd: str = getcwd()
+    return join(cwd, p)
+
+
+def normpath(p: str) -> str:
+    """Normalize path by collapsing redundant separators (basic)."""
+    result: str = ""
+    i: int = 0
+    n: int = len(p)
+    prev_sep: int = 0
+    while i < n:
+        ch: str = p[i:i + 1]
+        if ch == "/" or ch == "\\":
+            if not prev_sep:
+                result = result + "/"
+            prev_sep = 1
+        else:
+            result = result + ch
+            prev_sep = 0
+        i = i + 1
+    return result
 
 
 # Under CPython, swap in native implementations of the I/O helpers (the FFI

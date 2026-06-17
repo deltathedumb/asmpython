@@ -35,6 +35,10 @@ _ALWAYS_AVAILABLE: frozenset[str] = frozenset({
     "frozenset", "sum", "min", "max", "abs", "sorted", "reversed", "any",
     "all", "ord", "chr", "repr", "type", "id", "range", "isinstance",
     "getattr", "hasattr", "True", "False", "None",
+    "enumerate", "zip", "map", "filter", "vars", "dir", "iter", "next",
+    "open", "round", "divmod", "pow", "hash", "bool", "bytes", "bytearray",
+    "tuple", "object", "super", "staticmethod", "classmethod", "property",
+    "NotImplemented", "Ellipsis",
 })
 
 
@@ -155,14 +159,40 @@ def _resolve_absolute(module: str, root: Path) -> Path | None:
 # `Func`/`Const` bindings (`os`, `sys`, `math`, ...). `import pathlib` /
 # `from argparse import ArgumentParser` resolve to these bundled files and get
 # merged like project modules, so their classes are fully type-checked.
-_BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({"pathlib", "argparse"})
+_BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
+    "pathlib", "argparse",
+    "string", "collections", "itertools", "functools", "json",
+    "ospath", "re", "io", "operator", "copy",
+    "enum", "abc", "contextlib",
+    "struct", "hashlib", "heapq", "bisect", "statistics",
+    "typing", "dataclasses", "textwrap", "csv", "uuid", "base64",
+    "fractions", "decimal", "datetime", "warnings", "urllib",
+    "urllibparse", "pprint", "platform", "glob", "threading",
+    "logging", "secrets", "shutil", "traceback", "inspect",
+    "fnmatch", "queue", "weakref", "gc",
+    "configparser", "locale",
+    "subprocess", "atexit", "tempfile", "types", "signal",
+    "html", "keyword", "shlex", "calendar", "difflib",
+    "ipaddress", "numbers", "hmac", "timeit", "getpass",
+    "gzip", "zipfile", "pickle",
+    "colorsys", "cmath", "sched",
+})
+
+# Dotted module names that map to a differently-named file in stdlib/.
+_BUNDLED_DOTTED: dict[str, str] = {
+    "os.path":      "ospath",
+    "urllib.parse": "urllibparse",
+}
 
 
 def _resolve_bundled_stdlib(module: str) -> Path | None:
-    top = module.split(".")[0]
-    if top not in _BUNDLED_SOURCE_STDLIB:
-        return None
-    py = Path(__file__).resolve().parent.parent / "stdlib" / f"{top}.py"
+    stem = _BUNDLED_DOTTED.get(module)
+    if stem is None:
+        top = module.split(".")[0]
+        if top not in _BUNDLED_SOURCE_STDLIB:
+            return None
+        stem = top
+    py = Path(__file__).resolve().parent.parent / "stdlib" / f"{stem}.py"
     return py if py.is_file() else None
 
 
@@ -201,9 +231,7 @@ def _within(path: Path, root: Path) -> bool:
 
 def _collect_import_stmts(module: A.Module) -> list:
     """Every Import / FromImport in the module — including those nested inside
-    function and method bodies (the compiler uses function-local imports, e.g.
-    `_handle_include`'s `from asmpython.stdlib.assembly import pkgformat`) and
-    control-flow blocks."""
+    function and method bodies and control-flow blocks."""
     found: list = []
 
     def walk(stmts) -> None:
@@ -220,7 +248,7 @@ def _collect_import_stmts(module: A.Module) -> list:
             elif isinstance(s, A.Try):
                 walk(s.body)
                 walk(getattr(s, "handler", None))
-                for _bind, hbody in getattr(s, "extra_handlers", []) or []:
+                for _types, _bind, hbody in getattr(s, "extra_handlers", []) or []:
                     walk(hbody)
                 walk(getattr(s, "else_body", None))
                 walk(getattr(s, "finally_body", None))
@@ -232,6 +260,78 @@ def _collect_import_stmts(module: A.Module) -> list:
         for m in c.methods:
             walk(m.body)
     return found
+
+
+def _rename_call_targets(node, renames: dict[str, str]) -> None:
+    """Recursively rewrite every `A.Call.func` and `A.ClosureBind.func_name`
+    in `node` (and anything nested inside it — other dataclass fields, lists,
+    tuples) per `renames`.
+
+    `ClosureBind.func_name` has to move in lockstep with the call-site rename:
+    sema keys its captured-free-var-type table (`_fv_types`) by this same
+    string (see `_prescan_fv_types`/`scan_closurebinds`), and codegen uses it
+    both as the local variable the closure object is bound to and as the
+    label baked into the closure's function pointer. Leaving it as the old
+    name after renaming the `FuncDef` left `_fv_types` keyed under a name sema
+    never looks up again, silently dropping the captured types (free vars
+    defaulted back to `int`).
+
+    Generic over every AST node type via dataclass introspection rather than
+    enumerating each node kind by hand, so it can't silently miss a branch the
+    way a hand-written walker can (see the `_cl_walk_expr`/`for...else` bug).
+    """
+    if isinstance(node, A.Call) and node.func in renames:
+        node.func = renames[node.func]
+    elif isinstance(node, A.ClosureBind) and node.func_name in renames:
+        node.func_name = renames[node.func_name]
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        for f in dataclasses.fields(node):
+            _rename_call_targets(getattr(node, f.name), renames)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            _rename_call_targets(item, renames)
+
+
+def _dedupe_lifted_funcs(module: "A.Module", taken_names: set[str]) -> None:
+    """Rename any of `module`'s lifted (nested-function-turned-top-level)
+    funcs whose bare name collides with `taken_names`, fixing up every call
+    site within `module` to match.
+
+    `taken_names` must NOT include any of `module`'s own funcs (lifted or
+    not) — only names already claimed by *other* modules / by `module`'s
+    surrounding context before this call. Passing `module`'s own names in
+    would make every lifted func look like it collides with itself.
+
+    Nested `def`s are lifted to module scope under their original source name
+    (see `Parser._parse_stmt`'s `def` branch). That name is just the variable
+    the closure happens to be bound to in its *own* file — it carries no
+    cross-file meaning, so two unrelated files both nesting a helper named
+    `walk` must not collide once whole-program merge puts every module's
+    functions into one flat `entry.funcs` list. Plain (non-lifted) top-level
+    functions are intentionally left alone: `load_program`'s merge treats a
+    same-named top-level function in a later module as already-provided by an
+    earlier one (first definition wins), which is the desired behavior there.
+    """
+    renames: dict[str, str] = {}
+    for f in module.funcs:
+        if not getattr(f, "is_lifted", False):
+            continue
+        if f.name in taken_names:
+            new_name = f.name
+            n = 0
+            while new_name in taken_names or new_name in renames.values():
+                n += 1
+                new_name = f"{f.name}__lifted{n}"
+            renames[f.name] = new_name
+            f.name = new_name
+        taken_names.add(f.name)
+    if renames:
+        _rename_call_targets(module.body, renames)
+        for f in module.funcs:
+            _rename_call_targets(f.body, renames)
+        for c in module.classes:
+            for m in c.methods:
+                _rename_call_targets(m.body, renames)
 
 
 def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]:
@@ -267,8 +367,7 @@ def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]
                             out.append(pkg_init)
             elif stmt.module:
                 # `from asmpython.pkg import X`: X may be a name defined in the
-                # package's module/__init__, OR a *submodule* (`from
-                # asmpython.stdlib.assembly import pkgformat`). Resolve the
+                # package's module/__init__, OR a *submodule*. Resolve the
                 # module itself, and also try each imported name as a submodule.
                 p = _resolve_absolute(stmt.module, root)
                 if p is None:
@@ -351,23 +450,25 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
 
     entry = Parser(Lexer(entry_src).tokenize()).parse()
 
-    seen: set[Path] = {entry_path}
+    seen: list[str] = [str(entry_path)]
     # Names already defined so merges don't duplicate (first definition wins).
+    _dedupe_lifted_funcs(entry, set())
     func_names = {f.name for f in entry.funcs}
     class_names = {c.name for c in entry.classes}
 
     # Per-module parsed AST + the top-level value assigns it exports, recorded
     # in discovery order so the materialization pass can resolve cross-module
     # value imports and order them leaves-first.
-    parsed: dict[Path, A.Module] = {entry_path: entry}
-    discovery_order: list[Path] = [entry_path]
+    parsed: dict[str, A.Module] = {str(entry_path): entry}
+    discovery_order: list[str] = [str(entry_path)]
 
     queue = _project_imports(entry, entry_path, root)
     while queue:
         mod_path = queue.pop(0).resolve()
-        if mod_path in seen:
+        mod_path_str = str(mod_path)
+        if mod_path_str in seen:
             continue
-        seen.add(mod_path)
+        seen.append(mod_path_str)
         try:
             mod_src = mod_path.read_text(encoding="utf-8")
             mod = Parser(Lexer(mod_src).tokenize()).parse()
@@ -376,8 +477,9 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
             # use constructs outside the subset; the importer still type-checks
             # leniently against the missing name.
             continue
-        parsed[mod_path] = mod
-        discovery_order.append(mod_path)
+        parsed[mod_path_str] = mod
+        discovery_order.append(mod_path_str)
+        _dedupe_lifted_funcs(mod, set(func_names))
         for f in mod.funcs:
             if f.name not in func_names:
                 func_names.add(f.name)
@@ -388,7 +490,7 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
                 entry.classes.append(c)
         # Recurse into this module's own project imports.
         for p in _project_imports(mod, mod_path, root):
-            if p.resolve() not in seen:
+            if str(p.resolve()) not in seen:
                 queue.append(p)
 
     _merge_import_bindings(entry, parsed, discovery_order)
@@ -396,8 +498,41 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
     return entry
 
 
+def _simple_const_if_targets(stmt: "A.If", available: set[str]) -> set[str] | None:
+    """If `stmt` is a top-level `if/elif/.../else` chain whose every branch
+    consists solely of simple constant assigns (e.g. the platform-conditional
+    `if sys.platform == "win32": SIGABRT: int = 22 else: SIGABRT: int = 6`
+    pattern), return the set of every name assigned across all branches so the
+    caller can hoist the whole `If` into the entry body as a program global.
+
+    Returns None if the `If` doesn't fit this shape (left for the
+    value-import / lenient-fallback machinery to handle as before).
+    """
+    free: set = set()
+    _free_names(stmt.test, free)
+    if not free <= available:
+        return None
+    targets: set[str] = set()
+    for branch in (stmt.then, stmt.orelse):
+        for s in branch or []:
+            if isinstance(s, A.If):
+                sub = _simple_const_if_targets(s, available)
+                if sub is None:
+                    return None
+                targets |= sub
+                continue
+            if not (isinstance(s, A.Assign) and isinstance(s.target, str)):
+                return None
+            bfree: set = set()
+            _free_names(s.value, bfree)
+            if not bfree <= available:
+                return None
+            targets.add(s.target)
+    return targets
+
+
 def _merge_import_bindings(
-    entry: A.Module, parsed: dict[Path, A.Module], discovery_order: list[Path]
+    entry: A.Module, parsed: dict[str, A.Module], discovery_order: list[str]
 ) -> None:
     """Replay each merged module's import statements into the entry body.
 
@@ -412,12 +547,12 @@ def _merge_import_bindings(
     so sema binds those module names globally. The entry's own imports are left
     where they are.
     """
-    seen_keys: set = set()
+    seen_keys: set[str] = set()
 
-    def key(stmt) -> tuple:
+    def key(stmt) -> str:
         if isinstance(stmt, A.Import):
-            return ("import", stmt.module)
-        return ("from", stmt.level, stmt.module, tuple(stmt.names))
+            return "import:" + stmt.module
+        return "from:" + str(stmt.level) + ":" + stmt.module + ":" + ",".join(stmt.names)
 
     extra: list = []
     # Names already bound at entry top-level, so a merged module's own global
@@ -440,8 +575,21 @@ def _merge_import_bindings(
                 continue
             seen_keys.add(k)
             extra.append(stmt)
+            if isinstance(stmt, A.Import):
+                # `import sys` binds `sys`; `import a.b.c` binds `a`. Once
+                # replayed into the entry body this name is a valid global
+                # reference, so platform-conditional constants below (e.g.
+                # `if sys.platform == "win32": ...`) can depend on it.
+                available.add(stmt.module.split(".")[0])
+            elif isinstance(stmt, A.FromImport):
+                # Track locally-bound names so subsequent constant assignments
+                # in later (or same) modules don't shadow import-bound aliases.
+                # Example: `from . import ast_nodes as A` must not be clobbered
+                # by `re.py`'s `A: int = 256`.
+                for _n in stmt.names:
+                    available.add(_n)
         # A merged module's own top-level constant assignments (e.g.
-        # `ASMPKG_SUFFIX = ".asmpkg"`) are used by its functions, so they must
+        # `STDLIB_BINDINGS = {...}`) are used by its functions, so they must
         # become program globals too. Skip a constant whose initializer needs a
         # name we can't provide here (e.g. `STDLIB_BINDINGS = {... _MATH_BINDINGS
         # ...}`, which depends on a cross-module value import) — the dependency-
@@ -458,14 +606,22 @@ def _merge_import_bindings(
                     continue
                 available.add(stmt.target)
                 extra.append(stmt)
+            elif isinstance(stmt, A.If):
+                # Platform-conditional top-level constants (e.g. signal.py's
+                # `if sys.platform == "win32": SIGABRT: int = 22 else: SIGABRT: int = 6`).
+                # Hoist the whole `If` so codegen evaluates the right branch.
+                targets = _simple_const_if_targets(stmt, available)
+                if targets is not None and not (targets & available):
+                    available |= targets
+                    extra.append(stmt)
     if extra:
         entry.body[:0] = extra
 
 
 def _materialize_value_imports(
     entry: A.Module,
-    parsed: dict[Path, A.Module],
-    discovery_order: list[Path],
+    parsed: dict[str, A.Module],
+    discovery_order: list[str],
     root: Path,
 ) -> None:
     """Pull every cross-module *value* import into the entry body as a global,
@@ -498,50 +654,64 @@ def _materialize_value_imports(
     }
     base_available |= _ALWAYS_AVAILABLE
 
-    # Map each module's locally-imported value name -> (source module, orig
-    # name), so a free name in an initializer can be chased to its definition.
-    def value_import_edges(mod_path: Path) -> dict[str, tuple[Path, str]]:
-        edges: dict[str, tuple[Path, str]] = {}
-        for stmt in parsed[mod_path].body:
+    # Map each module's locally-imported value name -> (source module str path,
+    # orig name), so a free name in an initializer can be chased to its definition.
+    def value_import_edges(mod_path_str: str) -> dict[str, tuple[str, str]]:
+        edges: dict[str, tuple[str, str]] = {}
+        mod = parsed.get(mod_path_str)
+        if mod is None:
+            return edges
+        mod_path = Path(mod_path_str)
+        for stmt in mod.body:
             if not isinstance(stmt, A.FromImport):
                 continue
             tgt = _resolve_fromimport_path(stmt, mod_path, root)
-            if tgt is None or tgt not in parsed:
+            if tgt is None:
+                continue
+            tgt_str = str(tgt)
+            if tgt_str not in parsed:
                 continue
             for local, orig in zip(stmt.names, stmt.orig_names or stmt.names):
-                edges[local] = (tgt, orig)
+                edges[local] = (tgt_str, orig)
         return edges
 
     materialized: dict[str, A.Assign] = {}  # local alias -> renamed assign
-    prepend: list[A.Stmt] = []
+    prepend: list = []
 
-    def resolve(local: str, mod_path: Path, orig: str, stack: frozenset) -> bool:
-        """Ensure `local` is materialized as the value `orig` from `mod_path`.
+    def resolve(local: str, mod_path_str: str, orig: str, stack: set) -> bool:
+        """Ensure `local` is materialized as the value `orig` from `mod_path_str`.
         Returns True on success. `stack` guards against import cycles."""
         if local in base_available or local in materialized:
             return True
-        key = (mod_path, orig)
-        if key in stack:  # cycle — give up on this chain
+        cycle_key = mod_path_str + "\x00" + orig
+        if cycle_key in stack:  # cycle — give up on this chain
             return False
-        exports = _toplevel_value_assigns(parsed[mod_path])
+        mod = parsed.get(mod_path_str)
+        if mod is None:
+            return False
+        exports = _toplevel_value_assigns(mod)
         if orig not in exports:
             return False
         assign = exports[orig]
         free: set[str] = set()
         _free_names(assign.value, free)  # type: ignore[union-attr]
-        edges = value_import_edges(mod_path)
+        edges = value_import_edges(mod_path_str)
+        new_stack: set[str] = set()
+        for s in stack:
+            new_stack.add(s)
+        new_stack.add(cycle_key)
         deps: list[A.Assign] = []
         for nm in free:
             if nm in base_available or nm in materialized:
                 continue
             # Is it a value this module imported? Chase it.
             if nm in edges:
-                src, src_orig = edges[nm]
-                if resolve(nm, src, src_orig, stack | {key}):
+                src_str, src_orig = edges[nm]
+                if resolve(nm, src_str, src_orig, new_stack):
                     continue
             # Or a value defined locally in this same module? Pull it too.
             if nm in exports:
-                if resolve(nm, mod_path, nm, stack | {key}):
+                if resolve(nm, mod_path_str, nm, new_stack):
                     continue
             return False  # a free name we can't provide — abandon the chain
         # All deps satisfied (resolve() already appended them). Emit this one.
@@ -554,9 +724,10 @@ def _materialize_value_imports(
     # module's functions reference its own value imports (`sema.py`'s
     # STDLIB_BINDINGS) just as much as the entry's do. Aliases land as globals
     # in the flat program, so resolution is idempotent across modules.
-    for mod_path in reversed(discovery_order):
-        for local, (src, orig) in value_import_edges(mod_path).items():
-            resolve(local, src, orig, frozenset())
+    empty_stack: set[str] = set()
+    for mod_path_str in reversed(discovery_order):
+        for local, (src_str, orig) in value_import_edges(mod_path_str).items():
+            resolve(local, src_str, orig, empty_stack)
 
     if prepend:
         entry.body[:0] = prepend

@@ -1,9 +1,9 @@
 # expect:
-# 1
-# 0
-# 1
-# 0
-# 1
+# True
+# False
+# True
+# False
+# True
 print(0 < 5 < 10)
 print(0 < 5 < 3)
 print(1 == 1 == 1)

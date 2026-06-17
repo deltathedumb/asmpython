@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .errors import LexError, SourcePos
+from .errors import ErrorCode, LexError, SourcePos
 
 
 KEYWORDS = {
@@ -89,14 +89,16 @@ def _is_ignore_marker(line: str, which: str) -> bool:
     return key == "compiler" and val == which
 
 
-def _strip_fstring_spec(raw: str) -> str:
-    """Drop a trailing `!r`/`!s`/`!a` conversion and/or `:format-spec` from an
-    f-string replacement field, leaving just the expression text.
+def _split_fstring_spec(raw: str) -> tuple[str, str, str]:
+    """Split an f-string replacement field into (expression, format-spec,
+    conversion).
 
-    Only top-level (outside any `()[]{}`) markers count, so `{a != b}` and
-    `{d[1:2]}` keep their `!=` / slice intact. Conversions and format specs
-    aren't applied yet — they're stripped so the expression re-lexes cleanly.
-    (TODO: honour `!r` and `:.2f` once repr / format land.)
+    A trailing `!r`/`!s`/`!a` conversion is captured separately so codegen can
+    apply it (`!r`/`!a` use repr-style formatting; `!s` is the default str
+    conversion). A top-level `:format-spec` (outside any `()[]{}`) is also
+    returned separately so codegen can honour `:.2f`-style specs. `{a != b}`
+    and `{d[1:2]}` keep their `!=` / slice intact because only depth-0 markers
+    count.
 
     A module-level function rather than a staticmethod so the lexer stays within
     asmpython's own compilable subset (the compiler doesn't model staticmethods).
@@ -112,16 +114,26 @@ def _strip_fstring_spec(raw: str) -> str:
             depth -= 1
         elif depth == 0:
             if ch == ":":
-                return raw[:i].strip()
+                return raw[:i].strip(), raw[i + 1:].strip(), ""
             if (
                 ch == "!"
                 and i + 1 < n
                 and raw[i + 1] in "rsa"
                 and (i + 2 == n or raw[i + 2] == ":")
             ):
-                return raw[:i].strip()
+                conv = raw[i + 1]
+                rest = raw[i + 2:]
+                if rest.startswith(":"):
+                    return raw[:i].strip(), rest[1:].strip(), conv
+                return raw[:i].strip(), "", conv
         i += 1
-    return raw.strip()
+    return raw.strip(), "", ""
+
+
+def _strip_fstring_spec(raw: str) -> str:
+    """Back-compat: just the expression text (spec/conversion dropped)."""
+    expr, _, _ = _split_fstring_spec(raw)
+    return expr
 
 
 class Lexer:
@@ -241,6 +253,20 @@ class Lexer:
                 self.tokens.append(self._read_fstring())
                 continue
 
+            # r"..." raw strings: backslashes are literal (no escape processing).
+            # We reuse _read_string but strip backslash-escape processing.
+            if ch == "r" and self._peek(1) in ('"', "'"):
+                self._advance()  # consume 'r'
+                self.tokens.append(self._read_raw_string())
+                continue
+
+            # b"..." / b'...' byte literals: emit as BYTES token (list[int]).
+            if ch == "b" and self._peek(1) in ('"', "'"):
+                self._advance()  # consume 'b'
+                tok = self._read_string()
+                self.tokens.append(Token("BYTES", tok.value, tok.pos.line, tok.pos.col))
+                continue
+
             if ch.isalpha() or ch == "_":
                 self.tokens.append(self._read_identifier())
                 continue
@@ -284,7 +310,7 @@ class Lexer:
                 self.indents.pop()
                 self.tokens.append(Token("DEDENT", "", self.line, 1))
             if depth != self.indents[-1]:
-                raise LexError("inconsistent indentation", SourcePos(self.line, 1))
+                raise LexError("inconsistent indentation", SourcePos(self.line, 1), ErrorCode.L_INCONSISTENT_INDENT)
 
     def _read_identifier(self) -> Token:
         line, col = self.line, self.col
@@ -333,7 +359,7 @@ class Lexer:
             try:
                 return Token("FLOAT", float(text), line, col)
             except ValueError:
-                raise LexError(f"invalid float literal {text!r}", SourcePos(line, col))
+                raise LexError(f"invalid float literal {text!r}", SourcePos(line, col), ErrorCode.L_INVALID_FLOAT)
         return Token("INT", int(text), line, col)
 
     def _read_fstring(self) -> Token:
@@ -352,9 +378,9 @@ class Lexer:
         while True:
             c = self._peek()
             if c == "":
-                raise LexError("unterminated f-string", SourcePos(line, col))
+                raise LexError("unterminated f-string", SourcePos(line, col), ErrorCode.L_UNTERMINATED_FSTRING)
             if c == "\n":
-                raise LexError("newline in f-string", SourcePos(line, col))
+                raise LexError("newline in f-string", SourcePos(line, col), ErrorCode.L_NEWLINE_IN_FSTRING)
             if c == quote:
                 self._advance()
                 break
@@ -406,9 +432,10 @@ class Lexer:
                         expr_chars.append(self._advance())
                     else:
                         expr_chars.append(self._advance())
-                segments.append(
-                    ("expr", _strip_fstring_spec("".join(expr_chars).strip()))
+                _expr, _spec, _conv = _split_fstring_spec(
+                    "".join(expr_chars).strip()
                 )
+                segments.append(("expr", _expr, _spec, _conv))
                 continue
             if c == "}":
                 self._advance()
@@ -425,6 +452,28 @@ class Lexer:
             segments.append(("str", "".join(text)))
         return Token("FSTRING", segments, line, col)
 
+    def _read_raw_string(self) -> Token:
+        """Read r"..." or r'...': backslashes are literal, no escape processing."""
+        line, col = self.line, self.col
+        quote = self._advance()
+        chars: list[str] = []
+        while True:
+            c = self._peek()
+            if c == "":
+                raise LexError("unterminated raw string literal", SourcePos(line, col), ErrorCode.L_UNTERMINATED_RAW)
+            if c == "\n":
+                raise LexError("newline in raw string literal", SourcePos(line, col), ErrorCode.L_NEWLINE_IN_STRING)
+            if c == quote:
+                self._advance()
+                break
+            if c == "\\" and self._peek(1) == quote:
+                # Only escaped-quote is special in raw strings (prevents closing).
+                self._advance()
+                chars.append(self._advance())
+            else:
+                chars.append(self._advance())
+        return Token("STRING", "".join(chars), line, col)
+
     def _read_string(self) -> Token:
         line, col = self.line, self.col
         quote = self._advance()
@@ -439,9 +488,9 @@ class Lexer:
         while True:
             c = self._peek()
             if c == "":
-                raise LexError("unterminated string literal", SourcePos(line, col))
+                raise LexError("unterminated string literal", SourcePos(line, col), ErrorCode.L_UNTERMINATED_STRING)
             if c == "\n":
-                raise LexError("newline in string literal", SourcePos(line, col))
+                raise LexError("newline in string literal", SourcePos(line, col), ErrorCode.L_NEWLINE_IN_STRING)
             if c == quote:
                 self._advance()
                 break
@@ -524,6 +573,7 @@ class Lexer:
             "&=",
             "|=",
             "^=",
+            ":=",
         ):
             self._advance()
             self._advance()
@@ -535,4 +585,4 @@ class Lexer:
             self.paren_depth -= 1
         if ch in "+-*/%<>=,:()[]{}&|^~.@":
             return Token("OP", ch, line, col)
-        raise LexError(f"unexpected character {ch!r}", SourcePos(line, col))
+        raise LexError(f"unexpected character {ch!r}", SourcePos(line, col), ErrorCode.L_UNEXPECTED_CHAR)

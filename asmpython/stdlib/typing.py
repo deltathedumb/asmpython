@@ -1,0 +1,225 @@
+"""typing module: type hints support.
+
+In asmpython, type annotations are used by the semantic analyser but
+the typing module itself is a stub that provides the common names so
+that `from typing import X` works without errors.
+"""
+from __future__ import annotations
+
+
+def _identity(x: int) -> int:
+    return x
+
+
+# Generic alias stubs — these are callable and return their argument
+# when used as decorators or subscript-like calls.
+
+def Optional(t: int) -> int:
+    return t
+
+
+def Union(*args) -> int:
+    return 0
+
+
+def List(t: int) -> int:
+    return t
+
+
+def Dict(k: int, v: int) -> int:
+    return k
+
+
+def Tuple(*args) -> int:
+    return 0
+
+
+def Set(t: int) -> int:
+    return t
+
+
+def FrozenSet(t: int) -> int:
+    return t
+
+
+def Type(t: int) -> int:
+    return t
+
+
+def Callable(*args) -> int:
+    return 0
+
+
+def Iterator(t: int) -> int:
+    return t
+
+
+def Iterable(t: int) -> int:
+    return t
+
+
+def Generator(*args) -> int:
+    return 0
+
+
+def Sequence(t: int) -> int:
+    return t
+
+
+def MutableSequence(t: int) -> int:
+    return t
+
+
+def Mapping(k: int, v: int) -> int:
+    return k
+
+
+def MutableMapping(k: int, v: int) -> int:
+    return k
+
+
+def ClassVar(t: int) -> int:
+    return t
+
+
+def Final(t: int) -> int:
+    return t
+
+
+def Literal(*args) -> int:
+    return 0
+
+
+def Annotated(*args) -> int:
+    return 0
+
+
+def overload(func: int) -> int:
+    return func
+
+
+def cast(t: int, val: int) -> int:
+    return val
+
+
+def no_type_check(func: int) -> int:
+    return func
+
+
+def runtime_checkable(cls: int) -> int:
+    return cls
+
+
+# TypeVar stub
+class TypeVar:
+    def __init__(self, name: str) -> None:
+        self.__name__: str = name
+
+    def __str__(self) -> str:
+        return self.__name__
+
+
+# Protocol stub
+class Protocol:
+    pass
+
+
+# NamedTuple stub
+class NamedTuple:
+    pass
+
+
+# TypedDict stub
+class TypedDict:
+    pass
+
+
+# Special forms as int constants (used as type: ignore anchors)
+Any: int = 0
+Never: int = 0
+NoReturn: int = 0
+Self: int = 0
+TYPE_CHECKING: int = 0
+
+
+def get_type_hints(obj: int, globalns: int = 0, localns: int = 0) -> int:
+    """Return type hints for a function or class (stub: returns 0)."""
+    return 0
+
+
+def get_args(tp: int) -> list:
+    """Return arguments of a generic alias (stub: returns empty list)."""
+    return []
+
+
+def get_origin(tp: int) -> int:
+    """Return the __origin__ of a generic alias (stub: returns 0)."""
+    return 0
+
+
+def is_typeddict(tp: int) -> int:
+    """Return True if tp is a TypedDict type (stub: always False)."""
+    return 0
+
+
+class ParamSpec:
+    """PEP 612 Parameter Specification Variable (stub)."""
+
+    def __init__(self, name: str) -> None:
+        self.__name__: str = name
+
+    def __str__(self) -> str:
+        return self.__name__
+
+
+class TypeVarTuple:
+    """PEP 646 TypeVarTuple (stub)."""
+
+    def __init__(self, name: str) -> None:
+        self.__name__: str = name
+
+
+def TypeAlias(t: int) -> int:
+    """PEP 613 TypeAlias annotation (stub: returns unchanged)."""
+    return t
+
+
+def Concatenate(*args) -> int:
+    """PEP 612 Concatenate (stub)."""
+    return 0
+
+
+def Unpack(t: int) -> int:
+    """PEP 646 Unpack (stub)."""
+    return t
+
+
+def assert_never(arg: int) -> int:
+    """Assert that a branch is unreachable (stub)."""
+    return 0
+
+
+def assert_type(val: int, typ: int) -> int:
+    """Assert that val has type typ at type check time (stub: returns val)."""
+    return val
+
+
+def reveal_type(obj: int) -> int:
+    """Reveal the inferred type of obj (stub: returns obj)."""
+    return obj
+
+
+def dataclass_transform(eq_default: int = 1, order_default: int = 0,
+                        frozen_default: int = 0) -> int:
+    """PEP 681 dataclass_transform decorator (stub)."""
+    return 0
+
+
+def override(func: int) -> int:
+    """PEP 698 @override decorator (stub: no-op)."""
+    return func
+
+
+LiteralString: int = 0
+Required: int = 0
+NotRequired: int = 0

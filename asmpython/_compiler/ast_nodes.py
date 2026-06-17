@@ -29,10 +29,10 @@ class Module:
     ffi_funcs: dict = field(default_factory=dict)
     ffi_consts: dict = field(default_factory=dict)
     classes_sig: dict = field(default_factory=dict)  # name -> sema.ClassSig
-    # Assembly packages requested via include(...), in source order. Populated
-    # by sema from the loaded `.asmpkg` manifests; codegen emits their NASM and
-    # treats their exports as callable symbols.
-    asm_packages: list = field(default_factory=list)  # list[pkgformat.AsmPackage]
+    # `from module import orig as local` aliases for bundled-source stdlib funcs.
+    # Maps local_name -> original_name so codegen can resolve the real symbol.
+    # Populated by sema during FromImport analysis.
+    func_aliases: dict = field(default_factory=dict)  # local -> original
 
 
 @dataclass
@@ -57,6 +57,9 @@ class FuncDef:
     # positional arguments into a list and pass it there, so the callee and the
     # register-spill prologue treat it as an ordinary (list) parameter.
     vararg: "Optional[str]" = None
+    # Name of the `**kwargs` parameter, or None. Call sites pack excess keyword
+    # arguments into a DictLit passed as a trailing dict-typed slot.
+    kwarg: "Optional[str]" = None
     # Set when the function was marked `@assembly_func`: `asm_body` is the raw
     # NASM lifted from the docstring (emitted verbatim as the body) and
     # `asm_symbol` is the label to define (defaults to `name`). When `asm_body`
@@ -67,6 +70,9 @@ class FuncDef:
     # True for nested functions lifted to module level by the parser. Sema
     # skips undefined-variable errors in their bodies (closure vars).
     is_lifted: bool = False
+    # Decorator identities preceding the def (leading dotted names), e.g.
+    # ["staticmethod"] / ["classmethod"]. Used to relax the method `self` rule.
+    decorators: list = field(default_factory=list)
 
 
 @dataclass
@@ -117,14 +123,31 @@ class AugAssign:
 
 
 @dataclass
+class StarTarget:
+    """`*name` as one target of a TupleAssign (PEP 3132 starred assignment),
+    e.g. `a, *rest = xs` or `first, *mid, last = xs`. At most one per
+    TupleAssign, and only valid when the single right-hand value is a
+    `list`-typed expression -- `rest`/`mid`/etc. is bound to a fresh list
+    holding the "leftover" middle elements (same element kind as the
+    right-hand list)."""
+
+    name: str
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
 class TupleAssign:
     """a, b, c = e1, e2, e3 -- evaluates every rhs first (into temporaries),
     then performs each store, so a, b = b, a works.
 
-    Only simple name targets are supported (no nested unpacking, no `*rest`,
-    no subscript/attr targets yet)."""
+    Targets are `Name`, `Subscript`, `Attr`, or (single-iterable unpack form
+    only) `StarTarget` expressions (e.g. `xs[0], xs[1] = xs[1], xs[0]`,
+    `self.x, self.y = self.y, self.x`, or `a, *rest = xs`). Subscript/Attr
+    targets are only allowed in the parallel form (one value per target) --
+    the single-iterable unpack form requires plain names (and at most one
+    `*rest`, no nested unpacking)."""
 
-    targets: list[str] = field(default_factory=list)
+    targets: list["Expr"] = field(default_factory=list)
     values: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
@@ -179,6 +202,10 @@ class For:
     # is normally a name (str); for nested unpacking like
     # `for i, (a, b) in enumerate(zip(...))` an entry may itself be a list[str].
     targets: list = field(default_factory=list)
+    # Per-target element kinds for tuple-unpack loops (`for a, b in xs`), filled
+    # by sema from the iterable's element tuple slots so codegen types each bound
+    # name. Empty -> targets are opaque ("any").
+    target_types: list = field(default_factory=list)
     # `else` clause: runs when the iterator is exhausted without a break.
     orelse: list["Stmt"] = field(default_factory=list)
 
@@ -205,25 +232,28 @@ class Pass:
 
 
 @dataclass
-class Import:
-    """import math  (the module name remains visible as a prefix)."""
+class ClosureBind:
+    """Bind a name to a closure object wrapping a lifted inner function.
 
-    module: str
+    Emitted by the parser when a nested `def` is found; replaces the old
+    `Pass` placeholder.  `func_name` is the inner function's name; `free_vars`
+    is the list of outer-scope variable names that the body references.
+    `nonlocal_vars` is the subset of free_vars declared `nonlocal` in the inner
+    body (these are captured by box/reference so the inner function can mutate them).
+    Codegen allocates a list [CLOSURE_MAGIC, fn_ptr, var1, var2, ...].
+    """
+
+    func_name: str
+    free_vars: list
+    nonlocal_vars: list = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
 @dataclass
-class Include:
-    """include("name") — pull in an assembly package (`<name>.asmpkg`).
+class Import:
+    """import math  (the module name remains visible as a prefix)."""
 
-    Built from a top-level `include(...)` call (the function imported from
-    `asmpython.assembly`). The package's exported symbols become callable; its
-    NASM is concatenated into the program's output. `name` is the literal
-    package name. Resolution + loading happen in sema/codegen via
-    `asmpython.assembly.pkgformat`.
-    """
-
-    name: str
+    module: str
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
@@ -295,32 +325,37 @@ class With:
 class Try:
     """`try: body (except [Type] [as name]: handler)+ [else: ...] [finally: ...]`.
 
-    asmpython has no exception-class RTTI, so an `except` clause's type is parsed
-    but ignored: the first handler catches anything raised. `bind_name` binds
-    the exception's message string inside that first handler.
+    Each `except` clause may name one or more exception types (`except E:` or
+    `except (E1, E2):`); an empty `types` list means a bare `except:` that
+    matches anything. At runtime, the raised exception carries a type id and
+    `_gen_try` checks each handler's declared types (and their builtin/user
+    class ancestry) in source order, running the first one that matches. If
+    none match, any `finally` runs and the exception propagates.
 
-    The first handler stays in `handler` / `bind_name` for back-compat with the
-    single-handler codegen path. Any additional `except` clauses land in
-    `extra_handlers` as (bind_name, body) pairs; `else_body` / `finally_body`
-    hold the optional trailing clauses. Codegen currently implements only the
-    single-handler, no-else, no-finally shape and rejects the rest until the
-    full handler machinery lands.
+    The first handler stays in `handler` / `handler_types` / `bind_name` for
+    back-compat with the single-handler codegen path. Any additional `except`
+    clauses land in `extra_handlers` as `(types, bind_name, body)` tuples;
+    `else_body` / `finally_body` hold the optional trailing clauses.
     """
 
     body: list["Stmt"]
     handler: list["Stmt"]
     bind_name: Optional[str] = None
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
-    extra_handlers: list = field(default_factory=list)  # list[(bind_name, body)]
+    handler_types: list[str] = field(default_factory=list)
+    extra_handlers: list = field(
+        default_factory=list
+    )  # list[(types: list[str], bind_name, body)]
     else_body: list["Stmt"] = field(default_factory=list)
     finally_body: list["Stmt"] = field(default_factory=list)
 
 
 @dataclass
 class Raise:
-    """`raise expr` — expr must evaluate to a str."""
+    """`raise expr` — expr must evaluate to a str. `value` is None for a
+    bare `raise` (re-raise the currently-active exception)."""
 
-    value: "Expr"
+    value: "Expr | None"
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
@@ -353,6 +388,115 @@ class Del:
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
+@dataclass
+class YieldStmt:
+    """`yield expr` — suspends a generator function and produces one value."""
+
+    value: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+# ---- match/case patterns -----------------------------------------------------
+
+
+@dataclass
+class MatchValue:
+    """A literal pattern: `case 1:`, `case "x":`, `case 3.0:`, `case None:`,
+    `case True:`, `case -1:`. Matches when the subject equals `value`."""
+
+    value: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class MatchCapture:
+    """A capture pattern (`case x:`, binds the subject to `x`) or the
+    wildcard pattern (`case _:`, when `name == "_"`, matches anything and
+    binds nothing)."""
+
+    name: str
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class MatchOr:
+    """`case p1 | p2 | ...:` — matches if any alternative matches.
+
+    Only literal alternatives (MatchValue, or nested MatchOr of literals) are
+    supported: capture patterns inside an `or` pattern are rejected, since
+    asmpython doesn't support the cross-alternative binding-consistency rules
+    CPython enforces.
+    """
+
+    patterns: list["Pattern"] = field(default_factory=list)
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class MatchSequence:
+    """`case [p0, p1, ...]:` / `case (p0, p1, ...):` — matches a list/tuple of
+    the right shape. At most one element may be a starred capture (`*rest` /
+    `*_`); `star_index` is its position in `patterns`, or None if there's no
+    star. A starred wildcard (`*_`) still occupies a slot in `patterns`
+    (as `MatchCapture("_")`) but binds nothing."""
+
+    patterns: list["Pattern"] = field(default_factory=list)
+    star_index: Optional[int] = None
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class MatchClass:
+    """`case ClassName(p0, p1, kw=pk, ...):` — matches an instance of
+    `cls_name` (via isinstance/RTTI) whose `__match_args__`-named attributes
+    (for positional sub-patterns) and keyword-named attributes match."""
+
+    cls_name: str
+    positional: list["Pattern"] = field(default_factory=list)
+    kwargs: list = field(default_factory=list)  # list[(str, Pattern)]
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class MatchAs:
+    """`case pattern as name:` — matches if `pattern` matches, and also binds
+    the whole subject to `name`. `pattern` is None for a bare capture (`case
+    name:`) handled instead by MatchCapture; MatchAs is only built for the
+    explicit `as` form."""
+
+    pattern: "Optional[Pattern]"
+    name: str
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class MatchMapping:
+    """`case {"key1": p1, "key2": p2, ...}:` — matches a dict with at least
+    the listed keys present, checking each sub-pattern against the value.
+    Only string literal keys are supported."""
+
+    keys: list  # list[str]
+    patterns: list  # list[Pattern]
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+Pattern = MatchValue | MatchCapture | MatchOr | MatchSequence | MatchClass | MatchAs | MatchMapping
+
+
+@dataclass
+class Match:
+    """`match subject: case pattern [if guard]: body ...`.
+
+    Sema rewrites this *in place* into an `If`/`elif`/.../`else` chain (see
+    `Analyzer._check_stmt`), evaluating `subject` once into a synthetic temp
+    so patterns/guards can reference it without re-evaluating side effects.
+    """
+
+    subject: "Expr"
+    cases: list = field(default_factory=list)  # list[(Pattern, Optional[Expr], list[Stmt])]
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
 Stmt = (
     Assign
     | AugAssign
@@ -365,9 +509,9 @@ Stmt = (
     | Continue
     | ExprStmt
     | Pass
+    | ClosureBind
     | Import
     | FromImport
-    | Include
     | AttrAssign
     | Try
     | With
@@ -375,6 +519,8 @@ Stmt = (
     | Global
     | Nonlocal
     | Del
+    | Match
+    | YieldStmt
 )
 # IndexAssign is also a Stmt but forward-referenced because Subscript is defined below.
 
@@ -386,6 +532,15 @@ Stmt = (
 class IntLit:
     value: int
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    # True for the literals `True`/`False` (both parse to IntLit(1)/IntLit(0)).
+    # Lets print()/str()/f-strings render "True"/"False" instead of "1"/"0"
+    # without a separate AST node or a distinct static type (bool is still
+    # "int" everywhere else: arithmetic, comparisons, etc.).
+    is_bool: bool = False
+    # True for the literal `None` (parses to IntLit(0)). Lets print()/str()/
+    # f-strings render "None" instead of "0"; `None` is still "int" (0)
+    # everywhere else (comparisons, truthiness, etc.).
+    is_none: bool = False
 
 
 @dataclass
@@ -411,10 +566,29 @@ class Name:
     # "str" / "float"). Lets codegen specialise iteration / indexing without
     # re-running the scope analysis.
     list_el_type: str = "int"
+    # Filled in by sema when inferred_type == "list" and list_el_type is
+    # itself a container ("list"/"dict") — the common element/value kind one
+    # level down, so repr can recurse into nested containers.
+    list_el_value_type: str = "int"
+    # Filled in by sema when inferred_type == "dict" — value kind ("int" /
+    # "str" / "float" / "list" / "dict").
+    value_type: str = "int"
+    # Filled in by sema when inferred_type == "dict" and value_type is itself
+    # a container ("list"/"dict") — the common element/value kind one level
+    # down, so repr can recurse into nested containers.
+    inner_value_type: str = "int"
     # Filled in by sema when inferred_type == "tuple": the per-position
     # element kinds (e.g. ["int", "str"]). Tuples are heterogeneous, so
     # there's one entry per slot rather than a single element type.
     tuple_elem_types: list[str] = field(default_factory=list)
+    # Filled in by sema when inferred_type == "int" and the name was last
+    # assigned a bool-valued expression (see is_bool_expr). Lets print()/
+    # str()/f-strings render "True"/"False" for `b = x > 1; print(b)`.
+    is_bool: bool = False
+    # Filled in by sema when inferred_type == "int" and the name was last
+    # assigned `None` (see is_none_expr). Lets print()/str()/f-strings render
+    # "None" for `x = None; print(x)`.
+    is_none: bool = False
 
 
 @dataclass
@@ -467,6 +641,23 @@ class IfExp:
 
 
 @dataclass
+class NamedExpr:
+    """`target := value` — assignment expression (the "walrus operator").
+
+    Evaluates `value`, assigns it to `target` (same scope as a plain
+    `Assign` to that name would use), and the whole expression evaluates to
+    that value. `inferred_type` / `list_el_type` mirror `value`'s type and
+    are filled in by sema.
+    """
+
+    target: str
+    value: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    inferred_type: str = "int"
+    list_el_type: str = "int"
+
+
+@dataclass
 class Call:
     func: str
     args: list["Expr"] = field(default_factory=list)
@@ -506,6 +697,15 @@ class Comprehension:
     # When empty, the comprehension is single-target and `var` holds the one
     # name. Mirrors `A.For.targets`.
     targets: list = field(default_factory=list)
+    # Additional `for` clauses: `[x for a in A for b in B]`.
+    # Parallel lists: extra_for_vars[i] is str (single name) or "" (multi-target),
+    # extra_for_targets[i] is list of names when multi-unpack, else [],
+    # extra_for_iters[i] is the iterable expr,
+    # extra_for_conds[i] is the filter expr or None.
+    extra_for_vars: list = field(default_factory=list)
+    extra_for_targets: list = field(default_factory=list)
+    extra_for_iters: list = field(default_factory=list)
+    extra_for_conds: list = field(default_factory=list)
 
 
 @dataclass
@@ -563,6 +763,12 @@ class ListLit:
     elems: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     el_type: str = "int"
+    # When el_type is a container ("dict"/"list"), the common value/element kind
+    # of those nested containers (one level down). "int" when unknown.
+    el_value_type: str = "int"
+    # When el_type == "tuple", the common per-slot element kinds of those tuple
+    # elements (so `xs[i][0]` / `for a, b in xs` resolve). Empty when unknown.
+    el_tuple_types: list = field(default_factory=list)
 
 
 @dataclass
@@ -642,9 +848,15 @@ class DictLit:
     """{key: value, ...} literal. Keys must be str. Values may be any of int /
     str / float / instance:<Class>, but the dict is homogeneous in value kind
     (sema rejects mixed-value dicts). `value_type` is set by sema and lets
-    codegen / iteration recover the right per-element kind."""
+    codegen / iteration recover the right per-element kind.
 
-    keys: list["Expr"] = field(default_factory=list)
+    PEP 448 dict unpacking (`{**other, "k": v}`) is represented by a `None`
+    entry in `keys` paired with the spread expression (which must be
+    dict-typed) at the same index in `values`; codegen merges that dict's
+    entries in via `_runtime_dict_update` in source order, so later entries
+    (whether spreads or explicit keys) win on key conflicts."""
+
+    keys: list["Expr | None"] = field(default_factory=list)
     values: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     value_type: str = "int"
@@ -691,6 +903,22 @@ class SetLit:
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
+@dataclass
+class Starred:
+    """`*expr` used as a call argument, e.g. `f(*pieces[0])`.
+
+    asmpython has no runtime varargs, so sema requires `value` to be a
+    tuple-typed expression with statically-known `elem_types` (a Name,
+    Subscript, or Attr — not a Call, to avoid re-evaluating side effects) and
+    rewrites the single Starred argument into one `Subscript` per tuple slot
+    (`value[0], value[1], ...`) before codegen ever sees it. codegen has no
+    knowledge of this node at all.
+    """
+
+    value: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
 Expr = (
     IntLit
     | FloatLit
@@ -713,6 +941,8 @@ Expr = (
     | Comprehension
     | DictComprehension
     | Lambda
+    | Starred
+    | NamedExpr
 )
 
 
@@ -745,6 +975,8 @@ def expr_type(e: Expr) -> str:
         return e.inferred_type
     if isinstance(e, IfExp):
         return e.inferred_type
+    if isinstance(e, NamedExpr):
+        return e.inferred_type
     if isinstance(e, Subscript):
         return getattr(e, "inferred_type", "int")
     if isinstance(e, BinOp):
@@ -755,9 +987,10 @@ def expr_type(e: Expr) -> str:
             return e.inferred_type  # type: ignore
         # sema may stamp a BinOp with a non-arithmetic result: a union of class
         # objects (`A | B | C`) is "type"; an opaque ("any") operand makes the
-        # result "any"; set union/difference/intersection (|, -, &) is "set".
-        # Honor those so they chain (e.g. `(a | b) | c` for nested set unions).
-        if getattr(e, "inferred_type", None) in ("type", "any", "set"):
+        # result "any"; set union/difference/intersection (|, -, &) is "set";
+        # dict union (`d1 | d2`, PEP 584) is "dict". Honor those so they chain
+        # (e.g. `(a | b) | c` for nested set/dict unions).
+        if getattr(e, "inferred_type", None) in ("type", "any", "set", "dict", "list", "str"):
             return e.inferred_type  # type: ignore
         lt, rt = expr_type(e.left), expr_type(e.right)
         if e.op in ("&", "|", "^", "<<", ">>"):
@@ -772,6 +1005,9 @@ def expr_type(e: Expr) -> str:
         if e.op == "*" and (
             (lt == "str" and rt == "int") or (lt == "int" and rt == "str")
         ):
+            return "str"
+        # `"...%s..." % (args)` (printf-style formatting) always yields a str.
+        if e.op == "%" and lt == "str":
             return "str"
         # Python's true division always produces a float, even on ints.
         if e.op == "/":
@@ -803,6 +1039,49 @@ def expr_type(e: Expr) -> str:
     return "int"
 
 
+def is_bool_expr(e: Expr) -> bool:
+    """True if `e` statically evaluates to a Python `bool` (True/False),
+    even though its `expr_type` is "int" (bool is int-compatible everywhere:
+    arithmetic, comparisons, indexing). Used by print()/str()/f-strings to
+    render "True"/"False" instead of "1"/"0"."""
+    if isinstance(e, IntLit):
+        return e.is_bool
+    if isinstance(e, Compare):
+        return True
+    if isinstance(e, UnaryOp):
+        return e.op == "not"
+    if isinstance(e, BoolOp):
+        return is_bool_expr(e.left) and is_bool_expr(e.right)
+    if isinstance(e, IfExp):
+        return is_bool_expr(e.body) and is_bool_expr(e.orelse)
+    if isinstance(e, Call):
+        return e.func in ("bool", "isinstance", "any", "all") or getattr(e, "is_bool", False)
+    if isinstance(e, MethodCall):
+        return e.method in (
+            "isdigit", "isalpha", "isalnum", "isspace",
+            "isupper", "islower", "isdecimal", "isidentifier",
+            "startswith", "endswith",
+        ) or getattr(e, "is_bool", False)
+    if isinstance(e, Name):
+        return getattr(e, "is_bool", False)
+    if isinstance(e, NamedExpr):
+        return is_bool_expr(e.value)
+    return False
+
+
+def is_none_expr(e: Expr) -> bool:
+    """True if `e` statically evaluates to `None` (parsed as IntLit(0)), even
+    though its `expr_type` is "int". Used by print()/str()/f-strings to
+    render "None" instead of "0"."""
+    if isinstance(e, IntLit):
+        return e.is_none
+    if isinstance(e, Name):
+        return getattr(e, "is_none", False)
+    if isinstance(e, NamedExpr):
+        return is_none_expr(e.value)
+    return False
+
+
 def tuple_element_types(e: Expr) -> list[str]:
     """Per-slot element kinds for a tuple-typed expression, or [] if unknown.
 
@@ -812,3 +1091,125 @@ def tuple_element_types(e: Expr) -> list[str]:
     if isinstance(e, TupleLit):
         return list(e.elem_types)
     return list(getattr(e, "tuple_elem_types", []))
+
+
+def parse_pct_format(fmt: str) -> tuple[list[tuple], int]:
+    """Parse a printf-style '%' format string into (pieces, n_conversions).
+
+    Each piece is either ("lit", text) or ("arg", flags, width, precision,
+    conv), where flags/width are the raw characters between '%' and the
+    conversion character and precision includes the leading '.' (or "" if
+    absent). "%%" becomes a literal "%". Raises ValueError on a malformed or
+    unsupported specifier. Shared by sema (validation) and codegen (lowering)
+    so the two stay in sync.
+    """
+    pieces: list[tuple] = []
+    buf = ""
+    nconv = 0
+    i = 0
+    n = len(fmt)
+    while i < n:
+        ch = fmt[i]
+        if ch != "%":
+            buf += ch
+            i += 1
+            continue
+        if i + 1 < n and fmt[i + 1] == "%":
+            buf += "%"
+            i += 2
+            continue
+        j = i + 1
+        flags = ""
+        while j < n and fmt[j] in "-+0 #":
+            flags += fmt[j]
+            j += 1
+        width = ""
+        while j < n and fmt[j].isdigit():
+            width += fmt[j]
+            j += 1
+        precision = ""
+        if j < n and fmt[j] == ".":
+            precision = "."
+            j += 1
+            while j < n and fmt[j].isdigit():
+                precision += fmt[j]
+                j += 1
+        if j >= n:
+            raise ValueError("incomplete format specifier")
+        conv = fmt[j]
+        if conv not in "rsdiouxXeEfFgG":
+            raise ValueError(f"unsupported format character {conv!r}")
+        if buf:
+            pieces.append(("lit", buf))
+            buf = ""
+        pieces.append(("arg", flags, width, precision, conv))
+        nconv += 1
+        i = j + 1
+    if buf:
+        pieces.append(("lit", buf))
+    return pieces, nconv
+
+
+def parse_format_fields(fmt: str) -> list[tuple]:
+    """Parse a str.format()-style format string into a flat list of pieces.
+
+    Each piece is either ("lit", text, "", "") for literal text (with `{{`/
+    `}}` collapsed to literal `{`/`}`), or ("arg", index_or_name, spec, conv)
+    for a `{field}` replacement: `index_or_name` is an `int` for an
+    auto-numbered (`{}`) or explicit-index (`{0}`) field, or a `str` for a
+    named field (`{name}`); `spec` is the optional `:format-spec` (without
+    the leading `:`); `conv` is the optional `!r`/`!s`/`!a` conversion
+    (without the leading `!`). Auto-numbering only advances for `{}` fields,
+    matching CPython. Shared by sema (validation) and codegen (lowering) so
+    the two stay in sync.
+    """
+    pieces: list[tuple] = []
+    buf = ""
+    auto = 0
+    i = 0
+    n = len(fmt)
+    while i < n:
+        ch = fmt[i]
+        if ch == "{":
+            if i + 1 < n and fmt[i + 1] == "{":
+                buf += "{"
+                i += 2
+                continue
+            j = i + 1
+            field = ""
+            while j < n and fmt[j] != "}":
+                field += fmt[j]
+                j += 1
+            name_conv, _, spec = field.partition(":")
+            if "!" in name_conv:
+                idx_part, conv = name_conv.split("!", 1)
+            else:
+                idx_part, conv = name_conv, ""
+            idx_part = idx_part.strip()
+            idx: object
+            if idx_part == "":
+                idx = auto
+                auto += 1
+            elif idx_part.isdigit():
+                idx = int(idx_part)
+            else:
+                idx = idx_part
+            if buf:
+                pieces.append(("lit", buf, "", ""))
+                buf = ""
+            pieces.append(("arg", idx, spec, conv))
+            i = j + 1
+            continue
+        if ch == "}":
+            if i + 1 < n and fmt[i + 1] == "}":
+                buf += "}"
+                i += 2
+                continue
+            buf += "}"
+            i += 1
+            continue
+        buf += ch
+        i += 1
+    if buf:
+        pieces.append(("lit", buf, "", ""))
+    return pieces

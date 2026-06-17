@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 from .lexer import Token, Lexer
-from .errors import ParseError
+from .errors import ErrorCode, ParseError
 from . import ast_nodes as A
 
 
@@ -46,7 +48,7 @@ class Parser:
         t = self.toks[self.i]
         if t.kind != kind or (value is not None and t.value != value):
             want = f"{kind} {value!r}" if value is not None else kind
-            raise ParseError(f"expected {want}, got {t.kind} {t.value!r}", t.pos)
+            raise ParseError(f"expected {want}, got {t.kind} {t.value!r}", t.pos, ErrorCode.P_EXPECTED_TOKEN)
         self.i += 1
         return t
 
@@ -65,6 +67,269 @@ class Parser:
             self._eat()
 
     # ---- top level ---------------------------------------------------------
+
+    def _find_free_vars(self, fdef: A.FuncDef) -> tuple:
+        """Return (free_vars, nonlocal_vars) for fdef.
+
+        free_vars: outer-scope names referenced in fdef's body that are not
+        locally bound (params / non-nonlocal assigns).
+        nonlocal_vars: subset of free_vars declared `nonlocal` in the body;
+        these must be captured by reference (boxed cell) so mutations are shared."""
+        local_names: set = set(fdef.params)
+        if fdef.vararg:
+            local_names.add(fdef.vararg)
+        if fdef.kwarg:
+            local_names.add(fdef.kwarg)
+        # Collect names declared `nonlocal` — exclude them from local_names so
+        # they appear in free_vars even when assigned inside the body.
+        nonlocal_names: set = set()
+        def _collect_nonlocal(stmts: list) -> None:
+            for s in stmts:
+                if isinstance(s, A.Nonlocal):
+                    nonlocal_names.update(s.names)
+        _collect_nonlocal(fdef.body)
+        # Collect names that are assigned (bound) inside the body (skip nonlocal).
+        def _collect_assigned(stmts: list) -> None:
+            for s in stmts:
+                if isinstance(s, A.Assign):
+                    if s.target not in nonlocal_names:
+                        local_names.add(s.target)
+                elif isinstance(s, A.AugAssign):
+                    if s.target not in nonlocal_names:
+                        local_names.add(s.target)
+                elif isinstance(s, A.For):
+                    if isinstance(s.var, str) and s.var not in nonlocal_names:
+                        local_names.add(s.var)
+                    for _t in (s.targets or []):
+                        if isinstance(_t, str) and _t not in nonlocal_names:
+                            local_names.add(_t)
+                        elif isinstance(_t, list):
+                            for _nm in _t:
+                                if isinstance(_nm, str) and _nm not in nonlocal_names:
+                                    local_names.add(_nm)
+                    _collect_assigned(s.body)
+                elif isinstance(s, A.If):
+                    _collect_assigned(s.then)
+                    _collect_assigned(s.orelse)
+                elif isinstance(s, A.MultiAssign):
+                    for _nm in s.targets:
+                        if isinstance(_nm, str) and _nm not in nonlocal_names:
+                            local_names.add(_nm)
+                elif isinstance(s, A.TupleAssign):
+                    for _t in s.targets:
+                        if isinstance(_t, A.Name):
+                            if _t.name not in nonlocal_names:
+                                local_names.add(_t.name)
+                        elif isinstance(_t, A.StarTarget):
+                            if _t.name not in nonlocal_names:
+                                local_names.add(_t.name)
+                elif isinstance(s, A.While):
+                    _collect_assigned(s.body)
+                elif isinstance(s, A.Try):
+                    _collect_assigned(s.body)
+                    _collect_assigned(s.handler)
+                    for _et, _eb, _eh in (getattr(s, "extra_handlers", None) or []):
+                        _collect_assigned(_eh)
+                    _collect_assigned(getattr(s, "else_body", None) or [])
+                    _collect_assigned(getattr(s, "finally_body", None) or [])
+                    if getattr(s, "bind_name", None) and s.bind_name not in nonlocal_names:
+                        local_names.add(s.bind_name)
+        _collect_assigned(fdef.body)
+        # Collect all Name references in the body.
+        referenced: set = set()
+        # Names currently bound by an enclosing comprehension's own `for`
+        # clause(s) — Python scopes these to the comprehension itself, not
+        # the surrounding function, so a `Name` read while this is non-empty
+        # must not be recorded as a free-var reference. A list-as-stack
+        # (rather than reassigning a set) so nested comprehensions compose
+        # without needing `nonlocal`.
+        comp_suppressed: list = []
+        def _collect_refs(stmts: list) -> None:
+            for s in stmts:
+                _collect_refs_expr(s)
+        def _collect_refs_expr(node) -> None:
+            if isinstance(node, A.Name):
+                if node.name not in comp_suppressed:
+                    referenced.add(node.name)
+            elif isinstance(node, A.BinOp):
+                _collect_refs_expr(node.left)
+                _collect_refs_expr(node.right)
+            elif isinstance(node, A.UnaryOp):
+                _collect_refs_expr(node.operand)
+            elif isinstance(node, A.Call):
+                for a in node.args:
+                    _collect_refs_expr(a)
+                for _kw_name, kw_val in (node.kwargs or []):
+                    _collect_refs_expr(kw_val)
+            elif isinstance(node, A.MethodCall):
+                _collect_refs_expr(node.obj)
+                for a in node.args:
+                    _collect_refs_expr(a)
+                for _kw_name, kw_val in (node.kwargs or []):
+                    _collect_refs_expr(kw_val)
+            elif isinstance(node, A.Attr):
+                _collect_refs_expr(node.obj)
+            elif isinstance(node, A.Subscript):
+                _collect_refs_expr(node.obj)
+                _collect_refs_expr(node.index)
+            elif isinstance(node, A.Slice):
+                if node.start is not None:
+                    _collect_refs_expr(node.start)
+                if node.stop is not None:
+                    _collect_refs_expr(node.stop)
+                if node.step is not None:
+                    _collect_refs_expr(node.step)
+            elif isinstance(node, A.IfExp):
+                _collect_refs_expr(node.test)
+                _collect_refs_expr(node.body)
+                _collect_refs_expr(node.orelse)
+            elif isinstance(node, A.NamedExpr):
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.BoolOp):
+                _collect_refs_expr(node.left)
+                _collect_refs_expr(node.right)
+            elif isinstance(node, A.Compare):
+                for op in node.operands:
+                    _collect_refs_expr(op)
+            elif isinstance(node, A.ListLit):
+                for e in node.elems:
+                    _collect_refs_expr(e)
+            elif isinstance(node, A.TupleLit):
+                for e in node.elems:
+                    _collect_refs_expr(e)
+            elif isinstance(node, A.SetLit):
+                for e in node.elems:
+                    _collect_refs_expr(e)
+            elif isinstance(node, A.DictLit):
+                for k in node.keys:
+                    if k is not None:
+                        _collect_refs_expr(k)
+                for v in node.values:
+                    _collect_refs_expr(v)
+            elif isinstance(node, A.FString):
+                for seg in node.segments:
+                    _collect_refs_expr(seg)
+            elif isinstance(node, A.Starred):
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.Lambda):
+                if node.body is not None:
+                    _collect_refs_expr(node.body)
+            elif isinstance(node, A.Comprehension):
+                # `iter` (the outermost `for x in <iter>`) runs in the
+                # *enclosing* scope in real Python, so walk it before any
+                # suppression is pushed.
+                _collect_refs_expr(node.iter)
+                _comp_vars: list = []
+                if node.var:
+                    _comp_vars.append(node.var)
+                for _t in (node.targets or []):
+                    if isinstance(_t, str):
+                        _comp_vars.append(_t)
+                for _ev in (node.extra_for_vars or []):
+                    if _ev:
+                        _comp_vars.append(_ev)
+                for _etl in (node.extra_for_targets or []):
+                    for _t in _etl:
+                        if isinstance(_t, str):
+                            _comp_vars.append(_t)
+                for _cv in _comp_vars:
+                    comp_suppressed.append(_cv)
+                _collect_refs_expr(node.elt)
+                if node.cond is not None:
+                    _collect_refs_expr(node.cond)
+                for it in node.extra_for_iters:
+                    _collect_refs_expr(it)
+                for c in node.extra_for_conds:
+                    if c is not None:
+                        _collect_refs_expr(c)
+                for _cv in _comp_vars:
+                    comp_suppressed.remove(_cv)
+            elif isinstance(node, A.DictComprehension):
+                _collect_refs_expr(node.iter)
+                _comp_vars = []
+                if node.var:
+                    _comp_vars.append(node.var)
+                for _t in (node.targets or []):
+                    if isinstance(_t, str):
+                        _comp_vars.append(_t)
+                for _cv in _comp_vars:
+                    comp_suppressed.append(_cv)
+                _collect_refs_expr(node.key)
+                _collect_refs_expr(node.value)
+                if node.cond is not None:
+                    _collect_refs_expr(node.cond)
+                for _cv in _comp_vars:
+                    comp_suppressed.remove(_cv)
+            elif isinstance(node, A.Assign):
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.AugAssign):
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.MultiAssign):
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.TupleAssign):
+                for t in node.targets:
+                    _collect_refs_expr(t)
+                for v in node.values:
+                    _collect_refs_expr(v)
+            elif isinstance(node, A.AttrAssign):
+                _collect_refs_expr(node.obj)
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.IndexAssign):
+                _collect_refs_expr(node.target)
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.Del):
+                _collect_refs_expr(node.target)
+            elif isinstance(node, A.Return):
+                if node.value is not None:
+                    _collect_refs_expr(node.value)
+            elif isinstance(node, A.Raise):
+                if node.value is not None:
+                    _collect_refs_expr(node.value)
+            elif isinstance(node, A.YieldStmt):
+                if node.value is not None:
+                    _collect_refs_expr(node.value)
+            elif isinstance(node, A.If):
+                _collect_refs_expr(node.test)
+                _collect_refs(node.then)
+                _collect_refs(node.orelse or [])
+            elif isinstance(node, A.While):
+                _collect_refs_expr(node.test)
+                _collect_refs(node.body)
+                _collect_refs(node.orelse or [])
+            elif isinstance(node, A.For):
+                for ra in node.range_args:
+                    _collect_refs_expr(ra)
+                if node.iter is not None:
+                    _collect_refs_expr(node.iter)
+                _collect_refs(node.body)
+                _collect_refs(node.orelse or [])
+            elif isinstance(node, A.Try):
+                _collect_refs(node.body)
+                _collect_refs(node.handler)
+                for _types, _bind, eh_body in (node.extra_handlers or []):
+                    _collect_refs(eh_body)
+                _collect_refs(node.else_body or [])
+                _collect_refs(node.finally_body or [])
+            elif isinstance(node, A.With):
+                _collect_refs_expr(node.expr)
+                _collect_refs(node.body)
+            elif isinstance(node, A.ExprStmt):
+                _collect_refs_expr(node.expr)
+        _collect_refs(fdef.body)
+        # Free vars = referenced names that are not locally bound.
+        BUILTINS = {
+            "print", "len", "range", "str", "int", "float", "bool", "list",
+            "dict", "tuple", "set", "abs", "min", "max", "sum", "sorted",
+            "isinstance", "type", "enumerate", "zip", "map", "filter",
+            "hasattr", "getattr", "setattr", "repr", "hash", "id",
+            "StopIteration", "ValueError", "TypeError", "KeyError",
+            "IndexError", "AttributeError", "RuntimeError", "Exception",
+            "ZeroDivisionError", "NotImplementedError", "OverflowError",
+            "True", "False", "None",
+        }
+        free = [n for n in sorted(referenced - local_names) if n not in BUILTINS]
+        nl = [n for n in free if n in nonlocal_names]
+        return free, nl
 
     def parse(self) -> A.Module:
         funcs: list[A.FuncDef] = []
@@ -85,8 +350,65 @@ class Parser:
             self._skip_newlines()
         # Add any nested functions parsed inside function bodies (lifted to
         # module level so calls to them resolve in sema).
+        Parser._propagate_transitive_free_vars(self._nested_funcs)
         funcs.extend(self._nested_funcs)
         return A.Module(funcs=funcs, body=body, classes=classes)
+
+    @staticmethod
+    def _collect_called_names(node, out: set) -> None:
+        """Collect every `A.Call.func` name reachable inside `node`. Generic
+        over node type via dataclass introspection (see `_dedupe_lifted_funcs`
+        in program.py for the same pattern and its rationale)."""
+        if isinstance(node, A.Call):
+            out.add(node.func)
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            for f in dataclasses.fields(node):
+                Parser._collect_called_names(getattr(node, f.name), out)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                Parser._collect_called_names(item, out)
+
+    @staticmethod
+    def _propagate_transitive_free_vars(nested_funcs: list) -> None:
+        """`_find_free_vars` (used for every nested `def`) only sees variables
+        a function references *directly* — it has no notion that calling a
+        sibling nested function (also lifted to module scope) might require
+        forwarding free vars *that sibling* needs but the caller never
+        touches itself. E.g. a `walk(stmts)` helper that does nothing but
+        `for s in stmts: walk_expr(s)` has no free vars of its own, but
+        `walk_expr` might close over `found`/`results` from their shared
+        enclosing scope — `walk` must still receive and forward them, since
+        sema prepends free vars as the lifted function's leading params and
+        codegen passes a direct-by-name call's free vars from the *caller's*
+        own scope (see codegen.py's `_gen_call`).
+
+        Fixed-point over the whole nested-function batch: repeatedly union in
+        any callee's free vars (minus names the caller already locally binds,
+        i.e. params/vararg/kwarg) until nothing changes. Bounded by the
+        number of nested functions, so this always terminates."""
+        by_name = {f.name: f for f in nested_funcs}
+        changed = True
+        while changed:
+            changed = False
+            for f in nested_funcs:
+                called: set = set()
+                Parser._collect_called_names(f.body, called)
+                own_locals = set(f.params)
+                if f.vararg:
+                    own_locals.add(f.vararg)
+                if f.kwarg:
+                    own_locals.add(f.kwarg)
+                for callee_name in called:
+                    callee = by_name.get(callee_name)
+                    if callee is None or callee is f:
+                        continue
+                    for fv in callee.free_vars:
+                        if fv in own_locals or fv in f.free_vars:
+                            continue
+                        f.free_vars.append(fv)
+                        if fv in callee.nonlocal_vars and fv not in f.nonlocal_vars:
+                            f.nonlocal_vars.append(fv)
+                        changed = True
 
     # Decorator names the parser treats specially.
     _ASM_DECORATOR = "assembly_func"
@@ -105,6 +427,16 @@ class Parser:
             name = None
             if self._check("NAME"):
                 name = self._peek().value
+                # `@<prop>.setter` / `.getter` / `.deleter`: capture the
+                # dotted accessor form (e.g. "x.setter") so sema can match
+                # it against the property getter method of the same name.
+                if (
+                    self._peek(1).kind == "OP"
+                    and self._peek(1).value == "."
+                    and self._peek(2).kind == "NAME"
+                    and self._peek(2).value in ("setter", "getter", "deleter")
+                ):
+                    name = f"{name}.{self._peek(2).value}"
             # Eat the rest of the line as a free-form decorator expression.
             # We don't model the call so we just skip until NEWLINE, balancing
             # any `(` `[` `{` along the way.
@@ -134,11 +466,13 @@ class Parser:
         if self._check("OP", "("):
             self._eat()
             if not self._check("OP", ")"):
-                # First base class, possibly dotted (`module.Base`).
+                # First base class, possibly dotted (`module.Base`). Every
+                # consumer (sema's class table, codegen's chain walker) keys
+                # by bare class name, so only the leaf survives.
                 parent = self._expect("NAME").value
                 while self._check("OP", "."):
                     self._eat()
-                    parent = f"{parent}.{self._expect('NAME').value}"
+                    parent = self._expect("NAME").value
                 # Extra bases / keyword bases (multiple inheritance, metaclass=)
                 # aren't modelled — single inheritance only. Skip the rest so
                 # the source still parses.
@@ -253,6 +587,7 @@ class Parser:
         defaults: list = []  # parallel to params; None means required
         param_types: list = []  # parallel to params; None means unannotated
         vararg: str | None = None
+        kwarg: str | None = None
         first = True
         while not self._check("OP", ")"):
             if not first:
@@ -260,11 +595,15 @@ class Parser:
                 if self._check("OP", ")"):
                     break  # trailing comma
             first = False
-            # `**kwargs`: accepted so source parses; asmpython doesn't model
-            # keyword-collection, so the name is discarded.
             if self._check("OP", "**"):
                 self._eat()
-                self._expect("NAME")
+                kwarg = self._expect("NAME").value
+                if self._check("OP", ":"):
+                    self._eat()
+                    self._parse_type_annotation()  # value-type annotation; dict[str, T] either way
+                params.append(kwarg)
+                param_types.append(("dict", None))
+                defaults.append(None)
                 continue
             if self._check("OP", "*"):
                 self._eat()
@@ -307,8 +646,10 @@ class Parser:
             param_types=param_types,
             ret_type=ret_type,
             vararg=vararg,
+            kwarg=kwarg,
             asm_body=asm_body,
             asm_symbol=asm_symbol,
+            decorators=list(decorators) if decorators else [],
         )
 
     def _extract_asm_body(self, name: str, body: list, pos) -> "tuple[str, str]":
@@ -374,23 +715,22 @@ class Parser:
             self._eat()
             return A.IntLit(value=-t.value if neg else t.value, pos=t.pos)  # type: ignore
         if t.kind == "FLOAT":
-            # Float defaults need extra plumbing (xmm0 vs rax dispatch through
-            # the call site). Not supported in the MVP; punt for now with a
-            # clear error so the user knows the gap.
-            raise ParseError(
-                "float default arguments aren't supported yet; "
-                "use an int default and convert inside the body",
-                t.pos,
-            )
+            self._eat()
+            return A.FloatLit(value=-t.value if neg else t.value, pos=t.pos)  # type: ignore
         if neg:
-            raise ParseError("unary '-' only allowed before numeric default", eq.pos)
+            raise ParseError("unary '-' only allowed before numeric default", eq.pos, ErrorCode.P_INVALID_DEFAULT)
         if t.kind == "STRING":
             self._eat()
             return A.StrLit(value=t.value, pos=t.pos)  # type: ignore
         if t.kind == "KEYWORD" and t.value in ("True", "False", "None"):
             self._eat()
             v = 1 if t.value == "True" else 0
-            return A.IntLit(value=v, pos=t.pos)
+            return A.IntLit(
+                value=v,
+                pos=t.pos,
+                is_bool=t.value != "None",
+                is_none=t.value == "None",
+            )
         if t.kind == "OP" and t.value == "[":
             return self._parse_default_list(t)
         if t.kind == "OP" and t.value == "{":
@@ -466,11 +806,13 @@ class Parser:
         if t.kind == "KEYWORD" and t.value == "None":
             self._eat()
             return ("none", None)
-        # A quoted forward reference like `"Expr"` — re-lex isn't worth it;
-        # treat as unconstrained.
+        # A quoted forward reference like `"Expr"` (PEP 484): re-lex the
+        # string's contents as a type expression, e.g. `"Path"` -> `Path`,
+        # `"list[Foo]"` -> `list[Foo]`. Falls back to unconstrained `any` if
+        # the contents aren't a parseable annotation.
         if t.kind == "STRING":
             self._eat()
-            return ("any", None)
+            return self._parse_annot_from_string(t.value)
         if t.kind != "NAME":
             # Unexpected shape (e.g. the `[int]` inside `Callable[[int], str]`).
             # Skip a balanced atom so we don't misparse the enclosing list.
@@ -491,6 +833,18 @@ class Parser:
                     inner.append(self._parse_annot_union())
             self._expect("OP", "]")
         return self._normalize_annot(name, inner)  # type: ignore
+
+    def _parse_annot_from_string(self, src: str) -> tuple:
+        """Re-lex and parse a quoted forward-reference annotation's contents
+        (e.g. the `Path` in `-> "Path"`) as a normal type expression, by
+        running it through a fresh `Lexer`/`Parser` pair. Any lex/parse
+        failure (the string isn't actually a type expression) falls back to
+        unconstrained `any`, matching the previous behaviour."""
+        try:
+            sub = Parser(Lexer(src).tokenize())
+            return sub._parse_annot_union()
+        except Exception:
+            return ("any", None)
 
     def _skip_annot_atom(self) -> tuple:
         """Consume one balanced annotation atom (balancing []/()/{}), stopping
@@ -520,7 +874,9 @@ class Parser:
     _DICT_ANNOTS = {"dict", "Dict", "Mapping", "MutableMapping"}
 
     def _normalize_annot(self, name: str, inner: list) -> tuple:
-        if name in ("int", "bool"):
+        if name == "bool":
+            return ("bool", None)
+        if name == "int":
             return ("int", None)
         if name in ("str",):
             return ("str", None)
@@ -528,20 +884,42 @@ class Parser:
             return ("float", None)
         if name in ("None", "none"):
             return ("none", None)
-        if name in ("object", "Any", "bytes"):
+        if name in ("object", "Any"):
             return ("any", None)
+        if name in ("bytes", "bytearray"):
+            # Treat bytes/bytearray as list[int] — same memory layout, int elements.
+            return ("list", "int")
         if name in ("Optional",):
             return inner[0] if inner else ("any", None)
         if name in ("Union",):
             return ("any", None)
         if name in self._LIST_ANNOTS:
+            if inner and inner[0][0] in ("tuple", "Tuple") and inner[0][1]:
+                # list[tuple[T1, T2, ...]]: keep the per-slot base kinds so
+                # `for a, b in <list[tuple[T1,T2]]>` can type each target
+                # (instead of collapsing to the bare "tuple" element kind).
+                slot_bases = [s[0] for s in inner[0][1]]
+                return ("list", ("tuple", slot_bases))
+            if inner and inner[0][0] in self._LIST_ANNOTS:
+                # list[list[T]]: preserve the inner element kind so
+                # `for row in matrix: row[i]` knows the leaf type.
+                # inner[0] is already the normalized ("list", el_kind) tuple.
+                inner_el = inner[0][1]
+                return ("list", ("list", inner_el))
+            if inner and inner[0][0] in self._DICT_ANNOTS:
+                # list[dict[K,V]]: preserve the value kind so
+                # `for d in dicts: d[key]` knows the value type.
+                # inner[0] is already the normalized ("dict", val_kind) tuple
+                # produced by the recursive _normalize_annot call for the dict.
+                val_el = inner[0][1]
+                return ("list", ("dict", val_el))
             el = inner[0][0] if inner else None
             return ("list", el)
         if name in self._DICT_ANNOTS:
             val = inner[1][0] if len(inner) >= 2 else None
             return ("dict", val)
         if name in ("tuple", "Tuple"):
-            return ("tuple", None)
+            return ("tuple", inner)
         if name in ("set", "Set", "frozenset"):
             return ("set", None)
         # Anything else (CamelCase class, dotted module.Class) is a class-ish
@@ -588,13 +966,24 @@ class Parser:
                 self._expect("NEWLINE")
                 return A.Continue(pos=pos)
             if t.value == "def":
-                # Nested function definition: lift to module level so calls to
-                # it resolve in sema. Closures aren't modelled; captured vars
-                # become opaque. The call site sees a regular top-level func.
+                # Nested function definition: lift to module level. Detect
+                # free variables (names referenced in the body but not in the
+                # inner params or locally assigned) so codegen can build a
+                # closure object bundling the captured values.
                 decorators = self._eat_decorators()
                 fdef = self._parse_funcdef(decorators=decorators)
                 fdef.is_lifted = True
+                free_vars, nonlocal_vars = self._find_free_vars(fdef)
+                fdef.free_vars = free_vars
+                fdef.nonlocal_vars = nonlocal_vars
                 self._nested_funcs.append(fdef)
+                if free_vars:
+                    return A.ClosureBind(
+                        func_name=fdef.name,
+                        free_vars=free_vars,
+                        nonlocal_vars=nonlocal_vars,
+                        pos=fdef.pos,
+                    )
                 return A.Pass(pos=fdef.pos)
             if t.value == "import":
                 return self._parse_import()
@@ -615,12 +1004,19 @@ class Parser:
             if t.value == "del":
                 return self._parse_del()
             if t.value == "yield":
-                # `yield expr` as a statement (bare yield-as-expression)
                 pos = self._eat().pos
-                if not self._check("NEWLINE"):
-                    self._parse_expr()  # consume the value but discard
+                if self._check("NEWLINE"):
+                    val: A.Expr = A.IntLit(value=0, pos=pos)  # bare yield
+                else:
+                    val = self._parse_expr()
                 self._expect("NEWLINE")
-                return A.Pass(pos=pos)  # yield not yet implemented: treat as pass
+                return A.YieldStmt(value=val, pos=pos)
+
+        # `match` is a soft keyword (an ordinary NAME token): only treat it as
+        # a match statement when the lookahead confirms `match <expr>:` shape,
+        # so `match = 5` / `match(x)` / `match.foo` keep working as before.
+        if t.kind == "NAME" and t.value == "match" and self._looks_like_match_stmt():
+            return self._parse_match()
 
         # Assignment / aug-assignment vs expression statement.
         if t.kind == "NAME":
@@ -638,15 +1034,45 @@ class Parser:
                 if self._looks_like_tuple_assign():
                     return self._parse_tuple_assign()
 
+        # Starred unpack target: `a, *rest = xs` or `*init, last = xs`. The
+        # `*name` form can also lead the LHS, so it's not caught by the
+        # NAME-led check above.
+        if t.kind == "OP" and t.value == "*" and self._looks_like_tuple_assign():
+            return self._parse_tuple_assign()
+
         # Save state so we can detect "lhs[i] = rhs" -> IndexAssign and
         # "lhs.name = rhs" -> AttrAssign.
         pos = t.pos
         expr = self._parse_expr()
+        # Tuple assignment with at least one subscript/attribute target, e.g.
+        # `xs[0], xs[1] = xs[1], xs[0]` or `a, self.x = self.x, a`. Pure
+        # NAME-only sequences are handled above by `_parse_tuple_assign`.
+        if isinstance(expr, (A.Name, A.Subscript, A.Attr)) and self._check("OP", ","):
+            targets = [expr]
+            while self._check("OP", ","):
+                self._eat()
+                tgt = self._parse_expr()
+                if not isinstance(tgt, (A.Name, A.Subscript, A.Attr)):
+                    raise ParseError("cannot assign to this expression", tgt.pos, ErrorCode.P_INVALID_ASSIGN_TARGET)
+                targets.append(tgt)
+            self._expect("OP", "=")
+            values = [self._parse_expr()]
+            while self._check("OP", ","):
+                self._eat()
+                values.append(self._parse_expr())
+            self._expect("NEWLINE")
+            return A.TupleAssign(targets=targets, values=values, pos=pos)
         if isinstance(expr, A.Subscript) and self._check("OP", "="):
             self._eat()
             value = self._parse_expr()
             self._expect("NEWLINE")
             return A.IndexAssign(target=expr, value=value, pos=pos)
+        if isinstance(expr, A.Subscript) and self._peek().kind == "OP" and self._peek().value in AUG_OPS:
+            op_tok = self._eat()
+            rhs = self._parse_expr()
+            self._expect("NEWLINE")
+            combined = A.BinOp(op=AUG_OPS[op_tok.value], left=expr, right=rhs, pos=op_tok.pos)
+            return A.IndexAssign(target=expr, value=combined, pos=pos)
         if isinstance(expr, A.Attr) and self._check("OP", "="):
             self._eat()
             value = self._parse_expr()
@@ -689,27 +1115,52 @@ class Parser:
         self._expect("NEWLINE")
         return A.ExprStmt(expr=expr, pos=pos)
 
+    @staticmethod
+    def _exc_type_name(e) -> str | None:
+        """The exception class name for an `except` clause's type expression:
+        a bare name (`ValueError`) or a dotted attribute (`subprocess.
+        CalledProcessError`, `pkg.mod.MyError`) -- in both cases asmpython's
+        flat whole-program class namespace only cares about the final
+        component. Returns `None` for any other expression shape."""
+        if isinstance(e, A.Name):
+            return e.name
+        if isinstance(e, A.Attr):
+            return e.name
+        return None
+
     def _parse_try(self) -> A.Try:
         kw = self._expect("KEYWORD", "try")
         self._expect("OP", ":")
         body = self._parse_block()
         self._skip_newlines()
         # One or more `except` clauses, each with an optional exception type
-        # and optional `as name` binding. The type expression is parsed (so
-        # `except (A, B) as e:` is accepted) but discarded — asmpython has no
-        # exception-class RTTI, so handlers catch everything.
-        handlers: list = []  # list[(bind_name, body)]
+        # (or tuple of types) and optional `as name` binding.
+        handlers: list = []  # list[(types, bind_name, body)]
         while self._check("KEYWORD", "except"):
-            self._eat()
+            tok = self._eat()
+            types: list[str] = []
             if not self._check("OP", ":") and not self._check("KEYWORD", "as"):
-                self._parse_expr()  # exception type — ignored
+                type_expr = self._parse_expr()
+                name = self._exc_type_name(type_expr)
+                if name is not None:
+                    types = [name]
+                elif isinstance(type_expr, A.TupleLit) and all(
+                    self._exc_type_name(e) is not None for e in type_expr.elems
+                ):
+                    types = [self._exc_type_name(e) for e in type_expr.elems]  # type: ignore[misc]
+                else:
+                    raise ParseError(
+                        "'except' type must be a name, a dotted name, or a "
+                        "tuple of names",
+                        tok.pos,
+                    )
             bind_name = None
             if self._check("KEYWORD", "as"):
                 self._eat()
                 bind_name = self._expect("NAME").value
             self._expect("OP", ":")
             hbody = self._parse_block()
-            handlers.append((bind_name, hbody))
+            handlers.append((types, bind_name, hbody))
             self._skip_newlines()
         # Optional `else:` (runs when no exception fired) and `finally:`.
         else_body: list = []
@@ -727,11 +1178,14 @@ class Parser:
             raise ParseError(
                 "'try' must be followed by 'except' or 'finally'", self._peek().pos
             )
-        first_bind, first_body = handlers[0] if handlers else (None, [])
+        first_types, first_bind, first_body = (
+            handlers[0] if handlers else ([], None, [])
+        )
         return A.Try(
             body=body,
             handler=first_body,
             bind_name=first_bind,  # type: ignore[arg-type]
+            handler_types=first_types,
             extra_handlers=handlers[1:],
             else_body=else_body,
             finally_body=finally_body,
@@ -740,17 +1194,281 @@ class Parser:
 
     def _parse_with(self) -> "A.With":
         kw = self._expect("KEYWORD", "with")
-        expr = self._parse_expr()
-        name: str | None = None
-        if self._check("KEYWORD", "as"):
-            self._eat()
-            name = self._expect("NAME").value
+        items: list[tuple] = []
+        while True:
+            expr = self._parse_expr()
+            name: str | None = None
+            if self._check("KEYWORD", "as"):
+                self._eat()
+                name = self._expect("NAME").value
+            items.append((expr, name))
+            if self._check("OP", ","):
+                self._eat()
+                continue
+            break
         self._expect("OP", ":")
         body = self._parse_block()
-        return A.With(expr=expr, name=name, body=body, pos=kw.pos)
+        # Desugar `with a as x, b as y: body` into nested
+        # `with a as x: with b as y: body` -- sema's A.With -> A.Try rewrite
+        # then handles each level (and each level's __enter__/__exit__) the
+        # same as a single `with`, innermost first.
+        with_stmt: A.With
+        for expr, name in reversed(items):
+            with_stmt = A.With(expr=expr, name=name, body=body, pos=kw.pos)
+            body = [with_stmt]
+        return with_stmt
+
+    def _looks_like_match_stmt(self) -> bool:
+        """`match` is a soft keyword: only `match <expr>:` followed by
+        NEWLINE (then an indented block of `case` clauses) is a match
+        statement. Anything else (`match = 5`, `match(x)`, `match.attr`,
+        `match[i] = v`, ...) is a normal NAME-led statement, so this
+        speculatively parses the subject expression and rewinds regardless of
+        the outcome."""
+        save = self.i
+        self._eat()  # 'match'
+        ok = False
+        try:
+            self._parse_expr()
+            ok = self._check("OP", ":") and self._peek(1).kind == "NEWLINE"
+        except ParseError:
+            ok = False
+        self.i = save
+        return ok
+
+    def _parse_match(self) -> A.Match:
+        kw = self._eat()  # 'match'
+        subject = self._parse_expr()
+        self._expect("OP", ":")
+        self._expect("NEWLINE")
+        self._skip_newlines()
+        self._expect("INDENT")
+        cases: list = []
+        while not self._check("DEDENT"):
+            self._skip_newlines()
+            if self._check("DEDENT"):
+                break
+            cases.append(self._parse_case())
+            self._skip_newlines()
+        self._expect("DEDENT")
+        return A.Match(subject=subject, cases=cases, pos=kw.pos)
+
+    def _parse_case(self) -> tuple:
+        self._expect("NAME", "case")  # soft keyword, like 'match'
+        pattern = self._parse_case_pattern()
+        guard = None
+        if self._check("KEYWORD", "if"):
+            self._eat()
+            guard = self._parse_expr()
+        self._expect("OP", ":")
+        body = self._parse_block()
+        return (pattern, guard, body)
+
+    def _parse_case_pattern(self) -> "A.Pattern":
+        """Top-level pattern of a `case` clause: a single pattern, or an
+        unparenthesized sequence pattern (`case a, b:`, `case a, *rest:`)."""
+        star_index: "int | None"
+        if self._check("OP", "*"):
+            star_index = 0
+            patterns = [self._parse_star_pattern()]
+        else:
+            first = self._parse_as_pattern()
+            if not self._check("OP", ","):
+                return first
+            patterns = [first]
+            star_index = None
+        pos = patterns[0].pos
+        while self._check("OP", ","):
+            self._eat()
+            if self._check("OP", ":") or self._check("KEYWORD", "if"):
+                break  # trailing comma
+            if self._check("OP", "*"):
+                if star_index is not None:
+                    raise ParseError(
+                        "multiple starred names in sequence pattern",
+                        self._peek().pos,
+                    )
+                star_index = len(patterns)
+                patterns.append(self._parse_star_pattern())
+            else:
+                patterns.append(self._parse_as_pattern())
+        return A.MatchSequence(patterns=patterns, star_index=star_index, pos=pos)
+
+    def _parse_star_pattern(self) -> "A.Pattern":
+        """`*name` / `*_` inside a sequence pattern."""
+        pos = self._expect("OP", "*").pos
+        name = self._expect("NAME").value
+        return A.MatchCapture(name=name, pos=pos)
+
+    def _parse_as_pattern(self) -> "A.Pattern":
+        pat = self._parse_or_pattern()
+        if self._check("KEYWORD", "as"):
+            pos = self._eat().pos
+            name = self._expect("NAME").value
+            return A.MatchAs(pattern=pat, name=name, pos=pos)
+        return pat
+
+    def _parse_or_pattern(self) -> "A.Pattern":
+        first = self._parse_closed_pattern()
+        if not self._check("OP", "|"):
+            return first
+        alts = [first]
+        while self._check("OP", "|"):
+            self._eat()
+            alts.append(self._parse_closed_pattern())
+        return A.MatchOr(patterns=alts, pos=first.pos)
+
+    def _parse_sequence_items(self, close: str) -> tuple:
+        """Comma-separated pattern items up to (not including) the `close`
+        OP token. Returns (patterns, star_index, saw_trailing_comma)."""
+        patterns: list = []
+        star_index: "int | None" = None
+        saw_comma = False
+        while not self._check("OP", close):
+            if self._check("OP", "*"):
+                if star_index is not None:
+                    raise ParseError(
+                        "multiple starred names in sequence pattern",
+                        self._peek().pos,
+                    )
+                star_index = len(patterns)
+                patterns.append(self._parse_star_pattern())
+            else:
+                patterns.append(self._parse_as_pattern())
+            if self._check("OP", ","):
+                self._eat()
+                saw_comma = True
+                continue
+            break
+        return patterns, star_index, saw_comma
+
+    def _parse_closed_pattern(self) -> "A.Pattern":
+        t = self._peek()
+        if t.kind == "OP" and t.value == "(":
+            pos = self._eat().pos
+            patterns, star_index, saw_comma = self._parse_sequence_items(")")
+            self._expect("OP", ")")
+            if len(patterns) == 1 and star_index is None and not saw_comma:
+                return patterns[0]  # `(pattern)` is a grouping, not a 1-sequence
+            return A.MatchSequence(patterns=patterns, star_index=star_index, pos=pos)
+        if t.kind == "OP" and t.value == "[":
+            pos = self._eat().pos
+            patterns, star_index, _ = self._parse_sequence_items("]")
+            self._expect("OP", "]")
+            return A.MatchSequence(patterns=patterns, star_index=star_index, pos=pos)
+        if t.kind == "OP" and t.value == "{":
+            pos = self._eat().pos
+            keys: list = []
+            patterns_map: list = []
+            if not (self._peek().kind == "OP" and self._peek().value == "}"):
+                while True:
+                    key_tok = self._peek()
+                    if key_tok.kind != "STRING":
+                        raise ParseError(
+                            "mapping pattern keys must be string literals", key_tok.pos
+                        )
+                    self._eat()
+                    keys.append(key_tok.value)
+                    self._expect("OP", ":")
+                    patterns_map.append(self._parse_or_pattern())
+                    if not (self._peek().kind == "OP" and self._peek().value == ","):
+                        break
+                    self._eat()
+                    if self._peek().kind == "OP" and self._peek().value == "}":
+                        break
+            self._expect("OP", "}")
+            return A.MatchMapping(keys=keys, patterns=patterns_map, pos=pos)
+        if t.kind == "OP" and t.value == "-":
+            self._eat()
+            n = self._peek()
+            if n.kind == "INT":
+                self._eat()
+                return A.MatchValue(
+                    value=A.IntLit(value=-n.value, pos=t.pos), pos=t.pos  # type: ignore
+                )
+            if n.kind == "FLOAT":
+                self._eat()
+                return A.MatchValue(
+                    value=A.FloatLit(value=-n.value, pos=t.pos), pos=t.pos  # type: ignore
+                )
+            raise ParseError("expected a number after '-' in pattern", n.pos)
+        if t.kind == "INT":
+            self._eat()
+            return A.MatchValue(value=A.IntLit(value=t.value, pos=t.pos), pos=t.pos)  # type: ignore
+        if t.kind == "FLOAT":
+            self._eat()
+            return A.MatchValue(value=A.FloatLit(value=t.value, pos=t.pos), pos=t.pos)  # type: ignore
+        if t.kind == "STRING":
+            self._eat()
+            return A.MatchValue(value=A.StrLit(value=t.value, pos=t.pos), pos=t.pos)  # type: ignore
+        if t.kind == "KEYWORD" and t.value in ("True", "False"):
+            self._eat()
+            val = A.IntLit(value=1 if t.value == "True" else 0, pos=t.pos, is_bool=True)
+            return A.MatchValue(value=val, pos=t.pos)
+        if t.kind == "KEYWORD" and t.value == "None":
+            self._eat()
+            return A.MatchValue(
+                value=A.IntLit(value=0, pos=t.pos, is_none=True), pos=t.pos
+            )
+        if t.kind == "NAME":
+            if t.value == "_":
+                self._eat()
+                return A.MatchCapture(name="_", pos=t.pos)
+            name_tok = self._eat()
+            if self._check("OP", "."):
+                # Dotted value pattern (`case Color.RED:`) or a dotted class
+                # pattern (`case mod.ClassName(...):`, last segment is the
+                # class). Resolve once the chain ends.
+                value: A.Expr = A.Name(name=name_tok.value, pos=name_tok.pos)
+                last_name = name_tok.value
+                while self._check("OP", "."):
+                    self._eat()
+                    last_name = self._expect("NAME").value
+                    value = A.Attr(obj=value, name=last_name, pos=name_tok.pos)
+                if self._check("OP", "("):
+                    return self._parse_class_pattern(last_name, name_tok.pos)
+                return A.MatchValue(value=value, pos=name_tok.pos)
+            if self._check("OP", "("):
+                return self._parse_class_pattern(name_tok.value, name_tok.pos)
+            return A.MatchCapture(name=name_tok.value, pos=name_tok.pos)
+        raise ParseError(f"invalid pattern: unexpected {t.kind} {t.value!r}", t.pos)
+
+    def _parse_class_pattern(self, cls_name: str, pos) -> "A.MatchClass":
+        self._expect("OP", "(")
+        positional: list = []
+        kwargs: list = []
+        while not self._check("OP", ")"):
+            if (
+                self._check("NAME")
+                and self._peek(1).kind == "OP"
+                and self._peek(1).value == "="
+            ):
+                kwname = self._eat().value
+                self._eat()  # '='
+                kwargs.append((kwname, self._parse_as_pattern()))
+            else:
+                if kwargs:
+                    raise ParseError(
+                        "positional pattern follows keyword pattern",
+                        self._peek().pos,
+                    )
+                positional.append(self._parse_as_pattern())
+            if self._check("OP", ","):
+                self._eat()
+                continue
+            break
+        self._expect("OP", ")")
+        return A.MatchClass(
+            cls_name=cls_name, positional=positional, kwargs=kwargs, pos=pos
+        )
 
     def _parse_raise(self) -> A.Raise:
         kw = self._expect("KEYWORD", "raise")
+        # Bare `raise` (no expression) re-raises the currently-active
+        # exception; only valid inside an `except` handler.
+        if self._check("NEWLINE"):
+            self._eat()
+            return A.Raise(value=None, pos=kw.pos)
         value = self._parse_expr()
         # `raise X from Y` — exception chaining. asmpython doesn't model the
         # __cause__ link, so the cause expression is parsed and discarded.
@@ -835,7 +1553,7 @@ class Parser:
                 module = f"{module}.{self._expect('NAME').value}"
         elif level == 0:
             # `from import ...` with no module name is invalid.
-            raise ParseError("expected module name after 'from'", self._peek().pos)
+            raise ParseError("expected module name after 'from'", self._peek().pos, ErrorCode.P_MISSING_MODULE)
         self._expect("KEYWORD", "import")
         # `names` holds the locally-bound name (the alias when `as` is present);
         # `orig_names` holds the exported name as the source module spells it.
@@ -935,19 +1653,30 @@ class Parser:
         )
 
     def _looks_like_tuple_assign(self) -> bool:
-        """Peek ahead to see if we're at `NAME ( , NAME )+ =`. Doesn't consume."""
-        k = self.i
-        if self.toks[k].kind != "NAME":
+        """Peek ahead to see if we're at `(NAME|*NAME) ( , (NAME|*NAME) )* =`.
+        Doesn't consume."""
+
+        def _item(k: int) -> int | None:
+            if self.toks[k].kind == "OP" and self.toks[k].value == "*":
+                k += 1
+                if k >= len(self.toks) or self.toks[k].kind != "NAME":
+                    return None
+                return k + 1
+            if self.toks[k].kind == "NAME":
+                return k + 1
+            return None
+
+        k = _item(self.i)
+        if k is None:
             return False
-        k += 1
         while k < len(self.toks):
             t = self.toks[k]
             if t.kind != "OP" or t.value != ",":
                 break
-            k += 1
-            if k >= len(self.toks) or self.toks[k].kind != "NAME":
+            k2 = _item(k + 1)
+            if k2 is None:
                 return False
-            k += 1
+            k = k2
         return (
             k < len(self.toks)
             and self.toks[k].kind == "OP"
@@ -955,11 +1684,29 @@ class Parser:
         )
 
     def _parse_tuple_assign(self) -> A.TupleAssign:
-        first = self._expect("NAME")
-        targets = [first.value]
+        def _parse_target():
+            if self._check("OP", "*"):
+                star_tok = self._eat()
+                name_tok = self._expect("NAME")
+                return A.StarTarget(name=name_tok.value, pos=star_tok.pos)
+            tok = self._expect("NAME")
+            return A.Name(name=tok.value, pos=tok.pos)
+
+        first = _parse_target()
+        targets: list = [first]
         while self._check("OP", ","):
             self._eat()
-            targets.append(self._expect("NAME").value)
+            targets.append(_parse_target())
+        if len(targets) == 1 and isinstance(targets[0], A.StarTarget):
+            raise ParseError(
+                "starred assignment target must be in a list or tuple",
+                targets[0].pos,
+            )
+        n_star = sum(1 for t in targets if isinstance(t, A.StarTarget))
+        if n_star > 1:
+            raise ParseError(
+                "multiple starred expressions in assignment", first.pos
+            )
         self._expect("OP", "=")
         values = [self._parse_expr()]
         while self._check("OP", ","):
@@ -1116,6 +1863,15 @@ class Parser:
     def _parse_expr(self) -> "A.Expr":
         if self._check("KEYWORD", "lambda"):
             return self._parse_lambda()
+        if (
+            self._check("NAME")
+            and self._peek(1).kind == "OP"
+            and self._peek(1).value == ":="
+        ):
+            name_tok = self._eat()
+            pos = self._eat().pos  # ':='
+            value = self._parse_expr()
+            return A.NamedExpr(target=name_tok.value, value=value, pos=pos)
         return self._parse_ternary()
 
     def _parse_lambda(self) -> "A.Lambda":
@@ -1316,6 +2072,14 @@ class Parser:
         elif t.kind == "FLOAT":
             self._eat()
             atom = A.FloatLit(value=t.value, pos=t.pos)  # type: ignore
+        elif t.kind == "BYTES":
+            # b"..." literal: expand to list[int] of character codes.
+            self._eat()
+            byte_elems: list = [
+                A.IntLit(value=ord(c), pos=t.pos)
+                for c in t.value  # type: ignore
+            ]
+            atom = A.ListLit(elems=byte_elems, pos=t.pos, el_type="int")
         elif t.kind == "STRING":
             self._eat()
             atom = self._absorb_string_concat(A.StrLit(value=t.value, pos=t.pos))  # type: ignore
@@ -1323,10 +2087,10 @@ class Parser:
             atom = self._absorb_string_concat(self._parse_fstring())
         elif t.kind == "KEYWORD" and t.value in ("True", "False"):
             self._eat()
-            atom = A.IntLit(value=1 if t.value == "True" else 0, pos=t.pos)
+            atom = A.IntLit(value=1 if t.value == "True" else 0, pos=t.pos, is_bool=True)
         elif t.kind == "KEYWORD" and t.value == "None":
             self._eat()
-            atom = A.IntLit(value=0, pos=t.pos)
+            atom = A.IntLit(value=0, pos=t.pos, is_none=True)
         elif t.kind == "OP" and t.value == "(":
             atom = self._parse_paren_or_tuple()
         elif t.kind == "OP" and t.value == "[":
@@ -1343,7 +2107,7 @@ class Parser:
             else:
                 atom = A.Name(name=t.value, pos=t.pos)  # type: ignore
         else:
-            raise ParseError(f"unexpected token {t.kind} {t.value!r}", t.pos)
+            raise ParseError(f"unexpected token {t.kind} {t.value!r}", t.pos, ErrorCode.P_UNEXPECTED_TOKEN)
 
         # Trailing subscripts and method calls chain off any primary.
         return self._parse_trailers(atom)
@@ -1449,12 +2213,16 @@ class Parser:
                         "positional argument follows keyword argument",
                         self._peek().pos,
                     )
-                arg = self._parse_expr()
-                # A bare generator expression as the sole argument:
-                # `sum(x for x in xs)`.
-                if self._check("KEYWORD", "for"):
-                    arg = self._parse_comprehension_tail(arg, arg.pos)
-                args.append(arg)
+                if self._check("OP", "*"):
+                    star_pos = self._eat().pos
+                    args.append(A.Starred(value=self._parse_expr(), pos=star_pos))
+                else:
+                    arg = self._parse_expr()
+                    # A bare generator expression as the sole argument:
+                    # `sum(x for x in xs)`.
+                    if self._check("KEYWORD", "for"):
+                        arg = self._parse_comprehension_tail(arg, arg.pos)
+                    args.append(arg)
             if not self._check("OP", ","):
                 break
             self._eat()
@@ -1507,7 +2275,11 @@ class Parser:
     def _parse_fstring(self) -> A.FString:
         tok = self._eat()
         segments: list = []
-        for kind, text in tok.value:  # type: ignore
+        for seg in tok.value:  # type: ignore
+            kind = seg[0]
+            text = seg[1]
+            spec = seg[2] if len(seg) > 2 else ""
+            conv = seg[3] if len(seg) > 3 else ""
             if kind == "str":
                 segments.append(A.StrLit(value=text, pos=tok.pos))
             else:
@@ -1523,19 +2295,48 @@ class Parser:
                         f"unexpected tokens in f-string expression: {text!r}",
                         tok.pos,
                     )
+                # Carry a `:format-spec` (e.g. `.2f`) for codegen to honour.
+                if spec:
+                    expr.fmt_spec = spec  # type: ignore[attr-defined]
+                # Carry a `!r`/`!s`/`!a` conversion for codegen to honour.
+                if conv:
+                    expr.conv_flag = conv  # type: ignore[attr-defined]
                 segments.append(expr)
         return A.FString(segments=segments, pos=tok.pos)
 
     def _parse_brace(self):
         """Parse a `{...}` literal — either a dict or a set.
 
-        `{}` is the empty dict (matching Python). Otherwise the first element
-        decides: a `key: value` colon makes it a dict, anything else a set.
+        `{}` is the empty dict (matching Python). A leading `**` (PEP 448
+        dict unpacking) is unambiguously a dict literal, since sets can't
+        contain `**expr`. Otherwise the first element decides: a `key: value`
+        colon makes it a dict, anything else a set.
         """
         start = self._expect("OP", "{").pos
         if self._check("OP", "}"):
             self._eat()
             return A.DictLit(keys=[], values=[], pos=start)
+        if self._check("OP", "**"):
+            # `{**d1, "k": v, **d2, ...}`.
+            keys: list = []
+            values: list = []
+            while True:
+                if self._check("OP", "**"):
+                    op = self._eat()
+                    keys.append(A.Name(name="**", pos=op.pos))
+                    values.append(self._parse_expr())
+                else:
+                    k = self._parse_expr()
+                    self._expect("OP", ":")
+                    keys.append(k)
+                    values.append(self._parse_expr())
+                if not self._check("OP", ","):
+                    break
+                self._eat()
+                if self._check("OP", "}"):
+                    break  # trailing comma
+            self._expect("OP", "}")
+            return A.DictLit(keys=keys, values=values, pos=start)
         first = self._parse_expr()
         if self._check("OP", ":"):
             # Dict literal or dict comprehension. Both open `key: value`.
@@ -1546,12 +2347,19 @@ class Parser:
                 comp = self._parse_dict_comprehension_tail(first, first_value, start)
                 self._expect("OP", "}")
                 return comp
-            keys: list = [first]
-            values: list = [first_value]
+            keys: list = []
+            keys.extend([first])
+            values = [first_value]
             while self._check("OP", ","):
                 self._eat()
                 if self._check("OP", "}"):
                     break  # trailing comma
+                if self._check("OP", "**"):
+                    # `{"k": v, **other, ...}` — merge another dict in here.
+                    op = self._eat()
+                    keys.append(A.Name(name="**", pos=op.pos))
+                    values.append(self._parse_expr())
+                    continue
                 keys.append(self._parse_expr())
                 self._expect("OP", ":")
                 values.append(self._parse_expr())
@@ -1616,7 +2424,31 @@ class Parser:
         if self._check("KEYWORD", "if"):
             self._eat()
             cond = self._parse_or()
-        return A.Comprehension(elt=elt, var=var, iter=iter_expr, cond=cond, pos=pos, targets=multi)  # type: ignore
+        ef_vars: list = []
+        ef_targets: list = []
+        ef_iters: list = []
+        ef_conds: list = []
+        while self._check("KEYWORD", "for"):
+            self._eat()
+            etargets = [self._parse_for_target()]
+            while self._check("OP", ","):
+                self._eat()
+                if self._check("KEYWORD", "in"):
+                    break
+                etargets.append(self._parse_for_target())
+            evar2: str = etargets[0] if len(etargets) == 1 and isinstance(etargets[0], str) else ""
+            emulti2: list = [] if len(etargets) == 1 and isinstance(etargets[0], str) else etargets
+            self._expect("KEYWORD", "in")
+            eiter2 = self._parse_or()
+            econd2 = None
+            if self._check("KEYWORD", "if"):
+                self._eat()
+                econd2 = self._parse_or()
+            ef_vars.append(evar2)
+            ef_targets.append(emulti2)
+            ef_iters.append(eiter2)
+            ef_conds.append(econd2)
+        return A.Comprehension(elt=elt, var=var, iter=iter_expr, cond=cond, pos=pos, targets=multi, extra_for_vars=ef_vars, extra_for_targets=ef_targets, extra_for_iters=ef_iters, extra_for_conds=ef_conds)  # type: ignore
 
     def _parse_dict_comprehension_tail(self, key, value, pos):
         """Parse `for <var> in <iter> [if <cond>]` after `key: value`, returning

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asmpython"
-version = "1.0.0"
+version = "1.1.0"
 description = "Compile Python to native x86-64 executables via NASM"
 readme = "README.md"
 license = { text = "MIT" }
@@ -32,7 +32,7 @@ asmpython = "asmpython._compiler.__main__:main"
 
 [project.urls]
 Repository = "https://github.com/deltathedumb/asmpython"
-Documentation = "https://github.com/deltathedumb/asmpython/blob/main/docs.html"
+Documentation = "https://github.com/deltathedumb/asmpython/blob/main/docs/index.html"
 Changelog = "https://github.com/deltathedumb/asmpython/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]

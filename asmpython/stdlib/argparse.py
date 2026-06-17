@@ -32,9 +32,10 @@ Supported via `add_argument(name, ...)`:
   - value-taking options (`add_argument("--output", short="-o")`)
   - `choices` -- a list of allowed string values
   - `metavar` -- the placeholder shown for an option's value in usage/help
-  - `type` -- accepted for call-site compatibility (e.g. `type=Path`, a bare
-    class evaluating to its RTTI id); values are still stored as strings, so
-    callers needing a `Path` use `Namespace.get_path()`
+  - `type` -- a bare class reference (e.g. `type=Path`, evaluating to its RTTI
+    id) applied to the raw string value before it's stored, mirroring CPython
+    argparse's `type=` conversion (e.g. `args.source` comes back as a real
+    `Path`, not a string)
   - `default`, `dest`, `help`, `version`
 
 `ap.add_argument_group(title)` returns a group whose `.add_argument(...)`
@@ -108,7 +109,7 @@ class _Arg:
     def __init__(self, dest: str, name: str, short: str, is_positional: int,
                  action: str, default: str, choices: list[str], help: str,
                  required: int, version: str, const: str, metavar: str,
-                 nargs: str) -> None:
+                 nargs: str, type: int = 0) -> None:
         self.dest = dest
         self.name = name
         self.short = short
@@ -122,8 +123,21 @@ class _Arg:
         self.const = const
         self.metavar = metavar
         self.nargs = nargs
+        # RTTI id of the `type=` callable (e.g. `Path`), or 0 if none was
+        # given. `parse_args` uses this to convert the raw string value
+        # before storing it, mirroring CPython argparse's `type=` semantics
+        # — callers like asmpython's own CLI (`__main__.py`) call real
+        # `Path` methods (`.exists()`, `.read_text()`, ...) directly on
+        # `args.source`, so the conversion has to actually happen here
+        # rather than being a no-op accepted only for signature compat.
+        self.type = type
         # >= 0 -> index into the owning parser's mutually-exclusive groups.
         self.mutex_group = -1
+
+    def _convert(self, value: str) -> Path | str:
+        if self.type == Path:
+            return Path(value)
+        return value
 
     def _in_choices(self, value: str) -> int:
         if len(self.choices) == 0:
@@ -143,23 +157,59 @@ class _Arg:
 
 
 class Namespace:
+    """Parsed values live as real dynamic attributes (via `setattr`/`getattr`
+    against this instance's own field dict — asmpython instances are
+    str-keyed dicts under the hood), not a separate `dict` field. This lets
+    CPython-argparse-style call sites (`args.source`, `args.output = ...`)
+    work identically whether this module or real CPython argparse is in use,
+    instead of only supporting the `.get()`-style accessors below.
+
+    asmpython's sema only infers an instance field's type from a
+    `self.x = ...` assignment inside this class's own methods (an attribute
+    that's only ever set via an external `setattr(ns, ...)` call, as
+    `parse_args` does, stays untyped/opaque, and an untyped truthy check
+    like `if args.check:` tests the raw pointer rather than the value —
+    always true for a non-null string/int). The fields below are the ones
+    asmpython's own CLI (`__main__.py`) relies on coming back as a real
+    typed value via plain attribute access instead of the `.get_path()` /
+    `.get_flag()` accessors: the `Path` ones for `add_argument(...,
+    type=Path)` dests (so `.exists()`, `.read_text()`, etc. resolve to real
+    `Path` methods), the `int` ones for `store_true`/`count` dests checked
+    with a plain `if args.x:`. Add more here if another caller needs
+    real attribute-style access for a new dest."""
+
     def __init__(self) -> None:
-        self.values: dict[str, str] = {}
+        # `None` here (not `Path("")`) is deliberate: it keeps the runtime
+        # value a null pointer until `parse_args` actually sets one via
+        # `setattr`, so `args.source is None` (`is`/`is not` lower to a raw
+        # `== 0` check — see sema's `is`/`is not` handling) still works for
+        # an absent optional `type=Path` argument, exactly like before these
+        # fields were declared. Only the static `Path` annotation is new.
+        self.source: Path = None
+        self.output: Path = None
+        self.icon: Path = None
+        self.nasm: Path = None
+        self.gcc: Path = None
+        # store_true/count flags read via plain `if args.x:` truthiness.
+        self.check: int = 0
+        self.use_runtime_lib: int = 0
+        self.emit_asm: int = 0
+        self.keep: int = 0
+        self.keep_assembly: int = 0
+        self.one_error: int = 0
+        self.json: int = 0
 
     def get(self, key: str, default: str = "") -> str:
-        return self.values.get(key, default)
+        return getattr(self, key, default)
 
     def get_int(self, key: str, default: int = 0) -> int:
-        v = self.values.get(key, "")
-        if v == "":
-            return default
-        return int(v)
+        return getattr(self, key, default)
 
     def get_flag(self, key: str) -> int:
-        return int(self.values.get(key, "0") == "1")
+        return getattr(self, key, 0)
 
     def get_path(self, key: str, default: str = "") -> Path:
-        return Path(self.values.get(key, default))
+        return Path(getattr(self, key, default))
 
 
 class _MutexGroup:
@@ -235,6 +285,15 @@ class ArgumentParser:
                       required: int = 0, dest: str = "", version: str = "",
                       const: str = "", metavar: str = "", nargs: str = "",
                       type: int = 0) -> _Arg:
+        # CPython argparse accepts either flag-name order:
+        # `add_argument("-o", "--output")` or `add_argument("--output", "-o")`.
+        # Both `name` and `short` arrive as plain positionals here (asmpython
+        # has no *args), so normalize: whichever of the two is the long form
+        # (`--xxx`) becomes the canonical `name`; the other (if also a flag)
+        # becomes `short`. Single-flag and positional calls pass through.
+        if name.startswith("-") == 1 and short.startswith("-") == 1:
+            if name.startswith("--") == 0 and short.startswith("--") == 1:
+                name, short = short, name
         is_positional = int(name.startswith("-") == 0)
         if dest == "":
             if is_positional == 1:
@@ -247,7 +306,7 @@ class ArgumentParser:
         if is_positional == 1 and default == "" and required == 0 and nargs != "?":
             required = 1
         spec = _Arg(dest, name, short, is_positional, action, default, choices,
-                     help, required, version, const, metavar, nargs)
+                     help, required, version, const, metavar, nargs, type)
         self.specs.append(spec)
         return spec
 
@@ -297,29 +356,32 @@ class ArgumentParser:
         # with CPython argparse but otherwise unused — see module docstring.
         print(self._usage())
 
-    def print_help(self) -> None:
-        print(self._usage())
+    def format_help(self) -> str:
+        # Mirrors CPython argparse: print_help() is just print(format_help()).
+        # Subclasses (e.g. a colorizing _ColorParser) override print_help to
+        # post-process this text instead of duplicating the layout.
+        out = self._usage()
         if self.description != "":
-            print("")
-            print(self.description)
-        print("")
-        print("positional arguments:")
+            out = out + "\n\n" + self.description
+        out = out + "\n\npositional arguments:"
         for a in self.specs:
             if a.is_positional == 1:
-                print("  " + a.name + "  " + a.help)
-        print("")
-        print("options:")
+                out = out + "\n  " + a.name + "  " + a.help
+        out = out + "\n\noptions:"
         if self.add_help == 1:
-            print("  -h, --help  show this help message and exit")
+            out = out + "\n  -h, --help  show this help message and exit"
         for a in self.specs:
             if a.is_positional == 0:
                 label = a.name
                 if a.short != "":
                     label = a.short + ", " + a.name
-                print("  " + label + "  " + a.help)
+                out = out + "\n  " + label + "  " + a.help
         if self.epilog != "":
-            print("")
-            print(self.epilog)
+            out = out + "\n\n" + self.epilog
+        return out
+
+    def print_help(self) -> None:
+        print(self.format_help())
 
     def error(self, message: str) -> None:
         self.print_usage()
@@ -334,13 +396,20 @@ class ArgumentParser:
         ns = Namespace()
         for a in self.specs:
             if a.action == "store_true" or a.action == "count":
-                ns.values[a.dest] = "0"
+                setattr(ns, a.dest, 0)
             elif a.action == "store_false":
-                ns.values[a.dest] = "1"
+                setattr(ns, a.dest, 1)
+            elif a.is_positional == 1 and a.nargs == "?" and a.default == "":
+                # An optional positional with no explicit default behaves like
+                # CPython's `default=None`: leave the field unset so it reads
+                # back as the dict-default 0, matching how an explicit
+                # `default=None` flag is stored (see add_argument above) —
+                # this is what lets `args.source is None` work when absent.
+                pass
             else:
-                ns.values[a.dest] = a.default
+                setattr(ns, a.dest, a._convert(a.default))
         if self._default_bundle_mode != "":
-            ns.values["bundle_mode"] = self._default_bundle_mode
+            setattr(ns, "bundle_mode", self._default_bundle_mode)
 
         positionals: list[_Arg] = []
         for a in self.specs:
@@ -382,13 +451,13 @@ class ArgumentParser:
                     self.error("unrecognized argument: " + tok)
                 matched = self.specs[matched_i]
                 if matched.action == "store_true":
-                    ns.values[matched.dest] = "1"
+                    setattr(ns, matched.dest, 1)
                 elif matched.action == "store_false":
-                    ns.values[matched.dest] = "0"
+                    setattr(ns, matched.dest, 0)
                 elif matched.action == "count":
-                    ns.values[matched.dest] = str(ns.get_int(matched.dest, 0) + 1)
+                    setattr(ns, matched.dest, ns.get_int(matched.dest, 0) + 1)
                 elif matched.action == "store_const":
-                    ns.values[matched.dest] = matched.const
+                    setattr(ns, matched.dest, matched.const)
                 elif matched.action == "help":
                     self.print_help()
                     sys.exit(0)
@@ -403,7 +472,7 @@ class ArgumentParser:
                         value = argv[i]
                     if matched._in_choices(value) == 0:
                         self.error("argument " + key + ": invalid choice: '" + value + "' (choose from " + matched._choices_str() + ")")
-                    ns.values[matched.dest] = value
+                    setattr(ns, matched.dest, matched._convert(value))
                 seen[matched.dest] = 1
                 i = i + 1
                 continue
@@ -411,7 +480,7 @@ class ArgumentParser:
                 a = positionals[pos_i]
                 if a._in_choices(tok) == 0:
                     self.error("argument " + a.name + ": invalid choice: '" + tok + "' (choose from " + a._choices_str() + ")")
-                ns.values[a.dest] = tok
+                setattr(ns, a.dest, a._convert(tok))
                 seen[a.dest] = 1
                 pos_i = pos_i + 1
             else:

@@ -1,17 +1,15 @@
-"""Public API for writing assembly that asmpython can compile and call.
+"""Public API for writing inline assembly that asmpython can compile and call.
 
-Two entry points, both recognised specially by the compiler:
-
-    from asmpython.assembly import assembly_func, include
+    from asmpython.assembly import asm_func
 
 `@asm_func`
-----------------
+-----------
 Marks a function whose *body* is raw NASM x86-64. The Python signature carries
 the contract the compiler needs — the symbol name, the parameter types, and the
 return type — while the triple-quoted docstring carries the instructions that
 are emitted verbatim as the function's body:
 
-    @assembly_func
+    @asm_func
     def add(a: int, b: int) -> int:
         \"\"\"
         ; args arrive per the target ABI (rdi/rsi on SysV, rcx/rdx on Win64)
@@ -23,20 +21,8 @@ are emitted verbatim as the function's body:
 Ordinary asmpython code then calls `add(2, 3)` like any other function; the
 compiler routes the call to the inline-asm body instead of generating one.
 
-`include(name)`
----------------
-Pulls in an *assembly package* — a ``<name>.asmpkg`` directory or file that
-ships a blob of NASM plus a manifest of the symbols it exports (see
-``asmpython/assembly/pkgformat.py``). Included packages lay the groundwork for
-``--freestanding`` builds, where the whole runtime is supplied as .asmpkg
-instead of linked from libc.
-
-Both functions are *compile-time directives*. Under plain CPython they are
-inert: `assembly_func` returns a stub that raises if you actually call it (the
-NASM body only means something to the compiler), and `include` just records the
-request in a module-level registry so tooling can introspect it. This keeps a
-source file importable by linters and type-checkers even though only the
-asmpython compiler gives the directives meaning.
+Under CPython, `@asm_func` returns a stub that raises if you call it — the
+NASM body only means something to the asmpython compiler.
 """
 
 from __future__ import annotations
@@ -44,13 +30,7 @@ from __future__ import annotations
 from typing import Callable
 
 
-__all__ = ["asm_func", "include", "AssemblyFunc", "included_packages"]
-
-
-# Packages requested via include(), in source order. The compiler reads its own
-# copy out of the AST; this list is what a CPython import sees, so tooling can
-# inspect which packages a module pulls in.
-_INCLUDES: list[str] = []
+__all__ = ["asm_func", "AssemblyFunc"]
 
 
 class AssemblyFunc:
@@ -1018,17 +998,3 @@ def asm_func(
     return AssemblyFunc(fn, symbol=symbol)
 
 
-def include(name: str) -> None:
-    """Request that the assembly package ``name`` be linked into the program.
-
-    A compile-time directive: under CPython it only records the request. The
-    asmpython compiler resolves ``name`` to a ``.asmpkg`` and links its symbols.
-    """
-    if not isinstance(name, str) or not name:
-        raise TypeError("include() takes a non-empty package name string")
-    _INCLUDES.append(name)
-
-
-def included_packages() -> list[str]:
-    """The package names requested via include() so far, in order."""
-    return list(_INCLUDES)

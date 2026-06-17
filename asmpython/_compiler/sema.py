@@ -15,14 +15,14 @@ flag what's clearly wrong).
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Optional
 
 from . import ast_nodes as A
 from .. import stdlib
 from ..stdlib import STDLIB_BINDINGS
-from ..asmlib import ASMLIB_BINDINGS
-from .errors import SemaError
+from .errors import ErrorCode, SemaError
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ def _check_asm_operand_lit(val: str, pos: object) -> None:
     """
     s = val.strip()
     if not s:
-        raise SemaError("Assembly: operand must not be an empty string", pos)
+        raise SemaError("Assembly: operand must not be an empty string", pos, ErrorCode.E_ASM_OPERAND)
 
     lo = s.lower()
 
@@ -133,7 +133,8 @@ def _check_asm_operand_lit(val: str, pos: object) -> None:
     # Flag a register-shaped name that isn't in the valid set
     if _asm_operand_looks_like_bad_register(lo):
         raise SemaError(
-            f"Assembly: {val!r} is not a recognised x86-64 register", pos
+            f"Assembly: {val!r} is not a recognised x86-64 register", pos,
+            ErrorCode.E_ASM_REGISTER,
         )
 
     # Anything else (label, symbol) → accept
@@ -182,12 +183,16 @@ BUILTINS: dict[str, tuple[int, int]] = {
     "next": (1, 2),  # next(iterator[, default]) -> any
     "map": (2, 64),  # map(func, *iterables) -> iterator
     "filter": (2, 2),  # filter(func, iterable) -> iterator
+    "zip": (2, 64),    # zip(*iterables) -> iterator of tuples
     "format": (1, 2),  # format(value[, spec]) -> str
     "hex": (1, 1),  # hex(x) -> str
     "oct": (1, 1),  # oct(x) -> str
     "bin": (1, 1),  # bin(x) -> str
+    "divmod": (2, 2),  # divmod(a, b) -> (a // b, a % b)
     "hash": (1, 1),  # hash(x) -> int
     "issubclass": (2, 2),
+    "bytes": (0, 2),     # bytes() / bytes(n) / bytes(str) -> list[int]
+    "bytearray": (0, 2), # bytearray() / bytearray(n) / bytearray(str) -> list[int]
 }
 
 
@@ -265,6 +270,14 @@ DUNDER_BINOP: dict[str, tuple[str, str]] = {
     "@": ("__matmul__", "__rmatmul__"),
 }
 
+# Unary operator → dunder method name for instance dispatch.
+DUNDER_UNARY: dict[str, str] = {
+    "-": "__neg__",
+    "+": "__pos__",
+    "~": "__invert__",
+    "abs": "__abs__",
+}
+
 # Dunder methods whose second parameter ("other") conventionally holds another
 # instance of the same class — every forward/reflected arithmetic dunder plus
 # the rich-comparison dunders. An unannotated `other` on one of these methods
@@ -292,6 +305,15 @@ class FuncSig:
     # Resolved return type as (ty, el_type, value_type), or None if the
     # function has no usable return annotation (treated as int at call sites).
     ret_type: object = None
+    # When ret_type is ("list", "tuple", ...) from a `-> list[tuple[T1,T2]]`
+    # annotation, the per-slot kinds ["T1","T2"] (else None). Lets call sites
+    # of `for a, b in <list[tuple[T1,T2]]>` type each unpack target.
+    ret_list_tuple_types: object = None
+    # When ret_type is ("list", "list"/"dict", ...) from a `-> list[list[T]]`
+    # or `-> list[dict[K,V]]` annotation, the inner element/value kind ("str",
+    # "int", etc.) — else None. Lets call sites stamp el_value_type so
+    # `for row in rows: row[i]` recovers the leaf type.
+    ret_inner_el_type: object = None
     # Parameter names and their default expressions (parallel to params,
     # including `self` for methods). Used to bind keyword arguments onto
     # positions at call sites.
@@ -299,9 +321,22 @@ class FuncSig:
     param_defaults: list = field(default_factory=list)
     # Name of the `*args` parameter (the trailing list slot), or None.
     vararg: Optional[str] = None
+    # Name of the `**kwargs` parameter (the trailing dict slot), or None.
+    kwarg: Optional[str] = None
     # Per-slot kinds when the body returns a tuple (`return a, b`), so a call
     # site can unpack `x, y = obj.m()`. None when it doesn't return a tuple.
     ret_tuple: object = None
+    # Decorator identities for methods (["staticmethod"] / ["classmethod"]).
+    decorators: list = field(default_factory=list)
+    # True when every reachable `return` in the body is a bare `return self`
+    # (and at least one exists), and the method has no explicit return-type
+    # annotation. Lets call sites of e.g. `__enter__` (which conventionally
+    # `return self`) infer `instance:<ClassName>` instead of defaulting to
+    # `int`. Mirrors `ret_tuple`'s body-scanning approach.
+    returns_self: bool = False
+    # True when the function has an explicit `-> bool` annotation (so call
+    # sites can render the return value as True/False in print/str/f-string).
+    ret_bool: bool = False
 
 
 @dataclass
@@ -320,6 +355,11 @@ class ClassSig:
     # "instance:<Class>"), inferred from `self.x = <value>` assignments and
     # `self.x: T` annotations. Drives the type of `obj.x` reads. Unknown fields
     # read as int (the dict's int-default).
+    # Property name -> mangled setter method name (e.g. "x" -> "x__setter"),
+    # populated for methods decorated `@x.setter`. The setter itself is also
+    # registered in `methods` under its mangled name so normal method
+    # resolution/dispatch (incl. virtual dispatch) handles it unchanged.
+    setters: dict[str, str] = field(default_factory=dict)
     fields: dict[str, str] = field(default_factory=dict)
     # Companion element-kind info for collection fields, so `self.xs[i]` and
     # `for x in self.xs` recover the kind. `field_el_types` holds the list
@@ -345,6 +385,14 @@ class Scope:
     # runtime; we currently support homogeneous lists of any of those four
     # element kinds.
     list_el_types: dict[str, str] = field(default_factory=dict)
+    # For names typed "list" whose elements are themselves containers
+    # (list[dict] / list[list]), the common value/element kind of those nested
+    # containers — so `xs[i][k]` and `for x in xs: x[k]` recover the leaf type.
+    list_el_value_types: dict[str, str] = field(default_factory=dict)
+    # For names typed "list" whose elements are tuples (list[tuple]), the common
+    # per-slot element kinds of those tuples — so `xs[i][0]` and
+    # `for a, b in xs` recover the slot types. Empty when unknown.
+    list_el_tuple_types: dict[str, list[str]] = field(default_factory=dict)
     # For names typed "dict", value kind. Keys are always str in v1.
     dict_value_types: dict[str, str] = field(default_factory=dict)
     # For names typed "dict" whose value kind is itself a container, the common
@@ -357,6 +405,12 @@ class Scope:
     dict_value_tuple_types: dict[str, list[str]] = field(default_factory=dict)
     # For names typed "tuple", the per-slot element kinds.
     tuple_elem_types: dict[str, list[str]] = field(default_factory=dict)
+    # For names typed "int" that were last assigned a bool-valued expression
+    # (see A.is_bool_expr) — lets print()/str()/f-strings render "True"/"False".
+    bool_flags: dict[str, bool] = field(default_factory=dict)
+    # For names typed "int" that were last assigned `None` (see A.is_none_expr)
+    # — lets print()/str()/f-strings render "None".
+    none_flags: dict[str, bool] = field(default_factory=dict)
 
     @property
     def names(self):
@@ -369,14 +423,24 @@ class Scope:
         ty: str = "int",
         *,
         el_type: str | None = None,
+        el_value_type: str | None = None,
+        el_tuple_types: list[str] | None = None,
         value_type: str | None = None,
         inner_value_type: str | None = None,
         value_tuple_types: list[str] | None = None,
         tuple_types: list[str] | None = None,
+        is_bool: bool = False,
+        is_none: bool = False,
     ) -> None:
         self.types[name] = ty
+        self.bool_flags[name] = is_bool
+        self.none_flags[name] = is_none
         if ty == "list" and el_type is not None:
             self.list_el_types[name] = el_type
+        if ty == "list" and el_value_type is not None:
+            self.list_el_value_types[name] = el_value_type
+        if ty == "list" and el_tuple_types:
+            self.list_el_tuple_types[name] = el_tuple_types
         if ty == "dict" and value_type is not None:
             self.dict_value_types[name] = value_type
         if ty == "dict" and inner_value_type is not None:
@@ -432,22 +496,20 @@ def _load_module(name: str) -> dict:
             break
     if key in STDLIB_BINDINGS:
         return STDLIB_BINDINGS[key]
-    if key in ASMLIB_BINDINGS:
-        return ASMLIB_BINDINGS[key]
-    raise SemaError(f"no such module: {name!r}")
+    raise SemaError(f"no such module: {name!r}", code=ErrorCode.E_NO_SUCH_MODULE)
 
 
 class SemaAnalyzer:
-    def __init__(self, mod: A.Module, *, source_dir=None) -> None:
+    def __init__(self, mod: A.Module, *, source_dir=None, collect_errors: bool = False) -> None:
         self.mod = mod
-        # Directory of the source file, for resolving include("pkg") against a
-        # sibling `<pkg>.asmpkg`. None outside a real compile.
         self.source_dir = source_dir
-        # Loaded assembly packages, keyed by package name (dedup repeated
-        # includes). Their exports become callable symbols.
-        self.asm_packages: dict[str, object] = {}
+        self.collect_errors = collect_errors
+        self._collected_errors: list = []
         self.funcs: dict[str, FuncSig] = {}
         self.classes: dict[str, ClassSig] = {}
+        # Variable name -> return type of the lambda bound to it, so an indirect
+        # call `f(...)` on a name-bound lambda gets the right result type.
+        self.lambda_rets: dict[str, str] = {}
         # Module-level names (imports + top-level assignments). Populated by
         # analyze() before function/method bodies are checked.
         self.global_scope: Scope = Scope()
@@ -457,6 +519,10 @@ class SemaAnalyzer:
         # Name of the class whose method body is currently being checked, so
         # `super()` can resolve against its base. None outside a method.
         self.current_class: Optional[str] = None
+        # Name of the `cls` parameter inside a @classmethod body (e.g. "cls").
+        # Used to rewrite `cls.field` → `ClassName.field` so the existing
+        # class-var read/write codegen path handles it instead of null-ptr deref.
+        self.classmethod_cls_param: Optional[str] = None
         # Imported FFI: bindings either bound under a module prefix or
         # lifted directly into the namespace via from-import.
         self.imported_modules: dict[str, dict] = {}
@@ -466,6 +532,37 @@ class SemaAnalyzer:
         # (i.e. have a `return a, b` somewhere). Lets `q, r = f()` recover
         # the per-target types at the call site. Computed in analyze().
         self.func_ret_tuple: dict[str, list[str]] = {}
+        # (qualified_name, param_index) -> (ty, el, val, tup) for parameters
+        # with no annotation and no default, inferred from literal-typed
+        # arguments at call sites. `qualified_name` is a function's plain name,
+        # or "ClassName.method_name" for a method. See
+        # `_infer_unannotated_params`.
+        self.inferred_param_types: dict[str, tuple] = {}
+        # func_name -> list of (ty, el_type, val_type) for each free variable,
+        # populated by _prescan_fv_types() before the main analysis loops.
+        self._fv_types: dict = {}
+
+    def _resolve_class_chain(self, name: str) -> list:
+        """[name, parent, grandparent, ...] for a user-defined class."""
+        out: list = []
+        cur = name
+        while cur is not None and cur not in out:
+            out.append(cur)
+            cls = self.classes.get(cur)
+            cur = cls.parent if cls is not None else None
+        return out
+
+    def _common_class_ancestor(self, a: str, b: str) -> "str | None":
+        """Nearest common ancestor of two user-defined classes, e.g. for
+        `WindowsCodegen` and `Freestanding16Codegen` both descending from
+        `Codegen`. Returns None if they share no modeled ancestor (siblings
+        with only an external/unmodeled base, or unrelated classes)."""
+        chain_a = self._resolve_class_chain(a)
+        chain_b = set(self._resolve_class_chain(b))
+        for cls_name in chain_a:
+            if cls_name in chain_b:
+                return cls_name
+        return None
 
     def _has_external_base(self, class_name: str) -> bool:
         """True if `class_name` or any ancestor inherits from a base that isn't
@@ -483,6 +580,22 @@ class SemaAnalyzer:
                 return True
             cur = cls.parent
         return False
+
+    def _class_var_type(self, class_name: str, var: str) -> "str | None":
+        """Static type of a class-level variable `ClassName.var` from its
+        default expression, or None if the class has no such class var. Only
+        plain classes contribute static class vars (a @dataclass's class vars
+        are per-instance fields)."""
+        for c in self.mod.classes:
+            if c.name != class_name:
+                continue
+            if getattr(c, "is_dataclass", False):
+                return None
+            for cv in getattr(c, "class_vars", []) or []:
+                cvname, _annot, cvdefault = cv
+                if cvname == var and cvdefault is not None:
+                    return A.expr_type(cvdefault)
+        return None
 
     def _resolve_method(
         self, class_name: str, method: str
@@ -502,6 +615,42 @@ class SemaAnalyzer:
                 return cur, cls.methods[method]
             cur = cls.parent
         return None
+
+    def _resolve_setter(self, class_name: str, prop_name: str) -> Optional[str]:
+        """Walk parent chain to find a `@<prop_name>.setter` for `prop_name`.
+
+        Returns the setter's mangled method name (e.g. "x__setter"), or None.
+        """
+        cur = class_name
+        seen = set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            cls = self.classes.get(cur)
+            if cls is None:
+                return None
+            if prop_name in cls.setters:
+                return cls.setters[prop_name]
+            cur = cls.parent
+        return None
+
+    def _check_exc_type_name(self, name: str, pos, scope: "Scope | None" = None) -> None:
+        """Validate that `name` (from an `except <name>:` clause) refers to a
+        builtin exception or a user class deriving from one."""
+        if name in BUILTIN_EXCEPTIONS:
+            return
+        if name in self.classes and self._is_exception_class(name):
+            return
+        if name not in self.classes:
+            # Not a locally-defined class. If it's in scope (imported from
+            # another module), accept leniently — we can't verify the
+            # hierarchy at sema time. If it's not in scope at all, it's a
+            # genuinely unknown name and we reject it.
+            if scope is None or name in scope:
+                return
+        raise SemaError(
+            f"'{name}' is not an exception type", pos,
+            ErrorCode.E_NOT_AN_EXCEPTION,
+        )
 
     def _is_exception_class(self, class_name: str) -> bool:
         """True if `class_name` derives (transitively) from a builtin exception.
@@ -587,7 +736,7 @@ class SemaAnalyzer:
                 cname, cannot, cvalue = cv
                 r = self._resolve_annot(cannot)
                 if r is not None:
-                    ty, el, val, _tup = r
+                    ty, el, val, _tup, _elval = r
                 elif cvalue is not None:
                     ty, el, val = A.expr_type(cvalue), None, None
                 else:
@@ -610,7 +759,11 @@ class SemaAnalyzer:
                     if r is not None:
                         pinfo[p] = r
                     elif i < len(m.defaults) and m.defaults[i] is not None:
-                        pinfo[p] = (A.expr_type(m.defaults[i]), None, None, None)  # type: ignore
+                        pinfo[p] = (A.expr_type(m.defaults[i]), None, None, None, None)  # type: ignore
+                    else:
+                        inferred = self.inferred_param_types.get(f"{c.name}.{m.name}:{i}")
+                        if inferred is not None:
+                            pinfo[p] = inferred
                 self._scan_field_assigns(m.body, sig, pinfo)
 
     def _scan_field_assigns(self, stmts: list, sig: ClassSig, pinfo: dict) -> None:
@@ -625,9 +778,11 @@ class SemaAnalyzer:
                 # can't. Otherwise fall back to the value's static type.
                 r = self._resolve_annot(getattr(s, "annot", None))  # type: ignore
                 if r is not None:
-                    ty, el, val, tup = r
+                    ty, el, val, tup, _elval = r
                 else:
-                    ty, el, val, tup = self._static_value_info(s.value, pinfo)
+                    raw = self._static_value_info(s.value, pinfo)
+                    ty, el, val, tup = raw[0], raw[1], raw[2], raw[3]
+                    _elval = None
                 existing = sig.fields.get(s.name)
                 # Don't let a later `= 0` reset placeholder downgrade a field we
                 # already typed more precisely.
@@ -649,16 +804,17 @@ class SemaAnalyzer:
             elif isinstance(s, A.Try):
                 self._scan_field_assigns(s.body, sig, pinfo)
                 self._scan_field_assigns(s.handler, sig, pinfo)
-                for _bind, hbody in s.extra_handlers:
+                for _types, _bind, hbody in s.extra_handlers:
                     self._scan_field_assigns(hbody, sig, pinfo)
                 self._scan_field_assigns(s.else_body, sig, pinfo)
                 self._scan_field_assigns(s.finally_body, sig, pinfo)
 
-    def _static_value_info(self, value, pinfo: dict):
-        """Best-effort (ty, el, val, tuple) of an assigned value, used for field
-        inference before full body analysis (so it can't rely on stamped
-        inferred_type). Covers the dataclass-style cases that matter. `el`/`val`
-        are the list-element / dict-value kinds; `tuple` the per-slot kinds."""
+    def _literal_arg_type(self, value):
+        """(ty, el, val, tuple) for an expression whose type is knowable from
+        its syntax alone, independent of scope -- or None if it depends on a
+        name binding (e.g. a bare variable reference). Used both by
+        `_static_value_info` (for `self.x = <value>` field inference) and by
+        `_infer_unannotated_params` (for call-site argument inference)."""
         if isinstance(value, A.IntLit):
             return ("int", None, None, None)
         if isinstance(value, A.FloatLit):
@@ -671,11 +827,181 @@ class SemaAnalyzer:
             return ("dict", None, None, None)
         if isinstance(value, A.TupleLit):
             return ("tuple", None, None, None)
-        if isinstance(value, A.Name):
-            return pinfo.get(value.name, ("int", None, None, None))
         if isinstance(value, A.Call) and value.func in self.classes:
             return (f"instance:{value.func}", None, None, None)
+        return None
+
+    def _static_value_info(self, value, pinfo: dict):
+        """Best-effort (ty, el, val, tuple) of an assigned value, used for field
+        inference before full body analysis (so it can't rely on stamped
+        inferred_type). Covers the dataclass-style cases that matter. `el`/`val`
+        are the list-element / dict-value kinds; `tuple` the per-slot kinds."""
+        lit = self._literal_arg_type(value)
+        if lit is not None:
+            return lit
+        if isinstance(value, A.Name):
+            return pinfo.get(value.name, ("int", None, None, None))
         return ("int", None, None, None)
+
+    # ---- call-site argument type inference for unannotated parameters ------
+
+    def _collect_calls(self, node, out: list) -> None:
+        """Recursively collect every `A.Call`/`A.MethodCall` reachable from
+        `node` (a statement, expression, or list of either), via a generic
+        dataclass-field walk. Used by `_infer_unannotated_params` to find every
+        call site of every function/method in the module, regardless of how
+        deeply it's nested in expressions."""
+        if isinstance(node, (A.Call, A.MethodCall)):
+            out.append(node)
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            for f in dataclasses.fields(node):
+                self._collect_calls(getattr(node, f.name, None), out)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                self._collect_calls(item, out)
+
+    def _infer_unannotated_params(self) -> None:
+        """For function/method parameters with no type annotation and no
+        default, scan every call site in the module for arguments whose type
+        is knowable from syntax alone (`_literal_arg_type`: literals,
+        f-strings, constructor calls) and, if every such call site agrees on a
+        single non-int type, adopt it as the parameter's type.
+
+        Without this, idiomatic Python -- which rarely annotates parameters --
+        has every unannotated parameter (and any `self.x = param` field it
+        feeds) silently default to `int`, so e.g. `def __init__(self, name):
+        self.name = name` called as `Cls("a")` would treat `self.name` as an
+        int and print its pointer value instead of "a". A parameter with no
+        literal-typed call sites, or with conflicting literal types, keeps the
+        existing `int` default -- callers needing a different type still
+        annotate explicitly, same as before."""
+        calls: list = []
+        self._collect_calls(self.mod.body, calls)
+        for f in self.mod.funcs:
+            self._collect_calls(f.body, calls)
+        for c in self.mod.classes:
+            for m in c.methods:
+                self._collect_calls(m.body, calls)
+
+        for f in self.mod.funcs:
+            sites = [c for c in calls if isinstance(c, A.Call) and c.func == f.name]
+            self._infer_call_target_params(f.name, f, sites, start=0)
+
+        for c in self.mod.classes:
+            for m in c.methods:
+                if m.name == "__init__":
+                    sites = [
+                        c2 for c2 in calls if isinstance(c2, A.Call) and c2.func == c.name
+                    ]
+                else:
+                    # Matched by method name only (the receiver's static type
+                    # isn't known yet at this pre-pass). If another class has a
+                    # same-named method with conflicting argument types, the
+                    # mismatch just falls back to `int` as before -- no new
+                    # miscompile.
+                    sites = [
+                        mc for mc in calls
+                        if isinstance(mc, A.MethodCall) and mc.method == m.name
+                    ]
+                self._infer_call_target_params(f"{c.name}.{m.name}", m, sites, start=1)
+
+    def _infer_call_target_params(self, qualname: str, fn, sites: list, start: int) -> None:
+        """Infer types for `fn`'s parameters at index >= `start` (0 for plain
+        functions, 1 for methods to skip `self`) from `sites` (the `A.Call`/
+        `A.MethodCall` nodes invoking it), storing results in
+        `self.inferred_param_types`. See `_infer_unannotated_params`."""
+        for i, p in enumerate(fn.params):
+            if i < start:
+                continue
+            annot = fn.param_types[i] if i < len(fn.param_types) else None
+            if self._resolve_annot(annot) is not None:  # type: ignore
+                continue
+            if i < len(fn.defaults) and fn.defaults[i] is not None:
+                continue
+            candidates: list = []
+            found_any = False
+            arg_idx = i - start
+            for site in sites:
+                args = site.args
+                if arg_idx < len(args):
+                    arg = args[arg_idx]
+                else:
+                    arg = next((v for n, v in getattr(site, "kwargs", []) if n == p), None)
+                    if arg is None:
+                        continue
+                lit = self._literal_arg_type(arg)
+                if lit is None:
+                    continue
+                found_any = True
+                if lit not in candidates:
+                    candidates.append(lit)
+            if found_any and len(candidates) == 1:
+                self.inferred_param_types[f"{qualname}:{i}"] = candidates[0]
+
+    # ---- return-type inference for unannotated functions/methods ----------
+
+    def _infer_unannotated_returns(self) -> None:
+        """For functions/methods with no return-type annotation and no
+        inferred tuple-return shape (`ret_tuple`), scan `return` statements
+        and -- if every reachable one has a value, every value's type is
+        statically knowable, and they all agree -- adopt that as `ret_type`.
+        Mirrors `ret_tuple`'s body-scanning precedent for the scalar case,
+        e.g. `def f(x): return x` called as `f("hi")` makes `f("hi")` a str
+        result instead of defaulting to int (using the parameter type
+        `_infer_unannotated_params` just determined for `x`)."""
+        for f in self.mod.funcs:
+            sig = self.funcs[f.name]
+            if sig.ret_type is not None or sig.ret_tuple is not None:
+                continue
+            ty = self._infer_return_type(f, f.name)
+            if ty is not None:
+                sig.ret_type = ty
+        for c in self.mod.classes:
+            for m in c.methods:
+                sig = self.classes[c.name].methods[m.name]
+                if (
+                    sig.ret_type is not None
+                    or sig.ret_tuple is not None
+                    or sig.returns_self
+                ):
+                    continue
+                ty = self._infer_return_type(m, f"{c.name}.{m.name}")
+                if ty is not None:
+                    sig.ret_type = ty
+
+    def _infer_return_type(self, fn, qualname: str):
+        """(ty, el, val) for every reachable `return` in `fn.body`, if all
+        have a value and those values' types are statically knowable
+        (`_literal_arg_type`, or a reference to one of `fn`'s parameters whose
+        type is known) and agree -- else None. Helper for
+        `_infer_unannotated_returns`."""
+        returns: list = []
+        self._collect_returns(fn.body, returns)
+        if not returns:
+            return None
+        types: list = []
+        for r in returns:
+            if r.value is None:
+                return None  # bare `return` mixed in: ambiguous
+            lit = self._literal_arg_type(r.value)
+            if lit is None and isinstance(r.value, A.Name) and r.value.name in fn.params:
+                j = fn.params.index(r.value.name)
+                annot = fn.param_types[j] if j < len(fn.param_types) else None
+                resolved = self._resolve_annot(annot)  # type: ignore
+                if resolved is not None:
+                    lit = resolved
+                elif j < len(fn.defaults) and fn.defaults[j] is not None:
+                    lit = (A.expr_type(fn.defaults[j]), None, None, None, None)
+                else:
+                    lit = self.inferred_param_types.get(f"{qualname}:{j}")
+            if lit is None:
+                return None
+            entry = (lit[0], lit[1], lit[2])
+            if entry not in types:
+                types.append(entry)
+        if len(types) == 1:
+            return types[0]
+        return None
 
     def _static_value_type(self, value, ptypes: dict) -> str:
         """Just the type half of `_static_value_info` (kept for callers that
@@ -697,6 +1023,8 @@ class SemaAnalyzer:
             return "any"
         if base in ("int", "str", "float"):
             return base
+        if base == "bool":
+            return "int"
         if base in ("list", "dict", "tuple"):
             # A nested collection element/value (`dict[str, list[str]]`): every
             # value is an 8-byte pointer, so the container kind passes through.
@@ -707,71 +1035,118 @@ class SemaAnalyzer:
             return "any"
         if base in self.classes:
             return f"instance:{base}"
-        # A capitalized external/imported class (`list[Token]`, `dict[str, Expr]`):
-        # model the element as an opaque instance so attribute/method access on
-        # elements read out of the container stays lenient (mirrors
-        # _resolve_annot's handling of a bare external annotation).
+        # A capitalized external/imported class (`list[Token]`, `dict[str, Expr]`),
+        # or a dotted reference to a class we do model (`list[argparse.Namespace]`).
+        # Prefer the modeled class if the leaf matches one; otherwise fall back to
+        # an opaque instance so attribute/method access on elements read out of
+        # the container stays lenient (mirrors _resolve_annot's handling of a
+        # bare external annotation).
         leaf = base.split(".")[-1] if isinstance(base, str) else ""
+        if leaf in self.classes:
+            return f"instance:{leaf}"
         if leaf[:1].isupper():
             return f"instance:{leaf}"
         return "int"
 
     def _resolve_annot(self, annot):
         """Turn a parser annotation descriptor (base, el) into
-        (ty, el_type, value_type, tuple_types), or None if it doesn't
-        constrain the type (so the caller falls back to default inference).
-        `annot` is a (base, el) tuple or None."""
+        (ty, el_type, value_type, tuple_types, el_value_type), or None if it
+        doesn't constrain the type (so the caller falls back to default
+        inference). `annot` is a (base, el) tuple or None."""
         if annot is None:
             return None
         base, el = annot
-        if base in ("int", "str", "float"):
-            return (base, None, None, None)
+        if base in ("int", "str", "float", "bool"):
+            return ("int" if base == "bool" else base, None, None, None, None)
         if base == "list":
-            return ("list", self._resolve_scalar_annot(el), None, None)
+            if isinstance(el, tuple) and el[0] == "tuple":
+                # list[tuple[T1, T2, ...]]: el is ("tuple", [base1, base2, ...])
+                # (see parser._normalize_annot) -- resolve each slot's kind so
+                # `for a, b in <list[tuple[T1,T2]]>` can type each target.
+                slot_types = [self._resolve_scalar_annot(b) for b in el[1]]
+                return ("list", "tuple", None, slot_types, None)
+            if isinstance(el, tuple) and el[0] == "list":
+                # list[list[T]]: el is ("list", inner_el_name)
+                # Propagate the leaf kind via el_value_type so
+                # `for row in matrix: row[i]` recovers the element type.
+                inner_el = self._resolve_scalar_annot(el[1])
+                return ("list", "list", None, None, inner_el)
+            if isinstance(el, tuple) and el[0] == "dict":
+                # list[dict[K,V]]: el is ("dict", val_el_name)
+                # Propagate the value kind via el_value_type so
+                # `for d in dicts: d[key]` recovers the value type.
+                inner_val = self._resolve_scalar_annot(el[1])
+                return ("list", "dict", None, None, inner_val)
+            return ("list", self._resolve_scalar_annot(el), None, None, None)
         if base == "dict":
-            return ("dict", None, self._resolve_scalar_annot(el), None)
+            return ("dict", None, self._resolve_scalar_annot(el), None, None)
         if base == "tuple":
             # Annotations don't give per-slot kinds; leave them unknown.
-            return ("tuple", None, None, [])
+            return ("tuple", None, None, [], None)
         if base in ("set", "frozenset"):
             # A `set`-annotated value: type it as a set so membership and the
             # set methods (`add`/`discard`/`remove`/`update`) resolve, rather
             # than falling through to the int default.
-            return ("set", None, None, None)
+            return ("set", None, None, None, None)
         if base == "any":
             # An explicit opaque annotation (`object`, `Any`, or a genuine
             # multi-type union the parser collapsed to "any"): constrain the
             # value to the lenient "any" type rather than leaving it to default
             # to int. Lets a `-> str | list` method type its result usefully.
-            return ("any", None, None, None)
+            return ("any", None, None, None, None)
         if base == "none":
             return None
         if base in self.classes:
-            return (f"instance:{base}", None, None, None)
+            return (f"instance:{base}", None, None, None, None)
+        # A dotted reference to a class we do model (`module.ClassName`, e.g.
+        # `argparse.ArgumentParser`): match on the leaf so the annotation
+        # resolves to the real class (with its known methods/fields) instead
+        # of falling through to the opaque/external branch below, which would
+        # silently break the inheritance chain for any subclass returned
+        # through a base-class-annotated function.
+        leaf = base.split(".")[-1]
+        if leaf in self.classes:
+            return (f"instance:{leaf}", None, None, None, None)
         # An external / imported class annotation (`Token`, `A.IntLit`,
         # `FuncInfo`). We can't see its methods or fields, so model it as an
         # opaque instance: attribute and method access against it are checked
         # leniently (see _check_expr's Attr / MethodCall handling). The leaf of
         # a dotted path is the class-ish name.
-        leaf = base.split(".")[-1]
         if leaf[:1].isupper():
-            return (f"instance:{leaf}", None, None, None)
+            return (f"instance:{leaf}", None, None, None, None)
         # A lowercase unknown name (a type alias we don't model) — don't
         # constrain; the body's usage decides what's legal.
         return None
 
-    def _seed_param(self, scope: Scope, name: str, annot, default_expr) -> None:
-        """Add a parameter to `scope`, typing it from its annotation if present,
-        otherwise from a literal default, otherwise int."""
+    def _seed_param(self, scope: Scope, name: str, annot, default_expr, inferred=None) -> None:
+        """Add a parameter to `scope`, typing it from its annotation if
+        present, otherwise from a literal default, otherwise from
+        `inferred` (a (ty, el, val, tup) tuple from
+        `_infer_unannotated_params`, or None), otherwise int."""
         resolved = self._resolve_annot(annot)
         if resolved is not None:
-            ty, el, val, tup = resolved
-            scope.add(name, ty, el_type=el, value_type=val, tuple_types=tup)
+            ty, el, val, tup, elval = resolved
+            if ty == "list" and tup:
+                # list[tuple[T1,T2,...]]: slot types go into el_tuple_types so
+                # `for a, b in pairs` can type each target correctly.
+                scope.add(name, ty, el_type=el, value_type=val,
+                          el_tuple_types=tup, el_value_type=elval)
+            else:
+                scope.add(name, ty, el_type=el, value_type=val, tuple_types=tup,
+                          el_value_type=elval)
             return
-        ty = "int"
         if default_expr is not None:
-            ty = A.expr_type(default_expr)
-        scope.add(name, ty)
+            scope.add(name, A.expr_type(default_expr))
+            return
+        if inferred is not None:
+            self._seed_param_from_inferred(scope, name, inferred)
+            return
+        scope.add(name, "int")
+
+    def _seed_param_from_inferred(self, scope: Scope, name: str, inferred: tuple) -> None:
+        """Unpack an inferred (ty, el, val, tup) 4-tuple and seed `scope`."""
+        ty, el, val, tup = inferred[0], inferred[1], inferred[2], inferred[3]
+        scope.add(name, ty, el_type=el, value_type=val, tuple_types=tup)
 
     def _seed_globals_into(self, scope: Scope) -> None:
         """Copy module-level names (and their tracked types) into a fresh
@@ -784,6 +1159,103 @@ class SemaAnalyzer:
         scope.dict_inner_value_types.update(g.dict_inner_value_types)
         scope.dict_value_tuple_types.update(g.dict_value_tuple_types)
         scope.tuple_elem_types.update(g.tuple_elem_types)
+
+    def _prescan_fv_types(self) -> None:
+        """Pre-scan every function/method body for ClosureBind nodes.
+
+        For each ClosureBind found, record the types of its captured free
+        variables into self._fv_types[func_name] so the lifted function's scope
+        is seeded with the correct types rather than defaulting to int.  Uses
+        annotation-based inference only (no full type analysis), allowing this
+        to run before the main analysis loops regardless of order.
+        """
+        def collect_annot_locals(stmts: list, acc: dict) -> None:
+            for s in stmts:
+                if isinstance(s, A.Assign):
+                    annot = getattr(s, "annot", None)
+                    if annot is not None:
+                        resolved = self._resolve_annot(annot)
+                        if resolved is not None and isinstance(s.target, str):
+                            ty, el, val, _tup, _elval = resolved
+                            acc[s.target] = (ty, el, val)
+                elif isinstance(s, A.If):
+                    collect_annot_locals(s.then, acc)
+                    if s.orelse:
+                        collect_annot_locals(s.orelse, acc)
+                elif isinstance(s, A.While):
+                    collect_annot_locals(s.body, acc)
+                elif isinstance(s, A.For):
+                    collect_annot_locals(s.body, acc)
+                elif isinstance(s, A.Try):
+                    collect_annot_locals(s.body, acc)
+                    collect_annot_locals(s.handler, acc)
+                    if s.else_body:
+                        collect_annot_locals(s.else_body, acc)
+                elif isinstance(s, A.With):
+                    collect_annot_locals(s.body, acc)
+
+        def scan_closurebinds(stmts: list, local_types: dict) -> None:
+            for s in stmts:
+                if isinstance(s, A.ClosureBind):
+                    fv_types: list = []
+                    for fv in s.free_vars:
+                        if fv in local_types:
+                            fv_types.append(local_types[fv])
+                        elif fv in self.global_scope.types:
+                            ty = self.global_scope.types[fv]
+                            el = self.global_scope.list_el_types.get(fv)
+                            val = self.global_scope.dict_value_types.get(fv)
+                            fv_types.append((ty, el, val))
+                        else:
+                            fv_types.append(("int", None, None))
+                    self._fv_types[s.func_name] = fv_types
+                elif isinstance(s, A.If):
+                    scan_closurebinds(s.then, local_types)
+                    if s.orelse:
+                        scan_closurebinds(s.orelse, local_types)
+                elif isinstance(s, A.While):
+                    scan_closurebinds(s.body, local_types)
+                elif isinstance(s, A.For):
+                    scan_closurebinds(s.body, local_types)
+                elif isinstance(s, A.Try):
+                    scan_closurebinds(s.body, local_types)
+                    scan_closurebinds(s.handler, local_types)
+                    if s.else_body:
+                        scan_closurebinds(s.else_body, local_types)
+                elif isinstance(s, A.With):
+                    scan_closurebinds(s.body, local_types)
+
+        def build_param_types(params: list, param_types: list) -> dict:
+            local_types: dict = {}
+            for i, p in enumerate(params):
+                annot = param_types[i] if i < len(param_types) else None
+                resolved = self._resolve_annot(annot)
+                if resolved is not None:
+                    ty, el, val, _tup, _elval = resolved
+                    local_types[p] = (ty, el, val)
+            return local_types
+
+        for f in self.mod.funcs:
+            if getattr(f, "is_lifted", False):
+                continue
+            local_types: dict = build_param_types(f.params, f.param_types)
+            collect_annot_locals(f.body, local_types)
+            scan_closurebinds(f.body, local_types)
+
+        for c in self.mod.classes:
+            for m in c.methods:
+                mdeco = getattr(m, "decorators", [])
+                local_types: dict = {}
+                if "staticmethod" not in mdeco:
+                    local_types["self"] = (f"instance:{c.name}", None, None)
+                start = 0 if "staticmethod" in mdeco else 1
+                method_locals: dict = build_param_types(
+                    m.params[start:], m.param_types[start:]
+                )
+                for k, v in method_locals.items():
+                    local_types[k] = v
+                collect_annot_locals(m.body, local_types)
+                scan_closurebinds(m.body, local_types)
 
     # ---- entry --------------------------------------------------------------
 
@@ -820,29 +1292,597 @@ class SemaAnalyzer:
         except Exception:
             pass
 
+    def _try_check_block(self, stmts: list, scope: "Scope") -> None:
+        """Run `_check_block` and, in collect-errors mode, stash any SemaError
+        instead of propagating it so analysis continues in other bodies."""
+        if not self.collect_errors:
+            self._check_block(stmts, scope)
+            return
+        try:
+            self._check_block(stmts, scope)
+        except SemaError as e:
+            self._collected_errors.append(e)
+
+    def _collect_gen_locals(self, stmts: list, exclude: set) -> list:
+        """Collect all local variable names assigned in stmts, excluding those in exclude."""
+        names: list = []
+        seen: set = set()
+        def walk(ss):
+            for s in ss:
+                if isinstance(s, (A.Assign, A.AugAssign)):
+                    n = s.target
+                    if isinstance(n, str) and n not in exclude and n not in seen:
+                        names.append(n)
+                        seen.add(n)
+                elif isinstance(s, A.TupleAssign):
+                    for t in s.targets:
+                        nm = t.name if isinstance(t, A.StarTarget) else (t.name if isinstance(t, A.Name) else None)
+                        if nm and nm not in exclude and nm not in seen:
+                            names.append(nm)
+                            seen.add(nm)
+                elif isinstance(s, A.For):
+                    if isinstance(s.var, str) and s.var not in exclude and s.var not in seen:
+                        names.append(s.var)
+                        seen.add(s.var)
+                    walk(s.body)
+                elif isinstance(s, A.While):
+                    walk(s.body)
+                elif isinstance(s, A.If):
+                    walk(s.then)
+                    if s.orelse:
+                        walk(s.orelse)
+        walk(stmts)
+        return names
+
+    def _rename_locals_in_stmts(self, stmts: list, local_names: set) -> list:
+        """Deep-copy stmts, replacing each local Name ref with Attr(self, name)."""
+        def _self_name() -> A.Name:
+            return A.Name(name="self", pos=A.SourcePos(0, 0))
+
+        def fix_expr(e):
+            if e is None:
+                return None
+            if isinstance(e, A.Name):
+                if e.name in local_names:
+                    return A.Attr(obj=_self_name(), name=e.name, pos=e.pos)
+                return e
+            if isinstance(e, A.IntLit) or isinstance(e, A.FloatLit) or isinstance(e, A.StrLit):
+                return e
+            if isinstance(e, A.BinOp):
+                return A.BinOp(op=e.op, left=fix_expr(e.left), right=fix_expr(e.right), pos=e.pos)
+            if isinstance(e, A.UnaryOp):
+                return A.UnaryOp(op=e.op, operand=fix_expr(e.operand), pos=e.pos)
+            if isinstance(e, A.Compare):
+                return A.Compare(ops=e.ops, operands=[fix_expr(x) for x in e.operands], pos=e.pos)
+            if isinstance(e, A.BoolOp):
+                return A.BoolOp(op=e.op, left=fix_expr(e.left), right=fix_expr(e.right), pos=e.pos)
+            if isinstance(e, A.Attr):
+                return A.Attr(obj=fix_expr(e.obj), name=e.name, pos=e.pos)
+            if isinstance(e, A.Subscript):
+                return A.Subscript(obj=fix_expr(e.obj), index=fix_expr(e.index), pos=e.pos)
+            if isinstance(e, A.Call):
+                return A.Call(
+                    func=e.func,
+                    args=[fix_expr(a) for a in e.args],
+                    pos=e.pos,
+                    kwargs=[(k, fix_expr(v)) for k, v in (e.kwargs or [])],
+                )
+            if isinstance(e, A.MethodCall):
+                return A.MethodCall(
+                    obj=fix_expr(e.obj),
+                    method=e.method,
+                    args=[fix_expr(a) for a in e.args],
+                    pos=e.pos,
+                )
+            if isinstance(e, A.IfExp):
+                return A.IfExp(test=fix_expr(e.test), body=fix_expr(e.body), orelse=fix_expr(e.orelse), pos=e.pos)
+            if isinstance(e, A.ListLit):
+                return A.ListLit(elems=[fix_expr(x) for x in e.elems], pos=e.pos)
+            if isinstance(e, A.TupleLit):
+                return A.TupleLit(elems=[fix_expr(x) for x in e.elems], pos=e.pos)
+            return e
+
+        def fix_stmt(s):
+            if isinstance(s, A.Assign):
+                target = s.target
+                rhs = fix_expr(s.value)
+                if isinstance(target, str) and target in local_names:
+                    return A.AttrAssign(
+                        obj=_self_name(), name=target, value=rhs, pos=s.pos
+                    )
+                return A.Assign(target=target, value=rhs, pos=s.pos, annot=s.annot)
+            if isinstance(s, A.AugAssign):
+                target = s.target
+                rhs = fix_expr(s.value)
+                if isinstance(target, str) and target in local_names:
+                    lhs = A.Attr(obj=_self_name(), name=target, pos=s.pos)
+                    new_val = A.BinOp(op=s.op, left=lhs, right=rhs, pos=s.pos)
+                    return A.AttrAssign(obj=_self_name(), name=target, value=new_val, pos=s.pos)
+                return A.AugAssign(target=target, op=s.op, value=rhs, pos=s.pos)
+            if isinstance(s, A.ExprStmt):
+                return A.ExprStmt(expr=fix_expr(s.expr), pos=s.pos)
+            if isinstance(s, A.Return):
+                return A.Return(value=fix_expr(s.value), pos=s.pos)
+            if isinstance(s, A.If):
+                return A.If(
+                    test=fix_expr(s.test),
+                    then=[fix_stmt(x) for x in s.then],
+                    orelse=[fix_stmt(x) for x in (s.orelse or [])],
+                    pos=s.pos,
+                )
+            if isinstance(s, A.While):
+                return A.While(
+                    test=fix_expr(s.test),
+                    body=[fix_stmt(x) for x in s.body],
+                    pos=s.pos,
+                )
+            if isinstance(s, A.For):
+                return A.For(
+                    var=s.var,
+                    range_args=[fix_expr(x) for x in (s.range_args or [])],
+                    iter=fix_expr(s.iter),
+                    body=[fix_stmt(x) for x in s.body],
+                    pos=s.pos,
+                    targets=list(s.targets),
+                )
+            if isinstance(s, A.YieldStmt):
+                return A.YieldStmt(value=fix_expr(s.value), pos=s.pos)
+            if isinstance(s, A.AttrAssign):
+                return A.AttrAssign(obj=fix_expr(s.obj), name=s.name, value=fix_expr(s.value), pos=s.pos)
+            if isinstance(s, (A.Break, A.Continue, A.Pass)):
+                return s
+            if isinstance(s, A.Raise):
+                return A.Raise(value=fix_expr(s.value), pos=s.pos)
+            return s
+
+        return [fix_stmt(x) for x in stmts]
+
+    def _transform_generator(self, f: A.FuncDef) -> "tuple[A.FuncDef, A.ClassDef] | None":
+        """Transform a generator function into a factory + iterator class.
+
+        Supports:
+          - Pre-loop stmts (init code before the while/for loop)
+          - A single while loop containing exactly one yield per iteration path
+          - A single for loop with yield in body
+
+        Returns (new_factory_func, iterator_class) or None if pattern not recognized.
+        """
+        pos = f.pos
+        cls_name = f"_genobj_{f.name}"
+        params_no_self = list(f.params)  # e.g. ["n"]
+        param_types_no_self = list(f.param_types) if f.param_types else [None] * len(f.params)
+
+        # Separate pre-loop stmts from the first while/for loop.
+        pre_stmts: list = []
+        loop_stmt = None
+        post_stmts: list = []
+        for s in f.body:
+            if loop_stmt is None:
+                if isinstance(s, (A.While, A.For)):
+                    loop_stmt = s
+                else:
+                    pre_stmts.append(s)
+            else:
+                post_stmts.append(s)
+
+        if loop_stmt is None:
+            return None  # No loop found
+
+        # Check that the loop contains exactly one YieldStmt in its body.
+        def has_yield(stmts):
+            for s in stmts:
+                if isinstance(s, A.YieldStmt):
+                    return True
+                if isinstance(s, (A.If, A.While, A.For)):
+                    body = getattr(s, 'then', None) or getattr(s, 'body', [])
+                    orelse = getattr(s, 'orelse', []) or []
+                    if has_yield(body) or has_yield(orelse):
+                        return True
+            return False
+
+        if not has_yield(loop_stmt.body):
+            return None
+
+        # Collect all local variable names (excluding params) for renaming.
+        all_params = set(params_no_self)
+        all_locals = self._collect_gen_locals(f.body, all_params)
+        all_locals_set = set(all_locals)
+        all_names = all_params | all_locals_set
+
+        # --- Build __init__ ---
+        # Params: self + original params
+        init_params = ["self"] + params_no_self
+        init_param_types = [None] + list(param_types_no_self)
+        init_defaults = [None] + [None] * len(params_no_self)
+        init_body: list = []
+        # self.param = param for each param
+        self_name = A.Name(name="self", pos=pos)
+        for p in params_no_self:
+            init_body.append(A.AttrAssign(obj=A.Name(name="self", pos=pos), name=p, value=A.Name(name=p, pos=pos), pos=pos))
+        # self.local = 0 for each local
+        for loc in all_locals:
+            init_body.append(A.AttrAssign(obj=A.Name(name="self", pos=pos), name=loc, value=A.IntLit(value=0, pos=pos), pos=pos))
+
+        init_func = A.FuncDef(
+            name="__init__",
+            params=init_params,
+            body=init_body,
+            defaults=init_defaults,
+            param_types=init_param_types,
+            pos=pos,
+        )
+
+        # --- Build __iter__ ---
+        iter_func = A.FuncDef(
+            name="__iter__",
+            params=["self"],
+            body=[A.Return(value=A.Name(name="self", pos=pos), pos=pos)],
+            defaults=[None],
+            param_types=[None],
+            pos=pos,
+        )
+
+        # --- Build __next__ ---
+        # Transform the loop body: rename locals to self.X, split at yield.
+        # For while loop: while cond: body_before; yield val; body_after
+        #   → __next__: if not (cond with self.X): raise StopIteration
+        #                body_before; result = val; body_after; return result
+        next_body: list = []
+
+        # Run pre-loop statements (init assignments like `i = 0`) — but only
+        # once. We'll handle this by renaming them to AttrAssign and putting
+        # them in __init__ instead (already done above for explicit locals).
+        # The pre-stmts that aren't assignments (e.g. function calls) need to
+        # go in __next__ with a _done-guard. For now, skip pre-stmts since
+        # the common case (i = 0) is handled in __init__.
+
+        result_name = "_genresult"
+
+        if isinstance(loop_stmt, A.While):
+            # Loop-in-next: `while cond: <transformed body>; raise StopIteration`.
+            # _gen_body_transform recursively replaces every `yield val` with:
+            #   _genresult = val; <continuation>; return _genresult
+            # where the continuation carries all stmts that must still run
+            # (e.g. `i += 1` after the yield) before state is saved.
+            next_body = self._make_stmt_list()
+            next_body.append(A.While(
+                test=self._rename_expr(loop_stmt.test, all_names),
+                body=self._gen_body_transform(
+                    loop_stmt.body, [], all_names, pos, result_name
+                ),
+                pos=pos,
+            ))
+            next_body.append(A.Raise(
+                value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
+            ))
+
+        else:  # For loop
+            # Tuple-unpacking for-loop generators are not yet supported.
+            if getattr(loop_stmt, 'targets', []):
+                return None
+            loop_var = loop_stmt.var
+            if not isinstance(loop_var, str):
+                return None
+
+            # Build the iter expression: range_args → range(...), else use iter.
+            if loop_stmt.iter is not None:
+                iter_expr = loop_stmt.iter
+            elif loop_stmt.range_args:
+                iter_expr = A.Call(func="range", args=list(loop_stmt.range_args), pos=pos)
+            else:
+                return None
+
+            renamed_iter = self._rename_expr(iter_expr, all_names)
+
+            # Store the materialised list and index on self in __init__.
+            init_body.append(A.AttrAssign(
+                obj=A.Name(name="self", pos=pos), name="_genlist",
+                value=A.Call(func="list", args=[renamed_iter], pos=pos),
+                pos=pos,
+            ))
+            init_body.append(A.AttrAssign(
+                obj=A.Name(name="self", pos=pos), name="_idx",
+                value=A.IntLit(value=0, pos=pos),
+                pos=pos,
+            ))
+
+            # Loop-in-next: advance _idx BEFORE the body so that any
+            # yield-induced return leaves _idx pointing at the next element.
+            # _gen_body_transform with empty continuation handles nested yields.
+            loop_body_prefix = [
+                A.AttrAssign(
+                    obj=A.Name(name="self", pos=pos),
+                    name=loop_var,
+                    value=A.Subscript(
+                        obj=A.Attr(obj=A.Name(name="self", pos=pos), name="_genlist", pos=pos),
+                        index=A.Attr(obj=A.Name(name="self", pos=pos), name="_idx", pos=pos),
+                        pos=pos,
+                    ),
+                    pos=pos,
+                ),
+                A.AttrAssign(
+                    obj=A.Name(name="self", pos=pos),
+                    name="_idx",
+                    value=A.BinOp(
+                        op="+",
+                        left=A.Attr(obj=A.Name(name="self", pos=pos), name="_idx", pos=pos),
+                        right=A.IntLit(value=1, pos=pos),
+                        pos=pos,
+                    ),
+                    pos=pos,
+                ),
+            ]
+            _cmp_ops = self._make_stmt_list()
+            _cmp_ops.append(A.Attr(obj=A.Name(name="self", pos=pos), name="_idx", pos=pos))
+            _cmp_ops.append(A.Call(func="len", args=[
+                A.Attr(obj=A.Name(name="self", pos=pos), name="_genlist", pos=pos),
+            ], pos=pos))
+            next_body = self._make_stmt_list()
+            next_body.append(A.While(
+                test=A.Compare(ops=["<"], operands=_cmp_ops, pos=pos),
+                body=loop_body_prefix + self._gen_body_transform(
+                    loop_stmt.body, [], all_names, pos, result_name
+                ),
+                pos=pos,
+            ))
+            next_body.append(A.Raise(
+                value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
+            ))
+
+        # Determine the yield value's return type from original function annotation,
+        # or default to int.
+        ret_type = f.ret_type if f.ret_type else ("int", None)
+
+        next_func = A.FuncDef(
+            name="__next__",
+            params=["self"],
+            body=next_body,
+            defaults=[None],
+            param_types=[None],
+            ret_type=ret_type,
+            pos=pos,
+        )
+
+        # --- Build the iterator class ---
+        cls = A.ClassDef(
+            name=cls_name,
+            parent=None,
+            methods=[init_func, iter_func, next_func],
+            pos=pos,
+        )
+
+        # --- Build the factory function (replaces original) ---
+        # factory_body: return _genobj_FNAME(args...)
+        factory_body = [
+            A.Return(
+                value=A.Call(
+                    func=cls_name,
+                    args=[A.Name(name=p, pos=pos) for p in params_no_self],
+                    pos=pos,
+                ),
+                pos=pos,
+            )
+        ]
+        factory_func = A.FuncDef(
+            name=f.name,
+            params=list(f.params),
+            body=factory_body,
+            defaults=list(f.defaults),
+            param_types=list(param_types_no_self),
+            ret_type=(cls_name, None),
+            pos=pos,
+            vararg=f.vararg,
+            kwarg=f.kwarg,
+        )
+
+        return factory_func, cls
+
+    def _rename_expr(self, e, local_names: set):
+        """Replace Name(x) with Attr(self, x) for x in local_names."""
+        pos = getattr(e, 'pos', A.SourcePos(0, 0))
+        if e is None:
+            return None
+        if isinstance(e, A.Name):
+            if e.name in local_names:
+                return A.Attr(obj=A.Name(name="self", pos=pos), name=e.name, pos=pos)
+            return e
+        if isinstance(e, (A.IntLit, A.FloatLit, A.StrLit)):
+            return e
+        if isinstance(e, A.BinOp):
+            return A.BinOp(op=e.op, left=self._rename_expr(e.left, local_names), right=self._rename_expr(e.right, local_names), pos=e.pos)
+        if isinstance(e, A.UnaryOp):
+            return A.UnaryOp(op=e.op, operand=self._rename_expr(e.operand, local_names), pos=e.pos)
+        if isinstance(e, A.Compare):
+            return A.Compare(ops=e.ops, operands=[self._rename_expr(x, local_names) for x in e.operands], pos=e.pos)
+        if isinstance(e, A.BoolOp):
+            return A.BoolOp(op=e.op, left=self._rename_expr(e.left, local_names), right=self._rename_expr(e.right, local_names), pos=e.pos)
+        if isinstance(e, A.Attr):
+            return A.Attr(obj=self._rename_expr(e.obj, local_names), name=e.name, pos=e.pos)
+        if isinstance(e, A.Call):
+            return A.Call(func=e.func, args=[self._rename_expr(a, local_names) for a in e.args], pos=e.pos,
+                         kwargs=[(k, self._rename_expr(v, local_names)) for k, v in (e.kwargs or [])])
+        if isinstance(e, A.MethodCall):
+            return A.MethodCall(obj=self._rename_expr(e.obj, local_names), method=e.method,
+                               args=[self._rename_expr(a, local_names) for a in e.args], pos=e.pos)
+        if isinstance(e, A.Subscript):
+            return A.Subscript(obj=self._rename_expr(e.obj, local_names), index=self._rename_expr(e.index, local_names), pos=e.pos)
+        if isinstance(e, A.IfExp):
+            return A.IfExp(test=self._rename_expr(e.test, local_names), body=self._rename_expr(e.body, local_names),
+                          orelse=self._rename_expr(e.orelse, local_names), pos=e.pos)
+        if isinstance(e, A.ListLit):
+            return A.ListLit(elems=[self._rename_expr(x, local_names) for x in e.elems], pos=e.pos)
+        if isinstance(e, A.TupleLit):
+            return A.TupleLit(elems=[self._rename_expr(x, local_names) for x in e.elems], pos=e.pos)
+        return e
+
+    def _rename_stmts(self, stmts: list, local_names: set, pos) -> list:
+        """Rename local variable references in stmts to self.X."""
+        result = stmts[0:0]
+        for s in stmts:
+            if isinstance(s, A.Assign):
+                rhs = self._rename_expr(s.value, local_names)
+                if isinstance(s.target, str) and s.target in local_names:
+                    result.append(A.AttrAssign(obj=A.Name(name="self", pos=pos), name=s.target, value=rhs, pos=s.pos))
+                else:
+                    result.append(A.Assign(target=s.target, value=rhs, pos=s.pos, annot=s.annot))
+            elif isinstance(s, A.AugAssign):
+                rhs = self._rename_expr(s.value, local_names)
+                if isinstance(s.target, str) and s.target in local_names:
+                    lhs = A.Attr(obj=A.Name(name="self", pos=pos), name=s.target, pos=s.pos)
+                    new_val = A.BinOp(op=s.op, left=lhs, right=rhs, pos=s.pos)
+                    result.append(A.AttrAssign(obj=A.Name(name="self", pos=pos), name=s.target, value=new_val, pos=s.pos))
+                else:
+                    result.append(A.AugAssign(target=s.target, op=s.op, value=rhs, pos=s.pos))
+            elif isinstance(s, A.ExprStmt):
+                result.append(A.ExprStmt(expr=self._rename_expr(s.expr, local_names), pos=s.pos))
+            elif isinstance(s, A.If):
+                result.append(A.If(
+                    test=self._rename_expr(s.test, local_names),
+                    then=self._rename_stmts(s.then, local_names, pos),
+                    orelse=self._rename_stmts(s.orelse or [], local_names, pos),
+                    pos=s.pos,
+                ))
+            elif isinstance(s, A.While):
+                result.append(A.While(
+                    test=self._rename_expr(s.test, local_names),
+                    body=self._rename_stmts(s.body, local_names, pos),
+                    pos=s.pos,
+                ))
+            elif isinstance(s, A.AttrAssign):
+                result.append(A.AttrAssign(obj=self._rename_expr(s.obj, local_names), name=s.name, value=self._rename_expr(s.value, local_names), pos=s.pos))
+            elif isinstance(s, (A.Break, A.Continue, A.Pass)):
+                result.append(s)
+            elif isinstance(s, A.Return):
+                result.append(A.Return(value=self._rename_expr(s.value, local_names), pos=s.pos))
+            else:
+                result.append(s)
+        return result
+
+    def _make_stmt_list(self) -> list:
+        r: list = []
+        return r
+
+    def _gen_body_transform(self, stmts: list, continuation, all_names, pos, result_name):
+        """Transform a generator loop body for __next__.
+
+        Replaces every `yield val` with:
+            _genresult = val
+            <renamed continuation stmts>
+            return _genresult
+
+        `continuation` is a list of RAW (unrenammed) stmts from the outer
+        context that must execute after the yield point.  For every `If`
+        that contains a nested yield, the non-yielding branch also receives
+        the continuation so both paths complete the same "iteration work"
+        before falling through to the outer while loop's next check.
+        """
+        def _hw(ss):
+            for s in ss:
+                if isinstance(s, A.YieldStmt):
+                    return True
+                if isinstance(s, A.If) and (_hw(s.then) or _hw(s.orelse or [])):
+                    return True
+            return False
+
+        result = stmts[0:0]
+        for i, s in enumerate(stmts):
+            local_remaining = stmts[i + 1:]
+            full_cont = local_remaining + list(continuation)
+
+            if isinstance(s, A.YieldStmt):
+                result.append(A.Assign(
+                    target=result_name,
+                    value=self._rename_expr(s.value, all_names),
+                    pos=pos,
+                ))
+                result.extend(self._rename_stmts(full_cont, all_names, pos))
+                result.append(A.Return(
+                    value=A.Name(name=result_name, pos=pos), pos=pos
+                ))
+                break
+
+            elif isinstance(s, A.If):
+                then_hw = _hw(s.then)
+                orelse_hw = _hw(s.orelse or [])
+                if then_hw or orelse_hw:
+                    renamed_full = self._rename_stmts(full_cont, all_names, pos)
+                    new_then = (
+                        self._gen_body_transform(s.then, full_cont, all_names, pos, result_name)
+                        if then_hw
+                        else self._rename_stmts(s.then, all_names, pos) + renamed_full
+                    )
+                    new_orelse = (
+                        self._gen_body_transform(s.orelse or [], full_cont, all_names, pos, result_name)
+                        if orelse_hw
+                        else self._rename_stmts(s.orelse or [], all_names, pos) + renamed_full
+                    )
+                    result.append(A.If(
+                        test=self._rename_expr(s.test, all_names),
+                        then=new_then,
+                        orelse=new_orelse,
+                        pos=s.pos,
+                    ))
+                    break  # full_cont is injected inside branches
+                else:
+                    result.extend(self._rename_stmts([s], all_names, pos))
+            else:
+                result.extend(self._rename_stmts([s], all_names, pos))
+        return result
+
     def analyze(self) -> None:
         # Inject stdlib Assembly class if the user imported it, so the
         # constructor and method calls resolve through the normal class path.
         self._inject_assembly_class_if_needed()
+        # Transform generator functions (functions with yield) into factory +
+        # iterator class pairs before any other analysis.
+        new_funcs: list = []
+        new_classes: list = []
+        for f in self.mod.funcs:
+            def _has_yield(stmts):
+                for s in stmts:
+                    if isinstance(s, A.YieldStmt):
+                        return True
+                    for attr in ('body', 'then', 'orelse'):
+                        sub = getattr(s, attr, None)
+                        if sub and _has_yield(sub):
+                            return True
+                return False
+            if _has_yield(f.body):
+                result = self._transform_generator(f)
+                if result is not None:
+                    factory, cls = result
+                    new_funcs.append(factory)
+                    new_classes.append(cls)
+                else:
+                    new_funcs.append(f)  # unsupported pattern, leave as-is
+            else:
+                new_funcs.append(f)
+        self.mod.funcs = new_funcs
+        self.mod.classes = list(self.mod.classes) + new_classes
         # First pass: collect function signatures so forward references resolve.
         for f in self.mod.funcs:
             if f.name in self.funcs:
-                raise SemaError(f"function {f.name!r} redefined", f.pos)
+                raise SemaError(f"function {f.name!r} redefined", f.pos, ErrorCode.E_REDEFINED_FUNC)
             if f.name in BUILTINS:
                 raise SemaError(
                     f"cannot redefine builtin {f.name!r}",
                     f.pos,
                 )
             r = self._resolve_annot(f.ret_type)  # type: ignore
+            _raw_ret_base = f.ret_type[0] if f.ret_type else None
             self.funcs[f.name] = FuncSig(
                 name=f.name,
                 arity=len(f.params),
                 n_defaults=_count_defaults(f.defaults),
                 pos=f.pos,
                 ret_type=(r[0], r[1], r[2]) if r is not None else None,
+                ret_list_tuple_types=(r[3] if r is not None and r[1] == "tuple" else None),
+                ret_inner_el_type=(r[4] if r is not None and r[1] in ("list", "dict") else None),
                 param_names=list(f.params),
                 param_defaults=list(f.defaults),
                 vararg=f.vararg,
+                kwarg=f.kwarg,
+                ret_bool=(_raw_ret_base == "bool"),
             )
 
         # Infer which functions return a tuple, and the shape of that tuple,
@@ -860,9 +1900,11 @@ class SemaAnalyzer:
                 if not has_init:
                     params: list = ["self"]
                     defaults: list = [None]
+                    param_types: list = [None]  # self has no annotation
                     body_stmts: list = []
                     for fname, _fannot, fvalue in c.class_vars:
                         params.append(fname)
+                        param_types.append(_fannot)  # carry class-var annotation
                         _func_nm = (
                             fvalue.func if isinstance(getattr(fvalue, "func", None), str)
                             else getattr(getattr(fvalue, "func", None), "name", None)
@@ -886,6 +1928,7 @@ class SemaAnalyzer:
                         params=params,
                         body=body_stmts,
                         defaults=defaults,
+                        param_types=param_types,
                         pos=c.pos,
                     )
                     c.methods.insert(0, init_func)
@@ -898,23 +1941,48 @@ class SemaAnalyzer:
                 )
             sig = ClassSig(name=c.name, parent=c.parent, pos=c.pos)
             for m in c.methods:
-                if not m.params or m.params[0] != "self":
-                    raise SemaError(
-                        f"method {c.name}.{m.name!r} must take 'self' as its first parameter",
-                        m.pos,
-                    )
+                deco = getattr(m, "decorators", [])
+                is_static = "staticmethod" in deco
+                is_classm = "classmethod" in deco
+                if not (is_static or is_classm):
+                    if not m.params or m.params[0] != "self":
+                        raise SemaError(
+                            f"method {c.name}.{m.name!r} must take 'self' as its first parameter",
+                            m.pos,
+                        )
                 mr = self._resolve_annot(m.ret_type)  # type: ignore
+                # `@x.setter` methods are registered under a mangled name
+                # ("x__setter") so they don't collide in `methods`/codegen
+                # symbols with the `@property` getter of the same name "x".
+                # `ClassSig.setters` maps the property name to this mangled
+                # name so `obj.x = v` can be rewritten to dispatch to it.
+                setter_prop = None
+                for d in getattr(m, "decorators", []):
+                    if d == f"{m.name}.setter":
+                        setter_prop = m.name
+                        break
+                if setter_prop is not None:
+                    m.name = f"{setter_prop}__setter"
+                _raw_mret_base = m.ret_type[0] if m.ret_type else None
                 sig.methods[m.name] = FuncSig(
                     name=m.name,
                     arity=len(m.params),
                     n_defaults=_count_defaults(m.defaults),
                     pos=m.pos,
                     ret_type=(mr[0], mr[1], mr[2]) if mr is not None else None,
+                    ret_list_tuple_types=(mr[3] if mr is not None and mr[1] == "tuple" else None),
+                    ret_inner_el_type=(mr[4] if mr is not None and mr[1] in ("list", "dict") else None),
                     param_names=list(m.params),
                     param_defaults=list(m.defaults),
                     vararg=m.vararg,
+                    kwarg=m.kwarg,
                     ret_tuple=self._scan_tuple_return(m.body),
+                    decorators=list(getattr(m, "decorators", [])),
+                    returns_self=mr is None and self._method_returns_self(m.body),
+                    ret_bool=(_raw_mret_base == "bool"),
                 )
+                if setter_prop is not None:
+                    sig.setters[setter_prop] = m.name
             self.classes[c.name] = sig
 
         # Validate parents and check for cycles. A parent that isn't a
@@ -940,6 +2008,18 @@ class SemaAnalyzer:
         # function/method bodies. In CPython a function reads module globals at
         # call time; we approximate that by seeding each body's scope with the
         # names the module level defines.
+        # Infer parameter types for unannotated, no-default parameters from
+        # literal-typed arguments at call sites (see
+        # `_infer_unannotated_params`). Done before field-type collection so
+        # `self.x = param` in `__init__` benefits too.
+        self._infer_unannotated_params()
+
+        # Infer return types for functions/methods with no return annotation
+        # and no inferred tuple-return shape, from their `return` statements
+        # (using the parameter types just inferred above). See
+        # `_infer_unannotated_returns`.
+        self._infer_unannotated_returns()
+
         # Infer instance-field types from `self.x = ...` so `obj.x` reads carry
         # the right static type. Done before any body is checked (top-level or
         # method) so every field read — including from module-level code — sees
@@ -950,7 +2030,24 @@ class SemaAnalyzer:
         # Module dunders the runtime always provides.
         self.global_scope.add("__name__", "str")
         self.global_scope.add("__file__", "str")
-        self._check_block(self.mod.body, self.global_scope)
+        self._try_check_block(self.mod.body, self.global_scope)
+
+        # Pre-scan all function/method bodies for ClosureBind nodes so that
+        # free-variable types can be propagated into lifted function scopes.
+        # Must run after global_scope is populated (above) and before free-var
+        # params are prepended and function bodies are checked (below).
+        self._prescan_fv_types()
+
+        # Lifted (closure) functions: prepend captured free-variable names as
+        # extra params so the body can reference them.  The outer function's
+        # ClosureBind emits a closure list at runtime that passes these values.
+        for f in self.mod.funcs:
+            free_vars = getattr(f, "free_vars", [])
+            if free_vars and getattr(f, "is_lifted", False):
+                # Prepend free vars as params (before the original params).
+                f.params = free_vars + list(f.params)
+                f.param_types = [None] * len(free_vars) + list(f.param_types)
+                f.defaults = [None] * len(free_vars) + list(f.defaults)
 
         # Function bodies: each has its own scope, seeded with globals then
         # params. If a param has a default literal, infer its type from the
@@ -966,11 +2063,24 @@ class SemaAnalyzer:
             self.in_lifted = getattr(f, "is_lifted", False)
             scope = Scope()
             self._seed_globals_into(scope)
+            free_vars = getattr(f, "free_vars", [])
+            n_fvs = len(free_vars)
+            fv_type_list = self._fv_types.get(f.name, [])
             for i, p in enumerate(f.params):
-                annot = f.param_types[i] if i < len(f.param_types) else None
-                default = f.defaults[i] if i < len(f.defaults) else None
-                self._seed_param(scope, p, annot, default)
-            self._check_block(f.body, scope)
+                if i < n_fvs:
+                    # Free-variable param: use the outer-scope type recorded
+                    # by _prescan_fv_types() instead of defaulting to int.
+                    if i < len(fv_type_list):
+                        ty, el, val = fv_type_list[i]
+                        scope.add(p, ty, el_type=el, value_type=val)
+                    else:
+                        scope.add(p, "int")
+                else:
+                    annot = f.param_types[i] if i < len(f.param_types) else None
+                    default = f.defaults[i] if i < len(f.defaults) else None
+                    inferred = self.inferred_param_types.get(f"{f.name}:{i}")
+                    self._seed_param(scope, p, annot, default, inferred)
+            self._try_check_block(f.body, scope)
             self.in_function = None
             self.in_lifted = False
 
@@ -983,8 +2093,20 @@ class SemaAnalyzer:
                 self.current_class = c.name
                 scope = Scope()
                 self._seed_globals_into(scope)
-                scope.add("self", f"instance:{c.name}")
-                for i, p in enumerate(m.params[1:], start=1):
+                mdeco = getattr(m, "decorators", [])
+                if "staticmethod" in mdeco:
+                    # No implicit receiver: every parameter is a real argument.
+                    start = 0
+                elif "classmethod" in mdeco:
+                    # First param is `cls` (opaque — asmpython has no class objs).
+                    if m.params:
+                        scope.add(m.params[0], "any")
+                        self.classmethod_cls_param = m.params[0]
+                    start = 1
+                else:
+                    scope.add("self", f"instance:{c.name}")
+                    start = 1
+                for i, p in enumerate(m.params[start:], start=start):
                     annot = m.param_types[i] if i < len(m.param_types) else None
                     default = m.defaults[i] if i < len(m.defaults) else None
                     if (
@@ -998,10 +2120,59 @@ class SemaAnalyzer:
                         # DUNDER_SAME_TYPE_OTHER) so `other.field` resolves.
                         scope.add(p, f"instance:{c.name}")
                         continue
-                    self._seed_param(scope, p, annot, default)
-                self._check_block(m.body, scope)
+                    inferred = self.inferred_param_types.get(f"{c.name}.{m.name}:{i}")
+                    self._seed_param(scope, p, annot, default, inferred)
+                self._try_check_block(m.body, scope)
                 self.in_function = None
                 self.current_class = None
+                self.classmethod_cls_param = None
+
+        # Raise all collected errors now that every body has been checked.
+        if self._collected_errors:
+            from .errors import MultiSemaError
+            if len(self._collected_errors) == 1:
+                raise MultiSemaError(self._collected_errors)
+            raise MultiSemaError(self._collected_errors)
+
+        # For functions that contain a ClosureBind and return that closure,
+        # upgrade their FuncSig ret_type to "closure" so call sites get the
+        # right type and codegen dispatches correctly.
+        def _body_has_closure_bind(body: list, name: str) -> bool:
+            for s in body:
+                if isinstance(s, A.ClosureBind) and s.func_name == name:
+                    return True
+            return False
+        closure_factories: set = set()
+        for f in self.mod.funcs:
+            if getattr(f, "is_lifted", False):
+                continue
+            sig = self.funcs.get(f.name)
+            if sig is None or sig.ret_type is not None:
+                continue
+            # Check if the function returns a name that is a ClosureBind.
+            for s in f.body:
+                if isinstance(s, A.Return) and s.value is not None:
+                    if (
+                        isinstance(s.value, A.Name)
+                        and _body_has_closure_bind(f.body, s.value.name)
+                    ):
+                        sig.ret_type = ("closure", None, None, None, None)
+                        closure_factories.add(f.name)
+                        break
+        # Re-type Call nodes in the module body that target closure factories.
+        def _retype_closure_calls(stmts: list) -> None:
+            for s in stmts:
+                if isinstance(s, A.Assign) and isinstance(s.value, A.Call):
+                    if s.value.func in closure_factories:
+                        s.value.inferred_type = "closure"
+                elif isinstance(s, A.For):
+                    _retype_closure_calls(s.body)
+                elif isinstance(s, A.If):
+                    _retype_closure_calls(s.then)
+                    _retype_closure_calls(s.orelse)
+                elif isinstance(s, A.While):
+                    _retype_closure_calls(s.body)
+        _retype_closure_calls(self.mod.body)
 
         # Hand resolved tables to codegen via the Module.
         self.mod.imported_modules = self.imported_modules
@@ -1009,74 +2180,22 @@ class SemaAnalyzer:
         self.mod.ffi_consts = self.ffi_consts
         # Codegen needs to look up methods by class chain for dispatch.
         self.mod.classes_sig = self.classes
-        # Assembly packages pulled in via include(), in load order.
-        self.mod.asm_packages = list(self.asm_packages.values())
-        # Drop the `include(...)` directive statements from the module body so
-        # codegen never tries to emit a runtime call for them. They were fully
-        # consumed above (package loaded, exports registered).
-        self.mod.body = [s for s in self.mod.body if not self._is_include_stmt(s)]
 
     # ---- helpers ------------------------------------------------------------
 
     def _check_block(self, stmts: list, scope: Scope) -> None:
-        for s in stmts:
-            self._check_stmt(s, scope)
-
-    def _is_include_stmt(self, s) -> bool:
-        """True if `s` is an `include("pkg")` directive statement.
-
-        Matched structurally on the ExprStmt/Call shape; `include` having been
-        bound as an asmdirective was already verified when it was handled, so
-        any leftover `include(...)` ExprStmt in the module body is a directive.
-        """
-        return (
-            isinstance(s, A.ExprStmt)
-            and isinstance(s.expr, A.Call)
-            and s.expr.func == "include"
-        )
-
-    def _handle_include(self, call: A.Call) -> None:
-        """Resolve and load an `include("pkg")` directive.
-
-        Validates the argument is a single string literal, finds the matching
-        `<pkg>.asmpkg` on the search path, loads it, registers each export as a
-        callable FFI-style symbol, and records the package on the Module so
-        codegen can emit its NASM. Duplicate includes are ignored.
-        """
-        from asmpython.stdlib.assembly import pkgformat
-
-        if len(call.args) != 1 or call.kwargs:
-            raise SemaError("include() takes exactly one package-name string", call.pos)
-        arg = call.args[0]
-        if not isinstance(arg, A.StrLit):
-            raise SemaError("include() argument must be a string literal", call.pos)
-        name = arg.value
-        if name in self.asm_packages:
-            return  # already included
-
-        # Search path: the source file's directory, then the CWD as a fallback.
-        # Plain string directory paths (not pathlib) so this stays in the
-        # compilable subset for self-host; pkgformat resolves them with string
-        # ops + the os file-I/O FFI.
-        search: list = []
-        if self.source_dir is not None:
-            search.append(str(self.source_dir))
-        search.append(".")
-        try:
-            pkg_path = pkgformat.find_package(name, search)
-            pkg = pkgformat.load_package(pkg_path)
-        except pkgformat.AsmPkgError as e:
-            raise SemaError(str(e), call.pos) from e
-
-        self.asm_packages[name] = pkg
-        # Register exports so call sites resolve. We reuse the FFI Func surface:
-        # an exported symbol is just a foreign function with a known signature.
-        for exp in pkg.exports.values():
-            self.ffi_funcs[exp.symbol] = stdlib.Func(
-                arg_types=tuple(exp.arg_types),
-                ret_type=exp.ret_type,
-                c_name=exp.symbol,
-            )
+        # Index-based so `_check_stmt` can splice extra statements (already
+        # checked) immediately before `s` -- used by the `match` rewrite to
+        # introduce a subject temp-variable assignment ahead of the `if`
+        # chain it rewrites `s` into.
+        i = 0
+        while i < len(stmts):
+            s = stmts[i]
+            extra = self._check_stmt(s, scope)
+            if extra:
+                stmts[i:i] = extra
+                i += len(extra)
+            i += 1
 
     def _narrow_type_of(self, te) -> str:
         """The type a variable narrows to inside an `isinstance(x, te)` guard.
@@ -1141,6 +2260,10 @@ class SemaAnalyzer:
             else:
                 scope.types.pop(name, None)
 
+    def _method_symbol_name(self, cls_name: str, method_name: str) -> str:
+        """Return the mangled symbol name for a class method (matches codegen)."""
+        return f"{cls_name}__{method_name}"
+
     def _flat_target_names(self, targets: list) -> list:
         """Flatten a for-loop target list (entries may be names or nested name
         groups) into the bare names it binds."""
@@ -1165,32 +2288,62 @@ class SemaAnalyzer:
             else:
                 child.add(e.var, el)
             return
-        shape = list(getattr(e.iter, "tuple_elem_types", []) or [])
+        shape = self._list_el_tuple_types(e.iter, child) or list(
+            getattr(e.iter, "tuple_elem_types", []) or []
+        )
         flat = all(isinstance(t, str) for t in e.targets)
         for ti, nm in enumerate(self._flat_target_names(e.targets)):
-            if flat and ti < len(shape) and shape[ti] not in ("int", "any"):
+            if flat and ti < len(shape):
                 child.add(nm, shape[ti])
             else:
                 child.add(nm, "any")
 
-    def _for_zip_spec(self, s: A.For):
-        """Recognize the parallel-iteration loop shapes
-        `for a, b in zip(A, B)` and `for i, (a, b) in enumerate(zip(A, B))`.
+    def _merge_walrus_bindings(self, scope: Scope, child: Scope, exclude: set) -> None:
+        """Copy any *new* name bindings made in `child` (a comprehension's
+        child scope) back into `scope`, except for the comprehension's own
+        loop variable(s). Implements PEP 572: a `target := value` inside a
+        comprehension binds `target` in the containing scope, not the
+        comprehension's."""
+        for name, ty in child.types.items():
+            if name in exclude or name in scope.types:
+                continue
+            scope.types[name] = ty
+            scope.bool_flags[name] = child.bool_flags.get(name, False)
+            scope.none_flags[name] = child.none_flags.get(name, False)
+            if name in child.list_el_types:
+                scope.list_el_types[name] = child.list_el_types[name]
+            if name in child.list_el_value_types:
+                scope.list_el_value_types[name] = child.list_el_value_types[name]
+            if name in child.list_el_tuple_types:
+                scope.list_el_tuple_types[name] = child.list_el_tuple_types[name]
+            if name in child.dict_value_types:
+                scope.dict_value_types[name] = child.dict_value_types[name]
+            if name in child.dict_inner_value_types:
+                scope.dict_inner_value_types[name] = child.dict_inner_value_types[name]
+            if name in child.dict_value_tuple_types:
+                scope.dict_value_tuple_types[name] = child.dict_value_tuple_types[name]
+            if name in child.tuple_elem_types:
+                scope.tuple_elem_types[name] = child.tuple_elem_types[name]
 
-        Returns (idx_name_or_None, a_name, b_name, a_expr, b_expr) when `s`
-        matches, otherwise None (so the caller falls back to ordinary handling).
+    def _for_zip_spec(self, s: A.For):
+        """Recognize `for a, b[, c...] in zip(A, B[, C...])` and
+        `for i, (a, b[, c...]) in enumerate(zip(A, B[, C...]))`.
+
+        Returns (idx_name_or_None, names_list, exprs_list) when `s` matches,
+        otherwise None (so the caller falls back to ordinary handling).
+        Names and exprs are parallel lists of N >= 2 items.
         """
         it = s.iter
         if it is None or not isinstance(it, A.Call):
             return None
         if it.func == "zip":
+            n = len(it.args)
             if (
-                len(it.args) == 2
-                and len(s.targets) == 2
-                and isinstance(s.targets[0], str)
-                and isinstance(s.targets[1], str)
+                n >= 2
+                and len(s.targets) == n
+                and all(isinstance(t, str) for t in s.targets)
             ):
-                return (None, s.targets[0], s.targets[1], it.args[0], it.args[1])
+                return (None, list(s.targets), list(it.args))
             return None
         if (
             it.func == "enumerate"
@@ -1199,19 +2352,18 @@ class SemaAnalyzer:
             and it.args[0].func == "zip"
         ):
             z = it.args[0]
+            n = len(z.args)
             if (
-                len(z.args) == 2
+                n >= 2
                 and len(s.targets) == 2
                 and isinstance(s.targets[0], str)
                 and isinstance(s.targets[1], list)
-                and len(s.targets[1]) == 2
+                and len(s.targets[1]) == n
             ):
                 return (
                     s.targets[0],
-                    s.targets[1][0],
-                    s.targets[1][1],
-                    z.args[0],
-                    z.args[1],
+                    list(s.targets[1]),
+                    list(z.args),
                 )
             return None
         return None
@@ -1229,6 +2381,41 @@ class SemaAnalyzer:
         if t == "any":
             return "any"
         return "int"
+
+    def _list_el_value_type(self, e, scope: Scope) -> str:
+        """For a list whose elements are themselves containers (list[dict] /
+        list[list]), the common value/element kind of those nested containers.
+        'int' if unknown. Mirrors `_dict_inner_value_type` for lists."""
+        if isinstance(e, A.ListLit):
+            return getattr(e, "el_value_type", "int")
+        if isinstance(e, A.Comprehension):
+            return getattr(e, "el_value_type", "int")
+        if isinstance(e, A.Name):
+            return scope.list_el_value_types.get(e.name, "int")
+        if isinstance(e, (A.Call, A.MethodCall)):
+            return getattr(e, "el_value_type", "int")
+        if isinstance(e, A.Attr):
+            return getattr(e, "el_value_type", "int")
+        return "int"
+
+    def _list_el_tuple_types(self, e, scope: Scope) -> list[str]:
+        """For a list whose elements are tuples (list[tuple]), the common
+        per-slot kinds of those tuples. [] if unknown."""
+        if isinstance(e, A.ListLit):
+            return list(getattr(e, "el_tuple_types", []))
+        if isinstance(e, A.Comprehension):
+            return list(getattr(e, "el_tuple_types", []))
+        if isinstance(e, A.Name):
+            return list(scope.list_el_tuple_types.get(e.name, []))
+        if isinstance(e, A.MethodCall):
+            # dict.items() -> list[(str, V)]; sema stamps the pair shape on
+            # `tuple_elem_types` (the element tuple's per-slot kinds).
+            return list(getattr(e, "tuple_elem_types", []))
+        if isinstance(e, A.Call):
+            # A user function annotated `-> list[tuple[T1,T2]]` stamps the
+            # per-slot kinds onto the call node (see _check_call).
+            return list(getattr(e, "tuple_elem_types", []))
+        return []
 
     def _list_el_type(self, e, scope: Scope) -> str:
         """Element type of a list-valued expression. 'int' if unknown."""
@@ -1272,6 +2459,11 @@ class SemaAnalyzer:
             # A dict read out of an outer container: sema stamped "any" for the
             # untracked inner value kind.
             return getattr(e, "value_type", "int")
+        if isinstance(e, A.BinOp) and e.op == "|":
+            # `d1 | d2`: the merged dict's value kind, preferring whichever
+            # side has a known (non-default) value type.
+            lvt = self._dict_value_type(e.left, scope)
+            return lvt if lvt != "int" else self._dict_value_type(e.right, scope)
         return "int"
 
     def _dict_inner_value_type(self, e, scope: Scope) -> str:
@@ -1312,6 +2504,28 @@ class SemaAnalyzer:
             elif seen != inner:
                 seen = "any"
         return seen if seen is not None else "int"
+
+    def _common_tuple_slots(self, values: list, scope: Scope) -> list[str]:
+        """Common per-slot kinds across a list of tuple expressions. Returns the
+        shared slot kinds, with a slot set to 'any' where the tuples disagree,
+        or [] if shapes differ / none are known. Used to type list[tuple]."""
+        shared: list[str] | None = None
+        for v in values:
+            slots = self._tuple_elem_types(v, scope)
+            if not slots:
+                return []
+            if shared is None:
+                shared = list(slots)
+            elif len(shared) != len(slots):
+                return []  # ragged shapes: give up
+            else:
+                merged: list[str] = []
+                i = 0
+                for s in shared:
+                    merged.append(s if s == slots[i] else "any")
+                    i += 1
+                shared = merged
+        return shared if shared is not None else []
 
     def _tuple_elem_types(self, e, scope: Scope) -> list[str]:
         """Per-slot element kinds of a tuple-valued expression, or [] if
@@ -1365,73 +2579,186 @@ class SemaAnalyzer:
                 self._collect_tuple_returns(s.body, acc)
                 self._collect_tuple_returns(s.handler, acc)
 
-    def _check_stmt(self, s, scope: Scope) -> None:
+    def _method_returns_self(self, stmts: list) -> bool:
+        """True if every reachable `return` in `stmts` is `return self`, and
+        at least one such return exists. Mirrors `_scan_tuple_return`'s
+        body-scanning approach (see `FuncSig.returns_self`)."""
+        returns: list = []
+        self._collect_returns(stmts, returns)
+        if not returns:
+            return False
+        return all(
+            isinstance(r.value, A.Name) and r.value.name == "self" for r in returns
+        )
+
+    def _collect_returns(self, stmts: list, acc: list) -> None:
+        for s in stmts:
+            if isinstance(s, A.Return):
+                acc.append(s)
+            elif isinstance(s, A.If):
+                self._collect_returns(s.then, acc)
+                self._collect_returns(s.orelse, acc)
+            elif isinstance(s, (A.While, A.For)):
+                self._collect_returns(s.body, acc)
+            elif isinstance(s, A.Try):
+                self._collect_returns(s.body, acc)
+                self._collect_returns(s.handler, acc)
+                for _types, _bind, hbody in s.extra_handlers:
+                    self._collect_returns(hbody, acc)
+                self._collect_returns(s.else_body, acc)
+                self._collect_returns(s.finally_body, acc)
+
+    def _bind_name_from_value(self, target: str, value, scope: Scope, annot=None) -> None:
+        """Bind `target` in `scope` to the static type of `value`, the same
+        way a plain `target = value` assignment would. Shared by `A.Assign`
+        and `A.NamedExpr` (the walrus operator `target := value`)."""
+        # Remember a name bound directly to a lambda, so a later `name(...)`
+        # call recovers the lambda's result type instead of defaulting int.
+        if isinstance(value, A.Lambda):
+            self.lambda_rets[target] = getattr(value, "lambda_ret", "int")
+        t = A.expr_type(value)
+        # A declaration annotation (`name: T = value`) overrides inference
+        # when it constrains the type — this is how `xs: list[str] = []`
+        # pins the element kind even though the empty initializer infers
+        # nothing. Honor it only when the inferred type is the unknown
+        # default ("int") or the annotation refines a same-kind container.
+        ann = self._resolve_annot(annot)
+        if ann is not None:
+            aty, ael, aval, atup, aelval = ann
+            if t in ("int", "any") or t == aty:
+                if aty == "list":
+                    scope.add(
+                        target,
+                        "list",
+                        el_type=ael or self._list_el_type(value, scope),
+                        el_value_type=aelval,
+                        el_tuple_types=atup or None,
+                    )
+                    return
+                if aty == "dict":
+                    scope.add(
+                        target,
+                        "dict",
+                        value_type=aval or self._dict_value_type(value, scope),
+                        inner_value_type=self._dict_inner_value_type(value, scope),
+                        value_tuple_types=self._dict_value_tuple_types(value, scope),
+                    )
+                    return
+                if aty == "tuple":
+                    scope.add(
+                        target,
+                        "tuple",
+                        tuple_types=atup or self._tuple_elem_types(value, scope),
+                    )
+                    return
+                if aty in ("str", "float", "any") or aty.startswith("instance:"):
+                    scope.add(target, aty)
+                    return
+        if t == "list":
+            scope.add(
+                target,
+                t,
+                el_type=self._list_el_type(value, scope),
+                el_value_type=self._list_el_value_type(value, scope),
+                el_tuple_types=self._list_el_tuple_types(value, scope),
+            )
+        elif t == "dict":
+            scope.add(
+                target,
+                t,
+                value_type=self._dict_value_type(value, scope),
+                inner_value_type=self._dict_inner_value_type(value, scope),
+                value_tuple_types=self._dict_value_tuple_types(value, scope),
+            )
+        elif t == "tuple":
+            scope.add(target, t, tuple_types=self._tuple_elem_types(value, scope))
+        else:
+            # A name re-assigned to a sibling class instance across `if`/`elif`
+            # branches that share scope (`gen = WindowsCodegen(...)` in one
+            # branch, `gen = Freestanding16Codegen(...)` in another) must widen
+            # to their common ancestor rather than let the last-checked branch
+            # win outright — code after the merge point calls methods on `gen`
+            # expecting virtual dispatch across all the branches' classes, not
+            # just whichever one happened to be assigned last in source order.
+            if t.startswith("instance:") and target in scope.types:
+                prev_t = scope.types[target]
+                if prev_t.startswith("instance:") and prev_t != t:
+                    prev_cls, new_cls = prev_t[len("instance:"):], t[len("instance:"):]
+                    common = self._common_class_ancestor(prev_cls, new_cls)
+                    if common is not None:
+                        t = f"instance:{common}"
+            scope.add(
+                target,
+                t,
+                is_bool=t == "int" and A.is_bool_expr(value),
+                is_none=t == "int" and A.is_none_expr(value),
+            )
+
+    def _check_stmt(self, s, scope: Scope) -> "Optional[list]":
         if isinstance(s, A.Pass):
+            return
+        if isinstance(s, A.YieldStmt):
+            self._check_expr(s.value, scope)
+            return
+        if isinstance(s, A.ClosureBind):
+            # A nested `def` that captures outer variables.
+            # Validate that each free variable is in scope.
+            for fv in s.free_vars:
+                if fv not in scope.names and fv not in self.global_scope.names:
+                    pass  # Accept unknown names; may be a global defined later.
+            # Type is "closure" so codegen can distinguish from plain lists.
+            scope.add(s.func_name, "closure")
             return
         if isinstance(s, A.Assign):
             self._check_expr(s.value, scope)
-            t = A.expr_type(s.value)
-            # A declaration annotation (`name: T = value`) overrides inference
-            # when it constrains the type — this is how `xs: list[str] = []`
-            # pins the element kind even though the empty initializer infers
-            # nothing. Honor it only when the inferred type is the unknown
-            # default ("int") or the annotation refines a same-kind container.
-            ann = self._resolve_annot(getattr(s, "annot", None))
-            if ann is not None:
-                aty, ael, aval, atup = ann
-                if t in ("int", "any") or t == aty:
-                    if aty == "list":
-                        scope.add(
-                            s.target,
-                            "list",
-                            el_type=ael or self._list_el_type(s.value, scope),
-                        )
-                        return
-                    if aty == "dict":
-                        scope.add(
-                            s.target,
-                            "dict",
-                            value_type=aval or self._dict_value_type(s.value, scope),
-                            inner_value_type=self._dict_inner_value_type(
-                                s.value, scope
-                            ),
-                            value_tuple_types=self._dict_value_tuple_types(
-                                s.value, scope
-                            ),
-                        )
-                        return
-                    if aty == "tuple":
-                        scope.add(
-                            s.target,
-                            "tuple",
-                            tuple_types=atup or self._tuple_elem_types(s.value, scope),
-                        )
-                        return
-                    if aty in ("str", "float", "any") or aty.startswith("instance:"):
-                        scope.add(s.target, aty)
-                        return
-            if t == "list":
-                scope.add(s.target, t, el_type=self._list_el_type(s.value, scope))
-            elif t == "dict":
-                scope.add(
-                    s.target,
-                    t,
-                    value_type=self._dict_value_type(s.value, scope),
-                    inner_value_type=self._dict_inner_value_type(s.value, scope),
-                    value_tuple_types=self._dict_value_tuple_types(s.value, scope),
-                )
-            elif t == "tuple":
-                scope.add(
-                    s.target, t, tuple_types=self._tuple_elem_types(s.value, scope)
-                )
-            else:
-                scope.add(s.target, t)
+            self._bind_name_from_value(
+                s.target, s.value, scope, getattr(s, "annot", None)
+            )
             return
         if isinstance(s, A.TupleAssign):
             # Resolve the RHS first so tuple-returning calls have their type
             # set before we decide between unpack and parallel forms.
             for v in s.values:
                 self._check_expr(v, scope)
+            star_targets = [t for t in s.targets if isinstance(t, A.StarTarget)]
+            if star_targets:
+                # `a, *rest = xs` / `*init, last = xs` / `a, *mid, b = xs`
+                # (PEP 3132). Only the single-iterable unpack form of a
+                # `list`-typed RHS is supported: `rest`/`init`/`mid` becomes a
+                # fresh list of the same element kind, holding whichever
+                # elements aren't claimed by the plain targets on either side
+                # of the star.
+                if len(s.values) != 1:
+                    raise SemaError(
+                        "starred assignment requires a single list on the "
+                        "right-hand side",
+                        s.pos,
+                    )
+                rhs_t = A.expr_type(s.values[0])
+                if rhs_t != "list":
+                    raise SemaError(
+                        f"starred assignment requires a list on the "
+                        f"right-hand side, got {rhs_t}",
+                        s.pos,
+                    )
+                el = self._list_el_type(s.values[0], scope)
+                el_bound = el if el != "int" else "any"
+                for t in s.targets:
+                    if isinstance(t, A.StarTarget):
+                        scope.add(t.name, "list", el_type=el)
+                    else:
+                        scope.add(t.name, el_bound)
+                return
+            nonname_targets = [t for t in s.targets if not isinstance(t, A.Name)]
+            if nonname_targets and len(s.values) == 1:
+                # The unpack forms below (`a, b = <tuple/list/...>`) only know
+                # how to bind plain names; subscript/attribute targets need
+                # one value per target.
+                raise SemaError(
+                    "tuple assign with subscript/attribute targets requires "
+                    "the parallel form (one value per target)",
+                    s.pos,
+                )
             # Unpack form: `a, b = <single tuple expr>` (a literal, a tuple
             # variable, or a call to a tuple-returning function).
             if len(s.values) == 1 and A.expr_type(s.values[0]) == "tuple":
@@ -1448,7 +2775,7 @@ class SemaAnalyzer:
                 # lenient. A concrete scalar/instance slot keeps its kind.
                 for i, t in enumerate(s.targets):
                     slot = ets[i] if i < len(ets) else "any"
-                    scope.add(t, "any" if slot == "int" else slot)
+                    scope.add(t.name, "any" if slot == "int" else slot)
                 return
             if len(s.values) == 1 and A.expr_type(s.values[0]) in (
                 "any",
@@ -1472,7 +2799,7 @@ class SemaAnalyzer:
                 elif A.expr_type(s.values[0]) == "str":
                     el = "str"
                 for t in s.targets:
-                    scope.add(t, el)
+                    scope.add(t.name, el)
                 return
             # Parallel form: `a, b = e1, e2`.
             if len(s.targets) != len(s.values):
@@ -1487,7 +2814,7 @@ class SemaAnalyzer:
                 # live in xmm and aren't plumbed through this path yet.
                 if vt == "float":
                     raise SemaError(
-                        f"tuple assign target {t!r}: float values aren't supported in "
+                        f"tuple assign target: float values aren't supported in "
                         "parallel assignment yet (assign separately)",
                         s.pos,
                     )
@@ -1501,10 +2828,10 @@ class SemaAnalyzer:
                     "set",
                 ) and not vt.startswith("instance:"):
                     raise SemaError(
-                        f"tuple assign target {t!r}: unsupported value type {vt}",
+                        f"tuple assign target: unsupported value type {vt}",
                         s.pos,
                     )
-                scope.add(t, vt)
+                self._check_tuple_assign_target(t, vt, scope, s.pos)
             return
         if isinstance(s, A.AugAssign):
             if s.target not in scope.names:
@@ -1513,10 +2840,23 @@ class SemaAnalyzer:
                     s.pos,
                 )
             self._check_expr(s.value, scope)
+            # `d |= other` (PEP 584): in-place dict union, merging `other`'s
+            # entries into `d` (overwriting on key conflicts).
+            if s.op == "|" and scope.types.get(s.target) == "dict":
+                rt = A.expr_type(s.value)
+                if rt not in ("dict", "any"):
+                    raise SemaError(
+                        f"unsupported operand type for |=: dict |= {rt}", s.pos
+                    )
+                return
+            # `b += 1` etc. demotes a tracked bool back to a plain int, as in
+            # CPython (bool has no augmented-assign dunders of its own).
+            scope.bool_flags[s.target] = False
+            scope.none_flags[s.target] = False
             return
         if isinstance(s, A.Return):
             if self.in_function is None:
-                raise SemaError("'return' outside of a function", s.pos)
+                raise SemaError("'return' outside of a function", s.pos, ErrorCode.E_RETURN_OUTSIDE_FUNC)
             if s.value is not None:
                 self._check_expr(s.value, scope)
             return
@@ -1549,19 +2889,15 @@ class SemaAnalyzer:
             # optional index. Recognized before the plain-enumerate handler.
             zspec = self._for_zip_spec(s)
             if zspec is not None:
-                idx_name, a_name, b_name, a_expr, b_expr = zspec
-                self._check_expr(a_expr, scope)
-                self._check_expr(b_expr, scope)
-                # zip operands must be iterable: lists or tuples (which share the
-                # list layout) — or opaque, which we trust leniently.
-                if A.expr_type(a_expr) not in ("list", "tuple", "any") or A.expr_type(
-                    b_expr
-                ) not in ("list", "tuple", "any"):
-                    raise SemaError("zip() arguments must be lists or tuples", s.pos)
+                idx_name, znames, zexprs = zspec
+                for ze in zexprs:
+                    self._check_expr(ze, scope)
+                    if A.expr_type(ze) not in ("list", "tuple", "any"):
+                        raise SemaError("zip() arguments must be lists or tuples", s.pos, ErrorCode.E_ZIP_ARGS)
                 if idx_name is not None:
                     scope.add(idx_name, "int")
-                scope.add(a_name, self._iter_element_type(a_expr, scope))
-                scope.add(b_name, self._iter_element_type(b_expr, scope))
+                for zn, ze in zip(znames, zexprs):
+                    scope.add(zn, self._iter_element_type(ze, scope))
                 self.loop_depth += 1
                 try:
                     self._check_block(s.body, scope)
@@ -1576,8 +2912,15 @@ class SemaAnalyzer:
                 and isinstance(s.iter, A.Call)
                 and s.iter.func == "enumerate"
             ):
-                if len(s.iter.args) != 1:
-                    raise SemaError("enumerate() takes 1 argument", s.pos)
+                _enum_start_kwarg = None
+                for _kn, _kv in getattr(s.iter, "kwargs", []):
+                    if _kn == "start":
+                        _enum_start_kwarg = _kv
+                _enum_n_args = len(s.iter.args) + (1 if _enum_start_kwarg else 0)
+                if _enum_n_args not in (1, 2):
+                    raise SemaError(
+                        "enumerate() takes 1 or 2 arguments", s.pos
+                    )
                 if len(s.targets) != 2:
                     raise SemaError(
                         "for ... in enumerate(...) needs two targets "
@@ -1586,6 +2929,14 @@ class SemaAnalyzer:
                     )
                 inner = s.iter.args[0]
                 self._check_expr(inner, scope)
+                _start_arg = s.iter.args[1] if len(s.iter.args) == 2 else _enum_start_kwarg
+                if _start_arg is not None:
+                    self._check_expr(_start_arg, scope)
+                    if A.expr_type(_start_arg) != "int":
+                        raise SemaError(
+                            "enumerate() start argument must be an int",
+                            s.pos,
+                        )
                 scope.add(s.targets[0], "int")
                 scope.add(s.targets[1], self._iter_element_type(inner, scope))
                 self.loop_depth += 1
@@ -1603,26 +2954,58 @@ class SemaAnalyzer:
                 # and tuple-of-tuples uniformly. (zip/enumerate were already
                 # handled above with precise element kinds.)
                 if s.targets and it_t in ("list", "tuple", "dict", "str", "any", "int"):
-                    # If the iterable carries a per-pair slot shape (e.g.
-                    # d.items() -> [str, value-kind]) and the targets are FLAT
-                    # names (a nested group like `for k, (a, b) in ...` consumes
-                    # one slot per group, so slot kinds don't map 1:1 onto the
-                    # flattened names), type each target from its slot;
-                    # otherwise bind leniently.
-                    shape = list(getattr(s.iter, "tuple_elem_types", []) or [])
+                    # `for a, b in <list[T]>` where each element is a plain
+                    # user-class instance (T not itself a tuple/list/dict)
+                    # has no list/tuple buffer to unpack: codegen's
+                    # _gen_for_list would dereference the instance pointer as
+                    # if it were a list header and segfault. CPython rejects
+                    # this at runtime with "cannot unpack non-iterable X
+                    # object"; reject it at compile time instead.
+                    if it_t == "list":
+                        el_t = self._list_el_type(s.iter, scope)
+                        if el_t.startswith("instance:"):
+                            cls = el_t.split(":", 1)[1]
+                            raise SemaError(
+                                f"cannot unpack non-iterable {cls} object",
+                                s.pos,
+                            )
+                    # If the iterable carries a per-pair slot shape and the
+                    # targets are FLAT names (a nested group like
+                    # `for k, (a, b) in ...` consumes one slot per group, so slot
+                    # kinds don't map 1:1 onto the flattened names), type each
+                    # target from its slot; otherwise bind leniently.
+                    #   - list[tuple]: element tuples' per-slot kinds
+                    #   - direct tuple shape (d.items(), tuple-of-tuples)
+                    if it_t == "list":
+                        shape = self._list_el_tuple_types(s.iter, scope)
+                    else:
+                        shape = list(getattr(s.iter, "tuple_elem_types", []) or [])
                     flat = True
                     for t in s.targets:
                         if not isinstance(t, str):
                             flat = False
                     names = self._flat_target_names(s.targets)
+                    ttypes: list[str] = []
                     for ti, nm in enumerate(names):
-                        if flat and ti < len(shape) and shape[ti] not in (
-                            "int",
-                            "any",
-                        ):
-                            scope.add(nm, shape[ti])
+                        # Only bind a target to a concrete kind when the slot is
+                        # str/float — the kinds that misprint as int. "int"/"any"
+                        # stay lenient (the historical behavior the self-host
+                        # build relies on, and which keeps append targets open).
+                        # Append only string literals so this stays self-host
+                        # compilable (a subscript result types as int otherwise).
+                        is_str = flat and ti < len(shape) and shape[ti] == "str"
+                        is_flt = flat and ti < len(shape) and shape[ti] == "float"
+                        if is_str:
+                            scope.add(nm, "str")
+                            ttypes.append("str")
+                        elif is_flt:
+                            scope.add(nm, "float")
+                            ttypes.append("float")
                         else:
                             scope.add(nm, "any")
+                            ttypes.append("any")
+                    if flat:
+                        s.target_types = ttypes  # codegen local typing
                     self.loop_depth += 1
                     try:
                         self._check_block(s.body, scope)
@@ -1632,10 +3015,25 @@ class SemaAnalyzer:
                 if it_t == "list":
                     el_t = self._list_el_type(s.iter, scope)
                     if el_t == "tuple":
-                        # Per-slot shape (e.g. d.values() of a tuple-valued
-                        # dict) so `pair[0]` etc. type correctly.
+                        # Single-var iteration over list[tuple] (`for pair in xs`).
+                        # Multi-target unpack is handled by the branch above and
+                        # returns before reaching here. Carry the per-slot kinds
+                        # so `pair[0]` types correctly.
+                        slots = self._list_el_tuple_types(s.iter, scope)
+                        scope.add(s.var, el_t, tuple_types=slots)
+                    elif el_t == "dict":
+                        # list[dict]: bind the loop var as a dict carrying the
+                        # tracked value kind so `x[k]` recovers the leaf type.
+                        inner = self._list_el_value_type(s.iter, scope)
                         scope.add(
-                            s.var, el_t, tuple_types=self._tuple_elem_types(s.iter, scope)
+                            s.var, "dict", value_type=inner if inner != "int" else "any"
+                        )
+                    elif el_t == "list":
+                        # list[list]: bind as a list carrying the inner element
+                        # kind so `x[i]` recovers the leaf type.
+                        inner = self._list_el_value_type(s.iter, scope)
+                        scope.add(
+                            s.var, "list", el_type=inner if inner != "int" else "any"
                         )
                     else:
                         scope.add(s.var, el_t)
@@ -1663,6 +3061,30 @@ class SemaAnalyzer:
                 elif it_t == "str":
                     # Each iteration yields a fresh 1-char str.
                     scope.add(s.var, "str")
+                elif it_t.startswith("instance:"):
+                    # User-defined iterable: class must have __iter__ and __next__.
+                    cls_name = it_t.split(":", 1)[1]
+                    cls_sig = self.classes.get(cls_name)
+                    if cls_sig is None:
+                        raise SemaError(
+                            f"cannot iterate over {cls_name!r}: unknown class",
+                            s.pos,
+                        )
+                    cls_methods = cls_sig.methods
+                    if "__iter__" not in cls_methods or "__next__" not in cls_methods:
+                        raise SemaError(
+                            f"cannot iterate over {cls_name!r}: "
+                            f"class must define __iter__ and __next__",
+                            s.pos,
+                        )
+                    # Determine element type from __next__'s declared return type.
+                    next_sig = cls_methods.get("__next__")
+                    el_t = "any"
+                    if next_sig is not None and next_sig.ret_type is not None:
+                        el_t = next_sig.ret_type[0]
+                    # Mark the For node so codegen uses the iterator protocol path.
+                    s.iter_is_instance = cls_name
+                    scope.add(s.var, el_t)
                 elif it_t in ("any", "int"):
                     # Opaque iterable (e.g. a value read out of an unannotated
                     # container, or an unannotated field typed "int" by default):
@@ -1690,11 +3112,11 @@ class SemaAnalyzer:
             return
         if isinstance(s, A.Break):
             if self.loop_depth == 0:
-                raise SemaError("'break' outside a loop", s.pos)
+                raise SemaError("'break' outside a loop", s.pos, ErrorCode.E_BREAK_OUTSIDE_LOOP)
             return
         if isinstance(s, A.Continue):
             if self.loop_depth == 0:
-                raise SemaError("'continue' outside a loop", s.pos)
+                raise SemaError("'continue' outside a loop", s.pos, ErrorCode.E_CONTINUE_OUTSIDE_LOOP)
             return
         if isinstance(s, A.Import):
             # Dotted path: bind the leading segment ("os.path" -> "os"). Real
@@ -1733,8 +3155,8 @@ class SemaAnalyzer:
                         scope.add(name, "module")
                     except SemaError:
                         # A stdlib *submodule* that isn't an FFI binding set
-                        # (e.g. `ospath`, `assembly.pkgformat`). Bind it as a
-                        # module so `name.func(...)` dispatches to the merged
+                        # (e.g. `ospath`). Bind it as a module so `name.func(...)`
+                        # dispatches to the merged
                         # project function (whole-program) — unless the name was
                         # already bound (e.g. a materialized value global like
                         # `BINDINGS`): re-binding would clobber its real type.
@@ -1743,18 +3165,12 @@ class SemaAnalyzer:
                             ty = "any" if orig[:1].isupper() else "module"
                             scope.add(name, ty)
                 return
-            # `from asmpython.assembly import assembly_func, include`: the two
-            # compiler directives. Bind them so call sites resolve; `include`
-            # is acted on when called, `assembly_func` is consumed at parse time
-            # as a decorator (its name in scope is just a marker here).
+            # `from asmpython.assembly import assembly_func, include`: compiler
+            # directives. `assembly_func` is consumed at parse time as a
+            # decorator. Bind all names from the package as opaque markers.
             if s.module in ("asmpython.assembly", "assembly") and s.level == 0:
                 for name in s.names:
-                    # Only the two directives are special; anything else from
-                    # the package (e.g. `pkgformat`) is an ordinary opaque name.
-                    if name in ("assembly_func", "include"):
-                        scope.add(name, "asmdirective")
-                    else:
-                        scope.add(name, "any")
+                    scope.add(name, "asmdirective")
                 return
             # Relative import or unknown module: accept the syntax and bind
             # each imported name as a dummy int. Self-host needs every source
@@ -1766,11 +3182,28 @@ class SemaAnalyzer:
                 # *name* import (`from .x import Y`) binds an opaque value
                 # ("any") so `Y(...)` / `Y.method()` / `Y.attr` all stay lenient
                 # rather than erroring as operations on an int.
-                bind_ty = "module" if not s.module else "any"
+                if not s.module:
+                    # No module name at all after the dots: either a sibling-
+                    # module import (`from . import ast_nodes as A`, always
+                    # aliased in this codebase since the bare name would
+                    # collide with the file itself being imported elsewhere),
+                    # or a bare value pulled from a package's __init__.py
+                    # (`from .. import __version__`, never aliased — there's
+                    # nothing to alias away from). Use that to tell them apart:
+                    # an `as`-aliased name is the module case; an unaliased
+                    # name is the value case, whose real type the whole-program
+                    # loader's _materialize_value_imports already prepended as
+                    # a real `Assign` ahead of this statement, so scope[name]
+                    # must not be clobbered back to "module".
+                    orig_names = s.orig_names or s.names
+                    for name, orig in zip(s.names, orig_names):
+                        if name != orig:
+                            scope.add(name, "module")
+                        elif name not in scope:
+                            scope.add(name, "any")
+                    return
+                bind_ty = "any"
                 for name in s.names:
-                    # Don't clobber a name the whole-program loader already
-                    # materialized with its real type (`from .._stdlib import
-                    # STDLIB_BINDINGS` after the dict global was prepended).
                     if name not in scope:
                         scope.add(name, bind_ty)
                 return
@@ -1785,9 +3218,14 @@ class SemaAnalyzer:
                 # import (`from asmpython._compiler.sema import STDLIB_BINDINGS`)
                 # refers to a value the whole-program loader already
                 # materialized with its REAL type.
-                for name in s.names:
-                    if name not in scope:
-                        scope.add(name, "any")
+                # For `from bundled_module import orig as local`, register the
+                # alias so codegen can resolve `local` to the merged `orig` symbol.
+                orig_names = s.orig_names or s.names
+                for local, orig in zip(s.names, orig_names):
+                    if local != orig:
+                        self.mod.func_aliases[local] = orig
+                    if local not in scope:
+                        scope.add(local, "any")
                 return
             for name in s.names:
                 if name not in bindings:
@@ -1803,16 +3241,6 @@ class SemaAnalyzer:
                     scope.add(name, b.ty)
             return
         if isinstance(s, A.ExprStmt):
-            # `include("pkg")` — an assembly-package directive. Recognised only
-            # when `include` came from `asmpython.assembly` (bound as
-            # "asmdirective") so a user function named `include` still works.
-            if (
-                isinstance(s.expr, A.Call)
-                and s.expr.func == "include"
-                and scope.types.get("include") == "asmdirective"
-            ):
-                self._handle_include(s.expr)
-                return
             self._check_expr(s.expr, scope)
             return
         if isinstance(s, A.IndexAssign):
@@ -1860,10 +3288,39 @@ class SemaAnalyzer:
                     )
             elif obj_t == "any":
                 pass  # opaque target: accept the index assignment leniently
+            elif obj_t.startswith("instance:"):
+                cls_name = obj_t.split(":", 1)[1]
+                cls_sig = self.classes.get(cls_name)
+                msig = None
+                if cls_sig is not None:
+                    msig = cls_sig.methods.get("__setitem__")
+                if msig is None:
+                    raise SemaError(
+                        f"'{cls_name}' object does not support index assignment", s.pos,
+                        ErrorCode.E_INDEX_ASSIGN,
+                    )
+                s.target._setitem_class = cls_name  # type: ignore[attr-defined]
             else:
-                raise SemaError(f"cannot index a {obj_t}", s.pos)
+                raise SemaError(f"cannot index a {obj_t}", s.pos, ErrorCode.E_INDEX_OBJECT_TYPE)
             return
         if isinstance(s, A.AttrAssign):
+            # cls.field = v inside a @classmethod → rewrite to ClassName.field = v
+            if (
+                isinstance(s.obj, A.Name)
+                and self.classmethod_cls_param is not None
+                and s.obj.name == self.classmethod_cls_param
+                and self.current_class is not None
+            ):
+                s.obj.name = self.current_class
+            # Class-level variable write: `ClassName.x = v`. Allowed when the
+            # class declares `x` as a (non-dataclass) class var.
+            if (
+                isinstance(s.obj, A.Name)
+                and s.obj.name in self.classes
+                and self._class_var_type(s.obj.name, s.name) is not None
+            ):
+                self._check_expr(s.value, scope)
+                return
             self._check_expr(s.obj, scope)
             obj_t = A.expr_type(s.obj)
             if not obj_t.startswith("instance:") and obj_t not in ("any", "module", "int"):
@@ -1871,19 +3328,41 @@ class SemaAnalyzer:
                     f"cannot assign attribute on {obj_t}",
                     s.pos,
                 )
+            if obj_t.startswith("instance:"):
+                cls_name = obj_t.split(":", 1)[1]
+                if cls_name in self.classes:
+                    resolved = self._resolve_method(cls_name, s.name)
+                    if resolved is not None and "property" in resolved[1].decorators:
+                        setter_name = self._resolve_setter(cls_name, s.name)
+                        if setter_name is None:
+                            # A read-only property can never be assigned,
+                            # just like in CPython.
+                            raise SemaError(
+                                f"property {s.name!r} of {cls_name!r} object has no setter",
+                                s.pos,
+                            )
+                        # `obj.x = value` -> `obj.x__setter(value)`: rewrite
+                        # this AttrAssign into an ExprStmt wrapping a
+                        # MethodCall, in place, so codegen's existing
+                        # method-dispatch (incl. virtual dispatch) handles it.
+                        obj_expr = s.obj
+                        value_expr = s.value
+                        s.__class__ = A.ExprStmt  # type: ignore[assignment]
+                        s.expr = A.MethodCall(  # type: ignore[attr-defined]
+                            obj=obj_expr,
+                            method=setter_name,
+                            args=[value_expr],
+                            pos=s.pos,
+                        )
+                        self._check_expr(s.expr, scope)  # type: ignore[attr-defined]
+                        return
             self._check_expr(s.value, scope)
             value_t = A.expr_type(s.value)
             # Instance fields hold any 8-byte value (int / str-ptr / instance /
-            # list / dict / tuple). Floats are the exception: they'd need xmm
-            # spilling into the dict slot, which the field codegen doesn't do.
+            # list / dict / tuple / float bit pattern).
             user_instance = obj_t.startswith("instance:") and (
                 obj_t.split(":", 1)[1] in self.classes
             )
-            if user_instance and value_t == "float":
-                raise SemaError(
-                    "float instance attributes are not supported yet",
-                    s.pos,
-                )
             # Keep the class's field table in sync with assignments made after
             # the inference pass (e.g. a field first assigned in a later method).
             if user_instance and isinstance(s.obj, A.Name) and s.obj.name == "self":
@@ -1896,13 +3375,17 @@ class SemaAnalyzer:
             return
         if isinstance(s, A.Try):
             self._check_block(s.body, scope)
+            for name in s.handler_types:
+                self._check_exc_type_name(name, s.pos, scope)
             # `except ... as e` binds the caught exception's message string
             # (asmpython's native exception payload). Codegen relies on this
             # being `str` so `print(e)` prints it correctly.
             if s.bind_name is not None:
                 scope.add(s.bind_name, "str")
             self._check_block(s.handler, scope)
-            for bind_name, hbody in s.extra_handlers:
+            for types, bind_name, hbody in s.extra_handlers:
+                for name in types:
+                    self._check_exc_type_name(name, s.pos, scope)
                 if bind_name is not None:
                     scope.add(bind_name, "str")
                 self._check_block(hbody, scope)
@@ -1910,6 +3393,9 @@ class SemaAnalyzer:
             self._check_block(s.finally_body, scope)
             return
         if isinstance(s, A.Raise):
+            if s.value is None:
+                # Bare `raise`: re-raises the currently-active exception.
+                return
             self._check_expr(s.value, scope)
             vt = A.expr_type(s.value)
             # Accept a bare string message (asmpython's native exception payload),
@@ -1932,6 +3418,64 @@ class SemaAnalyzer:
             return
         if isinstance(s, A.With):
             self._check_expr(s.expr, scope)
+            obj_t = A.expr_type(s.expr)
+            if obj_t.startswith("instance:"):
+                cls_name = obj_t.split(":", 1)[1]
+                enter = self._resolve_method(cls_name, "__enter__")
+                exitm = self._resolve_method(cls_name, "__exit__")
+                if enter is None or exitm is None:
+                    raise SemaError(
+                        f"{cls_name!r} object does not support the context "
+                        "manager protocol (missing __enter__/__exit__)",
+                        s.pos,
+                    )
+                # `with expr as name: body` -> rewrite *in place* into:
+                #   __cm = expr
+                #   [name = ] __cm.__enter__()
+                #   try:
+                #       body
+                #   finally:
+                #       __cm.__exit__(None, None, None)
+                # so the existing setjmp/longjmp try/finally machinery makes
+                # __exit__ run even if `body` raises. asmpython's exception
+                # model doesn't carry rich exception objects, so __exit__
+                # always sees (None, None, None) -- it can't inspect or
+                # suppress the exception, only run cleanup.
+                cm_name = f"__cm_{id(s)}"
+                cm_assign = A.Assign(target=cm_name, value=s.expr, pos=s.pos)
+                cm_ref = A.Name(name=cm_name, pos=s.pos)
+                enter_call = A.MethodCall(
+                    obj=cm_ref, method="__enter__", args=[], pos=s.pos
+                )
+                if s.name is not None:
+                    enter_stmt: A.Stmt = A.Assign(
+                        target=s.name, value=enter_call, pos=s.pos
+                    )
+                else:
+                    enter_stmt = A.ExprStmt(expr=enter_call, pos=s.pos)
+                none_args = [
+                    A.IntLit(value=0, pos=s.pos, is_none=True) for _ in range(3)
+                ]
+                exit_call = A.MethodCall(
+                    obj=A.Name(name=cm_name, pos=s.pos),
+                    method="__exit__",
+                    args=none_args,
+                    pos=s.pos,
+                )
+                body: list = []
+                body.append(cm_assign)
+                body.append(enter_stmt)
+                body.extend(s.body)
+                s.__class__ = A.Try  # type: ignore[assignment]
+                s.body = body  # type: ignore[attr-defined]
+                s.handler = []  # type: ignore[attr-defined]
+                s.bind_name = None  # type: ignore[attr-defined]
+                s.handler_types = []  # type: ignore[attr-defined]
+                s.extra_handlers = []  # type: ignore[attr-defined]
+                s.else_body = []  # type: ignore[attr-defined]
+                s.finally_body = [A.ExprStmt(expr=exit_call, pos=s.pos)]  # type: ignore[attr-defined]
+                self._check_stmt(s, scope)
+                return
             if s.name is not None:
                 scope.add(s.name, A.expr_type(s.expr))
             self._check_block(s.body, scope)
@@ -1959,9 +3503,426 @@ class SemaAnalyzer:
             except Exception:
                 pass
             return
+        if isinstance(s, A.Match):
+            # Rewrite `match subject: case p [if g]: body ...` in place into a
+            # subject-temp assignment + an if/elif/.../else chain, then type-check
+            # the resulting if-chain. The subject is evaluated exactly once.
+            subj_name = f"__match_subj_{id(s)}"
+            subj_assign = A.Assign(target=subj_name, value=s.subject, pos=s.pos)
+            self._check_stmt(subj_assign, scope)
+
+            # Collect per-case pre-stmts (elem temps that must be in scope before
+            # each case's test), which are spliced in before the if-chain.
+            all_pre: list = [subj_assign]
+
+            orelse: list = []
+            for pattern, guard, body in reversed(s.cases):
+                pre, test, binds = self._lower_pattern(pattern, subj_name, s.pos)
+                for p in pre:
+                    self._check_stmt(p, scope)
+                all_pre.extend(pre)
+                if guard is not None:
+                    # Put binds before the guard so captured names are in scope
+                    # when the guard expression is evaluated, then nest the guard
+                    # inside the pattern-match if-arm: `if test: binds; if guard: body; else: next`
+                    inner_if = A.If(
+                        test=guard, then=list(body), orelse=orelse, pos=s.pos
+                    )
+                    if_node = A.If(
+                        test=test, then=binds + [inner_if], orelse=orelse, pos=s.pos
+                    )
+                else:
+                    if_node = A.If(
+                        test=test, then=binds + list(body), orelse=orelse, pos=s.pos
+                    )
+                orelse = [if_node]
+
+            if not orelse:
+                return all_pre[1:] or None
+
+            top = orelse[0]
+            s.__class__ = A.If  # type: ignore[assignment]
+            s.test = top.test  # type: ignore[attr-defined]
+            s.then = top.then  # type: ignore[attr-defined]
+            s.orelse = top.orelse  # type: ignore[attr-defined]
+            self._check_stmt(s, scope)
+            return all_pre
+
         raise SemaError(
             f"internal: unhandled stmt {type(s).__name__}", getattr(s, "pos", None)
         )
+
+    # ---- match/case helpers -------------------------------------------------
+
+    def _make_name_ref(self, name: str, pos) -> A.Expr:
+        """Return a fresh Name node for `name`. Must build a new node every
+        call — never reuse a node in two places in the rewritten AST tree."""
+        return A.Name(name=name, pos=pos)
+
+    def _and_chain(self, exprs: list, pos) -> A.Expr:
+        """Left-fold a non-empty list of expressions with `and`."""
+        result = exprs[0]
+        for e in exprs[1:]:
+            result = A.BoolOp(op="and", left=result, right=e, pos=pos)
+        return result
+
+    def _or_chain(self, exprs: list, pos) -> A.Expr:
+        """Left-fold a non-empty list of expressions with `or`."""
+        result = exprs[0]
+        for e in exprs[1:]:
+            result = A.BoolOp(op="or", left=result, right=e, pos=pos)
+        return result
+
+    def _lower_pattern(
+        self, pattern, subj_name: str, pos
+    ) -> tuple:
+        """Lower one pattern into (pre_stmts, test_expr, bind_stmts).
+
+        `subj_name` is the name of the synthetic subject temp variable.
+        Every call to `_make_name_ref(subj_name, pos)` produces a fresh node.
+
+        Returns:
+            pre_stmts  — list[A.Assign] that must be executed BEFORE the test
+                         (e.g. element-temp assignments for sequence sub-patterns).
+                         These are hoisted to just before the enclosing if-node.
+            test_expr  — an A.Expr that evaluates to truthy iff the pattern
+                         matches the subject (may be a fresh IntLit(1) for
+                         unconditional matches).
+            bind_stmts — list[A.Assign] that bind captured names; placed in the
+                         if-node's `then` body so they only run when the test passes.
+        """
+        _TRUE = A.IntLit(value=1, pos=pos, is_bool=True)
+
+        if isinstance(pattern, A.MatchValue):
+            test = A.Compare(
+                ops=["=="],
+                operands=[self._make_name_ref(subj_name, pos), pattern.value],
+                pos=pattern.pos,
+            )
+            return [], test, []
+
+        if isinstance(pattern, A.MatchCapture):
+            if pattern.name == "_":
+                return [], _TRUE, []
+            bind = A.Assign(
+                target=pattern.name,
+                value=self._make_name_ref(subj_name, pos),
+                pos=pattern.pos,
+            )
+            return [], _TRUE, [bind]
+
+        if isinstance(pattern, A.MatchOr):
+            for alt in pattern.patterns:
+                if isinstance(alt, A.MatchCapture) and alt.name != "_":
+                    raise SemaError(
+                        "capture patterns are not allowed inside or-patterns",
+                        alt.pos,
+                    )
+            tests = [
+                self._lower_pattern(p, subj_name, pattern.pos)[1]
+                for p in pattern.patterns
+            ]
+            return [], self._or_chain(tests, pattern.pos), []
+
+        if isinstance(pattern, A.MatchSequence):
+            seq_tests: list = []
+            seq_binds: list = []
+            seq_pre: list = []  # assigns that must happen BEFORE the test (elem temps)
+            star_index = pattern.star_index
+            n_fixed = len(pattern.patterns) - (1 if star_index is not None else 0)
+
+            # Length check: exact when no star, >= n_fixed when starred.
+            len_call = A.Call(
+                func="len",
+                args=[self._make_name_ref(subj_name, pos)],
+                pos=pattern.pos,
+            )
+            _len_ops = self._make_stmt_list()
+            _len_ops.append(len_call)
+            _len_ops.append(A.IntLit(value=n_fixed, pos=pattern.pos))
+            if star_index is None:
+                len_test = A.Compare(ops=["=="], operands=_len_ops, pos=pattern.pos)
+            else:
+                len_test = A.Compare(ops=[">="], operands=_len_ops, pos=pattern.pos)
+            seq_tests.append(len_test)
+
+            n_after = (len(pattern.patterns) - star_index - 1) if star_index is not None else 0
+
+            for i, sub in enumerate(pattern.patterns):
+                if star_index is not None and i == star_index:
+                    # Star capture: bind subj[i : len(subj)-n_after].
+                    if isinstance(sub, A.MatchCapture) and sub.name != "_":
+                        if n_after == 0:
+                            stop_node = None
+                        else:
+                            stop_node = A.BinOp(
+                                op="-",
+                                left=A.Call(
+                                    func="len",
+                                    args=[self._make_name_ref(subj_name, pos)],
+                                    pos=pattern.pos,
+                                ),
+                                right=A.IntLit(value=n_after, pos=pattern.pos),
+                                pos=pattern.pos,
+                            )
+                        slice_node = A.Slice(
+                            start=A.IntLit(value=i, pos=pattern.pos),
+                            stop=stop_node,
+                            pos=pattern.pos,
+                        )
+                        sub_ref = A.Subscript(
+                            obj=self._make_name_ref(subj_name, pos),
+                            index=slice_node,
+                            pos=pattern.pos,
+                        )
+                        seq_binds.append(A.Assign(target=sub.name, value=sub_ref, pos=sub.pos))
+                    continue
+
+                # Fixed-position element: front indices before star, back indices after.
+                if star_index is None or i < star_index:
+                    idx_expr: A.Expr = A.IntLit(value=i, pos=pattern.pos)
+                else:
+                    # How many fixed elements remain after position i (not counting i itself).
+                    remaining = len(pattern.patterns) - i - 1
+                    back_idx = -(remaining + 1)
+                    idx_expr = A.IntLit(value=back_idx, pos=pattern.pos)
+
+                elem_ref = A.Subscript(
+                    obj=self._make_name_ref(subj_name, pos),
+                    index=idx_expr,
+                    pos=pattern.pos,
+                )
+
+                # Simple sub-patterns can reference elem_ref directly, no temp needed:
+                # - MatchCapture: bind from elem_ref -> goes to binds (after test passes)
+                # - MatchWildcard: nothing to do
+                # - MatchValue: compare directly against elem_ref -> test only
+                # Complex sub-patterns need a temp allocated BEFORE the test.
+                if isinstance(sub, A.MatchCapture):
+                    if sub.name != "_":
+                        seq_binds.append(A.Assign(target=sub.name, value=elem_ref, pos=sub.pos))
+                elif isinstance(sub, A.MatchValue):
+                    _elem_ops = self._make_stmt_list()
+                    _elem_ops.append(elem_ref)
+                    _elem_ops.append(sub.value)
+                    elem_test = A.Compare(ops=["=="], operands=_elem_ops, pos=sub.pos)
+                    seq_tests.append(elem_test)
+                else:
+                    # Complex pattern: create elem temp, hoist its assignment before
+                    # the enclosing if's test so the sub-pattern can reference it.
+                    elem_name = f"__match_elem_{id(pattern)}_{i}"
+                    seq_pre.append(A.Assign(target=elem_name, value=elem_ref, pos=pattern.pos))
+                    sub_pre, sub_test, sub_binds = self._lower_pattern(sub, elem_name, pattern.pos)
+                    seq_pre.extend(sub_pre)
+                    if not (isinstance(sub_test, A.IntLit) and sub_test.value == 1):
+                        seq_tests.append(sub_test)
+                    seq_binds.extend(sub_binds)
+
+            return seq_pre, self._and_chain(seq_tests, pattern.pos), seq_binds
+
+        if isinstance(pattern, A.MatchMapping):
+            map_tests: list = []
+            map_pre: list = []
+            map_binds: list = []
+            subj_ref = self._make_name_ref(subj_name, pos)
+            for key, sub in zip(pattern.keys, pattern.patterns):
+                key_node = A.StrLit(value=key, pos=pattern.pos)
+                # key in subject
+                _in_ops = self._make_stmt_list()
+                _in_ops.append(key_node)
+                _in_ops.append(subj_ref)
+                in_test = A.Compare(ops=["in"], operands=_in_ops, pos=pattern.pos)
+                map_tests.append(in_test)
+                val_ref = A.Subscript(
+                    obj=subj_ref,
+                    index=key_node,
+                    pos=pattern.pos,
+                )
+                if isinstance(sub, A.MatchCapture):
+                    if sub.name != "_":
+                        map_binds.append(A.Assign(target=sub.name, value=val_ref, pos=sub.pos))
+                elif isinstance(sub, A.MatchValue):
+                    _val_ops = self._make_stmt_list()
+                    _val_ops.append(val_ref)
+                    _val_ops.append(sub.value)
+                    val_test = A.Compare(ops=["=="], operands=_val_ops, pos=sub.pos)
+                    if isinstance(sub.value, A.StrLit):
+                        val_test._map_val_str_cmp = True  # type: ignore[attr-defined]
+                    map_tests.append(val_test)
+                else:
+                    elem_name = f"__match_map_{id(pattern)}_{key}"
+                    map_pre.append(A.Assign(target=elem_name, value=val_ref, pos=pattern.pos))
+                    sub_pre, sub_test, sub_binds = self._lower_pattern(sub, elem_name, pattern.pos)
+                    map_pre.extend(sub_pre)
+                    if not (isinstance(sub_test, A.IntLit) and sub_test.value == 1):
+                        map_tests.append(sub_test)
+                    map_binds.extend(sub_binds)
+            return map_pre, self._and_chain(map_tests, pattern.pos), map_binds
+
+        if isinstance(pattern, A.MatchClass):
+            cls_name = pattern.cls_name
+            # isinstance(subject, ClassName) check.
+            _isinst_args = self._make_stmt_list()
+            _isinst_args.append(self._make_name_ref(subj_name, pos))
+            _isinst_args.append(A.Name(name=cls_name, pos=pattern.pos))
+            isinstance_call = A.Call(func="isinstance", args=_isinst_args, pos=pattern.pos)
+            cls_tests: list = [isinstance_call]
+            cls_pre: list = []
+            cls_binds: list = []
+
+            # Resolve positional patterns via __match_args__.
+            if pattern.positional:
+                match_args: list = []
+                for c in self.mod.classes:
+                    if c.name != cls_name:
+                        continue
+                    for cv_name, _annot, cv_val in getattr(c, "class_vars", []) or []:
+                        if cv_name == "__match_args__" and cv_val is not None:
+                            if isinstance(cv_val, A.TupleLit):
+                                for elt in cv_val.elems:
+                                    if isinstance(elt, A.StrLit):
+                                        match_args.append(elt.value)
+                            elif isinstance(cv_val, A.ListLit):
+                                for elt in cv_val.elems:
+                                    if isinstance(elt, A.StrLit):
+                                        match_args.append(elt.value)
+                if not match_args:
+                    raise SemaError(
+                        f"class '{cls_name}' does not define __match_args__ "
+                        "for positional patterns",
+                        pattern.pos,
+                    )
+                if len(pattern.positional) > len(match_args):
+                    raise SemaError(
+                        f"too many positional patterns for '{cls_name}' "
+                        f"(__match_args__ has {len(match_args)} entries)",
+                        pattern.pos,
+                    )
+                for i, sub in enumerate(pattern.positional):
+                    attr_name = match_args[i]
+                    attr_ref = A.Attr(
+                        obj=self._make_name_ref(subj_name, pos),
+                        name=attr_name,
+                        pos=pattern.pos,
+                    )
+                    elem_name = f"__match_attr_{id(pattern)}_{attr_name}"
+                    cls_pre.append(A.Assign(target=elem_name, value=attr_ref, pos=pattern.pos))
+                    sub_pre, sub_test, sub_binds = self._lower_pattern(sub, elem_name, pattern.pos)
+                    cls_pre.extend(sub_pre)
+                    if not (isinstance(sub_test, A.IntLit) and sub_test.value == 1):
+                        cls_tests.append(sub_test)
+                    cls_binds.extend(sub_binds)
+
+            # Keyword patterns.
+            for attr_name, sub in pattern.kwargs:
+                attr_ref = A.Attr(
+                    obj=self._make_name_ref(subj_name, pos),
+                    name=attr_name,
+                    pos=pattern.pos,
+                )
+                elem_name = f"__match_kw_{id(pattern)}_{attr_name}"
+                cls_pre.append(A.Assign(target=elem_name, value=attr_ref, pos=pattern.pos))
+                sub_pre, sub_test, sub_binds = self._lower_pattern(sub, elem_name, pattern.pos)
+                cls_pre.extend(sub_pre)
+                if not (isinstance(sub_test, A.IntLit) and sub_test.value == 1):
+                    cls_tests.append(sub_test)
+                cls_binds.extend(sub_binds)
+
+            return cls_pre, self._and_chain(cls_tests, pattern.pos), cls_binds
+
+        if isinstance(pattern, A.MatchAs):
+            if pattern.pattern is None:
+                as_pre: list = []
+                as_test = _TRUE
+                as_binds: list = []
+            else:
+                as_pre, as_test, as_binds = self._lower_pattern(pattern.pattern, subj_name, pos)
+            as_binds.append(
+                A.Assign(
+                    target=pattern.name,
+                    value=self._make_name_ref(subj_name, pos),
+                    pos=pattern.pos,
+                )
+            )
+            return as_pre, as_test, as_binds
+
+        raise SemaError(
+            f"internal: unhandled pattern {type(pattern).__name__}", pos
+        )
+
+    def _check_tuple_assign_target(
+        self, t: "A.Expr", value_t: str, scope: Scope, pos
+    ) -> None:
+        """Validate one target of a parallel-form TupleAssign against the
+        already-checked type of its paired value, and bind `Name` targets
+        into scope. Mirrors the equivalent checks in IndexAssign/AttrAssign
+        (`xs[0], xs[1] = ...`, `self.x, self.y = ...`)."""
+        if isinstance(t, A.Name):
+            scope.add(t.name, value_t)
+            return
+        if isinstance(t, A.Subscript):
+            self._check_expr(t.obj, scope)
+            self._check_expr(t.index, scope)
+            obj_t = A.expr_type(t.obj)
+            if isinstance(t.index, A.Slice):
+                return
+            if obj_t == "list":
+                el_t = self._list_el_type(t.obj, scope)
+                if (
+                    el_t not in ("?", "any", "int")
+                    and value_t not in ("any", "int")
+                    and value_t != el_t
+                ):
+                    raise SemaError(
+                        f"list[i] = v: list element type is {el_t}, got {value_t}",
+                        pos,
+                    )
+            elif obj_t == "dict":
+                ikt = A.expr_type(t.index)
+                if ikt not in ("str", "any", "int") and not ikt.startswith("instance:"):
+                    raise SemaError("dict keys must be strings", pos)
+                dvt = self._dict_value_type(t.obj, scope)
+                if (
+                    dvt not in ("any", "int")
+                    and value_t not in ("any", "int")
+                    and value_t != dvt
+                    and not (dvt.startswith("instance:") and value_t.startswith("instance:"))
+                ):
+                    raise SemaError(
+                        f"dict[k] = v: dict values are {dvt}, got {value_t}",
+                        pos,
+                    )
+            elif obj_t == "any":
+                pass  # opaque target: accept the index assignment leniently
+            else:
+                raise SemaError(f"cannot index a {obj_t}", pos, ErrorCode.E_INDEX_OBJECT_TYPE)
+            return
+        # A.Attr
+        if (
+            isinstance(t.obj, A.Name)
+            and t.obj.name in self.classes
+            and self._class_var_type(t.obj.name, t.name) is not None
+        ):
+            return
+        self._check_expr(t.obj, scope)
+        obj_t = A.expr_type(t.obj)
+        if not obj_t.startswith("instance:") and obj_t not in ("any", "module", "int"):
+            raise SemaError(f"cannot assign attribute on {obj_t}", pos)
+        if obj_t.startswith("instance:"):
+            cls_name = obj_t.split(":", 1)[1]
+            if cls_name in self.classes:
+                resolved = self._resolve_method(cls_name, t.name)
+                if resolved is not None and "property" in resolved[1].decorators:
+                    raise SemaError(
+                        f"property {t.name!r} of {cls_name!r} object has no setter",
+                        pos,
+                    )
+                sig = self.classes[cls_name]
+                if isinstance(t.obj, A.Name) and t.obj.name == "self":
+                    if t.name not in sig.fields or (
+                        sig.fields[t.name] == "int" and value_t not in ("int", "any")
+                    ):
+                        sig.fields[t.name] = value_t
 
     def _check_expr(self, e, scope: Scope) -> None:
         if isinstance(e, (A.IntLit, A.FloatLit, A.StrLit)):
@@ -1976,22 +3937,48 @@ class SemaAnalyzer:
                 e.inferred_type = "type"
                 return
             # A module-level function used as a value (passed, stored in a var).
-            if e.name in self.funcs:
+            # Scope binding takes priority: if the user named a variable the same
+            # as a merged stdlib function (e.g. `log = logging.getLogger(...)`
+            # shadowing `logging.log`), the variable's type wins.
+            if e.name in self.funcs and e.name not in scope:
                 e.inferred_type = "any"
                 return
             if e.name not in scope:
                 if self.in_lifted:
                     e.inferred_type = "any"
                     return
-                raise SemaError(f"undefined variable {e.name!r}", e.pos)
+                raise SemaError(f"undefined variable {e.name!r}", e.pos, ErrorCode.E_UNDEFINED_NAME)
             e.inferred_type = scope.types[e.name]
             if e.inferred_type == "list":
                 e.list_el_type = scope.list_el_types.get(e.name, "int")
+                e.list_el_value_type = scope.list_el_value_types.get(e.name, "int")
+            elif e.inferred_type == "dict":
+                e.value_type = scope.dict_value_types.get(e.name, "int")
+                e.inner_value_type = scope.dict_inner_value_types.get(e.name, "int")
             elif e.inferred_type == "tuple":
                 e.tuple_elem_types = list(scope.tuple_elem_types.get(e.name, []))
+            elif e.inferred_type == "int":
+                e.is_bool = scope.bool_flags.get(e.name, False)
+                e.is_none = scope.none_flags.get(e.name, False)
             return
         if isinstance(e, A.UnaryOp):
             self._check_expr(e.operand, scope)
+            ot = A.expr_type(e.operand)
+            if ot.startswith("instance:") and e.op in DUNDER_UNARY:
+                mname = DUNDER_UNARY[e.op]
+                cls_name = ot.split(":", 1)[1]
+                resolved = self._resolve_method(cls_name, mname)
+                if resolved is not None:
+                    owner, sig = resolved
+                    e.dunder_owner = owner  # type: ignore
+                    e.dunder_method = mname  # type: ignore
+                    if sig.ret_type is not None:
+                        ty, el, _val = sig.ret_type  # type: ignore
+                        e.inferred_type = ty  # type: ignore
+                        if ty == "list" and el is not None:
+                            e.list_el_type = el  # type: ignore
+                    else:
+                        e.inferred_type = "any"  # type: ignore
             return
         if isinstance(e, A.BinOp):
             self._check_expr(e.left, scope)
@@ -2005,6 +3992,13 @@ class SemaAnalyzer:
             if "any" in (lt, rt):
                 if e.op == "+" and "str" in (lt, rt):
                     e.inferred_type = "str"  # type: ignore
+                    return
+                # `float + any` (e.g. an opaque list element added to a float
+                # accumulator): numeric promotion still applies, so the result
+                # is "float", not opaque -- otherwise codegen's int/float
+                # dispatch for the enclosing assignment mistypes the result.
+                if e.op not in ("&", "|", "^", "<<", ">>") and "float" in (lt, rt):
+                    e.inferred_type = "float"  # type: ignore
                     return
                 e.inferred_type = "any"  # type: ignore
                 return
@@ -2048,6 +4042,9 @@ class SemaAnalyzer:
             # String operations: + concatenates two strings; * repeats a string
             # by an int count. Anything else involving strings is rejected.
             if "str" in (lt, rt):
+                if e.op == "%" and lt == "str":
+                    self._check_pct_format(e, scope)
+                    return
                 if e.op == "+" and lt == "str" and rt == "str":
                     return
                 if e.op == "*" and (
@@ -2070,9 +4067,24 @@ class SemaAnalyzer:
             if e.op == "|=" and lt == "set":
                 e.inferred_type = "set"  # type: ignore
                 return
+            # Dict union (PEP 584): `d1 | d2` builds a new dict containing
+            # d1's entries with d2's entries merged in on top (d2 wins on
+            # key conflicts).
+            if e.op == "|" and lt == "dict" and rt == "dict":
+                e.inferred_type = "dict"  # type: ignore
+                return
             # List concatenation: list + list -> list.
             if e.op == "+" and lt in ("list", "any", "int") and rt in ("list", "any", "int") and "list" in (lt, rt):
                 e.inferred_type = "list"  # type: ignore
+                return
+            # List repetition: [x] * n  or  n * [x]  -> list.
+            if e.op == "*" and (
+                (lt == "list" and rt in ("int", "any")) or
+                (rt == "list" and lt in ("int", "any"))
+            ):
+                e.inferred_type = "list"  # type: ignore
+                list_side = e.left if lt == "list" else e.right
+                e.list_el_type = self._list_el_type(list_side, scope)  # type: ignore
                 return
             # Numeric-only ops; reject lists/dicts/instances.
             for side, t in (("left", lt), ("right", rt)):
@@ -2156,23 +4168,90 @@ class SemaAnalyzer:
                         # `x in {…}`: sets only model membership; the element
                         # kind isn't tracked, so accept any needle.
                         continue
-                    if rt in ("any", "int") or rt.startswith("instance:"):
-                        # Membership against an opaque value (`any`), the unknown-
-                        # `int` sentinel, or a user instance — e.g. a property/
-                        # field asmpython can't model (`x in scope.names`) or an
-                        # instance with `__contains__` (`x in scope`). All are
-                        # dict-backed at runtime, so codegen lowers this via dict
-                        # membership; stay lenient rather than erroring on a
-                        # container we couldn't type precisely.
+                    if rt in ("any", "int"):
+                        # Membership against an opaque value (`any`) or the
+                        # unknown-`int` sentinel: dict-backed at runtime.
+                        continue
+                    if rt.startswith("instance:"):
+                        # `x in obj` on a user instance: dispatch to __contains__
+                        # if the class defines it; error otherwise.
+                        cls_name = rt.split(":", 1)[1]
+                        resolved = self._resolve_method(cls_name, "__contains__")
+                        if resolved is not None and len(e.ops) == 1:
+                            owner, sig = resolved
+                            e.dunder_contains_owner = owner  # type: ignore[attr-defined]
+                            e.dunder_contains_negate = (op == "not in")  # type: ignore[attr-defined]
+                        else:
+                            raise SemaError(
+                                f"'{op}': {cls_name} does not define __contains__",
+                                e.pos,
+                            )
                         continue
                     raise SemaError(
                         f"'{op}' not supported between {lt} and {rt}",
                         e.pos,
+                        ErrorCode.E_BINARY_OP_TYPE,
                     )
                 if op in ("is", "is not"):
                     # asmpython has no `None`-as-distinct-value yet. `x is None`
                     # therefore lowers to `x == 0`. Accept any operand types
                     # — the comparison happens at the raw 8-byte level.
+                    continue
+                if op in ("==", "!=") and (
+                    lt.startswith("instance:") or rt.startswith("instance:")
+                ):
+                    # `a == b` / `a != b` where either side is a user
+                    # instance: dispatch to a user-defined `__eq__` if the
+                    # class has one, mirroring DUNDER_BINOP's resolution for
+                    # arithmetic operators. CPython's default `__ne__` is
+                    # `not __eq__`, so `!=` reuses `__eq__` and negates the
+                    # result. Only handled for a single (non-chained)
+                    # comparison, matching codegen's scratch-slot allocation.
+                    cls = (
+                        lt.split(":", 1)[1]
+                        if lt.startswith("instance:")
+                        else rt.split(":", 1)[1]
+                    )
+                    resolved = self._resolve_method(cls, "__eq__")
+                    if resolved is not None and len(e.ops) == 1:
+                        owner, sig = resolved
+                        if sig.arity != 2:
+                            raise SemaError(
+                                f"{owner}.__eq__() must take exactly (self, other)",
+                                e.pos,
+                            )
+                        e.dunder_owner = owner  # type: ignore
+                        e.dunder_method = "__eq__"  # type: ignore
+                        e.dunder_negate = (op == "!=")  # type: ignore
+                    continue
+                if op in ("<", "<=", ">", ">=") and (
+                    lt.startswith("instance:") or rt.startswith("instance:")
+                ):
+                    # Ordering comparisons dispatch to __lt__/__le__/__gt__/__ge__
+                    # with reflected fallback, like DUNDER_BINOP's resolution.
+                    _DUNDER_CMP: dict = {
+                        "<": ("__lt__", "__gt__"),
+                        "<=": ("__le__", "__ge__"),
+                        ">": ("__gt__", "__lt__"),
+                        ">=": ("__ge__", "__le__"),
+                    }
+                    fwd_m, rfl_m = _DUNDER_CMP[op]
+                    cmp_resolved = None
+                    cmp_reflected = False
+                    if lt.startswith("instance:"):
+                        cmp_resolved = self._resolve_method(
+                            lt.split(":", 1)[1], fwd_m
+                        )
+                    if cmp_resolved is None and rt.startswith("instance:"):
+                        cmp_resolved = self._resolve_method(
+                            rt.split(":", 1)[1], rfl_m
+                        )
+                        cmp_reflected = cmp_resolved is not None
+                    if cmp_resolved is not None and len(e.ops) == 1:
+                        owner, _ = cmp_resolved
+                        e.dunder_owner = owner  # type: ignore
+                        e.dunder_method = rfl_m if cmp_reflected else fwd_m  # type: ignore
+                        e.dunder_reflected = cmp_reflected  # type: ignore
                     continue
                 if "str" in (lt, rt):
                     if op not in ("==", "!=", "<", "<=", ">", ">="):
@@ -2245,6 +4324,16 @@ class SemaAnalyzer:
                     e.pos,
                 )
             return
+        if isinstance(e, A.NamedExpr):
+            # `target := value` (the walrus operator): check + type the value,
+            # bind `target` exactly as `target = value` would, and the whole
+            # expression takes on `value`'s type.
+            self._check_expr(e.value, scope)
+            self._bind_name_from_value(e.target, e.value, scope)
+            e.inferred_type = A.expr_type(e.value)
+            if e.inferred_type == "list":
+                e.list_el_type = self._list_el_type(e.value, scope)
+            return
         if isinstance(e, A.Call):
             self._check_call(e, scope)
             return
@@ -2289,8 +4378,49 @@ class SemaAnalyzer:
                     )
             # Empty literal stays "?" until the first append pins the type.
             e.el_type = seen if seen is not None else "?"
+            # When elements are nested containers (list[dict] / list[list]),
+            # remember the common leaf kind so `xs[i][k]` / `for x in xs: x[k]`
+            # recover the value type one level down.
+            if seen in ("dict", "list"):
+                e.el_value_type = self._common_container_inner(e.elems, scope)
+            # When elements are tuples, remember the common per-slot kinds so
+            # `xs[i][0]` and `for a, b in xs` resolve the slot types.
+            elif seen == "tuple":
+                e.el_tuple_types = self._common_tuple_slots(e.elems, scope)
             return
         if isinstance(e, A.Comprehension):
+            # `[elt for i, x in enumerate(xs) ...]` — treat like the For-loop
+            # enumerate special case: bind index as int, element from xs.
+            if (
+                isinstance(e.iter, A.Call)
+                and e.iter.func == "enumerate"
+                and len(e.iter.args) >= 1
+                and e.targets
+                and len(e.targets) == 2
+            ):
+                inner = e.iter.args[0]
+                self._check_expr(inner, scope)
+                child = Scope()
+                child.types.update(scope.types)
+                child.list_el_types.update(scope.list_el_types)
+                child.list_el_tuple_types.update(scope.list_el_tuple_types)
+                child.dict_value_types.update(scope.dict_value_types)
+                child.dict_inner_value_types.update(scope.dict_inner_value_types)
+                child.tuple_elem_types.update(scope.tuple_elem_types)
+                idx_name = e.targets[0] if isinstance(e.targets[0], str) else None
+                el_name = e.targets[1] if isinstance(e.targets[1], str) else None
+                if idx_name:
+                    child.add(idx_name, "int")
+                if el_name:
+                    child.add(el_name, self._iter_element_type(inner, scope))
+                loop_vars = {n for n in (idx_name, el_name) if n}
+                if e.cond is not None:
+                    self._check_expr(e.cond, child)
+                self._check_expr(e.elt, child)
+                e.inferred_type = "list"
+                e.list_el_type = A.expr_type(e.elt)
+                self._merge_walrus_bindings(scope, child, loop_vars)
+                return
             self._check_expr(e.iter, scope)
             it_t = A.expr_type(e.iter)
             # Element type the loop variable takes from the iterable.
@@ -2303,23 +4433,113 @@ class SemaAnalyzer:
                 el = ets[0] if ets else "int"
             elif it_t == "any":
                 el = "any"
+            elif it_t.startswith("instance:"):
+                cls_name = it_t.split(":", 1)[1]
+                cls_sig = self.classes.get(cls_name)
+                if cls_sig is None or "__iter__" not in cls_sig.methods or "__next__" not in cls_sig.methods:
+                    raise SemaError(
+                        f"cannot iterate a {it_t} in a comprehension: "
+                        f"class must define __iter__ and __next__",
+                        e.pos,
+                        ErrorCode.E_ITER_TYPE,
+                    )
+                next_sig = cls_sig.methods.get("__next__")
+                el = (next_sig.ret_type[0] if next_sig and next_sig.ret_type else "any")
             else:
-                raise SemaError(f"cannot iterate a {it_t} in a comprehension", e.pos)
+                raise SemaError(f"cannot iterate a {it_t} in a comprehension", e.pos, ErrorCode.E_ITER_TYPE)
             # A child scope so the loop variable doesn't leak.
             child = Scope()
             child.types.update(scope.types)
             child.list_el_types.update(scope.list_el_types)
+            child.list_el_tuple_types.update(scope.list_el_tuple_types)
             child.dict_value_types.update(scope.dict_value_types)
             child.dict_inner_value_types.update(scope.dict_inner_value_types)
             child.tuple_elem_types.update(scope.tuple_elem_types)
             self._bind_comprehension_targets(e, el, child)
+            # When the outer element is itself a list (list[list[T]]), propagate
+            # the inner element type so `_list_el_type(var, child)` returns T.
+            if el == "list" and not e.targets:
+                inner_el = self._list_el_value_type(e.iter, scope)
+                if inner_el != "int":
+                    child.list_el_types[e.var] = inner_el
+            loop_vars = set(self._flat_target_names(e.targets)) if e.targets else {e.var}
             if e.cond is not None:
                 self._check_expr(e.cond, child)
+            ef_vars = getattr(e, "extra_for_vars", [])
+            ef_targets_list = getattr(e, "extra_for_targets", [])
+            ef_iters = getattr(e, "extra_for_iters", [])
+            ef_conds = getattr(e, "extra_for_conds", [])
+            for ef_n in range(len(ef_iters)):
+                ef_evar = ef_vars[ef_n] if ef_n < len(ef_vars) else ""
+                ef_emulti = ef_targets_list[ef_n] if ef_n < len(ef_targets_list) else []
+                ef_iter = ef_iters[ef_n]
+                ef_cond = ef_conds[ef_n] if ef_n < len(ef_conds) else None
+                self._check_expr(ef_iter, child)
+                ef_it_t = A.expr_type(ef_iter)
+                if ef_it_t == "list":
+                    ef_el = self._list_el_type(ef_iter, child)
+                elif ef_it_t in ("str", "dict"):
+                    ef_el = "str"
+                elif ef_it_t == "any":
+                    ef_el = "any"
+                else:
+                    ef_el = "int"
+                if ef_emulti:
+                    for tgt in ef_emulti:
+                        if isinstance(tgt, str):
+                            child.add(tgt, ef_el)
+                            loop_vars.add(tgt)
+                elif ef_evar:
+                    child.add(ef_evar, ef_el)
+                    loop_vars.add(ef_evar)
+                    # Propagate inner element type for list[list[T]] case
+                    if ef_el == "list":
+                        ef_inner = self._list_el_value_type(ef_iter, child)
+                        if ef_inner != "int":
+                            child.list_el_types[ef_evar] = ef_inner
+                if ef_cond is not None:
+                    self._check_expr(ef_cond, child)
             self._check_expr(e.elt, child)
             e.inferred_type = "list"
             e.list_el_type = A.expr_type(e.elt)
+            if e.list_el_type == "tuple":
+                e.el_tuple_types = self._tuple_elem_types(e.elt, child)
+            self._merge_walrus_bindings(scope, child, loop_vars)
             return
         if isinstance(e, A.DictComprehension):
+            # enumerate(iterable) special case: `{k: i for i, k in enumerate(xs)}`
+            if (
+                isinstance(e.iter, A.Call)
+                and e.iter.func == "enumerate"
+                and len(e.iter.args) >= 1
+                and e.targets
+                and len(e.targets) == 2
+            ):
+                inner = e.iter.args[0]
+                self._check_expr(inner, scope)
+                child = Scope()
+                child.types.update(scope.types)
+                child.list_el_types.update(scope.list_el_types)
+                child.list_el_tuple_types.update(scope.list_el_tuple_types)
+                child.dict_value_types.update(scope.dict_value_types)
+                child.dict_inner_value_types.update(scope.dict_inner_value_types)
+                child.tuple_elem_types.update(scope.tuple_elem_types)
+                idx_name = e.targets[0] if isinstance(e.targets[0], str) else None
+                el_name = e.targets[1] if isinstance(e.targets[1], str) else None
+                if idx_name:
+                    child.add(idx_name, "int")
+                if el_name:
+                    child.add(el_name, self._iter_element_type(inner, scope))
+                loop_vars = {n for n in (idx_name, el_name) if n}
+                if e.cond is not None:
+                    self._check_expr(e.cond, child)
+                self._check_expr(e.key, child)
+                self._check_expr(e.value, child)
+                vt = A.expr_type(e.value)
+                e.inferred_type = "dict"
+                e.value_type = vt if vt != "any" else "int"
+                self._merge_walrus_bindings(scope, child, loop_vars)
+                return
             self._check_expr(e.iter, scope)
             it_t = A.expr_type(e.iter)
             if it_t == "list":
@@ -2338,10 +4558,12 @@ class SemaAnalyzer:
             child = Scope()
             child.types.update(scope.types)
             child.list_el_types.update(scope.list_el_types)
+            child.list_el_tuple_types.update(scope.list_el_tuple_types)
             child.dict_value_types.update(scope.dict_value_types)
             child.dict_inner_value_types.update(scope.dict_inner_value_types)
             child.tuple_elem_types.update(scope.tuple_elem_types)
             self._bind_comprehension_targets(e, el, child)
+            loop_vars = set(self._flat_target_names(e.targets)) if e.targets else {e.var}
             if e.cond is not None:
                 self._check_expr(e.cond, child)
             self._check_expr(e.key, child)
@@ -2369,9 +4591,21 @@ class SemaAnalyzer:
                 )
             e.inferred_type = "dict"
             e.value_type = vt if vt != "any" else "int"
+            self._merge_walrus_bindings(scope, child, loop_vars)
             return
         if isinstance(e, A.DictLit):
-            for k in e.keys:
+            for k, v in zip(e.keys, e.values):
+                if isinstance(k, A.Name) and k.name == "**":
+                    # `**other` (PEP 448 dict unpacking): `other` must itself
+                    # be dict-typed (or opaque).
+                    self._check_expr(v, scope)
+                    vt = A.expr_type(v)
+                    if vt not in ("dict", "any"):
+                        raise SemaError(
+                            f"dict unpacking requires a dict (got {vt})",
+                            getattr(v, "pos", e.pos),
+                        )
+                    continue
                 self._check_expr(k, scope)
                 if A.expr_type(k) not in ("str", "any", "int") and not A.expr_type(k).startswith("instance:"):
                     raise SemaError(
@@ -2385,23 +4619,31 @@ class SemaAnalyzer:
             # value kind is tracked on the DictLit so codegen / iteration / a
             # chained read (`d[k][k2]`) can recover it.
             seen_v: str | None = None
-            for v in e.values:
-                self._check_expr(v, scope)
-                vt = A.expr_type(v)
-                if vt not in (
-                    "int",
-                    "str",
-                    "float",
-                    "any",
-                    "tuple",
-                    "dict",
-                    "list",
-                    "set",
-                ) and not vt.startswith("instance:"):
-                    raise SemaError(
-                        f"dict value of type {vt} is not supported yet",
-                        getattr(v, "pos", e.pos),
-                    )
+            for k, v in zip(e.keys, e.values):
+                if isinstance(k, A.Name) and k.name == "**":
+                    # A `**other` spread contributes `other`'s value kind too,
+                    # so e.g. `{**d1, "x": 1}` where `d1: dict[str, str]` and
+                    # the literal key is `int` collapses to "any" below, same
+                    # as any other value-kind mismatch. An opaque `other`
+                    # ("any"-typed dict) is compatible with any value kind.
+                    vt = "any" if A.expr_type(v) == "any" else self._dict_value_type(v, scope)
+                else:
+                    self._check_expr(v, scope)
+                    vt = A.expr_type(v)
+                    if vt not in (
+                        "int",
+                        "str",
+                        "float",
+                        "any",
+                        "tuple",
+                        "dict",
+                        "list",
+                        "set",
+                    ) and not vt.startswith("instance:"):
+                        raise SemaError(
+                            f"dict value of type {vt} is not supported yet",
+                            getattr(v, "pos", e.pos),
+                        )
                 if vt == "any":
                     continue  # opaque value: compatible with any value kind
                 if seen_v is None or seen_v == "any":
@@ -2465,9 +4707,18 @@ class SemaAnalyzer:
         if isinstance(e, A.SetLit):
             # A `{a, b, ...}` set literal. Elements are checked but their kind
             # isn't tracked (set membership is the only operation modelled);
-            # `expr_type` already reports a SetLit as "set".
+            # `expr_type` already reports a SetLit as "set". The backing store
+            # is a str-keyed dict; `int` elements are accepted by converting
+            # to their decimal string at codegen time (see _gen_set_lit).
             for el in e.elems:
                 self._check_expr(el, scope)
+                et = A.expr_type(el)
+                if et not in ("str", "int", "any", "tuple"):
+                    raise SemaError(
+                        f"set elements of type {et} are not supported yet "
+                        "(sets are str/int-keyed in v1)",
+                        getattr(el, "pos", e.pos),
+                    )
             return
         if isinstance(e, A.Subscript):
             self._check_expr(e.obj, scope)
@@ -2491,10 +4742,7 @@ class SemaAnalyzer:
                     e.inferred_type = "any"
                     return
                 if obj_t == "list":
-                    # List slice preserves element type. We don't support step
-                    # for lists yet — it'd require a non-contiguous copy loop.
-                    if e.index.step is not None:
-                        raise SemaError("list slice does not support a step yet", e.pos)
+                    # List slice preserves element type.
                     e.inferred_type = "list"
                     # Propagate element type onto the Subscript so codegen and
                     # downstream `_list_el_type` see the right kind.
@@ -2505,6 +4753,17 @@ class SemaAnalyzer:
             self._check_expr(e.index, scope)
             if obj_t == "list":
                 e.inferred_type = self._list_el_type(e.obj, scope)
+                # A nested container element (list[dict] / list[list]): carry the
+                # tracked leaf kind onto the read-out container so `xs[i][k]`
+                # recovers the value type. Falls back to "any" when untracked.
+                if e.inferred_type in ("dict", "list"):
+                    inner = self._list_el_value_type(e.obj, scope)
+                    inner = inner if inner != "int" else "any"
+                    e.value_type = inner
+                    e.list_el_type = inner
+                elif e.inferred_type == "tuple":
+                    # list[tuple]: carry the per-slot kinds so `xs[i][0]` types.
+                    e.tuple_elem_types = self._list_el_tuple_types(e.obj, scope)
             elif obj_t == "tuple":
                 if A.expr_type(e.index) != "int":
                     raise SemaError("tuple index must be an int", e.pos)
@@ -2555,8 +4814,27 @@ class SemaAnalyzer:
             elif obj_t == "any":
                 # Indexing an opaque value stays opaque.
                 e.inferred_type = "any"
+            elif obj_t.startswith("instance:"):
+                cls_name = obj_t.split(":", 1)[1]
+                cls_sig = self.classes.get(cls_name)
+                msig = None
+                if cls_sig is not None:
+                    msig = cls_sig.methods.get("__getitem__")
+                if msig is None:
+                    raise SemaError(
+                        f"'{cls_name}' object does not support indexing", e.pos
+                    )
+                # Mark so codegen translates this subscript into a __getitem__ call.
+                e._getitem_class = cls_name  # type: ignore[attr-defined]
+                if msig.ret_type is not None:
+                    ty, el, _val = msig.ret_type  # type: ignore[misc]
+                    e.inferred_type = ty
+                    if ty == "list" and el is not None:
+                        e.list_el_type = el  # type: ignore[attr-defined]
+                else:
+                    e.inferred_type = "int"
             else:
-                raise SemaError(f"cannot index a {obj_t}", e.pos)
+                raise SemaError(f"cannot index a {obj_t}", e.pos, ErrorCode.E_INDEX_OBJECT_TYPE)
             return
         if isinstance(e, A.FString):
             for seg in e.segments:
@@ -2568,9 +4846,25 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"f-string segment cannot be a {t}",
                         getattr(seg, "pos", e.pos),
+                        ErrorCode.E_FSTRING_SEGMENT_TYPE,
                     )
             return
         if isinstance(e, A.Attr):
+            # cls.field inside a @classmethod body → rewrite to ClassName.field
+            if (
+                isinstance(e.obj, A.Name)
+                and self.classmethod_cls_param is not None
+                and e.obj.name == self.classmethod_cls_param
+                and self.current_class is not None
+            ):
+                e.obj.name = self.current_class
+            # Class-level variable read: `ClassName.x` (static constant). Type it
+            # from the class var's default expression.
+            if isinstance(e.obj, A.Name) and e.obj.name in self.classes:
+                cvt = self._class_var_type(e.obj.name, e.name)
+                if cvt is not None:
+                    e.inferred_type = cvt
+                    return
             # Special-case module attribute: math.pi, math.sqrt(...).
             if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
                 bindings = self.imported_modules[e.obj.name]
@@ -2604,6 +4898,34 @@ class SemaAnalyzer:
                 # A field of an external/imported instance is also "any".
                 cls = obj_t.split(":", 1)[1]
                 if cls in self.classes:
+                    # `@property`: `obj.x` (no call parens) invokes the
+                    # zero-arg getter method `x`, not a field read. Rewrite
+                    # this Attr node into an equivalent no-arg MethodCall in
+                    # place, so codegen's existing method-dispatch (including
+                    # virtual dispatch for overridden properties) handles it.
+                    resolved = self._resolve_method(cls, e.name)
+                    if resolved is not None and "property" in resolved[1].decorators:
+                        _owner, sig = resolved
+                        obj_expr = e.obj
+                        e.__class__ = A.MethodCall  # type: ignore[assignment]
+                        e.obj = obj_expr  # type: ignore[attr-defined]
+                        e.method = e.name  # type: ignore[attr-defined]
+                        e.args = []  # type: ignore[attr-defined]
+                        e.kwargs = []  # type: ignore[attr-defined]
+                        e.list_el_type = "int"  # type: ignore[attr-defined]
+                        e.value_type = "int"  # type: ignore[attr-defined]
+                        e.tuple_elem_types = []  # type: ignore[attr-defined]
+                        if sig.ret_tuple is not None:
+                            e.inferred_type = "tuple"
+                            e.tuple_elem_types = list(sig.ret_tuple)  # type: ignore[attr-defined]
+                        elif sig.ret_type is not None:
+                            ty, el, _val = sig.ret_type  # type: ignore[misc]
+                            e.inferred_type = ty
+                            if ty == "list" and el is not None:
+                                e.list_el_type = el  # type: ignore[attr-defined]
+                        else:
+                            e.inferred_type = "int"
+                        return
                     ft = self._resolve_field_type(cls, e.name)
                     e.inferred_type = ft if ft is not None else "any"
                     # Carry the collection element/value kinds so a later
@@ -2636,6 +4958,7 @@ class SemaAnalyzer:
             e.inferred_type = "any"
             return
         if isinstance(e, A.MethodCall):
+            e.args = self._expand_starred_args(e.args, scope)
             # Interpreter-only calls (dynamic import, code-exec by string) have
             # no native lowering — reject early with a located message instead
             # of letting them reach codegen as a raw NotImplementedError.
@@ -2651,6 +4974,17 @@ class SemaAnalyzer:
                 )
             # Module function call: math.sqrt(x), math.pow(a, b).
             if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
+                # os.getcwd() / os.listdir(path): inline codegen helpers not in
+                # BINDINGS (no C symbol). Give them proper types and accept args.
+                if e.obj.name == "os" and e.method == "getcwd":
+                    e.inferred_type = "str"
+                    return
+                if e.obj.name == "os" and e.method == "listdir":
+                    if e.args:
+                        self._check_expr(e.args[0], scope)
+                    e.inferred_type = "list"
+                    e.list_el_type = "str"
+                    return
                 bindings = self.imported_modules[e.obj.name]
                 if e.method not in bindings or not isinstance(
                     bindings[e.method], stdlib.Func
@@ -2667,7 +5001,7 @@ class SemaAnalyzer:
                 return
             # `module.Thing(args)` where `module` is a merged *project* module
             # (not an FFI registry module) and `Thing` is a merged class or
-            # top-level function (`stdlib.Func(...)`, `pkgformat.load_package(p)`):
+            # top-level function (`stdlib.Func(...)`, `ospath.join(a, b)`):
             # whole-program compilation flattens the namespace, so this IS a
             # plain call to the merged symbol. Rewrite the node into an A.Call
             # in place and run the ordinary call checker — constructors get the
@@ -2760,6 +5094,7 @@ class SemaAnalyzer:
                 elif e.method == "sort":
                     if e.args:
                         raise SemaError("list.sort() takes no arguments", e.pos)
+                    self._check_sort_kwargs(e, scope)
                     e.inferred_type = "int"  # in-place, returns None ~ 0
                 elif e.method == "reverse":
                     if e.args:
@@ -2801,6 +5136,8 @@ class SemaAnalyzer:
                     if kt not in ("str", "any", "int") and not kt.startswith("instance:"):
                         raise SemaError("dict.get() key must be a str", e.pos)
                     e.inferred_type = self._dict_value_type(e.obj, scope)
+                    if len(e.args) == 1:
+                        e.dict_get_none_default = True
                 elif e.method == "contains":
                     if len(e.args) != 1:
                         raise SemaError("dict.contains() takes 1 argument", e.pos)
@@ -2902,6 +5239,8 @@ class SemaAnalyzer:
                     e.inferred_type = ty
                     if ty == "list" and el is not None:
                         e.list_el_type = el
+                        if el in ("list", "dict") and sig.ret_inner_el_type:
+                            e.el_value_type = sig.ret_inner_el_type
                 else:
                     e.inferred_type = "int"
                 return
@@ -2926,13 +5265,17 @@ class SemaAnalyzer:
                     )
                 _, sig = resolved
                 # Method arity counts self; user passed args don't include self.
-                expected = sig.arity - 1
+                # @staticmethod has no implicit self so don't subtract 1.
+                is_static_m = "staticmethod" in getattr(sig, "decorators", [])
+                expected = sig.arity if is_static_m else sig.arity - 1
                 required = expected - sig.n_defaults
-                if not (required <= len(e.args) <= expected):
-                    raise SemaError(
-                        f"{class_name}.{e.method}() takes {required}..{expected} argument(s), got {len(e.args)}",
-                        e.pos,
-                    )
+                if sig.vararg is None and sig.kwarg is None and not e.kwargs:
+                    if not (required <= len(e.args) <= expected):
+                        raise SemaError(
+                            f"{class_name}.{e.method}() takes {required}..{expected} argument(s), got {len(e.args)}",
+                            e.pos,
+                            ErrorCode.E_ARG_COUNT,
+                        )
                 # Assembly operand validation: when string literals are passed
                 # to any Assembly method, validate them at compile time.
                 if class_name == "Assembly":
@@ -2948,13 +5291,24 @@ class SemaAnalyzer:
                 elif sig.ret_type is not None:
                     ty, el, _val = sig.ret_type  # type: ignore
                     e.inferred_type = ty
+                    if sig.ret_bool:
+                        e.is_bool = True
                     if ty == "list" and el is not None:
                         e.list_el_type = el
+                        if el == "tuple" and sig.ret_list_tuple_types:
+                            e.tuple_elem_types = list(sig.ret_list_tuple_types)  # type: ignore
+                        elif el in ("list", "dict") and sig.ret_inner_el_type:
+                            e.el_value_type = sig.ret_inner_el_type
+                elif sig.returns_self:
+                    # `def m(self): ... return self` with no annotation: the
+                    # call's result is another reference to the receiver's
+                    # type (e.g. `__enter__` returning `self`).
+                    e.inferred_type = obj_t
                 else:
                     e.inferred_type = "int"
             elif obj_t == "module" and e.method in self.funcs:
                 # A module-qualified call to a merged project function
-                # (`pkgformat.load_package(p)`, `ospath.join(a, b)`): adopt the
+                # (`ospath.join(a, b)`, etc.): adopt the
                 # function's signature so the result is typed like a plain call
                 # (codegen dispatches it to the merged symbol).
                 msig = self.funcs[e.method]
@@ -2966,6 +5320,8 @@ class SemaAnalyzer:
                     e.inferred_type = mty
                     if mty == "list" and mel is not None:
                         e.list_el_type = mel
+                        if mel in ("list", "dict") and msig.ret_inner_el_type:
+                            e.el_value_type = msig.ret_inner_el_type
                     elif mty == "dict" and mval is not None:
                         e.value_type = mval
                 else:
@@ -2977,7 +5333,16 @@ class SemaAnalyzer:
                 # the result is opaque so chains keep type-checking.
                 e.inferred_type = "any"
             elif obj_t == "set":
-                if e.method in ("add", "discard", "remove", "update", "clear"):
+                if e.method in ("add", "discard", "remove"):
+                    arg_t = A.expr_type(e.args[0])
+                    if arg_t not in ("str", "int", "any"):
+                        raise SemaError(
+                            f"set.{e.method}({arg_t}) is not supported yet "
+                            "(sets are str/int-keyed in v1)",
+                            e.args[0].pos,
+                        )
+                    e.inferred_type = "int"
+                elif e.method in ("update", "clear"):
                     e.inferred_type = "int"
                 elif e.method in ("union", "intersection", "difference"):
                     if len(e.args) != 1:
@@ -2995,6 +5360,45 @@ class SemaAnalyzer:
                     e.inferred_type = "str"
                 else:
                     e.inferred_type = "any"
+            elif isinstance(e.obj, A.Name) and e.obj.name in self.classes:
+                # `ClassName.method(args)`: a @staticmethod / @classmethod called
+                # on the class itself (no instance). Validate against the method
+                # signature; static methods take their args verbatim, class
+                # methods take an implicit leading `cls`.
+                cls_name = e.obj.name
+                resolved = self._resolve_method(cls_name, e.method)
+                if resolved is None:
+                    raise SemaError(
+                        f"{cls_name} has no method {e.method!r}", e.pos
+                    )
+                _owner, sig = resolved
+                deco = getattr(sig, "decorators", [])
+                if "classmethod" in deco:
+                    expected = sig.arity - 1  # drop implicit cls
+                elif "staticmethod" in deco:
+                    expected = sig.arity
+                else:
+                    raise SemaError(
+                        f"{cls_name}.{e.method}() needs an instance "
+                        "(not a @staticmethod or @classmethod)",
+                        e.pos,
+                    )
+                required = expected - sig.n_defaults
+                if not (required <= len(e.args) <= expected):
+                    raise SemaError(
+                        f"{cls_name}.{e.method}() takes {required}..{expected} "
+                        f"argument(s), got {len(e.args)}",
+                        e.pos,
+                    )
+                for a in e.args:
+                    self._check_expr(a, scope)
+                if sig.ret_type is not None:
+                    ty, el, _val = sig.ret_type  # type: ignore
+                    e.inferred_type = ty
+                    if ty == "list" and el is not None:
+                        e.list_el_type = el
+                else:
+                    e.inferred_type = "int"
             else:
                 raise SemaError(f"{obj_t} has no method {e.method!r}", e.pos)
             return
@@ -3011,10 +5415,14 @@ class SemaAnalyzer:
                 inner_scope.add(nm, ty)
             for p in e.params:
                 inner_scope.add(p, "any")
-            try:
-                self._check_expr(e.body, inner_scope)
-            except Exception:
-                pass
+            ret_t = "int"
+            if e.body is not None:
+                try:
+                    self._check_expr(e.body, inner_scope)
+                    ret_t = A.expr_type(e.body)
+                except Exception:
+                    pass
+            e.lambda_ret = ret_t  # type: ignore[attr-defined]
             e.inferred_type = "any"
             return
         if isinstance(e, A.Slice):
@@ -3034,12 +5442,17 @@ class SemaAnalyzer:
     STR_METHODS = {
         "upper": ((), "str"),
         "lower": ((), "str"),
+        "casefold": ((), "str"),
+        "capitalize": ((), "str"),
+        "swapcase": ((), "str"),
+        "title": ((), "str"),
         "strip": ((), "str"),
         "lstrip": ((), "str"),
         "rstrip": ((), "str"),
         "startswith": (("str",), "int"),
         "endswith": (("str",), "int"),
-        "find": (("str",), "int"),
+        "removeprefix": (("str",), "str"),
+        "removesuffix": (("str",), "str"),
         "count": (("str",), "int"),
         "replace": (("str", "str"), "str"),
         # Character-class predicates (0-arg, bool result) used by the lexer.
@@ -3051,6 +5464,97 @@ class SemaAnalyzer:
         "islower": ((), "int"),
         "isidentifier": ((), "int"),
     }
+
+    def _check_pct_format(self, e: A.BinOp, scope: Scope) -> None:
+        """`"...%s..." % (args)` (or `% single_arg`) — printf-style formatting.
+
+        The format string must be a literal (codegen lowers it to a concat
+        chain, like .format()). Validates the argument count against the
+        number of conversions and that each conversion's argument type makes
+        sense (`%d`/`%x`/etc. need int, `%f`/etc. need a number; `%s`/`%r`
+        accept anything).
+        """
+        if not isinstance(e.left, A.StrLit):
+            raise SemaError(
+                "'%' string formatting requires a literal format string", e.pos
+            )
+        try:
+            pieces, nconv = A.parse_pct_format(e.left.value)
+        except ValueError as exc:
+            raise SemaError(f"bad format string: {exc}", e.pos)
+        args = e.right.elems if isinstance(e.right, A.TupleLit) else [e.right]
+        if len(args) != nconv:
+            raise SemaError(
+                f"'%' format string expects {nconv} argument(s), got {len(args)}",
+                e.pos,
+                ErrorCode.E_FORMAT_ARG_COUNT,
+            )
+        ai = 0
+        for piece in pieces:
+            if piece[0] != "arg":
+                continue
+            conv = piece[4]
+            t = A.expr_type(args[ai])
+            if conv in "dioxX" and t not in ("int", "any"):
+                raise SemaError(f"'%{conv}' format requires an int argument", e.pos, ErrorCode.E_FORMAT_ARG_TYPE)
+            if conv in "eEfFgG" and t not in ("int", "float", "any"):
+                raise SemaError(f"'%{conv}' format requires a numeric argument", e.pos, ErrorCode.E_FORMAT_ARG_TYPE)
+            ai += 1
+        e.inferred_type = "str"  # type: ignore
+
+    def _check_sort_kwargs(self, e, scope: Scope) -> None:
+        """Validate and resolve the `key=`/`reverse=` kwargs shared by
+        `sorted()`, `min()`/`max()`, and `list.sort()`.
+
+        Only `key=<lambda literal>` and `key=<name bound to a lambda>` are
+        supported (a bare named-function reference currently segfaults via
+        the same indirect-call path used elsewhere, so it's rejected here
+        too). Stamps `e.sort_key` (Optional[expr]), `e.sort_key_ret`
+        ("str"/"int"), and `e.sort_reverse` (Optional[expr]), then clears
+        `e.kwargs` so normal call-arg checks don't see them.
+        """
+        key_expr = None
+        reverse_expr = None
+        for kname, kexpr in e.kwargs:
+            if kname == "key":
+                key_expr = kexpr
+            elif kname == "reverse":
+                reverse_expr = kexpr
+            else:
+                raise SemaError(f"unexpected keyword argument {kname!r}", e.pos, ErrorCode.E_ARG_COUNT)
+        if key_expr is not None:
+            self._check_expr(key_expr, scope)
+            if isinstance(key_expr, A.Lambda):
+                ret_t = getattr(key_expr, "lambda_ret", "int")
+            elif isinstance(key_expr, A.Name):
+                if key_expr.name not in self.lambda_rets:
+                    raise SemaError(
+                        "key= must be a lambda literal or a name bound to a "
+                        f"lambda (a bare function reference like {key_expr.name!r} "
+                        "isn't supported)",
+                        e.pos,
+                    )
+                ret_t = self.lambda_rets[key_expr.name]
+            else:
+                raise SemaError(
+                    "key= must be a lambda literal or a name bound to a lambda",
+                    e.pos,
+                )
+            # Lambda params are typed "any", so most non-str results (int,
+            # float-as-bits, "any") compare correctly as ints; only an
+            # explicit "str" result needs the string comparator.
+            key_ret = "str" if ret_t == "str" else "int"
+            e.sort_key = key_expr  # type: ignore[attr-defined]
+            e.sort_key_ret = key_ret  # type: ignore[attr-defined]
+        else:
+            e.sort_key = None  # type: ignore[attr-defined]
+            e.sort_key_ret = "int"  # type: ignore[attr-defined]
+        if reverse_expr is not None:
+            self._check_expr(reverse_expr, scope)
+            e.sort_reverse = reverse_expr  # type: ignore[attr-defined]
+        else:
+            e.sort_reverse = None  # type: ignore[attr-defined]
+        e.kwargs = []
 
     def _check_str_method(self, e: A.MethodCall, scope: Scope) -> None:
         # Methods with non-trivial signatures: split returns list[str]; join
@@ -3094,13 +5598,13 @@ class SemaAnalyzer:
             e.inferred_type = "list"
             e.list_el_type = "str"
             return
-        if e.method == "partition":
-            # str.partition(sep) -> (before, sep, after): always a 3-tuple of
-            # strings, so the unpack targets type as str (prints / == work).
+        if e.method in ("partition", "rpartition"):
+            # str.(r)partition(sep) -> (before, sep, after): always a 3-tuple
+            # of strings, so the unpack targets type as str (prints / == work).
             if len(e.args) != 1:
-                raise SemaError("str.partition() takes 1 argument", e.pos)
+                raise SemaError(f"str.{e.method}() takes 1 argument", e.pos)
             if A.expr_type(e.args[0]) not in ("str", "any"):
-                raise SemaError("str.partition() separator must be str", e.pos)
+                raise SemaError(f"str.{e.method}() separator must be str", e.pos)
             e.inferred_type = "tuple"
             e.tuple_elem_types = ["str", "str", "str"]
             return
@@ -3130,6 +5634,74 @@ class SemaAnalyzer:
                 raise SemaError(f"str.{e.method}() argument must be str", e.pos)
             e.inferred_type = "str"
             return
+        if e.method == "zfill":
+            if len(e.args) != 1:
+                raise SemaError("str.zfill() takes 1 argument", e.pos)
+            if A.expr_type(e.args[0]) not in ("int", "any"):
+                raise SemaError("str.zfill() argument must be an int", e.pos)
+            e.inferred_type = "str"
+            return
+        if e.method in ("ljust", "rjust", "center"):
+            # str.{ljust,rjust,center}(width[, fillchar]); fillchar defaults
+            # to a space when omitted.
+            if len(e.args) not in (1, 2):
+                raise SemaError(f"str.{e.method}() takes 1 or 2 arguments", e.pos)
+            if A.expr_type(e.args[0]) not in ("int", "any"):
+                raise SemaError(f"str.{e.method}() width must be an int", e.pos)
+            if len(e.args) == 2 and A.expr_type(e.args[1]) not in ("str", "any"):
+                raise SemaError(f"str.{e.method}() fillchar must be a str", e.pos)
+            e.inferred_type = "str"
+            return
+        if e.method in ("find", "rfind", "index", "rindex"):
+            # str.find(sub[, start[, end]]): asmpython supports 1- or 2-arg form.
+            if len(e.args) not in (1, 2):
+                raise SemaError(f"str.{e.method}() takes 1 or 2 arguments", e.pos)
+            if A.expr_type(e.args[0]) not in ("str", "any"):
+                raise SemaError(f"str.{e.method}() sub must be a str", e.pos)
+            if len(e.args) == 2 and A.expr_type(e.args[1]) not in ("int", "any"):
+                raise SemaError(f"str.{e.method}() start must be an int", e.pos)
+            e.inferred_type = "int"
+            return
+        if e.method == "expandtabs":
+            # str.expandtabs([tabsize=8])
+            if len(e.args) > 1:
+                raise SemaError("str.expandtabs() takes 0 or 1 argument", e.pos)
+            if e.args and A.expr_type(e.args[0]) not in ("int", "any"):
+                raise SemaError("str.expandtabs() tabsize must be an int", e.pos)
+            e.inferred_type = "str"
+            return
+        if e.method == "format" and isinstance(e.obj, A.StrLit):
+            # `"...".format(args)` with a literal format string: codegen lowers
+            # this to a concat chain, so the result is a real str.
+            for a in e.args:
+                self._check_expr(a, scope)
+            for _, a in e.kwargs:
+                self._check_expr(a, scope)
+            kwarg_names = {name for name, _ in e.kwargs}
+            for kind, val, _spec, _conv in A.parse_format_fields(e.obj.value):
+                if kind != "arg":
+                    continue
+                if isinstance(val, str):
+                    if "." in val or "[" in val:
+                        raise SemaError(
+                            "str.format() attribute/index access in "
+                            f"fields (e.g. '{{0.attr}}', '{{0[0]}}') is not "
+                            "supported",
+                            e.pos,
+                        )
+                    if val not in kwarg_names:
+                        raise SemaError(
+                            f"str.format() got an unexpected field name {val!r}",
+                            e.pos,
+                        )
+                elif val >= len(e.args):
+                    raise SemaError(
+                        f"str.format() field index {val} out of range "
+                        f"({len(e.args)} positional argument(s))",
+                        e.pos,
+                    )
+            e.inferred_type = "str"
+            return
         sig = self.STR_METHODS.get(e.method)
         if sig is None:
             # An unmodeled method on a str-typed value. asmpython's
@@ -3147,13 +5719,15 @@ class SemaAnalyzer:
                 f"str.{e.method}() takes {len(arg_types)} argument(s), got {len(e.args)}",
                 e.pos,
             )
-        for i, (a, want) in enumerate(zip(e.args, arg_types)):
+        _si = 0
+        for a, want in zip(e.args, arg_types):
             got = A.expr_type(a)
             if got != want:
                 raise SemaError(
-                    f"str.{e.method}() argument {i + 1}: expected {want}, got {got}",
+                    f"str.{e.method}() argument {_si + 1}: expected {want}, got {got}",
                     e.pos,
                 )
+            _si = _si + 1
         e.inferred_type = ret
 
     def _check_ffi_call(
@@ -3167,22 +5741,26 @@ class SemaAnalyzer:
                 f"{label}() takes {len(fn.arg_types)} argument(s), got {len(args)}",
                 pos,
             )
-        for i, (a, want) in enumerate(zip(args, fn.arg_types)):
+        _ffi_i = 0
+        for a, want in zip(args, fn.arg_types):
             self._check_expr(a, scope)
             got = A.expr_type(a)
             if got == want:
+                _ffi_i = _ffi_i + 1
                 continue
             # Allow int -> float promotion.
             if want == "float" and got == "int":
+                _ffi_i = _ffi_i + 1
                 continue
             # "list_buf": pass a list[int]'s underlying data buffer as a raw
             # pointer (see _gen_ffi_call) -- used for FFI calls that fill a
             # fixed-size struct (e.g. `stat`) the caller reads back as int64
             # words, since string buffers can't survive embedded NUL bytes.
             if want == "list_buf" and got == "list" and getattr(a, "list_el_type", "int") == "int":
+                _ffi_i = _ffi_i + 1
                 continue
             raise SemaError(
-                f"{label}() argument {i + 1}: expected {want}, got {got}",
+                f"{label}() argument {_ffi_i + 1}: expected {want}, got {got}",
                 pos,
             )
 
@@ -3199,13 +5777,16 @@ class SemaAnalyzer:
             sig = r[1] if r else None
         if sig is None:
             return
+        is_static_m = "staticmethod" in getattr(sig, "decorators", [])
+        skip = 0 if is_static_m else 1
         self._bind_args(
             e,
-            sig.param_names[1:],
-            sig.param_defaults[1:],
+            sig.param_names[skip:],
+            sig.param_defaults[skip:],
             sig.vararg,
             e.pos,
             e.method,
+            kwarg=sig.kwarg,
         )
 
     def _bind_args(
@@ -3216,6 +5797,7 @@ class SemaAnalyzer:
         vararg,
         pos,
         label,
+        kwarg=None,
     ) -> None:
         """Rewrite a call's (positional, keyword) arguments into a single
         positional list matching `names`, so codegen sees an ordinary call.
@@ -3224,9 +5806,13 @@ class SemaAnalyzer:
         Keyword args are matched onto positions by name; omitted params fall
         back to their default. With a `*args` parameter (the trailing slot),
         surplus positionals are packed into a ListLit passed in that slot.
+        With a `**kwargs` parameter, excess keyword arguments are packed into
+        a DictLit passed as a final trailing dict-typed slot.
         """
-        fixed_names = names[:-1] if vararg is not None else names
-        fixed_defaults = defaults[:-1] if vararg is not None else defaults
+        # Strip trailing special slots (*args and/or **kwargs) from the fixed param list.
+        tail = (1 if vararg is not None else 0) + (1 if kwarg is not None else 0)
+        fixed_names = names[:-tail] if tail else names
+        fixed_defaults = defaults[:-tail] if tail else defaults
         nfixed = len(fixed_names)
         # Pre-size the slot list with None placeholders. Built with an explicit
         # loop rather than `[None] * nfixed` so this stays self-compilable
@@ -3244,17 +5830,22 @@ class SemaAnalyzer:
                 raise SemaError(
                     f"{label}() takes {nfixed} argument(s), got {len(e.args)}", pos
                 )
+        excess_kw: list = []
         for kname, kexpr in e.kwargs:
             if kname not in fixed_names:
-                raise SemaError(
-                    f"{label}() got an unexpected keyword argument {kname!r}", pos
-                )
-            idx = fixed_names.index(kname)
-            if slots[idx] is not None:
-                raise SemaError(
-                    f"{label}() got multiple values for argument {kname!r}", pos
-                )
-            slots[idx] = kexpr
+                if kwarg is not None:
+                    excess_kw.append((kname, kexpr))
+                else:
+                    raise SemaError(
+                        f"{label}() got an unexpected keyword argument {kname!r}", pos
+                    )
+            else:
+                idx = fixed_names.index(kname)
+                if slots[idx] is not None:
+                    raise SemaError(
+                        f"{label}() got multiple values for argument {kname!r}", pos
+                    )
+                slots[idx] = kexpr
         for i in range(nfixed):
             if slots[i] is None:
                 if fixed_defaults[i] is not None:
@@ -3267,24 +5858,80 @@ class SemaAnalyzer:
         new_args = list(slots)
         if vararg is not None:
             new_args.append(A.ListLit(elems=extra, pos=pos))
+        if kwarg is not None:
+            kw_keys: list = []
+            kw_vals: list = []
+            for kname, kexpr in excess_kw:
+                kw_keys.append(A.StrLit(value=kname, pos=pos))
+                kw_vals.append(kexpr)
+            new_args.append(A.DictLit(keys=kw_keys, values=kw_vals, pos=pos, value_type="any"))
         e.args = new_args
         e.kwargs = []
 
+    def _expand_starred_args(self, args: list, scope: Scope) -> list:
+        """Rewrite `*expr` call arguments in place into one Subscript per
+        tuple slot (`expr[0], expr[1], ...`), since asmpython has no runtime
+        varargs. Returns the (possibly unchanged) args list."""
+        if not any(isinstance(a, A.Starred) for a in args):
+            return args
+        new_args: list = []
+        for a in args:
+            if not isinstance(a, A.Starred):
+                new_args.append(a)
+                continue
+            self._check_expr(a.value, scope)
+            if not isinstance(a.value, (A.Name, A.Subscript, A.Attr)):
+                raise SemaError(
+                    "*expr argument unpacking requires a name, subscript, or "
+                    "attribute expression (assign the value to a variable "
+                    "first)",
+                    a.pos,
+                )
+            ets = self._tuple_elem_types(a.value, scope)
+            if not ets:
+                raise SemaError(
+                    "*expr argument unpacking requires a tuple with known "
+                    "element types",
+                    a.pos,
+                )
+            for i in range(len(ets)):
+                sub = A.Subscript(
+                    obj=a.value, index=A.IntLit(value=i, pos=a.pos), pos=a.pos
+                )
+                self._check_expr(sub, scope)
+                new_args.append(sub)
+        return new_args
+
     def _check_call(self, e: A.Call, scope: Scope) -> None:
+        e.args = self._expand_starred_args(e.args, scope)
         if e.func in INTERPRETER_ONLY_BUILTINS:
             raise SemaError(
                 f"{e.func}() is not supported: it requires a Python interpreter "
                 "and cannot be compiled to native code",
                 e.pos,
             )
+        if e.func == "range":
+            # range(...) as a value materializes a list[int]. (In a `for` header
+            # the parser captures range specially and it never becomes a Call.)
+            if not (1 <= len(e.args) <= 3):
+                raise SemaError(
+                    f"range() takes 1-3 arguments, got {len(e.args)}", e.pos
+                )
+            for a in e.args:
+                self._check_expr(a, scope)
+                if A.expr_type(a) not in ("int", "any"):
+                    raise SemaError("range() arguments must be ints", e.pos, ErrorCode.E_ARG_TYPE)
+            e.inferred_type = "list"
+            e.list_el_type = "int"
+            return
         if e.func == "super":
             # super() — only valid inside a method, takes no args, and resolves
             # to the current class's base. The result carries a `super:<Base>`
             # marker so the enclosing MethodCall dispatches against the base.
             if e.args:
-                raise SemaError("super() takes no arguments", e.pos)
+                raise SemaError("super() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
             if self.current_class is None:
-                raise SemaError("super() outside a method", e.pos)
+                raise SemaError("super() outside a method", e.pos, ErrorCode.E_SUPER_NO_CLASS)
             parent = self.classes[self.current_class].parent
             if parent is None:
                 raise SemaError(
@@ -3342,13 +5989,6 @@ class SemaAnalyzer:
                 )
             for a in e.args:
                 self._check_expr(a, scope)
-            if e.func == "print":
-                for a in e.args:
-                    if A.expr_type(a) == "tuple":
-                        raise SemaError(
-                            "cannot print a tuple directly yet; print its elements",
-                            getattr(a, "pos", e.pos),
-                        )
             # Set the static return type so codegen knows how to interpret it.
             e.inferred_type = {
                 "print": "int",
@@ -3367,7 +6007,7 @@ class SemaAnalyzer:
                 "min": "any",
                 "max": "any",
                 "abs": "any",
-                "round": "int",
+                "round": "float" if len(e.args) >= 2 else "int",
                 "pow": "int",
                 "sorted": "list",
                 "reversed": "list",
@@ -3388,21 +6028,71 @@ class SemaAnalyzer:
                 "next": "any",
                 "map": "list",
                 "filter": "list",
+                "zip": "list",
                 "format": "str",
                 "hex": "str",
                 "oct": "str",
                 "bin": "str",
+                "divmod": "tuple",
                 "hash": "int",
                 "issubclass": "int",
+                "bytes": "list",
+                "bytearray": "list",
             }[e.func]
+            if e.func == "abs":
+                # abs preserves the operand's numeric type (float -> float so
+                # the result prints/operates as a float, not its raw bits).
+                arg_t = A.expr_type(e.args[0])
+                if arg_t.startswith("instance:"):
+                    resolved = self._resolve_method(arg_t.split(":", 1)[1], "__abs__")
+                    if resolved is not None:
+                        _, sig = resolved
+                        if sig.ret_type is not None:
+                            ty, el, _val = sig.ret_type  # type: ignore
+                            e.inferred_type = ty  # type: ignore
+                            if ty == "list" and el is not None:
+                                e.list_el_type = el  # type: ignore
+                        else:
+                            e.inferred_type = "any"  # type: ignore
+                    else:
+                        e.inferred_type = "int"  # type: ignore
+                else:
+                    e.inferred_type = "float" if arg_t == "float" else "int"  # type: ignore
+                return
+            if e.func == "type":
+                # type(x) -> "<class '...'>" string for any statically-known
+                # type (builtin scalar/container, or a user instance); falls
+                # back to "any" (the raw RTTI class id) for opaque values.
+                arg_t = A.expr_type(e.args[0])
+                if arg_t.startswith("instance:") or arg_t in (
+                    "int", "float", "str", "list", "dict", "tuple", "set",
+                ):
+                    e.inferred_type = "str"
+                return
+            if e.func == "zip":
+                # zip(*iterables) -> list of tuples; each arg must be a list/tuple.
+                for a in e.args:
+                    t = A.expr_type(a)
+                    if t not in ("list", "tuple", "any"):
+                        raise SemaError("zip() arguments must be lists or tuples", e.pos, ErrorCode.E_ZIP_ARGS)
+                e.list_el_type = "tuple"
+                e.tuple_elem_types = [self._iter_element_type(a, scope) for a in e.args]
+                return
+            if e.func in ("set", "frozenset"):
+                # For set comprehensions, validate the element type.
+                if e.args and isinstance(e.args[0], A.Comprehension):
+                    comp = e.args[0]
+                    et = A.expr_type(comp.elt)
+                    if et not in ("str", "int", "any", "tuple"):
+                        raise SemaError(
+                            f"set elements of type {et} are not supported yet "
+                            "(sets are str/int-keyed in v1)",
+                            e.pos,
+                        )
+                return
             if e.func in (
                 "bool",
-                "set",
-                "frozenset",
                 "sum",
-                "min",
-                "max",
-                "abs",
                 "round",
                 "pow",
                 "reversed",
@@ -3411,13 +6101,38 @@ class SemaAnalyzer:
                 "ord",
                 "chr",
                 "repr",
-                "type",
                 "id",
             ):
+                return
+            if e.func in ("min", "max"):
+                # min/max: the 1-arg "iterable" form supports key=/reverse=
+                # (reverse= is meaningless here but accepted for symmetry with
+                # sorted()'s kwarg set — codegen ignores it). The variadic
+                # scalar form (min(a, b, ...)) doesn't support key=.
+                self._check_sort_kwargs(e, scope)
+                if len(e.args) == 1:
+                    e.inferred_type = self._list_el_type(e.args[0], scope)
+                    if e.inferred_type == "tuple":
+                        e.tuple_elem_types = self._list_el_tuple_types(e.args[0], scope)
+                else:
+                    if e.sort_key is not None:
+                        raise SemaError(
+                            f"{e.func}(): key= is only supported for the "
+                            "single-iterable form",
+                            e.pos,
+                        )
+                    types = {A.expr_type(a) for a in e.args}
+                    if "float" in types:
+                        e.inferred_type = "float"
+                    elif "str" in types:
+                        e.inferred_type = "str"
+                    else:
+                        e.inferred_type = "int"
                 return
             if e.func == "sorted":
                 # sorted(x) -> a new list. Sets/dicts sort their (str) keys;
                 # lists/tuples keep their element kind for printing/iteration.
+                self._check_sort_kwargs(e, scope)
                 t = A.expr_type(e.args[0])
                 if t in ("set", "dict"):
                     e.list_el_type = "str"
@@ -3443,21 +6158,37 @@ class SemaAnalyzer:
                         "list() requires a list, tuple, dict, or string", e.pos
                     )
                 e.list_el_type = self._list_el_type(e.args[0], scope)
+                # Propagate per-slot tuple types so `for a, b in list(zip(...))` works.
+                tup_types = self._list_el_tuple_types(e.args[0], scope)
+                if tup_types:
+                    e.tuple_elem_types = tup_types
                 return
             if e.func == "dict":
                 # dict() / dict(other) -> a (shallow-copied) dict. Carry the
                 # source's value kind so later reads recover it.
+                # Also accepts a list of 2-tuples: dict([(k, v), ...]).
                 if e.args:
                     t = A.expr_type(e.args[0])
-                    if t not in ("dict", "any"):
-                        raise SemaError("dict() requires a dict argument", e.pos)
-                    e.value_type = self._dict_value_type(e.args[0], scope)
+                    if t not in ("dict", "any", "list", "tuple"):
+                        raise SemaError("dict() requires a dict or list-of-pairs argument", e.pos)
+                    if t == "dict":
+                        e.value_type = self._dict_value_type(e.args[0], scope)
+                    else:
+                        e.dict_from_pairs = True
+                return
+            if e.func == "divmod":
+                # divmod(a, b) -> (a // b, a % b), both ints (floor semantics).
+                for a in e.args:
+                    t = A.expr_type(a)
+                    if t not in ("int", "any"):
+                        raise SemaError("divmod() requires int arguments", e.pos, ErrorCode.E_ARG_TYPE)
+                e.tuple_elem_types = ["int", "int"]
                 return
             # Argument-type sanity for builtins that care. An opaque ("any")
             # argument is accepted everywhere — we can't know its real type.
             if e.func == "len":
                 t = A.expr_type(e.args[0])
-                if t not in ("str", "list", "dict", "tuple", "set", "any", "int"):
+                if t not in ("str", "list", "dict", "tuple", "set", "any", "int") and not t.startswith("instance:"):
                     # "int" is the default for unannotated vars — accept leniently
                     raise SemaError(
                         "len() requires a string, list, dict, tuple, or set", e.pos
@@ -3472,22 +6203,28 @@ class SemaAnalyzer:
                     raise SemaError("float() requires str / int / float", e.pos)
             elif e.func == "str":
                 t = A.expr_type(e.args[0])
-                # int/float/str convert directly; an opaque value or an instance
-                # (which may define __str__/__repr__) is accepted leniently and
-                # yields a str. Plain collections aren't stringified yet.
-                if t not in ("int", "float", "str", "any") and not t.startswith(
-                    "instance:"
-                ):
+                # int/float/str convert directly; list/tuple/dict/set stringify
+                # via their repr; an opaque value or an instance (which may define
+                # __str__/__repr__) is accepted leniently. All yield a str.
+                if t not in (
+                    "int", "float", "str", "any", "list", "tuple", "dict", "set"
+                ) and not t.startswith("instance:"):
                     raise SemaError(
-                        "str() requires int / float / str / an object", e.pos
+                        "str() requires a scalar, container, or object", e.pos
                     )
             return
+        # Resolve import alias (from mod import orig as local) for bundled-source
+        # stdlib functions so type-checking and inference use the real FuncSig.
+        if e.func in self.mod.func_aliases and e.func not in self.funcs:
+            resolved = self.mod.func_aliases[e.func]
+            if resolved in self.funcs:
+                e.func = resolved
         if e.func in self.funcs:
             sig = self.funcs[e.func]
             # Plain positional calls keep the precise arity diagnostics; calls
             # with keyword args or to a `*args` function are validated by the
             # binder instead.
-            if sig.vararg is None and not e.kwargs:
+            if sig.vararg is None and sig.kwarg is None and not e.kwargs:
                 required = sig.arity - sig.n_defaults
                 if not (required <= len(e.args) <= sig.arity):
                     if required == sig.arity:
@@ -3503,7 +6240,8 @@ class SemaAnalyzer:
             # (defaults filled, keyword args placed, varargs packed) so codegen
             # always sees a fixed-shape call.
             self._bind_args(
-                e, sig.param_names, sig.param_defaults, sig.vararg, e.pos, e.func
+                e, sig.param_names, sig.param_defaults, sig.vararg, e.pos, e.func,
+                kwarg=sig.kwarg,
             )
             for a in e.args:
                 self._check_expr(a, scope)
@@ -3516,8 +6254,16 @@ class SemaAnalyzer:
             elif sig.ret_type is not None:
                 ty, el, _val = sig.ret_type  # type: ignore
                 e.inferred_type = ty
+                if sig.ret_bool:
+                    e.is_bool = True
                 if ty == "list" and el is not None:
                     e.list_el_type = el
+                    if el == "tuple" and sig.ret_list_tuple_types:
+                        e.tuple_elem_types = list(sig.ret_list_tuple_types)  # type: ignore
+                    elif el in ("list", "dict") and sig.ret_inner_el_type:
+                        # list[list[T]] / list[dict[K,V]]: carry the leaf kind
+                        # so `for row in rows: row[i]` recovers T.
+                        e.el_value_type = sig.ret_inner_el_type
                 elif ty == "dict" and _val is not None:
                     # Carry the value kind so `d = f()[k]` / `f()[k].attr`
                     # reads recover it (bare `-> dict` gives value kind "any").
@@ -3540,10 +6286,14 @@ class SemaAnalyzer:
                 # synthesized init — accept the call leniently (full
                 # field/keyword validation is post-bootstrap). A class with no
                 # fields really does take no arguments.
+                cls_sig = self.classes[e.func]
+                parent = getattr(cls_sig, "parent", None)
+                parent_is_external = parent is not None and parent not in self.classes
                 if (
                     (e.args or e.kwargs)
-                    and not self.classes[e.func].fields
+                    and not cls_sig.fields
                     and not self._is_exception_class(e.func)
+                    and not parent_is_external
                 ):
                     raise SemaError(
                         f"{e.func}() has no __init__ and takes no arguments",
@@ -3558,17 +6308,19 @@ class SemaAnalyzer:
             else:
                 _, sig = init
                 expected = sig.arity - 1
-                if sig.vararg is None and not e.kwargs:
+                if sig.vararg is None and sig.kwarg is None and not e.kwargs:
                     required = expected - sig.n_defaults
                     if not (required <= len(e.args) <= expected):
                         if required == expected:
                             raise SemaError(
                                 f"{e.func}() takes {expected} argument(s), got {len(e.args)}",
                                 e.pos,
+                                ErrorCode.E_ARG_COUNT,
                             )
                         raise SemaError(
                             f"{e.func}() takes {required}-{expected} arguments, got {len(e.args)}",
                             e.pos,
+                            ErrorCode.E_ARG_COUNT,
                         )
                 self._bind_args(
                     e,
@@ -3577,6 +6329,7 @@ class SemaAnalyzer:
                     sig.vararg,
                     e.pos,
                     e.func,
+                    kwarg=sig.kwarg,
                 )
             for a in e.args:
                 self._check_expr(a, scope)
@@ -3594,28 +6347,62 @@ class SemaAnalyzer:
             e.inferred_type = f"instance:{e.func}"
             return
         if e.func in scope:
+            # A name bound to a user instance with __call__: dispatch to the
+            # method. Normalize args against __call__'s sig (skip self).
+            _inst_t = scope.types.get(e.func, "")
+            if _inst_t.startswith("instance:"):
+                _cls = _inst_t.split(":", 1)[1]
+                _call_resolved = self._resolve_method(_cls, "__call__")
+                if _call_resolved is not None:
+                    _owner, _sig = _call_resolved
+                    self._bind_args(
+                        e,
+                        _sig.param_names[1:],
+                        _sig.param_defaults[1:],
+                        _sig.vararg,
+                        e.pos,
+                        f"{_cls}.__call__",
+                        kwarg=_sig.kwarg,
+                    )
+                    for _a in e.args:
+                        self._check_expr(_a, scope)
+                    e.dunder_call_owner = _owner  # type: ignore
+                    if _sig.ret_type is not None:
+                        _ty, _el, _val = _sig.ret_type  # type: ignore
+                        e.inferred_type = _ty
+                        if _ty == "list" and _el is not None:
+                            e.list_el_type = _el  # type: ignore
+                    else:
+                        e.inferred_type = "any"
+                    return
             for a in e.args:
                 self._check_expr(a, scope)
+            # A name bound to a lambda: use the lambda's body type so the call
+            # result prints/operates correctly (e.g. a str-returning lambda).
+            if e.func in self.lambda_rets:
+                e.inferred_type = self.lambda_rets[e.func]
             # An opaque-imported callable (bound "any" — e.g. a function pulled
             # in via `from .._runtime.build import build_runtime_shared`) returns
             # an opaque value, as does a capitalized name (conventionally an
             # imported class/constructor: `Path(...)`, `Token(...)`). Either way
             # the result is "any" so attribute/method access stays lenient.
             # Anything else falls back to int.
-            if scope.types.get(e.func) == "any" or e.func[:1].isupper():
+            elif scope.types.get(e.func) == "any" or e.func[:1].isupper():
                 e.inferred_type = "any"
             else:
                 e.inferred_type = "int"
             return
-        raise SemaError(f"undefined function {e.func!r}", e.pos)
+        raise SemaError(f"undefined function {e.func!r}", e.pos, ErrorCode.E_UNDEFINED_FUNC)
 
 
-def analyze(mod: A.Module, *, source_dir=None) -> None:
+def analyze(mod: A.Module, *, source_dir=None, collect_errors: bool = False) -> None:
     """Run semantic analysis over `mod`.
 
-    `source_dir` is the directory of the source file (a Path or None). It seeds
-    the search path for `include("pkg")` so a `<pkg>.asmpkg` next to the source
-    is found. None disables file-relative package resolution (used by the
-    self-host gauntlet and tests that analyse in isolation).
+    `source_dir` is the directory of the source file (a Path or None). Used for
+    resolving relative imports and project-local module references. None for
+    isolation (used by the self-host gauntlet and tests).
+
+    When `collect_errors` is True, sema continues past the first error and
+    raises `MultiSemaError` at the end with every diagnostic collected.
     """
-    SemaAnalyzer(mod, source_dir=source_dir).analyze()
+    SemaAnalyzer(mod, source_dir=source_dir, collect_errors=collect_errors).analyze()

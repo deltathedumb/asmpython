@@ -1,15 +1,14 @@
 # expect:
-# carol
-# bob
 # alice
-# 28
-# 25
+# bob
+# carol
 # 30
+# 25
+# 28
 # sum: 83
 # count: 3
 
-# Iteration order matches the hashtable's slot order (FNV-1a buckets), not
-# insertion order. We just freeze whatever order the runtime produces.
+# Dicts are insertion-ordered (CPython 3.7+ guarantee).
 d = {"alice": 30, "bob": 25, "carol": 28}
 
 for k in d.keys():
