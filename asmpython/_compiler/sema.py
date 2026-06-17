@@ -538,6 +538,9 @@ class SemaAnalyzer:
         # or "ClassName.method_name" for a method. See
         # `_infer_unannotated_params`.
         self.inferred_param_types: dict[str, tuple] = {}
+        # func_name -> list of (ty, el_type, val_type) for each free variable,
+        # populated by _prescan_fv_types() before the main analysis loops.
+        self._fv_types: dict = {}
 
     def _has_external_base(self, class_name: str) -> bool:
         """True if `class_name` or any ancestor inherits from a base that isn't
@@ -1135,6 +1138,103 @@ class SemaAnalyzer:
         scope.dict_value_tuple_types.update(g.dict_value_tuple_types)
         scope.tuple_elem_types.update(g.tuple_elem_types)
 
+    def _prescan_fv_types(self) -> None:
+        """Pre-scan every function/method body for ClosureBind nodes.
+
+        For each ClosureBind found, record the types of its captured free
+        variables into self._fv_types[func_name] so the lifted function's scope
+        is seeded with the correct types rather than defaulting to int.  Uses
+        annotation-based inference only (no full type analysis), allowing this
+        to run before the main analysis loops regardless of order.
+        """
+        def collect_annot_locals(stmts: list, acc: dict) -> None:
+            for s in stmts:
+                if isinstance(s, A.Assign):
+                    annot = getattr(s, "annot", None)
+                    if annot is not None:
+                        resolved = self._resolve_annot(annot)
+                        if resolved is not None and isinstance(s.target, str):
+                            ty, el, val, _tup, _elval = resolved
+                            acc[s.target] = (ty, el, val)
+                elif isinstance(s, A.If):
+                    collect_annot_locals(s.then, acc)
+                    if s.orelse:
+                        collect_annot_locals(s.orelse, acc)
+                elif isinstance(s, A.While):
+                    collect_annot_locals(s.body, acc)
+                elif isinstance(s, A.For):
+                    collect_annot_locals(s.body, acc)
+                elif isinstance(s, A.Try):
+                    collect_annot_locals(s.body, acc)
+                    collect_annot_locals(s.handler, acc)
+                    if s.else_body:
+                        collect_annot_locals(s.else_body, acc)
+                elif isinstance(s, A.With):
+                    collect_annot_locals(s.body, acc)
+
+        def scan_closurebinds(stmts: list, local_types: dict) -> None:
+            for s in stmts:
+                if isinstance(s, A.ClosureBind):
+                    fv_types: list = []
+                    for fv in s.free_vars:
+                        if fv in local_types:
+                            fv_types.append(local_types[fv])
+                        elif fv in self.global_scope.types:
+                            ty = self.global_scope.types[fv]
+                            el = self.global_scope.list_el_types.get(fv)
+                            val = self.global_scope.dict_value_types.get(fv)
+                            fv_types.append((ty, el, val))
+                        else:
+                            fv_types.append(("int", None, None))
+                    self._fv_types[s.func_name] = fv_types
+                elif isinstance(s, A.If):
+                    scan_closurebinds(s.then, local_types)
+                    if s.orelse:
+                        scan_closurebinds(s.orelse, local_types)
+                elif isinstance(s, A.While):
+                    scan_closurebinds(s.body, local_types)
+                elif isinstance(s, A.For):
+                    scan_closurebinds(s.body, local_types)
+                elif isinstance(s, A.Try):
+                    scan_closurebinds(s.body, local_types)
+                    scan_closurebinds(s.handler, local_types)
+                    if s.else_body:
+                        scan_closurebinds(s.else_body, local_types)
+                elif isinstance(s, A.With):
+                    scan_closurebinds(s.body, local_types)
+
+        def build_param_types(params: list, param_types: list) -> dict:
+            local_types: dict = {}
+            for i, p in enumerate(params):
+                annot = param_types[i] if i < len(param_types) else None
+                resolved = self._resolve_annot(annot)
+                if resolved is not None:
+                    ty, el, val, _tup, _elval = resolved
+                    local_types[p] = (ty, el, val)
+            return local_types
+
+        for f in self.mod.funcs:
+            if getattr(f, "is_lifted", False):
+                continue
+            local_types: dict = build_param_types(f.params, f.param_types)
+            collect_annot_locals(f.body, local_types)
+            scan_closurebinds(f.body, local_types)
+
+        for c in self.mod.classes:
+            for m in c.methods:
+                mdeco = getattr(m, "decorators", [])
+                local_types: dict = {}
+                if "staticmethod" not in mdeco:
+                    local_types["self"] = (f"instance:{c.name}", None, None)
+                start = 0 if "staticmethod" in mdeco else 1
+                method_locals: dict = build_param_types(
+                    m.params[start:], m.param_types[start:]
+                )
+                for k, v in method_locals.items():
+                    local_types[k] = v
+                collect_annot_locals(m.body, local_types)
+                scan_closurebinds(m.body, local_types)
+
     # ---- entry --------------------------------------------------------------
 
     def _inject_assembly_class_if_needed(self) -> None:
@@ -1214,16 +1314,15 @@ class SemaAnalyzer:
 
     def _rename_locals_in_stmts(self, stmts: list, local_names: set) -> list:
         """Deep-copy stmts, replacing each local Name ref with Attr(self, name)."""
-        import copy
-
-        self_name = A.Name(name="self", pos=A.SourcePos(0, 0))
+        def _self_name() -> A.Name:
+            return A.Name(name="self", pos=A.SourcePos(0, 0))
 
         def fix_expr(e):
             if e is None:
                 return None
             if isinstance(e, A.Name):
                 if e.name in local_names:
-                    return A.Attr(obj=copy.copy(self_name), name=e.name, pos=e.pos)
+                    return A.Attr(obj=_self_name(), name=e.name, pos=e.pos)
                 return e
             if isinstance(e, A.IntLit) or isinstance(e, A.FloatLit) or isinstance(e, A.StrLit):
                 return e
@@ -1267,16 +1366,16 @@ class SemaAnalyzer:
                 rhs = fix_expr(s.value)
                 if isinstance(target, str) and target in local_names:
                     return A.AttrAssign(
-                        obj=copy.copy(self_name), name=target, value=rhs, pos=s.pos
+                        obj=_self_name(), name=target, value=rhs, pos=s.pos
                     )
                 return A.Assign(target=target, value=rhs, pos=s.pos, annot=s.annot)
             if isinstance(s, A.AugAssign):
                 target = s.target
                 rhs = fix_expr(s.value)
                 if isinstance(target, str) and target in local_names:
-                    lhs = A.Attr(obj=copy.copy(self_name), name=target, pos=s.pos)
+                    lhs = A.Attr(obj=_self_name(), name=target, pos=s.pos)
                     new_val = A.BinOp(op=s.op, left=lhs, right=rhs, pos=s.pos)
-                    return A.AttrAssign(obj=copy.copy(self_name), name=target, value=new_val, pos=s.pos)
+                    return A.AttrAssign(obj=_self_name(), name=target, value=new_val, pos=s.pos)
                 return A.AugAssign(target=target, op=s.op, value=rhs, pos=s.pos)
             if isinstance(s, A.ExprStmt):
                 return A.ExprStmt(expr=fix_expr(s.expr), pos=s.pos)
@@ -1298,9 +1397,11 @@ class SemaAnalyzer:
             if isinstance(s, A.For):
                 return A.For(
                     var=s.var,
+                    range_args=[fix_expr(x) for x in (s.range_args or [])],
                     iter=fix_expr(s.iter),
                     body=[fix_stmt(x) for x in s.body],
                     pos=s.pos,
+                    targets=list(s.targets),
                 )
             if isinstance(s, A.YieldStmt):
                 return A.YieldStmt(value=fix_expr(s.value), pos=s.pos)
@@ -1421,18 +1522,17 @@ class SemaAnalyzer:
             #   _genresult = val; <continuation>; return _genresult
             # where the continuation carries all stmts that must still run
             # (e.g. `i += 1` after the yield) before state is saved.
-            next_body = [
-                A.While(
-                    test=self._rename_expr(loop_stmt.test, all_names),
-                    body=self._gen_body_transform(
-                        loop_stmt.body, [], all_names, pos, result_name
-                    ),
-                    pos=pos,
+            next_body = self._make_stmt_list()
+            next_body.append(A.While(
+                test=self._rename_expr(loop_stmt.test, all_names),
+                body=self._gen_body_transform(
+                    loop_stmt.body, [], all_names, pos, result_name
                 ),
-                A.Raise(
-                    value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
-                ),
-            ]
+                pos=pos,
+            ))
+            next_body.append(A.Raise(
+                value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
+            ))
 
         else:  # For loop
             # Tuple-unpacking for-loop generators are not yet supported.
@@ -1490,27 +1590,22 @@ class SemaAnalyzer:
                     pos=pos,
                 ),
             ]
-            next_body = [
-                A.While(
-                    test=A.Compare(
-                        ops=["<"],
-                        operands=[
-                            A.Attr(obj=A.Name(name="self", pos=pos), name="_idx", pos=pos),
-                            A.Call(func="len", args=[
-                                A.Attr(obj=A.Name(name="self", pos=pos), name="_genlist", pos=pos),
-                            ], pos=pos),
-                        ],
-                        pos=pos,
-                    ),
-                    body=loop_body_prefix + self._gen_body_transform(
-                        loop_stmt.body, [], all_names, pos, result_name
-                    ),
-                    pos=pos,
+            _cmp_ops = self._make_stmt_list()
+            _cmp_ops.append(A.Attr(obj=A.Name(name="self", pos=pos), name="_idx", pos=pos))
+            _cmp_ops.append(A.Call(func="len", args=[
+                A.Attr(obj=A.Name(name="self", pos=pos), name="_genlist", pos=pos),
+            ], pos=pos))
+            next_body = self._make_stmt_list()
+            next_body.append(A.While(
+                test=A.Compare(ops=["<"], operands=_cmp_ops, pos=pos),
+                body=loop_body_prefix + self._gen_body_transform(
+                    loop_stmt.body, [], all_names, pos, result_name
                 ),
-                A.Raise(
-                    value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
-                ),
-            ]
+                pos=pos,
+            ))
+            next_body.append(A.Raise(
+                value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
+            ))
 
         # Determine the yield value's return type from original function annotation,
         # or default to int.
@@ -1600,7 +1695,7 @@ class SemaAnalyzer:
 
     def _rename_stmts(self, stmts: list, local_names: set, pos) -> list:
         """Rename local variable references in stmts to self.X."""
-        result = []
+        result = stmts[0:0]
         for s in stmts:
             if isinstance(s, A.Assign):
                 rhs = self._rename_expr(s.value, local_names)
@@ -1641,7 +1736,11 @@ class SemaAnalyzer:
                 result.append(s)
         return result
 
-    def _gen_body_transform(self, stmts, continuation, all_names, pos, result_name):
+    def _make_stmt_list(self) -> list:
+        r: list = []
+        return r
+
+    def _gen_body_transform(self, stmts: list, continuation, all_names, pos, result_name):
         """Transform a generator loop body for __next__.
 
         Replaces every `yield val` with:
@@ -1663,7 +1762,7 @@ class SemaAnalyzer:
                     return True
             return False
 
-        result = []
+        result = stmts[0:0]
         for i, s in enumerate(stmts):
             local_remaining = stmts[i + 1:]
             full_cont = local_remaining + list(continuation)
@@ -1911,6 +2010,12 @@ class SemaAnalyzer:
         self.global_scope.add("__file__", "str")
         self._try_check_block(self.mod.body, self.global_scope)
 
+        # Pre-scan all function/method bodies for ClosureBind nodes so that
+        # free-variable types can be propagated into lifted function scopes.
+        # Must run after global_scope is populated (above) and before free-var
+        # params are prepended and function bodies are checked (below).
+        self._prescan_fv_types()
+
         # Lifted (closure) functions: prepend captured free-variable names as
         # extra params so the body can reference them.  The outer function's
         # ClosureBind emits a closure list at runtime that passes these values.
@@ -1936,11 +2041,23 @@ class SemaAnalyzer:
             self.in_lifted = getattr(f, "is_lifted", False)
             scope = Scope()
             self._seed_globals_into(scope)
+            free_vars = getattr(f, "free_vars", [])
+            n_fvs = len(free_vars)
+            fv_type_list = self._fv_types.get(f.name, [])
             for i, p in enumerate(f.params):
-                annot = f.param_types[i] if i < len(f.param_types) else None
-                default = f.defaults[i] if i < len(f.defaults) else None
-                inferred = self.inferred_param_types.get(f"{f.name}:{i}")
-                self._seed_param(scope, p, annot, default, inferred)
+                if i < n_fvs:
+                    # Free-variable param: use the outer-scope type recorded
+                    # by _prescan_fv_types() instead of defaulting to int.
+                    if i < len(fv_type_list):
+                        ty, el, val = fv_type_list[i]
+                        scope.add(p, ty, el_type=el, value_type=val)
+                    else:
+                        scope.add(p, "int")
+                else:
+                    annot = f.param_types[i] if i < len(f.param_types) else None
+                    default = f.defaults[i] if i < len(f.defaults) else None
+                    inferred = self.inferred_param_types.get(f"{f.name}:{i}")
+                    self._seed_param(scope, p, annot, default, inferred)
             self._try_check_block(f.body, scope)
             self.in_function = None
             self.in_lifted = False
@@ -3309,7 +3426,10 @@ class SemaAnalyzer:
                     args=none_args,
                     pos=s.pos,
                 )
-                body = [cm_assign, enter_stmt] + list(s.body)
+                body: list = []
+                body.append(cm_assign)
+                body.append(enter_stmt)
+                body.extend(s.body)
                 s.__class__ = A.Try  # type: ignore[assignment]
                 s.body = body  # type: ignore[attr-defined]
                 s.handler = []  # type: ignore[attr-defined]
@@ -3398,7 +3518,7 @@ class SemaAnalyzer:
 
     # ---- match/case helpers -------------------------------------------------
 
-    def _make_name_ref(self, name: str, pos) -> A.Name:
+    def _make_name_ref(self, name: str, pos) -> A.Expr:
         """Return a fresh Name node for `name`. Must build a new node every
         call — never reuse a node in two places in the rewritten AST tree."""
         return A.Name(name=name, pos=pos)
@@ -3481,18 +3601,13 @@ class SemaAnalyzer:
                 args=[self._make_name_ref(subj_name, pos)],
                 pos=pattern.pos,
             )
+            _len_ops = self._make_stmt_list()
+            _len_ops.append(len_call)
+            _len_ops.append(A.IntLit(value=n_fixed, pos=pattern.pos))
             if star_index is None:
-                len_test = A.Compare(
-                    ops=["=="],
-                    operands=[len_call, A.IntLit(value=n_fixed, pos=pattern.pos)],
-                    pos=pattern.pos,
-                )
+                len_test = A.Compare(ops=["=="], operands=_len_ops, pos=pattern.pos)
             else:
-                len_test = A.Compare(
-                    ops=[">="],
-                    operands=[len_call, A.IntLit(value=n_fixed, pos=pattern.pos)],
-                    pos=pattern.pos,
-                )
+                len_test = A.Compare(ops=[">="], operands=_len_ops, pos=pattern.pos)
             seq_tests.append(len_test)
 
             n_after = (len(pattern.patterns) - star_index - 1) if star_index is not None else 0
@@ -3551,11 +3666,10 @@ class SemaAnalyzer:
                     if sub.name != "_":
                         seq_binds.append(A.Assign(target=sub.name, value=elem_ref, pos=sub.pos))
                 elif isinstance(sub, A.MatchValue):
-                    elem_test = A.Compare(
-                        ops=["=="],
-                        operands=[elem_ref, sub.value],
-                        pos=sub.pos,
-                    )
+                    _elem_ops = self._make_stmt_list()
+                    _elem_ops.append(elem_ref)
+                    _elem_ops.append(sub.value)
+                    elem_test = A.Compare(ops=["=="], operands=_elem_ops, pos=sub.pos)
                     seq_tests.append(elem_test)
                 else:
                     # Complex pattern: create elem temp, hoist its assignment before
@@ -3578,11 +3692,10 @@ class SemaAnalyzer:
             for key, sub in zip(pattern.keys, pattern.patterns):
                 key_node = A.StrLit(value=key, pos=pattern.pos)
                 # key in subject
-                in_test = A.Compare(
-                    ops=["in"],
-                    operands=[key_node, subj_ref],
-                    pos=pattern.pos,
-                )
+                _in_ops = self._make_stmt_list()
+                _in_ops.append(key_node)
+                _in_ops.append(subj_ref)
+                in_test = A.Compare(ops=["in"], operands=_in_ops, pos=pattern.pos)
                 map_tests.append(in_test)
                 val_ref = A.Subscript(
                     obj=subj_ref,
@@ -3593,11 +3706,10 @@ class SemaAnalyzer:
                     if sub.name != "_":
                         map_binds.append(A.Assign(target=sub.name, value=val_ref, pos=sub.pos))
                 elif isinstance(sub, A.MatchValue):
-                    val_test = A.Compare(
-                        ops=["=="],
-                        operands=[val_ref, sub.value],
-                        pos=sub.pos,
-                    )
+                    _val_ops = self._make_stmt_list()
+                    _val_ops.append(val_ref)
+                    _val_ops.append(sub.value)
+                    val_test = A.Compare(ops=["=="], operands=_val_ops, pos=sub.pos)
                     if isinstance(sub.value, A.StrLit):
                         val_test._map_val_str_cmp = True  # type: ignore[attr-defined]
                     map_tests.append(val_test)
@@ -3614,14 +3726,10 @@ class SemaAnalyzer:
         if isinstance(pattern, A.MatchClass):
             cls_name = pattern.cls_name
             # isinstance(subject, ClassName) check.
-            isinstance_call = A.Call(
-                func="isinstance",
-                args=[
-                    self._make_name_ref(subj_name, pos),
-                    A.Name(name=cls_name, pos=pattern.pos),
-                ],
-                pos=pattern.pos,
-            )
+            _isinst_args = self._make_stmt_list()
+            _isinst_args.append(self._make_name_ref(subj_name, pos))
+            _isinst_args.append(A.Name(name=cls_name, pos=pattern.pos))
+            isinstance_call = A.Call(func="isinstance", args=_isinst_args, pos=pattern.pos)
             cls_tests: list = [isinstance_call]
             cls_pre: list = []
             cls_binds: list = []

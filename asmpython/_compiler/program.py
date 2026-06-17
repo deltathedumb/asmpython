@@ -602,7 +602,7 @@ def _materialize_value_imports(
         return edges
 
     materialized: dict[str, A.Assign] = {}  # local alias -> renamed assign
-    prepend: list[A.Stmt] = []
+    prepend: list = []
 
     def resolve(local: str, mod_path_str: str, orig: str, stack: set) -> bool:
         """Ensure `local` is materialized as the value `orig` from `mod_path_str`.

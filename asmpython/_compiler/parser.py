@@ -98,14 +98,40 @@ class Parser:
                 elif isinstance(s, A.For):
                     if isinstance(s.var, str) and s.var not in nonlocal_names:
                         local_names.add(s.var)
+                    for _t in (s.targets or []):
+                        if isinstance(_t, str) and _t not in nonlocal_names:
+                            local_names.add(_t)
+                        elif isinstance(_t, list):
+                            for _nm in _t:
+                                if isinstance(_nm, str) and _nm not in nonlocal_names:
+                                    local_names.add(_nm)
+                    _collect_assigned(s.body)
                 elif isinstance(s, A.If):
                     _collect_assigned(s.then)
                     _collect_assigned(s.orelse)
+                elif isinstance(s, A.MultiAssign):
+                    for _nm in s.targets:
+                        if isinstance(_nm, str) and _nm not in nonlocal_names:
+                            local_names.add(_nm)
+                elif isinstance(s, A.TupleAssign):
+                    for _t in s.targets:
+                        if isinstance(_t, A.Name):
+                            if _t.name not in nonlocal_names:
+                                local_names.add(_t.name)
+                        elif isinstance(_t, A.StarTarget):
+                            if _t.name not in nonlocal_names:
+                                local_names.add(_t.name)
                 elif isinstance(s, A.While):
                     _collect_assigned(s.body)
                 elif isinstance(s, A.Try):
                     _collect_assigned(s.body)
                     _collect_assigned(s.handler)
+                    for _et, _eb, _eh in (getattr(s, "extra_handlers", None) or []):
+                        _collect_assigned(_eh)
+                    _collect_assigned(getattr(s, "else_body", None) or [])
+                    _collect_assigned(getattr(s, "finally_body", None) or [])
+                    if getattr(s, "bind_name", None) and s.bind_name not in nonlocal_names:
+                        local_names.add(s.bind_name)
         _collect_assigned(fdef.body)
         # Collect all Name references in the body.
         referenced: set = set()
@@ -123,34 +149,132 @@ class Parser:
             elif isinstance(node, A.Call):
                 for a in node.args:
                     _collect_refs_expr(a)
+                for _kw_name, kw_val in (node.kwargs or []):
+                    _collect_refs_expr(kw_val)
+            elif isinstance(node, A.MethodCall):
+                _collect_refs_expr(node.obj)
+                for a in node.args:
+                    _collect_refs_expr(a)
+                for _kw_name, kw_val in (node.kwargs or []):
+                    _collect_refs_expr(kw_val)
+            elif isinstance(node, A.Attr):
+                _collect_refs_expr(node.obj)
+            elif isinstance(node, A.Subscript):
+                _collect_refs_expr(node.obj)
+                _collect_refs_expr(node.index)
+            elif isinstance(node, A.Slice):
+                if node.start is not None:
+                    _collect_refs_expr(node.start)
+                if node.stop is not None:
+                    _collect_refs_expr(node.stop)
+                if node.step is not None:
+                    _collect_refs_expr(node.step)
+            elif isinstance(node, A.IfExp):
+                _collect_refs_expr(node.test)
+                _collect_refs_expr(node.body)
+                _collect_refs_expr(node.orelse)
+            elif isinstance(node, A.NamedExpr):
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.BoolOp):
+                _collect_refs_expr(node.left)
+                _collect_refs_expr(node.right)
+            elif isinstance(node, A.Compare):
+                for op in node.operands:
+                    _collect_refs_expr(op)
+            elif isinstance(node, A.ListLit):
+                for e in node.elems:
+                    _collect_refs_expr(e)
+            elif isinstance(node, A.TupleLit):
+                for e in node.elems:
+                    _collect_refs_expr(e)
+            elif isinstance(node, A.SetLit):
+                for e in node.elems:
+                    _collect_refs_expr(e)
+            elif isinstance(node, A.DictLit):
+                for k in node.keys:
+                    if k is not None:
+                        _collect_refs_expr(k)
+                for v in node.values:
+                    _collect_refs_expr(v)
+            elif isinstance(node, A.FString):
+                for seg in node.segments:
+                    _collect_refs_expr(seg)
+            elif isinstance(node, A.Starred):
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.Lambda):
+                if node.body is not None:
+                    _collect_refs_expr(node.body)
+            elif isinstance(node, A.Comprehension):
+                _collect_refs_expr(node.iter)
+                _collect_refs_expr(node.elt)
+                if node.cond is not None:
+                    _collect_refs_expr(node.cond)
+                for it in node.extra_for_iters:
+                    _collect_refs_expr(it)
+                for c in node.extra_for_conds:
+                    if c is not None:
+                        _collect_refs_expr(c)
+            elif isinstance(node, A.DictComprehension):
+                _collect_refs_expr(node.iter)
+                _collect_refs_expr(node.key)
+                _collect_refs_expr(node.value)
+                if node.cond is not None:
+                    _collect_refs_expr(node.cond)
             elif isinstance(node, A.Assign):
                 _collect_refs_expr(node.value)
             elif isinstance(node, A.AugAssign):
                 _collect_refs_expr(node.value)
+            elif isinstance(node, A.MultiAssign):
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.TupleAssign):
+                for t in node.targets:
+                    _collect_refs_expr(t)
+                for v in node.values:
+                    _collect_refs_expr(v)
+            elif isinstance(node, A.AttrAssign):
+                _collect_refs_expr(node.obj)
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.IndexAssign):
+                _collect_refs_expr(node.target)
+                _collect_refs_expr(node.value)
+            elif isinstance(node, A.Del):
+                _collect_refs_expr(node.target)
             elif isinstance(node, A.Return):
+                if node.value is not None:
+                    _collect_refs_expr(node.value)
+            elif isinstance(node, A.Raise):
+                if node.value is not None:
+                    _collect_refs_expr(node.value)
+            elif isinstance(node, A.YieldStmt):
                 if node.value is not None:
                     _collect_refs_expr(node.value)
             elif isinstance(node, A.If):
                 _collect_refs_expr(node.test)
                 _collect_refs(node.then)
-                _collect_refs(node.orelse)
+                _collect_refs(node.orelse or [])
             elif isinstance(node, A.While):
                 _collect_refs_expr(node.test)
                 _collect_refs(node.body)
+                _collect_refs(node.orelse or [])
             elif isinstance(node, A.For):
+                for ra in node.range_args:
+                    _collect_refs_expr(ra)
                 if node.iter is not None:
                     _collect_refs_expr(node.iter)
                 _collect_refs(node.body)
+                _collect_refs(node.orelse or [])
+            elif isinstance(node, A.Try):
+                _collect_refs(node.body)
+                _collect_refs(node.handler)
+                for _types, _bind, eh_body in (node.extra_handlers or []):
+                    _collect_refs(eh_body)
+                _collect_refs(node.else_body or [])
+                _collect_refs(node.finally_body or [])
+            elif isinstance(node, A.With):
+                _collect_refs_expr(node.expr)
+                _collect_refs(node.body)
             elif isinstance(node, A.ExprStmt):
                 _collect_refs_expr(node.expr)
-            elif isinstance(node, A.Attr):
-                _collect_refs_expr(node.obj)
-            elif isinstance(node, A.Compare):
-                for op in node.operands:
-                    _collect_refs_expr(op)
-            elif isinstance(node, A.BoolOp):
-                _collect_refs_expr(node.left)
-                _collect_refs_expr(node.right)
         _collect_refs(fdef.body)
         # Free vars = referenced names that are not locally bound.
         BUILTINS = {
@@ -2126,7 +2250,8 @@ class Parser:
                 comp = self._parse_dict_comprehension_tail(first, first_value, start)
                 self._expect("OP", "}")
                 return comp
-            keys = [first]
+            keys: list = []
+            keys.extend([first])
             values = [first_value]
             while self._check("OP", ","):
                 self._eat()

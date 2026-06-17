@@ -43,7 +43,7 @@ def _is_word(c: str) -> int:
 
 # ---- Match object ----------------------------------------------------------
 
-class Match:
+class ReMatch:
     def __init__(self, start: int, end: int, string: str) -> None:
         self._start: int = start
         self._end: int = end
@@ -305,7 +305,7 @@ def _try_match(pat: str, pi: int, s: str, si: int) -> int:
 
 # ---- Public API ------------------------------------------------------------
 
-def match(pattern: str, string: str) -> Match:
+def match(pattern: str, string: str) -> ReMatch:
     """Match at the beginning of string. Returns Match or None."""
     # ^ is implicit for match()
     pat: str = pattern
@@ -314,10 +314,10 @@ def match(pattern: str, string: str) -> Match:
     end: int = _try_match(pat, 0, string, 0)
     if end < 0:
         return None  # type: ignore
-    return Match(0, end, string)
+    return ReMatch(0, end, string)
 
 
-def fullmatch(pattern: str, string: str) -> Match:
+def fullmatch(pattern: str, string: str) -> ReMatch:
     """Match the entire string. Returns Match or None."""
     pat: str = pattern
     if len(pat) > 0 and pat[0] == "^":
@@ -327,10 +327,10 @@ def fullmatch(pattern: str, string: str) -> Match:
     end: int = _try_match(pat, 0, string, 0)
     if end < 0 or end != len(string):
         return None  # type: ignore
-    return Match(0, end, string)
+    return ReMatch(0, end, string)
 
 
-def search(pattern: str, string: str) -> Match:
+def search(pattern: str, string: str) -> ReMatch:
     """Search anywhere in string. Returns first Match or None."""
     pat: str = pattern
     anchored: int = 0
@@ -342,7 +342,7 @@ def search(pattern: str, string: str) -> Match:
     while i <= n:
         end2: int = _try_match(pat, 0, string, i)
         if end2 >= 0:
-            return Match(i, end2, string)
+            return ReMatch(i, end2, string)
         if anchored:
             return None  # type: ignore
         i = i + 1
@@ -460,7 +460,7 @@ def finditer(pattern: str, string: str) -> list:
     while i < n:
         end7: int = _try_match(pat, 0, string, i)
         if end7 >= 0:
-            m: Match = Match(i, end7, string)
+            m: ReMatch = ReMatch(i, end7, string)
             results.append(m)
             if end7 > i:
                 i = end7
