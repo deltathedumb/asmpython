@@ -13201,26 +13201,35 @@ class Codegen:
             # explicit __init__) live on instances too — store each evaluable
             # class-var default before __init__ runs, so `self.STR_METHODS`
             # reads work. Unevaluable defaults are skipped (read back as 0).
-            cls_def0 = None
-            for c0 in self.mod.classes:
-                if c0.name == e.func:
-                    cls_def0 = c0
-            for cv0 in getattr(cls_def0, "class_vars", []) if cls_def0 else []:
-                fname0, _fa0, fdef0 = cv0
-                if fdef0 is None:
-                    continue
-                if isinstance(fdef0, A.Call) and fdef0.func == "field":
-                    continue
-                self.gen_expr(fdef0, info)
-                if A.expr_type(fdef0) == "float":
-                    self.emitf("movq rax, xmm0")
-                key0, _ = self.intern_string(fname0)
-                self.emitf(
-                    "mov rcx, rax",
-                    f"lea rbx, [{key0}]",
-                    f"mov rax, [rbp{slot_off:+d}]",
-                    "call _runtime_dict_set",
-                )
+            # Walk the chain grandparent-first so a child's own class var
+            # overwrites (rather than is shadowed by) an inherited one with
+            # the same name — matches normal attribute-lookup precedence.
+            # Without this, a subclass that doesn't override a base class's
+            # class var (e.g. WindowsCodegen inheriting Codegen.section_bss)
+            # never gets that key seeded into the instance dict at all, so
+            # later instance reads of it return the dict_get_default fallback
+            # (0 / NULL) instead of the base class's value.
+            for cname0 in reversed(self._resolve_class_chain(e.func)):
+                cls_def0 = None
+                for c0 in self.mod.classes:
+                    if c0.name == cname0:
+                        cls_def0 = c0
+                for cv0 in getattr(cls_def0, "class_vars", []) if cls_def0 else []:
+                    fname0, _fa0, fdef0 = cv0
+                    if fdef0 is None:
+                        continue
+                    if isinstance(fdef0, A.Call) and fdef0.func == "field":
+                        continue
+                    self.gen_expr(fdef0, info)
+                    if A.expr_type(fdef0) == "float":
+                        self.emitf("movq rax, xmm0")
+                    key0, _ = self.intern_string(fname0)
+                    self.emitf(
+                        "mov rcx, rax",
+                        f"lea rbx, [{key0}]",
+                        f"mov rax, [rbp{slot_off:+d}]",
+                        "call _runtime_dict_set",
+                    )
             # __init__(self, args...). Sema normalized e.args to a complete
             # positional list; the instance (already in slot_off) is reg 0.
             cleanup = self._emit_positional_args(
