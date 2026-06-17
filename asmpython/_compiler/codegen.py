@@ -1493,15 +1493,22 @@ class Codegen:
             for _kn, kv in kwlist:
                 self._cl_walk_expr(info, kv)
             if expr.func in self.mod.classes_sig:
-                for c in self.mod.classes:
-                    if c.name == expr.func:
-                        for cv in getattr(c, "class_vars", []) or []:
-                            _fn, _fa, fdefault = cv
-                            if fdefault is not None and not (
-                                isinstance(fdefault, A.Call)
-                                and fdefault.func == "field"
-                            ):
-                                self._cl_walk_expr(info, fdefault)
+                # Mirrors _gen_constructor's class-var seeding, which walks
+                # the full inheritance chain (not just expr.func's own
+                # class_vars) so an inherited-but-not-overridden class var
+                # is seeded into the instance too. Every class-var default
+                # expression _gen_constructor will emit needs its slot
+                # reserved here first.
+                for cname in self._resolve_class_chain(expr.func):
+                    for c in self.mod.classes:
+                        if c.name == cname:
+                            for cv in getattr(c, "class_vars", []) or []:
+                                _fn, _fa, fdefault = cv
+                                if fdefault is not None and not (
+                                    isinstance(fdefault, A.Call)
+                                    and fdefault.func == "field"
+                                ):
+                                    self._cl_walk_expr(info, fdefault)
         elif isinstance(expr, A.MethodCall):
             # os.environ.get(key[, default]) — lowers to getenv(key); reserve
             # its one FFI scratch slot (see the matching codegen in
