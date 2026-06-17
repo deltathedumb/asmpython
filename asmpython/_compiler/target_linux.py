@@ -523,6 +523,8 @@ class LinuxCodegen(Codegen):
         "_gui_load_bmp",
         "_gui_render_copy", "_gui_query_texture_w", "_gui_query_texture_h",
         "_gui_is_key_down", "_gui_mouse_dx", "_gui_mouse_dy",
+        "_gui_render_copy_ex", "_gui_render_copy_region",
+        "_gui_joystick_axis", "_gui_joystick_button",
     )
     _AUDIO_SYMS = (
         "_audio_load_wav",
@@ -1392,6 +1394,79 @@ class LinuxCodegen(Codegen):
                            "lea rsi, [_gui_rel_dim+4]",
                            "call SDL_GetRelativeMouseState",
                            "movsx rax, dword [_gui_rel_dim+4]",
+                           "leave", "ret")
+
+            # _gui_render_copy_ex(rdi=renderer, rsi=texture, rdx=x, rcx=y,
+            #   r8=w, r9=h, [rbp+16]=angle_deg, [rbp+24]=flip) -> rax
+            # Incoming: 8 plain ints, first 6 in SysV int regs, last 2 on the
+            # caller's stack (no shadow space under SysV). Builds SDL_Rect
+            # dstrect on our stack, converts angle to double for xmm0 (SysV
+            # counts int/float regs independently, so angle -- the 5th real
+            # arg, all-int args before it -- still fits in xmm0; center/flip
+            # land in r8/r9, the two int regs left after renderer..dstrect).
+            if "_gui_render_copy_ex" in self.ffi_called:
+                self.emit("extern SDL_RenderCopyEx")
+                self.label("_gui_render_copy_ex")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+                self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi")
+                # Build SDL_Rect (dstrect) at [rbp-48]
+                self.emitf("mov dword [rbp-48], edx",   # rect.x
+                           "mov dword [rbp-44], ecx",   # rect.y
+                           "mov dword [rbp-40], r8d",   # rect.w
+                           "mov dword [rbp-36], r9d")   # rect.h
+                self.emitf("mov eax, dword [rbp+16]",   # angle_deg (7th arg, on stack)
+                           "cvtsi2sd xmm0, eax")          # angle as double -> xmm0
+                self.emitf("mov eax, dword [rbp+24]",   # flip (8th arg, on stack)
+                           "mov [rbp-56], rax")
+                self.emitf("mov rdi, [rbp-8]", "mov rsi, [rbp-16]",
+                           "xor rdx, rdx",                # srcrect = NULL
+                           "lea rcx, [rbp-48]",            # dstrect
+                           "xor r8, r8",                   # center = NULL
+                           "mov r9, [rbp-56]",             # flip
+                           "call SDL_RenderCopyEx",
+                           "leave", "ret")
+
+            # _gui_render_copy_region(rdi=renderer, rsi=texture, rdx=sx, rcx=sy,
+            #   r8=sw, r9=sh, [rbp+16]=dx, [rbp+24]=dy) -> rax
+            # Builds SDL_Rect src{sx,sy,sw,sh} and dst{dx,dy,sw,sh}, calls
+            # SDL_RenderCopy(ren, tex, &src, &dst) (dest uses src's w/h, no scaling).
+            if "_gui_render_copy_region" in self.ffi_called:
+                self.label("_gui_render_copy_region")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+                self.emitf("mov [rbp-8], rdi", "mov [rbp-16], rsi")
+                # src rect at [rbp-48]
+                self.emitf("mov dword [rbp-48], edx",   # src.x = sx
+                           "mov dword [rbp-44], ecx",   # src.y = sy
+                           "mov dword [rbp-40], r8d",   # src.w
+                           "mov dword [rbp-36], r9d")   # src.h
+                # dst rect at [rbp-32]: dx, dy, sw, sh (same w/h as src)
+                self.emitf("mov eax, dword [rbp+16]",   # dx (7th arg, on stack)
+                           "mov dword [rbp-32], eax",
+                           "mov eax, dword [rbp+24]",   # dy (8th arg, on stack)
+                           "mov dword [rbp-28], eax",
+                           "mov eax, dword [rbp-40]", "mov dword [rbp-24], eax",  # dst.w = src.w
+                           "mov eax, dword [rbp-36]", "mov dword [rbp-20], eax")  # dst.h = src.h
+                self.emitf("mov rdi, [rbp-8]", "mov rsi, [rbp-16]",
+                           "lea rdx, [rbp-48]", "lea rcx, [rbp-32]",
+                           "call SDL_RenderCopy",
+                           "leave", "ret")
+
+            # _gui_joystick_axis(rdi=joystick, rsi=axis) -> rax (sign-extended Sint16)
+            if "_gui_joystick_axis" in self.ffi_called:
+                self.emit("extern SDL_JoystickGetAxis")
+                self.label("_gui_joystick_axis")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("call SDL_JoystickGetAxis",
+                           "movsx rax, ax",
+                           "leave", "ret")
+
+            # _gui_joystick_button(rdi=joystick, rsi=button) -> rax (0 or 1)
+            if "_gui_joystick_button" in self.ffi_called:
+                self.emit("extern SDL_JoystickGetButton")
+                self.label("_gui_joystick_button")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
+                self.emitf("call SDL_JoystickGetButton",
+                           "movzx rax, al",
                            "leave", "ret")
 
         # ---- SDL2_mixer / audio helpers ---------------------------------------

@@ -89,13 +89,23 @@ freestanding (framebuffer) targets.
   - `-lSDL2_ttf` is auto-linked via a `needs_ttf` property, following the same `ffi_called`-based precision tracking as `needs_gui`/`needs_audio`.
   - Requires SDL2_ttf installed (Linux: `libsdl2-ttf-dev`; Windows: `SDL2_ttf.dll` next to the executable).
 
+- **Joystick/gamepad input in `gui`**: `gui.num_joysticks()`, `gui.Joystick(index)` with `.name()`, `.num_axes()`, `.num_buttons()`, `.axis(i)`, `.button(i)`, `.close()`; `gui.joystick_update()`. Auto-initializes the `SDL_INIT_JOYSTICK` subsystem on first use. New event constants `EVENT_JOYAXISMOTION`/`EVENT_JOYBUTTONDOWN`/`EVENT_JOYBUTTONUP`.
+
+- **Rotated/flipped sprite blits**: `Canvas.blit_ex(img, x, y, w, h, angle_deg, flip)` wraps `SDL_RenderCopyEx` — rotate (clockwise degrees) and/or flip (`FLIP_NONE`/`FLIP_HORIZONTAL`/`FLIP_VERTICAL`) a scaled sprite in one call. New `_gui_render_copy_ex` inline helper handles the Win64/SysV argument-passing mismatch (angle is the 5th positional argument, which Win64 always spills to the stack regardless of type, while SysV's independent int/float register counting still fits it in `xmm0`).
+
+- **Cropped blits**: `Canvas.blit_region(img, sx, sy, sw, sh, dx, dy)` draws a sub-rect of a texture (e.g. one frame of a sprite sheet) at its natural size via a new `_gui_render_copy_region` helper.
+
+- **`gui.Tilemap`**: a grid of tile indices into a single spritesheet `Image`. `Tilemap(sheet, tile_w, tile_h, cols, rows)`, `.set(col, row, tile_index)`, `.get(col, row)`, `.draw(canvas, x, y)` (renders the whole grid via `blit_region`).
+
+- **`framebuffer.Framebuffer.text(...)`**: short alias for `draw_text(...)`, matching `gui.Canvas.text()`'s naming.
+
 ### Fixed
 
 - `_BUNDLED_SOURCE_STDLIB` was missing `"audio"`, so `import audio` silently compiled to dead code (no error, no real calls) instead of merging the real module source. Added `"audio"` and `"_font8x8"` to the bundled-source stdlib list.
 
 ### Tests
 
-451/451 passing (was 448 at 1.1.0).
+453/453 passing (was 448 at 1.1.0).
 
 ## [1.1.0] — 2026-06-16
 

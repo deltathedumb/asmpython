@@ -12,6 +12,7 @@ from . import Func, Const
 BINDINGS: dict = {
     # ---- Init / quit --------------------------------------------------------
     "init":             Func(arg_types=("int",),                    ret_type="int", c_name="SDL_Init"),
+    "init_subsystem":   Func(arg_types=("int",),                    ret_type="int", c_name="SDL_InitSubSystem"),
     "quit":             Func(arg_types=(),                          ret_type="int", c_name="SDL_Quit"),
 
     # ---- Window -------------------------------------------------------------
@@ -28,6 +29,12 @@ BINDINGS: dict = {
     "query_texture_w":  Func(arg_types=("int",),                    ret_type="int", c_name="_gui_query_texture_w"),
     "query_texture_h":  Func(arg_types=("int",),                    ret_type="int", c_name="_gui_query_texture_h"),
     "render_copy":      Func(arg_types=("int","int","int","int","int","int"), ret_type="int", c_name="_gui_render_copy"),
+    # render_copy_ex(renderer, texture, x, y, w, h, angle_deg, flip) -> int
+    # angle_deg is truncated-to-int degrees (clockwise); flip is a FLIP_* const.
+    "render_copy_ex":   Func(arg_types=("int","int","int","int","int","int","int","int"), ret_type="int", c_name="_gui_render_copy_ex"),
+    # render_copy_region(renderer, texture, sx, sy, sw, sh, dx, dy) -> int
+    # Blits the (sx,sy,sw,sh) sub-rect of texture to (dx,dy) at its natural size.
+    "render_copy_region": Func(arg_types=("int","int","int","int","int","int","int","int"), ret_type="int", c_name="_gui_render_copy_region"),
     "set_texture_blend":Func(arg_types=("int","int"),               ret_type="int", c_name="SDL_SetTextureBlendMode"),
     "set_texture_alpha":Func(arg_types=("int","int"),               ret_type="int", c_name="SDL_SetTextureAlphaMod"),
 
@@ -66,6 +73,17 @@ BINDINGS: dict = {
     "set_clipboard_text": Func(arg_types=("str",),                  ret_type="int", c_name="SDL_SetClipboardText"),
     "get_clipboard_text": Func(arg_types=(),                        ret_type="str", c_name="SDL_GetClipboardText"),
 
+    # ---- Joystick -------------------------------------------------------------
+    "num_joysticks":     Func(arg_types=(),                         ret_type="int", c_name="SDL_NumJoysticks"),
+    "joystick_open":     Func(arg_types=("int",),                   ret_type="int", c_name="SDL_JoystickOpen"),
+    "joystick_close":    Func(arg_types=("int",),                   ret_type="int", c_name="SDL_JoystickClose"),
+    "joystick_name":     Func(arg_types=("int",),                   ret_type="str", c_name="SDL_JoystickName"),
+    "joystick_num_axes": Func(arg_types=("int",),                   ret_type="int", c_name="SDL_JoystickNumAxes"),
+    "joystick_num_buttons": Func(arg_types=("int",),                ret_type="int", c_name="SDL_JoystickNumButtons"),
+    "joystick_axis":     Func(arg_types=("int","int"),              ret_type="int", c_name="_gui_joystick_axis"),
+    "joystick_button":   Func(arg_types=("int","int"),              ret_type="int", c_name="_gui_joystick_button"),
+    "joystick_update":   Func(arg_types=(),                         ret_type="int", c_name="SDL_JoystickUpdate"),
+
     # ---- Timing -------------------------------------------------------------
     "delay":            Func(arg_types=("int",),                   ret_type="int", c_name="SDL_Delay"),
     "get_ticks":        Func(arg_types=(),                         ret_type="int", c_name="SDL_GetTicks"),
@@ -74,6 +92,7 @@ BINDINGS: dict = {
     "INIT_VIDEO":           Const(ty="int", value=0x00000020),
     "INIT_AUDIO":           Const(ty="int", value=0x00000010),
     "INIT_EVENTS":          Const(ty="int", value=0x00004000),
+    "INIT_JOYSTICK":        Const(ty="int", value=0x00000200),
     "INIT_EVERYTHING":      Const(ty="int", value=0x0000FFFF),
 
     # ---- Window flags -------------------------------------------------------
@@ -94,6 +113,11 @@ BINDINGS: dict = {
     "BLEND_ADD":            Const(ty="int", value=2),
     "BLEND_MOD":            Const(ty="int", value=4),
 
+    # ---- SDL_RendererFlip (for render_copy_ex) -------------------------------
+    "FLIP_NONE":            Const(ty="int", value=0),
+    "FLIP_HORIZONTAL":      Const(ty="int", value=1),
+    "FLIP_VERTICAL":        Const(ty="int", value=2),
+
     # ---- Event types --------------------------------------------------------
     "EVENT_QUIT":           Const(ty="int", value=0x100),
     "EVENT_KEYDOWN":        Const(ty="int", value=0x300),
@@ -102,6 +126,9 @@ BINDINGS: dict = {
     "EVENT_MOUSEBUTTONDOWN":Const(ty="int", value=0x401),
     "EVENT_MOUSEBUTTONUP":  Const(ty="int", value=0x402),
     "EVENT_MOUSEWHEEL":     Const(ty="int", value=0x403),
+    "EVENT_JOYAXISMOTION":  Const(ty="int", value=0x600),
+    "EVENT_JOYBUTTONDOWN":  Const(ty="int", value=0x603),
+    "EVENT_JOYBUTTONUP":    Const(ty="int", value=0x604),
 
     # ---- Keyboard scancodes (SDL_Scancode) ----------------------------------
     # Letters

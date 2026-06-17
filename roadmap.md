@@ -54,7 +54,9 @@ Complete, batteries-included graphics library for all targets.
 
 **Gap-filling in `gui`** — live key state (`Canvas.key_down`), relative mouse motion and capture (`mouse_dx`/`mouse_dy`/`relative_mouse`), cursor show/hide, runtime fullscreen/resize, clipboard text, and `gui.Font` (SDL2_ttf TrueType rendering via `Canvas.draw_ttf`) auto-linked via `needs_ttf`.
 
-**Tests:** 451/451 passing.
+**Joystick/gamepad input, sprite transforms, tilemaps** — `gui.Joystick`/`gui.num_joysticks()` (SDL2 joystick API), `Canvas.blit_ex()` (rotated/flipped sprite blits via `SDL_RenderCopyEx`), `Canvas.blit_region()` (cropped sprite-sheet blits), `gui.Tilemap` (tile-grid rendering on top of `blit_region`), `framebuffer.Framebuffer.text()` alias.
+
+**Tests:** 453/453 passing.
 
 ---
 

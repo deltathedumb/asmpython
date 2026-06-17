@@ -107,6 +107,60 @@ class Font:
 
 
 # ---------------------------------------------------------------------------
+# Joystick — SDL2 game controller / joystick input
+# ---------------------------------------------------------------------------
+
+class Joystick:
+    """Physical joystick/gamepad opened by device index.
+
+    Call gui.num_joysticks() first to see how many are connected. Axis
+    values range roughly -32768..32767 (raw SDL_JoystickGetAxis output).
+    Close with .close() when done.
+    """
+
+    def __init__(self, index: int) -> int:
+        _gui_sdl.init_subsystem(INIT_JOYSTICK)
+        self._joy: int = _gui_sdl.joystick_open(index)
+        return 0
+
+    def name(self) -> str:
+        return _gui_sdl.joystick_name(self._joy)
+
+    def num_axes(self) -> int:
+        return _gui_sdl.joystick_num_axes(self._joy)
+
+    def num_buttons(self) -> int:
+        return _gui_sdl.joystick_num_buttons(self._joy)
+
+    def axis(self, index: int) -> int:
+        """Raw axis value, roughly -32768..32767."""
+        return _gui_sdl.joystick_axis(self._joy, index)
+
+    def button(self, index: int) -> int:
+        """Return non-zero if the given button index is currently held down."""
+        return _gui_sdl.joystick_button(self._joy, index)
+
+    def close(self) -> int:
+        _gui_sdl.joystick_close(self._joy)
+        self._joy = 0
+        return 0
+
+
+def num_joysticks() -> int:
+    """Return the number of joysticks/gamepads currently connected."""
+    _gui_sdl.init_subsystem(INIT_JOYSTICK)
+    return _gui_sdl.num_joysticks()
+
+
+def joystick_update() -> int:
+    """Poll the OS for joystick state changes (call once per frame if not
+    using Canvas.update(), which already does this via the event queue).
+    """
+    _gui_sdl.joystick_update()
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Canvas — hardware-accelerated 2D surface backed by an SDL2 window
 # ---------------------------------------------------------------------------
 
@@ -337,6 +391,21 @@ class Canvas:
         _gui_sdl.render_copy(self._ren, img._tex, x, y, w, h)
         return 0
 
+    def blit_region(self, img: Image, sx: int, sy: int, sw: int, sh: int, dx: int, dy: int) -> int:
+        """Draw the (sx, sy, sw, sh) sub-rect of an Image's texture at (dx, dy),
+        at its natural (unscaled) size. Useful for sprite sheets.
+        """
+        _gui_sdl.render_copy_region(self._ren, img._tex, sx, sy, sw, sh, dx, dy)
+        return 0
+
+    def blit_ex(self, img: Image, x: int, y: int, w: int, h: int, angle: int, flip: int) -> int:
+        """Draw an Image scaled to (w, h) at (x, y), rotated `angle` degrees
+        clockwise around its center, optionally flipped (gui.FLIP_NONE,
+        FLIP_HORIZONTAL, or FLIP_VERTICAL).
+        """
+        _gui_sdl.render_copy_ex(self._ren, img._tex, x, y, w, h, angle, flip)
+        return 0
+
     def draw_ttf(self, font: Font, x: int, y: int, text: str, color: int) -> int:
         """Draw anti-aliased TrueType text at (x, y) using a Font and a packed
         0xRRGGBB color (see gui.r()/g()/b() or the named color constants).
@@ -466,6 +535,58 @@ class Canvas:
 
 
 # ---------------------------------------------------------------------------
+# Tilemap — grid of tile indices into a single spritesheet Image
+# ---------------------------------------------------------------------------
+
+class Tilemap:
+    """2D grid of tiles drawn from a single spritesheet Image.
+
+    The spritesheet is a regular grid of `tile_w` x `tile_h` cells, indexed
+    left-to-right, top-to-bottom starting at 0. Build the map with `set()`,
+    then call `draw()` once per frame.
+    """
+
+    def __init__(self, sheet: Image, tile_w: int, tile_h: int, cols: int, rows: int) -> int:
+        self._sheet: Image = sheet
+        self._tw: int = tile_w
+        self._th: int = tile_h
+        self._cols: int = cols
+        self._rows: int = rows
+        self._sheet_cols: int = sheet.w() // tile_w
+        self._cells: list[int] = []
+        i: int = 0
+        n: int = cols * rows
+        while i < n:
+            self._cells.append(0)
+            i = i + 1
+        return 0
+
+    def set(self, col: int, row: int, tile_index: int) -> int:
+        """Set the tile at (col, row) to the given spritesheet tile index."""
+        self._cells[row * self._cols + col] = tile_index
+        return 0
+
+    def get(self, col: int, row: int) -> int:
+        return self._cells[row * self._cols + col]
+
+    def draw(self, canvas: Canvas, x: int, y: int) -> int:
+        """Draw the whole map with its top-left corner at (x, y)."""
+        row: int = 0
+        while row < self._rows:
+            col: int = 0
+            while col < self._cols:
+                tile: int = self._cells[row * self._cols + col]
+                sx: int = (tile % self._sheet_cols) * self._tw
+                sy: int = (tile // self._sheet_cols) * self._th
+                dx: int = x + col * self._tw
+                dy: int = y + row * self._th
+                canvas.blit_region(self._sheet, sx, sy, self._tw, self._th, dx, dy)
+                col = col + 1
+            row = row + 1
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # Named color constants (packed as 0xRRGGBB)
 # ---------------------------------------------------------------------------
 BLACK:      int = 0x000000
@@ -519,6 +640,7 @@ def b(c: int) -> int:
 INIT_VIDEO:             int = 0x00000020
 INIT_AUDIO:             int = 0x00000010
 INIT_EVENTS:            int = 0x00004000
+INIT_JOYSTICK:          int = 0x00000200
 INIT_EVERYTHING:        int = 0x0000FFFF
 
 # ---------------------------------------------------------------------------
@@ -554,6 +676,13 @@ BLEND_ADD:              int = 2
 BLEND_MOD:              int = 4
 
 # ---------------------------------------------------------------------------
+# SDL_RendererFlip (for Canvas.blit_ex)
+# ---------------------------------------------------------------------------
+FLIP_NONE:              int = 0
+FLIP_HORIZONTAL:        int = 1
+FLIP_VERTICAL:          int = 2
+
+# ---------------------------------------------------------------------------
 # Event types
 # ---------------------------------------------------------------------------
 EVENT_QUIT:             int = 0x100
@@ -563,6 +692,9 @@ EVENT_MOUSEMOTION:      int = 0x400
 EVENT_MOUSEBUTTONDOWN:  int = 0x401
 EVENT_MOUSEBUTTONUP:    int = 0x402
 EVENT_MOUSEWHEEL:       int = 0x403
+EVENT_JOYAXISMOTION:    int = 0x600
+EVENT_JOYBUTTONDOWN:    int = 0x603
+EVENT_JOYBUTTONUP:      int = 0x604
 
 # ---------------------------------------------------------------------------
 # Keyboard scancodes (SDL_Scancode)

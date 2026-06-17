@@ -237,6 +237,10 @@ class Framebuffer:
             i = i + 1
         return 0
 
+    def text(self, x: int, y: int, s: str, color: int, scale: int = 1) -> int:
+        """Alias for draw_text(), matching gui.Canvas.text()'s shorter name."""
+        return self.draw_text(x, y, s, color, scale)
+
     def draw_triangle(self, x1: int, y1: int, x2: int, y2: int, x3: int, y3: int, color: int) -> int:
         """Draw the outline of a triangle."""
         self.draw_line(x1, y1, x2, y2, color)
