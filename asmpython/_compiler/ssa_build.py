@@ -385,9 +385,145 @@ def _build_return(ctx: FuncCtx, s: A.Return) -> None:
     ctx.builder().ret(value)
 
 
+def _build_truthy_branch(ctx: FuncCtx, expr: A.Expr, true_blk: ir.Block, false_blk: ir.Block) -> None:
+    """Build `expr`'s truthiness and branch to `true_blk`/`false_blk`,
+    mirroring codegen.py's `_gen_truthy_test` (codegen.py:11207),
+    primitive int/float case only — instance __bool__/__len__ dispatch
+    and container (list/dict/set/tuple) length-truthiness are deferred
+    (each already goes through a method call or a runtime-helper-style
+    length read today, so they're CALL/RAW_ASM wrapping work).
+
+    Float truthiness treats NaN as truthy (NaN != 0.0 under IEEE
+    semantics, matching Python) — expressed here as an explicit ICMP
+    against 0.0 using FCmp's ordinary not-equal predicate. NaN compared
+    with FCmp.NE against anything (including itself) is true under
+    IEEE "unordered compares as not-equal for !=", so this falls out
+    correctly without codegen.py's separate "jp past_nan" parity-flag
+    check — that's an x86-specific lowering detail of how ucomisd's
+    flags happen to encode unordered, not part of the IR's semantics
+    (see docs/IR-DESIGN.md's note on FCmp sidestepping the
+    ucomisd-vs-fcmp unordered-flag difference at the IR level).
+    """
+    t = A.expr_type(expr)
+    if t.startswith("instance:") or t in ("list", "tuple", "dict", "set"):
+        raise SSABuildError(f"truthiness of {t}: not yet wrapped")
+    b = ctx.builder()
+    if t == "float":
+        v = build_expr(ctx, expr)
+        b = ctx.builder()
+        zero = b.fconst(0.0)
+        cond = b.fcmp(Predicate.NE, v, zero)
+    else:
+        v = build_expr(ctx, expr)
+        b = ctx.builder()
+        zero = b.const(0)
+        cond = b.icmp(Predicate.NE, v, zero)
+    ctx.builder().condbr(cond, true_blk, false_blk)
+
+
+def _build_if(ctx: FuncCtx, s: A.If) -> None:
+    then_blk, then_b = new_block(ctx.func, "if_then")
+    else_blk, else_b = new_block(ctx.func, "if_else")
+    end_blk, end_b = new_block(ctx.func, "if_end")
+    entry_blk = ctx.block
+    _build_truthy_branch(ctx, s.test, then_blk, else_blk)
+    then_blk.preds.append(entry_blk)
+    else_blk.preds.append(entry_blk)
+
+    ctx.block = then_blk
+    build_stmts(ctx, s.then)
+    if ctx.block.terminator() is None:
+        ctx.builder().br(end_blk)
+        end_blk.preds.append(ctx.block)
+    then_exit = ctx.block
+
+    ctx.block = else_blk
+    build_stmts(ctx, s.orelse)
+    if ctx.block.terminator() is None:
+        ctx.builder().br(end_blk)
+        end_blk.preds.append(ctx.block)
+
+    ctx.block = end_blk
+    # If `end_blk` ends up with no predecessors (both arms always
+    # return/break/continue — terminate without falling through), it's
+    # dead code; leave it for now since dead-block elimination is an
+    # optimization pass, not a builder correctness concern, but it does
+    # mean a caller appending more statements after this `if` would be
+    # building into a block nothing can reach. That matches sema's
+    # existing assumption that unreachable-after-return code is the
+    # user's problem, not something codegen.py special-cases either.
+    _ = then_exit
+
+
+def _build_while(ctx: FuncCtx, s: A.While) -> None:
+    top_blk, top_b = new_block(ctx.func, "while_top")
+    body_blk, body_b = new_block(ctx.func, "while_body")
+    end_blk, end_b = new_block(ctx.func, "while_end")
+    entry_blk = ctx.block
+
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(entry_blk)
+
+    ctx.block = top_blk
+    # `orelse`'s target is its own block when there's an else clause,
+    # else `end_blk` directly — mirrors codegen.py:2417-2438's `nat`
+    # label (the orelse entry point) only existing when an orelse
+    # clause is actually present. Unlike the always-create-it first
+    # version of this function, `else_blk` is only created when needed:
+    # an unconditionally-created-but-sometimes-unused block violates
+    # Function.validate's "every block is non-empty" invariant (caught
+    # by hand-testing a plain `while` with no `else` — see the commit
+    # this fix landed in for the exact failure).
+    if s.orelse:
+        else_blk, else_b = new_block(ctx.func, "while_else")
+        cond_false_target = else_blk
+    else:
+        cond_false_target = end_blk
+    _build_truthy_branch(ctx, s.test, body_blk, cond_false_target)
+    body_blk.preds.append(top_blk)
+    cond_false_target.preds.append(top_blk)
+
+    ctx.loop_targets.append((top_blk, end_blk))
+    ctx.block = body_blk
+    build_stmts(ctx, s.body)
+    if ctx.block.terminator() is None:
+        ctx.builder().br(top_blk)
+        top_blk.preds.append(ctx.block)
+    ctx.loop_targets.pop()
+
+    if s.orelse:
+        ctx.block = else_blk
+        build_stmts(ctx, s.orelse)
+        if ctx.block.terminator() is None:
+            ctx.builder().br(end_blk)
+            end_blk.preds.append(ctx.block)
+
+    ctx.block = end_blk
+
+
+def _build_break(ctx: FuncCtx, s: A.Break) -> None:
+    if not ctx.loop_targets:
+        raise SSABuildError("break outside loop reached ssa_build (sema should reject)")
+    _, break_target = ctx.loop_targets[-1]
+    ctx.builder().br(break_target)
+    break_target.preds.append(ctx.block)
+
+
+def _build_continue(ctx: FuncCtx, s: A.Continue) -> None:
+    if not ctx.loop_targets:
+        raise SSABuildError("continue outside loop reached ssa_build (sema should reject)")
+    continue_target, _ = ctx.loop_targets[-1]
+    ctx.builder().br(continue_target)
+    continue_target.preds.append(ctx.block)
+
+
 _STMT_BUILDERS: dict[type, Callable[[FuncCtx, object], None]] = {
     A.Assign: _build_assign,
     A.Return: _build_return,
+    A.If: _build_if,
+    A.While: _build_while,
+    A.Break: _build_break,
+    A.Continue: _build_continue,
 }
 
 
@@ -399,5 +535,17 @@ def build_stmt(ctx: FuncCtx, stmt: A.Stmt) -> None:
 
 
 def build_stmts(ctx: FuncCtx, stmts: list) -> None:
+    """Build each statement in order, stopping early if the current block
+    already ends in a terminator (return/break/continue) — anything
+    after that point in the same source block is unreachable, and the
+    IR's one-terminator-at-the-end-only invariant (Function.validate)
+    means appending more instructions to an already-terminated block is
+    a structural error, not just dead code. codegen.py's direct-emission
+    model doesn't need this guard (NASM has no such invariant — emitting
+    unreachable instructions after a `jmp` is harmless there), so this
+    is a genuine new concern the IR's stricter structure introduces, not
+    a port of existing logic."""
     for s in stmts:
+        if ctx.block.terminator() is not None:
+            break
         build_stmt(ctx, s)
