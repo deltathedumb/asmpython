@@ -217,6 +217,39 @@ _COMPARE_PRED: dict[str, Predicate] = {
 }
 
 
+def _build_check_float_nonzero_divisor(ctx: FuncCtx, divisor: Value) -> None:
+    """Raise ZeroDivisionError if `divisor` (an F64 value) is 0.0.
+    Mirrors codegen.py's `_emit_check_float_nonzero_divisor`
+    (codegen.py:~11260-11285), shared by float `/`, `//`, and `%`.
+
+    A NaN divisor is NOT zero (dividing by NaN is valid IEEE-754 — it
+    just produces NaN, not an exception) — codegen.py handles this by
+    checking ucomisd's parity flag (PF, set on an unordered/NaN compare)
+    and treating "unordered" as "proceed, don't raise." This builder
+    gets the same behavior for free from FCmp.NE's IEEE
+    unordered-compares-as-not-equal semantics (see _build_truthy_branch's
+    docstring for the same reasoning applied to truthiness) — no
+    separate NaN check needed at the IR level.
+    """
+    nonzero_blk, nonzero_b = new_block(ctx.func, "fdiv_nonzero")
+    raise_blk, raise_b = new_block(ctx.func, "fdiv_raise")
+    b = ctx.builder()
+    zero = b.fconst(0.0)
+    is_nonzero = b.fcmp(Predicate.NE, divisor, zero)
+    b.condbr(is_nonzero, nonzero_blk, raise_blk)
+    nonzero_blk.preds.append(ctx.block)
+    raise_blk.preds.append(ctx.block)
+
+    ctx.block = raise_blk
+    msg = ctx.builder().string_addr("division by zero")
+    b = ctx.builder()
+    exc_id = b.const(BUILTIN_EXC_IDS["ZeroDivisionError"])
+    b.call(Kind.NONE, "_runtime_raise", [msg, exc_id])
+    b.ret(None)  # unreachable; see _build_int_floordiv_mod's note on this
+
+    ctx.block = nonzero_blk
+
+
 def _build_int_pow(ctx: FuncCtx, e: A.BinOp) -> Value:
     """Integer exponentiation: `result = 1; while exp > 0: result *=
     base; exp -= 1`, mirroring codegen.py's inline pow loop
@@ -385,20 +418,32 @@ def _build_binop(ctx: FuncCtx, e: A.BinOp) -> Value:
     b = ctx.builder()
     if e.op == "/":
         left = _build_as_float(ctx, e.left, lt)
-        b = ctx.builder()
         right = _build_as_float(ctx, e.right, rt)
+        b = ctx.builder()
+        _build_check_float_nonzero_divisor(ctx, right)
         b = ctx.builder()
         return b.fdiv(left, right)
     if e.op in ("//", "%"):
         if is_float:
-            # Float // uses divsd+roundsd(floor mode) and % uses libc
-            # fmod (codegen.py:11298-11304) - a different lowering shape
-            # from the int path below (no SDIV/SREM-truncation-vs-floor
-            # adjustment needed, since divsd+floor-rounding IS already
-            # Python's floor-division semantics). Deferred separately
-            # since it needs its own IR shape, not a variant of the int
-            # path's adjustment logic.
-            raise SSABuildError(f"BinOp {e.op!r} on float operands: not yet implemented")
+            left = _build_as_float(ctx, e.left, lt)
+            right = _build_as_float(ctx, e.right, rt)
+            b = ctx.builder()
+            _build_check_float_nonzero_divisor(ctx, right)
+            b = ctx.builder()
+            if e.op == "%":
+                # libc fmod(double, double) (codegen.py:11302-11304).
+                return b.call(Kind.FLOAT, "fmod", [left, right])
+            # Float // : divide then round toward -inf (codegen.py's
+            # `roundsd xmm0, xmm0, 1`, mode 1 = floor). divsd's quotient
+            # already needs no truncate-then-adjust dance the way the
+            # int SDIV/SREM path does — floor-rounding the raw quotient
+            # directly gives Python's floor-division semantics. Calls
+            # libc floor() rather than inventing a dedicated IR op for
+            # one specific SSE rounding mode, keeping this consistent
+            # with how pow()/fmod() are already handled as plain CALLs.
+            quotient = b.fdiv(left, right)
+            b = ctx.builder()
+            return b.call(Kind.FLOAT, "floor", [quotient])
         return _build_int_floordiv_mod(ctx, e, lt, rt)
     if e.op == "**":
         if is_float:
