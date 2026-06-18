@@ -141,13 +141,39 @@ Known gap: no `symbol=` override yet (unlike `@asm_func(symbol=...)`),
 so the Python function name must exactly match the real exported C
 symbol; only scalar parameter types are supported.
 
+## Done since last update (round 2)
+**Peephole pass** (`codegen.py` `_peephole_optimize`, commit `ac520ff7`) —
+`generate()` now eliminates a `mov reg, X` immediately followed by
+`mov reg, Y` to the same register, since the first write is dead in
+straight-line flow. Caught a real correctness bug in the first version
+before committing: the naive "same destination register" check missed
+that `mov rdx, [ptr]` / `mov rdx, [rdx+8]` (pointer-chasing — extremely
+common) is NOT a dead store, since the second line's source operand
+reads the value the first line just loaded. The full test suite caught
+it immediately (27/454 vs. 454/454) — the fix checks whether the second
+line's source operand text contains the destination register as a
+token before allowing removal. Yield on the real codebase is modest
+(~20 lines out of ~447K on the selfhost asm) once pointer-chasing is
+correctly excluded — the earlier "~1,905 pairs" estimate from session 1
+was the naive/buggy heuristic's count, not the safe one. Kept anyway:
+free, zero-risk now, and a base for future peephole patterns.
+
+Also fixed in passing: `Codegen` (base class) was missing
+`_emit_load_library`/`_emit_get_proc_addr` stubs — only the
+`WindowsCodegen`/`LinuxCodegen` subclasses had them, but
+`_gen_import_binary` (defined on the base class) calls both, which
+sema only caught when compiling something through the base-class
+static type (i.e. selfhost). Added `raise NotImplementedError` stubs
+matching the existing `_emit_os_getcwd`-style pattern.
+
 ## Pending
 1. Continue selfhost debugging (non-blocking bonus, not release scope)
 2. ARM64 codegen (IR layer) — blocks Pi, Apple Silicon, most of Android
 3. macOS Intel x86_64 (medium-large, reuses target_linux.py's SysV/libc approach)
 4. Garbage collector (refcounting — large, self-contained to x64 targets)
-5. Optimizations: NASM `-Ox` is already default (confirmed no-op to add
-   explicitly); peephole pass on emitted instructions is genuinely new and
-   cheap (found ~1,905 safe dead-store `mov`-then-`mov`-same-register pairs
-   in the selfhost asm as a concrete starting pattern)
+5. More peephole patterns if revisited: redundant `push X`/`pop X` pairs
+   and self-moves were both checked and found negligible on the current
+   codebase (0 and 1 instance respectively) — not worth a dedicated pass
+   on their own, but cheap to fold in if another pattern justifies a
+   second look at the instruction stream
 6. Add CODE_OF_CONDUCT.md, CONTRIBUTING.md, SECURITY.md, issue templates
