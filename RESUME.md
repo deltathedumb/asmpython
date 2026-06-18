@@ -53,7 +53,7 @@ real): WSL2 Ubuntu 24.04 (`wsl.exe -u root`) + `gcc-aarch64-linux-gnu` +
 starts at plan-step 5.
 
 **Done and committed** (`ir.py`, `ir_builder.py`, `ssa_build.py`, latest
-commit `550f532a`); working tree clean as of this write:
+commit `42418c10`); working tree clean as of this write:
 
 - `ir.py`/`ir_builder.py`: complete, stable data model + construction API.
 - Primitive/control-flow core: literals (int/float/string), local
@@ -74,6 +74,25 @@ commit `550f532a`); working tree clean as of this write:
   bounds-check-raising-IndexError, both real typed-IR control flow
   (block diamonds + short-circuit branching), not RAW_ASM — this is
   genuine new logic, not a helper wrap.
+- **`IndexAssign`** for `list[int|float]`: write side of list subscript;
+  negative-index wraparound, no bounds check (matching codegen.py's
+  existing silent-corrupt-on-oob behavior exactly).
+- **`MethodCall` (str + list)**: all 33 str methods from `STR_METHOD_RUNTIME`
+  (0/1/2-arg dispatch; special-cased `split`/`rsplit` `xor rcx, rcx`,
+  `ljust`/`rjust`/`center` default-space and 2-arg `movzx rcx, byte [rcx]`
+  fillchar extraction). List: `append` (int + float via `_float_to_int_bits`
+  bitcast), `pop` (int + float via `_int_to_float_bits`), `extend`, `reverse`,
+  `clear` (inline `STORE` to `LIST_LEN_OFF`—no helper), `sort` (int/str, no
+  key/reverse yet), `insert`, `copy` (via `_runtime_list_slice` sentinels).
+- **`for x in xs:`** over list/tuple: single-var only; buf reloaded each
+  iteration to survive in-body `append` calls.
+- **`len()`** extended: list/tuple and dict/set now resolve to a `LOAD` at
+  offset 8; string path unchanged.
+- **Container truthiness**: `list`/`tuple` and `dict`/`set` now supported in
+  `_build_truthy_branch` via length-field `LOAD` + `ICMP != 0`.
+- **`_float_to_int_bits` / `_int_to_float_bits`**: frame-slot bitcast helpers
+  (store Kind.FLOAT, reload as Kind.INT and vice versa), matching codegen.py's
+  `movq rax, xmm0` / `movq xmm0, rax` around list helper calls.
 - **Fixed a real latent bug**: both zero-division-check raise sites used
   `Op.CALL` to invoke `_runtime_raise`, but that helper reads `rax`/`rbx`
   by the fixed internal convention, not ABI-derived registers. Predated
@@ -107,16 +126,18 @@ checking that node's actual sema rule.
 
 **Explicitly still not done** (plan-step 1 remainder): general
 exception/try-except (only hand-wired `ZeroDivisionError` exists), string
-indexing/slicing/methods, list *operations* (append/index/slice/methods —
-only the literal exists so far), ALL dict/set/tuple, `TupleAssign`/
-`StarTarget`, `Global`/`Nonlocal` (blocked on `.bss`/box-pointer
-addressing not yet in the IR), f-strings, classes/methods/dunders,
-closures, generators, match statements, `for` over non-range iterables.
+indexing (`s[i]`) and slicing, `str.format()`, dict/set literals and all their
+operations, tuple literals, `TupleAssign`/`StarTarget`, `Global`/`Nonlocal`
+(blocked on `.bss`/box-pointer addressing not yet in the IR), f-strings,
+classes/instance methods/dunders, closures, generators, match statements,
+`for` over dict/set/str/zip/enumerate/instance iterables, `list.index()` and
+`list.count()` (need inline search loops), `list.sort(key=...)`/`reverse=...`.
 
-**Next step on resume**: continue the wrapping pass — list `append`/
-methods, list-element assignment (`xs[i] = v`, the write side of the
-Subscript work just landed), or dict literals are the natural next
-units. Once the remaining surface is substantially covered, move to
+**Next step on resume**: dict/set literals + dict method calls are the natural
+next unit (dict `get`/`set`/`pop`/`contains`/`keys`/`values`/`items`/`update`,
+set `add`/`discard`/`remove`). After that: string subscript (`s[i]` via
+`_runtime_str_char_at`), then tuple literals/subscript, then `for` over
+dict/set/str. Once the remaining surface is substantially covered, move to
 plan-step 2 (register allocator).
 
 ## Selfhost Debugging (paused, non-blocking — plan-step 11)
