@@ -48,6 +48,14 @@ class Value:
 
 
 class Op(Enum):
+    # Constants. `const_value` on the Instr holds the literal (a Python
+    # int for Kind.INT, a Python float for Kind.FLOAT). A dedicated op
+    # rather than e.g. an ADD-with-zero encoding, since overloading an
+    # arithmetic op to mean "load this immediate" would give the
+    # register allocator a fake extra use of whatever the zero operand
+    # was, distorting liveness for no reason.
+    CONST = auto()
+
     # Integer arithmetic/logic.
     ADD = auto()
     SUB = auto()
@@ -126,6 +134,9 @@ class Instr:
     op: Op
     args: list[Value] = field(default_factory=list)
     result: Optional[Value] = None
+
+    # CONST only: a Python int (Kind.INT) or float (Kind.FLOAT) literal.
+    const_value: object = None
 
     # ICMP/FCMP only.
     predicate: Optional[Predicate] = None

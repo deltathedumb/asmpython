@@ -28,6 +28,13 @@ class BlockBuilder:
         self.block.append(Instr(op=op, args=args, result=result, **kwargs))
         return result
 
+    # ---- constants ----
+    def const(self, value: int) -> Value:
+        return self._emit(Op.CONST, [], Kind.INT, const_value=value)
+
+    def fconst(self, value: float) -> Value:
+        return self._emit(Op.CONST, [], Kind.FLOAT, const_value=value)
+
     # ---- integer arithmetic ----
     def add(self, a: Value, b: Value) -> Value:
         return self._emit(Op.ADD, [a, b], Kind.INT)
