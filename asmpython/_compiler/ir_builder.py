@@ -35,6 +35,9 @@ class BlockBuilder:
     def fconst(self, value: float) -> Value:
         return self._emit(Op.CONST, [], Kind.FLOAT, const_value=value)
 
+    def string_addr(self, text: str) -> Value:
+        return self._emit(Op.STRING_ADDR, [], Kind.INT, const_value=text)
+
     # ---- integer arithmetic ----
     def add(self, a: Value, b: Value) -> Value:
         return self._emit(Op.ADD, [a, b], Kind.INT)

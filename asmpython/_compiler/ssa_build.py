@@ -154,17 +154,13 @@ def _build_floatlit(ctx: FuncCtx, e: A.FloatLit) -> Value:
 
 def _build_strlit(ctx: FuncCtx, e: A.StrLit) -> Value:
     # String literals are heap/.rodata addresses, i.e. plain Kind.INT
-    # values from the IR's point of view — the *string table* (interned
-    # text -> label) is a target-lowering-time concern (today's
-    # `self.intern_string`), not something the IR itself represents.
-    # RAW_ASM is the right escape hatch here in the first cut: each
-    # target's lowering interns the literal into its own data section
-    # and substitutes the address-load instruction for that target.
-    # (A dedicated Op.STRING_ADDR is the cleaner long-term shape — this
-    # is marked for a follow-up once more of the literal/string-table
-    # machinery is ported, to avoid prematurely committing to a string-
-    # table API shape before more call sites are converted.)
-    raise SSABuildError("StrLit: pending Op.STRING_ADDR design (follow-up)")
+    # values from the IR's point of view. Op.STRING_ADDR carries the
+    # raw literal text; each target's lowering is responsible for
+    # interning it (deduplicating identical literals program-wide into
+    # one .rodata entry, exactly like today's Codegen.intern_string) —
+    # see ir.py's Op.STRING_ADDR docstring for why that bookkeeping
+    # belongs at the target-lowering stage rather than here.
+    return ctx.builder().string_addr(e.value)
 
 
 def _build_name(ctx: FuncCtx, e: A.Name) -> Value:
@@ -387,6 +383,7 @@ def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
 _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.IntLit: _build_intlit,
     A.FloatLit: _build_floatlit,
+    A.StrLit: _build_strlit,
     A.Name: _build_name,
     A.BinOp: _build_binop,
     A.UnaryOp: _build_unaryop,

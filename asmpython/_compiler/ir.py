@@ -56,6 +56,21 @@ class Op(Enum):
     # was, distorting liveness for no reason.
     CONST = auto()
 
+    # String literal address. `const_value` holds the literal TEXT (a
+    # Python str), Kind.INT (it's a pointer once lowered). Deliberately
+    # carries the raw text rather than a pre-assigned label/offset:
+    # string interning (deduplicating identical literals into one
+    # .rodata entry, assigning the actual label) is each target's
+    # lowering-stage responsibility, not ssa_build.py's — this keeps
+    # SSA construction free of any global/cross-function string table,
+    # since the same literal text appearing in two different functions
+    # should usually still dedupe to one .rodata entry program-wide
+    # (exactly what Codegen.intern_string does today), and that kind of
+    # whole-program bookkeeping belongs at the point where a target is
+    # actually emitting a complete program, not mid-construction of one
+    # function's IR.
+    STRING_ADDR = auto()
+
     # Integer arithmetic/logic.
     ADD = auto()
     SUB = auto()
