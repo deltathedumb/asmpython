@@ -822,8 +822,135 @@ def _build_compare(ctx: FuncCtx, e: A.Compare) -> Value:
     # site, codegen.py:11526-11535). `in`/`not in`, dunder __eq__/__lt__
     # dispatch, string </<=/>/>= (needs _runtime_str_cmp, a separate
     # helper), and chained string comparisons are all still deferred.
+    if len(e.ops) == 1 and e.ops[0] in ("in", "not in"):
+        # `needle in container` / `needle not in container`
+        needle_expr = e.operands[0]
+        container_expr = e.operands[1]
+        negate = (e.ops[0] == "not in")
+        ct = A.expr_type(container_expr)
+
+        if ct in ("dict", "set"):
+            # `_runtime_dict_contains(rax=header, rbx=key) -> 0/1`
+            key_v = build_expr(ctx, needle_expr)
+            header_v = build_expr(ctx, container_expr)
+            result = ctx.builder().raw_asm(
+                Kind.INT, [header_v, key_v],
+                {k: "call _runtime_dict_contains" for k in _X86_64_KEYS},
+            )
+            if negate:
+                b = ctx.builder()
+                return b.xor(result, b.const(1))
+            return result
+
+        if ct in ("list", "tuple"):
+            # Inline linear scan (same comparison logic as list.index but
+            # returns 0/1 instead of raising). el_t from the container's
+            # list_el_type attribute or element types list.
+            if isinstance(container_expr, A.Name):
+                el_t_in = getattr(container_expr, "list_el_type", "int")
+            elif isinstance(container_expr, A.ListLit):
+                el_t_in = container_expr.el_type
+            elif isinstance(container_expr, A.TupleLit):
+                ets_in = [t for t in container_expr.elem_types if t != "any"]
+                el_t_in = ets_in[0] if ets_in else "int"
+            else:
+                el_t_in = "int"
+            el_kind_in = Kind.FLOAT if el_t_in == "float" else Kind.INT
+            needle_v = build_expr(ctx, needle_expr)
+            header_v = build_expr(ctx, container_expr)
+            ndl_slot = f"__listin_ndl_{id(e)}"
+            idx_slot = f"__listin_idx_{id(e)}"
+            len_slot = f"__listin_len_{id(e)}"
+            buf_slot = f"__listin_buf_{id(e)}"
+            ctx.alloc_slot(ndl_slot, el_t_in)
+            ctx.alloc_slot(idx_slot, "int")
+            ctx.alloc_slot(len_slot, "int")
+            ctx.alloc_slot(buf_slot, "int")
+            _local_write(ctx, ndl_slot, needle_v)
+            b = ctx.builder()
+            lst_len = b.load(Kind.INT, header_v, offset=_LIST_LEN_OFF)
+            b = ctx.builder()
+            lst_buf = b.load(Kind.INT, header_v, offset=_LIST_BUF_OFF)
+            _local_write(ctx, len_slot, lst_len)
+            _local_write(ctx, buf_slot, lst_buf)
+            _local_write(ctx, idx_slot, ctx.builder().const(0))
+
+            loop_blk, _ = new_block(ctx.func, "listin_loop")
+            search_blk, _ = new_block(ctx.func, "listin_search")
+            cont_blk, _ = new_block(ctx.func, "listin_cont")
+            found_blk, _ = new_block(ctx.func, "listin_found")
+            miss_blk, _ = new_block(ctx.func, "listin_miss")
+            end_blk, _ = new_block(ctx.func, "listin_end")
+
+            ctx.builder().br(loop_blk)
+            loop_blk.preds.append(ctx.block)
+
+            ctx.block = loop_blk
+            idx_v = _local_read(ctx, idx_slot, "int")
+            len_v = _local_read(ctx, len_slot, "int")
+            b = ctx.builder()
+            done = b.icmp(Predicate.GE, idx_v, len_v)
+            b.condbr(done, miss_blk, search_blk)
+            miss_blk.preds.append(loop_blk)
+            search_blk.preds.append(loop_blk)
+
+            ctx.block = search_blk
+            idx_v2 = _local_read(ctx, idx_slot, "int")
+            buf_v = _local_read(ctx, buf_slot, "int")
+            ndl_v = _local_read(ctx, ndl_slot, el_t_in)
+            b = ctx.builder()
+            byte_off = b.shl(idx_v2, b.const(3))
+            b = ctx.builder()
+            elem_ptr = b.add(buf_v, byte_off)
+            b = ctx.builder()
+            elem = b.load(el_kind_in, elem_ptr, offset=0)
+            if el_t_in == "str":
+                eq_v = ctx.builder().raw_asm(
+                    Kind.INT, [elem, ndl_v],
+                    {k: "call _runtime_str_eq" for k in _X86_64_KEYS},
+                )
+                b = ctx.builder()
+                match = b.icmp(Predicate.NE, eq_v, b.const(0))
+            elif el_t_in == "float":
+                match = ctx.builder().fcmp(Predicate.EQ, elem, ndl_v)
+            else:
+                match = ctx.builder().icmp(Predicate.EQ, elem, ndl_v)
+            ctx.builder().condbr(match, found_blk, cont_blk)
+            found_blk.preds.append(search_blk)
+            cont_blk.preds.append(search_blk)
+
+            ctx.block = cont_blk
+            idx_v3 = _local_read(ctx, idx_slot, "int")
+            b = ctx.builder()
+            next_idx = b.add(idx_v3, b.const(1))
+            _local_write(ctx, idx_slot, next_idx)
+            ctx.builder().br(loop_blk)
+            loop_blk.preds.append(cont_blk)
+
+            res_slot = f"__listin_res_{id(e)}"
+            ctx.alloc_slot(res_slot, "int")
+
+            ctx.block = found_blk
+            _local_write(ctx, res_slot, ctx.builder().const(1))
+            ctx.builder().br(end_blk)
+            end_blk.preds.append(found_blk)
+
+            ctx.block = miss_blk
+            _local_write(ctx, res_slot, ctx.builder().const(0))
+            ctx.builder().br(end_blk)
+            end_blk.preds.append(miss_blk)
+
+            ctx.block = end_blk
+            result = _local_read(ctx, res_slot, "int")
+            if negate:
+                b = ctx.builder()
+                return b.xor(result, b.const(1))
+            return result
+
+        raise SSABuildError(f"'in'/'not in' on {ct!r}: not yet wrapped")
+
     if any(op in ("in", "not in") for op in e.ops):
-        raise SSABuildError("Compare 'in'/'not in': not yet wrapped")
+        raise SSABuildError("Chained 'in'/'not in': not yet wrapped")
     operand_types = [A.expr_type(o) for o in e.operands]
     if all(t == "str" for t in operand_types):
         if len(e.ops) != 1 or e.ops[0] not in ("==", "!="):
@@ -1886,6 +2013,7 @@ _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.TupleLit: _build_tuplelit,
     A.Subscript: _build_subscript,
     A.MethodCall: _build_methodcall,
+    A.NamedExpr: _build_namedexpr,
 }
 
 
@@ -1897,6 +2025,18 @@ def build_expr(ctx: FuncCtx, expr: A.Expr) -> Value:
 
 
 # ---- statement builders -------------------------------------------------------
+
+
+def _build_namedexpr(ctx: FuncCtx, e: A.NamedExpr) -> Value:
+    # `target := value` — evaluate value, assign to target (like Assign),
+    # and return the value so the enclosing expression can use it.
+    # Mirrors codegen.py's _gen_named_expr (codegen.py:3582).
+    value = build_expr(ctx, e.value)
+    ty = A.expr_type(e.value)
+    if e.target not in ctx.locals_:
+        ctx.alloc_slot(e.target, ty)
+    _local_write(ctx, e.target, value)
+    return value
 
 
 def _build_assign(ctx: FuncCtx, s: A.Assign) -> None:
