@@ -317,18 +317,40 @@ def _build_listlit(ctx: FuncCtx, e: A.ListLit) -> Value:
 
 
 def _build_subscript(ctx: FuncCtx, e: A.Subscript) -> Value:
-    # Mirrors codegen.py's _gen_subscript (codegen.py:9253) list-index case
-    # (codegen.py:9316-9353) only — dict keys, string indexing, slices
-    # (A.Slice index), and instance __getitem__ are all deferred (each is
-    # its own dispatch branch in codegen.py, not a variation on this one).
-    # Scoped to int/float list elements, matching ListLit's current scope.
+    # Mirrors codegen.py's _gen_subscript (codegen.py:9253).
+    # Slices and instance __getitem__ are deferred.
     if isinstance(e.index, A.Slice):
         raise SSABuildError("Subscript with a Slice index: not yet wrapped")
     obj_t = A.expr_type(e.obj)
-    if obj_t != "list":
+
+    if obj_t == "str":
+        # _runtime_str_char_at(rax=s, rbx=index) handles negative indices
+        # and OOB internally — no IR-level bounds check needed here.
+        s_v = build_expr(ctx, e.obj)
+        idx_v = build_expr(ctx, e.index)
+        return ctx.builder().raw_asm(
+            Kind.INT, [s_v, idx_v],
+            {k: "call _runtime_str_char_at" for k in _X86_64_KEYS},
+        )
+
+    if obj_t == "dict":
+        # _runtime_dict_get(rax=header, rbx=key) raises KeyError if absent.
+        # Evaluate index before obj so the header ptr isn't clobbered by the
+        # key expression (mirrors codegen.py's key-spill-then-obj pattern).
+        key_v = build_expr(ctx, e.index)
+        header_v = build_expr(ctx, e.obj)
+        result = ctx.builder().raw_asm(
+            Kind.INT, [header_v, key_v],
+            {k: "call _runtime_dict_get" for k in _X86_64_KEYS},
+        )
+        if e.inferred_type == "float":
+            return _int_to_float_bits(ctx, result, str(id(e)))
+        return result
+
+    if obj_t not in ("list", "tuple"):
         raise SSABuildError(f"Subscript on {obj_t}: not yet wrapped")
     el_t = e.inferred_type
-    if el_t not in ("int", "float"):
+    if el_t not in ("int", "float", "str"):
         raise SSABuildError(f"Subscript yielding {el_t}: not yet wrapped")
 
     header = build_expr(ctx, e.obj)
@@ -2123,6 +2145,178 @@ def _build_for_list(ctx: FuncCtx, s: A.For) -> None:
     ctx.block = end_blk
 
 
+def _build_for_str(ctx: FuncCtx, s: A.For) -> None:
+    # `for c in some_str:` — mirrors codegen.py's _gen_for_str (codegen.py:3334).
+    # Each iteration calls _runtime_str_char_at(rax=ptr, rbx=index) which
+    # allocates a fresh 1-char string. Length is cached via strlen at loop entry.
+    str_v = build_expr(ctx, s.iter)
+
+    str_slot = f"__forstr_ptr_{id(s)}"
+    len_slot = f"__forstr_len_{id(s)}"
+    idx_slot = f"__forstr_idx_{id(s)}"
+    ctx.alloc_slot(str_slot, "int")
+    ctx.alloc_slot(len_slot, "int")
+    ctx.alloc_slot(idx_slot, "int")
+
+    _local_write(ctx, str_slot, str_v)
+    # strlen(rax=ptr) -> rax=len; Win64 uses rcx, SysV uses rdi.
+    str_len = ctx.builder().raw_asm(
+        Kind.INT, [str_v],
+        {"win64": "mov rcx, rax\ncall strlen", "linux_x86_64": "mov rdi, rax\ncall strlen"},
+    )
+    _local_write(ctx, len_slot, str_len)
+    _local_write(ctx, idx_slot, ctx.builder().const(0))
+
+    top_blk, _ = new_block(ctx.func, "forstr_top")
+    body_blk, _ = new_block(ctx.func, "forstr_body")
+    cont_blk, _ = new_block(ctx.func, "forstr_cont")
+    end_blk, _ = new_block(ctx.func, "forstr_end")
+    if s.orelse:
+        else_blk, _ = new_block(ctx.func, "forstr_else")
+        exit_target = else_blk
+    else:
+        exit_target = end_blk
+
+    entry_blk = ctx.block
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(entry_blk)
+
+    ctx.block = top_blk
+    idx_v = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    len_v = _local_read(ctx, len_slot, "int")
+    b = ctx.builder()
+    done = b.icmp(Predicate.GE, idx_v, len_v)
+    b.condbr(done, exit_target, body_blk)
+    exit_target.preds.append(top_blk)
+    body_blk.preds.append(top_blk)
+
+    ctx.block = body_blk
+    str_v2 = _local_read(ctx, str_slot, "int")
+    idx_v2 = _local_read(ctx, idx_slot, "int")
+    char_v = ctx.builder().raw_asm(
+        Kind.INT, [str_v2, idx_v2],
+        {k: "call _runtime_str_char_at" for k in _X86_64_KEYS},
+    )
+
+    if s.var not in ctx.locals_:
+        ctx.alloc_slot(s.var, "str")
+    _local_write(ctx, s.var, char_v)
+
+    ctx.loop_targets.append((cont_blk, end_blk))
+    build_stmts(ctx, s.body)
+    if ctx.block.terminator() is None:
+        ctx.builder().br(cont_blk)
+        cont_blk.preds.append(ctx.block)
+    ctx.loop_targets.pop()
+
+    ctx.block = cont_blk
+    idx_v3 = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    next_idx = b.add(idx_v3, b.const(1))
+    _local_write(ctx, idx_slot, next_idx)
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(cont_blk)
+
+    if s.orelse:
+        ctx.block = else_blk
+        build_stmts(ctx, s.orelse)
+        if ctx.block.terminator() is None:
+            ctx.builder().br(end_blk)
+            end_blk.preds.append(ctx.block)
+
+    ctx.block = end_blk
+
+
+def _build_for_dict(ctx: FuncCtx, s: A.For) -> None:
+    # `for k in d:` — walks order_buf[0..len) directly (codegen.py:2990).
+    # Insertion order is preserved (CPython 3.7+ semantics); order_buf has
+    # no tombstone gaps so a simple 0..len counter suffices.
+    # The iteration variable receives str keys only (dict keys are always str).
+    if s.targets:
+        raise SSABuildError("For (tuple-unpack targets) over dict: not yet wrapped")
+
+    header = build_expr(ctx, s.iter)
+
+    hdr_slot = f"__fordict_hdr_{id(s)}"
+    len_slot = f"__fordict_len_{id(s)}"
+    idx_slot = f"__fordict_idx_{id(s)}"
+    ctx.alloc_slot(hdr_slot, "int")
+    ctx.alloc_slot(len_slot, "int")
+    ctx.alloc_slot(idx_slot, "int")
+
+    _local_write(ctx, hdr_slot, header)
+    b = ctx.builder()
+    initial_len = b.load(Kind.INT, header, offset=_DICT_LEN_OFF)
+    _local_write(ctx, len_slot, initial_len)
+    _local_write(ctx, idx_slot, ctx.builder().const(0))
+
+    top_blk, _ = new_block(ctx.func, "fordict_top")
+    body_blk, _ = new_block(ctx.func, "fordict_body")
+    cont_blk, _ = new_block(ctx.func, "fordict_cont")
+    end_blk, _ = new_block(ctx.func, "fordict_end")
+    if s.orelse:
+        else_blk, _ = new_block(ctx.func, "fordict_else")
+        exit_target = else_blk
+    else:
+        exit_target = end_blk
+
+    entry_blk = ctx.block
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(entry_blk)
+
+    ctx.block = top_blk
+    idx_v = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    len_v = _local_read(ctx, len_slot, "int")
+    b = ctx.builder()
+    done = b.icmp(Predicate.GE, idx_v, len_v)
+    b.condbr(done, exit_target, body_blk)
+    exit_target.preds.append(top_blk)
+    body_blk.preds.append(top_blk)
+
+    ctx.block = body_blk
+    hdr_v = _local_read(ctx, hdr_slot, "int")
+    b = ctx.builder()
+    order_buf = b.load(Kind.INT, hdr_v, offset=_DICT_ORDER_OFF)
+    b = ctx.builder()
+    idx_v2 = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    byte_off = b.shl(idx_v2, b.const(3))
+    b = ctx.builder()
+    elem_ptr = b.add(order_buf, byte_off)
+    b = ctx.builder()
+    key_v = b.load(Kind.INT, elem_ptr, offset=0)
+
+    if s.var not in ctx.locals_:
+        ctx.alloc_slot(s.var, "str")
+    _local_write(ctx, s.var, key_v)
+
+    ctx.loop_targets.append((cont_blk, end_blk))
+    build_stmts(ctx, s.body)
+    if ctx.block.terminator() is None:
+        ctx.builder().br(cont_blk)
+        cont_blk.preds.append(ctx.block)
+    ctx.loop_targets.pop()
+
+    ctx.block = cont_blk
+    idx_v3 = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    next_idx = b.add(idx_v3, b.const(1))
+    _local_write(ctx, idx_slot, next_idx)
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(cont_blk)
+
+    if s.orelse:
+        ctx.block = else_blk
+        build_stmts(ctx, s.orelse)
+        if ctx.block.terminator() is None:
+            ctx.builder().br(end_blk)
+            end_blk.preds.append(ctx.block)
+
+    ctx.block = end_blk
+
+
 def _build_for(ctx: FuncCtx, s: A.For) -> None:
     # Mirrors codegen.py's _gen_for top-level dispatch (codegen.py:2753):
     # range-args vs. "for x in <iterable>" are different codegen paths entirely.
@@ -2132,6 +2326,12 @@ def _build_for(ctx: FuncCtx, s: A.For) -> None:
     iter_t = A.expr_type(s.iter)
     if iter_t in ("list", "tuple"):
         _build_for_list(ctx, s)
+        return
+    if iter_t == "str":
+        _build_for_str(ctx, s)
+        return
+    if iter_t == "dict":
+        _build_for_dict(ctx, s)
         return
     raise SSABuildError(f"For over {iter_t!r}: not yet wrapped")
 
