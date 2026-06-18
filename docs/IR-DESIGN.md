@@ -1,9 +1,40 @@
 # asmpython IR design (2.0.0)
 
-Status: draft, implementation starting. This document is the reference for
+Status: implementation in progress. This document is the reference for
 the codegen rewrite that makes ARM64 (and any future architecture) a real
 second backend instead of x86-64 being hardcoded into the shared compiler
 core. See `roadmap.md` for why this is versioned 2.0.0 rather than 1.3.0.
+
+**Progress as of 2026-06-17** (see git log for the actual commits):
+`ir.py` (the data model) and `ir_builder.py` (ergonomic construction
+helpers) are done and stable. `ssa_build.py` (AST -> IR construction,
+step 2 of the migration strategy below) has real, hand-verified-correct
+implementations for: int/float literals, plain local reads/writes,
+primitive int/float arithmetic and unary ops, comparisons including
+chained comparisons (`a < b < c`), if/while/break/continue, calls to
+plain user-defined functions, and `for x in range(...)`. Two real bugs
+were caught and fixed during this work (an empty-block validation
+failure in the while-loop builder, and a missing "stop building once
+the current block is terminated" guard) — see the commit history on
+`ssa_build.py` for details, since they're informative about what kinds
+of mistakes this style of builder is prone to.
+
+**Explicitly not yet done**: floor-division/modulo (`//`, `%` — need
+the truncate-toward-zero -> floor-toward-`-inf` adjustment), `**`,
+zero-division-check/exception-raising in general, string/list/dict/
+set/tuple operations, f-strings, classes/methods/dunder dispatch,
+closures, generators, match statements, and `for` over anything but
+`range(...)`. Per the "migration strategy" section below, most of
+these are expected to be a mechanical CALL/RAW_ASM wrapping pass
+(they already call `_runtime_*` helpers in the existing direct-emission
+codegen, not primitive arithmetic) rather than needing new IR
+semantics — but that pass, the register allocator, the X86_64Target
+lowering, full test-suite parity, and ARM64 lowering are all still
+ahead. Treat this as roughly the first quarter of the work, by node-
+type coverage — though the genuinely novel design risk (does the IR's
+shape actually work for real control flow, does SSA construction
+produce correct graphs) was concentrated in this first quarter, so the
+remainder should be more mechanical, if still substantial in volume.
 
 ## Why this exists
 
