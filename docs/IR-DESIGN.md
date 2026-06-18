@@ -225,6 +225,24 @@ today and a per-site override has never been needed. If a future helper
 genuinely needs a different convention (not yet encountered), revisit then
 rather than generalizing speculatively now.
 
+**RawAsm text must not contain internal jump labels** (found 2026-06-18
+while wrapping string truthiness): `target_text` is static, per-call-site
+text with no mechanism to mint fresh-per-instance label names the way
+`Function.fresh_block_name` does for real IR blocks — two `RawAsm`
+instructions emitting the same hand-written label text (e.g. two `if s:`
+checks on string locals in one function) would assemble to a hard NASM
+duplicate-label error, or worse, silently jump to the wrong instance if
+the assembler resolved it some other way. Any `RawAsm` site needing
+internal control flow must be written branchless (`cmov`, masking a
+pointer to a known-safe address before an otherwise-unsafe dereference,
+etc. — see `_build_truthy_branch`'s string case in ssa_build.py for a
+worked example: NULL-safe byte read via `lea reg, [rel $]` as a
+guaranteed-readable fallback address, masked in with `cmovz`, hardware-
+verified correct). If a helper is too control-flow-heavy to write
+branchless, it should become real typed IR instructions (more blocks, an
+ICMP/CONDBR) instead of a single RawAsm — i.e. exactly the kind of case
+that justifies skipping the escape hatch and just writing the IR.
+
 ## Register allocation: linear-scan
 
 Graph-coloring allocators produce better code (fewer spills) but are
