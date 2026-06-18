@@ -1034,6 +1034,70 @@ def _build_multiassign(ctx: FuncCtx, s: A.MultiAssign) -> None:
         _local_write(ctx, name, value)
 
 
+def _build_indexassign(ctx: FuncCtx, s: A.IndexAssign) -> None:
+    # `xs[i] = v` for list[int|float] only — the write-side counterpart to
+    # _build_subscript, mirroring codegen.py's IndexAssign list case
+    # (codegen.py:2526-2546). Slice-target assignment (dst[a:b] = src),
+    # dict targets, __setitem__ dispatch, and string elements are all
+    # deferred (each is its own dispatch branch in codegen.py).
+    #
+    # Notably asymmetric with the read side: codegen.py's list-index WRITE
+    # path does negative-index wraparound but has NO bounds check at all
+    # (codegen.py:2526-2546 - no oob/IndexError path, unlike the read
+    # side's codegen.py:9330-9352). Matched here exactly as-is, not
+    # "fixed" - the job here is mirroring existing behavior, not
+    # improving it; an out-of-bounds write currently corrupts memory
+    # silently in both the existing codegen and this IR builder.
+    if isinstance(s.target.index, A.Slice):
+        raise SSABuildError("IndexAssign with a Slice target: not yet wrapped")
+    obj_t = A.expr_type(s.target.obj)
+    if obj_t != "list":
+        raise SSABuildError(f"IndexAssign on {obj_t}: not yet wrapped")
+    el_t = A.expr_type(s.value)
+    if el_t not in ("int", "float"):
+        raise SSABuildError(f"IndexAssign of {el_t}: not yet wrapped")
+
+    header = build_expr(ctx, s.target.obj)
+    raw_idx = build_expr(ctx, s.target.index)
+    value = build_expr(ctx, s.value)
+
+    neg_blk, _ = new_block(ctx.func, "idxw_neg")
+    pos_blk, _ = new_block(ctx.func, "idxw_pos")
+    norm_blk, _ = new_block(ctx.func, "idxw_norm")
+    b = ctx.builder()
+    zero = b.const(0)
+    is_neg = b.icmp(Predicate.LT, raw_idx, zero)
+    b.condbr(is_neg, neg_blk, pos_blk)
+    neg_blk.preds.append(ctx.block)
+    pos_blk.preds.append(ctx.block)
+
+    ctx.block = neg_blk
+    b = ctx.builder()
+    list_len = b.load(Kind.INT, header, offset=_LIST_LEN_OFF)
+    b = ctx.builder()
+    wrapped_idx = b.add(raw_idx, list_len)
+    b.br(norm_blk)
+    norm_blk.preds.append(neg_blk)
+
+    ctx.block = pos_blk
+    ctx.builder().br(norm_blk)
+    norm_blk.preds.append(pos_blk)
+
+    ctx.block = norm_blk
+    norm_idx = ctx.builder().phi(Kind.INT)
+    ctx.builder().add_incoming(norm_idx, wrapped_idx)
+    ctx.builder().add_incoming(norm_idx, raw_idx)
+
+    b = ctx.builder()
+    buf = b.load(Kind.INT, header, offset=_LIST_BUF_OFF)
+    b = ctx.builder()
+    byte_off = b.shl(norm_idx, b.const(3))
+    b = ctx.builder()
+    elem_ptr = b.add(buf, byte_off)
+    b = ctx.builder()
+    b.store(elem_ptr, value, offset=0)
+
+
 def _build_return(ctx: FuncCtx, s: A.Return) -> None:
     value = build_expr(ctx, s.value) if s.value is not None else None
     ctx.builder().ret(value)
@@ -1408,6 +1472,7 @@ _STMT_BUILDERS: dict[type, Callable[[FuncCtx, object], None]] = {
     A.Pass: _build_pass,
     A.AugAssign: _build_augassign,
     A.Del: _build_del,
+    A.IndexAssign: _build_indexassign,
 }
 
 
