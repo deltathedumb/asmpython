@@ -250,6 +250,99 @@ def _build_listlit(ctx: FuncCtx, e: A.ListLit) -> Value:
     return header
 
 
+def _build_subscript(ctx: FuncCtx, e: A.Subscript) -> Value:
+    # Mirrors codegen.py's _gen_subscript (codegen.py:9253) list-index case
+    # (codegen.py:9316-9353) only — dict keys, string indexing, slices
+    # (A.Slice index), and instance __getitem__ are all deferred (each is
+    # its own dispatch branch in codegen.py, not a variation on this one).
+    # Scoped to int/float list elements, matching ListLit's current scope.
+    if isinstance(e.index, A.Slice):
+        raise SSABuildError("Subscript with a Slice index: not yet wrapped")
+    obj_t = A.expr_type(e.obj)
+    if obj_t != "list":
+        raise SSABuildError(f"Subscript on {obj_t}: not yet wrapped")
+    el_t = e.inferred_type
+    if el_t not in ("int", "float"):
+        raise SSABuildError(f"Subscript yielding {el_t}: not yet wrapped")
+
+    header = build_expr(ctx, e.obj)
+    raw_idx = build_expr(ctx, e.index)
+
+    # Negative-index wraparound: idx < 0 -> idx += len. A real branch (not
+    # a branchless formula) to match codegen.py's structure exactly
+    # (codegen.py:9320-9329's "jns pos / add rcx, [...]"), expressed as an
+    # IfExp-shaped diamond merged via phi rather than codegen's jump-to-
+    # shared-tail-with-rcx-preset.
+    neg_blk, _ = new_block(ctx.func, "idx_neg")
+    pos_blk, _ = new_block(ctx.func, "idx_pos")
+    norm_blk, _ = new_block(ctx.func, "idx_norm")
+    b = ctx.builder()
+    zero = b.const(0)
+    is_neg = b.icmp(Predicate.LT, raw_idx, zero)
+    b.condbr(is_neg, neg_blk, pos_blk)
+    neg_blk.preds.append(ctx.block)
+    pos_blk.preds.append(ctx.block)
+
+    ctx.block = neg_blk
+    b = ctx.builder()
+    list_len = b.load(Kind.INT, header, offset=_LIST_LEN_OFF)
+    b = ctx.builder()
+    wrapped_idx = b.add(raw_idx, list_len)
+    b.br(norm_blk)
+    norm_blk.preds.append(neg_blk)
+
+    ctx.block = pos_blk
+    ctx.builder().br(norm_blk)
+    norm_blk.preds.append(pos_blk)
+
+    ctx.block = norm_blk
+    norm_idx = ctx.builder().phi(Kind.INT)
+    ctx.builder().add_incoming(norm_idx, wrapped_idx)
+    ctx.builder().add_incoming(norm_idx, raw_idx)
+
+    # Bounds check: 0 <= norm_idx < len (codegen.py:9330-9352). Short-
+    # circuit, same shape as codegen's "js oob / cmp+jge oob" sequential
+    # jumps (and as _build_compare's chained-comparison short-circuit) -
+    # an AND-of-two-booleans would be semantically equivalent but always
+    # evaluates the second comparison even when the first already fails,
+    # unlike codegen.py's structure this is meant to mirror.
+    check_len_blk, _ = new_block(ctx.func, "idx_check_len")
+    ok_blk, _ = new_block(ctx.func, "idx_ok")
+    oob_blk, _ = new_block(ctx.func, "idx_oob")
+    b = ctx.builder()
+    zero2 = b.const(0)
+    nonneg = b.icmp(Predicate.GE, norm_idx, zero2)
+    b.condbr(nonneg, check_len_blk, oob_blk)
+    check_len_blk.preds.append(norm_blk)
+    oob_blk.preds.append(norm_blk)
+
+    ctx.block = check_len_blk
+    b = ctx.builder()
+    list_len2 = b.load(Kind.INT, header, offset=_LIST_LEN_OFF)
+    b = ctx.builder()
+    in_range = b.icmp(Predicate.LT, norm_idx, list_len2)
+    b.condbr(in_range, ok_blk, oob_blk)
+    ok_blk.preds.append(check_len_blk)
+    oob_blk.preds.append(check_len_blk)
+
+    ctx.block = oob_blk
+    msg = ctx.builder().string_addr("list index out of range")
+    exc_id = ctx.builder().const(BUILTIN_EXC_IDS["IndexError"])
+    _build_runtime_raise(ctx, msg, exc_id)
+    ctx.builder().ret(None)  # unreachable, same convention as the zero-division raises
+
+    ctx.block = ok_blk
+    b = ctx.builder()
+    buf = b.load(Kind.INT, header, offset=_LIST_BUF_OFF)
+    b = ctx.builder()
+    byte_off = b.shl(norm_idx, b.const(3))  # idx * 8
+    b = ctx.builder()
+    elem_ptr = b.add(buf, byte_off)
+    b = ctx.builder()
+    el_kind = Kind.FLOAT if el_t == "float" else Kind.INT
+    return b.load(el_kind, elem_ptr, offset=0)
+
+
 def _build_intlit(ctx: FuncCtx, e: A.IntLit) -> Value:
     return ctx.builder().const(e.value)
 
@@ -906,6 +999,7 @@ _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.BoolOp: _build_boolop,
     A.IfExp: _build_ifexp,
     A.ListLit: _build_listlit,
+    A.Subscript: _build_subscript,
 }
 
 
