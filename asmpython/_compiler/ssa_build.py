@@ -150,6 +150,26 @@ def _local_write(ctx: FuncCtx, name: str, value: Value) -> None:
 _X86_64_KEYS = ("win64", "linux_x86_64")
 
 
+def _build_runtime_raise(ctx: FuncCtx, msg: Value, exc_id: Value) -> None:
+    # _runtime_raise(rax=msg, rbx=exc_id) -> never returns (codegen.py:8445:
+    # "rax = exception message (string ptr), rbx = exception type id").
+    # This is the internal rax/rbx convention, NOT the platform ABI - a
+    # real bug existed here until this helper was introduced: the two
+    # call sites (zero-division checks) used `b.call(Kind.NONE,
+    # "_runtime_raise", [msg, exc_id])`, i.e. Op.CALL, which the IR
+    # documents as using ABI-derived argument registers (rcx/rdx on
+    # Win64, rdi/rsi on SysV) - wrong for a helper that reads rax/rbx by
+    # convention like every other _runtime_* helper. Predates the
+    # RAW_ASM argument-convention being resolved (it was written earlier,
+    # before string operations needed RAW_ASM at all, and never
+    # revisited). Fixed by routing through RAW_ASM like every other
+    # _runtime_* call, consistent with _X86_64_KEYS' convention.
+    ctx.builder().raw_asm(
+        Kind.NONE, [msg, exc_id],
+        {k: "call _runtime_raise" for k in _X86_64_KEYS},
+    )
+
+
 # ---- expression builders -----------------------------------------------------
 #
 # Each builder takes (ctx, expr) and returns the Value holding the
@@ -327,10 +347,9 @@ def _build_check_float_nonzero_divisor(ctx: FuncCtx, divisor: Value) -> None:
 
     ctx.block = raise_blk
     msg = ctx.builder().string_addr("division by zero")
-    b = ctx.builder()
-    exc_id = b.const(BUILTIN_EXC_IDS["ZeroDivisionError"])
-    b.call(Kind.NONE, "_runtime_raise", [msg, exc_id])
-    b.ret(None)  # unreachable; see _build_int_floordiv_mod's note on this
+    exc_id = ctx.builder().const(BUILTIN_EXC_IDS["ZeroDivisionError"])
+    _build_runtime_raise(ctx, msg, exc_id)
+    ctx.builder().ret(None)  # unreachable; see _build_int_floordiv_mod's note on this
 
     ctx.block = nonzero_blk
 
@@ -426,8 +445,7 @@ def _build_int_floordiv_mod(ctx: FuncCtx, e: A.BinOp, lt: str, rt: str) -> Value
 
     ctx.block = raise_blk
     msg = ctx.builder().string_addr("division by zero")
-    b = ctx.builder()
-    exc_id = b.const(BUILTIN_EXC_IDS["ZeroDivisionError"])
+    exc_id = ctx.builder().const(BUILTIN_EXC_IDS["ZeroDivisionError"])
     # _runtime_raise never returns (it longjmps to the nearest handler,
     # or prints+exits if none is installed) - codegen.py never emits
     # anything after this call on this path either. The IR still needs
@@ -436,8 +454,8 @@ def _build_int_floordiv_mod(ctx: FuncCtx, e: A.BinOp, lt: str, rt: str) -> Value
     # marker for it (a real Op.UNREACHABLE is a reasonable follow-up
     # once more exception-handling call sites exist to validate the
     # shape against).
-    b.call(Kind.NONE, "_runtime_raise", [msg, exc_id])
-    b.ret(None)
+    _build_runtime_raise(ctx, msg, exc_id)
+    ctx.builder().ret(None)
 
     ctx.block = nonzero_blk
     b = ctx.builder()
