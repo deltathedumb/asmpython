@@ -99,10 +99,25 @@ commit `42418c10`); working tree clean as of this write:
   the RAW_ASM argument-convention resolution; never revisited until
   `Subscript`'s bounds-check needed the same `_runtime_raise` call and
   exposed it. Fixed via a shared `_build_runtime_raise` helper.
+- **`DictLit`**: allocs dict header via `_build_alloc_dict` (cap rounded up
+  to next power of 2 ≥ 2n), calls `_runtime_dict_set` per k/v pair; float
+  values bitcast via `_float_to_int_bits`; `**spread` entries call
+  `_runtime_dict_update` in source order.
+- **`SetLit`**: same dict-keyed-by-members layout with dummy value 1 (str
+  elements only; int-element sets deferred until int→str helper lands in IR).
+- **`TupleLit`**: heterogeneous `elem_types[]`, reuses list layout; cap
+  rounded up to max(n,4).
+- **`MethodCall` (dict + set)**: dict — `get` (with/without default via
+  `_runtime_dict_get_default`), `keys`, `values`, `items`, `update`, `pop`,
+  `contains`, `clear`; set — `add` (str), `clear`, `update`, `remove`,
+  `discard` (CONDBR diamond: contains → pop only if present, no RAW_ASM
+  branching). `dict.copy`/`setdefault` and set `union`/`intersection`/
+  `difference` deferred.
 
 **Two RAW_ASM design rules established this stretch** (in
 `docs/IR-DESIGN.md`, load-bearing for every remaining RAW_ASM site —
 list/dict/set *operations*, not just literals, still ahead):
+
 1. **Argument convention**: `args[i]` -> i-th register of `rax, rbx, rcx,
    rdx, ...`, matching every `_runtime_*` helper's existing convention.
 2. **`target_text` keys are `(OS, ABI)` pairs**: `"win64"` /
@@ -126,19 +141,19 @@ checking that node's actual sema rule.
 
 **Explicitly still not done** (plan-step 1 remainder): general
 exception/try-except (only hand-wired `ZeroDivisionError` exists), string
-indexing (`s[i]`) and slicing, `str.format()`, dict/set literals and all their
-operations, tuple literals, `TupleAssign`/`StarTarget`, `Global`/`Nonlocal`
-(blocked on `.bss`/box-pointer addressing not yet in the IR), f-strings,
-classes/instance methods/dunders, closures, generators, match statements,
-`for` over dict/set/str/zip/enumerate/instance iterables, `list.index()` and
-`list.count()` (need inline search loops), `list.sort(key=...)`/`reverse=...`.
+indexing (`s[i]`) and slicing, `str.format()`, `TupleAssign`/`StarTarget`,
+`Global`/`Nonlocal` (blocked on `.bss`/box-pointer addressing not yet in the
+IR), f-strings, classes/instance methods/dunders, closures, generators, match
+statements, `for` over dict/set/str/zip/enumerate/instance iterables,
+`list.index()` and `list.count()` (need inline search loops),
+`list.sort(key=...)`/`reverse=...`, `dict.copy()`/`setdefault()`,
+`set.union`/`intersection`/`difference`, int-element sets.
 
-**Next step on resume**: dict/set literals + dict method calls are the natural
-next unit (dict `get`/`set`/`pop`/`contains`/`keys`/`values`/`items`/`update`,
-set `add`/`discard`/`remove`). After that: string subscript (`s[i]` via
-`_runtime_str_char_at`), then tuple literals/subscript, then `for` over
-dict/set/str. Once the remaining surface is substantially covered, move to
-plan-step 2 (register allocator).
+**Next step on resume**: string subscript `s[i]` via `_runtime_str_char_at`,
+then `for` over dict (key iteration via `_runtime_dict_keys` + list loop),
+then `for` over str. After that: `TupleAssign`/`StarTarget` unpack, then
+`list.index()`/`count()` inline loops. Once the remaining surface is
+substantially covered, move to plan-step 2 (register allocator).
 
 ## Selfhost Debugging (paused, non-blocking — plan-step 11)
 
@@ -151,6 +166,7 @@ git history (`git log -p -- RESUME.md`) or `[[feedback-selfhost-debugging]]`.
 8th bug not yet isolated. Opportunistic only — never blocks plan steps 1-10.
 
 ## Other Notes
+
 - macOS Intel and RPi/Mac ARM64 are plan-steps 4 and 6-8 above, not
   independent side work — sequencing matters, see `[[project-2.0-versioning]]`.
 - (Deferred, only if user revisits) A `.csproj`-style project
