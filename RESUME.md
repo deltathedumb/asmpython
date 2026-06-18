@@ -1,120 +1,137 @@
 # 2.0.0 Resume
 
 ## Directive
-"Continue dev until we hit 2.0.0 ready." 2.0.0 = ARM64 (+ eventually macOS
-Intel) platform support, gated on a full SSA/IR rewrite of codegen — see
-`docs/IR-DESIGN.md`. User explicitly chose the full IR rewrite over a
-smaller register-name-abstraction alternative, and explicitly chose full
-AST-node coverage in `ssa_build.py` before any end-to-end compile attempt,
-over a minimal-subset-first staged approach. Both settled; don't revisit
-without the user re-raising it. Selfhosting (below) is a stretch goal, not
-committed 2.0.0 scope.
+"Continue dev until we hit 2.0.0 ready," explicitly scoped 2026-06-18 as:
+garbage collector, optimizations, selfhost-capable, ARM support, Mac
+support (Intel + Apple Silicon), Raspberry Pi support (OS + bare metal).
+**This is now running as an autonomous `/loop`** — see the user's `loop`
+skill instructions for how to act without supervision (continue
+established work, commit/push only on clear continuations, don't invent
+new scope, stay reversible).
 
-## Current State: ARM64 IR Rewrite
+**Confirmed work order** (user answered explicitly when asked, given the
+real dependency chain — full reasoning in `[[project-2.0-versioning]]`
+memory):
+1. Finish `ssa_build.py`'s mechanical wrapping pass (~40 node types left).
+2. Linear-scan register allocator.
+3. `X86_64Target` lowering; validate full parity vs the 454-test suite.
+4. macOS Intel x86-64 target (reuses `target_linux.py`'s SysV/libc approach).
+5. ARM64 lowering (Linux first).
+6. macOS Apple Silicon (reuses step 5).
+7. Raspberry Pi Linux (reuses step 5).
+8. Raspberry Pi bare metal (needs a *freestanding* ARM64 target — new work).
+9. Garbage collector (refcounting).
+10. Optimization passes beyond the existing peephole dead-store pass.
+11. Selfhost: resume the 8th not-yet-isolated bug (opportunistic, never blocking).
+12. Release pass: CODE_OF_CONDUCT/CONTRIBUTING/SECURITY/issue templates, CHANGELOG, version bump off `-preview`.
 
-**Toolchain** (resolved, working): WSL2 Ubuntu 24.04 (`wsl.exe -u root`,
-not the default user — its `sudo` needs an interactive password unavailable
-to automation) with `gcc-aarch64-linux-gnu` (assembler/linker, AT&T syntax)
-+ `qemu-user` (runs aarch64 ELF on this x86-64 Windows host, no VM). Smoke
-tested end-to-end with a hand-written `.s` file.
+Currently on **step 1**. Don't skip ahead to register allocator/lowering
+work until the wrapping pass is substantially further along — that was
+the user's explicit, twice-confirmed call (full IR rewrite over a smaller
+alternative; full AST coverage before any end-to-end compile attempt).
+
+**Tangential, NOT active work**: user is also building **uASM**, a
+modular machine-code compiler with swappable backends/frontends, which
+currently depends on asmpython (Python implementation, compiled by
+asmpython, uses `import_binary` at runtime). Plan: finish 2.0.0 exactly
+as scoped here first, fork asmpython into a uASM-facing Python frontend
+*afterward*, as a separate effort. Zero impact on current IR/RAW_ASM
+design decisions — don't let this influence anything below. See
+`[[project-uasm-fork-plan]]` memory.
+
+## Step 1 Progress: ssa_build.py Wrapping Pass
 
 **Design**: `docs/IR-DESIGN.md`. SSA form, two value kinds (`Kind.INT`,
-`Kind.FLOAT` — no i8/i16/i32 distinctions), ICMP/FCMP are value-producing
-(sidesteps x86 `ucomisd` vs ARM64 `fcmp` unordered-NaN flag differences
-entirely at the IR level), linear-scan register allocation, a `RAW_ASM`
-escape hatch for the 73 hand-written `_runtime_*` helpers during migration,
-four-step migration (IR core -> x86-64 parity -> ARM64 lowering -> driver
-integration) that keeps today's direct-emission codegen.py working
-throughout.
+`Kind.FLOAT`), ICMP/FCMP are value-producing (sidesteps x86 `ucomisd` vs
+ARM64 `fcmp` unordered-NaN differences at the IR level), linear-scan
+register allocation, a `RAW_ASM` escape hatch for the 73 hand-written
+`_runtime_*` helpers during migration.
+
+**ARM64 toolchain** (resolved, working, not yet exercised by anything
+real): WSL2 Ubuntu 24.04 (`wsl.exe -u root`) + `gcc-aarch64-linux-gnu` +
+`qemu-user`. Smoke-tested with a hand-written `.s` file only — real use
+starts at plan-step 5.
 
 **Done and committed** (`ir.py`, `ir_builder.py`, `ssa_build.py`, latest
-commit `1b1ae842`); working tree clean, 5 commits ahead of `origin/beta`
-(not yet pushed as of this pause):
+commit `550f532a`); working tree clean as of this write:
 
 - `ir.py`/`ir_builder.py`: complete, stable data model + construction API.
-- `ssa_build.py` primitive/control-flow core (committed earlier): int/
-  float/string literals, local read/write, the **complete** primitive
-  int/float arithmetic surface (`+ - * / // % ** & | ^ << >>`, correct
-  Python floor/zero-division/NaN semantics), unary ops, comparisons incl.
-  chained (`a < b < c`), if/while/for(range)/break/continue, calls to
-  plain user-defined functions.
-- `ssa_build.py` additions this stretch: `BoolOp` (short-circuit, Python
-  VALUE semantics — not boolean-normalized), `IfExp` (both arms promoted
-  to result type, merged via phi), `ExprStmt`, `Pass`, `AugAssign`
-  (reuses `_build_binop` via a synthetic `BinOp`/`Name` pair),
-  `MultiAssign` (`a = b = c = value`, plain names only — `TupleAssign`'s
-  Subscript/Attr/star-unpack targets still deferred), `Del` (plain local
-  `Name` target only — zeros the slot with a raw integer 0, matching
-  codegen.py even for float slots since all-zero-bits is +0.0).
-- **First real `Op.RAW_ASM` call sites**: `str + str` (-> `_runtime_str_
-  concat`), `str == str` / `str != str` (-> `_runtime_str_eq`, `!=` XORs
-  the result with 1), and string truthiness (`if s:` — NULL-safe empty-
-  string check, written fully branchless using `lea reg, [rel $]` as a
-  guaranteed-safe dereference target plus `cmovz`, since the IR has no
-  byte-width LOAD and RawAsm text can't safely use jump labels — see
-  below). All hand-validated via constructed `FuncCtx`/`func.validate()`
-  cases, the truthiness branchless sequence additionally verified on
-  real hardware (assembled+ran a Win64 .exe, confirmed exit code by hand
-  computation). Full 454-test suite green after every commit (unaffected
-  so far — `ssa_build.py` isn't wired into the compile path yet).
+- Primitive/control-flow core: literals (int/float/string), local
+  read/write, **complete** primitive int/float arithmetic (`+ - * / // %
+  ** & | ^ << >>`), unary ops, comparisons incl. chained, if/while/
+  for(range)/break/continue, plain user-function calls, `BoolOp`,
+  `IfExp`, `ExprStmt`, `Pass`, `AugAssign`, `MultiAssign`, `Del`.
+- **String operations** (first real `RAW_ASM` sites): `str + str`, `str
+  ==`/`!= str`, string truthiness (`if s:`, written branchless — see
+  hazard note below), `len(s)`, `str(int)` (plain int only).
+- **`ListLit`** (int/float elements only — first container type). Turned
+  out *simpler* in the IR than codegen.py's version: no frame slot needed
+  to park the header pointer across the two `malloc` calls, since an SSA
+  `Value` just stays valid across later instructions by construction.
+  Element writes are real typed `STORE`s; only the two `malloc`s are
+  `RAW_ASM`.
+- **`Subscript`** for `list[int|float]`: negative-index wraparound +
+  bounds-check-raising-IndexError, both real typed-IR control flow
+  (block diamonds + short-circuit branching), not RAW_ASM — this is
+  genuine new logic, not a helper wrap.
+- **Fixed a real latent bug**: both zero-division-check raise sites used
+  `Op.CALL` to invoke `_runtime_raise`, but that helper reads `rax`/`rbx`
+  by the fixed internal convention, not ABI-derived registers. Predated
+  the RAW_ASM argument-convention resolution; never revisited until
+  `Subscript`'s bounds-check needed the same `_runtime_raise` call and
+  exposed it. Fixed via a shared `_build_runtime_raise` helper.
 
-**Two RAW_ASM design gaps resolved this stretch** (both documented in
-`docs/IR-DESIGN.md`, load-bearing for every future RAW_ASM site — list/
-dict/set ops still ahead):
-1. **Argument convention** (asked the user, didn't guess): a RawAsm's
-   `args[i]` lands in the i-th register of a fixed `rax, rbx, rcx, rdx,
-   ...` convention, matching every existing `_runtime_*` helper exactly.
-   No new `Instr` field; the register allocator treats it like a `Call`
-   with hardcoded-not-ABI-derived argument registers.
-2. **No internal jump labels in RawAsm text** (caught by self-review
-   before committing, not by a test failure): `target_text` is static
-   per-call-site text with no fresh-label-minting mechanism, so two
-   firings of the same RawAsm site in one function would emit duplicate
-   NASM labels. Any RawAsm needing internal control flow must be written
-   branchless, or promoted to real typed IR instructions (more blocks +
-   ICMP/CONDBR) if it's too complex for that.
+**Two RAW_ASM design rules established this stretch** (in
+`docs/IR-DESIGN.md`, load-bearing for every remaining RAW_ASM site —
+list/dict/set *operations*, not just literals, still ahead):
+1. **Argument convention**: `args[i]` -> i-th register of `rax, rbx, rcx,
+   rdx, ...`, matching every `_runtime_*` helper's existing convention.
+2. **`target_text` keys are `(OS, ABI)` pairs**: `"win64"` /
+   `"linux_x86_64"` / `"linux_arm64"`, NOT bare arch names — caught and
+   fixed after `len(s)`'s `strlen` call exposed that Win64 and SysV pass
+   args in different registers even on the same architecture. A
+   `_X86_64_KEYS` constant keeps self-contained (OS-independent) sites
+   consistent. **Don't reintroduce `"x86_64"` as a key.**
+3. **No internal jump labels in RAW_ASM text** — `target_text` can't mint
+   fresh per-instance labels, so two firings of the same site would
+   collide. Write branchless (see string truthiness's `cmovz` +
+   `lea reg, [rel $]` trick, hardware-verified correct) or promote to
+   real typed IR blocks if a helper is too control-flow-heavy for that.
 
-**Explicitly still not done**: general exception/try-except mechanism
-(only hand-wired ZeroDivisionError exists), string indexing/`len()`/
-methods, ALL list/dict/set/tuple operations, `TupleAssign`/`StarTarget`,
-`Global`/`Nonlocal` (blocked on `.bss`/box-pointer addressing not yet in
-the IR), f-strings, classes/methods/dunders, closures, generators, match
-statements, `for` over non-range iterables. Expected to be mechanical
-CALL/RAW_ASM wrapping per the design doc, lower risk per node type than
-what's landed, but still substantial volume — string/list/dict ops in
-particular will each need their own register-convention check against
-the real `_runtime_*` helper before wrapping.
+**Real assumption caught before becoming a bug**: `ListLit`'s first draft
+copied `_build_binop`'s int->float promotion pattern. Checked sema first
+— `ListLit` type-checking hard-rejects mixed-element-type lists, so no
+promotion is ever needed there. General lesson: don't assume a promotion
+pattern transfers between structurally-similar node types without
+checking that node's actual sema rule.
 
-**After the wrapping pass**: linear-scan register allocator, X86_64Target
-lowering, wire IR path into driver.py behind a flag, validate against full
-454-test suite for x86-64 parity, only then ARM64Target lowering + port 73
-runtime helpers to ARM64 + wire `--target linux-arm64` through WSL.
+**Explicitly still not done** (plan-step 1 remainder): general
+exception/try-except (only hand-wired `ZeroDivisionError` exists), string
+indexing/slicing/methods, list *operations* (append/index/slice/methods —
+only the literal exists so far), ALL dict/set/tuple, `TupleAssign`/
+`StarTarget`, `Global`/`Nonlocal` (blocked on `.bss`/box-pointer
+addressing not yet in the IR), f-strings, classes/methods/dunders,
+closures, generators, match statements, `for` over non-range iterables.
 
-**Next step on resume**: pick the next wrapping target — string indexing/
-`len()` or list literals/operations are the natural next units, both
-bigger than what's landed so far. Was about to ask the user before
-picking, given how much real design nuance the RAW_ASM sites have
-surfaced this stretch (worth confirming pace/direction rather than just
-plowing into list operations unprompted).
+**Next step on resume**: continue the wrapping pass — list `append`/
+methods, list-element assignment (`xs[i] = v`, the write side of the
+Subscript work just landed), or dict literals are the natural next
+units. Once the remaining surface is substantially covered, move to
+plan-step 2 (register allocator).
 
-## Selfhost Debugging (paused, non-blocking)
+## Selfhost Debugging (paused, non-blocking — plan-step 11)
 
 Still segfaults compiling `test_simple.py` via the selfhosted binary — 7
 distinct bugs found and fixed so far (Win64 shadow-space violations,
 `@dataclass` default_factory codegen, shared-AST-node default-arg
 collision, NULL truthiness checks, whole-program import merge ordering,
-class-var inheritance gap, hardcoded-empty `__file__`). Full details are
-in git history (`git log -p -- RESUME.md`) or the
-`[[feedback-selfhost-debugging]]` memory for the gdb-first workflow and
-exact fix locations. 8th bug not yet isolated. Resume only when asked;
-not committed 2.0.0 scope.
+class-var inheritance gap, hardcoded-empty `__file__`). Full details in
+git history (`git log -p -- RESUME.md`) or `[[feedback-selfhost-debugging]]`.
+8th bug not yet isolated. Opportunistic only — never blocks plan steps 1-10.
 
-## Other Pending (post-ARM64)
-- macOS Intel x86_64 target (Mach-O, clang/ld) — independent of ARM64 IR.
-- Garbage collector (refcounting) for x64 targets — independent of ARM64 IR.
-- CODE_OF_CONDUCT.md, CONTRIBUTING.md, SECURITY.md, issue templates.
-- Final 2.0.0 release pass: full test suite, CHANGELOG, version bump off
-  `-preview`.
+## Other Notes
+- macOS Intel and RPi/Mac ARM64 are plan-steps 4 and 6-8 above, not
+  independent side work — sequencing matters, see `[[project-2.0-versioning]]`.
 - (Deferred, only if user revisits) A `.csproj`-style project
-  manifest/build-orchestration system — asked about once, acknowledged as
-  a real but separate idea, no work started.
+  manifest/build-orchestration system for asmpython programs — asked
+  about once, acknowledged as a real but separate idea, no work started.
