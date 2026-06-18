@@ -9,32 +9,45 @@ core. See `roadmap.md` for why this is versioned 2.0.0 rather than 1.3.0.
 `ir.py` (the data model) and `ir_builder.py` (ergonomic construction
 helpers) are done and stable. `ssa_build.py` (AST -> IR construction,
 step 2 of the migration strategy below) has real, hand-verified-correct
-implementations for: int/float literals, plain local reads/writes,
-primitive int/float arithmetic and unary ops, comparisons including
-chained comparisons (`a < b < c`), if/while/break/continue, calls to
-plain user-defined functions, and `for x in range(...)`. Two real bugs
-were caught and fixed during this work (an empty-block validation
-failure in the while-loop builder, and a missing "stop building once
-the current block is terminated" guard) — see the commit history on
-`ssa_build.py` for details, since they're informative about what kinds
-of mistakes this style of builder is prone to.
+implementations for: int/float/string literals, plain local reads/
+writes, the *complete* primitive int/float arithmetic surface (`+ - *
+/ // % ** & | ^ << >>`, all with correct zero-division checking and
+Python floor/NaN semantics — int `//`/`%` get the truncate-toward-zero
+-> floor-toward-`-inf` adjustment via real ICMP/CONDBR + a merge phi;
+float `//` is divide-then-libc-`floor()`, `%` is libc `fmod()`, `**`
+is an int multiply-loop or libc `pow()`), unary ops, comparisons
+including chained comparisons (`a < b < c`), if/while/break/continue,
+calls to plain user-defined functions, and `for x in range(...)`.
 
-**Explicitly not yet done**: floor-division/modulo (`//`, `%` — need
-the truncate-toward-zero -> floor-toward-`-inf` adjustment), `**`,
-zero-division-check/exception-raising in general, string/list/dict/
-set/tuple operations, f-strings, classes/methods/dunder dispatch,
-closures, generators, match statements, and `for` over anything but
-`range(...)`. Per the "migration strategy" section below, most of
-these are expected to be a mechanical CALL/RAW_ASM wrapping pass
-(they already call `_runtime_*` helpers in the existing direct-emission
-codegen, not primitive arithmetic) rather than needing new IR
-semantics — but that pass, the register allocator, the X86_64Target
-lowering, full test-suite parity, and ARM64 lowering are all still
-ahead. Treat this as roughly the first quarter of the work, by node-
-type coverage — though the genuinely novel design risk (does the IR's
-shape actually work for real control flow, does SSA construction
-produce correct graphs) was concentrated in this first quarter, so the
-remainder should be more mechanical, if still substantial in volume.
+Several real bugs were caught and fixed during this work — see the
+commit history on `ssa_build.py` for details, since they're
+informative about what kinds of mistakes this style of builder is
+prone to: an empty-block validation failure in the while-loop builder;
+a missing "stop building once the current block is terminated" guard;
+and a missing zero-division check on float `/` (present on `//`/`%`
+from the start, but the original `/` implementation predated that
+pattern being established and the gap wasn't caught until revisiting
+the area for `//`/`%`).
+
+**Explicitly not yet done**: zero-division-check/exception-raising's
+*general* mechanism (the `ZeroDivisionError` case is hand-wired
+directly via `_runtime_raise`+`BUILTIN_EXC_IDS`, not a reusable
+"raise this exception" builder — `try`/`except`/general `raise` still
+need their own design), string/list/dict/set/tuple *operations*
+(methods, literals, indexing — only string literals as *values*
+exist so far), f-strings, classes/methods/dunder dispatch, closures,
+generators, match statements, and `for` over anything but `range(...)`.
+Per the "migration strategy" section below, most of these are expected
+to be a mechanical CALL/RAW_ASM wrapping pass (they already call
+`_runtime_*` helpers in the existing direct-emission codegen, not
+primitive arithmetic) rather than needing new IR semantics — but that
+pass, the register allocator, the X86_64Target lowering, full
+test-suite parity, and ARM64 lowering are all still ahead. The
+complete primitive-arithmetic surface plus full control flow is a
+meaningfully larger fraction of the *design risk* than of the
+remaining *volume* — the mechanical wrapping pass ahead is still
+substantial work, just lower-risk per node type than what's landed
+so far.
 
 ## Why this exists
 
