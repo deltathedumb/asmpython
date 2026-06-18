@@ -182,10 +182,183 @@ def _build_name(ctx: FuncCtx, e: A.Name) -> Value:
     )
 
 
+# op string -> (int Op, float Op-or-None). Mirrors codegen.py's
+# _emit_binop_inline (codegen.py:11310) dispatch table, primitive-type
+# case only — dunder/string/list/dict/set BinOp lowering (the bulk of
+# _gen_binop, codegen.py:10982) is deferred to the CALL/RAW_ASM wrapping
+# pass since it already goes through _runtime_* helpers today.
+_SIMPLE_BINOPS: dict[str, tuple[Op, Optional[Op]]] = {
+    "+": (Op.ADD, Op.FADD),
+    "-": (Op.SUB, Op.FSUB),
+    "*": (Op.MUL, Op.FMUL),
+    "&": (Op.AND, None),   # bitwise: int-only, sema rejects float operands
+    "|": (Op.OR, None),
+    "^": (Op.XOR, None),
+    "<<": (Op.SHL, None),
+    ">>": (Op.SAR, None),  # Python >> is arithmetic (sign-preserving) shift
+}
+
+_COMPARE_PRED: dict[str, Predicate] = {
+    "==": Predicate.EQ,
+    "!=": Predicate.NE,
+    "<": Predicate.LT,
+    "<=": Predicate.LE,
+    ">": Predicate.GT,
+    ">=": Predicate.GE,
+    # `is`/`is not`: identity-as-bit-equality, same lowering as ==/!= given
+    # asmpython's uniform 8-byte value representation (codegen.py:11391-95).
+    "is": Predicate.EQ,
+    "is not": Predicate.NE,
+}
+
+
+def _build_binop(ctx: FuncCtx, e: A.BinOp) -> Value:
+    lt, rt = A.expr_type(e.left), A.expr_type(e.right)
+    if lt.startswith("instance:") or rt.startswith("instance:") or "str" in (lt, rt) or lt in (
+        "list", "dict", "set", "tuple",
+    ) or rt in ("list", "dict", "set", "tuple"):
+        raise SSABuildError(
+            f"BinOp {e.op!r} on {lt}/{rt}: dunder/string/container lowering "
+            "not yet wrapped (deferred to the CALL/RAW_ASM pass)"
+        )
+    is_float = "float" in (lt, rt) or e.op == "/"  # true division always float
+    b = ctx.builder()
+    if e.op == "/":
+        left = _build_as_float(ctx, e.left, lt)
+        b = ctx.builder()
+        right = _build_as_float(ctx, e.right, rt)
+        b = ctx.builder()
+        return b.fdiv(left, right)
+    if e.op in ("//", "%"):
+        # Python floor-division/modulo semantics differ from the raw
+        # SDIV/SREM instruction (which truncate toward zero): when the
+        # remainder is nonzero and its sign differs from the divisor's,
+        # adjust quotient -= 1 / remainder += divisor so the result
+        # rounds toward -inf instead of toward zero, matching
+        # codegen.py:11332-49's idiv+adjust sequence exactly, just
+        # expressed as IR ops instead of raw cqo/idiv text. Zero-division
+        # checking (codegen.py:11319-30's ZeroDivisionError raise) is
+        # deferred until exception-raising has its own IR mechanism —
+        # not implemented in this builder yet.
+        raise SSABuildError(f"BinOp {e.op!r}: floor-div/modulo adjustment not yet implemented")
+    if e.op == "**":
+        raise SSABuildError("BinOp '**': integer exponentiation loop not yet implemented")
+    if e.op not in _SIMPLE_BINOPS:
+        raise SSABuildError(f"BinOp {e.op!r}: not yet implemented")
+    int_op, float_op = _SIMPLE_BINOPS[e.op]
+    if is_float:
+        if float_op is None:
+            raise SSABuildError(f"BinOp {e.op!r}: float operands not supported (sema should reject)")
+        left = _build_as_float(ctx, e.left, lt)
+        right = _build_as_float(ctx, e.right, rt)
+        b = ctx.builder()
+        return getattr(b, _OP_TO_BUILDER_METHOD[float_op])(left, right)
+    left = build_expr(ctx, e.left)
+    right = build_expr(ctx, e.right)
+    b = ctx.builder()
+    return getattr(b, _OP_TO_BUILDER_METHOD[int_op])(left, right)
+
+
+_OP_TO_BUILDER_METHOD: dict[Op, str] = {
+    Op.ADD: "add", Op.SUB: "sub", Op.MUL: "mul",
+    Op.AND: "and_", Op.OR: "or_", Op.XOR: "xor",
+    Op.SHL: "shl", Op.SAR: "sar",
+    Op.FADD: "fadd", Op.FSUB: "fsub", Op.FMUL: "fmul", Op.FDIV: "fdiv",
+}
+
+
+def _build_as_float(ctx: FuncCtx, e: A.Expr, ty: str) -> Value:
+    """Build `e` and promote to Kind.FLOAT if it's a plain int, mirroring
+    codegen.py's `_gen_expr_as_float` int->float promotion at binop/
+    comparison sites where Python implicitly widens (`1 + 2.0`)."""
+    v = build_expr(ctx, e)
+    if ty == "float":
+        return v
+    return ctx.builder().sitofp(v)
+
+
+def _build_unaryop(ctx: FuncCtx, e: A.UnaryOp) -> Value:
+    operand_t = A.expr_type(e.operand)
+    if operand_t.startswith("instance:") or operand_t in ("str", "list", "dict", "set", "tuple"):
+        raise SSABuildError(f"UnaryOp {e.op!r} on {operand_t}: not yet wrapped")
+    v = build_expr(ctx, e.operand)
+    b = ctx.builder()
+    if e.op == "-":
+        return b.fneg(v) if operand_t == "float" else b.neg(v)
+    if e.op == "~":
+        return b.not_(v)
+    if e.op == "not":
+        # Truthiness-of-a-primitive: int 0/1, str/list/dict/etc. truthiness
+        # (empty-check) is deferred — see the str/container guard above,
+        # which already rejects non-primitive operands before reaching here.
+        zero = b.const(0) if operand_t != "float" else b.fconst(0.0)
+        pred = Predicate.EQ
+        return b.fcmp(pred, v, zero) if operand_t == "float" else b.icmp(pred, v, zero)
+    raise SSABuildError(f"UnaryOp {e.op!r}: not yet implemented")
+
+
+def _build_compare(ctx: FuncCtx, e: A.Compare) -> Value:
+    # Mirrors codegen.py's _gen_compare (codegen.py:11427), primitive
+    # int/float case only — `in`/`not in`, dunder __eq__/__lt__ dispatch,
+    # and string compare are all deferred (each already goes through a
+    # _runtime_* helper or a method call today, so they're CALL/RAW_ASM
+    # wrapping work, not new IR semantics).
+    if any(op in ("in", "not in") for op in e.ops):
+        raise SSABuildError("Compare 'in'/'not in': not yet wrapped")
+    operand_types = [A.expr_type(o) for o in e.operands]
+    if any(t.startswith("instance:") or t in ("str", "list", "dict", "set", "tuple") for t in operand_types):
+        raise SSABuildError("Compare on non-primitive operand: not yet wrapped")
+    is_float = not all(op in ("is", "is not") for op in e.ops) and "float" in operand_types
+
+    def _operand(i: int) -> Value:
+        return _build_as_float(ctx, e.operands[i], operand_types[i]) if is_float else build_expr(ctx, e.operands[i])
+
+    if len(e.ops) == 1:
+        left = _operand(0)
+        right = _operand(1)
+        b = ctx.builder()
+        pred = _COMPARE_PRED[e.ops[0]]
+        return b.fcmp(pred, left, right) if is_float else b.icmp(pred, left, right)
+
+    # Chained comparison (`a < b < c`): short-circuits to False as soon as
+    # one link fails, matching codegen.py:11597-11622's false_lbl/end_lbl
+    # branch structure, expressed here as real IR blocks merged via a phi
+    # instead of jump-to-shared-tail-with-rax-preset.
+    false_blk, false_b = new_block(ctx.func, "cmp_false")
+    merge_blk, merge_b = new_block(ctx.func, "cmp_merge")
+    left = _operand(0)
+    for i, op in enumerate(e.ops):
+        right = _operand(i + 1)
+        b = ctx.builder()
+        pred = _COMPARE_PRED[op]
+        ok = b.fcmp(pred, left, right) if is_float else b.icmp(pred, left, right)
+        cont_blk, cont_b = new_block(ctx.func, "cmp_cont")
+        b.condbr(ok, cont_blk, false_blk)
+        false_blk.preds.append(ctx.block)
+        ctx.block = cont_blk
+        left = right
+    # Every link held: fall through to merge with 1.
+    true_const = ctx.builder().const(1)
+    ctx.builder().br(merge_blk)
+    merge_blk.preds.append(ctx.block)
+    ctx.block = false_blk
+    false_const = ctx.builder().const(0)
+    ctx.builder().br(merge_blk)
+    merge_blk.preds.append(false_blk)
+    ctx.block = merge_blk
+    result = ctx.builder().phi(Kind.INT)
+    ctx.builder().add_incoming(result, true_const)
+    ctx.builder().add_incoming(result, false_const)
+    return result
+
+
 _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.IntLit: _build_intlit,
     A.FloatLit: _build_floatlit,
     A.Name: _build_name,
+    A.BinOp: _build_binop,
+    A.UnaryOp: _build_unaryop,
+    A.Compare: _build_compare,
 }
 
 

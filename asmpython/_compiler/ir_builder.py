@@ -167,8 +167,11 @@ def new_function(name: str) -> tuple[Function, BlockBuilder]:
     return func, BlockBuilder(func, entry)
 
 
-def new_block(func: Function, name: str) -> tuple[Block, BlockBuilder]:
-    """Append a fresh block to `func` and return (block, builder)."""
-    block = Block(name=name)
+def new_block(func: Function, hint: str) -> tuple[Block, BlockBuilder]:
+    """Append a fresh block to `func` (named `<hint>_<n>`, uniqued via
+    `Function.fresh_block_name` so e.g. repeated "cmp_cont" hints from a
+    chained-comparison loop stay distinguishable in debug output) and
+    return (block, builder)."""
+    block = Block(name=func.fresh_block_name(hint))
     func.blocks.append(block)
     return block, BlockBuilder(func, block)

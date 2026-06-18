@@ -201,11 +201,20 @@ class Function:
     # Bumped by `new_value`; not reset between blocks, only between
     # functions (see the module docstring's identity note).
     _next_value_id: int = 0
+    # Bumped by `fresh_block_name`; keeps e.g. repeated "cmp_cont" hints
+    # (one per link of a chained comparison) human-distinguishable in
+    # debug output even though blocks are identified by object identity
+    # everywhere else in the IR, never by name.
+    _next_block_id: int = 0
 
     def new_value(self, kind: Kind) -> Value:
         v = Value(id_=self._next_value_id, kind=kind)
         self._next_value_id += 1
         return v
+
+    def fresh_block_name(self, hint: str) -> str:
+        self._next_block_id += 1
+        return f"{hint}_{self._next_block_id}"
 
     def entry(self) -> Block:
         return self.blocks[0]
