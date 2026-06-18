@@ -442,11 +442,17 @@ class Parser:
                 # `@<prop>.setter` / `.getter` / `.deleter`: capture the
                 # dotted accessor form (e.g. "x.setter") so sema can match
                 # it against the property getter method of the same name.
+                # `@<handle>.imported` (import_binary dynamic-loading
+                # handles) needs the same dotted capture, but `<handle>` is
+                # an arbitrary variable name rather than a fixed property
+                # name — sema resolves which import_binary() call `name`
+                # came from separately; the parser only needs to keep the
+                # ".imported" suffix instead of discarding it.
                 if (
                     self._peek(1).kind == "OP"
                     and self._peek(1).value == "."
                     and self._peek(2).kind == "NAME"
-                    and self._peek(2).value in ("setter", "getter", "deleter")
+                    and self._peek(2).value in ("setter", "getter", "deleter", "imported")
                 ):
                     name = f"{name}.{self._peek(2).value}"
             # Eat the rest of the line as a free-form decorator expression.

@@ -168,9 +168,19 @@ A broad set of language and stdlib improvements shipped alongside the core
 ## Planned
 ` Any listed implementations may change on release. `
 
-### 1.3.0 / 2.0.0 — Compatibility overhaul: ARM and macOS
+### 2.0.0 — Compatibility overhaul: ARM and macOS
 
-A platform-expansion release that broadens asmpython beyond x86-64 Windows/Linux. The version number (1.3.0 vs 2.0.0) will be decided based on how much of the existing codegen needs restructuring.
+A platform-expansion release that broadens asmpython beyond x86-64 Windows/Linux.
+
+**Versioning decided: 2.0.0.** A codebase survey (2026-06-17) confirmed
+`codegen.py` hardcodes x86-64 mnemonics directly in ~3,461 lines of raw
+f-string assembly emission, not through an abstracted instruction layer —
+the existing `_arg_reg` / `_assign_arg_regs` / `emit_func_prologue` hooks
+only abstract calling-convention bookkeeping (register assignment, stack
+frame size), not instruction selection itself. ARM64 cannot be added as a
+parallel target subclass the way Linux/Windows were; it requires
+restructuring codegen around a proper IR that both x86-64 and AArch64
+backends lower from. Per the criterion below, that makes this 2.0.0.
 
 #### ARM64 support
 
@@ -206,13 +216,32 @@ optimisation pass:
 - **Type specialisation** — hot integer paths avoid the generic boxing
   overhead that the runtime incurs for `any`-typed values.
 
-#### Scope decision: 1.3.0 vs 2.0.0
+#### Bare-metal Raspberry Pi (AArch64)
 
-If adding the ARM64 ISA backend requires restructuring codegen into a
-proper IR (intermediate representation) layer that the x86-64 backend
-also targets, the version will be 2.0.0 — a meaningful internal
-architecture change even if the Python-level API is unchanged. If it
-can be done as a parallel target alongside the existing codegen, 1.3.0.
+- Gated entirely on the ARM64 IR/codegen work above — none of
+  `target_freestanding.py` / `target_freestanding16.py`'s boot code is
+  reusable (Multiboot1, VGA text buffer, real-mode BIOS `INT 13h`, A20/GDT
+  setup are all x86-only protocols with no ARM equivalent).
+- Pi boot model is GPU-firmware-loads-`kernel.img` + device-tree, not
+  Multiboot — a new boot/hardware layer, not a port of the existing one.
+- UART output in place of VGA text mode for early console.
+
+#### Android (.apk) — exploratory, not committed for 2.0.0
+
+- Different deployment model from the other targets: packaging
+  (Gradle/dex/AndroidManifest/`apksigner`) and JNI calling convention, not
+  just a new ISA/object-format backend.
+- Foundation exists: `--type library` already produces a `.so` via
+  `gcc -shared`. Reaching a real APK means adding `JNIEnv*`/`jobject` ABI
+  awareness, an NDK (clang+bionic) toolchain path, and ARM64 codegen
+  (above) for real devices.
+- Likely follow-up release after 2.0.0's ARM64 work lands, not part of it.
+
+#### Scope decision: 1.3.0 vs 2.0.0 — resolved, see note above
+
+ARM64 needs the IR rewrite (confirmed 2026-06-17 survey), so this is
+2.0.0: a meaningful internal architecture change even though the
+Python-level language surface is unchanged.
 
 ---
 

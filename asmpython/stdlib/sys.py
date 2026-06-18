@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from . import Func, Const
+from .. import __version__
 
 BINDINGS: dict = {
     # sys.exit(code)
@@ -16,7 +17,7 @@ BINDINGS: dict = {
     # sys.abort() — unrecoverable crash
     "abort": Func(arg_types=(), ret_type="int", c_name="abort"),
     # Constants
-    "version": Const(ty="str", value="asmpython 1.1.0-0.1"),
+    "version": Const(ty="str", value=f"asmpython {__version__}"),
     "maxsize": Const(ty="int", value=9223372036854775807),
     "byteorder": Const(ty="str", value="little"),
     "platform": Const(ty="str", value="linux", value_windows="win32"),

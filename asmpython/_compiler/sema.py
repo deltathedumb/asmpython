@@ -15,6 +15,7 @@ flag what's clearly wrong).
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 from dataclasses import dataclass, field
 from typing import Optional
@@ -1912,7 +1913,18 @@ class SemaAnalyzer:
                             else getattr(getattr(fvalue, "func", None), "name", None)
                         ) if isinstance(fvalue, A.Call) else None
                         if isinstance(fvalue, A.Call) and _func_nm == "field":
-                            defaults.append(A.IntLit(value=0, pos=c.pos))
+                            factory = None
+                            for kn, kv in getattr(fvalue, "kwargs", []) or []:
+                                if kn == "default_factory" and isinstance(kv, A.Name):
+                                    factory = kv.name
+                            if factory == "list":
+                                defaults.append(A.ListLit(elems=[], pos=c.pos))
+                            elif factory == "dict":
+                                defaults.append(A.DictLit(keys=[], values=[], pos=c.pos))
+                            elif factory == "set":
+                                defaults.append(A.SetLit(elems=[], pos=c.pos))
+                            else:
+                                defaults.append(A.IntLit(value=0, pos=c.pos))
                         elif fvalue is not None:
                             defaults.append(fvalue)
                         else:
@@ -5861,7 +5873,12 @@ class SemaAnalyzer:
         for i in range(nfixed):
             if slots[i] is None:
                 if fixed_defaults[i] is not None:
-                    slots[i] = fixed_defaults[i]
+                    # Deep-copy: each omitted-argument call site needs its own
+                    # AST node identity. Codegen keys per-literal scratch frame
+                    # slots off id(expr) (e.g. _gen_dict_lit's __dictlit_{id(e)}),
+                    # so two call sites sharing one default node would collide
+                    # on the same slot and corrupt each other's container.
+                    slots[i] = copy.deepcopy(fixed_defaults[i])
                 else:
                     raise SemaError(
                         f"{label}() missing required argument {fixed_names[i]!r}",
@@ -5986,6 +6003,25 @@ class SemaAnalyzer:
             for a in e.args:
                 self._check_expr(a, scope)
             e.inferred_type = "int"
+            return
+        if e.func == "import_binary":
+            # import_binary(path) -> a dynamic-module handle (a real runtime
+            # LoadLibraryW/dlopen handle). Codegen resolves which functions
+            # belong to it from `@<assigned-name>.imported` decorators found
+            # elsewhere in the program (Codegen.imported_funcs, built from
+            # the whole-program AST) — sema only needs to type the call's
+            # result so `handle.some_func(...)` type-checks as a method call
+            # on an instance, the same path every other class uses.
+            if len(e.args) != 1:
+                raise SemaError(
+                    f"import_binary() takes 1 argument, got {len(e.args)}", e.pos
+                )
+            self._check_expr(e.args[0], scope)
+            if A.expr_type(e.args[0]) != "str":
+                raise SemaError(
+                    "import_binary() path argument must be a str", e.pos, ErrorCode.E_ARG_TYPE
+                )
+            e.inferred_type = "instance:DynamicModule"
             return
         if e.func in BUILTINS:
             lo, hi = BUILTINS[e.func]

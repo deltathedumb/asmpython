@@ -4,29 +4,78 @@ All notable changes to asmpython are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
-## [1.3.0] — 2026-06-17 — Self-hosting
+## [2.0.0-preview] — in progress — Win64 ABI fixes and selfhost debugging
 
-Lots and lots of optimizations.
+Versioned 2.0.0 (not 1.3.0): the ARM64/macOS platform work planned for this
+release needs codegen restructured around an IR layer rather than a parallel
+target subclass — see `roadmap.md` for the full reasoning. Selfhosting
+(asmpython compiling itself) is a stretch goal for this release, not part of
+the committed scope; the platform/optimization roadmap is the actual
+deliverable.
 
 ### Fixed
 
-- **Self-hosting** (`python build.py`): lifted (nested) functions from imported
-  modules were silently dropped from the merged program. `_dedupe_lifted_funcs`
-  was adding each module's lifted-function names to the shared `taken_names`/
-  `func_names` set before the merge loop ran, so the subsequent
-  `if f.name not in func_names` check always evaluated false for lifted funcs —
-  they were present in `module.funcs` but never appended to `entry.funcs`.
-  Fix: use a module-local `local_names` set for within-module collision
-  detection; `taken_names` (the cross-module set) is no longer mutated.
-  Result: all nested functions in the compiler source (`_collect_nonlocal`,
-  `_collect_assigned`, `_collect_refs_expr`, `walk`, `fix_expr`, `fix_stmt`,
-  etc.) are now correctly emitted as top-level NASM labels, and the self-host
-  build produces a working `build/asmpython-<version>-x86_64.exe`.
+- **Win64 shadow-space violations**: every hand-rolled runtime helper and
+  function prologue on the Windows target needs at least 32 bytes of shadow
+  space below `rsp` before calling any external (libc/Win32) function, per
+  the Win64 ABI. Several runtime helpers (`_runtime_chr`, `_runtime_zalloc`,
+  `_runtime_dict_get`/`_dict_get_default`/`_dict_contains`,
+  `_runtime_list_reverse`, `_runtime_str_strip`/`_str_splitlines`,
+  `_runtime_input`, `_math_ldexp`, `_random_random`, `_gui_load_bmp`,
+  `_gui_joystick_axis`/`_joystick_button`, `_audio_load_wav`,
+  `_threading_lock_acquire`/`_lock_release`/`_lock_destroy`,
+  `_time_sleep_ms`) allocated only 16–32 bytes, corrupting the caller's
+  frame on the C call. Fixed by raising each to a 48-byte minimum.
+  `emit_func_prologue`/`emit_entry_prologue` (`target_windows.py`) now also
+  enforce a 48-byte frame floor for every compiled function, not just the
+  hand-written helpers, so a function with few/no locals still has room for
+  a callee's shadow space.
+
+- **`@dataclass` synthesized `__init__` ignored `field(default_factory=...)`**
+  (`sema.py`): when a `@dataclass` had no explicit `__init__`, the
+  synthesized constructor substituted the literal integer `0` for any field
+  declared `= field(default_factory=dict)` (or `list`/`set`), regardless of
+  the requested factory. Every such field silently became `0` instead of a
+  fresh empty container, segfaulting on first use (e.g. `self.types.update(...)`
+  with `self.types == 0`). Fixed to emit `A.DictLit`/`A.ListLit`/`A.SetLit`
+  literal nodes matching the requested factory.
+
+- **Shared AST node across call sites for omitted-argument defaults**
+  (`sema.py` `_bind_args`): when a call omitted an argument with a default,
+  the *same* default AST node object was reused for every call site that
+  omitted it. Codegen keys per-literal scratch frame slots off the node's
+  `id()` (e.g. `_gen_dict_lit`'s `__dictlit_{id(e)}`), so two omitted-arg
+  call sites in the same function collided on one frame slot. Fixed with
+  `copy.deepcopy` per call site.
+
+- **NULL-pointer crash in `str`/container truthiness checks** (`codegen.py`):
+  truthiness tests for `str` (`if x:`, `not x`, `bool(x)`) read the first
+  byte of the string pointer to check for empty-string falsiness, and
+  container truthiness (`list`/`tuple`/`dict`/`set`) read the length field
+  at `[ptr+8]` — both assumed the pointer is never NULL. An `Optional[str]`
+  or `Optional[list/dict/...]` holding `None` is a NULL pointer, and `None`
+  is also falsy, so all three call sites now test the pointer for NULL
+  before dereferencing it.
+
+### Known issues
+
+- The selfhost binary (asmpython compiling itself) still segfaults on a
+  distinct, not-yet-isolated bug beyond the fixes above. Tracked as a
+  follow-up; not a blocker for this release's actual scope (ARM64/macOS
+  planning, see `roadmap.md`).
 
 - **`parser.py` mutual-recursion sema error**: `_collect_refs_expr` called
   `_collect_refs` (defined later in the same scope), which asmpython's sema
   couldn't forward-resolve. Inlined `_collect_refs` (a one-liner `for`-loop)
   at every call site and deleted the function.
+
+- **Lifted (nested) functions from imported modules silently dropped**:
+  `_dedupe_lifted_funcs` was adding each module's lifted-function names to
+  the shared `taken_names`/`func_names` set before the merge loop ran, so
+  the subsequent `if f.name not in func_names` check always evaluated false
+  for lifted funcs — present in `module.funcs` but never appended to
+  `entry.funcs`. Fixed with a module-local `local_names` set for
+  within-module collision detection; `taken_names` is no longer mutated.
 
 
 ## [1.2.0] — 2026-06-17 — Graphics everywhere

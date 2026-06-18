@@ -27,6 +27,25 @@ class StatResult:
         self.st_mtime = st_mtime
 
 
+class PathParents:
+    """`Path.parents` — indexable view where `[0]` is `Path.parent`, `[1]`
+    is `Path.parent.parent`, etc. Holds the original path and walks up `n+1`
+    levels on each `__getitem__` call rather than precomputing a list, since
+    the only real use (`Path(__file__).resolve().parents[2]`) needs a single
+    fixed index, not iteration."""
+
+    def __init__(self, p: str) -> None:
+        self.p = p
+
+    def __getitem__(self, n: int) -> Path:
+        cur = Path(self.p)
+        i = 0
+        while i <= n:
+            cur = cur.parent
+            i = i + 1
+        return cur
+
+
 class Path:
     def __init__(self, p: str = "") -> None:
         self.p = p
@@ -94,6 +113,10 @@ class Path:
         if cut == 0:
             return Path(p[0:1])
         return Path(p[0:cut])
+
+    @property
+    def parents(self) -> PathParents:
+        return PathParents(self.p)
 
     @property
     def suffix(self) -> str:
