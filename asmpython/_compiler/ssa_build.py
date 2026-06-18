@@ -159,6 +159,77 @@ _X86_64_KEYS = ("win64", "linux_x86_64")
 # nested `_build_expr` call and re-fetch it via `ctx.builder()`.
 
 
+# List header layout (codegen.py:8523-8526): [cap, len, buf_ptr], each an
+# 8-byte field, then a separately-malloc'd buffer of `cap * 8` bytes
+# (tuples reuse this exact layout). Mirrored here as plain offsets rather
+# than named IR concepts since the IR's memory model is just "typed
+# LOAD/STORE at a constant offset from a pointer value" (ir.py's module
+# docstring) — a list header is no different from a frame slot to the IR,
+# just a heap pointer instead of FRAME_BASE.
+_LIST_CAP_OFF = 0
+_LIST_LEN_OFF = 8
+_LIST_BUF_OFF = 16
+_LIST_HEADER_SIZE = 24
+
+
+def _build_malloc(ctx: FuncCtx, n_bytes: int) -> Value:
+    # codegen.py's _emit_malloc: a compile-time-constant size baked
+    # directly into the RawAsm text (not passed via the args/register
+    # convention - there's nothing to pass, malloc's one arg IS the
+    # constant). Genuinely OS-specific arg register (Win64 rcx vs SysV rdi).
+    return ctx.builder().raw_asm(
+        Kind.INT, [],
+        {
+            "win64": f"mov rcx, {n_bytes}\ncall malloc",
+            "linux_x86_64": f"mov rdi, {n_bytes}\ncall malloc",
+        },
+    )
+
+
+def _build_listlit(ctx: FuncCtx, e: A.ListLit) -> Value:
+    # Mirrors codegen.py's _gen_list_lit (codegen.py:8561-8589). codegen.py
+    # parks the header pointer in a dedicated frame slot between the two
+    # malloc calls and each element's (possibly call-emitting) evaluation,
+    # since it can't push/pop a pointer across a `call` without breaking
+    # 16-byte stack alignment. The IR doesn't need that trick at all: a
+    # RawAsm/Call's result is a normal SSA Value that can be held live
+    # across any number of later instructions (including more calls) by
+    # construction - keeping it alive across calls is exactly what the
+    # eventual register allocator's spill/reload logic is for, the same
+    # way any other SSA value already works in this IR. No frame slot.
+    #
+    # Scoped to int/float elements only (no nested containers, no str
+    # elements yet - str would need _runtime_str_concat_dup-style copying
+    # semantics to consider, not just a wider element write).
+    if e.el_type not in ("int", "float"):
+        raise SSABuildError(f"ListLit with {e.el_type} elements: not yet wrapped")
+    n = len(e.elems)
+    cap = max(n, 4)
+    header = _build_malloc(ctx, _LIST_HEADER_SIZE)
+    b = ctx.builder()
+    cap_const = b.const(cap)
+    b.store(header, cap_const, offset=_LIST_CAP_OFF)
+    b = ctx.builder()
+    len_const = b.const(n)
+    b.store(header, len_const, offset=_LIST_LEN_OFF)
+    buf = _build_malloc(ctx, cap * 8)
+    b = ctx.builder()
+    b.store(header, buf, offset=_LIST_BUF_OFF)
+    # No int->float promotion needed here, unlike arithmetic: sema rejects
+    # mixed-type list literals outright (SemaError "mixed list element
+    # types"), so every element's static type already equals e.el_type
+    # exactly when el_type is "int" or "float" — codegen.py's
+    # _gen_list_lit (codegen.py:8580-8588) doesn't promote either, it
+    # just trusts that invariant. Matched here rather than reusing
+    # _build_as_float, which would silently paper over a real sema
+    # contract violation if it were ever wrong.
+    for i, el in enumerate(e.elems):
+        v = build_expr(ctx, el)
+        b = ctx.builder()
+        b.store(buf, v, offset=i * 8)
+    return header
+
+
 def _build_intlit(ctx: FuncCtx, e: A.IntLit) -> Value:
     return ctx.builder().const(e.value)
 
@@ -816,6 +887,7 @@ _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.Call: _build_call,
     A.BoolOp: _build_boolop,
     A.IfExp: _build_ifexp,
+    A.ListLit: _build_listlit,
 }
 
 
