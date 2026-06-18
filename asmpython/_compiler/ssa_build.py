@@ -136,6 +136,20 @@ def _local_write(ctx: FuncCtx, name: str, value: Value) -> None:
     ctx.builder().store(FRAME_BASE, value, offset=offset)
 
 
+# RawAsm target_text is keyed by (OS, ABI), not just architecture — Windows
+# x86-64 (Win64 ABI: rcx/rdx/r8/r9, 32-byte shadow space) and Linux x86-64
+# (SysV ABI: rdi/rsi/rdx/rcx/r8/r9, no shadow space) are the same
+# architecture but need different text for anything that calls an external
+# (libc) function directly, exactly mirroring today's WindowsCodegen vs.
+# LinuxCodegen split (see codegen.py's _emit_strlen: "mov rcx, rax" on
+# Windows, "mov rdi, rax" on Linux, for the same `call strlen`). A RawAsm
+# site that's fully self-contained (an internal asm label, no external
+# call) can use the same text for both keys, but still writes both
+# explicitly — relying on an implicit fallback would silently break the
+# day a self-contained helper changes to call something external.
+_X86_64_KEYS = ("win64", "linux_x86_64")
+
+
 # ---- expression builders -----------------------------------------------------
 #
 # Each builder takes (ctx, expr) and returns the Value holding the
@@ -413,9 +427,11 @@ def _build_binop(ctx: FuncCtx, e: A.BinOp) -> Value:
         # (no int/float coercion), so this is the only string BinOp case.
         left = build_expr(ctx, e.left)
         right = build_expr(ctx, e.right)
+        # Self-contained internal label (no external call), same text both
+        # OSes — see _X86_64_KEYS' docstring (defined near _build_str_eq).
         return ctx.builder().raw_asm(
             Kind.INT, [left, right],
-            {"x86_64": "call _runtime_str_concat"},
+            {k: "call _runtime_str_concat" for k in _X86_64_KEYS},
         )
     if lt.startswith("instance:") or rt.startswith("instance:") or "str" in (lt, rt) or lt in (
         "list", "dict", "set", "tuple",
@@ -522,9 +538,10 @@ def _build_unaryop(ctx: FuncCtx, e: A.UnaryOp) -> Value:
 def _build_str_eq(ctx: FuncCtx, left: Value, right: Value) -> Value:
     # _runtime_str_eq(rax=a, rbx=b) -> rax (1/0), NULL-safe (None compares
     # equal to None, unequal to a real string) — codegen.py:6130-6145.
+    # Self-contained internal label (no external call), same text both OSes.
     return ctx.builder().raw_asm(
         Kind.INT, [left, right],
-        {"x86_64": "call _runtime_str_eq"},
+        {k: "call _runtime_str_eq" for k in _X86_64_KEYS},
     )
 
 
@@ -857,17 +874,20 @@ def _build_truthy_branch(ctx: FuncCtx, expr: A.Expr, true_blk: ir.Block, false_b
         # read result is always discarded.
         v = build_expr(ctx, expr)
         b = ctx.builder()
+        # Self-contained (no external call, no OS-specific register
+        # convention), same text both OSes — see _X86_64_KEYS' docstring.
+        strtruthy_text = "\n".join([
+            "mov rcx, rax",            # rcx = original ptr (for the cmovz test)
+            "test rax, rax",
+            "lea rdx, [rel $]",        # rdx = a known-non-NULL safe address (this insn's own RIP)
+            "cmovz rax, rdx",          # rax = NULL ? safe-addr : original ptr
+            "movzx rax, byte [rax]",   # always safe to dereference now
+            "test rcx, rcx",
+            "cmovz rax, rcx",          # rcx is 0 here iff original was NULL -> force result to 0
+        ])
         byte_or_null = b.raw_asm(
             Kind.INT, [v],
-            {"x86_64": "\n".join([
-                "mov rcx, rax",            # rcx = original ptr (for the cmovz test)
-                "test rax, rax",
-                "lea rdx, [rel $]",        # rdx = a known-non-NULL safe address (this insn's own RIP)
-                "cmovz rax, rdx",          # rax = NULL ? safe-addr : original ptr
-                "movzx rax, byte [rax]",   # always safe to dereference now
-                "test rcx, rcx",
-                "cmovz rax, rcx",          # rcx is 0 here iff original was NULL -> force result to 0
-            ])},
+            {k: strtruthy_text for k in _X86_64_KEYS},
         )
         zero = b.const(0)
         cond = b.icmp(Predicate.NE, byte_or_null, zero)

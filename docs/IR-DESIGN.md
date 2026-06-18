@@ -207,6 +207,22 @@ eventually become a real sequence of typed IR instructions once there's
 time to rewrite that specific helper, but it unblocks shipping x86-64-on-IR
 without a hard dependency on every runtime helper being ported on day one.
 
+**`target_text` keys are (OS, ABI) pairs, not bare architecture names —
+found 2026-06-18 while wrapping `len(s)`**: `"win64"`, `"linux_x86_64"`,
+`"linux_arm64"` (mirroring `WindowsCodegen`/`LinuxCodegen`'s existing
+split exactly), not `"x86_64"`/`"arm64"`. Same-architecture-different-OS
+genuinely needs different text the moment a `RawAsm` site calls an
+external (libc) function directly — Win64's ABI passes the first integer
+argument in `rcx`, SysV's in `rdi` (see codegen.py's `_emit_strlen`: `mov
+rcx, rax` on Windows vs. `mov rdi, rax` on Linux for the identical `call
+strlen`). A `RawAsm` site that's fully self-contained (calls only an
+internal asm label, no external function) can reuse the same text string
+for both x86-64 keys, but should still write both keys explicitly rather
+than rely on a fallback — there is no fallback mechanism, and inventing
+one would hide the day a self-contained helper grows an external call.
+ssa_build.py's `_X86_64_KEYS = ("win64", "linux_x86_64")` constant exists
+so every RAW_ASM site stays consistent about this without re-deriving it.
+
 **RawAsm argument convention — resolved (2026-06-18)**: a `RawAsm`'s
 `args[i]` is placed in the i-th register of a fixed convention
 (`rax, rbx, rcx, rdx, ...` for `Kind.INT`/pointer; the float helpers that
