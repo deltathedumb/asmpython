@@ -1,6 +1,7 @@
 # 2.0.0 Resume
 
 ## Directive
+
 "Continue dev until we hit 2.0.0 ready," explicitly scoped 2026-06-18 as:
 garbage collector, optimizations, selfhost-capable, ARM support, Mac
 support (Intel + Apple Silicon), Raspberry Pi support (OS + bare metal).
@@ -12,6 +13,7 @@ new scope, stay reversible).
 **Confirmed work order** (user answered explicitly when asked, given the
 real dependency chain — full reasoning in `[[project-2.0-versioning]]`
 memory):
+
 1. Finish `ssa_build.py`'s mechanical wrapping pass (~40 node types left).
 2. Linear-scan register allocator.
 3. `X86_64Target` lowering; validate full parity vs the 454-test suite.
@@ -23,7 +25,8 @@ memory):
 9. Garbage collector (refcounting).
 10. Optimization passes beyond the existing peephole dead-store pass.
 11. Selfhost: resume the 8th not-yet-isolated bug (opportunistic, never blocking).
-12. Release pass: CODE_OF_CONDUCT/CONTRIBUTING/SECURITY/issue templates, CHANGELOG, version bump off `-preview`.
+12. Release pass: CODE_OF_CONDUCT/CONTRIBUTING/SECURITY/issue templates,
+    CHANGELOG, version bump off `-preview`.
 
 Currently on **step 1**. Don't skip ahead to register allocator/lowering
 work until the wrapping pass is substantially further along — that was
@@ -53,7 +56,7 @@ real): WSL2 Ubuntu 24.04 (`wsl.exe -u root`) + `gcc-aarch64-linux-gnu` +
 starts at plan-step 5.
 
 **Done and committed** (`ir.py`, `ir_builder.py`, `ssa_build.py`, latest
-commit `42418c10`); working tree clean as of this write:
+commit `c5b1ac73`); working tree clean as of this write:
 
 - `ir.py`/`ir_builder.py`: complete, stable data model + construction API.
 - Primitive/control-flow core: literals (int/float/string), local
