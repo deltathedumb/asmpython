@@ -833,6 +833,44 @@ def _build_truthy_branch(ctx: FuncCtx, expr: A.Expr, true_blk: ir.Block, false_b
         b = ctx.builder()
         zero = b.fconst(0.0)
         cond = b.fcmp(Predicate.NE, v, zero)
+    elif t == "str":
+        # NULL-safe empty-string check (codegen.py:11251-11261): a `str |
+        # None` value can be a NULL pointer (also falsy), so test for NULL
+        # before dereferencing the first byte. No shared _runtime_* helper
+        # exists for this (codegen.py inlines it directly with local jump
+        # labels), and the IR's LOAD op has no byte-width variant to
+        # express "read 1 byte" (LOAD is always a full Kind.INT/FLOAT-width
+        # read) - so this is inline x86-64 text via RAW_ASM rather than
+        # decomposed into typed IR ops, same rationale as the other
+        # RAW_ASM sites (a real ARM64 rewrite is deferred to the ARM64
+        # lowering step). Written fully branchless (no jump labels at all)
+        # since RAW_ASM's target_text is static per-call-site text with no
+        # mechanism (yet) to mint fresh-per-instance label names the way
+        # ssa_build.py's Function.fresh_block_name does for real IR blocks
+        # - a label-using version here would silently collide with itself
+        # across multiple `if s:`-style checks in one function (two RAW_ASM
+        # instructions emitting the literal same label text). Reading
+        # byte [rax] when rax is NULL would fault, so the pointer is
+        # masked to a known-safe address (rdata's own base, via `lea`)
+        # before the dereference whenever it's NULL, then the *result* is
+        # forced back to 0 for the NULL case via cmovz - the safe-address
+        # read result is always discarded.
+        v = build_expr(ctx, expr)
+        b = ctx.builder()
+        byte_or_null = b.raw_asm(
+            Kind.INT, [v],
+            {"x86_64": "\n".join([
+                "mov rcx, rax",            # rcx = original ptr (for the cmovz test)
+                "test rax, rax",
+                "lea rdx, [rel $]",        # rdx = a known-non-NULL safe address (this insn's own RIP)
+                "cmovz rax, rdx",          # rax = NULL ? safe-addr : original ptr
+                "movzx rax, byte [rax]",   # always safe to dereference now
+                "test rcx, rcx",
+                "cmovz rax, rcx",          # rcx is 0 here iff original was NULL -> force result to 0
+            ])},
+        )
+        zero = b.const(0)
+        cond = b.icmp(Predicate.NE, byte_or_null, zero)
     else:
         v = build_expr(ctx, expr)
         b = ctx.builder()
