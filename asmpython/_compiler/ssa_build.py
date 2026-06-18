@@ -706,6 +706,19 @@ def _build_assign(ctx: FuncCtx, s: A.Assign) -> None:
     _local_write(ctx, s.target, value)
 
 
+def _build_multiassign(ctx: FuncCtx, s: A.MultiAssign) -> None:
+    # `a = b = c = value`: evaluate once, write to every target. Mirrors
+    # codegen.py:2112 exactly — targets are always plain names (unlike
+    # TupleAssign, which also allows Subscript/Attr targets and is
+    # deferred to the container-operations wrapping pass).
+    value = build_expr(ctx, s.value)
+    ty = A.expr_type(s.value)
+    for name in s.targets:
+        if name not in ctx.locals_:
+            ctx.alloc_slot(name, ty)
+        _local_write(ctx, name, value)
+
+
 def _build_return(ctx: FuncCtx, s: A.Return) -> None:
     value = build_expr(ctx, s.value) if s.value is not None else None
     ctx.builder().ret(value)
@@ -1010,6 +1023,7 @@ def _build_for(ctx: FuncCtx, s: A.For) -> None:
 
 _STMT_BUILDERS: dict[type, Callable[[FuncCtx, object], None]] = {
     A.Assign: _build_assign,
+    A.MultiAssign: _build_multiassign,
     A.Return: _build_return,
     A.If: _build_if,
     A.While: _build_while,
