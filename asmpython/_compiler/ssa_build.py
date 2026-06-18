@@ -634,6 +634,56 @@ def _build_len(ctx: FuncCtx, e: A.Call) -> Value:
     )
 
 
+def _build_str_of_int(ctx: FuncCtx, e: A.Call) -> Value:
+    # str(x) where x is a plain (non-bool, non-None) int — codegen.py:
+    # 12011-12013's final-else fallback. bool/None/float/str/instance/
+    # container all have their own dispatch (codegen.py:11988-12010) and
+    # are deferred: bool/None need is_bool_expr/is_none_expr-driven
+    # branching to a different static string, float's _emit_float_to_str
+    # has internal NaN/inf-detection control flow on Windows (the kind of
+    # RawAsm-can't-safely-have-local-labels case docs/IR-DESIGN.md now
+    # documents — needs real typed IR blocks, not a single RawAsm, when
+    # it's done), and instance dispatch needs method resolution.
+    arg = e.args[0]
+    if A.expr_type(arg) != "int" or A.is_bool_expr(arg) or A.is_none_expr(arg):
+        raise SSABuildError("str() of non-plain-int: not yet wrapped")
+    v = build_expr(ctx, arg)
+    b = ctx.builder()
+    # sprintf(itoa_str_buf, fmt, v) -> rax = ptr into the shared static
+    # buffer (codegen.py:167-175/116-125), then _runtime_str_concat_dup
+    # copies out to a fresh allocation so the result doesn't alias the
+    # buffer if a caller stores it (e.g. `[str(x) for x in xs]`).
+    # Genuinely OS-specific: different arg registers (Win64 rcx/rdx/r8 vs
+    # SysV rdi/rsi/rdx), different format-string label name, and SysV's
+    # variadic-call convention requires AL = vector-register count (0
+    # here, no float args) while Win64's doesn't.
+    sprintf_result = b.raw_asm(
+        Kind.INT, [v],
+        {
+            "win64": "\n".join([
+                "mov r8, rax",
+                "lea rdx, [fmt_int_only]",
+                "lea rcx, [itoa_str_buf]",
+                "call sprintf",
+                "lea rax, [itoa_str_buf]",
+            ]),
+            "linux_x86_64": "\n".join([
+                "mov rdx, rax",
+                "lea rsi, [fmt_int]",
+                "lea rdi, [itoa_str_buf]",
+                "xor rax, rax",
+                "call sprintf",
+                "lea rax, [itoa_str_buf]",
+            ]),
+        },
+    )
+    b = ctx.builder()
+    return b.raw_asm(
+        Kind.INT, [sprintf_result],
+        {k: "call _runtime_str_concat_dup" for k in _X86_64_KEYS},
+    )
+
+
 def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
     # Mirrors codegen.py's _gen_call (codegen.py:11915) fallback case
     # (codegen.py:12948-12953) reached after ~30 builtin-name special
@@ -657,6 +707,8 @@ def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
     # restriction introduced here.
     if e.func == "len":
         return _build_len(ctx, e)
+    if e.func == "str":
+        return _build_str_of_int(ctx, e)
     if e.func not in ctx.user_funcs:
         raise SSABuildError(
             f"Call to {e.func!r}: not a known user function in this FuncCtx "
