@@ -191,6 +191,35 @@ _LIST_LEN_OFF = 8
 _LIST_BUF_OFF = 16
 _LIST_HEADER_SIZE = 24
 
+# Dict/set length is at the same offset as list length (codegen.py:8543-8549).
+_DICT_LEN_OFF = 8
+
+
+def _float_to_int_bits(ctx: FuncCtx, v: Value, hint: str) -> Value:
+    """Bitcast a Kind.FLOAT SSA value to Kind.INT (same 8 bytes, different
+    interpretation). Needed when passing a float to a `_runtime_*` helper that
+    expects all args in integer registers (rax/rbx/... convention). Implemented
+    as a round-trip through a frame slot: store float (movsd [slot], xmm0) then
+    reload as int (mov rax, [slot]). Equivalent to codegen.py's `movq rax, xmm0`
+    before pushing a float to stack for a helper call (codegen.py:10753-10756)."""
+    slot = f"__fbits_{hint}"
+    ctx.alloc_slot(slot, "float")
+    _, off = ctx.locals_[slot]
+    ctx.builder().store(FRAME_BASE, v, offset=off)
+    return ctx.builder().load(Kind.INT, FRAME_BASE, offset=off)
+
+
+def _int_to_float_bits(ctx: FuncCtx, v: Value, hint: str) -> Value:
+    """Reverse bitcast: Kind.INT (raw bits from a helper's rax result) to
+    Kind.FLOAT. Used when a `_runtime_*` helper returns a float's bit pattern
+    in rax (e.g. list.pop on a float list). Equivalent to codegen.py's
+    `movq xmm0, rax` after the helper call (codegen.py:10767-10768)."""
+    slot = f"__ibits_{hint}"
+    ctx.alloc_slot(slot, "int")
+    _, off = ctx.locals_[slot]
+    ctx.builder().store(FRAME_BASE, v, offset=off)
+    return ctx.builder().load(Kind.FLOAT, FRAME_BASE, offset=off)
+
 
 def _build_malloc(ctx: FuncCtx, n_bytes: int) -> Value:
     # codegen.py's _emit_malloc: a compile-time-constant size baked
@@ -795,25 +824,29 @@ def _build_compare(ctx: FuncCtx, e: A.Compare) -> Value:
 
 
 def _build_len(ctx: FuncCtx, e: A.Call) -> Value:
-    # Mirrors codegen.py:11961-11981 — len()'s dispatch depends entirely on
-    # the argument's static type. list/tuple/dict/set/instance.__len__ are
-    # deferred (each needs a container layout or method dispatch this IR
-    # doesn't have yet); string is the only case wrapped so far.
+    # Mirrors codegen.py:11961-11981 — len()'s dispatch depends on the
+    # argument's static type. list/tuple/dict/set are simple LOAD from offset
+    # 8 (shared length field). instance.__len__ dispatch is deferred.
     arg = e.args[0]
     t = A.expr_type(arg)
-    if t != "str":
-        raise SSABuildError(f"len() of {t}: not yet wrapped")
     v = build_expr(ctx, arg)
-    # libc strlen(ptr) -> length. Genuinely OS-specific text (Win64 passes
-    # the first integer arg in rcx, SysV in rdi) — see codegen.py's
-    # _emit_strlen and the _X86_64_KEYS docstring above.
-    return ctx.builder().raw_asm(
-        Kind.INT, [v],
-        {
-            "win64": "mov rcx, rax\ncall strlen",
-            "linux_x86_64": "mov rdi, rax\ncall strlen",
-        },
-    )
+    b = ctx.builder()
+    if t == "str":
+        # libc strlen(ptr) -> length. Genuinely OS-specific (Win64: rcx, SysV: rdi).
+        return b.raw_asm(
+            Kind.INT, [v],
+            {
+                "win64": "mov rcx, rax\ncall strlen",
+                "linux_x86_64": "mov rdi, rax\ncall strlen",
+            },
+        )
+    if t in ("list", "tuple"):
+        return b.load(Kind.INT, v, offset=_LIST_LEN_OFF)
+    if t in ("dict", "set"):
+        return b.load(Kind.INT, v, offset=_DICT_LEN_OFF)
+    if t.startswith("instance:"):
+        raise SSABuildError(f"len(instance) __len__ dispatch: not yet wrapped")
+    raise SSABuildError(f"len({t!r}): not yet wrapped")
 
 
 def _build_str_of_int(ctx: FuncCtx, e: A.Call) -> Value:
@@ -987,6 +1020,253 @@ def _build_ifexp(ctx: FuncCtx, e: A.IfExp) -> Value:
     return result
 
 
+# ---- str method builders -------------------------------------------------------
+
+# Mirrors codegen.py's STR_METHOD_RUNTIME (codegen.py:10006-10043).
+_STR_METHOD_SYM: dict[str, str] = {
+    "upper": "_runtime_str_upper",
+    "lower": "_runtime_str_lower",
+    "casefold": "_runtime_str_lower",
+    "capitalize": "_runtime_str_capitalize",
+    "swapcase": "_runtime_str_swapcase",
+    "title": "_runtime_str_title",
+    "strip": "_runtime_str_strip",
+    "lstrip": "_runtime_str_lstrip",
+    "rstrip": "_runtime_str_rstrip",
+    "zfill": "_runtime_str_zfill",
+    "ljust": "_runtime_str_ljust",
+    "rjust": "_runtime_str_rjust",
+    "center": "_runtime_str_center",
+    "startswith": "_runtime_str_starts_with",
+    "endswith": "_runtime_str_ends_with",
+    "removeprefix": "_runtime_str_removeprefix",
+    "removesuffix": "_runtime_str_removesuffix",
+    "find": "_runtime_str_index_of",
+    "index": "_runtime_str_index_of",
+    "rfind": "_runtime_str_rindex_of",
+    "rindex": "_runtime_str_rindex_of",
+    "expandtabs": "_runtime_str_expandtabs",
+    "count": "_runtime_str_count",
+    "replace": "_runtime_str_replace",
+    "split": "_runtime_str_split",
+    "splitlines": "_runtime_str_splitlines",
+    "join": "_runtime_str_join",
+    "partition": "_runtime_str_partition",
+    "rpartition": "_runtime_str_rpartition",
+    "rsplit": "_runtime_str_rsplit",
+    "isdigit": "_runtime_str_isdigit",
+    "isalpha": "_runtime_str_isalpha",
+    "isalnum": "_runtime_str_isalnum",
+    "isspace": "_runtime_str_isspace",
+    "isupper": "_runtime_str_isupper",
+    "islower": "_runtime_str_islower",
+}
+
+
+def _build_str_methodcall(ctx: FuncCtx, e: A.MethodCall) -> Value:
+    # Mirrors codegen.py's _gen_str_method (codegen.py:10045-10153). Calling
+    # convention: args[0]=obj->rax, args[1]=first-arg->rbx, args[2]->rcx.
+    # For the arg-order mismatch (codegen.py evaluates args to stack then shuffles
+    # into regs), our RAW_ASM convention already puts them in rax/rbx/rcx order
+    # so no shuffling text is needed. str.format() is deferred (needs its own
+    # complex literal-segment-concatenation lowering).
+    if e.method == "format":
+        raise SSABuildError("str.format(): not yet wrapped")
+    sym = _STR_METHOD_SYM.get(e.method)
+    if sym is None:
+        raise SSABuildError(f"str.{e.method}(): unknown str method")
+    nargs = len(e.args)
+    obj = build_expr(ctx, e.obj)
+
+    if nargs == 0:
+        if e.method == "split":
+            return ctx.builder().raw_asm(
+                Kind.INT, [obj],
+                {k: "call _runtime_str_split_ws" for k in _X86_64_KEYS},
+            )
+        if e.method == "expandtabs":
+            return ctx.builder().raw_asm(
+                Kind.INT, [obj],
+                {k: "mov rbx, 8\ncall _runtime_str_expandtabs" for k in _X86_64_KEYS},
+            )
+        return ctx.builder().raw_asm(
+            Kind.INT, [obj], {k: f"call {sym}" for k in _X86_64_KEYS},
+        )
+
+    if nargs == 1:
+        arg0 = build_expr(ctx, e.args[0])
+        if e.method in ("split", "rsplit"):
+            # split(sep) with 1 arg: xor rcx, rcx so runtime treats rcx=0 as "no limit"
+            return ctx.builder().raw_asm(
+                Kind.INT, [obj, arg0],
+                {k: f"xor rcx, rcx\ncall {sym}" for k in _X86_64_KEYS},
+            )
+        if e.method in ("ljust", "rjust", "center"):
+            # ljust(width) with no fillchar: default ' ' (0x20)
+            return ctx.builder().raw_asm(
+                Kind.INT, [obj, arg0],
+                {k: f"mov rcx, 0x20\ncall {sym}" for k in _X86_64_KEYS},
+            )
+        if e.method in ("find", "index"):
+            # 1-arg: _runtime_str_index_of(rax=haystack, rbx=needle)
+            return ctx.builder().raw_asm(
+                Kind.INT, [obj, arg0],
+                {k: "call _runtime_str_index_of" for k in _X86_64_KEYS},
+            )
+        return ctx.builder().raw_asm(
+            Kind.INT, [obj, arg0], {k: f"call {sym}" for k in _X86_64_KEYS},
+        )
+
+    if nargs == 2:
+        arg0 = build_expr(ctx, e.args[0])
+        arg1 = build_expr(ctx, e.args[1])
+        if e.method in ("ljust", "rjust", "center"):
+            # (width, fillchar_str): fillchar is a str ptr in rcx (args[2]);
+            # movzx extracts its first byte as the fill character (codegen.py:10109).
+            return ctx.builder().raw_asm(
+                Kind.INT, [obj, arg0, arg1],
+                {k: f"movzx rcx, byte [rcx]\ncall {sym}" for k in _X86_64_KEYS},
+            )
+        if e.method in ("find", "index"):
+            # 2-arg find/index(sub, start): different helper with start offset
+            return ctx.builder().raw_asm(
+                Kind.INT, [obj, arg0, arg1],
+                {k: "call _runtime_str_index_of_start" for k in _X86_64_KEYS},
+            )
+        # General 2-arg: rax=obj, rbx=arg0, rcx=arg1 — covers replace, split(sep,max),
+        # rsplit(sep,max), rfind(sub,start), rindex(sub,start) (codegen.py:10130-10134).
+        return ctx.builder().raw_asm(
+            Kind.INT, [obj, arg0, arg1],
+            {k: f"call {sym}" for k in _X86_64_KEYS},
+        )
+
+    # Too many args: evaluate all for side effects, return 0 (matches
+    # codegen.py:10150-10153's fallthrough).
+    for a in e.args:
+        build_expr(ctx, a)
+    return ctx.builder().const(0)
+
+
+# ---- list method builders -------------------------------------------------------
+
+
+def _build_list_methodcall(ctx: FuncCtx, e: A.MethodCall) -> Value:
+    # Mirrors codegen.py's _gen_method_call list branch (codegen.py:10750-10912).
+    # All _runtime_list_* helpers use the internal rax/rbx/rcx convention.
+    if isinstance(e.obj, A.Name):
+        el_t: str = getattr(e.obj, "list_el_type", "int")
+    elif isinstance(e.obj, A.ListLit):
+        el_t = e.obj.el_type
+    else:
+        el_t = "int"
+
+    header = build_expr(ctx, e.obj)
+
+    if e.method == "append":
+        # _runtime_list_append(rax=header, rbx=value_bits) — rbx holds the raw
+        # 8-byte bit pattern; floats must be bitcast via _float_to_int_bits
+        # (equivalent to codegen.py's `movq rax, xmm0` + push, codegen.py:10753-56).
+        arg_t = A.expr_type(e.args[0])
+        val = build_expr(ctx, e.args[0])
+        if arg_t == "float":
+            val = _float_to_int_bits(ctx, val, str(id(e)))
+        ctx.builder().raw_asm(
+            Kind.NONE, [header, val],
+            {k: "call _runtime_list_append" for k in _X86_64_KEYS},
+        )
+        return ctx.builder().const(0)
+
+    if e.method == "pop":
+        # list.pop() (no-arg only — no index-arg pop in the runtime).
+        # Returns the raw bit pattern in rax; bitcast to float if needed.
+        result = ctx.builder().raw_asm(
+            Kind.INT, [header],
+            {k: "call _runtime_list_pop" for k in _X86_64_KEYS},
+        )
+        if el_t == "float" or e.inferred_type == "float":
+            return _int_to_float_bits(ctx, result, str(id(e)))
+        return result
+
+    if e.method == "extend":
+        src = build_expr(ctx, e.args[0])
+        ctx.builder().raw_asm(
+            Kind.NONE, [header, src],
+            {k: "call _runtime_list_extend" for k in _X86_64_KEYS},
+        )
+        return ctx.builder().const(0)
+
+    if e.method == "reverse":
+        ctx.builder().raw_asm(
+            Kind.NONE, [header],
+            {k: "call _runtime_list_reverse" for k in _X86_64_KEYS},
+        )
+        return ctx.builder().const(0)
+
+    if e.method == "clear":
+        # Zero the length field directly — no helper call needed (codegen.py:10806).
+        zero_v = ctx.builder().const(0)
+        ctx.builder().store(header, zero_v, offset=_LIST_LEN_OFF)
+        return ctx.builder().const(0)
+
+    if e.method == "sort":
+        sort_key = getattr(e, "sort_key", None)
+        if sort_key is not None:
+            raise SSABuildError("list.sort(key=...): not yet wrapped")
+        sort_reverse = getattr(e, "sort_reverse", None)
+        if sort_reverse is not None:
+            raise SSABuildError("list.sort(reverse=...): not yet wrapped")
+        sym = "_runtime_sort_str" if el_t == "str" else "_runtime_sort_int"
+        ctx.builder().raw_asm(
+            Kind.NONE, [header], {k: f"call {sym}" for k in _X86_64_KEYS},
+        )
+        return ctx.builder().const(0)
+
+    if e.method == "insert":
+        # _runtime_list_insert(rax=header, rbx=idx, rcx=value)
+        idx = build_expr(ctx, e.args[0])
+        val = build_expr(ctx, e.args[1])
+        ctx.builder().raw_asm(
+            Kind.NONE, [header, idx, val],
+            {k: "call _runtime_list_insert" for k in _X86_64_KEYS},
+        )
+        return ctx.builder().const(0)
+
+    if e.method == "copy":
+        # _runtime_list_slice(rax=header, rbx=sentinel_min, rcx=sentinel_max)
+        # returns a shallow copy. Sentinels baked into text (codegen.py:10819-20).
+        return ctx.builder().raw_asm(
+            Kind.INT, [header],
+            {k: "mov rbx, 0x8000000000000000\nmov rcx, 0x7fffffffffffffff\ncall _runtime_list_slice"
+             for k in _X86_64_KEYS},
+        )
+
+    if e.method == "index":
+        raise SSABuildError("list.index(): not yet wrapped (needs inline search loop)")
+
+    if e.method == "count":
+        raise SSABuildError("list.count(): not yet wrapped (needs inline search loop)")
+
+    raise SSABuildError(f"list.{e.method}(): not yet wrapped")
+
+
+def _build_methodcall(ctx: FuncCtx, e: A.MethodCall) -> Value:
+    # Top-level dispatch mirroring codegen.py's _gen_method_call
+    # (codegen.py:10212): route by the receiver's static type.
+    # Module-qualified calls, super(), user class methods, and virtual
+    # dispatch are all deferred (each needs class resolution machinery
+    # not yet threaded into FuncCtx).
+    obj_t = A.expr_type(e.obj)
+    if obj_t == "str":
+        return _build_str_methodcall(ctx, e)
+    if obj_t in ("list", "tuple"):
+        return _build_list_methodcall(ctx, e)
+    if obj_t in ("dict", "set"):
+        raise SSABuildError(f"MethodCall on {obj_t!r}: dict/set methods not yet wrapped")
+    if obj_t.startswith("instance:"):
+        raise SSABuildError(f"MethodCall on instance ({obj_t}): not yet wrapped")
+    raise SSABuildError(f"MethodCall on {obj_t!r}: not yet wrapped")
+
+
 _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.IntLit: _build_intlit,
     A.FloatLit: _build_floatlit,
@@ -1000,6 +1280,7 @@ _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.IfExp: _build_ifexp,
     A.ListLit: _build_listlit,
     A.Subscript: _build_subscript,
+    A.MethodCall: _build_methodcall,
 }
 
 
@@ -1173,9 +1454,29 @@ def _build_truthy_branch(ctx: FuncCtx, expr: A.Expr, true_blk: ir.Block, false_b
     ucomisd-vs-fcmp unordered-flag difference at the IR level).
     """
     t = A.expr_type(expr)
-    if t.startswith("instance:") or t in ("list", "tuple", "dict", "set"):
+    if t.startswith("instance:"):
         raise SSABuildError(f"truthiness of {t}: not yet wrapped")
     b = ctx.builder()
+    if t in ("list", "tuple"):
+        # Truthy when len > 0: load [header+LIST_LEN_OFF] and compare != 0.
+        # Mirrors codegen.py:11225-11231's `mov rax, [rax+LIST_LEN_OFF]; test`.
+        v = build_expr(ctx, expr)
+        b = ctx.builder()
+        length = b.load(Kind.INT, v, offset=_LIST_LEN_OFF)
+        b = ctx.builder()
+        zero = b.const(0)
+        cond = b.icmp(Predicate.NE, length, zero)
+        ctx.builder().condbr(cond, true_blk, false_blk)
+        return
+    if t in ("dict", "set"):
+        v = build_expr(ctx, expr)
+        b = ctx.builder()
+        length = b.load(Kind.INT, v, offset=_DICT_LEN_OFF)
+        b = ctx.builder()
+        zero = b.const(0)
+        cond = b.icmp(Predicate.NE, length, zero)
+        ctx.builder().condbr(cond, true_blk, false_blk)
+        return
     if t == "float":
         v = build_expr(ctx, expr)
         b = ctx.builder()
@@ -1449,14 +1750,123 @@ def _build_for_range(ctx: FuncCtx, s: A.For) -> None:
     ctx.block = end_blk
 
 
+def _build_for_list(ctx: FuncCtx, s: A.For) -> None:
+    # `for x in xs:` where xs is a list or tuple. Mirrors codegen.py's
+    # _gen_for_list (codegen.py:3171-3235): index counter 0..len(xs)-1,
+    # loading buf[i*8] each iteration (buffer reloaded each time in case an
+    # append inside the body reallocates it — codegen.py:3201-3207). Only the
+    # single-variable case: tuple-unpack targets (`for a, b in pairs:`) are
+    # deferred (need per-slot reads from a per-iteration inner list).
+    if s.targets:
+        raise SSABuildError("For (tuple-unpack targets) over list/tuple: not yet wrapped")
+
+    # Determine element kind from the iterable's annotation.
+    if isinstance(s.iter, A.Name):
+        el_t = getattr(s.iter, "list_el_type", "int")
+    elif isinstance(s.iter, A.ListLit):
+        el_t = s.iter.el_type
+    else:
+        el_t = "int"
+    el_kind = Kind.FLOAT if el_t == "float" else Kind.INT
+
+    header = build_expr(ctx, s.iter)
+
+    # Allocate frame slots for loop-carried state (index, cached length,
+    # header pointer) — the same reason _build_for_range uses frame slots:
+    # these values span basic-block boundaries and phi nodes would be the
+    # "correct" SSA approach but frame slots are the established pattern here.
+    idx_slot = f"__forlist_idx_{id(s)}"
+    len_slot = f"__forlist_len_{id(s)}"
+    hdr_slot = f"__forlist_hdr_{id(s)}"
+    ctx.alloc_slot(idx_slot, "int")
+    ctx.alloc_slot(len_slot, "int")
+    ctx.alloc_slot(hdr_slot, "int")
+
+    _local_write(ctx, idx_slot, ctx.builder().const(0))
+    b = ctx.builder()
+    initial_len = b.load(Kind.INT, header, offset=_LIST_LEN_OFF)
+    _local_write(ctx, len_slot, initial_len)
+    _local_write(ctx, hdr_slot, header)
+
+    top_blk, _ = new_block(ctx.func, "forlist_top")
+    body_blk, _ = new_block(ctx.func, "forlist_body")
+    cont_blk, _ = new_block(ctx.func, "forlist_cont")
+    end_blk, _ = new_block(ctx.func, "forlist_end")
+    if s.orelse:
+        else_blk, _ = new_block(ctx.func, "forlist_else")
+        exit_target = else_blk
+    else:
+        exit_target = end_blk
+
+    entry_blk = ctx.block
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(entry_blk)
+
+    ctx.block = top_blk
+    idx_v = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    len_v = _local_read(ctx, len_slot, "int")
+    b = ctx.builder()
+    done = b.icmp(Predicate.GE, idx_v, len_v)
+    b.condbr(done, exit_target, body_blk)
+    exit_target.preds.append(top_blk)
+    body_blk.preds.append(top_blk)
+
+    ctx.block = body_blk
+    # Reload buf each iteration: a list.append() inside the body may
+    # realloc the buffer (same reason as codegen.py:3201-3207).
+    hdr_v = _local_read(ctx, hdr_slot, "int")
+    b = ctx.builder()
+    buf = b.load(Kind.INT, hdr_v, offset=_LIST_BUF_OFF)
+    b = ctx.builder()
+    idx_v2 = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    byte_off = b.shl(idx_v2, b.const(3))
+    b = ctx.builder()
+    elem_ptr = b.add(buf, byte_off)
+    b = ctx.builder()
+    elem = b.load(el_kind, elem_ptr, offset=0)
+
+    if s.var not in ctx.locals_:
+        ctx.alloc_slot(s.var, el_t)
+    _local_write(ctx, s.var, elem)
+
+    ctx.loop_targets.append((cont_blk, end_blk))
+    build_stmts(ctx, s.body)
+    if ctx.block.terminator() is None:
+        ctx.builder().br(cont_blk)
+        cont_blk.preds.append(ctx.block)
+    ctx.loop_targets.pop()
+
+    ctx.block = cont_blk
+    idx_v3 = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    next_idx = b.add(idx_v3, b.const(1))
+    _local_write(ctx, idx_slot, next_idx)
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(cont_blk)
+
+    if s.orelse:
+        ctx.block = else_blk
+        build_stmts(ctx, s.orelse)
+        if ctx.block.terminator() is None:
+            ctx.builder().br(end_blk)
+            end_blk.preds.append(ctx.block)
+
+    ctx.block = end_blk
+
+
 def _build_for(ctx: FuncCtx, s: A.For) -> None:
     # Mirrors codegen.py's _gen_for top-level dispatch (codegen.py:2753):
-    # range-args vs. "for x in <iterable>" are different codegen paths
-    # entirely. Only the range case has a real implementation here yet.
+    # range-args vs. "for x in <iterable>" are different codegen paths entirely.
     if s.iter is None:
         _build_for_range(ctx, s)
         return
-    raise SSABuildError("For (non-range iterable): not yet wrapped")
+    iter_t = A.expr_type(s.iter)
+    if iter_t in ("list", "tuple"):
+        _build_for_list(ctx, s)
+        return
+    raise SSABuildError(f"For over {iter_t!r}: not yet wrapped")
 
 
 _STMT_BUILDERS: dict[type, Callable[[FuncCtx, object], None]] = {
