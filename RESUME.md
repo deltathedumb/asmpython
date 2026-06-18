@@ -144,19 +144,40 @@ checking that node's actual sema rule.
 
 **Explicitly still not done** (plan-step 1 remainder): general
 exception/try-except (only hand-wired `ZeroDivisionError` exists), string
-indexing (`s[i]`) and slicing, `str.format()`, `TupleAssign`/`StarTarget`,
-`Global`/`Nonlocal` (blocked on `.bss`/box-pointer addressing not yet in the
-IR), f-strings, classes/instance methods/dunders, closures, generators, match
-statements, `for` over dict/set/str/zip/enumerate/instance iterables,
-`list.index()` and `list.count()` (need inline search loops),
-`list.sort(key=...)`/`reverse=...`, `dict.copy()`/`setdefault()`,
-`set.union`/`intersection`/`difference`, int-element sets.
+slicing (`s[a:b]`), `str.format()`, `Global`/`Nonlocal` (blocked on
+`.bss`/box-pointer addressing not yet in the IR), f-strings,
+classes/instance methods/dunders, closures, generators, match statements,
+`for` over set/zip/enumerate/instance iterables, remaining builtins
+(`print`, `enumerate`, `zip`, `sorted`, `reversed`, `sum`, `any`, `all`,
+`isinstance`), `list.sort(key=...)`/`reverse=...`, `dict.copy()`/
+`setdefault()`, `set.union`/`intersection`/`difference`, int-element sets,
+list comprehensions.
 
-**Next step on resume**: string subscript `s[i]` via `_runtime_str_char_at`,
-then `for` over dict (key iteration via `_runtime_dict_keys` + list loop),
-then `for` over str. After that: `TupleAssign`/`StarTarget` unpack, then
-`list.index()`/`count()` inline loops. Once the remaining surface is
-substantially covered, move to plan-step 2 (register allocator).
+**Done and committed** (latest commit `98b53bd9`):
+
+- **`str` subscript `s[i]`** via `_runtime_str_char_at`; handles negative
+  indices internally.
+- **`for c in s:`** (str iteration) — strlen at entry, char-at per step.
+- **`for k in d:`** (dict iteration) — walks `order_buf[0..len)`.
+- **`TupleAssign`** all three forms: StarTarget (`a, *rest = xs`), single
+  iterable unpack (`a, b = tup`), parallel swap (`a, b = b, a`).
+- **`list.index()`**, **`list.count()`**, **`list.remove()`** — inline
+  scan/shift loops with real IR blocks; no helper call.
+- **`in`/`not in`** for dict/set (helper), list/tuple (inline scan).
+- **`NamedExpr` (`:=`)** — walrus assign-and-return-value.
+- **`dict |=`** and **`list +=`** in `AugAssign`.
+- **`dict[k] = v`** (`IndexAssign` dict target).
+- **Builtin functions**: `int()`, `float()`, `bool()`, `abs()`, `hash()`,
+  `max(a,b)`, `min(a,b)`, `list()`, `chr()`, `ord()`, `id()`.
+
+**Next step on resume**: remaining builtin functions not yet wrapped —
+`print()`, `str(x)` for non-int types (already handles int), `range()`
+(only 3-arg form; used in for-range already), `enumerate()`, `zip()`,
+`sorted()`, `reversed()`, `sum()`, `any()`, `all()`, `isinstance()`.
+After those: string slicing (`s[a:b]`), `str.format()` / f-strings,
+list comprehensions, `Global`/`Nonlocal`, classes/instance
+methods/dunders. Once the remaining surface is substantially covered,
+move to plan-step 2 (register allocator).
 
 ## Selfhost Debugging (paused, non-blocking — plan-step 11)
 
