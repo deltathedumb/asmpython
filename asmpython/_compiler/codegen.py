@@ -588,7 +588,79 @@ class Codegen:
                 self.emit_function(mangled)
         self.emit_print_impls()
         self.emit_data_sections()
+        self.lines = self._peephole_optimize(self.lines)
         return "\n".join(self.lines) + "\n"
+
+    def _peephole_optimize(self, lines: list[str]) -> list[str]:
+        """Drop instructions whose result is immediately overwritten before
+        anything reads it: `mov reg, X` followed directly (no label, no
+        other instruction) by another `mov reg, Y` to the *same* register
+        makes the first write dead — PROVIDED `Y` doesn't itself read `reg`
+        (e.g. `mov rdx, [ptr]` / `mov rdx, [rdx+8]` is pointer-chasing, not
+        a dead store: the second line's source operand needs the value the
+        first line just loaded). Nothing else in straight-line flow can
+        observe the first write either way, and a jump targeting the
+        second line lands there regardless of whether the first line ran.
+
+        Deliberately conservative: only plain `mov <reg>, <anything>` pairs
+        with an exact register-name match, only when truly adjacent (a
+        label, comment, or blank line between them is left alone rather
+        than reasoned about — this pass runs once near the very end and
+        correctness matters far more than squeezing out every dead store).
+        """
+        GP_REGS = (
+            "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+            "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+            "eax", "ebx", "ecx", "edx", "esi", "edi",
+            "al", "bl", "cl", "dl",
+        )
+
+        def mov_dest_and_src(line: str) -> tuple[str, str] | None:
+            s = line.strip()
+            if not s.startswith("mov "):
+                return None
+            rest = s[4:]
+            comma = rest.find(",")
+            if comma == -1:
+                return None
+            dest = rest[:comma].strip()
+            if dest not in GP_REGS:
+                return None
+            return dest, rest[comma + 1:].strip()
+
+        def src_reads_reg(src: str, reg: str) -> bool:
+            # Tokenize on anything that isn't part of a register name so
+            # "rdx" inside "[rdx+8]" matches but a coincidental substring
+            # inside a longer identifier wouldn't (not a real risk for our
+            # fixed register-name set, but cheap to do properly).
+            token = ""
+            for ch in src:
+                if ch.isalnum() or ch == "_":
+                    token += ch
+                else:
+                    if token == reg:
+                        return True
+                    token = ""
+            return token == reg
+
+        out: list[str] = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            if i + 1 < n:
+                m0 = mov_dest_and_src(lines[i])
+                m1 = mov_dest_and_src(lines[i + 1]) if m0 is not None else None
+                if (
+                    m0 is not None
+                    and m1 is not None
+                    and m0[0] == m1[0]
+                    and not src_reads_reg(m1[1], m0[0])
+                ):
+                    i += 1  # drop lines[i]; lines[i+1] (now current) overwrites it
+                    continue
+            out.append(lines[i])
+            i += 1
+        return out
 
     def generate_runtime_only(self) -> str:
         """Emit a freestanding `.asm` containing the asmpython runtime helpers and
@@ -13739,6 +13811,14 @@ class Codegen:
 
     def _emit_os_listdir(self, path_arg, info: FuncInfo) -> None:
         """Emit code for os.listdir(path) -> list[str]. Result in rax."""
+        raise NotImplementedError
+
+    def _emit_load_library(self) -> None:
+        """rax = path -> rax = library handle, or NULL. See _gen_import_binary."""
+        raise NotImplementedError
+
+    def _emit_get_proc_addr(self) -> None:
+        """rax = handle, rbx = name -> rax = function ptr, or NULL."""
         raise NotImplementedError
 
     def _emit_cwd_buf_if_needed(self) -> None:
