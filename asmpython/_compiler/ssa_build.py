@@ -1300,10 +1300,326 @@ def _build_list_methodcall(ctx: FuncCtx, e: A.MethodCall) -> Value:
         )
 
     if e.method == "index":
-        raise SSABuildError("list.index(): not yet wrapped (needs inline search loop)")
+        # Linear scan returning the first matching index; raises ValueError
+        # when absent. Mirrors codegen.py:10684-10742.
+        # Frame slots carry needle and idx across basic-block boundaries
+        # (and across _runtime_str_eq calls which clobber caller-save regs).
+        # Block layout: entry → loop → search → {found | cont → loop}; loop → miss
+        needle = build_expr(ctx, e.args[0])
+        needle_slot = f"__lidx_needle_{id(e)}"
+        idx_slot = f"__lidx_idx_{id(e)}"
+        len_slot = f"__lidx_len_{id(e)}"
+        buf_slot = f"__lidx_buf_{id(e)}"
+        ctx.alloc_slot(needle_slot, el_t)
+        ctx.alloc_slot(idx_slot, "int")
+        ctx.alloc_slot(len_slot, "int")
+        ctx.alloc_slot(buf_slot, "int")
+        _local_write(ctx, needle_slot, needle)
+        b = ctx.builder()
+        lst_len = b.load(Kind.INT, header, offset=_LIST_LEN_OFF)
+        b = ctx.builder()
+        buf = b.load(Kind.INT, header, offset=_LIST_BUF_OFF)
+        _local_write(ctx, len_slot, lst_len)
+        _local_write(ctx, buf_slot, buf)
+        _local_write(ctx, idx_slot, ctx.builder().const(0))
+
+        loop_blk, _ = new_block(ctx.func, "lidx_loop")
+        search_blk, _ = new_block(ctx.func, "lidx_search")
+        cont_blk, _ = new_block(ctx.func, "lidx_cont")
+        miss_blk, _ = new_block(ctx.func, "lidx_miss")
+        found_blk, _ = new_block(ctx.func, "lidx_found")
+
+        ctx.builder().br(loop_blk)
+        loop_blk.preds.append(ctx.block)
+
+        ctx.block = loop_blk
+        idx_v = _local_read(ctx, idx_slot, "int")
+        len_v = _local_read(ctx, len_slot, "int")
+        b = ctx.builder()
+        done = b.icmp(Predicate.GE, idx_v, len_v)
+        b.condbr(done, miss_blk, search_blk)
+        miss_blk.preds.append(loop_blk)
+        search_blk.preds.append(loop_blk)
+
+        ctx.block = search_blk
+        idx_v2 = _local_read(ctx, idx_slot, "int")
+        buf_v = _local_read(ctx, buf_slot, "int")
+        needle_v = _local_read(ctx, needle_slot, el_t)
+        b = ctx.builder()
+        byte_off = b.shl(idx_v2, b.const(3))
+        b = ctx.builder()
+        elem_ptr = b.add(buf_v, byte_off)
+        el_kind = Kind.FLOAT if el_t == "float" else Kind.INT
+        b = ctx.builder()
+        elem = b.load(el_kind, elem_ptr, offset=0)
+        if el_t == "str":
+            eq_v = ctx.builder().raw_asm(
+                Kind.INT, [elem, needle_v],
+                {k: "call _runtime_str_eq" for k in _X86_64_KEYS},
+            )
+            b = ctx.builder()
+            match = b.icmp(Predicate.NE, eq_v, b.const(0))
+        elif el_t == "float":
+            match = ctx.builder().fcmp(Predicate.EQ, elem, needle_v)
+        else:
+            match = ctx.builder().icmp(Predicate.EQ, elem, needle_v)
+        ctx.builder().condbr(match, found_blk, cont_blk)
+        found_blk.preds.append(search_blk)
+        cont_blk.preds.append(search_blk)
+
+        ctx.block = cont_blk
+        idx_v3 = _local_read(ctx, idx_slot, "int")
+        b = ctx.builder()
+        next_idx = b.add(idx_v3, b.const(1))
+        _local_write(ctx, idx_slot, next_idx)
+        ctx.builder().br(loop_blk)
+        loop_blk.preds.append(cont_blk)
+
+        ctx.block = miss_blk
+        msg = ctx.builder().string_addr("ValueError: value not in list")
+        exc_id = ctx.builder().const(BUILTIN_EXC_IDS["ValueError"])
+        _build_runtime_raise(ctx, msg, exc_id)
+        ctx.builder().ret(None)
+
+        ctx.block = found_blk
+        return _local_read(ctx, idx_slot, "int")
 
     if e.method == "count":
-        raise SSABuildError("list.count(): not yet wrapped (needs inline search loop)")
+        # Count occurrences of value. Mirrors codegen.py:10852-10895.
+        needle = build_expr(ctx, e.args[0])
+        needle_slot = f"__lcnt_needle_{id(e)}"
+        idx_slot = f"__lcnt_idx_{id(e)}"
+        len_slot = f"__lcnt_len_{id(e)}"
+        buf_slot = f"__lcnt_buf_{id(e)}"
+        cnt_slot = f"__lcnt_cnt_{id(e)}"
+        ctx.alloc_slot(needle_slot, el_t)
+        ctx.alloc_slot(idx_slot, "int")
+        ctx.alloc_slot(len_slot, "int")
+        ctx.alloc_slot(buf_slot, "int")
+        ctx.alloc_slot(cnt_slot, "int")
+        _local_write(ctx, needle_slot, needle)
+        b = ctx.builder()
+        lst_len = b.load(Kind.INT, header, offset=_LIST_LEN_OFF)
+        b = ctx.builder()
+        buf = b.load(Kind.INT, header, offset=_LIST_BUF_OFF)
+        _local_write(ctx, len_slot, lst_len)
+        _local_write(ctx, buf_slot, buf)
+        _local_write(ctx, idx_slot, ctx.builder().const(0))
+        _local_write(ctx, cnt_slot, ctx.builder().const(0))
+
+        loop_blk, _ = new_block(ctx.func, "lcnt_loop")
+        check_blk, _ = new_block(ctx.func, "lcnt_check")
+        inc_blk, _ = new_block(ctx.func, "lcnt_inc")
+        cont_blk, _ = new_block(ctx.func, "lcnt_cont")
+        end_blk, _ = new_block(ctx.func, "lcnt_end")
+
+        ctx.builder().br(loop_blk)
+        loop_blk.preds.append(ctx.block)
+
+        ctx.block = loop_blk
+        idx_v = _local_read(ctx, idx_slot, "int")
+        len_v = _local_read(ctx, len_slot, "int")
+        b = ctx.builder()
+        done = b.icmp(Predicate.GE, idx_v, len_v)
+        b.condbr(done, end_blk, check_blk)
+        end_blk.preds.append(loop_blk)
+        check_blk.preds.append(loop_blk)
+
+        ctx.block = check_blk
+        idx_v2 = _local_read(ctx, idx_slot, "int")
+        buf_v = _local_read(ctx, buf_slot, "int")
+        needle_v = _local_read(ctx, needle_slot, el_t)
+        b = ctx.builder()
+        byte_off = b.shl(idx_v2, b.const(3))
+        b = ctx.builder()
+        elem_ptr = b.add(buf_v, byte_off)
+        el_kind = Kind.FLOAT if el_t == "float" else Kind.INT
+        b = ctx.builder()
+        elem = b.load(el_kind, elem_ptr, offset=0)
+        if el_t == "str":
+            eq_v = ctx.builder().raw_asm(
+                Kind.INT, [elem, needle_v],
+                {k: "call _runtime_str_eq" for k in _X86_64_KEYS},
+            )
+            b = ctx.builder()
+            match = b.icmp(Predicate.NE, eq_v, b.const(0))
+        elif el_t == "float":
+            match = ctx.builder().fcmp(Predicate.EQ, elem, needle_v)
+        else:
+            match = ctx.builder().icmp(Predicate.EQ, elem, needle_v)
+        ctx.builder().condbr(match, inc_blk, cont_blk)
+        inc_blk.preds.append(check_blk)
+        cont_blk.preds.append(check_blk)
+
+        ctx.block = inc_blk
+        cnt_v = _local_read(ctx, cnt_slot, "int")
+        b = ctx.builder()
+        new_cnt = b.add(cnt_v, b.const(1))
+        _local_write(ctx, cnt_slot, new_cnt)
+        ctx.builder().br(cont_blk)
+        cont_blk.preds.append(ctx.block)
+
+        ctx.block = cont_blk
+        idx_v3 = _local_read(ctx, idx_slot, "int")
+        b = ctx.builder()
+        next_idx = b.add(idx_v3, b.const(1))
+        _local_write(ctx, idx_slot, next_idx)
+        ctx.builder().br(loop_blk)
+        loop_blk.preds.append(ctx.block)
+
+        ctx.block = end_blk
+        return _local_read(ctx, cnt_slot, "int")
+
+    if e.method == "remove":
+        # Remove first occurrence; raises ValueError if absent.
+        # Loop 1: find index (same structure as .index). Loop 2: shift
+        # buf[i] = buf[i+1] for i in range(found, len-1), then decrement len.
+        # Mirrors codegen.py:10911-10962.
+        # Block layout: entry → find_top → {miss | fsearch → {found_shift | find_cont}}
+        #   found_shift → shift_top → {shift_end | shift_copy → shift_top}
+        #   shift_end → done
+        el_kind = Kind.FLOAT if el_t == "float" else Kind.INT
+        needle = build_expr(ctx, e.args[0])
+        needle_slot = f"__lrem_needle_{id(e)}"
+        idx_slot = f"__lrem_idx_{id(e)}"
+        len_slot = f"__lrem_len_{id(e)}"
+        buf_slot = f"__lrem_buf_{id(e)}"
+        s_idx_slot = f"__lrem_sidx_{id(e)}"
+        ctx.alloc_slot(needle_slot, el_t)
+        ctx.alloc_slot(idx_slot, "int")
+        ctx.alloc_slot(len_slot, "int")
+        ctx.alloc_slot(buf_slot, "int")
+        ctx.alloc_slot(s_idx_slot, "int")
+        _local_write(ctx, needle_slot, needle)
+        b = ctx.builder()
+        lst_len = b.load(Kind.INT, header, offset=_LIST_LEN_OFF)
+        b = ctx.builder()
+        buf = b.load(Kind.INT, header, offset=_LIST_BUF_OFF)
+        _local_write(ctx, len_slot, lst_len)
+        _local_write(ctx, buf_slot, buf)
+        _local_write(ctx, idx_slot, ctx.builder().const(0))
+
+        find_top, _ = new_block(ctx.func, "lrem_find")
+        fsearch, _ = new_block(ctx.func, "lrem_fsearch")
+        find_cont, _ = new_block(ctx.func, "lrem_fcont")
+        miss_blk, _ = new_block(ctx.func, "lrem_miss")
+        shift_top, _ = new_block(ctx.func, "lrem_shift_top")
+        shift_copy, _ = new_block(ctx.func, "lrem_shift_copy")
+        shift_end, _ = new_block(ctx.func, "lrem_shift_end")
+        done_blk, _ = new_block(ctx.func, "lrem_done")
+
+        ctx.builder().br(find_top)
+        find_top.preds.append(ctx.block)
+
+        ctx.block = find_top
+        idx_v = _local_read(ctx, idx_slot, "int")
+        len_v = _local_read(ctx, len_slot, "int")
+        b = ctx.builder()
+        at_end = b.icmp(Predicate.GE, idx_v, len_v)
+        b.condbr(at_end, miss_blk, fsearch)
+        miss_blk.preds.append(find_top)
+        fsearch.preds.append(find_top)
+
+        ctx.block = fsearch
+        idx_v2 = _local_read(ctx, idx_slot, "int")
+        buf_v = _local_read(ctx, buf_slot, "int")
+        needle_v = _local_read(ctx, needle_slot, el_t)
+        b = ctx.builder()
+        byte_off = b.shl(idx_v2, b.const(3))
+        b = ctx.builder()
+        elem_ptr = b.add(buf_v, byte_off)
+        b = ctx.builder()
+        elem = b.load(el_kind, elem_ptr, offset=0)
+        if el_t == "str":
+            eq_v = ctx.builder().raw_asm(
+                Kind.INT, [elem, needle_v],
+                {k: "call _runtime_str_eq" for k in _X86_64_KEYS},
+            )
+            b = ctx.builder()
+            match = b.icmp(Predicate.NE, eq_v, b.const(0))
+        elif el_t == "float":
+            match = ctx.builder().fcmp(Predicate.EQ, elem, needle_v)
+        else:
+            match = ctx.builder().icmp(Predicate.EQ, elem, needle_v)
+        ctx.builder().condbr(match, shift_top, find_cont)
+        shift_top.preds.append(fsearch)
+        find_cont.preds.append(fsearch)
+
+        ctx.block = find_cont
+        idx_v3 = _local_read(ctx, idx_slot, "int")
+        b = ctx.builder()
+        next_idx = b.add(idx_v3, b.const(1))
+        _local_write(ctx, idx_slot, next_idx)
+        ctx.builder().br(find_top)
+        find_top.preds.append(find_cont)
+
+        ctx.block = miss_blk
+        msg = ctx.builder().string_addr("ValueError: value not in list")
+        exc_id = ctx.builder().const(BUILTIN_EXC_IDS["ValueError"])
+        _build_runtime_raise(ctx, msg, exc_id)
+        ctx.builder().ret(None)
+
+        # --- shift loop ---
+        # shift_top is the init block (one-shot): set up s_idx and stop,
+        # then fall into shift_loop (the real header).
+        # Layout: shift_top(init) → shift_loop → {shift_end | shift_body → shift_loop}
+        shift_loop, _ = new_block(ctx.func, "lrem_shift_loop")
+        shift_body2, _ = new_block(ctx.func, "lrem_shift_body")
+
+        ctx.block = shift_top
+        found_idx = _local_read(ctx, idx_slot, "int")
+        len_v2 = _local_read(ctx, len_slot, "int")
+        b = ctx.builder()
+        stop_val = b.sub(len_v2, b.const(1))
+        s_stop_slot = f"__lrem_stop_{id(e)}"
+        ctx.alloc_slot(s_stop_slot, "int")
+        _local_write(ctx, s_idx_slot, found_idx)
+        _local_write(ctx, s_stop_slot, stop_val)
+        ctx.builder().br(shift_loop)
+        shift_loop.preds.append(shift_top)
+
+        ctx.block = shift_loop
+        s_idx = _local_read(ctx, s_idx_slot, "int")
+        stop_v2 = _local_read(ctx, s_stop_slot, "int")
+        b = ctx.builder()
+        at_stop = b.icmp(Predicate.GE, s_idx, stop_v2)
+        b.condbr(at_stop, shift_end, shift_body2)
+        shift_end.preds.append(shift_loop)
+        shift_body2.preds.append(shift_loop)
+
+        ctx.block = shift_body2
+        s_idx2 = _local_read(ctx, s_idx_slot, "int")
+        buf_v2 = _local_read(ctx, buf_slot, "int")
+        b = ctx.builder()
+        next_off = b.add(s_idx2, b.const(1))
+        b = ctx.builder()
+        src_byte = b.shl(next_off, b.const(3))
+        b = ctx.builder()
+        src_ptr = b.add(buf_v2, src_byte)
+        b = ctx.builder()
+        val_to_copy = b.load(el_kind, src_ptr, offset=0)
+        b = ctx.builder()
+        dst_byte = b.shl(s_idx2, b.const(3))
+        b = ctx.builder()
+        dst_ptr = b.add(buf_v2, dst_byte)
+        ctx.builder().store(dst_ptr, val_to_copy, offset=0)
+        s_idx3 = _local_read(ctx, s_idx_slot, "int")
+        b = ctx.builder()
+        next_s = b.add(s_idx3, b.const(1))
+        _local_write(ctx, s_idx_slot, next_s)
+        ctx.builder().br(shift_loop)
+        shift_loop.preds.append(shift_body2)
+
+        ctx.block = shift_end
+        len_v3 = _local_read(ctx, len_slot, "int")
+        b = ctx.builder()
+        new_len = b.sub(len_v3, b.const(1))
+        ctx.builder().store(header, new_len, offset=_LIST_LEN_OFF)
+        ctx.builder().br(done_blk)
+        done_blk.preds.append(shift_end)
+
+        ctx.block = done_blk
+        return ctx.builder().const(0)
 
     raise SSABuildError(f"list.{e.method}(): not yet wrapped")
 
@@ -1605,28 +1921,32 @@ def _build_multiassign(ctx: FuncCtx, s: A.MultiAssign) -> None:
 
 
 def _build_indexassign(ctx: FuncCtx, s: A.IndexAssign) -> None:
-    # `xs[i] = v` for list[int|float] only — the write-side counterpart to
-    # _build_subscript, mirroring codegen.py's IndexAssign list case
-    # (codegen.py:2526-2546). Slice-target assignment (dst[a:b] = src),
-    # dict targets, __setitem__ dispatch, and string elements are all
-    # deferred (each is its own dispatch branch in codegen.py).
-    #
-    # Notably asymmetric with the read side: codegen.py's list-index WRITE
-    # path does negative-index wraparound but has NO bounds check at all
-    # (codegen.py:2526-2546 - no oob/IndexError path, unlike the read
-    # side's codegen.py:9330-9352). Matched here exactly as-is, not
-    # "fixed" - the job here is mirroring existing behavior, not
-    # improving it; an out-of-bounds write currently corrupts memory
-    # silently in both the existing codegen and this IR builder.
+    # Write-side counterpart to _build_subscript, mirroring codegen.py's
+    # IndexAssign cases (codegen.py:2453-2608). Slice-target and __setitem__
+    # dispatch are deferred; list, tuple, and dict targets are all handled.
     if isinstance(s.target.index, A.Slice):
         raise SSABuildError("IndexAssign with a Slice target: not yet wrapped")
     obj_t = A.expr_type(s.target.obj)
-    if obj_t != "list":
-        raise SSABuildError(f"IndexAssign on {obj_t}: not yet wrapped")
-    el_t = A.expr_type(s.value)
-    if el_t not in ("int", "float"):
-        raise SSABuildError(f"IndexAssign of {el_t}: not yet wrapped")
 
+    if obj_t == "dict":
+        # _runtime_dict_set(rax=header, rbx=key, rcx=value_bits)
+        key_v = build_expr(ctx, s.target.index)
+        header_v = build_expr(ctx, s.target.obj)
+        val_v = build_expr(ctx, s.value)
+        val_t = A.expr_type(s.value)
+        if val_t == "float":
+            val_v = _float_to_int_bits(ctx, val_v, str(id(s)))
+        ctx.builder().raw_asm(
+            Kind.NONE, [header_v, key_v, val_v],
+            {k: "call _runtime_dict_set" for k in _X86_64_KEYS},
+        )
+        return
+
+    if obj_t not in ("list", "tuple"):
+        raise SSABuildError(f"IndexAssign on {obj_t}: not yet wrapped")
+
+    # List/tuple write: negative-index wraparound, no bounds check (matches
+    # codegen.py:2526-2546's silent-corrupt-on-oob behaviour exactly).
     header = build_expr(ctx, s.target.obj)
     raw_idx = build_expr(ctx, s.target.index)
     value = build_expr(ctx, s.value)
@@ -1680,6 +2000,25 @@ def _build_augassign(ctx: FuncCtx, s: A.AugAssign) -> None:
     ty = ctx.local_types.get(s.target)
     if ty is None:
         raise SSABuildError(f"AugAssign to {s.target!r}: not a known local (nonlocal box deferred)")
+    if ty == "dict" and s.op == "|":
+        # `d |= other` (PEP 584): merge other's entries into d in-place.
+        # The header pointer itself doesn't change — update through it.
+        other = build_expr(ctx, s.value)
+        header = _local_read(ctx, s.target, "int")
+        ctx.builder().raw_asm(
+            Kind.NONE, [header, other],
+            {k: "call _runtime_dict_update" for k in _X86_64_KEYS},
+        )
+        return
+    if ty == "list" and s.op == "+":
+        # `xs += other` → extend xs in-place (same as xs.extend(other)).
+        other = build_expr(ctx, s.value)
+        header = _local_read(ctx, s.target, "int")
+        ctx.builder().raw_asm(
+            Kind.NONE, [header, other],
+            {k: "call _runtime_list_extend" for k in _X86_64_KEYS},
+        )
+        return
     if ty.startswith("instance:") or ty in ("str", "list", "dict", "set", "tuple"):
         raise SSABuildError(f"AugAssign {s.op!r} on {ty}: not yet wrapped")
     left = A.Name(name=s.target, inferred_type=ty)
