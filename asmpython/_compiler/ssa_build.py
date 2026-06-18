@@ -724,6 +724,24 @@ def _build_return(ctx: FuncCtx, s: A.Return) -> None:
     ctx.builder().ret(value)
 
 
+def _build_del(ctx: FuncCtx, s: A.Del) -> None:
+    # `del x` only (codegen.py:2658) — zero the slot so the variable can't
+    # be accidentally read. `del d[k]`/`del xs[i]` (codegen.py's Subscript
+    # case, _runtime_dict_pop/_runtime_list_del) are deferred to the
+    # container-operations wrapping pass.
+    #
+    # codegen.py always writes a raw integer 0 (`mov qword [...], 0`) even
+    # for float slots, since all-zero bits is also +0.0 under IEEE-754 —
+    # matched here rather than using fconst(0.0), which would be the same
+    # bit pattern via an extra (and target-lowering-dependent) float-const
+    # path for no benefit.
+    if not (isinstance(s.target, A.Name) and s.target.name in ctx.locals_):
+        raise SSABuildError("Del on non-local-Name target: not yet wrapped")
+    _, offset = ctx.locals_[s.target.name]
+    zero = ctx.builder().const(0)
+    ctx.builder().store(FRAME_BASE, zero, offset=offset)
+
+
 def _build_exprstmt(ctx: FuncCtx, s: A.ExprStmt) -> None:
     build_expr(ctx, s.expr)
 
@@ -1033,6 +1051,7 @@ _STMT_BUILDERS: dict[type, Callable[[FuncCtx, object], None]] = {
     A.ExprStmt: _build_exprstmt,
     A.Pass: _build_pass,
     A.AugAssign: _build_augassign,
+    A.Del: _build_del,
 }
 
 
