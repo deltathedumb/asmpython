@@ -588,6 +588,92 @@ def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
     return ctx.builder().call(kind, e.func, args)
 
 
+def _build_boolop(ctx: FuncCtx, e: A.BoolOp) -> Value:
+    # Mirrors codegen.py's _gen_boolop (codegen.py:11739): short-circuit,
+    # Python VALUE semantics, not boolean-normalized — `a or b` yields a's
+    # own value when truthy (not 1), `a and b` yields a when falsy (not 0).
+    # Only meaningful here for primitive int/float operands (str/list/
+    # instance truthiness is deferred, same as _build_truthy_branch).
+    lt, rt = A.expr_type(e.left), A.expr_type(e.right)
+    if lt.startswith("instance:") or rt.startswith("instance:") or lt in (
+        "str", "list", "dict", "set", "tuple",
+    ) or rt in ("str", "list", "dict", "set", "tuple"):
+        raise SSABuildError(f"BoolOp {e.op!r} on {lt}/{rt}: not yet wrapped")
+    is_float = lt == "float" or rt == "float"
+    kind = Kind.FLOAT if is_float else Kind.INT
+
+    left = _build_as_float(ctx, e.left, lt) if is_float else build_expr(ctx, e.left)
+    short_circuit_blk, _ = new_block(ctx.func, "bool_short")
+    eval_right_blk, _ = new_block(ctx.func, "bool_right")
+    merge_blk, _ = new_block(ctx.func, "bool_merge")
+    test_blk = ctx.block
+
+    b = ctx.builder()
+    zero = b.fconst(0.0) if is_float else b.const(0)
+    left_truthy = b.fcmp(Predicate.NE, left, zero) if is_float else b.icmp(Predicate.NE, left, zero)
+    if e.op == "and":
+        # Left falsy -> short-circuit (result is left); left truthy -> eval right.
+        b.condbr(left_truthy, eval_right_blk, short_circuit_blk)
+    else:
+        # Left truthy -> short-circuit (result is left); left falsy -> eval right.
+        b.condbr(left_truthy, short_circuit_blk, eval_right_blk)
+    short_circuit_blk.preds.append(test_blk)
+    eval_right_blk.preds.append(test_blk)
+
+    # short_circuit_blk just forwards `left` to the merge — still needs its
+    # own terminator (Function.validate rejects empty blocks).
+    ctx.block = short_circuit_blk
+    ctx.builder().br(merge_blk)
+    merge_blk.preds.append(short_circuit_blk)
+
+    ctx.block = eval_right_blk
+    right = _build_as_float(ctx, e.right, rt) if is_float else build_expr(ctx, e.right)
+    ctx.builder().br(merge_blk)
+    merge_blk.preds.append(ctx.block)
+
+    ctx.block = merge_blk
+    result = ctx.builder().phi(kind)
+    # add_incoming order must match merge_blk.preds' append order above:
+    # [short_circuit_blk carrying `left`, eval_right_blk's exit carrying `right`].
+    ctx.builder().add_incoming(result, left)
+    ctx.builder().add_incoming(result, right)
+    return result
+
+
+def _build_ifexp(ctx: FuncCtx, e: A.IfExp) -> Value:
+    # Mirrors codegen.py's _gen_ifexp (codegen.py:11755): both arms are
+    # promoted to the result type (set by sema) so the join point sees a
+    # uniform register class, exactly like _build_as_float does at binop/
+    # comparison sites.
+    ty = e.inferred_type
+    if ty.startswith("instance:") or ty in ("str", "list", "dict", "set", "tuple"):
+        raise SSABuildError(f"IfExp result type {ty}: not yet wrapped")
+    kind = ctx.kind_of(ty)
+    body_blk, _ = new_block(ctx.func, "ifexp_body")
+    else_blk, _ = new_block(ctx.func, "ifexp_else")
+    merge_blk, _ = new_block(ctx.func, "ifexp_merge")
+    entry_blk = ctx.block
+    _build_truthy_branch(ctx, e.test, body_blk, else_blk)
+    body_blk.preds.append(entry_blk)
+    else_blk.preds.append(entry_blk)
+
+    ctx.block = body_blk
+    body_v = _build_as_float(ctx, e.body, A.expr_type(e.body)) if ty == "float" else build_expr(ctx, e.body)
+    ctx.builder().br(merge_blk)
+    merge_blk.preds.append(ctx.block)
+
+    ctx.block = else_blk
+    else_v = _build_as_float(ctx, e.orelse, A.expr_type(e.orelse)) if ty == "float" else build_expr(ctx, e.orelse)
+    ctx.builder().br(merge_blk)
+    merge_blk.preds.append(ctx.block)
+
+    ctx.block = merge_blk
+    result = ctx.builder().phi(kind)
+    ctx.builder().add_incoming(result, body_v)
+    ctx.builder().add_incoming(result, else_v)
+    return result
+
+
 _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.IntLit: _build_intlit,
     A.FloatLit: _build_floatlit,
@@ -597,6 +683,8 @@ _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.UnaryOp: _build_unaryop,
     A.Compare: _build_compare,
     A.Call: _build_call,
+    A.BoolOp: _build_boolop,
+    A.IfExp: _build_ifexp,
 }
 
 
@@ -621,6 +709,38 @@ def _build_assign(ctx: FuncCtx, s: A.Assign) -> None:
 def _build_return(ctx: FuncCtx, s: A.Return) -> None:
     value = build_expr(ctx, s.value) if s.value is not None else None
     ctx.builder().ret(value)
+
+
+def _build_exprstmt(ctx: FuncCtx, s: A.ExprStmt) -> None:
+    build_expr(ctx, s.expr)
+
+
+def _build_pass(ctx: FuncCtx, s: A.Pass) -> None:
+    pass
+
+
+def _build_augassign(ctx: FuncCtx, s: A.AugAssign) -> None:
+    # Mirrors codegen.py's AugAssign handling (codegen.py:2303) primitive
+    # int/float fallback only — nonlocal boxes, dict `|=`, list `+=`,
+    # str `+=`, and instance __iadd__/__add__ dunder dispatch (codegen.py:
+    # 2304-2369) are all deferred (each already goes through box-pointer
+    # indirection, a _runtime_* helper, or a method call today, so they're
+    # CALL/RAW_ASM wrapping work, not new IR semantics).
+    #
+    # Reuses _build_binop wholesale rather than re-deriving the op dispatch:
+    # `x += v` becomes the same IR as `x = x + v`, built via a synthetic
+    # BinOp/Name pair so _build_binop's float-promotion/zero-check/floor-
+    # adjustment logic (and its non-primitive-operand guard) applies
+    # identically to both forms.
+    ty = ctx.local_types.get(s.target)
+    if ty is None:
+        raise SSABuildError(f"AugAssign to {s.target!r}: not a known local (nonlocal box deferred)")
+    if ty.startswith("instance:") or ty in ("str", "list", "dict", "set", "tuple"):
+        raise SSABuildError(f"AugAssign {s.op!r} on {ty}: not yet wrapped")
+    left = A.Name(name=s.target, inferred_type=ty)
+    synthetic = A.BinOp(op=s.op, left=left, right=s.value)
+    value = _build_binop(ctx, synthetic)
+    _local_write(ctx, s.target, value)
 
 
 def _build_truthy_branch(ctx: FuncCtx, expr: A.Expr, true_blk: ir.Block, false_blk: ir.Block) -> None:
@@ -896,6 +1016,9 @@ _STMT_BUILDERS: dict[type, Callable[[FuncCtx, object], None]] = {
     A.For: _build_for,
     A.Break: _build_break,
     A.Continue: _build_continue,
+    A.ExprStmt: _build_exprstmt,
+    A.Pass: _build_pass,
+    A.AugAssign: _build_augassign,
 }
 
 
