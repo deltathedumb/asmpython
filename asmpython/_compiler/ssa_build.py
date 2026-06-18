@@ -80,6 +80,14 @@ class FuncCtx:
     # caller (codegen integration step) from the same source codegen.py
     # already computes; ssa_build.py doesn't recompute it.
     global_names: set = dc_field(default_factory=set)
+    # Set of names that are plain module-level user functions (mirrors
+    # codegen.py's self.funcs keys) — distinguishes a `Call` to a real
+    # user-defined function (the genuinely-new IR-call case this file
+    # implements) from the ~30 builtin-name special cases (print, len,
+    # range, str(), etc.) that _gen_call dispatches on first, each of
+    # which already calls a _runtime_* helper today and is deferred to
+    # the CALL/RAW_ASM wrapping pass rather than reimplemented here.
+    user_funcs: set = dc_field(default_factory=set)
 
     def builder(self) -> BlockBuilder:
         return BlockBuilder(self.func, self.block)
@@ -352,6 +360,30 @@ def _build_compare(ctx: FuncCtx, e: A.Compare) -> Value:
     return result
 
 
+def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
+    # Mirrors codegen.py's _gen_call (codegen.py:11915) fallback case
+    # (codegen.py:12948-12953) reached after ~30 builtin-name special
+    # cases (print, len, range, str(), id(), ...) and the closure/
+    # free-variable call path are checked and don't match — i.e. a
+    # plain call to a real user-defined module-level function with
+    # sema-normalized positional args (defaults filled, kwargs placed,
+    # varargs packed; see sema.py's _bind_args). That's the genuinely
+    # new IR-call case this builder implements; builtins are deferred
+    # to the CALL/RAW_ASM wrapping pass since each already dispatches
+    # to a _runtime_* helper today, and closures (functions captured as
+    # values, called indirectly through a pointer) are a separate
+    # follow-up — see ir.py's Op.CALL docstring for the is_indirect
+    # mechanism this will eventually use.
+    if e.func not in ctx.user_funcs:
+        raise SSABuildError(
+            f"Call to {e.func!r}: not a known user function in this FuncCtx "
+            "(builtins/FFI/closures not yet implemented)"
+        )
+    args = [build_expr(ctx, a) for a in e.args]
+    kind = ctx.kind_of(e.inferred_type)
+    return ctx.builder().call(kind, e.func, args)
+
+
 _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.IntLit: _build_intlit,
     A.FloatLit: _build_floatlit,
@@ -359,6 +391,7 @@ _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.BinOp: _build_binop,
     A.UnaryOp: _build_unaryop,
     A.Compare: _build_compare,
+    A.Call: _build_call,
 }
 
 
@@ -517,11 +550,145 @@ def _build_continue(ctx: FuncCtx, s: A.Continue) -> None:
     continue_target.preds.append(ctx.block)
 
 
+def _build_for_range(ctx: FuncCtx, s: A.For) -> None:
+    # Mirrors codegen.py's _gen_for (codegen.py:2753) range-args case
+    # (codegen.py:2794-2866) only — `for x in <list/dict/set/str/zip/
+    # enumerate/instance>` are each their own deferred wrap-as-CALL case
+    # (every one of them already dispatches to a _runtime_* helper or a
+    # dedicated _gen_for_* method today, none of which need new IR
+    # semantics, just CALL/RAW_ASM wrapping).
+    #
+    # The loop direction (ascending vs. descending) is determined at
+    # RUNTIME from the step's sign, not statically, since `step` can be
+    # an arbitrary (non-constant) expression — `for i in range(a, b, step)`
+    # with a variable `step`. This means the loop-condition check itself
+    # branches on the step's sign every iteration, exactly mirroring
+    # codegen.py:2832-2850's runtime `test rax, rax` / `jg pos_branch`
+    # structure rather than picking one comparison direction up front.
+    if s.iter is not None:
+        raise SSABuildError("For (non-range iterable): not yet wrapped")
+    args = s.range_args
+    if len(args) == 1:
+        start_e, stop_e, step_e = A.IntLit(value=0), args[0], A.IntLit(value=1)
+    elif len(args) == 2:
+        start_e, stop_e, step_e = args[0], args[1], A.IntLit(value=1)
+    else:
+        start_e, stop_e, step_e = args[0], args[1], args[2]
+
+    start_v = build_expr(ctx, start_e)
+    ctx.alloc_slot(s.var, "int")
+    _local_write(ctx, s.var, start_v)
+    stop_v = build_expr(ctx, stop_e)
+    stop_slot_name = f"__for_stop_{id(s)}"
+    ctx.alloc_slot(stop_slot_name, "int")
+    _local_write(ctx, stop_slot_name, stop_v)
+    step_v = build_expr(ctx, step_e)
+    step_slot_name = f"__for_step_{id(s)}"
+    ctx.alloc_slot(step_slot_name, "int")
+    _local_write(ctx, step_slot_name, step_v)
+
+    # Block layout (planned up front, not patched after the fact):
+    #   top         -- reads step's sign, branches to pos/nonpos
+    #   for_step_pos    -- step > 0: "var >= stop?" -> cond_end : body
+    #   for_step_nonpos -- step <= 0: "var <= stop?" -> cond_end : body
+    #   body        -- loop body, falls through to cont
+    #   cont        -- var += step, jumps back to top
+    #   else (optional) / end
+    top_blk, top_b = new_block(ctx.func, "for_top")
+    pos_blk, pos_b = new_block(ctx.func, "for_step_pos")
+    nonpos_blk, nonpos_b = new_block(ctx.func, "for_step_nonpos")
+    body_blk, body_b = new_block(ctx.func, "for_body")
+    cont_blk, cont_b = new_block(ctx.func, "for_cont")
+    end_blk, end_b = new_block(ctx.func, "for_end")
+    if s.orelse:
+        else_blk, else_b = new_block(ctx.func, "for_else")
+        cond_end_target = else_blk
+    else:
+        cond_end_target = end_blk
+
+    entry_blk = ctx.block
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(entry_blk)
+
+    # top: branch on the step's sign (computed at runtime — see this
+    # function's docstring for why it can't be decided statically).
+    ctx.block = top_blk
+    step_read = _local_read(ctx, step_slot_name, "int")
+    b = ctx.builder()
+    zero = b.const(0)
+    step_positive = b.icmp(Predicate.GT, step_read, zero)
+    b.condbr(step_positive, pos_blk, nonpos_blk)
+    pos_blk.preds.append(top_blk)
+    nonpos_blk.preds.append(top_blk)
+
+    # step > 0: ascending: loop while var < stop (mirrors codegen.py's
+    # "if var >= stop: goto cond_end").
+    ctx.block = pos_blk
+    var_read_pos = _local_read(ctx, s.var, "int")
+    b = ctx.builder()
+    stop_read_pos = _local_read(ctx, stop_slot_name, "int")
+    b = ctx.builder()
+    pos_done = b.icmp(Predicate.GE, var_read_pos, stop_read_pos)
+    b.condbr(pos_done, cond_end_target, body_blk)
+    cond_end_target.preds.append(pos_blk)
+    body_blk.preds.append(pos_blk)
+
+    # step <= 0: descending (or a no-op zero step): loop while var > stop
+    # (mirrors codegen.py's "if var <= stop: goto cond_end").
+    ctx.block = nonpos_blk
+    var_read_nonpos = _local_read(ctx, s.var, "int")
+    b = ctx.builder()
+    stop_read_nonpos = _local_read(ctx, stop_slot_name, "int")
+    b = ctx.builder()
+    nonpos_done = b.icmp(Predicate.LE, var_read_nonpos, stop_read_nonpos)
+    b.condbr(nonpos_done, cond_end_target, body_blk)
+    cond_end_target.preds.append(nonpos_blk)
+    body_blk.preds.append(nonpos_blk)
+
+    ctx.loop_targets.append((cont_blk, end_blk))
+    ctx.block = body_blk
+    build_stmts(ctx, s.body)
+    if ctx.block.terminator() is None:
+        ctx.builder().br(cont_blk)
+        cont_blk.preds.append(ctx.block)
+    ctx.loop_targets.pop()
+
+    ctx.block = cont_blk
+    var_read_cont = _local_read(ctx, s.var, "int")
+    b = ctx.builder()
+    step_read_cont = _local_read(ctx, step_slot_name, "int")
+    b = ctx.builder()
+    next_v = b.add(var_read_cont, step_read_cont)
+    _local_write(ctx, s.var, next_v)
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(cont_blk)
+
+    if s.orelse:
+        ctx.block = else_blk
+        build_stmts(ctx, s.orelse)
+        if ctx.block.terminator() is None:
+            ctx.builder().br(end_blk)
+            end_blk.preds.append(ctx.block)
+
+    ctx.block = end_blk
+
+
+def _build_for(ctx: FuncCtx, s: A.For) -> None:
+    # Mirrors codegen.py's _gen_for top-level dispatch (codegen.py:2753):
+    # range-args vs. "for x in <iterable>" are different codegen paths
+    # entirely. Only the range case has a real implementation here yet.
+    if s.iter is None:
+        _build_for_range(ctx, s)
+        return
+    raise SSABuildError("For (non-range iterable): not yet wrapped")
+
+
 _STMT_BUILDERS: dict[type, Callable[[FuncCtx, object], None]] = {
     A.Assign: _build_assign,
     A.Return: _build_return,
     A.If: _build_if,
     A.While: _build_while,
+    A.For: _build_for,
     A.Break: _build_break,
     A.Continue: _build_continue,
 }
