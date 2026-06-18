@@ -1630,42 +1630,7 @@ def _build_indexassign(ctx: FuncCtx, s: A.IndexAssign) -> None:
     header = build_expr(ctx, s.target.obj)
     raw_idx = build_expr(ctx, s.target.index)
     value = build_expr(ctx, s.value)
-
-    neg_blk, _ = new_block(ctx.func, "idxw_neg")
-    pos_blk, _ = new_block(ctx.func, "idxw_pos")
-    norm_blk, _ = new_block(ctx.func, "idxw_norm")
-    b = ctx.builder()
-    zero = b.const(0)
-    is_neg = b.icmp(Predicate.LT, raw_idx, zero)
-    b.condbr(is_neg, neg_blk, pos_blk)
-    neg_blk.preds.append(ctx.block)
-    pos_blk.preds.append(ctx.block)
-
-    ctx.block = neg_blk
-    b = ctx.builder()
-    list_len = b.load(Kind.INT, header, offset=_LIST_LEN_OFF)
-    b = ctx.builder()
-    wrapped_idx = b.add(raw_idx, list_len)
-    b.br(norm_blk)
-    norm_blk.preds.append(neg_blk)
-
-    ctx.block = pos_blk
-    ctx.builder().br(norm_blk)
-    norm_blk.preds.append(pos_blk)
-
-    ctx.block = norm_blk
-    norm_idx = ctx.builder().phi(Kind.INT)
-    ctx.builder().add_incoming(norm_idx, wrapped_idx)
-    ctx.builder().add_incoming(norm_idx, raw_idx)
-
-    b = ctx.builder()
-    buf = b.load(Kind.INT, header, offset=_LIST_BUF_OFF)
-    b = ctx.builder()
-    byte_off = b.shl(norm_idx, b.const(3))
-    b = ctx.builder()
-    elem_ptr = b.add(buf, byte_off)
-    b = ctx.builder()
-    b.store(elem_ptr, value, offset=0)
+    _build_list_subscript_store(ctx, header, raw_idx, value)
 
 
 def _build_return(ctx: FuncCtx, s: A.Return) -> None:
@@ -2336,9 +2301,215 @@ def _build_for(ctx: FuncCtx, s: A.For) -> None:
     raise SSABuildError(f"For over {iter_t!r}: not yet wrapped")
 
 
+def _build_list_subscript_store(
+    ctx: FuncCtx, header: Value, raw_idx: Value, value: Value
+) -> None:
+    """Write `value` into `header[raw_idx]` with negative-index wraparound.
+
+    Shared helper used by _build_indexassign and _build_tupleassign's
+    parallel-Subscript branch. No bounds check — matches codegen.py's
+    existing silent-corrupt-on-oob behaviour.
+    """
+    neg_blk, _ = new_block(ctx.func, "idxw_neg")
+    pos_blk, _ = new_block(ctx.func, "idxw_pos")
+    norm_blk, _ = new_block(ctx.func, "idxw_norm")
+    b = ctx.builder()
+    zero = b.const(0)
+    is_neg = b.icmp(Predicate.LT, raw_idx, zero)
+    b.condbr(is_neg, neg_blk, pos_blk)
+    neg_blk.preds.append(ctx.block)
+    pos_blk.preds.append(ctx.block)
+
+    ctx.block = neg_blk
+    b = ctx.builder()
+    list_len = b.load(Kind.INT, header, offset=_LIST_LEN_OFF)
+    b = ctx.builder()
+    wrapped_idx = b.add(raw_idx, list_len)
+    b.br(norm_blk)
+    norm_blk.preds.append(neg_blk)
+
+    ctx.block = pos_blk
+    ctx.builder().br(norm_blk)
+    norm_blk.preds.append(pos_blk)
+
+    ctx.block = norm_blk
+    norm_idx = ctx.builder().phi(Kind.INT)
+    ctx.builder().add_incoming(norm_idx, wrapped_idx)
+    ctx.builder().add_incoming(norm_idx, raw_idx)
+
+    b = ctx.builder()
+    buf = b.load(Kind.INT, header, offset=_LIST_BUF_OFF)
+    b = ctx.builder()
+    byte_off = b.shl(norm_idx, b.const(3))
+    b = ctx.builder()
+    elem_ptr = b.add(buf, byte_off)
+    ctx.builder().store(elem_ptr, value, offset=0)
+
+
+def _build_tupleassign(ctx: FuncCtx, s: A.TupleAssign) -> None:
+    # Three sub-cases matching codegen.py:2141-2302:
+    #
+    # (A) StarTarget form: `a, *rest = xs` — evaluate xs once, read plain
+    #     slots at fixed offsets, build rest via _runtime_list_slice.
+    # (B) Unpack form: `a, b = tup_or_str` (single RHS, tuple/list/str/any
+    #     typed) — evaluate RHS once, extract per-slot value.
+    # (C) Parallel form: `a, b = b, a` (one value per target) — evaluate
+    #     every RHS into a temp slot FIRST, then commit all stores.
+
+    has_star = any(isinstance(t, A.StarTarget) for t in s.targets)
+
+    if has_star:
+        # ---- case A: starred assignment ----
+        star_i = next(i for i, t in enumerate(s.targets) if isinstance(t, A.StarTarget))
+        n_before = star_i
+        n_after = len(s.targets) - star_i - 1
+
+        src = build_expr(ctx, s.values[0])
+        hdr_slot = f"__tupunpack_{id(s)}"
+        ctx.alloc_slot(hdr_slot, "int")
+        _local_write(ctx, hdr_slot, src)
+
+        el_t = getattr(s.values[0], "list_el_type", "int")
+        el_kind = Kind.FLOAT if el_t == "float" else Kind.INT
+
+        # Plain targets before the star
+        for i in range(n_before):
+            hdr_v = _local_read(ctx, hdr_slot, "int")
+            b = ctx.builder()
+            buf = b.load(Kind.INT, hdr_v, offset=_LIST_BUF_OFF)
+            b = ctx.builder()
+            elem = b.load(el_kind, buf, offset=i * 8)
+            name = s.targets[i].name
+            if name not in ctx.locals_:
+                ctx.alloc_slot(name, el_t)
+            _local_write(ctx, name, elem)
+
+        # Plain targets after the star (read from the end)
+        for j in range(n_after):
+            hdr_v = _local_read(ctx, hdr_slot, "int")
+            b = ctx.builder()
+            lst_len = b.load(Kind.INT, hdr_v, offset=_LIST_LEN_OFF)
+            b = ctx.builder()
+            tail_off = b.sub(lst_len, b.const(n_after - j))
+            b = ctx.builder()
+            buf = b.load(Kind.INT, hdr_v, offset=_LIST_BUF_OFF)
+            b = ctx.builder()
+            byte_off = b.shl(tail_off, b.const(3))
+            b = ctx.builder()
+            elem_ptr = b.add(buf, byte_off)
+            b = ctx.builder()
+            elem = b.load(el_kind, elem_ptr, offset=0)
+            name = s.targets[star_i + 1 + j].name
+            if name not in ctx.locals_:
+                ctx.alloc_slot(name, el_t)
+            _local_write(ctx, name, elem)
+
+        # Star target: list slice [n_before : len - n_after]
+        hdr_v = _local_read(ctx, hdr_slot, "int")
+        b = ctx.builder()
+        lst_len = b.load(Kind.INT, hdr_v, offset=_LIST_LEN_OFF)
+        b = ctx.builder()
+        stop_v = b.sub(lst_len, b.const(n_after))
+        start_v = ctx.builder().const(n_before)
+        rest_v = ctx.builder().raw_asm(
+            Kind.INT, [hdr_v, start_v, stop_v],
+            {k: "call _runtime_list_slice" for k in _X86_64_KEYS},
+        )
+        rest_name = s.targets[star_i].name
+        if rest_name not in ctx.locals_:
+            ctx.alloc_slot(rest_name, "list")
+        _local_write(ctx, rest_name, rest_v)
+        return
+
+    rhs_t = A.expr_type(s.values[0]) if len(s.values) == 1 else None
+    is_unpack = len(s.values) == 1 and (
+        rhs_t in ("tuple", "any", "str") or A.expr_type(s.values[0]) == "list"
+    )
+
+    if is_unpack:
+        # ---- case B: single-iterable unpack ----
+        src = build_expr(ctx, s.values[0])
+        hdr_slot = f"__tupunpack_{id(s)}"
+        ctx.alloc_slot(hdr_slot, "int")
+        _local_write(ctx, hdr_slot, src)
+
+        if rhs_t == "str":
+            for i, target in enumerate(s.targets):
+                ptr_v = _local_read(ctx, hdr_slot, "int")
+                idx_v = ctx.builder().const(i)
+                char_v = ctx.builder().raw_asm(
+                    Kind.INT, [ptr_v, idx_v],
+                    {k: "call _runtime_str_char_at" for k in _X86_64_KEYS},
+                )
+                name = target.name
+                if name not in ctx.locals_:
+                    ctx.alloc_slot(name, "str")
+                _local_write(ctx, name, char_v)
+            return
+
+        ets = A.tuple_element_types(s.values[0])
+        for i, target in enumerate(s.targets):
+            el_t = ets[i] if i < len(ets) else "int"
+            el_kind = Kind.FLOAT if el_t == "float" else Kind.INT
+            hdr_v = _local_read(ctx, hdr_slot, "int")
+            b = ctx.builder()
+            buf = b.load(Kind.INT, hdr_v, offset=_LIST_BUF_OFF)
+            b = ctx.builder()
+            elem = b.load(el_kind, buf, offset=i * 8)
+            name = target.name
+            if name not in ctx.locals_:
+                ctx.alloc_slot(name, el_t)
+            _local_write(ctx, name, elem)
+        return
+
+    # ---- case C: parallel form ----
+    # Evaluate every RHS into a temporary frame slot first (two-pass model
+    # so swap works: a, b = b, a evaluates both b and a BEFORE storing).
+    tmp_vals: list[Value] = []
+    tmp_types: list[str] = []
+    for i, v_expr in enumerate(s.values):
+        v = build_expr(ctx, v_expr)
+        v_t = A.expr_type(v_expr)
+        tmp_name = f"__tuptmp_{id(s)}_{i}"
+        ctx.alloc_slot(tmp_name, v_t)
+        _local_write(ctx, tmp_name, v)
+        tmp_vals.append(v)
+        tmp_types.append(v_t)
+
+    # Commit stores.
+    for i, target in enumerate(s.targets):
+        tmp_name = f"__tuptmp_{id(s)}_{i}"
+        val_v = _local_read(ctx, tmp_name, tmp_types[i])
+
+        if isinstance(target, A.Name):
+            if target.name not in ctx.locals_:
+                ctx.alloc_slot(target.name, tmp_types[i])
+            _local_write(ctx, target.name, val_v)
+
+        elif isinstance(target, A.Subscript):
+            obj_t = A.expr_type(target.obj)
+            if obj_t == "dict":
+                key_v = build_expr(ctx, target.index)
+                header_v = build_expr(ctx, target.obj)
+                ctx.builder().raw_asm(
+                    Kind.NONE, [header_v, key_v, val_v],
+                    {k: "call _runtime_dict_set" for k in _X86_64_KEYS},
+                )
+            else:
+                header_v = build_expr(ctx, target.obj)
+                raw_idx = build_expr(ctx, target.index)
+                _build_list_subscript_store(ctx, header_v, raw_idx, val_v)
+
+        else:
+            raise SSABuildError(
+                f"TupleAssign parallel target type {type(target).__name__}: not yet wrapped"
+            )
+
+
 _STMT_BUILDERS: dict[type, Callable[[FuncCtx, object], None]] = {
     A.Assign: _build_assign,
     A.MultiAssign: _build_multiassign,
+    A.TupleAssign: _build_tupleassign,
     A.Return: _build_return,
     A.If: _build_if,
     A.While: _build_while,
