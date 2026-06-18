@@ -34,6 +34,7 @@ from typing import Callable, Optional
 
 from . import ast_nodes as A
 from . import ir
+from .codegen import BUILTIN_EXC_IDS
 from .ir import Kind, Op, Predicate, Value
 from .ir_builder import BlockBuilder, new_block, new_function
 
@@ -216,6 +217,97 @@ _COMPARE_PRED: dict[str, Predicate] = {
 }
 
 
+def _build_int_floordiv_mod(ctx: FuncCtx, e: A.BinOp, lt: str, rt: str) -> Value:
+    """`a // b` / `a % b` on plain int operands. Mirrors codegen.py's
+    `_emit_binop_inline` (op in ("//", "%"), codegen.py:11318-11349):
+
+    1. Zero-check the divisor; raise ZeroDivisionError if it's 0
+       (codegen.py:11319-30's `test rbx, rbx` / `jnz nonzero` / raise).
+    2. SDIV/SREM truncate toward zero, but Python's // and % floor
+       toward -inf — when the remainder is nonzero and its sign differs
+       from the divisor's, adjust: quotient -= 1, remainder += divisor
+       (codegen.py:11331-46's cqo/idiv + sign-mismatch adjustment,
+       expressed here as ICMP/CONDBR + a merge phi instead of raw
+       flags-register jcc chains).
+    """
+    left = build_expr(ctx, e.left)
+    right = build_expr(ctx, e.right)
+
+    nonzero_blk, nonzero_b = new_block(ctx.func, "divmod_nonzero")
+    raise_blk, raise_b = new_block(ctx.func, "divmod_raise")
+    b = ctx.builder()
+    zero = b.const(0)
+    is_zero = b.icmp(Predicate.EQ, right, zero)
+    b.condbr(is_zero, raise_blk, nonzero_blk)
+    raise_blk.preds.append(ctx.block)
+    nonzero_blk.preds.append(ctx.block)
+
+    ctx.block = raise_blk
+    msg = ctx.builder().string_addr("division by zero")
+    b = ctx.builder()
+    exc_id = b.const(BUILTIN_EXC_IDS["ZeroDivisionError"])
+    # _runtime_raise never returns (it longjmps to the nearest handler,
+    # or prints+exits if none is installed) - codegen.py never emits
+    # anything after this call on this path either. The IR still needs
+    # a terminator for this block per Function.validate, so RET with no
+    # value stands in for "unreachable" until the IR has a dedicated
+    # marker for it (a real Op.UNREACHABLE is a reasonable follow-up
+    # once more exception-handling call sites exist to validate the
+    # shape against).
+    b.call(Kind.NONE, "_runtime_raise", [msg, exc_id])
+    b.ret(None)
+
+    ctx.block = nonzero_blk
+    b = ctx.builder()
+    quot = b.sdiv(left, right)
+    b = ctx.builder()
+    rem = b.srem(left, right)
+
+    # Sign-mismatch check: remainder nonzero AND (remainder XOR divisor) < 0
+    # (i.e. they have different signs) -> adjust.
+    rem_nonzero_blk, rem_nonzero_b = new_block(ctx.func, "divmod_remnz")
+    adjust_blk, adjust_b = new_block(ctx.func, "divmod_adjust")
+    merge_blk, merge_b = new_block(ctx.func, "divmod_merge")
+    b = ctx.builder()
+    rem_is_zero = b.icmp(Predicate.EQ, rem, zero)
+    b.condbr(rem_is_zero, merge_blk, rem_nonzero_blk)
+    merge_blk.preds.append(ctx.block)
+    rem_nonzero_blk.preds.append(ctx.block)
+
+    ctx.block = rem_nonzero_blk
+    b = ctx.builder()
+    sign_xor = b.xor(rem, right)
+    b = ctx.builder()
+    zero2 = b.const(0)
+    signs_differ = b.icmp(Predicate.LT, sign_xor, zero2)
+    b.condbr(signs_differ, adjust_blk, merge_blk)
+    adjust_blk.preds.append(ctx.block)
+    merge_blk.preds.append(ctx.block)
+
+    ctx.block = adjust_blk
+    b = ctx.builder()
+    one = b.const(1)
+    adj_quot = b.sub(quot, one)
+    adj_rem = b.add(rem, right)
+    b.br(merge_blk)
+    merge_blk.preds.append(ctx.block)
+
+    ctx.block = merge_blk
+    b = ctx.builder()
+    final_quot = b.phi(Kind.INT)
+    final_rem = b.phi(Kind.INT)
+    # Two of the three incoming edges (the rem-is-zero short-circuit and
+    # the signs-agree case) carry the *unadjusted* quot/rem; only the
+    # adjust_blk edge carries the adjusted pair. add_incoming order must
+    # match merge_blk.preds' append order above: [from rem_is_zero check,
+    # from signs_differ-false, from adjust_blk] - i.e. (quot, rem),
+    # (quot, rem), (adj_quot, adj_rem).
+    for q, r in ((quot, rem), (quot, rem), (adj_quot, adj_rem)):
+        ctx.builder().add_incoming(final_quot, q)
+        ctx.builder().add_incoming(final_rem, r)
+    return final_quot if e.op == "//" else final_rem
+
+
 def _build_binop(ctx: FuncCtx, e: A.BinOp) -> Value:
     lt, rt = A.expr_type(e.left), A.expr_type(e.right)
     if lt.startswith("instance:") or rt.startswith("instance:") or "str" in (lt, rt) or lt in (
@@ -234,17 +326,16 @@ def _build_binop(ctx: FuncCtx, e: A.BinOp) -> Value:
         b = ctx.builder()
         return b.fdiv(left, right)
     if e.op in ("//", "%"):
-        # Python floor-division/modulo semantics differ from the raw
-        # SDIV/SREM instruction (which truncate toward zero): when the
-        # remainder is nonzero and its sign differs from the divisor's,
-        # adjust quotient -= 1 / remainder += divisor so the result
-        # rounds toward -inf instead of toward zero, matching
-        # codegen.py:11332-49's idiv+adjust sequence exactly, just
-        # expressed as IR ops instead of raw cqo/idiv text. Zero-division
-        # checking (codegen.py:11319-30's ZeroDivisionError raise) is
-        # deferred until exception-raising has its own IR mechanism —
-        # not implemented in this builder yet.
-        raise SSABuildError(f"BinOp {e.op!r}: floor-div/modulo adjustment not yet implemented")
+        if is_float:
+            # Float // uses divsd+roundsd(floor mode) and % uses libc
+            # fmod (codegen.py:11298-11304) - a different lowering shape
+            # from the int path below (no SDIV/SREM-truncation-vs-floor
+            # adjustment needed, since divsd+floor-rounding IS already
+            # Python's floor-division semantics). Deferred separately
+            # since it needs its own IR shape, not a variant of the int
+            # path's adjustment logic.
+            raise SSABuildError(f"BinOp {e.op!r} on float operands: not yet implemented")
+        return _build_int_floordiv_mod(ctx, e, lt, rt)
     if e.op == "**":
         raise SSABuildError("BinOp '**': integer exponentiation loop not yet implemented")
     if e.op not in _SIMPLE_BINOPS:
