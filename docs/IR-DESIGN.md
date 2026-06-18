@@ -207,6 +207,24 @@ eventually become a real sequence of typed IR instructions once there's
 time to rewrite that specific helper, but it unblocks shipping x86-64-on-IR
 without a hard dependency on every runtime helper being ported on day one.
 
+**RawAsm argument convention — resolved (2026-06-18)**: a `RawAsm`'s
+`args[i]` is placed in the i-th register of a fixed convention
+(`rax, rbx, rcx, rdx, ...` for `Kind.INT`/pointer; the float helpers that
+need it use `xmm0, xmm1, ...` separately) matching every existing
+`_runtime_*` helper's hand-written calling convention exactly — this is
+not a new concept, it's the same "argument N goes in a specific register"
+constraint a real `Call`'s ABI lowering already has to handle, just with a
+fixed convention instead of a per-target ABI table. The register allocator
+treats a `RawAsm` exactly like a `Call` with a hardcoded (rather than
+ABI-derived) argument-register assignment: it must ensure `args[i]` is in
+the right physical register immediately before the instruction, exactly as
+it already must for real calls. No new field on `Instr` — `target_text`'s
+prose may assume this convention, callers don't declare it per site, since
+every `_runtime_*` helper already uses the same rax/rbx/rcx/rdx ordering
+today and a per-site override has never been needed. If a future helper
+genuinely needs a different convention (not yet encountered), revisit then
+rather than generalizing speculatively now.
+
 ## Register allocation: linear-scan
 
 Graph-coloring allocators produce better code (fewer spills) but are

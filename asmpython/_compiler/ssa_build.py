@@ -407,6 +407,16 @@ def _build_int_floordiv_mod(ctx: FuncCtx, e: A.BinOp, lt: str, rt: str) -> Value
 
 def _build_binop(ctx: FuncCtx, e: A.BinOp) -> Value:
     lt, rt = A.expr_type(e.left), A.expr_type(e.right)
+    if lt == "str" and rt == "str" and e.op == "+":
+        # _runtime_str_concat(rax=a, rbx=b) -> rax (freshly allocated
+        # concat) — codegen.py:2328-2332/5726-5745. Sema only allows str+str
+        # (no int/float coercion), so this is the only string BinOp case.
+        left = build_expr(ctx, e.left)
+        right = build_expr(ctx, e.right)
+        return ctx.builder().raw_asm(
+            Kind.INT, [left, right],
+            {"x86_64": "call _runtime_str_concat"},
+        )
     if lt.startswith("instance:") or rt.startswith("instance:") or "str" in (lt, rt) or lt in (
         "list", "dict", "set", "tuple",
     ) or rt in ("list", "dict", "set", "tuple"):
@@ -509,15 +519,36 @@ def _build_unaryop(ctx: FuncCtx, e: A.UnaryOp) -> Value:
     raise SSABuildError(f"UnaryOp {e.op!r}: not yet implemented")
 
 
+def _build_str_eq(ctx: FuncCtx, left: Value, right: Value) -> Value:
+    # _runtime_str_eq(rax=a, rbx=b) -> rax (1/0), NULL-safe (None compares
+    # equal to None, unequal to a real string) — codegen.py:6130-6145.
+    return ctx.builder().raw_asm(
+        Kind.INT, [left, right],
+        {"x86_64": "call _runtime_str_eq"},
+    )
+
+
 def _build_compare(ctx: FuncCtx, e: A.Compare) -> Value:
     # Mirrors codegen.py's _gen_compare (codegen.py:11427), primitive
-    # int/float case only — `in`/`not in`, dunder __eq__/__lt__ dispatch,
-    # and string compare are all deferred (each already goes through a
-    # _runtime_* helper or a method call today, so they're CALL/RAW_ASM
-    # wrapping work, not new IR semantics).
+    # int/float case plus string ==/!= (the only string comparison wrapped
+    # so far — _runtime_str_eq is a simple two-arg-in/one-result-out RAW_ASM
+    # site, codegen.py:11526-11535). `in`/`not in`, dunder __eq__/__lt__
+    # dispatch, string </<=/>/>= (needs _runtime_str_cmp, a separate
+    # helper), and chained string comparisons are all still deferred.
     if any(op in ("in", "not in") for op in e.ops):
         raise SSABuildError("Compare 'in'/'not in': not yet wrapped")
     operand_types = [A.expr_type(o) for o in e.operands]
+    if all(t == "str" for t in operand_types):
+        if len(e.ops) != 1 or e.ops[0] not in ("==", "!="):
+            raise SSABuildError("Chained or ordering (</<=/>/>=) string Compare: not yet wrapped")
+        left = build_expr(ctx, e.operands[0])
+        right = build_expr(ctx, e.operands[1])
+        eq = _build_str_eq(ctx, left, right)
+        if e.ops[0] == "==":
+            return eq
+        b = ctx.builder()
+        one = b.const(1)
+        return b.xor(eq, one)
     if any(t.startswith("instance:") or t in ("str", "list", "dict", "set", "tuple") for t in operand_types):
         raise SSABuildError("Compare on non-primitive operand: not yet wrapped")
     is_float = not all(op in ("is", "is not") for op in e.ops) and "float" in operand_types
