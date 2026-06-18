@@ -612,6 +612,28 @@ def _build_compare(ctx: FuncCtx, e: A.Compare) -> Value:
     return result
 
 
+def _build_len(ctx: FuncCtx, e: A.Call) -> Value:
+    # Mirrors codegen.py:11961-11981 — len()'s dispatch depends entirely on
+    # the argument's static type. list/tuple/dict/set/instance.__len__ are
+    # deferred (each needs a container layout or method dispatch this IR
+    # doesn't have yet); string is the only case wrapped so far.
+    arg = e.args[0]
+    t = A.expr_type(arg)
+    if t != "str":
+        raise SSABuildError(f"len() of {t}: not yet wrapped")
+    v = build_expr(ctx, arg)
+    # libc strlen(ptr) -> length. Genuinely OS-specific text (Win64 passes
+    # the first integer arg in rcx, SysV in rdi) — see codegen.py's
+    # _emit_strlen and the _X86_64_KEYS docstring above.
+    return ctx.builder().raw_asm(
+        Kind.INT, [v],
+        {
+            "win64": "mov rcx, rax\ncall strlen",
+            "linux_x86_64": "mov rdi, rax\ncall strlen",
+        },
+    )
+
+
 def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
     # Mirrors codegen.py's _gen_call (codegen.py:11915) fallback case
     # (codegen.py:12948-12953) reached after ~30 builtin-name special
@@ -626,6 +648,15 @@ def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
     # values, called indirectly through a pointer) are a separate
     # follow-up — see ir.py's Op.CALL docstring for the is_indirect
     # mechanism this will eventually use.
+    #
+    # len() is the first builtin wrapped (see _build_len) — checked first,
+    # matching codegen.py's _gen_call dispatch order exactly (codegen.py:
+    # 11921-11980 checks every builtin name before ever consulting
+    # self.funcs). A user function named "len" would be unreachable via a
+    # call expression either way — same behavior as today, not a new
+    # restriction introduced here.
+    if e.func == "len":
+        return _build_len(ctx, e)
     if e.func not in ctx.user_funcs:
         raise SSABuildError(
             f"Call to {e.func!r}: not a known user function in this FuncCtx "
