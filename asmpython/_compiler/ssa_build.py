@@ -1085,6 +1085,219 @@ def _build_str_of_int(ctx: FuncCtx, e: A.Call) -> Value:
     )
 
 
+def _build_int_of(ctx: FuncCtx, e: A.Call) -> Value:
+    # int(x) — mirrors codegen.py:12015-12033.
+    arg = e.args[0]
+    arg_t = A.expr_type(arg)
+    v = build_expr(ctx, arg)
+    if arg_t == "str":
+        return ctx.builder().raw_asm(
+            Kind.INT, [v],
+            {k: "call _runtime_str_to_int" for k in _X86_64_KEYS},
+        )
+    if arg_t == "float":
+        return ctx.builder().fptosi(v)
+    # int or bool: identity (bool is a subtype of int at runtime)
+    return v
+
+
+def _build_float_of(ctx: FuncCtx, e: A.Call) -> Value:
+    # float(x) — mirrors codegen.py:12035-12062.
+    arg = e.args[0]
+    arg_t = A.expr_type(arg)
+    # float("nan") / float("inf") / float("-inf"): direct bit-pattern constants.
+    if isinstance(arg, A.StrLit):
+        s = arg.value.strip().lower()
+        if s == "nan":
+            v = ctx.builder().const(0x7FF8000000000000)
+            return _int_to_float_bits(ctx, v, f"{id(e)}_nan")
+        if s in ("inf", "+inf", "infinity", "+infinity"):
+            v = ctx.builder().const(0x7FF0000000000000)
+            return _int_to_float_bits(ctx, v, f"{id(e)}_inf")
+        if s in ("-inf", "-infinity"):
+            v = ctx.builder().const(0xFFF0000000000000)
+            return _int_to_float_bits(ctx, v, f"{id(e)}_ninf")
+    v = build_expr(ctx, arg)
+    if arg_t == "int":
+        return ctx.builder().sitofp(v)
+    if arg_t == "str":
+        # strtod(ptr, NULL) -> result in xmm0; OS-specific call conv.
+        return ctx.builder().raw_asm(
+            Kind.FLOAT, [v],
+            {
+                "win64": "mov rcx, rax\nxor rdx, rdx\ncall strtod",
+                "linux_x86_64": "mov rdi, rax\nxor rsi, rsi\ncall strtod",
+            },
+        )
+    # float: identity
+    return v
+
+
+def _build_bool_of(ctx: FuncCtx, e: A.Call) -> Value:
+    # bool(x) -> 0/1 truthiness — mirrors codegen.py:12547-12597.
+    # Reuses _build_truthy_branch to build the CFG, then collapses to a
+    # 0/1 value via a frame slot (same approach as 'in'/'not in').
+    arg = e.args[0]
+    arg_t = A.expr_type(arg)
+    v = build_expr(ctx, arg)
+    if arg_t == "float":
+        b = ctx.builder()
+        zero = b.fconst(0.0)
+        return b.fcmp(Predicate.NE, v, zero)
+    if arg_t in ("int",):
+        b = ctx.builder()
+        return b.icmp(Predicate.NE, v, b.const(0))
+    if arg_t == "str":
+        # nonzero first byte → truthy (load byte, ICMP NE 0)
+        b = ctx.builder()
+        ch = b.load(Kind.INT, v, offset=0)
+        b = ctx.builder()
+        byte_v = b.and_(ch, b.const(0xFF))
+        b = ctx.builder()
+        return b.icmp(Predicate.NE, byte_v, b.const(0))
+    if arg_t in ("list", "tuple"):
+        b = ctx.builder()
+        lst_len = b.load(Kind.INT, v, offset=_LIST_LEN_OFF)
+        b = ctx.builder()
+        return b.icmp(Predicate.NE, lst_len, b.const(0))
+    if arg_t in ("dict", "set"):
+        b = ctx.builder()
+        dict_len = b.load(Kind.INT, v, offset=_DICT_LEN_OFF)
+        b = ctx.builder()
+        return b.icmp(Predicate.NE, dict_len, b.const(0))
+    raise SSABuildError(f"bool({arg_t!r}): not yet wrapped")
+
+
+def _build_abs(ctx: FuncCtx, e: A.Call) -> Value:
+    # abs(x) — mirrors codegen.py:12652-12675.
+    arg = e.args[0]
+    arg_t = A.expr_type(arg)
+    v = build_expr(ctx, arg)
+    if arg_t == "float":
+        # Clear sign bit: movq → AND 0x7FFFFFFFFFFFFFFF → movq back.
+        # RAW_ASM: args[0]→xmm0 (Kind.FLOAT input in xmm0 by convention).
+        # But our convention puts args[i] in rax/rbx/rcx for INT only.
+        # Float values live in xmm0 as the return value. The RAW_ASM
+        # args list feeds rax/rbx/... for INT args. For a float arg we
+        # must bitcast to int first, mask, then bitcast back.
+        v_bits = _float_to_int_bits(ctx, v, f"{id(e)}_absbits")
+        b = ctx.builder()
+        masked = b.and_(v_bits, b.const(0x7FFFFFFFFFFFFFFF))
+        return _int_to_float_bits(ctx, masked, f"{id(e)}_absf")
+    # int: branchless `t = rax>>63; rax = (rax^t) - t`
+    # RAW_ASM with no incoming values; read + write rax inline.
+    return ctx.builder().raw_asm(
+        Kind.INT, [v],
+        {k: "mov rbx, rax\nsar rbx, 63\nxor rax, rbx\nsub rax, rbx"
+         for k in _X86_64_KEYS},
+    )
+
+
+def _build_hash(ctx: FuncCtx, e: A.Call) -> Value:
+    # hash(x) — mirrors codegen.py:12676-12689.
+    arg = e.args[0]
+    arg_t = A.expr_type(arg)
+    v = build_expr(ctx, arg)
+    if arg_t == "str":
+        return ctx.builder().raw_asm(
+            Kind.INT, [v], {k: "call _runtime_hash_string" for k in _X86_64_KEYS}
+        )
+    # int/float/bool: identity (pointer/value is the hash)
+    return v
+
+
+def _build_maxmin(ctx: FuncCtx, e: A.Call) -> Value:
+    # max(a, b) / min(a, b) — 2-arg scalar only (codegen.py:12388-12450).
+    # Multi-arg and list-scan forms deferred.
+    is_max = (e.func == "max")
+    if len(e.args) != 2:
+        raise SSABuildError(f"{e.func}() with {len(e.args)} args: only 2-arg form wrapped")
+    a_t = A.expr_type(e.args[0])
+    b_t = A.expr_type(e.args[1])
+    is_float = (a_t == "float" or b_t == "float")
+    a_v = _build_as_float(ctx, e.args[0], a_t) if is_float else build_expr(ctx, e.args[0])
+    b_v = _build_as_float(ctx, e.args[1], b_t) if is_float else build_expr(ctx, e.args[1])
+    if is_float:
+        # FCMP GT → select: max(a,b) = a if a>b else b
+        pred = Predicate.GT if is_max else Predicate.LT
+        b = ctx.builder()
+        cond = b.fcmp(pred, a_v, b_v)
+        res_slot = f"__maxmin_{id(e)}"
+        ctx.alloc_slot(res_slot, "float")
+        true_blk, _ = new_block(ctx.func, "maxmin_true")
+        false_blk, _ = new_block(ctx.func, "maxmin_false")
+        merge_blk, _ = new_block(ctx.func, "maxmin_merge")
+        b.condbr(cond, true_blk, false_blk)
+        true_blk.preds.append(ctx.block)
+        false_blk.preds.append(ctx.block)
+        ctx.block = true_blk
+        _local_write(ctx, res_slot, a_v)
+        ctx.builder().br(merge_blk)
+        merge_blk.preds.append(true_blk)
+        ctx.block = false_blk
+        _local_write(ctx, res_slot, b_v)
+        ctx.builder().br(merge_blk)
+        merge_blk.preds.append(false_blk)
+        ctx.block = merge_blk
+        return _local_read(ctx, res_slot, "float")
+    # Int: branchless cmov — can't use a real x86 cmov in RAW_ASM because
+    # the conditional depends on ICMP which is an IR value. Use a real
+    # branch + frame slot (same shape as float case).
+    b = ctx.builder()
+    pred = Predicate.GT if is_max else Predicate.LT
+    cond = b.icmp(pred, a_v, b_v)
+    res_slot = f"__maxmin_{id(e)}"
+    ctx.alloc_slot(res_slot, "int")
+    true_blk, _ = new_block(ctx.func, "maxmin_true")
+    false_blk, _ = new_block(ctx.func, "maxmin_false")
+    merge_blk, _ = new_block(ctx.func, "maxmin_merge")
+    b.condbr(cond, true_blk, false_blk)
+    true_blk.preds.append(ctx.block)
+    false_blk.preds.append(ctx.block)
+    ctx.block = true_blk
+    _local_write(ctx, res_slot, a_v)
+    ctx.builder().br(merge_blk)
+    merge_blk.preds.append(true_blk)
+    ctx.block = false_blk
+    _local_write(ctx, res_slot, b_v)
+    ctx.builder().br(merge_blk)
+    merge_blk.preds.append(false_blk)
+    ctx.block = merge_blk
+    return _local_read(ctx, res_slot, "int")
+
+
+def _build_list_call(ctx: FuncCtx, e: A.Call) -> Value:
+    # list(x) for list/tuple src: full slice via _runtime_list_slice.
+    # Mirrors codegen.py:12247-12262.
+    if not e.args:
+        # list() with no args: empty list
+        return _build_malloc_list(ctx, 0, [])
+    src = build_expr(ctx, e.args[0])
+    src_t = A.expr_type(e.args[0])
+    if src_t not in ("list", "tuple", "any"):
+        raise SSABuildError(f"list({src_t!r}): not yet wrapped")
+    return ctx.builder().raw_asm(
+        Kind.INT, [src],
+        {k: "mov rbx, 0x8000000000000000\nmov rcx, 0x7fffffffffffffff\ncall _runtime_list_slice"
+         for k in _X86_64_KEYS},
+    )
+
+
+def _build_malloc_list(ctx: FuncCtx, n: int, elem_exprs: list) -> Value:
+    # Shared helper: build an empty list of cap=max(n,4) and populate
+    # it. Used by list() with no args, and potentially list comprehensions.
+    cap = max(n, 4)
+    header = _build_malloc(ctx, _LIST_HEADER_SIZE)
+    b = ctx.builder()
+    b.store(header, b.const(cap), offset=_LIST_CAP_OFF)
+    b = ctx.builder()
+    b.store(header, b.const(n), offset=_LIST_LEN_OFF)
+    buf = _build_malloc(ctx, cap * 8)
+    b = ctx.builder()
+    b.store(header, buf, offset=_LIST_BUF_OFF)
+    return header
+
+
 def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
     # Mirrors codegen.py's _gen_call (codegen.py:11915) fallback case
     # (codegen.py:12948-12953) reached after ~30 builtin-name special
@@ -1110,6 +1323,32 @@ def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
         return _build_len(ctx, e)
     if e.func == "str":
         return _build_str_of_int(ctx, e)
+    if e.func == "int":
+        return _build_int_of(ctx, e)
+    if e.func == "float":
+        return _build_float_of(ctx, e)
+    if e.func == "bool":
+        return _build_bool_of(ctx, e)
+    if e.func == "abs":
+        return _build_abs(ctx, e)
+    if e.func == "chr":
+        v = build_expr(ctx, e.args[0])
+        return ctx.builder().raw_asm(
+            Kind.INT, [v], {k: "call _runtime_chr" for k in _X86_64_KEYS}
+        )
+    if e.func == "ord":
+        v = build_expr(ctx, e.args[0])
+        return ctx.builder().raw_asm(
+            Kind.INT, [v], {k: "movzx rax, byte [rax]" for k in _X86_64_KEYS}
+        )
+    if e.func == "id":
+        return build_expr(ctx, e.args[0])
+    if e.func == "hash":
+        return _build_hash(ctx, e)
+    if e.func in ("max", "min"):
+        return _build_maxmin(ctx, e)
+    if e.func == "list":
+        return _build_list_call(ctx, e)
     if e.func not in ctx.user_funcs:
         raise SSABuildError(
             f"Call to {e.func!r}: not a known user function in this FuncCtx "
