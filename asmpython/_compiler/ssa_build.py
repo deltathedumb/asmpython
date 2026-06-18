@@ -217,6 +217,70 @@ _COMPARE_PRED: dict[str, Predicate] = {
 }
 
 
+def _build_int_pow(ctx: FuncCtx, e: A.BinOp) -> Value:
+    """Integer exponentiation: `result = 1; while exp > 0: result *=
+    base; exp -= 1`, mirroring codegen.py's inline pow loop
+    (codegen.py:11363-11380) exactly (including its int-only `**`
+    semantics — no negative-exponent or overflow handling, matching
+    what the existing direct-emission codegen already does).
+
+    Uses temporary frame slots for the loop-carried `result`/`exp`
+    values (the same approach `_build_for_range` uses for its loop
+    variable) rather than hand-rolling phi nodes directly — simpler and
+    consistent with this file's established style for loop-carried
+    state, at the cost of a memory round-trip per iteration that a
+    later register-promotion pass (see docs/IR-DESIGN.md's open
+    questions) could eliminate.
+    """
+    base_v = build_expr(ctx, e.left)
+    exp_v = build_expr(ctx, e.right)
+    result_name = f"__pow_result_{id(e)}"
+    exp_name = f"__pow_exp_{id(e)}"
+    base_name = f"__pow_base_{id(e)}"
+    ctx.alloc_slot(result_name, "int")
+    ctx.alloc_slot(exp_name, "int")
+    ctx.alloc_slot(base_name, "int")
+    one = ctx.builder().const(1)
+    _local_write(ctx, result_name, one)
+    _local_write(ctx, exp_name, exp_v)
+    _local_write(ctx, base_name, base_v)
+
+    loop_blk, loop_b = new_block(ctx.func, "pow_loop")
+    body_blk, body_b = new_block(ctx.func, "pow_body")
+    end_blk, end_b = new_block(ctx.func, "pow_end")
+
+    entry_blk = ctx.block
+    ctx.builder().br(loop_blk)
+    loop_blk.preds.append(entry_blk)
+
+    ctx.block = loop_blk
+    exp_read = _local_read(ctx, exp_name, "int")
+    b = ctx.builder()
+    zero = b.const(0)
+    exp_done = b.icmp(Predicate.LE, exp_read, zero)
+    b.condbr(exp_done, end_blk, body_blk)
+    end_blk.preds.append(loop_blk)
+    body_blk.preds.append(loop_blk)
+
+    ctx.block = body_blk
+    result_read = _local_read(ctx, result_name, "int")
+    b = ctx.builder()
+    base_read = _local_read(ctx, base_name, "int")
+    b = ctx.builder()
+    new_result = b.mul(result_read, base_read)
+    _local_write(ctx, result_name, new_result)
+    exp_read2 = _local_read(ctx, exp_name, "int")
+    b = ctx.builder()
+    one2 = b.const(1)
+    new_exp = b.sub(exp_read2, one2)
+    _local_write(ctx, exp_name, new_exp)
+    ctx.builder().br(loop_blk)
+    loop_blk.preds.append(ctx.block)
+
+    ctx.block = end_blk
+    return _local_read(ctx, result_name, "int")
+
+
 def _build_int_floordiv_mod(ctx: FuncCtx, e: A.BinOp, lt: str, rt: str) -> Value:
     """`a // b` / `a % b` on plain int operands. Mirrors codegen.py's
     `_emit_binop_inline` (op in ("//", "%"), codegen.py:11318-11349):
@@ -337,7 +401,15 @@ def _build_binop(ctx: FuncCtx, e: A.BinOp) -> Value:
             raise SSABuildError(f"BinOp {e.op!r} on float operands: not yet implemented")
         return _build_int_floordiv_mod(ctx, e, lt, rt)
     if e.op == "**":
-        raise SSABuildError("BinOp '**': integer exponentiation loop not yet implemented")
+        if is_float:
+            # Float ** is just libc pow(double, double) (codegen.py:11305-
+            # 11306) - far simpler than the int path's loop, since pow()
+            # already implements the semantics directly.
+            left = _build_as_float(ctx, e.left, lt)
+            right = _build_as_float(ctx, e.right, rt)
+            b = ctx.builder()
+            return b.call(Kind.FLOAT, "pow", [left, right])
+        return _build_int_pow(ctx, e)
     if e.op not in _SIMPLE_BINOPS:
         raise SSABuildError(f"BinOp {e.op!r}: not yet implemented")
     int_op, float_op = _SIMPLE_BINOPS[e.op]
