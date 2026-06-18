@@ -191,8 +191,14 @@ _LIST_LEN_OFF = 8
 _LIST_BUF_OFF = 16
 _LIST_HEADER_SIZE = 24
 
-# Dict/set length is at the same offset as list length (codegen.py:8543-8549).
+# Dict/set ABI (codegen.py:8528-8549). Sets reuse the dict layout.
+_DICT_CAP_OFF = 0
 _DICT_LEN_OFF = 8
+_DICT_TOMB_OFF = 16
+_DICT_BUF_OFF = 24
+_DICT_ORDER_OFF = 32
+_DICT_HEADER_SIZE = 40
+_DICT_SLOT_SIZE = 16
 
 
 def _float_to_int_bits(ctx: FuncCtx, v: Value, hint: str) -> Value:
@@ -233,6 +239,37 @@ def _build_malloc(ctx: FuncCtx, n_bytes: int) -> Value:
             "linux_x86_64": f"mov rdi, {n_bytes}\ncall malloc",
         },
     )
+
+
+def _build_zalloc(ctx: FuncCtx, n_bytes: int) -> Value:
+    # _runtime_zalloc(rbx=size) -> rax (zero-filled allocation). Internal
+    # helper, not libc — same internal rax/rbx/... convention as all other
+    # _runtime_* helpers; self-contained, same text on both OSes.
+    return ctx.builder().raw_asm(
+        Kind.INT, [],
+        {k: f"mov rbx, {n_bytes}\ncall _runtime_zalloc" for k in _X86_64_KEYS},
+    )
+
+
+def _build_alloc_dict(ctx: FuncCtx, cap: int) -> Value:
+    """Allocate and fully initialize an empty dict/set header with the given
+    capacity. Returns the stable header pointer (Kind.INT). Mirrors codegen.py's
+    _gen_dict_lit init sequence (codegen.py:9912-9928) plus
+    _emit_dict_alloc_order_buf (codegen.py:8551-8559)."""
+    header = _build_malloc(ctx, _DICT_HEADER_SIZE)
+    b = ctx.builder()
+    b.store(header, b.const(cap), offset=_DICT_CAP_OFF)
+    b = ctx.builder()
+    b.store(header, b.const(0), offset=_DICT_LEN_OFF)
+    b = ctx.builder()
+    b.store(header, b.const(0), offset=_DICT_TOMB_OFF)
+    slot_buf = _build_zalloc(ctx, cap * _DICT_SLOT_SIZE)
+    b = ctx.builder()
+    b.store(header, slot_buf, offset=_DICT_BUF_OFF)
+    order_buf = _build_zalloc(ctx, cap * 8)
+    b = ctx.builder()
+    b.store(header, order_buf, offset=_DICT_ORDER_OFF)
+    return header
 
 
 def _build_listlit(ctx: FuncCtx, e: A.ListLit) -> Value:
@@ -1249,6 +1286,231 @@ def _build_list_methodcall(ctx: FuncCtx, e: A.MethodCall) -> Value:
     raise SSABuildError(f"list.{e.method}(): not yet wrapped")
 
 
+# ---- dict / set / tuple builders -----------------------------------------------
+
+
+def _build_dictlit(ctx: FuncCtx, e: A.DictLit) -> Value:
+    # Mirrors codegen.py's _gen_dict_lit (codegen.py:9902-9958).
+    # `**spread` entries: key is None in e.keys (PEP 448).
+    n = len(e.keys)
+    cap = 8
+    while cap < n * 2:
+        cap *= 2
+    header = _build_alloc_dict(ctx, cap)
+    for k_expr, v_expr in zip(e.keys, e.values):
+        if k_expr is None:
+            # `**other`: merge other dict into this one in source order
+            other = build_expr(ctx, v_expr)
+            ctx.builder().raw_asm(
+                Kind.NONE, [header, other],
+                {k: "call _runtime_dict_update" for k in _X86_64_KEYS},
+            )
+            continue
+        key_v = build_expr(ctx, k_expr)
+        val_v = build_expr(ctx, v_expr)
+        val_t = A.expr_type(v_expr)
+        if val_t == "float":
+            # dict values are stored as raw 8-byte bit patterns (codegen.py:9951)
+            val_v = _float_to_int_bits(ctx, val_v, f"{id(v_expr)}")
+        # _runtime_dict_set(rax=header, rbx=key_ptr, rcx=value_bits)
+        ctx.builder().raw_asm(
+            Kind.NONE, [header, key_v, val_v],
+            {k: "call _runtime_dict_set" for k in _X86_64_KEYS},
+        )
+    return header
+
+
+def _build_setlit(ctx: FuncCtx, e: A.SetLit) -> Value:
+    # Sets are dicts keyed by their members with a dummy value of 1
+    # (codegen.py:9960-10002). Only str elements are supported here
+    # (int elements need _emit_int_to_str, which is str(int) lowering —
+    # deferred until we have a shared int-to-str IR helper factored out).
+    n = len(e.elems)
+    cap = 8
+    while cap < n * 2:
+        cap *= 2
+    header = _build_alloc_dict(ctx, cap)
+    for el_expr in e.elems:
+        el_t = A.expr_type(el_expr)
+        if el_t != "str":
+            raise SSABuildError(f"SetLit with {el_t!r} element: only str elements wrapped so far")
+        key_v = build_expr(ctx, el_expr)
+        # _runtime_dict_set(rax=header, rbx=key_ptr, rcx=1)
+        ctx.builder().raw_asm(
+            Kind.NONE, [header, key_v],
+            {k: "mov rcx, 1\ncall _runtime_dict_set" for k in _X86_64_KEYS},
+        )
+    return header
+
+
+def _build_tuplelit(ctx: FuncCtx, e: A.TupleLit) -> Value:
+    # Tuples reuse the list layout (codegen.py:875-892 and _gen_list_lit pattern).
+    # Unlike ListLit, elements may be heterogeneous: each elem_types[i] is its own type.
+    n = len(e.elems)
+    cap = max(n, 4)
+    header = _build_malloc(ctx, _LIST_HEADER_SIZE)
+    b = ctx.builder()
+    b.store(header, b.const(cap), offset=_LIST_CAP_OFF)
+    b = ctx.builder()
+    b.store(header, b.const(n), offset=_LIST_LEN_OFF)
+    buf = _build_malloc(ctx, cap * 8)
+    b = ctx.builder()
+    b.store(header, buf, offset=_LIST_BUF_OFF)
+    for i, (el_expr, el_ty) in enumerate(zip(e.elems, e.elem_types)):
+        el_v = build_expr(ctx, el_expr)
+        b = ctx.builder()
+        b.store(buf, el_v, offset=i * 8)
+    return header
+
+
+def _build_dict_methodcall(ctx: FuncCtx, e: A.MethodCall) -> Value:
+    # Mirrors codegen.py's _gen_method_call dict branch (codegen.py:10423-10572).
+    # dict.copy() and dict.setdefault() need block diamonds / second alloc; deferred.
+    header = build_expr(ctx, e.obj)
+
+    if e.method == "get":
+        key = build_expr(ctx, e.args[0])
+        if len(e.args) >= 2:
+            default = build_expr(ctx, e.args[1])
+            if A.expr_type(e.args[1]) == "float":
+                default = _float_to_int_bits(ctx, default, f"{id(e)}_def")
+        else:
+            default = ctx.builder().const(0)
+        result = ctx.builder().raw_asm(
+            Kind.INT, [header, key, default],
+            {k: "call _runtime_dict_get_default" for k in _X86_64_KEYS},
+        )
+        if e.inferred_type == "float":
+            return _int_to_float_bits(ctx, result, str(id(e)))
+        return result
+
+    if e.method == "keys":
+        return ctx.builder().raw_asm(
+            Kind.INT, [header],
+            {k: "call _runtime_dict_keys" for k in _X86_64_KEYS},
+        )
+
+    if e.method == "values":
+        return ctx.builder().raw_asm(
+            Kind.INT, [header],
+            {k: "call _runtime_dict_values" for k in _X86_64_KEYS},
+        )
+
+    if e.method == "items":
+        return ctx.builder().raw_asm(
+            Kind.INT, [header],
+            {k: "call _runtime_dict_items" for k in _X86_64_KEYS},
+        )
+
+    if e.method == "update":
+        src = build_expr(ctx, e.args[0])
+        ctx.builder().raw_asm(
+            Kind.NONE, [header, src],
+            {k: "call _runtime_dict_update" for k in _X86_64_KEYS},
+        )
+        return ctx.builder().const(0)
+
+    if e.method == "pop":
+        key = build_expr(ctx, e.args[0])
+        if len(e.args) >= 2:
+            raise SSABuildError("dict.pop(key, default): not yet wrapped (needs branching)")
+        result = ctx.builder().raw_asm(
+            Kind.INT, [header, key],
+            {k: "call _runtime_dict_pop" for k in _X86_64_KEYS},
+        )
+        if e.inferred_type == "float":
+            return _int_to_float_bits(ctx, result, str(id(e)))
+        return result
+
+    if e.method == "contains":
+        key = build_expr(ctx, e.args[0])
+        return ctx.builder().raw_asm(
+            Kind.INT, [header, key],
+            {k: "call _runtime_dict_contains" for k in _X86_64_KEYS},
+        )
+
+    if e.method == "clear":
+        ctx.builder().raw_asm(
+            Kind.NONE, [header], {k: "call _runtime_dict_clear" for k in _X86_64_KEYS},
+        )
+        return ctx.builder().const(0)
+
+    if e.method in ("copy", "setdefault"):
+        raise SSABuildError(f"dict.{e.method}(): not yet wrapped (needs alloc + block diamond)")
+
+    raise SSABuildError(f"dict.{e.method}(): not yet wrapped")
+
+
+def _build_set_methodcall(ctx: FuncCtx, e: A.MethodCall) -> Value:
+    # Sets are dicts keyed by str members (codegen.py:10573-10683).
+    # set.discard is implemented with real IR control flow (contains + conditional pop).
+    header = build_expr(ctx, e.obj)
+
+    if e.method == "add":
+        el_t = A.expr_type(e.args[0])
+        if el_t != "str":
+            raise SSABuildError(f"set.add({el_t!r}): only str members wrapped so far")
+        key = build_expr(ctx, e.args[0])
+        ctx.builder().raw_asm(
+            Kind.NONE, [header, key],
+            {k: "mov rcx, 1\ncall _runtime_dict_set" for k in _X86_64_KEYS},
+        )
+        return ctx.builder().const(0)
+
+    if e.method == "clear":
+        ctx.builder().raw_asm(
+            Kind.NONE, [header], {k: "call _runtime_dict_clear" for k in _X86_64_KEYS},
+        )
+        return ctx.builder().const(0)
+
+    if e.method == "update":
+        src = build_expr(ctx, e.args[0])
+        ctx.builder().raw_asm(
+            Kind.NONE, [header, src],
+            {k: "call _runtime_dict_update" for k in _X86_64_KEYS},
+        )
+        return ctx.builder().const(0)
+
+    if e.method in ("discard", "remove"):
+        el_t = A.expr_type(e.args[0])
+        if el_t != "str":
+            raise SSABuildError(f"set.{e.method}({el_t!r}): only str members wrapped so far")
+        key = build_expr(ctx, e.args[0])
+        if e.method == "remove":
+            # remove: unconditional pop (KeyError if absent)
+            ctx.builder().raw_asm(
+                Kind.NONE, [header, key],
+                {k: "call _runtime_dict_pop" for k in _X86_64_KEYS},
+            )
+            return ctx.builder().const(0)
+        # discard: only pop if present — real IR control flow (CONDBR)
+        in_set = ctx.builder().raw_asm(
+            Kind.INT, [header, key],
+            {k: "call _runtime_dict_contains" for k in _X86_64_KEYS},
+        )
+        b = ctx.builder()
+        present = b.icmp(Predicate.NE, in_set, b.const(0))
+        pop_blk, _ = new_block(ctx.func, "sdiscard_pop")
+        end_blk, _ = new_block(ctx.func, "sdiscard_end")
+        b.condbr(present, pop_blk, end_blk)
+        pop_blk.preds.append(ctx.block)
+        end_blk.preds.append(ctx.block)
+        ctx.block = pop_blk
+        ctx.builder().raw_asm(
+            Kind.NONE, [header, key],
+            {k: "call _runtime_dict_pop" for k in _X86_64_KEYS},
+        )
+        ctx.builder().br(end_blk)
+        end_blk.preds.append(ctx.block)
+        ctx.block = end_blk
+        return ctx.builder().const(0)
+
+    if e.method in ("union", "intersection", "difference", "pop", "copy"):
+        raise SSABuildError(f"set.{e.method}(): not yet wrapped")
+
+    raise SSABuildError(f"set.{e.method}(): not yet wrapped")
+
+
 def _build_methodcall(ctx: FuncCtx, e: A.MethodCall) -> Value:
     # Top-level dispatch mirroring codegen.py's _gen_method_call
     # (codegen.py:10212): route by the receiver's static type.
@@ -1260,8 +1522,10 @@ def _build_methodcall(ctx: FuncCtx, e: A.MethodCall) -> Value:
         return _build_str_methodcall(ctx, e)
     if obj_t in ("list", "tuple"):
         return _build_list_methodcall(ctx, e)
-    if obj_t in ("dict", "set"):
-        raise SSABuildError(f"MethodCall on {obj_t!r}: dict/set methods not yet wrapped")
+    if obj_t == "dict":
+        return _build_dict_methodcall(ctx, e)
+    if obj_t == "set":
+        return _build_set_methodcall(ctx, e)
     if obj_t.startswith("instance:"):
         raise SSABuildError(f"MethodCall on instance ({obj_t}): not yet wrapped")
     raise SSABuildError(f"MethodCall on {obj_t!r}: not yet wrapped")
@@ -1279,6 +1543,9 @@ _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.BoolOp: _build_boolop,
     A.IfExp: _build_ifexp,
     A.ListLit: _build_listlit,
+    A.DictLit: _build_dictlit,
+    A.SetLit: _build_setlit,
+    A.TupleLit: _build_tuplelit,
     A.Subscript: _build_subscript,
     A.MethodCall: _build_methodcall,
 }
