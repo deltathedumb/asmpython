@@ -2855,12 +2855,17 @@ class SemaAnalyzer:
                 )
             self._check_expr(s.value, scope)
             # `d |= other` (PEP 584): in-place dict union, merging `other`'s
-            # entries into `d` (overwriting on key conflicts).
-            if s.op == "|" and scope.types.get(s.target) == "dict":
+            # entries into `d` (overwriting on key conflicts). `s |= other`:
+            # in-place set union, identical codegen since sets are
+            # dict-backed (codegen.py's AugAssign handler) — previously
+            # only "dict" was checked here, so `some_set |= 5` (or any
+            # non-set RHS) silently passed sema instead of raising.
+            target_ty = scope.types.get(s.target)
+            if s.op == "|" and target_ty in ("dict", "set"):
                 rt = A.expr_type(s.value)
-                if rt not in ("dict", "any"):
+                if rt not in (target_ty, "any"):
                     raise SemaError(
-                        f"unsupported operand type for |=: dict |= {rt}", s.pos
+                        f"unsupported operand type for |=: {target_ty} |= {rt}", s.pos
                     )
                 return
             # `b += 1` etc. demotes a tracked bool back to a plain int, as in

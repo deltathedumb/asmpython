@@ -2314,9 +2314,19 @@ class Codegen:
                 return
             mem = self._var_mem(stmt.target, info)
             ty = self._var_type(stmt.target, info)
-            if ty == "dict" and stmt.op == "|":
-                # `d |= other` (PEP 584): merge other's entries into d in
-                # place; the dict header pointer itself doesn't change.
+            if ty in ("dict", "set") and stmt.op == "|":
+                # `d |= other` (PEP 584) / `s |= other` (set in-place union):
+                # merge other's entries into d/s in place; the header
+                # pointer itself doesn't change. Sets are dict-backed
+                # (dummy value 1 per key, see _gen_set_call), so
+                # _runtime_dict_update's "call _runtime_dict_set(dst, key,
+                # value) per src entry" is exactly set union too — no
+                # separate runtime helper needed. Previously this only
+                # checked ty == "dict": a set target fell through to the
+                # generic integer-arithmetic fallback further down, which
+                # did `or rax, rbx` on the two raw 40-byte dict/set header
+                # pointers and stored the resulting garbage address back
+                # into the target's slot, corrupting it for any later use.
                 self.gen_expr(stmt.value, info)
                 self.emitf("mov rbx, rax", f"mov rax, {mem}", "call _runtime_dict_update")
                 return
