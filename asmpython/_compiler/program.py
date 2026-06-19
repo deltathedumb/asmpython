@@ -177,17 +177,28 @@ _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "gzip", "zipfile", "pickle",
     "colorsys", "cmath", "sched",
     "gui", "framebuffer", "audio", "_font8x8",
-    # 2.0.0 stdlib additions
+    # 2.0.0 stdlib additions (batch 1)
     "errno", "stat", "getopt", "binascii", "array", "unittest",
     "urllib_request", "urllib_error",
+    # 2.0.0 stdlib additions (batch 2)
+    "token", "tokenize", "shelve", "codecs", "fileinput", "linecache",
+    "mimetypes", "socketserver", "smtplib", "ftplib", "poplib", "imaplib",
+    "http_server", "xml_etree", "html_parser", "tarfile",
+    "concurrent_futures", "profile", "pstats", "tracemalloc",
+    "uu", "quopri", "zlib", "ssl", "sqlite3", "asyncio", "importlib",
 })
 
 # Dotted module names that map to a differently-named file in stdlib/.
 _BUNDLED_DOTTED: dict[str, str] = {
-    "os.path":        "ospath",
-    "urllib.parse":   "urllibparse",
-    "urllib.request": "urllib_request",
-    "urllib.error":   "urllib_error",
+    "os.path":                   "ospath",
+    "urllib.parse":              "urllibparse",
+    "urllib.request":            "urllib_request",
+    "urllib.error":              "urllib_error",
+    "http.server":               "http_server",
+    "xml.etree.ElementTree":     "xml_etree",
+    "xml.etree":                 "xml_etree",
+    "html.parser":               "html_parser",
+    "concurrent.futures":        "concurrent_futures",
 }
 
 
