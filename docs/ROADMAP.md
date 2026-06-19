@@ -208,8 +208,15 @@ This release is also the point at which the x86-64 backend gets a proper
 optimisation pass:
 
 - **Constant folding** — arithmetic on literal values reduced at sema time.
-- **Peephole optimiser** — redundant `mov`/`push`/`pop` pairs and
-  dead-store elimination over short windows of emitted instructions.
+- **Dead-code elimination** ✓ — `_compiler/dce.py` implements three SSA-level
+  passes (unreachable block removal, constant-branch folding, mark-and-sweep
+  dead instruction elimination), iterated to fixpoint. `Value.def_` back-edge
+  is now wired up in `ir_builder.py` so def-use traversal works correctly.
+  Entry point: `dce.run_dce(func)`.
+- **Peephole optimiser** — redundant `mov`/`push`/`pop` pairs eliminated
+  over short windows; the existing text-level dead-store pass in `codegen.py`
+  is the first step; SSA-level passes (above) will supersede it once the IR
+  pipeline is fully wired.
 - **Register allocation** — short-lived temporaries kept in registers
   instead of round-tripping through the stack; reduces memory traffic in
   tight numeric loops.

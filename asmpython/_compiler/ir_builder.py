@@ -25,7 +25,10 @@ class BlockBuilder:
 
     def _emit(self, op: Op, args: list[Value], kind: Kind, **kwargs) -> Value | None:
         result = self.func.new_value(kind) if kind != Kind.NONE else None
-        self.block.append(Instr(op=op, args=args, result=result, **kwargs))
+        instr = Instr(op=op, args=args, result=result, **kwargs)
+        if result is not None:
+            result.def_ = instr
+        self.block.append(instr)
         return result
 
     # ---- constants ----
@@ -135,7 +138,9 @@ class BlockBuilder:
         block's predecessor list is finalized, since blocks are often
         wired up out of definition order)."""
         result = self.func.new_value(kind)
-        self.block.instrs.insert(0, Instr(op=Op.PHI, result=result))
+        instr = Instr(op=Op.PHI, result=result)
+        result.def_ = instr
+        self.block.instrs.insert(0, instr)
         return result
 
     def add_incoming(self, phi_value: Value, value: Value) -> None:

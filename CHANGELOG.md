@@ -4,7 +4,7 @@ All notable changes to asmpython are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
-## [2.0.0-preview] — in progress — Win64 ABI fixes and selfhost debugging
+## [2.0.0-preview] — in progress — Win64 ABI fixes, stdlib depth, SSA optimisation
 
 Versioned 2.0.0 (not 1.3.0): the ARM64/macOS platform work planned for this
 release needs codegen restructured around an IR layer rather than a parallel
@@ -12,6 +12,38 @@ target subclass — see `roadmap.md` for the full reasoning. Selfhosting
 (asmpython compiling itself) is a stretch goal for this release, not part of
 the committed scope; the platform/optimization roadmap is the actual
 deliverable.
+
+### Added
+
+- **27 new stdlib modules** — full implementations of `token`, `tokenize`,
+  `shelve` (pickle-backed, typed getters/setters for complex object persistence),
+  `codecs`, `fileinput`, `linecache`, `mimetypes`, `socketserver`, `smtplib`,
+  `ftplib`, `poplib`, `imaplib`, `http.server` (`http_server`),
+  `xml.etree.ElementTree` (`xml_etree`), `html.parser` (`html_parser`),
+  `tarfile`, `concurrent.futures` (`concurrent_futures`), `profile`, `pstats`,
+  `tracemalloc`, `uu`, `quopri`, `zlib`, `ssl`, `sqlite3`, `asyncio`,
+  `importlib`. All 454 tests still pass.
+
+- **Dead-code elimination (DCE) pass** (`_compiler/dce.py`) — three-pass
+  optimizer on the SSA IR, iterating to fixpoint:
+  - *Unreachable block elimination*: BFS from the entry block; blocks not
+    reachable via the CFG are removed and their predecessors' lists and PHI
+    incoming values are updated.
+  - *Constant-branch folding*: a `CONDBR` whose condition is a compile-time
+    `CONST` is replaced with an unconditional `BR` to the taken arm; the
+    not-taken block's predecessor list and PHI incoming values are patched
+    accordingly.
+  - *Dead instruction elimination*: mark-and-sweep from side-effecting
+    instructions (`STORE`, `CALL`, `BR`, `CONDBR`, `RET`, `RAW_ASM`);
+    any instruction whose result has no live consumer is dropped. PHI nodes
+    are treated as ordinary data-flow nodes and swept away when unused.
+  Entry point: `dce.run_dce(func)`.
+
+- **`Value.def_` back-pointer now wired up** (`_compiler/ir_builder.py`) —
+  `BlockBuilder._emit` and `BlockBuilder.phi` now set `result.def_` to the
+  newly created `Instr`, making the SSA def-use graph fully navigable.
+  Previously `def_` was always `None` for non-parameter values, which would
+  have broken any analysis that walks the def-use chain (including DCE).
 
 ### Fixed
 
