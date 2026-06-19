@@ -1193,6 +1193,32 @@ def _build_abs(ctx: FuncCtx, e: A.Call) -> Value:
     )
 
 
+def _build_range_value(ctx: FuncCtx, e: A.Call) -> Value:
+    # range(...) used as a VALUE (not a for-loop header — that's
+    # _build_for_range, a separate dispatch in codegen.py too:
+    # codegen.py:11930-11959). Materializes a real list[int] via
+    # _runtime_range_list(rax=start, rbx=stop, rcx=step) -> rax, a
+    # self-contained internal label (two-pass count-then-fill, no
+    # external call inside it) - same text both OSes, unlike len(s)'s
+    # strlen call.
+    if len(e.args) == 1:
+        start_v = ctx.builder().const(0)
+        stop_v = build_expr(ctx, e.args[0])
+        step_v = ctx.builder().const(1)
+    elif len(e.args) == 2:
+        start_v = build_expr(ctx, e.args[0])
+        stop_v = build_expr(ctx, e.args[1])
+        step_v = ctx.builder().const(1)
+    else:
+        start_v = build_expr(ctx, e.args[0])
+        stop_v = build_expr(ctx, e.args[1])
+        step_v = build_expr(ctx, e.args[2])
+    return ctx.builder().raw_asm(
+        Kind.INT, [start_v, stop_v, step_v],
+        {k: "call _runtime_range_list" for k in _X86_64_KEYS},
+    )
+
+
 def _build_hash(ctx: FuncCtx, e: A.Call) -> Value:
     # hash(x) — mirrors codegen.py:12676-12689.
     arg = e.args[0]
@@ -1511,6 +1537,8 @@ def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
         return build_expr(ctx, e.args[0])
     if e.func == "hash":
         return _build_hash(ctx, e)
+    if e.func == "range":
+        return _build_range_value(ctx, e)
     if e.func in ("max", "min"):
         return _build_maxmin(ctx, e)
     if e.func == "list":
