@@ -1219,6 +1219,67 @@ def _build_range_value(ctx: FuncCtx, e: A.Call) -> Value:
     )
 
 
+def _build_list_el_type(e: A.Expr) -> str:
+    # Shared with _build_list_methodcall's identical inline logic — best-
+    # effort static element-kind lookup for a list-typed expression: a
+    # Name carries it from sema (list_el_type), a ListLit carries it
+    # directly, anything else (a Call result, a Subscript, ...) falls
+    # back to "int" since that information isn't tracked through those
+    # expression shapes yet.
+    if isinstance(e, A.Name):
+        return getattr(e, "list_el_type", "int")
+    if isinstance(e, A.ListLit):
+        return e.el_type
+    return "int"
+
+
+def _build_list_whole_copy(ctx: FuncCtx, src: Value) -> Value:
+    # xs[:] via _runtime_list_slice(rax=src, rbx=start, rcx=stop) -> rax,
+    # using codegen.py's INT64_MIN/INT64_MAX sentinels (codegen.py:4897-
+    # 4898) to mean "no explicit bound" -- the helper clamps both to the
+    # real list length internally, so passing the full signed-64-bit
+    # range is how codegen.py spells "the whole list" rather than reading
+    # the length first. Shared by sorted()/reversed(), which must each
+    # return a fresh list rather than mutating their argument in place.
+    INT64_MIN = -(2 ** 63)
+    INT64_MAX = 2 ** 63 - 1
+    b = ctx.builder()
+    start = b.const(INT64_MIN)
+    stop = b.const(INT64_MAX)
+    return ctx.builder().raw_asm(
+        Kind.INT, [src, start, stop],
+        {k: "call _runtime_list_slice" for k in _X86_64_KEYS},
+    )
+
+
+def _build_sorted(ctx: FuncCtx, e: A.Call) -> Value:
+    # sorted(xs) — no key=/reverse= (codegen.py's full method-call sort
+    # path supports both; deferred here same as list.sort() above).
+    # Copies first, then sorts the COPY in place and returns it —
+    # sorted() must not mutate its argument, unlike list.sort().
+    if getattr(e, "kwargs", None):
+        raise SSABuildError("sorted(key=...) / sorted(reverse=...): not yet wrapped")
+    src = build_expr(ctx, e.args[0])
+    el_t = _build_list_el_type(e.args[0])
+    copy = _build_list_whole_copy(ctx, src)
+    sym = "_runtime_sort_str" if el_t == "str" else "_runtime_sort_int"
+    ctx.builder().raw_asm(
+        Kind.NONE, [copy], {k: f"call {sym}" for k in _X86_64_KEYS},
+    )
+    return copy
+
+
+def _build_reversed(ctx: FuncCtx, e: A.Call) -> Value:
+    # reversed(xs) — copy then reverse the copy in place, leaving the
+    # original untouched.
+    src = build_expr(ctx, e.args[0])
+    copy = _build_list_whole_copy(ctx, src)
+    ctx.builder().raw_asm(
+        Kind.NONE, [copy], {k: "call _runtime_list_reverse" for k in _X86_64_KEYS},
+    )
+    return copy
+
+
 def _build_hash(ctx: FuncCtx, e: A.Call) -> Value:
     # hash(x) — mirrors codegen.py:12676-12689.
     arg = e.args[0]
@@ -1539,6 +1600,10 @@ def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
         return _build_hash(ctx, e)
     if e.func == "range":
         return _build_range_value(ctx, e)
+    if e.func == "sorted":
+        return _build_sorted(ctx, e)
+    if e.func == "reversed":
+        return _build_reversed(ctx, e)
     if e.func in ("max", "min"):
         return _build_maxmin(ctx, e)
     if e.func == "list":
