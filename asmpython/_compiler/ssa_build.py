@@ -603,10 +603,16 @@ def _build_name(ctx: FuncCtx, e: A.Name) -> Value:
         return _local_read(ctx, e.name, ty)
     if e.name in ctx.global_names:
         # Module globals live in a fixed .bss slot, addressed by symbol
-        # rather than a frame offset — RAW_ASM per target until a real
-        # Op.GLOBAL_ADDR (or similar) lands; see _build_strlit's note,
-        # same shape of "defer the API until more call sites exist."
-        raise SSABuildError(f"Name (module global) not yet implemented: {e.name!r}")
+        # (codegen.py's _global_label: f"__g_{name}") rather than a frame
+        # offset. Op.GLOBAL_ADDR (added alongside this) carries the bare
+        # name the same way Op.STRING_ADDR carries literal text — symbol
+        # mangling and the actual .bss reservation are each target's
+        # lowering-stage job, not ssa_build.py's. The type comes from the
+        # Name node's own inferred_type (sema already stamped it), not a
+        # separate FuncCtx.global_types table, since A.expr_type already
+        # resolves a Name to e.inferred_type directly.
+        addr = ctx.builder().global_addr(e.name)
+        return ctx.builder().load(ctx.kind_of(e.inferred_type), addr, offset=0)
     raise SSABuildError(
         f"Name {e.name!r}: not a known local/global in this FuncCtx "
         "(FFI consts / dunders / class-as-value / etc. not yet implemented)"
@@ -2887,6 +2893,16 @@ def build_expr(ctx: FuncCtx, expr: A.Expr) -> Value:
 
 def _build_assign(ctx: FuncCtx, s: A.Assign) -> None:
     value = build_expr(ctx, s.value)
+    if s.target not in ctx.locals_ and s.target in ctx.global_names:
+        # `global x; x = value` — write through the .bss slot, never
+        # shadow with a fresh local. This branch existing at all is a
+        # real bug fix: the unconditional alloc_slot below would have
+        # silently created a same-named LOCAL instead of writing the
+        # actual global, for any name declared `global` but not already
+        # present in ctx.locals_ (which a global, by definition, never is).
+        addr = ctx.builder().global_addr(s.target)
+        ctx.builder().store(addr, value, offset=0)
+        return
     if s.target not in ctx.locals_:
         ty = A.expr_type(s.value)
         ctx.alloc_slot(s.target, ty)
@@ -2967,6 +2983,28 @@ def _build_exprstmt(ctx: FuncCtx, s: A.ExprStmt) -> None:
 
 
 def _build_pass(ctx: FuncCtx, s: A.Pass) -> None:
+    pass
+
+
+def _build_global(ctx: FuncCtx, s: A.Global) -> None:
+    # No-op at build time, matching codegen.py exactly (codegen.py:2107-
+    # 2108: "return # handled at _cl_walk time"). The actual EFFECT of
+    # `global x` (routing later Name reads/writes of x to the .bss slot
+    # instead of a frame slot) comes entirely from ctx.global_names
+    # already containing the name — populated by the caller before this
+    # function's body is ever built (see FuncCtx.global_names' docstring),
+    # not incrementally as Global statements are walked. So encountering
+    # this statement mid-body changes nothing that isn't already in
+    # effect for every Name reference to this name in this function.
+    pass
+
+
+def _build_nonlocal(ctx: FuncCtx, s: A.Nonlocal) -> None:
+    # No-op, matching codegen.py exactly (codegen.py:2656-2657: "closures
+    # not supported; accept as no-op"). Closures/nonlocal-box machinery
+    # isn't implemented in this IR yet either, so this is genuinely the
+    # same scope limitation as the existing direct-emission path, not a
+    # new restriction introduced here.
     pass
 
 
@@ -3846,6 +3884,8 @@ _STMT_BUILDERS: dict[type, Callable[[FuncCtx, object], None]] = {
     A.AugAssign: _build_augassign,
     A.Del: _build_del,
     A.IndexAssign: _build_indexassign,
+    A.Global: _build_global,
+    A.Nonlocal: _build_nonlocal,
 }
 
 

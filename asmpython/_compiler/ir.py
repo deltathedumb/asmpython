@@ -71,6 +71,18 @@ class Op(Enum):
     # function's IR.
     STRING_ADDR = auto()
 
+    # Module-global variable address. `const_value` holds the bare global
+    # NAME (a Python str, not a pre-mangled label) — Kind.INT, since a
+    # global's slot is read/written via LOAD/STORE against this address
+    # the same way a frame slot is read/written against FRAME_BASE. Mirrors
+    # STRING_ADDR's "carry the source-level identity, not a lowering
+    # decision" shape: each target's lowering is responsible for mangling
+    # the name into its actual symbol (codegen.py's `_global_label` does
+    # `f"__g_{name}"` today) and for emitting that symbol's `.bss`
+    # reservation as part of whole-program output — neither of those is
+    # ssa_build.py's concern any more than .rodata string interning is.
+    GLOBAL_ADDR = auto()
+
     # Integer arithmetic/logic.
     ADD = auto()
     SUB = auto()

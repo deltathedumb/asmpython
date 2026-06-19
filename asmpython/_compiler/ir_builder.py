@@ -41,6 +41,9 @@ class BlockBuilder:
     def string_addr(self, text: str) -> Value:
         return self._emit(Op.STRING_ADDR, [], Kind.INT, const_value=text)
 
+    def global_addr(self, name: str) -> Value:
+        return self._emit(Op.GLOBAL_ADDR, [], Kind.INT, const_value=name)
+
     # ---- integer arithmetic ----
     def add(self, a: Value, b: Value) -> Value:
         return self._emit(Op.ADD, [a, b], Kind.INT)
