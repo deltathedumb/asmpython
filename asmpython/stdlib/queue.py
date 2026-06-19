@@ -1,7 +1,13 @@
 """queue module: synchronized queue classes.
 
 Provides FIFO, LIFO, and priority queues. In asmpython these are
-single-threaded, so the 'blocking' and 'timeout' parameters are ignored.
+single-threaded unless used with the threading module. put()/get()
+ignore the `block` and `timeout` parameters (non-blocking by default).
+
+task_done() / join() are implemented with an unfinished-task counter.
+join() busy-waits until all tasks are marked done; in a single-threaded
+program it will block forever if task_done() is never called, matching
+CPython's join() behaviour (just without OS-level blocking primitives).
 """
 from __future__ import annotations
 
@@ -17,7 +23,7 @@ class Empty(Exception):
 
 
 class Full(Exception):
-    """Raised when put() is called on a full queue."""
+    """Raised when put() is called on a full queue (maxsize > 0)."""
 
     def __init__(self, msg: str = "") -> None:
         self.msg: str = msg
@@ -32,31 +38,44 @@ class Queue:
     def __init__(self, maxsize: int = 0) -> None:
         self.maxsize: int = maxsize
         self._data: list = []
+        self._unfinished: int = 0
 
     def qsize(self) -> int:
+        """Return the approximate number of items in the queue."""
         return len(self._data)
 
     def empty(self) -> int:
+        """Return 1 if the queue is empty, 0 otherwise."""
         return 1 if len(self._data) == 0 else 0
 
     def full(self) -> int:
+        """Return 1 if the queue is full, 0 otherwise."""
         if self.maxsize <= 0:
             return 0
         return 1 if len(self._data) >= self.maxsize else 0
 
     def put(self, item: int, block: int = 1, timeout: int = -1) -> None:
-        """Put an item into the queue."""
+        """Put an item into the queue.
+
+        Raises Full if maxsize is set and the queue is already full.
+        (block and timeout are ignored in the single-threaded implementation.)
+        """
         if self.maxsize > 0 and len(self._data) >= self.maxsize:
-            return
+            raise Full("queue is full")
         self._data.append(item)
+        self._unfinished = self._unfinished + 1
 
     def put_nowait(self, item: int) -> None:
+        """Put an item into the queue without blocking (raises Full if full)."""
         self.put(item, 0)
 
     def get(self, block: int = 1, timeout: int = -1) -> int:
-        """Remove and return an item from the queue."""
+        """Remove and return an item from the queue.
+
+        Raises Empty if the queue is empty.
+        """
         if len(self._data) == 0:
-            return 0
+            raise Empty("queue is empty")
         item: int = self._data[0]
         new_data: list = []
         i: int = 1
@@ -67,13 +86,30 @@ class Queue:
         return item
 
     def get_nowait(self) -> int:
+        """Remove and return an item from the queue without blocking."""
         return self.get(0)
 
     def task_done(self) -> None:
-        pass
+        """Indicate that a formerly enqueued task is complete.
+
+        For each item that is get()ted from the queue, call task_done() once
+        to inform the queue that the item is processed. When the count of
+        unfinished tasks drops to zero, join() unblocks.
+        """
+        if self._unfinished <= 0:
+            raise ValueError("task_done() called more times than put()")
+        self._unfinished = self._unfinished - 1
 
     def join(self) -> None:
-        pass
+        """Block until all items in the queue have been got and task_done() called.
+
+        In asmpython (single-threaded) this is a spin-wait. When run within
+        a thread, it will yield execution correctly as long as other threads
+        call task_done(). For single-threaded use, ensure all tasks are done
+        before calling join() to avoid an infinite busy loop.
+        """
+        while self._unfinished > 0:
+            pass
 
 
 class LifoQueue(Queue):
@@ -82,10 +118,11 @@ class LifoQueue(Queue):
     def __init__(self, maxsize: int = 0) -> None:
         self.maxsize: int = maxsize
         self._data: list = []
+        self._unfinished: int = 0
 
     def get(self, block: int = 1, timeout: int = -1) -> int:
         if len(self._data) == 0:
-            return 0
+            raise Empty("queue is empty")
         n: int = len(self._data)
         item: int = self._data[n - 1]
         new_data: list = []
@@ -98,16 +135,19 @@ class LifoQueue(Queue):
 
 
 class PriorityQueue(Queue):
-    """A priority queue (min-heap by value)."""
+    """A priority queue (min-heap)."""
 
     def __init__(self, maxsize: int = 0) -> None:
         self.maxsize: int = maxsize
         self._data: list = []
+        self._unfinished: int = 0
 
     def put(self, item: int, block: int = 1, timeout: int = -1) -> None:
         if self.maxsize > 0 and len(self._data) >= self.maxsize:
-            return
+            raise Full("queue is full")
         self._data.append(item)
+        self._unfinished = self._unfinished + 1
+        # Sift up.
         i: int = len(self._data) - 1
         while i > 0:
             parent: int = (i - 1) // 2
@@ -122,7 +162,7 @@ class PriorityQueue(Queue):
     def get(self, block: int = 1, timeout: int = -1) -> int:
         n: int = len(self._data)
         if n == 0:
-            return 0
+            raise Empty("queue is empty")
         item: int = self._data[0]
         self._data[0] = self._data[n - 1]
         new_data: list = []
@@ -132,8 +172,9 @@ class PriorityQueue(Queue):
             i = i + 1
         self._data = new_data
         n = n - 1
+        # Sift down.
         i = 0
-        while True:
+        while 1:
             left: int = 2 * i + 1
             right: int = 2 * i + 2
             smallest: int = i
@@ -151,7 +192,7 @@ class PriorityQueue(Queue):
 
 
 class SimpleQueue:
-    """A simple unbounded FIFO queue."""
+    """A simple unbounded FIFO queue (no task tracking)."""
 
     def __init__(self) -> None:
         self._data: list = []
@@ -170,7 +211,7 @@ class SimpleQueue:
 
     def get(self, block: int = 1, timeout: int = -1) -> int:
         if len(self._data) == 0:
-            return 0
+            raise Empty("queue is empty")
         item: int = self._data[0]
         new_data: list = []
         i: int = 1

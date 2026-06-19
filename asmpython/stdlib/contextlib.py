@@ -69,6 +69,7 @@ class ExitStack:
         i: int = len(self._callbacks) - 1
         while i >= 0:
             cb: int = self._callbacks[i]
+            cb()
             i = i - 1
         self._callbacks = []
         return 0

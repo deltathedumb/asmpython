@@ -177,12 +177,17 @@ _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "gzip", "zipfile", "pickle",
     "colorsys", "cmath", "sched",
     "gui", "framebuffer", "audio", "_font8x8",
+    # 2.0.0 stdlib additions
+    "errno", "stat", "getopt", "binascii", "array", "unittest",
+    "urllib_request", "urllib_error",
 })
 
 # Dotted module names that map to a differently-named file in stdlib/.
 _BUNDLED_DOTTED: dict[str, str] = {
-    "os.path":      "ospath",
-    "urllib.parse": "urllibparse",
+    "os.path":        "ospath",
+    "urllib.parse":   "urllibparse",
+    "urllib.request": "urllib_request",
+    "urllib.error":   "urllib_error",
 }
 
 
