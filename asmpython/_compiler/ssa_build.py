@@ -251,6 +251,18 @@ def _build_zalloc(ctx: FuncCtx, n_bytes: int) -> Value:
     )
 
 
+def _build_list_append_raw(ctx: FuncCtx, header: Value, raw_value: Value) -> None:
+    # _runtime_list_append(rax=header, rbx=value_bits) — rbx must already
+    # hold the raw 8-byte bit pattern (callers bitcast floats via
+    # _float_to_int_bits first, equivalent to codegen.py's `movq rax,
+    # xmm0`, codegen.py:10753-56). Shared by list.append() and list
+    # comprehensions, which both need exactly this append shape.
+    ctx.builder().raw_asm(
+        Kind.NONE, [header, raw_value],
+        {k: "call _runtime_list_append" for k in _X86_64_KEYS},
+    )
+
+
 def _build_alloc_dict(ctx: FuncCtx, cap: int) -> Value:
     """Allocate and fully initialize an empty dict/set header with the given
     capacity. Returns the stable header pointer (Kind.INT). Mirrors codegen.py's
@@ -314,6 +326,114 @@ def _build_listlit(ctx: FuncCtx, e: A.ListLit) -> Value:
         b = ctx.builder()
         b.store(buf, v, offset=i * 8)
     return header
+
+
+def _build_comprehension(ctx: FuncCtx, e: A.Comprehension) -> Value:
+    # `[elt for var in iter (if cond)]` — mirrors codegen.py's
+    # _gen_comprehension (codegen.py:8591-8770) base case only: a single
+    # target var (no tuple-unpack targets), a single `for` clause (no
+    # `extra_for_*` nested clauses), a list/tuple iterable (not str/set/
+    # instance, not the enumerate() special case), int/float elt type.
+    # Real IR loop with frame-slot loop-carried state, the established
+    # convention for loops in this file (_build_for_list/_build_sum), not
+    # phi nodes and not RAW_ASM (RAW_ASM text can't safely contain
+    # internal jump labels — this is genuine control flow, an empty
+    # result list grown via repeated _runtime_list_append calls).
+    if e.targets:
+        raise SSABuildError("Comprehension with tuple-unpack targets: not yet wrapped")
+    if e.extra_for_iters:
+        raise SSABuildError("Comprehension with multiple for-clauses: not yet wrapped")
+    if isinstance(e.iter, A.Call) and e.iter.func == "enumerate":
+        raise SSABuildError("Comprehension over enumerate(...): not yet wrapped")
+    iter_t = A.expr_type(e.iter)
+    if iter_t not in ("list", "tuple"):
+        raise SSABuildError(f"Comprehension over {iter_t}: not yet wrapped")
+    if isinstance(e.iter, A.Name):
+        src_el_t = getattr(e.iter, "list_el_type", "int")
+    elif isinstance(e.iter, A.ListLit):
+        src_el_t = e.iter.el_type
+    else:
+        src_el_t = "int"
+    src_el_kind = Kind.FLOAT if src_el_t == "float" else Kind.INT
+    if e.list_el_type not in ("int", "float"):
+        raise SSABuildError(f"Comprehension producing {e.list_el_type} elements: not yet wrapped")
+
+    src_header = build_expr(ctx, e.iter)
+    res_header = _build_malloc_list(ctx, 0, [])  # empty list, cap=max(0,4)=4
+
+    uid = str(id(e))
+    idx_slot = f"__comp_idx_{uid}"
+    len_slot = f"__comp_len_{uid}"
+    buf_slot = f"__comp_buf_{uid}"
+    ctx.alloc_slot(idx_slot, "int")
+    ctx.alloc_slot(len_slot, "int")
+    ctx.alloc_slot(buf_slot, "int")
+    b = ctx.builder()
+    _local_write(ctx, idx_slot, b.const(0))
+    b = ctx.builder()
+    src_len = b.load(Kind.INT, src_header, offset=_LIST_LEN_OFF)
+    _local_write(ctx, len_slot, src_len)
+    b = ctx.builder()
+    src_buf = b.load(Kind.INT, src_header, offset=_LIST_BUF_OFF)
+    _local_write(ctx, buf_slot, src_buf)
+
+    top_blk, _ = new_block(ctx.func, f"comp_top_{uid}")
+    body_blk, _ = new_block(ctx.func, f"comp_body_{uid}")
+    end_blk, _ = new_block(ctx.func, f"comp_end_{uid}")
+    entry_blk = ctx.block
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(entry_blk)
+
+    ctx.block = top_blk
+    idx_v = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    len_v = _local_read(ctx, len_slot, "int")
+    b = ctx.builder()
+    done = b.icmp(Predicate.GE, idx_v, len_v)
+    b.condbr(done, end_blk, body_blk)
+    end_blk.preds.append(top_blk)
+    body_blk.preds.append(top_blk)
+
+    ctx.block = body_blk
+    idx_v2 = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    buf_v = _local_read(ctx, buf_slot, "int")
+    b = ctx.builder()
+    byte_off = b.shl(idx_v2, b.const(3))
+    b = ctx.builder()
+    elem_ptr = b.add(buf_v, byte_off)
+    b = ctx.builder()
+    elem = b.load(src_el_kind, elem_ptr, offset=0)
+
+    if e.var not in ctx.locals_:
+        ctx.alloc_slot(e.var, src_el_t)
+    _local_write(ctx, e.var, elem)
+
+    cont_blk, _ = new_block(ctx.func, f"comp_cont_{uid}")
+    if e.cond is not None:
+        append_blk, _ = new_block(ctx.func, f"comp_append_{uid}")
+        _build_truthy_branch(ctx, e.cond, append_blk, cont_blk)
+        append_blk.preds.append(ctx.block)
+        cont_blk.preds.append(ctx.block)
+        ctx.block = append_blk
+
+    elt_v = build_expr(ctx, e.elt)
+    if e.list_el_type == "float":
+        elt_v = _float_to_int_bits(ctx, elt_v, uid)
+    _build_list_append_raw(ctx, res_header, elt_v)
+    ctx.builder().br(cont_blk)
+    cont_blk.preds.append(ctx.block)
+
+    ctx.block = cont_blk
+    idx_v3 = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    next_idx = b.add(idx_v3, b.const(1))
+    _local_write(ctx, idx_slot, next_idx)
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(cont_blk)
+
+    ctx.block = end_blk
+    return res_header
 
 
 def _build_subscript(ctx: FuncCtx, e: A.Subscript) -> Value:
@@ -2078,17 +2198,13 @@ def _build_list_methodcall(ctx: FuncCtx, e: A.MethodCall) -> Value:
     header = build_expr(ctx, e.obj)
 
     if e.method == "append":
-        # _runtime_list_append(rax=header, rbx=value_bits) — rbx holds the raw
-        # 8-byte bit pattern; floats must be bitcast via _float_to_int_bits
-        # (equivalent to codegen.py's `movq rax, xmm0` + push, codegen.py:10753-56).
+        # floats must be bitcast via _float_to_int_bits first (equivalent
+        # to codegen.py's `movq rax, xmm0` + push, codegen.py:10753-56).
         arg_t = A.expr_type(e.args[0])
         val = build_expr(ctx, e.args[0])
         if arg_t == "float":
             val = _float_to_int_bits(ctx, val, str(id(e)))
-        ctx.builder().raw_asm(
-            Kind.NONE, [header, val],
-            {k: "call _runtime_list_append" for k in _X86_64_KEYS},
-        )
+        _build_list_append_raw(ctx, header, val)
         return ctx.builder().const(0)
 
     if e.method == "pop":
@@ -2755,6 +2871,7 @@ _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.Subscript: _build_subscript,
     A.MethodCall: _build_methodcall,
     A.NamedExpr: _build_namedexpr,
+    A.Comprehension: _build_comprehension,
 }
 
 
