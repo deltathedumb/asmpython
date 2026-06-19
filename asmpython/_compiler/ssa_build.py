@@ -318,9 +318,29 @@ def _build_listlit(ctx: FuncCtx, e: A.ListLit) -> Value:
 
 def _build_subscript(ctx: FuncCtx, e: A.Subscript) -> Value:
     # Mirrors codegen.py's _gen_subscript (codegen.py:9253).
-    # Slices and instance __getitem__ are deferred.
+    # List slices and instance __getitem__ are deferred.
     if isinstance(e.index, A.Slice):
-        raise SSABuildError("Subscript with a Slice index: not yet wrapped")
+        sl: A.Slice = e.index
+        if sl.step is not None:
+            raise SSABuildError("Subscript with a stepped Slice: not yet wrapped")
+        obj_t_sl = A.expr_type(e.obj)
+        if obj_t_sl != "str":
+            raise SSABuildError(f"Slice on {obj_t_sl}: not yet wrapped")
+        # s[start:stop] (no step) via _runtime_str_slice(rax=s, rbx=start,
+        # rcx=stop) -> new substring, codegen.py:9817-9852. Self-contained
+        # internal label (negative-index/clamp logic lives inside the
+        # helper), same text both OSes. Missing start defaults to 0,
+        # missing stop defaults to INT64_MAX (the helper clamps both to
+        # the real string length internally).
+        s_v = build_expr(ctx, e.obj)
+        b = ctx.builder()
+        start_v = build_expr(ctx, sl.start) if sl.start is not None else b.const(0)
+        b = ctx.builder()
+        stop_v = build_expr(ctx, sl.stop) if sl.stop is not None else b.const(2 ** 63 - 1)
+        return ctx.builder().raw_asm(
+            Kind.INT, [s_v, start_v, stop_v],
+            {k: "call _runtime_str_slice" for k in _X86_64_KEYS},
+        )
     obj_t = A.expr_type(e.obj)
 
     if obj_t == "str":
