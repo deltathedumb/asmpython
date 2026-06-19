@@ -278,13 +278,43 @@ file has accumulated.
 
 ## Selfhost Debugging (paused, non-blocking — plan-step 11)
 
-Still segfaults compiling `test_simple.py` via the selfhosted binary — 7
+Still segfaults compiling real programs via the selfhosted binary — 7
 distinct bugs found and fixed so far (Win64 shadow-space violations,
 `@dataclass` default_factory codegen, shared-AST-node default-arg
 collision, NULL truthiness checks, whole-program import merge ordering,
 class-var inheritance gap, hardcoded-empty `__file__`). Full details in
 git history (`git log -p -- RESUME.md`) or `[[feedback-selfhost-debugging]]`.
-8th bug not yet isolated. Opportunistic only — never blocks plan steps 1-10.
+Opportunistic only — never blocks plan steps 1-10.
+
+**8th bug — narrowed but not yet fixed (2026-06-19)**: `asmpython-2.0.0-
+preview-x86_64.exe build\my.py` (the selfhosted binary compiling a
+trivial `import sys; print(sys.version)` program) crashes with
+`STATUS_ACCESS_VIOLATION`. gdb backtrace: `strlen(NULL)` inside
+`Path__name`, called via `Path___join`/`Path__with_suffix`, originating
+from `driver.py`'s `out_path.resolve(); stem = out_path.with_suffix("")`
+(driver.py:257-258). **Confirmed selfhost-specific, not a real language
+bug**: the *exact same* `pathlib.py` source/pattern —
+```python
+from pathlib import Path
+def main() -> None:
+    out_path = Path("build/test.exe").resolve()
+    stem = out_path.with_suffix("")
+    print(stem.p)
+main()
+```
+— compiles and runs correctly via the Python-hosted compiler (no
+crash, correct resolved path printed). So the selfhosted binary's own
+codegen is doing something wrong with this exact call pattern that the
+Python-hosted compiler doesn't — likely in the same family as the
+earlier constructor/field-init bugs (#2/#3/#6), since `Path.__init__`
+always sets `self.p` and there's no legitimate code path to a NULL `p`
+in the Python source itself. Next step: save the snippet above to a
+file, gdb into the selfhosted binary's own compilation of it (smaller
+repro than the full driver.py path) and trace where `self.p` goes
+missing — compare the selfhosted asm's `Path.__init__`/`resolve`/
+`with_suffix` against the Python-hosted compiler's asm for the same
+functions to spot the divergence directly, rather than re-deriving
+from scratch.
 
 ## Other Notes
 
