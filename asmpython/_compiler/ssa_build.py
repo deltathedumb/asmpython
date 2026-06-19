@@ -590,6 +590,45 @@ def _build_strlit(ctx: FuncCtx, e: A.StrLit) -> Value:
     return ctx.builder().string_addr(e.value)
 
 
+def _build_fstring_segment(ctx: FuncCtx, seg: A.Expr) -> Value:
+    # One f-string segment -> a str-typed Value. Mirrors codegen.py's
+    # _gen_fstring_segment (codegen.py:3869) no-format-spec, no-
+    # conversion-flag fallback only (codegen.py:3941-3969) — a segment
+    # carrying a `:spec` or `!r`/`!s`/`!a` conversion is deferred (each
+    # routes through extra machinery: _split_fmt_align, _cfmt_for_spec,
+    # alignment/precision/grouping helpers, none of which exist in this
+    # IR yet). bool/None segments are also deferred (need is_bool_expr/
+    # is_none_expr-driven branching to a different static string, same
+    # gap str() itself has); float and instance segments need their own
+    # follow-up work (float: Windows NaN/inf branching, see
+    # _build_str_of_int's note; instance: __str__/__repr__ method
+    # resolution).
+    if getattr(seg, "fmt_spec", "") or getattr(seg, "conv_flag", ""):
+        raise SSABuildError("f-string segment with a format spec or conversion: not yet wrapped")
+    t = A.expr_type(seg)
+    if t == "str":
+        return build_expr(ctx, seg)
+    if t == "int":
+        if A.is_bool_expr(seg) or A.is_none_expr(seg):
+            raise SSABuildError("f-string segment of bool/None: not yet wrapped")
+        v = build_expr(ctx, seg)
+        return _build_int_to_str(ctx, v)
+    raise SSABuildError(f"f-string segment of {t}: not yet wrapped")
+
+
+def _build_fstring(ctx: FuncCtx, e: A.FString) -> Value:
+    # Mirrors codegen.py's _gen_fstring (codegen.py:3612-3636): convert
+    # each segment to a str (via _build_fstring_segment), chain through
+    # _runtime_str_concat. Empty f-string -> "".
+    if not e.segments:
+        return ctx.builder().string_addr("")
+    acc = _build_fstring_segment(ctx, e.segments[0])
+    for seg in e.segments[1:]:
+        seg_v = _build_fstring_segment(ctx, seg)
+        acc = _build_str_concat(ctx, acc, seg_v)
+    return acc
+
+
 def _build_name(ctx: FuncCtx, e: A.Name) -> Value:
     # Mirrors codegen.py's gen_expr Name case (codegen.py:3398-3456), but
     # only the "plain local/global read" sub-case for this first cut —
@@ -835,20 +874,26 @@ def _build_int_floordiv_mod(ctx: FuncCtx, e: A.BinOp, lt: str, rt: str) -> Value
     return final_quot if e.op == "//" else final_rem
 
 
+def _build_str_concat(ctx: FuncCtx, left: Value, right: Value) -> Value:
+    # _runtime_str_concat(rax=a, rbx=b) -> rax (freshly allocated concat)
+    # — codegen.py:2328-2332/5726-5745. Self-contained internal label (no
+    # external call), same text both OSes — see _X86_64_KEYS' docstring
+    # (defined near _build_str_eq). Shared by str+str BinOp and f-string
+    # segment chaining, both of which need exactly this concat.
+    return ctx.builder().raw_asm(
+        Kind.INT, [left, right],
+        {k: "call _runtime_str_concat" for k in _X86_64_KEYS},
+    )
+
+
 def _build_binop(ctx: FuncCtx, e: A.BinOp) -> Value:
     lt, rt = A.expr_type(e.left), A.expr_type(e.right)
     if lt == "str" and rt == "str" and e.op == "+":
-        # _runtime_str_concat(rax=a, rbx=b) -> rax (freshly allocated
-        # concat) — codegen.py:2328-2332/5726-5745. Sema only allows str+str
-        # (no int/float coercion), so this is the only string BinOp case.
+        # Sema only allows str+str (no int/float coercion), so this is
+        # the only string BinOp case.
         left = build_expr(ctx, e.left)
         right = build_expr(ctx, e.right)
-        # Self-contained internal label (no external call), same text both
-        # OSes — see _X86_64_KEYS' docstring (defined near _build_str_eq).
-        return ctx.builder().raw_asm(
-            Kind.INT, [left, right],
-            {k: "call _runtime_str_concat" for k in _X86_64_KEYS},
-        )
+        return _build_str_concat(ctx, left, right)
     if lt.startswith("instance:") or rt.startswith("instance:") or "str" in (lt, rt) or lt in (
         "list", "dict", "set", "tuple",
     ) or rt in ("list", "dict", "set", "tuple"):
@@ -1181,21 +1226,9 @@ def _build_len(ctx: FuncCtx, e: A.Call) -> Value:
     raise SSABuildError(f"len({t!r}): not yet wrapped")
 
 
-def _build_str_of_int(ctx: FuncCtx, e: A.Call) -> Value:
-    # str(x) where x is a plain (non-bool, non-None) int — codegen.py:
-    # 12011-12013's final-else fallback. bool/None/float/str/instance/
-    # container all have their own dispatch (codegen.py:11988-12010) and
-    # are deferred: bool/None need is_bool_expr/is_none_expr-driven
-    # branching to a different static string, float's _emit_float_to_str
-    # has internal NaN/inf-detection control flow on Windows (the kind of
-    # RawAsm-can't-safely-have-local-labels case docs/IR-DESIGN.md now
-    # documents — needs real typed IR blocks, not a single RawAsm, when
-    # it's done), and instance dispatch needs method resolution.
-    arg = e.args[0]
-    if A.expr_type(arg) != "int" or A.is_bool_expr(arg) or A.is_none_expr(arg):
-        raise SSABuildError("str() of non-plain-int: not yet wrapped")
-    v = build_expr(ctx, arg)
-    b = ctx.builder()
+def _build_int_to_str(ctx: FuncCtx, v: Value) -> Value:
+    # Plain int Value -> fresh heap string. Shared by str(int) and
+    # f-string int segments, both of which need exactly this conversion.
     # sprintf(itoa_str_buf, fmt, v) -> rax = ptr into the shared static
     # buffer (codegen.py:167-175/116-125), then _runtime_str_concat_dup
     # copies out to a fresh allocation so the result doesn't alias the
@@ -1204,6 +1237,7 @@ def _build_str_of_int(ctx: FuncCtx, e: A.Call) -> Value:
     # SysV rdi/rsi/rdx), different format-string label name, and SysV's
     # variadic-call convention requires AL = vector-register count (0
     # here, no float args) while Win64's doesn't.
+    b = ctx.builder()
     sprintf_result = b.raw_asm(
         Kind.INT, [v],
         {
@@ -1229,6 +1263,23 @@ def _build_str_of_int(ctx: FuncCtx, e: A.Call) -> Value:
         Kind.INT, [sprintf_result],
         {k: "call _runtime_str_concat_dup" for k in _X86_64_KEYS},
     )
+
+
+def _build_str_of_int(ctx: FuncCtx, e: A.Call) -> Value:
+    # str(x) where x is a plain (non-bool, non-None) int — codegen.py:
+    # 12011-12013's final-else fallback. bool/None/float/str/instance/
+    # container all have their own dispatch (codegen.py:11988-12010) and
+    # are deferred: bool/None need is_bool_expr/is_none_expr-driven
+    # branching to a different static string, float's _emit_float_to_str
+    # has internal NaN/inf-detection control flow on Windows (the kind of
+    # RawAsm-can't-safely-have-local-labels case docs/IR-DESIGN.md now
+    # documents — needs real typed IR blocks, not a single RawAsm, when
+    # it's done), and instance dispatch needs method resolution.
+    arg = e.args[0]
+    if A.expr_type(arg) != "int" or A.is_bool_expr(arg) or A.is_none_expr(arg):
+        raise SSABuildError("str() of non-plain-int: not yet wrapped")
+    v = build_expr(ctx, arg)
+    return _build_int_to_str(ctx, v)
 
 
 def _build_int_of(ctx: FuncCtx, e: A.Call) -> Value:
@@ -1743,6 +1794,8 @@ def _build_print_value(ctx: FuncCtx, arg: A.Expr, uid: str) -> None:
     # are deferred). bool/None checked before generic int, matching
     # codegen.py's is_bool_expr/is_none_expr-driven dispatch (these are
     # both statically "int"-typed but need different runtime output).
+    if getattr(arg, "fmt_spec", "") or getattr(arg, "conv_flag", ""):
+        raise SSABuildError("print() of an f-string segment with a format spec/conversion: not yet wrapped")
     t = A.expr_type(arg)
     if t.startswith("instance:") or t in ("list", "dict", "set", "tuple"):
         raise SSABuildError(f"print() of {t}: not yet wrapped")
@@ -1868,8 +1921,15 @@ def _build_print(ctx: FuncCtx, e: A.Call) -> Value:
         return ctx.builder().const(0)
     for i, arg in enumerate(e.args):
         if isinstance(arg, A.FString):
-            raise SSABuildError("print() of an f-string: not yet wrapped")
-        _build_print_value(ctx, arg, f"{uid}_{i}")
+            # codegen.py:13873-13876 prints each segment individually
+            # (no separator between them — they're already adjacent
+            # text), rather than concatenating into one string first.
+            # Matched here for the same reason: fidelity to the existing
+            # behavior, plus it avoids an unnecessary heap allocation.
+            for j, seg in enumerate(arg.segments):
+                _build_print_value(ctx, seg, f"{uid}_{i}_{j}")
+        else:
+            _build_print_value(ctx, arg, f"{uid}_{i}")
         if i < len(e.args) - 1:
             if sep_expr is not None and isinstance(sep_expr, A.StrLit):
                 _emit_literal_str(sep_expr.value)
@@ -2878,6 +2938,7 @@ _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.MethodCall: _build_methodcall,
     A.NamedExpr: _build_namedexpr,
     A.Comprehension: _build_comprehension,
+    A.FString: _build_fstring,
 }
 
 
