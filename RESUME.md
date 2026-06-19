@@ -58,7 +58,7 @@ real): WSL2 Ubuntu 24.04 (`wsl.exe -u root`) + `gcc-aarch64-linux-gnu` +
 starts at plan-step 5.
 
 **Done and committed** (`ir.py`, `ir_builder.py`, `ssa_build.py`, latest
-commit `0f2ad7a0`); working tree clean as of this write:
+commit `0fd427e9`); working tree clean as of this write:
 
 - `ir.py`/`ir_builder.py`: complete, stable data model + construction API.
 - Primitive/control-flow core: literals (int/float/string), local
@@ -145,18 +145,31 @@ pattern transfers between structurally-similar node types without
 checking that node's actual sema rule.
 
 **Explicitly still not done** (plan-step 1 remainder): general
-exception/try-except (only hand-wired `ZeroDivisionError` exists), string
-slicing (`s[a:b]`), `str.format()`, `Global`/`Nonlocal` (blocked on
-`.bss`/box-pointer addressing not yet in the IR), f-strings,
-classes/instance methods/dunders, closures, generators, match statements,
-`for` over set/zip/enumerate/instance iterables, `enumerate()`/`zip()` as
+exception/try-except (only hand-wired `ZeroDivisionError` exists),
+stepped string slices (`s[a:b:c]`), list slices (`xs[a:b]`),
+`str.format()`, `Global`/`Nonlocal` (blocked on `.bss`/box-pointer
+addressing not yet in the IR), f-strings, classes/instance
+methods/dunders, closures, generators, match statements, `for` over
+set/zip/enumerate/instance iterables, `enumerate()`/`zip()` as
 standalone values (deferred — codegen only handles these inside for-loop
 iteration), `list.sort(key=...)`/`reverse=...`, `dict.copy()`/
-`setdefault()`, `set.union`/`intersection`/`difference`, int-element sets,
-list comprehensions, `isinstance()` with a tuple-of-classes or class-name
-target (needs class-id tracking FuncCtx doesn't have yet).
+`setdefault()`, `set.union`/`intersection`/`difference`, int-element
+sets, comprehensions with tuple-unpack targets/multiple `for` clauses/
+non-list-or-tuple iterables, `isinstance()` with a tuple-of-classes or
+class-name target (needs class-id tracking FuncCtx doesn't have yet).
 
-**Done and committed** (latest commit `0f2ad7a0`):
+**Done and committed** (latest commit `0fd427e9`):
+
+- **String slicing** `s[a:b]` (no step) via `_runtime_str_slice`,
+  self-contained helper, same text both OSes. Stepped slices and list
+  slices still deferred.
+- **List comprehensions** `[elt for var in iter (if cond)]` over a
+  list/tuple — real IR loop (frame-slot loop-carried state, the
+  established convention for loops in this file, not phi nodes/RAW_ASM)
+  building the result via repeated `_runtime_list_append` calls.
+  Extracted a shared `_build_list_append_raw` helper used by both this
+  and the existing `list.append()` MethodCall builder. Tuple-unpack
+  targets, multiple `for` clauses, and non-list/tuple iterables deferred.
 
 - **`str` subscript `s[i]`** via `_runtime_str_char_at`; handles negative
   indices internally.
@@ -192,19 +205,16 @@ target (needs class-id tracking FuncCtx doesn't have yet).
   matching the file's established convention (every other builder is
   defined above the dict that registers it).
 
-**Next step on resume**: the documented builtin-wrapper punch list is
-now fully closed out. Next natural targets: string slicing (`s[a:b]`),
-f-strings / `str.format()`, list comprehensions, `Global`/`Nonlocal`,
-classes/instance methods/dunders — roughly in that order of
-tractability (slicing reuses `_runtime_str_*` patterns already
-established; f-strings need `_gen_fstring_segment`-equivalent dispatch;
-comprehensions need a real IR loop building into a list, similar shape
-to `sum()`/`any()`/`all()`'s loops but appending instead of scanning;
-classes are the biggest remaining unit — method resolution, dunder
-dispatch, instance layout). Once the remaining surface is substantially
-covered, move to plan-step 2 (register allocator). Before starting
-classes specifically, worth checking in on scope/pace given how much
-real design nuance this file has accumulated.
+**Next step on resume**: the builtin-wrapper punch list, string slicing,
+and list comprehensions are all landed. Remaining natural targets:
+f-strings / `str.format()`, `Global`/`Nonlocal`, classes/instance
+methods/dunders, stepped slices, list slices. Classes are the biggest
+remaining unit (method resolution, dunder dispatch, instance layout) —
+worth tackling f-strings and Global/Nonlocal first since they're more
+contained. Once the remaining surface is substantially covered, move to
+plan-step 2 (register allocator). Before starting classes specifically,
+worth checking in on scope/pace given how much real design nuance this
+file has accumulated.
 
 ## Stdlib Status (plan-step 12)
 
