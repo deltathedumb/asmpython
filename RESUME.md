@@ -58,7 +58,7 @@ real): WSL2 Ubuntu 24.04 (`wsl.exe -u root`) + `gcc-aarch64-linux-gnu` +
 starts at plan-step 5.
 
 **Done and committed** (`ir.py`, `ir_builder.py`, `ssa_build.py`, latest
-commit `c5b1ac73`); working tree clean as of this write:
+commit `0f2ad7a0`); working tree clean as of this write:
 
 - `ir.py`/`ir_builder.py`: complete, stable data model + construction API.
 - Primitive/control-flow core: literals (int/float/string), local
@@ -149,13 +149,14 @@ exception/try-except (only hand-wired `ZeroDivisionError` exists), string
 slicing (`s[a:b]`), `str.format()`, `Global`/`Nonlocal` (blocked on
 `.bss`/box-pointer addressing not yet in the IR), f-strings,
 classes/instance methods/dunders, closures, generators, match statements,
-`for` over set/zip/enumerate/instance iterables, remaining builtins
-(`print`, `enumerate`, `zip`, `sorted`, `reversed`, `sum`, `any`, `all`,
-`isinstance`), `list.sort(key=...)`/`reverse=...`, `dict.copy()`/
+`for` over set/zip/enumerate/instance iterables, `enumerate()`/`zip()` as
+standalone values (deferred — codegen only handles these inside for-loop
+iteration), `list.sort(key=...)`/`reverse=...`, `dict.copy()`/
 `setdefault()`, `set.union`/`intersection`/`difference`, int-element sets,
-list comprehensions.
+list comprehensions, `isinstance()` with a tuple-of-classes or class-name
+target (needs class-id tracking FuncCtx doesn't have yet).
 
-**Done and committed** (latest commit `98b53bd9`):
+**Done and committed** (latest commit `0f2ad7a0`):
 
 - **`str` subscript `s[i]`** via `_runtime_str_char_at`; handles negative
   indices internally.
@@ -169,121 +170,41 @@ list comprehensions.
 - **`NamedExpr` (`:=`)** — walrus assign-and-return-value.
 - **`dict |=`** and **`list +=`** in `AugAssign`.
 - **`dict[k] = v`** (`IndexAssign` dict target).
-- **Builtin functions**: `int()`, `float()`, `bool()`, `abs()`, `hash()`,
+- **All 8 remaining builtin wrappers landed**: `print()` (scalar args
+  only — int/str/float/bool/None, real IR branching for bool/None
+  dispatch, no f-strings/containers yet), `range(...)` as a value (not
+  just a for-loop header — materializes a real `list[int]` via
+  `_runtime_range_list`), `sorted()`/`reversed()` (copy-then-mutate-copy,
+  reusing `_runtime_list_slice`'s INT64_MIN/MAX-sentinel whole-list
+  trick), `sum()`/`any()`/`all()` (real IR loops with frame-slot loop-
+  carried state, same shape as `_build_for_list` — not phi nodes, not
+  RAW_ASM, since this is genuine control flow not a single helper
+  call), `isinstance()` (single primitive-class target only, resolved
+  statically at IR-build time — `bool` maps to runtime type `"int"`).
+  Plus earlier: `int()`, `float()`, `bool()`, `abs()`, `hash()`,
   `max(a,b)`, `min(a,b)`, `list()`, `chr()`, `ord()`, `id()`.
+- **Fixed a real import-time bug** found while validating `print()`:
+  `_build_namedexpr` was defined AFTER `_EXPR_BUILDERS`'s dict literal
+  but referenced inside it (landed in an earlier autonomous cycle) —
+  `import ssa_build` raised `NameError` unconditionally. The 454-test
+  suite never caught this since `ssa_build.py` isn't wired into the
+  compile path yet. Fixed by moving the function above the dict,
+  matching the file's established convention (every other builder is
+  defined above the dict that registers it).
 
-**Next step on resume**: implement the remaining builtin wrappers in
-`ssa_build.py`'s `_build_call`. All implementation details resolved this
-session (2026-06-18); listed below under "Implementation notes for next
-session". After those: string slicing (`s[a:b]`), `str.format()` /
-f-strings, list comprehensions, `Global`/`Nonlocal`, classes/instance
-methods/dunders. Once the remaining surface is substantially covered,
-move to plan-step 2 (register allocator).
-
-### Implementation notes for next session (2026-06-18)
-
-All research done; just write the code in `ssa_build.py`.  Insert the new
-helpers and `_build_call` branches in the same file; no new runtime helpers
-needed.
-
-**`str(float)` / `print(float)`**: Use existing `_runtime_fmt_elem` helper
-(`emit_format_helpers` in codegen.py ~line 7175). Kind=2 (float): `._fe_float:`
-does `movq xmm0, rax` + `_emit_float_to_str` (NaN/inf-aware on Win64) →
-rax = string ptr (static buffer). No new runtime functions needed.
-
-```python
-bits = _float_to_int_bits(ctx, float_val, uid)
-return ctx.builder().raw_asm(Kind.INT, [bits],
-    {k: "mov rbx, 2\ncall _runtime_fmt_elem" for k in _X86_64_KEYS})
-```
-
-For `str(float)`: additionally call `_runtime_str_concat_dup` to heap-copy.
-
-**`str(bool)`**: Real IR blocks + `string_addr`:
-
-```python
-v = build_expr(ctx, arg)
-true_str = b.string_addr("True"); false_str = b.string_addr("False")
-# icmp EQ v, const(0) → condbr → phi of false_str / true_str
-```
-
-**`str(None)`**: `b.string_addr("None")` — interned via `STRING_ADDR` op, no
-raw label needed.
-
-**`print()`**: Type-dispatch at build time on each arg's `A.expr_type()`.
-
-- `str`: RAW_ASM print_str (fmt_str + printf, OS-specific registers)
-- `int` (non-bool, non-None): RAW_ASM print_int (fmt_int + printf)
-- `bool`: icmp+condbr+phi of `string_addr("True"/"False")`, then print_str
-- `None`: `string_addr("None")` then print_str
-- `float`: `_float_to_int_bits` → `mov rbx,2; call _runtime_fmt_elem` →
-  print_str
-- default `end=\n`: win64 `mov rcx,10\ncall putchar`;
-  linux `mov rdi,10\ncall putchar`
-- default `sep=<space>`: win64 `mov rcx,32\ncall putchar`;
-  linux `mov rdi,32\ncall putchar`
-- `sep=`/`end=` kwargs: extract via `getattr(e, "kwargs", None) or []`; string
-  literal override → `b.string_addr(s)` + print_str; `""` → emit nothing.
-
-**`range()` as value**: args in rax/rbx/rcx by RAW_ASM convention:
-
-```python
-# 1-arg: start=const(0), step=const(1); 2-arg: step=const(1)
-return b.raw_asm(Kind.INT, [start, stop, step],
-    {k: "call _runtime_range_list" for k in _X86_64_KEYS})
-```
-
-**`sorted(xs)`** (no key/reverse — defer those with SSABuildError):
-
-```python
-src = build_expr(ctx, e.args[0])
-SENTINELS = "mov rbx, 0x8000000000000000\nmov rcx, 0x7fffffffffffffff\n"
-copy = b.raw_asm(Kind.INT, [src],
-    {k: SENTINELS + "call _runtime_list_slice" for k in _X86_64_KEYS})
-sort_sym = "_runtime_sort_str" if el_kind == "str" else "_runtime_sort_int"
-return b.raw_asm(Kind.INT, [copy],
-    {k: f"call {sort_sym}" for k in _X86_64_KEYS})
-```
-
-**`reversed(xs)`**: Copy + reverse (two chained RAW_ASM sites):
-
-```python
-copy = b.raw_asm(Kind.INT, [src],
-    {k: SENTINELS + "call _runtime_list_slice" for k in _X86_64_KEYS})
-return b.raw_asm(Kind.INT, [copy],
-    {k: "call _runtime_list_reverse" for k in _X86_64_KEYS})
-```
-
-**`sum(xs[, start])`**: Real IR loop (RAW_ASM can't have internal labels).
-PHI nodes for `acc` and `idx`; element ptr = `add(lst_buf, mul(idx, 8))`.
-
-```text
-entry → header_blk (phi acc, phi idx)
-       → [idx<len → body_blk, else → done_blk]
-body_blk: elem=load(ptr,0), acc_next=add(acc,elem),
-          idx_next=add(idx,1) → header_blk
-done_blk: result = acc_phi
-```
-
-PHI incoming: acc←(start_v from entry, acc_next from body),
-idx←(const(0) from entry, idx_next from body).
-
-**`any(xs)` / `all(xs)`**: Same loop shape; early-exit block:
-
-```text
-header → [idx<len → body, else → done(1 for all, 0 for any)]
-body: load elem; truthy? any→hit(1); all→hit(0); else inc idx→header
-hit: const result in merge block via phi
-```
-
-**`isinstance(x, Cls)`**: Primitive targets only (int/str/float/bool/list/
-dict/tuple/set) — resolve statically from `A.expr_type(e.args[0])` using the
-same `PRIM_MAP` as codegen.py's `_gen_isinstance`. Evaluate arg[0] for side
-effects, then return `b.const(0)` or `b.const(1)`. Instance-type targets →
-SSABuildError (FuncCtx has no `class_ids` yet).
-
-**`enumerate()` / `zip()` as standalone values**: Defer — codegen only handles
-these inside for-loop iteration. Raise SSABuildError.
+**Next step on resume**: the documented builtin-wrapper punch list is
+now fully closed out. Next natural targets: string slicing (`s[a:b]`),
+f-strings / `str.format()`, list comprehensions, `Global`/`Nonlocal`,
+classes/instance methods/dunders — roughly in that order of
+tractability (slicing reuses `_runtime_str_*` patterns already
+established; f-strings need `_gen_fstring_segment`-equivalent dispatch;
+comprehensions need a real IR loop building into a list, similar shape
+to `sum()`/`any()`/`all()`'s loops but appending instead of scanning;
+classes are the biggest remaining unit — method resolution, dunder
+dispatch, instance layout). Once the remaining surface is substantially
+covered, move to plan-step 2 (register allocator). Before starting
+classes specifically, worth checking in on scope/pace given how much
+real design nuance this file has accumulated.
 
 ## Stdlib Status (plan-step 12)
 
