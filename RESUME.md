@@ -25,7 +25,9 @@ memory):
 9. Garbage collector (refcounting).
 10. Optimization passes beyond the existing peephole dead-store pass.
 11. Selfhost: resume the 8th not-yet-isolated bug (opportunistic, never blocking).
-12. Release pass: CODE_OF_CONDUCT/CONTRIBUTING/SECURITY/issue templates,
+12. **Stdlib completion** (added 2026-06-18): full implementations of all
+    requested modules — see "Stdlib Status" section below.
+13. Release pass: CODE_OF_CONDUCT/CONTRIBUTING/SECURITY/issue templates,
     CHANGELOG, version bump off `-preview`.
 
 Currently on **step 1**. Don't skip ahead to register allocator/lowering
@@ -178,6 +180,66 @@ After those: string slicing (`s[a:b]`), `str.format()` / f-strings,
 list comprehensions, `Global`/`Nonlocal`, classes/instance
 methods/dunders. Once the remaining surface is substantially covered,
 move to plan-step 2 (register allocator).
+
+## Stdlib Status (plan-step 12)
+
+### From user's explicit list (commit `e9dd2545`)
+
+- `abc` — Complete (abstractmethod/ABCMeta stubs; correct for compiled lang)
+- `argparse` — Complete (506 lines; flags, positionals, mutex groups)
+- `array` — **New**: typed array class (all CPython typecodes, list-backed)
+- `base64` — Complete (b64/urlsafe/b16/b32 encode+decode)
+- `binascii` — **New**: hexlify/unhexlify, b2a/a2b_base64, crc32, crc_hqx
+- `collections` — Complete (deque, OrderedDict, defaultdict, Counter,
+  namedtuple, ChainMap)
+- `contextlib` — Complete (suppress, nullcontext, closing; ExitStack
+  callbacks now actually called)
+- `copy` — **Rewritten**: copy/deepcopy(list); copy_dict/copy_set added
+- `csv` — Complete (reader/writer, DictReader/DictWriter, dialect)
+- `errno` — **New**: POSIX error constants, errorcode dict, strerror()
+- `functools` — **Rewritten**: partial class with `_fn` local-var call
+  pattern; reduce, lru_cache, wraps, total_ordering
+- `gc` — Complete (stub GC API; real refcounting is plan-step 9)
+- `getopt` — **New**: full GNU getopt() and gnu_getopt()
+- `inspect` — Complete for asmpython's needs (179 lines)
+- `itertools` — Complete (chain, islice, product, combinations,
+  permutations, groupby, pairwise, batched…)
+- `json` — Complete (dumps/loads with indent; JSONEncoder/Decoder)
+- `locale` — Complete (LC_* constants, setlocale, format_string, currency)
+- `pickle` — **Rewritten**: int/str/float/list/dict; Pickler/Unpickler
+- `queue` — **Rewritten**: task_done/join with unfinished counter;
+  raises Empty/Full
+- `signal` — Complete (POSIX constants, signal/getsignal, stubs)
+- `stat` — **New**: S_IF*/S_I* mode constants, S_ISREG/DIR/LNK,
+  filemode()
+- `types` — **Improved**: SimpleNamespace (_set/_get/_del/_has/_repr/_eq);
+  MappingProxyType
+- `unittest` — **New**: TestCase (20+ asserts), TestSuite, TextTestRunner,
+  FunctionTestCase, main()
+- `urllib` — **Expanded**: urllib.request (HTTP GET/POST via socket),
+  urllib.error; dotted `from urllib.request import urlopen` works
+- `zipfile` — Complete (ZipFile read/write, ZipInfo, namelist)
+
+### Notable constraints / differences from CPython
+
+- `functools.lru_cache` / `cache` / `wraps` are pass-through stubs (no
+  memoisation — requires a dict keyed by arbitrary argument tuples).
+- `copy.copy` / `deepcopy` accept `list` parameters only in the generic
+  form; use `copy_dict` / `deepcopy_dict` for dicts (asmpython's
+  `isinstance(obj, list)` on an `object`-typed parameter has no runtime
+  branch effect — dispatch must happen at the typed call site).
+- `queue.join()` is a busy-spin in single-threaded programs; correct when
+  used with `threading` (other threads call `task_done()`).
+- `pickle` uses a text format incompatible with CPython's binary protocol.
+- `unittest.main()` does not auto-discover test methods (no reflection);
+  build `TestSuite` explicitly and call `TextTestRunner().run(suite)`.
+- `urllib.request` supports HTTP only (no TLS/HTTPS — no ssl runtime).
+
+### Missing entirely (deferred to step 12 continued)
+
+`shelve`, `tarfile`, `zlib` (needs C), `ssl` (needs C), `xml`, `http.server`,
+`smtplib`, `asyncio`, `concurrent.futures`, `multiprocessing`,
+`sqlite3` (needs C), `codecs`, `token`/`tokenize`.
 
 ## Selfhost Debugging (paused, non-blocking — plan-step 11)
 
