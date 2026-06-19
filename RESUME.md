@@ -147,8 +147,8 @@ checking that node's actual sema rule.
 **Explicitly still not done** (plan-step 1 remainder): general
 exception/try-except (only hand-wired `ZeroDivisionError` exists),
 stepped string slices (`s[a:b:c]`), list slices (`xs[a:b]`),
-`str.format()`, `Global`/`Nonlocal` (blocked on `.bss`/box-pointer
-addressing not yet in the IR), f-strings, classes/instance
+`str.format()`, f-string segments with a format spec/conversion (`f"{x:
+.2f}"`, `f"{x!r}"`) or bool/None/float/instance values, classes/instance
 methods/dunders, closures, generators, match statements, `for` over
 set/zip/enumerate/instance iterables, `enumerate()`/`zip()` as
 standalone values (deferred — codegen only handles these inside for-loop
@@ -156,9 +156,11 @@ iteration), `list.sort(key=...)`/`reverse=...`, `dict.copy()`/
 `setdefault()`, `set.union`/`intersection`/`difference`, int-element
 sets, comprehensions with tuple-unpack targets/multiple `for` clauses/
 non-list-or-tuple iterables, `isinstance()` with a tuple-of-classes or
-class-name target (needs class-id tracking FuncCtx doesn't have yet).
+class-name target (needs class-id tracking FuncCtx doesn't have yet),
+nonlocal-box closures (Nonlocal itself is a no-op, matching codegen.py —
+closures aren't supported there either).
 
-**Done and committed** (latest commit `0fd427e9`):
+**Done and committed** (latest commit `5e9ee118`):
 
 - **String slicing** `s[a:b]` (no step) via `_runtime_str_slice`,
   self-contained helper, same text both OSes. Stepped slices and list
@@ -170,6 +172,22 @@ class-name target (needs class-id tracking FuncCtx doesn't have yet).
   Extracted a shared `_build_list_append_raw` helper used by both this
   and the existing `list.append()` MethodCall builder. Tuple-unpack
   targets, multiple `for` clauses, and non-list/tuple iterables deferred.
+- **`Global`/`Nonlocal`** statements (no-ops, matching codegen.py
+  exactly) plus the actual blocker that mattered: a new `Op.GLOBAL_ADDR`
+  IR op (modeled directly on `Op.STRING_ADDR`) wiring up global `Name`
+  reads/writes via `LOAD`/`STORE` against the global's address, the same
+  way a frame slot is read/written against `FRAME_BASE`. Found and fixed
+  a real bug in the same pass: `_build_assign` unconditionally
+  `alloc_slot`'d a fresh LOCAL for any target not already in
+  `ctx.locals_`, which would have silently shadowed every `global x; x =
+  value` with a same-named local instead of writing the actual global.
+- **F-strings** (no format spec/conversion) — segments convert to str
+  (str passes through, int via sprintf) and chain through
+  `_runtime_str_concat`. Also wired into `print()`, matching
+  codegen.py's behavior of printing each segment individually with no
+  separator (not concatenating first). Extracted `_build_int_to_str`/
+  `_build_str_concat` as shared helpers, now used by `str(int)`/`str+str`
+  too instead of duplicating the RAW_ASM text.
 
 - **`str` subscript `s[i]`** via `_runtime_str_char_at`; handles negative
   indices internally.
@@ -206,15 +224,15 @@ class-name target (needs class-id tracking FuncCtx doesn't have yet).
   defined above the dict that registers it).
 
 **Next step on resume**: the builtin-wrapper punch list, string slicing,
-and list comprehensions are all landed. Remaining natural targets:
-f-strings / `str.format()`, `Global`/`Nonlocal`, classes/instance
-methods/dunders, stepped slices, list slices. Classes are the biggest
-remaining unit (method resolution, dunder dispatch, instance layout) —
-worth tackling f-strings and Global/Nonlocal first since they're more
-contained. Once the remaining surface is substantially covered, move to
-plan-step 2 (register allocator). Before starting classes specifically,
-worth checking in on scope/pace given how much real design nuance this
-file has accumulated.
+list comprehensions, `Global`/`Nonlocal`, and basic f-strings are all
+landed. Remaining natural targets, roughly in order of size: `str.
+format()` and format-spec'd f-string segments (reuse codegen.py's
+`_cfmt_for_spec`/alignment logic as a guide), stepped/list slices, then
+classes/instance methods/dunders (the biggest remaining unit — method
+resolution, dunder dispatch, instance layout). Once the remaining
+surface is substantially covered, move to plan-step 2 (register
+allocator). Before starting classes specifically, worth checking in on
+scope/pace given how much real design nuance this file has accumulated.
 
 ## Stdlib Status (plan-step 12)
 
