@@ -1298,6 +1298,170 @@ def _build_malloc_list(ctx: FuncCtx, n: int, elem_exprs: list) -> Value:
     return header
 
 
+def _build_print_value(ctx: FuncCtx, arg: A.Expr, uid: str) -> None:
+    # Print one scalar value, no separator/newline (codegen.py's
+    # _emit_print_value, codegen.py:14003, scalar cases only — f-string
+    # segments with a format spec/conversion, and containers/instances,
+    # are deferred). bool/None checked before generic int, matching
+    # codegen.py's is_bool_expr/is_none_expr-driven dispatch (these are
+    # both statically "int"-typed but need different runtime output).
+    t = A.expr_type(arg)
+    if t.startswith("instance:") or t in ("list", "dict", "set", "tuple"):
+        raise SSABuildError(f"print() of {t}: not yet wrapped")
+    if t == "int" and A.is_bool_expr(arg):
+        v = build_expr(ctx, arg)
+        b = ctx.builder()
+        zero = b.const(0)
+        is_true = b.icmp(Predicate.NE, v, zero)
+        true_blk, _ = new_block(ctx.func, f"printbool_true_{uid}")
+        false_blk, _ = new_block(ctx.func, f"printbool_false_{uid}")
+        merge_blk, _ = new_block(ctx.func, f"printbool_merge_{uid}")
+        b.condbr(is_true, true_blk, false_blk)
+        true_blk.preds.append(ctx.block)
+        false_blk.preds.append(ctx.block)
+        ctx.block = true_blk
+        true_str = ctx.builder().string_addr("True")
+        ctx.builder().br(merge_blk)
+        merge_blk.preds.append(true_blk)
+        ctx.block = false_blk
+        false_str = ctx.builder().string_addr("False")
+        ctx.builder().br(merge_blk)
+        merge_blk.preds.append(false_blk)
+        ctx.block = merge_blk
+        s = ctx.builder().phi(Kind.INT)
+        ctx.builder().add_incoming(s, true_str)
+        ctx.builder().add_incoming(s, false_str)
+        ctx.builder().raw_asm(
+            Kind.NONE, [s],
+            {k: "mov rdx, rax\nlea rcx, [fmt_str]\ncall printf" if k == "win64"
+             else "mov rsi, rax\nlea rdi, [fmt_str]\nxor rax, rax\ncall printf"
+             for k in _X86_64_KEYS},
+        )
+        return
+    if t == "int" and A.is_none_expr(arg):
+        build_expr(ctx, arg)  # evaluate for side effects, matching codegen.py
+        s = ctx.builder().string_addr("None")
+        ctx.builder().raw_asm(
+            Kind.NONE, [s],
+            {k: "mov rdx, rax\nlea rcx, [fmt_str]\ncall printf" if k == "win64"
+             else "mov rsi, rax\nlea rdi, [fmt_str]\nxor rax, rax\ncall printf"
+             for k in _X86_64_KEYS},
+        )
+        return
+    if t == "str":
+        v = build_expr(ctx, arg)
+        ctx.builder().raw_asm(
+            Kind.NONE, [v],
+            {k: "mov rdx, rax\nlea rcx, [fmt_str]\ncall printf" if k == "win64"
+             else "mov rsi, rax\nlea rdi, [fmt_str]\nxor rax, rax\ncall printf"
+             for k in _X86_64_KEYS},
+        )
+        return
+    if t == "float":
+        v = build_expr(ctx, arg)
+        bits = _float_to_int_bits(ctx, v, uid)
+        s = ctx.builder().raw_asm(
+            Kind.INT, [bits],
+            {k: "mov rbx, 2\ncall _runtime_fmt_elem" for k in _X86_64_KEYS},
+        )
+        ctx.builder().raw_asm(
+            Kind.NONE, [s],
+            {k: "mov rdx, rax\nlea rcx, [fmt_str]\ncall printf" if k == "win64"
+             else "mov rsi, rax\nlea rdi, [fmt_str]\nxor rax, rax\ncall printf"
+             for k in _X86_64_KEYS},
+        )
+        return
+    if t == "int":
+        v = build_expr(ctx, arg)
+        ctx.builder().raw_asm(
+            Kind.NONE, [v],
+            {k: "mov rdx, rax\nlea rcx, [fmt_int]\ncall printf" if k == "win64"
+             else "mov rsi, rax\nlea rdi, [fmt_int]\nxor rax, rax\ncall printf"
+             for k in _X86_64_KEYS},
+        )
+        return
+    raise SSABuildError(f"print() of {t}: not yet wrapped")
+
+
+def _build_print(ctx: FuncCtx, e: A.Call) -> Value:
+    # Mirrors codegen.py's _gen_print (codegen.py:13854) for scalar args
+    # only — f-string segments with a format spec/conversion and
+    # container/instance args are deferred (each needs more machinery:
+    # _gen_fstring_segment, _emit_container_repr). sep=/end= are honored
+    # only when given as a literal A.StrLit (matching codegen.py's own
+    # `isinstance(end_expr, A.StrLit)` guard — a non-literal sep/end
+    # expression falls through to codegen.py's default behavior too, so
+    # this isn't a new restriction).
+    #
+    # print() is a statement-shaped builtin (Python's print() returns
+    # None) but _build_call's signature returns Value, matching every
+    # other expression builder — None is represented as the int 0
+    # throughout this language's value model (see list.sort()'s "xor
+    # rax, rax  # returns None ~ 0", codegen.py:10796), so this returns
+    # a const(0) as print()'s "value" rather than returning None from
+    # this Python function (which would violate the -> Value contract
+    # every _EXPR_BUILDERS entry relies on).
+    kwargs = dict(getattr(e, "kwargs", None) or [])
+    sep_expr = kwargs.get("sep")
+    end_expr = kwargs.get("end")
+    uid = str(id(e))
+
+    def _emit_literal_str(text: str) -> None:
+        if not text:
+            return
+        s = ctx.builder().string_addr(text)
+        ctx.builder().raw_asm(
+            Kind.NONE, [s],
+            {k: "mov rdx, rax\nlea rcx, [fmt_str]\ncall printf" if k == "win64"
+             else "mov rsi, rax\nlea rdi, [fmt_str]\nxor rax, rax\ncall printf"
+             for k in _X86_64_KEYS},
+        )
+
+    if not e.args:
+        if end_expr is not None and isinstance(end_expr, A.StrLit):
+            _emit_literal_str(end_expr.value)
+        else:
+            ctx.builder().raw_asm(
+                Kind.NONE, [],
+                {k: "mov rcx, 10\ncall putchar" if k == "win64"
+                 else "mov rdi, 10\ncall putchar"
+                 for k in _X86_64_KEYS},
+            )
+        return ctx.builder().const(0)
+    for i, arg in enumerate(e.args):
+        if isinstance(arg, A.FString):
+            raise SSABuildError("print() of an f-string: not yet wrapped")
+        _build_print_value(ctx, arg, f"{uid}_{i}")
+        if i < len(e.args) - 1:
+            if sep_expr is not None and isinstance(sep_expr, A.StrLit):
+                _emit_literal_str(sep_expr.value)
+            else:
+                ctx.builder().raw_asm(
+                    Kind.NONE, [],
+                    {k: "mov rcx, 32\ncall putchar" if k == "win64"
+                     else "mov rdi, 32\ncall putchar"
+                     for k in _X86_64_KEYS},
+                )
+    if end_expr is not None and isinstance(end_expr, A.StrLit):
+        if end_expr.value == "\n":
+            ctx.builder().raw_asm(
+                Kind.NONE, [],
+                {k: "mov rcx, 10\ncall putchar" if k == "win64"
+                 else "mov rdi, 10\ncall putchar"
+                 for k in _X86_64_KEYS},
+            )
+        else:
+            _emit_literal_str(end_expr.value)
+    else:
+        ctx.builder().raw_asm(
+            Kind.NONE, [],
+            {k: "mov rcx, 10\ncall putchar" if k == "win64"
+             else "mov rdi, 10\ncall putchar"
+             for k in _X86_64_KEYS},
+        )
+    return ctx.builder().const(0)
+
+
 def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
     # Mirrors codegen.py's _gen_call (codegen.py:11915) fallback case
     # (codegen.py:12948-12953) reached after ~30 builtin-name special
@@ -1319,6 +1483,8 @@ def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
     # self.funcs). A user function named "len" would be unreachable via a
     # call expression either way — same behavior as today, not a new
     # restriction introduced here.
+    if e.func == "print":
+        return _build_print(ctx, e)
     if e.func == "len":
         return _build_len(ctx, e)
     if e.func == "str":
@@ -2235,6 +2401,18 @@ def _build_methodcall(ctx: FuncCtx, e: A.MethodCall) -> Value:
     raise SSABuildError(f"MethodCall on {obj_t!r}: not yet wrapped")
 
 
+def _build_namedexpr(ctx: FuncCtx, e: A.NamedExpr) -> Value:
+    # `target := value` — evaluate value, assign to target (like Assign),
+    # and return the value so the enclosing expression can use it.
+    # Mirrors codegen.py's _gen_named_expr (codegen.py:3582).
+    value = build_expr(ctx, e.value)
+    ty = A.expr_type(e.value)
+    if e.target not in ctx.locals_:
+        ctx.alloc_slot(e.target, ty)
+    _local_write(ctx, e.target, value)
+    return value
+
+
 _EXPR_BUILDERS: dict[type, Callable[[FuncCtx, object], Value]] = {
     A.IntLit: _build_intlit,
     A.FloatLit: _build_floatlit,
@@ -2264,18 +2442,6 @@ def build_expr(ctx: FuncCtx, expr: A.Expr) -> Value:
 
 
 # ---- statement builders -------------------------------------------------------
-
-
-def _build_namedexpr(ctx: FuncCtx, e: A.NamedExpr) -> Value:
-    # `target := value` — evaluate value, assign to target (like Assign),
-    # and return the value so the enclosing expression can use it.
-    # Mirrors codegen.py's _gen_named_expr (codegen.py:3582).
-    value = build_expr(ctx, e.value)
-    ty = A.expr_type(e.value)
-    if e.target not in ctx.locals_:
-        ctx.alloc_slot(e.target, ty)
-    _local_write(ctx, e.target, value)
-    return value
 
 
 def _build_assign(ctx: FuncCtx, s: A.Assign) -> None:
