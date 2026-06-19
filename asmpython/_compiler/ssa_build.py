@@ -1453,6 +1453,38 @@ def _build_sum(ctx: FuncCtx, e: A.Call) -> Value:
     return final_acc
 
 
+_ISINSTANCE_PRIM_MAP = {
+    "int": ("int",),
+    "str": ("str",),
+    "float": ("float",),
+    "bool": ("int",),  # bool is a subtype of int (no separate runtime type)
+    "list": ("list",),
+    "dict": ("dict",),
+    "tuple": ("tuple",),
+    "set": ("set",),
+}
+
+
+def _build_isinstance(ctx: FuncCtx, e: A.Call) -> Value:
+    # isinstance(x, Cls) for a single PRIMITIVE class target only (int,
+    # str, float, bool, list, dict, tuple, set) — mirrors codegen.py:
+    # 13257-13284 exactly, including bool mapping to runtime type "int"
+    # (asmpython doesn't distinguish them at the value level). A tuple-
+    # of-classes target and any instance/class-name target are deferred:
+    # the latter needs _subclass_ids-style runtime class-id dispatch,
+    # which FuncCtx has no tracking for yet (no class_ids field exists
+    # in this IR builder's state).
+    cls_arg = e.args[1]
+    if not isinstance(cls_arg, A.Name) or cls_arg.name not in _ISINSTANCE_PRIM_MAP:
+        raise SSABuildError(
+            "isinstance() with a non-primitive or tuple class target: not yet wrapped"
+        )
+    arg0_t = A.expr_type(e.args[0])
+    build_expr(ctx, e.args[0])  # evaluate for side effects, matching codegen.py
+    match = arg0_t in _ISINSTANCE_PRIM_MAP[cls_arg.name]
+    return ctx.builder().const(1 if match else 0)
+
+
 def _build_hash(ctx: FuncCtx, e: A.Call) -> Value:
     # hash(x) — mirrors codegen.py:12676-12689.
     arg = e.args[0]
@@ -1781,6 +1813,8 @@ def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
         return _build_anyall(ctx, e)
     if e.func == "sum":
         return _build_sum(ctx, e)
+    if e.func == "isinstance":
+        return _build_isinstance(ctx, e)
     if e.func in ("max", "min"):
         return _build_maxmin(ctx, e)
     if e.func == "list":
