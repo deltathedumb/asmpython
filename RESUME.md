@@ -172,14 +172,118 @@ list comprehensions.
 - **Builtin functions**: `int()`, `float()`, `bool()`, `abs()`, `hash()`,
   `max(a,b)`, `min(a,b)`, `list()`, `chr()`, `ord()`, `id()`.
 
-**Next step on resume**: remaining builtin functions not yet wrapped —
-`print()`, `str(x)` for non-int types (already handles int), `range()`
-(only 3-arg form; used in for-range already), `enumerate()`, `zip()`,
-`sorted()`, `reversed()`, `sum()`, `any()`, `all()`, `isinstance()`.
-After those: string slicing (`s[a:b]`), `str.format()` / f-strings,
-list comprehensions, `Global`/`Nonlocal`, classes/instance
+**Next step on resume**: implement the remaining builtin wrappers in
+`ssa_build.py`'s `_build_call`. All implementation details resolved this
+session (2026-06-18); listed below under "Implementation notes for next
+session". After those: string slicing (`s[a:b]`), `str.format()` /
+f-strings, list comprehensions, `Global`/`Nonlocal`, classes/instance
 methods/dunders. Once the remaining surface is substantially covered,
 move to plan-step 2 (register allocator).
+
+### Implementation notes for next session (2026-06-18)
+
+All research done; just write the code in `ssa_build.py`.  Insert the new
+helpers and `_build_call` branches in the same file; no new runtime helpers
+needed.
+
+**`str(float)` / `print(float)`**: Use existing `_runtime_fmt_elem` helper
+(`emit_format_helpers` in codegen.py ~line 7175). Kind=2 (float): `._fe_float:`
+does `movq xmm0, rax` + `_emit_float_to_str` (NaN/inf-aware on Win64) →
+rax = string ptr (static buffer). No new runtime functions needed.
+
+```python
+bits = _float_to_int_bits(ctx, float_val, uid)
+return ctx.builder().raw_asm(Kind.INT, [bits],
+    {k: "mov rbx, 2\ncall _runtime_fmt_elem" for k in _X86_64_KEYS})
+```
+
+For `str(float)`: additionally call `_runtime_str_concat_dup` to heap-copy.
+
+**`str(bool)`**: Real IR blocks + `string_addr`:
+
+```python
+v = build_expr(ctx, arg)
+true_str = b.string_addr("True"); false_str = b.string_addr("False")
+# icmp EQ v, const(0) → condbr → phi of false_str / true_str
+```
+
+**`str(None)`**: `b.string_addr("None")` — interned via `STRING_ADDR` op, no
+raw label needed.
+
+**`print()`**: Type-dispatch at build time on each arg's `A.expr_type()`.
+
+- `str`: RAW_ASM print_str (fmt_str + printf, OS-specific registers)
+- `int` (non-bool, non-None): RAW_ASM print_int (fmt_int + printf)
+- `bool`: icmp+condbr+phi of `string_addr("True"/"False")`, then print_str
+- `None`: `string_addr("None")` then print_str
+- `float`: `_float_to_int_bits` → `mov rbx,2; call _runtime_fmt_elem` →
+  print_str
+- default `end=\n`: win64 `mov rcx,10\ncall putchar`;
+  linux `mov rdi,10\ncall putchar`
+- default `sep=<space>`: win64 `mov rcx,32\ncall putchar`;
+  linux `mov rdi,32\ncall putchar`
+- `sep=`/`end=` kwargs: extract via `getattr(e, "kwargs", None) or []`; string
+  literal override → `b.string_addr(s)` + print_str; `""` → emit nothing.
+
+**`range()` as value**: args in rax/rbx/rcx by RAW_ASM convention:
+
+```python
+# 1-arg: start=const(0), step=const(1); 2-arg: step=const(1)
+return b.raw_asm(Kind.INT, [start, stop, step],
+    {k: "call _runtime_range_list" for k in _X86_64_KEYS})
+```
+
+**`sorted(xs)`** (no key/reverse — defer those with SSABuildError):
+
+```python
+src = build_expr(ctx, e.args[0])
+SENTINELS = "mov rbx, 0x8000000000000000\nmov rcx, 0x7fffffffffffffff\n"
+copy = b.raw_asm(Kind.INT, [src],
+    {k: SENTINELS + "call _runtime_list_slice" for k in _X86_64_KEYS})
+sort_sym = "_runtime_sort_str" if el_kind == "str" else "_runtime_sort_int"
+return b.raw_asm(Kind.INT, [copy],
+    {k: f"call {sort_sym}" for k in _X86_64_KEYS})
+```
+
+**`reversed(xs)`**: Copy + reverse (two chained RAW_ASM sites):
+
+```python
+copy = b.raw_asm(Kind.INT, [src],
+    {k: SENTINELS + "call _runtime_list_slice" for k in _X86_64_KEYS})
+return b.raw_asm(Kind.INT, [copy],
+    {k: "call _runtime_list_reverse" for k in _X86_64_KEYS})
+```
+
+**`sum(xs[, start])`**: Real IR loop (RAW_ASM can't have internal labels).
+PHI nodes for `acc` and `idx`; element ptr = `add(lst_buf, mul(idx, 8))`.
+
+```text
+entry → header_blk (phi acc, phi idx)
+       → [idx<len → body_blk, else → done_blk]
+body_blk: elem=load(ptr,0), acc_next=add(acc,elem),
+          idx_next=add(idx,1) → header_blk
+done_blk: result = acc_phi
+```
+
+PHI incoming: acc←(start_v from entry, acc_next from body),
+idx←(const(0) from entry, idx_next from body).
+
+**`any(xs)` / `all(xs)`**: Same loop shape; early-exit block:
+
+```text
+header → [idx<len → body, else → done(1 for all, 0 for any)]
+body: load elem; truthy? any→hit(1); all→hit(0); else inc idx→header
+hit: const result in merge block via phi
+```
+
+**`isinstance(x, Cls)`**: Primitive targets only (int/str/float/bool/list/
+dict/tuple/set) — resolve statically from `A.expr_type(e.args[0])` using the
+same `PRIM_MAP` as codegen.py's `_gen_isinstance`. Evaluate arg[0] for side
+effects, then return `b.const(0)` or `b.const(1)`. Instance-type targets →
+SSABuildError (FuncCtx has no `class_ids` yet).
+
+**`enumerate()` / `zip()` as standalone values**: Defer — codegen only handles
+these inside for-loop iteration. Raise SSABuildError.
 
 ## Stdlib Status (plan-step 12)
 
