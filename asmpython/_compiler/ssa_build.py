@@ -1280,6 +1280,179 @@ def _build_reversed(ctx: FuncCtx, e: A.Call) -> Value:
     return copy
 
 
+def _build_anyall(ctx: FuncCtx, e: A.Call) -> Value:
+    # any(xs)/all(xs) over a list/tuple — mirrors codegen.py:12326-12357's
+    # register-only scan-with-early-exit (no helper calls inside the loop;
+    # codegen.py reads raw 8-byte slots and tests them for truthiness
+    # directly, so this is int/pointer truthiness only — not Python's full
+    # str/container truthiness rules per element, matching codegen.py
+    # exactly rather than "improving" it).
+    #
+    # Real IR loop with frame-slot loop-carried state, same established
+    # shape as _build_for_list (idx/len/header in frame slots, not phi
+    # nodes — this file's convention for loops, not a RAW_ASM site, since
+    # RAW_ASM text can't safely contain its own internal jump labels).
+    is_all = e.func == "all"
+    header = build_expr(ctx, e.args[0])
+    uid = str(id(e))
+    idx_slot = f"__anyall_idx_{uid}"
+    len_slot = f"__anyall_len_{uid}"
+    buf_slot = f"__anyall_buf_{uid}"
+    ctx.alloc_slot(idx_slot, "int")
+    ctx.alloc_slot(len_slot, "int")
+    ctx.alloc_slot(buf_slot, "int")
+    b = ctx.builder()
+    _local_write(ctx, idx_slot, b.const(0))
+    b = ctx.builder()
+    list_len = b.load(Kind.INT, header, offset=_LIST_LEN_OFF)
+    _local_write(ctx, len_slot, list_len)
+    b = ctx.builder()
+    buf = b.load(Kind.INT, header, offset=_LIST_BUF_OFF)
+    _local_write(ctx, buf_slot, buf)
+
+    top_blk, _ = new_block(ctx.func, f"anyall_top_{uid}")
+    body_blk, _ = new_block(ctx.func, f"anyall_body_{uid}")
+    hit_blk, _ = new_block(ctx.func, f"anyall_hit_{uid}")
+    end_blk, _ = new_block(ctx.func, f"anyall_end_{uid}")
+    merge_blk, _ = new_block(ctx.func, f"anyall_merge_{uid}")
+    entry_blk = ctx.block
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(entry_blk)
+
+    ctx.block = top_blk
+    idx_v = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    len_v = _local_read(ctx, len_slot, "int")
+    b = ctx.builder()
+    done = b.icmp(Predicate.GE, idx_v, len_v)
+    b.condbr(done, end_blk, body_blk)
+    end_blk.preds.append(top_blk)
+    body_blk.preds.append(top_blk)
+
+    ctx.block = body_blk
+    idx_v2 = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    buf_v = _local_read(ctx, buf_slot, "int")
+    b = ctx.builder()
+    byte_off = b.shl(idx_v2, b.const(3))
+    b = ctx.builder()
+    elem_ptr = b.add(buf_v, byte_off)
+    b = ctx.builder()
+    elem = b.load(Kind.INT, elem_ptr, offset=0)
+    b = ctx.builder()
+    zero = b.const(0)
+    # all(): hit (early-exit) on a FALSY element. any(): hit on a TRUTHY one.
+    pred = Predicate.EQ if is_all else Predicate.NE
+    is_hit = b.icmp(pred, elem, zero)
+    cont_blk, _ = new_block(ctx.func, f"anyall_cont_{uid}")
+    b.condbr(is_hit, hit_blk, cont_blk)
+    hit_blk.preds.append(body_blk)
+    cont_blk.preds.append(body_blk)
+
+    ctx.block = cont_blk
+    idx_v3 = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    next_idx = b.add(idx_v3, b.const(1))
+    _local_write(ctx, idx_slot, next_idx)
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(cont_blk)
+
+    # Ran off the end (no hit): all() -> 1 (no falsy found), any() -> 0.
+    ctx.block = end_blk
+    end_result = ctx.builder().const(1 if is_all else 0)
+    ctx.builder().br(merge_blk)
+    merge_blk.preds.append(end_blk)
+
+    # Early exit: all() found falsy -> 0; any() found truthy -> 1.
+    ctx.block = hit_blk
+    hit_result = ctx.builder().const(0 if is_all else 1)
+    ctx.builder().br(merge_blk)
+    merge_blk.preds.append(hit_blk)
+
+    ctx.block = merge_blk
+    result = ctx.builder().phi(Kind.INT)
+    ctx.builder().add_incoming(result, end_result)
+    ctx.builder().add_incoming(result, hit_result)
+    return result
+
+
+def _build_sum(ctx: FuncCtx, e: A.Call) -> Value:
+    # sum(xs[, start]): integer-only accumulation over a list/tuple buffer
+    # (codegen.py:12358-12387) — reads raw 8-byte slots as ints regardless
+    # of static element type, matching codegen.py exactly (no float-sum
+    # special case exists there either). start is added AFTER the loop,
+    # not used as the loop's initial accumulator value - codegen.py does
+    # this same after-the-fact add (codegen.py:12385-12386), not because
+    # it's meaningfully different but because that's what's there.
+    start_v = build_expr(ctx, e.args[1]) if len(e.args) == 2 else None
+    header = build_expr(ctx, e.args[0])
+    uid = str(id(e))
+    idx_slot = f"__sum_idx_{uid}"
+    len_slot = f"__sum_len_{uid}"
+    buf_slot = f"__sum_buf_{uid}"
+    acc_slot = f"__sum_acc_{uid}"
+    ctx.alloc_slot(idx_slot, "int")
+    ctx.alloc_slot(len_slot, "int")
+    ctx.alloc_slot(buf_slot, "int")
+    ctx.alloc_slot(acc_slot, "int")
+    b = ctx.builder()
+    _local_write(ctx, idx_slot, b.const(0))
+    b = ctx.builder()
+    _local_write(ctx, acc_slot, b.const(0))
+    b = ctx.builder()
+    list_len = b.load(Kind.INT, header, offset=_LIST_LEN_OFF)
+    _local_write(ctx, len_slot, list_len)
+    b = ctx.builder()
+    buf = b.load(Kind.INT, header, offset=_LIST_BUF_OFF)
+    _local_write(ctx, buf_slot, buf)
+
+    top_blk, _ = new_block(ctx.func, f"sum_top_{uid}")
+    body_blk, _ = new_block(ctx.func, f"sum_body_{uid}")
+    end_blk, _ = new_block(ctx.func, f"sum_end_{uid}")
+    entry_blk = ctx.block
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(entry_blk)
+
+    ctx.block = top_blk
+    idx_v = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    len_v = _local_read(ctx, len_slot, "int")
+    b = ctx.builder()
+    done = b.icmp(Predicate.GE, idx_v, len_v)
+    b.condbr(done, end_blk, body_blk)
+    end_blk.preds.append(top_blk)
+    body_blk.preds.append(top_blk)
+
+    ctx.block = body_blk
+    idx_v2 = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    buf_v = _local_read(ctx, buf_slot, "int")
+    b = ctx.builder()
+    byte_off = b.shl(idx_v2, b.const(3))
+    b = ctx.builder()
+    elem_ptr = b.add(buf_v, byte_off)
+    b = ctx.builder()
+    elem = b.load(Kind.INT, elem_ptr, offset=0)
+    b = ctx.builder()
+    acc_v = _local_read(ctx, acc_slot, "int")
+    b = ctx.builder()
+    new_acc = b.add(acc_v, elem)
+    _local_write(ctx, acc_slot, new_acc)
+    idx_v3 = _local_read(ctx, idx_slot, "int")
+    b = ctx.builder()
+    next_idx = b.add(idx_v3, b.const(1))
+    _local_write(ctx, idx_slot, next_idx)
+    ctx.builder().br(top_blk)
+    top_blk.preds.append(body_blk)
+
+    ctx.block = end_blk
+    final_acc = _local_read(ctx, acc_slot, "int")
+    if start_v is not None:
+        b = ctx.builder()
+        return b.add(final_acc, start_v)
+    return final_acc
+
+
 def _build_hash(ctx: FuncCtx, e: A.Call) -> Value:
     # hash(x) — mirrors codegen.py:12676-12689.
     arg = e.args[0]
@@ -1604,6 +1777,10 @@ def _build_call(ctx: FuncCtx, e: A.Call) -> Value:
         return _build_sorted(ctx, e)
     if e.func == "reversed":
         return _build_reversed(ctx, e)
+    if e.func in ("any", "all"):
+        return _build_anyall(ctx, e)
+    if e.func == "sum":
+        return _build_sum(ctx, e)
     if e.func in ("max", "min"):
         return _build_maxmin(ctx, e)
     if e.func == "list":
