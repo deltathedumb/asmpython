@@ -396,16 +396,44 @@ feature addition, not a one-line fix. Left for a future session;
 section until it's done, which is intentional (a visible marker, not
 silently skipped).
 
-**Next step on resume**: rebuild the selfhosted binary from the
-current HEAD (all four fixes applied) and confirm
-`build/asmpython-2.0.0-preview-x86_64.exe build/my.py` (or any trivial
-program) no longer crashes — a rebuild was in progress when this was
-last written. If clean, this bug is fully closed and selfhost
-debugging can return to fully-opportunistic/non-blocking status. If
-NOT clean, there is at least a fifth bug — use the same gdb-first
-methodology (conditional breakpoints on `malloc`/`_runtime_dict_lookup_slot`
-for garbage sizes/pointers, narrow via `tests/cases/999_comprehensive_
-codegen.py`-style bisection) rather than re-deriving the approach.
+**Rebuild result (2026-06-19, build/asmpython_v11.exe, all four fixes
+applied)**: real, confirmed progress, but NOT fully closed —
+`test_min2.py` (`print("hello")`) and a no-import single-print file
+both now compile-and-exit-0 with NO crash where they used to crash
+100% of the time. This is a major narrowing. But:
+- `build/my.py` (`import sys; print(sys.version)`) hits a NEW, clean
+  (non-crashing) `asmpython: undefined variable sys` compile error
+  when run from the repo root via the selfhosted binary — the
+  Python-hosted compiler handles the identical file fine from the same
+  cwd, so this looks like a stdlib/module-resolution path difference
+  specific to running AS the selfhosted binary (same family as the
+  historical `__file__`/`Path.parents` issues), not a crash. Not yet
+  investigated further.
+- A separate plain `print("no imports here")` file (zero imports)
+  STILL CRASHES via `asmpython_v11.exe` — gdb shows `strlen(NULL)`
+  inside `_runtime_str_concat`, called from a `str_NNNN` label (an
+  intern'd-string helper). This is the SAME crash signature/shape as
+  the very first repro chased at the start of this session
+  (`Path__name`'s `strlen(NULL)`) - a NULL string pointer reaching a
+  concat operation. Not yet root-caused; this is bug #5 (or #9
+  counting the original numbered history), genuinely still open.
+
+**Next step on resume**: root-cause the `_runtime_str_concat`
+`strlen(NULL)` crash on a zero-import single-`print()` file, using the
+same gdb-first + conditional-breakpoint methodology as bugs #3/#4
+above (this session's `feedback-selfhost-debugging` memory has the
+exact technique notes). Given the crash is in string concatenation
+fed a NULL pointer, look first at whatever string-building code runs
+during the compiler's own startup/codegen-init path for ANY program
+(matching the "crashes on nearly everything" pattern) — likely
+something in `Codegen.__init__`/`generate()`'s own setup, intern-string
+table construction, or similar, rather than anything import-related
+specifically (the crashing repro has zero imports). Don't assume this
+is the same root cause as bugs #3/#4 - the crash signature (NULL string
+ptr into concat) doesn't obviously match either of those (closure
+free-var typing; dict-helper shadow-space corruption), so treat it as
+a fresh investigation rather than a leftover symptom of an already-
+identified bug.
 
 ## Other Notes
 
