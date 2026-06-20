@@ -12213,15 +12213,29 @@ class Codegen:
             _rr = _rr + 1
         assigns = self._assign_arg_regs(_reg_types + list(arg_types))
 
-        stack_offs: list = []
-        reg_loads: list = []  # (reg, is_xmm, off)
+        # Parallel lists, not a list of (reg, is_xmm, off) tuples: sema can't
+        # infer a per-slot tuple shape for a list that starts empty and gets
+        # tuples appended later (only a tuple-element *literal* list gets
+        # that treatment) -- the unpacked `off` in `for reg, is_xmm, off in
+        # reg_loads:` then defaulted to "any", which skipped _gen_fstring_
+        # segment's int->str conversion entirely and fed the raw frame-slot
+        # offset integer straight into _runtime_str_concat as if it were
+        # already a string pointer (strlen() on a small negative integer).
+        # Confirmed via gdb on a selfhost rebuild crashing on every call to
+        # a user function taking >=1 argument.
+        stack_offs: list[int] = []
+        reg_loads_reg: list[str] = []
+        reg_loads_is_xmm: list = []
+        reg_loads_off: list[int] = []
         for pos, off in enumerate(offs, start=start_reg):
             assign = assigns[pos]
             if assign is None:
                 stack_offs.append(off)
             else:
                 reg, is_xmm = assign
-                reg_loads.append((reg, is_xmm, off))
+                reg_loads_reg.append(reg)
+                reg_loads_is_xmm.append(is_xmm)
+                reg_loads_off.append(off)
 
         # Stack-passed arguments first (they use rax as scratch): reserve a
         # 16-aligned area (Win64 also needs 32 bytes of shadow space below the
@@ -12245,7 +12259,10 @@ class Codegen:
         if receiver_slot is not None:
             reg, _is_xmm = assigns[0]  # receiver is always a pointer
             self.emitf(f"mov {reg}, [rbp{receiver_slot:+d}]")
-        for reg, is_xmm, off in reg_loads:
+        for i in range(len(reg_loads_reg)):
+            reg = reg_loads_reg[i]
+            is_xmm = reg_loads_is_xmm[i]
+            off = reg_loads_off[i]
             if is_xmm:
                 self.emitf(f"movsd {reg}, [rbp{off:+d}]")
             else:
