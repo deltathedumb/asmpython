@@ -1398,6 +1398,7 @@ class Codegen:
             for o in expr.operands:
                 self._cl_walk_expr(info, o)
         elif isinstance(expr, A.BoolOp):
+            self._cl_define(info, f"__boolop_{id(expr)}")
             self._cl_walk_expr(info, expr.left)
             self._cl_walk_expr(info, expr.right)
         elif isinstance(expr, A.IfExp):
@@ -11312,6 +11313,39 @@ class Codegen:
 
     def _gen_truthy_test(self, expr, info: FuncInfo, false_target: str) -> None:
         """Evaluate expr; jump to false_target if value is falsy."""
+        if isinstance(expr, A.BoolOp):
+            # `A.expr_type` of a BoolOp falls back to "int" when its operands
+            # have different static types (e.g. `x is None and some_list`),
+            # even though the runtime value can be the list. Don't materialize
+            # that value and re-test it as a generic int/pointer (the same bug
+            # _gen_boolop itself had) — flatten the same-operator chain and
+            # truthy-test each real leaf with its own type instead.
+            operands: list = []
+
+            def flatten_truthy_chain(node) -> None:
+                if isinstance(node, A.BoolOp) and node.op == expr.op:
+                    flatten_truthy_chain(node.left)
+                    flatten_truthy_chain(node.right)
+                else:
+                    operands.append(node)
+
+            flatten_truthy_chain(expr)
+            if expr.op == "and":
+                # All must be truthy; any falsy one fails the whole test.
+                for operand in operands:
+                    self._gen_truthy_test(operand, info, false_target)
+            else:
+                # `or`: short-circuit to "overall truthy" on the first truthy
+                # operand; only fail if every operand is falsy.
+                pass_lbl = self.fresh("boolop_or_pass")
+                for operand in operands[:-1]:
+                    next_lbl = self.fresh("boolop_or_next")
+                    self._gen_truthy_test(operand, info, next_lbl)
+                    self.emitf(f"jmp {pass_lbl}")
+                    self.label(next_lbl)
+                self._gen_truthy_test(operands[-1], info, false_target)
+                self.label(pass_lbl)
+            return
         t = A.expr_type(expr)
         if t == "float":
             self.gen_expr(expr, info)  # xmm0 = value
@@ -11890,19 +11924,93 @@ class Codegen:
             self.emitf("xor rax, 1")
 
     def _gen_boolop(self, e: A.BoolOp, info: FuncInfo) -> None:
-        # Short-circuit, Python value semantics: `a or b` yields a's VALUE
-        # when truthy (else b's), `a and b` yields a when falsy (else b).
-        # No 0/1 normalization — `x or []` / `s or "default"` must produce
-        # the operand pointer, not a boolean. Conditions re-test the result
-        # themselves, so leaving the raw value is safe there too.
+        # Short-circuit, Python value semantics: `a and b and c` yields the
+        # first falsy operand's VALUE, or the last operand if all are truthy
+        # (symmetric for `or`/truthy). No 0/1 normalization — `x or []` must
+        # produce the operand pointer, not a boolean.
+        #
+        # `A.expr_type` of a *nested* BoolOp node falls back to "int" when its
+        # two arms have different static types (e.g. `(d is None) and
+        # defaults`: Compare is "int", defaults is "list") even though the
+        # value it can actually produce at runtime is the list. Trusting that
+        # fallback for the truthiness check would test a list pointer for
+        # nonzero instead of emptiness. So: flatten the run of same-operator
+        # BoolOps into its real leaf operands first and type-check each leaf
+        # individually — every leaf's own expr_type is trustworthy, only the
+        # synthetic intermediate BoolOp nodes' types are not.
+        operands: list = []
+
+        def flatten_boolop_chain(node) -> None:
+            if isinstance(node, A.BoolOp) and node.op == e.op:
+                flatten_boolop_chain(node.left)
+                flatten_boolop_chain(node.right)
+            else:
+                operands.append(node)
+
+        flatten_boolop_chain(e)
+
         end = self.fresh("bool_end")
-        self.gen_expr(e.left, info)
-        self.emitf("test rax, rax")
-        if e.op == "and":
-            self.emitf(f"jz {end}")  # left false -> result is left (0)
-        else:
-            self.emitf(f"jnz {end}")  # left true  -> result is left (nonzero)
-        self.gen_expr(e.right, info)
+        slot = info.locals_[f"__boolop_{id(e)}"]
+        stop_truthy = e.op == "or"  # `or` stops (and returns) on a truthy value
+        for idx, operand in enumerate(operands[:-1]):
+            t = A.expr_type(operand)
+            stop_lbl = self.fresh("boolop_stop")
+            cont_lbl = self.fresh("boolop_cont")
+            if t == "float":
+                self._gen_expr_as_float(operand, info, t)
+                self.emitf(f"movsd [rbp{slot:+d}], xmm0")
+                zero_lbl = self.intern_float(0.0)
+                past_nan = self.fresh("not_nan")
+                # NaN is truthy in Python: route it to whichever label
+                # "truthy" means for this operator before the zero-compare.
+                truthy_lbl = stop_lbl if stop_truthy else cont_lbl
+                self.emitf(
+                    f"movsd xmm1, [{zero_lbl}]",
+                    "ucomisd xmm0, xmm1",
+                    f"jp {truthy_lbl}",
+                    f"je {cont_lbl if stop_truthy else stop_lbl}",
+                )
+                self.label(past_nan)
+                self.emitf(f"jmp {truthy_lbl}")
+            else:
+                self.gen_expr(operand, info)
+                self.emitf(f"mov [rbp{slot:+d}], rax")
+                truthy_lbl = stop_lbl if stop_truthy else cont_lbl
+                falsy_lbl = cont_lbl if stop_truthy else stop_lbl
+                if t.startswith("instance:"):
+                    cls_name = t.split(":", 1)[1]
+                    tested = False
+                    for mname in ("__bool__", "__len__"):
+                        owner = self._resolve_method_owner(cls_name, mname)
+                        if owner is not None:
+                            self.emitf(f"mov {self._arg_reg(0)}, rax")
+                            self.emit_call(self._method_symbol(owner, mname))
+                            self.emitf("test rax, rax", f"jz {falsy_lbl}")
+                            tested = True
+                            break
+                    if not tested:
+                        pass  # always truthy: fall straight through
+                elif t in ("list", "tuple", "dict", "set"):
+                    self.emitf(
+                        "test rax, rax", f"jz {falsy_lbl}",
+                        "mov rax, [rax+8]", "test rax, rax", f"jz {falsy_lbl}",
+                    )
+                elif t == "str":
+                    self.emitf(
+                        "test rax, rax", f"jz {falsy_lbl}",
+                        "movzx rax, byte [rax]", "test rax, rax", f"jz {falsy_lbl}",
+                    )
+                else:
+                    self.emitf("test rax, rax", f"jz {falsy_lbl}")
+                self.emitf(f"jmp {truthy_lbl}")
+            self.label(stop_lbl)
+            if t == "float":
+                self.emitf(f"movsd xmm0, [rbp{slot:+d}]")
+            else:
+                self.emitf(f"mov rax, [rbp{slot:+d}]")
+            self.emitf(f"jmp {end}")
+            self.label(cont_lbl)
+        self.gen_expr(operands[-1], info)
         self.label(end)
 
     def _gen_ifexp(self, e: A.IfExp, info: FuncInfo) -> None:
