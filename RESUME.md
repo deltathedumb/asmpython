@@ -435,30 +435,103 @@ in the fix itself, but something about how the SELFHOSTED BINARY's own
 compilation of this exact branch-and-merge code differs from CPython's.
 Bug #6, genuinely still open.
 
-**Next step on resume**: this is now clearly the recurring pattern
-worth treating as its own category — "a fix is verified correct via
-the Python-hosted compiler, but the selfhosted binary still produces
-different (wrong) behavior for the identical source." That means the
-bug is in how the SELFHOSTED COMPILER ITSELF compiles a construct
-that's common to its own source (closures, `Optional[instance]`
-dunder calls, multi-branch control flow merging via labels — bug #5's
-fix is exactly a fresh `if/else`-via-labels pattern, which is worth
-suspecting first given bug #3 was ALSO about a closure/control-flow
-codegen detail). Concretely: take the now-failing `Lfstr_inst_none`/
-`Lfstr_inst_end` branch-merge pattern (test/jz/call/jmp/label/label)
-and check whether the SELFHOSTED compiler's own codegen for that exact
-shape (conditional branch + merge with phi-like accumulator reload)
-has a bug that the Python-hosted compiler's CPython-run version
-doesn't hit — i.e. look for a self-referential bug where the
-compiler's handling of ITS OWN control-flow-merge pattern (independent
-of strings/dunders specifically) is what's actually broken. Use the
-same gdb-first + conditional-breakpoint methodology as bugs #3-#5 (this
-session's `feedback-selfhost-debugging` memory has the exact technique
-notes) — break on `_runtime_str_concat` with `$rbx == 0` again, but
-this time trace backward from `Lfstr_inst_end` through the SELFHOSTED
-BINARY's actual disassembly of that label (not the Python-hosted
-compiler's version, which is known-correct) to find where the two
-diverge.
+**Bug #6 — ROOT-CAUSED AND FIXED (2026-06-20)**: the actual cause was
+in `asmpython/stdlib/argparse.py`'s `_Arg._convert`: `if self.type ==
+Path: return Path(value)` ran unconditionally, even when `value` is
+the unset-flag sentinel `None` — wrapping `None` in a real (but
+broken) `Path` instance whose own `.p` field is `None`, instead of
+leaving the argument as `None`. `_resolve_tool`'s `override: Path |
+None` parameter (filled from `args.nasm`/`args.gcc`) got this treatment
+on *every* compile, not just ones passing `--nasm`/`--gcc` — explaining
+why the crash was so broad. Fixed (commit `d4c8a6ac`) by returning
+`None` immediately when `_convert`'s input is `None`.
+
+Three more real, distinct bugs were found and fixed clearing the path
+to a full rebuild-and-verify cycle:
+
+- **`_gen_boolop`/`_gen_truthy_test` tested `and`/`or` truthiness via
+  raw `test rax, rax`** (pointer-nonzero), wrong for empty containers
+  (`bool([])` must be `False`, but `[]` is a valid non-NULL pointer)
+  and floats (value lives in xmm0, never checked). This crashed the
+  selfhosted compiler on **every function with ≥1 parameter** —
+  `parser.py`'s `_parse_param` does `defaults and defaults[-1] is not
+  None`, true even when `defaults == []`. Commit `b898694f`. Also fixed
+  a separate bug found while fixing this: `_collect_locals`'s closure
+  free-var type inference doesn't track program.py's same-name-closure
+  dedup rename, so the renamed half of two nested `flatten` functions
+  (introduced by this same fix, in two different methods) silently lost
+  its captured types. Sidestepped by naming the closures differently.
+- **`driver.py`'s `_run()` passed `cmd: list[str]` to
+  `subprocess.run()`**, but asmpython's `subprocess` stub only accepts
+  a single string (it shells out via `os.system`). Fixed by joining
+  `cmd` into a quoted string before the call (commit `d4c8a6ac`, same
+  commit as the argparse fix — found together while verifying the
+  rebuild). A related crash surfaced fixing this: `os.environ["PATH"] =
+  ...` (bare `os.environ`, no `.copy()`) evaluates through the
+  opaque-attribute stub (a NULL pointer) since only `.get()` was
+  special-cased — writing through it as a dict header NULL-deref'd.
+  Fixed properly at the type level (commit `7976fd1b`): sema now types
+  `os.environ` as `"dict"`, and `_gen_attr` lazily allocates a real,
+  persistent empty dict (cached in a new `_environ_dict` .bss slot) the
+  first time it's touched any way other than `.get()`. Note `.get()`
+  (→ real `getenv`) and subscript-assign (→ the lazy dict) are two
+  separate, intentionally-disconnected stores — not a regression, just
+  newly visible now that `os.environ` has a real type.
+- **`_runtime_dict_update` dereferenced its `src` argument
+  unconditionally** — crashed when `src` is the NULL stub from an
+  unresolved attribute (`os.environ.copy()` before the fix above).
+  Guarded with a NULL check (commit `67293344`).
+- **`set.update(some_list)` corrupted memory**: real Python's
+  `set.update()` accepts any iterable, but `codegen.py` always called
+  `_runtime_dict_update`, which assumes its source is dict/set-shaped
+  (reads `order_buf`/`buf` at dict-header offsets — a `LIST_HEADER` has
+  neither, so it read adjacent heap memory as if it were those fields).
+  Crashed compiling `tests/cases/03_fib.py` via
+  `codegen.py`'s own `_collect_frame_bound`'s `acc.update(s.targets)`
+  (`s.targets` is `list[str]`). Fixed (commit `195f8ef4`) by walking
+  list/tuple arguments element-by-element via `_runtime_dict_set`
+  instead of the bulk merge helper when the argument isn't dict/set.
+
+**Verified end to end**: `build/asmpython_v18.exe`/`v19.exe` (rebuilt
+selfhosted binaries with all of the above) compile, assemble, link, and
+run `print("hello")` correctly with **zero crashes** — confirmed via
+PowerShell with `ASMPYTHON_NASM`/`ASMPYTHON_GCC` env vars pointing at
+no-space toolchain paths (`C:\Program Files\NASM\...` has a space,
+which `_resolve_tool`'s `Path.is_file()` doesn't handle — separate,
+un-investigated gap; use space-free copies for selfhost testing). Bug
+\#6, as originally reported, is closed.
+
+**Bug #7 — OPEN, not yet root-caused**: broader coverage
+(`tests/cases/03_fib.py`, and a minimal `def f(n): return n; x = f(5);
+print(x)` repro) still crashes the selfhosted binary — `strlen()`
+called with the literal pointer value `8` (not a real string),
+originating somewhere inside `Codegen.__gen_call`'s plain
+user-function-call path while compiling `f(5)`. Confirmed via
+`--check` that this is purely a codegen-phase bug (sema passes clean).
+Confirmed NOT present via the Python-hosted compiler (runs correctly,
+prints `5`). Investigation got as far as: `_gen_call` is entered
+exactly once (for the one call in the file) and crashes before
+returning; the crash is unrelated to `print()` itself (a breakpoint on
+`_gen_print` never fires). Likely candidates not yet checked: `_emit_
+positional_args`/`_eval_call_operands`/`_load_call_operands` (the
+1-argument register/stack-spill path — note 0-argument calls like
+`def f(): return 5; x = f()` do NOT crash, narrowing it to something
+specific to ≥1 argument), or `_user_symbol`/`self.funcs` dict-membership
+check right before dispatch. Same gdb methodology as bugs #1-#6 applies
+— `break Codegen___gen_call`, then single-step or break on nested
+helper entry points (`Codegen___emit_positional_args`,
+`Codegen___eval_call_operands`, `Codegen___load_call_operands`) to
+narrow which one diverges. Minimal repro saved as a pattern (not a
+checked-in file): `def f(n): return n` + `x = f(5)` + `print(x)` is
+the smallest known trigger.
+
+**Toolchain note for future selfhost testing sessions**: the `build/`
+directory's many generated `.exe` files got externally wiped mid-session
+(likely Windows Defender or similar quarantining freshly-built,
+unsigned executables) — if `build/asmpython_v*.exe` binaries vanish
+unexpectedly, that's the likely cause; just rebuild. Also: avoid output
+filenames containing "update"/"install"/"setup"/"patch" — Windows
+flags them for UAC elevation, which hangs non-interactive runs.
 
 ## Other Notes
 
