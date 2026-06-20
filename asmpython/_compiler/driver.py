@@ -78,15 +78,33 @@ def _resolve_tool(name: str, *, override: Path | None, env_var: str) -> str:
     raise RuntimeError(f"could not find '{name}'. Looked in: " + ", ".join(tried))
 
 
+def _quote_cmd_part(s: str) -> str:
+    """Wrap an argv element in double quotes if it contains a space, for
+    the os.system()-backed subprocess stub (which only takes one command
+    string, not a real argv array)."""
+    has_space = False
+    i = 0
+    n = len(s)
+    while i < n:
+        if s[i] == " ":
+            has_space = True
+            break
+        i = i + 1
+    if not has_space:
+        return s
+    return '"' + s + '"'
+
+
 def _run(cmd: list[str], extra_path_dirs: list[str] | None = None) -> None:
     print("$", " ".join(cmd))
-    env = None
     if extra_path_dirs:
-        env = os.environ.copy()
-        env["PATH"] = (
-            os.pathsep.join(extra_path_dirs) + os.pathsep + env.get("PATH", "")
-        )
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        new_path = os.pathsep.join(extra_path_dirs) + os.pathsep + os.environ.get("PATH", "")
+        os.environ["PATH"] = new_path
+    parts: list[str] = []
+    for c in cmd:
+        parts.append(_quote_cmd_part(c))
+    cmd_str = " ".join(parts)
+    proc = subprocess.run(cmd_str, capture_output=True, text=True)
     if proc.stdout:
         sys.stdout.write(proc.stdout)
     if proc.stderr:

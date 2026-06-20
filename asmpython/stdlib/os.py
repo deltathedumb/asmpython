@@ -69,6 +69,10 @@ BINDINGS = {
     "_closedir": Func(arg_types=("str",), ret_type="int", c_name="closedir"),
     # getcwd(buf, size) -> buf on success, NULL on failure.
     "_getcwd": Func(arg_types=("str", "int"), ret_type="str", c_name="getcwd", c_name_windows="_getcwd"),
+    # putenv("NAME=VALUE") -> 0 on success. Modifies the current process's
+    # environment in place, inherited by any later os.system() child. MSVC's
+    # CRT requires the underscore-prefixed name; POSIX libc uses the bare one.
+    "_putenv": Func(arg_types=("str",), ret_type="int", c_name="putenv", c_name_windows="_putenv"),
 
     # stat(path, buf) -> 0 on success, writing a raw `struct stat` (Linux) /
     # `struct _stat64` (Windows) into the caller-provided buffer. `buf` is a

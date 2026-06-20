@@ -135,6 +135,8 @@ class _Arg:
         self.mutex_group = -1
 
     def _convert(self, value: str) -> Path | str:
+        if value is None:
+            return None
         if self.type == Path:
             return Path(value)
         return value
