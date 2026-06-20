@@ -297,42 +297,115 @@ scope/pace given how much real design nuance this file has accumulated.
 ## Selfhost Debugging (paused, non-blocking — plan-step 11)
 
 Still segfaults compiling real programs via the selfhosted binary — 7
-distinct bugs found and fixed so far (Win64 shadow-space violations,
-`@dataclass` default_factory codegen, shared-AST-node default-arg
-collision, NULL truthiness checks, whole-program import merge ordering,
-class-var inheritance gap, hardcoded-empty `__file__`). Full details in
-git history (`git log -p -- RESUME.md`) or `[[feedback-selfhost-debugging]]`.
-Opportunistic only — never blocks plan steps 1-10.
+distinct bugs found and fixed so far before this stretch (Win64
+shadow-space violations, `@dataclass` default_factory codegen,
+shared-AST-node default-arg collision, NULL truthiness checks,
+whole-program import merge ordering, class-var inheritance gap,
+hardcoded-empty `__file__`). Full details in git history (`git log -p
+-- RESUME.md`) or `[[feedback-selfhost-debugging]]`. Opportunistic
+only — never blocks plan steps 1-10.
 
-**8th bug — narrowed but not yet fixed (2026-06-19)**: `asmpython-2.0.0-
-preview-x86_64.exe build\my.py` (the selfhosted binary compiling a
-trivial `import sys; print(sys.version)` program) crashes with
-`STATUS_ACCESS_VIOLATION`. gdb backtrace: `strlen(NULL)` inside
-`Path__name`, called via `Path___join`/`Path__with_suffix`, originating
-from `driver.py`'s `out_path.resolve(); stem = out_path.with_suffix("")`
-(driver.py:257-258). **Confirmed selfhost-specific, not a real language
-bug**: the *exact same* `pathlib.py` source/pattern —
-```python
-from pathlib import Path
-def main() -> None:
-    out_path = Path("build/test.exe").resolve()
-    stem = out_path.with_suffix("")
-    print(stem.p)
-main()
-```
-— compiles and runs correctly via the Python-hosted compiler (no
-crash, correct resolved path printed). So the selfhosted binary's own
-codegen is doing something wrong with this exact call pattern that the
-Python-hosted compiler doesn't — likely in the same family as the
-earlier constructor/field-init bugs (#2/#3/#6), since `Path.__init__`
-always sets `self.p` and there's no legitimate code path to a NULL `p`
-in the Python source itself. Next step: save the snippet above to a
-file, gdb into the selfhosted binary's own compilation of it (smaller
-repro than the full driver.py path) and trace where `self.p` goes
-missing — compare the selfhosted asm's `Path.__init__`/`resolve`/
-`with_suffix` against the Python-hosted compiler's asm for the same
-functions to spot the divergence directly, rather than re-deriving
-from scratch.
+**8th bug — FOUR real bugs found and fixed (2026-06-19)**: User
+correctly pushed back on deferring this — a real codegen divergence
+between the selfhosted binary and the Python-hosted compiler means
+OTHER programs could hit the same bugs, not just the compiler's own
+bootstrap path. This turned into a much deeper investigation than
+expected: every fix attempt revealed the binary still crashed, but
+with progressively narrower repros, eventually finding four distinct,
+independently-real bugs. All four are fixed and committed; the
+selfhosted binary rebuild with all four applied was the last step in
+progress.
+
+1. **`set |= other` corrupted the target pointer** (commit `7f5c6329`).
+   `codegen.py`'s `AugAssign` handler only special-cased `ty == "dict"
+   and stmt.op == "|"` for `_runtime_dict_update`. A set-typed target
+   fell through to the generic int-arithmetic fallback, doing `or rax,
+   rbx` on two ~40-byte dict/set header *pointers*. Fixed by widening
+   to `ty in ("dict", "set")`. Real bug, triggered by `program.py:544`'s
+   `targets |= sub`, but turned out NOT to be the actual crash cause
+   (see #3) — just the first thing found while chasing it.
+2. **`set <=`/`>=`/`<`/`>` fell back to raw pointer comparison**
+   (commit `baab23bc`). No special case existed for set subset/
+   superset comparisons in `_gen_compare`; they fell through to a
+   plain `cmp rax, rbx` on the two set header pointers — a wrong-
+   answer bug (not a crash) found while re-checking #1's trigger site.
+   Added `_runtime_set_subset` and wired in all four operators.
+   Hand-validated against real CPython semantics across a 3-set
+   fixture (proper vs non-proper subset/superset, all 7 combinations
+   correct).
+3. **Closure free-variable type inference defaulted to "int" for
+   unannotated container literals — the ACTUAL root cause** (commit
+   `b7042fb0`, found by a dedicated investigation subagent after #1+#2
+   turned out insufficient). `sema.py`'s `_prescan_fv_types` only
+   inferred a captured free variable's type from an explicit `x: T =
+   ...` annotation. `codegen.py:611`'s `GP_REGS = ("rax", "rbx", ...)`
+   — an unannotated tuple literal captured by the peephole pass's
+   nested `mov_dest_and_src` closure — fell through to a hardcoded
+   `("int", None, None)` default. This made `dest not in GP_REGS` (a
+   tuple-membership test) compile as a *dict*-membership test
+   (`_gen_dict_in`/`_runtime_dict_contains`) instead of a list/tuple
+   linear scan, misreading a 24-byte `LIST_HEADER` as a 40-byte
+   `DICT_HEADER`. Confirmed via gdb: the misread header showed
+   `cap=len=26`, exactly `GP_REGS`' element count. This explains the
+   "crashes on almost ANY input" breadth precisely — the peephole pass
+   runs on every compile. Fixed by adding a literal-shape fallback
+   (tuple/list/dict/set/str/int/float) for unannotated locals.
+4. **`_runtime_dict_items` push/pop landed `cap` in malloc's shadow
+   space** (commit `8e8e74ec`, the actual remaining-crash culprit
+   after #3 — found via a conditional gdb breakpoint on `malloc` with
+   `$rcx > 0x100000`, which caught a corrupted size argument). Unlike
+   every other `_runtime_dict_*` helper (which all use frame slots
+   around calls), this one parked `cap` via `push rbx; sub rsp, 8`
+   around the list-header malloc call — placing the saved value only 8
+   bytes below the call's `rsp`, squarely inside the 32-byte Win64
+   shadow space `malloc`'s own prologue is allowed to overwrite.
+   Fixed by parking `cap` in a frame slot (`[rbp-72]`, grew the frame
+   96→112 bytes) instead, matching every sibling helper's style.
+
+**Verified end to end**: the original crash repro (`s = "hello";
+print(s.upper()); d = {"a": 1, "b": 2}; print(d.items())`, the
+smallest case found that triggered bug #4) now runs to completion with
+no crash via the Python-hosted compiler. Full 454-test suite green
+throughout all four fixes (the one new test, see below, fails on a
+fifth, separate, NON-crashing bug — not a regression).
+
+A side effect of this investigation: while validating, wrote
+`tests/cases/999_comprehensive_codegen.py` (commit `cead00bb`) — a
+single large test file whose `# expect:` block is captured by actually
+running the file under real CPython, not hand-transcribed (the whole
+point: a hand-written expected-output block can silently encode the
+same wrong answer a human wouldn't catch either, exactly like bug #2's
+wrong-but-plausible boolean). This test is what surfaced bug #4's
+crash in the first place, and remains the easiest way to broadly
+re-check codegen correctness going forward.
+
+**Known remaining gap, NOT a crash, scoped out of this session**:
+`print(d.items())` / `sorted(d.items())` print raw pointer integers
+instead of `[('a', 1), ('b', 2), ...]`. Root cause identified:
+`_runtime_list_repr`'s element-kind encoding (`codegen.py`'s
+`_composite_repr_kind`/`_value_repr_kind`, `_REPR_KIND = {"str": 1,
+"float": 2}`) has no kind code for `"tuple"` elements at all — only
+int/str/float/list/dict. `_list_repr_kind` correctly reads
+`list_el_type == "tuple"` from sema's `dict.items()` annotation, but
+`_value_repr_kind` doesn't recognize `"tuple"` and silently defaults to
+`0` (int). Fixing this properly needs `_runtime_list_repr`/
+`_runtime_fmt_elem` to gain an actual tuple-element repr path (format
+each slot per the dict's value type, not just print raw bits) — a real
+feature addition, not a one-line fix. Left for a future session;
+`999_comprehensive_codegen.py` will keep failing on this specific
+section until it's done, which is intentional (a visible marker, not
+silently skipped).
+
+**Next step on resume**: rebuild the selfhosted binary from the
+current HEAD (all four fixes applied) and confirm
+`build/asmpython-2.0.0-preview-x86_64.exe build/my.py` (or any trivial
+program) no longer crashes — a rebuild was in progress when this was
+last written. If clean, this bug is fully closed and selfhost
+debugging can return to fully-opportunistic/non-blocking status. If
+NOT clean, there is at least a fifth bug — use the same gdb-first
+methodology (conditional breakpoints on `malloc`/`_runtime_dict_lookup_slot`
+for garbage sizes/pointers, narrow via `tests/cases/999_comprehensive_
+codegen.py`-style bisection) rather than re-deriving the approach.
 
 ## Other Notes
 
