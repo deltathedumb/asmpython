@@ -1172,6 +1172,35 @@ class SemaAnalyzer:
         annotation-based inference only (no full type analysis), allowing this
         to run before the main analysis loops regardless of order.
         """
+        def literal_shape_type(value: "A.Expr") -> tuple[str, object, object] | None:
+            """Cheap, annotation-free type guess for an unannotated local's
+            RHS, used only as a fallback when no `x: T = ...` annotation
+            exists. Literal-shape only (no full expression evaluation) -
+            covers exactly the case that bit a real closure free-variable
+            (codegen.py's `GP_REGS = (...)`, an unannotated tuple literal):
+            without this, scan_closurebinds' fallback below silently typed
+            it "int", which made a `dest not in GP_REGS` tuple-membership
+            test downstream get compiled as a dict-membership test instead
+            of a list/tuple linear scan - a real, very-broad-impact bug
+            (the peephole pass containing this closure runs on every
+            compile), not just a theoretical gap.
+            """
+            if isinstance(value, A.TupleLit):
+                return ("tuple", None, None)
+            if isinstance(value, A.ListLit):
+                return ("list", value.el_type, None)
+            if isinstance(value, A.DictLit):
+                return ("dict", None, value.value_type)
+            if isinstance(value, A.SetLit):
+                return ("set", None, None)
+            if isinstance(value, A.StrLit):
+                return ("str", None, None)
+            if isinstance(value, A.IntLit):
+                return ("int", None, None)
+            if isinstance(value, A.FloatLit):
+                return ("float", None, None)
+            return None
+
         def collect_annot_locals(stmts: list, acc: dict) -> None:
             for s in stmts:
                 if isinstance(s, A.Assign):
@@ -1181,6 +1210,10 @@ class SemaAnalyzer:
                         if resolved is not None and isinstance(s.target, str):
                             ty, el, val, _tup, _elval = resolved
                             acc[s.target] = (ty, el, val)
+                    elif isinstance(s.target, str) and s.target not in acc:
+                        guessed = literal_shape_type(s.value)
+                        if guessed is not None:
+                            acc[s.target] = guessed
                 elif isinstance(s, A.If):
                     collect_annot_locals(s.then, acc)
                     if s.orelse:
