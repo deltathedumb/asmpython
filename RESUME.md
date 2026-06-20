@@ -501,29 +501,71 @@ which `_resolve_tool`'s `Path.is_file()` doesn't handle — separate,
 un-investigated gap; use space-free copies for selfhost testing). Bug
 \#6, as originally reported, is closed.
 
-**Bug #7 — OPEN, not yet root-caused**: broader coverage
-(`tests/cases/03_fib.py`, and a minimal `def f(n): return n; x = f(5);
-print(x)` repro) still crashes the selfhosted binary — `strlen()`
-called with the literal pointer value `8` (not a real string),
-originating somewhere inside `Codegen.__gen_call`'s plain
-user-function-call path while compiling `f(5)`. Confirmed via
-`--check` that this is purely a codegen-phase bug (sema passes clean).
-Confirmed NOT present via the Python-hosted compiler (runs correctly,
-prints `5`). Investigation got as far as: `_gen_call` is entered
-exactly once (for the one call in the file) and crashes before
-returning; the crash is unrelated to `print()` itself (a breakpoint on
-`_gen_print` never fires). Likely candidates not yet checked: `_emit_
-positional_args`/`_eval_call_operands`/`_load_call_operands` (the
-1-argument register/stack-spill path — note 0-argument calls like
-`def f(): return 5; x = f()` do NOT crash, narrowing it to something
-specific to ≥1 argument), or `_user_symbol`/`self.funcs` dict-membership
-check right before dispatch. Same gdb methodology as bugs #1-#6 applies
-— `break Codegen___gen_call`, then single-step or break on nested
-helper entry points (`Codegen___emit_positional_args`,
-`Codegen___eval_call_operands`, `Codegen___load_call_operands`) to
-narrow which one diverges. Minimal repro saved as a pattern (not a
-checked-in file): `def f(n): return n` + `x = f(5)` + `print(x)` is
-the smallest known trigger.
+**Bug #7 — ROOT-CAUSED AND FIXED (2026-06-20, commit `a6c9a34b`)**:
+crashed the selfhosted binary on every call to a user function taking
+≥1 argument (`strlen()` called with a literal small integer like `8`,
+not a real string pointer). Found by byte-diffing `_load_call_
+operands`'s compiled output between the Python-hosted and selfhosted
+compilers (identical — ruled out a codegen-divergence bug) and then
+verifying every runtime VALUE through gdb (`offs`, `MS_ARG_REGS`, the
+function's own code — all correct, ruling out data corruption). The
+actual bug: `reg_loads: list = []` then `reg_loads.append((reg,
+is_xmm, off))` — sema has no mechanism to infer a tuple-shape for a
+list that starts empty and gets tuples appended later (only a list
+*literal* whose elements are tuple literals gets that treatment).
+`for reg, is_xmm, off in reg_loads:` therefore bound `off` to `"any"`
+instead of `"int"`, and `_gen_fstring_segment`'s int→str conversion
+only triggers for an exact `"int"`/`"float"`/`"instance:*"` match —
+for `"any"` it silently no-ops, leaving the raw frame-slot-offset
+integer to be fed directly into `_runtime_str_concat` as if already a
+string. Fixed by replacing the tuple-list with three parallel,
+homogeneously-typed lists (`reg_loads_reg: list[str]`, `reg_loads_
+is_xmm: list`, `reg_loads_off: list[int]`), which sema types correctly.
+
+**Bug #8 — ROOT-CAUSED AND FIXED (2026-06-20, commit `a6ab0abb`)**:
+surfaced immediately after bug #7's fix cleared the way to it — every
+function with more than a trivial one-line body crashed inside
+`_runtime_dict_lookup_slot` (called from `_runtime_dict_contains` /
+`_collect_locals`). Same bug *class* as bug #7 (an opaque/`"any"`-
+typed value treated as a different runtime shape than it actually is):
+`_collect_locals` built `nonlocal_set: set = set(getattr(f,
+"nonlocal_vars", []))`. A `getattr()` call result is opaque (`"any"`)
+to sema, and `_gen_set_call`'s `if at in ("set", "dict", "any"): hand
+it straight back` branch assumes any `"any"`-typed `set(...)` argument
+is *already* dict-backed — but `nonlocal_vars`'s actual runtime value
+is a `LIST_HEADER` (24 bytes: cap/len/buf), not a dict (40 bytes,
+different field layout). Iterating/membership-testing it as a dict
+read whatever memory happened to follow the list's allocation as if
+it were `buf`/`order_buf` fields. Fixed by using a plain `list`
+instead of `set()` — `nonlocal_vars` is already deduplicated by the
+pass that produces it, so list semantics work identically without
+needing the broken `set()`-constructor path at all.
+
+**Verified end to end (commit-by-commit, all three fixes applied,
+`build/asmpython_v22.exe`)**: `print("hello")` (bug #6), a 2-argument
+function call `add(2, 3) -> 5` (bugs #7 + #8), both compile, link, and
+run correctly with the selfhosted binary — zero crashes. Full 454-test
+suite green throughout.
+
+**Bug #9 — OPEN, NOT a crash (compile-time IndexError)**: broader
+coverage via `tests/cases/03_fib.py` (recursion + `for i in
+range(10):` + `print(fib(i))`) still fails to compile — `asmpython:
+list index out of range`, traced to the same `Codegen.__cl_walk`
+label/pattern as bugs #7/#8's investigation (`_runtime_dict_get_
+default(stmt, "targets", 0)` → `Codegen___target_names(...)` → a
+string-bounds-checked index read with an `"any"`-shaped fallback,
+matching `ttypes[i] if i < len(ttypes) else "any"` at
+`codegen.py:1964`-ish). NOT yet conclusively root-caused: `03_fib.py`
+has no tuple-unpacking `for` loop in its own source, so the trigger is
+either the compiler processing some OTHER multi-target binding while
+compiling this file's `for i in range(10):` / recursive call /
+`print(fib(i))`, or a different occurrence of the same source pattern
+than the one chased for bugs #7/#8. Same methodology applies: `break
+Codegen___target_names` or `break Codegen___cl_walk`, inspect `s`
+(the AST node dict) at the crash, and check whether `s.targets`
+really is non-empty for some statement in this file's compile path —
+if so, find which one and why its `target_types`/`ttypes` shape isn't
+what `_collect_locals`-style code expects.
 
 **Toolchain note for future selfhost testing sessions**: the `build/`
 directory's many generated `.exe` files got externally wiped mid-session
