@@ -270,15 +270,16 @@ h2:hover .anc, h3:hover .anc { opacity: 1; }
     <li><a href="#stdlib-datetime">datetime / time</a></li>
     <li><a href="#stdlib-collections">collections / itertools</a></li>
     <li><a href="#stdlib-misc">string / textwrap / others</a></li>
-
-    <li class="sep">asmlib</li>
-    <li><a href="#asmlib-hardware">hardware</a></li>
-    <li><a href="#asmlib-network">network</a></li>
-    <li><a href="#asmlib-gui">gui</a></li>
+    <li><a href="#stdlib-hardware">hardware</a></li>
+    <li><a href="#stdlib-network">network</a></li>
+    <li><a href="#stdlib-gui">gui</a></li>
+    <li><a href="#stdlib-framebuffer">framebuffer</a></li>
+    <li><a href="#stdlib-audio">audio</a></li>
 
     <li class="sep">Assembly</li>
     <li><a href="#inline-asm">Inline assembly</a></li>
     <li><a href="#ffi">Inline FFI</a></li>
+    <li><a href="#import-binary">Dynamic loading (import_binary)</a></li>
 
     <li class="sep">Targets</li>
     <li><a href="#target-windows">Windows (PE64)</a></li>
@@ -990,12 +991,12 @@ lines = textwrap.wrap(<span class="str">"long text"</span>, width=<span class="n
   <p>Also available: <code>keyword</code>, <code>numbers</code>, <code>abc</code>, <code>types</code>, <code>typing</code>, <code>configparser</code>, <code>pprint</code>, <code>traceback</code>, <code>warnings</code>, <code>inspect</code>, <code>gc</code>, <code>atexit</code>, <code>signal</code>, <code>getpass</code>, <code>locale</code>, <code>threading</code>, <code>queue</code>, <code>weakref</code>.</p>
 </section>
 
-<!-- ═══════════════════ ASMLIB ═══════════════════════════════ -->
+<!-- ═══════════════════ HARDWARE / NETWORK / GUI / AUDIO ══════ -->
 
-<section id="asmlib-hardware">
-  <h2>asmlib.hardware <a class="anc" href="#asmlib-hardware">#</a></h2>
+<section id="stdlib-hardware">
+  <h2>hardware <a class="anc" href="#stdlib-hardware">#</a></h2>
   <p>Bare-metal and hardware access. Inline NASM on freestanding; stub-returns on hosted targets.</p>
-  <pre><div class="lang">python</div><code><span class="kw2">from</span> asmlib <span class="kw2">import</span> hardware
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> hardware
 
 <span class="cmt"># Port I/O</span>
 hardware.out_byte(<span class="num">0x60</span>, <span class="num">0xAE</span>)
@@ -1019,9 +1020,9 @@ hardware.console_write(<span class="str">"Hello!"</span>)
 hardware.console_set_color(<span class="num">0x0F</span>)</code></pre>
 </section>
 
-<section id="asmlib-network">
-  <h2>asmlib.network <a class="anc" href="#asmlib-network">#</a></h2>
-  <pre><div class="lang">python</div><code><span class="kw2">from</span> asmlib <span class="kw2">import</span> network
+<section id="stdlib-network">
+  <h2>network <a class="anc" href="#stdlib-network">#</a></h2>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> network
 
 fd = network.socket(network.AF_INET, network.SOCK_STREAM)
 network.bind(fd, <span class="str">"127.0.0.1"</span>, <span class="num">8080</span>)
@@ -1033,9 +1034,9 @@ network.close(client)</code></pre>
   <p>BSD socket API: <code>socket</code>, <code>bind</code>, <code>connect</code>, <code>listen</code>, <code>accept</code>, <code>close</code>, <code>send</code>, <code>recv</code>, <code>send_all</code>, byte-order helpers, address helpers, constants (<code>AF_INET</code>, <code>SOCK_STREAM</code>, etc.).</p>
 </section>
 
-<section id="asmlib-gui">
-  <h2>asmlib.gui <a class="anc" href="#asmlib-gui">#</a></h2>
-  <pre><div class="lang">python</div><code><span class="kw2">from</span> asmlib <span class="kw2">import</span> gui
+<section id="stdlib-gui">
+  <h2>gui <a class="anc" href="#stdlib-gui">#</a></h2>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> gui
 
 gui.init()
 win = gui.create_window(<span class="str">"Demo"</span>, <span class="num">800</span>, <span class="num">600</span>)
@@ -1049,7 +1050,36 @@ gui.set_window_icon(win, gui.load_bmp(<span class="str">"icon.bmp"</span>))
     gui.present(ren)
 
 gui.quit()</code></pre>
-  <p>SDL2 bindings: window/renderer management, drawing (<code>draw_line</code>, <code>fill_rect</code>, <code>draw_rect</code>), event pump, timing. Icon loading with <code>load_bmp</code>/<code>set_window_icon</code>/<code>free_surface</code>.</p>
+  <p>SDL2 bindings: window/renderer management, drawing (<code>draw_line</code>, <code>fill_rect</code>, <code>draw_rect</code>), event pump, timing. Icon loading with <code>load_bmp</code>/<code>set_window_icon</code>/<code>free_surface</code>. Part of Lumen, asmpython's graphics/audio/input ecosystem (<code>gui</code> + <code>framebuffer</code> + <code>audio</code>).</p>
+</section>
+
+<section id="stdlib-framebuffer">
+  <h2>framebuffer <a class="anc" href="#stdlib-framebuffer">#</a></h2>
+  <p>Software pixel rendering for bare-metal and UEFI targets — writes directly to a linear memory-mapped framebuffer via <code>hardware.mmio_write32</code>/<code>mmio_write8</code>. No OS, no SDL2.</p>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> framebuffer
+
+<span class="cmt"># addr, width, height, and pitch come from the GOP FrameBufferBase,</span>
+<span class="cmt"># HorizontalResolution, VerticalResolution, and PixelsPerScanLine fields.</span>
+fb = framebuffer.Framebuffer(<span class="num">0x80000000</span>, <span class="num">1920</span>, <span class="num">1080</span>, <span class="num">7680</span>, <span class="num">32</span>)
+fb.clear(framebuffer.BLACK)
+fb.fill_rect(<span class="num">100</span>, <span class="num">100</span>, <span class="num">400</span>, <span class="num">300</span>, framebuffer.BLUE)
+fb.draw_text(<span class="num">10</span>, <span class="num">10</span>, <span class="str">"Hello"</span>, framebuffer.WHITE)</code></pre>
+  <p>Color format for 32&nbsp;bpp is <code>0x00RRGGBB</code> (stored little-endian as BGRX, matching the typical UEFI <code>PixelBlueGreenRedReserved</code> format). Use <code>bgr(r, g, b)</code> to pack colors for the wire format. Constants: <code>BLACK</code>, <code>WHITE</code>, <code>RED</code>, <code>GREEN</code>, <code>BLUE</code>. Bundled bitmap font for <code>draw_text</code>.</p>
+</section>
+
+<section id="stdlib-audio">
+  <h2>audio <a class="anc" href="#stdlib-audio">#</a></h2>
+  <p>SDL2_mixer sound playback for hosted targets — WAV chunk and streaming music playback. Requires SDL2_mixer alongside SDL2 (<code>apt install libsdl2-mixer-dev</code> on Linux; ship <code>SDL2_mixer.dll</code> next to the executable on Windows).</p>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> audio
+
+audio.init()
+snd = audio.Sound(<span class="str">"shoot.wav"</span>)
+mus = audio.Music(<span class="str">"theme.ogg"</span>)
+mus.play()           <span class="cmt"># loops forever by default</span>
+<span class="cmt"># in your game loop:</span>
+snd.play()            <span class="cmt"># play on any free channel</span>
+audio.quit()</code></pre>
+  <p><code>Sound</code>: <code>play</code>/<code>play_on</code>/<code>stop</code>/<code>volume</code>/<code>playing</code>/<code>free</code>. <code>Music</code>: <code>play</code>/<code>stop</code>/<code>volume</code>/<code>playing</code>/<code>free</code>. Part of Lumen, asmpython's graphics/audio/input ecosystem.</p>
 </section>
 
 <!-- ═══════════════════ ASSEMBLY ═════════════════════════════ -->
@@ -1082,6 +1112,24 @@ link(<span class="str">"kernel32"</span>)
   <p><code>@extern</code> declares a foreign function; the compiler emits an <code>extern</code> NASM directive and routes calls through the platform ABI. <code>include()</code> and <code>link()</code> add <code>#include</code> and <code>-l</code> flags to the compile step.</p>
 </section>
 
+<section id="import-binary">
+  <h2>Dynamic loading (import_binary) <a class="anc" href="#import-binary">#</a></h2>
+  <p>Loads a shared library at <em>runtime</em> (a real <code>LoadLibraryW</code>/<code>dlopen</code> handle), as opposed to <code>@extern</code>'s compile-time/link-time binding. Functions are declared with <code>@&lt;handle&gt;.imported</code> and resolved via <code>GetProcAddress</code>/<code>dlsym</code> the first time they're called.</p>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> sys
+<span class="kw2">from</span> asmpython <span class="kw2">import</span> import_binary
+
+<span class="kw">if</span> sys.platform == <span class="str">"win32"</span>:
+    libc = import_binary(<span class="str">"msvcrt.dll"</span>)
+<span class="kw">else</span>:
+    libc = import_binary(<span class="str">"libc.so.6"</span>)
+
+<span class="kw">@libc.imported</span>
+<span class="kw">def</span> <span class="fn">toupper</span>(x: <span class="ty">int</span>) -&gt; <span class="ty">int</span>: ...
+
+<span class="fn">print</span>(libc.toupper(<span class="num">97</span>))   <span class="cmt"># 65</span></code></pre>
+  <p>Only scalar (int/float/str-as-pointer) parameters are supported — the foreign function's real signature isn't introspectable, so the stub's own annotations are the contract. Useful when the library to load isn't known until runtime (plugins, optional dependencies, platform-specific DLLs picked by name).</p>
+</section>
+
 <!-- ═══════════════════ TARGETS ══════════════════════════════ -->
 
 <section id="target-windows">
@@ -1090,7 +1138,7 @@ link(<span class="str">"kernel32"</span>)
   <pre><div class="lang">shell</div><code>python -m asmpython prog.py               <span class="cmt"># auto-detects Windows</span>
 python -m asmpython prog.py --target windows -o prog.exe
 python -m asmpython prog.py --icon app.png  <span class="cmt"># embed PNG icon</span></code></pre>
-  <p>If networking is used (<code>asmlib.network</code>) the compiler automatically links <code>-lws2_32</code>.</p>
+  <p>If networking is used (<code>network</code>) the compiler automatically links <code>-lws2_32</code>.</p>
 </section>
 
 <section id="target-linux">
