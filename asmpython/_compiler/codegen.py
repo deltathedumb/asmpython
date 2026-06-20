@@ -1691,6 +1691,11 @@ class Codegen:
                 if expr.method == "update" and obj_t in ("dict", "set", "any"):
                     # dict/set.update(src): park src across the receiver's eval.
                     self._cl_define(info, f"__dictupd_{id(expr)}")
+                    if obj_t == "set" and expr.args and A.expr_type(expr.args[0]) in ("list", "tuple"):
+                        # set.update(some_list): per-element add loop needs its
+                        # own index and set-header scratch slots too.
+                        self._cl_define(info, f"__dictupd_idx_{id(expr)}")
+                        self._cl_define(info, f"__dictupd_set_{id(expr)}")
                 if expr.method == "index" and obj_t in ("list", "tuple", "any"):
                     # list.index(v): park the needle across the receiver eval.
                     self._cl_define(info, f"__listidx_{id(expr)}")
@@ -10713,8 +10718,55 @@ class Codegen:
             # Sets are dicts keyed by their members (dummy value 1). Mutators
             # map onto the dict runtime.
             if e.method == "update":
-                # s.update(other): sets are dicts keyed by members, so this is
-                # exactly the dict merge.
+                arg_t = A.expr_type(e.args[0])
+                if arg_t in ("list", "tuple"):
+                    # s.update(some_list): real Python's set.update() accepts
+                    # any iterable, not just another set/dict -- but
+                    # _runtime_dict_update assumes its source is dict-shaped
+                    # (it reads order_buf/buf at dict offsets). Feeding it a
+                    # LIST_HEADER (different layout, no order_buf at all)
+                    # reads garbage/freed memory past the list's allocation
+                    # and corrupts the program -- confirmed via gdb on a
+                    # selfhost rebuild crashing inside _collect_frame_bound's
+                    # `acc.update(s.targets)` (s.targets is a list[str]).
+                    # Walk the list and .add() each element instead.
+                    src_slot = info.locals_[f"__dictupd_{id(e)}"]
+                    idx_slot = info.locals_[f"__dictupd_idx_{id(e)}"]
+                    set_slot = info.locals_[f"__dictupd_set_{id(e)}"]
+                    self.gen_expr(e.args[0], info)
+                    self.emitf(f"mov [rbp{src_slot:+d}], rax")
+                    self.gen_expr(e.obj, info)
+                    self.emitf(f"mov [rbp{set_slot:+d}], rax")
+                    self.emitf(f"mov qword [rbp{idx_slot:+d}], 0")
+                    loop = self.fresh("setupd_loop")
+                    done = self.fresh("setupd_done")
+                    el_t = getattr(e.args[0], "list_el_type", None) or "any"
+                    self.label(loop)
+                    self.emitf(
+                        f"mov rax, [rbp{src_slot:+d}]",
+                        f"mov rbx, [rax+{self.LIST_LEN_OFF}]",
+                        f"mov rcx, [rbp{idx_slot:+d}]",
+                        "cmp rcx, rbx",
+                        f"jge {done}",
+                        f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+                        "mov rax, [rdx+rcx*8]",
+                    )
+                    if el_t == "int":
+                        self._emit_int_to_str()
+                        self.emitf("call _runtime_str_concat_dup")
+                    self.emitf(
+                        "mov rbx, rax",
+                        "mov rcx, 1",
+                        f"mov rax, [rbp{set_slot:+d}]",
+                        "call _runtime_dict_set",
+                        f"inc qword [rbp{idx_slot:+d}]",
+                        f"jmp {loop}",
+                    )
+                    self.label(done)
+                    self.emitf(f"mov rax, [rbp{set_slot:+d}]")
+                    return
+                # s.update(other_set_or_dict): sets are dicts keyed by
+                # members, so this is exactly the dict merge.
                 key_slot = info.locals_[f"__dictupd_{id(e)}"]
                 self.gen_expr(e.args[0], info)
                 self.emitf(f"mov [rbp{key_slot:+d}], rax")
