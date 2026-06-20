@@ -98,22 +98,21 @@ def _quote_cmd_part(s: str) -> str:
 def _run(cmd: list[str], extra_path_dirs: list[str] | None = None) -> None:
     print("$", " ".join(cmd))
     if extra_path_dirs:
-        # `os.environ.copy()` (NOT bare `os.environ`) as the dict base is
-        # required here: asmpython's codegen only special-cases
-        # `os.environ.get(...)`, so a bare `os.environ` subscript-assign
-        # evaluates the unresolved-attribute fallback (a stub 0 pointer)
-        # and writes through it -- a real NULL-deref crash, confirmed via
-        # gdb on a selfhost rebuild. `.copy()` resolves through the
-        # generic unknown-method fallback differently and yields a real,
-        # freshly-allocated (if logically empty) dict, safe to mutate.
-        # asmpython's subprocess stub has no real env parameter (it's an
-        # os.system() wrapper), so this PATH override only takes effect
-        # under the CPython-hosted compiler; that's an existing gap, not
-        # something this fix introduces or needs to solve.
-        env = os.environ.copy()
-        env["PATH"] = (
-            os.pathsep.join(extra_path_dirs) + os.pathsep + env.get("PATH", "")
-        )
+        # Sema can't give `os.environ.copy()`'s result a real "dict" type
+        # (os.environ is an opaque external attribute; only `.get()` is
+        # special-cased), so it infers "any" -- codegen then picks the
+        # generic LIST subscript-assign path for `env["PATH"] = ...`
+        # (direct-index-into-buffer semantics) even though the runtime
+        # value is dict-shaped, corrupting the stack. Confirmed via gdb
+        # on a selfhost rebuild. Mutate the real process environment
+        # directly instead of building a wrapper dict: under the
+        # CPython-hosted compiler this changes os.environ in place
+        # (inherited by subprocess.run's default env=None passthrough);
+        # asmpython's subprocess stub is os.system()-backed and has no
+        # env parameter regardless, so this is a no-op there either way,
+        # same as before this PATH-prepend feature existed.
+        new_path = os.pathsep.join(extra_path_dirs) + os.pathsep + os.environ.get("PATH", "")
+        os.environ["PATH"] = new_path
     parts: list[str] = []
     for c in cmd:
         parts.append(_quote_cmd_part(c))

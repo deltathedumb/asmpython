@@ -847,6 +847,7 @@ class Codegen:
         self.emit("_sys_argv_list: resq 1")
         self.emit("_argv_hdr: resq 1")
         self.emit("_argv_i: resq 1")
+        self.emit("_environ_dict: resq 1")
         self.emit(self.section_text)
         self.label(self.label_main)
         self.emit_entry_prologue(info)
@@ -4063,8 +4064,35 @@ class Codegen:
                 return
             self.emitf("xor rax, rax")
             return
+        # `os.environ`, used any way other than `.get(...)` (which has its
+        # own dedicated lowering -- see the MethodCall handling above):
+        # `.copy()`, subscript-assign, etc. Sema types this "dict" (see
+        # sema.py's Attr check), so codegen must hand back a REAL dict
+        # header, not the usual opaque-attribute stub -- a real process
+        # environment snapshot is more than this stub spawner needs, so
+        # lazily allocate one empty dict the first time it's touched and
+        # cache it in a .bss slot; every later read returns the same
+        # pointer, so mutations against it persist for the process's
+        # lifetime like a real `os.environ` object would.
+        if isinstance(e.obj, A.Name) and e.obj.name == "os" and e.name == "environ":
+            ready = self.fresh("environ_ready")
+            self.emitf("mov rax, [rel _environ_dict]", "test rax, rax", f"jnz {ready}")
+            self._emit_malloc(self.DICT_HEADER)
+            self.emitf(
+                f"mov qword [rax+{self.DICT_CAP_OFF}], 8",
+                f"mov qword [rax+{self.DICT_LEN_OFF}], 0",
+                f"mov qword [rax+{self.DICT_TOMB_OFF}], 0",
+                "mov [rel _environ_dict], rax",
+            )
+            self.emitf(f"mov rbx, {8 * self.DICT_SLOT_SIZE}", "call _runtime_zalloc")
+            self.emitf("mov rbx, [rel _environ_dict]", f"mov [rbx+{self.DICT_BUF_OFF}], rax")
+            self.emitf("mov rbx, 64", "call _runtime_zalloc")
+            self.emitf("mov rbx, [rel _environ_dict]", f"mov [rbx+{self.DICT_ORDER_OFF}], rax")
+            self.emitf("mov rax, [rel _environ_dict]")
+            self.label(ready)
+            return
         # Unknown attr on an opaque/int type (external module attribute like
-        # os.environ, or unresolved field access). Return 0 as a stub.
+        # os.sep, or unresolved field access). Return 0 as a stub.
         self.gen_expr(e.obj, info)
         self.emitf("xor rax, rax")
 

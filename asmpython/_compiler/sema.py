@@ -4929,10 +4929,24 @@ class SemaAnalyzer:
             if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
                 bindings = self.imported_modules[e.obj.name]
                 if e.name not in bindings:
+                    if e.obj.name == "os" and e.name == "environ":
+                        # `os.environ` is conceptually a str->str dict. Typing
+                        # it "dict" (not the opaque "any" every other unmodeled
+                        # module attribute gets) routes `.copy()`,
+                        # subscript-assign (`os.environ["X"] = v`), etc through
+                        # the real dict codegen paths instead of the generic
+                        # list-shaped IndexAssign fallback, which corrupts the
+                        # stack when applied to a dict-shaped runtime value
+                        # (confirmed via gdb on a selfhost rebuild: env =
+                        # os.environ.copy(); env["PATH"] = ... miscompiled as
+                        # a direct buffer index-write).
+                        e.inferred_type = "dict"
+                        e.value_type = "str"
+                        return
                     # An attribute the curated registry doesn't model (e.g.
-                    # `os.environ`, `os.sep`). The real CPython module has it;
-                    # stay lenient (opaque) rather than erroring, so source that
-                    # uses unmodeled module attributes still type-checks.
+                    # `os.sep`). The real CPython module has it; stay lenient
+                    # (opaque) rather than erroring, so source that uses
+                    # unmodeled module attributes still type-checks.
                     e.inferred_type = "any"
                     return
                 b = bindings[e.name]
