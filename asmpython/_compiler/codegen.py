@@ -4563,6 +4563,10 @@ class Codegen:
         )
         loop = self.fresh("du_loop")
         done = self.fresh("du_done")
+        # A NULL src (e.g. an unresolved external attribute's stub value
+        # used as if it were a dict) has nothing to copy -- treat it as
+        # already-empty rather than dereferencing it.
+        self.emitf("mov rax, [rbp-16]", "test rax, rax", f"jz {done}")
         self.label(loop)
         self.emitf(
             "mov rax, [rbp-16]",  # src
