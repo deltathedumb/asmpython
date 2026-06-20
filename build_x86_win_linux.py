@@ -101,5 +101,5 @@ run_windows()
 run_linux()
 
 # Check if we are in a batch script
-if not os.getenv("ASMPYTHON_BUILD_BATCH") == "1" and sys.stdin.isatty():
+if not os.getenv("ASMPYTHON_BUILD_BATCH") == "1":
     input("Press Enter to exit . . .")
