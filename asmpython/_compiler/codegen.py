@@ -1082,8 +1082,21 @@ class Codegen:
         info.is_main = f.name == self.label_main
         # Nonlocal vars in this lifted inner function: param holds a box ptr;
         # reads/writes go through one pointer indirection.
-        nonlocal_set: set = set(getattr(f, "nonlocal_vars", []))
-        for n in nonlocal_set:
+        #
+        # A plain list, not `set(getattr(f, "nonlocal_vars", []))`: a
+        # getattr() result is opaque ("any"-typed) to sema, and _gen_set_call
+        # treats any "any"-typed set() argument as already dict-shaped
+        # (sets are dict-backed) instead of iterating it as a list -- the
+        # runtime value here actually IS a LIST_HEADER, so that branch read
+        # garbage past the list's allocation as if it were a dict's
+        # buf/order_buf fields. Confirmed via gdb on a selfhost rebuild
+        # (crashed inside _runtime_dict_lookup_slot on every multi-line
+        # function body). nonlocal_vars is already de-duplicated by the
+        # pass that produces it, so a list works identically here -- both
+        # `for n in nonlocal_list` and `if p in nonlocal_list` are correct
+        # without set semantics.
+        nonlocal_list: list = list(getattr(f, "nonlocal_vars", []))
+        for n in nonlocal_list:
             info.nonlocal_boxes[n] = n  # same slot, just mark for indirection
         # Each local (incl. params) gets an 8-byte slot at a negative RBP offset.
         info.offset = 0
@@ -1101,7 +1114,7 @@ class Codegen:
                     ty = A.expr_type(f.defaults[i])  # type: ignore
             # Nonlocal params hold a box pointer, not the actual value — treat
             # as int (pointer) regardless of the annotation.
-            if p in nonlocal_set:
+            if p in nonlocal_list:
                 ty = "int"
             info.local_types[p] = ty
 
