@@ -3974,9 +3974,33 @@ class Codegen:
             else:
                 resolved = self._resolve_str_dunder(class_name)
             if resolved is not None:
+                # A statically `instance:T`-typed expression can still be a
+                # runtime NULL pointer when its declared type is actually
+                # `Optional[T]` (`T | None`) - is_none_expr only catches a
+                # STATICALLY-always-None expression (a bare `None` literal,
+                # or a Name sema tracked as currently bound to None), not
+                # "this Optional value happens to be None at this call
+                # site" (e.g. `f"{maybe_path}"` where maybe_path: Path |
+                # None = None and could be either at runtime). Calling the
+                # dunder unconditionally then dereferences `self` as NULL
+                # inside the method (e.g. Path.__str__ reading self.p) -
+                # a real crash found via gdb on the selfhosted binary
+                # (driver.py's `_resolve_tool`'s `f"--{name} {override}"`
+                # with `override: Path | None = None`). Guarded the same
+                # way codegen.py's own _gen_truthy_test already guards
+                # str/container NULL checks: test the pointer before
+                # dereferencing, route to the same "None" string the
+                # int/None case above uses.
+                none_lbl = self.fresh("fstr_inst_none")
+                end_lbl = self.fresh("fstr_inst_end")
+                self.emitf("test rax, rax", f"jz {none_lbl}")
                 owner, method = resolved
                 self.emitf(f"mov {self._arg_reg(0)}, rax")
                 self.emit_call(self._method_symbol(owner, method))
+                self.emitf(f"jmp {end_lbl}")
+                self.label(none_lbl)
+                self.emitf("lea rax, [_runtime_none_str]")
+                self.label(end_lbl)
             else:
                 self._emit_int_to_str()
         elif t == "str" and conv in ("r", "a"):
@@ -14181,10 +14205,24 @@ class Codegen:
         elif t.startswith("instance:"):
             resolved = self._resolve_str_dunder(t.split(":", 1)[1])
             if resolved is not None:
+                # Same NULL guard as _gen_fstring_segment's instance case
+                # just above, and for the same reason: a statically
+                # `instance:T`-typed expr can be a runtime-None
+                # `Optional[T]` value, which is_none_expr can't catch
+                # (it only sees statically-always-None expressions).
+                # print()-ing such a value must call the dunder unconditionally
+                # only when non-NULL.
+                none_lbl = self.fresh("print_inst_none")
+                end_lbl = self.fresh("print_inst_end")
+                self.emitf("test rax, rax", f"jz {none_lbl}")
                 owner, method = resolved
                 self.emitf(f"mov {self._arg_reg(0)}, rax")
                 self.emit_call(self._method_symbol(owner, method))
                 self._emit_print_str_ptr_no_newline()
+                self.emitf(f"jmp {end_lbl}")
+                self.label(none_lbl)
+                self._emit_print_none_no_newline()
+                self.label(end_lbl)
             else:
                 self._emit_print_int_no_newline()
         else:
