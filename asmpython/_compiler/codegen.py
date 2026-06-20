@@ -707,6 +707,7 @@ class Codegen:
         "_runtime_dict_values",
         "_runtime_dict_update",
         "_runtime_dict_items",
+        "_runtime_set_subset",
         "_runtime_sort_str",
         "_runtime_sort_int",
         "_runtime_sort_pairs_str",
@@ -1352,6 +1353,12 @@ class Codegen:
                 ):
                     # `a < b` etc. dispatched to user __lt__/__le__/__gt__/__ge__
                     self._cl_define(info, f"__cmpord_lhs_{id(expr)}")
+                elif op in ("<=", ">=", "<", ">") and lt == "set" and rt == "set":
+                    # Set subset/superset comparisons (_gen_compare's
+                    # _runtime_set_subset call).
+                    self._cl_define(info, f"__setcmp_{id(expr)}")
+                    if op in ("<", ">"):
+                        self._cl_define(info, f"__setcmp_eq_{id(expr)}")
                 elif (
                     op in ("in", "not in")
                     and lt in ("str", "any")
@@ -4551,6 +4558,47 @@ class Codegen:
         self.emitf("inc qword [rbp-24]", f"jmp {loop}")
         self.label(done)
         self.emitf("mov rax, [rbp-8]", "leave", "ret")
+
+        # ---- _runtime_set_subset
+        # rax = a (header), rbx = b (header) -> rax = 1 if every member of a
+        # is also a member of b (a <= b, i.e. a.issubset(b)), else 0.
+        # Walks a's order_buf, short-circuiting false on the first member of
+        # a not found in b via _runtime_dict_contains. The empty set is a
+        # subset of everything, including itself, so an empty a (len 0)
+        # falls straight through the loop to "all members found" -> 1.
+        # Locals [rbp-8..rbp-32]; reserve 64 = 32 + 32 shadow.
+        self.label("_runtime_set_subset")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+        self.emitf(
+            "mov [rbp-8], rax",  # a
+            "mov [rbp-16], rbx",  # b
+            "mov qword [rbp-24], 0",  # i
+        )
+        loop = self.fresh("ss_loop")
+        miss = self.fresh("ss_miss")
+        hit = self.fresh("ss_hit")
+        self.label(loop)
+        self.emitf(
+            "mov rax, [rbp-8]",  # a
+            f"mov rbx, [rax+{self.DICT_LEN_OFF}]",
+            "mov rcx, [rbp-24]",  # i
+            "cmp rcx, rbx",
+            f"jge {hit}",  # ran off the end with no miss -> subset
+            f"mov rdx, [rax+{self.DICT_ORDER_OFF}]",
+            "mov r9, [rdx+rcx*8]",  # r9 = a.order_buf[i] (key ptr)
+            "mov [rbp-32], r9",
+        )
+        self.emitf(
+            "mov rax, [rbp-16]",  # b
+            "mov rbx, [rbp-32]",  # key
+            "call _runtime_dict_contains",
+        )
+        self.emitf("test rax, rax", f"jz {miss}")
+        self.emitf("inc qword [rbp-24]", f"jmp {loop}")
+        self.label(miss)
+        self.emitf("xor rax, rax", "leave", "ret")
+        self.label(hit)
+        self.emitf("mov rax, 1", "leave", "ret")
 
     def _emit_dict_items_helper(self) -> None:
         """`_runtime_dict_items`: d.items() -> list of (key, value) pairs.
@@ -11521,6 +11569,53 @@ class Codegen:
                 f"mov {self._arg_reg(0)}, [rbp{slot_off:+d}]",
             )
             self.emit_call(self._method_symbol(owner, method))
+            return
+        if len(e.ops) == 1 and lt0 == "set" and rt0 == "set" and e.ops[0] in ("<=", ">=", "<", ">"):
+            # Set subset/superset comparisons (PEP-3119-style: `a <= b` is
+            # `a.issubset(b)`, `a < b` is a proper subset i.e. subset AND
+            # a != b, and `>=`/`>` are the mirror via swapped operands).
+            # Previously unhandled here, so these fell through to the
+            # generic `cmp rax, rbx` integer path below — silently doing a
+            # raw pointer-VALUE comparison of the two set headers instead
+            # of any subset logic, a real correctness bug (not a crash by
+            # itself, but capable of flipping which branch downstream code
+            # takes wherever it's used, e.g. `if not free <= available:`
+            # in program.py's whole-program module merging).
+            op = e.ops[0]
+            swap = op in (">=", ">")
+            sub_expr, sup_expr = (e.operands[1], e.operands[0]) if swap else (e.operands[0], e.operands[1])
+            slot_off = info.locals_[f"__setcmp_{id(e)}"]
+            self.gen_expr(sub_expr, info)
+            self.emitf(f"mov [rbp{slot_off:+d}], rax")
+            self.gen_expr(sup_expr, info)
+            self.emitf(
+                "mov rbx, rax",
+                f"mov rax, [rbp{slot_off:+d}]",
+                "call _runtime_set_subset",
+            )
+            if op in ("<", ">"):
+                # Proper subset/superset: subset holds AND the two sets
+                # aren't equal (same length is sufficient given subset
+                # already held - a subset of equal length must be the
+                # same set). Re-evaluating sub/sup here would duplicate
+                # any side effects in their source expressions, so park
+                # the subset-check 0/1 result and compare lengths via the
+                # already-evaluated header pointers instead.
+                eq_slot = info.locals_[f"__setcmp_eq_{id(e)}"]
+                self.emitf(f"mov [rbp{eq_slot:+d}], rax")  # subset result
+                self.gen_expr(sub_expr, info)
+                self.emitf(f"mov [rbp{slot_off:+d}], rax")
+                self.gen_expr(sup_expr, info)
+                self.emitf(
+                    f"mov rcx, [rbp{slot_off:+d}]",
+                    f"mov rdx, [rax+{self.DICT_LEN_OFF}]",
+                    f"mov rax, [rcx+{self.DICT_LEN_OFF}]",
+                    "cmp rax, rdx",
+                    "sete al",
+                    "movzx rax, al",
+                    "xor rax, 1",  # 1 if lengths differ (not equal)
+                    f"and rax, [rbp{eq_slot:+d}]",
+                )
             return
         if (
             len(e.ops) == 1
