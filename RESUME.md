@@ -396,44 +396,69 @@ feature addition, not a one-line fix. Left for a future session;
 section until it's done, which is intentional (a visible marker, not
 silently skipped).
 
-**Rebuild result (2026-06-19, build/asmpython_v11.exe, all four fixes
-applied)**: real, confirmed progress, but NOT fully closed —
-`test_min2.py` (`print("hello")`) and a no-import single-print file
-both now compile-and-exit-0 with NO crash where they used to crash
-100% of the time. This is a major narrowing. But:
-- `build/my.py` (`import sys; print(sys.version)`) hits a NEW, clean
-  (non-crashing) `asmpython: undefined variable sys` compile error
-  when run from the repo root via the selfhosted binary — the
-  Python-hosted compiler handles the identical file fine from the same
-  cwd, so this looks like a stdlib/module-resolution path difference
-  specific to running AS the selfhosted binary (same family as the
-  historical `__file__`/`Path.parents` issues), not a crash. Not yet
-  investigated further.
-- A separate plain `print("no imports here")` file (zero imports)
-  STILL CRASHES via `asmpython_v11.exe` — gdb shows `strlen(NULL)`
-  inside `_runtime_str_concat`, called from a `str_NNNN` label (an
-  intern'd-string helper). This is the SAME crash signature/shape as
-  the very first repro chased at the start of this session
-  (`Path__name`'s `strlen(NULL)`) - a NULL string pointer reaching a
-  concat operation. Not yet root-caused; this is bug #5 (or #9
-  counting the original numbered history), genuinely still open.
+**Rebuild #1 result (build/asmpython_v11.exe, bugs #1-4 applied)**: real
+progress — `test_min2.py`/a no-import single-print file went from
+crashing 100% of the time to compile-and-exit-0 clean. But two things
+remained: `build/my.py` hit a new, non-crashing `undefined variable
+sys` compile error (not yet investigated — separate from the crash
+chain), and a separate zero-import `print(...)` file STILL crashed:
+gdb showed `strlen(NULL)` inside `_runtime_str_concat`, called from
+`_resolve_tool` (`driver.py`) building `f"--{name} {override}"` where
+`override: Path | None = None` — `Path.__str__` got called with
+`self=NULL` because neither `_gen_fstring_segment` nor
+`_emit_print_value`'s `instance:` dispatch branch had a runtime NULL
+guard (only a STATIC "this expression is always None" check existed,
+which can't catch a genuinely-Optional value that's None at one call
+site and a real instance at another). **Fixed as bug #5** (commit
+`052014fa`): added a `test rax, rax / jz` guard before the dunder call
+in both places, routing None to the shared `_runtime_none_str`
+constant. Hand-validated via a direct repro matching the exact
+`_resolve_tool` shape (a function taking `override: Path | None`,
+building the same f-string) — works correctly via the Python-hosted
+compiler (`--nasm None` printed, no crash).
 
-**Next step on resume**: root-cause the `_runtime_str_concat`
-`strlen(NULL)` crash on a zero-import single-`print()` file, using the
-same gdb-first + conditional-breakpoint methodology as bugs #3/#4
-above (this session's `feedback-selfhost-debugging` memory has the
-exact technique notes). Given the crash is in string concatenation
-fed a NULL pointer, look first at whatever string-building code runs
-during the compiler's own startup/codegen-init path for ANY program
-(matching the "crashes on nearly everything" pattern) — likely
-something in `Codegen.__init__`/`generate()`'s own setup, intern-string
-table construction, or similar, rather than anything import-related
-specifically (the crashing repro has zero imports). Don't assume this
-is the same root cause as bugs #3/#4 - the crash signature (NULL string
-ptr into concat) doesn't obviously match either of those (closure
-free-var typing; dict-helper shadow-space corruption), so treat it as
-a fresh investigation rather than a leftover symptom of an already-
-identified bug.
+**Rebuild #2 result (build/asmpython_v12.exe, bugs #1-5 applied)**:
+`test_min2.py` STILL CRASHES — same `_runtime_str_concat` /
+`strlen(NULL)` signature, same `_resolve_tool` trigger
+(`f"--{name} {override}"`), but now the crash happens AFTER bug #5's
+fix runs (gdb backtrace points at `_resolve_tool.Lfstr_inst_end_441`,
+literally inside the label my own fix added), with `rax` holding the
+literal text `"--nasm "` going into the next concat. This means bug #5's
+fix is correct in isolation (verified again via a close repro of the
+real `_resolve_tool` shape — works via the Python-hosted compiler,
+prints `--nasm None` exactly as expected) but the SELFHOSTED compile of
+this exact code still does something different. **This is the same
+selfhost-vs-Python-hosted divergence pattern as the very first repro
+chased at the start of this session** (`Path.resolve()`/`with_suffix()`
+working via Python-hosted but crashing via selfhost) — not a logic bug
+in the fix itself, but something about how the SELFHOSTED BINARY's own
+compilation of this exact branch-and-merge code differs from CPython's.
+Bug #6, genuinely still open.
+
+**Next step on resume**: this is now clearly the recurring pattern
+worth treating as its own category — "a fix is verified correct via
+the Python-hosted compiler, but the selfhosted binary still produces
+different (wrong) behavior for the identical source." That means the
+bug is in how the SELFHOSTED COMPILER ITSELF compiles a construct
+that's common to its own source (closures, `Optional[instance]`
+dunder calls, multi-branch control flow merging via labels — bug #5's
+fix is exactly a fresh `if/else`-via-labels pattern, which is worth
+suspecting first given bug #3 was ALSO about a closure/control-flow
+codegen detail). Concretely: take the now-failing `Lfstr_inst_none`/
+`Lfstr_inst_end` branch-merge pattern (test/jz/call/jmp/label/label)
+and check whether the SELFHOSTED compiler's own codegen for that exact
+shape (conditional branch + merge with phi-like accumulator reload)
+has a bug that the Python-hosted compiler's CPython-run version
+doesn't hit — i.e. look for a self-referential bug where the
+compiler's handling of ITS OWN control-flow-merge pattern (independent
+of strings/dunders specifically) is what's actually broken. Use the
+same gdb-first + conditional-breakpoint methodology as bugs #3-#5 (this
+session's `feedback-selfhost-debugging` memory has the exact technique
+notes) — break on `_runtime_str_concat` with `$rbx == 0` again, but
+this time trace backward from `Lfstr_inst_end` through the SELFHOSTED
+BINARY's actual disassembly of that label (not the Python-hosted
+compiler's version, which is known-correct) to find where the two
+diverge.
 
 ## Other Notes
 
