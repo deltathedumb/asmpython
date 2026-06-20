@@ -57,3 +57,9 @@ test.zip
 _scratch*.*
 _probe*.*
 _tmp*.*
+
+
+editors/vscode/node_modules/
+editors/vscode/out/
+editors/vscode/*.vsix
+editors/vscode/package-lock.json

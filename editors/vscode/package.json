@@ -1,34 +1,190 @@
 {
-  "name": "asmpython-syntax-support",
-  "displayName": "ASMPython Syntax Support",
-  "description": "Adds support for ASMPython syntax.",
-  "version": "0.1.0",
+  "name": "asmpython",
+  "displayName": "ASMPython",
+  "description": "Diagnostics, build, and run support for asmpython (the Python-to-native compiler) directly on .py files.",
+  "version": "0.2.0",
   "publisher": "pixelateddream",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/deltathedumb/asmpython",
+    "directory": "editors/vscode"
+  },
 
   "engines": {
-    "vscode": "^1.120.0"
+    "vscode": "^1.85.0"
   },
 
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Linters",
+    "Debuggers"
   ],
 
+  "activationEvents": [
+    "onLanguage:python"
+  ],
+
+  "main": "./out/extension.js",
+
   "contributes": {
-    "languages": [
+    "configuration": {
+      "title": "ASMPython",
+      "properties": {
+        "asmpython.executablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the asmpython executable or 'python -m asmpython' shim. Leave empty to auto-detect (tries 'asmpython' on PATH, then 'py -m asmpython' / 'python3 -m asmpython')."
+        },
+        "asmpython.checkOnType": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run `asmpython --check` as you type (debounced), not just on save."
+        },
+        "asmpython.checkDebounceMs": {
+          "type": "number",
+          "default": 400,
+          "description": "Milliseconds to wait after the last keystroke before re-running `--check` when asmpython.checkOnType is enabled."
+        },
+        "asmpython.target": {
+          "type": "string",
+          "default": "",
+          "enum": ["", "windows", "linux", "freestanding", "freestanding16"],
+          "description": "Default --target for Compile/Run commands. Empty = host platform (asmpython's default)."
+        },
+        "asmpython.extraCompileArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Extra command-line arguments appended to every compile invocation (e.g. [\"--use-runtime-lib\"])."
+        },
+        "asmpython.outputDirectory": {
+          "type": "string",
+          "default": "build",
+          "description": "Directory (relative to the workspace folder) where Compile/Run commands write the output executable."
+        }
+      }
+    },
+
+    "commands": [
       {
-        "id": "asmpython",
-        "aliases": ["ASMPython", "asmpython"],
-        "extensions": [".asmpy", ".asmpython", ".apy"],
-        "configuration": "./language-configuration.json"
+        "command": "asmpython.compile",
+        "title": "ASMPython: Compile Current File",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "asmpython.run",
+        "title": "ASMPython: Compile and Run Current File",
+        "icon": "$(play)"
+      },
+      {
+        "command": "asmpython.check",
+        "title": "ASMPython: Check Current File (no build)",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "asmpython.emitAsm",
+        "title": "ASMPython: Emit Assembly for Current File"
+      },
+      {
+        "command": "asmpython.explainCode",
+        "title": "ASMPython: Explain Error Code..."
+      },
+      {
+        "command": "asmpython.showOutput",
+        "title": "ASMPython: Show Output Channel"
       }
     ],
 
-    "grammars": [
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "asmpython.run",
+          "when": "resourceLangId == python",
+          "group": "navigation@1"
+        },
+        {
+          "command": "asmpython.compile",
+          "when": "resourceLangId == python",
+          "group": "navigation@2"
+        }
+      ],
+      "commandPalette": [
+        { "command": "asmpython.compile", "when": "resourceLangId == python" },
+        { "command": "asmpython.run", "when": "resourceLangId == python" },
+        { "command": "asmpython.check", "when": "resourceLangId == python" },
+        { "command": "asmpython.emitAsm", "when": "resourceLangId == python" },
+        { "command": "asmpython.explainCode" },
+        { "command": "asmpython.showOutput" }
+      ]
+    },
+
+    "keybindings": [
       {
-        "language": "asmpython",
-        "scopeName": "source.asmpython",
-        "path": "./syntaxes/MagicASMPython.tmLanguage"
+        "command": "asmpython.run",
+        "key": "ctrl+f5",
+        "mac": "cmd+f5",
+        "when": "resourceLangId == python"
+      },
+      {
+        "command": "asmpython.compile",
+        "key": "ctrl+shift+b",
+        "mac": "cmd+shift+b",
+        "when": "resourceLangId == python"
+      }
+    ],
+
+    "taskDefinitions": [
+      {
+        "type": "asmpython",
+        "required": ["mode"],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["compile", "run", "check", "emit-asm"],
+            "description": "Which asmpython invocation this task runs."
+          },
+          "file": {
+            "type": "string",
+            "description": "Source file to compile (defaults to the active editor file)."
+          },
+          "target": {
+            "type": "string",
+            "description": "Override --target for this task."
+          }
+        }
+      }
+    ],
+
+    "problemMatchers": [
+      {
+        "name": "asmpython",
+        "owner": "asmpython",
+        "severity": "error",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "pattern": {
+          "regexp": "^(.*):(\\d+):(\\d+):\\s+\\w+\\s+error:\\s+(?:\\[(\\w+)\\]\\s+)?(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "code": 4,
+          "message": 5
+        }
       }
     ]
+  },
+
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0",
+    "@vscode/vsce": "^2.24.0"
   }
 }
