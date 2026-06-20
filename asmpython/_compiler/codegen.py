@@ -4606,21 +4606,31 @@ class Codegen:
         In:  rax = dict header. Out: rax = list header whose elements are
         2-slot tuples (shared list layout) of each live entry's key and value,
         in insertion order (walks order_buf[0..len), CPython 3.7+ ordering).
-        Locals [rbp-8..rbp-64]; 64 + 32 shadow = 96.
+        Locals [rbp-8..rbp-72]; 72 + 32 shadow = 104, rounded to 112
+        (16-aligned). [rbp-72] (`cap`) was added to fix a real bug: the
+        original version parked `cap` via push/pop around the first malloc
+        call instead of a frame slot, placing the saved value only 8 bytes
+        below that call's rsp - squarely inside the 32-byte shadow space
+        malloc's own prologue is allowed to write into on Win64, silently
+        corrupting it. Every other _runtime_dict_* helper in this file
+        already uses frame slots instead of push/pop around a call for
+        exactly this reason; this one didn't, and it broke.
         """
         self.label("_runtime_dict_items")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 96")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 112")
         self.emitf("mov [rbp-8], rax")  # dict
         # Result list sized to the dict's length (cap >= 4).
         self.emitf(f"mov rbx, [rax+{self.DICT_LEN_OFF}]")
         cap_ok = self.fresh("ditems_cap")
         self.emitf("cmp rbx, 4", f"jge {cap_ok}", "mov rbx, 4")
         self.label(cap_ok)
-        self.emitf("push rbx", "sub rsp, 8", "mov rax, 24")
+        # `cap` parked in [rbp-72] across the malloc call - see this
+        # function's docstring for why (push/pop landed it in malloc's
+        # shadow space).
+        self.emitf("mov [rbp-72], rbx", "mov rax, 24")
         self._emit_libc_malloc_size_in_rax()
         self.emitf(
-            "add rsp, 8",
-            "pop rbx",
+            "mov rbx, [rbp-72]",
             "mov [rbp-16], rax",  # list header
             f"mov [rax+{self.LIST_CAP_OFF}], rbx",
             "mov rcx, [rbp-8]",
