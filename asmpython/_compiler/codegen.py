@@ -6664,8 +6664,19 @@ class Codegen:
 
         # ---- _runtime_str_upper ----------------------------------------------
         # rax = s -> rax = newly-allocated upper-case copy. ASCII only.
+        # Locals [rbp-8..rbp-24] = 24 bytes + 32 shadow = 56, round to 64
+        # (16-aligned). Previously `sub rsp, 48` reserved only 24+32-8=48 -
+        # 8 bytes short of the real shadow-space requirement, so strlen/
+        # malloc's own shadow-space writes (always [rsp..rsp+31] relative
+        # to the call site, per Win64 ABI) clobbered this function's own
+        # `dst` local at [rbp-24], corrupting it before the copy loop ever
+        # read it back. The corrupted pointer was then used as a malloc'd
+        # buffer, which corrupts the heap allocator's own bookkeeping -
+        # the actual segfault this surfaces as happens much later, inside
+        # an unrelated subsequent malloc() call once the heap metadata
+        # itself is damaged, not at this function's own return.
         self.label("_runtime_str_upper")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64", "mov [rbp-8], rax")
         self._emit_libc_strlen()
         self.emitf(
             "mov [rbp-16], rax",  # len
@@ -6695,8 +6706,11 @@ class Codegen:
 
         # ---- _runtime_str_lower ----------------------------------------------
         # rax = s -> rax = newly-allocated lower-case copy. ASCII only.
+        # Same shadow-space fix as _runtime_str_upper just above (24 bytes
+        # of locals + 32 shadow = 56, round to 64) - this function has the
+        # identical structure and had the identical 8-byte-short bug.
         self.label("_runtime_str_lower")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48", "mov [rbp-8], rax")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64", "mov [rbp-8], rax")
         self._emit_libc_strlen()
         self.emitf("mov [rbp-16], rax", "inc rax")
         self._emit_libc_malloc_size_in_rax()
