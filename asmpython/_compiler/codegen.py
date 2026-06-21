@@ -13864,11 +13864,17 @@ class Codegen:
             # later instance reads of it return the dict_get_default fallback
             # (0 / NULL) instead of the base class's value.
             for cname0 in reversed(self._resolve_class_chain(e.func)):
-                cls_def0 = None
+                # Same fix as the @dataclass-style branch below: read
+                # class_vars directly inside the search loop instead of via
+                # a `cls_def0 = None` sentinel reassigned and read after the
+                # loop. A.Module is an external (opaque) type to sema, so
+                # `cls_def0.class_vars` read after the loop stayed
+                # "any"-typed regardless of cls_def0's real value.
+                class_vars0: list = []
                 for c0 in self.mod.classes:
                     if c0.name == cname0:
-                        cls_def0 = c0
-                for cv0 in getattr(cls_def0, "class_vars", []) if cls_def0 else []:
+                        class_vars0 = c0.class_vars
+                for cv0 in class_vars0:
                     fname0, _fa0, fdef0 = cv0
                     if fdef0 is None:
                         continue
@@ -13899,21 +13905,25 @@ class Codegen:
             # default. `field(default_factory=list/dict)` defaults synthesize a
             # fresh empty container; an unevaluable default (lambda factories)
             # leaves the field unset, which reads back as 0.
-            cls_def = None
+            # Read class_vars directly inside the search loop, not via a
+            # `cls_def = None` sentinel reassigned to the found A.ClassDef
+            # and read afterward. sema can't carry the reassignment's real
+            # type forward through the `None`-typed initial declaration (it
+            # has no flow-sensitive narrowing for "this loop-local variable
+            # got reassigned to something with a real type"), so
+            # `cls_def.class_vars` read after the loop was "any"-typed
+            # regardless of cls_def's actual runtime value -- which fed
+            # `enumerate(class_vars)`/iteration below with an opaquely-typed
+            # list. Confirmed via gdb on a selfhost rebuild: this was the
+            # actual mechanism behind a "KeyError: key not in dict" error,
+            # since every @dataclass-style constructor call (including the
+            # parser's own AST node construction, e.g. A.For(...)) goes
+            # through this exact code, and the corrupted iteration built
+            # instances with garbage dict keys instead of real field names.
+            class_vars: list = []
             for c in self.mod.classes:
                 if c.name == e.func:
-                    cls_def = c
-            # Direct field access, not getattr(cls_def, "class_vars", []):
-            # cls_def.class_vars is always a real `list` field on a class
-            # def. A getattr() result is opaque ("any"-typed) to sema --
-            # this fed `enumerate(class_vars)`/loop iteration below with an
-            # opaquely-typed list, which (confirmed via gdb on a selfhost
-            # rebuild constructing an A.For instance with corrupted field
-            # names) was the actual mechanism behind a "KeyError: key not
-            # in dict" compile-time error: every @dataclass-style
-            # constructor call (including the parser's own AST node
-            # construction, e.g. A.For(...)) goes through this exact loop.
-            class_vars = cls_def.class_vars if cls_def else []
+                    class_vars = c.class_vars
             kwmap: dict = {}
             for kn, kv in getattr(e, "kwargs", []) or []:
                 kwmap[kn] = kv
