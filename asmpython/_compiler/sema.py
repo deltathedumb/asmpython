@@ -3519,10 +3519,27 @@ class SemaAnalyzer:
                         elif name not in scope:
                             scope.add(name, "any")
                     return
-                bind_ty = "any"
-                for name in s.names:
+                # `from .sibling import orig as local`: a relative import WITH
+                # a module name. Whole-program merge has already inlined
+                # `sibling`'s top-level functions/classes into this same
+                # module (this is the path driver.py's
+                # `from .sema import analyze as sema_analyze` takes), so an
+                # aliased name here isn't really opaque -- it's a real call
+                # target hiding under a local name. Without registering it in
+                # func_aliases, `sema_analyze(...)` bound as plain opaque
+                # "any" and never resolved to the merged `analyze` function:
+                # _check_call found no match in self.funcs or func_aliases,
+                # so the whole call silently failed to bind to anything and
+                # codegen had no symbol to emit it against -- the entire
+                # statement vanished from the compiled output with no error,
+                # since this self-host bootstrapping path is intentionally
+                # lenient about unresolved relative imports.
+                orig_names = s.orig_names or s.names
+                for name, orig in zip(s.names, orig_names):
+                    if name != orig:
+                        self.mod.func_aliases[name] = orig
                     if name not in scope:
-                        scope.add(name, bind_ty)
+                        scope.add(name, "any")
                 return
             try:
                 bindings = _load_module(s.module)
