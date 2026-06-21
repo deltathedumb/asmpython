@@ -1143,7 +1143,17 @@ class SemaAnalyzer:
                 if arg_idx < len(args):
                     arg = args[arg_idx]
                 else:
-                    arg = next((v for n, v in getattr(site, "kwargs", []) if n == p), None)
+                    # Explicit loop, not next((v for n,v in ... if n==p), None):
+                    # asmpython's own codegen has no generator-expression/next()
+                    # support (this is the compiler's own source, self-compiled),
+                    # so that construct silently fell through to an unrelated
+                    # fallback and corrupted state instead of erroring.
+                    site_kwargs: list = site.kwargs
+                    arg = None
+                    for kw_name, kw_val in site_kwargs:
+                        if kw_name == p:
+                            arg = kw_val
+                            break
                     if arg is None:
                         continue
                 lit = self._literal_arg_type(arg)
