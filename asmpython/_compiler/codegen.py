@@ -13925,7 +13925,19 @@ class Codegen:
                 if c.name == e.func:
                     class_vars = c.class_vars
             kwmap: dict = {}
-            for kn, kv in getattr(e, "kwargs", []) or []:
+            # Direct field access: e is this function's own A.Call parameter,
+            # and kwargs: list is always present on it. A getattr() result
+            # is opaque to sema -- `for kn, kv in <opaque>:` unpacks each
+            # element with unknown per-slot types, which (matching the
+            # cv-unpack pattern below) defaults kn/kv's inferred types
+            # wrong, in turn making `fname in kwmap` spuriously False for
+            # every real keyword arg. This was the actual remaining cause
+            # of the the "KeyError: key not in dict" error: every
+            # A.For(var=..., range_args=..., ...)-style keyword-argument
+            # constructor call (used throughout the parser for AST nodes)
+            # silently dropped every field whose value came from a keyword
+            # argument instead of a positional one or a literal default.
+            for kn, kv in e.kwargs:
                 kwmap[kn] = kv
             for fi, cv in enumerate(class_vars):
                 fname, _fannot, fdefault = cv
