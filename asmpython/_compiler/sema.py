@@ -724,6 +724,43 @@ class SemaAnalyzer:
 
     # ---- instance field type inference --------------------------------------
 
+    def _literal_shape_el_type(self, e: "A.ListLit") -> str | None:
+        """Cheap, `_check_expr`-free element-kind guess for a list literal's
+        own elements (str/float/int literals only -- enough for the
+        unannotated-class-var case, which is what needs this before any body
+        has been checked). None if empty or not a simple homogeneous literal
+        scalar kind."""
+        kinds: set[str] = set()
+        for el in e.elems:
+            if isinstance(el, A.StrLit):
+                kinds.add("str")
+            elif isinstance(el, A.FloatLit):
+                kinds.add("float")
+            elif isinstance(el, A.IntLit):
+                kinds.add("int")
+            else:
+                return None
+        if len(kinds) == 1:
+            return next(iter(kinds))
+        return None
+
+    def _literal_shape_value_type(self, e: "A.DictLit") -> str | None:
+        """Same idea as `_literal_shape_el_type`, but for a dict literal's
+        values."""
+        kinds: set[str] = set()
+        for v in e.values:
+            if isinstance(v, A.StrLit):
+                kinds.add("str")
+            elif isinstance(v, A.FloatLit):
+                kinds.add("float")
+            elif isinstance(v, A.IntLit):
+                kinds.add("int")
+            else:
+                return None
+        if len(kinds) == 1:
+            return next(iter(kinds))
+        return None
+
     def _collect_field_types(self) -> None:
         """Infer each class's instance-field types from `self.x = <value>`
         assignments in its methods. The assigned value's static type becomes
@@ -741,7 +778,27 @@ class SemaAnalyzer:
                 if r is not None:
                     ty, el, val, _tup, _elval = r
                 elif cvalue is not None:
-                    ty, el, val = A.expr_type(cvalue), None, None
+                    ty = A.expr_type(cvalue)
+                    # `_check_expr` hasn't run on `cvalue` yet at this point in
+                    # `analyze()` (this pass runs before any body is checked),
+                    # so a DictLit/ListLit's own `value_type`/`el_type`
+                    # attributes aren't populated yet -- read the literal's
+                    # element shape directly instead. Without this, an
+                    # unannotated `NAME = {"a": "b", ...}` class var always
+                    # fell back to "int" for its value kind (None here, then
+                    # "int" downstream wherever a value-kind default applies),
+                    # even when every value is a string. A `self.NAME[k]`
+                    # subscript read then carried the wrong static type,
+                    # which only became visible when the result was used
+                    # somewhere that branches on the static type (e.g. an
+                    # f-string segment's int-vs-str formatting) -- confirmed
+                    # via gdb on a selfhost rebuild: codegen.py's own
+                    # `self.SETCC[op]` (SETCC: dict[str, str], unannotated)
+                    # read back "int", so `f"{setcc} al"` applied int-to-str
+                    # conversion to what's actually a string pointer,
+                    # corrupting the generated NASM text.
+                    el = self._literal_shape_el_type(cvalue) if isinstance(cvalue, A.ListLit) else None
+                    val = self._literal_shape_value_type(cvalue) if isinstance(cvalue, A.DictLit) else None
                 else:
                     ty, el, val = "int", None, None
                 sig.fields[cname] = ty
