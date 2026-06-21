@@ -776,7 +776,16 @@ class SemaAnalyzer:
                 cname, cannot, cvalue = cv
                 r = self._resolve_annot(cannot)
                 if r is not None:
-                    ty, el, val, _tup, _elval = r
+                    # Subscript reads with an explicit `ty: str` annotation,
+                    # not `ty, el, val, _tup, _elval = r`: r's own slot-0
+                    # static type doesn't reliably land as "str"/"any" through
+                    # a tuple-unpack (a selfhost-only divergence -- see
+                    # _resolve_annot's matching fix), so every downstream
+                    # `ty == "list"` / `ty == "dict"` check could compile as
+                    # a raw pointer comparison instead of _runtime_str_eq.
+                    ty: str = r[0]
+                    el = r[1]
+                    val = r[2]
                 elif cvalue is not None:
                     ty = A.expr_type(cvalue)
                     # `_check_expr` hasn't run on `cvalue` yet at this point in
@@ -1204,7 +1213,14 @@ class SemaAnalyzer:
         `_infer_unannotated_params`, or None), otherwise int."""
         resolved = self._resolve_annot(annot)
         if resolved is not None:
-            ty, el, val, tup, elval = resolved
+            # See the matching fix in _collect_field_types: subscript reads
+            # with an explicit `ty: str`, not a tuple-unpack, so `ty == "..."`
+            # checks below route through _runtime_str_eq reliably.
+            ty: str = resolved[0]
+            el = resolved[1]
+            val = resolved[2]
+            tup = resolved[3]
+            elval = resolved[4]
             if ty == "list" and tup:
                 # list[tuple[T1,T2,...]]: slot types go into el_tuple_types so
                 # `for a, b in pairs` can type each target correctly.
@@ -1284,7 +1300,9 @@ class SemaAnalyzer:
                     if annot is not None:
                         resolved = self._resolve_annot(annot)
                         if resolved is not None and isinstance(s.target, str):
-                            ty, el, val, _tup, _elval = resolved
+                            ty: str = resolved[0]
+                            el = resolved[1]
+                            val = resolved[2]
                             acc[s.target] = (ty, el, val)
                     elif isinstance(s.target, str) and s.target not in acc:
                         guessed = literal_shape_type(s.value)
@@ -1343,7 +1361,9 @@ class SemaAnalyzer:
                 annot = param_types[i] if i < len(param_types) else None
                 resolved = self._resolve_annot(annot)
                 if resolved is not None:
-                    ty, el, val, _tup, _elval = resolved
+                    ty: str = resolved[0]
+                    el = resolved[1]
+                    val = resolved[2]
                     local_types[p] = (ty, el, val)
             return local_types
 
