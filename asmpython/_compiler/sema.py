@@ -1108,14 +1108,33 @@ class SemaAnalyzer:
             return f"instance:{leaf}"
         return "int"
 
-    def _resolve_annot(self, annot):
+    def _resolve_annot(self, annot: tuple | None):
         """Turn a parser annotation descriptor (base, el) into
         (ty, el_type, value_type, tuple_types, el_value_type), or None if it
         doesn't constrain the type (so the caller falls back to default
         inference). `annot` is a (base, el) tuple or None."""
         if annot is None:
             return None
-        base, el = annot
+        # Explicitly-annotated subscript reads, not `base, el = annot`:
+        # `annot`'s own parameter has no annotation, so it's typed "int" by
+        # default (no literal default, no annotation to seed it). Unpacking
+        # an "int"-typed tuple via TupleAssign falls back to `ets[i] if i <
+        # len(ets) else "int"` per slot (sema can't see annot's real
+        # per-slot shape), so `base` came out "int"-typed even though its
+        # runtime value is always a real string. Every `base == "list"` /
+        # `base == "dict"` / etc. string-equality check below then silently
+        # compiled as a raw pointer comparison instead of _runtime_str_eq
+        # (whose dispatch in _gen_compare requires lt0 in ("str", "any")) --
+        # always false, since a heap/interned string pointer never equals a
+        # different literal's address. That made _resolve_annot silently
+        # fail to recognize ANY annotation base (including a bare `: dict`)
+        # in the selfhosted binary specifically, while the Python-hosted
+        # compiler (whose own `base, el = annot` line runs as real Python,
+        # with no static-type pass to get confused) worked fine -- a
+        # selfhost-only divergence, confirmed via matching minimal repros
+        # compiled by both compilers and diffing the generated .asm.
+        base: str = annot[0]
+        el = annot[1]
         if base in ("int", "str", "float", "bool"):
             return ("int" if base == "bool" else base, None, None, None, None)
         if base == "list":
