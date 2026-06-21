@@ -1216,10 +1216,19 @@ class Codegen:
                 self._cl_define(info, f"__comp_inst_parent_{id(expr)}", "int")
                 self._cl_define(info, f"__comp_inst_prev_exc_{id(expr)}", "int")
                 self._cl_define(info, f"__comp_inst_prev_exc_type_{id(expr)}", "int")
-            ef_vars = getattr(expr, "extra_for_vars", [])
-            ef_targets_l = getattr(expr, "extra_for_targets", [])
-            ef_iters = getattr(expr, "extra_for_iters", [])
-            ef_conds_l = getattr(expr, "extra_for_conds", [])
+            # Direct field access, not getattr(expr, "...", []): expr is
+            # already confirmed isinstance(expr, A.Comprehension) here, and
+            # all four extra_for_* fields are always-present `list`-typed
+            # fields on it. A getattr() result is opaque ("any"-typed) to
+            # sema regardless of the real field's type, which makes len()
+            # compile as strlen() (the only fallback codegen's len() has
+            # for an "any"-typed argument) instead of a real list-length
+            # read -- same bug class fixed elsewhere in this function for
+            # target_types/free_vars/nonlocal_vars.
+            ef_vars = expr.extra_for_vars
+            ef_targets_l = expr.extra_for_targets
+            ef_iters = expr.extra_for_iters
+            ef_conds_l = expr.extra_for_conds
             for ef_idx in range(len(ef_iters)):
                 ef_evar = ef_vars[ef_idx] if ef_idx < len(ef_vars) else ""
                 ef_emulti = ef_targets_l[ef_idx] if ef_idx < len(ef_targets_l) else []
@@ -1582,7 +1591,15 @@ class Codegen:
             # args instead of assuming they all fit in registers.
             for ff in self.mod.funcs:
                 if ff.name == expr.func and getattr(ff, "is_lifted", False):
-                    for k in range(len(getattr(ff, "free_vars", []) or [])):
+                    # Direct field access, not getattr(ff, "free_vars", [])
+                    # or []: a getattr() result is always opaque ("any"-typed)
+                    # to sema, which made len() below compile as strlen()
+                    # (codegen's len() has no other fallback for "any") --
+                    # same bug class as the target_types fix above, just one
+                    # more occurrence of the pattern. ff is a real FuncDef
+                    # here (from self.mod.funcs) and free_vars: list is
+                    # always present on it.
+                    for k in range(len(ff.free_vars)):
                         self._cl_define(info, f"__fvarg_{id(expr)}_{k}")
                     break
             # Closure call: allocate per-arg scratch slots to park evaluated args
@@ -1733,7 +1750,12 @@ class Codegen:
                         self._cl_walk_expr(info, expr.sort_reverse)
                 if obj_t in ("dict", "set", "any") and expr.method in ("pop", "setdefault"):
                     self._cl_define(info, f"__dm_arg_{id(expr)}")
-                    if len(getattr(expr, "args", [])) >= 2:
+                    # expr (A.MethodCall) always has a real `args: list`
+                    # field -- direct access, not getattr(expr, "args", []),
+                    # which would make len() compile as strlen() on an
+                    # "any"-typed opaque value (same bug class fixed above
+                    # for target_types/free_vars).
+                    if len(expr.args) >= 2:
                         self._cl_define(info, f"__dm_arg2_{id(expr)}")
                 if expr.method == "copy" and obj_t not in ("list", "tuple"):
                     self._cl_define(info, f"__dm_src_{id(expr)}")
@@ -1970,7 +1992,28 @@ class Codegen:
                     # `for a, b in pairs`: tuple-unpacking targets. sema stamps
                     # per-target kinds (list[tuple] slots) onto target_types;
                     # fall back to opaque "any" when shapes are untracked.
-                    ttypes = getattr(s, "target_types", [])
+                    #
+                    # `s` is already known to be an A.For here (this whole
+                    # branch is `elif isinstance(s, A.For)`), and every A.For
+                    # has a real `target_types: list` field -- access it
+                    # directly rather than through getattr(s, "target_types",
+                    # []). A getattr() call's result is always opaque
+                    # ("any"-typed) to sema regardless of the real attribute's
+                    # type, which made `len(ttypes)` below compile as
+                    # strlen() (codegen's len() has no other fallback for an
+                    # "any"-typed argument) instead of a real list-length
+                    # read. strlen() on a list header's raw bytes returns a
+                    # essentially-random length, so `i < len(ttypes)` passed
+                    # or failed unpredictably and the following `ttypes[i]`
+                    # (correctly compiled as a real list read, since
+                    # `ttypes`'s own static type from direct field access is
+                    # "list") indexed out of the real list's actual bounds.
+                    # Confirmed via gdb on a selfhost rebuild: crashed
+                    # compiling tests/cases/03_fib.py with a "list index out
+                    # of range" compile-time error (not a segfault, since
+                    # the OOB check itself is correct -- only the LENGTH fed
+                    # into it was wrong).
+                    ttypes = s.target_types
                     names = self._target_names(s.targets)
                     i = 0
                     for t in names:
@@ -2098,10 +2141,19 @@ class Codegen:
                 f"mov [rcx+8], rax",
             )
             # [2..] = captured variable values (or box ptrs for nonlocal vars)
-            nl_set = set(getattr(stmt, "nonlocal_vars", []))
+            #
+            # A plain list, not set(getattr(stmt, "nonlocal_vars", [])):
+            # same bug class as _collect_locals' nonlocal_set fix -- a
+            # getattr() result is opaque ("any"-typed) to sema, and
+            # _gen_set_call's "any"-argument branch hands an opaque value
+            # straight back as if it were already dict-shaped instead of
+            # iterating it as the list it actually is here. stmt
+            # (A.ClosureBind) always has a real `nonlocal_vars: list`
+            # field, so access it directly.
+            nl_list = list(stmt.nonlocal_vars)
             for i, fv in enumerate(stmt.free_vars):
                 fv_mem = self._var_mem(fv, info)
-                if fv in nl_set:
+                if fv in nl_list:
                     # Nonlocal: allocate an 8-byte box, write current value,
                     # store the box ptr in the closure slot.
                     box_slot = f"__nl_box_{fv}_{id(stmt)}"
@@ -8841,11 +8893,16 @@ class Codegen:
         if e.cond is not None:
             skip = self.fresh("comp_skip")
             self._gen_truthy_test(e.cond, info, skip)
-        ef_iters_g = getattr(e, "extra_for_iters", [])
+        # Direct field access, not getattr(e, "...", []): e is an
+        # A.Comprehension here, and all four extra_for_* fields are
+        # always-present `list`-typed fields on it. See the matching fix
+        # in _cl_walk for why getattr() + len() is unsafe here (it makes
+        # len() compile as strlen() on an opaque "any"-typed value).
+        ef_iters_g = e.extra_for_iters
         if ef_iters_g:
-            ef_vars_g = getattr(e, "extra_for_vars", [])
-            ef_tgts_g = getattr(e, "extra_for_targets", [])
-            ef_conds_g = getattr(e, "extra_for_conds", [])
+            ef_vars_g = e.extra_for_vars
+            ef_tgts_g = e.extra_for_targets
+            ef_conds_g = e.extra_for_conds
             # Nested for-clauses: emit inner loops, then append at innermost.
             # We track (top, end, idx_slot, skip) for each inner loop so we can
             # close them in reverse order after the append.
@@ -13181,7 +13238,12 @@ class Codegen:
                     # Direct match: e.func is a lifted function name with free_vars
                     for ff in self.mod.funcs:
                         if ff.name == e.func and getattr(ff, "is_lifted", False):
-                            n_free = len(getattr(ff, "free_vars", []))
+                            # Direct field access: ff.free_vars is always
+                            # present (real FuncDef field); getattr(ff,
+                            # "free_vars", []) made len() compile as
+                            # strlen() on an opaque "any"-typed value (same
+                            # bug class fixed elsewhere in this file).
+                            n_free = len(ff.free_vars)
                             break
                     if n_free == 0:
                         # Indirect: e.func was assigned from a factory call.
