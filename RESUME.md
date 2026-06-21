@@ -639,6 +639,103 @@ bug class as bug #7's `(reg, is_xmm, off)` tuple-list issue — this
 hasn't been checked yet and is a strong remaining candidate given the
 pattern-match to a bug already found and fixed once this session.
 
+**MAJOR FINDING (2026-06-21, supersedes the above as the active
+lead)**: bug #9's true mechanism is much more fundamental than any
+`getattr()`/tuple-unpack issue. Landed several more real, committed
+fixes this session (`ea8885bc`, `25fe766c`, `76d4d3ac`, `14d1feea`,
+`2ce1c7c1` — all the `_resolve_annot`/`base, el = annot` tuple-unpack
+chain, root-caused via a minimal `d: dict = {}; d["a"] = 1` repro
+that diverges between the Python-hosted and selfhosted compilers).
+Those are real and worth keeping, but a *separate, much bigger* bug
+was found while diagnosing why the dict-annotation fix still didn't
+take effect: **user-defined method calls and constructor calls are
+silently elided (no `call` instruction emitted at all) by the
+selfhosted compiler**, independent of any annotation. Minimal repro
+(`build/test_print_multiarg.py`): a class `Foo` with a method `bar`
+that prints several things; `f = Foo(); f.bar()` at module level.
+Compiled by `py -m asmpython`: all prints appear correctly. Compiled
+by any selfhosted `asmpython_vNN.exe` (v32/v33 confirmed): only
+module-level prints appear — `f = Foo()` compiles to `xor rax,rax`
+(no malloc/dict_set at all) and `f.bar()` compiles to evaluating `f`
+then discarding it (`_gen_method_call`'s final "unknown method on an
+opaque receiver, return 0" stub) — `Foo__bar`'s compiled body exists
+in the .asm but is never `call`ed anywhere.
+
+Traced via gdb + manual dict-memory inspection (walking the order_buf
+and slot buffer by hand — calling runtime helpers like
+`_runtime_dict_get_default` directly from gdb's `call` segfaults,
+possibly an ABI/shadow-space mismatch when invoked from the debugger,
+so don't bother with that approach) at `Codegen.__init__`'s entry:
+`self.mod.classes_sig` (the dict `_gen_call` checks via `if e.func in
+self.mod.classes_sig:` to decide whether a call is a constructor) is
+present in `mod`'s instance dict (key found at the right slot) but its
+VALUE is an empty dict (cap=8, len=0), even though `mod.classes` (the
+parser's own class list) correctly shows len=1 for the same compile.
+Sema's `self.mod.classes_sig = self.classes` (sema.py ~line 2331,
+near the end of `SemaAnalyzer.analyze()`) is supposed to populate it
+from `self.classes: dict[str, ClassSig]` (built incrementally via
+`self.classes[c.name] = sig` inside the class-signature-collection
+loop, sema.py ~line 2135).
+
+Extensive static re-reading of every step in this chain (the
+`AttrAssign`/`IndexAssign`/chained-`Attr` codegen for
+`self.classes[c.name] = sig`, `self.mod.classes_sig = self.classes`,
+and the read side `self.mod.classes_sig` in `_gen_call`) did NOT find
+a bug — every individual codegen step, read closely against the
+actual generated .asm in `asmpython_v33.asm`, looks correct (key
+strings match, dict_set/get_default argument registers match the
+runtime helpers' calling convention, chained `self.mod.classes_sig`
+correctly threads `rax` from the inner `self.mod` lookup into the
+outer `.classes_sig` lookup without an intervening clobber). This
+means the bug is either (a) in `self.classes[c.name] = sig`'s *value*
+specifically — maybe `sig` itself, or the dict it's stored into, gets
+corrupted by something upstream not yet checked, or (b) somewhere
+genuinely not yet looked at in this chain.
+
+Also discovered along the way: **print() statements added inside
+`SemaAnalyzer` methods (`analyzed()`, `_check_stmt`, etc.) for
+debugging never produced visible output when compiled into a
+selfhosted binary**, even though the equivalent prints work fine
+under `py -m asmpython`. This was initially mistaken for a
+gdb-breakpoint-symbol-resolution issue (breakpoints on
+`SemaAnalyzer___check_stmt`/`SemaAnalyzer___bind_name_from_value`
+never hit, while `Codegen____init__`/`_runtime_dict_set` breakpoints
+hit fine) but is now understood to be **the exact same root bug**:
+since `SemaAnalyzer(mod, ...).analyze()` and all its `self.foo(...)`
+calls are themselves user-defined method calls, and method calls are
+the thing silently failing to emit `call` instructions, of course
+debug prints inside those methods never ran, and of course gdb never
+broke on those symbols — the methods are simply never invoked. This
+was confirmed directly with the minimal `Foo.bar()` repro once it was
+found, which doesn't depend on sema internals at all.
+
+**Next steps on resume (current, supersedes the bullet list above)**:
+(1) Add a debug print or breakpoint at `self.classes[c.name] = sig`
+itself (sema.py ~2135) to confirm/deny it actually runs and what `sig`
+looks like — NOTE that print()-inside-a-method won't show output
+given the bug above, so this needs either a module-level-reachable
+print (have `analyze()` itself print right after the loop, since
+`analyze()` is called once from module-level code, or stash a value
+into a global and print it from module level afterward) or further
+gdb memory inspection (find `self`'s `"classes"` key in its instance
+dict the same way `classes_sig` was found, and check its `len` right
+after the loop). (2) More importantly: given method calls in general
+seem to be the failure point, consider testing whether ALL method
+calls fail, or only ones in specific shapes (no-arg vs with-args,
+calls on `self` vs on other instances, calls whose target class has
+vs doesn't have an explicit `__init__`) — the `Foo.bar()` repro is a
+plain no-arg instance method on a class with no `__init__`, which is
+the *exact* shape `_gen_constructor`'s "no explicit `__init__`"
+branch handles, so the constructor-call failure and the bug-class
+overlap may not be coincidental. (3) Given how fundamental this now
+looks (method calls silently no-op'ing would affect nearly everything
+in a self-hosting compiler), it may be more efficient to bisect
+selfhost generations by testing progressively older `asmpython_vNN.exe`
+builds (v18 through v33 all still exist in `build/`) against the
+`Foo.bar()` repro to find which commit/version first introduced
+working vs broken method-call codegen, rather than continuing forward
+from current HEAD.
+
 **Toolchain note for future selfhost testing sessions**: the `build/`
 directory's many generated `.exe` files got externally wiped mid-session
 (likely Windows Defender or similar quarantining freshly-built,
