@@ -709,32 +709,86 @@ broke on those symbols — the methods are simply never invoked. This
 was confirmed directly with the minimal `Foo.bar()` repro once it was
 found, which doesn't depend on sema internals at all.
 
-**Next steps on resume (current, supersedes the bullet list above)**:
-(1) Add a debug print or breakpoint at `self.classes[c.name] = sig`
-itself (sema.py ~2135) to confirm/deny it actually runs and what `sig`
-looks like — NOTE that print()-inside-a-method won't show output
-given the bug above, so this needs either a module-level-reachable
-print (have `analyze()` itself print right after the loop, since
-`analyze()` is called once from module-level code, or stash a value
-into a global and print it from module level afterward) or further
-gdb memory inspection (find `self`'s `"classes"` key in its instance
-dict the same way `classes_sig` was found, and check its `len` right
-after the loop). (2) More importantly: given method calls in general
-seem to be the failure point, consider testing whether ALL method
-calls fail, or only ones in specific shapes (no-arg vs with-args,
-calls on `self` vs on other instances, calls whose target class has
-vs doesn't have an explicit `__init__`) — the `Foo.bar()` repro is a
-plain no-arg instance method on a class with no `__init__`, which is
-the *exact* shape `_gen_constructor`'s "no explicit `__init__`"
-branch handles, so the constructor-call failure and the bug-class
-overlap may not be coincidental. (3) Given how fundamental this now
-looks (method calls silently no-op'ing would affect nearly everything
-in a self-hosting compiler), it may be more efficient to bisect
-selfhost generations by testing progressively older `asmpython_vNN.exe`
-builds (v18 through v33 all still exist in `build/`) against the
-`Foo.bar()` repro to find which commit/version first introduced
-working vs broken method-call codegen, rather than continuing forward
-from current HEAD.
+**Follow-up findings (same session, after the above)**:
+
+1. **Bisected across existing selfhost generations**: `build/asmpython_v20.exe`
+   and `v21.exe` both segfault outright trying to compile *any*
+   class+method test file (a different, earlier-stage bug). `v22.exe`
+   onward (the first version built right after bugs #7/#8 were fixed,
+   *before* any bug #9 work started) all compile cleanly but exhibit
+   the silent method-call elision. So this bug is not something the
+   `_resolve_annot` work introduced this session — it's been present
+   in every selfhost build since very early in this session, just
+   never noticed because the only post-#7/#8 regression tests were
+   `print("hello")` and a 2-arg *function* (not method) call.
+
+2. **`Codegen.class_ids` (built fresh in `Codegen.__init__` via `for
+   cls in mod.classes: self.class_ids[cls.name] = cid`) is correctly
+   populated** (confirmed via gdb memory walk: cap=8, len=1 for a
+   single-class test file) — this rules out "all `self.x[k]=v]` on a
+   `self`-typed dict is broken" as too broad an explanation. The
+   working case (`Codegen.__init__`, a short function, simple loop
+   over a `list["ClassDef"]` param) and the broken case
+   (`SemaAnalyzer.analyze()`, building `self.classes` from the same
+   `mod.classes` list) look structurally identical in source but
+   behave differently compiled.
+
+3. **Found a second, code-PATH-narrower repro that fails at COMPILE
+   TIME instead of silently**: a small class `Collector` with
+   `self.classes: dict = {}` in `__init__`, a `collect(self, names:
+   list)` method that loops `for n in names: sig = Sig(n);
+   self.classes[n] = sig`, and a `count(self) -> int: return
+   len(self.classes)` method. Under `py -m asmpython`: compiles and
+   runs correctly (prints `3` then `True`). Under any selfhosted
+   `asmpython_vNN.exe`: **compile-time** `KeyError: key not in dict`
+   (not the earlier binaries' silent runtime no-op — a different,
+   more specific failure for this exact shape). Traced via a gdb
+   breakpoint+continue script logging every `_runtime_dict_get` key
+   lookup (calling raw helpers from gdb's `call` mostly works for
+   *this* one, just not `_runtime_dict_get_default` for some reason —
+   inconsistent, be ready to fall back to a logging breakpoint
+   `commands`/`continue` script if a direct `call` segfaults) up to
+   the failing key: `"__lm_val_<id>"` — a list-method codegen temp
+   slot name (`_collect_locals` only defines this for `list.count`/
+   `list.remove`/`list.insert`, none of which this test program calls
+   anywhere). The slot gets DEFINED under one `id(expr)` during
+   `_collect_locals`'s AST pre-walk and LOOKED UP under a different
+   `id(e)` during the real codegen walk for what should be the same
+   AST node — i.e. `id()` (asmpython's own pointer-identity builtin,
+   used here purely as a unique temp-name suffix, not by the *user*
+   program) is returning different values for the same object across
+   two different compiler passes. This is a strong, narrow, and very
+   promising lead: if `id()`'s codegen — or, more likely, something
+   about how `_collect_locals`'s walk vs. the real codegen walk visit
+   AST nodes — doesn't guarantee revisiting *the same* Python/asmpython
+   object both times, that would directly explain both this KeyError
+   and quite possibly the broader method-elision symptom (if
+   `_gen_method_call`'s own dispatch logic relies on matching against
+   AST node identity or a `self.mod.classes_sig`-style lookup keyed
+   by something that isn't stable across passes the same way).
+
+**Next steps on resume**: (1) Pick up the `id()`-mismatch lead first —
+it's the most concrete, reproducible, compile-time (not runtime-silent)
+symptom found so far. Check `_collect_locals`'s entry point: does it
+walk a *freshly re-parsed* copy of the function body, or the exact
+same `FuncDef.body` list object the real codegen pass later iterates?
+If self-compilation involves re-parsing or any AST transformation
+between the two passes (e.g. a `match`-statement rewrite, a generator
+transform, anything that calls `A.X(...)` to build replacement nodes)
+for only *some* code paths, that would explain why `id(expr)` (from
+the pre-pass) and `id(e)` (from codegen) diverge only sometimes. (2)
+If that doesn't pan out, fall back to the original `self.classes`-
+specific lead: add a print reachable from module-level code (not
+inside any method, given the elision bug) to check `self.classes`'s
+real length right after the collection loop in a selfhosted build,
+or use the gdb memory-walk technique demonstrated above (walk
+`self`'s order_buf/slot buffer by hand) to inspect it directly. (3)
+Given the `KeyError` repro is compile-time and far more debuggable
+than the silent-elision repro, prefer it for further investigation —
+debug print()s placed inside the *user test program* being compiled
+(not inside the compiler's own sema.py — those don't show output, see
+above) should work fine and could help narrow exactly which
+`_collect_locals` vs. codegen pass visits diverge.
 
 **Toolchain note for future selfhost testing sessions**: the `build/`
 directory's many generated `.exe` files got externally wiped mid-session
