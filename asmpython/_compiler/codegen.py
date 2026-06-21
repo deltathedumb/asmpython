@@ -11398,7 +11398,7 @@ class Codegen:
         """
         assert isinstance(e.left, A.StrLit)
         pieces, _ = A.parse_pct_format(e.left.value)
-        args = e.right.elems if isinstance(e.right, A.TupleLit) else [e.right]
+        args: list = e.right.elems if isinstance(e.right, A.TupleLit) else [e.right]
         # A mutable single-element list standing in for a nonlocal counter:
         # this closure needs shared, advancing state across calls, and
         # asmpython has no codegen for iter()/next() (this file is itself
