@@ -560,16 +560,28 @@ class Parser:
                     own_locals.add(f.vararg)
                 if f.kwarg:
                     own_locals.add(f.kwarg)
+                # Same fix again: explicit `: list` reads for f's own
+                # free_vars/nonlocal_vars, not direct attribute access --
+                # f.free_vars / f.nonlocal_vars read as "any" (f: A.FuncDef,
+                # an opaque external type), which makes `fv in f.free_vars`
+                # compile as an int-comparison membership test (the el_t
+                # inference for a plain A.Attr falls to its "int" default)
+                # instead of a real string comparison, so it never actually
+                # matched and every call kept re-appending the same free var.
+                f_free_vars: list = f.free_vars
+                f_nonlocal_vars: list = f.nonlocal_vars
                 for callee_name in called:
                     callee = by_name.get(callee_name)
                     if callee is None or callee is f:
                         continue
-                    for fv in callee.free_vars:
-                        if fv in own_locals or fv in f.free_vars:
+                    callee_free_vars: list = callee.free_vars
+                    callee_nonlocal_vars: list = callee.nonlocal_vars
+                    for fv in callee_free_vars:
+                        if fv in own_locals or fv in f_free_vars:
                             continue
-                        f.free_vars.append(fv)
-                        if fv in callee.nonlocal_vars and fv not in f.nonlocal_vars:
-                            f.nonlocal_vars.append(fv)
+                        f_free_vars.append(fv)
+                        if fv in callee_nonlocal_vars and fv not in f_nonlocal_vars:
+                            f_nonlocal_vars.append(fv)
                         changed = True
 
     # Decorator names the parser treats specially.
