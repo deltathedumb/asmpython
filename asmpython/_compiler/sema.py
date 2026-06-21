@@ -2897,7 +2897,9 @@ class SemaAnalyzer:
                 self._collect_returns(s.else_body, acc)
                 self._collect_returns(s.finally_body, acc)
 
-    def _bind_name_from_value(self, target: str, value, scope: Scope, annot=None) -> None:
+    def _bind_name_from_value(
+        self, target: str, value, scope: Scope, annot: tuple | None = None
+    ) -> None:
         """Bind `target` in `scope` to the static type of `value`, the same
         way a plain `target = value` assignment would. Shared by `A.Assign`
         and `A.NamedExpr` (the walrus operator `target := value`)."""
@@ -3013,9 +3015,17 @@ class SemaAnalyzer:
             return
         if isinstance(s, A.Assign):
             self._check_expr(s.value, scope)
-            self._bind_name_from_value(
-                s.target, s.value, scope, getattr(s, "annot", None)
-            )
+            # Direct field access, not getattr(s, "annot", None): s is
+            # confirmed isinstance(s, A.Assign) here, and annot is always a
+            # real field on it. A getattr() result is opaque ("any"-typed)
+            # to sema, and that opacity propagates into _bind_name_from_value's
+            # own `annot=None` parameter (itself unannotated, so it silently
+            # defaults to "int" instead of carrying the real (base, el)
+            # tuple shape) -- breaking the explicit `: T = value` annotation
+            # override for every plain `A.Assign` in the entire compiler,
+            # including the `func_name: str = e.func` pattern used to fix
+            # the opaque-attribute bug class everywhere else this session.
+            self._bind_name_from_value(s.target, s.value, scope, s.annot)
             return
         if isinstance(s, A.TupleAssign):
             # Resolve the RHS first so tuple-returning calls have their type
@@ -6572,8 +6582,28 @@ class SemaAnalyzer:
             return
         # Resolve import alias (from mod import orig as local) for bundled-source
         # stdlib functions so type-checking and inference use the real FuncSig.
-        if e.func in self.mod.func_aliases and e.func not in self.funcs:
-            resolved = self.mod.func_aliases[e.func]
+        #
+        # Explicit `: str` read, not a bare `e.func in self.mod.func_aliases`
+        # subscript: e is this function's own `A.Call` parameter, an
+        # external/opaque type to sema, so e.func reads "any"-typed despite
+        # always holding a real string. _gen_subscript's opaque-receiver
+        # dispatch only promotes an "any" object to a dict lookup when the
+        # INDEX is statically "str" -- with e.func opaque instead, that
+        # check failed and `self.mod.func_aliases[e.func]` fell through to
+        # the list-indexing default, treating the string pointer as a raw
+        # integer offset. This was the actual root cause behind a much
+        # bigger symptom: `from .sema import analyze as sema_analyze` is
+        # exactly the kind of aliased import this lookup resolves, and
+        # driver.py's `sema_analyze(module, ...)` call site went through
+        # this exact code when the compiler's own source was self-compiled
+        # -- when the lookup corrupted `resolved`, sema_analyze never
+        # resolved to a real function, and the entire call silently
+        # vanished from the compiled output (no crash, no error -- codegen
+        # just had nothing it could call), explaining why sema appeared to
+        # never run at all in the selfhosted binary.
+        func_name: str = e.func
+        if func_name in self.mod.func_aliases and func_name not in self.funcs:
+            resolved = self.mod.func_aliases[func_name]
             if resolved in self.funcs:
                 e.func = resolved
         if e.func in self.funcs:
