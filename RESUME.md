@@ -547,25 +547,97 @@ function call `add(2, 3) -> 5` (bugs #7 + #8), both compile, link, and
 run correctly with the selfhosted binary — zero crashes. Full 454-test
 suite green throughout.
 
-**Bug #9 — OPEN, NOT a crash (compile-time IndexError)**: broader
-coverage via `tests/cases/03_fib.py` (recursion + `for i in
-range(10):` + `print(fib(i))`) still fails to compile — `asmpython:
-list index out of range`, traced to the same `Codegen.__cl_walk`
-label/pattern as bugs #7/#8's investigation (`_runtime_dict_get_
-default(stmt, "targets", 0)` → `Codegen___target_names(...)` → a
-string-bounds-checked index read with an `"any"`-shaped fallback,
-matching `ttypes[i] if i < len(ttypes) else "any"` at
-`codegen.py:1964`-ish). NOT yet conclusively root-caused: `03_fib.py`
-has no tuple-unpacking `for` loop in its own source, so the trigger is
-either the compiler processing some OTHER multi-target binding while
-compiling this file's `for i in range(10):` / recursive call /
-`print(fib(i))`, or a different occurrence of the same source pattern
-than the one chased for bugs #7/#8. Same methodology applies: `break
-Codegen___target_names` or `break Codegen___cl_walk`, inspect `s`
-(the AST node dict) at the crash, and check whether `s.targets`
-really is non-empty for some statement in this file's compile path —
-if so, find which one and why its `target_types`/`ttypes` shape isn't
-what `_collect_locals`-style code expects.
+**Bug #9 — multiple real fixes landed, still open (compile-time, not a
+crash)**: `tests/cases/03_fib.py` (recursion + `for i in range(10):` +
+`print(fib(i))`) still fails to compile under the selfhosted binary.
+This turned into a chain of real, distinct bugs, all sharing one root
+cause: **`getattr(obj, "field", default)` always types its result
+`"any"` (opaque) to sema, regardless of `field`'s real declared type**
+— and several codegen operations have no safe fallback for an
+`"any"`-typed value:
+
+1. **Unannotated class-var dict/list value-kind inference** (commit
+   `60ba9aa6`). `codegen.py`'s own `SETCC = {"==": "sete", ...}`
+   (unannotated) always recorded its value-kind as unset, defaulting to
+   `"int"`. Fixed by computing the literal's homogeneous value/element
+   kind directly from its own elements during `_collect_field_types`
+   (which runs before `_check_expr` has populated `DictLit.value_type`/
+   `ListLit.el_type`).
+2. **`len()`/`set()` on `getattr()` results** (commit `711417a6`).
+   `len()`'s codegen has no `"any"` fallback other than `strlen()` (the
+   same gap `set()` has, already fixed once for `nonlocal_vars` as bug
+   #8). Found and fixed **six** occurrences across `codegen.py`:
+   `_cl_walk`'s `target_types`/`MethodCall.args`, `_gen_comprehension`'s
+   and `_cl_walk_expr`'s `extra_for_*` fields, `_gen_closurebind`'s
+   `nonlocal_vars` (a second instance beyond the one already fixed for
+   bug #8), and a closure free-var count check in `_gen_call`. All were
+   genuine bugs (confirmed by checking each field really is a real,
+   always-present dataclass field, so `getattr()`'s defensiveness was
+   unnecessary) but **none of them turned out to be 03_fib.py's actual
+   crash mechanism** — fixing all six didn't change the error.
+3. **`_gen_for`'s `orelse` + `_gen_constructor`'s `class_vars`**
+   (commit `4c01065f`). Same pattern, two more occurrences. The
+   `class_vars` one looked very promising: `_gen_constructor`'s
+   `@dataclass`-style synthesis branch is the single code path *every*
+   `@dataclass`-style constructor call goes through, including the
+   **parser's own AST node construction** (`A.For(...)` etc.) — so a
+   bug there could plausibly explain corrupted AST nodes. This changed
+   the error from "list index out of range" to **"KeyError: key not in
+   dict"** (a different failure, so SOME real corruption was fixed) but
+   `03_fib.py` still doesn't compile.
+4. **`cls_def = None` then reassigned in a loop** (commit `14d1feea`).
+   Investigating fix #3 further: `class_vars = cls_def.class_vars if
+   cls_def else []` was STILL `"any"`-typed even after switching from
+   `getattr()` to direct field access, because `cls_def` itself starts
+   as `cls_def = None` and gets reassigned to a real `A.ClassDef`
+   inside a loop — sema has no flow-sensitive narrowing through a
+   `None`-typed initial declaration, so the post-loop read stays opaque
+   regardless of the reassignment. Deeper cause: `A.Module` (`self.mod`'s
+   type) is an external/opaque class to sema (no introspection into
+   `ast_nodes.py`'s dataclass field types), so `self.mod.classes`'s
+   element type is unavoidably opaque too. Fixed by reading
+   `class_vars` directly inside the search loop (both occurrences in
+   `_gen_constructor`) instead of through a separate sentinel read
+   after the loop — this is more correct regardless, but **did not
+   change `03_fib.py`'s outcome**: still the exact same crash site
+   (`Codegen.__gen_for`, `info.locals_[stmt.var]` → KeyError, same
+   `Lendif_12959` label) after rebuild #4.
+
+**Current status after 4 rebuild-and-verify cycles**: bugs #6/#7/#8
+remain solidly fixed (`print("hello")` and a 2-argument function call
+both compile/link/run correctly via the selfhosted binary — re-verified
+after every one of bug #9's fix attempts, no regressions). `03_fib.py`
+specifically still fails with `KeyError: key not in dict`, crash site
+unchanged since fix #3: `Codegen___gen_for.Lendif_12959+57`, i.e.
+`var_off = info.locals_[stmt.var]` (codegen.py ~line 2904) raising
+because the `A.For` instance being compiled apparently doesn't have a
+real `"var"` key in its backing dict. **Not yet conclusively
+root-caused** — fix #3's `class_vars` theory was plausible (this is
+exactly the code path that constructs `A.For` instances) but
+empirically didn't fix it, so either: (a) there's a SEPARATE bug in
+how `A.For` instances specifically get constructed (the parser site
+that emits `A.For(var=..., ...)`, not `_gen_constructor` generically),
+or (b) `_gen_constructor`'s `class_vars` fix is real but insufficient
+— something else in that same function (the `fname, _fannot, fdefault
+= cv` tuple-unpack on an opaque-but-list-shaped `class_vars` element,
+not yet checked the same way the `getattr()`/`None`-sentinel angles
+were) is still corrupting field names.
+
+**Next steps on resume**: (1) check whether `A.For` specifically (as
+opposed to other dataclass-constructed AST nodes) is built via a
+DIFFERENT path than `_gen_constructor` — e.g. a hand-rolled
+fast-construct helper the parser uses, which might have its own,
+not-yet-found bug; (2) if it does go through `_gen_constructor`, set a
+conditional gdb breakpoint catching the exact moment `A.For`'s `"var"`
+key gets `_runtime_dict_set` (or fails to), to see definitively
+whether the SOURCE field-name string itself is wrong at that point,
+or whether the dict-set call never happens at all for that field; (3)
+consider whether `cv`'s tuple-unpack (`fname, _fannot, fdefault = cv`,
+where `cv` comes from iterating the now-correctly-list-typed but
+still-opaque-element-typed `class_vars`) is itself miscompiled, same
+bug class as bug #7's `(reg, is_xmm, off)` tuple-list issue — this
+hasn't been checked yet and is a strong remaining candidate given the
+pattern-match to a bug already found and fixed once this session.
 
 **Toolchain note for future selfhost testing sessions**: the `build/`
 directory's many generated `.exe` files got externally wiped mid-session
