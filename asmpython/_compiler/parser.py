@@ -73,7 +73,19 @@ class Parser:
         locally bound (params / non-nonlocal assigns).
         nonlocal_vars: subset of free_vars declared `nonlocal` in the body;
         these must be captured by reference (boxed cell) so mutations are shared."""
-        local_names: set = set(fdef.params)
+        # Explicit `: list` read, not `set(fdef.params)` directly: fdef is
+        # this function's own A.FuncDef parameter, an external/opaque type to
+        # sema, so fdef.params reads as "any" -- set()'s codegen treats an
+        # "any"-typed argument as already dict-shaped (sets are dict-backed)
+        # and hands it straight back instead of iterating it as the list it
+        # actually is here, same bug class fixed elsewhere this session for
+        # nonlocal_vars/kwargs. Confirmed via a selfhost rebuild: this made
+        # local_names not actually exclude a lifted nested function's own
+        # parameters from its free_vars, corrupting the closure-lifting
+        # param-prepend in sema and shifting every real parameter out of
+        # position ("undefined variable" for an in-scope parameter name).
+        params_list: list = fdef.params
+        local_names: set = set(params_list)
         if fdef.vararg:
             local_names.add(fdef.vararg)
         if fdef.kwarg:
@@ -540,7 +552,10 @@ class Parser:
             for f in nested_funcs:
                 called: set = set()
                 Parser._collect_called_names(f.body, called)
-                own_locals = set(f.params)
+                # Same fix as _find_free_vars: explicit `: list` read, not
+                # set(f.params) directly (f.params reads "any"-typed here).
+                f_params: list = f.params
+                own_locals = set(f_params)
                 if f.vararg:
                     own_locals.add(f.vararg)
                 if f.kwarg:
