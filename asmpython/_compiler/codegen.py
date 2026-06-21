@@ -2840,7 +2840,10 @@ class Codegen:
         return None
 
     def _gen_for(self, stmt: A.For, info: FuncInfo) -> None:
-        orelse_stmts = getattr(stmt, "orelse", [])
+        # Direct field access: stmt is A.For (the function's own parameter
+        # type) and orelse: list is always present on it -- getattr() would
+        # make its result opaque ("any"-typed) to sema for no reason here.
+        orelse_stmts = stmt.orelse
         zspec = self._for_zip_spec(stmt)
         if zspec is not None:
             self._gen_for_zip(stmt, info, zspec)
@@ -13900,7 +13903,17 @@ class Codegen:
             for c in self.mod.classes:
                 if c.name == e.func:
                     cls_def = c
-            class_vars = getattr(cls_def, "class_vars", []) if cls_def else []
+            # Direct field access, not getattr(cls_def, "class_vars", []):
+            # cls_def.class_vars is always a real `list` field on a class
+            # def. A getattr() result is opaque ("any"-typed) to sema --
+            # this fed `enumerate(class_vars)`/loop iteration below with an
+            # opaquely-typed list, which (confirmed via gdb on a selfhost
+            # rebuild constructing an A.For instance with corrupted field
+            # names) was the actual mechanism behind a "KeyError: key not
+            # in dict" compile-time error: every @dataclass-style
+            # constructor call (including the parser's own AST node
+            # construction, e.g. A.For(...)) goes through this exact loop.
+            class_vars = cls_def.class_vars if cls_def else []
             kwmap: dict = {}
             for kn, kv in getattr(e, "kwargs", []) or []:
                 kwmap[kn] = kv
