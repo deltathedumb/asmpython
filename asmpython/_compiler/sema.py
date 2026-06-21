@@ -740,7 +740,12 @@ class SemaAnalyzer:
             else:
                 return None
         if len(kinds) == 1:
-            return next(iter(kinds))
+            # Explicit loop, not next(iter(kinds)): codegen has no support
+            # for iter()/next() (this is the compiler's own source, self-
+            # compiled) -- kinds has exactly one element here, so the loop
+            # body runs once and returns it.
+            for kind in kinds:
+                return kind
         return None
 
     def _literal_shape_value_type(self, e: "A.DictLit") -> str | None:
@@ -757,7 +762,12 @@ class SemaAnalyzer:
             else:
                 return None
         if len(kinds) == 1:
-            return next(iter(kinds))
+            # Explicit loop, not next(iter(kinds)): codegen has no support
+            # for iter()/next() (this is the compiler's own source, self-
+            # compiled) -- kinds has exactly one element here, so the loop
+            # body runs once and returns it.
+            for kind in kinds:
+                return kind
         return None
 
     def _collect_field_types(self) -> None:

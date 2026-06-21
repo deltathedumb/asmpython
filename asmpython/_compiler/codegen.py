@@ -11399,7 +11399,11 @@ class Codegen:
         assert isinstance(e.left, A.StrLit)
         pieces, _ = A.parse_pct_format(e.left.value)
         args = e.right.elems if isinstance(e.right, A.TupleLit) else [e.right]
-        arg_iter = iter(args)
+        # A mutable single-element list standing in for a nonlocal counter:
+        # this closure needs shared, advancing state across calls, and
+        # asmpython has no codegen for iter()/next() (this file is itself
+        # self-compiled), so an explicit index replaces the iterator.
+        arg_pos = [0]
 
         def emit_pct_piece(piece: tuple) -> None:
             if piece[0] == "lit":
@@ -11407,7 +11411,8 @@ class Codegen:
                 self.emitf(f"lea rax, [{label}]")
                 return
             _, flags, width, precision, conv = piece
-            arg = next(arg_iter)
+            arg = args[arg_pos[0]]
+            arg_pos[0] += 1
             if conv in "sr":
                 if conv == "r":
                     arg.conv_flag = "r"  # type: ignore[attr-defined]
