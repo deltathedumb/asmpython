@@ -16,7 +16,6 @@ flag what's clearly wrong).
 from __future__ import annotations
 
 import copy
-import dataclasses
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -919,20 +918,162 @@ class SemaAnalyzer:
 
     # ---- call-site argument type inference for unannotated parameters ------
 
-    def _collect_calls(self, node, out: list) -> None:
-        """Recursively collect every `A.Call`/`A.MethodCall` reachable from
-        `node` (a statement, expression, or list of either), via a generic
-        dataclass-field walk. Used by `_infer_unannotated_params` to find every
-        call site of every function/method in the module, regardless of how
-        deeply it's nested in expressions."""
-        if isinstance(node, (A.Call, A.MethodCall)):
-            out.append(node)
-        if dataclasses.is_dataclass(node) and not isinstance(node, type):
-            for f in dataclasses.fields(node):
-                self._collect_calls(getattr(node, f.name, None), out)
-        elif isinstance(node, (list, tuple)):
-            for item in node:
-                self._collect_calls(item, out)
+    def _collect_calls_stmts(self, stmts: list, out: list) -> None:
+        """Recursively collect every `A.Call`/`A.MethodCall` reachable from a
+        statement list, via an explicit walk over every statement/expression
+        shape. Used by `_infer_unannotated_params` to find every call site of
+        every function/method in the module, regardless of how deeply it's
+        nested in expressions."""
+        for s in stmts:
+            if isinstance(s, A.Assign):
+                self._collect_calls_expr(s.value, out)
+            elif isinstance(s, A.AugAssign):
+                self._collect_calls_expr(s.value, out)
+            elif isinstance(s, A.TupleAssign):
+                for t in s.targets:
+                    if isinstance(t, (A.Subscript, A.Attr)):
+                        self._collect_calls_expr(t, out)
+                for v in s.values:
+                    self._collect_calls_expr(v, out)
+            elif isinstance(s, A.MultiAssign):
+                self._collect_calls_expr(s.value, out)
+            elif isinstance(s, A.Return):
+                if s.value is not None:
+                    self._collect_calls_expr(s.value, out)
+            elif isinstance(s, A.If):
+                self._collect_calls_expr(s.test, out)
+                self._collect_calls_stmts(s.then, out)
+                self._collect_calls_stmts(s.orelse, out)
+            elif isinstance(s, A.While):
+                self._collect_calls_expr(s.test, out)
+                self._collect_calls_stmts(s.body, out)
+                self._collect_calls_stmts(s.orelse, out)
+            elif isinstance(s, A.For):
+                for a in s.range_args:
+                    self._collect_calls_expr(a, out)
+                if s.iter is not None:
+                    self._collect_calls_expr(s.iter, out)
+                self._collect_calls_stmts(s.body, out)
+                self._collect_calls_stmts(s.orelse, out)
+            elif isinstance(s, A.ExprStmt):
+                self._collect_calls_expr(s.expr, out)
+            elif isinstance(s, A.AttrAssign):
+                self._collect_calls_expr(s.obj, out)
+                self._collect_calls_expr(s.value, out)
+            elif isinstance(s, A.IndexAssign):
+                self._collect_calls_expr(s.target, out)
+                self._collect_calls_expr(s.value, out)
+            elif isinstance(s, A.With):
+                self._collect_calls_expr(s.expr, out)
+                self._collect_calls_stmts(s.body, out)
+            elif isinstance(s, A.Try):
+                self._collect_calls_stmts(s.body, out)
+                self._collect_calls_stmts(s.handler, out)
+                for _types, _bind, hbody in s.extra_handlers:
+                    self._collect_calls_stmts(hbody, out)
+                self._collect_calls_stmts(s.else_body, out)
+                self._collect_calls_stmts(s.finally_body, out)
+            elif isinstance(s, A.Raise):
+                if s.value is not None:
+                    self._collect_calls_expr(s.value, out)
+            elif isinstance(s, A.Del):
+                self._collect_calls_expr(s.target, out)
+            elif isinstance(s, A.YieldStmt):
+                self._collect_calls_expr(s.value, out)
+            elif isinstance(s, A.Match):
+                self._collect_calls_expr(s.subject, out)
+                for _pattern, guard, body in s.cases:
+                    if guard is not None:
+                        self._collect_calls_expr(guard, out)
+                    self._collect_calls_stmts(body, out)
+            # Break/Continue/Pass/Import/FromImport/Global/Nonlocal/ClosureBind
+            # carry no nested expressions worth scanning (ClosureBind's lifted
+            # function body is a separate top-level FuncDef already walked on
+            # its own by _infer_unannotated_params's callers).
+
+    def _collect_calls_expr(self, e, out: list) -> None:
+        if isinstance(e, (A.Call, A.MethodCall)):
+            out.append(e)
+        if isinstance(e, A.Call):
+            for a in e.args:
+                self._collect_calls_expr(a, out)
+            for _kn, kv in e.kwargs:
+                self._collect_calls_expr(kv, out)
+        elif isinstance(e, A.MethodCall):
+            self._collect_calls_expr(e.obj, out)
+            for a in e.args:
+                self._collect_calls_expr(a, out)
+            for _kn, kv in e.kwargs:
+                self._collect_calls_expr(kv, out)
+        elif isinstance(e, A.BinOp):
+            self._collect_calls_expr(e.left, out)
+            self._collect_calls_expr(e.right, out)
+        elif isinstance(e, A.UnaryOp):
+            self._collect_calls_expr(e.operand, out)
+        elif isinstance(e, A.Compare):
+            for o in e.operands:
+                self._collect_calls_expr(o, out)
+        elif isinstance(e, A.BoolOp):
+            self._collect_calls_expr(e.left, out)
+            self._collect_calls_expr(e.right, out)
+        elif isinstance(e, A.IfExp):
+            self._collect_calls_expr(e.test, out)
+            self._collect_calls_expr(e.body, out)
+            self._collect_calls_expr(e.orelse, out)
+        elif isinstance(e, A.NamedExpr):
+            self._collect_calls_expr(e.value, out)
+        elif isinstance(e, A.ListLit):
+            for el in e.elems:
+                self._collect_calls_expr(el, out)
+        elif isinstance(e, A.Subscript):
+            self._collect_calls_expr(e.obj, out)
+            if isinstance(e.index, A.Slice):
+                if e.index.start is not None:
+                    self._collect_calls_expr(e.index.start, out)
+                if e.index.stop is not None:
+                    self._collect_calls_expr(e.index.stop, out)
+                if e.index.step is not None:
+                    self._collect_calls_expr(e.index.step, out)
+            else:
+                self._collect_calls_expr(e.index, out)
+        elif isinstance(e, A.Attr):
+            self._collect_calls_expr(e.obj, out)
+        elif isinstance(e, A.FString):
+            for seg in e.segments:
+                self._collect_calls_expr(seg, out)
+        elif isinstance(e, A.DictLit):
+            for k in e.keys:
+                if k is not None:
+                    self._collect_calls_expr(k, out)
+            for v in e.values:
+                self._collect_calls_expr(v, out)
+        elif isinstance(e, A.TupleLit):
+            for el in e.elems:
+                self._collect_calls_expr(el, out)
+        elif isinstance(e, A.SetLit):
+            for el in e.elems:
+                self._collect_calls_expr(el, out)
+        elif isinstance(e, A.Starred):
+            self._collect_calls_expr(e.value, out)
+        elif isinstance(e, A.Comprehension):
+            self._collect_calls_expr(e.elt, out)
+            self._collect_calls_expr(e.iter, out)
+            if e.cond is not None:
+                self._collect_calls_expr(e.cond, out)
+            for ei in e.extra_for_iters:
+                self._collect_calls_expr(ei, out)
+            for ec in e.extra_for_conds:
+                if ec is not None:
+                    self._collect_calls_expr(ec, out)
+        elif isinstance(e, A.DictComprehension):
+            self._collect_calls_expr(e.key, out)
+            self._collect_calls_expr(e.value, out)
+            self._collect_calls_expr(e.iter, out)
+            if e.cond is not None:
+                self._collect_calls_expr(e.cond, out)
+        elif isinstance(e, A.Lambda):
+            if e.body is not None:
+                self._collect_calls_expr(e.body, out)
 
     def _infer_unannotated_params(self) -> None:
         """For function/method parameters with no type annotation and no
@@ -950,12 +1091,12 @@ class SemaAnalyzer:
         existing `int` default -- callers needing a different type still
         annotate explicitly, same as before."""
         calls: list = []
-        self._collect_calls(self.mod.body, calls)
+        self._collect_calls_stmts(self.mod.body, calls)
         for f in self.mod.funcs:
-            self._collect_calls(f.body, calls)
+            self._collect_calls_stmts(f.body, calls)
         for c in self.mod.classes:
             for m in c.methods:
-                self._collect_calls(m.body, calls)
+                self._collect_calls_stmts(m.body, calls)
 
         for f in self.mod.funcs:
             sites = [c for c in calls if isinstance(c, A.Call) and c.func == f.name]

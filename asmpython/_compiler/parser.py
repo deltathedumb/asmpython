@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
-
 from .lexer import Token, Lexer
 from .errors import ErrorCode, ParseError
 from . import ast_nodes as A
@@ -365,18 +363,155 @@ class Parser:
         return A.Module(funcs=funcs, body=body, classes=classes)
 
     @staticmethod
-    def _collect_called_names(node, out: set) -> None:
-        """Collect every `A.Call.func` name reachable inside `node`. Generic
-        over node type via dataclass introspection (see `_dedupe_lifted_funcs`
-        in program.py for the same pattern and its rationale)."""
-        if isinstance(node, A.Call):
-            out.add(node.func)
-        if dataclasses.is_dataclass(node) and not isinstance(node, type):
-            for f in dataclasses.fields(node):
-                Parser._collect_called_names(getattr(node, f.name), out)
-        elif isinstance(node, (list, tuple)):
-            for item in node:
-                Parser._collect_called_names(item, out)
+    def _collect_called_names(stmts: list, out: set) -> None:
+        """Collect every `A.Call.func` name reachable inside a statement
+        list, via an explicit walk over every statement/expression shape."""
+        for s in stmts:
+            if isinstance(s, A.Assign):
+                Parser._collect_called_names_expr(s.value, out)
+            elif isinstance(s, A.AugAssign):
+                Parser._collect_called_names_expr(s.value, out)
+            elif isinstance(s, A.TupleAssign):
+                for t in s.targets:
+                    if isinstance(t, (A.Subscript, A.Attr)):
+                        Parser._collect_called_names_expr(t, out)
+                for v in s.values:
+                    Parser._collect_called_names_expr(v, out)
+            elif isinstance(s, A.MultiAssign):
+                Parser._collect_called_names_expr(s.value, out)
+            elif isinstance(s, A.Return):
+                if s.value is not None:
+                    Parser._collect_called_names_expr(s.value, out)
+            elif isinstance(s, A.If):
+                Parser._collect_called_names_expr(s.test, out)
+                Parser._collect_called_names(s.then, out)
+                Parser._collect_called_names(s.orelse, out)
+            elif isinstance(s, A.While):
+                Parser._collect_called_names_expr(s.test, out)
+                Parser._collect_called_names(s.body, out)
+                Parser._collect_called_names(s.orelse, out)
+            elif isinstance(s, A.For):
+                for a in s.range_args:
+                    Parser._collect_called_names_expr(a, out)
+                if s.iter is not None:
+                    Parser._collect_called_names_expr(s.iter, out)
+                Parser._collect_called_names(s.body, out)
+                Parser._collect_called_names(s.orelse, out)
+            elif isinstance(s, A.ExprStmt):
+                Parser._collect_called_names_expr(s.expr, out)
+            elif isinstance(s, A.AttrAssign):
+                Parser._collect_called_names_expr(s.obj, out)
+                Parser._collect_called_names_expr(s.value, out)
+            elif isinstance(s, A.IndexAssign):
+                Parser._collect_called_names_expr(s.target, out)
+                Parser._collect_called_names_expr(s.value, out)
+            elif isinstance(s, A.With):
+                Parser._collect_called_names_expr(s.expr, out)
+                Parser._collect_called_names(s.body, out)
+            elif isinstance(s, A.Try):
+                Parser._collect_called_names(s.body, out)
+                Parser._collect_called_names(s.handler, out)
+                for _types, _bind, hbody in s.extra_handlers:
+                    Parser._collect_called_names(hbody, out)
+                Parser._collect_called_names(s.else_body, out)
+                Parser._collect_called_names(s.finally_body, out)
+            elif isinstance(s, A.Raise):
+                if s.value is not None:
+                    Parser._collect_called_names_expr(s.value, out)
+            elif isinstance(s, A.Del):
+                Parser._collect_called_names_expr(s.target, out)
+            elif isinstance(s, A.YieldStmt):
+                Parser._collect_called_names_expr(s.value, out)
+            elif isinstance(s, A.Match):
+                Parser._collect_called_names_expr(s.subject, out)
+                for _pattern, guard, body in s.cases:
+                    if guard is not None:
+                        Parser._collect_called_names_expr(guard, out)
+                    Parser._collect_called_names(body, out)
+
+    @staticmethod
+    def _collect_called_names_expr(e, out: set) -> None:
+        if isinstance(e, A.Call):
+            out.add(e.func)
+            for a in e.args:
+                Parser._collect_called_names_expr(a, out)
+            for _kn, kv in e.kwargs:
+                Parser._collect_called_names_expr(kv, out)
+        elif isinstance(e, A.MethodCall):
+            Parser._collect_called_names_expr(e.obj, out)
+            for a in e.args:
+                Parser._collect_called_names_expr(a, out)
+            for _kn, kv in e.kwargs:
+                Parser._collect_called_names_expr(kv, out)
+        elif isinstance(e, A.BinOp):
+            Parser._collect_called_names_expr(e.left, out)
+            Parser._collect_called_names_expr(e.right, out)
+        elif isinstance(e, A.UnaryOp):
+            Parser._collect_called_names_expr(e.operand, out)
+        elif isinstance(e, A.Compare):
+            for o in e.operands:
+                Parser._collect_called_names_expr(o, out)
+        elif isinstance(e, A.BoolOp):
+            Parser._collect_called_names_expr(e.left, out)
+            Parser._collect_called_names_expr(e.right, out)
+        elif isinstance(e, A.IfExp):
+            Parser._collect_called_names_expr(e.test, out)
+            Parser._collect_called_names_expr(e.body, out)
+            Parser._collect_called_names_expr(e.orelse, out)
+        elif isinstance(e, A.NamedExpr):
+            Parser._collect_called_names_expr(e.value, out)
+        elif isinstance(e, A.ListLit):
+            for el in e.elems:
+                Parser._collect_called_names_expr(el, out)
+        elif isinstance(e, A.Subscript):
+            Parser._collect_called_names_expr(e.obj, out)
+            if isinstance(e.index, A.Slice):
+                if e.index.start is not None:
+                    Parser._collect_called_names_expr(e.index.start, out)
+                if e.index.stop is not None:
+                    Parser._collect_called_names_expr(e.index.stop, out)
+                if e.index.step is not None:
+                    Parser._collect_called_names_expr(e.index.step, out)
+            else:
+                Parser._collect_called_names_expr(e.index, out)
+        elif isinstance(e, A.Attr):
+            Parser._collect_called_names_expr(e.obj, out)
+        elif isinstance(e, A.FString):
+            for seg in e.segments:
+                Parser._collect_called_names_expr(seg, out)
+        elif isinstance(e, A.DictLit):
+            for k in e.keys:
+                if k is not None:
+                    Parser._collect_called_names_expr(k, out)
+            for v in e.values:
+                Parser._collect_called_names_expr(v, out)
+        elif isinstance(e, A.TupleLit):
+            for el in e.elems:
+                Parser._collect_called_names_expr(el, out)
+        elif isinstance(e, A.SetLit):
+            for el in e.elems:
+                Parser._collect_called_names_expr(el, out)
+        elif isinstance(e, A.Starred):
+            Parser._collect_called_names_expr(e.value, out)
+        elif isinstance(e, A.Comprehension):
+            Parser._collect_called_names_expr(e.elt, out)
+            Parser._collect_called_names_expr(e.iter, out)
+            if e.cond is not None:
+                Parser._collect_called_names_expr(e.cond, out)
+            for ei in e.extra_for_iters:
+                Parser._collect_called_names_expr(ei, out)
+            for ec in e.extra_for_conds:
+                if ec is not None:
+                    Parser._collect_called_names_expr(ec, out)
+        elif isinstance(e, A.DictComprehension):
+            Parser._collect_called_names_expr(e.key, out)
+            Parser._collect_called_names_expr(e.value, out)
+            Parser._collect_called_names_expr(e.iter, out)
+            if e.cond is not None:
+                Parser._collect_called_names_expr(e.cond, out)
+        elif isinstance(e, A.Lambda):
+            if e.body is not None:
+                Parser._collect_called_names_expr(e.body, out)
 
     @staticmethod
     def _propagate_transitive_free_vars(nested_funcs: list) -> None:

@@ -19,7 +19,6 @@ symbol ABI — every project module's code ends up in one `.asm`.
 
 from __future__ import annotations
 
-import dataclasses
 from pathlib import Path
 
 from .lexer import Lexer
@@ -54,11 +53,13 @@ def _flatten_targets(targets: list, out: set[str]) -> None:
 
 
 def _free_names(node: object, out: set[str]) -> None:
-    """Collect the bare names an expression/statement references: `Name`
-    lookups and `Call`/`MethodCall` callee names. Used to decide whether a
-    value-import's initializer can be safely materialized (every name it needs
-    must already be available). Attribute names and string literals are not
-    free variables, so they're skipped.
+    """Collect the bare names an expression references: `Name` lookups and
+    `Call`/`MethodCall` callee names. Used to decide whether a value-import's
+    initializer can be safely materialized (every name it needs must already
+    be available). Attribute names and string literals are not free
+    variables, so they're skipped. Explicit per-node-type walk over every
+    expression shape (no statement shapes: every call site passes a single
+    expression, e.g. an import initializer or an `if`/assert test).
     """
     if isinstance(node, A.Name):
         out.add(node.name)
@@ -67,7 +68,7 @@ def _free_names(node: object, out: set[str]) -> None:
         out.add(node.func)
         for a in node.args:
             _free_names(a, out)
-        for _kw, val in getattr(node, "kwargs", []) or []:
+        for _kw, val in node.kwargs:
             _free_names(val, out)
         return
     if isinstance(node, A.MethodCall):
@@ -76,6 +77,8 @@ def _free_names(node: object, out: set[str]) -> None:
         _free_names(node.obj, out)
         for a in node.args:
             _free_names(a, out)
+        for _kw, val in node.kwargs:
+            _free_names(val, out)
         return
     if isinstance(node, A.Attr):
         # `obj.name`: only the object is a free reference.
@@ -84,23 +87,103 @@ def _free_names(node: object, out: set[str]) -> None:
     if isinstance(node, (A.Comprehension, A.DictComprehension)):
         # `[elt for a, b in iter if cond]`: `var`/`targets` are loop-bound
         # names, not free references — collect names from the rest of the
-        # node (elt/key/value/iter/cond) and drop the bound ones, so e.g.
-        # `{fwd for fwd, _rfl in DUNDER_BINOP.values()}` reports only
-        # `DUNDER_BINOP` as free, not `fwd`/`_rfl`.
+        # node (elt/key/value/iter/cond/extra_for_*) and drop the bound
+        # ones, so e.g. `{fwd for fwd, _rfl in DUNDER_BINOP.values()}`
+        # reports only `DUNDER_BINOP` as free, not `fwd`/`_rfl`.
         bound: set[str] = set()
         if node.var:
             bound.add(node.var)
         _flatten_targets(node.targets, bound)
+        for t in node.extra_for_vars:
+            if t:
+                bound.add(t)
+        for t in node.extra_for_targets:
+            _flatten_targets(t, bound)
         inner: set[str] = set()
-        for f in dataclasses.fields(node):
-            if f.name in ("var", "targets"):
-                continue
-            _free_names(getattr(node, f.name), inner)
+        if isinstance(node, A.Comprehension):
+            _free_names(node.elt, inner)
+        else:
+            _free_names(node.key, inner)
+            _free_names(node.value, inner)
+        _free_names(node.iter, inner)
+        if node.cond is not None:
+            _free_names(node.cond, inner)
+        for ei in node.extra_for_iters:
+            _free_names(ei, inner)
+        for ec in node.extra_for_conds:
+            if ec is not None:
+                _free_names(ec, inner)
         out |= inner - bound
         return
-    if dataclasses.is_dataclass(node):
-        for f in dataclasses.fields(node):
-            _free_names(getattr(node, f.name), out)
+    if isinstance(node, A.BinOp):
+        _free_names(node.left, out)
+        _free_names(node.right, out)
+        return
+    if isinstance(node, A.UnaryOp):
+        _free_names(node.operand, out)
+        return
+    if isinstance(node, A.Compare):
+        for o in node.operands:
+            _free_names(o, out)
+        return
+    if isinstance(node, A.BoolOp):
+        _free_names(node.left, out)
+        _free_names(node.right, out)
+        return
+    if isinstance(node, A.IfExp):
+        _free_names(node.test, out)
+        _free_names(node.body, out)
+        _free_names(node.orelse, out)
+        return
+    if isinstance(node, A.NamedExpr):
+        out.add(node.target)
+        _free_names(node.value, out)
+        return
+    if isinstance(node, A.ListLit):
+        for el in node.elems:
+            _free_names(el, out)
+        return
+    if isinstance(node, A.Subscript):
+        _free_names(node.obj, out)
+        if isinstance(node.index, A.Slice):
+            if node.index.start is not None:
+                _free_names(node.index.start, out)
+            if node.index.stop is not None:
+                _free_names(node.index.stop, out)
+            if node.index.step is not None:
+                _free_names(node.index.step, out)
+        else:
+            _free_names(node.index, out)
+        return
+    if isinstance(node, A.FString):
+        for seg in node.segments:
+            _free_names(seg, out)
+        return
+    if isinstance(node, A.DictLit):
+        for k in node.keys:
+            if k is not None:
+                _free_names(k, out)
+        for v in node.values:
+            _free_names(v, out)
+        return
+    if isinstance(node, A.TupleLit):
+        for el in node.elems:
+            _free_names(el, out)
+        return
+    if isinstance(node, A.SetLit):
+        for el in node.elems:
+            _free_names(el, out)
+        return
+    if isinstance(node, A.Starred):
+        _free_names(node.value, out)
+        return
+    if isinstance(node, A.Lambda):
+        # The lambda's own params shadow any same-named outer reference, so
+        # exclude them from what its body contributes as free.
+        if node.body is not None:
+            inner: set[str] = set()
+            _free_names(node.body, inner)
+            out |= inner - set(node.params)
         return
     if isinstance(node, (list, tuple)):
         for item in node:
@@ -279,10 +362,10 @@ def _collect_import_stmts(module: A.Module) -> list:
     return found
 
 
-def _rename_call_targets(node, renames: dict[str, str]) -> None:
+def _rename_call_targets(stmts: list, renames: dict[str, str]) -> None:
     """Recursively rewrite every `A.Call.func` and `A.ClosureBind.func_name`
-    in `node` (and anything nested inside it — other dataclass fields, lists,
-    tuples) per `renames`.
+    in a statement list (and every expression nested inside it) per
+    `renames`.
 
     `ClosureBind.func_name` has to move in lockstep with the call-site rename:
     sema keys its captured-free-var-type table (`_fv_types`) by this same
@@ -293,20 +376,159 @@ def _rename_call_targets(node, renames: dict[str, str]) -> None:
     never looks up again, silently dropping the captured types (free vars
     defaulted back to `int`).
 
-    Generic over every AST node type via dataclass introspection rather than
-    enumerating each node kind by hand, so it can't silently miss a branch the
-    way a hand-written walker can (see the `_cl_walk_expr`/`for...else` bug).
+    Explicit per-node-type walk over every statement/expression shape (not a
+    nested function's own body — that's a separate top-level FuncDef already
+    walked on its own by this function's callers).
     """
-    if isinstance(node, A.Call) and node.func in renames:
-        node.func = renames[node.func]
-    elif isinstance(node, A.ClosureBind) and node.func_name in renames:
-        node.func_name = renames[node.func_name]
-    if dataclasses.is_dataclass(node) and not isinstance(node, type):
-        for f in dataclasses.fields(node):
-            _rename_call_targets(getattr(node, f.name), renames)
-    elif isinstance(node, (list, tuple)):
-        for item in node:
-            _rename_call_targets(item, renames)
+    for s in stmts:
+        if isinstance(s, A.Assign):
+            _rename_call_targets_expr(s.value, renames)
+        elif isinstance(s, A.AugAssign):
+            _rename_call_targets_expr(s.value, renames)
+        elif isinstance(s, A.TupleAssign):
+            for t in s.targets:
+                if isinstance(t, (A.Subscript, A.Attr)):
+                    _rename_call_targets_expr(t, renames)
+            for v in s.values:
+                _rename_call_targets_expr(v, renames)
+        elif isinstance(s, A.MultiAssign):
+            _rename_call_targets_expr(s.value, renames)
+        elif isinstance(s, A.Return):
+            if s.value is not None:
+                _rename_call_targets_expr(s.value, renames)
+        elif isinstance(s, A.If):
+            _rename_call_targets_expr(s.test, renames)
+            _rename_call_targets(s.then, renames)
+            _rename_call_targets(s.orelse, renames)
+        elif isinstance(s, A.While):
+            _rename_call_targets_expr(s.test, renames)
+            _rename_call_targets(s.body, renames)
+            _rename_call_targets(s.orelse, renames)
+        elif isinstance(s, A.For):
+            for a in s.range_args:
+                _rename_call_targets_expr(a, renames)
+            if s.iter is not None:
+                _rename_call_targets_expr(s.iter, renames)
+            _rename_call_targets(s.body, renames)
+            _rename_call_targets(s.orelse, renames)
+        elif isinstance(s, A.ExprStmt):
+            _rename_call_targets_expr(s.expr, renames)
+        elif isinstance(s, A.AttrAssign):
+            _rename_call_targets_expr(s.obj, renames)
+            _rename_call_targets_expr(s.value, renames)
+        elif isinstance(s, A.IndexAssign):
+            _rename_call_targets_expr(s.target, renames)
+            _rename_call_targets_expr(s.value, renames)
+        elif isinstance(s, A.With):
+            _rename_call_targets_expr(s.expr, renames)
+            _rename_call_targets(s.body, renames)
+        elif isinstance(s, A.Try):
+            _rename_call_targets(s.body, renames)
+            _rename_call_targets(s.handler, renames)
+            for _types, _bind, hbody in s.extra_handlers:
+                _rename_call_targets(hbody, renames)
+            _rename_call_targets(s.else_body, renames)
+            _rename_call_targets(s.finally_body, renames)
+        elif isinstance(s, A.Raise):
+            if s.value is not None:
+                _rename_call_targets_expr(s.value, renames)
+        elif isinstance(s, A.Del):
+            _rename_call_targets_expr(s.target, renames)
+        elif isinstance(s, A.YieldStmt):
+            _rename_call_targets_expr(s.value, renames)
+        elif isinstance(s, A.Match):
+            _rename_call_targets_expr(s.subject, renames)
+            for _pattern, guard, body in s.cases:
+                if guard is not None:
+                    _rename_call_targets_expr(guard, renames)
+                _rename_call_targets(body, renames)
+        elif isinstance(s, A.ClosureBind) and s.func_name in renames:
+            s.func_name = renames[s.func_name]
+
+
+def _rename_call_targets_expr(e, renames: dict[str, str]) -> None:
+    if isinstance(e, A.Call):
+        if e.func in renames:
+            e.func = renames[e.func]
+        for a in e.args:
+            _rename_call_targets_expr(a, renames)
+        for _kn, kv in e.kwargs:
+            _rename_call_targets_expr(kv, renames)
+    elif isinstance(e, A.MethodCall):
+        _rename_call_targets_expr(e.obj, renames)
+        for a in e.args:
+            _rename_call_targets_expr(a, renames)
+        for _kn, kv in e.kwargs:
+            _rename_call_targets_expr(kv, renames)
+    elif isinstance(e, A.BinOp):
+        _rename_call_targets_expr(e.left, renames)
+        _rename_call_targets_expr(e.right, renames)
+    elif isinstance(e, A.UnaryOp):
+        _rename_call_targets_expr(e.operand, renames)
+    elif isinstance(e, A.Compare):
+        for o in e.operands:
+            _rename_call_targets_expr(o, renames)
+    elif isinstance(e, A.BoolOp):
+        _rename_call_targets_expr(e.left, renames)
+        _rename_call_targets_expr(e.right, renames)
+    elif isinstance(e, A.IfExp):
+        _rename_call_targets_expr(e.test, renames)
+        _rename_call_targets_expr(e.body, renames)
+        _rename_call_targets_expr(e.orelse, renames)
+    elif isinstance(e, A.NamedExpr):
+        _rename_call_targets_expr(e.value, renames)
+    elif isinstance(e, A.ListLit):
+        for el in e.elems:
+            _rename_call_targets_expr(el, renames)
+    elif isinstance(e, A.Subscript):
+        _rename_call_targets_expr(e.obj, renames)
+        if isinstance(e.index, A.Slice):
+            if e.index.start is not None:
+                _rename_call_targets_expr(e.index.start, renames)
+            if e.index.stop is not None:
+                _rename_call_targets_expr(e.index.stop, renames)
+            if e.index.step is not None:
+                _rename_call_targets_expr(e.index.step, renames)
+        else:
+            _rename_call_targets_expr(e.index, renames)
+    elif isinstance(e, A.Attr):
+        _rename_call_targets_expr(e.obj, renames)
+    elif isinstance(e, A.FString):
+        for seg in e.segments:
+            _rename_call_targets_expr(seg, renames)
+    elif isinstance(e, A.DictLit):
+        for k in e.keys:
+            if k is not None:
+                _rename_call_targets_expr(k, renames)
+        for v in e.values:
+            _rename_call_targets_expr(v, renames)
+    elif isinstance(e, A.TupleLit):
+        for el in e.elems:
+            _rename_call_targets_expr(el, renames)
+    elif isinstance(e, A.SetLit):
+        for el in e.elems:
+            _rename_call_targets_expr(el, renames)
+    elif isinstance(e, A.Starred):
+        _rename_call_targets_expr(e.value, renames)
+    elif isinstance(e, A.Comprehension):
+        _rename_call_targets_expr(e.elt, renames)
+        _rename_call_targets_expr(e.iter, renames)
+        if e.cond is not None:
+            _rename_call_targets_expr(e.cond, renames)
+        for ei in e.extra_for_iters:
+            _rename_call_targets_expr(ei, renames)
+        for ec in e.extra_for_conds:
+            if ec is not None:
+                _rename_call_targets_expr(ec, renames)
+    elif isinstance(e, A.DictComprehension):
+        _rename_call_targets_expr(e.key, renames)
+        _rename_call_targets_expr(e.value, renames)
+        _rename_call_targets_expr(e.iter, renames)
+        if e.cond is not None:
+            _rename_call_targets_expr(e.cond, renames)
+    elif isinstance(e, A.Lambda):
+        if e.body is not None:
+            _rename_call_targets_expr(e.body, renames)
 
 
 def _dedupe_lifted_funcs(module: "A.Module", taken_names: set[str]) -> None:
