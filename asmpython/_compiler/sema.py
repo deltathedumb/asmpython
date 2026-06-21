@@ -1120,7 +1120,9 @@ class SemaAnalyzer:
                     ]
                 self._infer_call_target_params(f"{c.name}.{m.name}", m, sites, start=1)
 
-    def _infer_call_target_params(self, qualname: str, fn, sites: list, start: int) -> None:
+    def _infer_call_target_params(
+        self, qualname: str, fn: "A.FuncDef", sites: list, start: int
+    ) -> None:
         """Infer types for `fn`'s parameters at index >= `start` (0 for plain
         functions, 1 for methods to skip `self`) from `sites` (the `A.Call`/
         `A.MethodCall` nodes invoking it), storing results in
