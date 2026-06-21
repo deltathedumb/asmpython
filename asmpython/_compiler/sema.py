@@ -847,7 +847,12 @@ class SemaAnalyzer:
                 # can't. Otherwise fall back to the value's static type.
                 r = self._resolve_annot(getattr(s, "annot", None))  # type: ignore
                 if r is not None:
-                    ty, el, val, tup, _elval = r
+                    # Same fix as elsewhere: subscript reads with an
+                    # explicit `ty: str`, not a tuple-unpack.
+                    ty: str = r[0]
+                    el = r[1]
+                    val = r[2]
+                    tup = r[3]
                 else:
                     raw = self._static_value_info(s.value, pinfo)
                     ty, el, val, tup = raw[0], raw[1], raw[2], raw[3]
@@ -2767,7 +2772,20 @@ class SemaAnalyzer:
         # default ("int") or the annotation refines a same-kind container.
         ann = self._resolve_annot(annot)
         if ann is not None:
-            aty, ael, aval, atup, aelval = ann
+            # Same fix as _seed_param/_collect_field_types: subscript reads
+            # with an explicit `aty: str`, not a tuple-unpack, so `aty ==
+            # "list"` / `aty == "dict"` below route through _runtime_str_eq.
+            # This is the path `name: dict = {}`-style annotated local
+            # assignments go through (_check_stmt's A.Assign -> here), so it
+            # was the actual remaining cause of bug #9's core symptom: a
+            # `: dict`-annotated local never got recognized as dict-typed in
+            # the selfhosted binary, so `d[k] = v` miscompiled as a raw
+            # indexed write instead of _runtime_dict_set.
+            aty: str = ann[0]
+            ael = ann[1]
+            aval = ann[2]
+            atup = ann[3]
+            aelval = ann[4]
             if t in ("int", "any") or t == aty:
                 if aty == "list":
                     scope.add(
