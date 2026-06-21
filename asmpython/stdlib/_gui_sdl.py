@@ -25,7 +25,19 @@ BINDINGS: dict = {
     "load_bmp":         Func(arg_types=("str",),                    ret_type="int", c_name="_gui_load_bmp"),
     "free_surface":     Func(arg_types=("int",),                    ret_type="int", c_name="SDL_FreeSurface"),
     "create_texture":   Func(arg_types=("int","int"),               ret_type="int", c_name="SDL_CreateTextureFromSurface"),
+    # create_texture_argb(renderer, access, w, h) -> texture. Always uses
+    # SDL_PIXELFORMAT_ARGB8888, the format PixelBuffer's update_texture
+    # writes; access is a TEXTUREACCESS_* constant (see gui._pixels).
+    "create_texture_argb": Func(arg_types=("int","int","int","int"),  ret_type="int", c_name="_gui_create_texture_argb"),
+    # update_texture(texture, pixels_addr, pitch) -> int. Always updates the
+    # whole texture (rect=NULL); pixels_addr is a raw pointer (see
+    # PixelBuffer.raw_addr()), pitch is bytes per row (width * 4 for ARGB8888).
+    "update_texture":   Func(arg_types=("int","int","int"),         ret_type="int", c_name="_gui_update_texture"),
     "destroy_texture":  Func(arg_types=("int",),                    ret_type="int", c_name="SDL_DestroyTexture"),
+    # list_buf_addr(a_list) -> raw address of the list's backing buffer.
+    # Used by PixelBuffer.raw_addr() (see gui._pixels) — works on any
+    # asmpython list, not just pixel buffers.
+    "list_buf_addr":    Func(arg_types=("list",),                   ret_type="int", c_name="_gui_list_buf_addr"),
     "query_texture_w":  Func(arg_types=("int",),                    ret_type="int", c_name="_gui_query_texture_w"),
     "query_texture_h":  Func(arg_types=("int",),                    ret_type="int", c_name="_gui_query_texture_h"),
     "render_copy":      Func(arg_types=("int","int","int","int","int","int"), ret_type="int", c_name="_gui_render_copy"),
@@ -106,6 +118,12 @@ BINDINGS: dict = {
     "RENDERER_ACCELERATED": Const(ty="int", value=0x00000002),
     "RENDERER_PRESENTVSYNC":Const(ty="int", value=0x00000004),
     "RENDERER_SOFTWARE":    Const(ty="int", value=0x00000001),
+
+    # ---- Texture access / pixel format (for create_texture_argb) ------------
+    "TEXTUREACCESS_STATIC":    Const(ty="int", value=0),
+    "TEXTUREACCESS_STREAMING": Const(ty="int", value=1),
+    "TEXTUREACCESS_TARGET":    Const(ty="int", value=2),
+    "PIXELFORMAT_ARGB8888":    Const(ty="int", value=0x16362004),
 
     # ---- Blend modes --------------------------------------------------------
     "BLEND_NONE":           Const(ty="int", value=0),

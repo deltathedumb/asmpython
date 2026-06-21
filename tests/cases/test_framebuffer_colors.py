@@ -10,7 +10,7 @@
 # 16777215
 # 16711680
 # 255
-from framebuffer import rgb, bgr, BLACK, WHITE, RED, BLUE
+from lumen.framebuffer import rgb, bgr, BLACK, WHITE, RED, BLUE
 
 print(rgb(255, 0, 0))
 print(rgb(0, 255, 0))

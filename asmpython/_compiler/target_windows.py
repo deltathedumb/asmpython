@@ -654,6 +654,7 @@ class WindowsCodegen(Codegen):
         "_gui_is_key_down", "_gui_mouse_dx", "_gui_mouse_dy",
         "_gui_render_copy_ex", "_gui_render_copy_region",
         "_gui_joystick_axis", "_gui_joystick_button",
+        "_gui_list_buf_addr", "_gui_update_texture", "_gui_create_texture_argb",
     )
     _AUDIO_SYMS = (
         "_audio_load_wav",
@@ -1343,6 +1344,7 @@ class WindowsCodegen(Codegen):
             self.emit("extern SDL_RenderDrawRect")
             self.emit("extern SDL_RenderCopy")
             self.emit("extern SDL_QueryTexture")
+            self.emit("extern SDL_UpdateTexture")
 
             self.emit("section .bss")
             self.emit("_gui_event_buf: resb 56")
@@ -1455,6 +1457,39 @@ class WindowsCodegen(Codegen):
                            "call SDL_RenderCopy",
                            "leave", "ret")
 
+            # _gui_update_texture(rcx=texture, rdx=pixels_addr, r8=pitch) -> rax
+            # Calls SDL_UpdateTexture(texture, NULL, pixels_addr, pitch),
+            # updating the whole texture in one call from a raw pixel buffer
+            # (see PixelBuffer.raw_addr() / Canvas.blit_pixels()).
+            if "_gui_update_texture" in self.ffi_called:
+                self.label("_gui_update_texture")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+                self.emitf("mov r9, r8",     # pitch -> 4th arg
+                           "mov r8, rdx",    # pixels_addr -> 3rd arg
+                           "xor rdx, rdx",   # rect = NULL
+                           "call SDL_UpdateTexture",
+                           "leave", "ret")
+
+            # _gui_create_texture_argb(rcx=renderer, rdx=access, r8=w, r9=h) -> rax
+            # Calls SDL_CreateTexture(renderer, ARGB8888, access, w, h);
+            # always uses the ARGB8888 pixel format PixelBuffer's pixel
+            # ints are packed as.
+            if "_gui_create_texture_argb" in self.ffi_called:
+                self.emit("extern SDL_CreateTexture")
+                self.label("_gui_create_texture_argb")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+                self.emitf("mov [rbp-8], rcx",   # renderer
+                           "mov [rbp-16], rdx",  # access
+                           "mov [rbp-24], r8",   # w
+                           "mov [rbp-32], r9")   # h
+                self.emitf("mov rcx, [rbp-8]",
+                           "mov edx, 0x16362004",  # SDL_PIXELFORMAT_ARGB8888
+                           "mov r8, [rbp-16]",     # access
+                           "mov r9, [rbp-24]",     # w
+                           "mov rax, [rbp-32]", "mov [rsp+32], rax",  # h (5th arg)
+                           "call SDL_CreateTexture",
+                           "leave", "ret")
+
             # _gui_query_texture_w(rcx=texture) -> rax (width as signed 64-bit)
             # _gui_query_texture_h(rcx=texture) -> rax (height as signed 64-bit)
             # Both call SDL_QueryTexture(texture, NULL, NULL, &w, &h) and return one dim.
@@ -1482,6 +1517,16 @@ class WindowsCodegen(Codegen):
                            "call SDL_QueryTexture",
                            "movsx rax, dword [_gui_tex_dim+4]",
                            "leave", "ret")
+
+            # _gui_list_buf_addr(rcx=list_header_ptr) -> rax (buffer address)
+            # Every asmpython list is a [cap, len, buf_ptr] header; buf_ptr
+            # lives at offset 16. Lets PixelBuffer.raw_addr() hand back a
+            # real, stable, externally-writable pointer to its pixel data
+            # (e.g. for hardware.mmio_write32-style direct pokes), without
+            # exposing the list header layout to .py source.
+            if "_gui_list_buf_addr" in self.ffi_called:
+                self.label("_gui_list_buf_addr")
+                self.emitf("mov rax, [rcx+16]", "ret")
 
             # _gui_is_key_down(rcx=scancode) -> rax (0 or 1)
             # SDL_GetKeyboardState(NULL) returns Uint8* indexed by scancode.

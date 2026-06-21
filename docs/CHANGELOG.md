@@ -4,6 +4,38 @@ All notable changes to asmpython are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
+## [Unreleased]
+
+### Changed
+
+- **Lumen renamed and consolidated**: `gui`, `framebuffer`, and `audio` are
+  now `lumen`, `lumen.framebuffer`, and `lumen.audio` — one package, three
+  independently-importable pieces. `import lumen` gets the SDL2 `Canvas`/
+  `Image`/`Font`/`Joystick`/`Tilemap`/colors/constants API (unchanged
+  otherwise); `import lumen.framebuffer` / `import lumen.audio` pull in only
+  their own dependencies (bare-metal MMIO, SDL2_mixer respectively) without
+  dragging in SDL2/SDL2_ttf. The bundled-stdlib loader gained real
+  package-directory and dotted-submodule resolution to support this
+  (`stdlib/lumen/__init__.py` + `framebuffer.py`/`audio.py`/internal `_*.py`
+  submodules), plus parser support for parenthesized `from x import (a, b,
+  ...)` import lists.
+- **`gui` split into a multi-file package** internally (`_colors.py`,
+  `_constants.py`, `_canvas.py`, `_image.py`, `_font.py`, `_joystick.py`,
+  `_tilemap.py`, `_pixels.py` under `stdlib/lumen/`), still one public
+  `import lumen` entry point.
+
+### Added
+
+- **`lumen.PixelBuffer`** — a CPU-side `w × h` array of packed pixels for
+  fast bulk per-pixel drawing (raycasting, software 3D, procedural
+  textures), avoiding one SDL2 draw call per pixel. `set(x, y, color)` /
+  `get(x, y)` / `fill_rect(...)` / `clear(...)` write directly into the
+  buffer; `Canvas.blit_pixels(buf, x, y)` uploads the whole thing to the
+  screen in one `SDL_UpdateTexture` call. `raw_addr()` returns the buffer's
+  real memory address for bare-metal-style direct writes, mirroring
+  `lumen.framebuffer.Framebuffer`'s `hardware.mmio_write32`-based API.
+
+
 ## [1.2.0] — 2026-06-17 — Graphics everywhere
 
 A complete, batteries-included graphics library for both hosted (SDL2) and

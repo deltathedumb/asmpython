@@ -1744,6 +1744,13 @@ class Parser:
             # `from import ...` with no module name is invalid.
             raise ParseError("expected module name after 'from'", self._peek().pos, ErrorCode.P_MISSING_MODULE)
         self._expect("KEYWORD", "import")
+        # `from x import (a, b, ...)`: the lexer already suppresses NEWLINE
+        # tokens while paren_depth > 0 (same mechanism that lets a call's
+        # arguments span lines), so this only needs to consume the optional
+        # parens around the name list.
+        parenthesized = self._check("OP", "(")
+        if parenthesized:
+            self._eat()
         # `names` holds the locally-bound name (the alias when `as` is present);
         # `orig_names` holds the exported name as the source module spells it.
         first: str = self._expect("NAME").value  # type: ignore[assignment]
@@ -1754,12 +1761,17 @@ class Parser:
             names[-1] = self._expect("NAME").value  # type: ignore[assignment]
         while self._check("OP", ","):
             self._eat()
+            # Allow a trailing comma before the closing paren: `(a, b,)`.
+            if parenthesized and self._check("OP", ")"):
+                break
             nm: str = self._expect("NAME").value  # type: ignore[assignment]
             names.append(nm)
             orig_names.append(nm)
             if self._check("KEYWORD", "as"):
                 self._eat()
                 names[-1] = self._expect("NAME").value  # type: ignore[assignment]
+        if parenthesized:
+            self._expect("OP", ")")
         self._expect("NEWLINE")
         return A.FromImport(  # type: ignore
             module=module, names=names, orig_names=orig_names, pos=kw.pos, level=level

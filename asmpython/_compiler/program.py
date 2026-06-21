@@ -208,7 +208,7 @@ def _resolve_relative(importer: Path, level: int, module: str, root: Path) -> Pa
             target = target / part
     candidate = target.with_suffix(".py") if target.suffix == "" else target
     py = candidate if candidate.suffix == ".py" else Path(str(candidate) + ".py")
-    if py.is_file() and _within(py, root):
+    if py.is_file() and (_within(py, root) or _is_within_stdlib(py)):
         return py
     # `from . import submod` — module is "", the imported *name* is the module.
     return None
@@ -259,7 +259,7 @@ _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "ipaddress", "numbers", "hmac", "timeit", "getpass",
     "gzip", "zipfile", "pickle",
     "colorsys", "cmath", "sched",
-    "gui", "framebuffer", "audio", "_font8x8",
+    "lumen", "_font8x8",
     # 2.0.0 stdlib additions (batch 1)
     "errno", "stat", "getopt", "binascii", "array", "unittest",
     "urllib_request", "urllib_error",
@@ -285,15 +285,70 @@ _BUNDLED_DOTTED: dict[str, str] = {
 }
 
 
+def _stdlib_dir() -> Path:
+    # Computed inline rather than cached in a module-level constant: a
+    # top-level `_STDLIB_DIR: Path = Path(__file__)...` initializer isn't a
+    # trivially-hoistable constant when this file is itself merged into a
+    # self-compiling program (whole-program compilation can't see `__file__`
+    # as a resolvable free name for a global), which broke selfhost with an
+    # "undefined variable '_STDLIB_DIR'" error. A local computation inside
+    # each function that needs it has no such requirement.
+    return Path(__file__).resolve().parent.parent / "stdlib"
+
+
+def _is_within_stdlib(path: Path) -> bool:
+    """True if `path` lives under asmpython's bundled stdlib/ directory.
+
+    Bundled-stdlib files are always trusted (same as `_resolve_bundled_stdlib`
+    itself not checking project-root containment), so their own internal
+    relative imports (a package like `stdlib/gui/` importing its own
+    `._canvas` submodule) must resolve independently of the user project's
+    root — the normal `_within(path, root)` check would always fail for them
+    since they live outside the user's project entirely.
+    """
+    return _within(path, _stdlib_dir())
+
+
 def _resolve_bundled_stdlib(module: str) -> Path | None:
     stem = _BUNDLED_DOTTED.get(module)
+    stdlib_dir = _stdlib_dir()
     if stem is None:
         top = module.split(".")[0]
         if top not in _BUNDLED_SOURCE_STDLIB:
             return None
+        rest = module.split(".")[1:]
+        if rest:
+            # A genuine dotted submodule path inside a bundled *package*
+            # (`lumen.framebuffer` -> stdlib/lumen/framebuffer.py), distinct
+            # from `_BUNDLED_DOTTED`'s flat-file aliases (`os.path` ->
+            # stdlib/ospath.py, a different file entirely, not a real
+            # `os/path.py` submodule). Only a real package directory (not a
+            # flat `<top>.py` module, e.g. `urllib`) can have submodules;
+            # `module` naming more path segments than actually exist (e.g.
+            # `urllib.parse.quote`, where `quote` is a name *inside*
+            # urllibparse.py, not its own file) must resolve to nothing here
+            # rather than falling back to the unrelated `<top>.py` file.
+            if not (stdlib_dir / top).is_dir():
+                return None
+            sub = stdlib_dir / top
+            for part in rest:
+                sub = sub / part
+            sub_py = Path(str(sub) + ".py")
+            if sub_py.is_file():
+                return sub_py
+            sub_init = sub / "__init__.py"
+            if sub_init.is_file():
+                return sub_init
+            return None
         stem = top
-    py = Path(__file__).resolve().parent.parent / "stdlib" / f"{stem}.py"
-    return py if py.is_file() else None
+    py = stdlib_dir / f"{stem}.py"
+    if py.is_file():
+        return py
+    # A bundled stdlib module may be a package directory (stdlib/<stem>/
+    # __init__.py) instead of a flat file, e.g. for a module large enough to
+    # split across several internal submodules.
+    pkg_init = stdlib_dir / stem / "__init__.py"
+    return pkg_init if pkg_init.is_file() else None
 
 
 def _resolve_user_module(module: str, importer: Path, root: Path) -> Path | None:
@@ -607,23 +662,40 @@ def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]
                             out.append(pkg_init)
             elif stmt.module:
                 # `from asmpython.pkg import X`: X may be a name defined in the
-                # package's module/__init__, OR a *submodule*. Resolve the
-                # module itself, and also try each imported name as a submodule.
-                p = _resolve_absolute(stmt.module, root)
-                if p is None:
-                    p = _resolve_user_module(stmt.module, importer, root)
-                if p is None:
-                    p = _resolve_bundled_stdlib(stmt.module)
-                if p is not None:
-                    out.append(p)
+                # package's module/__init__, OR a *submodule*. Try each
+                # imported name as a submodule FIRST: a name that resolves as
+                # its own file (`from lumen import framebuffer` ->
+                # stdlib/lumen/framebuffer.py) must NOT also pull in the
+                # package's __init__.py — some bundled packages split
+                # genuinely independent submodules with different link
+                # requirements (lumen's __init__ needs SDL2; lumen.framebuffer
+                # needs neither), and merging __init__ in regardless would
+                # drag SDL2 into a program that only wants the bare-metal
+                # framebuffer. Only fall back to resolving the base module
+                # itself when at least one imported name *isn't* its own
+                # submodule (so it must live in the package's __init__/be the
+                # module itself, e.g. `from os.path import join`).
+                resolved_as_submodule: set[str] = set()
                 for orig in (stmt.orig_names or stmt.names):
                     sub = _resolve_absolute(f"{stmt.module}.{orig}", root)
                     if sub is None:
                         sub = _resolve_user_module(
                             f"{stmt.module}.{orig}", importer, root
                         )
+                    if sub is None:
+                        sub = _resolve_bundled_stdlib(f"{stmt.module}.{orig}")
                     if sub is not None:
                         out.append(sub)
+                        resolved_as_submodule.add(orig)
+                names_to_check = stmt.orig_names or stmt.names
+                if any(n not in resolved_as_submodule for n in names_to_check):
+                    p = _resolve_absolute(stmt.module, root)
+                    if p is None:
+                        p = _resolve_user_module(stmt.module, importer, root)
+                    if p is None:
+                        p = _resolve_bundled_stdlib(stmt.module)
+                    if p is not None:
+                        out.append(p)
         elif isinstance(stmt, A.Import):
             p = _resolve_absolute(stmt.module, root)
             if p is None:
@@ -1031,7 +1103,9 @@ def _resolve_fromimport_path(
             for part in stmt.module.split("."):
                 pkg = pkg / part
             pkg_init = pkg / "__init__.py"
-            return pkg_init if pkg_init.is_file() and _within(pkg_init, root) else None
+            if pkg_init.is_file() and (_within(pkg_init, root) or _is_within_stdlib(pkg_init)):
+                return pkg_init
+            return None
         # `from . import X`: X may be a sibling module or a name in __init__.
         # For value imports we care about the name living in the package
         # __init__, so resolve to that.

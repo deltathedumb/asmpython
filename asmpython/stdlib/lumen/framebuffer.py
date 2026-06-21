@@ -1,13 +1,13 @@
-"""framebuffer — software pixel rendering for bare-metal and UEFI targets.
+"""lumen.framebuffer — software pixel rendering for bare-metal and UEFI targets.
 
-Part of Lumen, asmpython's graphics/audio/input ecosystem (gui + framebuffer
-+ audio). Provides a Framebuffer class that writes pixels directly to a
-linear memory-mapped framebuffer using hardware.mmio_write32 / mmio_write8.
-No OS, no SDL2, no dependencies beyond the hardware module.
+Part of `lumen`, asmpython's graphics/audio/input ecosystem. Provides a
+Framebuffer class that writes pixels directly to a linear memory-mapped
+framebuffer using hardware.mmio_write32 / mmio_write8. No OS, no SDL2, no
+dependencies beyond the hardware module.
 
 Typical UEFI GOP setup::
 
-    import framebuffer
+    import lumen.framebuffer as framebuffer
     # addr, width, height, and pitch come from the GOP FrameBufferBase,
     # HorizontalResolution, VerticalResolution, and PixelsPerScanLine fields.
     fb = framebuffer.Framebuffer(0x80000000, 1920, 1080, 7680, 32)
@@ -238,7 +238,7 @@ class Framebuffer:
         return 0
 
     def text(self, x: int, y: int, s: str, color: int, scale: int = 1) -> int:
-        """Alias for draw_text(), matching gui.Canvas.text()'s shorter name."""
+        """Alias for draw_text(), matching lumen.Canvas.text()'s shorter name."""
         return self.draw_text(x, y, s, color, scale)
 
     def draw_triangle(self, x1: int, y1: int, x2: int, y2: int, x3: int, y3: int, color: int) -> int:
