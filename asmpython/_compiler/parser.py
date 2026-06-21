@@ -543,7 +543,16 @@ class Parser:
         any callee's free vars (minus names the caller already locally binds,
         i.e. params/vararg/kwarg) until nothing changes. Bounded by the
         number of nested functions, so this always terminates."""
-        by_name = {}
+        # Explicit `dict` annotation: an unannotated `{}` literal's value
+        # kind defaults to "int" (sema can't see f's real type -- A.FuncDef
+        # is an external/opaque type), so `by_name.get(callee_name)`'s
+        # result read back as "int"-typed instead of opaque/instance. That
+        # made every `callee.free_vars` / `callee.nonlocal_vars` attribute
+        # read below dispatch through codegen's int-receiver path instead
+        # of the real instance-attribute (dict_get_default) path, reading
+        # garbage. Confirmed via gdb: crashed inside this exact function
+        # for any two nested functions that call each other.
+        by_name: dict = {}
         for f in nested_funcs:
             by_name[f.name] = f
         changed = True
