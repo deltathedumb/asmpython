@@ -790,6 +790,67 @@ debug print()s placed inside the *user test program* being compiled
 above) should work fine and could help narrow exactly which
 `_collect_locals` vs. codegen pass visits diverge.
 
+**2026-06-21 continuation, post-summary**: landed several more real,
+committed fixes chasing the nested-function nightmare (all confirmed
+correct under `py -m asmpython`, full suite green throughout):
+- `aa596ecf` — `set(fdef.params)`/`set(f.params)` in
+  `Parser._find_free_vars`/`_propagate_transitive_free_vars` read
+  `fdef.params` as opaque `"any"` (external-type attribute access),
+  so `set()` handed the list back unchanged instead of iterating it —
+  a function's own params weren't excluded from its computed
+  `free_vars`.
+- `77beeee2` — same bug class for `f.free_vars`/`f.nonlocal_vars`/
+  `callee.free_vars`/`callee.nonlocal_vars` reads in the same function's
+  fixed-point sibling-call loop.
+- `02f5e470` — `by_name = {}` (unannotated dict literal in
+  `_propagate_transitive_free_vars`) had its value kind default to
+  `"int"` (sema can't see `A.FuncDef`'s real type), so
+  `by_name.get(callee_name)` came back `"int"`-typed instead of
+  opaque/instance, making `callee.free_vars` dispatch through the
+  wrong codegen path. Fixed with an explicit `by_name: dict = {}`
+  annotation.
+
+After all three: `test_nested_def_minimal.py` (bare nested def, no
+params) finally fully works end-to-end in a selfhosted binary. But
+**`test_instance_type_repro.py` (a plain `Box` class, `__init__` +
+one method, zero nested functions) has been broken in *every* build
+since v37** — `Box()`/`box.get()` calls still silently elide (return
+0), and `module.classes_sig` still reads back empty. This is
+confirmed via a side-channel debug stash (`module.func_aliases`,
+since `print()` inside any `SemaAnalyzer`/`Codegen` method never
+surfaces output from a selfhosted binary — read directly from
+`driver.py`, a plain function, after `sema_analyze()` returns) added
+right inside the class-signature-collection loop in `analyze()`
+(sema.py ~2226, `for c in self.mod.classes: ... self.classes[c.name]
+= sig`): **`loop_ran` came back `"MISSING"` — the loop body never
+executes a single iteration**, despite `module.classes` correctly
+showing `len=1` with `"Box"` parsed. (Debug scaffolding has been
+removed from `driver.py`/`sema.py` again — this paragraph is the
+record of the finding, not a live diagnostic.)
+
+This means the `classes_sig`-empty bug and the nested-function bugs
+are two **separate, independent root causes** that happened to look
+similar (both manifest as "user method/constructor calls silently
+return 0"). The nested-function ones are now understood and fixed.
+This one is NOT understood yet: `for c in self.mod.classes:` failing
+to iterate even once, for a `module.classes` that's confirmed
+non-empty in the same compile, needs fresh investigation — possibly
+in `self.mod.classes`'s read itself (chained attribute access,
+`self` → `self.mod` → `.classes`, the same shape that was the
+original mid-session suspect) or in something that runs between
+`module = load_program(...)` and this loop inside `analyze()`
+(`_inject_assembly_class_if_needed`, the generator-transform loop,
+the function-signature-collection loop, or the `@dataclass`
+`__init__`-synthesis loop, all of which run first and could be
+silently corrupting `self.mod`/`self.classes`/`self.mod.classes`
+before this loop ever gets a chance to run). Next session: gdb-break
+on `Codegen____init__` (reliable), walk `self`'s (the `Codegen`
+instance) `"mod"` key to a `Module` instance, then walk *that*
+instance's `"classes"` key directly (not `module.classes` from
+Python — the actual runtime dict the selfhosted binary built) to see
+if `mod.classes` itself is already corrupted by the time `Codegen`
+sees it, vs. only `classes_sig` being wrong.
+
 **Toolchain note for future selfhost testing sessions**: the `build/`
 directory's many generated `.exe` files got externally wiped mid-session
 (likely Windows Defender or similar quarantining freshly-built,
