@@ -6123,7 +6123,7 @@ class SemaAnalyzer:
     def _bind_args(
         self,
         e: "A.Call | A.MethodCall",
-        names: list,
+        names: list[str],
         defaults: list,
         vararg,
         pos,
