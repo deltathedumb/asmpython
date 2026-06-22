@@ -285,20 +285,45 @@ class SemaError(CompileError):
 class MultiSemaError(Exception):
     """Raised when --all-errors mode collects more than one sema error.
 
-    `errors` is a non-empty list of SemaError instances in source order.
+    `errors` is a non-empty list of SemaError instances in source order
+    UNDER A PYTHON-HOSTED COMPILER. When asmpython compiles itself (this
+    file is part of the self-compiled compiler source), `raise
+    SemaError(message, pos, code)` does not construct a real SemaError
+    instance at runtime at all -- asmpython's native exception model only
+    carries a message string and a type id through `_runtime_raise`, so
+    `except SemaError as e: self._collected_errors.append(e)` (sema.py's
+    _try_check_block) only ever has a plain string for `e`, never a real
+    object with `.message`/`.pos`/`.code`. `errors` is therefore typed
+    loosely here (not `list[SemaError]`) since it holds plain strings when
+    self-compiled and real SemaError instances when Python-hosted; format_all
+    handles both.
     The first error is also available as `errors[0]` for callers that want
     to surface a single representative diagnostic.
     """
 
-    def __init__(self, errors: "list[SemaError]") -> None:
+    def __init__(self, errors: list) -> None:
         self.errors = errors
         super().__init__(f"{len(errors)} semantic error(s)")
 
     def format_all(self, src: str, filename: str) -> str:
-        """Format every collected error, separated by blank lines."""
+        """Format every collected error, separated by blank lines.
+
+        Under a Python-hosted compiler, each entry in `self.errors` is a
+        real SemaError instance and `.format(...)` gives the full
+        `file:line:col: ... + source line + caret` presentation. Under a
+        self-compiled (selfhosted) compiler, `raise SemaError(...)` never
+        constructs a real instance at runtime (asmpython's native
+        exception model only carries a message string through
+        `_runtime_raise`), so each entry is just that plain string instead
+        -- printed as-is, without the file/line/caret decoration that
+        genuinely isn't available in that case.
+        """
         parts: list[str] = []
         for e in self.errors:
-            parts.append(e.format(src, filename))
+            if isinstance(e, str):
+                parts.append(e)
+            else:
+                parts.append(e.format(src, filename))
         return "\n".join(parts)
 
 

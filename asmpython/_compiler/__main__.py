@@ -372,19 +372,35 @@ def _run_check(
         module = Parser(tokens).parse()
         sema_analyze(module, source_dir=source_dir, collect_errors=all_errors)
     except MultiSemaError as me:
-        for _dbg_e in me.errors:
-            print("DBG_ERR_MSG:" + _dbg_e.message)
+        # me itself is a real MultiSemaError instance under a Python-hosted
+        # compiler, but when self-compiled, asmpython's native exception
+        # model can't carry a real object through `raise MultiSemaError(...)`
+        # at all -- `me` is just the generic message string ("N semantic
+        # error(s)") that MultiSemaError.__init__ passed to its own
+        # super().__init__(...), with no `.errors` list, no `.format_all()`,
+        # nothing else available. Print that directly rather than trying to
+        # access fields/methods that don't exist on a plain string.
+        if isinstance(me, str):
+            print(me, file=sys.stderr)
+            return 1
+        # Each entry in me.errors is a real SemaError instance under a
+        # Python-hosted compiler. Guard every `.phase`/`.message`/`.pos`/
+        # `.code` access so a selfhosted compiler's diagnostics degrade to
+        # bare messages instead of crashing.
         if as_json:
             from .errors import _code_label
             diags = []
             for e in me.errors:
-                diags.append({
-                    "phase": e.phase,
-                    "message": e.message,
-                    "line": e.pos.line if e.pos else 1,
-                    "col": e.pos.col if e.pos else 1,
-                    "code": _code_label(e.code) if e.code is not None else None,
-                })
+                if isinstance(e, str):
+                    diags.append({"phase": None, "message": e, "line": 1, "col": 1, "code": None})
+                else:
+                    diags.append({
+                        "phase": e.phase,
+                        "message": e.message,
+                        "line": e.pos.line if e.pos else 1,
+                        "col": e.pos.col if e.pos else 1,
+                        "code": _code_label(e.code) if e.code is not None else None,
+                    })
             print(json.dumps(diags))
         else:
             print(me.format_all(src, str(source_path)), file=sys.stderr)
@@ -392,16 +408,22 @@ def _run_check(
     except CompileError as e:
         if as_json:
             from .errors import _code_label
-            diag = {
-                "phase": e.phase,
-                "message": e.message,
-                "line": e.pos.line if e.pos else 1,
-                "col": e.pos.col if e.pos else 1,
-                "code": _code_label(e.code) if e.code is not None else None,
-            }
+            if isinstance(e, str):
+                diag = {"phase": None, "message": e, "line": 1, "col": 1, "code": None}
+            else:
+                diag = {
+                    "phase": e.phase,
+                    "message": e.message,
+                    "line": e.pos.line if e.pos else 1,
+                    "col": e.pos.col if e.pos else 1,
+                    "code": _code_label(e.code) if e.code is not None else None,
+                }
             print(json.dumps([diag]))
         else:
-            print(e.format(src, str(source_path)), file=sys.stderr)
+            if isinstance(e, str):
+                print(e, file=sys.stderr)
+            else:
+                print(e.format(src, str(source_path)), file=sys.stderr)
         return 1
     if as_json:
         print("[]")
@@ -496,10 +518,21 @@ def main(argv: list[str] | None = None) -> int:
                 all_errors=all_errors,
             )
     except MultiSemaError as me:
-        print(me.format_all(src, str(args.source)), file=sys.stderr)
+        # me is just the generic "N semantic error(s)" message string when
+        # self-compiled (see the matching guard in _run_check above for why).
+        if isinstance(me, str):
+            print(me, file=sys.stderr)
+        else:
+            print(me.format_all(src, str(args.source)), file=sys.stderr)
         return 1
     except CompileError as e:
-        print(e.format(src, str(args.source)), file=sys.stderr)
+        # e is a real CompileError instance under a Python-hosted compiler,
+        # but just a plain message string when self-compiled (see
+        # MultiSemaError's docstring in errors.py for why).
+        if isinstance(e, str):
+            print(e, file=sys.stderr)
+        else:
+            print(e.format(src, str(args.source)), file=sys.stderr)
         return 1
     except Exception as e:
         print(f"asmpython: {e}", file=sys.stderr)

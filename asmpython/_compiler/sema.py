@@ -665,6 +665,25 @@ class SemaAnalyzer:
             ErrorCode.E_NOT_AN_EXCEPTION,
         )
 
+    def _is_interpreter_only_method(self, obj_name: str, method: str) -> bool:
+        """True if `obj_name.method(...)` is one of INTERPRETER_ONLY_METHODS.
+
+        Written as explicit string comparisons rather than
+        `(obj_name, method) in INTERPRETER_ONLY_METHODS` because the latter
+        is a tuple-in-frozenset-of-tuples membership test, and codegen's
+        set/dict membership lowering only supports str/int-keyed
+        sets/dicts (see _gen_dict_in) -- a tuple needle isn't converted and
+        is used as a raw pointer "key" under self-compilation, which never
+        reliably matches. (Also avoids `for a, b in frozenset_of_tuples:`,
+        a tuple-unpacking for-loop over a dict-backed container, which
+        _gen_for_dict doesn't support either -- it expects a single bind
+        var, not unpack targets.)
+        """
+        for pair in INTERPRETER_ONLY_METHODS:
+            if obj_name == pair[0] and method == pair[1]:
+                return True
+        return False
+
     def _is_exception_class(self, class_name: str) -> bool:
         """True if `class_name` derives (transitively) from a builtin exception.
         Such a class inherits `Exception.__init__`, so `MyError("msg")` is valid
@@ -2213,7 +2232,8 @@ class SemaAnalyzer:
                 self.func_ret_tuple[f.name] = ets
 
         # Synthesise __init__ for @dataclass classes that don't define one.
-        for c in self.mod.classes:
+        for c0 in self.mod.classes:
+            c: A.ClassDef = c0
             if getattr(c, "is_dataclass", False):
                 has_init = any(m.name == "__init__" for m in c.methods)
                 if not has_init:
@@ -2221,7 +2241,8 @@ class SemaAnalyzer:
                     defaults: list = [None]
                     param_types: list = [None]  # self has no annotation
                     body_stmts: list = []
-                    for fname, _fannot, fvalue in c.class_vars:
+                    class_vars_list: list = c.class_vars
+                    for fname, _fannot, fvalue in class_vars_list:
                         params.append(fname)
                         param_types.append(_fannot)  # carry class-var annotation
                         _func_nm = (
@@ -5438,9 +5459,21 @@ class SemaAnalyzer:
             # Interpreter-only calls (dynamic import, code-exec by string) have
             # no native lowering — reject early with a located message instead
             # of letting them reach codegen as a raw NotImplementedError.
-            if (
-                isinstance(e.obj, A.Name)
-                and (e.obj.name, e.method) in INTERPRETER_ONLY_METHODS
+            #
+            # `(name, method) in INTERPRETER_ONLY_METHODS` is a tuple-in-
+            # frozenset-of-tuples membership test. Codegen's set/dict
+            # membership lowering (_gen_dict_in, "a set is a dict keyed by
+            # its members") only supports str/int keys -- a tuple needle
+            # falls through unconverted and gets used as a raw pointer
+            # "key", which never correctly matches under self-compilation
+            # (confirmed: this spuriously rejected `some_set.add(...)` for
+            # EVERY set/dict .add()-like call under a selfhosted compiler,
+            # since `("some_set_name", "add")` is never really a member but
+            # the broken lowering doesn't reliably return False either).
+            # `_is_interpreter_only_method` does the same check via a plain
+            # tuple-of-string comparisons, avoiding tuple-keyed membership.
+            if isinstance(e.obj, A.Name) and self._is_interpreter_only_method(
+                e.obj.name, e.method
             ):
                 raise SemaError(
                     f"{e.obj.name}.{e.method}() is not supported: dynamic import "
