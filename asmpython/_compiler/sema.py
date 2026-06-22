@@ -1228,7 +1228,8 @@ class SemaAnalyzer:
         type is known) and agree -- else None. Helper for
         `_infer_unannotated_returns`."""
         returns: list = []
-        self._collect_returns(fn.body, returns)
+        fn_body: list = fn.body
+        self._collect_returns(fn_body, returns)
         if not returns:
             return None
         types: list = []
@@ -2206,7 +2207,8 @@ class SemaAnalyzer:
         # so call sites can unpack `q, r = f()`. Done before body analysis so
         # forward references and recursion still see the inferred shape.
         for f in self.mod.funcs:
-            ets = self._scan_tuple_return(f.body)
+            f_body_str: list = f.body
+            ets = self._scan_tuple_return(f_body_str)
             if ets is not None:
                 self.func_ret_tuple[f.name] = ets
 
@@ -2292,6 +2294,13 @@ class SemaAnalyzer:
                 if setter_prop is not None:
                     m.name = f"{setter_prop}__setter"
                 _raw_mret_base = m.ret_type[0] if m.ret_type else None
+                # Explicit `: list` intermediate: m.body is a direct
+                # attribute read on m (external/opaque to sema), and passing
+                # it straight into _scan_tuple_return/_method_returns_self
+                # (both `stmts: list`-typed parameters) carried that opacity
+                # through into _collect_returns' recursive walk, crashing
+                # with a null-pointer dereference for any method at all.
+                m_body: list = m.body
                 sig.methods[m.name] = FuncSig(
                     name=m.name,
                     arity=len(m.params),
@@ -2304,9 +2313,9 @@ class SemaAnalyzer:
                     param_defaults=list(m.defaults),
                     vararg=m.vararg,
                     kwarg=m.kwarg,
-                    ret_tuple=self._scan_tuple_return(m.body),
+                    ret_tuple=self._scan_tuple_return(m_body),
                     decorators=list(getattr(m, "decorators", [])),
-                    returns_self=mr is None and self._method_returns_self(m.body),
+                    returns_self=mr is None and self._method_returns_self(m_body),
                     ret_bool=(_raw_mret_base == "bool"),
                 )
                 if setter_prop is not None:
@@ -2924,17 +2933,26 @@ class SemaAnalyzer:
         return merged
 
     def _collect_tuple_returns(self, stmts: list, acc: list) -> None:
+        # Same explicit `: list` intermediates as _collect_returns, and for
+        # the same reason: s.then/s.orelse/s.body/s.handler are opaque
+        # attribute reads that must not be passed directly into a recursive
+        # call expecting a real `list`.
         for s in stmts:
             if isinstance(s, A.Return) and isinstance(s.value, A.TupleLit):
                 acc.append([A.expr_type(el) for el in s.value.elems])
             elif isinstance(s, A.If):
-                self._collect_tuple_returns(s.then, acc)
-                self._collect_tuple_returns(s.orelse, acc)
+                s_then: list = s.then
+                s_orelse: list = s.orelse
+                self._collect_tuple_returns(s_then, acc)
+                self._collect_tuple_returns(s_orelse, acc)
             elif isinstance(s, (A.While, A.For)):
-                self._collect_tuple_returns(s.body, acc)
+                s_body: list = s.body
+                self._collect_tuple_returns(s_body, acc)
             elif isinstance(s, A.Try):
-                self._collect_tuple_returns(s.body, acc)
-                self._collect_tuple_returns(s.handler, acc)
+                st_body: list = s.body
+                st_handler: list = s.handler
+                self._collect_tuple_returns(st_body, acc)
+                self._collect_tuple_returns(st_handler, acc)
 
     def _method_returns_self(self, stmts: list) -> bool:
         """True if every reachable `return` in `stmts` is `return self`, and
@@ -2949,21 +2967,38 @@ class SemaAnalyzer:
         )
 
     def _collect_returns(self, stmts: list, acc: list) -> None:
+        # Each branch reads its sub-block into an explicit `: list`
+        # intermediate before recursing: s.then/s.orelse/s.body/etc. are
+        # direct attribute reads on an external/opaque AST-node type (s is
+        # generically typed inside this `for s in stmts` loop), so passing
+        # them straight into a recursive call that expects `stmts: list`
+        # carried the same opacity through and crashed with a null-pointer
+        # dereference the moment a function's body had any control flow at
+        # all (or, for the top-level call, just by being passed in as
+        # fn.body from a caller that never gave it an explicit list type).
         for s in stmts:
             if isinstance(s, A.Return):
                 acc.append(s)
             elif isinstance(s, A.If):
-                self._collect_returns(s.then, acc)
-                self._collect_returns(s.orelse, acc)
+                s_then: list = s.then
+                s_orelse: list = s.orelse
+                self._collect_returns(s_then, acc)
+                self._collect_returns(s_orelse, acc)
             elif isinstance(s, (A.While, A.For)):
-                self._collect_returns(s.body, acc)
+                s_body: list = s.body
+                self._collect_returns(s_body, acc)
             elif isinstance(s, A.Try):
-                self._collect_returns(s.body, acc)
-                self._collect_returns(s.handler, acc)
-                for _types, _bind, hbody in s.extra_handlers:
+                st_body: list = s.body
+                st_handler: list = s.handler
+                self._collect_returns(st_body, acc)
+                self._collect_returns(st_handler, acc)
+                st_extra: list = s.extra_handlers
+                for _types, _bind, hbody in st_extra:
                     self._collect_returns(hbody, acc)
-                self._collect_returns(s.else_body, acc)
-                self._collect_returns(s.finally_body, acc)
+                st_else: list = s.else_body
+                st_finally: list = s.finally_body
+                self._collect_returns(st_else, acc)
+                self._collect_returns(st_finally, acc)
 
     def _bind_name_from_value(
         self, target: str, value, scope: Scope, annot: tuple | None = None
