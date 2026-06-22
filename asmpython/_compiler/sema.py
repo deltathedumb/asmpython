@@ -6186,10 +6186,18 @@ class SemaAnalyzer:
             return
         is_static_m = "staticmethod" in getattr(sig, "decorators", [])
         skip = 0 if is_static_m else 1
+        # Explicit `: list` reads before slicing: same opaque-slice bug as
+        # the constructor call site above -- sig.param_names/param_defaults
+        # read "any" here too (sig itself came from an IfExp/conditional
+        # subscript a few lines up), so slicing them went through
+        # _gen_subscript's string-slice fallback instead of the real
+        # list-slice path.
+        sig_param_names: list = sig.param_names
+        sig_param_defaults: list = sig.param_defaults
         self._bind_args(
             e,
-            sig.param_names[skip:],
-            sig.param_defaults[skip:],
+            sig_param_names[skip:],
+            sig_param_defaults[skip:],
             sig.vararg,
             e.pos,
             e.method,
@@ -6759,7 +6767,19 @@ class SemaAnalyzer:
                 e.inferred_type = f"instance:{e.func}"
                 return
             else:
-                _, sig = init
+                # Explicit subscript read, not `_, sig = init`: init's static
+                # type is the generic "tuple" (Optional[tuple[str, FuncSig]]
+                # isn't tracked element-by-element), so a tuple-unpack left
+                # sig opaque ("any") instead of carrying FuncSig's real
+                # fields. sig.param_names[1:] / sig.param_defaults[1:] then
+                # read as opaque "any" slices, and _gen_subscript's slice
+                # dispatch (which only routes to the list-slice path when the
+                # object's static type is exactly "list") fell through to
+                # the STRING-slice path instead, corrupting the list passed
+                # into _bind_args and crashing inside dict/list runtime
+                # helpers down the line whenever a constructor call used a
+                # keyword argument.
+                sig: FuncSig = init[1]
                 expected = sig.arity - 1
                 if sig.vararg is None and sig.kwarg is None and not e.kwargs:
                     required = expected - sig.n_defaults
@@ -6775,10 +6795,12 @@ class SemaAnalyzer:
                             e.pos,
                             ErrorCode.E_ARG_COUNT,
                         )
+                sig_param_names: list = sig.param_names
+                sig_param_defaults: list = sig.param_defaults
                 self._bind_args(
                     e,
-                    sig.param_names[1:],
-                    sig.param_defaults[1:],
+                    sig_param_names[1:],
+                    sig_param_defaults[1:],
                     sig.vararg,
                     e.pos,
                     e.func,
@@ -6807,11 +6829,17 @@ class SemaAnalyzer:
                 _cls = _inst_t.split(":", 1)[1]
                 _call_resolved = self._resolve_method(_cls, "__call__")
                 if _call_resolved is not None:
-                    _owner, _sig = _call_resolved
+                    # Explicit subscript, not `_owner, _sig = _call_resolved`:
+                    # same opaque-tuple-unpack issue as the constructor call
+                    # site above.
+                    _owner: str = _call_resolved[0]
+                    _sig: FuncSig = _call_resolved[1]
+                    _sig_param_names: list = _sig.param_names
+                    _sig_param_defaults: list = _sig.param_defaults
                     self._bind_args(
                         e,
-                        _sig.param_names[1:],
-                        _sig.param_defaults[1:],
+                        _sig_param_names[1:],
+                        _sig_param_defaults[1:],
                         _sig.vararg,
                         e.pos,
                         f"{_cls}.__call__",
