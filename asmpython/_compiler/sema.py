@@ -6881,8 +6881,15 @@ class SemaAnalyzer:
                 # synthesized init — accept the call leniently (full
                 # field/keyword validation is post-bootstrap). A class with no
                 # fields really does take no arguments.
-                cls_sig = self.classes[e.func]
-                parent = getattr(cls_sig, "parent", None)
+                # Explicit ClassSig annotation, and a direct field read
+                # instead of getattr(): cls_sig's unannotated type defaulted
+                # wrong (the established self.classes[...] dict-subscript
+                # opacity pattern), and getattr() on top of that doubled the
+                # opacity -- cls_sig.parent is always a real field (str or
+                # None) on ClassSig, never genuinely missing, so getattr()
+                # was unnecessary and made the read worse, not safer.
+                cls_sig: ClassSig = self.classes[e.func]
+                parent: "str | None" = cls_sig.parent
                 parent_is_external = parent is not None and parent not in self.classes
                 if (
                     (e.args or e.kwargs)
