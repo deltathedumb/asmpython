@@ -1132,11 +1132,46 @@ class Codegen:
         info.frame_size = frame
         return info
 
+    def _is_closure_factory_call(self, value) -> bool:
+        """True if `value` is a Call to a function whose body constructs and
+        returns a closure (contains a ClosureBind) -- i.e. calling it
+        produces a closure object, not a plain value.
+
+        A.expr_type(value) (sema's static inferred_type) only know about
+        the Callable[...] annotation, not this codegen-internal distinction,
+        so without this check a variable assigned from such a call never
+        gets tagged "closure" -- the call site then takes the plain
+        function-pointer-variable path instead of unwrapping the closure's
+        [MAGIC, fn_ptr, captured_vars...] list, calling the list's own
+        header pointer as if it were code (segfault).
+        """
+        if not isinstance(value, A.Call) or not isinstance(value.func, str):
+            return False
+        for ff in self.mod.funcs:
+            if ff.name == value.func:
+                for fs in ff.body:
+                    if isinstance(fs, A.ClosureBind):
+                        return True
+                return False
+        return False
+
     def _cl_define(self, info: FuncInfo, name: str, ty: str = "int") -> None:
         """Reserve an 8-byte frame slot for `name` (no-op if already present).
         Promotes an int slot to a wider type if a later use reveals it."""
         if info.is_main and name in self.global_vars:
-            return  # module global: lives in .bss, addressed by symbol
+            # Module global: lives in .bss, addressed by symbol -- no frame
+            # slot needed. But the type recorded for it in the initial
+            # pre-scan (the assigned expression's static return type) can't
+            # know about codegen-internal tags like "closure", which only
+            # get assigned here, later. Without promoting it too, a closure
+            # bound to a module-level global never gets tagged "closure",
+            # so the call site falls through to the plain
+            # function-pointer-variable call path instead of unwrapping the
+            # closure's [MAGIC, fn_ptr, captured_vars...] list -- calling
+            # the list's own header pointer as if it were code (segfault).
+            if ty != "int" and self.global_vars[name] != ty:
+                self.global_vars[name] = ty
+            return
         if name in info.global_names:
             return  # declared `global` in this function
         if name not in info.locals_:
@@ -1864,6 +1899,8 @@ class Codegen:
                     self._cl_define(info, nm, ty_ma)
             elif isinstance(s, A.Assign):
                 ty_wa = A.expr_type(s.value)
+                if self._is_closure_factory_call(s.value):
+                    ty_wa = "closure"
 
                 self._cl_define(info, s.target, ty_wa)
                 self._cl_walk_expr(info, s.value)
