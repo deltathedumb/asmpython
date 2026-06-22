@@ -372,6 +372,8 @@ def _run_check(
         module = Parser(tokens).parse()
         sema_analyze(module, source_dir=source_dir, collect_errors=all_errors)
     except MultiSemaError as me:
+        for _dbg_e in me.errors:
+            print("DBG_ERR_MSG:" + _dbg_e.message)
         if as_json:
             from .errors import _code_label
             diags = []

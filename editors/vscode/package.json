@@ -4,29 +4,25 @@
   "description": "Diagnostics, build, and run support for asmpython (the Python-to-native compiler) directly on .py files.",
   "version": "0.2.0",
   "publisher": "pixelateddream",
+  "icon": "icon.png",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/deltathedumb/asmpython",
     "directory": "editors/vscode"
   },
-
   "engines": {
     "vscode": "^1.85.0"
   },
-
   "categories": [
     "Programming Languages",
     "Linters",
     "Debuggers"
   ],
-
   "activationEvents": [
     "onLanguage:python"
   ],
-
   "main": "./out/extension.js",
-
   "contributes": {
     "configuration": {
       "title": "ASMPython",
@@ -49,12 +45,20 @@
         "asmpython.target": {
           "type": "string",
           "default": "",
-          "enum": ["", "windows", "linux", "freestanding", "freestanding16"],
+          "enum": [
+            "",
+            "windows",
+            "linux",
+            "freestanding",
+            "freestanding16"
+          ],
           "description": "Default --target for Compile/Run commands. Empty = host platform (asmpython's default)."
         },
         "asmpython.extraCompileArgs": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Extra command-line arguments appended to every compile invocation (e.g. [\"--use-runtime-lib\"])."
         },
@@ -65,7 +69,6 @@
         }
       }
     },
-
     "commands": [
       {
         "command": "asmpython.compile",
@@ -95,7 +98,6 @@
         "title": "ASMPython: Show Output Channel"
       }
     ],
-
     "menus": {
       "editor/title/run": [
         {
@@ -110,15 +112,30 @@
         }
       ],
       "commandPalette": [
-        { "command": "asmpython.compile", "when": "resourceLangId == python" },
-        { "command": "asmpython.run", "when": "resourceLangId == python" },
-        { "command": "asmpython.check", "when": "resourceLangId == python" },
-        { "command": "asmpython.emitAsm", "when": "resourceLangId == python" },
-        { "command": "asmpython.explainCode" },
-        { "command": "asmpython.showOutput" }
+        {
+          "command": "asmpython.compile",
+          "when": "resourceLangId == python"
+        },
+        {
+          "command": "asmpython.run",
+          "when": "resourceLangId == python"
+        },
+        {
+          "command": "asmpython.check",
+          "when": "resourceLangId == python"
+        },
+        {
+          "command": "asmpython.emitAsm",
+          "when": "resourceLangId == python"
+        },
+        {
+          "command": "asmpython.explainCode"
+        },
+        {
+          "command": "asmpython.showOutput"
+        }
       ]
     },
-
     "keybindings": [
       {
         "command": "asmpython.run",
@@ -133,15 +150,21 @@
         "when": "resourceLangId == python"
       }
     ],
-
     "taskDefinitions": [
       {
         "type": "asmpython",
-        "required": ["mode"],
+        "required": [
+          "mode"
+        ],
         "properties": {
           "mode": {
             "type": "string",
-            "enum": ["compile", "run", "check", "emit-asm"],
+            "enum": [
+              "compile",
+              "run",
+              "check",
+              "emit-asm"
+            ],
             "description": "Which asmpython invocation this task runs."
           },
           "file": {
@@ -155,13 +178,15 @@
         }
       }
     ],
-
     "problemMatchers": [
       {
         "name": "asmpython",
         "owner": "asmpython",
         "severity": "error",
-        "fileLocation": ["relative", "${workspaceFolder}"],
+        "fileLocation": [
+          "relative",
+          "${workspaceFolder}"
+        ],
         "pattern": {
           "regexp": "^(.*):(\\d+):(\\d+):\\s+\\w+\\s+error:\\s+(?:\\[(\\w+)\\]\\s+)?(.*)$",
           "file": 1,
@@ -173,18 +198,16 @@
       }
     ]
   },
-
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package"
   },
-
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
-    "typescript": "^5.4.0",
-    "@vscode/vsce": "^2.24.0"
+    "@vscode/vsce": "^2.32.0",
+    "typescript": "^5.4.0"
   }
 }
