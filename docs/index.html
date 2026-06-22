@@ -6,121 +6,141 @@
 <title>asmpython — Documentation</title>
 <style>
 :root {
-  --bg:       #000;
-  --surface:  #0d0d0d;
-  --surface2: #161616;
-  --border:   #2a1a1a;
-  --accent:   #ff5555;
-  --accent2:  #ff8080;
-  --green:    #22c55e;
-  --green2:   #4ade80;
-  --orange:   #f59e0b;
-  --red:      #ef4444;
-  --muted:    #6b7280;
-  --text:     #c9d1d9;
-  --heading:  #f0f0f0;
-  --code-bg:  #0a0a0a;
-  --tag-bg:   rgba(255,85,85,.10);
-  --nav-w:    260px;
+  --bg:       #0a0c10;
+  --surface:  #11141a;
+  --surface2: #181c24;
+  --surface3: #1f242f;
+  --border:   #232838;
+  --accent:   #e8a23d;
+  --accent2:  #ffcb7a;
+  --cyan:     #5fd0c0;
+  --cyan2:    #8be8db;
+  --green:    #6ee7a0;
+  --red:      #f06868;
+  --muted:    #7b8496;
+  --text:     #cdd3df;
+  --heading:  #f5f3ef;
+  --code-bg:  #0d1016;
+  --tag-bg:   rgba(232,162,61,.10);
+  --header-h: 56px;
+  --nav-w:    270px;
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { font-size: 16px; scroll-behavior: smooth; scroll-padding-top: 24px; }
+html { font-size: 16px; scroll-behavior: smooth; scroll-padding-top: calc(var(--header-h) + 16px); }
 body {
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   line-height: 1.7;
-  display: flex;
-  min-height: 100vh;
 }
 
-/* ── Nav ─────────────────────────────────── */
-nav {
-  width: var(--nav-w);
-  min-width: var(--nav-w);
+/* ── Top header bar ──────────────────────── */
+header.topbar {
+  position: fixed; top: 0; left: 0; right: 0; height: var(--header-h);
+  display: flex; align-items: center; gap: 14px;
+  background: rgba(10,12,16,.88); backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+  padding: 0 18px; z-index: 100;
+}
+.burger {
+  display: none; width: 32px; height: 32px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--surface2);
+  color: var(--text); align-items: center; justify-content: center;
+  cursor: pointer; flex-shrink: 0;
+}
+.burger svg { width: 16px; height: 16px; }
+.brand { display: flex; align-items: center; gap: 9px; text-decoration: none; flex-shrink: 0; }
+.brand-icon { width: 26px; height: 26px; border-radius: 7px; overflow: hidden; flex-shrink: 0; }
+.brand-icon img { width: 100%; height: 100%; object-fit: cover; }
+.brand-name { font-weight: 800; font-size: 15px; color: var(--heading); letter-spacing: -.01em; }
+.ver-pill {
+  font-size: 10.5px; font-weight: 700; color: var(--accent);
+  background: var(--tag-bg); border: 1px solid rgba(232,162,61,.3);
+  border-radius: 20px; padding: 2px 9px; white-space: nowrap;
+}
+.topbar-search { flex: 1; max-width: 360px; position: relative; }
+.topbar-search input {
+  width: 100%; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 7px; padding: 7px 12px 7px 32px; color: var(--text);
+  font-size: 13px; font-family: inherit; outline: none;
+  transition: border-color .15s;
+}
+.topbar-search input:focus { border-color: var(--accent); }
+.topbar-search svg {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  width: 14px; height: 14px; color: var(--muted); pointer-events: none;
+}
+.topbar-spacer { flex: 1; }
+.gh-link {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--muted); text-decoration: none; font-size: 12.5px;
+  border: 1px solid var(--border); border-radius: 7px; padding: 6px 11px;
+  transition: color .15s, border-color .15s; flex-shrink: 0;
+}
+.gh-link:hover { color: var(--accent2); border-color: var(--accent); text-decoration: none; }
+.gh-link svg { width: 15px; height: 15px; }
+
+/* ── Shell layout ────────────────────────── */
+.shell { display: flex; padding-top: var(--header-h); min-height: 100vh; }
+
+nav.side {
+  width: var(--nav-w); min-width: var(--nav-w);
   background: var(--surface);
   border-right: 1px solid var(--border);
-  position: sticky;
-  top: 0;
-  height: 100vh;
-  overflow-y: auto;
-  padding: 0 0 60px;
-  flex-shrink: 0;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
+  position: fixed; top: var(--header-h); left: 0;
+  height: calc(100vh - var(--header-h));
+  overflow-y: auto; padding: 14px 0 60px; flex-shrink: 0;
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  transition: transform .2s ease;
+  z-index: 60;
 }
-nav::-webkit-scrollbar { width: 4px; }
-nav::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-
-.nav-logo {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 20px 18px 18px;
-  border-bottom: 1px solid var(--border);
-  text-decoration: none;
-  position: sticky;
-  top: 0;
-  background: var(--surface);
-  z-index: 10;
-}
-.nav-icon {
-  width: 34px; height: 34px;
-  border-radius: 9px;
-  display: flex; align-items: center; justify-content: center;
-  flex-shrink: 0;
-  overflow: hidden;
-}
-.nav-icon img { width: 100%; height: 100%; object-fit: cover; }
-.nav-title { font-weight: 700; font-size: 14px; color: var(--accent); line-height: 1.2; }
-.nav-ver   { font-size: 10.5px; color: var(--muted); margin-top: 1px; }
-
-nav ul { list-style: none; padding: 8px 0; }
-nav li.sep {
-  font-size: 10px; font-weight: 700; letter-spacing: .1em;
+nav.side::-webkit-scrollbar { width: 4px; }
+nav.side::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+nav.side ul { list-style: none; }
+nav.side li.sep {
+  font-size: 10px; font-weight: 700; letter-spacing: .12em;
   text-transform: uppercase; color: var(--muted);
-  padding: 16px 18px 4px; margin-top: 4px;
+  padding: 18px 20px 6px; margin-top: 2px;
 }
-nav li a {
-  display: block;
-  padding: 4px 18px 4px 20px;
-  color: var(--text);
-  text-decoration: none;
-  font-size: 13px;
-  border-left: 2px solid transparent;
-  transition: color .12s, border-color .12s, background .12s;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+nav.side li.sep:first-child { margin-top: 0; }
+nav.side li a {
+  display: flex; align-items: center; gap: 8px;
+  margin: 1px 10px; padding: 6px 10px;
+  border-radius: 6px;
+  color: var(--text); text-decoration: none; font-size: 13px;
+  transition: color .12s, background .12s;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-nav li a:hover { color: var(--accent2); background: rgba(255,255,255,.03); }
-nav li a.active { color: var(--accent); border-left-color: var(--accent); background: var(--tag-bg); }
+nav.side li a:hover { color: var(--accent2); background: var(--surface2); }
+nav.side li a.active { color: var(--accent); background: var(--tag-bg); font-weight: 600; }
+nav.side li a.hidden { display: none; }
+nav.side li.sep.hidden { display: none; }
+.nav-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+nav.side li a.active .nav-dot { background: var(--accent); }
 
-/* ── Main ─────────────────────────────────── */
 main {
-  flex: 1;
-  max-width: 920px;
-  padding: 52px 60px 120px;
-  min-width: 0;
+  flex: 1; margin-left: var(--nav-w);
+  max-width: 940px; padding: 44px 56px 140px; min-width: 0;
 }
 
 /* ── Typography ───────────────────────────── */
-h1 { font-size: 2.2rem; color: var(--accent); font-weight: 800; line-height: 1.15; letter-spacing: -.02em; }
+h1 { font-size: 2.3rem; color: var(--heading); font-weight: 800; line-height: 1.15; letter-spacing: -.02em; }
+h1 .grad { background: linear-gradient(90deg, var(--accent), var(--accent2)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
 h2 {
-  font-size: 1.3rem; color: var(--heading); font-weight: 700;
-  margin-top: 56px; padding-top: 22px;
-  border-top: 1px solid var(--border);
+  font-size: 1.32rem; color: var(--heading); font-weight: 700;
+  margin-top: 58px; padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
   display: flex; align-items: center; gap: 8px;
 }
-h3 { font-size: 1rem; color: var(--heading); font-weight: 600; margin-top: 28px; }
-h4 { font-size: .82rem; color: var(--accent2); font-weight: 700; margin-top: 20px; text-transform: uppercase; letter-spacing: .08em; }
+h3 { font-size: 1.02rem; color: var(--heading); font-weight: 600; margin-top: 30px; }
+h4 { font-size: .8rem; color: var(--cyan2); font-weight: 700; margin-top: 22px; text-transform: uppercase; letter-spacing: .07em; }
 p  { margin-top: 12px; }
 ul, ol { margin-top: 10px; padding-left: 24px; }
 li { margin-top: 5px; }
 a  { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 strong { color: var(--heading); font-weight: 600; }
-em { font-style: italic; color: var(--accent2); }
+em { font-style: italic; color: var(--cyan2); }
 
 code {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
@@ -148,45 +168,56 @@ pre code { background: none; border: none; padding: 0; color: var(--text); font-
         font-family: "SFMono-Regular", Menlo, monospace; text-transform: uppercase; letter-spacing: .06em; }
 
 /* Syntax */
-.kw  { color: #ff7b72; }
-.fn  { color: #d2a8ff; }
-.str { color: #a5d6ff; }
-.num { color: #f2cc60; }
+.kw  { color: #ff9d6c; }
+.kw2 { color: #ff9d6c; }
+.fn  { color: #8bc6ff; }
+.str { color: #b6e6a8; }
+.num { color: var(--accent2); }
 .cmt { color: #6e7681; font-style: italic; }
-.ty  { color: #79c0ff; }
+.ty  { color: var(--cyan2); }
 .asm { color: #56d364; }
-.err { color: #ff7b72; font-style: italic; }
+.err { color: var(--red); font-style: italic; }
 
 /* ── Tables ──────────────────────────────── */
 .table-wrap { overflow-x: auto; margin-top: 14px; border-radius: 8px; border: 1px solid var(--border); }
 table { border-collapse: collapse; width: 100%; font-size: .86rem; }
-th { background: var(--surface); color: var(--accent2); font-weight: 600; text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--border); }
+th { background: var(--surface); color: var(--cyan2); font-weight: 600; text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--border); }
 th:not(:last-child), td:not(:last-child) { border-right: 1px solid var(--border); }
 td { padding: 7px 14px; vertical-align: top; }
 tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 tr:nth-child(even) td { background: rgba(255,255,255,.015); }
 
 /* ── Callouts ────────────────────────────── */
-.note, .warn, .tip {
+.note, .warn, .tip, .status {
   border-radius: 0 8px 8px 0;
   padding: 12px 16px;
   margin-top: 16px;
   font-size: .9rem;
   border-left: 3px solid;
 }
-.note { background: rgba(255,85,85,.09); border-color: var(--accent); }
-.warn { background: rgba(245,158,11,.09); border-color: var(--orange); }
-.tip  { background: rgba(34,197,94,.08);  border-color: var(--green2); }
+.note { background: rgba(95,208,192,.08); border-color: var(--cyan); }
+.warn { background: rgba(240,104,104,.08); border-color: var(--red); }
+.tip  { background: rgba(110,231,160,.08); border-color: var(--green); }
+.status { background: var(--tag-bg); border-color: var(--accent); }
 
 /* ── Hero ────────────────────────────────── */
-.hero { margin-bottom: 32px; }
+.hero { margin-bottom: 28px; }
 .hero-tag {
-  display: inline-flex; align-items: center; gap: 5px;
-  background: var(--tag-bg); border: 1px solid rgba(255,85,85,.30);
-  border-radius: 20px; padding: 3px 12px;
-  font-size: 11.5px; color: var(--accent2); font-weight: 600; margin-bottom: 12px;
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--tag-bg); border: 1px solid rgba(232,162,61,.30);
+  border-radius: 20px; padding: 4px 13px;
+  font-size: 11.5px; color: var(--accent2); font-weight: 600; margin-bottom: 14px;
 }
-.hero p { font-size: 1.1rem; color: var(--text); margin-top: 10px; max-width: 660px; }
+.hero-tag .pulse { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.8s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+.hero p.lead { font-size: 1.12rem; color: var(--text); margin-top: 12px; max-width: 680px; }
+.stat-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 20px; }
+.stat {
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 9px;
+  padding: 10px 16px; min-width: 108px;
+}
+.stat .n { font-size: 1.3rem; font-weight: 800; color: var(--accent2); line-height: 1.1; }
+.stat .l { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-top: 2px; }
 .badges { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
 .badge {
   display: inline-flex; align-items: center; overflow: hidden;
@@ -195,103 +226,157 @@ tr:nth-child(even) td { background: rgba(255,255,255,.015); }
 .badge .bl { background: #1a1a1a; padding: 3px 9px; color: var(--text); }
 .badge .br { padding: 3px 9px; color: #fff; }
 .badge.g .br { background: #166534; }
-.badge.b .br { background: #991b1b; }
-.badge.v .br { background: #7f1d1d; }
+.badge.b .br { background: #1d4ed8; }
+.badge.v .br { background: #92400e; }
 
 /* ── Section anchors ─────────────────────── */
-h2 .anc, h3 .anc { color: var(--muted); font-size: .75em; font-weight: 400; opacity: 0; transition: opacity .15s; }
+h2 .anc, h3 .anc { color: var(--muted); font-size: .75em; font-weight: 400; opacity: 0; transition: opacity .15s; margin-left: auto; }
 h2:hover .anc, h3:hover .anc { opacity: 1; }
 
 /* ── Stdlib grid ─────────────────────────── */
-.mod-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin-top: 14px; }
+.mod-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 14px; }
 .mod-card {
   background: var(--surface2); border: 1px solid var(--border); border-radius: 7px;
   padding: 9px 12px; font-size: .8rem; color: var(--text); text-decoration: none;
-  transition: border-color .15s, background .15s;
+  transition: border-color .15s, background .15s; display: block;
 }
 .mod-card:hover { border-color: var(--accent); background: var(--tag-bg); color: var(--accent2); text-decoration: none; }
 .mod-card .mod-name { font-family: "SFMono-Regular", Menlo, monospace; font-size: .82rem; font-weight: 600; color: var(--heading); }
-.mod-card .mod-desc { font-size: .74rem; color: var(--muted); margin-top: 3px; }
+.mod-card .mod-desc { font-size: .73rem; color: var(--muted); margin-top: 3px; }
+.mod-card.new { border-color: rgba(232,162,61,.4); }
+.mod-card.new .mod-name::after { content: " •"; color: var(--accent); }
 
 /* ── Error code table ─────────────────────── */
-.ec { font-family: "SFMono-Regular", Menlo, monospace; font-size: .82rem; color: var(--accent); font-weight: 600; }
+.ec { font-family: "SFMono-Regular", Menlo, monospace; font-size: .82rem; font-weight: 600; }
+.ec.L { color: var(--cyan2); }
+.ec.P { color: var(--accent2); }
+.ec.E { color: var(--red); }
+
+/* ── Timeline ────────────────────────────── */
+.timeline { margin-top: 16px; border-left: 2px solid var(--border); padding-left: 20px; }
+.tl-item { position: relative; padding-bottom: 22px; }
+.tl-item::before {
+  content: ""; position: absolute; left: -26px; top: 4px;
+  width: 9px; height: 9px; border-radius: 50%; background: var(--surface3);
+  border: 2px solid var(--muted);
+}
+.tl-item.now::before { background: var(--accent); border-color: var(--accent2); }
+.tl-ver { font-weight: 700; color: var(--heading); font-size: .92rem; }
+.tl-ver .tag { font-size: 10px; color: var(--accent); margin-left: 6px; font-weight: 600; }
+.tl-desc { font-size: .85rem; color: var(--muted); margin-top: 2px; }
 
 /* ── Two-column layout ─────────────────────── */
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 16px; }
 
+/* ── Cards ──────────────────────────────── */
+.card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 16px; }
+.card {
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px;
+}
+.card h4 { margin-top: 0; }
+.card p { font-size: .87rem; color: var(--muted); }
+
+/* ── Footer ─────────────────────────────── */
+footer.docs-footer {
+  margin-top: 70px; padding-top: 24px; border-top: 1px solid var(--border);
+  font-size: .82rem; color: var(--muted); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+}
+
 /* ── Responsive ──────────────────────────── */
-@media (max-width: 800px) {
-  nav { display: none; }
-  main { padding: 28px 22px 80px; }
-  h1 { font-size: 1.6rem; }
+@media (max-width: 900px) {
+  .burger { display: flex; }
+  .topbar-search { display: none; }
+  nav.side { transform: translateX(-100%); box-shadow: 8px 0 30px rgba(0,0,0,.5); }
+  nav.side.open { transform: translateX(0); }
+  main { margin-left: 0; padding: 28px 22px 80px; }
+  h1 { font-size: 1.7rem; }
   h2 { font-size: 1.15rem; }
-  .two-col { grid-template-columns: 1fr; }
+  .two-col, .card-grid { grid-template-columns: 1fr; }
 }
 </style>
 </head>
 <body>
 
-<!-- ══ SIDEBAR ═══════════════════════════════════════════════════ -->
-<nav>
-  <a href="#intro" class="nav-logo">
-    <div class="nav-icon"><img src="icon.png" alt="asmpython"></div>
-    <div>
-      <div class="nav-title">asmpython</div>
-      <div class="nav-ver">v1.1.0</div>
-    </div>
+<!-- ══ TOP BAR ═══════════════════════════════════════════════════ -->
+<header class="topbar">
+  <button class="burger" id="navToggle" aria-label="Toggle navigation">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+  </button>
+  <a href="#intro" class="brand">
+    <div class="brand-icon"><img src="icon.png" alt="asmpython"></div>
+    <div class="brand-name">asmpython</div>
   </a>
+  <span class="ver-pill">v2.0.0-preview</span>
+  <div class="topbar-search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    <input id="navSearch" type="text" placeholder="Filter docs…" autocomplete="off">
+  </div>
+  <div class="topbar-spacer"></div>
+  <a class="gh-link" href="https://github.com/deltathedumb/asmpython" target="_blank" rel="noopener">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    GitHub
+  </a>
+</header>
+
+<div class="shell">
+<!-- ══ SIDEBAR ═══════════════════════════════════════════════════ -->
+<nav class="side" id="sideNav">
   <ul>
-    <li class="sep">Getting Started</li>
-    <li><a href="#intro">Introduction</a></li>
-    <li><a href="#install">Installation</a></li>
-    <li><a href="#quickstart">Quick start</a></li>
-    <li><a href="#cli">CLI reference</a></li>
+    <li class="sep">Overview</li>
+    <li><a href="#intro"><span class="nav-dot"></span>Introduction</a></li>
+    <li><a href="#status"><span class="nav-dot"></span>Project status</a></li>
+    <li><a href="#install"><span class="nav-dot"></span>Installation</a></li>
+    <li><a href="#quickstart"><span class="nav-dot"></span>Quick start</a></li>
+    <li><a href="#cli"><span class="nav-dot"></span>CLI reference</a></li>
 
     <li class="sep">Language</li>
-    <li><a href="#types">Types</a></li>
-    <li><a href="#strings">Strings</a></li>
-    <li><a href="#collections">Collections</a></li>
-    <li><a href="#control-flow">Control flow</a></li>
-    <li><a href="#match-case">Pattern matching</a></li>
-    <li><a href="#functions">Functions</a></li>
-    <li><a href="#generators">Generators</a></li>
-    <li><a href="#classes">Classes</a></li>
-    <li><a href="#exceptions">Exceptions</a></li>
-    <li><a href="#context-managers">Context managers</a></li>
-    <li><a href="#comprehensions">Comprehensions</a></li>
-    <li><a href="#imports">Imports &amp; modules</a></li>
+    <li><a href="#types"><span class="nav-dot"></span>Types</a></li>
+    <li><a href="#strings"><span class="nav-dot"></span>Strings</a></li>
+    <li><a href="#collections"><span class="nav-dot"></span>Collections</a></li>
+    <li><a href="#control-flow"><span class="nav-dot"></span>Control flow</a></li>
+    <li><a href="#match-case"><span class="nav-dot"></span>Pattern matching</a></li>
+    <li><a href="#functions"><span class="nav-dot"></span>Functions</a></li>
+    <li><a href="#generators"><span class="nav-dot"></span>Generators</a></li>
+    <li><a href="#classes"><span class="nav-dot"></span>Classes</a></li>
+    <li><a href="#exceptions"><span class="nav-dot"></span>Exceptions</a></li>
+    <li><a href="#context-managers"><span class="nav-dot"></span>Context managers</a></li>
+    <li><a href="#comprehensions"><span class="nav-dot"></span>Comprehensions</a></li>
+    <li><a href="#imports"><span class="nav-dot"></span>Imports &amp; modules</a></li>
 
     <li class="sep">Standard Library</li>
-    <li><a href="#stdlib">Overview</a></li>
-    <li><a href="#stdlib-math">math</a></li>
-    <li><a href="#stdlib-os">os / sys / pathlib</a></li>
-    <li><a href="#stdlib-re">re</a></li>
-    <li><a href="#stdlib-io">json / csv / io</a></li>
-    <li><a href="#stdlib-datetime">datetime / time</a></li>
-    <li><a href="#stdlib-collections">collections / itertools</a></li>
-    <li><a href="#stdlib-misc">string / textwrap / others</a></li>
-    <li><a href="#stdlib-hardware">hardware</a></li>
-    <li><a href="#stdlib-network">network</a></li>
-    <li><a href="#stdlib-gui">gui</a></li>
-    <li><a href="#stdlib-framebuffer">framebuffer</a></li>
-    <li><a href="#stdlib-audio">audio</a></li>
+    <li><a href="#stdlib"><span class="nav-dot"></span>Overview (120+ modules)</a></li>
+    <li><a href="#stdlib-math"><span class="nav-dot"></span>math / cmath / decimal</a></li>
+    <li><a href="#stdlib-os"><span class="nav-dot"></span>os / sys / pathlib</a></li>
+    <li><a href="#stdlib-re"><span class="nav-dot"></span>re</a></li>
+    <li><a href="#stdlib-io"><span class="nav-dot"></span>json / csv / io / pickle</a></li>
+    <li><a href="#stdlib-datetime"><span class="nav-dot"></span>datetime / time</a></li>
+    <li><a href="#stdlib-collections"><span class="nav-dot"></span>collections / itertools</a></li>
+    <li><a href="#stdlib-net"><span class="nav-dot"></span>net / web protocols</a></li>
+    <li><a href="#stdlib-misc"><span class="nav-dot"></span>string / textwrap / others</a></li>
+    <li><a href="#stdlib-hardware"><span class="nav-dot"></span>hardware</a></li>
+    <li><a href="#stdlib-network"><span class="nav-dot"></span>network</a></li>
+    <li><a href="#stdlib-lumen"><span class="nav-dot"></span>lumen (graphics/audio)</a></li>
 
     <li class="sep">Assembly</li>
-    <li><a href="#inline-asm">Inline assembly</a></li>
-    <li><a href="#ffi">Inline FFI</a></li>
-    <li><a href="#import-binary">Dynamic loading (import_binary)</a></li>
+    <li><a href="#inline-asm"><span class="nav-dot"></span>Inline assembly</a></li>
+    <li><a href="#assembly-class"><span class="nav-dot"></span>Assembly builder class</a></li>
+    <li><a href="#ffi"><span class="nav-dot"></span>Inline FFI</a></li>
+    <li><a href="#import-binary"><span class="nav-dot"></span>Dynamic loading (import_binary)</a></li>
 
     <li class="sep">Targets</li>
-    <li><a href="#target-windows">Windows (PE64)</a></li>
-    <li><a href="#target-linux">Linux (ELF64)</a></li>
-    <li><a href="#target-freestanding">Freestanding</a></li>
-    <li><a href="#target-freestanding16">16-bit boot</a></li>
+    <li><a href="#target-windows"><span class="nav-dot"></span>Windows (PE64)</a></li>
+    <li><a href="#target-linux"><span class="nav-dot"></span>Linux (ELF64)</a></li>
+    <li><a href="#target-freestanding"><span class="nav-dot"></span>Freestanding</a></li>
+    <li><a href="#target-freestanding16"><span class="nav-dot"></span>16-bit boot</a></li>
+
+    <li class="sep">Compiler Internals</li>
+    <li><a href="#architecture"><span class="nav-dot"></span>Architecture &amp; pipeline</a></li>
+    <li><a href="#ssa-ir"><span class="nav-dot"></span>SSA IR &amp; optimization</a></li>
 
     <li class="sep">Reference</li>
-    <li><a href="#builtins">Builtins</a></li>
-    <li><a href="#architecture">Architecture</a></li>
-    <li><a href="#error-codes">Error codes</a></li>
-    <li><a href="#limitations">Limitations</a></li>
+    <li><a href="#builtins"><span class="nav-dot"></span>Builtins</a></li>
+    <li><a href="#error-codes"><span class="nav-dot"></span>Error codes</a></li>
+    <li><a href="#limitations"><span class="nav-dot"></span>Limitations</a></li>
   </ul>
 </nav>
 
@@ -301,13 +386,19 @@ h2:hover .anc, h3:hover .anc { opacity: 1; }
 <!-- ── Intro ─────────────────────────────────────────────────── -->
 <section id="intro">
   <div class="hero">
-    <div class="hero-tag">✦ v1.1.0 — ahead-of-time compiler</div>
-    <h1>asmpython</h1>
-    <p>Compile Python source to native x86-64 executables — no VM, no interpreter, no runtime dependencies.</p>
+    <div class="hero-tag"><span class="pulse"></span> v2.0.0-preview — Win64 ABI fixes, stdlib depth, SSA optimisation</div>
+    <h1>asm<span class="grad">python</span></h1>
+    <p class="lead">Compile Python source to native x86-64 executables — no VM, no interpreter, no runtime dependencies.</p>
     <div class="badges">
-      <div class="badge g"><span class="bl">platform</span><span class="br">Windows · Linux</span></div>
+      <div class="badge g"><span class="bl">platform</span><span class="br">Windows · Linux · Freestanding</span></div>
       <div class="badge b"><span class="bl">python</span><span class="br">3.11+</span></div>
       <div class="badge v"><span class="bl">license</span><span class="br">MIT</span></div>
+    </div>
+    <div class="stat-row">
+      <div class="stat"><div class="n">120+</div><div class="l">stdlib modules</div></div>
+      <div class="stat"><div class="n">455</div><div class="l">test cases</div></div>
+      <div class="stat"><div class="n">4</div><div class="l">output targets</div></div>
+      <div class="stat"><div class="n">150+</div><div class="l">asm instructions</div></div>
     </div>
   </div>
 
@@ -320,6 +411,56 @@ h2:hover .anc, h3:hover .anc { opacity: 1; }
     <li><strong>Freestanding (Multiboot1)</strong> — bare-metal kernel that boots in QEMU</li>
     <li><strong>Freestanding 16-bit</strong> — BIOS-bootable disk image (16-bit boot sector → 64-bit long mode)</li>
   </ul>
+</section>
+
+<!-- ── Status ────────────────────────────────────────────────── -->
+<section id="status">
+  <h2>Project status <a class="anc" href="#status">#</a></h2>
+  <div class="status">
+    <strong>2.0.0-preview is the active development line.</strong> The headline
+    work isn't a new language feature — it's a structural rewrite of the
+    code generator around a proper <a href="#ssa-ir">SSA intermediate
+    representation</a>, which is the prerequisite for ARM64/macOS/Raspberry
+    Pi targets, a real register allocator, and optimization passes that
+    weren't previously possible against direct AST→NASM emission. The
+    existing AST→NASM <code>codegen.py</code> path remains the one that
+    actually ships builds today; the IR work is additive and lands
+    incrementally behind its own pipeline.
+  </div>
+
+  <div class="timeline">
+    <div class="tl-item now">
+      <div class="tl-ver">2.0.0-preview <span class="tag">IN PROGRESS</span></div>
+      <div class="tl-desc">SSA IR (<code>ir.py</code>/<code>ir_builder.py</code>/<code>ssa_build.py</code>) + dead-code elimination pass; 27 new stdlib modules; Win64 ABI shadow-space fixes; <code>@dataclass</code> default-factory fix; NULL-truthiness fixes.</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">1.2.0 — Graphics everywhere</div>
+      <div class="tl-desc">Lumen graphics/audio/input ecosystem: SDL2-backed <code>lumen</code> (Canvas, PixelBuffer, Image, Font, Joystick, Tilemap), bare-metal <code>lumen.framebuffer</code>, <code>lumen.audio</code> (SDL2_mixer).</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">1.1.0 — CPython parity expansion</div>
+      <div class="tl-desc">Full operator-dunder dispatch, <code>match</code>/<code>case</code>, <code>with</code> statements, generators, closures, walrus operator, f-string format-spec mini-language, container repr.</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">1.0.x — Public launch</div>
+      <div class="tl-desc">Core language, Windows/Linux/freestanding targets, first stdlib pass, <code>asmlib</code> hardware/network/gui bindings.</div>
+    </div>
+  </div>
+
+  <h3>Confirmed work order toward 2.0.0</h3>
+  <ol>
+    <li>Finish the SSA IR builder's mechanical AST-node coverage pass.</li>
+    <li>Linear-scan register allocator.</li>
+    <li>x86-64 IR lowering; validate full parity vs. the existing test suite.</li>
+    <li>macOS Intel x86-64 target.</li>
+    <li>ARM64 lowering (Linux first), then macOS Apple Silicon and Raspberry Pi.</li>
+    <li>Raspberry Pi bare-metal (new freestanding ARM64 target).</li>
+    <li>Garbage collector (refcounting).</li>
+    <li>Optimization passes beyond dead-code elimination.</li>
+    <li>Selfhost completion (asmpython compiling itself, end-to-end).</li>
+    <li>Stdlib completion pass; release hardening (CONTRIBUTING/SECURITY/templates).</li>
+  </ol>
+  <div class="note">Full detail lives in <code>docs/ROADMAP.md</code> and <code>CHANGELOG.md</code> in the repository root.</div>
 </section>
 
 <!-- ── Install ───────────────────────────────────────────────── -->
@@ -339,6 +480,7 @@ pip install .</code></pre>
       <tr><td><code>gcc</code> (MinGW on Windows)</td><td>Windows, Linux</td><td>Not needed for freestanding targets</td></tr>
       <tr><td><code>windres</code></td><td>Windows + <code>--icon</code></td><td>Bundled with MinGW</td></tr>
       <tr><td><code>qemu-system-x86_64</code></td><td>Freestanding testing</td><td>Optional</td></tr>
+      <tr><td><code>SDL2</code> (+ <code>SDL2_mixer</code>, <code>SDL2_ttf</code>)</td><td><code>lumen</code> graphics/audio</td><td>Auto-linked only when actually used</td></tr>
     </tbody>
   </table></div>
 
@@ -360,6 +502,10 @@ pip install .</code></pre>
   <h3>Freestanding kernel</h3>
   <pre><div class="lang">shell</div><code>python -m asmpython kernel.py --target freestanding -o kernel.bin
 qemu-system-x86_64 -kernel kernel.bin -serial stdio -display none</code></pre>
+
+  <h3>Multi-target in one invocation</h3>
+  <pre><div class="lang">shell</div><code>python -m asmpython prog.py --target windows,linux</code></pre>
+  <p>Lex/parse/sema run once; codegen and linking run once per target.</p>
 </section>
 
 <!-- ── CLI ───────────────────────────────────────────────────── -->
@@ -368,24 +514,49 @@ qemu-system-x86_64 -kernel kernel.bin -serial stdio -display none</code></pre>
 
   <pre><div class="lang">shell</div><code>python -m asmpython &lt;source.py&gt; [options]</code></pre>
 
+  <h3>Input / output</h3>
   <div class="table-wrap"><table>
     <thead><tr><th>Option</th><th>Description</th></tr></thead>
     <tbody>
-      <tr><td><code>-o &lt;path&gt;</code></td><td>Output path (default: source stem + platform extension)</td></tr>
-      <tr><td><code>--target &lt;t&gt;</code></td><td><code>windows</code> | <code>linux</code> | <code>freestanding</code> | <code>freestanding16</code> (auto-detected)</td></tr>
+      <tr><td><code>-o, --output &lt;path&gt;</code></td><td>Output path (default: source stem + platform extension)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Target / build mode</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Option</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>--target &lt;t&gt;</code></td><td>Comma-separated <code>windows</code>/<code>linux</code>/<code>freestanding</code>/<code>freestanding16</code> (auto-detected from host if omitted)</td></tr>
+      <tr><td><code>--type executable|library</code></td><td>Produce an executable (default) or a shared library (<code>.dll</code>/<code>.so</code>)</td></tr>
       <tr><td><code>--emit-asm</code></td><td>Write <code>.asm</code> only — skip assemble/link</td></tr>
-      <tr><td><code>--keep</code></td><td>Keep intermediate <code>.obj</code>/<code>.o</code> files</td></tr>
-      <tr><td><code>--check</code></td><td>Front-end only (lex/parse/sema), no codegen</td></tr>
-      <tr><td><code>--json</code></td><td>Machine-readable JSON diagnostics on stderr</td></tr>
-      <tr><td><code>--explain &lt;CODE&gt;</code></td><td>Describe an error code and exit (e.g. <code>--explain E014</code>)</td></tr>
-      <tr><td><code>--use-runtime-lib</code></td><td>Link pre-built <code>libasmpython_rt</code> (~50% smaller .asm output)</td></tr>
-      <tr><td><code>--onefile</code></td><td>Single statically-linked binary (default)</td></tr>
-      <tr><td><code>--onedir</code></td><td>Bundle directory: exe + shared runtime library (implies <code>--use-runtime-lib</code>)</td></tr>
-      <tr><td><code>--type executable</code></td><td>Produce an executable (default)</td></tr>
-      <tr><td><code>--type library</code></td><td>Produce a shared library (<code>.dll</code> / <code>.so</code>)</td></tr>
-      <tr><td><code>--icon &lt;path&gt;</code></td><td>Embed <code>.ico</code> or <code>.png</code> as Windows icon resource (Windows only; PNG auto-converted via Pillow or a fallback minimal ICO wrapper)</td></tr>
-      <tr><td><code>--nasm &lt;path&gt;</code></td><td>Override nasm executable path</td></tr>
-      <tr><td><code>--gcc &lt;path&gt;</code></td><td>Override gcc executable path</td></tr>
+      <tr><td><code>--check</code></td><td>Front-end only (lex/parse/sema), no codegen, no toolchain required</td></tr>
+      <tr><td><code>--one-error</code></td><td>Stop at the first sema error instead of collecting all of them (parse errors always stop early)</td></tr>
+      <tr><td><code>--json</code></td><td>With <code>--check</code>, machine-readable JSON diagnostics array on stdout</td></tr>
+      <tr><td><code>--keep</code></td><td>Keep the intermediate <code>.obj</code>/<code>.o</code> file after linking</td></tr>
+      <tr><td><code>--keep-assembly</code></td><td>Keep the intermediate <code>.asm</code> file after assembling</td></tr>
+      <tr><td><code>--icon &lt;path&gt;</code></td><td>Embed <code>.ico</code> or <code>.png</code> as a Windows icon resource (Windows only; PNG auto-converted via Pillow or a fallback minimal ICO wrapper)</td></tr>
+      <tr><td><code>-of, --onefile</code></td><td>Single statically-linked binary (default)</td></tr>
+      <tr><td><code>-od, --onedir</code></td><td>Bundle directory: exe plus a <code>resources/</code>/<code>.resources/</code> folder holding the shared runtime library</td></tr>
+      <tr><td><code>--use-runtime-lib</code></td><td>Link the pre-built <code>libasmpython_rt</code> archive instead of inlining helpers (~50% smaller <code>.asm</code> output)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Toolchain overrides</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Option</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>--nasm &lt;path&gt;</code></td><td>Override nasm executable path (env: <code>ASMPYTHON_NASM</code>)</td></tr>
+      <tr><td><code>--gcc &lt;path&gt;</code></td><td>Override gcc executable path (env: <code>ASMPYTHON_GCC</code>)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Information</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Option</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>-h, --help</code></td><td>Show help and exit</td></tr>
+      <tr><td><code>-V, --version</code></td><td>Show version and exit</td></tr>
+      <tr><td><code>--explain &lt;CODE&gt;</code></td><td>Describe an error code and exit (e.g. <code>--explain E021</code>, <code>--explain L003</code>, <code>--explain P002</code>)</td></tr>
     </tbody>
   </table></div>
 
@@ -393,7 +564,7 @@ qemu-system-x86_64 -kernel kernel.bin -serial stdio -display none</code></pre>
   <pre><div class="lang">output</div><code>broken.py:3:5: semantic error: <span class="err">[E002]</span> undefined function 'greet'
   greet("world")
   ^</code></pre>
-  <p>All errors go to stderr with a non-zero exit code. Use <code>--explain E002</code> for a full description of any error code. With <code>--check --json</code> the output is machine-readable for editor integration.</p>
+  <p>All errors go to stderr with a non-zero exit code. By default every sema error in the file is collected and reported together (pass <code>--one-error</code> to stop at the first one; parse errors always stop early). Use <code>--explain &lt;CODE&gt;</code> for a full description of any error code, or <code>--check --json</code> for machine-readable output in editor integrations.</p>
 </section>
 
 <!-- ═══════════════════ LANGUAGE ════════════════════════════ -->
@@ -691,7 +862,7 @@ Config.version += <span class="num">1</span>
         <span class="kw">self</span>._r = v</code></pre>
 
   <h3>Dunders</h3>
-  <p><code>__init__</code>, <code>__str__</code>, <code>__repr__</code>, <code>__len__</code>, <code>__getitem__</code>, <code>__setitem__</code>, <code>__contains__</code>, <code>__iter__</code>, <code>__next__</code>, <code>__add__</code>, <code>__sub__</code>, <code>__mul__</code>, <code>__truediv__</code>, <code>__floordiv__</code>, <code>__mod__</code>, <code>__pow__</code>, <code>__neg__</code>, <code>__pos__</code>, <code>__abs__</code>, <code>__invert__</code>, <code>__eq__</code>, <code>__lt__</code>, <code>__le__</code>, <code>__gt__</code>, <code>__ge__</code>, <code>__hash__</code>, <code>__bool__</code>, <code>__enter__</code>/<code>__exit__</code>, <code>__match_args__</code>. All binary dunder operators try reflected form on failure.</p>
+  <p><code>__init__</code>, <code>__str__</code>, <code>__repr__</code>, <code>__len__</code>, <code>__getitem__</code>, <code>__setitem__</code>, <code>__contains__</code>, <code>__iter__</code>, <code>__next__</code>, <code>__call__</code>, <code>__add__</code>, <code>__sub__</code>, <code>__mul__</code>, <code>__truediv__</code>, <code>__floordiv__</code>, <code>__mod__</code>, <code>__pow__</code>, <code>__matmul__</code>, <code>__neg__</code>, <code>__pos__</code>, <code>__abs__</code>, <code>__invert__</code>, <code>__eq__</code>, <code>__lt__</code>, <code>__le__</code>, <code>__gt__</code>, <code>__ge__</code>, <code>__hash__</code>, <code>__bool__</code>, <code>__enter__</code>/<code>__exit__</code>, in-place variants (<code>__iadd__</code>, etc.), <code>__match_args__</code>. All binary dunder operators try reflected form (<code>__radd__</code>, …) on failure.</p>
 </section>
 
 <section id="exceptions">
@@ -733,7 +904,7 @@ Config.version += <span class="num">1</span>
 <span class="kw">class</span> <span class="fn">Lock</span>:
     <span class="kw">def</span> <span class="fn">__enter__</span>(<span class="kw">self</span>): <span class="kw">return</span> <span class="kw">self</span>
     <span class="kw">def</span> <span class="fn">__exit__</span>(<span class="kw">self</span>, t, v, tb): <span class="kw">return</span> <span class="kw">False</span></code></pre>
-  <p><code>with</code> rewrites to <code>try/finally</code> in sema. <code>__exit__</code> is always called as <code>__exit__(None, None, None)</code>. <code>contextlib.suppress</code> and <code>contextlib.nullcontext</code> available.</p>
+  <p><code>with</code> rewrites to <code>try/finally</code> in sema. <code>__exit__</code> is always called as <code>__exit__(None, None, None)</code>. <code>contextlib.suppress</code>, <code>contextlib.nullcontext</code>, and <code>contextlib.closing</code> are available.</p>
 </section>
 
 <section id="comprehensions">
@@ -751,7 +922,7 @@ uniq = {x.lower() <span class="kw">for</span> x <span class="kw">in</span> words
 
 <span class="cmt"># Generator expression (eager; same as list comp)</span>
 total = <span class="fn">sum</span>(x * x <span class="kw">for</span> x <span class="kw">in</span> xs)</code></pre>
-  <p>Comprehension loop variables are scoped to the comprehension (Python 3 semantics). Multiple <code>for</code> clauses and <code>if</code> filters supported.</p>
+  <p>Comprehension loop variables are scoped to the comprehension (Python 3 semantics). Multiple <code>for</code> clauses and <code>if</code> filters supported. <code>enumerate(xs)</code> as the comprehension source binds two targets directly.</p>
 </section>
 
 <section id="imports">
@@ -764,29 +935,37 @@ total = <span class="fn">sum</span>(x * x <span class="kw">for</span> x <span cl
 
   <p>Two import modes:</p>
   <ul>
-    <li><strong>Source stdlib</strong> — modules like <code>re</code>, <code>json</code>, <code>collections</code> are compiled whole-program alongside your code. All top-level definitions become globally visible.</li>
-    <li><strong>FFI stdlib</strong> — <code>math</code>, <code>os</code>, <code>sys</code>, <code>time</code> use direct C runtime bindings.</li>
+    <li><strong>Source stdlib</strong> — modules like <code>re</code>, <code>json</code>, <code>collections</code>, <code>lumen</code> are compiled whole-program alongside your code. All top-level definitions become globally visible.</li>
+    <li><strong>FFI stdlib</strong> — <code>math</code>, <code>os</code>, <code>sys</code>, <code>time</code>, <code>hardware</code>, <code>network</code> use direct C runtime bindings.</li>
   </ul>
-  <p>User modules: <code>import utils</code> finds <code>utils.py</code> in the same directory and merges into the compilation unit. Whole-program compilation ensures zero linking overhead for user modules.</p>
+  <p>User modules: <code>import utils</code> finds <code>utils.py</code> in the same directory and merges into the compilation unit. Whole-program compilation ensures zero linking overhead for user modules — the first definition of any name wins, so stdlib can be overridden by user code.</p>
 </section>
 
 <!-- ═══════════════════ STDLIB ═══════════════════════════════ -->
 
 <section id="stdlib">
   <h2>Standard library overview <a class="anc" href="#stdlib">#</a></h2>
-  <p>All modules listed below are fully implemented. Source stdlib modules are compiled into your binary; FFI modules bind to C runtime symbols.</p>
+  <p>120+ modules across two flavors. <strong class="new">Cards marked with a dot</strong> were added during the 2.0.0-preview stdlib expansion. Source-stdlib modules are compiled whole-program into your binary; FFI modules bind directly to C runtime symbols.</p>
 
   <h3>Data &amp; text</h3>
   <div class="mod-grid">
-    <a href="#stdlib-math"    class="mod-card"><div class="mod-name">math</div><div class="mod-desc">Numeric functions</div></a>
-    <a href="#stdlib-re"      class="mod-card"><div class="mod-name">re</div><div class="mod-desc">Regular expressions</div></a>
-    <a href="#stdlib-io"      class="mod-card"><div class="mod-name">json</div><div class="mod-desc">JSON encode/decode</div></a>
-    <a href="#stdlib-io"      class="mod-card"><div class="mod-name">csv</div><div class="mod-desc">CSV reader/writer</div></a>
-    <a href="#stdlib-misc"    class="mod-card"><div class="mod-name">string</div><div class="mod-desc">String constants</div></a>
-    <a href="#stdlib-misc"    class="mod-card"><div class="mod-name">textwrap</div><div class="mod-desc">Text wrapping</div></a>
-    <div class="mod-card"><div class="mod-name">html</div><div class="mod-desc">HTML escape</div></div>
-    <div class="mod-card"><div class="mod-name">shlex</div><div class="mod-desc">Shell lexer</div></div>
+    <a href="#stdlib-math" class="mod-card"><div class="mod-name">math</div><div class="mod-desc">Numeric functions</div></a>
+    <div class="mod-card"><div class="mod-name">cmath</div><div class="mod-desc">Complex-number math</div></div>
+    <div class="mod-card"><div class="mod-name">decimal</div><div class="mod-desc">Decimal arithmetic</div></div>
+    <div class="mod-card"><div class="mod-name">fractions</div><div class="mod-desc">Rational numbers</div></div>
+    <div class="mod-card"><div class="mod-name">numbers</div><div class="mod-desc">Numeric ABCs</div></div>
+    <div class="mod-card"><div class="mod-name">statistics</div><div class="mod-desc">mean/median/stdev</div></div>
+    <div class="mod-card"><div class="mod-name">random</div><div class="mod-desc">Random numbers</div></div>
+    <a href="#stdlib-re" class="mod-card"><div class="mod-name">re</div><div class="mod-desc">Regular expressions</div></a>
+    <div class="mod-card"><div class="mod-name">string</div><div class="mod-desc">String constants</div></div>
+    <div class="mod-card"><div class="mod-name">textwrap</div><div class="mod-desc">Text wrapping/fill</div></div>
     <div class="mod-card"><div class="mod-name">difflib</div><div class="mod-desc">Sequence diffs</div></div>
+    <div class="mod-card"><div class="mod-name">shlex</div><div class="mod-desc">Shell-style lexer</div></div>
+    <div class="mod-card"><div class="mod-name">html</div><div class="mod-desc">HTML escape/unescape</div></div>
+    <div class="mod-card new"><div class="mod-name">html.parser</div><div class="mod-desc">HTML parser</div></div>
+    <div class="mod-card new"><div class="mod-name">token / tokenize</div><div class="mod-desc">Python tokenizer</div></div>
+    <div class="mod-card new"><div class="mod-name">codecs</div><div class="mod-desc">Encode/decode registry</div></div>
+    <div class="mod-card"><div class="mod-name">unicodedata</div><div class="mod-desc">ASCII-range stub</div></div>
   </div>
 
   <h3>Collections &amp; algorithms</h3>
@@ -794,11 +973,16 @@ total = <span class="fn">sum</span>(x * x <span class="kw">for</span> x <span cl
     <a href="#stdlib-collections" class="mod-card"><div class="mod-name">collections</div><div class="mod-desc">deque, Counter, etc.</div></a>
     <a href="#stdlib-collections" class="mod-card"><div class="mod-name">itertools</div><div class="mod-desc">Iterator combinators</div></a>
     <div class="mod-card"><div class="mod-name">functools</div><div class="mod-desc">Higher-order funcs</div></div>
+    <div class="mod-card"><div class="mod-name">operator</div><div class="mod-desc">Operator functions</div></div>
     <div class="mod-card"><div class="mod-name">bisect</div><div class="mod-desc">Sorted-list ops</div></div>
     <div class="mod-card"><div class="mod-name">heapq</div><div class="mod-desc">Heap queue</div></div>
-    <div class="mod-card"><div class="mod-name">operator</div><div class="mod-desc">Operator functions</div></div>
     <div class="mod-card"><div class="mod-name">copy</div><div class="mod-desc">Shallow/deep copy</div></div>
-    <div class="mod-card"><div class="mod-name">enum</div><div class="mod-desc">Enumerations</div></div>
+    <div class="mod-card"><div class="mod-name">enum</div><div class="mod-desc">Enum/IntEnum/IntFlag</div></div>
+    <div class="mod-card"><div class="mod-name">dataclasses</div><div class="mod-desc">@dataclass</div></div>
+    <div class="mod-card"><div class="mod-name">types</div><div class="mod-desc">SimpleNamespace, etc.</div></div>
+    <div class="mod-card"><div class="mod-name">typing</div><div class="mod-desc">Type annotations</div></div>
+    <div class="mod-card"><div class="mod-name">weakref</div><div class="mod-desc">Weak references</div></div>
+    <div class="mod-card new"><div class="mod-name">array</div><div class="mod-desc">Typed array</div></div>
   </div>
 
   <h3>File system &amp; OS</h3>
@@ -808,61 +992,127 @@ total = <span class="fn">sum</span>(x * x <span class="kw">for</span> x <span cl
     <a href="#stdlib-os" class="mod-card"><div class="mod-name">pathlib</div><div class="mod-desc">Path objects</div></a>
     <a href="#stdlib-os" class="mod-card"><div class="mod-name">sys</div><div class="mod-desc">System interface</div></a>
     <div class="mod-card"><div class="mod-name">glob</div><div class="mod-desc">File globbing</div></div>
+    <div class="mod-card"><div class="mod-name">fnmatch</div><div class="mod-desc">Filename matching</div></div>
     <div class="mod-card"><div class="mod-name">shutil</div><div class="mod-desc">File operations</div></div>
     <div class="mod-card"><div class="mod-name">subprocess</div><div class="mod-desc">Run processes</div></div>
     <div class="mod-card"><div class="mod-name">tempfile</div><div class="mod-desc">Temp files/dirs</div></div>
+    <div class="mod-card new"><div class="mod-name">fileinput</div><div class="mod-desc">Iterate input files</div></div>
+    <div class="mod-card new"><div class="mod-name">linecache</div><div class="mod-desc">Cached line lookup</div></div>
+    <div class="mod-card new"><div class="mod-name">stat</div><div class="mod-desc">st_mode constants</div></div>
+    <div class="mod-card new"><div class="mod-name">errno</div><div class="mod-desc">POSIX error constants</div></div>
+    <div class="mod-card new"><div class="mod-name">getopt</div><div class="mod-desc">GNU getopt/gnu_getopt</div></div>
+    <div class="mod-card"><div class="mod-name">getpass</div><div class="mod-desc">Password prompt</div></div>
+    <div class="mod-card"><div class="mod-name">platform</div><div class="mod-desc">Platform info</div></div>
   </div>
 
-  <h3>Date, time &amp; math</h3>
+  <h3>Date, time &amp; scheduling</h3>
   <div class="mod-grid">
     <a href="#stdlib-datetime" class="mod-card"><div class="mod-name">datetime</div><div class="mod-desc">Date &amp; time</div></a>
     <a href="#stdlib-datetime" class="mod-card"><div class="mod-name">time</div><div class="mod-desc">Wall/CPU time</div></a>
-    <div class="mod-card"><div class="mod-name">random</div><div class="mod-desc">Random numbers</div></div>
-    <div class="mod-card"><div class="mod-name">decimal</div><div class="mod-desc">Decimal arith.</div></div>
-    <div class="mod-card"><div class="mod-name">fractions</div><div class="mod-desc">Rational numbers</div></div>
-    <div class="mod-card"><div class="mod-name">statistics</div><div class="mod-desc">Stats functions</div></div>
+    <div class="mod-card"><div class="mod-name">calendar</div><div class="mod-desc">Calendar calculations</div></div>
+    <div class="mod-card"><div class="mod-name">sched</div><div class="mod-desc">Event scheduler</div></div>
+    <div class="mod-card"><div class="mod-name">timeit</div><div class="mod-desc">Timing measurement</div></div>
+  </div>
+
+  <h3>Concurrency</h3>
+  <div class="mod-grid">
+    <div class="mod-card"><div class="mod-name">threading</div><div class="mod-desc">Threads, locks</div></div>
+    <div class="mod-card"><div class="mod-name">queue</div><div class="mod-desc">Thread-safe queue</div></div>
+    <div class="mod-card new"><div class="mod-name">asyncio</div><div class="mod-desc">Async primitives (subset)</div></div>
+    <div class="mod-card new"><div class="mod-name">concurrent.futures</div><div class="mod-desc">Thread pool executor</div></div>
   </div>
 
   <h3>Crypto &amp; encoding</h3>
   <div class="mod-grid">
     <div class="mod-card"><div class="mod-name">hashlib</div><div class="mod-desc">MD5, SHA256, etc.</div></div>
-    <div class="mod-card"><div class="mod-name">base64</div><div class="mod-desc">Base64/32/16 codec</div></div>
-    <div class="mod-card"><div class="mod-name">struct</div><div class="mod-desc">Binary packing</div></div>
-    <div class="mod-card"><div class="mod-name">uuid</div><div class="mod-desc">UUID generation</div></div>
     <div class="mod-card"><div class="mod-name">hmac</div><div class="mod-desc">HMAC auth codes</div></div>
     <div class="mod-card"><div class="mod-name">secrets</div><div class="mod-desc">Secure random</div></div>
+    <div class="mod-card"><div class="mod-name">base64</div><div class="mod-desc">Base64/32/16 codec</div></div>
+    <div class="mod-card new"><div class="mod-name">binascii</div><div class="mod-desc">hexlify, crc32, …</div></div>
+    <div class="mod-card new"><div class="mod-name">quopri</div><div class="mod-desc">Quoted-printable codec</div></div>
+    <div class="mod-card new"><div class="mod-name">uu</div><div class="mod-desc">uuencode/uudecode</div></div>
+    <div class="mod-card"><div class="mod-name">struct</div><div class="mod-desc">Binary packing</div></div>
+    <div class="mod-card"><div class="mod-name">uuid</div><div class="mod-desc">UUID generation</div></div>
   </div>
 
-  <h3>Networking</h3>
+  <h3>Archives &amp; compression</h3>
   <div class="mod-grid">
-    <div class="mod-card"><div class="mod-name">urllib</div><div class="mod-desc">URL handling</div></div>
-    <div class="mod-card"><div class="mod-name">urllib.parse</div><div class="mod-desc">URL parsing</div></div>
-    <div class="mod-card"><div class="mod-name">socket</div><div class="mod-desc">Network sockets</div></div>
+    <div class="mod-card"><div class="mod-name">gzip</div><div class="mod-desc">gzip read/write</div></div>
+    <div class="mod-card"><div class="mod-name">zipfile</div><div class="mod-desc">ZIP archives</div></div>
+    <div class="mod-card new"><div class="mod-name">tarfile</div><div class="mod-desc">TAR archives</div></div>
+    <div class="mod-card new"><div class="mod-name">zlib</div><div class="mod-desc">DEFLATE (stub)</div></div>
   </div>
 
-  <h3>Diagnostics &amp; system</h3>
+  <h3>Networking &amp; protocols</h3>
+  <div class="mod-grid">
+    <a href="#stdlib-net" class="mod-card"><div class="mod-name">socket</div><div class="mod-desc">BSD sockets</div></a>
+    <a href="#stdlib-net" class="mod-card"><div class="mod-name">urllib</div><div class="mod-desc">URL handling</div></a>
+    <a href="#stdlib-net" class="mod-card"><div class="mod-name">urllib.parse</div><div class="mod-desc">URL parsing</div></a>
+    <a href="#stdlib-net" class="mod-card"><div class="mod-name">urllib.request</div><div class="mod-desc">HTTP GET/POST</div></a>
+    <a href="#stdlib-net" class="mod-card"><div class="mod-name">urllib.error</div><div class="mod-desc">URL error types</div></a>
+    <div class="mod-card new"><div class="mod-name">socketserver</div><div class="mod-desc">TCP/UDP servers</div></div>
+    <div class="mod-card new"><div class="mod-name">http.server</div><div class="mod-desc">HTTP server</div></div>
+    <div class="mod-card new"><div class="mod-name">smtplib</div><div class="mod-desc">SMTP client</div></div>
+    <div class="mod-card new"><div class="mod-name">ftplib</div><div class="mod-desc">FTP client</div></div>
+    <div class="mod-card new"><div class="mod-name">poplib</div><div class="mod-desc">POP3 client</div></div>
+    <div class="mod-card new"><div class="mod-name">imaplib</div><div class="mod-desc">IMAP4 client</div></div>
+    <div class="mod-card new"><div class="mod-name">ipaddress</div><div class="mod-desc">IPv4/IPv6 manipulation</div></div>
+    <div class="mod-card new"><div class="mod-name">mimetypes</div><div class="mod-desc">MIME type guessing</div></div>
+    <div class="mod-card"><div class="mod-name">ssl</div><div class="mod-desc">TLS (stub — no real crypto)</div></div>
+  </div>
+
+  <h3>Data formats &amp; persistence</h3>
+  <div class="mod-grid">
+    <a href="#stdlib-io" class="mod-card"><div class="mod-name">json</div><div class="mod-desc">JSON encode/decode</div></a>
+    <a href="#stdlib-io" class="mod-card"><div class="mod-name">csv</div><div class="mod-desc">CSV reader/writer</div></a>
+    <a href="#stdlib-io" class="mod-card"><div class="mod-name">io</div><div class="mod-desc">StringIO/BytesIO</div></a>
+    <a href="#stdlib-io" class="mod-card"><div class="mod-name">pickle</div><div class="mod-desc">Object serialization</div></a>
+    <div class="mod-card new"><div class="mod-name">shelve</div><div class="mod-desc">Pickle-backed persistence</div></div>
+    <div class="mod-card"><div class="mod-name">configparser</div><div class="mod-desc">INI config files</div></div>
+    <div class="mod-card new"><div class="mod-name">xml.etree.ElementTree</div><div class="mod-desc">XML tree parsing</div></div>
+    <div class="mod-card"><div class="mod-name">sqlite3</div><div class="mod-desc">SQLite bindings (stub)</div></div>
+  </div>
+
+  <h3>Diagnostics, introspection &amp; dev tools</h3>
   <div class="mod-grid">
     <div class="mod-card"><div class="mod-name">logging</div><div class="mod-desc">Logging framework</div></div>
     <div class="mod-card"><div class="mod-name">argparse</div><div class="mod-desc">CLI arg parser</div></div>
     <div class="mod-card"><div class="mod-name">contextlib</div><div class="mod-desc">Context managers</div></div>
-    <div class="mod-card"><div class="mod-name">io</div><div class="mod-desc">I/O streams</div></div>
     <div class="mod-card"><div class="mod-name">abc</div><div class="mod-desc">Abstract base classes</div></div>
-    <div class="mod-card"><div class="mod-name">typing</div><div class="mod-desc">Type annotations</div></div>
-    <div class="mod-card"><div class="mod-name">platform</div><div class="mod-desc">Platform info</div></div>
-    <div class="mod-card"><div class="mod-name">signal</div><div class="mod-desc">Signal handling</div></div>
-    <div class="mod-card"><div class="mod-name">atexit</div><div class="mod-card"><div class="mod-desc">Exit handlers</div></div>
+    <div class="mod-card"><div class="mod-name">inspect</div><div class="mod-desc">Live introspection</div></div>
+    <div class="mod-card"><div class="mod-name">traceback</div><div class="mod-desc">Traceback formatting</div></div>
+    <div class="mod-card"><div class="mod-name">warnings</div><div class="mod-desc">Warning filters</div></div>
     <div class="mod-card"><div class="mod-name">pprint</div><div class="mod-desc">Pretty printing</div></div>
+    <div class="mod-card"><div class="mod-name">gc</div><div class="mod-desc">GC API (stub)</div></div>
+    <div class="mod-card"><div class="mod-name">atexit</div><div class="mod-desc">Exit handlers</div></div>
+    <div class="mod-card"><div class="mod-name">signal</div><div class="mod-desc">Signal handling</div></div>
+    <div class="mod-card"><div class="mod-name">keyword</div><div class="mod-desc">Keyword lists</div></div>
+    <div class="mod-card"><div class="mod-name">locale</div><div class="mod-desc">Locale formatting</div></div>
+    <div class="mod-card new"><div class="mod-name">unittest</div><div class="mod-desc">TestCase/TestSuite</div></div>
+    <div class="mod-card new"><div class="mod-name">profile / pstats</div><div class="mod-desc">Profiling (stub)</div></div>
+    <div class="mod-card new"><div class="mod-name">tracemalloc</div><div class="mod-desc">Memory tracing (stub)</div></div>
+    <div class="mod-card new"><div class="mod-name">importlib</div><div class="mod-desc">Import machinery (stub)</div></div>
+  </div>
+
+  <h3>Hardware, graphics &amp; audio</h3>
+  <div class="mod-grid">
+    <a href="#stdlib-hardware" class="mod-card"><div class="mod-name">hardware</div><div class="mod-desc">Bare-metal port/MMIO I/O</div></a>
+    <a href="#stdlib-network" class="mod-card"><div class="mod-name">network</div><div class="mod-desc">BSD socket FFI bindings</div></a>
+    <a href="#stdlib-lumen" class="mod-card"><div class="mod-name">lumen</div><div class="mod-desc">SDL2 Canvas/PixelBuffer/Font</div></a>
+    <a href="#stdlib-lumen" class="mod-card"><div class="mod-name">lumen.framebuffer</div><div class="mod-desc">Bare-metal pixel framebuffer</div></a>
+    <a href="#stdlib-lumen" class="mod-card"><div class="mod-name">lumen.audio</div><div class="mod-desc">SDL2_mixer sound/music</div></a>
   </div>
 </section>
 
 <section id="stdlib-math">
-  <h2>math <a class="anc" href="#stdlib-math">#</a></h2>
+  <h2>math / cmath / decimal <a class="anc" href="#stdlib-math">#</a></h2>
   <pre><div class="lang">python</div><code><span class="kw2">import</span> math
 <span class="fn">print</span>(math.sqrt(<span class="num">2.0</span>))    <span class="cmt"># 1.4142135623730951</span>
 <span class="fn">print</span>(math.floor(<span class="num">3.7</span>))   <span class="cmt"># 3  (int)</span>
 <span class="fn">print</span>(math.log(math.e))  <span class="cmt"># 1.0</span></code></pre>
   <p>Constants: <code>math.pi</code>, <code>math.e</code>, <code>math.tau</code>, <code>math.inf</code>, <code>math.nan</code>.</p>
   <p>Functions: <code>sqrt</code>, <code>floor</code>, <code>ceil</code>, <code>trunc</code>, <code>round</code>, <code>abs</code>, <code>pow</code>, <code>log</code>, <code>log2</code>, <code>log10</code>, <code>log1p</code>, <code>exp</code>, <code>exp2</code>, <code>expm1</code>, <code>sin</code>, <code>cos</code>, <code>tan</code>, <code>asin</code>, <code>acos</code>, <code>atan</code>, <code>atan2</code>, <code>sinh</code>, <code>cosh</code>, <code>tanh</code>, <code>asinh</code>, <code>acosh</code>, <code>atanh</code>, <code>degrees</code>, <code>radians</code>, <code>hypot</code>, <code>gcd</code>, <code>lcm</code>, <code>factorial</code>, <code>isfinite</code>, <code>isinf</code>, <code>isnan</code>, <code>copysign</code>, <code>fabs</code>, <code>fmod</code>, <code>remainder</code>, <code>fdim</code>, <code>fmax</code>, <code>fmin</code>, <code>modf</code>, <code>ldexp</code>, <code>frexp</code>, <code>comb</code>, <code>perm</code>, <code>nearbyint</code>. <code>floor</code>/<code>ceil</code>/<code>trunc</code> return <code>int</code>.</p>
+  <p><strong>cmath</strong> mirrors the subset of complex-number functions that make sense without a native complex type. <strong>decimal.Decimal</strong> provides arbitrary-precision-flavored decimal arithmetic over the existing float/str machinery.</p>
 </section>
 
 <section id="stdlib-os">
@@ -910,7 +1160,7 @@ pat = re.compile(<span class="str">r"(\w+)"</span>)        <span class="cmt"># r
 </section>
 
 <section id="stdlib-io">
-  <h2>json / csv / io <a class="anc" href="#stdlib-io">#</a></h2>
+  <h2>json / csv / io / pickle <a class="anc" href="#stdlib-io">#</a></h2>
 
   <h3>json</h3>
   <pre><div class="lang">python</div><code><span class="kw2">import</span> json
@@ -933,6 +1183,15 @@ val = buf.getvalue()
 buf.seek(<span class="num">0</span>)
 <span class="kw">with</span> io.StringIO() <span class="kw">as</span> b: b.write(<span class="str">"x"</span>)</code></pre>
   <p><code>io.StringIO</code> and <code>io.BytesIO</code> support <code>write</code>, <code>read</code>, <code>getvalue</code>, <code>seek</code>, <code>tell</code>, <code>readable()</code>, <code>writable()</code>, <code>seekable()</code>, context manager protocol.</p>
+
+  <h3>pickle / shelve</h3>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> pickle, shelve
+blob: <span class="ty">str</span> = pickle.dumps([<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>])
+xs = pickle.loads(blob)
+
+<span class="kw">with</span> shelve.open(<span class="str">"db"</span>) <span class="kw">as</span> db:
+    db[<span class="str">"key"</span>] = {<span class="str">"a"</span>: <span class="num">1</span>}</code></pre>
+  <p><code>pickle</code> serializes <code>int</code>/<code>str</code>/<code>float</code>/<code>list</code>/<code>dict</code> with a text-based format (not CPython's binary protocol — round-trips within asmpython only). <code>shelve</code> is a pickle-backed persistent <code>dict</code>-like store, with typed getters/setters for complex object persistence.</p>
 </section>
 
 <section id="stdlib-datetime">
@@ -949,10 +1208,11 @@ future = now + delta
 t = time.time()         <span class="cmt"># float seconds</span>
 time.sleep(<span class="num">0.1</span>)
 <span class="fn">print</span>(time.strftime(<span class="str">"%H:%M:%S"</span>))</code></pre>
+  <p>Also available: <code>calendar</code> (calendar math, leap years, month/day names), <code>sched</code> (event scheduler), <code>timeit</code> (timing measurement).</p>
 </section>
 
 <section id="stdlib-collections">
-  <h2>collections / itertools <a class="anc" href="#stdlib-collections">#</a></h2>
+  <h2>collections / itertools / functools <a class="anc" href="#stdlib-collections">#</a></h2>
   <pre><div class="lang">python</div><code><span class="kw2">from</span> collections <span class="kw2">import</span> deque, Counter, defaultdict, OrderedDict
 <span class="kw2">import</span> itertools
 
@@ -972,10 +1232,29 @@ od.popitem()
 
 <span class="kw">for</span> pair <span class="kw">in</span> itertools.combinations([<span class="num">1</span>,<span class="num">2</span>,<span class="num">3</span>], <span class="num">2</span>): ...
 <span class="fn">list</span>(itertools.chain([<span class="num">1</span>], [<span class="num">2</span>], [<span class="num">3</span>]))</code></pre>
-  <p><strong>fractions</strong>: <code>Fraction(n, d)</code> with full arithmetic (+, -, *, /, **, abs, comparisons).<br>
+  <p><strong>collections</strong>: <code>deque</code>, <code>Counter</code>, <code>defaultdict</code>, <code>OrderedDict</code>, <code>namedtuple</code>, <code>ChainMap</code>.<br>
+  <strong>itertools</strong>: <code>chain</code>, <code>islice</code>, <code>product</code>, <code>combinations</code>, <code>permutations</code>, <code>groupby</code>, <code>pairwise</code>, <code>batched</code>, and more.<br>
+  <strong>functools</strong>: <code>partial</code>, <code>reduce</code>, <code>lru_cache</code> (pass-through, no memoization yet), <code>wraps</code>, <code>total_ordering</code>.<br>
+  <strong>fractions</strong>: <code>Fraction(n, d)</code> with full arithmetic (+, -, *, /, **, abs, comparisons).<br>
   <strong>base64</strong>: <code>b64encode/decode</code>, <code>urlsafe_*</code>, <code>b32encode/decode</code>, <code>b16encode/decode</code>.<br>
   <strong>uuid</strong>: <code>UUID(hex_str)</code>, <code>uuid4()</code>, <code>.hex</code>, <code>str(u)</code>.<br>
   <strong>hashlib</strong>: <code>md5/sha1/sha256/sha512(data)</code> with <code>.hexdigest()</code>.</p>
+</section>
+
+<section id="stdlib-net">
+  <h2>Networking &amp; web protocols <a class="anc" href="#stdlib-net">#</a></h2>
+  <p>Source-stdlib modules that build text-protocol clients/servers on top of <code>socket</code> (itself FFI-backed by the platform's BSD socket API).</p>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> socket
+<span class="kw2">from</span> urllib.request <span class="kw2">import</span> urlopen
+<span class="kw2">import</span> smtplib, ftplib, imaplib
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect((<span class="str">"example.com"</span>, <span class="num">80</span>))
+s.sendall(<span class="str">b"GET / HTTP/1.0\r\n\r\n"</span>)
+
+resp = urlopen(<span class="str">"http://example.com"</span>)   <span class="cmt"># HTTP only, no TLS</span>
+<span class="fn">print</span>(resp.read())</code></pre>
+  <p><strong>socket</strong>: full BSD socket wrapper class over the FFI <code>network</code> bindings. <strong>urllib.request</strong>: HTTP GET/POST via raw sockets (no HTTPS — no SSL runtime). <strong>http.server</strong>, <strong>socketserver</strong>: basic TCP/UDP and HTTP server scaffolding. <strong>smtplib</strong>/<strong>ftplib</strong>/<strong>poplib</strong>/<strong>imaplib</strong>: minimal text-protocol clients for SMTP/FTP/POP3/IMAP4. <strong>ipaddress</strong>: IPv4/IPv6 address and network manipulation. <strong>ssl</strong>/<strong>sqlite3</strong> exist as API-shaped stubs (no real TLS/SQLite engine — no C library binding for either yet).</p>
 </section>
 
 <section id="stdlib-misc">
@@ -988,14 +1267,14 @@ od.popitem()
 
 lines = textwrap.wrap(<span class="str">"long text"</span>, width=<span class="num">40</span>)
 <span class="fn">print</span>(textwrap.fill(<span class="str">"long text"</span>, width=<span class="num">40</span>))</code></pre>
-  <p>Also available: <code>keyword</code>, <code>numbers</code>, <code>abc</code>, <code>types</code>, <code>typing</code>, <code>configparser</code>, <code>pprint</code>, <code>traceback</code>, <code>warnings</code>, <code>inspect</code>, <code>gc</code>, <code>atexit</code>, <code>signal</code>, <code>getpass</code>, <code>locale</code>, <code>threading</code>, <code>queue</code>, <code>weakref</code>.</p>
+  <p>Also available: <code>keyword</code>, <code>numbers</code>, <code>abc</code>, <code>types</code>, <code>typing</code>, <code>configparser</code>, <code>pprint</code>, <code>traceback</code>, <code>warnings</code>, <code>inspect</code>, <code>gc</code>, <code>atexit</code>, <code>signal</code>, <code>getpass</code>, <code>locale</code>, <code>threading</code>, <code>queue</code>, <code>weakref</code>, <code>unittest</code>, <code>argparse</code>, <code>array</code>, <code>binascii</code>, <code>errno</code>, <code>stat</code>, <code>getopt</code>, <code>fileinput</code>, <code>linecache</code>, <code>mimetypes</code>, <code>token</code>/<code>tokenize</code>, <code>codecs</code>, <code>xml.etree.ElementTree</code>, <code>html.parser</code>, <code>tarfile</code>, <code>concurrent.futures</code>, <code>profile</code>/<code>pstats</code>, <code>tracemalloc</code>, <code>uu</code>, <code>quopri</code>, <code>zlib</code>, <code>asyncio</code>, <code>importlib</code>.</p>
 </section>
 
-<!-- ═══════════════════ HARDWARE / NETWORK / GUI / AUDIO ══════ -->
+<!-- ═══════════════════ HARDWARE / NETWORK / LUMEN ════════════ -->
 
 <section id="stdlib-hardware">
   <h2>hardware <a class="anc" href="#stdlib-hardware">#</a></h2>
-  <p>Bare-metal and hardware access. Inline NASM on freestanding; stub-returns on hosted targets.</p>
+  <p>Bare-metal and hardware access. Real privileged instructions on <code>--target freestanding</code>; stub-returns-0 on hosted targets for anything that needs ring 0 (port I/O, MMIO, MSRs, CR0–4, <code>invlpg</code>, <code>lidt</code>, <code>cli</code>/<code>sti</code>/<code>hlt</code>, PIC/PIT, keyboard, VGA text mode). <code>rdtsc()</code>, <code>cpuid()</code>, and <code>rdrand()</code> are not privileged, so they return genuine CPU values on hosted targets too.</p>
   <pre><div class="lang">python</div><code><span class="kw2">import</span> hardware
 
 <span class="cmt"># Port I/O</span>
@@ -1014,10 +1293,12 @@ cr0 = hardware.read_cr0()
 hardware.write_cr3(pml4_addr)
 msr = hardware.read_msr(<span class="num">0xC0000080</span>)
 
-<span class="cmt"># VGA console (freestanding)</span>
+<span class="cmt"># VGA console (freestanding) / ANSI console (hosted)</span>
 hardware.console_clear()
 hardware.console_write(<span class="str">"Hello!"</span>)
-hardware.console_set_color(<span class="num">0x0F</span>)</code></pre>
+hardware.console_set_color(<span class="num">0x0F</span>)
+row = hardware.console_get_row()</code></pre>
+  <p>The <code>console_*</code> layer works identically on bare metal (writes the VGA text-mode buffer at <code>0xB8000</code>) and on hosted Windows/Linux (drives the real terminal via ANSI/VT100 escapes) — write a status-line/menu/progress-bar UI once, run it on both.</p>
 </section>
 
 <section id="stdlib-network">
@@ -1031,70 +1312,80 @@ client = network.accept(fd)
 data = network.recv(client, <span class="num">1024</span>)
 network.send_all(client, <span class="str">"HTTP/1.1 200 OK\r\n\r\n"</span>)
 network.close(client)</code></pre>
-  <p>BSD socket API: <code>socket</code>, <code>bind</code>, <code>connect</code>, <code>listen</code>, <code>accept</code>, <code>close</code>, <code>send</code>, <code>recv</code>, <code>send_all</code>, byte-order helpers, address helpers, constants (<code>AF_INET</code>, <code>SOCK_STREAM</code>, etc.).</p>
+  <p>Low-level BSD socket FFI bindings: <code>socket</code>, <code>bind</code>, <code>connect</code>, <code>listen</code>, <code>accept</code>, <code>close</code>, <code>send</code>, <code>recv</code>, <code>send_all</code>, byte-order helpers (<code>htons</code>/<code>htonl</code>/<code>ntohs</code>/<code>ntohl</code>), address helpers (<code>inet_addr</code>, <code>gethostname</code>), constants (<code>AF_INET</code>, <code>SOCK_STREAM</code>, etc.). The source-stdlib <code>socket</code> module wraps this in a class-based API; use whichever level fits.</p>
 </section>
 
-<section id="stdlib-gui">
-  <h2>gui <a class="anc" href="#stdlib-gui">#</a></h2>
-  <pre><div class="lang">python</div><code><span class="kw2">import</span> gui
+<section id="stdlib-lumen">
+  <h2>lumen (graphics, framebuffer, audio) <a class="anc" href="#stdlib-lumen">#</a></h2>
+  <p>Lumen is asmpython's graphics/audio/input ecosystem. <code>import lumen</code> gets the SDL2-backed 2D graphics package; the bare-metal framebuffer and SDL2_mixer audio pieces are separate submodules since they pull in different link dependencies.</p>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> lumen
 
-gui.init()
-win = gui.create_window(<span class="str">"Demo"</span>, <span class="num">800</span>, <span class="num">600</span>)
-ren = gui.create_renderer(win)
-gui.set_window_icon(win, gui.load_bmp(<span class="str">"icon.bmp"</span>))
+canvas = lumen.Canvas(<span class="str">"Hello"</span>, <span class="num">800</span>, <span class="num">600</span>)
+<span class="kw">while</span> canvas.update():
+    canvas.clear(lumen.NAVY)
+    canvas.color(lumen.YELLOW)
+    canvas.disc(<span class="num">400</span>, <span class="num">300</span>, <span class="num">50</span>)
+    <span class="kw">if</span> canvas.key() == lumen.KEY_ESCAPE:
+        <span class="kw">break</span>
+canvas.close()</code></pre>
+  <p><strong>lumen.Canvas</strong> — hardware-accelerated SDL2 window+renderer: <code>color</code>, <code>clear</code>, <code>pixel</code>, <code>line</code>, <code>rect</code>/<code>fill</code>, <code>circle</code>/<code>disc</code>, <code>triangle</code>/<code>ftriangle</code>, <code>char</code>/<code>text</code> (bitmap font), <code>image()</code>/<code>blit</code>/<code>blit_scaled</code>/<code>blit_region</code>/<code>blit_ex</code> (sprites, rotation/flip), <code>blit_pixels</code> (from a <code>PixelBuffer</code>), <code>draw_ttf</code> (TrueType via <code>Font</code>), <code>poll</code>/<code>update</code>/<code>key</code>/<code>mx</code>/<code>my</code>/<code>btn</code>/<code>key_down</code>/<code>mouse_dx</code>/<code>mouse_dy</code>/<code>relative_mouse</code>, <code>fullscreen</code>/<code>resize</code>/<code>set_clipboard</code>/<code>get_clipboard</code>, <code>delay</code>/<code>ticks</code>/<code>close</code>.</p>
+  <p><strong>lumen.PixelBuffer</strong> — CPU-side pixel buffer for per-pixel work (software 3D, raycasting, procedural textures): <code>set</code>/<code>get</code>/<code>clear</code>/<code>fill_rect</code>, <code>raw_addr()</code> for direct memory access, blitted to a <code>Canvas</code> via <code>blit_pixels</code>.</p>
+  <p><strong>lumen.Image</strong> (sprites), <strong>lumen.Font</strong> (SDL2_ttf TrueType, auto-linked via <code>-lSDL2_ttf</code>), <strong>lumen.Joystick</strong>/<code>num_joysticks()</code>/<code>joystick_update()</code> (gamepad input), <strong>lumen.Tilemap</strong> (tile-grid rendering on a spritesheet). 30+ named colors, full SDL2 init/window/renderer/blend/flip constants, full keyboard and mouse-button constants.</p>
 
-<span class="kw">while</span> <span class="kw">True</span>:
-    <span class="kw">if</span> gui.poll_quit(): <span class="kw">break</span>
-    gui.set_draw_color(ren, <span class="num">255</span>, <span class="num">0</span>, <span class="num">0</span>, <span class="num">255</span>)
-    gui.fill_rect(ren, <span class="num">10</span>, <span class="num">10</span>, <span class="num">100</span>, <span class="num">50</span>)
-    gui.present(ren)
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> lumen.framebuffer <span class="kw2">as</span> framebuffer
 
-gui.quit()</code></pre>
-  <p>SDL2 bindings: window/renderer management, drawing (<code>draw_line</code>, <code>fill_rect</code>, <code>draw_rect</code>), event pump, timing. Icon loading with <code>load_bmp</code>/<code>set_window_icon</code>/<code>free_surface</code>. Part of Lumen, asmpython's graphics/audio/input ecosystem (<code>gui</code> + <code>framebuffer</code> + <code>audio</code>).</p>
-</section>
-
-<section id="stdlib-framebuffer">
-  <h2>framebuffer <a class="anc" href="#stdlib-framebuffer">#</a></h2>
-  <p>Software pixel rendering for bare-metal and UEFI targets — writes directly to a linear memory-mapped framebuffer via <code>hardware.mmio_write32</code>/<code>mmio_write8</code>. No OS, no SDL2.</p>
-  <pre><div class="lang">python</div><code><span class="kw2">import</span> framebuffer
-
-<span class="cmt"># addr, width, height, and pitch come from the GOP FrameBufferBase,</span>
-<span class="cmt"># HorizontalResolution, VerticalResolution, and PixelsPerScanLine fields.</span>
+<span class="cmt"># addr, width, height, pitch come from the GOP/VBE framebuffer descriptor</span>
 fb = framebuffer.Framebuffer(<span class="num">0x80000000</span>, <span class="num">1920</span>, <span class="num">1080</span>, <span class="num">7680</span>, <span class="num">32</span>)
 fb.clear(framebuffer.BLACK)
 fb.fill_rect(<span class="num">100</span>, <span class="num">100</span>, <span class="num">400</span>, <span class="num">300</span>, framebuffer.BLUE)
 fb.draw_text(<span class="num">10</span>, <span class="num">10</span>, <span class="str">"Hello"</span>, framebuffer.WHITE)</code></pre>
-  <p>Color format for 32&nbsp;bpp is <code>0x00RRGGBB</code> (stored little-endian as BGRX, matching the typical UEFI <code>PixelBlueGreenRedReserved</code> format). Use <code>bgr(r, g, b)</code> to pack colors for the wire format. Constants: <code>BLACK</code>, <code>WHITE</code>, <code>RED</code>, <code>GREEN</code>, <code>BLUE</code>. Bundled bitmap font for <code>draw_text</code>.</p>
-</section>
+  <p><strong>lumen.framebuffer</strong> — software pixel rendering for bare-metal/UEFI targets, writing directly to a linear memory-mapped framebuffer via <code>hardware.mmio_write32</code>/<code>mmio_write8</code>. No OS, no SDL2. <code>put_pixel</code>, <code>clear</code>, <code>fill_rect</code>/<code>draw_rect</code>, <code>draw_line</code>, <code>draw_circle</code>/<code>fill_circle</code>, <code>draw_triangle</code>/<code>fill_triangle</code>, <code>draw_char</code>/<code>draw_text</code>/<code>text</code> (bitmap font), <code>rgb()</code>/<code>bgr()</code> color packing.</p>
 
-<section id="stdlib-audio">
-  <h2>audio <a class="anc" href="#stdlib-audio">#</a></h2>
-  <p>SDL2_mixer sound playback for hosted targets — WAV chunk and streaming music playback. Requires SDL2_mixer alongside SDL2 (<code>apt install libsdl2-mixer-dev</code> on Linux; ship <code>SDL2_mixer.dll</code> next to the executable on Windows).</p>
-  <pre><div class="lang">python</div><code><span class="kw2">import</span> audio
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> lumen.audio <span class="kw2">as</span> audio
 
 audio.init()
 snd = audio.Sound(<span class="str">"shoot.wav"</span>)
 mus = audio.Music(<span class="str">"theme.ogg"</span>)
-mus.play()           <span class="cmt"># loops forever by default</span>
-<span class="cmt"># in your game loop:</span>
-snd.play()            <span class="cmt"># play on any free channel</span>
+mus.play()             <span class="cmt"># loops forever by default</span>
+snd.play()              <span class="cmt"># play on any free channel</span>
 audio.quit()</code></pre>
-  <p><code>Sound</code>: <code>play</code>/<code>play_on</code>/<code>stop</code>/<code>volume</code>/<code>playing</code>/<code>free</code>. <code>Music</code>: <code>play</code>/<code>stop</code>/<code>volume</code>/<code>playing</code>/<code>free</code>. Part of Lumen, asmpython's graphics/audio/input ecosystem.</p>
+  <p><strong>lumen.audio</strong> — SDL2_mixer-backed sound and music. <code>Sound</code>: <code>play</code>/<code>play_on</code>/<code>stop</code>/<code>volume</code>/<code>playing</code>/<code>free</code>. <code>Music</code>: <code>play</code>/<code>stop</code>/<code>volume</code>/<code>playing</code>/<code>free</code>.</p>
+  <div class="note">SDL2 (and SDL2_mixer/SDL2_ttf as needed) are auto-linked only when actually called — a program that imports <code>lumen</code> but never calls an SDL2 function links nothing extra.</div>
 </section>
 
 <!-- ═══════════════════ ASSEMBLY ═════════════════════════════ -->
 
 <section id="inline-asm">
   <h2>Inline assembly <a class="anc" href="#inline-asm">#</a></h2>
-  <pre><div class="lang">python</div><code><span class="kw2">from</span> asmpython._compiler.ast_nodes <span class="kw2">import</span> AsmBlock
+  <pre><div class="lang">python</div><code><span class="kw2">from</span> asmpython.assembly <span class="kw2">import</span> assembly_func
 
-<span class="kw">def</span> <span class="fn">rdtsc</span>() -&gt; <span class="ty">int</span>:
+<span class="kw">@assembly_func</span>
+<span class="kw">def</span> <span class="fn">popcnt</span>(x: <span class="ty">int</span>) -&gt; <span class="ty">int</span>:
+    <span class="str">"""
+    popcnt rax, rdi     ; SysV: x in rdi
+    ret
+    """</span></code></pre>
+  <p>The docstring is raw NASM emitted verbatim as the function body. Arguments arrive in the platform's integer-argument registers (Win64: <code>rcx/rdx/r8/r9</code>; SysV/Linux: <code>rdi/rsi/rdx/rcx/r8/r9</code>).</p>
+
+  <h3>Asm blocks inside a normal function</h3>
+  <pre><div class="lang">python</div><code><span class="kw2">def</span> <span class="fn">rdtsc</span>() -&gt; <span class="ty">int</span>:
     <span class="asm">asm {
         rdtsc
         shl rdx, 32
         or  rax, rdx
     }</span></code></pre>
-  <p>Raw NASM inserted verbatim into the function body. The enclosing function's prologue/epilogue is still emitted; the asm block appears between them. Useful for instructions without Python-level wrappers.</p>
+  <p>Raw NASM inserted verbatim into the function body. The enclosing function's prologue/epilogue is still emitted; the <code>asm</code> block appears between them. Useful for instructions without Python-level wrappers, without giving up the rest of the function to hand-written assembly.</p>
+</section>
+
+<section id="assembly-class">
+  <h2>Assembly builder class <a class="anc" href="#assembly-class">#</a></h2>
+  <p><code>from asmpython.assembly import Assembly</code> gives a chainable builder for generating NASM programmatically — useful for code generators, JITs-within-the-compiled-binary, or any case where the instruction sequence isn't known until runtime.</p>
+  <pre><div class="lang">python</div><code><span class="kw2">from</span> asmpython.assembly <span class="kw2">import</span> Assembly
+
+a = Assembly()
+a.mov(<span class="str">"rax"</span>, <span class="num">0</span>).xor(<span class="str">"rbx"</span>, <span class="str">"rbx"</span>).label(<span class="str">"loop"</span>).inc(<span class="str">"rax"</span>).dec(<span class="str">"rbx"</span>).jnz(<span class="str">"loop"</span>).ret()
+<span class="fn">print</span>(a.emit())</code></pre>
+  <p>150+ instruction methods: full integer ALU, SSE/AVX, atomics, system calls, and the full NASM directive set. Each method appends one formatted line to the builder's internal body and returns <code>self</code> for chaining.</p>
 </section>
 
 <section id="ffi">
@@ -1109,7 +1400,7 @@ link(<span class="str">"kernel32"</span>)
 
 <span class="kw">@extern</span>
 <span class="kw">def</span> <span class="fn">MessageBoxA</span>(hwnd: <span class="ty">int</span>, text: <span class="ty">str</span>, cap: <span class="ty">str</span>, utype: <span class="ty">int</span>) -&gt; <span class="ty">int</span>: ...</code></pre>
-  <p><code>@extern</code> declares a foreign function; the compiler emits an <code>extern</code> NASM directive and routes calls through the platform ABI. <code>include()</code> and <code>link()</code> add <code>#include</code> and <code>-l</code> flags to the compile step.</p>
+  <p><code>@extern</code> declares a foreign function; the compiler emits an <code>extern</code> NASM directive and routes calls through the platform ABI. <code>include()</code> and <code>link()</code> add <code>#include</code> and <code>-l</code> flags to the compile step. This is compile-time/link-time binding — the symbol must be resolvable by the linker. For a library whose name isn't known until runtime, see <a href="#import-binary">import_binary</a>.</p>
 </section>
 
 <section id="import-binary">
@@ -1134,16 +1425,17 @@ link(<span class="str">"kernel32"</span>)
 
 <section id="target-windows">
   <h2>Windows (PE64) <a class="anc" href="#target-windows">#</a></h2>
-  <p>Default target when running on Windows. Produces a <code>.exe</code> linked against <code>msvcrt.dll</code>. Uses the x64 Windows ABI (RCX/RDX/R8/R9 with 32-byte shadow space). The entry point is <code>main(int argc, char** argv)</code>.</p>
+  <p>Default target when running on Windows. Produces a <code>.exe</code> linked against <code>msvcrt.dll</code>. Uses the Microsoft x64 ABI (<code>rcx/rdx/r8/r9</code> with 32-byte shadow space). The entry point is <code>main(int argc, char** argv)</code>.</p>
   <pre><div class="lang">shell</div><code>python -m asmpython prog.py               <span class="cmt"># auto-detects Windows</span>
 python -m asmpython prog.py --target windows -o prog.exe
 python -m asmpython prog.py --icon app.png  <span class="cmt"># embed PNG icon</span></code></pre>
-  <p>If networking is used (<code>network</code>) the compiler automatically links <code>-lws2_32</code>.</p>
+  <p>Networking (<code>network</code>/<code>socket</code>) auto-links <code>-lws2_32</code>; <code>lumen</code> auto-links <code>-lSDL2</code> (and <code>-lSDL2_mixer</code>/<code>-lSDL2_ttf</code> as needed) only when actually used.</p>
+  <div class="note">Every hand-rolled runtime helper and function prologue on this target reserves at least 32 bytes of shadow space below <code>rsp</code> before calling any external function, per the Win64 ABI — a 2.0.0-preview fix that closed several stack-corruption bugs in runtime helpers.</div>
 </section>
 
 <section id="target-linux">
   <h2>Linux (ELF64) <a class="anc" href="#target-linux">#</a></h2>
-  <p>ELF64 binary linked against glibc using the SysV ABI (RDI/RSI/RDX/RCX/R8/R9). Linked with <code>-no-pie</code> (the code uses absolute relocations).</p>
+  <p>ELF64 binary linked against glibc using the System V AMD64 ABI (<code>rdi/rsi/rdx/rcx/r8/r9</code>). Linked with <code>-no-pie</code> (the code uses absolute relocations, which modern gcc's default PIE mode would otherwise reject).</p>
   <pre><div class="lang">shell</div><code>python -m asmpython prog.py --target linux -o prog</code></pre>
 </section>
 
@@ -1167,6 +1459,90 @@ qemu-system-x86_64 -kernel kernel.bin -serial stdio -display none</code></pre>
   <p>Generates a BIOS-bootable raw disk image. Boots in real mode via INT 13h, transitions through 32-bit protected mode, then enters 64-bit long mode before running your code.</p>
   <pre><div class="lang">shell</div><code>python -m asmpython boot.py --target freestanding16 -o boot.img
 qemu-system-x86_64 -drive format=raw,file=boot.img -display none -serial stdio</code></pre>
+</section>
+
+<!-- ═══════════════════ COMPILER INTERNALS ═══════════════════ -->
+
+<section id="architecture">
+  <h2>Architecture &amp; pipeline <a class="anc" href="#architecture">#</a></h2>
+  <p>asmpython compiles through four sequential passes — the path every build actually takes today:</p>
+
+  <ol>
+    <li><strong>Lex</strong> (<code>lexer.py</code>) — tokenizes source; handles all Python literal types, f-strings, indentation blocks</li>
+    <li><strong>Parse</strong> (<code>parser.py</code>) — recursive-descent parser builds an AST (<code>ast_nodes.py</code>); inlines closures via free-variable lifting; resolves generators into state machines</li>
+    <li><strong>Sema</strong> (<code>sema.py</code>) — type inference and semantic analysis; resolves method overloads, propagates element types, desugars <code>match</code>/<code>case</code>, <code>with</code> statements, properties, and comprehensions</li>
+    <li><strong>Codegen</strong> (<code>codegen.py</code>, ~14&nbsp;000 lines, plus one subclass per target) — direct AST → NASM x86-64 emission; target-specific ABI handling</li>
+  </ol>
+
+  <pre><div class="lang">text</div><code>asmpython/
+├── __init__.py              package version
+├── __main__.py               python -m asmpython entry shim
+├── assembly/                 @assembly_func, Assembly builder, include()
+├── stdlib/                   ~120 modules: math, os, sys, collections, lumen, …
+└── _compiler/
+    ├── __main__.py            real CLI entry (argparse, --explain, --check)
+    ├── lexer.py               indent-aware tokenizer
+    ├── parser.py              recursive-descent parser
+    ├── ast_nodes.py           AST dataclasses + expr_type()
+    ├── sema.py                name resolution, type inference, import binding
+    ├── errors.py              L/P/E error-code registry + --explain text
+    ├── program.py             whole-program module merge + stdlib resolution
+    ├── codegen.py             target-agnostic code generation
+    ├── target_windows.py      PE64, MS x64 ABI
+    ├── target_linux.py        ELF64, System V AMD64 ABI
+    ├── target_freestanding.py    Multiboot1, bare-metal runtime
+    ├── target_freestanding16.py  BIOS MBR + 16-bit bootstrap
+    ├── driver.py              invokes nasm + gcc
+    ├── ir.py                  SSA IR data model (2.0.0, not yet wired to codegen)
+    ├── ir_builder.py          BlockBuilder construction API
+    ├── ssa_build.py           AST → SSA IR lowering (in progress)
+    └── dce.py                 dead-code elimination pass over the SSA IR</code></pre>
+
+  <p><strong>Whole-program compilation:</strong> all source files (including stdlib modules) are merged into a single compilation unit before sema. The first definition of any name wins, so stdlib can be overridden by user code.</p>
+
+  <p><strong>Type system:</strong> structural, not nominal. Types flow from annotations and literals. Unannotated parameters are inferred from call sites. Class inheritance is tracked for virtual dispatch and <code>isinstance</code>.</p>
+
+  <p><strong>Runtime:</strong> a set of hand-written <code>_runtime_*</code> helper functions (string ops, allocation, dict/list operations, exception propagation, dynamic dispatch) emitted as NASM alongside your compiled code. These can be inlined per-binary (<code>--onefile</code>, the default) or linked from a pre-built archive (<code>--use-runtime-lib</code>) for a much smaller <code>.asm</code> output.</p>
+</section>
+
+<section id="ssa-ir">
+  <h2>SSA IR &amp; optimization <a class="anc" href="#ssa-ir">#</a></h2>
+  <p>2.0.0-preview's structural change: a real SSA (static single assignment) intermediate representation between the AST and machine code, replacing direct AST→NASM emission for the parts of the compiler that have been migrated so far. This is what makes a real register allocator, target-independent optimization passes, and additional CPU architectures (ARM64) tractable — none of those are practical to retrofit onto per-target AST-walking codegen.</p>
+
+  <h3>IR data model</h3>
+  <p><code>ir.py</code> defines a deliberately bare data model: <code>Value</code> (an SSA value with an id, a <code>Kind</code> — <code>INT</code> or <code>FLOAT</code> — and a back-pointer to its defining <code>Instr</code>), <code>Instr</code> (one operation: arithmetic, comparison, control flow, memory, or call), <code>Block</code> (a list of instructions plus predecessor blocks), and <code>Function</code> (a list of blocks). <code>ir_builder.py</code> wraps this in an ergonomic <code>BlockBuilder</code> — one method per op — that <code>ssa_build.py</code> (and tests) use to assemble IR by hand instead of constructing <code>Instr</code> nodes directly.</p>
+
+  <h3>Design decisions</h3>
+  <div class="card-grid">
+    <div class="card">
+      <h4>Two value kinds</h4>
+      <p>Only <code>Kind.INT</code> and <code>Kind.FLOAT</code> exist at the IR level. <code>ICMP</code>/<code>FCMP</code> are value-producing (not branch-fused), which sidesteps the x86 <code>ucomisd</code> vs. ARM64 <code>fcmp</code> unordered-NaN comparison differences at the IR level rather than per-target.</p>
+    </div>
+    <div class="card">
+      <h4>RAW_ASM escape hatch</h4>
+      <p>An <code>Op.RAW_ASM</code> instruction carries a <code>{(OS, ABI): text}</code> map so IR-lowered code can still call the ~75 hand-written <code>_runtime_*</code> helpers during migration, with a fixed argument convention (<code>args[i]</code> → the i-th of <code>rax, rbx, rcx, rdx, …</code>) instead of ABI-derived registers.</p>
+    </div>
+    <div class="card">
+      <h4>No internal jump labels in RAW_ASM</h4>
+      <p><code>target_text</code> can't mint fresh per-instance labels — two firings of the same call site would collide. Control-flow-heavy helpers are promoted to real typed IR blocks (PHI nodes, <code>CONDBR</code>) instead of being wrapped as a single RAW_ASM site.</p>
+    </div>
+    <div class="card">
+      <h4>Linear-scan register allocation (planned)</h4>
+      <p>The IR's explicit def-use graph (via each <code>Value.def_</code> back-pointer) is what a linear-scan allocator needs; this is plan-step&nbsp;2, after the AST-node lowering coverage pass finishes.</p>
+    </div>
+  </div>
+
+  <h3>Dead-code elimination</h3>
+  <p><code>dce.py</code> runs three passes over a <code>Function</code>'s SSA form, iterating to a fixpoint:</p>
+  <ol>
+    <li><strong>Unreachable block elimination</strong> — BFS from the entry block over the CFG; blocks never reached are dropped, and surviving blocks' predecessor lists and PHI <code>incoming</code> values are patched to match.</li>
+    <li><strong>Constant-branch folding</strong> — a <code>CONDBR</code> whose condition resolves to a compile-time <code>CONST</code> is rewritten to an unconditional <code>BR</code> to the taken arm; this routinely creates new unreachable blocks for pass 1 to clean up on the next iteration.</li>
+    <li><strong>Dead-instruction elimination</strong> — mark-and-sweep seeded from side-effecting instructions (<code>STORE</code>, <code>CALL</code>, <code>RAW_ASM</code>, <code>BR</code>, <code>CONDBR</code>, <code>RET</code>), propagated backward through the def-use graph; anything never reached — including PHI nodes — is dropped. <code>LOAD</code> is deliberately not seeded as a side effect: a load whose result is never read is dead.</li>
+  </ol>
+  <pre><div class="lang">python</div><code><span class="kw2">from</span> asmpython._compiler.dce <span class="kw2">import</span> run_dce
+run_dce(func)   <span class="cmt"># mutates func.blocks in place</span></code></pre>
+
+  <div class="tip">All current SSA IR work is additive and gated behind its own pipeline — it does not change what <code>python -m asmpython</code> produces today. The migration path is: extend <code>ssa_build.py</code>'s AST coverage → register allocator → swap in IR-based codegen for one target → validate output parity against the full test suite → repeat per target.</div>
 </section>
 
 <!-- ═══════════════════ REFERENCE ════════════════════════════ -->
@@ -1212,41 +1588,60 @@ qemu-system-x86_64 -drive format=raw,file=boot.img -display none -serial stdio</
   </table></div>
 </section>
 
-<section id="architecture">
-  <h2>Architecture <a class="anc" href="#architecture">#</a></h2>
-  <p>asmpython compiles through four sequential passes:</p>
-
-  <ol>
-    <li><strong>Lex</strong> — tokenizes source; handles all Python literal types, f-strings, indentation blocks</li>
-    <li><strong>Parse</strong> — recursive-descent parser builds an AST; inlines closures via free-variable lifting; resolves generators into state machines</li>
-    <li><strong>Sema</strong> — type inference and semantic analysis; resolves method overloads, propagates element types, desugars match/case, with statements, properties, and comprehensions</li>
-    <li><strong>Codegen</strong> — direct AST → NASM x86-64 emission; no IR; target-specific ABI handling</li>
-  </ol>
-
-  <p><strong>Whole-program compilation:</strong> All source files (including stdlib modules) are merged into a single compilation unit before sema. The first definition of any name wins (allows stdlib to be overridden by user code).</p>
-
-  <p><strong>Type system:</strong> Structural, not nominal. Types flow from annotations and literals. Unannotated parameters are inferred from call sites. Class inheritance tracked for virtual dispatch and <code>isinstance</code>.</p>
-
-  <p><strong>Runtime:</strong> A small set of C helper functions (<code>_runtime_*</code>) handle dynamic dispatch, string operations, allocation, and exception propagation. These can be inlined (<code>--onefile</code>) or linked from a pre-built archive (<code>--use-runtime-lib</code>).</p>
-</section>
-
 <section id="error-codes">
   <h2>Error codes <a class="anc" href="#error-codes">#</a></h2>
-  <p>Use <code>--explain E0XX</code> for full descriptions. Selected codes:</p>
+  <p>Every diagnostic carries a stable code: <span class="ec L">L0xx</span> for lex errors, <span class="ec P">P0xx</span> for parse errors, <span class="ec E">E0xx</span> for semantic errors. Run <code>asmpython --explain &lt;CODE&gt;</code> for the full description of any code. Selected codes:</p>
+
+  <h3>Lex (<span class="ec L">L</span>)</h3>
   <div class="table-wrap"><table>
     <thead><tr><th>Code</th><th>Message</th></tr></thead>
     <tbody>
-      <tr><td><span class="ec">E001</span></td><td>Syntax error</td></tr>
-      <tr><td><span class="ec">E002</span></td><td>Undefined function</td></tr>
-      <tr><td><span class="ec">E003</span></td><td>Undefined variable</td></tr>
-      <tr><td><span class="ec">E004</span></td><td>Wrong number of arguments</td></tr>
-      <tr><td><span class="ec">E005</span></td><td>Type mismatch in assignment</td></tr>
-      <tr><td><span class="ec">E006</span></td><td>Method not found on type</td></tr>
-      <tr><td><span class="ec">E007</span></td><td>Attribute not found on class</td></tr>
-      <tr><td><span class="ec">E008</span></td><td>Mixed list element types</td></tr>
-      <tr><td><span class="ec">E009</span></td><td>Return type mismatch</td></tr>
-      <tr><td><span class="ec">E010</span></td><td>Unsupported operation</td></tr>
-      <tr><td><span class="ec">E014</span></td><td>Feature not supported in this target</td></tr>
+      <tr><td><span class="ec L">L001</span></td><td>Inconsistent indentation</td></tr>
+      <tr><td><span class="ec L">L002</span></td><td>Unexpected character</td></tr>
+      <tr><td><span class="ec L">L003</span></td><td>Unterminated string literal</td></tr>
+      <tr><td><span class="ec L">L005</span></td><td>Unterminated f-string</td></tr>
+      <tr><td><span class="ec L">L007</span></td><td>Invalid float literal</td></tr>
+      <tr><td><span class="ec L">L008</span></td><td>Invalid escape sequence</td></tr>
+      <tr><td><span class="ec L">L009</span></td><td>Invalid integer literal</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Parse (<span class="ec P">P</span>)</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Code</th><th>Message</th></tr></thead>
+    <tbody>
+      <tr><td><span class="ec P">P001</span></td><td>Unexpected token</td></tr>
+      <tr><td><span class="ec P">P002</span></td><td>Expected a specific token</td></tr>
+      <tr><td><span class="ec P">P003</span></td><td>Cannot assign to this expression</td></tr>
+      <tr><td><span class="ec P">P005</span></td><td>Invalid match pattern</td></tr>
+      <tr><td><span class="ec P">P007</span></td><td>Invalid default argument</td></tr>
+      <tr><td><span class="ec P">P008</span></td><td>Invalid type annotation</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Semantic (<span class="ec E">E</span>)</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Code</th><th>Message</th></tr></thead>
+    <tbody>
+      <tr><td><span class="ec E">E001</span></td><td>Name is not defined</td></tr>
+      <tr><td><span class="ec E">E002</span></td><td>Call to undefined function</td></tr>
+      <tr><td><span class="ec E">E003</span></td><td>Function redefined in same scope</td></tr>
+      <tr><td><span class="ec E">E005</span></td><td>Import of unknown module</td></tr>
+      <tr><td><span class="ec E">E011</span></td><td>Incompatible types in expression</td></tr>
+      <tr><td><span class="ec E">E012</span></td><td>Operator not supported between types</td></tr>
+      <tr><td><span class="ec E">E015</span></td><td>Return value type mismatch</td></tr>
+      <tr><td><span class="ec E">E018</span></td><td>Iterating a non-iterable type</td></tr>
+      <tr><td><span class="ec E">E019</span></td><td>Assignment type mismatch</td></tr>
+      <tr><td><span class="ec E">E021</span></td><td>Wrong number of arguments</td></tr>
+      <tr><td><span class="ec E">E024</span></td><td>Calling a non-callable value</td></tr>
+      <tr><td><span class="ec E">E031</span></td><td><code>break</code> outside a loop</td></tr>
+      <tr><td><span class="ec E">E041</span></td><td>Object has no attribute</td></tr>
+      <tr><td><span class="ec E">E044</span></td><td><code>super()</code> outside a class method</td></tr>
+      <tr><td><span class="ec E">E051</span></td><td>List literal has mixed types</td></tr>
+      <tr><td><span class="ec E">E054</span></td><td>Dict operation requires str key</td></tr>
+      <tr><td><span class="ec E">E061</span></td><td>Invalid assembly operand</td></tr>
+      <tr><td><span class="ec E">E071</span></td><td><code>zip()</code> arguments must be lists/tuples</td></tr>
+      <tr><td><span class="ec E">E073</span></td><td>Unsupported match pattern</td></tr>
     </tbody>
   </table></div>
 </section>
@@ -1264,24 +1659,62 @@ qemu-system-x86_64 -drive format=raw,file=boot.img -display none -serial stdio</
     <li><strong>No mapping patterns</strong> in <code>match</code>/<code>case</code></li>
     <li><strong>Generator expressions are eager</strong> — <code>(x for x in xs)</code> materializes immediately</li>
     <li><strong><code>*expr</code> unpacking</strong> at call sites requires a statically-known tuple (literal or named variable)</li>
-    <li><strong>No async/await</strong></li>
+    <li><strong>No async/await</strong> — <code>asyncio</code> ships as a subset of primitives, not a real event loop</li>
+    <li><strong>No real TLS/SQLite</strong> — <code>ssl</code> and <code>sqlite3</code> are API-shaped stubs pending a C library binding</li>
     <li><strong>No runtime introspection</strong> beyond <code>isinstance</code>, <code>hasattr</code>, <code>getattr</code>, <code>type</code></li>
+    <li><strong>No ARM64/macOS/Raspberry Pi targets yet</strong> — gated on the SSA IR migration; see <a href="#ssa-ir">SSA IR &amp; optimization</a></li>
   </ul>
 
-  <div class="tip">Most limitations are by design to keep the compiler single-pass and the output zero-overhead. The subset covers a wide range of real programs — see <code>examples/</code> for demonstrations.</div>
+  <div class="tip">Most limitations are by design to keep the compiler single-pass and the output zero-overhead. The subset covers a wide range of real programs — see <code>examples/</code> in the repository for demonstrations.</div>
 </section>
 
+<footer class="docs-footer">
+  <span>asmpython — MIT licensed. A Pixelated Dream project.</span>
+  <span>See <code>CHANGELOG.md</code> and <code>docs/ROADMAP.md</code> in the repository for full version history.</span>
+</footer>
+
 </main>
+</div>
 
 <script>
+const sideNav = document.getElementById('sideNav');
+const navToggle = document.getElementById('navToggle');
+navToggle.addEventListener('click', () => sideNav.classList.toggle('open'));
+document.addEventListener('click', (e) => {
+  if (window.innerWidth <= 900 && sideNav.classList.contains('open')
+      && !sideNav.contains(e.target) && e.target !== navToggle && !navToggle.contains(e.target)) {
+    sideNav.classList.remove('open');
+  }
+});
+
+const navSearch = document.getElementById('navSearch');
+navSearch.addEventListener('input', () => {
+  const q = navSearch.value.trim().toLowerCase();
+  const items = sideNav.querySelectorAll('li:not(.sep)');
+  items.forEach(li => {
+    const a = li.querySelector('a');
+    const match = !q || a.textContent.toLowerCase().includes(q);
+    a.classList.toggle('hidden', !match);
+  });
+  sideNav.querySelectorAll('li.sep').forEach(sep => {
+    let n = sep.nextElementSibling, anyVisible = false;
+    while (n && !n.classList.contains('sep')) {
+      const a = n.querySelector('a');
+      if (a && !a.classList.contains('hidden')) anyVisible = true;
+      n = n.nextElementSibling;
+    }
+    sep.classList.toggle('hidden', !anyVisible);
+  });
+});
+
 // Highlight active nav link on scroll
-const sections = document.querySelectorAll("section[id]");
-const links    = document.querySelectorAll("nav li a");
+const sections = document.querySelectorAll("main section[id]");
+const links    = document.querySelectorAll("nav.side li a");
 const obs = new IntersectionObserver(entries => {
   entries.forEach(e => {
     if (e.isIntersecting) {
       links.forEach(l => l.classList.remove("active"));
-      const a = document.querySelector(`nav li a[href="#${e.target.id}"]`);
+      const a = document.querySelector(`nav.side li a[href="#${e.target.id}"]`);
       if (a) a.classList.add("active");
     }
   });
