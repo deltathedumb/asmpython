@@ -1221,7 +1221,7 @@ class SemaAnalyzer:
                 if ty is not None:
                     sig.ret_type = ty
 
-    def _infer_return_type(self, fn, qualname: str):
+    def _infer_return_type(self, fn: A.FuncDef, qualname: str):
         """(ty, el, val) for every reachable `return` in `fn.body`, if all
         have a value and those values' types are statically knowable
         (`_literal_arg_type`, or a reference to one of `fn`'s parameters whose
