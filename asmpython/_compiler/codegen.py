@@ -4113,24 +4113,7 @@ class Codegen:
         # message), but a raised exception INSTANCE arrives as the same 8-byte
         # pointer — attribute access reads its field dict, mirroring sema's
         # leniency for the exception-object-as-string case.
-        #
-        # "int" included too: an unannotated function/method parameter with
-        # no default and no inferred type falls back to "int" as sema's
-        # generic unknown-type sentinel (_seed_param's documented fallback),
-        # NOT because it's ever genuinely meant to be a plain integer that
-        # `.attr` is read on (int has no attributes in asmpython -- this
-        # branch is unreachable for a value that's really just a number).
-        # Before this fix, `obj_t == "int"` fell through to the destructive
-        # "unknown attr on opaque/int" stub a few lines down, which discards
-        # the receiver and unconditionally returns 0 -- so something like
-        # `fn.body` (fn: an untyped helper parameter actually holding a real
-        # AST node) always read back null/0 instead of the real field,
-        # regardless of what _runtime_dict_get_default would have returned.
-        # This was the root cause of an intermittent (ASLR-timing-dependent:
-        # ended up null only when the zeroed-out value happened to coincide
-        # with how a downstream consumer treated it) segfault that took most
-        # of a session to track down.
-        if obj_t.startswith("instance:") or obj_t in ("any", "str", "int"):
+        if obj_t.startswith("instance:") or obj_t in ("any", "str"):
             key_label, _ = self.intern_string(e.name)
             self.gen_expr(e.obj, info)  # rax = instance dict
             self.emitf(
