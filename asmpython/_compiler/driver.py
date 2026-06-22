@@ -97,6 +97,18 @@ def _vendor_sdl2_dir(target: str) -> Path | None:
     return d if d.is_dir() else None
 
 
+# The vendored runtime DLLs (not the .dll.a import libs) under
+# asmpython/_vendor/sdl2/windows/ -- listed explicitly rather than
+# discovered via Path.glob(), which asmpython's own Path model doesn't
+# support (this file is part of the compiler's own self-compiled source).
+_VENDOR_SDL2_WINDOWS_DLLS = (
+    "SDL2.dll",
+    "SDL2_mixer.dll",
+    "libSDL2_ttf.dll",
+    "libfreetype.dll",
+)
+
+
 def _vendor_sdl2_runtime_dlls(target: str) -> list[Path]:
     """The vendored .dll files (not the .dll.a import libs) for `target`,
     so callers can copy them next to a built executable. Empty if this
@@ -104,7 +116,12 @@ def _vendor_sdl2_runtime_dlls(target: str) -> list[Path]:
     d = _vendor_sdl2_dir(target)
     if d is None:
         return []
-    return sorted(d.glob("*.dll"))
+    out: list[Path] = []
+    for name in _VENDOR_SDL2_WINDOWS_DLLS:
+        p = d / name
+        if p.is_file():
+            out.append(p)
+    return out
 
 
 def _copy_vendor_sdl2_dlls(target: str, dest_dir: Path) -> None:
