@@ -2232,7 +2232,8 @@ class SemaAnalyzer:
                 self.func_ret_tuple[f.name] = ets
 
         # Synthesise __init__ for @dataclass classes that don't define one.
-        for c in self.mod.classes:
+        for c0 in self.mod.classes:
+            c: A.ClassDef = c0
             if getattr(c, "is_dataclass", False):
                 has_init = any(m.name == "__init__" for m in c.methods)
                 if not has_init:
@@ -2240,7 +2241,8 @@ class SemaAnalyzer:
                     defaults: list = [None]
                     param_types: list = [None]  # self has no annotation
                     body_stmts: list = []
-                    for fname, _fannot, fvalue in c.class_vars:
+                    class_vars_list: list = c.class_vars
+                    for fname, _fannot, fvalue in class_vars_list:
                         params.append(fname)
                         param_types.append(_fannot)  # carry class-var annotation
                         _func_nm = (
