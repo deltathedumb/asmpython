@@ -10497,7 +10497,7 @@ class Codegen:
             cls_name = e.obj.name
             mdef = self._find_method_def(cls_name, e.method)
             if mdef is not None:
-                deco = getattr(mdef, "decorators", [])
+                deco: list = getattr(mdef, "decorators", [])
                 if "classmethod" in deco:
                     cleanup = self._emit_positional_args(e, e.args, info, start_reg=1)
                     self.emitf(f"xor {self._arg_reg(0)}, {self._arg_reg(0)}")  # cls = null

@@ -1561,7 +1561,7 @@ class SemaAnalyzer:
 
         for c in self.mod.classes:
             for m in c.methods:
-                mdeco = getattr(m, "decorators", [])
+                mdeco: list = getattr(m, "decorators", [])
                 local_types: dict = {}
                 if "staticmethod" not in mdeco:
                     local_types["self"] = (f"instance:{c.name}", None, None)
@@ -2269,7 +2269,7 @@ class SemaAnalyzer:
                 )
             sig = ClassSig(name=c.name, parent=c.parent, pos=c.pos)
             for m in c.methods:
-                deco = getattr(m, "decorators", [])
+                deco: list = getattr(m, "decorators", [])
                 is_static = "staticmethod" in deco
                 is_classm = "classmethod" in deco
                 if not (is_static or is_classm):
@@ -2440,7 +2440,15 @@ class SemaAnalyzer:
                 self.current_class = c.name
                 scope = Scope()
                 self._seed_globals_into(scope)
-                mdeco = getattr(m, "decorators", [])
+                # Explicit `: list` annotation: getattr(m, "decorators", [])
+                # read as opaque "any" instead of "list" (m: A.FuncDef is
+                # external/opaque to sema), so `"staticmethod" in mdeco`
+                # routed through _gen_dict_in's container-membership dispatch
+                # (treating mdeco's pointer as if it were a dict header)
+                # instead of the real list-membership scan -- the source of
+                # the _runtime_dict_contains-then-segfault crash whenever a
+                # class with any method (decorated or not) was compiled.
+                mdeco: list = getattr(m, "decorators", [])
                 if "staticmethod" in mdeco:
                     # No implicit receiver: every parameter is a real argument.
                     start = 0
@@ -5679,10 +5687,11 @@ class SemaAnalyzer:
                         f"{class_name} has no method {e.method!r}",
                         e.pos,
                     )
-                _, sig = resolved
+                sig: FuncSig = resolved[1]
                 # Method arity counts self; user passed args don't include self.
                 # @staticmethod has no implicit self so don't subtract 1.
-                is_static_m = "staticmethod" in getattr(sig, "decorators", [])
+                sig_decorators: list = getattr(sig, "decorators", [])
+                is_static_m = "staticmethod" in sig_decorators
                 expected = sig.arity if is_static_m else sig.arity - 1
                 required = expected - sig.n_defaults
                 if sig.vararg is None and sig.kwarg is None and not e.kwargs:
@@ -5787,8 +5796,8 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"{cls_name} has no method {e.method!r}", e.pos
                     )
-                _owner, sig = resolved
-                deco = getattr(sig, "decorators", [])
+                sig: FuncSig = resolved[1]
+                deco: list = getattr(sig, "decorators", [])
                 if "classmethod" in deco:
                     expected = sig.arity - 1  # drop implicit cls
                 elif "staticmethod" in deco:
@@ -6186,16 +6195,19 @@ class SemaAnalyzer:
         """Bind keyword/vararg args on a user-class method call (or super())
         onto positions. No-op for str/list/dict/external methods, which don't
         take keyword args in asmpython's model."""
-        sig = None
+        sig: "FuncSig | None" = None
         if obj_t.startswith("instance:"):
             r = self._resolve_method(obj_t.split(":", 1)[1], e.method)
-            sig = r[1] if r else None
+            if r is not None:
+                sig = r[1]
         elif obj_t.startswith("super:"):
             r = self._resolve_method(obj_t.split(":", 1)[1], e.method)
-            sig = r[1] if r else None
+            if r is not None:
+                sig = r[1]
         if sig is None:
             return
-        is_static_m = "staticmethod" in getattr(sig, "decorators", [])
+        sig_decorators2: list = getattr(sig, "decorators", [])
+        is_static_m = "staticmethod" in sig_decorators2
         skip = 0 if is_static_m else 1
         # Explicit `: list` reads before slicing: same opaque-slice bug as
         # the constructor call site above -- sig.param_names/param_defaults
