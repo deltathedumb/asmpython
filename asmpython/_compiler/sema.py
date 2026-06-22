@@ -5734,7 +5734,16 @@ class SemaAnalyzer:
                         # bound to a typed param), or the method lives on an
                         # unmodeled external base (a subclass of an imported
                         # Codegen calling self.emit). Accept it; result is an
-                        # opaque value so chained calls stay lenient.
+                        # opaque value so chained calls stay lenient. Args
+                        # still need their own type-checking pass (sema-level
+                        # side effects elsewhere may depend on every arg
+                        # having been visited) even though this call's own
+                        # signature is unknown -- previously this returned
+                        # before reaching the `for a in e.args` check below,
+                        # leaving an inherited method call's arguments
+                        # entirely unchecked.
+                        for _ext_a in e.args:
+                            self._check_expr(_ext_a, scope)
                         e.inferred_type = "any"
                         return
                     raise SemaError(
