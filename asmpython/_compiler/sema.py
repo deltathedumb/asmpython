@@ -5801,7 +5801,21 @@ class SemaAnalyzer:
                 e.inferred_type = "any"
             elif obj_t == "set":
                 if e.method in ("add", "discard", "remove"):
-                    arg_t = A.expr_type(e.args[0])
+                    # Explicit `: str` read: A.expr_type(...) is a plain
+                    # function call (not a method), and its result landing
+                    # in an unannotated local read back "any" instead of
+                    # "str" -- so `arg_t not in ("str", "int", "any")` always
+                    # compared a real string pointer against the tuple's
+                    # literal pointers without going through _runtime_str_eq,
+                    # never matching any of them and raising this SemaError
+                    # for EVERY set.add()/discard()/remove() call regardless
+                    # of the real argument type. This made `set().add(x)`
+                    # uncompilable in any selfhosted binary, including
+                    # program.py's own func_names/class_names dedup sets
+                    # used during whole-program merge -- almost certainly the
+                    # root cause behind self.mod.funcs ending up empty when
+                    # self-compiling the full multi-file compiler source.
+                    arg_t: str = A.expr_type(e.args[0])
                     if arg_t not in ("str", "int", "any"):
                         raise SemaError(
                             f"set.{e.method}({arg_t}) is not supported yet "
@@ -6778,7 +6792,20 @@ class SemaAnalyzer:
                 e.inferred_type = "tuple"
                 e.tuple_elem_types = list(self.func_ret_tuple[e.func])
             elif sig.ret_type is not None:
-                ty, el, _val = sig.ret_type  # type: ignore
+                # Explicit subscript reads, not `ty, el, _val = sig.ret_type`:
+                # sig.ret_type is declared `ret_type: object` on FuncSig (see
+                # its dataclass definition), and `object` isn't a concrete
+                # type sema can track field-wise -- a tuple-unpack of it left
+                # `ty` opaque instead of carrying the real "str"/"list"/etc.
+                # string, so e.inferred_type ended up wrong for EVERY plain
+                # function call whose return type came from this path. This
+                # likely explains a wide swath of "A.something(...)"-style
+                # cross-module call sites throughout sema.py/codegen.py
+                # reading back "any" instead of their annotated return type.
+                ret_tuple_val: tuple = sig.ret_type  # type: ignore
+                ty: str = ret_tuple_val[0]
+                el = ret_tuple_val[1]
+                _val = ret_tuple_val[2]
                 e.inferred_type = ty
                 if sig.ret_bool:
                     e.is_bool = True
