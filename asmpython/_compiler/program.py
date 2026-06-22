@@ -310,6 +310,21 @@ def _is_within_stdlib(path: Path) -> bool:
 
 
 def _resolve_bundled_stdlib(module: str) -> Path | None:
+    # `import asmpython.stdlib.lumen as lumen` (the fully-qualified form,
+    # mirroring how the bundled stdlib is laid out on disk) names the same
+    # file as plain `import lumen`, but every lookup below keys off the bare
+    # stdlib-relative name. Without this strip, the qualified form silently
+    # resolves to None here -- not a hard error, since an unresolved module
+    # name just leaves the import's bound name untyped ("any") -- so `lumen`
+    # was never merged, none of its classes (Canvas, PixelBuffer, ...) existed
+    # in self.classes, and every method call on a value built from it fell
+    # back through opaque/"any" dispatch heuristics instead of real per-class
+    # codegen. That's what let `canvas.update()` collide with dict.update()'s
+    # name-based "any" dispatch and crash codegen with an IndexError several
+    # layers removed from the actual cause.
+    prefix = "asmpython.stdlib."
+    if module.startswith(prefix):
+        module = module[len(prefix):]
     stem = _BUNDLED_DOTTED.get(module)
     stdlib_dir = _stdlib_dir()
     if stem is None:

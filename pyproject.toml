@@ -40,4 +40,4 @@ where = ["."]
 include = ["asmpython*"]
 
 [tool.setuptools.package-data]
-"asmpython" = ["stdlib/**/*.py", "asmlib/*.py", "_runtime/**/*"]
+"asmpython" = ["stdlib/**/*.py", "asmlib/*.py", "_runtime/**/*", "_vendor/**/*"]

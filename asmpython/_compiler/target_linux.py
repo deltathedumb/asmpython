@@ -847,7 +847,11 @@ class LinuxCodegen(Codegen):
             # _random_random() -> xmm0 in [0.0, 1.0)
             if "_random_random" in self.ffi_called:
                 self.label("_random_random")
-                self.emitf("xor eax, eax", "call rand")
+                # `push rbp` is pure 16-byte alignment padding for the `call`
+                # below (entry RSP is 8 mod 16 -- see _gui_poll_event's
+                # comment for the full explanation); it's never read back as
+                # a frame pointer. `pop rbp` doesn't touch rax/xmm0.
+                self.emitf("push rbp", "xor eax, eax", "call rand", "pop rbp")
                 self.emitf("cvtsi2sd xmm0, rax", "mulsd xmm0, [rel _rand_inv]", "ret")
 
             # _random_randint(rdi=a, rsi=b) -> rax  in [a, b] inclusive
@@ -1047,7 +1051,9 @@ class LinuxCodegen(Codegen):
             if "_time_sleep_ms" in self.ffi_called:
                 self.emit("extern usleep")
                 self.label("_time_sleep_ms")
-                self.emitf("imul rdi, rdi, 1000", "call usleep", "xor rax, rax", "ret")
+                # push rbp: alignment padding, see _gui_poll_event's comment.
+                self.emitf("push rbp", "imul rdi, rdi, 1000", "call usleep",
+                           "pop rbp", "xor rax, rax", "ret")
 
         # ---- hardware stubs: ring-0 ops are unavailable in user mode ---------
         if needs_hw:
@@ -1179,14 +1185,18 @@ class LinuxCodegen(Codegen):
                 self.emitf("mov rax, [rbp-32]", "leave", "ret")
 
             # _net_accept(rdi=fd) -> rax (new fd)
+            # push rbp below is pure 16-byte alignment padding for the `call`
+            # (entry RSP is 8 mod 16 -- see _gui_poll_event's comment), not a
+            # real frame pointer use.
             if "_net_accept" in self.ffi_called:
                 self.label("_net_accept")
-                self.emitf("xor rsi, rsi", "xor rdx, rdx", "call accept", "ret")
+                self.emitf("push rbp", "xor rsi, rsi", "xor rdx, rdx",
+                           "call accept", "pop rbp", "ret")
 
             # _net_close(rdi=fd) -> rax
             if "_net_close" in self.ffi_called:
                 self.label("_net_close")
-                self.emitf("call close", "ret")
+                self.emitf("push rbp", "call close", "pop rbp", "ret")
 
             # _net_gethostname() -> rax (ptr to static 256-byte buffer)
             if "_net_gethostname" in self.ffi_called:
@@ -1194,8 +1204,8 @@ class LinuxCodegen(Codegen):
                 self.emit("_net_hostname_buf: resb 256")
                 self.emit("section .text")
                 self.label("_net_gethostname")
-                self.emitf("lea rdi, [_net_hostname_buf]", "mov esi, 255",
-                           "call gethostname",
+                self.emitf("push rbp", "lea rdi, [_net_hostname_buf]", "mov esi, 255",
+                           "call gethostname", "pop rbp",
                            "lea rax, [_net_hostname_buf]", "ret")
 
             # _net_errno() -> rax
@@ -1302,17 +1312,29 @@ class LinuxCodegen(Codegen):
             # _gui_poll_event() -> rax (event type; 0 = none)
             if "_gui_poll_event" in self.ffi_called:
                 self.label("_gui_poll_event")
-                self.emitf("lea rdi, [_gui_event_buf]", "call SDL_PollEvent",
+                # Entry RSP is 8 mod 16 (the `call` reaching this label pushed
+                # one return address onto a 16-aligned caller RSP) -- every
+                # sibling FFI helper in this file fixes that with `push rbp`
+                # before its own stack use so its own `call`s land 16-aligned
+                # (see _gui_fill_rect above). This helper called straight into
+                # SDL_PollEvent with no adjustment at all, so the call was
+                # always made 8 mod 16 instead of 16-aligned. `push rbp` here
+                # is pure alignment padding (never read back as a frame
+                # pointer), matching the established pattern.
+                self.emitf("push rbp",
+                           "lea rdi, [_gui_event_buf]", "call SDL_PollEvent",
                            "test rax, rax", "jz ._gpe_none",
-                           "mov eax, dword [_gui_event_buf]", "ret")
+                           "mov eax, dword [_gui_event_buf]", "pop rbp", "ret")
                 self.label("._gpe_none")
-                self.emitf("xor rax, rax", "ret")
+                self.emitf("xor rax, rax", "pop rbp", "ret")
 
             # _gui_wait_event() -> rax (event type)
             if "_gui_wait_event" in self.ffi_called:
                 self.label("_gui_wait_event")
-                self.emitf("lea rdi, [_gui_event_buf]", "call SDL_WaitEvent",
-                           "mov eax, dword [_gui_event_buf]", "ret")
+                # Same misalignment fix as _gui_poll_event above.
+                self.emitf("push rbp",
+                           "lea rdi, [_gui_event_buf]", "call SDL_WaitEvent",
+                           "mov eax, dword [_gui_event_buf]", "pop rbp", "ret")
 
             # _gui_key_scancode() -> rax  (SDL_KeyboardEvent.keysym.scancode at +16)
             if "_gui_key_scancode" in self.ffi_called:
@@ -1664,7 +1686,8 @@ class LinuxCodegen(Codegen):
             # _threading_get_ident() -> rax = pthread_t (opaque, fits int64)
             if "_threading_get_ident" in self.ffi_called:
                 self.label("_threading_get_ident")
-                self.emitf("call pthread_self", "ret")
+                # push rbp: alignment padding, see _gui_poll_event's comment.
+                self.emitf("push rbp", "call pthread_self", "pop rbp", "ret")
 
             # _threading_active_count() -> 1 (no global tracking)
             if "_threading_active_count" in self.ffi_called:

@@ -28,10 +28,23 @@ class PixelBuffer:
     def __init__(self, w: int, h: int) -> int:
         self._w: int = w
         self._h: int = h
+        # Every asmpython `int` is a 64-bit (8-byte) value -- `list[int]`
+        # elements are 8 bytes apart in memory, not 4. raw_addr()/pitch() hand
+        # this buffer straight to SDL_UpdateTexture as tightly-packed 4-byte
+        # ARGB8888 pixels, so storing one pixel per list slot would leave every
+        # other SDL-visible 4-byte word reading the always-zero upper half of
+        # an 8-byte slot (alternating real/black pixels), and the true
+        # 8-bytes-per-pixel row stride would make SDL's row-to-row pitch land
+        # halfway through the *next* real row instead of at its start. Packing
+        # two pixels per 8-byte slot (low 32 bits = even pixel, high 32 bits =
+        # odd pixel, indexed by flat row-major pixel index y*w+x) makes the
+        # backing store genuinely 4-bytes-per-pixel and tightly packed, which
+        # is what pitch() == width()*4 actually requires.
         self._pixels: list[int] = []
+        n_pixels: int = w * h
+        n_slots: int = (n_pixels + 1) // 2
         i: int = 0
-        n: int = w * h
-        while i < n:
+        while i < n_slots:
             self._pixels.append(0)
             i = i + 1
         self._tex: int = 0
@@ -54,20 +67,34 @@ class PixelBuffer:
             return 0
         if y >= self._h:
             return 0
-        self._pixels[y * self._w + x] = 0xFF000000 | color
+        idx: int = y * self._w + x
+        slot: int = idx // 2
+        packed: int = 0xFF000000 | color
+        low_mask: int = 0xFFFFFFFF
+        if idx % 2 == 0:
+            self._pixels[slot] = (self._pixels[slot] & (low_mask << 32)) | packed
+        else:
+            self._pixels[slot] = (self._pixels[slot] & low_mask) | (packed << 32)
         return 0
 
     def get(self, x: int, y: int) -> int:
         """Read back one pixel as a packed 0xRRGGBB int (alpha byte stripped)."""
-        return self._pixels[y * self._w + x] & 0x00FFFFFF
+        idx: int = y * self._w + x
+        slot: int = idx // 2
+        val: int = self._pixels[slot]
+        if idx % 2 == 0:
+            return val & 0x00FFFFFF
+        return (val >> 32) & 0x00FFFFFF
 
     def clear(self, color: int = 0) -> int:
         """Fill the whole buffer with one color."""
         packed: int = 0xFF000000 | color
+        double: int = packed | (packed << 32)
+        n_pixels: int = self._w * self._h
+        n_slots: int = (n_pixels + 1) // 2
         i: int = 0
-        n: int = self._w * self._h
-        while i < n:
-            self._pixels[i] = packed
+        while i < n_slots:
+            self._pixels[i] = double
             i = i + 1
         return 0
 
@@ -89,13 +116,11 @@ class PixelBuffer:
             return 0
         if y0 > y1:
             return 0
-        packed: int = 0xFF000000 | color
         row: int = y0
         while row <= y1:
-            base: int = row * self._w
             col: int = x0
             while col <= x1:
-                self._pixels[base + col] = packed
+                self.set(col, row, color)
                 col = col + 1
             row = row + 1
         return 0

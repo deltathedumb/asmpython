@@ -1285,14 +1285,20 @@ class WindowsCodegen(Codegen):
                 self.emitf("mov rax, [rbp-32]", "leave", "ret")
 
             # _net_accept(rcx=fd) -> rax
+            # Entry RSP is 8 mod 16; this and the three helpers below called
+            # straight out with zero shadow space AND no alignment fix
+            # (see _gui_poll_event's comment above for why that's wrong on
+            # both counts). `sub rsp, 40` restores 16-byte alignment for the
+            # `call` and provides the required >=32 bytes of shadow space.
             if "_net_accept" in self.ffi_called:
                 self.label("_net_accept")
-                self.emitf("xor rdx, rdx", "xor r8, r8", "call accept", "ret")
+                self.emitf("sub rsp, 40", "xor rdx, rdx", "xor r8, r8",
+                           "call accept", "add rsp, 40", "ret")
 
             # _net_close(rcx=fd) -> rax
             if "_net_close" in self.ffi_called:
                 self.label("_net_close")
-                self.emitf("call closesocket", "ret")
+                self.emitf("sub rsp, 40", "call closesocket", "add rsp, 40", "ret")
 
             # _net_gethostname() -> rax
             if "_net_gethostname" in self.ffi_called:
@@ -1300,14 +1306,15 @@ class WindowsCodegen(Codegen):
                 self.emit("_net_hostname_buf: resb 256")
                 self.emit("section .text")
                 self.label("_net_gethostname")
-                self.emitf("lea rcx, [_net_hostname_buf]", "mov edx, 255",
-                           "call gethostname",
+                self.emitf("sub rsp, 40",
+                           "lea rcx, [_net_hostname_buf]", "mov edx, 255",
+                           "call gethostname", "add rsp, 40",
                            "lea rax, [_net_hostname_buf]", "ret")
 
             # _net_errno() -> rax (Winsock2 error code)
             if "_net_errno" in self.ffi_called:
                 self.label("_net_errno")
-                self.emitf("call WSAGetLastError", "ret")
+                self.emitf("sub rsp, 40", "call WSAGetLastError", "add rsp, 40", "ret")
 
             # _net_setsockopt(rcx=fd, rdx=level, r8=optname, r9=value) -> rax
             if "_net_setsockopt" in self.ffi_called:
@@ -1406,9 +1413,24 @@ class WindowsCodegen(Codegen):
 
             if "_gui_poll_event" in self.ffi_called:
                 self.label("_gui_poll_event")
-                self.emitf("sub rsp, 32",
+                # Entry RSP is 8 mod 16 (the `call` that got us here pushed one
+                # return address onto a 16-aligned caller RSP). Every sibling
+                # FFI helper in this file fixes that with `push rbp` before its
+                # own `sub rsp, N` so the stack is 16-aligned at its own `call`
+                # sites -- this one subtracted 32 (a multiple of 16) straight
+                # from the misaligned entry RSP, so SDL_PollEvent was always
+                # entered 8 mod 16 instead of 16-aligned. SSE-using code paths
+                # inside SDL_PollEvent's underlying Win32 message dispatch
+                # (DispatchMessageW -> arbitrary WNDPROC, occasionally routing
+                # into shell components like CoreMessaging.dll for certain
+                # window messages) only sometimes hit an aligned-move
+                # instruction against that misaligned stack, which is why this
+                # crashed intermittently rather than every call. 40 (8 mod 16)
+                # restores 16-byte alignment for the call while still leaving
+                # the required >=32 bytes of shadow space.
+                self.emitf("sub rsp, 40",
                            "lea rcx, [_gui_event_buf]", "call SDL_PollEvent",
-                           "add rsp, 32",
+                           "add rsp, 40",
                            "test rax, rax", "jz ._gpe_none",
                            "mov eax, dword [_gui_event_buf]", "ret")
                 self.label("._gpe_none")
@@ -1416,9 +1438,10 @@ class WindowsCodegen(Codegen):
 
             if "_gui_wait_event" in self.ffi_called:
                 self.label("_gui_wait_event")
-                self.emitf("sub rsp, 32",
+                # Same misalignment fix as _gui_poll_event above.
+                self.emitf("sub rsp, 40",
                            "lea rcx, [_gui_event_buf]", "call SDL_WaitEvent",
-                           "add rsp, 32",
+                           "add rsp, 40",
                            "mov eax, dword [_gui_event_buf]", "ret")
 
             if "_gui_key_scancode" in self.ffi_called:
@@ -1803,8 +1826,11 @@ class WindowsCodegen(Codegen):
             # _threading_get_ident() -> rax = thread id (DWORD, zero-extended)
             if "_threading_get_ident" in self.ffi_called:
                 self.label("_threading_get_ident")
-                self.emitf("sub rsp, 32", "call GetCurrentThreadId",
-                           "mov eax, eax", "add rsp, 32", "ret")
+                # sub rsp,32 alone keeps the misaligned 8-mod-16 entry RSP
+                # misaligned (32 is a multiple of 16); 40 fixes it while still
+                # giving >=32 bytes of shadow space (see _gui_poll_event).
+                self.emitf("sub rsp, 40", "call GetCurrentThreadId",
+                           "mov eax, eax", "add rsp, 40", "ret")
 
             # _threading_active_count() -> rax (stub: always 1, no global tracking)
             if "_threading_active_count" in self.ffi_called:
