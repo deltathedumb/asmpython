@@ -3539,8 +3539,15 @@ class SemaAnalyzer:
                 raise SemaError("'continue' outside a loop", s.pos, ErrorCode.E_CONTINUE_OUTSIDE_LOOP)
             return
         if isinstance(s, A.Import):
-            # Dotted path: bind the leading segment ("os.path" -> "os"). Real
-            # submodule lookup is post-bootstrap.
+            # `import a.b.c [as d]`: the name later `x.attr` lookups bind
+            # through is the alias if present (`d`), else the dotted path's
+            # leading segment ("os.path" -> "os"). Real submodule lookup
+            # (whole-program merge resolving s.module, the FULL dotted path,
+            # to lumen/audio.py etc.) is post-bootstrap/program.py's job;
+            # this only needs to get the right NAME into scope so `audio.x`
+            # parses and type-checks instead of falling through to an
+            # opaque-int default.
+            bind_name = s.alias if s.alias is not None else s.module.split(".")[0]
             top_name = s.module.split(".")[0]
             try:
                 bindings = _load_module(top_name)
@@ -3550,12 +3557,12 @@ class SemaAnalyzer:
                 # standard CPython modules can still be checked. The name
                 # becomes a dummy in scope; any subsequent `x.attr` lookup
                 # will still error at the attribute resolution step.
-                scope.add(top_name, "module")
+                scope.add(bind_name, "module")
                 return
-            self.imported_modules[top_name] = bindings
+            self.imported_modules[bind_name] = bindings
             # Make `math` a known name in scope (as a dummy int) so `math.x`
             # parses cleanly past the Name lookup.
-            scope.add(top_name, "module")
+            scope.add(bind_name, "module")
             return
         if isinstance(s, A.FromImport):
             # `from asmpython.stdlib import os` (the compiler imports its stdlib

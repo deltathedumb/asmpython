@@ -16,19 +16,19 @@ BINDINGS: dict = {
     "quit":             Func(arg_types=(),                          ret_type="int", c_name="SDL_Quit"),
 
     # ---- Window -------------------------------------------------------------
-    "create_window":    Func(arg_types=("str","int","int","int","int","int"), ret_type="int", c_name="SDL_CreateWindow"),
+    "create_window":    Func(arg_types=("str","int","int","int","int","int"), ret_type="int", c_name="SDL_CreateWindow", ret_conv="ptr"),
     "destroy_window":   Func(arg_types=("int",),                   ret_type="int", c_name="SDL_DestroyWindow"),
     "set_window_title": Func(arg_types=("int", "str"),              ret_type="int", c_name="SDL_SetWindowTitle"),
     "set_window_icon":  Func(arg_types=("int","int"),               ret_type="int", c_name="SDL_SetWindowIcon"),
 
     # ---- Surfaces / textures ------------------------------------------------
-    "load_bmp":         Func(arg_types=("str",),                    ret_type="int", c_name="_gui_load_bmp"),
+    "load_bmp":         Func(arg_types=("str",),                    ret_type="int", c_name="_gui_load_bmp", ret_conv="ptr"),
     "free_surface":     Func(arg_types=("int",),                    ret_type="int", c_name="SDL_FreeSurface"),
-    "create_texture":   Func(arg_types=("int","int"),               ret_type="int", c_name="SDL_CreateTextureFromSurface"),
+    "create_texture":   Func(arg_types=("int","int"),               ret_type="int", c_name="SDL_CreateTextureFromSurface", ret_conv="ptr"),
     # create_texture_argb(renderer, access, w, h) -> texture. Always uses
     # SDL_PIXELFORMAT_ARGB8888, the format PixelBuffer's update_texture
     # writes; access is a TEXTUREACCESS_* constant (see gui._pixels).
-    "create_texture_argb": Func(arg_types=("int","int","int","int"),  ret_type="int", c_name="_gui_create_texture_argb"),
+    "create_texture_argb": Func(arg_types=("int","int","int","int"),  ret_type="int", c_name="_gui_create_texture_argb", ret_conv="ptr"),
     # update_texture(texture, pixels_addr, pitch) -> int. Always updates the
     # whole texture (rect=NULL); pixels_addr is a raw pointer (see
     # PixelBuffer.raw_addr()), pitch is bytes per row (width * 4 for ARGB8888).
@@ -37,7 +37,7 @@ BINDINGS: dict = {
     # list_buf_addr(a_list) -> raw address of the list's backing buffer.
     # Used by PixelBuffer.raw_addr() (see gui._pixels) — works on any
     # asmpython list, not just pixel buffers.
-    "list_buf_addr":    Func(arg_types=("list",),                   ret_type="int", c_name="_gui_list_buf_addr"),
+    "list_buf_addr":    Func(arg_types=("list",),                   ret_type="int", c_name="_gui_list_buf_addr", ret_conv="ptr"),
     "query_texture_w":  Func(arg_types=("int",),                    ret_type="int", c_name="_gui_query_texture_w"),
     "query_texture_h":  Func(arg_types=("int",),                    ret_type="int", c_name="_gui_query_texture_h"),
     "render_copy":      Func(arg_types=("int","int","int","int","int","int"), ret_type="int", c_name="_gui_render_copy"),
@@ -51,7 +51,7 @@ BINDINGS: dict = {
     "set_texture_alpha":Func(arg_types=("int","int"),               ret_type="int", c_name="SDL_SetTextureAlphaMod"),
 
     # ---- Renderer -----------------------------------------------------------
-    "create_renderer":  Func(arg_types=("int","int","int"),         ret_type="int", c_name="SDL_CreateRenderer"),
+    "create_renderer":  Func(arg_types=("int","int","int"),         ret_type="int", c_name="SDL_CreateRenderer", ret_conv="ptr"),
     "destroy_renderer": Func(arg_types=("int",),                   ret_type="int", c_name="SDL_DestroyRenderer"),
     "set_draw_color":   Func(arg_types=("int","int","int","int","int"), ret_type="int", c_name="SDL_SetRenderDrawColor"),
     "set_draw_blend":   Func(arg_types=("int","int"),               ret_type="int", c_name="SDL_SetRenderDrawBlendMode"),
@@ -87,7 +87,7 @@ BINDINGS: dict = {
 
     # ---- Joystick -------------------------------------------------------------
     "num_joysticks":     Func(arg_types=(),                         ret_type="int", c_name="SDL_NumJoysticks"),
-    "joystick_open":     Func(arg_types=("int",),                   ret_type="int", c_name="SDL_JoystickOpen"),
+    "joystick_open":     Func(arg_types=("int",),                   ret_type="int", c_name="SDL_JoystickOpen", ret_conv="ptr"),
     "joystick_close":    Func(arg_types=("int",),                   ret_type="int", c_name="SDL_JoystickClose"),
     "joystick_name":     Func(arg_types=("int",),                   ret_type="str", c_name="SDL_JoystickName"),
     "joystick_num_axes": Func(arg_types=("int",),                   ret_type="int", c_name="SDL_JoystickNumAxes"),

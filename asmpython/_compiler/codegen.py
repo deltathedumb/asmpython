@@ -14196,6 +14196,12 @@ class Codegen:
             # math.trunc/floor/ceil narrow to int) -- truncate toward zero
             # into rax instead of reading eax/rax (which holds garbage).
             self.emitf("cvttsd2si rax, xmm0")
+        elif getattr(fn, "ret_conv", None) == "ptr":
+            # The C function returns a real 64-bit pointer/handle (e.g.
+            # SDL_CreateWindow's SDL_Window*) in RAX, not a 32-bit C `int`.
+            # Leave RAX as-is -- sign-extending just EAX would truncate the
+            # pointer to its low 32 bits.
+            pass
         elif fn.ret_type == "int":
             # C `int` is 32-bit: the callee returns it in EAX with the upper 32
             # bits of RAX undefined. asmpython values are full 64-bit slots, so

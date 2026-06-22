@@ -28,6 +28,15 @@ class Func:
     # -- e.g. libm's trunc/floor/ceil, which CPython's math.trunc/floor/ceil
     # narrow to int -- set this to "f2i" so codegen truncates xmm0 to rax via
     # cvttsd2si instead of reading (garbage) eax/rax.
+    #
+    # When the C function returns a real 64-bit pointer/handle (a
+    # SDL_Window*, SDL_Renderer*, etc.) rather than a genuine 32-bit C `int`
+    # -- asmpython has no separate pointer type, so these are still declared
+    # ret_type="int" -- set this to "ptr" so codegen keeps the full 64-bit
+    # RAX from the callee instead of sign-extending just EAX. Sign-extending
+    # a real pointer truncates it to its low 32 bits (and can flip sign on
+    # the high half), corrupting any heap address that doesn't happen to
+    # fit and round-trip through a signed 32-bit value -- which most don't.
     ret_conv: str | None = None
 
 

@@ -17,11 +17,11 @@ from . import Func, Const
 BINDINGS: dict = {
     "init":             Func(arg_types=(),                         ret_type="int", c_name="TTF_Init"),
     "quit":             Func(arg_types=(),                         ret_type="int", c_name="TTF_Quit"),
-    "open_font":        Func(arg_types=("str", "int"),              ret_type="int", c_name="TTF_OpenFont"),
+    "open_font":        Func(arg_types=("str", "int"),              ret_type="int", c_name="TTF_OpenFont", ret_conv="ptr"),
     "close_font":       Func(arg_types=("int",),                    ret_type="int", c_name="TTF_CloseFont"),
 
     # render_blended(font, text, r, g, b) -> SDL_Surface* (anti-aliased text)
-    "render_blended":   Func(arg_types=("int", "str", "int", "int", "int"), ret_type="int", c_name="_ttf_render_blended"),
+    "render_blended":   Func(arg_types=("int", "str", "int", "int", "int"), ret_type="int", c_name="_ttf_render_blended", ret_conv="ptr"),
 
     "size_text_w":      Func(arg_types=("int", "str"),              ret_type="int", c_name="_ttf_size_text_w"),
     "size_text_h":      Func(arg_types=("int", "str"),              ret_type="int", c_name="_ttf_size_text_h"),

@@ -78,6 +78,48 @@ def _resolve_tool(name: str, *, override: Path | None, env_var: str) -> str:
     raise RuntimeError(f"could not find '{name}'. Looked in: " + ", ".join(tried))
 
 
+def _vendor_sdl2_dir(target: str) -> Path | None:
+    """Directory holding asmpython's bundled SDL2/SDL2_ttf/SDL2_mixer
+    binaries for `target`, or None if this target has no vendored copy.
+
+    Windows has no universal system package manager, so a `lumen` program
+    that needs `-lSDL2` would otherwise fail to link (or, with a DLL but no
+    import lib, fail at the linker step) unless the user manually installs
+    SDL2 dev libraries. asmpython ships its own copies under
+    `asmpython/_vendor/sdl2/windows/` instead -- see that directory's
+    README.md for exactly what's vendored and why. Linux relies on the
+    system SDL2 (a single `apt install` away on every major distro), so
+    there's no Linux vendor directory.
+    """
+    if target != "windows":
+        return None
+    d = Path(__file__).resolve().parents[1] / "_vendor" / "sdl2" / "windows"
+    return d if d.is_dir() else None
+
+
+def _vendor_sdl2_runtime_dlls(target: str) -> list[Path]:
+    """The vendored .dll files (not the .dll.a import libs) for `target`,
+    so callers can copy them next to a built executable. Empty if this
+    target has no vendor directory."""
+    d = _vendor_sdl2_dir(target)
+    if d is None:
+        return []
+    return sorted(d.glob("*.dll"))
+
+
+def _copy_vendor_sdl2_dlls(target: str, dest_dir: Path) -> None:
+    """Copy every vendored SDL2 runtime DLL into `dest_dir` (typically next
+    to a freshly built .exe) so the program can actually start without the
+    user having SDL2 on PATH. No-op if nothing needed it (the caller only
+    invokes this when needs_gui/needs_audio/needs_ttf is true) or if this
+    target has no vendor directory (Linux)."""
+    for dll in _vendor_sdl2_runtime_dlls(target):
+        dst = dest_dir / dll.name
+        if dst.exists() and dst.stat().st_mtime >= dll.stat().st_mtime:
+            continue
+        dst.write_bytes(dll.read_bytes())
+
+
 def _quote_cmd_part(s: str) -> str:
     """Wrap an argv element in double quotes if it contains a space, for
     the os.system()-backed subprocess stub (which only takes one command
@@ -369,20 +411,46 @@ def _run_backend(
                 f"-L{_build_dir()}",
                 f"-lasmpython_rt_{'win' if target == 'windows' else 'linux'}",
             ]
-        if getattr(gen, "needs_gui", False):
+        needs_gui = getattr(gen, "needs_gui", False)
+        needs_audio = getattr(gen, "needs_audio", False)
+        needs_ttf = getattr(gen, "needs_ttf", False)
+        vendor_dir = _vendor_sdl2_dir(target)
+        if (needs_gui or needs_audio or needs_ttf) and vendor_dir is not None:
+            link_cmd.append(f"-L{vendor_dir}")
+        if needs_gui:
             link_cmd.append("-lSDL2")
-        if getattr(gen, "needs_audio", False):
+        if needs_audio:
+            # _audio_load_wav's stub calls SDL_RWFromFile (core SDL2, not
+            # SDL2_mixer) but doesn't route through ffi_called/ffi_externs
+            # the way a normal FFI call does (it's a hand-written assembly
+            # helper, not a user-facing binding), so needs_gui's "any
+            # SDL_-prefixed symbol" check never sees it -- audio-only
+            # programs need -lSDL2 unconditionally alongside -lSDL2_mixer.
             link_cmd.append("-lSDL2_mixer")
-        if getattr(gen, "needs_ttf", False):
+            if not needs_gui:
+                link_cmd.append("-lSDL2")
+        if needs_ttf:
             link_cmd.append("-lSDL2_ttf")
         _run(link_cmd, extra_path_dirs=[gcc_dir])
+        if needs_gui or needs_audio or needs_ttf:
+            _copy_vendor_sdl2_dlls(target, exe_path.parent)
     elif bundle_mode == "onedir":
+        _od_needs_gui = getattr(gen, "needs_gui", False)
+        _od_needs_audio = getattr(gen, "needs_audio", False)
+        _od_needs_ttf = getattr(gen, "needs_ttf", False)
         _onedir_extra: list = []
-        if getattr(gen, "needs_gui", False):
+        _od_vendor_dir = _vendor_sdl2_dir(target)
+        if (_od_needs_gui or _od_needs_audio or _od_needs_ttf) and _od_vendor_dir is not None:
+            _onedir_extra.append(f"-L{_od_vendor_dir}")
+        if _od_needs_gui:
             _onedir_extra.append("-lSDL2")
-        if getattr(gen, "needs_audio", False):
+        if _od_needs_audio:
+            # See the non-bundled link path's comment: _audio_load_wav
+            # always needs core SDL2 (SDL_RWFromFile) regardless of needs_gui.
             _onedir_extra.append("-lSDL2_mixer")
-        if getattr(gen, "needs_ttf", False):
+            if not _od_needs_gui:
+                _onedir_extra.append("-lSDL2")
+        if _od_needs_ttf:
             _onedir_extra.append("-lSDL2_ttf")
         exe_path = _link_onedir(
             target=target,
@@ -393,6 +461,12 @@ def _run_backend(
             icon_obj=icon_obj,
             extra_libs=_onedir_extra,
         )
+        if _od_needs_gui or _od_needs_audio or _od_needs_ttf:
+            # _link_onedir's bundle keeps a side-by-side copy of the runtime
+            # next to the exe (see its own comment on why); SDL2's DLLs need
+            # the same treatment since the Windows loader searches the exe's
+            # own directory, not the resources/ subfolder.
+            _copy_vendor_sdl2_dlls(target, exe_path.parent)
     else:
         link_cmd = [gcc, str(obj_path)]
         if icon_obj is not None:
@@ -424,13 +498,25 @@ def _run_backend(
         if target == "linux" and getattr(gen, "imported_funcs", None):
             # dlopen/dlsym: pre-2.34 glibc ships them in libdl, not libc.
             link_cmd.append("-ldl")
-        if getattr(gen, "needs_gui", False):
+        _df_needs_gui = getattr(gen, "needs_gui", False)
+        _df_needs_audio = getattr(gen, "needs_audio", False)
+        _df_needs_ttf = getattr(gen, "needs_ttf", False)
+        _df_vendor_dir = _vendor_sdl2_dir(target)
+        if (_df_needs_gui or _df_needs_audio or _df_needs_ttf) and _df_vendor_dir is not None:
+            link_cmd.append(f"-L{_df_vendor_dir}")
+        if _df_needs_gui:
             link_cmd.append("-lSDL2")
-        if getattr(gen, "needs_audio", False):
+        if _df_needs_audio:
+            # See the "library" output path's comment on why audio-only
+            # programs need -lSDL2 unconditionally too.
             link_cmd.append("-lSDL2_mixer")
-        if getattr(gen, "needs_ttf", False):
+            if not _df_needs_gui:
+                link_cmd.append("-lSDL2")
+        if _df_needs_ttf:
             link_cmd.append("-lSDL2_ttf")
         _run(link_cmd, extra_path_dirs=[gcc_dir])
+        if _df_needs_gui or _df_needs_audio or _df_needs_ttf:
+            _copy_vendor_sdl2_dlls(target, exe_path.parent)
 
     if not keep_intermediates:
         try:

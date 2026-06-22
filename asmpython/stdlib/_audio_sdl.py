@@ -18,7 +18,7 @@ BINDINGS: dict = {
     # ---- Chunk (WAV) --------------------------------------------------------
     # _audio_load_wav is an inline helper (wraps Mix_LoadWAV_RW + SDL_RWFromFile).
     "load_wav":  Func(arg_types=("str",),                      ret_type="int",
-                      c_name="_audio_load_wav"),
+                      c_name="_audio_load_wav", ret_conv="ptr"),
     "free":      Func(arg_types=("int",),                      ret_type="int",
                       c_name="Mix_FreeChunk"),
     "play":      Func(arg_types=("int", "int", "int"),         ret_type="int",
@@ -32,7 +32,7 @@ BINDINGS: dict = {
 
     # ---- Music (OGG, MP3, MOD, etc.) ----------------------------------------
     "load_mus":  Func(arg_types=("str",),                      ret_type="int",
-                      c_name="Mix_LoadMUS"),
+                      c_name="Mix_LoadMUS", ret_conv="ptr"),
     "free_mus":  Func(arg_types=("int",),                      ret_type="int",
                       c_name="Mix_FreeMusic"),
     "play_mus":  Func(arg_types=("int", "int"),                ret_type="int",

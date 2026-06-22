@@ -1717,13 +1717,20 @@ class Parser:
         while self._check("OP", "."):
             self._eat()
             name = f"{name}.{self._expect('NAME').value}"
-        # Optional `as` alias — accepted but the alias name replaces the
-        # module name so subsequent `name.x` lookups go through it.
+        # Optional `as` alias: keep the full dotted path in `module` (needed
+        # to resolve the real file -- a prior version of this collapsed
+        # `module` to just the alias, e.g. `import lumen.audio as audio`
+        # became module="audio", an import_program-merge could never find,
+        # so the whole submodule silently never got pulled in and every
+        # `audio.x` call/attribute on it silently fell through to an
+        # opaque-int default instead of erroring or working) and the local
+        # bound name in `alias` separately.
+        alias: "str | None" = None
         if self._check("KEYWORD", "as"):
             self._eat()
-            name = self._expect("NAME").value  # type: ignore[assignment]
+            alias = self._expect("NAME").value  # type: ignore[assignment]
         self._expect("NEWLINE")
-        return A.Import(module=name, pos=kw.pos)  # type: ignore
+        return A.Import(module=name, alias=alias, pos=kw.pos)  # type: ignore
 
     def _parse_from_import(self) -> A.FromImport:
         kw = self._expect("KEYWORD", "from")

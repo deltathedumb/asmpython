@@ -35,6 +35,11 @@ _build/
 *.a
 *.lib
 
+# Vendored SDL2 binaries (asmpython/_vendor/sdl2/README.md): these are
+# intentionally committed so `import lumen` builds without any system SDL2
+# install, so the binary-extension blanket ignores above don't apply here.
+!asmpython/_vendor/**
+
 # Keep the assembly sources that ship inside assembly packages.
 !**/*.asmpkg/**/*.asm
 

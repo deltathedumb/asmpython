@@ -251,9 +251,17 @@ class ClosureBind:
 
 @dataclass
 class Import:
-    """import math  (the module name remains visible as a prefix)."""
+    """import math  (the module name remains visible as a prefix).
+
+    `import a.b.c as d` keeps the full dotted path in `module` (needed to
+    resolve which real file/package this import points at) and the local
+    name in `alias` (the name later `alias.x` lookups bind through); `alias`
+    is None when there's no `as` clause, in which case lookups use `module`
+    directly (or its first dotted segment).
+    """
 
     module: str
+    alias: "str | None" = None
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
