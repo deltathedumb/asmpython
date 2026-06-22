@@ -829,15 +829,17 @@ class SemaAnalyzer:
                 # (ty, el, val, tuple) so a `self.x = param` assignment can carry
                 # the param's element/value kinds onto the field.
                 pinfo: dict = {}
+                m_param_types_x: list = m.param_types
+                m_defaults_x: list = m.defaults
                 for i, p in enumerate(m.params):
                     if i == 0:
                         continue  # self
-                    annot = m.param_types[i] if i < len(m.param_types) else None
+                    annot = m_param_types_x[i] if i < len(m_param_types_x) else None
                     r = self._resolve_annot(annot)  # type: ignore
                     if r is not None:
                         pinfo[p] = r
-                    elif i < len(m.defaults) and m.defaults[i] is not None:
-                        pinfo[p] = (A.expr_type(m.defaults[i]), None, None, None, None)  # type: ignore
+                    elif i < len(m_defaults_x) and m_defaults_x[i] is not None:
+                        pinfo[p] = (A.expr_type(m_defaults_x[i]), None, None, None, None)  # type: ignore
                     else:
                         inferred = self.inferred_param_types.get(f"{c.name}.{m.name}:{i}")
                         if inferred is not None:
@@ -1137,13 +1139,15 @@ class SemaAnalyzer:
         functions, 1 for methods to skip `self`) from `sites` (the `A.Call`/
         `A.MethodCall` nodes invoking it), storing results in
         `self.inferred_param_types`. See `_infer_unannotated_params`."""
+        fn_param_types: list = fn.param_types
+        fn_defaults: list = fn.defaults
         for i, p in enumerate(fn.params):
             if i < start:
                 continue
-            annot = fn.param_types[i] if i < len(fn.param_types) else None
+            annot = fn_param_types[i] if i < len(fn_param_types) else None
             if self._resolve_annot(annot) is not None:  # type: ignore
                 continue
-            if i < len(fn.defaults) and fn.defaults[i] is not None:
+            if i < len(fn_defaults) and fn_defaults[i] is not None:
                 continue
             candidates: list = []
             found_any = False
@@ -1223,12 +1227,14 @@ class SemaAnalyzer:
             lit = self._literal_arg_type(r.value)
             if lit is None and isinstance(r.value, A.Name) and r.value.name in fn.params:
                 j = fn.params.index(r.value.name)
-                annot = fn.param_types[j] if j < len(fn.param_types) else None
+                fn_param_types_2: list = fn.param_types
+                fn_defaults_2: list = fn.defaults
+                annot = fn_param_types_2[j] if j < len(fn_param_types_2) else None
                 resolved = self._resolve_annot(annot)  # type: ignore
                 if resolved is not None:
                     lit = resolved
-                elif j < len(fn.defaults) and fn.defaults[j] is not None:
-                    lit = (A.expr_type(fn.defaults[j]), None, None, None, None)
+                elif j < len(fn_defaults_2) and fn_defaults_2[j] is not None:
+                    lit = (A.expr_type(fn_defaults_2[j]), None, None, None, None)
                 else:
                     lit = self.inferred_param_types.get(f"{qualname}:{j}")
             if lit is None:
@@ -2387,8 +2393,23 @@ class SemaAnalyzer:
                     else:
                         scope.add(p, "int")
                 else:
-                    annot = f.param_types[i] if i < len(f.param_types) else None
-                    default = f.defaults[i] if i < len(f.defaults) else None
+                    # Explicit `: list` reads, not direct f.param_types /
+                    # f.defaults attribute access: f is an external/opaque
+                    # type to sema (A.FuncDef), so those attributes read
+                    # "any"-typed despite always holding real lists. len()
+                    # on an "any"-typed value falls back to strlen() (the
+                    # generic "not a known container" case), so `len(
+                    # f.param_types)` silently computed a garbage length by
+                    # scanning the list's header bytes as a C string instead
+                    # of reading its real length field -- which then let `i
+                    # < len(f.param_types)` pass when it shouldn't have,
+                    # tripping a real out-of-bounds list read on the next
+                    # line. With explicit list types, len() dispatches
+                    # through the real list-length path instead.
+                    f_param_types: list = f.param_types
+                    f_defaults: list = f.defaults
+                    annot = f_param_types[i] if i < len(f_param_types) else None
+                    default = f_defaults[i] if i < len(f_defaults) else None
                     inferred = self.inferred_param_types.get(f"{f.name}:{i}")
                     self._seed_param(scope, p, annot, default, inferred)
             self._try_check_block(f.body, scope)
@@ -2417,9 +2438,11 @@ class SemaAnalyzer:
                 else:
                     scope.add("self", f"instance:{c.name}")
                     start = 1
+                m_param_types: list = m.param_types
+                m_defaults: list = m.defaults
                 for i, p in enumerate(m.params[start:], start=start):
-                    annot = m.param_types[i] if i < len(m.param_types) else None
-                    default = m.defaults[i] if i < len(m.defaults) else None
+                    annot = m_param_types[i] if i < len(m_param_types) else None
+                    default = m_defaults[i] if i < len(m_defaults) else None
                     if (
                         i == 1
                         and annot is None

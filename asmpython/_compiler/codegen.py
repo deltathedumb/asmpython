@@ -1100,18 +1100,20 @@ class Codegen:
             info.nonlocal_boxes[n] = n  # same slot, just mark for indirection
         # Each local (incl. params) gets an 8-byte slot at a negative RBP offset.
         info.offset = 0
+        f_param_types: list = f.param_types
+        f_defaults: list = f.defaults
         for i, p in enumerate(f.params):
             info.offset -= 8
             info.locals_[p] = info.offset
             # Param type, in priority order: explicit annotation, then the
             # default's type, then int. This decides the read/write register
             # class (int/pointer via rax vs float via xmm0).
-            annot = f.param_types[i] if i < len(f.param_types) else None
+            annot = f_param_types[i] if i < len(f_param_types) else None
             ty = self._param_type_from_annot(annot)
             if ty is None:
                 ty = "int"
-                if i < len(f.defaults) and f.defaults[i] is not None:
-                    ty = A.expr_type(f.defaults[i])  # type: ignore
+                if i < len(f_defaults) and f_defaults[i] is not None:
+                    ty = A.expr_type(f_defaults[i])  # type: ignore
             # Nonlocal params hold a box pointer, not the actual value — treat
             # as int (pointer) regardless of the annotation.
             if p in nonlocal_list:
