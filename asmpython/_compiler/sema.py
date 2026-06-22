@@ -2382,7 +2382,11 @@ class SemaAnalyzer:
             self._seed_globals_into(scope)
             free_vars = getattr(f, "free_vars", [])
             n_fvs = len(free_vars)
-            fv_type_list = self._fv_types.get(f.name, [])
+            # Explicit `: list` annotation: self._fv_types.get(...)'s result
+            # type defaults wrong (unannotated dict.get), so len() on it fell
+            # back to strlen() -- the same len()-on-opaque-attribute bug class
+            # as f.param_types/f.defaults, but via a dict lookup this time.
+            fv_type_list: list = self._fv_types.get(f.name, [])
             for i, p in enumerate(f.params):
                 if i < n_fvs:
                     # Free-variable param: use the outer-scope type recorded
