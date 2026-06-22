@@ -550,7 +550,7 @@ class SemaAnalyzer:
         cur = name
         while cur is not None and cur not in out:
             out.append(cur)
-            cls = self.classes.get(cur)
+            cls: ClassSig = self.classes.get(cur)
             cur = cls.parent if cls is not None else None
         return out
 
@@ -575,7 +575,7 @@ class SemaAnalyzer:
         seen: set = set()
         while cur is not None and cur not in seen:
             seen.add(cur)
-            cls = self.classes.get(cur)
+            cls: ClassSig = self.classes.get(cur)
             if cls is None:
                 return False
             if cls.parent is not None and cls.parent not in self.classes:
@@ -610,7 +610,18 @@ class SemaAnalyzer:
         seen = set()
         while cur is not None and cur not in seen:
             seen.add(cur)
-            cls = self.classes.get(cur)
+            # Explicit ClassSig annotation: self.classes.get(cur)'s result
+            # type defaulted wrong (unannotated dict.get), so `cls.methods`
+            # read as opaque "any" instead of the real dict -- a 5th
+            # instance of the recurring opaque-value bug class this
+            # session, this time corrupting a dict LOOKUP (not a list
+            # index/len), surfaced as a hard segfault inside
+            # _runtime_dict_lookup_slot the moment a real constructor/
+            # method-resolution call exercised this function for the
+            # first time (it's never reached compiling a program with no
+            # classes, which is why test_kwargs_func.py passed while
+            # test_kwargs_init.py crashed).
+            cls: ClassSig = self.classes.get(cur)
             if cls is None:
                 return None
             if method in cls.methods:
@@ -627,7 +638,7 @@ class SemaAnalyzer:
         seen = set()
         while cur is not None and cur not in seen:
             seen.add(cur)
-            cls = self.classes.get(cur)
+            cls: ClassSig = self.classes.get(cur)
             if cls is None:
                 return None
             if prop_name in cls.setters:
@@ -664,7 +675,7 @@ class SemaAnalyzer:
             if cur in BUILTIN_EXCEPTIONS:
                 return True
             seen.add(cur)
-            cls = self.classes.get(cur)
+            cls: ClassSig = self.classes.get(cur)
             if cls is None:
                 # Parent isn't a user class; it's an exception only if its name
                 # is a builtin exception (checked at the top of the next loop).
@@ -679,7 +690,7 @@ class SemaAnalyzer:
         seen = set()
         while cur is not None and cur not in seen:
             seen.add(cur)
-            cls = self.classes.get(cur)
+            cls: ClassSig = self.classes.get(cur)
             if cls is None:
                 return None
             if field_name in cls.fields:
@@ -694,7 +705,7 @@ class SemaAnalyzer:
         seen = set()
         while cur is not None and cur not in seen:
             seen.add(cur)
-            cls = self.classes.get(cur)
+            cls: ClassSig = self.classes.get(cur)
             if cls is None:
                 return "int"
             if field_name in cls.field_el_types:
@@ -711,7 +722,7 @@ class SemaAnalyzer:
         seen = set()
         while cur is not None and cur not in seen:
             seen.add(cur)
-            cls = self.classes.get(cur)
+            cls: ClassSig = self.classes.get(cur)
             if cls is None:
                 return []
             if field_name in cls.field_tuple_types:
@@ -3430,7 +3441,7 @@ class SemaAnalyzer:
                 elif it_t.startswith("instance:"):
                     # User-defined iterable: class must have __iter__ and __next__.
                     cls_name = it_t.split(":", 1)[1]
-                    cls_sig = self.classes.get(cls_name)
+                    cls_sig: ClassSig = self.classes.get(cls_name)
                     if cls_sig is None:
                         raise SemaError(
                             f"cannot iterate over {cls_name!r}: unknown class",
@@ -3673,7 +3684,7 @@ class SemaAnalyzer:
                 pass  # opaque target: accept the index assignment leniently
             elif obj_t.startswith("instance:"):
                 cls_name = obj_t.split(":", 1)[1]
-                cls_sig = self.classes.get(cls_name)
+                cls_sig: ClassSig = self.classes.get(cls_name)
                 msig = None
                 if cls_sig is not None:
                     msig = cls_sig.methods.get("__setitem__")
@@ -4822,7 +4833,7 @@ class SemaAnalyzer:
                 el = "any"
             elif it_t.startswith("instance:"):
                 cls_name = it_t.split(":", 1)[1]
-                cls_sig = self.classes.get(cls_name)
+                cls_sig: ClassSig = self.classes.get(cls_name)
                 if cls_sig is None or "__iter__" not in cls_sig.methods or "__next__" not in cls_sig.methods:
                     raise SemaError(
                         f"cannot iterate a {it_t} in a comprehension: "
@@ -5207,7 +5218,7 @@ class SemaAnalyzer:
                 e.inferred_type = "any"
             elif obj_t.startswith("instance:"):
                 cls_name = obj_t.split(":", 1)[1]
-                cls_sig = self.classes.get(cls_name)
+                cls_sig: ClassSig = self.classes.get(cls_name)
                 msig = None
                 if cls_sig is not None:
                     msig = cls_sig.methods.get("__getitem__")
