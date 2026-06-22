@@ -50,7 +50,6 @@ _smoke.log
 nasm*.log
 nasm*.txt
 
-
 # Unit test artifacts
 hi.txt
 test.zip
@@ -58,7 +57,10 @@ _scratch*.*
 _probe*.*
 _tmp*.*
 
+# Zip for some reason
+asmpython.zip
 
+# VS Code specific files
 editors/vscode/node_modules/
 editors/vscode/out/
 editors/vscode/*.vsix
