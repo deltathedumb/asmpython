@@ -2720,6 +2720,24 @@ class Codegen:
                         self._emit_int_to_str()
                     elif arg_t == "float":
                         self._emit_float_to_str()
+                    elif arg_t in ("list", "tuple", "dict", "set"):
+                        # `raise MultiSemaError(self._collected_errors)`: the
+                        # first arg is a LIST of error messages (or similar
+                        # container), not a scalar message -- using its raw
+                        # list/dict header pointer as if it were a string
+                        # pointer corrupted the printed message into garbage
+                        # (the header's first field, e.g. a small capacity
+                        # int, read back as a 1-2 byte "string"). Fall back to
+                        # a generic placeholder message instead of the
+                        # unusable raw container pointer; this loses the
+                        # per-error detail under self-compilation (the same
+                        # accepted degradation as the rest of this exception
+                        # model -- structured data doesn't survive `raise`),
+                        # but is no longer corrupted garbage.
+                        ph_lbl, _ = self.intern_string(
+                            "(multiple errors; detail unavailable)"
+                        )
+                        self.emitf(f"lea rax, [rel {ph_lbl}]")
                 else:
                     cls_lbl, _ = self.intern_string(stmt.value.func)
                     self.emitf(f"lea rax, [{cls_lbl}]")
