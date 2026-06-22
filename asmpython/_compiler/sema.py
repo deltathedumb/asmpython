@@ -4413,11 +4413,14 @@ class SemaAnalyzer:
                 cls_name = ot.split(":", 1)[1]
                 resolved = self._resolve_method(cls_name, mname)
                 if resolved is not None:
-                    owner, sig = resolved
+                    owner: str = resolved[0]
+                    sig: FuncSig = resolved[1]
                     e.dunder_owner = owner  # type: ignore
                     e.dunder_method = mname  # type: ignore
                     if sig.ret_type is not None:
-                        ty, el, _val = sig.ret_type  # type: ignore
+                        rt: tuple = sig.ret_type  # type: ignore
+                        ty: str = rt[0]
+                        el = rt[1]
                         e.inferred_type = ty  # type: ignore
                         if ty == "list" and el is not None:
                             e.list_el_type = el  # type: ignore
@@ -4462,7 +4465,8 @@ class SemaAnalyzer:
                     resolved = self._resolve_method(rt.split(":", 1)[1], rfl)
                     reflected = resolved is not None
                 if resolved is not None:
-                    owner, sig = resolved
+                    owner: str = resolved[0]
+                    sig: FuncSig = resolved[1]
                     if sig.arity != 2:
                         raise SemaError(
                             f"{owner}.{sig.name}() must take exactly (self, other)",
@@ -4472,7 +4476,9 @@ class SemaAnalyzer:
                     e.dunder_method = sig.name  # type: ignore
                     e.dunder_reflected = reflected  # type: ignore
                     if sig.ret_type is not None:
-                        ty, el, _val = sig.ret_type  # type: ignore
+                        rt2: tuple = sig.ret_type  # type: ignore
+                        ty: str = rt2[0]
+                        el = rt2[1]
                         e.inferred_type = ty
                         if ty == "list" and el is not None:
                             e.list_el_type = el
@@ -5279,7 +5285,9 @@ class SemaAnalyzer:
                 # Mark so codegen translates this subscript into a __getitem__ call.
                 e._getitem_class = cls_name  # type: ignore[attr-defined]
                 if msig.ret_type is not None:
-                    ty, el, _val = msig.ret_type  # type: ignore[misc]
+                    rt3: tuple = msig.ret_type  # type: ignore[misc]
+                    ty: str = rt3[0]
+                    el = rt3[1]
                     e.inferred_type = ty
                     if ty == "list" and el is not None:
                         e.list_el_type = el  # type: ignore[attr-defined]
@@ -5385,7 +5393,9 @@ class SemaAnalyzer:
                             e.inferred_type = "tuple"
                             e.tuple_elem_types = list(sig.ret_tuple)  # type: ignore[attr-defined]
                         elif sig.ret_type is not None:
-                            ty, el, _val = sig.ret_type  # type: ignore[misc]
+                            rt4: tuple = sig.ret_type  # type: ignore[misc]
+                            ty: str = rt4[0]
+                            el = rt4[1]
                             e.inferred_type = ty
                             if ty == "list" and el is not None:
                                 e.list_el_type = el  # type: ignore[attr-defined]
@@ -5691,7 +5701,7 @@ class SemaAnalyzer:
                         e.inferred_type = "any"
                         return
                     raise SemaError(f"{parent} has no method {e.method!r}", e.pos)
-                _, sig = resolved
+                sig: FuncSig = resolved[1]
                 expected = sig.arity - 1
                 required = expected - sig.n_defaults
                 if not (required <= len(e.args) <= expected):
@@ -5701,7 +5711,9 @@ class SemaAnalyzer:
                         e.pos,
                     )
                 if sig.ret_type is not None:
-                    ty, el, _val = sig.ret_type  # type: ignore
+                    rt5: tuple = sig.ret_type  # type: ignore
+                    ty: str = rt5[0]
+                    el = rt5[1]
                     e.inferred_type = ty
                     if ty == "list" and el is not None:
                         e.list_el_type = el
@@ -5756,7 +5768,9 @@ class SemaAnalyzer:
                     e.inferred_type = "tuple"
                     e.tuple_elem_types = list(sig.ret_tuple)  # type: ignore
                 elif sig.ret_type is not None:
-                    ty, el, _val = sig.ret_type  # type: ignore
+                    rt6: tuple = sig.ret_type  # type: ignore
+                    ty: str = rt6[0]
+                    el = rt6[1]
                     e.inferred_type = ty
                     if sig.ret_bool:
                         e.is_bool = True
@@ -5783,7 +5797,22 @@ class SemaAnalyzer:
                     e.inferred_type = "tuple"
                     e.tuple_elem_types = list(msig.ret_tuple)  # type: ignore
                 elif msig.ret_type is not None:
-                    mty, mel, mval = msig.ret_type  # type: ignore
+                    # Same fix as _check_call's plain-call path: explicit
+                    # subscript reads instead of a tuple-unpack of
+                    # msig.ret_type (declared `ret_type: object` on FuncSig,
+                    # not a concrete type sema can track field-wise). This is
+                    # the exact path `module_name.func_name(...)` calls go
+                    # through for a plain `import X` (not `from X import Y`)
+                    # -- left uncorrupted callers (a working `from X import Y`)
+                    # unaffected while every `import X` + `X.func()` call
+                    # site got the wrong inferred_type, which cascaded into
+                    # severe miscompilation (observed as a hard crash with a
+                    # corrupted instruction pointer) for any program -- like
+                    # asmpython's own __main__.py -- using plain `import X`.
+                    mret_tuple_val: tuple = msig.ret_type  # type: ignore
+                    mty: str = mret_tuple_val[0]
+                    mel = mret_tuple_val[1]
+                    mval = mret_tuple_val[2]
                     e.inferred_type = mty
                     if mty == "list" and mel is not None:
                         e.list_el_type = mel
@@ -5874,7 +5903,9 @@ class SemaAnalyzer:
                 for a in e.args:
                     self._check_expr(a, scope)
                 if sig.ret_type is not None:
-                    ty, el, _val = sig.ret_type  # type: ignore
+                    rt7: tuple = sig.ret_type  # type: ignore
+                    ty: str = rt7[0]
+                    el = rt7[1]
                     e.inferred_type = ty
                     if ty == "list" and el is not None:
                         e.list_el_type = el
@@ -6560,13 +6591,15 @@ class SemaAnalyzer:
             if e.func == "abs":
                 # abs preserves the operand's numeric type (float -> float so
                 # the result prints/operates as a float, not its raw bits).
-                arg_t = A.expr_type(e.args[0])
+                arg_t: str = A.expr_type(e.args[0])
                 if arg_t.startswith("instance:"):
                     resolved = self._resolve_method(arg_t.split(":", 1)[1], "__abs__")
                     if resolved is not None:
-                        _, sig = resolved
+                        sig: FuncSig = resolved[1]
                         if sig.ret_type is not None:
-                            ty, el, _val = sig.ret_type  # type: ignore
+                            rt8: tuple = sig.ret_type  # type: ignore
+                            ty: str = rt8[0]
+                            el = rt8[1]
                             e.inferred_type = ty  # type: ignore
                             if ty == "list" and el is not None:
                                 e.list_el_type = el  # type: ignore
