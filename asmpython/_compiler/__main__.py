@@ -372,11 +372,19 @@ def _run_check(
         module = Parser(tokens).parse()
         sema_analyze(module, source_dir=source_dir, collect_errors=all_errors)
     except MultiSemaError as me:
+        # me itself is a real MultiSemaError instance under a Python-hosted
+        # compiler, but when self-compiled, asmpython's native exception
+        # model can't carry a real object through `raise MultiSemaError(...)`
+        # at all -- `me` is just the generic message string ("N semantic
+        # error(s)") that MultiSemaError.__init__ passed to its own
+        # super().__init__(...), with no `.errors` list, no `.format_all()`,
+        # nothing else available. Print that directly rather than trying to
+        # access fields/methods that don't exist on a plain string.
+        if isinstance(me, str):
+            print(me, file=sys.stderr)
+            return 1
         # Each entry in me.errors is a real SemaError instance under a
-        # Python-hosted compiler, but just a plain message string when
-        # self-compiled (asmpython's native exception model can't carry a
-        # real object through `raise SemaError(...)` -- see MultiSemaError's
-        # docstring in errors.py). Guard every `.phase`/`.message`/`.pos`/
+        # Python-hosted compiler. Guard every `.phase`/`.message`/`.pos`/
         # `.code` access so a selfhosted compiler's diagnostics degrade to
         # bare messages instead of crashing.
         if as_json:
@@ -510,7 +518,12 @@ def main(argv: list[str] | None = None) -> int:
                 all_errors=all_errors,
             )
     except MultiSemaError as me:
-        print(me.format_all(src, str(args.source)), file=sys.stderr)
+        # me is just the generic "N semantic error(s)" message string when
+        # self-compiled (see the matching guard in _run_check above for why).
+        if isinstance(me, str):
+            print(me, file=sys.stderr)
+        else:
+            print(me.format_all(src, str(args.source)), file=sys.stderr)
         return 1
     except CompileError as e:
         # e is a real CompileError instance under a Python-hosted compiler,
