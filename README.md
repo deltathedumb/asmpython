@@ -148,7 +148,7 @@ from asmlib import hardware
 hardware.console.clear()
 hardware.console.print_at(5, 5, "Hello!")
 tsc = hardware.cpu.rdtsc()
-hardware.port.out8(0x3F8, 0x41)   # write byte to COM1
+hardware.port.out8(0x3F8, 0x41)  # write byte to COM1
 ```
 
 #### `asmlib.network`
@@ -272,6 +272,7 @@ bare re-raise inside a handler, `assert`
 
 ```python
 from asmpython.assembly import assembly_func
+
 
 @assembly_func
 def popcnt(x: int) -> int:

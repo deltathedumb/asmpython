@@ -19,6 +19,7 @@ symbol ABI — every project module's code ends up in one `.asm`.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 from .lexer import Lexer
@@ -38,6 +39,13 @@ _ALWAYS_AVAILABLE: frozenset[str] = frozenset({
     "open", "round", "divmod", "pow", "hash", "bool", "bytes", "bytearray",
     "tuple", "object", "super", "staticmethod", "classmethod", "property",
     "NotImplemented", "Ellipsis",
+    # Dynamic-loading builtins (see sema.py's _check_call): a module-level
+    # `glfns = gl_import()` / `h = import_binary(path)` is exactly the kind
+    # of value-import initializer this materialization pass needs to chase
+    # (e.g. GLRenderer3D's methods referencing a sibling `glfns`), so the
+    # builtin call name itself must count as always-resolvable the same way
+    # `getattr`/`isinstance`/etc. already do above.
+    "gl_import", "import_binary", "gl_resolve",
 })
 
 
@@ -185,10 +193,104 @@ def _free_names(node: object, out: set[str]) -> None:
             _free_names(node.body, inner)
             out |= inner - set(node.params)
         return
+    # Statement shapes: only reachable when _free_names is asked to scan a
+    # whole method/function body (see _class_free_names below), not from
+    # value-import initializer resolution (which only ever passes a single
+    # expression). Each case collects the free names *referenced*, not
+    # names the statement itself binds (locals, loop variables, ...) -- a
+    # method's own locals shadowing an outer name isn't tracked precisely
+    # here (this is a conservative "what might this method need from
+    # outside itself" scan, not a real scope analysis), so a local that
+    # happens to share a name with a module-level value just means that
+    # value gets materialized even though the method doesn't actually need
+    # it -- harmless (an unused extra global), unlike under-collecting.
+    if isinstance(node, A.Assign):
+        _free_names(node.value, out)
+        return
+    if isinstance(node, A.AugAssign):
+        out.add(node.target)
+        _free_names(node.value, out)
+        return
+    if isinstance(node, A.TupleAssign):
+        for v in node.values:
+            _free_names(v, out)
+        return
+    if isinstance(node, A.MultiAssign):
+        _free_names(node.value, out)
+        return
+    if isinstance(node, A.AttrAssign):
+        _free_names(node.obj, out)
+        _free_names(node.value, out)
+        return
+    if isinstance(node, A.IndexAssign):
+        _free_names(node.target, out)
+        _free_names(node.value, out)
+        return
+    if isinstance(node, A.Return):
+        if node.value is not None:
+            _free_names(node.value, out)
+        return
+    if isinstance(node, A.ExprStmt):
+        _free_names(node.expr, out)
+        return
+    if isinstance(node, A.If):
+        _free_names(node.test, out)
+        _free_names(node.then, out)
+        _free_names(node.orelse, out)
+        return
+    if isinstance(node, A.While):
+        _free_names(node.test, out)
+        _free_names(node.body, out)
+        _free_names(node.orelse, out)
+        return
+    if isinstance(node, A.For):
+        if node.iter is not None:
+            _free_names(node.iter, out)
+        for a in node.range_args:
+            _free_names(a, out)
+        _free_names(node.body, out)
+        _free_names(node.orelse, out)
+        return
+    if isinstance(node, A.With):
+        _free_names(node.expr, out)
+        _free_names(node.body, out)
+        return
+    if isinstance(node, A.Try):
+        _free_names(node.body, out)
+        _free_names(node.handler, out)
+        for _types, _bind, body in node.extra_handlers:
+            _free_names(body, out)
+        _free_names(node.else_body, out)
+        _free_names(node.finally_body, out)
+        return
+    if isinstance(node, A.Raise):
+        if node.value is not None:
+            _free_names(node.value, out)
+        return
+    if isinstance(node, A.YieldStmt):
+        _free_names(node.value, out)
+        return
+    if isinstance(node, A.Del):
+        _free_names(node.target, out)
+        return
+    if isinstance(node, (A.Break, A.Continue, A.Pass, A.Global, A.Nonlocal)):
+        return
     if isinstance(node, (list, tuple)):
         for item in node:
             _free_names(item, out)
         return
+
+
+def _class_free_names(cls: "A.ClassDef") -> set[str]:
+    """Every bare name a class's methods reference, across all method
+    bodies. Used to auto-materialize module-level values a merged class
+    depends on (see load_program's class-merge loop) -- e.g. GLRenderer3D's
+    methods referencing a sibling module-level `glfns = gl_import()` that
+    nothing ever explicitly `from module import glfns`s."""
+    out: set[str] = set()
+    for m in cls.methods:
+        _free_names(m.body, out)
+    return out
 
 
 def _resolve_relative(importer: Path, level: int, module: str, root: Path) -> Path | None:
@@ -792,6 +894,12 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
     # value imports and order them leaves-first.
     parsed: dict[str, A.Module] = {str(entry_path): entry}
     discovery_order: list[str] = [str(entry_path)]
+    # class name -> the module path string it was merged from, so
+    # _materialize_value_imports can find module-level values a merged
+    # class's methods reference (e.g. GLRenderer3D's methods reading a
+    # sibling `glfns = gl_import()`) even though nothing ever explicitly
+    # `from module import glfns`s -- only `from module import GLRenderer3D`.
+    class_origin: dict[str, str] = {}
 
     queue = _project_imports(entry, entry_path, root)
     while queue:
@@ -822,13 +930,14 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
             if c.name not in class_names:
                 class_names.add(c.name)
                 entry.classes.append(c)
+                class_origin[c.name] = mod_path_str
         # Recurse into this module's own project imports.
         for p in _project_imports(mod, mod_path, root):
             if str(p.resolve()) not in seen:
                 queue.append(p)
 
     _merge_import_bindings(entry, parsed, discovery_order)
-    _materialize_value_imports(entry, parsed, discovery_order, root)
+    _materialize_value_imports(entry, parsed, discovery_order, root, class_origin)
     return entry
 
 
@@ -990,6 +1099,7 @@ def _materialize_value_imports(
     parsed: dict[str, A.Module],
     discovery_order: list[str],
     root: Path,
+    class_origin: dict[str, str] | None = None,
 ) -> None:
     """Pull every cross-module *value* import into the entry body as a global,
     transitively.
@@ -1009,6 +1119,18 @@ def _materialize_value_imports(
     ends in a source module's own imports/globals (e.g. `Const(value=_py_math.pi)`,
     which needs CPython's `math`), the whole chain is abandoned and the importer
     keeps its prior opaque binding — so the pass never turns a clean file broken.
+
+    `class_origin` (class name -> the module path string it was merged from)
+    also drives materialization for module-level values a merged CLASS's
+    methods reference but the entry never explicitly imports by name --
+    `from module import GLRenderer3D` merges the class fine (funcs/classes are
+    always merged unconditionally), but a sibling `glfns = gl_import()` in
+    that same module, referenced only inside GLRenderer3D's method bodies,
+    would otherwise never run: nothing about merging the class itself asks
+    "what module-level values does this class need". Each free name found
+    via _class_free_names is resolved exactly like an explicit value import,
+    just sourced from the class's own origin module instead of a FromImport
+    statement.
     """
     # Names available without materialization: merged classes/funcs, the entry's
     # own module-level assigns, and the builtins the compiler always provides.
@@ -1097,6 +1219,27 @@ def _materialize_value_imports(
         edges: dict[str, tuple[str, str]] = value_import_edges(mod_path_str)
         for local, (src_str, orig) in edges.items():
             resolve(local, src_str, orig, empty_stack)
+
+    # Resolve module-level values a merged CLASS's methods reference, even
+    # with no explicit `from module import that_value` anywhere (see this
+    # function's docstring -- GLRenderer3D's @glfns.imported methods reading
+    # the sibling `glfns = gl_import()` is the motivating case). A free name
+    # only resolves here if it's a top-level value assign in the class's OWN
+    # origin module: a method referencing some other free name (a builtin, a
+    # local, a typo) is silently left alone, same as resolve() already does
+    # for unresolvable chains elsewhere in this function.
+    if class_origin:
+        for cls in entry.classes:
+            mod_path_str = class_origin.get(cls.name)
+            if mod_path_str is None:
+                continue  # entry's own class, nothing to chase
+            mod = parsed.get(mod_path_str)
+            if mod is None:
+                continue
+            exports = _toplevel_value_assigns(mod)
+            for nm in _class_free_names(cls):
+                if nm in exports:
+                    resolve(nm, mod_path_str, nm, set())
 
     if prepend:
         entry.body[:0] = prepend

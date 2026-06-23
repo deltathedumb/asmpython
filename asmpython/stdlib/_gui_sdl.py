@@ -229,4 +229,41 @@ BINDINGS: dict = {
     "BUTTON_LEFT":      Const(ty="int", value=1),
     "BUTTON_MIDDLE":    Const(ty="int", value=2),
     "BUTTON_RIGHT":     Const(ty="int", value=3),
+
+    # ---- OpenGL context (see lumen.gl) ---------------------------------------
+    # set_gl_attribute/create_gl_context/etc. wrap SDL's GL context API
+    # directly; the actual GL 1.2+ function calls themselves go through
+    # gl_import() instead (resolved via SDL_GL_GetProcAddress against
+    # whichever context is current -- see _gen_gl_import in codegen.py),
+    # since opengl32.dll/libGL.so only statically export the GL 1.1 surface.
+    "set_gl_attribute": Func(arg_types=("int", "int"),              ret_type="int", c_name="SDL_GL_SetAttribute"),
+    "create_gl_context": Func(arg_types=("int",),                   ret_type="int", c_name="SDL_GL_CreateContext", ret_conv="ptr"),
+    "delete_gl_context": Func(arg_types=("int",),                   ret_type="int", c_name="SDL_GL_DeleteContext"),
+    "make_gl_current":  Func(arg_types=("int", "int"),              ret_type="int", c_name="SDL_GL_MakeCurrent"),
+    "swap_gl_window":   Func(arg_types=("int",),                    ret_type="int", c_name="SDL_GL_SwapWindow"),
+    "set_gl_swap_interval": Func(arg_types=("int",),                ret_type="int", c_name="SDL_GL_SetSwapInterval"),
+    # gl_shader_source_1(glShaderSource_fn_ptr, shader_id, source) -> int
+    # Wraps glShaderSource(shader, 1, &source, NULL) -- glShaderSource takes
+    # a dynamically-resolved function pointer (1st arg, from gl_import())
+    # rather than calling a static `extern` symbol, since it's itself a
+    # GL 1.2+ function with no static export. See _gl_shader_source_1 in
+    # target_windows.py / target_linux.py for the array-of-one-pointer
+    # marshalling this avoids needing on the asmpython side.
+    "gl_shader_source_1": Func(arg_types=("int", "int", "str"),      ret_type="int", c_name="_gl_shader_source_1"),
+
+    # ---- Window flags (OpenGL-capable window) --------------------------------
+    "WINDOW_OPENGL":    Const(ty="int", value=0x00000002),
+
+    # ---- SDL_GLattr (see lumen.gl.set_attribute) -----------------------------
+    "GL_RED_SIZE":            Const(ty="int", value=0),
+    "GL_GREEN_SIZE":          Const(ty="int", value=1),
+    "GL_BLUE_SIZE":           Const(ty="int", value=2),
+    "GL_ALPHA_SIZE":          Const(ty="int", value=3),
+    "GL_DEPTH_SIZE":          Const(ty="int", value=6),
+    "GL_STENCIL_SIZE":        Const(ty="int", value=7),
+    "GL_DOUBLEBUFFER":        Const(ty="int", value=5),
+    "GL_CONTEXT_MAJOR_VERSION": Const(ty="int", value=17),
+    "GL_CONTEXT_MINOR_VERSION": Const(ty="int", value=18),
+    "GL_CONTEXT_PROFILE_MASK":  Const(ty="int", value=21),
+    "GL_CONTEXT_PROFILE_CORE":  Const(ty="int", value=0x0001),
 }

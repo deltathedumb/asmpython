@@ -138,6 +138,25 @@ class Codegen:
     # self-host subset).
     target_name: str = "Codegen"
 
+    # GL functions whose real C signature takes/returns GLdouble (64-bit),
+    # not the GLfloat (32-bit) every other GL function uses -- see
+    # _gen_dynamic_call's `is_gl` float-narrowing for why this distinction
+    # matters. Deliberately a short, explicit allowlist of the legacy/
+    # fixed-function-era double-precision entry points (core GL 3.3+ added
+    # none) rather than trying to infer width from the function name.
+    _GL_DOUBLE_FUNCS = frozenset({
+        "glDepthRange", "glClearDepth",
+        "glVertex2d", "glVertex3d", "glVertex4d",
+        "glColor3d", "glColor4d",
+        "glNormal3d",
+        "glTexCoord1d", "glTexCoord2d", "glTexCoord3d", "glTexCoord4d",
+        "glRasterPos2d", "glRasterPos3d", "glRasterPos4d",
+        "glRectd",
+        "glLoadMatrixd", "glMultMatrixd",
+        "glLoadTransposeMatrixd", "glMultTransposeMatrixd",
+        "glDepthRangeIndexed",
+    })
+
     def __init__(
         self, mod: A.Module, *, use_runtime_lib: bool = False, entry_path: str | None = None
     ) -> None:
@@ -177,6 +196,35 @@ class Codegen:
                 if hasattr(b, "c_name"):
                     sym = self._platform_c_name(b)
                     self.ffi_externs.add(sym)
+        # gl_import() emits a direct `call SDL_GL_GetProcAddress` via
+        # hand-written asm (_emit_get_gl_proc_addr), not through
+        # _gen_ffi_call, so it never reaches the auto-registration loops
+        # above. Detected here (module body scan, at __init__ time) rather
+        # than from inside _gen_gl_import itself: generate()'s extern-line
+        # emission runs before entry/function codegen, so adding to
+        # ffi_externs from within _gen_gl_import would be too late --
+        # nothing would re-scan ffi_externs after that point.
+        #
+        # The same scan also records which handle variables came from
+        # gl_import() specifically (as opposed to import_binary()) into
+        # self.gl_import_handles: _gen_dynamic_call narrows float
+        # arguments/return values to 32 bits only for these handles, since
+        # OpenGL's GLfloat is a 32-bit C float, but asmpython's `float` is
+        # always a 64-bit C double -- passing a double's raw bits where a
+        # GL entry point expects a float silently corrupts the value (a
+        # double 1.0's low 32 bits happen to decode as float 0.0, which is
+        # exactly the "glClearColor never visibly does anything" bug this
+        # fixes). import_binary()-loaded libraries have no such
+        # convention, so they're left as genuine doubles.
+        self.gl_import_handles: set[str] = set()
+        for s in mod.body:
+            if not (isinstance(s, A.Assign) and isinstance(s.value, A.Call)):
+                continue
+            if s.value.func == "gl_import" and isinstance(s.target, str):
+                self.gl_import_handles.add(s.target)
+        if self.gl_import_handles:
+            self.ffi_externs.add("SDL_GL_GetProcAddress")
+            self.ffi_called.add("SDL_GL_GetProcAddress")
         self.funcs: dict[str, FuncInfo] = {}
         # Stack of (continue_label, break_label) pairs for the loop currently
         # being generated. Push on loop entry, pop on exit.
@@ -253,12 +301,39 @@ class Codegen:
         # function in its list via GetProcAddress/dlsym immediately, storing
         # each pointer keyed by name on the handle instance — see
         # _gen_constructor-adjacent dynamic-import codegen.
+        #
+        # Also scans class methods (mod.classes[*].methods), not just
+        # top-level mod.funcs: a class can wrap a set of GL bindings behind
+        # its own API (e.g. pugtk's GLRenderer3D) instead of forcing every
+        # caller to hand-declare the same ~20 top-level @glfns.imported
+        # stubs. `handle` (the `@<handle>.imported` decorator's receiver)
+        # still has to be a name resolvable where the decorator itself is
+        # evaluated -- a module-level `glfns = gl_import()`, since Python
+        # evaluates a class's decorators once, at class-definition time,
+        # not per-instance. Methods compile with `self` as their first
+        # parameter; _gen_dynamic_call's plain_params helper below strips
+        # it before marshalling so `self` is never sent to the GL call.
         self.imported_funcs: dict[str, list[tuple[str, A.FuncDef]]] = {}
         for f in mod.funcs:
             for deco in f.decorators:
                 if deco.endswith(".imported"):
                     handle_name = deco[: -len(".imported")]
                     self.imported_funcs.setdefault(handle_name, []).append((f.name, f))
+        # (class_name, method_name) -> handle_name, the reverse direction:
+        # at a `some_instance.glClearColor(...)` call site, `some_instance`
+        # has nothing to do with `glfns` (the handle) syntactically -- only
+        # `some_instance`'s static class, cross-referenced against this
+        # table, says the call should dispatch through `glfns`'s resolved
+        # function pointer instead of compiling as an ordinary method call
+        # to GLRenderer3D.glClearColor's literal (stub) body.
+        self.imported_method_handle: dict[tuple[str, str], str] = {}
+        for cls in mod.classes:
+            for m in cls.methods:
+                for deco in m.decorators:
+                    if deco.endswith(".imported"):
+                        handle_name = deco[: -len(".imported")]
+                        self.imported_funcs.setdefault(handle_name, []).append((m.name, m))
+                        self.imported_method_handle[(cls.name, m.name)] = handle_name
         # Exception-type RTTI: builtins get the fixed ids above; user classes
         # deriving (transitively) from a builtin exception get the next ids,
         # assigned in declaration order so output is deterministic.
@@ -1368,6 +1443,40 @@ class Codegen:
             # other operand's evaluation (which may itself call).
             if lt.startswith("instance:") or rt.startswith("instance:"):
                 self._cl_define(info, f"__binop_lhs_{id(expr)}")
+            # Float arithmetic (a - b, a * b, ...) needs a scratch slot to
+            # park the left operand (in xmm0) across the right operand's
+            # evaluation -- which may itself be or contain a call (e.g.
+            # `f0 + (1.0 - f0) * math.pow(x, 5.0)`). A raw `sub rsp, 8` /
+            # `[rsp]` push (rather than this rbp-relative slot) is NOT safe
+            # here: an FFI call evaluated for the right operand adjusts rsp
+            # itself (shadow space / stack-passed args), so by the time
+            # control returns, `[rsp]` no longer points at the spilled left
+            # operand -- silently reading garbage instead (confirmed bug:
+            # `f0 + (1.0 - f0) * math.pow(1.0 - ct, 5.0)` produced ~75000
+            # instead of ~0.04).
+            if ("str" not in (lt, rt) and not lt.startswith("instance:")
+                    and not rt.startswith("instance:")
+                    and ("float" in (lt, rt) or expr.op == "/")):
+                self._cl_define(info, f"__binfloat_{id(expr)}", "float")
+            # Plain int arithmetic (a + b, a - b, ...) needs a scratch slot
+            # for the exact same reason as the float case just above: the
+            # right operand's evaluation may itself be or contain a call
+            # (e.g. `total + callee()`, or `total + handlers[i]()` calling
+            # through a stored function pointer), and a raw `push rax` (the
+            # previous implementation) breaks 16-byte stack alignment for
+            # any such nested call -- confirmed bug: `total = total +
+            # callee()` segfaulted specifically when callee()'s own body
+            # contained a further call (e.g. a `print(...)`), since that's
+            # what's needed to actually execute code while the alignment
+            # is wrong; with no nested call inside callee() the misaligned
+            # rsp was simply never exercised by anything alignment-
+            # sensitive, masking the bug. Same condition shape as the
+            # float branch, but for the plain-int fallback path instead.
+            if ("str" not in (lt, rt) and not lt.startswith("instance:")
+                    and not rt.startswith("instance:")
+                    and "list" not in (lt, rt)
+                    and "float" not in (lt, rt) and expr.op != "/"):
+                self._cl_define(info, f"__binint_{id(expr)}")
             # Set algebra (`|`, `&`, `-`) builds a fresh set, mirroring
             # set.union/intersection/difference's scratch slots. Dict union
             # (`d1 | d2`, PEP 584) reuses the same "union" scratch slots.
@@ -1455,6 +1564,16 @@ class Codegen:
                     # in/not-in (e.g. list-in-list, unusual LHS types). The
                     # codegen fallback routes through _gen_dict_in.
                     self._cl_define(info, f"__dictin_{id(expr)}")
+            # Float comparison (a < b, a == math.pow(...), chained a < b < c,
+            # ...) needs a scratch slot per spilled LHS, same reasoning as
+            # __binfloat_ above: a raw `sub rsp, 8` / `[rsp]` push isn't
+            # safe across evaluating an operand that is or contains an FFI
+            # call. One slot per comparison position (_gen_compare spills
+            # once per chained `op`, not just once for the whole chain).
+            if not any(op in ("is", "is not") for op in expr.ops):
+                if any(A.expr_type(o) == "float" for o in expr.operands):
+                    for ci in range(len(expr.ops)):
+                        self._cl_define(info, f"__cmpfloat_{id(expr)}_{ci}", "float")
             for o in expr.operands:
                 self._cl_walk_expr(info, o)
         elif isinstance(expr, A.BoolOp):
@@ -1492,6 +1611,9 @@ class Codegen:
                 self._cl_define(info, f"__{expr.func}_name_{id(expr)}")
             if expr.func == "setattr":
                 self._cl_define(info, f"__setattr_name_{id(expr)}")
+            if expr.func == "gl_resolve":
+                self._cl_define(info, f"__glresolve_dict_{id(expr)}")
+                self._cl_define(info, f"__glresolve_ptr_{id(expr)}")
                 self._cl_define(info, f"__setattr_val_{id(expr)}")
             # int(s, base) parks the base across the string's evaluation.
             if expr.func == "int" and len(expr.args) == 2:
@@ -1583,6 +1705,24 @@ class Codegen:
                         lam = a0.args[0]
                         for p in lam.params:
                             self._cl_define(info, p)
+                        # The lambda's body is inlined directly into this
+                        # loop (see _gen_list_map/_gen_list_filter) rather
+                        # than compiled as a separate function, so it never
+                        # goes through its own _collect_locals pass -- any
+                        # scratch slots its expressions need (e.g. a plain
+                        # int BinOp's __binint_ parking slot) must be
+                        # reserved here explicitly, in the ENCLOSING
+                        # function's frame, or codegen hits a bare
+                        # info.locals_[...] KeyError the first time the
+                        # lambda body needs one (confirmed bug: `list(map(
+                        # lambda x: x * x, xs))` crashed with KeyError
+                        # '__binint_...' once plain-int BinOps started
+                        # needing a reserved slot -- this walk was simply
+                        # always missing, just never observed before since
+                        # nothing inside a mapped/filtered lambda body had
+                        # needed a scratch slot until then).
+                        if lam.body is not None:
+                            self._cl_walk_expr(info, lam.body)
                 # list(zip(A, B, ...)): result list + per-iterable pointer + stop + idx.
                 if isinstance(a0, A.Call) and a0.func == "zip":
                     n = len(a0.args)
@@ -1730,6 +1870,44 @@ class Codegen:
                             "float" if base == "float" else "int",
                         )
                     self._cl_define(info, f"__dyncall_ptr_{id(expr)}")
+                    # Holds the handle dict pointer across a GL call's
+                    # lazy-resolve _runtime_dict_set (see _gen_dynamic_call's
+                    # is_gl branch). Reserved unconditionally here (cheap,
+                    # one frame slot) rather than threading "is this
+                    # actually a gl_import() handle" through this scan too.
+                    self._cl_define(info, f"__dyncall_gldict_{id(expr)}")
+            # `instance.glClearColor(args)` where glClearColor is a
+            # `@glfns.imported` *method* (see imported_method_handle /
+            # _gen_method_call) -- same scratch-slot shape as the direct
+            # `glfns.glClearColor(...)` case just above, just matched via
+            # the receiver's static class instead of expr.obj being the
+            # handle itself, and offset past `self` in param_types.
+            _recv_ty = A.expr_type(expr.obj)
+            if _recv_ty.startswith("instance:"):
+                _cls_name = _recv_ty[len("instance:"):]
+                _handle = self.imported_method_handle.get((_cls_name, expr.method))
+                if _handle is not None:
+                    _funcdef = None
+                    for _fname, _fdef in self.imported_funcs.get(_handle, []):
+                        if _fname == expr.method:
+                            _funcdef = _fdef
+                            break
+                    if _funcdef is not None:
+                        for k in range(len(expr.args)):
+                            pidx = k + 1  # skip `self`
+                            annot = (
+                                _funcdef.param_types[pidx]
+                                if pidx < len(_funcdef.param_types)
+                                else None
+                            )
+                            base = annot[0] if annot else "int"
+                            self._cl_define(
+                                info,
+                                f"__dyncall_arg_{id(expr)}_{k}",
+                                "float" if base == "float" else "int",
+                            )
+                        self._cl_define(info, f"__dyncall_ptr_{id(expr)}")
+                        self._cl_define(info, f"__dyncall_gldict_{id(expr)}")
             if not (isinstance(expr.obj, A.Name) and expr.obj.name in self.imported_modules):
                 # String methods spill the object pointer (and one extra
                 # for replace's 2-arg signature) across argument eval. An
@@ -1913,6 +2091,17 @@ class Codegen:
                     # sequence of GetProcAddress/dlsym calls that resolve
                     # each @<target>.imported function (each clobbers rax).
                     self._cl_define(info, f"__importbin_handle_{id(s)}", "int")
+                if (
+                    isinstance(s.target, str)
+                    and isinstance(s.value, A.Call)
+                    and s.value.func == "gl_import"
+                ):
+                    # Scratch slot to hold the function-pointer-table dict
+                    # across _emit_dict_alloc_order_buf's setup (mirrors
+                    # import_binary's handle slot, but there's no library
+                    # handle here -- just the dict itself needs to survive
+                    # across that helper call).
+                    self._cl_define(info, f"__glimport_dictslot_{id(s)}", "int")
             elif isinstance(s, A.AugAssign):
                 self._cl_define(info, s.target, A.expr_type(s.value))
                 self._cl_walk_expr(info, s.value)
@@ -2243,6 +2432,13 @@ class Codegen:
                 and stmt.value.func == "import_binary"
             ):
                 self._gen_import_binary(stmt, info, mem)
+                return
+            if (
+                isinstance(stmt.target, str)
+                and isinstance(stmt.value, A.Call)
+                and stmt.value.func == "gl_import"
+            ):
+                self._gen_gl_import(stmt, info, mem)
                 return
             if isinstance(stmt.target, str) and stmt.target in info.nonlocal_boxes:
                 # Nonlocal: param slot holds box ptr; store value through it.
@@ -10543,6 +10739,28 @@ class Codegen:
             if funcdef is not None:
                 self._gen_dynamic_call(e, funcdef, info)
                 return
+        # `some_instance.glClearColor(args)` where glClearColor is a
+        # `@<handle>.imported`-decorated *method* (e.g. GLRenderer3D
+        # wrapping its own GL bindings instead of forcing every caller to
+        # hand-declare top-level @glfns.imported stubs) -- cross-reference
+        # the receiver's static class against imported_method_handle to
+        # find which handle to dispatch through, then reuse the exact same
+        # _gen_dynamic_call as the direct `glfns.glClearColor(...)` case
+        # above, just with `self` excluded from the argument list (it's a
+        # real asmpython instance pointer, not part of the GL signature).
+        recv_ty = A.expr_type(e.obj)
+        if recv_ty.startswith("instance:"):
+            cls_name = recv_ty[len("instance:"):]
+            handle_name = self.imported_method_handle.get((cls_name, e.method))
+            if handle_name is not None:
+                funcdef = None
+                for fname, fdef in self.imported_funcs[handle_name]:
+                    if fname == e.method:
+                        funcdef = fdef
+                        break
+                if funcdef is not None:
+                    self._gen_dynamic_call(e, funcdef, info, handle_name=handle_name, skip_self=True)
+                    return
         # `ClassName.method(args)`: @staticmethod / @classmethod called on the
         # class itself. Static methods take args verbatim; class methods get an
         # implicit leading `cls` (passed as null — asmpython has no class
@@ -11387,10 +11605,17 @@ class Codegen:
                 "call _runtime_list_repeat",
             )
             return
+        # Frame slot, not push/pop: the right operand's evaluation may
+        # itself be or contain a call, and a raw push/pop pair across a
+        # call breaks 16-byte stack alignment for that call (every other
+        # BinOp path above already avoids this; see __binint_'s
+        # reservation comment in _cl_walk_expr for the confirmed-bug
+        # writeup this mirrors).
+        slot = info.locals_[f"__binint_{id(e)}"]
         self.gen_expr(e.left, info)
-        self.emitf("push rax")
+        self.emitf(f"mov [rbp{slot:+d}], rax")
         self.gen_expr(e.right, info)
-        self.emitf("mov rbx, rax", "pop rax")
+        self.emitf("mov rbx, rax", f"mov rax, [rbp{slot:+d}]")
         self._emit_binop_inline(e.op)
 
     def _gen_binop_str(self, e: A.BinOp, info: FuncInfo, lt: str, rt: str) -> None:
@@ -11512,13 +11737,22 @@ class Codegen:
         self.emitf(f"mov rax, [rbp{acc_slot:+d}]")
 
     def _gen_binop_float(self, e: A.BinOp, info: FuncInfo, lt: str, rt: str) -> None:
-        # Evaluate left (promote to float if int), spill to stack, evaluate
-        # right (promote), then load into xmm1, restore left to xmm0.
+        # Evaluate left (promote to float if int), spill to a stable
+        # rbp-relative scratch slot, evaluate right (promote), then load
+        # into xmm1, restore left to xmm0.
+        #
+        # The spill slot must be rbp-relative, not a raw `sub rsp, 8` /
+        # `[rsp]` push: if the right operand is or contains an FFI call
+        # (e.g. `(1.0 - f0) * math.pow(x, 5.0)`), that call adjusts rsp
+        # itself for shadow space / stack-passed args, so `[rsp]` no longer
+        # points at the spilled value once control returns -- silently
+        # reading garbage instead (confirmed bug, see _cl_walk_expr's
+        # __binfloat_ comment for the exact failing example).
         self._gen_expr_as_float(e.left, info, lt)
-        # Spill xmm0 to a scratch frame slot via the stack.
-        self.emitf("sub rsp, 8", "movsd [rsp], xmm0")
+        slot = info.locals_[f"__binfloat_{id(e)}"]
+        self.emitf(f"movsd [rbp{slot:+d}], xmm0")
         self._gen_expr_as_float(e.right, info, rt)
-        self.emitf("movsd xmm1, xmm0", "movsd xmm0, [rsp]", "add rsp, 8")
+        self.emitf(f"movsd xmm1, xmm0", f"movsd xmm0, [rbp{slot:+d}]")
         self._emit_binop_inline_float(e.op)
 
     def _gen_expr_as_float(self, expr, info: FuncInfo, ty: str) -> None:
@@ -11986,10 +12220,16 @@ class Codegen:
                 self._gen_dict_in(e, info)
                 return
             if is_float:
+                # rbp-relative spill, not a raw `sub rsp, 8` / `[rsp]` push
+                # -- see _cl_walk_expr's __cmpfloat_ comment: an FFI call
+                # (e.g. `x < math.pow(y, 2.0)`) evaluated for operands[1]
+                # would otherwise corrupt the spilled LHS by adjusting rsp
+                # itself for shadow space / stack-passed args.
+                slot = info.locals_[f"__cmpfloat_{id(e)}_0"]
                 self._gen_expr_as_float(e.operands[0], info, A.expr_type(e.operands[0]))
-                self.emitf("sub rsp, 8", "movsd [rsp], xmm0")
+                self.emitf(f"movsd [rbp{slot:+d}], xmm0")
                 self._gen_expr_as_float(e.operands[1], info, A.expr_type(e.operands[1]))
-                self.emitf("movsd xmm1, xmm0", "movsd xmm0, [rsp]", "add rsp, 8")
+                self.emitf(f"movsd xmm1, xmm0", f"movsd xmm0, [rbp{slot:+d}]")
                 setcc = self.SETCC_FLOAT[e.ops[0]]
                 self.emitf("ucomisd xmm0, xmm1", f"{setcc} al", "movzx rax, al")
             else:
@@ -12008,12 +12248,14 @@ class Codegen:
         if is_float:
             self._gen_expr_as_float(e.operands[0], info, A.expr_type(e.operands[0]))
             for i, op in enumerate(e.ops):
-                # xmm0 = current LHS
-                self.emitf("sub rsp, 8", "movsd [rsp], xmm0")
+                # xmm0 = current LHS. rbp-relative spill (see the single-
+                # compare branch above for why a raw rsp push isn't safe).
+                slot = info.locals_[f"__cmpfloat_{id(e)}_{i}"]
+                self.emitf(f"movsd [rbp{slot:+d}], xmm0")
                 self._gen_expr_as_float(
                     e.operands[i + 1], info, A.expr_type(e.operands[i + 1])
                 )
-                self.emitf("movsd xmm1, xmm0", "movsd xmm0, [rsp]", "add rsp, 8")
+                self.emitf(f"movsd xmm1, xmm0", f"movsd xmm0, [rbp{slot:+d}]")
                 jcc = self.JCC_INV_FLOAT[op]
                 self.emitf("ucomisd xmm0, xmm1", f"{jcc} {false_lbl}")
                 # Reuse xmm1 as next LHS.
@@ -12597,6 +12839,41 @@ class Codegen:
                     "xor rcx, rcx",
                     "call _runtime_dict_get_default",
                 )
+            return
+        if e.func == "gl_resolve":
+            # gl_resolve(handle, "funcName") -> int: force the lazy resolve-
+            # and-cache _gen_dynamic_call normally does on a function's
+            # first real call (see gl_import()'s docstring for why
+            # resolution is lazy at all), without calling through the
+            # pointer -- for functions whose stub exists only to register
+            # a pointer for a hand-marshalled helper to use directly (e.g.
+            # glShaderSource, called through gl_shader_source_1 instead of
+            # any @handle.imported dispatch, since its real char**
+            # signature doesn't fit that marshalling).
+            if not isinstance(e.args[1], A.StrLit):
+                raise NotImplementedError(
+                    "gl_resolve()'s second argument must be a string literal"
+                )
+            name_label, _ = self.intern_string(e.args[1].value)
+            dict_slot = info.locals_[f"__glresolve_dict_{id(e)}"]
+            ptr_slot = info.locals_[f"__glresolve_ptr_{id(e)}"]
+            self.gen_expr(e.args[0], info)  # rax = handle dict
+            self.emitf(f"mov [rbp{dict_slot:+d}], rax")
+            self.emitf(f"lea rbx, [{name_label}]", "xor rcx, rcx", "call _runtime_dict_get_default")
+            self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+            not_null = self.fresh("glresolve_cached")
+            self.emitf("test rax, rax", f"jnz {not_null}")
+            self.emitf(f"lea rax, [{name_label}]")
+            self._emit_get_gl_proc_addr()  # rax = resolved function ptr, or NULL
+            self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+            self.emitf(
+                "mov rcx, rax",
+                f"lea rbx, [{name_label}]",
+                f"mov rax, [rbp{dict_slot:+d}]",
+                "call _runtime_dict_set",
+            )
+            self.label(not_null)
+            self.emitf(f"mov rax, [rbp{ptr_slot:+d}]")
             return
         if e.func == "hasattr":
             # hasattr(obj, name) -> dict_contains(obj, name) (0/1). Name may be
@@ -13881,6 +14158,49 @@ class Codegen:
                 "call _runtime_dict_set",
             )
 
+    def _gen_gl_import(self, stmt: A.Assign, info: FuncInfo, mem: str) -> None:
+        """`handle = gl_import()`.
+
+        Allocates an empty function-pointer-table dict; nothing is resolved
+        here. Resolution is LAZY, done by _gen_dynamic_call on each
+        function's first real call (see the "is_gl" lazy-resolve branch
+        there) -- deliberately not eager like _gen_import_binary(), for two
+        reasons specific to GL:
+
+        1. SDL_GL_GetProcAddress requires a current GL context; resolving
+           every @<handle>.imported function the moment `gl_import()` runs
+           would return NULL for all of them whenever that line executes
+           before context creation. And it always does in one important
+           case: asmpython's whole-program bundler prepends a class's
+           required module-level globals (see program.py's
+           _materialize_value_imports class_origin handling) to the very
+           TOP of the compiled program -- before ANY of the user's own
+           setup code (including their own context creation) has run.
+           Lazy resolution sidesteps needing the bundler to special-case
+           "but not THIS global, place it after context creation" (a
+           dependency the bundler has no way to know about, since nothing
+           about `glfns = gl_import()` syntactically says "must run after
+           SDL_GL_CreateContext").
+        2. It also matches how real GL loaders (GLAD, GLEW, SDL's own
+           examples) behave -- resolve what you actually use, when you
+           first use it -- so a program that only calls a handful of GL
+           functions doesn't pay for resolving every @imported stub it
+           happens to have declared.
+        """
+        cap = 8
+        self._emit_malloc(self.DICT_HEADER)
+        self.emitf(
+            f"mov qword [rax+{self.DICT_CAP_OFF}], {cap}",
+            f"mov qword [rax+{self.DICT_LEN_OFF}], 0",
+            f"mov qword [rax+{self.DICT_TOMB_OFF}], 0",
+            f"mov {mem}, rax",
+        )
+        self.emitf(f"mov rbx, {cap * self.DICT_SLOT_SIZE}", "call _runtime_zalloc")
+        self.emitf(f"mov rbx, {mem}", f"mov [rbx+{self.DICT_BUF_OFF}], rax")
+        dict_slot_off = info.locals_[f"__glimport_dictslot_{id(stmt)}"]
+        self.emitf(f"mov rax, {mem}", f"mov [rbp{dict_slot_off:+d}], rax")
+        self._emit_dict_alloc_order_buf(cap, dict_slot_off)
+
     def _gen_constructor(self, e: A.Call, info: FuncInfo) -> None:
         """ClassName(args)  ->  rax = pointer to new instance.
 
@@ -14273,25 +14593,81 @@ class Codegen:
             # into RAX for int returns.
             self.emitf("movsxd rax, eax")
 
-    def _gen_dynamic_call(self, e: A.MethodCall, funcdef: A.FuncDef, info: FuncInfo) -> None:
+    def _gen_dynamic_call(
+        self,
+        e: A.MethodCall,
+        funcdef: A.FuncDef,
+        info: FuncInfo,
+        handle_name: str | None = None,
+        skip_self: bool = False,
+    ) -> None:
         """`handle.func(args)` for a `@handle.imported` function: marshal args
         exactly like `_gen_ffi_call`, but call through the function pointer
         GetProcAddress/dlsym already resolved into the handle dict (keyed by
         `func`'s name) instead of a static `extern` symbol.
 
-        Only scalar (int/float/str-as-pointer) parameters are supported —
-        the foreign function's real signature isn't introspectable, so the
-        stub's own annotations are the only contract; an unannotated or
-        container-typed parameter has no defined ABI mapping here.
+        `handle_name`/`skip_self` cover the wrapped-in-a-class shape (e.g.
+        `instance.glClearColor(...)` where glClearColor is a `@glfns.imported`
+        *method* on instance's class, not a direct `glfns.glClearColor(...)`
+        call): `e.obj` is the instance (its own dict, unrelated to the GL
+        handle), so the handle dict has to be fetched by `handle_name`
+        instead of by evaluating `e.obj`; `funcdef.param_types`/`.params`
+        still include `self` as their first entry (it's a real method), so
+        `skip_self` drops that entry when matching against `e.args` (which,
+        being the call's actual argument list, never includes the implicit
+        receiver).
+
+        Scalar (int/float/str-as-pointer) parameters are supported, plus
+        `list[int]`/`list[float]` as `list_buf` (the list's raw backing
+        buffer pointer, not its header -- see _gen_ffi_call's identical
+        "list_buf" handling, used the same way by e.g. os._stat's
+        struct-out-param and GL functions like glShaderSource/glBufferData
+        that take a raw data pointer). The foreign function's real
+        signature isn't introspectable, so the stub's own annotations are
+        the only contract; an unannotated parameter defaults to "int".
+
+        For a handle from gl_import() specifically (tracked in
+        self.gl_import_handles), every `float` argument/return is narrowed
+        to/from a 32-bit C `float` (GLfloat) instead of staying a 64-bit
+        `double` -- OpenGL's API is GLfloat throughout (glClearColor,
+        glUniform*f, ...), but asmpython's `float` is always a double;
+        passing a double's raw 64 bits where the driver reads a 32-bit
+        float silently corrupts the value (confirmed: double 1.0's low 32
+        bits decode as float 0.0 -- exactly why glClearColor(1.0, ...)
+        visibly did nothing despite a correct call reaching the correct,
+        verified-via-disassembly-identical-to-a-working-C-program function
+        pointer). The handful of genuine GLdouble functions are listed in
+        _GL_DOUBLE_FUNCS below and excluded from this narrowing -- they
+        were never the bug (glDepthRange's GLdouble args already round-
+        tripped correctly as asmpython doubles; narrowing THEM would be
+        the new bug).
         """
+        effective_handle: str | None = handle_name
+        if effective_handle is None and isinstance(e.obj, A.Name):
+            effective_handle = e.obj.name
+        is_gl: bool = (
+            effective_handle is not None
+            and effective_handle in self.gl_import_handles
+            and funcdef.name not in self._GL_DOUBLE_FUNCS
+        )
+        # When skip_self is set, funcdef.param_types[0] is `self`'s
+        # annotation slot (always None/unused) -- offset past it so
+        # param_types[1:] lines up positionally with e.args, the same way
+        # it already does for a plain function/direct handle call.
+        param_offset = 1 if skip_self else 0
         arg_types: list[str] = []
         for i in range(len(e.args)):
-            annot = funcdef.param_types[i] if i < len(funcdef.param_types) else None
+            pidx = i + param_offset
+            annot = funcdef.param_types[pidx] if pidx < len(funcdef.param_types) else None
             base = annot[0] if annot else "int"
+            if base == "list":
+                arg_types.append("list_buf")
+                continue
             if base not in ("int", "float", "str"):
                 raise NotImplementedError(
-                    f"@{e.obj.name}.imported function {funcdef.name!r}: "
-                    f"parameter type {base!r} is not supported (only int/float/str)"
+                    f"@{effective_handle}.imported function {funcdef.name!r}: "
+                    f"parameter type {base!r} is not supported "
+                    "(only int/float/str/list[int]/list[float])"
                 )
             arg_types.append(base)
         slot_offs: list[int] = []
@@ -14300,34 +14676,97 @@ class Codegen:
             slot = info.locals_[f"__dyncall_arg_{id(e)}_{i}"]
             if want == "float":
                 self._gen_expr_as_float(arg, info, got)
-                self.emitf(f"movsd [rbp{slot:+d}], xmm0")
+                if is_gl:
+                    self.emitf("cvtsd2ss xmm0, xmm0")
+                    self.emitf(f"movss [rbp{slot:+d}], xmm0")
+                else:
+                    self.emitf(f"movsd [rbp{slot:+d}], xmm0")
+            elif want == "list_buf":
+                self.gen_expr(arg, info)  # rax = list header
+                self.emitf(f"mov rax, [rax+{self.LIST_BUF_OFF}]")
+                self.emitf(f"mov [rbp{slot:+d}], rax")
             else:
                 self.gen_expr(arg, info)
                 self.emitf(f"mov [rbp{slot:+d}], rax")
             slot_offs.append(slot)
         assigns = self._assign_arg_regs(arg_types)
         stack_positions = [i for i, a in enumerate(assigns) if a is None]
-        cleanup = 0
-        if stack_positions:
-            shadow = self._caller_shadow_space()
-            area = shadow + 8 * len(stack_positions)
-            if area % 16:
-                area += 16 - (area % 16)
-            cleanup = area
-            self.emitf(f"sub rsp, {area}")
-            for k, i in enumerate(stack_positions):
-                self.emitf(
-                    f"mov rax, [rbp{slot_offs[i]:+d}]",
-                    f"mov [rsp+{shadow + 8 * k}], rax",
-                )
+        # Always reserve shadow space before the indirect `call rax` below,
+        # even with zero stack-passed args: Win64 requires the caller to
+        # reserve 32 bytes of shadow space below rsp for *every* call, not
+        # just ones with 5+ arguments (the same class of bug as the
+        # hand-rolled runtime helpers' shadow-space fix -- see CHANGELOG).
+        # Without this, a 1-4-argument dynamically-resolved call (e.g.
+        # `glGetString(name)`, one int arg) had stack_positions == [] and
+        # skipped shadow-space allocation entirely, letting the callee
+        # silently corrupt the caller's own frame -- confirmed: glGetString
+        # resolved to a real, distinct, correct function pointer and was
+        # called with the right argument, but returned NULL/silently
+        # corrupted state instead of erroring, because Linux/SysV has no
+        # shadow-space requirement at all (this bug is Windows-only) while
+        # the GL driver's internal call on Windows clobbered our frame.
+        shadow = self._caller_shadow_space()
+        area = shadow + 8 * len(stack_positions)
+        if area % 16:
+            area += 16 - (area % 16)
+        cleanup = area
         # Look up the resolved function pointer (stored by name in the
-        # handle dict at import_binary() time) before loading arg registers,
-        # so the lookup's own calls don't clobber them.
+        # handle dict at import_binary()/gl_import() time) BEFORE reserving
+        # this call's own shadow space / stack args, and before loading arg
+        # registers -- the lookup itself is a `call _runtime_dict_get_default`,
+        # which (like any call) needs its OWN 32 bytes of shadow space below
+        # rsp. Reserving this call's frame (`sub rsp, area`) first and then
+        # calling the lookup *inside* that already-adjusted frame let the
+        # lookup's internal shadow-space usage land on the exact same
+        # [rsp, rsp+32) bytes already written with stack-spilled arguments
+        # (positions 5+, e.g. glReadPixels' format/type/data params),
+        # silently corrupting them before the real call ever ran (confirmed:
+        # glReadPixels resolved correctly and was reached, but its
+        # stack-spilled args were always read back as garbage/zero).
         ptr_slot = info.locals_[f"__dyncall_ptr_{id(e)}"]
         name_label, _ = self.intern_string(funcdef.name)
-        self.gen_expr(e.obj, info)  # rax = handle dict
-        self.emitf(f"lea rbx, [{name_label}]", "xor rcx, rcx", "call _runtime_dict_get_default")
-        self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+        if handle_name is not None:
+            # Method-wrapped form: the handle dict is a module-level global
+            # (`glfns`, not `e.obj` -- e.obj is `self`/the instance, an
+            # unrelated dict) referenced purely by name, so synthesize the
+            # same Name-lookup a direct `glfns.func(...)` call already does.
+            self.gen_expr(A.Name(name=handle_name, pos=e.pos), info)  # rax = handle dict
+        else:
+            self.gen_expr(e.obj, info)  # rax = handle dict
+        if is_gl:
+            # Lazy resolve-and-cache (see _gen_gl_import's docstring for
+            # why gl_import() can't resolve eagerly): look up the cached
+            # pointer first; a NULL/missing result means "not resolved
+            # yet" (a real GL function pointer is never NULL once a
+            # context exists), so resolve it via SDL_GL_GetProcAddress and
+            # store it back into the handle dict before proceeding, the
+            # same one-time cost _gen_gl_import used to pay for every
+            # function up front regardless of whether it was ever called.
+            dict_slot = info.locals_[f"__dyncall_gldict_{id(e)}"]
+            self.emitf(f"mov [rbp{dict_slot:+d}], rax")  # save handle dict
+            self.emitf(f"lea rbx, [{name_label}]", "xor rcx, rcx", "call _runtime_dict_get_default")
+            self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+            not_null = self.fresh("gllazy_resolved")
+            self.emitf("test rax, rax", f"jnz {not_null}")
+            self.emitf(f"lea rax, [{name_label}]")
+            self._emit_get_gl_proc_addr()  # rax = resolved function ptr, or NULL
+            self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+            self.emitf(
+                "mov rcx, rax",
+                f"lea rbx, [{name_label}]",
+                f"mov rax, [rbp{dict_slot:+d}]",
+                "call _runtime_dict_set",
+            )
+            self.label(not_null)
+        else:
+            self.emitf(f"lea rbx, [{name_label}]", "xor rcx, rcx", "call _runtime_dict_get_default")
+            self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+        self.emitf(f"sub rsp, {area}")
+        for k, i in enumerate(stack_positions):
+            self.emitf(
+                f"mov rax, [rbp{slot_offs[i]:+d}]",
+                f"mov [rsp+{shadow + 8 * k}], rax",
+            )
         float_idx = 0
         for i, slot in enumerate(slot_offs):
             assign = assigns[i]
@@ -14335,11 +14774,25 @@ class Codegen:
                 continue
             reg, is_xmm = assign
             if is_xmm:
-                self.emitf(f"movsd {reg}, [rbp{slot:+d}]")
+                if is_gl and arg_types[i] == "float":
+                    # 32-bit GLfloat: only the low 4 bytes of the slot are
+                    # meaningful (written by movss above) -- load with
+                    # movss, not movsd, or the high 4 (stale/undefined)
+                    # bytes would corrupt the value. Skip the int-register
+                    # mirror entirely: it exists only for Win64's variadic
+                    # convention (a float arg also needs to land in the
+                    # matching integer register so a varargs callee can
+                    # read it positionally without knowing the type), and
+                    # no GL function is variadic -- mirroring a
+                    # single-precision value into a 64-bit int register
+                    # with movq would also be the wrong width regardless.
+                    self.emitf(f"movss {reg}, [rbp{slot:+d}]")
+                else:
+                    self.emitf(f"movsd {reg}, [rbp{slot:+d}]")
+                    if self._needs_xmm_mirror_to_int() and i < len(self._int_arg_regs()):
+                        int_reg = self._int_arg_regs()[i]
+                        self.emitf(f"movq {int_reg}, {reg}")
                 float_idx += 1
-                if self._needs_xmm_mirror_to_int() and i < len(self._int_arg_regs()):
-                    int_reg = self._int_arg_regs()[i]
-                    self.emitf(f"movq {int_reg}, {reg}")
             else:
                 self.emitf(f"mov {reg}, [rbp{slot:+d}]")
         if self._sysv_needs_al_count():
@@ -14347,9 +14800,28 @@ class Codegen:
         self.emitf(f"mov rax, [rbp{ptr_slot:+d}]", "call rax")
         if cleanup:
             self.emitf(f"add rsp, {cleanup}")
+        # Unlike _gen_ffi_call, no sign-extending truncation (`movsxd rax,
+        # eax`) here for `-> int`-declared returns: a dynamically-resolved
+        # function's real C return width isn't known (the stub's `-> int`
+        # annotation is the caller's best guess, not an introspected
+        # signature), and plenty of real functions called this way return a
+        # genuine 64-bit pointer through an `int`-typed stub (e.g.
+        # glGetString's `const GLubyte*`, lumen.gl's whole reason for
+        # dynamic resolution). Truncating-then-sign-extending a real
+        # pointer corrupts it whenever its high 32 bits matter; leaving rax
+        # untouched is correct for a real pointer and for any `int`-typed
+        # return where the callee already zero-extends eax into rax (true
+        # for both MSVC- and GCC-compiled callees on x86-64, which use
+        # `mov eax, ...` and rely on the architecture's implicit
+        # zero-extension to upper 32 bits).
         ret_base = funcdef.ret_type[0] if funcdef.ret_type else "int"
-        if ret_base == "int":
-            self.emitf("movsxd rax, eax")
+        if is_gl and ret_base == "float":
+            # The callee returns a 32-bit GLfloat in the low 32 bits of
+            # xmm0; widen to a 64-bit double (asmpython's only float
+            # width) so the rest of the program reads a correct value
+            # instead of the low-32-bits-only garbage a bare xmm0 would
+            # decode as if read as a double directly.
+            self.emitf("cvtss2sd xmm0, xmm0")
 
     # ---- os.getcwd / os.listdir inline helpers --------------------------------
 
@@ -14367,6 +14839,10 @@ class Codegen:
 
     def _emit_get_proc_addr(self) -> None:
         """rax = handle, rbx = name -> rax = function ptr, or NULL."""
+        raise NotImplementedError
+
+    def _emit_get_gl_proc_addr(self) -> None:
+        """rax = name -> rax = GL function ptr, or NULL. See _gen_gl_import."""
         raise NotImplementedError
 
     def _emit_cwd_buf_if_needed(self) -> None:
