@@ -317,6 +317,16 @@ class WindowsCodegen(Codegen):
         # rax = handle, rbx = name (C string) -> rax = function ptr, or NULL.
         self.emitf("mov rcx, rax", "mov rdx, rbx", "call GetProcAddress")
 
+    def _emit_get_gl_proc_addr(self) -> None:
+        # rax = name (C string) -> rax = GL function ptr, or NULL.
+        # SDL_GL_GetProcAddress(const char* proc) is the only correct way
+        # to resolve OpenGL functions beyond GL 1.1 -- unlike GetProcAddress
+        # against a fixed DLL handle, it resolves against whichever GL
+        # context is current, which on Windows is required for anything
+        # an ICD (the GPU vendor's driver) implements rather than
+        # opengl32.dll's own ~300-function fixed-function-era surface.
+        self.emitf("mov rcx, rax", "call SDL_GL_GetProcAddress")
+
     def _emit_libc_memcpy(self) -> None:
         # rax = dst, rbx = src, rcx = n
         self.emitf("mov r8, rcx", "mov rdx, rbx", "mov rcx, rax", "call memcpy")
@@ -655,6 +665,7 @@ class WindowsCodegen(Codegen):
         "_gui_render_copy_ex", "_gui_render_copy_region",
         "_gui_joystick_axis", "_gui_joystick_button",
         "_gui_list_buf_addr", "_gui_update_texture", "_gui_create_texture_argb",
+        "_gl_shader_source_1",
     )
     _AUDIO_SYMS = (
         "_audio_load_wav",
@@ -1511,6 +1522,38 @@ class WindowsCodegen(Codegen):
                            "mov r9, [rbp-24]",     # w
                            "mov rax, [rbp-32]", "mov [rsp+32], rax",  # h (5th arg)
                            "call SDL_CreateTexture",
+                           "leave", "ret")
+
+            # _gl_shader_source_1(rcx=glShaderSource_fn_ptr, rdx=shader_id,
+            #                     r8=source_str) -> rax
+            # Calls glShaderSource(shader, 1, &source_str, NULL) through the
+            # *dynamically resolved* function pointer passed in rcx (see
+            # gl_import() / _gen_dynamic_call) -- unlike every other helper
+            # in this file, which calls a statically-linked `extern` symbol,
+            # glShaderSource has no static import (it's resolved at runtime
+            # via SDL_GL_GetProcAddress, like every GL function past 1.1).
+            #
+            # glShaderSource's real signature is
+            #   void glShaderSource(GLuint shader, GLsizei count,
+            #                       const GLchar *const *string,
+            #                       const GLint *length)
+            # -- a pointer to an array of string pointers, not a single
+            # string. With count=1 and length=NULL (every string assumed
+            # NUL-terminated, a documented valid GL usage), the array is
+            # just one pointer, so it's built on this stub's own stack
+            # frame instead of needing any asmpython-side array marshalling.
+            if "_gl_shader_source_1" in self.ffi_called:
+                self.label("_gl_shader_source_1")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+                self.emitf("mov [rbp-8], rcx",    # fn ptr
+                           "mov [rbp-16], rdx",   # shader id
+                           "mov [rbp-24], r8")    # source str ptr
+                self.emitf("mov rax, [rbp-24]", "mov [rbp-32], rax")  # string[0] = source ptr
+                self.emitf("mov rcx, [rbp-16]",   # shader
+                           "mov edx, 1",            # count = 1
+                           "lea r8, [rbp-32]",       # &string[0]
+                           "xor r9, r9",             # length = NULL
+                           "call [rbp-8]",
                            "leave", "ret")
 
             # _gui_query_texture_w(rcx=texture) -> rax (width as signed 64-bit)

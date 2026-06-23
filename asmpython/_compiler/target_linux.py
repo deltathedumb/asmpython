@@ -222,6 +222,15 @@ class LinuxCodegen(Codegen):
         # rax = handle, rbx = name (C string) -> rax = function ptr, or NULL.
         self.emitf("mov rdi, rax", "mov rsi, rbx", "call dlsym")
 
+    def _emit_get_gl_proc_addr(self) -> None:
+        # rax = name (C string) -> rax = GL function ptr, or NULL.
+        # SDL_GL_GetProcAddress resolves against the current GL context
+        # (via glXGetProcAddress under the hood on Linux/GLX), the same
+        # reason this is required rather than dlsym against libGL.so.1 --
+        # see target_windows.py's _emit_get_gl_proc_addr for the full
+        # rationale (identical on both platforms).
+        self.emitf("mov rdi, rax", "call SDL_GL_GetProcAddress")
+
     def _emit_libc_memcpy(self) -> None:
         self.emitf("mov rdx, rcx", "mov rsi, rbx", "mov rdi, rax", "call memcpy")
 
@@ -538,6 +547,7 @@ class LinuxCodegen(Codegen):
         "_gui_render_copy_ex", "_gui_render_copy_region",
         "_gui_joystick_axis", "_gui_joystick_button",
         "_gui_list_buf_addr", "_gui_update_texture", "_gui_create_texture_argb",
+        "_gl_shader_source_1",
     )
     _AUDIO_SYMS = (
         "_audio_load_wav",
@@ -1399,6 +1409,28 @@ class LinuxCodegen(Codegen):
                            "mov rdx, rsi",             # access -> 3rd arg
                            "mov esi, 0x16362004",      # SDL_PIXELFORMAT_ARGB8888
                            "call SDL_CreateTexture",
+                           "leave", "ret")
+
+            # _gl_shader_source_1(rdi=glShaderSource_fn_ptr, rsi=shader_id,
+            #                     rdx=source_str) -> rax
+            # Calls glShaderSource(shader, 1, &source_str, NULL) through the
+            # dynamically-resolved function pointer in rdi (see gl_import()
+            # / _gen_dynamic_call) -- see target_windows.py's identical stub
+            # for the full rationale (one-element char*[1] array built on
+            # this stub's own stack, since count=1/length=NULL is valid GL
+            # usage for a single NUL-terminated source string).
+            if "_gl_shader_source_1" in self.ffi_called:
+                self.label("_gl_shader_source_1")
+                self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+                self.emitf("mov [rbp-8], rdi",    # fn ptr
+                           "mov [rbp-16], rsi",   # shader id
+                           "mov [rbp-24], rdx")   # source str ptr
+                self.emitf("mov rax, [rbp-24]", "mov [rbp-32], rax")  # string[0]
+                self.emitf("mov rdi, [rbp-16]",   # shader
+                           "mov esi, 1",            # count = 1
+                           "lea rdx, [rbp-32]",      # &string[0]
+                           "xor rcx, rcx",            # length = NULL
+                           "call [rbp-8]",
                            "leave", "ret")
 
             # _gui_query_texture_w/h(rdi=texture) -> rax (width or height)

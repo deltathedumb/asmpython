@@ -89,6 +89,122 @@ deliverable.
   is also falsy, so all three call sites now test the pointer for NULL
   before dereferencing it.
 
+- **Float binop/compare spilled the left operand across an `rsp`-touching
+  right operand** (`codegen.py` `_gen_binop_float`, `_gen_compare`): both
+  spilled xmm0 (the left operand) with a raw `sub rsp, 8` / `movsd [rsp],
+  xmm0` while evaluating the right operand. If the right operand was, or
+  contained, an FFI call (e.g. `math.pow`) — which itself adjusts `rsp` for
+  Win64 shadow space / stack-passed arguments — `[rsp]` no longer pointed
+  at the spilled value once the call returned, silently reading whatever
+  garbage the call had left on the stack instead. Confirmed with
+  `f0 + (1.0 - f0) * math.pow(1.0 - ct, 5.0)`: the `math.pow` call itself
+  returned the correct value, but the surrounding `+`/`*` read back garbage
+  for the left operand, producing ~75000 instead of ~0.04. Fixed by
+  spilling to a stable `rbp`-relative scratch slot (keyed by the `BinOp`/
+  `Compare` node's `id()`, reserved in `_collect_locals`) instead of the
+  stack pointer, matching every other "park a value across a
+  call-containing evaluation" scratch slot in this file (`__binstr_`,
+  `__listcat_`, `__ffi_arg_`, ...).
+
+- **`@handle.imported` dynamic calls (`_gen_dynamic_call`) skipped Win64
+  shadow-space reservation for 1-4 argument calls** (`codegen.py`): the
+  indirect `call rax` through a `GetProcAddress`/`SDL_GL_GetProcAddress`-
+  resolved function pointer only reserved the mandatory 32-byte shadow
+  space when the call had 5+ arguments (i.e. needed stack-passed args
+  anyway); a 1-4 argument call left `stack_positions` empty and skipped
+  `sub rsp` entirely, violating the Win64 ABI requirement that *every*
+  call reserve shadow space regardless of argument count. The callee
+  (any real Windows DLL function, confirmed with `glGetString` resolved
+  via `SDL_GL_GetProcAddress`) then used that unreserved stack space as
+  its own scratch area, silently corrupting the caller's frame — no
+  crash, no error, just a wrong/garbage result with no signal that
+  anything had gone wrong. Fixed by always reserving shadow space before
+  the indirect call.
+
+- **`@handle.imported` dynamic calls sign-extended every `-> int` return,
+  corrupting genuine pointer returns** (`codegen.py` `_gen_dynamic_call`):
+  unlike `_gen_ffi_call` (which has an explicit `ret_conv="ptr"` opt-out),
+  every dynamically-resolved call with an `int`-annotated return got
+  `movsxd rax, eax` — correct for a real 32-bit `int`/`GLenum` return, but
+  silently truncating-then-sign-extending any function that actually
+  returns a 64-bit pointer through an `int`-typed stub (there's no way to
+  introspect the real C signature for a `GetProcAddress`/dlsym-resolved
+  function, so the stub's annotation is a guess). Confirmed with
+  `glGetString`, whose real return type is `const GLubyte*`. Fixed by
+  leaving `rax` untouched after the call: correct for a real pointer, and
+  still correct for a real 32-bit return since x86-64 callees compiled by
+  both MSVC and GCC already zero-extend `eax` into `rax` via the
+  architecture's implicit upper-32-bit zeroing on a 32-bit `mov`/`ret`.
+
+- **`@handle.imported` dynamic calls wrote stack-spilled arguments (5th+
+  parameter) before resolving the function pointer, letting the resolver's
+  own call clobber them** (`codegen.py` `_gen_dynamic_call`): the stack-arg
+  write loop ran inside the already-`sub rsp`-adjusted call frame, then
+  `call _runtime_dict_get_default` (the pointer lookup) executed using
+  that *same* frame for its own Win64 shadow space — silently overwriting
+  the stack-passed arguments at `[rsp+32..)` before the real indirect call
+  ever ran. Confirmed with `glReadPixels` (7 args: 4 register-passed, 3
+  stack-spilled including the output buffer pointer) — the call reached
+  the correct, real `glReadPixels`, but always read back zeroed/garbage
+  data regardless of input, while the simpler 2-arg `glGetIntegerv` (no
+  stack spill) worked correctly. Fixed by resolving the function pointer
+  *before* reserving the call's own stack frame / writing stack args, the
+  same ordering `_gen_import_binary`'s original comment already intended
+  but `_gen_dynamic_call`'s stack-spill path didn't follow.
+
+- **`gl_import()` builtin added** (`sema.py`, `codegen.py`,
+  `target_windows.py`, `target_linux.py`): like `import_binary(path)`, but
+  resolves every `@<handle>.imported` function via `SDL_GL_GetProcAddress`
+  instead of `LoadLibrary`+`GetProcAddress`/`dlsym` — required for OpenGL
+  functions beyond GL 1.1, which aren't statically exported by
+  `opengl32.dll`/`libGL.so` and must be resolved against whichever GL
+  context is current instead. Takes no arguments (unlike `import_binary`,
+  there's no library path — resolution always targets the current
+  context). Reuses the exact same `@handle.imported`/`imported_funcs`
+  machinery as `import_binary`, just with a different resolver
+  (`_emit_get_gl_proc_addr`, new per-target) and no library-handle step.
+  Verified end-to-end against a real GPU (driver-reported
+  `GL_VERSION`/`GL_VENDOR`/`GL_RENDERER` resolve and read back correctly;
+  a real GLSL shader pair compiles, links, and renders an actual
+  hardware-rasterized triangle — see `pugtk`'s `gl_triangle.py`) —
+  exercised all three shadow-space/truncation/stack-spill fixes above,
+  each first surfaced by this path.
+
+- **`gl_import()` calls silently corrupted every `GLfloat` argument/
+  return value** (`codegen.py` `_gen_dynamic_call`): asmpython's `float`
+  type is always a 64-bit C `double` — there is no 32-bit `float` type
+  anywhere in the language. OpenGL's API is `GLfloat` (32-bit) throughout
+  (`glClearColor`, `glUniform*f`, ...; only a handful of legacy/fixed-
+  function entry points like `glDepthRange` genuinely take `GLdouble`).
+  Loading a double's raw 64 bits into an xmm register and calling a
+  function that reads it as a 32-bit float reads garbage: a double `1.0`'s
+  low 32 bits happen to decode as float `0.0`, which is exactly why
+  `glClearColor(1.0, 0.0, 0.0, 1.0)` visibly did nothing — every channel
+  silently became `0.0`. Confirmed via direct disassembly comparison
+  against a hand-written C program calling the identical
+  `SDL_GL_GetProcAddress`-resolved function pointer: both produced
+  byte-identical machine code for the call site itself, and a minimal
+  hand-assembled repro linked into the *working* C program reproduced the
+  exact same silent-zero bug — conclusively isolating the issue to the
+  double/float width mismatch rather than the call/resolution mechanism
+  (which is correct, as the three shadow-space/truncation/stack-spill
+  fixes above already demonstrated by fixing *other* real bugs along the
+  way). Fixed by narrowing every `float` argument to a 32-bit single
+  (`cvtsd2ss`) before loading it into the call's xmm register, and
+  widening a `float`-typed return value back to a double (`cvtss2sd`)
+  after the call — but only for handles created via `gl_import()`
+  specifically (tracked in the new `self.gl_import_handles`), and only
+  for functions not in the new `_GL_DOUBLE_FUNCS` allowlist (`glDepthRange`,
+  `glClearDepth`, and the small set of other genuine `GLdouble` legacy
+  entry points) — `import_binary()`-loaded libraries and those few GL
+  functions keep using real doubles, since narrowing them would
+  reintroduce the same corruption in the opposite direction. Verified:
+  `glClearColor`/`glUniform3f` now read back exactly the requested values
+  via `glGetFloatv`, `glDepthRange` still reads back correctly via
+  `glGetDoublev`, and `gl_triangle.py` now renders the correct dark
+  background and orange triangle (previously: blue background, black
+  triangle) — screenshot-confirmed.
+
 ### Known issues
 
 - The selfhost binary (asmpython compiling itself) still segfaults on a

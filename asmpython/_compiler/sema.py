@@ -6566,6 +6566,24 @@ class SemaAnalyzer:
                 )
             e.inferred_type = "instance:DynamicModule"
             return
+        if e.func == "gl_import":
+            # gl_import() -> a GL-function-pointer-table handle, the same
+            # `@<assigned-name>.imported` resolution mechanism as
+            # import_binary() (see Codegen.imported_funcs), but resolving
+            # each function via SDL_GL_GetProcAddress instead of
+            # LoadLibrary+GetProcAddress/dlsym -- the right lookup for
+            # OpenGL functions beyond GL 1.1, which aren't necessarily
+            # exported directly by opengl32.dll/libGL.so and must be
+            # resolved through the active GL context instead. Takes no
+            # arguments: unlike import_binary(path), there's no library
+            # path -- SDL_GL_GetProcAddress always resolves against
+            # whichever GL context is current.
+            if len(e.args) != 0:
+                raise SemaError(
+                    f"gl_import() takes 0 arguments, got {len(e.args)}", e.pos
+                )
+            e.inferred_type = "instance:DynamicModule"
+            return
         if e.func in BUILTINS:
             lo, hi = BUILTINS[e.func]
             if not (lo <= len(e.args) <= hi):
