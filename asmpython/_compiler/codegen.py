@@ -301,12 +301,39 @@ class Codegen:
         # function in its list via GetProcAddress/dlsym immediately, storing
         # each pointer keyed by name on the handle instance — see
         # _gen_constructor-adjacent dynamic-import codegen.
+        #
+        # Also scans class methods (mod.classes[*].methods), not just
+        # top-level mod.funcs: a class can wrap a set of GL bindings behind
+        # its own API (e.g. pugtk's GLRenderer3D) instead of forcing every
+        # caller to hand-declare the same ~20 top-level @glfns.imported
+        # stubs. `handle` (the `@<handle>.imported` decorator's receiver)
+        # still has to be a name resolvable where the decorator itself is
+        # evaluated -- a module-level `glfns = gl_import()`, since Python
+        # evaluates a class's decorators once, at class-definition time,
+        # not per-instance. Methods compile with `self` as their first
+        # parameter; _gen_dynamic_call's plain_params helper below strips
+        # it before marshalling so `self` is never sent to the GL call.
         self.imported_funcs: dict[str, list[tuple[str, A.FuncDef]]] = {}
         for f in mod.funcs:
             for deco in f.decorators:
                 if deco.endswith(".imported"):
                     handle_name = deco[: -len(".imported")]
                     self.imported_funcs.setdefault(handle_name, []).append((f.name, f))
+        # (class_name, method_name) -> handle_name, the reverse direction:
+        # at a `some_instance.glClearColor(...)` call site, `some_instance`
+        # has nothing to do with `glfns` (the handle) syntactically -- only
+        # `some_instance`'s static class, cross-referenced against this
+        # table, says the call should dispatch through `glfns`'s resolved
+        # function pointer instead of compiling as an ordinary method call
+        # to GLRenderer3D.glClearColor's literal (stub) body.
+        self.imported_method_handle: dict[tuple[str, str], str] = {}
+        for cls in mod.classes:
+            for m in cls.methods:
+                for deco in m.decorators:
+                    if deco.endswith(".imported"):
+                        handle_name = deco[: -len(".imported")]
+                        self.imported_funcs.setdefault(handle_name, []).append((m.name, m))
+                        self.imported_method_handle[(cls.name, m.name)] = handle_name
         # Exception-type RTTI: builtins get the fixed ids above; user classes
         # deriving (transitively) from a builtin exception get the next ids,
         # assigned in declaration order so output is deterministic.
@@ -1565,6 +1592,9 @@ class Codegen:
                 self._cl_define(info, f"__{expr.func}_name_{id(expr)}")
             if expr.func == "setattr":
                 self._cl_define(info, f"__setattr_name_{id(expr)}")
+            if expr.func == "gl_resolve":
+                self._cl_define(info, f"__glresolve_dict_{id(expr)}")
+                self._cl_define(info, f"__glresolve_ptr_{id(expr)}")
                 self._cl_define(info, f"__setattr_val_{id(expr)}")
             # int(s, base) parks the base across the string's evaluation.
             if expr.func == "int" and len(expr.args) == 2:
@@ -1803,6 +1833,44 @@ class Codegen:
                             "float" if base == "float" else "int",
                         )
                     self._cl_define(info, f"__dyncall_ptr_{id(expr)}")
+                    # Holds the handle dict pointer across a GL call's
+                    # lazy-resolve _runtime_dict_set (see _gen_dynamic_call's
+                    # is_gl branch). Reserved unconditionally here (cheap,
+                    # one frame slot) rather than threading "is this
+                    # actually a gl_import() handle" through this scan too.
+                    self._cl_define(info, f"__dyncall_gldict_{id(expr)}")
+            # `instance.glClearColor(args)` where glClearColor is a
+            # `@glfns.imported` *method* (see imported_method_handle /
+            # _gen_method_call) -- same scratch-slot shape as the direct
+            # `glfns.glClearColor(...)` case just above, just matched via
+            # the receiver's static class instead of expr.obj being the
+            # handle itself, and offset past `self` in param_types.
+            _recv_ty = A.expr_type(expr.obj)
+            if _recv_ty.startswith("instance:"):
+                _cls_name = _recv_ty[len("instance:"):]
+                _handle = self.imported_method_handle.get((_cls_name, expr.method))
+                if _handle is not None:
+                    _funcdef = None
+                    for _fname, _fdef in self.imported_funcs.get(_handle, []):
+                        if _fname == expr.method:
+                            _funcdef = _fdef
+                            break
+                    if _funcdef is not None:
+                        for k in range(len(expr.args)):
+                            pidx = k + 1  # skip `self`
+                            annot = (
+                                _funcdef.param_types[pidx]
+                                if pidx < len(_funcdef.param_types)
+                                else None
+                            )
+                            base = annot[0] if annot else "int"
+                            self._cl_define(
+                                info,
+                                f"__dyncall_arg_{id(expr)}_{k}",
+                                "float" if base == "float" else "int",
+                            )
+                        self._cl_define(info, f"__dyncall_ptr_{id(expr)}")
+                        self._cl_define(info, f"__dyncall_gldict_{id(expr)}")
             if not (isinstance(expr.obj, A.Name) and expr.obj.name in self.imported_modules):
                 # String methods spill the object pointer (and one extra
                 # for replace's 2-arg signature) across argument eval. An
@@ -10634,6 +10702,28 @@ class Codegen:
             if funcdef is not None:
                 self._gen_dynamic_call(e, funcdef, info)
                 return
+        # `some_instance.glClearColor(args)` where glClearColor is a
+        # `@<handle>.imported`-decorated *method* (e.g. GLRenderer3D
+        # wrapping its own GL bindings instead of forcing every caller to
+        # hand-declare top-level @glfns.imported stubs) -- cross-reference
+        # the receiver's static class against imported_method_handle to
+        # find which handle to dispatch through, then reuse the exact same
+        # _gen_dynamic_call as the direct `glfns.glClearColor(...)` case
+        # above, just with `self` excluded from the argument list (it's a
+        # real asmpython instance pointer, not part of the GL signature).
+        recv_ty = A.expr_type(e.obj)
+        if recv_ty.startswith("instance:"):
+            cls_name = recv_ty[len("instance:"):]
+            handle_name = self.imported_method_handle.get((cls_name, e.method))
+            if handle_name is not None:
+                funcdef = None
+                for fname, fdef in self.imported_funcs[handle_name]:
+                    if fname == e.method:
+                        funcdef = fdef
+                        break
+                if funcdef is not None:
+                    self._gen_dynamic_call(e, funcdef, info, handle_name=handle_name, skip_self=True)
+                    return
         # `ClassName.method(args)`: @staticmethod / @classmethod called on the
         # class itself. Static methods take args verbatim; class methods get an
         # implicit leading `cls` (passed as null — asmpython has no class
@@ -12706,6 +12796,41 @@ class Codegen:
                     "call _runtime_dict_get_default",
                 )
             return
+        if e.func == "gl_resolve":
+            # gl_resolve(handle, "funcName") -> int: force the lazy resolve-
+            # and-cache _gen_dynamic_call normally does on a function's
+            # first real call (see gl_import()'s docstring for why
+            # resolution is lazy at all), without calling through the
+            # pointer -- for functions whose stub exists only to register
+            # a pointer for a hand-marshalled helper to use directly (e.g.
+            # glShaderSource, called through gl_shader_source_1 instead of
+            # any @handle.imported dispatch, since its real char**
+            # signature doesn't fit that marshalling).
+            if not isinstance(e.args[1], A.StrLit):
+                raise NotImplementedError(
+                    "gl_resolve()'s second argument must be a string literal"
+                )
+            name_label, _ = self.intern_string(e.args[1].value)
+            dict_slot = info.locals_[f"__glresolve_dict_{id(e)}"]
+            ptr_slot = info.locals_[f"__glresolve_ptr_{id(e)}"]
+            self.gen_expr(e.args[0], info)  # rax = handle dict
+            self.emitf(f"mov [rbp{dict_slot:+d}], rax")
+            self.emitf(f"lea rbx, [{name_label}]", "xor rcx, rcx", "call _runtime_dict_get_default")
+            self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+            not_null = self.fresh("glresolve_cached")
+            self.emitf("test rax, rax", f"jnz {not_null}")
+            self.emitf(f"lea rax, [{name_label}]")
+            self._emit_get_gl_proc_addr()  # rax = resolved function ptr, or NULL
+            self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+            self.emitf(
+                "mov rcx, rax",
+                f"lea rbx, [{name_label}]",
+                f"mov rax, [rbp{dict_slot:+d}]",
+                "call _runtime_dict_set",
+            )
+            self.label(not_null)
+            self.emitf(f"mov rax, [rbp{ptr_slot:+d}]")
+            return
         if e.func == "hasattr":
             # hasattr(obj, name) -> dict_contains(obj, name) (0/1). Name may be
             # a literal or a runtime string, same as getattr above.
@@ -13984,22 +14109,31 @@ class Codegen:
     def _gen_gl_import(self, stmt: A.Assign, info: FuncInfo, mem: str) -> None:
         """`handle = gl_import()`.
 
-        Like _gen_import_binary(), but resolves every `@<handle>.imported`
-        function via SDL_GL_GetProcAddress (see _emit_get_gl_proc_addr)
-        instead of LoadLibrary+GetProcAddress/dlsym -- there's no library
-        path or handle to load (SDL2 is already linked, and GL function
-        resolution goes through the active GL context instead of a DLL),
-        so this skips straight to resolving each function by name.
+        Allocates an empty function-pointer-table dict; nothing is resolved
+        here. Resolution is LAZY, done by _gen_dynamic_call on each
+        function's first real call (see the "is_gl" lazy-resolve branch
+        there) -- deliberately not eager like _gen_import_binary(), for two
+        reasons specific to GL:
 
-        Requires a current GL context (lumen.gl.create_context() or
-        equivalent must run first) -- SDL_GL_GetProcAddress returns NULL
-        for every symbol otherwise, which would make every resolved
-        function pointer NULL and crash on first call.
-
-        SDL_GL_GetProcAddress's `extern` declaration and SDL2-link
-        detection are registered eagerly in __init__ (a module-body scan
-        for any top-level `gl_import()` call), not here -- by the time this
-        method runs, generate() has already emitted the `extern` lines.
+        1. SDL_GL_GetProcAddress requires a current GL context; resolving
+           every @<handle>.imported function the moment `gl_import()` runs
+           would return NULL for all of them whenever that line executes
+           before context creation. And it always does in one important
+           case: asmpython's whole-program bundler prepends a class's
+           required module-level globals (see program.py's
+           _materialize_value_imports class_origin handling) to the very
+           TOP of the compiled program -- before ANY of the user's own
+           setup code (including their own context creation) has run.
+           Lazy resolution sidesteps needing the bundler to special-case
+           "but not THIS global, place it after context creation" (a
+           dependency the bundler has no way to know about, since nothing
+           about `glfns = gl_import()` syntactically says "must run after
+           SDL_GL_CreateContext").
+        2. It also matches how real GL loaders (GLAD, GLEW, SDL's own
+           examples) behave -- resolve what you actually use, when you
+           first use it -- so a program that only calls a handful of GL
+           functions doesn't pay for resolving every @imported stub it
+           happens to have declared.
         """
         cap = 8
         self._emit_malloc(self.DICT_HEADER)
@@ -14014,17 +14148,6 @@ class Codegen:
         dict_slot_off = info.locals_[f"__glimport_dictslot_{id(stmt)}"]
         self.emitf(f"mov rax, {mem}", f"mov [rbp{dict_slot_off:+d}], rax")
         self._emit_dict_alloc_order_buf(cap, dict_slot_off)
-
-        for func_name, _funcdef in self.imported_funcs.get(stmt.target, []):
-            name_label, _ = self.intern_string(func_name)
-            self.emitf(f"lea rax, [{name_label}]")
-            self._emit_get_gl_proc_addr()  # rax = function ptr, or NULL
-            self.emitf(
-                "mov rcx, rax",
-                f"lea rbx, [{name_label}]",
-                f"mov rax, {mem}",
-                "call _runtime_dict_set",
-            )
 
     def _gen_constructor(self, e: A.Call, info: FuncInfo) -> None:
         """ClassName(args)  ->  rax = pointer to new instance.
@@ -14418,11 +14541,29 @@ class Codegen:
             # into RAX for int returns.
             self.emitf("movsxd rax, eax")
 
-    def _gen_dynamic_call(self, e: A.MethodCall, funcdef: A.FuncDef, info: FuncInfo) -> None:
+    def _gen_dynamic_call(
+        self,
+        e: A.MethodCall,
+        funcdef: A.FuncDef,
+        info: FuncInfo,
+        handle_name: str | None = None,
+        skip_self: bool = False,
+    ) -> None:
         """`handle.func(args)` for a `@handle.imported` function: marshal args
         exactly like `_gen_ffi_call`, but call through the function pointer
         GetProcAddress/dlsym already resolved into the handle dict (keyed by
         `func`'s name) instead of a static `extern` symbol.
+
+        `handle_name`/`skip_self` cover the wrapped-in-a-class shape (e.g.
+        `instance.glClearColor(...)` where glClearColor is a `@glfns.imported`
+        *method* on instance's class, not a direct `glfns.glClearColor(...)`
+        call): `e.obj` is the instance (its own dict, unrelated to the GL
+        handle), so the handle dict has to be fetched by `handle_name`
+        instead of by evaluating `e.obj`; `funcdef.param_types`/`.params`
+        still include `self` as their first entry (it's a real method), so
+        `skip_self` drops that entry when matching against `e.args` (which,
+        being the call's actual argument list, never includes the implicit
+        receiver).
 
         Scalar (int/float/str-as-pointer) parameters are supported, plus
         `list[int]`/`list[float]` as `list_buf` (the list's raw backing
@@ -14449,21 +14590,30 @@ class Codegen:
         tripped correctly as asmpython doubles; narrowing THEM would be
         the new bug).
         """
+        effective_handle: str | None = handle_name
+        if effective_handle is None and isinstance(e.obj, A.Name):
+            effective_handle = e.obj.name
         is_gl: bool = (
-            isinstance(e.obj, A.Name)
-            and e.obj.name in self.gl_import_handles
+            effective_handle is not None
+            and effective_handle in self.gl_import_handles
             and funcdef.name not in self._GL_DOUBLE_FUNCS
         )
+        # When skip_self is set, funcdef.param_types[0] is `self`'s
+        # annotation slot (always None/unused) -- offset past it so
+        # param_types[1:] lines up positionally with e.args, the same way
+        # it already does for a plain function/direct handle call.
+        param_offset = 1 if skip_self else 0
         arg_types: list[str] = []
         for i in range(len(e.args)):
-            annot = funcdef.param_types[i] if i < len(funcdef.param_types) else None
+            pidx = i + param_offset
+            annot = funcdef.param_types[pidx] if pidx < len(funcdef.param_types) else None
             base = annot[0] if annot else "int"
             if base == "list":
                 arg_types.append("list_buf")
                 continue
             if base not in ("int", "float", "str"):
                 raise NotImplementedError(
-                    f"@{e.obj.name}.imported function {funcdef.name!r}: "
+                    f"@{effective_handle}.imported function {funcdef.name!r}: "
                     f"parameter type {base!r} is not supported "
                     "(only int/float/str/list[int]/list[float])"
                 )
@@ -14523,9 +14673,42 @@ class Codegen:
         # stack-spilled args were always read back as garbage/zero).
         ptr_slot = info.locals_[f"__dyncall_ptr_{id(e)}"]
         name_label, _ = self.intern_string(funcdef.name)
-        self.gen_expr(e.obj, info)  # rax = handle dict
-        self.emitf(f"lea rbx, [{name_label}]", "xor rcx, rcx", "call _runtime_dict_get_default")
-        self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+        if handle_name is not None:
+            # Method-wrapped form: the handle dict is a module-level global
+            # (`glfns`, not `e.obj` -- e.obj is `self`/the instance, an
+            # unrelated dict) referenced purely by name, so synthesize the
+            # same Name-lookup a direct `glfns.func(...)` call already does.
+            self.gen_expr(A.Name(name=handle_name, pos=e.pos), info)  # rax = handle dict
+        else:
+            self.gen_expr(e.obj, info)  # rax = handle dict
+        if is_gl:
+            # Lazy resolve-and-cache (see _gen_gl_import's docstring for
+            # why gl_import() can't resolve eagerly): look up the cached
+            # pointer first; a NULL/missing result means "not resolved
+            # yet" (a real GL function pointer is never NULL once a
+            # context exists), so resolve it via SDL_GL_GetProcAddress and
+            # store it back into the handle dict before proceeding, the
+            # same one-time cost _gen_gl_import used to pay for every
+            # function up front regardless of whether it was ever called.
+            dict_slot = info.locals_[f"__dyncall_gldict_{id(e)}"]
+            self.emitf(f"mov [rbp{dict_slot:+d}], rax")  # save handle dict
+            self.emitf(f"lea rbx, [{name_label}]", "xor rcx, rcx", "call _runtime_dict_get_default")
+            self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+            not_null = self.fresh("gllazy_resolved")
+            self.emitf("test rax, rax", f"jnz {not_null}")
+            self.emitf(f"lea rax, [{name_label}]")
+            self._emit_get_gl_proc_addr()  # rax = resolved function ptr, or NULL
+            self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
+            self.emitf(
+                "mov rcx, rax",
+                f"lea rbx, [{name_label}]",
+                f"mov rax, [rbp{dict_slot:+d}]",
+                "call _runtime_dict_set",
+            )
+            self.label(not_null)
+        else:
+            self.emitf(f"lea rbx, [{name_label}]", "xor rcx, rcx", "call _runtime_dict_get_default")
+            self.emitf(f"mov [rbp{ptr_slot:+d}], rax")
         self.emitf(f"sub rsp, {area}")
         for k, i in enumerate(stack_positions):
             self.emitf(

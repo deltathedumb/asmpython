@@ -1,19 +1,24 @@
 """lumen.gl — OpenGL context setup and GL constants for hosted (SDL2)
 targets.
 
-Part of `lumen`, asmpython's graphics/audio/input ecosystem. Unlike
-`lumen`/`lumen.framebuffer`/`lumen.audio`, this module does *not* wrap the
-GL function calls themselves in a class -- `@<handle>.imported` function
-pointers (the mechanism gl_import() uses; see the `gl_import()` builtin
-and asmpython's CHANGELOG) only resolve from plain top-level function
-definitions in the compiled program, not methods on an imported class. So
-each program using GL declares its own top-level `@gl.imported def
-glXxx(...)` stubs for the functions it actually calls (see pugtk's
-`_renderer3d_gl.py` for a complete, working set), and this module supplies
-everything around that: window/context setup and the numeric GL constants
-those calls need (GL_TRIANGLES, GL_FLOAT, GL_COMPILE_STATUS, ...).
+Part of `lumen`, asmpython's graphics/audio/input ecosystem. This module
+does *not* wrap the GL function calls themselves -- `@<handle>.imported`
+function pointers (the mechanism gl_import() uses; see the `gl_import()`
+builtin and asmpython's CHANGELOG) resolve from `@handle.imported`-
+decorated functions or methods declared in the compiled program itself.
+`handle` (here, `glfns`) has to be a name resolvable where the decorator
+is evaluated -- a module-level `glfns = gl_import()`, since Python
+evaluates a class's decorators once at class-definition time, not per-
+instance, so the bindings can live as top-level functions OR as methods
+on a class (e.g. pugtk's GLRenderer3D wraps its own GL bindings as
+methods, giving callers a plain `GLRenderer3D(window, camera)`
+constructor with no GL boilerplate visible). This module supplies
+everything around the bindings themselves: window/context setup and the
+numeric GL constants those calls need (GL_TRIANGLES, GL_FLOAT,
+GL_COMPILE_STATUS, ...).
 
-Typical setup::
+Typical low-level setup (see pugtk.GLRenderer3D for the higher-level,
+no-boilerplate path)::
 
     import lumen
     import lumen.gl as gl
@@ -132,6 +137,23 @@ TRIANGLE_FAN:           int = 0x0006
 DEPTH_TEST:             int = 0x0B71
 CULL_FACE:              int = 0x0B44
 BLEND:                  int = 0x0BE2
+
+# ---- Depth comparison functions (glDepthFunc) ------------------------------------
+NEVER:                  int = 0x0200
+LESS:                   int = 0x0201
+EQUAL:                  int = 0x0202
+LEQUAL:                 int = 0x0203
+GREATER:                int = 0x0204
+NOTEQUAL:               int = 0x0205
+GEQUAL:                 int = 0x0206
+ALWAYS:                 int = 0x0207
+
+# ---- Face culling (glCullFace/glFrontFace) -------------------------------------
+FRONT:                  int = 0x0404
+BACK:                   int = 0x0405
+FRONT_AND_BACK:         int = 0x0408
+CW:                     int = 0x0900
+CCW:                    int = 0x0901
 
 # ---- Clear mask bits (glClear) --------------------------------------------------
 COLOR_BUFFER_BIT:       int = 0x4000

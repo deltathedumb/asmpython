@@ -205,6 +205,86 @@ deliverable.
   background and orange triangle (previously: blue background, black
   triangle) — screenshot-confirmed.
 
+- **`@handle.imported` now works on class methods, not just top-level
+  functions** (`codegen.py` `_gen_method_call`/`_gen_dynamic_call`): a
+  class can now wrap a set of dynamically-resolved bindings (e.g. GL
+  functions) behind its own constructor/API instead of forcing every
+  caller to hand-declare the same top-level `@handle.imported` stubs
+  before using it — `pugtk`'s `GLRenderer3D` is the motivating case
+  (~20 GL bindings encapsulated as methods, giving callers a plain
+  `GLRenderer3D(window, camera)` constructor). The decorator's handle
+  (`@<handle>.imported`) still has to be a name resolvable where Python
+  evaluates class decorators — a module-level `glfns = gl_import()`, since
+  decorators run once at class-definition time, not per-instance.
+  Implementation: `imported_funcs` now also scans `mod.classes[*].methods`
+  (previously `mod.funcs` only), and a new reverse index
+  (`imported_method_handle: (class_name, method_name) -> handle_name`)
+  lets `_gen_method_call` recognize `some_instance.glClearColor(...)` as a
+  dynamic dispatch through `glfns` even though `some_instance` (the
+  receiver) has nothing syntactically to do with the handle. `_gen_dynamic_call`
+  gained `handle_name`/`skip_self` parameters: the handle dict is now
+  fetched by name (a synthesized `A.Name` lookup) instead of always
+  evaluating the call's receiver expression, and parameter-type lookups
+  are offset by 1 to skip a method's implicit `self` slot, which has no
+  corresponding entry in the call site's real argument list. Verified
+  end-to-end against real GL state (`glClearColor`/`glReadPixels` called
+  as methods on a wrapper class, confirmed via pixel readback) on top of
+  the float-narrowing fix above.
+
+- **Whole-program bundler missed globals a merged class depends on**
+  (`program.py` `load_program`/`_materialize_value_imports`): a module-level
+  value (e.g. `glfns = gl_import()`) referenced only from inside a class's
+  methods — never via an explicit `from module import glfns` — was never
+  pulled into the entry module, so codegen treated it as an undefined
+  variable. The existing materialization pass only walked free names inside
+  directly-imported *functions*; it never looked inside merged *classes* at
+  all. Fixed by tracking `class_origin: dict[class_name -> source module]`
+  as classes are merged, and adding a `_class_free_names(cls)` walk (free
+  names across every method body) that feeds the same resolve/materialize
+  loop functions already used. Also surfaced a second gap: `gl_import` and
+  `import_binary` themselves were never in `_ALWAYS_AVAILABLE`, so even once
+  `glfns` was found as a free name, resolving *its own* initializer's call
+  target failed the same way — both builtins are now always-available.
+
+- **`gl_import()`-created handles resolved too early to ever work when
+  bundled** (`codegen.py` `_gen_gl_import`/`_gen_dynamic_call`): once the
+  bundler fix above started materializing `glfns = gl_import()` correctly,
+  it surfaced a deeper ordering problem — materialized globals are
+  prepended to the very top of the entry module's body, so `gl_import()`'s
+  eager resolution loop (`SDL_GL_GetProcAddress` for every `@imported` stub,
+  done once at the assignment) ran *before* the user's own GL context
+  creation code, meaning every pointer resolved to `NULL`. This isn't a
+  simple ordering bug to patch around — there's no single correct place to
+  put the materialized assignment relative to arbitrary user setup code.
+  Fixed architecturally: `gl_import()` now just allocates an empty handle
+  dict (`_gen_gl_import` no longer resolves anything), and resolution
+  happens lazily on first real use — `_gen_dynamic_call`'s GL path checks
+  the handle dict first, and only calls `SDL_GL_GetProcAddress` (caching the
+  result back into the dict) if the entry is still missing. Non-GL handles
+  (`import_binary()`) are unaffected — they still resolve at the call site
+  the same way as before, just sharing the now-slightly-refactored lookup
+  code path. Verified via a class wrapping `glClearColor`/`glClear`/
+  `glReadPixels`/`glGetError`, called well after context creation, with a
+  pixel readback confirming the resolved pointers are real and correct.
+
+- **Added `gl_resolve(handle, "name")` builtin** (`sema.py`, `codegen.py`):
+  a side effect of the laziness fix above is that `getattr(handle, "name", 0)`
+  — previously the documented way to fetch an `@imported` function's raw
+  pointer for manual use (e.g. passing `glShaderSource`'s pointer through to
+  `lumen.gl.shader_source`, which needs it directly rather than calling it
+  as a marshalled `@imported` stub) — silently breaks: `getattr` reads the
+  handle dict directly, bypassing the lazy-resolve-and-cache logic that now
+  only lives inside `_gen_dynamic_call`'s actual-call path. Rather than
+  special-casing `getattr` to know about GL laziness, added a dedicated
+  builtin with the same resolve-or-fetch-and-cache behavior as a real call,
+  minus actually invoking the function: `gl_resolve(glfns, "glShaderSource")`
+  returns the pointer, resolving and caching it on first use exactly like
+  calling `glfns.glShaderSource(...)` would. Sema requires the second
+  argument be a string literal (the same constraint `@imported` stub names
+  already have). Verified: `gl_resolve(glfns, "glShaderSource")` returns a
+  nonzero pointer that successfully drives a real shader compilation via
+  `lumen.gl.shader_source()`.
+
 ### Known issues
 
 - The selfhost binary (asmpython compiling itself) still segfaults on a

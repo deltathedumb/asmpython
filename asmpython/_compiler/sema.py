@@ -6584,6 +6584,32 @@ class SemaAnalyzer:
                 )
             e.inferred_type = "instance:DynamicModule"
             return
+        if e.func == "gl_resolve":
+            # gl_resolve(handle, "funcName") -> int (the resolved function
+            # pointer, or 0 if it's not a real GL function). Forces the
+            # same lazy resolve-and-cache _gen_dynamic_call does on a
+            # function's first real call (see gl_import()'s docstring),
+            # without actually calling through the pointer -- for a
+            # function whose real signature doesn't fit @handle.imported's
+            # plain int/float/str/list_buf marshalling (e.g. glShaderSource,
+            # which takes a char** and is called through the hand-marshalled
+            # gl_shader_source_1 helper instead), where the stub exists only
+            # to register the function's resolved pointer, never to be
+            # called through directly.
+            if len(e.args) != 2:
+                raise SemaError(
+                    f"gl_resolve() takes 2 arguments, got {len(e.args)}", e.pos
+                )
+            self._check_expr(e.args[0], scope)
+            self._check_expr(e.args[1], scope)
+            if A.expr_type(e.args[1]) != "str":
+                raise SemaError(
+                    "gl_resolve()'s second argument must be a str literal naming "
+                    "the function (e.g. \"glShaderSource\")",
+                    e.pos, ErrorCode.E_ARG_TYPE,
+                )
+            e.inferred_type = "int"
+            return
         if e.func in BUILTINS:
             lo, hi = BUILTINS[e.func]
             if not (lo <= len(e.args) <= hi):
