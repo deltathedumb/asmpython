@@ -590,24 +590,465 @@ def _build_strlit(ctx: FuncCtx, e: A.StrLit) -> Value:
     return ctx.builder().string_addr(e.value)
 
 
+# ---- format-spec parsing (pure; ported verbatim from codegen.py's
+# _cfmt_for_spec/_split_fmt_align/etc, codegen.py:3787-3969 — none of these
+# reference `self` in the original methods either, so the port is a direct
+# copy with `self.` dropped) ----
+
+def _fmt_cfmt_for_spec(spec: str, t: str) -> str | None:
+    """Translate a Python format spec (the part after `:`) into a C printf
+    format for a numeric value, or None if unsupported (caller falls back to
+    the default conversion). Mirrors codegen.py's _cfmt_for_spec."""
+    if not spec:
+        return None
+    if t == "float":
+        if spec and spec[-1] in "feEgG":
+            return "%" + spec
+        return None
+    if t == "int":
+        if spec and spec[-1] in "dxXo":
+            conv = spec[-1]
+            flags = spec[:-1]
+            return "%" + flags + "ll" + conv
+        if spec.isdigit() or (spec.startswith("0") and spec[1:].isdigit()):
+            return "%" + spec + "lld"
+        return None
+    return None
+
+
+def _fmt_parse_binary_spec(body: str) -> tuple[int, bool] | None:
+    """If `body` (an int format-spec, after any `[[fill]align]` prefix has
+    been removed) requests binary (`b`) formatting, return `(min_total_width,
+    prefix_flag)`. Mirrors codegen.py's _parse_binary_spec."""
+    if not body.endswith("b"):
+        return None
+    rest = body[:-1]
+    if rest and rest[0] in "+- ":
+        rest = rest[1:]
+    prefix_flag = rest.startswith("#")
+    if prefix_flag:
+        rest = rest[1:]
+    if rest and not rest.isdigit():
+        return None
+    return (int(rest) if rest else 0), prefix_flag
+
+
+def _fmt_strip_grouping_option(spec: str) -> tuple[str | None, str]:
+    """If `spec` contains a `,`/`_` grouping-option char, remove it and
+    return `(sep_char, spec_without_it)`. Mirrors codegen.py's
+    _strip_grouping_option."""
+    if "," in spec:
+        idx = spec.find(",")
+        return ",", spec[:idx] + spec[idx + 1:]
+    if "_" in spec:
+        idx = spec.find("_")
+        return "_", spec[:idx] + spec[idx + 1:]
+    return None, spec
+
+
+def _fmt_split_align(spec: str) -> tuple[str, str | None, str]:
+    """Split an optional `[[fill]align]` prefix off a format spec. Returns
+    (fill_char, align_char_or_None, rest). Mirrors codegen.py's
+    _split_fmt_align."""
+    if len(spec) >= 2 and spec[1] in "<>^=":
+        return spec[0], spec[1], spec[2:]
+    if len(spec) >= 1 and spec[0] in "<>^=":
+        return " ", spec[0], spec[1:]
+    return " ", None, spec
+
+
+def _fmt_split_width(body: str, t: str) -> tuple[int | None, str]:
+    """Split a leading width off `body` (after any `[[fill]align]` prefix
+    has been removed). Mirrors codegen.py's _split_fmt_width."""
+    if t == "str":
+        i = 0
+        while i < len(body) and body[i].isdigit():
+            i += 1
+        if i > 0 and body[i:] in ("", "s"):
+            return int(body[:i]), ""
+        return None, body
+    i = 0
+    while i < len(body) and body[i] in "+- #":
+        i += 1
+    prefix = body[:i]
+    j = i
+    if j < len(body) and body[j] == "0":
+        j += 1  # zero-pad flag: irrelevant once we pad ourselves
+    k = j
+    while k < len(body) and body[k].isdigit():
+        k += 1
+    if k == j:
+        return None, body
+    return int(body[j:k]), prefix + body[k:]
+
+
+def _fmt_split_str_width_precision(body: str) -> tuple[int | None, int | None]:
+    """Parse a `str` format-spec `body` of the form `[width][.precision][s]`.
+    Mirrors codegen.py's _split_str_width_precision."""
+    i = 0
+    while i < len(body) and body[i].isdigit():
+        i += 1
+    width = int(body[:i]) if i > 0 else None
+    j = i
+    precision = None
+    if j < len(body) and body[j] == ".":
+        k = j + 1
+        while k < len(body) and body[k].isdigit():
+            k += 1
+        if k > j + 1:
+            precision = int(body[j + 1 : k])
+            j = k
+    if j < len(body) and body[j] == "s":
+        j += 1
+    if j != len(body):
+        return None, None
+    return width, precision
+
+
+# ---- format-spec runtime calls (RawAsm wrappers around the existing
+# _runtime_* helpers codegen.py's format-spec machinery already uses —
+# every one is a self-contained internal label with the same rax/rbx/rcx/...
+# argument convention on both OSes, so each wrapper's target_text is
+# identical for both _X86_64_KEYS entries) ----
+
+def _build_str_concat_dup(ctx: FuncCtx, v: Value) -> Value:
+    # Fresh copy of a string. Needed after any cfmt-based sprintf
+    # (_build_int_fmt/_build_float_fmt), which return a pointer into the
+    # shared static itoa_str_buf rather than a fresh allocation — mirrors
+    # codegen.py's bare "call _runtime_str_concat_dup" following
+    # _emit_int_fmt/_emit_float_fmt (codegen.py:4087-4088).
+    return ctx.builder().raw_asm(
+        Kind.INT, [v], {k: "call _runtime_str_concat_dup" for k in _X86_64_KEYS},
+    )
+
+
+def _build_int_fmt(ctx: FuncCtx, v: Value, cfmt: str) -> Value:
+    # sprintf(itoa_str_buf, cfmt, v) -> rax = ptr into the shared static
+    # buffer (NOT freshly allocated). Mirrors codegen.py's _emit_int_fmt
+    # (target_linux.py:183-192, target_windows.py:275-283). `cfmt`'s
+    # address is passed as a second RawAsm arg (args[1] -> rbx by the fixed
+    # convention) rather than baked into target_text, since ssa_build.py
+    # defers string interning to the lowering stage (see ir.py's
+    # STRING_ADDR docstring) — there's no resolved NASM label name
+    # available yet to embed directly the way codegen.py's single-pass
+    # emission can.
+    b = ctx.builder()
+    fmt_v = b.string_addr(cfmt)
+    b = ctx.builder()
+    return b.raw_asm(
+        Kind.INT, [v, fmt_v],
+        {
+            "win64": "\n".join([
+                "mov r8, rax",
+                "mov rdx, rbx",
+                "lea rcx, [itoa_str_buf]",
+                "call sprintf",
+                "lea rax, [itoa_str_buf]",
+            ]),
+            "linux_x86_64": "\n".join([
+                "mov rdx, rax",
+                "mov rsi, rbx",
+                "lea rdi, [itoa_str_buf]",
+                "xor al, al",
+                "call sprintf",
+                "lea rax, [itoa_str_buf]",
+            ]),
+        },
+    )
+
+
+def _build_float_fmt(ctx: FuncCtx, v_float: Value, cfmt: str, hint: str) -> Value:
+    # Same idea as _build_int_fmt but for a Kind.FLOAT value: bitcast to raw
+    # bits first (the args[]->rax/rbx/... convention is integer-register
+    # only — see _float_to_int_bits's docstring), restored into xmm0 inside
+    # the RawAsm text right before the actual sprintf call. Mirrors
+    # codegen.py's _emit_float_fmt (target_linux.py:173-181,
+    # target_windows.py:265-273).
+    bits = _float_to_int_bits(ctx, v_float, hint)
+    b = ctx.builder()
+    fmt_v = b.string_addr(cfmt)
+    b = ctx.builder()
+    return b.raw_asm(
+        Kind.INT, [bits, fmt_v],
+        {
+            "win64": "\n".join([
+                "mov r8, rax",  # raw bits == the double's bits; Win64 passes
+                                # a variadic double through this GPR slot.
+                "mov rdx, rbx",
+                "lea rcx, [itoa_str_buf]",
+                "call sprintf",
+                "lea rax, [itoa_str_buf]",
+            ]),
+            "linux_x86_64": "\n".join([
+                "movq xmm0, rax",  # restore float bits (SysV variadic double needs xmm0)
+                "mov rsi, rbx",
+                "lea rdi, [itoa_str_buf]",
+                "mov al, 1",
+                "call sprintf",
+                "lea rax, [itoa_str_buf]",
+            ]),
+        },
+    )
+
+
+def _build_float_to_str_via_fmt_elem(ctx: FuncCtx, v_float: Value, hint: str) -> Value:
+    # Plain (no explicit numeric format) float -> str, routed through the
+    # shared _runtime_fmt_elem helper (rbx kind=2) instead of calling each
+    # target's _emit_float_to_str directly. _emit_float_to_str has internal
+    # NaN/inf-detection branching on Windows (multiple jump labels), which a
+    # RawAsm site can't safely contain (see IR-DESIGN.md "RawAsm text must
+    # not contain internal jump labels"). _runtime_fmt_elem is a single
+    # pre-existing internal label that already wraps exactly that
+    # target-specific logic once per program, so calling it sidesteps the
+    # restriction entirely — the same trick _build_print_value's float case
+    # already relies on (this file, above).
+    bits = _float_to_int_bits(ctx, v_float, hint)
+    b = ctx.builder()
+    kind_v = b.const(2)
+    b = ctx.builder()
+    return b.raw_asm(
+        Kind.INT, [bits, kind_v], {k: "call _runtime_fmt_elem" for k in _X86_64_KEYS},
+    )
+
+
+def _build_group_digits(ctx: FuncCtx, v: Value, sep: str) -> Value:
+    # _runtime_group_digits(rax=numeric string, rbx=sep byte) -> rax (fresh
+    # allocation). Mirrors codegen.py's _emit_group_digits.
+    b = ctx.builder()
+    sep_v = b.const(ord(sep))
+    b = ctx.builder()
+    return b.raw_asm(
+        Kind.INT, [v, sep_v], {k: "call _runtime_group_digits" for k in _X86_64_KEYS},
+    )
+
+
+def _build_group_digits_zeropad(ctx: FuncCtx, v: Value, width: int, sep: str) -> Value:
+    # _runtime_group_digits_zeropad(rax=numeric string, rbx=width,
+    # rcx=sep byte) -> rax (fresh allocation). Mirrors codegen.py's
+    # _emit_group_digits_zeropad.
+    b = ctx.builder()
+    width_v = b.const(width)
+    b = ctx.builder()
+    sep_v = b.const(ord(sep))
+    b = ctx.builder()
+    return b.raw_asm(
+        Kind.INT, [v, width_v, sep_v],
+        {k: "call _runtime_group_digits_zeropad" for k in _X86_64_KEYS},
+    )
+
+
+def _build_int_to_binary_str(ctx: FuncCtx, v: Value, width: int, prefix_flag: bool) -> Value:
+    # _runtime_int_to_binary(rax=n, rbx=min total width, rcx=prefix flag)
+    # -> rax (fresh allocation). Mirrors codegen.py's
+    # _emit_int_to_binary_str.
+    b = ctx.builder()
+    width_v = b.const(width)
+    b = ctx.builder()
+    prefix_v = b.const(1 if prefix_flag else 0)
+    b = ctx.builder()
+    return b.raw_asm(
+        Kind.INT, [v, width_v, prefix_v],
+        {k: "call _runtime_int_to_binary" for k in _X86_64_KEYS},
+    )
+
+
+def _build_str_pad(ctx: FuncCtx, v: Value, align: str, width: int, fill: str) -> Value:
+    # _runtime_str_ljust/_rjust/_center(rax=s, rbx=width, rcx=fill byte) ->
+    # rax (fresh allocation, dup-safe even when width doesn't exceed the
+    # value's length). Mirrors codegen.py's _gen_fstring_aligned's shared
+    # padding tail (codegen.py:4009-4016).
+    helper = {
+        "<": "_runtime_str_ljust",
+        ">": "_runtime_str_rjust",
+        "^": "_runtime_str_center",
+    }[align]
+    fill_byte = ord(fill[0]) if fill else 0x20
+    b = ctx.builder()
+    width_v = b.const(width)
+    b = ctx.builder()
+    fill_v = b.const(fill_byte)
+    b = ctx.builder()
+    return b.raw_asm(
+        Kind.INT, [v, width_v, fill_v], {k: f"call {helper}" for k in _X86_64_KEYS},
+    )
+
+
+def _build_str_truncate(ctx: FuncCtx, v: Value, n: int) -> Value:
+    # _runtime_str_truncate(rax=s, rbx=max length) -> rax (fresh
+    # allocation). Mirrors codegen.py's f-string `.precision` handling for
+    # str (codegen.py:3990-3991/4042).
+    b = ctx.builder()
+    n_v = b.const(n)
+    b = ctx.builder()
+    return b.raw_asm(
+        Kind.INT, [v, n_v], {k: "call _runtime_str_truncate" for k in _X86_64_KEYS},
+    )
+
+
+def _build_fmt_elem_quote(ctx: FuncCtx, v: Value) -> Value:
+    # repr()/!a of a plain string: wrap in quotes via _runtime_fmt_elem's
+    # str-quoted kind (rbx=1). Mirrors codegen.py's str+conv handling in
+    # both _gen_fstring_aligned (codegen.py:3988-3989) and the bottom of
+    # _gen_fstring_segment (codegen.py:4138-4141).
+    b = ctx.builder()
+    kind_v = b.const(1)
+    b = ctx.builder()
+    return b.raw_asm(
+        Kind.INT, [v, kind_v], {k: "call _runtime_fmt_elem" for k in _X86_64_KEYS},
+    )
+
+
+def _build_int_value_str(ctx: FuncCtx, seg: A.Expr, rest: str) -> Value:
+    # Evaluate int-typed `seg` to its formatted-string form (per the
+    # numeric format-spec `rest`), before any alignment/width padding. A
+    # bool/None `seg` formats as its plain 0/1 int value here — this helper
+    # is only reached once a non-empty format spec is already known to
+    # apply, where CPython's int.__format__ takes over regardless of
+    # is_bool_expr/is_none_expr (a *plain*, unspec'd bool/None segment is a
+    # separate, still-deferred case — see _build_fstring_segment below).
+    # Mirrors codegen.py's _gen_int_value_str (codegen.py:3879-3904).
+    sep, rest = _fmt_strip_grouping_option(rest)
+    binspec = _fmt_parse_binary_spec(rest) if rest else None
+    if binspec is not None:
+        width, prefix_flag = binspec
+        v = build_expr(ctx, seg)
+        return _build_int_to_binary_str(ctx, v, width, prefix_flag)
+    cfmt = _fmt_cfmt_for_spec(rest, "int") if rest else None
+    v = build_expr(ctx, seg)
+    s = _build_int_fmt(ctx, v, cfmt) if cfmt is not None else _build_int_to_str(ctx, v)
+    if sep is not None:
+        return _build_group_digits(ctx, s, sep)
+    return s
+
+
+def _build_fstring_aligned(
+    ctx: FuncCtx,
+    seg: A.Expr,
+    t: str,
+    conv: str,
+    width: int | None,
+    fill: str,
+    align: str,
+    rest: str,
+    precision: int | None,
+) -> Value:
+    # Evaluate `seg` to its (unpadded) string form, then pad/justify it to
+    # `width` with `fill`. Mirrors codegen.py's _gen_fstring_aligned
+    # (codegen.py:3970-4016).
+    if t == "str":
+        v = build_expr(ctx, seg)
+        if conv in ("r", "a"):
+            v = _build_fmt_elem_quote(ctx, v)
+        if precision is not None:
+            v = _build_str_truncate(ctx, v, precision)
+    elif t == "float":
+        sep, rest2 = _fmt_strip_grouping_option(rest) if rest else (None, rest)
+        cfmt = _fmt_cfmt_for_spec(rest2, "float") if rest2 else None
+        fv = build_expr(ctx, seg)
+        hint = f"{id(seg)}_fstralign"
+        v = (
+            _build_float_fmt(ctx, fv, cfmt, hint)
+            if cfmt is not None
+            else _build_float_to_str_via_fmt_elem(ctx, fv, hint)
+        )
+        if sep is not None:
+            v = _build_group_digits(ctx, v, sep)
+    else:
+        # A non-empty format spec on a bool/None formats the underlying int
+        # value (0/1), not "True"/"False"/"None" — matches CPython's
+        # int.__format__ (codegen.py:4003-4007).
+        v = _build_int_value_str(ctx, seg, rest)
+    w = width if width is not None else 0
+    return _build_str_pad(ctx, v, align, w, fill)
+
+
+def _build_fstring_unaligned_numeric(ctx: FuncCtx, seg: A.Expr, t: str, body: str) -> Value | None:
+    # The no-alignment-char numeric branch of codegen.py's
+    # _gen_fstring_segment (codegen.py:4044-4089): a recognized cfmt suffix
+    # (`d`/`x`/`X`/`o`/`f`/`e`/`g`, with width/zero-pad folded directly into
+    # the printf format string) or a `,`/`_` grouping separator, or both.
+    # Returns None when NEITHER applies (e.g. a bare numeric width with no
+    # align char on a float, which codegen.py's own `if cfmt is not None or
+    # sep is not None:` guard also leaves unformatted) — caller falls
+    # through to the unspec'd default.
+    sep, body2 = _fmt_strip_grouping_option(body)
+    if t == "int":
+        binspec = _fmt_parse_binary_spec(body2)
+        if binspec is not None:
+            width, prefix_flag = binspec
+            v = build_expr(ctx, seg)
+            return _build_int_to_binary_str(ctx, v, width, prefix_flag)
+    zwidth = None
+    if sep is not None and len(body2) >= 2 and body2[0] == "0" and body2[1].isdigit():
+        zwidth, body2 = _fmt_split_width(body2, t)
+    cfmt = _fmt_cfmt_for_spec(body2, t)
+    if cfmt is None and sep is None:
+        return None
+    if t == "float":
+        fv = build_expr(ctx, seg)
+        hint = f"{id(seg)}_fstrnum"
+        v = (
+            _build_float_fmt(ctx, fv, cfmt, hint)
+            if cfmt is not None
+            else _build_float_to_str_via_fmt_elem(ctx, fv, hint)
+        )
+    else:
+        iv = build_expr(ctx, seg)
+        v = _build_int_fmt(ctx, iv, cfmt) if cfmt is not None else _build_int_to_str(ctx, iv)
+    if sep is not None:
+        if zwidth is not None:
+            return _build_group_digits_zeropad(ctx, v, zwidth, sep)
+        return _build_group_digits(ctx, v, sep)
+    if cfmt is not None:
+        return _build_str_concat_dup(ctx, v)
+    return v
+
+
 def _build_fstring_segment(ctx: FuncCtx, seg: A.Expr) -> Value:
     # One f-string segment -> a str-typed Value. Mirrors codegen.py's
-    # _gen_fstring_segment (codegen.py:3869) no-format-spec, no-
-    # conversion-flag fallback only (codegen.py:3941-3969) — a segment
-    # carrying a `:spec` or `!r`/`!s`/`!a` conversion is deferred (each
-    # routes through extra machinery: _split_fmt_align, _cfmt_for_spec,
-    # alignment/precision/grouping helpers, none of which exist in this
-    # IR yet). bool/None segments are also deferred (need is_bool_expr/
-    # is_none_expr-driven branching to a different static string, same
-    # gap str() itself has); float and instance segments need their own
-    # follow-up work (float: Windows NaN/inf branching, see
-    # _build_str_of_int's note; instance: __str__/__repr__ method
-    # resolution).
-    if getattr(seg, "fmt_spec", "") or getattr(seg, "conv_flag", ""):
-        raise SSABuildError("f-string segment with a format spec or conversion: not yet wrapped")
+    # _gen_fstring_segment in full (codegen.py:4018-4142), including format
+    # specs (`:...`) and conversion flags (`!r`/`!s`/`!a`). instance
+    # segments stay deferred (need __str__/__repr__ method resolution,
+    # orthogonal to format-spec support); a *plain* (no spec, no
+    # conversion) bool/None segment also stays deferred (needs a
+    # True/False/None static-string selection — a separate, pre-existing
+    # gap, not part of format-spec parsing).
     t = A.expr_type(seg)
+    spec = getattr(seg, "fmt_spec", "")
+    conv = getattr(seg, "conv_flag", "")
+
+    if spec:
+        fill, align, body = _fmt_split_align(spec)
+        width, rest, precision = None, body, None
+        if t == "str":
+            width, precision = _fmt_split_str_width_precision(body)
+            rest = ""
+            if align is None and width is not None:
+                fill, align = " ", "<"
+        elif align is not None:
+            width, rest = _fmt_split_width(body, t)
+
+        if align in ("<", ">", "^") and t in ("str", "int", "float"):
+            return _build_fstring_aligned(ctx, seg, t, conv, width, fill, align, rest, precision)
+
+        if t == "str" and precision is not None:
+            v = build_expr(ctx, seg)
+            if conv in ("r", "a"):
+                v = _build_fmt_elem_quote(ctx, v)
+            return _build_str_truncate(ctx, v, precision)
+
+        if t in ("int", "float"):
+            result = _build_fstring_unaligned_numeric(ctx, seg, t, body)
+            if result is not None:
+                return result
+            # Neither a recognized cfmt suffix nor a grouping separator —
+            # falls through to the unspec'd default below.
+
     if t == "str":
-        return build_expr(ctx, seg)
+        v = build_expr(ctx, seg)
+        if conv in ("r", "a"):
+            return _build_fmt_elem_quote(ctx, v)
+        return v
     if t == "int":
         if A.is_bool_expr(seg) or A.is_none_expr(seg):
             raise SSABuildError("f-string segment of bool/None: not yet wrapped")

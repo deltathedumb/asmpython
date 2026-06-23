@@ -70,6 +70,15 @@ class FuncDef:
     # True for nested functions lifted to module level by the parser. Sema
     # skips undefined-variable errors in their bodies (closure vars).
     is_lifted: bool = False
+    # True for a top-level function merged in from an asmpython stdlib module
+    # (set by program.py's load_program, never by the parser). A stdlib
+    # module's own top-level function names are real Python stdlib API names
+    # meant to be called in a qualified way (`tarfile.open(...)`), not bare
+    # globals — see sema.py's "cannot redefine builtin" check, which would
+    # otherwise reject e.g. tarfile.py's `def open(...)` purely because it
+    # shares a name with the `open` builtin, even though nothing about it is
+    # actually a user mistake.
+    is_stdlib: bool = False
     # Decorator identities preceding the def (leading dotted names), e.g.
     # ["staticmethod"] / ["classmethod"]. Used to relax the method `self` rule.
     decorators: list = field(default_factory=list)

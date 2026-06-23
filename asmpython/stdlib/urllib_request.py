@@ -172,7 +172,7 @@ def _parse_url(url: str) -> list:
         host = host_part
         port = 443 if scheme == "https" else 80
 
-    return [scheme, host, port, path]
+    return [scheme, host, str(port), path]
 
 
 def _http_request(method: str, url: str, data: str, headers: dict,
@@ -181,16 +181,21 @@ def _http_request(method: str, url: str, data: str, headers: dict,
     parts: list = _parse_url(url)
     scheme: str = parts[0]
     host: str = parts[1]
-    port: int = parts[2]
+    port: int = int(parts[2])
     path: str = parts[3]
 
     if scheme == "https":
         raise URLError("HTTPS not supported (no TLS in native runtime)")
 
-    sock: _socket.socket = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-    if timeout > 0.0:
-        sock.settimeout(timeout)
-    sock.connect(host, port)
+    # asmpython's socket module is a raw FFI-bindings layer (a socket
+    # "handle" is a plain int fd/SOCKET, not an object with methods --
+    # see socket.py's module docstring), unlike CPython's socket.socket
+    # class. settimeout() has no equivalent binding here (would need a
+    # setsockopt(SOL_SOCKET, SO_RCVTIMEO, ...) call with a packed timeval
+    # struct), so a requested timeout is currently a silent no-op rather
+    # than actually bounding the request.
+    sock: int = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM, 0)
+    _socket.connect(sock, host, port)
 
     # Build request.
     req: str = method + " " + path + " HTTP/1.0\r\n"
@@ -204,15 +209,15 @@ def _http_request(method: str, url: str, data: str, headers: dict,
     if len(data) > 0:
         req = req + data
 
-    sock.sendall(req)
+    _socket.send_all(sock, req)
 
     # Read response.
     raw: str = ""
-    buf: str = sock.recv(4096)
+    buf: str = _socket.recv(sock, 4096)
     while len(buf) > 0:
         raw = raw + buf
-        buf = sock.recv(4096)
-    sock.close()
+        buf = _socket.recv(sock, 4096)
+    _socket.close(sock)
 
     # Split status line.
     crlf: int = -1
@@ -363,10 +368,11 @@ def urlopen(url: object, data: str = "", timeout: float = 30.0) -> HTTPResponse:
 
 
 def urlretrieve(url: str, filename: str = "",
-                reporthook: int = 0, data: str = "") -> list:
+                reporthook: int = 0, data: str = "") -> tuple:
     """Retrieve a URL into a temporary location.
 
-    Returns [filename, headers_dict].
+    Returns (filename, headers_dict). A tuple, not a list, since asmpython
+    lists must be homogeneous and these two slots differ in type (str, dict).
     """
     import os
     resp: HTTPResponse = urlopen(url, data)
@@ -374,12 +380,12 @@ def urlretrieve(url: str, filename: str = "",
     if len(filename) == 0:
         import tempfile
         filename = tempfile.mktemp(suffix=".tmp")
-    fp: int = os.fopen(filename, "wb")
+    fp = os.fopen(filename, "wb")
     if fp == 0:
         raise URLError("could not open " + filename + " for writing")
     os.fputs(body, fp)
     os.fclose(fp)
-    return [filename, resp._headers]
+    return (filename, resp._headers)
 
 
 def install_opener(opener: object) -> None:

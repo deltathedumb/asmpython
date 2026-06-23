@@ -172,6 +172,27 @@ class Path:
 
     # --- filesystem queries / mutation --------------------------------------
 
+    @staticmethod
+    def cwd() -> Path:
+        return Path(os.getcwd())
+
+    def iterdir(self) -> list:
+        names: list = os.listdir(self.p)
+        out: list = []
+        for n in names:
+            out.append(self._join(n))
+        return out
+
+    def rglob(self, pattern: str) -> list:
+        import fnmatch
+        out: list = []
+        for child in self.iterdir():
+            if fnmatch.fnmatch(child.name, pattern):
+                out.append(child)
+            if child.is_dir():
+                out.extend(child.rglob(pattern))
+        return out
+
     def exists(self) -> int:
         return int(os._access(self.p, 0) == 0)
 

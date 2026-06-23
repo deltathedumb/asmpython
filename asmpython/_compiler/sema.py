@@ -2200,7 +2200,7 @@ class SemaAnalyzer:
         for f in self.mod.funcs:
             if f.name in self.funcs:
                 raise SemaError(f"function {f.name!r} redefined", f.pos, ErrorCode.E_REDEFINED_FUNC)
-            if f.name in BUILTINS:
+            if f.name in BUILTINS and not getattr(f, "is_stdlib", False):
                 raise SemaError(
                     f"cannot redefine builtin {f.name!r}",
                     f.pos,
@@ -3747,10 +3747,32 @@ class SemaAnalyzer:
                     # Both instance types: one may be a subtype of the other.
                     and not (dvt.startswith("instance:") and value_t.startswith("instance:"))
                 ):
-                    raise SemaError(
-                        f"dict[k] = v: dict values are {dvt}, got {value_t}",
-                        s.pos,
-                    )
+                    if isinstance(s.target.obj, A.Name):
+                        # A genuinely heterogeneous dict (e.g. pickle.loads()
+                        # building a dict whose values vary by the parsed
+                        # tag character) — widen to opaque rather than reject,
+                        # same leniency an unannotated dict gets from the
+                        # start (see the pin-on-first-write `elif` below).
+                        scope.dict_value_types[s.target.obj.name] = "any"
+                    else:
+                        raise SemaError(
+                            f"dict[k] = v: dict values are {dvt}, got {value_t}",
+                            s.pos,
+                        )
+                elif dvt in ("any", "int") and value_t not in ("any", "int") and isinstance(
+                    s.target.obj, A.Name
+                ):
+                    # First concrete write to a dict whose value kind was never
+                    # pinned (declared as a bare `dict`, or assigned `{}` --
+                    # both resolve to the "any" element-kind sentinel, see
+                    # _resolve_scalar_annot) -- same "first write teaches the
+                    # element kind" rule as list.append() above. Without this,
+                    # every later `d.get(...)`/`d[k]`/`d.values()` keeps
+                    # reading the unknown-sentinel default forever, so e.g. a
+                    # str-valued dict's reads get treated as raw ints (a
+                    # pointer printed as a garbage number, not dereferenced
+                    # as a string).
+                    scope.dict_value_types[s.target.obj.name] = value_t
             elif obj_t == "any":
                 pass  # opaque target: accept the index assignment leniently
             elif obj_t.startswith("instance:"):

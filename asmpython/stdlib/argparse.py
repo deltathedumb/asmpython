@@ -52,6 +52,29 @@ argument wasn't given. Limited to the `bundle_mode` dest (asmpython has no
 `**kwargs`, so this can't be CPython's fully generic `set_defaults(**kwargs)`);
 extend with more named parameters if another dest needs this.
 
+`ap.add_subparsers(dest=)` returns a `_SubParsersAction`; `.add_parser(name,
+help=, description=, usage=, epilog=, add_help=, formatter_class=)` registers
+a sub-command and returns a brand new `ArgumentParser` for it, configured with
+its own `add_argument(...)` calls exactly like a top-level parser (nesting
+works the same way, e.g. a sub-parser can itself call `add_subparsers()` for a
+sub-sub-command). Unlike CPython argparse, a sub-parser's parsed values are
+written into the SAME `Namespace` the outer `parse_args()` call returns
+(rather than merged in afterward) — asmpython has no generic way to enumerate
+an arbitrary instance's fields to copy them between two `Namespace` objects,
+so sharing one `Namespace` throughout sidesteps that entirely. `dest`'s value
+is set to the matched sub-command's name; if no sub-command is given, `dest`
+is left unset (reads back via `.get(dest)` as `""`, matching CPython's
+`required=False` default — this module doesn't support `required=True` for
+subparsers). A sub-parser is always treated as the LAST positional on its
+parser (consumes every remaining token) — matches every real call site in
+this codebase, simpler than CPython's general interleaving rules.
+
+`type=` only special-cases a bare `Path` class reference (see above) — a
+plain function reference (e.g. a custom comma-split parser) isn't supported,
+since there's no generic "call this callable on the raw string" mechanism
+here. Store the raw string (no `type=`) and post-process it after
+`parse_args()` returns instead.
+
 `parse_args(argv)` validates required arguments and `choices`; on error it
 prints a usage line + message and calls `sys.exit(2)` (mirroring argparse).
 With the default `add_help=1`, `-h` / `--help` prints generated help and
@@ -192,6 +215,23 @@ class Namespace:
         self.icon: Path = None
         self.nasm: Path = None
         self.gcc: Path = None
+        self.dir: Path = None
+        # Plain str fields read via direct attribute access (equality
+        # comparison, `or`-chained fallback, etc. all need real str typing,
+        # not just truthiness) — same null-pointer-until-set deal as the
+        # Path fields above.
+        self.command: str = None
+        self.package_action: str = None
+        self.project_action: str = None
+        self.explain: str = None
+        self.bundle_mode: str = None
+        self.output_type: str = None
+        self.target: str = None
+        self.name: str = None
+        self.registry: str = None
+        self.version: str = None
+        self.type: str = None
+        self.from_pkg: str = None
         # store_true/count flags read via plain `if args.x:` truthiness.
         self.check: int = 0
         self.use_runtime_lib: int = 0
@@ -261,6 +301,40 @@ class _ArgGroup:
         return self.parser.add_mutually_exclusive_group()
 
 
+class _SubParsersAction:
+    """Returned by `ArgumentParser.add_subparsers()`. `.add_parser(name, ...)`
+    registers a sub-command and returns a fresh `ArgumentParser` for it — see
+    the module docstring for why a sub-parser writes into the SAME
+    `Namespace` as its parent instead of returning its own."""
+
+    def __init__(self, parser: ArgumentParser, dest: str) -> None:
+        self.parser = parser
+        self.dest = dest
+        self.choice_names: list[str] = []
+        self.choice_parsers: list[ArgumentParser] = []
+
+    def add_parser(self, name: str, help: str = "", description: str = "",
+                    usage: str = "", epilog: str = "", add_help: int = 1,
+                    formatter_class: int = 0) -> ArgumentParser:
+        prog = name if self.parser.prog == "" else self.parser.prog + " " + name
+        sub = ArgumentParser(prog, description, usage, epilog, add_help, formatter_class)
+        sub._help = help
+        self.choice_names.append(name)
+        self.choice_parsers.append(sub)
+        return sub
+
+    def _find(self, name: str) -> ArgumentParser | None:
+        i = 0
+        while i < len(self.choice_names):
+            if self.choice_names[i] == name:
+                return self.choice_parsers[i]
+            i = i + 1
+        return None
+
+    def _choices_str(self) -> str:
+        return ", ".join(self.choice_names)
+
+
 class ArgumentParser:
     def __init__(self, prog: str = "", description: str = "", usage: str = "",
                   epilog: str = "", add_help: int = 1,
@@ -281,6 +355,16 @@ class ArgumentParser:
         self._next_mutex_group = 0
         # set_defaults(bundle_mode=...) -- see module docstring.
         self._default_bundle_mode = ""
+        # add_subparsers() -- at most one per parser, matching CPython.
+        self._subparsers: _SubParsersAction = None
+        # add_parser()'s own `help=` text, stashed by the owning
+        # _SubParsersAction for the PARENT parser's help/usage listing.
+        self._help = ""
+
+    def add_subparsers(self, dest: str = "") -> _SubParsersAction:
+        sub = _SubParsersAction(self, dest)
+        self._subparsers = sub
+        return sub
 
     def add_argument(self, name: str, short: str = "", help: str = "",
                       default: str = "", choices: list[str] = [], action: str = "",
@@ -351,6 +435,8 @@ class ArgumentParser:
                 out = out + " " + label
             else:
                 out = out + " [" + label + "]"
+        if self._subparsers is not None:
+            out = out + " {" + self._subparsers._choices_str() + "} ..."
         return out
 
     def print_usage(self, file: int = 0) -> None:
@@ -369,6 +455,12 @@ class ArgumentParser:
         for a in self.specs:
             if a.is_positional == 1:
                 out = out + "\n  " + a.name + "  " + a.help
+        if self._subparsers is not None:
+            out = out + "\n  {" + self._subparsers._choices_str() + "}"
+            j = 0
+            while j < len(self._subparsers.choice_names):
+                out = out + "\n    " + self._subparsers.choice_names[j] + "  " + self._subparsers.choice_parsers[j]._help
+                j = j + 1
         out = out + "\n\noptions:"
         if self.add_help == 1:
             out = out + "\n  -h, --help  show this help message and exit"
@@ -396,6 +488,14 @@ class ArgumentParser:
         if argv is None:
             argv = sys.argv[1:]
         ns = Namespace()
+        self._parse_into(argv, ns)
+        return ns
+
+    def _parse_into(self, argv: list[str], ns: Namespace) -> None:
+        # Does the real work of parse_args(), but fills in an EXISTING
+        # Namespace instead of creating its own — see the module docstring
+        # on add_subparsers() for why a sub-parser shares its parent's
+        # Namespace rather than returning an independent one.
         for a in self.specs:
             if a.action == "store_true" or a.action == "count":
                 setattr(ns, a.dest, 0)
@@ -485,6 +585,20 @@ class ArgumentParser:
                 setattr(ns, a.dest, a._convert(tok))
                 seen[a.dest] = 1
                 pos_i = pos_i + 1
+            elif self._subparsers is not None:
+                sub = self._subparsers._find(tok)
+                if sub is None:
+                    self.error(
+                        "argument " + self._subparsers.dest + ": invalid choice: '" + tok
+                        + "' (choose from " + self._subparsers._choices_str() + ")"
+                    )
+                setattr(ns, self._subparsers.dest, tok)
+                seen[self._subparsers.dest] = 1
+                # A sub-parser consumes every remaining token (see module
+                # docstring) and writes straight into `ns`; nothing of this
+                # parser's own loop runs again after this.
+                sub._parse_into(argv[i + 1:], ns)
+                break
             else:
                 self.error("unrecognized argument: " + tok)
             i = i + 1
@@ -504,5 +618,3 @@ class ArgumentParser:
             if prev != "" and prev != a.name:
                 self.error("argument " + a.name + ": not allowed with argument " + prev)
             group_seen[gkey] = a.name
-
-        return ns

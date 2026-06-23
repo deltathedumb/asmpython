@@ -22,7 +22,19 @@ Usage::
 """
 from __future__ import annotations
 
-import os as _os
+import os
+
+def _makedirs(path: str) -> None:
+    """Recursive mkdir (os.py has no makedirs binding -- it's a pure FFI
+    registry, no real Python source allowed alongside it). Builds up each
+    path segment with the existing single-level os.mkdir binding."""
+    if path == "" or path == "/":
+        return
+    parent: str = path[:path.rfind("/")]
+    if parent and os.path.isdir(parent) == 0:
+        _makedirs(parent)
+    if os.path.isdir(path) == 0:
+        os.mkdir(path, 511)
 
 # Tar block size
 BLOCKSIZE: int = 512
@@ -299,7 +311,7 @@ class TarFile:
             self._data = ""
 
     def _load(self) -> None:
-        if not _os.path.exists(self.name):
+        if not os.path.exists(self.name):
             raise ReadError("file not found: " + self.name)
         f = open(self.name, "r")
         self._data = f.read()
@@ -345,14 +357,17 @@ class TarFile:
         info: TarInfo = TarInfo()
         if name:
             info.name = arcname if arcname else name
-            info.size = _os.path.getsize(name)
-            info.mtime = int(_os.path.getmtime(name))
-            if _os.path.isdir(name):
+            info.size = os.path.getsize(name)
+            info.mtime = int(os.path.getmtime(name))
+            if os.path.isdir(name):
                 info.type = DIRTYPE
                 info.size = 0
-            elif _os.path.islink(name):
+            elif os.path.islink(name):
                 info.type = SYMTYPE
-                info.linkname = _os.readlink(name)
+                # No readlink() binding exists (no portable equivalent on
+                # Windows, the primary target). Symlinks still get archived
+                # as SYMTYPE entries, just without a resolvable target.
+                info.linkname = ""
             else:
                 info.type = REGTYPE
         return info
@@ -379,7 +394,7 @@ class TarFile:
         dest: str = path + member.name
         if member.isdir():
             try:
-                _os.makedirs(dest)
+                _makedirs(dest)
             except Exception:
                 pass
         elif member.isreg():
@@ -388,7 +403,7 @@ class TarFile:
             parent: str = dest[:dest.rfind("/")]
             if parent:
                 try:
-                    _os.makedirs(parent)
+                    _makedirs(parent)
                 except Exception:
                     pass
             f = open(dest, "w")
@@ -408,7 +423,7 @@ class TarFile:
         """Add file(s) to the archive."""
         if not arcname:
             arcname = name
-        if _os.path.isdir(name) and recursive:
+        if os.path.isdir(name) and recursive:
             self._add_dir(name, arcname)
         else:
             self._add_file(name, arcname)
@@ -424,11 +439,11 @@ class TarFile:
         dir_info: TarInfo = TarInfo(arcname + "/")
         dir_info.type = DIRTYPE
         self.addfile(dir_info, "")
-        entries: list = _os.listdir(name)
+        entries: list = os.listdir(name)
         for entry in entries:
             full_path: str = name + "/" + entry
             arc_path: str = arcname + "/" + entry
-            if _os.path.isdir(full_path):
+            if os.path.isdir(full_path):
                 self._add_dir(full_path, arc_path)
             else:
                 self._add_file(full_path, arc_path)
@@ -503,12 +518,9 @@ def open(name: str = "", mode: str = "r", fileobj: object = None,
                    errorlevel, copybufsize)
 
 
-is_tarfile = None
-
-
 def is_tarfile(name: str) -> int:
     """Return 1 if name is a tar archive."""
-    if not _os.path.exists(name):
+    if not os.path.exists(name):
         return 0
     f = open(name, "r")
     data: str = f._data[:512]

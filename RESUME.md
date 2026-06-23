@@ -223,16 +223,51 @@ closures aren't supported there either).
   matching the file's established convention (every other builder is
   defined above the dict that registers it).
 
-**Next step on resume**: the builtin-wrapper punch list, string slicing,
-list comprehensions, `Global`/`Nonlocal`, and basic f-strings are all
-landed. Remaining natural targets, roughly in order of size: `str.
-format()` and format-spec'd f-string segments (reuse codegen.py's
-`_cfmt_for_spec`/alignment logic as a guide), stepped/list slices, then
-classes/instance methods/dunders (the biggest remaining unit — method
-resolution, dunder dispatch, instance layout). Once the remaining
-surface is substantially covered, move to plan-step 2 (register
-allocator). Before starting classes specifically, worth checking in on
-scope/pace given how much real design nuance this file has accumulated.
+**Format-spec'd f-string segments — landed (2026-06-23), full 1:1 port**
+(user explicitly chose "full port" over a common-cases-only scope when
+asked, given this file has no automated parity test yet and getting it
+wrong silently was the real risk): `_build_fstring_segment` now handles
+everything `codegen.py`'s `_gen_fstring_segment` does (codegen.py:4018-
+4142) — alignment (`<`/`>`/`^`, str/int/float), `.precision` truncation
+for str, numeric `cfmt` translation (`d`/`x`/`X`/`o`/`f`/`e`/`g`, width
+and zero-pad folded into the printf format string), `,`/`_` grouping
+separators including the zero-pad+grouping combo (`f"{n:015,}"`), binary
+format (`b`/`#b`), and `!r`/`!a` conversion (quote-wrapping via
+`_runtime_fmt_elem`). The pure spec-parsing helpers (`_fmt_cfmt_for_spec`,
+`_fmt_split_align`, etc.) are direct copies of `codegen.py`'s methods of
+the same name minus `self` — none of the originals touch `self` either,
+so this was genuinely mechanical. The runtime-call wrappers
+(`_build_int_fmt`, `_build_float_fmt`, `_build_group_digits[_zeropad]`,
+`_build_int_to_binary_str`, `_build_str_pad`, `_build_str_truncate`,
+`_build_fmt_elem_quote`) are `RawAsm` wrappers around the same
+pre-existing `_runtime_*` helpers `codegen.py` already calls. One
+non-obvious trick worth remembering: a *plain* (no explicit `.Nf`/`d`/...
+suffix) float-to-str still needs `codegen.py`'s `_emit_float_to_str`,
+which has internal NaN/inf-detection branching on Windows — multiple jump
+labels a single static `RawAsm` text blob can't safely contain (see
+IR-DESIGN.md "RawAsm text must not contain internal jump labels"). Fixed
+by routing through `_runtime_fmt_elem` (rbx kind=2) instead of calling the
+target's `_emit_float_to_str` directly — `_runtime_fmt_elem` is a single
+pre-existing internal label that already wraps that exact target-specific
+logic once per program, so calling it sidesteps the per-RawAsm-site label
+restriction entirely (`_build_float_to_str_via_fmt_elem`; the same trick
+`_build_print_value`'s pre-existing float case already relied on). Scope
+notes for later: instance segments (`__str__`/`__repr__` dispatch) and a
+*plain* unspec'd bool/None segment (needs True/False/None static-string
+selection) both stay deferred — orthogonal to format-spec parsing, not
+touched by this pass. Verified with a standalone harness (no test runner
+exercises `ssa_build.py` yet) covering ~20 spec shapes across str/int/
+float/bool/None, with IR dumps spot-checked by hand for two of the more
+involved cases (zero-pad+grouping, aligned float+cfmt) — both matched
+expectations exactly. Full 454-test suite still green throughout (the one
+known pre-existing failure, unrelated).
+
+**Next step on resume**: stepped/list slices, then classes/instance
+methods/dunders (the biggest remaining unit — method resolution, dunder
+dispatch, instance layout). Once the remaining surface is substantially
+covered, move to plan-step 2 (register allocator). Before starting
+classes specifically, worth checking in on scope/pace given how much real
+design nuance this file has accumulated.
 
 ## Stdlib Status (plan-step 12)
 
@@ -859,10 +894,346 @@ unexpectedly, that's the likely cause; just rebuild. Also: avoid output
 filenames containing "update"/"install"/"setup"/"patch" — Windows
 flags them for UAC elevation, which hangs non-interactive runs.
 
+**2026-06-23 session — `__main__.py` now passes sema cleanly; gen1
+builds and runs; full generation-2 self-compile still blocked.**
+Picking this up specifically because the CLI/package work earlier this
+session (subparsers, `Path.cwd`/`iterdir`/`rglob`, `packages.py`) made
+`__main__.py`'s own import closure (`pathlib`, `tarfile`, `urllib_request`,
+`shutil`, `tempfile`, `packages.py`) much bigger, surfacing several real,
+independent stdlib/sema bugs that had nothing to do with self-hosting —
+fixed all of them, confirmed via `sema.analyze()` on the full merged
+program returning zero errors (previously ~10):
+
+- `urllib_request.py`: mixed `str`/`int` list literal in `_parse_url`'s
+  return; `_http_request` assumed an OOP `socket.socket` class that
+  doesn't exist (`socket.py` is FFI-bindings-only, a socket is a raw int
+  fd) — rewrote to raw `_socket.socket/connect/send_all/recv/close`
+  calls; `urlretrieve()` called `tempfile.mktemp()`, which didn't exist
+  — added it; `urlretrieve()`'s `[filename, headers]` return was also a
+  mixed-type list — changed to a tuple.
+- `tarfile.py`: `import os as _os` defeated the `os.listdir`/`os.getcwd`
+  inline-codegen special case in `sema.py`/`codegen.py`, which matches
+  the literal bound name `"os"`, not whatever it's aliased to — removed
+  the alias (`import os`, `_os.` → `os.` throughout). `_os.makedirs`/
+  `_os.readlink` don't exist anywhere (`os.py` is a pure FFI-bindings
+  registry, no precedent for mixing it with real Python source) — added
+  a local `_makedirs()` helper using the existing `os.mkdir` binding,
+  and stubbed `readlink` to `""` (no portable equivalent, and only
+  reachable from the tar-*creation* path, not extraction). Also: a
+  literal `is_tarfile = None` immediately followed by `def is_tarfile(...)`
+  — vestigial dead code; deleting it fixed an "undefined variable `_os`"
+  error inside that function specifically (the redundant module-level
+  binding was somehow interfering with that one function's scope
+  resolution — not investigated further since removing the dead line was
+  the obviously-correct fix regardless).
+- `packages.py`: `BINARY_EXTS` was a tuple; `str.join()` only accepts
+  `list`/`any`/`int`, not `tuple`, so `', '.join(BINARY_EXTS)` failed
+  sema — changed to a list. `versions = entry.get("versions") or {}` is
+  `any`-typed (`.get()` is always opaque), so `sorted(versions)` defaulted
+  its element type to `"int"` instead of `"str"`, breaking the later
+  `.join()` — fixed with an explicit `versions: dict = ...` annotation
+  (forces `_bind_name_from_value`'s override path).
+- `pathlib.py`: added `Path.cwd()` / `.iterdir()` / `.rglob(pattern)`
+  (the latter two via the existing `os.listdir` inline helper + `fnmatch`).
+- `shutil.py`: `which()` was a complete stub (`if os.path.exists(name):
+  return name; return ""` — never actually searched `PATH`). This one
+  matters beyond `__main__.py`'s sema acceptance: `driver.py`'s own
+  `_resolve_tool()` falls back to `shutil.which("nasm"/"gcc")`, and that
+  silently worked under the Python-hosted compiler (real Python's
+  `shutil`) but made a freshly-built gen1 binary unable to find its own
+  toolchain. Implemented a real `$PATH`/`os.pathsep` search with
+  Windows `.exe`/`.bat`/`.cmd` extension fallback.
+- **Real, independent sema bug, not just a stdlib gap**: `d[k] = v` on a
+  `dict`-typed (or bare, un-narrowed) local never updated
+  `scope.dict_value_types`, only validated against it — so a dict
+  declared `d: dict = {}` (or just `dict`, no `[K, V]`) stayed pinned to
+  the unknown-sentinel (`"any"`) forever, even after every write agreed
+  on a concrete value type. Every later `d.get(...)`/`d[k]`/`d.values()`
+  read back that default, so e.g. a `dict[str, str]` built purely via
+  subscript-assignment got its values printed as raw garbage pointers
+  formatted as ints. Confirmed via a from-scratch repro (`d: dict = {};
+  d["x"] = "1"; print(d.get("x", "missing"))` printed a 15-digit garbage
+  number under *both* compilers, not just the selfhosted one — this is
+  not a self-hosting bug). Fixed in `sema.py`'s `IndexAssign` handler:
+  on the first concrete write to a dict whose tracked value type is
+  still `"any"`/`"int"`, pin `scope.dict_value_types[name]` to the
+  written type (mirrors the existing `list.append()`-on-`"?"` pinning
+  rule). A mismatched *later* write (a genuinely heterogeneous dict,
+  e.g. `pickle.py`'s `loads()` building a dict whose values vary by a
+  parsed tag byte) now widens back to `"any"` instead of raising — the
+  old hard "dict[k] = v: dict values are X, got Y" error only ever fired
+  for non-`Name` targets before this session (nothing had ever pinned a
+  `Name`-rooted dict's value type via a write before), so widening
+  instead of erroring here doesn't mask any previously-enforced check.
+  Full test suite still 454/455 (same pre-existing unrelated failure)
+  after this change.
+
+With all of the above fixed, `sema.analyze()` on the full `__main__.py`
+whole-program merge returns **zero errors** for the first time. Rebuilt
+gen1 successfully (`asmpython_gen1.exe`, ~4.97MB), and it works
+correctly as a general-purpose compiler — verified compiling and running
+several from-scratch test programs (`print()`, `isinstance()`
+dispatch, dicts, the new dict-value-type fix's own repros). It also now
+correctly locates `nasm`/`gcc` via the `shutil.which()` fix.
+
+**Generation-2 (gen1 self-compiling `__main__.py`) still segfaults.**
+Narrowed to a small, fast (no gen1 rebuild needed to iterate)
+self-hosting-only repro, independent of `__main__.py`'s size:
+
+```python
+# pkgtest/__init__.py
+from .mod_a import BINDINGS as _A_BINDINGS
+REGISTRY: dict = {"a": _A_BINDINGS}
+# pkgtest/mod_a.py
+BINDINGS = {"x": 1}
+# main file
+from pkgtest import REGISTRY
+def main() -> None:
+    a: dict = REGISTRY.get("a") or {}
+    print(len(a))
+main()
+```
+
+Python-hosted compiles and runs this correctly (prints `1`). gen1
+segfaults *compiling* it (i.e. gen1 itself crashes — this isn't a wrong-
+output bug in code gen1 produces, like the isinstance one below). A
+`from .mod_a import BINDINGS as _A_BINDINGS`-style relative *value*
+import (resolved by `program.py`'s `_materialize_value_imports`) is
+necessary to trigger it — removing the relative import (e.g. inlining
+`BINDINGS` directly) makes it disappear. This exact mechanism is also
+why `import os` alone (no usage at all, just the bare import statement)
+reliably crashes gen1 while `import sys`/`math`/`random`/`gc`/`io`/`re`
+don't: `os`'s `BINDINGS` reaches `STDLIB_BINDINGS` (in
+`asmpython/stdlib/__init__.py`) via this exact `from .os import BINDINGS
+as _OS_BINDINGS` pattern, baked into gen1's *own* data at gen1's *build*
+time — confirmed this isn't about `os.py`'s content at all: truncating
+its `BINDINGS` dict to 3 entries, then to `{}`, then deleting the whole
+file down to a bare docstring, made no difference whatsoever to the
+crash (expected in hindsight — gen1 already has this data baked in from
+when *it* was built; editing the source file on disk afterward can't
+touch it). Backslash-escaped string values (`os.py`'s `sep`/`linesep`/
+`devnull` Windows variants) were a strong early suspect (a plausible
+string-literal-escaping bug) but ruled out directly: stripping them
+changed nothing, and a standalone `s: str = "\\"` compiles and runs
+correctly under gen1.
+
+gdb backtrace on the minimal repro above:
+
+```text
+strlen() [msvcrt]
+  <- _runtime_str_concat
+  <- str_8190                  (a codegen-synthesized helper, not user code)
+  <- ?? (corrupted/unsymbolized frame)
+  <- ??
+  <- ??
+  <- _runtime_dict_get_default
+  <- itoa_str_buf
+  <- ??
+```
+
+`itoa_str_buf` (int-to-string) feeding into `_runtime_dict_get_default`
+feeding into a synthesized string-concat helper matches
+`program.py`'s `_merge_import_bindings`'s nested `key(stmt)` dedup-key
+builder almost exactly (`"from:" + str(stmt.level) + ":" + stmt.module +
+":" + ",".join(stmt.names)` — `program.py:886`), which runs once per
+`Import`/`FromImport` statement collected across every merged module via
+`_collect_import_stmts`. Strong suspect: one of `stmt.module`/
+`stmt.names` reads back corrupted (null or garbage pointer) specifically
+for a *relative* (`from .x import y`) import statement when gen1 itself
+walks it, feeding a bad pointer into `_runtime_str_concat`'s `strlen`.
+Not yet confirmed at the single-line level — next session should gdb-
+break on `key` directly (or instrument `_collect_import_stmts`'s caller)
+and inspect `stmt.level`/`stmt.module`/`stmt.names` for the relative
+import in the minimal repro above, the same way the `Box`-class
+investigation above walked `self`'s dict by hand.
+
+This is independent of the **previously-found, still-unfixed isinstance
+bug** (separate investigation, same session): `isinstance(x, FirstClass)`
+always returns false in code *gen1 produces* (not gen1 itself crashing)
+when `FirstClass` is the first class declared in the program being
+compiled — 2nd/3rd/etc. classes classify correctly. Reproduced with a
+minimal `Foo`/`Bar` two-class `isinstance` dispatch test, compiled by
+gen1 and run; confirmed positional-independence (swapping check order in
+the `if`/`elif` chain doesn't change which class fails — it's about
+declaration order, i.e. runtime class id 0, not source order of the
+checks). `_gen_isinstance` (`codegen.py:13735`) correctly uses `-1` as
+the no-class-tag sentinel (not `0`), so the bug isn't the obvious
+"0 is falsy" trap; root cause not yet found.
+
+**2026-06-23 session, continued — two real, confirmed, fixed bugs; the
+relative-value-import crash above is resolved; `import os` survives but
+is narrowed to one precise remaining cause.**
+
+1. **Fixed: `program.py`'s `key()` (`_merge_import_bindings`, line ~886)
+   had no `isinstance` narrowing for the `FromImport` case** — it was
+   `if isinstance(stmt, A.Import): return "import:" + stmt.module` followed
+   unconditionally by `return "from:" + str(stmt.level) + ...`, with no
+   `elif isinstance(stmt, A.FromImport):` guard. Since `stmt`'s parameter
+   has no type annotation, sema only narrows its type *inside* an explicit
+   `isinstance` block (confirmed via gdb: `stmt.module` read inside the
+   `if isinstance(stmt, A.Import):` arm correctly compiles to
+   `_runtime_dict_get_default`, but `stmt.level`/`.module`/`.names` in the
+   unnarrowed fallthrough arm all compiled to `_gen_attr`'s "unknown attr on
+   opaque/int type" stub (`codegen.py` ~4224-4227: evaluate the object for
+   side effects, then `xor rax, rax` — silently substituting 0/NULL).
+   `",".join(stmt.names)` then got a NULL list pointer, corrupting memory
+   and crashing somewhere downstream (`_runtime_str_concat`'s `strlen` on a
+   garbage pointer) — this was the exact minimal repro from the previous
+   entry (`from .mod_a import BINDINGS as _A_BINDINGS` /
+   `REGISTRY: dict = {"a": _A_BINDINGS}`). **Fix**: added the missing
+   `elif isinstance(stmt, A.FromImport):` arm (with a `return ""` fallback
+   for neither case). Rebuilt gen1; the minimal repro and a bare,
+   unused `import pkgtest` (no value-import at all) now compile and run
+   correctly. No regressions (454/455, same pre-existing failure).
+
+2. **Fixed: `_gen_isinstance` (`codegen.py:13735`) never null-checked the
+   instance pointer before calling `_runtime_dict_get_default`** — `isin
+   stance(x, Cls)` compiled to `gen_expr(x)` (rax = x, possibly 0/NULL if x
+   is statically opaque and happens to be Python `None` at runtime) followed
+   *unconditionally* by `_runtime_dict_get_default(rax, "__class__", -1)`.
+   `dict_get_default` dereferences its first arg's capacity field with no
+   NULL guard, so `isinstance(None, AnyClass)` segfaults instead of
+   returning `False` whenever `x`'s static type can't rule out `None`
+   (e.g. a value pulled from an untyped tuple/list element, or an optional
+   field). Found via the **real, pre-existing, fully reproducible
+   discovery this session that gen1 cannot compile *any* program using
+   `@dataclass`** — confirmed even on the bundled test suite's own
+   `tests/cases/205_dataclasses_module.py`. Bisected to the precise
+   trigger: a class-level variable declared with a bare annotation and no
+   default (`x: int`, not `x: int = 0`) — `@dataclass` always hits this
+   since dataclass fields are normally bare-annotated. Sema's dataclass-
+   `__init__`-synthesis / field-type-inference code does
+   `isinstance(fvalue, A.Call)` to detect a `field(default_factory=...)`
+   default; when there's no default, `fvalue` is `None`, and the
+   unguarded isinstance crashed. **Fix**: `_gen_isinstance` now does
+   `test rax, rax; jz <none-arm>` right after evaluating the instance,
+   jumping straight to "no match" (`rax = 0`) instead of calling
+   `dict_get_default` on a NULL pointer. Rebuilt gen1; every dataclass
+   repro from this investigation (bare int field, multi-field, frozen,
+   positional/keyword construction, declared-but-never-instantiated, the
+   bundled `205_dataclasses_module.py` test) now compiles and runs
+   correctly. This is a **different** bug from the "isinstance against
+   first-declared-class always false" one in the entry above (that one is
+   about *wrong output* in code gen1 *produces*; this one is gen1 *itself*
+   crashing while compiling) — both remain independently worth keeping in
+   mind, but only this one was root-caused and fixed this session. No
+   regressions (454/455).
+
+3. **`import os` still segfaults gen1, even after both fixes above —
+   narrowed to one precise, well-isolated remaining cause.** Bisection
+   ruled out, with direct A/B tests against gen1 (not just python-hosted):
+   - **Not BINDINGS content** — truncating the real `os.py`'s `BINDINGS`
+     to a single entry, then to `{}`, then to a totally empty file, all
+     still crash identically (confirmed by editing the real bundled file
+     with a backup/restore, since a project-local `build/os.py` does NOT
+     shadow the bundled stdlib module of the same name — verified
+     separately by injecting an unambiguous syntax error into a
+     project-local `build/os.py` and observing zero effect on the build).
+   - **Not the `Func`/`Const` dataclasses, not the relative `from . import
+     Const, Func` class-import, not multi-submodule value-import
+     aggregation** — a from-scratch package replicating
+     `asmpython/stdlib/__init__.py`'s exact shape (two submodules each
+     value-importing a `BINDINGS` dict into an aggregating `__init__.py`)
+     compiles and runs fine.
+   - **Not the file's content at all** — copying the *real, unmodified*
+     `asmpython/stdlib/os.py` verbatim into a same-shaped local package
+     under a different name (`realos_test.osfull`, a regular project
+     import, not the bundled-stdlib name `os`) compiles and runs fine.
+   - **Is specific to the bundled-stdlib resolution path for the literal
+     name `os`.** `sema.py`'s `_load_module()` (line 478) is the relevant
+     code: a generic `if key in STDLIB_BINDINGS: return STDLIB_BINDINGS
+     [key]` against the registry `asmpython/stdlib/__init__.py` builds via
+     `from .os import BINDINGS as _OS_BINDINGS` (and one such import per
+     module: math, sys, time, random, socket, ...). Since `sema.py` itself
+     is compiled into gen1, this whole registry is materialized as baked-
+     in data *at gen1's own build time* — gen1 never re-reads `os.py`'s
+     source when compiling a program that imports it, which is why
+     content edits to the live file have zero effect on the crash.
+     `math`/`sys`/`random`/`gc`/`io`/`re` all go through this exact same
+     mechanism and work; only `os` crashes. Since the lookup code itself
+     (`_load_module`) is generic with no per-module branching, the
+     remaining suspect is that something specific to compiling
+     `asmpython/stdlib/__init__.py`'s `from .os import BINDINGS as
+     _OS_BINDINGS` statement *during gen1's own build* bakes in bad/
+     corrupted data specifically for the `"os"` key (not a bug reachable
+     by writing ordinary asmpython programs — only by self-hosting).
+     Next session: instrument or gdb-trace `_materialize_value_imports`
+     specifically while *building gen1 itself* (not while gen1 compiles
+     something else) to see what gets baked in for `STDLIB_BINDINGS["os"]`
+     vs `STDLIB_BINDINGS["math"]`; comparing the two side by side (e.g. via
+     a temporary debug dump of the materialized AST before codegen) should
+     show the divergence directly. `os.py`'s only attributes not shared by
+     a working module like `time.py`/`random.py`: `arg_types=("str",
+     "list_buf")` (the `_stat` binding's raw-buffer FFI arg kind, also used
+     by `_gui_sdl.py`, untested) and the largest entry count (39) of any
+     *currently-tested* stdlib module — neither confirmed as the cause.
+
 ## Other Notes
 
 - macOS Intel and RPi/Mac ARM64 are plan-steps 4 and 6-8 above, not
   independent side work — sequencing matters, see `[[project-2.0-versioning]]`.
-- (Deferred, only if user revisits) A `.csproj`-style project
-  manifest/build-orchestration system for asmpython programs — asked
-  about once, acknowledged as a real but separate idea, no work started.
+
+## CLI restructure + package/project system (done, 2026-06-22/23)
+
+Not part of the numbered 2.0.0 plan above — a separate, user-requested CLI
+overhaul, fully implemented and test-suite-clean (454/455, same pre-existing
+failure as always).
+
+**New subcommand structure** (`asmpython/_compiler/__main__.py`):
+
+- `asmpython build <source.py|project.json> [options]` — everything the old
+  flat CLI did, plus accepting a project.json (see below) as the source.
+  Bare `asmpython <file> [opts]` (no subcommand) still works — shorthand for
+  `build`, implemented via an argv-preprocessing shim (`_preprocess_argv`)
+  that injects `"build"` when argv[0] isn't a known subcommand or a
+  top-level-only flag (`-h`/`-V`/`--explain`).
+- `asmpython package install|uninstall <name|project.json> [options]` — see
+  below.
+- `asmpython project new [name] [--dir] [--target]` — scaffolds
+  `project.json` + `main.py` + an empty `libs/` dir.
+
+**Project manifest** (`asmpython/_compiler/project.py`, `ProjectConfig`):
+JSON schema covering everything `build` needs — `name`, `entry`, `output`,
+`target`, `output_type`, `bundle_mode`, `icon`, `use_runtime_lib`,
+`library_dirs`, `packages`. CLI flags always override the matching
+project.json field when given; otherwise the project's value is the
+default. `find_default_project(cwd)` auto-detects a `project.json` sitting
+directly in the current directory (no upward search) for `package`'s
+no-`--dir` case.
+
+**Package system** (`asmpython/_compiler/packages.py`): installs *native
+runtime-library* dependencies (DLLs/.so/import libs — SDL2 and friends),
+NOT Python packages. Resolution order: (1) `asmpython/_vendor/<name>/
+<platform>/` — instant, offline, no network; this is how `sdl2` installs by
+default today since it's already vendored. (2) A remote JSON registry
+(`package-repository.json` at the repo root is the canonical format) keyed
+by package name -> `{latest, versions: {version: {url, sha, verified}}}`.
+Falls back to a small bundled dict (`_BUNDLED_REGISTRY`, just `sdl2`) if the
+network/registry URL is unreachable. `sha` (sha256 of the downloaded
+archive) and `verified` (maintainer-vetted) are independent, both optional:
+hash mismatch hard-fails install; hash-confirmed-but-unverified or
+no-hash-at-all both warn but proceed. Binaries are copied flat into a
+*library directory* (`library_dirs[0]` from a project.json, else `./libs/`)
+with a `.asmpython_packages.json` manifest recording exactly what was
+installed, so `uninstall` removes precisely those files. Passing a
+project.json instead of a bare name installs/uninstalls every name in its
+`packages` list at once.
+
+**Maintainer tool** (`fetch_package_hashes.py`, repo root): audits every
+version in `package-repository.json` by actually downloading it and
+comparing sha256 against the recorded `sha` — `OK`/`WARN` (missing)/
+`MISMATCH` (wrong) per version; `--write` fills in missing hashes, `--write
+--force` also overwrites mismatches. **Caught a real bug during this
+work**: the registry's first SDL2 entry (release-2.0.14) has zero attached
+GitHub release assets — the "download" was silently a 9-byte `"Not Found"`
+error body (via `curl -sL` with no `-f` flag), and the checksum recorded
+for it was garbage. Fixed by switching to `release-2.32.10`'s real
+`SDL2-devel-2.32.10-mingw.tar.gz` asset with a verified-correct sha256 (run
+`fetch_package_hashes.py` again before trusting any *future* registry
+entry someone adds by hand — don't assume a URL that looks right actually
+resolves to real content).
+
+**Known cosmetic gap, not fixed**: em-dashes in argparse help text
+(`_TOP_DESCRIPTION`, `_PACKAGE_DESCRIPTION`, etc.) render as `�` on a
+non-UTF8 Windows console (cp1252) — pre-existing behavior from before this
+rewrite too, not a regression, just never addressed.

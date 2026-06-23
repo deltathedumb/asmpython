@@ -73,9 +73,24 @@ def disk_usage(path: str) -> list:
 
 
 def which(name: str, mode: int = 1, path: str = "") -> str:
-    """Return full path to executable. Returns name if it exists."""
-    if os.path.exists(name):
+    """Return full path to executable found by searching *path* (or $PATH),
+    trying platform-appropriate executable extensions on Windows. Returns
+    "" if not found."""
+    import sys
+    import ospath
+    if ospath.isfile(name):
         return name
+    search_path: str = path if path else os.environ.get("PATH", "")
+    exts: list[str] = [""]
+    if sys.platform == "win32":
+        exts = ["", ".exe", ".bat", ".cmd"]
+    for d in search_path.split(os.pathsep):
+        if d == "":
+            continue
+        for ext in exts:
+            cand = d + "/" + name + ext
+            if ospath.isfile(cand):
+                return cand
     return ""
 
 
@@ -112,7 +127,7 @@ def ignore_patterns(*patterns) -> int:
     return 0
 
 
-def ReadError(Exception):
+class ReadError(Exception):
     """Raised on unreadable archive."""
     pass
 

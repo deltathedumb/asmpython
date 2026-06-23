@@ -28,6 +28,15 @@ def mkstemp(suffix: str = "", prefix: str = "tmp",
     return [fp, name]
 
 
+def mktemp(suffix: str = "", prefix: str = "tmp", dir: str = "") -> str:
+    """Return a unique temp file name without creating the file (matches
+    real Python's deprecated-but-still-present mktemp — callers that need
+    the file to actually exist should use mkstemp() instead)."""
+    name: str = _next_name(prefix, suffix)
+    use_dir: str = dir if len(dir) > 0 else gettempdir()
+    return use_dir + "/" + name
+
+
 def mkdtemp(suffix: str = "", prefix: str = "tmp", dir: str = "") -> str:
     """Create a temporary directory. Returns path."""
     name: str = _next_name(prefix, suffix)

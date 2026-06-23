@@ -13793,7 +13793,15 @@ class Codegen:
                     accept.append(cid)
 
         # Evaluate x (the instance) and read its "__class__" id into rax.
-        self.gen_expr(e.args[0], info)  # rax = instance dict header
+        # x's static type is often opaque here (an untyped tuple/list element,
+        # a None-able field, etc.), so it may legitimately be NULL (Python
+        # None) at runtime -- isinstance(None, Cls) must return False, not
+        # dereference a null dict header inside _runtime_dict_get_default.
+        self.gen_expr(e.args[0], info)  # rax = instance dict header (or 0)
+        match = self.fresh("isinst_yes")
+        done = self.fresh("isinst_done")
+        none_lbl = self.fresh("isinst_none")
+        self.emitf("test rax, rax", f"jz {none_lbl}")
         key_label, _ = self.intern_string("__class__")
         # dict_get_default(header=rax, key=rbx, default=rcx) -> rax = id (or -1).
         self.emitf(
@@ -13803,11 +13811,11 @@ class Codegen:
         )
         # rax now holds the runtime class id. Compare against each accepted id;
         # set rax = 1 on a match, else 0.
-        match = self.fresh("isinst_yes")
-        done = self.fresh("isinst_done")
         self.emitf("mov rbx, rax")  # rbx = runtime id
         for cid in accept:
             self.emitf(f"cmp rbx, {cid}", f"je {match}")
+        self.emitf("xor rax, rax", f"jmp {done}")
+        self.label(none_lbl)
         self.emitf("xor rax, rax", f"jmp {done}")
         self.label(match)
         self.emitf("mov rax, 1")

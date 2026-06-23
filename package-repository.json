@@ -1,0 +1,17 @@
+{
+    "sdl2": {
+        "name": "SDL2",
+        "author": "Sam Lantinga",
+        "license": "zlib",
+        "latest": "2.32.10",
+        "latest-beta": null,
+        "latest-alpha": null,
+        "versions": {
+            "2.32.10": {
+                "url": "https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-mingw.tar.gz",
+                "sha": "83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2",
+                "verified": true
+            }
+        }
+    }
+}

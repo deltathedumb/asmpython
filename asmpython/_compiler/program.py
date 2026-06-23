@@ -811,9 +811,12 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
         parsed[mod_path_str] = mod
         discovery_order.append(mod_path_str)
         _dedupe_lifted_funcs(mod, func_names)
+        mod_is_stdlib = _is_within_stdlib(mod_path)
         for f in mod.funcs:
             if f.name not in func_names:
                 func_names.add(f.name)
+                if mod_is_stdlib:
+                    f.is_stdlib = True
                 entry.funcs.append(f)
         for c in mod.classes:
             if c.name not in class_names:
@@ -883,7 +886,9 @@ def _merge_import_bindings(
     def key(stmt) -> str:
         if isinstance(stmt, A.Import):
             return "import:" + stmt.module
-        return "from:" + str(stmt.level) + ":" + stmt.module + ":" + ",".join(stmt.names)
+        if isinstance(stmt, A.FromImport):
+            return "from:" + str(stmt.level) + ":" + stmt.module + ":" + ",".join(stmt.names)
+        return ""
 
     # Names any merged module pulls in via a relative value import (`from ..
     # import __version__`, `from .sys import BINDINGS as _SYS_BINDINGS`).
