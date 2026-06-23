@@ -255,6 +255,27 @@ class FileIO(RawIOBase):
             c = os.fgetc(self._fp)
         return result
 
+    def read_bytes(self, size: int = -1) -> list:
+        """Like read(), but returns raw bytes as list[int] (0..255) instead
+        of a str -- for binary formats (images, .glb/.bin glTF buffers,
+        ...) where round-tripping through chr()/str risks the string
+        machinery treating the data as encoded text instead of opaque
+        bytes. fgetc() already returns one raw byte (0..255) or -1 at EOF,
+        so this just collects those directly with no str involved at all."""
+        import os
+        result: list = []
+        if self._closed:
+            return result
+        c: int = os.fgetc(self._fp)
+        count: int = 0
+        while c != -1:
+            result.append(c)
+            count = count + 1
+            if size > 0 and count >= size:
+                break
+            c = os.fgetc(self._fp)
+        return result
+
     def write(self, b: str) -> int:
         import os
         if self._closed:

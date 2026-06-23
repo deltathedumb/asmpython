@@ -2830,6 +2830,60 @@ class SemaAnalyzer:
             return getattr(e, "list_el_type", "int")
         return "int"
 
+    def _list_el_type_if_known(self, e, scope: Scope) -> str:
+        """Like _list_el_type, but returns "any" (not "int") for shapes
+        that carry no real, independently-known element-type signal.
+
+        A.MethodCall and A.Call are trusted:
+        - MethodCall: builtin string/container methods with a fixed
+          return shape (str.split() -> list[str], str.splitlines() ->
+          list[str], dict.keys() -> list[str], ...) stamp `list_el_type`
+          as a hardcoded literal constant in their own sema dispatch
+          (e.g. _check_str_method: `e.list_el_type = "str"`), independent
+          of any other inference.
+        - Call to a user function: `e.list_el_type` is stamped directly
+          from that function's own declared `-> list[T]` return
+          annotation (see _check_call: `if ty == "list" and el is not
+          None: e.list_el_type = el`) -- a bare `-> list` resolves `el`
+          to the "any" sentinel itself (never silently wrong), so this
+          is just as direct/reliable as MethodCall's literal stamps, not
+          a transitive call back into _list_el_type.
+
+        Deliberately NOT trusting Subscript/Attr/IfExp: those nodes'
+        `list_el_type` is frequently stamped by *transitively* calling
+        back into _list_el_type on some other sub-expression (e.g. a
+        Subscript on a bare-`list`-typed instance field whose element
+        type itself defaulted to the "int" placeholder from an empty `[]`
+        literal seen elsewhere -- confirmed in practice via
+        configparser.py's `self._section_keys.append([]); ...;
+        keys: list = self._section_keys[idx]` pattern, which regressed
+        when this trusted Subscript). Without auditing every one of the
+        ~20 stamping sites in sema.py for whether they're a hardcoded/
+        direct literal or a transitive call, only MethodCall and Call
+        (both confirmed direct, no recursion into _list_el_type) are
+        trusted today.
+
+        Used to decide whether a bare `list` annotation's "any" sentinel
+        should be overridden by the RHS's own type, instead of blindly
+        trusting _list_el_type's int-or-unknown default (see the call
+        site for the bug this guards against: `x: list = []` becoming
+        permanently int-only and rejecting later .append()s of any other
+        type)."""
+        if isinstance(e, (A.MethodCall, A.Call)):
+            return getattr(e, "list_el_type", "any")
+        return "any"
+
+    def _dict_value_type_if_known(self, e, scope: Scope) -> str:
+        """Like _dict_value_type, but returns "any" for shapes with no
+        independently-known value-type signal -- see
+        _list_el_type_if_known's docstring for the identical reasoning
+        (MethodCall's hardcoded-literal stamps and Call's direct
+        annotation-derived stamps are both trusted; transitive shapes
+        like Subscript/Attr are not)."""
+        if isinstance(e, (A.MethodCall, A.Call)):
+            return getattr(e, "value_type", "any")
+        return "any"
+
     def _dict_value_type(self, e, scope: Scope) -> str:
         """Value type of a dict-valued expression. 'int' if unknown."""
         if isinstance(e, (A.DictLit, A.DictComprehension)):
@@ -3055,19 +3109,41 @@ class SemaAnalyzer:
             aelval = ann[4]
             if t in ("int", "any") or t == aty:
                 if aty == "list":
+                    # A bare `list` annotation (no `list[T]` parameter)
+                    # resolves its element type to the "any" sentinel
+                    # (_resolve_scalar_annot's deliberate "unconstrained"
+                    # marker) -- but "any" is truthy, so a naive `ael or
+                    # ...` always picks it over the value's own better-
+                    # known element type, discarding real type info (e.g.
+                    # `x: list = s.split(...)` is really list[str], but
+                    # `ael` alone can't see that). Treat "any" as "no
+                    # annotation-derived info" so the value's inferred
+                    # element type can win instead -- but only when the
+                    # RHS shape actually carries genuine inferred
+                    # information (MethodCall/Call/Subscript/Attr/IfExp,
+                    # which sema stamps `list_el_type` onto when known).
+                    # An empty `[]` ListLit carries none -- its el_type
+                    # defaults to "int" as a placeholder, not a real
+                    # signal -- so `x: list = []` (declare-empty-then-
+                    # append-anything, a very common pattern) must keep
+                    # resolving to "any"/lenient, or every later .append()
+                    # of a non-int value would wrongly fail to type-check.
+                    el_type = ael if (ael and ael != "any") else self._list_el_type_if_known(value, scope)
                     scope.add(
                         target,
                         "list",
-                        el_type=ael or self._list_el_type(value, scope),
+                        el_type=el_type,
                         el_value_type=aelval,
                         el_tuple_types=atup or None,
                     )
                     return
                 if aty == "dict":
+                    # Same "any" truthiness trap as the list branch above.
+                    value_type = aval if (aval and aval != "any") else self._dict_value_type_if_known(value, scope)
                     scope.add(
                         target,
                         "dict",
-                        value_type=aval or self._dict_value_type(value, scope),
+                        value_type=value_type,
                         inner_value_type=self._dict_inner_value_type(value, scope),
                         value_tuple_types=self._dict_value_tuple_types(value, scope),
                     )
@@ -5759,6 +5835,32 @@ class SemaAnalyzer:
                 class_name = obj_t.split(":", 1)[1]
                 resolved = self._resolve_method(class_name, e.method)
                 if resolved is None:
+                    # `obj.field(args)` where `field` isn't a real method but
+                    # IS an instance-typed field whose class has __call__
+                    # (e.g. a Signal stored on an Instance: `part.touched`):
+                    # rewrite into "read the field, call __call__ on it" --
+                    # same `e.obj`/`e.method` shape the genuine instance-
+                    # method dispatch path already handles, so no codegen
+                    # changes are needed, just retargeting this node and
+                    # recursing (mirrors the existing `e.__class__ = A.Call`
+                    # retarget-and-recurse trick used a few lines above for
+                    # `module.ClassName(...)` constructor calls). Guarded by
+                    # `not e.via_field_call` so a __call__ that itself takes
+                    # no further field-callable resolution doesn't loop.
+                    cls_sig = self.classes.get(class_name)
+                    field_ty = cls_sig.fields.get(e.method) if cls_sig is not None else None
+                    if (
+                        not getattr(e, "via_field_call", False)
+                        and field_ty is not None
+                        and field_ty.startswith("instance:")
+                    ):
+                        field_cls = field_ty.split(":", 1)[1]
+                        if self._resolve_method(field_cls, "__call__") is not None:
+                            e.obj = A.Attr(obj=e.obj, name=e.method, pos=e.pos)
+                            e.method = "__call__"
+                            e.via_field_call = True  # type: ignore[attr-defined]
+                            self._check_expr(e, scope)
+                            return
                     if class_name not in self.classes or self._has_external_base(
                         class_name
                     ):

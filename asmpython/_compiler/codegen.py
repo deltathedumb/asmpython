@@ -1458,6 +1458,25 @@ class Codegen:
                     and not rt.startswith("instance:")
                     and ("float" in (lt, rt) or expr.op == "/")):
                 self._cl_define(info, f"__binfloat_{id(expr)}", "float")
+            # Plain int arithmetic (a + b, a - b, ...) needs a scratch slot
+            # for the exact same reason as the float case just above: the
+            # right operand's evaluation may itself be or contain a call
+            # (e.g. `total + callee()`, or `total + handlers[i]()` calling
+            # through a stored function pointer), and a raw `push rax` (the
+            # previous implementation) breaks 16-byte stack alignment for
+            # any such nested call -- confirmed bug: `total = total +
+            # callee()` segfaulted specifically when callee()'s own body
+            # contained a further call (e.g. a `print(...)`), since that's
+            # what's needed to actually execute code while the alignment
+            # is wrong; with no nested call inside callee() the misaligned
+            # rsp was simply never exercised by anything alignment-
+            # sensitive, masking the bug. Same condition shape as the
+            # float branch, but for the plain-int fallback path instead.
+            if ("str" not in (lt, rt) and not lt.startswith("instance:")
+                    and not rt.startswith("instance:")
+                    and "list" not in (lt, rt)
+                    and "float" not in (lt, rt) and expr.op != "/"):
+                self._cl_define(info, f"__binint_{id(expr)}")
             # Set algebra (`|`, `&`, `-`) builds a fresh set, mirroring
             # set.union/intersection/difference's scratch slots. Dict union
             # (`d1 | d2`, PEP 584) reuses the same "union" scratch slots.
@@ -1686,6 +1705,24 @@ class Codegen:
                         lam = a0.args[0]
                         for p in lam.params:
                             self._cl_define(info, p)
+                        # The lambda's body is inlined directly into this
+                        # loop (see _gen_list_map/_gen_list_filter) rather
+                        # than compiled as a separate function, so it never
+                        # goes through its own _collect_locals pass -- any
+                        # scratch slots its expressions need (e.g. a plain
+                        # int BinOp's __binint_ parking slot) must be
+                        # reserved here explicitly, in the ENCLOSING
+                        # function's frame, or codegen hits a bare
+                        # info.locals_[...] KeyError the first time the
+                        # lambda body needs one (confirmed bug: `list(map(
+                        # lambda x: x * x, xs))` crashed with KeyError
+                        # '__binint_...' once plain-int BinOps started
+                        # needing a reserved slot -- this walk was simply
+                        # always missing, just never observed before since
+                        # nothing inside a mapped/filtered lambda body had
+                        # needed a scratch slot until then).
+                        if lam.body is not None:
+                            self._cl_walk_expr(info, lam.body)
                 # list(zip(A, B, ...)): result list + per-iterable pointer + stop + idx.
                 if isinstance(a0, A.Call) and a0.func == "zip":
                     n = len(a0.args)
@@ -11568,10 +11605,17 @@ class Codegen:
                 "call _runtime_list_repeat",
             )
             return
+        # Frame slot, not push/pop: the right operand's evaluation may
+        # itself be or contain a call, and a raw push/pop pair across a
+        # call breaks 16-byte stack alignment for that call (every other
+        # BinOp path above already avoids this; see __binint_'s
+        # reservation comment in _cl_walk_expr for the confirmed-bug
+        # writeup this mirrors).
+        slot = info.locals_[f"__binint_{id(e)}"]
         self.gen_expr(e.left, info)
-        self.emitf("push rax")
+        self.emitf(f"mov [rbp{slot:+d}], rax")
         self.gen_expr(e.right, info)
-        self.emitf("mov rbx, rax", "pop rax")
+        self.emitf("mov rbx, rax", f"mov rax, [rbp{slot:+d}]")
         self._emit_binop_inline(e.op)
 
     def _gen_binop_str(self, e: A.BinOp, info: FuncInfo, lt: str, rt: str) -> None:

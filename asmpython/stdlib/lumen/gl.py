@@ -170,3 +170,32 @@ VENDOR:                 int = 0x1F00
 RENDERER:               int = 0x1F01
 VERSION:                int = 0x1F02
 SHADING_LANGUAGE_VERSION: int = 0x8B8C
+
+# ---- Textures (glGenTextures/glBindTexture/glTexParameteri/glTexImage2D) -------
+TEXTURE_2D:             int = 0x0DE1
+TEXTURE_MIN_FILTER:     int = 0x2801
+TEXTURE_MAG_FILTER:     int = 0x2800
+TEXTURE_WRAP_S:         int = 0x2802
+TEXTURE_WRAP_T:         int = 0x2803
+NEAREST:                int = 0x2600
+LINEAR:                 int = 0x2601
+CLAMP_TO_EDGE:          int = 0x812F
+CLAMP_TO_BORDER:        int = 0x812D
+TEXTURE_BORDER_COLOR:   int = 0x1004
+DEPTH_COMPONENT:        int = 0x1902
+DEPTH_COMPONENT24:      int = 0x81A6
+TEXTURE0:               int = 0x84C0
+TEXTURE1:               int = 0x84C1
+RGBA:                   int = 0x1908
+RGB:                    int = 0x1907
+SRGB8_ALPHA8:           int = 0x8C43
+GENERATE_MIPMAP:        int = 0x8191
+TEXTURE_WRAP_R:         int = 0x8072
+REPEAT:                 int = 0x2901
+LINEAR_MIPMAP_LINEAR:   int = 0x2703
+
+# ---- Framebuffers (glGenFramebuffers/glBindFramebuffer/glFramebufferTexture2D) -
+FRAMEBUFFER:            int = 0x8D40
+DEPTH_ATTACHMENT:       int = 0x8D00
+FRAMEBUFFER_COMPLETE:   int = 0x8CD5
+NONE:                   int = 0
