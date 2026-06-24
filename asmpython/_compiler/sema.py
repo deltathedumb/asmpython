@@ -15,7 +15,6 @@ flag what's clearly wrong).
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -6557,6 +6556,57 @@ class SemaAnalyzer:
             kwarg=sig.kwarg,
         )
 
+    def _clone_default_expr(self, e):
+        """Fresh-identity copy of a parsed default-value expression.
+
+        The parser only accepts literals here (int/float/str/True/False/
+        None/list/dict — see parser.py's "default argument must be a
+        literal" check), so this only needs to handle those node kinds.
+        `copy.deepcopy` would also work under CPython, but asmpython's own
+        bundled `copy` module (used once this file is self-compiled) only
+        implements deepcopy for actual `list` values — calling it on an AST
+        node reads the node's memory through the list-header layout
+        (len/buf offsets) instead of its real fields, corrupting whichever
+        call site relied on the default. Building fresh nodes by hand here
+        works identically whether this is interpreted (gen0) or
+        self-compiled (gen1).
+        """
+        if isinstance(e, A.IntLit):
+            return A.IntLit(value=e.value, pos=e.pos, is_bool=e.is_bool, is_none=e.is_none)
+        if isinstance(e, A.FloatLit):
+            return A.FloatLit(value=e.value, label=e.label, pos=e.pos)
+        if isinstance(e, A.StrLit):
+            return A.StrLit(value=e.value, label=e.label, pos=e.pos)
+        if isinstance(e, A.ListLit):
+            cloned_elems: list = []
+            for el in e.elems:
+                cloned_elems.append(self._clone_default_expr(el))
+            return A.ListLit(
+                elems=cloned_elems,
+                pos=e.pos,
+                el_type=e.el_type,
+                el_value_type=e.el_value_type,
+                el_tuple_types=list(e.el_tuple_types),
+            )
+        if isinstance(e, A.DictLit):
+            cloned_keys: list = []
+            for k in e.keys:
+                cloned_keys.append(self._clone_default_expr(k) if k is not None else None)
+            cloned_values: list = []
+            for v in e.values:
+                cloned_values.append(self._clone_default_expr(v))
+            return A.DictLit(
+                keys=cloned_keys,
+                values=cloned_values,
+                pos=e.pos,
+                value_type=e.value_type,
+                inner_value_type=e.inner_value_type,
+                value_tuple_elem_types=list(e.value_tuple_elem_types),
+            )
+        # Anything else (shouldn't occur for a literal default) shares
+        # identity with the original node rather than crashing.
+        return e
+
     def _bind_args(
         self,
         e: "A.Call | A.MethodCall",
@@ -6622,7 +6672,7 @@ class SemaAnalyzer:
                     # slots off id(expr) (e.g. _gen_dict_lit's __dictlit_{id(e)}),
                     # so two call sites sharing one default node would collide
                     # on the same slot and corrupt each other's container.
-                    slots[i] = copy.deepcopy(fixed_defaults[i])
+                    slots[i] = self._clone_default_expr(fixed_defaults[i])
                 else:
                     raise SemaError(
                         f"{label}() missing required argument {fixed_names[i]!r}",
