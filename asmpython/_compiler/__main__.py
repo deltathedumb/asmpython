@@ -424,6 +424,14 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         "or 'x86-64' (built-in direct-to-object SSA IR backend, windows "
         "only for now, experimental). Default: legacy",
     )
+    build_grp.add_argument(
+        "--linker",
+        choices=("gcc", "builtin"),
+        default=None,
+        help="linker to use: 'gcc' or 'builtin' (asmpython's own, no gcc/"
+        "ld involved). Default: whichever the selected --backend prefers "
+        "(legacy -> gcc, x86-64 -> builtin)",
+    )
 
     # Toolchain --------------------------------------------------------------
     tc_grp = ap.add_argument_group("toolchain overrides")
@@ -649,6 +657,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 icon_path=icon_path,
                 all_errors=all_errors,
                 backend=args.backend,
+                linker=args.linker,
             )
         else:
             compile_targets(
@@ -668,6 +677,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 icon_path=icon_path,
                 all_errors=all_errors,
                 backend=args.backend,
+                linker=args.linker,
             )
     except MultiSemaError as me:
         # me is just the generic "N semantic error(s)" message string when

@@ -84,6 +84,19 @@ def _run(cmd: list[str]) -> None:
         raise RuntimeError(f"{cmd[0]} exited {proc.returncode}")
 
 
+def runtime_object_path(target: str) -> Path:
+    """The single relocatable object build_runtime() assembles before
+    archiving it (the whole runtime is one NASM translation unit -- see
+    generate_runtime_only()). Linkers that want raw object bytes directly
+    (e.g. the builtin PE linker, which has no notion of .a archives) use
+    this instead of the .a build_runtime() returns."""
+    if target not in _TARGETS:
+        raise ValueError(f"unknown target {target!r}")
+    _cls, _fmt, archive_name = _TARGETS[target]
+    obj_suffix = ".obj" if target == "windows" else ".o"
+    return _build_dir() / archive_name.replace(".a", obj_suffix)
+
+
 def build_runtime(target: str, *, force: bool = False) -> Path:
     """Build the runtime archive for one target. Returns the .a/.lib path."""
     if target not in _TARGETS:

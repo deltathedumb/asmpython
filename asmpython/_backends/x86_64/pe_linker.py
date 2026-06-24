@@ -47,12 +47,40 @@ _DLL_FOR_SYMBOL: dict[str, str] = {}
 for _name in (
     "malloc", "realloc", "free", "calloc",
     "printf", "sprintf", "putchar", "puts", "fputs", "fputc",
-    "strlen", "strcmp", "strstr", "_strdup", "_atoi64", "strtoll",
-    "atof", "strtod", "fgets", "fopen", "fgetc", "fclose", "access",
-    "exit", "__acrt_iob_func", "memset", "memcpy", "fmod", "pow",
-    "___chkstk_ms", "fabs", "frexp", "ldexp", "log", "modf", "rand", "sqrt",
+    "strlen", "strcmp", "strstr", "_strdup", "_atoi64",
+    "atof", "strtod", "fgets", "fopen", "fgetc", "fclose",
+    "exit", "__iob_func", "memset", "memcpy", "fmod", "pow",
+    "fabs", "frexp", "ldexp", "log", "modf", "rand", "sqrt",
 ):
     _DLL_FOR_SYMBOL[_name] = "msvcrt.dll"
+
+# Some externs the legacy codegen calls under their POSIX/C99 name aren't
+# actually exported by msvcrt.dll under that name -- it only exports the
+# MS-specific equivalent (confirmed against the real system msvcrt.dll's
+# export table, the same way __acrt_iob_func's mismatch was found).
+# gcc/mingw papers over this via its own import library aliasing; this
+# linker has no equivalent, so referenced-name -> real-export-name aliases
+# are listed here instead. Both sides are ABI-compatible (same signature,
+# just a different export name), unlike __acrt_iob_func which needed
+# actual computation -- see _ACRT_IOB_FUNC_STUB_SYM for that one.
+_SYMBOL_ALIASES: dict[str, str] = {
+    "access": "_access",
+    "strtoll": "_strtoi64",
+}
+for _ref, _real in _SYMBOL_ALIASES.items():
+    _DLL_FOR_SYMBOL[_real] = "msvcrt.dll"
+# __acrt_iob_func (the UCRT stdin/stdout/stderr-by-index accessor NASM
+# emits a call to for input()/_runtime_input) is *not* an msvcrt.dll
+# export -- it's UCRT-only, which is why gcc/mingw resolves it by linking
+# in a small static thunk from its own runtime objects instead of
+# importing it from any DLL (confirmed: a gcc-linked build's import table
+# never lists it at all). Importing it from msvcrt.dll anyway, as if it
+# were a normal extern, made the loader fail to resolve the whole image
+# (every import is resolved before any code runs, so one bad entry breaks
+# programs that never call _runtime_input too). Synthesized below as a
+# tiny local stub instead of a DLL import -- see _ACRT_IOB_FUNC_STUB_SYM.
+_ACRT_IOB_FUNC_STUB_SYM = "__acrt_iob_func"
+_FILE_STRUCT_SIZE = 32  # sizeof(FILE) in this msvcrt.dll ABI (stable, well-known constant)
 for _name in (
     "LoadLibraryA", "GetProcAddress", "ExitProcess",
     "GetSystemTimeAsFileTime", "QueryPerformanceCounter",
@@ -142,33 +170,50 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
         raise LinkError(f"entry symbol {entry_symbol!r} not defined in any input object")
 
     # ── 3. Collect every relocation target not resolvable as a global
-    # symbol -- those are real DLL imports. ──
+    # symbol -- those are real DLL imports. __acrt_iob_func is special-
+    # cased: it's not actually an import (see _ACRT_IOB_FUNC_STUB_SYM's
+    # comment), it needs __iob_func imported instead and a synthetic
+    # local stub generated in step 4. ──
     imports: list[str] = []
     seen_imports: set[str] = set()
+    needs_acrt_iob_stub = False
+
+    def _want_import(name: str) -> None:
+        if name in global_syms or name in seen_imports:
+            return
+        if name not in _DLL_FOR_SYMBOL:
+            raise LinkError(
+                f"undefined symbol {name!r} has no known DLL "
+                f"(add it to pe_linker._DLL_FOR_SYMBOL if it's a real import)"
+            )
+        imports.append(name)
+        seen_imports.add(name)
+
     for obj in parsed:
         for sect in obj.sections:
             for r in sect.relocs:
+                if r.symbol == _ACRT_IOB_FUNC_STUB_SYM:
+                    needs_acrt_iob_stub = True
+                    _want_import("__iob_func")
+                    continue
                 if r.symbol in global_syms or r.symbol in seen_imports:
                     continue
-                if r.symbol not in _DLL_FOR_SYMBOL:
-                    raise LinkError(
-                        f"undefined symbol {r.symbol!r} has no known DLL "
-                        f"(add it to pe_linker._DLL_FOR_SYMBOL if it's a real import)"
-                    )
-                imports.append(r.symbol)
-                seen_imports.add(r.symbol)
+                _want_import(_SYMBOL_ALIASES.get(r.symbol, r.symbol))
     # ExitProcess powers the entry stub even if nothing else calls it.
-    if "ExitProcess" not in seen_imports:
-        imports.append("ExitProcess")
-        seen_imports.add("ExitProcess")
+    _want_import("ExitProcess")
     imports.sort(key=lambda n: (_DLL_FOR_SYMBOL[n], n))
 
     # ── 4. Lay out .text: merged code, then one 6-byte thunk per import
-    # (`jmp qword [rip+disp32]` into its IAT slot), then the entry stub. ──
+    # (`jmp qword [rip+disp32]` into its IAT slot), then the __acrt_iob_func
+    # stub (if needed), then the entry stub. ──
     text_body_len = len(bucket_bytes["text"])
     thunk_off = {name: text_body_len + i * 6 for i, name in enumerate(imports)}
     thunk_region_len = 6 * len(imports)
-    entry_stub_off = text_body_len + thunk_region_len
+    acrt_iob_stub_off = text_body_len + thunk_region_len
+    # sub rsp,40 ; mov r10d,ecx ; call rel32(__iob_func thunk) ;
+    # shl r10,5 ; add rax,r10 ; add rsp,40 ; ret
+    acrt_iob_stub_len = 4 + 3 + 5 + 4 + 3 + 4 + 1
+    entry_stub_off = acrt_iob_stub_off + (acrt_iob_stub_len if needs_acrt_iob_stub else 0)
     # sub rsp,40 ; call rel32(main) ; mov ecx,eax ; call rel32(ExitProcess thunk) ; ud2
     entry_stub_len = 4 + 5 + 2 + 5 + 2
     text_total_len = entry_stub_off + entry_stub_len
@@ -197,8 +242,11 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
                 return IMAGE_BASE + rva_data + data_base_in_section + off
             if bucket == "bss":
                 return IMAGE_BASE + rva_bss + off
+        name = _SYMBOL_ALIASES.get(name, name)
         if name in thunk_off:
             return IMAGE_BASE + rva_text + thunk_off[name]
+        if name == _ACRT_IOB_FUNC_STUB_SYM and needs_acrt_iob_stub:
+            return IMAGE_BASE + rva_text + acrt_iob_stub_off
         raise LinkError(f"unresolved symbol {name!r}")
 
     # rva_bss assigned after .idata is sized (placed last); referenced by
@@ -221,12 +269,15 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
         off += (len(names) + 1) * 8
     hintname_off: dict[str, int] = {}
     for name in imports:
-        if len(name) % 2 == 0:
-            off += 1  # keep entries word-aligned (hint:2 + name + NUL [+ pad])
-        hintname_off[name] = off
-        off += 2 + len(name) + 1
-        if (len(name) + 1) % 2:
+        # Each Hint/Name entry must start on a word (even) boundary -- pad
+        # based on the *running offset's* parity, not the name's length:
+        # padding from one entry can leave `off` odd even when this name's
+        # own length wouldn't have, so checking len(name) alone drifts
+        # after the first entry that needed a pad byte.
+        if off % 2:
             off += 1
+        hintname_off[name] = off
+        off += 2 + len(name) + 1  # hint(2) + name + NUL
     dllname_off: dict[str, int] = {}
     for dll in dlls:
         dllname_off[dll] = off
@@ -278,6 +329,28 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
         pos = thunk_off[name]
         disp = (IMAGE_BASE + iat_slot_rva(name)) - (IMAGE_BASE + rva_text + pos + 6)
         text[pos:pos + 6] = bytes([0xFF, 0x25]) + struct.pack("<i", disp)
+
+    if needs_acrt_iob_stub:
+        # __acrt_iob_func(index) -> __iob_func() + index*sizeof(FILE).
+        # index is always 0/1/2 (stdin/stdout/stderr), so a plain 32-bit
+        # mov/shl is enough -- no sign extension concerns.
+        iob = bytearray()
+        iob += bytes([0x48, 0x83, 0xEC, 0x28])           # sub rsp, 40
+        iob += bytes([0x41, 0x89, 0xCA])                 # mov r10d, ecx
+        call_disp_pos = len(iob) + 1
+        iob += bytes([0xE8, 0, 0, 0, 0])                 # call rel32 __iob_func thunk
+        iob += bytes([0x49, 0xC1, 0xE2, 0x05])           # shl r10, 5  (*sizeof(FILE)==32)
+        iob += bytes([0x4C, 0x01, 0xD0])                 # add rax, r10
+        iob += bytes([0x48, 0x83, 0xC4, 0x28])           # add rsp, 40
+        iob += bytes([0xC3])                             # ret
+        assert len(iob) == acrt_iob_stub_len
+        stub_addr = IMAGE_BASE + rva_text + acrt_iob_stub_off
+        call_patch_addr = stub_addr + call_disp_pos
+        struct.pack_into(
+            "<i", iob, call_disp_pos,
+            (IMAGE_BASE + rva_text + thunk_off["__iob_func"]) - (call_patch_addr + 4),
+        )
+        text[acrt_iob_stub_off:acrt_iob_stub_off + acrt_iob_stub_len] = bytes(iob)
 
     main_addr = resolve(entry_symbol)
     exitprocess_addr = resolve("ExitProcess")
@@ -389,7 +462,11 @@ def _build_pe_image(
     opt_hdr += struct.pack("<I", 0)                        # Win32VersionValue
     opt_hdr += struct.pack("<II", size_of_image, headers_size_aligned)
     opt_hdr += struct.pack("<I", 0)                        # CheckSum
-    opt_hdr += struct.pack("<HH", 3, 0x0140)                # Subsystem=CONSOLE, DllCharacteristics (NX+terminate)
+    # Subsystem=CONSOLE. DllCharacteristics=NX_COMPAT only -- DYNAMIC_BASE
+    # (ASLR) is deliberately *not* set: there's no .reloc section, so a
+    # relocated load would corrupt every absolute address this linker
+    # already baked in against the fixed IMAGE_BASE.
+    opt_hdr += struct.pack("<HH", 3, 0x0100)
     opt_hdr += struct.pack("<QQQQ", 0x100000, 0x1000, 0x100000, 0x1000)  # stack/heap reserve+commit
     opt_hdr += struct.pack("<I", 0)                         # LoaderFlags
     opt_hdr += struct.pack("<I", 16)                        # NumberOfRvaAndSizes

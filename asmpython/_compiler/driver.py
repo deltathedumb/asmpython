@@ -302,17 +302,20 @@ def _run_backend_x86_64(
     out_path: Path,
     *,
     gcc_path: Path | None = None,
-    keep_intermediates: bool = False,
+    linker: str | None = None,
 ) -> BuildResult:
-    """asmpython's built-in x86-64 backend: AST -> ir_lower.py -> a direct
-    SSA-IR-to-object-file compiler (asmpython/_backends/x86_64) -- no
-    NASM-text step at all.
+    """asmpython's built-in x86-64 backend: AST -> ir_lower.py -> the
+    vendored backend (asmpython/_backends/x86_64), which compiles to an
+    object file and links it via whichever linker plugin is selected
+    (asmpython/_linkers) -- the backend's own default ("builtin": no gcc/
+    ld involved at all) unless --linker overrides it.
 
     Scope is intentionally narrow for this first wiring: windows-only
     onefile executables, no icon/SDL2/networking/threading (ir_lower.py
-    doesn't lower those yet, and abi_shims.asm is win64-only -- see
-    build_abi_shims's docstring). Anything outside that raises clearly
-    rather than silently falling back to the legacy backend.
+    doesn't lower those yet, and the builtin PE linker's import table is
+    win64-only -- see pe_linker.py's docstring). Anything outside that
+    raises clearly rather than silently falling back to the legacy
+    backend.
     """
     if target != "windows":
         raise ValueError(
@@ -320,39 +323,39 @@ def _run_backend_x86_64(
         )
 
     from . import ir_lower
-    from .._backends.x86_64 import run_backend_codegen
-    from .._runtime.build import build_abi_shims, build_runtime, _build_dir
+    from .._backends.x86_64 import __module_backend__ as backend
+    from .._runtime.build import build_abi_shims, build_runtime, runtime_object_path
 
     ir_mod = ir_lower.lower_module(module)
-    out = run_backend_codegen(ir_mod, {"target_os": "windows", "abi": "win64"})
-    obj_name, obj_bytes = next(iter(out.items()))
+    compiled = backend.compile(ir_mod, {"target_os": "windows", "abi": "win64"})
+    program_obj = next(iter(compiled.values()))
+
+    shim_obj = build_abi_shims("windows").read_bytes()
+    build_runtime("windows")  # ensures runtime_object_path's file is current
+    runtime_obj = runtime_object_path("windows").read_bytes()
+
+    effective_linker = linker or backend.default_linker
+    gcc = None
+    if effective_linker == "gcc":
+        gcc = _resolve_tool("gcc", override=gcc_path, env_var="ASMPYTHON_GCC")
+
+    link_args = {
+        "target_os": "windows",
+        "abi": "win64",
+        "entry_symbol": "main",
+        "linker": linker,
+        "gcc_path": gcc,
+        "extra_args": ["-mconsole"],
+    }
+    linked = backend.link([program_obj, shim_obj, runtime_obj], link_args)
+    out_bytes = next(iter(linked.values()))
 
     out_path = out_path.resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    obj_path = out_path.with_suffix(Path(obj_name).suffix)
-    obj_path.write_bytes(obj_bytes)
-    print(f"wrote {obj_path}")
-
-    shim_obj = build_abi_shims("windows")
-    rt_archive = build_runtime("windows")
-
-    gcc = _resolve_tool("gcc", override=gcc_path, env_var="ASMPYTHON_GCC")
-    gcc_dir = str(Path(gcc).parent)
-    link_cmd = [
-        gcc, str(obj_path), str(shim_obj),
-        f"-L{_build_dir()}", "-lasmpython_rt_win",
-        "-o", str(out_path), "-mconsole",
-    ]
-    _run(link_cmd, extra_path_dirs=[gcc_dir])
-
-    if not keep_intermediates:
-        try:
-            obj_path.unlink()
-        except OSError:
-            pass
+    out_path.write_bytes(out_bytes)
 
     print(f"wrote {out_path}")
-    return BuildResult(asm_path=obj_path, obj_path=obj_path, exe_path=out_path)
+    return BuildResult(asm_path=out_path, obj_path=out_path, exe_path=out_path)
 
 
 def _run_backend(
@@ -371,6 +374,7 @@ def _run_backend(
     icon_path: Path | None = None,
     entry_path: Path | None = None,
     backend: str = "legacy",
+    linker: str | None = None,
     _asm_stem_suffix: str = "",
 ) -> BuildResult:
     """Target-specific back-end: codegen -> nasm -> gcc."""
@@ -384,8 +388,10 @@ def _run_backend(
             )
         return _run_backend_x86_64(
             module, target, out_path,
-            gcc_path=gcc_path, keep_intermediates=keep_intermediates,
+            gcc_path=gcc_path, linker=linker,
         )
+    elif linker is not None and linker != "gcc":
+        raise ValueError(f"--backend legacy only supports --linker gcc, got {linker!r}")
 
     if bundle_mode == "onedir":
         use_runtime_lib = True
@@ -649,6 +655,7 @@ def compile_source(
     icon_path: Path | None = None,
     all_errors: bool = False,
     backend: str = "legacy",
+    linker: str | None = None,
 ) -> BuildResult:
     module = _compile_program(
         src,
@@ -672,6 +679,7 @@ def compile_source(
         icon_path=icon_path,
         entry_path=entry_path,
         backend=backend,
+        linker=linker,
     )
 
 
@@ -694,6 +702,7 @@ def compile_targets(
     icon_path: Path | None = None,
     all_errors: bool = False,
     backend: str = "legacy",
+    linker: str | None = None,
 ) -> list[BuildResult]:
     """Compile src for multiple targets, sharing the front-end (lex/parse/sema).
 
@@ -723,6 +732,7 @@ def compile_targets(
             bundle_mode=bundle_mode,
             output_type=output_type,
             backend=backend,
+            linker=linker,
             icon_path=icon_path,
             entry_path=entry_path,
             _asm_stem_suffix=f"-{target}",

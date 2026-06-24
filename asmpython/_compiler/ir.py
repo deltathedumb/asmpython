@@ -116,10 +116,25 @@ class IRBackend(abc.ABC):
         """CLI arguments this backend wants the driver to register and
         pass through (e.g. --target-os, --abi)."""
 
+    @property
+    def default_linker(self) -> str:
+        """Name of the linker (asmpython/_linkers/<name>.py) this backend
+        links with when driver.py's --linker flag isn't given explicitly.
+        Backends "define" their linker this way -- e.g. the x86-64
+        backend defaults to "builtin" (its whole point is skipping
+        external tools); a backend with no opinion just inherits this
+        default of "gcc"."""
+        return "gcc"
+
     @abc.abstractmethod
     def compile(self, module: IRModule, args: dict) -> dict[str, bytes]:
         """Compile an IRModule to one or more output files, returned as
         {filename: bytes} (e.g. {"output.obj": b"..."})."""
+
+    @abc.abstractmethod
+    def link(self, objects: list[bytes], args: dict) -> dict[str, bytes]:
+        """Link one or more object files (as bytes) into one or more output files, returned as
+        {filename: bytes} (e.g. {"output.exe": b"..."})."""
 
 
 class ModuleBackend(IRBackend):
@@ -135,5 +150,12 @@ class ModuleBackend(IRBackend):
     def requested_args(self) -> list[dict]:
         return getattr(self._module, "requested_args", [])
 
+    @property
+    def default_linker(self) -> str:
+        return getattr(self._module, "default_linker", "gcc")
+
     def compile(self, module: IRModule, args: dict) -> dict[str, bytes]:
         return self._module.run_backend_codegen(module, args)  # type: ignore[attr-defined]
+
+    def link(self, objects: list[bytes], args: dict) -> dict[str, bytes]:
+        return self._module.run_backend_link(objects, args)  # type: ignore[attr-defined]

@@ -2,16 +2,24 @@
 asmpython's built-in x86-64 backend (driver.py's --backend x86-64).
 
 Compiles an IRModule (see asmpython._compiler.ir / ir_lower.py) to a
-relocatable object file (.o / .obj) using all available CPU cores. The
-result is linkable with gcc, clang, or MSVC link.
+relocatable object file (.o / .obj) using all available CPU cores, then
+links it via whichever linker plugin is selected (asmpython/_linkers) --
+`builtin` (this backend's own default: no gcc/ld involved at all) unless
+overridden by driver.py's --linker flag.
 
-Plugin interface:
-  run_backend_codegen(ir, args) -> dict[str, bytes]
+Plugin interface (the convention asmpython._compiler.ir.ModuleBackend
+adapts to IRBackend):
   requested_args: list[dict]
+  default_linker: str
+  run_backend_codegen(ir, args)       -> dict[str, bytes]
+  run_backend_link(objects, args)     -> dict[str, bytes]
+  __module_backend__: ModuleBackend   (so the driver can just import this
+                                        module and use it directly)
 """
 
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -22,6 +30,7 @@ from .codegen import compile_func, FuncCode
 from .elf import build_elf
 from .coff import build_coff
 from .phi_elim import eliminate_phi
+from ..._compiler.ir import ModuleBackend
 
 
 # ── CLI arguments this backend registers ─────────────────────────────────────
@@ -126,3 +135,46 @@ def run_backend_codegen(ir: Any, args: dict) -> dict[str, bytes]:
         return {"output.obj": build_coff(func_codes, globals)}
     else:
         return {"output.o": build_elf(func_codes, globals)}
+
+
+# ── Linking ───────────────────────────────────────────────────────────────────
+
+# This backend's own linker, used whenever args doesn't request a
+# different one explicitly (driver.py's --linker flag). Builtin first --
+# this backend's whole point is skipping external tools where it can.
+default_linker = "builtin"
+
+_LINKER_MODULES = {
+    "gcc": "asmpython._linkers.gcc",
+    "builtin": "asmpython._linkers.builtin",
+}
+
+
+def run_backend_link(objects: list[bytes], args: dict) -> dict[str, bytes]:
+    """
+    Link object files (as produced by run_backend_codegen, plus whatever
+    runtime-support objects the driver adds) into an executable.
+
+    objects: list of raw object-file bytes (this backend's own output
+             first, then any extra objects the driver appended -- order
+             doesn't matter to the linker, only to symbol resolution,
+             which doesn't care either since every linker resolves the
+             full symbol set before applying relocations).
+    args:    resolved CLI args, plus whatever driver.py adds as link
+             context (target_os, entry_symbol, gcc_path, extra_args, ...).
+             args["linker"] selects the linker by name; falls back to
+             this module's own default_linker when absent/None.
+    """
+    target_os, _abi = _resolve(args.get("target_os", "auto"), args.get("abi", "auto"))
+    linker_name = args.get("linker") or default_linker
+    if linker_name not in _LINKER_MODULES:
+        raise ValueError(f"unknown linker {linker_name!r} (have: {sorted(_LINKER_MODULES)})")
+
+    linker_mod = importlib.import_module(_LINKER_MODULES[linker_name])
+    ctx = {**args, "objects": objects, "target_os": target_os}
+    out_bytes = linker_mod.link(ctx)
+    ext = ".exe" if target_os == "windows" else ""
+    return {f"output{ext}": out_bytes}
+
+
+__module_backend__ = ModuleBackend(sys.modules[__name__])
