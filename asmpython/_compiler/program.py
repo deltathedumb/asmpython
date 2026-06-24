@@ -398,6 +398,28 @@ def _stdlib_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "stdlib"
 
 
+def _backends_dir() -> Path:
+    # See _stdlib_dir's docstring for why this is computed inline rather
+    # than cached in a module-level constant.
+    return Path(__file__).resolve().parent.parent / "_backends"
+
+
+def _is_cpython_only_backend(path: Path) -> bool:
+    """True if `path` lives under asmpython/_backends/ -- the vendored
+    x86-64 IR backend plugin (multiprocessing, importlib plugin loading,
+    NASM/gcc subprocess invocation) that driver.py's --backend x86-64 flag
+    loads at runtime under a real CPython host. It's never meant to be
+    self-host-compiled: it depends on CPython-only machinery (a real bytes
+    type, ProcessPoolExecutor, dynamic import by string) self-hosted
+    asmpython doesn't have and isn't trying to grow just to compile its own
+    build tooling. driver.py's import of it is function-local specifically
+    so the self-hosted compiler only needs the legacy gcc/text-asm path;
+    excluding it here keeps the bundler from discovering its whole
+    transitive closure (regalloc.py, elf.py, coff.py, ...) and dragging it
+    into a self-host build that was never going to run it anyway."""
+    return _within(path, _backends_dir())
+
+
 def _is_within_stdlib(path: Path) -> bool:
     """True if `path` lives under asmpython's bundled stdlib/ directory.
 
@@ -821,7 +843,10 @@ def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]
                 p = _resolve_bundled_stdlib(stmt.module)
             if p is not None:
                 out.append(p)
-    return out
+    # _backends/ is the CPython-only IR backend plugin (see
+    # _is_cpython_only_backend's docstring) -- never self-host-compiled,
+    # regardless of which project file imports it.
+    return [p for p in out if not _is_cpython_only_backend(p)]
 
 
 def _project_root(entry: Path) -> Path:
