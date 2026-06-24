@@ -156,10 +156,8 @@ def build_abi_shims(target: str, *, force: bool = False) -> Path:
     newer than the cached object.
     """
     if target not in _ABI_SHIM_TARGETS:
-        raise ValueError(
-            f"unknown target {target!r} for build_abi_shims "
-            f"(have: {sorted(_ABI_SHIM_TARGETS)})"
-        )
+        have = ", ".join(sorted(_ABI_SHIM_TARGETS))
+        raise ValueError(f"unknown target {target!r} for build_abi_shims (have: {have})")
     src_name, nasm_fmt, obj_name = _ABI_SHIM_TARGETS[target]
     src_path = Path(__file__).resolve().parent / src_name
     out_dir = _build_dir()

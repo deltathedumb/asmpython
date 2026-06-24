@@ -168,7 +168,8 @@ def run_backend_link(objects: list[bytes], args: dict) -> dict[str, bytes]:
     target_os, _abi = _resolve(args.get("target_os", "auto"), args.get("abi", "auto"))
     linker_name = args.get("linker") or default_linker
     if linker_name not in _LINKER_MODULES:
-        raise ValueError(f"unknown linker {linker_name!r} (have: {sorted(_LINKER_MODULES)})")
+        have = ", ".join(sorted(_LINKER_MODULES))
+        raise ValueError(f"unknown linker {linker_name!r} (have: {have})")
 
     linker_mod = importlib.import_module(_LINKER_MODULES[linker_name])
     ctx = {**args, "objects": objects, "target_os": target_os}
