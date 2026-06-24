@@ -47,6 +47,7 @@ _build/
 # pipeline's standard-ABI calls to the legacy runtime's ad-hoc convention
 # (see ir_lower.py's module docstring) -- this is source, not build output.
 !asmpython/_runtime/abi_shims.asm
+!asmpython/_runtime/abi_shims_linux.asm
 
 # ── Downloaded dependencies (NASM / GCC / embeddable Python) ─────────────────
 /tools/

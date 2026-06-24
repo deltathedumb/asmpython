@@ -310,29 +310,31 @@ def _run_backend_x86_64(
     (asmpython/_linkers) -- the backend's own default ("builtin": no gcc/
     ld involved at all) unless --linker overrides it.
 
-    Scope is intentionally narrow for this first wiring: windows-only
+    Scope is intentionally narrow for this first wiring: windows/linux
     onefile executables, no icon/SDL2/networking/threading (ir_lower.py
-    doesn't lower those yet, and the builtin PE linker's import table is
-    win64-only -- see pe_linker.py's docstring). Anything outside that
+    doesn't lower those yet, and the builtin linkers' import mechanisms
+    only cover what hardware.py/the runtime actually need -- see
+    pe_linker.py / elf_linker.py's docstrings). Anything outside that
     raises clearly rather than silently falling back to the legacy
     backend.
     """
-    if target != "windows":
+    if target not in ("windows", "linux"):
         raise ValueError(
-            f"--backend x86-64 only supports --target windows for now, got {target!r}"
+            f"--backend x86-64 only supports --target windows/linux for now, got {target!r}"
         )
+    abi = "win64" if target == "windows" else "sysv"
 
     from . import ir_lower
     from .._backends.x86_64 import __module_backend__ as backend
     from .._runtime.build import build_abi_shims, build_runtime, runtime_object_path
 
     ir_mod = ir_lower.lower_module(module)
-    compiled = backend.compile(ir_mod, {"target_os": "windows", "abi": "win64"})
+    compiled = backend.compile(ir_mod, {"target_os": target, "abi": abi})
     program_obj = next(iter(compiled.values()))
 
-    shim_obj = build_abi_shims("windows").read_bytes()
-    build_runtime("windows")  # ensures runtime_object_path's file is current
-    runtime_obj = runtime_object_path("windows").read_bytes()
+    shim_obj = build_abi_shims(target).read_bytes()
+    build_runtime(target)  # ensures runtime_object_path's file is current
+    runtime_obj = runtime_object_path(target).read_bytes()
 
     effective_linker = linker or backend.default_linker
     gcc = None
@@ -340,12 +342,12 @@ def _run_backend_x86_64(
         gcc = _resolve_tool("gcc", override=gcc_path, env_var="ASMPYTHON_GCC")
 
     link_args = {
-        "target_os": "windows",
-        "abi": "win64",
+        "target_os": target,
+        "abi": abi,
         "entry_symbol": "main",
         "linker": linker,
         "gcc_path": gcc,
-        "extra_args": ["-mconsole"],
+        "extra_args": ["-mconsole"] if target == "windows" else [],
     }
     linked = backend.link([program_obj, shim_obj, runtime_obj], link_args)
     out_bytes = next(iter(linked.values()))

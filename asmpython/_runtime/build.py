@@ -141,29 +141,37 @@ def build_runtime(target: str, *, force: bool = False) -> Path:
     return archive_path
 
 
-def build_abi_shims(target: str, *, force: bool = False) -> Path:
-    """Assemble the ABI shim layer (abi_shims.asm) for the new uasm-backed
-    SSA IR pipeline (see driver.py's _run_backend_uasm and ir_lower.py's
-    module docstring). Cached the same way as the runtime archive: rebuilt
-    only when the source .asm is newer than the cached object.
+_ABI_SHIM_TARGETS = {
+    # target -> (source filename, nasm output format, object filename)
+    "windows": ("abi_shims.asm", "win64", "abi_shims.obj"),
+    "linux": ("abi_shims_linux.asm", "elf64", "abi_shims_linux.o"),
+}
 
-    Windows only for now -- abi_shims.asm hardcodes the Win64 integer
-    argument registers (rcx/rdx/r8/r9); a SysV variant (rdi/rsi/rdx/rcx)
-    would need its own source file before --backend uasm can target linux.
+
+def build_abi_shims(target: str, *, force: bool = False) -> Path:
+    """Assemble the ABI shim layer (abi_shims.asm / abi_shims_linux.asm) for
+    the built-in x86-64 backend's SSA IR pipeline (see driver.py's
+    _run_backend_x86_64 and ir_lower.py's module docstring). Cached the
+    same way as the runtime archive: rebuilt only when the source .asm is
+    newer than the cached object.
     """
-    if target != "windows":
-        raise ValueError(f"abi_shims.asm only supports target=windows, got {target!r}")
-    src_path = Path(__file__).resolve().parent / "abi_shims.asm"
+    if target not in _ABI_SHIM_TARGETS:
+        raise ValueError(
+            f"unknown target {target!r} for build_abi_shims "
+            f"(have: {sorted(_ABI_SHIM_TARGETS)})"
+        )
+    src_name, nasm_fmt, obj_name = _ABI_SHIM_TARGETS[target]
+    src_path = Path(__file__).resolve().parent / src_name
     out_dir = _build_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
-    obj_path = out_dir / "abi_shims.obj"
+    obj_path = out_dir / obj_name
 
     if obj_path.exists() and not force:
         if obj_path.stat().st_mtime >= src_path.stat().st_mtime:
             return obj_path
 
     nasm = _which("nasm")
-    _run([nasm, "-f", "win64", "-w-label-redef-late", str(src_path), "-o", str(obj_path)])
+    _run([nasm, "-f", nasm_fmt, "-w-label-redef-late", str(src_path), "-o", str(obj_path)])
     print(f"wrote {obj_path}")
     return obj_path
 

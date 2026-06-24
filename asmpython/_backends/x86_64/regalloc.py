@@ -281,8 +281,20 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
         stack_top = 32
 
     # ── Align total stack frame to 16 bytes (ABI requirement at call sites) ───
-    if stack_top % 16 != 0:
-        stack_top += 16 - (stack_top % 16)
+    # _prologue() pushes (len(callee_saved) + 1) registers (the +1 is RBP)
+    # *before* subtracting stack_top, so the residue stack_top must land on
+    # depends on that count's parity: an odd number of callee-saved pushes
+    # needs stack_top % 16 == 8 to leave RSP 16-aligned before call sites;
+    # an even count (including zero) needs stack_top % 16 == 0. Always
+    # rounding to 0 here (regardless of parity) silently breaks alignment
+    # whenever exactly 1 (or 3, 5, ...) callee-saved GP registers are used
+    # and stack_top was already a multiple of 16 (most commonly 0) -- every
+    # call in the function then runs with RSP off by 8, which corrupts
+    # SSE-using libc internals (segfault) while plain integer code happens
+    # to tolerate it.
+    target_residue = 8 if len(used_callee_gp) % 2 == 1 else 0
+    if stack_top % 16 != target_residue:
+        stack_top += (target_residue - stack_top) % 16
 
     return AllocResult(
         locs             = locs,
