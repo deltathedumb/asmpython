@@ -12823,25 +12823,39 @@ class Codegen:
             else:
                 self.gen_expr(e.args[1], info)
                 self.emitf(f"mov [rbp{name_slot:+d}], rax")
+            none_lbl = self.fresh("getattr_none")
+            done_lbl = self.fresh("getattr_done")
             if len(e.args) == 3:
                 dslot = info.locals_[f"__getattr_def_{id(e)}"]
                 self.gen_expr(e.args[2], info)
                 if A.expr_type(e.args[2]) == "float":
                     self.emitf("movq rax, xmm0")
                 self.emitf(f"mov [rbp{dslot:+d}], rax")
-                self.gen_expr(e.args[0], info)  # rax = instance dict
+                self.gen_expr(e.args[0], info)  # rax = instance dict (or 0/None)
+                # getattr(None, name, default) must return default, not
+                # dereference a null dict.
+                self.emitf("test rax, rax", f"jz {none_lbl}")
                 self.emitf(
                     f"mov rbx, [rbp{name_slot:+d}]",
                     f"mov rcx, [rbp{dslot:+d}]",
                     "call _runtime_dict_get_default",
+                    f"jmp {done_lbl}",
                 )
+                self.label(none_lbl)
+                self.emitf(f"mov rax, [rbp{dslot:+d}]")
+                self.label(done_lbl)
             else:
-                self.gen_expr(e.args[0], info)  # rax = instance dict
+                self.gen_expr(e.args[0], info)  # rax = instance dict (or 0/None)
+                self.emitf("test rax, rax", f"jz {none_lbl}")
                 self.emitf(
                     f"mov rbx, [rbp{name_slot:+d}]",
                     "xor rcx, rcx",
                     "call _runtime_dict_get_default",
+                    f"jmp {done_lbl}",
                 )
+                self.label(none_lbl)
+                self.emitf("xor rax, rax")
+                self.label(done_lbl)
             return
         if e.func == "gl_resolve":
             # gl_resolve(handle, "funcName") -> int: force the lazy resolve-
@@ -12888,11 +12902,19 @@ class Codegen:
             else:
                 self.gen_expr(e.args[1], info)
                 self.emitf(f"mov [rbp{name_slot:+d}], rax")
-            self.gen_expr(e.args[0], info)  # rax = instance dict
+            self.gen_expr(e.args[0], info)  # rax = instance dict (or 0/None)
+            # hasattr(None, name) must be False, not a null-dict dereference.
+            none_lbl = self.fresh("hasattr_none")
+            done_lbl = self.fresh("hasattr_done")
+            self.emitf("test rax, rax", f"jz {none_lbl}")
             self.emitf(
                 f"mov rbx, [rbp{name_slot:+d}]",
                 "call _runtime_dict_contains",
+                f"jmp {done_lbl}",
             )
+            self.label(none_lbl)
+            self.emitf("xor rax, rax")
+            self.label(done_lbl)
             return
         if e.func == "setattr":
             # setattr(obj, name, value) -> dict_set(obj, name, value); result
