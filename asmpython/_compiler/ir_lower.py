@@ -45,12 +45,20 @@ class LowerError(Exception):
 class _ModuleCtx:
     """Shared across every function lowered in one module: interns string
     literals (and runtime format strings) as deduplicated IRGlobal entries,
-    and tracks which names are classes so `ClassName(...)` lowers to
-    instantiation rather than an ordinary call."""
+    tracks which names are classes so `ClassName(...)` lowers to
+    instantiation rather than an ordinary call, and holds the FFI surface
+    (stdlib.Func bindings, e.g. asmlib.hardware's in_byte/cpuid/...) so a
+    bare call to one of those names lowers to a call against its real
+    c_name symbol instead of treating the asmpython-level name as a label."""
 
-    def __init__(self, class_names: frozenset[str] = frozenset()) -> None:
+    def __init__(
+        self,
+        class_names: frozenset[str] = frozenset(),
+        ffi_funcs: dict | None = None,
+    ) -> None:
         self.data: list[IRGlobal] = []
         self.class_names = class_names
+        self.ffi_funcs = ffi_funcs or {}
         self._str_names: dict[str, str] = {}
         self._n = 0
 
@@ -216,6 +224,21 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("call", v, ["_abi_new_instance"]))
         return v
 
+    if isinstance(e, A.Call) and e.func in ctx.mctx.ffi_funcs:
+        # A bound stdlib FFI function (e.g. asmlib.hardware.in_byte/cpuid/
+        # disable_interrupts): call its real c_name symbol, not the
+        # asmpython-level name. All of hardware.py's bindings take plain
+        # int args (no float, no >4-arg overflow), which is exactly what a
+        # normal "call" IR op already marshals -- the same standard-ABI
+        # argument passing _gen_ffi_call does by hand in the legacy
+        # codegen.py for the same bindings.
+        fn = ctx.mctx.ffi_funcs[e.func]
+        c_name = getattr(fn, "c_name_windows", None) or fn.c_name
+        args = [_lower_expr(ctx, a) for a in e.args]
+        v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", v, [c_name, *args]))
+        return v
+
     if isinstance(e, A.Call):
         args = [_lower_expr(ctx, a) for a in e.args]
         v = ctx.tmp(I64)
@@ -329,7 +352,7 @@ def lower_func(f: A.FuncDef, mctx: _ModuleCtx, *, visibility: str | None = None)
 
 
 def lower_module(mod: A.Module) -> IRModule:
-    mctx = _ModuleCtx(frozenset(c.name for c in mod.classes))
+    mctx = _ModuleCtx(frozenset(c.name for c in mod.classes), mod.ffi_funcs)
     funcs = [lower_func(f, mctx) for f in mod.funcs]
     # A user-defined top-level `def main():` already produces the entry
     # symbol; only synthesize one wrapping module-level statements when
