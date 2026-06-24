@@ -31,6 +31,18 @@ class Parser:
         # can resolve calls to them (closures aren't compiled, but parsing
         # must succeed so the self-hosting gauntlet can proceed).
         self._nested_funcs: list = []
+        # Every name `import X [as Y]` / `from X import ... [as Y]` binds at
+        # module scope, accumulated as imports are parsed (which precedes any
+        # nested def referencing them, the normal case). _find_free_vars
+        # subtracts this set too: `A.IntLit` inside a nested function
+        # references the *module alias* `A`, a compile-time namespace lookup
+        # with no runtime storage location, not a value to capture into a
+        # closure -- without this, _var_mem crashes with "undefined variable
+        # A" trying to find A's (nonexistent) memory slot when building the
+        # closure's captured-value array. Confirmed via the self-host
+        # codegen probe: every file that does `from . import ast_nodes as A`
+        # and then has a nested def referencing `A.*` hit this.
+        self._import_bound_names: set = set()
 
     # ---- helpers -----------------------------------------------------------
 
@@ -347,7 +359,10 @@ class Parser:
             "ZeroDivisionError", "NotImplementedError", "OverflowError",
             "True", "False", "None",
         }
-        free = [n for n in sorted(referenced - local_names) if n not in BUILTINS]
+        free = [
+            n for n in sorted(referenced - local_names)
+            if n not in BUILTINS and n not in self._import_bound_names
+        ]
         nl = [n for n in free if n in nonlocal_names]
         return free, nl
 
@@ -1730,6 +1745,7 @@ class Parser:
             self._eat()
             alias = self._expect("NAME").value  # type: ignore[assignment]
         self._expect("NEWLINE")
+        self._import_bound_names.add(alias if alias else name.split(".")[0])
         return A.Import(module=name, alias=alias, pos=kw.pos)  # type: ignore
 
     def _parse_from_import(self) -> A.FromImport:
@@ -1780,6 +1796,7 @@ class Parser:
         if parenthesized:
             self._expect("OP", ")")
         self._expect("NEWLINE")
+        self._import_bound_names.update(names)
         return A.FromImport(  # type: ignore
             module=module, names=names, orig_names=orig_names, pos=kw.pos, level=level
         )
