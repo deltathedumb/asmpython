@@ -12807,6 +12807,13 @@ class Codegen:
             elif arg_t == "float":
                 # Truncate toward zero (Python's int(float) semantics).
                 self.emitf("cvttsd2si rax, xmm0")
+            elif arg_t.startswith("instance:"):
+                resolved = self._resolve_int_dunder(arg_t.split(":", 1)[1])
+                if resolved is not None:
+                    owner, method = resolved
+                    self.emitf(f"mov {self._arg_reg(0)}, rax")
+                    self.emit_call(self._method_symbol(owner, method))
+                # else: no __int__ -- fall through, treat the pointer as a raw int.
             # int -> int: nothing to do.
             return
         if e.func == "float":
@@ -14519,6 +14526,14 @@ class Codegen:
             owner = self._resolve_method_owner(class_name, method)
             if owner is not None:
                 return owner, method
+        return None
+
+    def _resolve_int_dunder(self, class_name: str) -> Optional[tuple[str, str]]:
+        """(owner, "__int__") if `class_name`'s chain defines it, else None.
+        Used by int() to convert a user instance, mirroring `_resolve_str_dunder`."""
+        owner = self._resolve_method_owner(class_name, "__int__")
+        if owner is not None:
+            return owner, "__int__"
         return None
 
     def _virtual_dispatch_rows(self, class_name: str, method: str) -> list:

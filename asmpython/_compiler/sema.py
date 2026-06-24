@@ -954,6 +954,10 @@ class SemaAnalyzer:
             return ("tuple", None, None, None)
         if isinstance(value, A.Call) and value.func in self.classes:
             return (f"instance:{value.func}", None, None, None)
+        if isinstance(value, A.Comprehension):
+            elt_lit = self._literal_arg_type(value.elt)
+            el = elt_lit[0] if elt_lit is not None else None
+            return ("list", el, None, None)
         return None
 
     def _static_value_info(self, value, pinfo: dict):
@@ -1246,16 +1250,18 @@ class SemaAnalyzer:
                     or sig.returns_self
                 ):
                     continue
-                ty = self._infer_return_type(m, f"{c.name}.{m.name}")
+                ty = self._infer_return_type(m, f"{c.name}.{m.name}", c.name)
                 if ty is not None:
                     sig.ret_type = ty
 
-    def _infer_return_type(self, fn: A.FuncDef, qualname: str):
+    def _infer_return_type(self, fn: A.FuncDef, qualname: str, cls_name: str | None = None):
         """(ty, el, val) for every reachable `return` in `fn.body`, if all
         have a value and those values' types are statically knowable
         (`_literal_arg_type`, or a reference to one of `fn`'s parameters whose
         type is known) and agree -- else None. Helper for
-        `_infer_unannotated_returns`."""
+        `_infer_unannotated_returns`. `cls_name` (methods only) lets a
+        `return self.field[i]` resolve to the field's element type via
+        `_collect_field_types`'s `field_el_types` (it runs before this pass)."""
         returns: list = []
         fn_body: list = fn.body
         self._collect_returns(fn_body, returns)
@@ -1266,6 +1272,20 @@ class SemaAnalyzer:
             if r.value is None:
                 return None  # bare `return` mixed in: ambiguous
             lit = self._literal_arg_type(r.value)
+            if (
+                lit is None
+                and cls_name is not None
+                and isinstance(r.value, A.Subscript)
+                and isinstance(r.value.obj, A.Attr)
+                and isinstance(r.value.obj.obj, A.Name)
+                and r.value.obj.obj.name == "self"
+            ):
+                fsig = self.classes.get(cls_name)
+                fname = r.value.obj.name
+                if fsig is not None and fsig.fields.get(fname) == "list":
+                    el = fsig.field_el_types.get(fname)
+                    if el is not None:
+                        lit = (el, None, None, None)
             if lit is None and isinstance(r.value, A.Name) and r.value.name in fn.params:
                 j = fn.params.index(r.value.name)
                 fn_param_types_2: list = fn.param_types
@@ -2388,17 +2408,20 @@ class SemaAnalyzer:
         # `self.x = param` in `__init__` benefits too.
         self._infer_unannotated_params()
 
+        # Infer instance-field types from `self.x = ...` so `obj.x` reads carry
+        # the right static type. Done before any body is checked (top-level or
+        # method) so every field read — including from module-level code — sees
+        # the inferred field types. Also done before return-type inference
+        # below, so `return self.field[i]` can resolve to the field's element
+        # type (e.g. `def r(self, i): return self.registers[i]` on a
+        # `self.registers: list[Trite]` field).
+        self._collect_field_types()
+
         # Infer return types for functions/methods with no return annotation
         # and no inferred tuple-return shape, from their `return` statements
         # (using the parameter types just inferred above). See
         # `_infer_unannotated_returns`.
         self._infer_unannotated_returns()
-
-        # Infer instance-field types from `self.x = ...` so `obj.x` reads carry
-        # the right static type. Done before any body is checked (top-level or
-        # method) so every field read — including from module-level code — sees
-        # the inferred field types.
-        self._collect_field_types()
 
         self.global_scope = Scope()
         # Module dunders the runtime always provides.
@@ -7012,7 +7035,12 @@ class SemaAnalyzer:
                     )
             elif e.func == "int":
                 t = A.expr_type(e.args[0])
-                if t not in ("str", "float", "int", "any"):
+                # An instance may define __int__ — accepted leniently like
+                # str()'s __str__/__repr__ dispatch; codegen falls back to
+                # treating the pointer as a raw int if no __int__ exists.
+                if t not in ("str", "float", "int", "any") and not t.startswith(
+                    "instance:"
+                ):
                     raise SemaError("int() requires str / float / int", e.pos)
             elif e.func == "float":
                 t = A.expr_type(e.args[0])
