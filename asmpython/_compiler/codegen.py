@@ -326,14 +326,17 @@ class Codegen:
         # table, says the call should dispatch through `glfns`'s resolved
         # function pointer instead of compiling as an ordinary method call
         # to GLRenderer3D.glClearColor's literal (stub) body.
-        self.imported_method_handle: dict[tuple[str, str], str] = {}
+        # Keyed by "ClassName:method_name" (a plain str, not a tuple --
+        # asmpython's dict.get()/index-assign type-checking doesn't fully
+        # support tuple keys yet).
+        self.imported_method_handle: dict[str, str] = {}
         for cls in mod.classes:
             for m in cls.methods:
                 for deco in m.decorators:
                     if deco.endswith(".imported"):
                         handle_name = deco[: -len(".imported")]
                         self.imported_funcs.setdefault(handle_name, []).append((m.name, m))
-                        self.imported_method_handle[(cls.name, m.name)] = handle_name
+                        self.imported_method_handle[f"{cls.name}:{m.name}"] = handle_name
         # Exception-type RTTI: builtins get the fixed ids above; user classes
         # deriving (transitively) from a builtin exception get the next ids,
         # assigned in declaration order so output is deterministic.
@@ -1170,7 +1173,7 @@ class Codegen:
         # pass that produces it, so a list works identically here -- both
         # `for n in nonlocal_list` and `if p in nonlocal_list` are correct
         # without set semantics.
-        nonlocal_list: list = list(getattr(f, "nonlocal_vars", []))
+        nonlocal_list: list[str] = list(getattr(f, "nonlocal_vars", []))
         for n in nonlocal_list:
             info.nonlocal_boxes[n] = n  # same slot, just mark for indirection
         # Each local (incl. params) gets an 8-byte slot at a negative RBP offset.
@@ -1611,10 +1614,10 @@ class Codegen:
                 self._cl_define(info, f"__{expr.func}_name_{id(expr)}")
             if expr.func == "setattr":
                 self._cl_define(info, f"__setattr_name_{id(expr)}")
+                self._cl_define(info, f"__setattr_val_{id(expr)}")
             if expr.func == "gl_resolve":
                 self._cl_define(info, f"__glresolve_dict_{id(expr)}")
                 self._cl_define(info, f"__glresolve_ptr_{id(expr)}")
-                self._cl_define(info, f"__setattr_val_{id(expr)}")
             # int(s, base) parks the base across the string's evaluation.
             if expr.func == "int" and len(expr.args) == 2:
                 self._cl_define(info, f"__int_base_{id(expr)}")
@@ -1885,7 +1888,7 @@ class Codegen:
             _recv_ty = A.expr_type(expr.obj)
             if _recv_ty.startswith("instance:"):
                 _cls_name = _recv_ty[len("instance:"):]
-                _handle = self.imported_method_handle.get((_cls_name, expr.method))
+                _handle = self.imported_method_handle.get(f"{_cls_name}:{expr.method}")
                 if _handle is not None:
                     _funcdef = None
                     for _fname, _fdef in self.imported_funcs.get(_handle, []):
@@ -10751,7 +10754,7 @@ class Codegen:
         recv_ty = A.expr_type(e.obj)
         if recv_ty.startswith("instance:"):
             cls_name = recv_ty[len("instance:"):]
-            handle_name = self.imported_method_handle.get((cls_name, e.method))
+            handle_name = self.imported_method_handle.get(f"{cls_name}:{e.method}")
             if handle_name is not None:
                 funcdef = None
                 for fname, fdef in self.imported_funcs[handle_name]:
@@ -10770,7 +10773,7 @@ class Codegen:
             cls_name = e.obj.name
             mdef = self._find_method_def(cls_name, e.method)
             if mdef is not None:
-                deco: list = getattr(mdef, "decorators", [])
+                deco: list[str] = getattr(mdef, "decorators", [])
                 if "classmethod" in deco:
                     cleanup = self._emit_positional_args(e, e.args, info, start_reg=1)
                     self.emitf(f"xor {self._arg_reg(0)}, {self._arg_reg(0)}")  # cls = null
