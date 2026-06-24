@@ -19,7 +19,6 @@ adapts to IRBackend):
 
 from __future__ import annotations
 
-import importlib
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -29,6 +28,8 @@ from .regalloc import allocate
 from .codegen import compile_func, FuncCode
 from .elf import build_elf
 from .coff import build_coff
+from ..._linkers import builtin as _builtin_linker
+from ..._linkers import gcc as _gcc_linker
 from .phi_elim import eliminate_phi
 from ..._compiler.ir import ModuleBackend
 
@@ -144,10 +145,7 @@ def run_backend_codegen(ir: Any, args: dict) -> dict[str, bytes]:
 # this backend's whole point is skipping external tools where it can.
 default_linker = "builtin"
 
-_LINKER_MODULES = {
-    "gcc": "asmpython._linkers.gcc",
-    "builtin": "asmpython._linkers.builtin",
-}
+_LINKER_NAMES = ["gcc", "builtin"]
 
 
 def run_backend_link(objects: list[bytes], args: dict) -> dict[str, bytes]:
@@ -167,13 +165,18 @@ def run_backend_link(objects: list[bytes], args: dict) -> dict[str, bytes]:
     """
     target_os, _abi = _resolve(args.get("target_os", "auto"), args.get("abi", "auto"))
     linker_name = args.get("linker") or default_linker
-    if linker_name not in _LINKER_MODULES:
-        have = ", ".join(sorted(_LINKER_MODULES))
-        raise ValueError(f"unknown linker {linker_name!r} (have: {have})")
-
-    linker_mod = importlib.import_module(_LINKER_MODULES[linker_name])
     ctx = {**args, "objects": objects, "target_os": target_os}
-    out_bytes = linker_mod.link(ctx)
+    # A static dispatch rather than a name -> module dict: asmpython has no
+    # first-class module values, so a dict holding module references and
+    # calling `.link()` on whatever comes out isn't representable under
+    # self-hosted compilation (modules aren't real heap values there).
+    if linker_name == "gcc":
+        out_bytes = _gcc_linker.link(ctx)
+    elif linker_name == "builtin":
+        out_bytes = _builtin_linker.link(ctx)
+    else:
+        have = ", ".join(_LINKER_NAMES)
+        raise ValueError(f"unknown linker {linker_name!r} (have: {have})")
     ext = ".exe" if target_os == "windows" else ""
     return {f"output{ext}": out_bytes}
 

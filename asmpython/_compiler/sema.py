@@ -4962,6 +4962,30 @@ class SemaAnalyzer:
                 if seen is None or seen == "any":
                     seen = et
                 elif seen != et:
+                    # Two different element kinds. A nested container (list/
+                    # dict/tuple/set/instance) mixed with plain "int" collapses
+                    # to opaque ("any") -- both are 8-byte slots (a heap pointer
+                    # or a raw integer), the same leniency DictLit already
+                    # applies to its values, e.g. an ELF header literal mixing
+                    # a nested byte-array list with scalar int fields. Anything
+                    # else (str mixed with int/a container, or any float mix)
+                    # stays a hard error: str's "any"-typed read sites assume a
+                    # real string label, and a float lives in a different
+                    # register class than every pointer-sized kind.
+                    is_container = (
+                        lambda t: t in ("list", "dict", "tuple", "set")
+                        or t.startswith("instance:")
+                    )
+                    if (
+                        "float" not in (seen, et)
+                        and "str" not in (seen, et)
+                        and (
+                            (seen == "int" and is_container(et))
+                            or (et == "int" and is_container(seen))
+                        )
+                    ):
+                        seen = "any"
+                        continue
                     raise SemaError(
                         f"mixed list element types ({seen} and {et}); "
                         "mixed-type lists need a tagged-value runtime, not yet implemented",
@@ -5614,6 +5638,13 @@ class SemaAnalyzer:
                         self._check_expr(e.args[0], scope)
                     e.inferred_type = "list"
                     e.list_el_type = "str"
+                    return
+                # os.cpu_count() -> int | None in real Python; asmpython has
+                # no nullability tracking, so this always returns a positive
+                # int (a worker-count fallback like `os.cpu_count() or 1`
+                # never needs the None case to matter).
+                if e.obj.name == "os" and e.method == "cpu_count":
+                    e.inferred_type = "int"
                     return
                 bindings = self.imported_modules[e.obj.name]
                 if e.method not in bindings or not isinstance(

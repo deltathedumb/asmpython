@@ -10747,6 +10747,12 @@ class Codegen:
                 path_arg = e.args[0] if e.args else None
                 self._emit_os_listdir(path_arg, info)
                 return
+            if e.obj.name == "os" and e.method == "cpu_count":
+                # No real platform query needed -- see sema.py's matching
+                # case: asmpython has no nullability tracking, so this is a
+                # plain positive-int constant rather than a real syscall.
+                self.emitf("mov rax, 1")
+                return
         # math.sqrt(x), math.pow(a, b) etc.
         if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
             bindings = self.imported_modules[e.obj.name]
