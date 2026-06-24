@@ -1,9 +1,8 @@
-"""SSA IR types, duck-type-compatible with uasm's x86-64 backend contract
-(see C:\\Users\\M\\Documents\\Coding\\uasm\\compiler\\uasm.py and
-compiler\\backends\\x86_64\\*.py). No import dependency on uasm itself --
-the backend's `run_backend_codegen(ir, args)` only ever touches `.funcs`
-and `.data`, and every nested field by name, so a same-shaped local
-dataclass is all that's required to hand a module to it directly.
+"""SSA IR types consumed by asmpython's built-in x86-64 backend
+(asmpython/_backends/x86_64), the codegen.py-free path reached via
+driver.py's --backend x86-64. The backend's `run_backend_codegen(ir,
+args)` only ever touches `.funcs`/`.data` and every nested field by name
+(duck-typed, no import cycle back to this module from the backend).
 
 asmpython's own type system (see ast_nodes.expr_type: "int", "float",
 "str", "list", "dict", "instance:Name", ...) collapses onto two IRTypes
@@ -101,14 +100,14 @@ class IRModule:
 class IRBackend(abc.ABC):
     """Interface every asmpython compiler backend implements.
 
-    In-process Python backends (uasm's x86_64 backend, anything else
-    written directly against this IR) implement it directly. A future
-    DLL-based custom backend wouldn't implement it itself -- it'd be
-    wrapped by an adapter that loads the DLL and marshals `compile()`
-    calls across that boundary via a serialized form of this IR (a DLL
-    can't receive live IRModule/IRValue objects directly), so the driver
-    only ever talks to an IRBackend either way and never needs to know
-    which kind it has.
+    In-process Python backends (the built-in x86-64 backend in
+    asmpython/_backends/x86_64, anything else written directly against
+    this IR) implement it directly. A future DLL-based custom backend
+    wouldn't implement it itself -- it'd be wrapped by an adapter that
+    loads the DLL and marshals `compile()` calls across that boundary via
+    a serialized form of this IR (a DLL can't receive live IRModule/
+    IRValue objects directly), so the driver only ever talks to an
+    IRBackend either way and never needs to know which kind it has.
     """
 
     @property
@@ -125,9 +124,9 @@ class IRBackend(abc.ABC):
 
 class ModuleBackend(IRBackend):
     """Adapts a plugin module exposing module-level `requested_args` and
-    `run_backend_codegen(ir, args)` -- uasm's existing convention (see
-    compiler/backends/x86_64/__init__.py) -- to the IRBackend interface,
-    so that backend is usable here unmodified."""
+    `run_backend_codegen(ir, args)` (see asmpython/_backends/x86_64's
+    __init__.py for the reference implementation of this convention) to
+    the IRBackend interface, so that backend is usable here unmodified."""
 
     def __init__(self, module: object) -> None:
         self._module = module

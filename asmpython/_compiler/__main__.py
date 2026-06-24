@@ -416,6 +416,14 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         help="link the pre-built libasmpython_rt archive instead of inlining "
         "the runtime helpers (smaller .asm; archive built on demand)",
     )
+    build_grp.add_argument(
+        "--backend",
+        choices=("legacy", "x86-64"),
+        default="legacy",
+        help="codegen backend: 'legacy' (NASM-text codegen.py, all targets) "
+        "or 'x86-64' (built-in direct-to-object SSA IR backend, windows "
+        "only for now, experimental). Default: legacy",
+    )
 
     # Toolchain --------------------------------------------------------------
     tc_grp = ap.add_argument_group("toolchain overrides")
@@ -640,6 +648,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 output_type=output_type,
                 icon_path=icon_path,
                 all_errors=all_errors,
+                backend=args.backend,
             )
         else:
             compile_targets(
@@ -658,6 +667,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 output_type=output_type,
                 icon_path=icon_path,
                 all_errors=all_errors,
+                backend=args.backend,
             )
     except MultiSemaError as me:
         # me is just the generic "N semantic error(s)" message string when

@@ -128,6 +128,33 @@ def build_runtime(target: str, *, force: bool = False) -> Path:
     return archive_path
 
 
+def build_abi_shims(target: str, *, force: bool = False) -> Path:
+    """Assemble the ABI shim layer (abi_shims.asm) for the new uasm-backed
+    SSA IR pipeline (see driver.py's _run_backend_uasm and ir_lower.py's
+    module docstring). Cached the same way as the runtime archive: rebuilt
+    only when the source .asm is newer than the cached object.
+
+    Windows only for now -- abi_shims.asm hardcodes the Win64 integer
+    argument registers (rcx/rdx/r8/r9); a SysV variant (rdi/rsi/rdx/rcx)
+    would need its own source file before --backend uasm can target linux.
+    """
+    if target != "windows":
+        raise ValueError(f"abi_shims.asm only supports target=windows, got {target!r}")
+    src_path = Path(__file__).resolve().parent / "abi_shims.asm"
+    out_dir = _build_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    obj_path = out_dir / "abi_shims.obj"
+
+    if obj_path.exists() and not force:
+        if obj_path.stat().st_mtime >= src_path.stat().st_mtime:
+            return obj_path
+
+    nasm = _which("nasm")
+    _run([nasm, "-f", "win64", "-w-label-redef-late", str(src_path), "-o", str(obj_path)])
+    print(f"wrote {obj_path}")
+    return obj_path
+
+
 def build_runtime_shared(target: str, *, force: bool = False) -> Path:
     """Build the runtime as a shared library (.dll/.so) for --onedir bundles.
 

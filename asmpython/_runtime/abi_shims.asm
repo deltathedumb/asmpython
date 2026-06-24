@@ -1,9 +1,10 @@
 ; ABI shim layer: thin wrappers exposing asmpython's runtime helpers (which
 ; use codegen.py's own ad-hoc internal calling convention -- rax/rbx/rcx for
-; most 2-3 arg helpers) under the standard Win64 ABI (rcx/rdx/r8), so the new
-; uasm-backed SSA IR pipeline (whose `call` op always marshals args into the
-; standard ABI registers) can call them directly. Zero changes to the
-; existing, tested runtime internals -- one small wrapper per helper needed.
+; most 2-3 arg helpers) under the standard Win64 ABI (rcx/rdx/r8), so the
+; built-in x86-64 backend's SSA IR pipeline (driver.py's --backend x86-64;
+; its `call` op always marshals args into the standard ABI registers) can
+; call them directly. Zero changes to the existing, tested runtime
+; internals -- one small wrapper per helper needed.
 ;
 ; Layout constants (DICT_*) mirror asmpython/_compiler/codegen.py's
 ; Codegen.DICT_* class attributes exactly; keep in sync if those ever change.

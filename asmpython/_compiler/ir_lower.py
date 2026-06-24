@@ -1,14 +1,14 @@
 """Lower asmpython's AST (post-sema) to the SSA IR in ir.py, for handoff to
-a uasm-shaped x86-64 backend (run_backend_codegen).
+the built-in x86-64 backend (asmpython/_backends/x86_64's
+run_backend_codegen) -- reached via driver.py's --backend x86-64.
 
-First-milestone scope only: int arithmetic, comparisons, if/while, return,
-and calls between asmpython functions. No floats, no runtime calls (dict/
-list/str/closures) yet -- those need the existing `_runtime_*` helpers
-linked in via the legacy runtime archive, which is a separate, later step.
-Intentionally narrow so the new pipeline (lowering -> uasm backend ->
-object file -> link -> run) can be proven correct on its own before
-carrying over the much larger dynamic-object surface that codegen.py
-already handles by hand.
+Current scope: int arithmetic, comparisons, if/while, return, calls
+between asmpython functions, print(int|str), class instantiation +
+attribute get/set (no-arg constructors only, via the ABI shim layer --
+see abi_shims.asm), and asmlib.hardware's FFI bindings. Still missing:
+floats, lists, real __init__ wiring, and most string operations -- see
+ir_lower.py's open items in the project's own tracking, not duplicated
+here.
 
 Every local variable gets its own stack slot (`alloca` + `load`/`store`)
 rather than being threaded through real SSA values with phi nodes at

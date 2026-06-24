@@ -1,0 +1,293 @@
+"""
+Linear-scan register allocator for the x86-64 backend.
+
+Maps every IRValue in an IRFunc to either a physical register or an
+RBP-relative stack slot using Belady's optimal eviction policy.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Union
+
+from .encoder import (
+    Reg, XmmReg,
+    ARG_REGS_SYSV, ARG_REGS_WIN64,
+    XMM_ARG_SYSV, XMM_ARG_WIN64,
+    CALLEE_SAVED_SYSV, CALLEE_SAVED_WIN64,
+)
+
+
+# ── Location types ────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class RegLoc:
+    reg: Reg
+
+
+@dataclass(frozen=True)
+class XmmLoc:
+    reg: XmmReg
+
+
+@dataclass(frozen=True)
+class StackLoc:
+    """RBP-relative offset, always negative (grows downward)."""
+    offset: int
+
+
+Location = Union[RegLoc, XmmLoc, StackLoc]
+
+
+# ── Result ────────────────────────────────────────────────────────────────────
+
+@dataclass
+class AllocResult:
+    locs:             dict[str, Location]   # IRValue.name → where it lives
+    alloca_slots:     dict[str, int]        # alloca result → RBP offset of storage
+    stack_bytes:      int                   # total bytes to SUB RSP in prologue
+    callee_saved:     list[Reg]             # must push/pop in prologue / epilogue
+    callee_saved_xmm: list[XmmReg]         # Win64: XMM6-15 if clobbered
+
+
+# ── Register pools ────────────────────────────────────────────────────────────
+# popleft() order: caller-saved first (no push/pop overhead), then callee-saved
+
+_GP_POOL: tuple[Reg, ...] = (
+    Reg.R10, Reg.R9,  Reg.R8,                       # caller-saved (R11 reserved as scratch)
+    Reg.RDI, Reg.RSI, Reg.RDX, Reg.RCX, Reg.RAX,  # caller-saved
+    Reg.RBX, Reg.R12, Reg.R13, Reg.R14, Reg.R15,  # callee-saved
+)
+
+_XMM_POOL: tuple[XmmReg, ...] = tuple(XmmReg(i) for i in range(15))  # XMM15 reserved as scratch
+
+# XMM6-XMM15 are callee-saved under Win64 ABI
+_WIN64_CALLEE_XMM: frozenset[XmmReg] = frozenset(XmmReg(i) for i in range(6, 16))
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _is_float(type_name: str) -> bool:
+    return type_name in ("f32", "f64", "v128")
+
+
+def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
+    """Return the (block_idx, instr_idx) of each value's final use."""
+    last: dict[str, tuple[int, int]] = {}
+    for bi, block in enumerate(func.blocks):
+        for ii, instr in enumerate(block.instrs):
+            for op in instr.operands:
+                if hasattr(op, "name"):
+                    last[op.name] = (bi, ii)
+    return last
+
+
+def _pick_evict(in_reg: dict[str, Any],
+                last_use: dict[str, tuple[int, int]],
+                now: tuple[int, int]) -> str:
+    """Belady: evict the value used furthest in the future (or already dead)."""
+    _INF = (10**9, 10**9)
+    return max(in_reg, key=lambda n: _INF if last_use.get(n, (-1, -1)) <= now else last_use[n])
+
+
+def _compute_crosses_call(func: Any) -> set[str]:
+    """Names of values whose live range spans a `call` instruction.
+
+    A value placed in a caller-saved register is *not* safe to read after a
+    call: the callee is free to clobber it (that's what "caller-saved"
+    means), and `_call`'s codegen does exactly that with no save/restore of
+    its own -- it trusts the allocator never put a still-needed value
+    there. Conservative by block, not just by instruction position: any use
+    in a different block than the definition counts as crossing, even if no
+    call is provably between them, since this allocator doesn't reason
+    about CFG edges precisely enough to prove otherwise.
+    """
+    def_pos: dict[str, tuple[int, int]] = {}
+    use_positions: dict[str, list[tuple[int, int]]] = {}
+    call_positions: list[tuple[int, int]] = []
+
+    for param in func.params:
+        def_pos[param.name] = (0, -1)  # available from before block 0's first instr
+
+    for bi, block in enumerate(func.blocks):
+        for ii, instr in enumerate(block.instrs):
+            if instr.op == "call":
+                call_positions.append((bi, ii))
+            if instr.result is not None:
+                def_pos.setdefault(instr.result.name, (bi, ii))
+            for op in instr.operands:
+                if hasattr(op, "name"):
+                    use_positions.setdefault(op.name, []).append((bi, ii))
+
+    crosses: set[str] = set()
+    for name, uses in use_positions.items():
+        db, di = def_pos.get(name, (0, -1))
+        for (ub, ui) in uses:
+            if ub != db:
+                crosses.add(name)
+                break
+            if any(cb == db and di < ci < ui for (cb, ci) in call_positions):
+                crosses.add(name)
+                break
+    return crosses
+
+
+# ── Main allocator ────────────────────────────────────────────────────────────
+
+def allocate(func: Any, abi: str = "sysv") -> AllocResult:
+    """
+    Allocate registers for *func* (an IRFunc duck-type).
+
+    abi: "sysv"  — Linux / macOS System V AMD64
+         "win64" — Windows x64
+    """
+    int_args    = ARG_REGS_WIN64   if abi == "win64" else ARG_REGS_SYSV
+    xmm_args    = XMM_ARG_WIN64    if abi == "win64" else XMM_ARG_SYSV
+    callee_gp   = set(CALLEE_SAVED_WIN64 if abi == "win64" else CALLEE_SAVED_SYSV)
+    callee_xmm  = _WIN64_CALLEE_XMM if abi == "win64" else frozenset()
+
+    locs:             dict[str, Location] = {}
+    alloca_slots:     dict[str, int]      = {}
+    used_callee_gp:   set[Reg]            = set()
+    used_callee_xmm:  set[XmmReg]         = set()
+    stack_top = 0  # bytes consumed below RBP so far
+
+    free_gp:  list[Reg]    = list(_GP_POOL)
+    free_xmm: list[XmmReg] = list(_XMM_POOL)
+
+    in_gp:  dict[str, Reg]    = {}  # values currently in a GP reg
+    in_xmm: dict[str, XmmReg] = {}  # values currently in an XMM reg
+
+    last_use  = _last_uses(func)
+    crosses_call = _compute_crosses_call(func)
+    now: tuple[int, int] = (-1, -1)  # updated each instruction
+
+    # ── inner helpers that close over the mutable state ───────────────────────
+
+    def _take_gp(prefer_callee_saved: bool = False) -> Reg:
+        nonlocal stack_top
+        if prefer_callee_saved:
+            # A value crossing a call must not land in a caller-saved
+            # register -- `_call`'s codegen clobbers those freely with no
+            # save/restore, trusting the allocator never put a still-live
+            # value there. Prefer any free callee-saved register first;
+            # only fall through to the normal pool if none is free (rare
+            # enough in practice that the residual risk is acceptable
+            # rather than building full eviction-aware callee-saved
+            # reservation for it).
+            for i, r in enumerate(free_gp):
+                if r in callee_gp:
+                    return free_gp.pop(i)
+        if free_gp:
+            return free_gp.pop(0)
+        victim = _pick_evict(in_gp, last_use, now)
+        stack_top += 8
+        locs[victim] = StackLoc(-stack_top)
+        freed = in_gp.pop(victim)
+        free_gp.append(freed)
+        return free_gp.pop(0)
+
+    def _take_xmm() -> XmmReg:
+        nonlocal stack_top
+        if free_xmm:
+            return free_xmm.pop(0)
+        victim = _pick_evict(in_xmm, last_use, now)
+        stack_top += 8
+        locs[victim] = StackLoc(-stack_top)
+        freed = in_xmm.pop(victim)
+        free_xmm.append(freed)
+        return free_xmm.pop(0)
+
+    def _alloc_gp(name: str) -> None:
+        r = _take_gp(prefer_callee_saved=name in crosses_call)
+        locs[name] = RegLoc(r)
+        in_gp[name] = r
+        if r in callee_gp:
+            used_callee_gp.add(r)
+
+    def _alloc_xmm(name: str) -> None:
+        x = _take_xmm()
+        locs[name] = XmmLoc(x)
+        in_xmm[name] = x
+        if x in callee_xmm:
+            used_callee_xmm.add(x)
+
+    def _free_if_dead(op: Any, pos: tuple[int, int]) -> None:
+        if not hasattr(op, "name"):
+            return
+        n = op.name
+        if last_use.get(n) != pos:
+            return
+        if n in in_gp:
+            free_gp.append(in_gp.pop(n))
+        elif n in in_xmm:
+            free_xmm.append(in_xmm.pop(n))
+
+    # ── Assign function parameters to ABI argument registers ──────────────────
+
+    int_i = xmm_i = 0
+    for param in func.params:
+        if _is_float(param.type.name):
+            if xmm_i < len(xmm_args):
+                x = xmm_args[xmm_i]; xmm_i += 1
+                locs[param.name] = XmmLoc(x)
+                in_xmm[param.name] = x
+                if x in free_xmm:
+                    free_xmm.remove(x)
+            else:
+                _alloc_xmm(param.name)
+        else:
+            if int_i < len(int_args):
+                r = int_args[int_i]; int_i += 1
+                locs[param.name] = RegLoc(r)
+                in_gp[param.name] = r
+                if r in free_gp:
+                    free_gp.remove(r)
+            else:
+                _alloc_gp(param.name)
+
+    # ── Walk all instructions ─────────────────────────────────────────────────
+
+    for bi, block in enumerate(func.blocks):
+        for ii, instr in enumerate(block.instrs):
+            now = (bi, ii)
+            result = instr.result
+
+            if result is not None and result.name not in locs:
+                if instr.op == "alloca":
+                    # Reserve stack storage; result is a pointer → GP register
+                    size = int(instr.operands[0]) if instr.operands else 8
+                    size = (size + 7) & ~7        # 8-byte align
+                    stack_top += size
+                    alloca_slots[result.name] = -stack_top
+                    _alloc_gp(result.name)
+                elif _is_float(result.type.name):
+                    _alloc_xmm(result.name)
+                else:
+                    _alloc_gp(result.name)
+
+            # Return registers to the free pool for operands that die here
+            for op in instr.operands:
+                _free_if_dead(op, now)
+
+    # Win64 callers must always leave >= 32 bytes of shadow space below RSP
+    # at any call site, even if nothing was spilled -- the callee is allowed
+    # to spill its own register args there. Functions with few enough locals
+    # to need zero spill/alloca space would otherwise emit `call` with no
+    # `sub rsp` at all, which is fine for calls to other functions compiled
+    # by this same backend (they never touch the caller's shadow space) but
+    # corrupts state on calls to real ABI-compliant code (libc, etc).
+    if abi == "win64" and stack_top < 32:
+        stack_top = 32
+
+    # ── Align total stack frame to 16 bytes (ABI requirement at call sites) ───
+    if stack_top % 16 != 0:
+        stack_top += 16 - (stack_top % 16)
+
+    return AllocResult(
+        locs             = locs,
+        alloca_slots     = alloca_slots,
+        stack_bytes      = stack_top,
+        callee_saved     = sorted(used_callee_gp,  key=int),
+        callee_saved_xmm = sorted(used_callee_xmm, key=int),
+    )

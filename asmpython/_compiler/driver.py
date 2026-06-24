@@ -296,6 +296,65 @@ def _compile_program(
     return module
 
 
+def _run_backend_x86_64(
+    module,
+    target: str,
+    out_path: Path,
+    *,
+    gcc_path: Path | None = None,
+    keep_intermediates: bool = False,
+) -> BuildResult:
+    """asmpython's built-in x86-64 backend: AST -> ir_lower.py -> a direct
+    SSA-IR-to-object-file compiler (asmpython/_backends/x86_64) -- no
+    NASM-text step at all.
+
+    Scope is intentionally narrow for this first wiring: windows-only
+    onefile executables, no icon/SDL2/networking/threading (ir_lower.py
+    doesn't lower those yet, and abi_shims.asm is win64-only -- see
+    build_abi_shims's docstring). Anything outside that raises clearly
+    rather than silently falling back to the legacy backend.
+    """
+    if target != "windows":
+        raise ValueError(
+            f"--backend x86-64 only supports --target windows for now, got {target!r}"
+        )
+
+    from . import ir_lower
+    from .._backends.x86_64 import run_backend_codegen
+    from .._runtime.build import build_abi_shims, build_runtime, _build_dir
+
+    ir_mod = ir_lower.lower_module(module)
+    out = run_backend_codegen(ir_mod, {"target_os": "windows", "abi": "win64"})
+    obj_name, obj_bytes = next(iter(out.items()))
+
+    out_path = out_path.resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    obj_path = out_path.with_suffix(Path(obj_name).suffix)
+    obj_path.write_bytes(obj_bytes)
+    print(f"wrote {obj_path}")
+
+    shim_obj = build_abi_shims("windows")
+    rt_archive = build_runtime("windows")
+
+    gcc = _resolve_tool("gcc", override=gcc_path, env_var="ASMPYTHON_GCC")
+    gcc_dir = str(Path(gcc).parent)
+    link_cmd = [
+        gcc, str(obj_path), str(shim_obj),
+        f"-L{_build_dir()}", "-lasmpython_rt_win",
+        "-o", str(out_path), "-mconsole",
+    ]
+    _run(link_cmd, extra_path_dirs=[gcc_dir])
+
+    if not keep_intermediates:
+        try:
+            obj_path.unlink()
+        except OSError:
+            pass
+
+    print(f"wrote {out_path}")
+    return BuildResult(asm_path=obj_path, obj_path=obj_path, exe_path=out_path)
+
+
 def _run_backend(
     module,
     target: str,
@@ -311,9 +370,23 @@ def _run_backend(
     output_type: str = "executable",
     icon_path: Path | None = None,
     entry_path: Path | None = None,
+    backend: str = "legacy",
     _asm_stem_suffix: str = "",
 ) -> BuildResult:
     """Target-specific back-end: codegen -> nasm -> gcc."""
+    if backend == "x86-64":
+        if emit_asm_only or keep_assembly:
+            raise ValueError("--backend x86-64 has no assembly stage; drop --emit-asm/--keep-assembly")
+        if bundle_mode != "onefile" or output_type != "executable" or icon_path is not None:
+            raise ValueError(
+                "--backend x86-64 only supports plain onefile executables for now "
+                "(no --onedir, --output-type library, or --icon)"
+            )
+        return _run_backend_x86_64(
+            module, target, out_path,
+            gcc_path=gcc_path, keep_intermediates=keep_intermediates,
+        )
+
     if bundle_mode == "onedir":
         use_runtime_lib = True
 
@@ -575,6 +648,7 @@ def compile_source(
     output_type: str = "executable",
     icon_path: Path | None = None,
     all_errors: bool = False,
+    backend: str = "legacy",
 ) -> BuildResult:
     module = _compile_program(
         src,
@@ -597,6 +671,7 @@ def compile_source(
         output_type=output_type,
         icon_path=icon_path,
         entry_path=entry_path,
+        backend=backend,
     )
 
 
@@ -618,6 +693,7 @@ def compile_targets(
     output_type: str = "executable",
     icon_path: Path | None = None,
     all_errors: bool = False,
+    backend: str = "legacy",
 ) -> list[BuildResult]:
     """Compile src for multiple targets, sharing the front-end (lex/parse/sema).
 
@@ -646,6 +722,7 @@ def compile_targets(
             gcc_path=gcc_path,
             bundle_mode=bundle_mode,
             output_type=output_type,
+            backend=backend,
             icon_path=icon_path,
             entry_path=entry_path,
             _asm_stem_suffix=f"-{target}",
