@@ -1404,8 +1404,14 @@ class SemaAnalyzer:
         # `FuncInfo`). We can't see its methods or fields, so model it as an
         # opaque instance: attribute and method access against it are checked
         # leniently (see _check_expr's Attr / MethodCall handling). The leaf of
-        # a dotted path is the class-ish name.
-        if leaf[:1].isupper():
+        # a dotted path is the class-ish name. lstrip("_") first so private-
+        # looking names (argparse._SubParsersAction, _ArgGroup, ...) still
+        # count as class-like -- leaf[:1] alone is "_", never upper, so this
+        # branch silently fell through to "unconstrained" below for any such
+        # annotation, leaving the parameter typed "int" by default (the same
+        # default the comment two blocks up describes) and every method call
+        # on it failing with "int has no method ...".
+        if leaf.lstrip("_")[:1].isupper():
             return (f"instance:{leaf}", None, None, None, None)
         # A lowercase unknown name (a type alias we don't model) — don't
         # constrain; the body's usage decides what's legal.
