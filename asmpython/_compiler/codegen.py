@@ -764,6 +764,13 @@ class Codegen:
         for sym in publish:
             self.emit(f"global {sym}")
         self.emit_print_impls()
+        # emit_print_impls's runtime bodies intern strings/floats (format
+        # strings, error messages) via self.intern_string/self.floats but
+        # never emit the .rodata definitions for those labels themselves --
+        # that's emit_data_sections's job, and generate() calls it but this
+        # method never did, so every interned label came out referenced but
+        # undefined (a NASM "symbol not defined" error at assemble time).
+        self.emit_data_sections()
         return "\n".join(self.lines) + "\n"
 
     # Symbols the runtime library exposes (functions and globals).

@@ -18,7 +18,9 @@ through typed field offsets.
 
 from __future__ import annotations
 
+import abc
 from dataclasses import dataclass, field
+import enum
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,13 @@ class IRType:
 
     def __repr__(self) -> str:
         return self.name
+
+
+class Visibility(enum.Enum):
+    PUBLIC = "public"
+    GLOBAL = "global"
+    PRIVATE = "private"
+    UNDEFINED = "undefined"
 
 
 I64 = IRType("i64")
@@ -72,7 +81,7 @@ class IRFunc:
     params: list[IRValue]
     ret_type: IRType | None
     blocks: list[IRBlock] = field(default_factory=list)
-    visibility: str | None = None  # "public" | "global" | "private" | None
+    visibility: Visibility = Visibility.UNDEFINED
 
 
 @dataclass
@@ -87,3 +96,45 @@ class IRGlobal:
 class IRModule:
     funcs: list[IRFunc] = field(default_factory=list)
     data: list[IRGlobal] = field(default_factory=list)
+
+
+class IRBackend(abc.ABC):
+    """Interface every asmpython compiler backend implements.
+
+    In-process Python backends (uasm's x86_64 backend, anything else
+    written directly against this IR) implement it directly. A future
+    DLL-based custom backend wouldn't implement it itself -- it'd be
+    wrapped by an adapter that loads the DLL and marshals `compile()`
+    calls across that boundary via a serialized form of this IR (a DLL
+    can't receive live IRModule/IRValue objects directly), so the driver
+    only ever talks to an IRBackend either way and never needs to know
+    which kind it has.
+    """
+
+    @property
+    @abc.abstractmethod
+    def requested_args(self) -> list[dict]:
+        """CLI arguments this backend wants the driver to register and
+        pass through (e.g. --target-os, --abi)."""
+
+    @abc.abstractmethod
+    def compile(self, module: IRModule, args: dict) -> dict[str, bytes]:
+        """Compile an IRModule to one or more output files, returned as
+        {filename: bytes} (e.g. {"output.obj": b"..."})."""
+
+
+class ModuleBackend(IRBackend):
+    """Adapts a plugin module exposing module-level `requested_args` and
+    `run_backend_codegen(ir, args)` -- uasm's existing convention (see
+    compiler/backends/x86_64/__init__.py) -- to the IRBackend interface,
+    so that backend is usable here unmodified."""
+
+    def __init__(self, module: object) -> None:
+        self._module = module
+
+    @property
+    def requested_args(self) -> list[dict]:
+        return getattr(self._module, "requested_args", [])
+
+    def compile(self, module: IRModule, args: dict) -> dict[str, bytes]:
+        return self._module.run_backend_codegen(module, args)  # type: ignore[attr-defined]

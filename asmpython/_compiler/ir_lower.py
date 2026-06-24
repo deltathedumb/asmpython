@@ -33,6 +33,7 @@ from .ir import (
     IRType,
     IRValue,
     I64,
+    PTR,
     ir_type_for,
 )
 
@@ -41,8 +42,31 @@ class LowerError(Exception):
     pass
 
 
+class _ModuleCtx:
+    """Shared across every function lowered in one module: interns string
+    literals (and runtime format strings) as deduplicated IRGlobal entries,
+    and tracks which names are classes so `ClassName(...)` lowers to
+    instantiation rather than an ordinary call."""
+
+    def __init__(self, class_names: frozenset[str] = frozenset()) -> None:
+        self.data: list[IRGlobal] = []
+        self.class_names = class_names
+        self._str_names: dict[str, str] = {}
+        self._n = 0
+
+    def intern_str(self, value: str) -> str:
+        if value in self._str_names:
+            return self._str_names[value]
+        self._n += 1
+        name = f"__str_{self._n}"
+        self.data.append(IRGlobal(name=name, type=PTR, value=value))
+        self._str_names[value] = name
+        return name
+
+
 class _FuncCtx:
-    def __init__(self) -> None:
+    def __init__(self, mctx: _ModuleCtx) -> None:
+        self.mctx = mctx
         self.blocks: list[IRBlock] = []
         self.cur: IRBlock | None = None
         self.terminated = False
@@ -139,6 +163,59 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         assert result is not None
         return result
 
+    if isinstance(e, A.StrLit):
+        name = ctx.mctx.intern_str(e.value)
+        v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", v, [name]))
+        return v
+
+    if isinstance(e, A.Call) and e.func == "print":
+        # print(x) -> printf(fmt, x); newline baked into the format string
+        # since asmpython's print() always appends one. Only int/str args
+        # for now -- float/list/dict printing needs the runtime helpers
+        # (_emit_float_to_str etc.), not yet wired into this pipeline.
+        if not e.args:
+            fmt_name = ctx.mctx.intern_str("\n")
+            fmt_ptr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", fmt_ptr, [fmt_name]))
+            ctx.emit(IRInstr("call", None, ["printf", fmt_ptr]))
+        else:
+            arg = e.args[0]
+            arg_ty = A.expr_type(arg)
+            val = _lower_expr(ctx, arg)
+            fmt_name = ctx.mctx.intern_str("%s\n" if arg_ty == "str" else "%lld\n")
+            fmt_ptr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", fmt_ptr, [fmt_name]))
+            ctx.emit(IRInstr("call", None, ["printf", fmt_ptr, val]))
+        v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", v, [0]))
+        return v
+
+    if isinstance(e, A.Attr):
+        # obj.name -> _abi_dict_get_default(obj, name, default=0). Instances
+        # are runtime dicts keyed by field name; bridges to the existing,
+        # tested _runtime_dict_get_default via the ABI shim (see
+        # build/abi_shims.asm), since that helper's own calling convention
+        # (rax/rbx/rcx) predates this ABI-compliant IR pipeline.
+        obj_val = _lower_expr(ctx, e.obj)
+        name = ctx.mctx.intern_str(e.name)
+        key_ptr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", key_ptr, [name]))
+        zero = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero, [0]))
+        v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", v, ["_abi_dict_get_default", obj_val, key_ptr, zero]))
+        return v
+
+    if isinstance(e, A.Call) and e.func in ctx.mctx.class_names:
+        # ClassName(...) -> a fresh empty instance dict (no __init__ call
+        # yet -- constructor wiring is a later step; for now this only
+        # supports classes whose fields get set via plain attribute
+        # assignment after construction).
+        v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", v, ["_abi_new_instance"]))
+        return v
+
     if isinstance(e, A.Call):
         args = [_lower_expr(ctx, a) for a in e.args]
         v = ctx.tmp(I64)
@@ -156,6 +233,17 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         val = _lower_expr(ctx, s.value)
         ptr = ctx.ensure_slot(s.target, val.type)
         ctx.emit(IRInstr("store", None, [val, ptr]))
+        return
+
+    if isinstance(s, A.AttrAssign):
+        # obj.name = value -> _abi_dict_set(obj, name, value); see the
+        # A.Attr read path's comment for why this goes through a shim.
+        obj_val = _lower_expr(ctx, s.obj)
+        name = ctx.mctx.intern_str(s.name)
+        key_ptr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", key_ptr, [name]))
+        val = _lower_expr(ctx, s.value)
+        ctx.emit(IRInstr("call", None, ["_abi_dict_set", obj_val, key_ptr, val]))
         return
 
     if isinstance(s, A.Return):
@@ -215,8 +303,8 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
     raise LowerError(f"unsupported stmt {type(s).__name__}")
 
 
-def lower_func(f: A.FuncDef, *, visibility: str | None = None) -> IRFunc:
-    ctx = _FuncCtx()
+def lower_func(f: A.FuncDef, mctx: _ModuleCtx, *, visibility: str | None = None) -> IRFunc:
+    ctx = _FuncCtx(mctx)
     entry = ctx.new_block("entry")
     ctx.switch_to(entry)
 
@@ -241,12 +329,13 @@ def lower_func(f: A.FuncDef, *, visibility: str | None = None) -> IRFunc:
 
 
 def lower_module(mod: A.Module) -> IRModule:
-    funcs = [lower_func(f) for f in mod.funcs]
+    mctx = _ModuleCtx(frozenset(c.name for c in mod.classes))
+    funcs = [lower_func(f, mctx) for f in mod.funcs]
     # A user-defined top-level `def main():` already produces the entry
     # symbol; only synthesize one wrapping module-level statements when
     # there isn't one (the normal asmpython shape: a script with no
     # explicit main(), matching what codegen.py's emit_entry() assumes).
     if not any(f.name == "main" for f in mod.funcs):
         main_body = A.FuncDef(name="main", params=[], body=list(mod.body))
-        funcs.append(lower_func(main_body, visibility="global"))
-    return IRModule(funcs=funcs, data=[])
+        funcs.append(lower_func(main_body, mctx, visibility="global"))
+    return IRModule(funcs=funcs, data=mctx.data)
