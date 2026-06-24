@@ -80,7 +80,8 @@ class Freestanding16Codegen(FreestandingCodegen):
                     asm_body=m.asm_body,
                     asm_symbol=(
                         self._method_symbol(cls.name, m.name)
-                        if m.asm_body is not None else None
+                        if m.asm_body is not None
+                        else None
                     ),
                 )
                 self.emit_function(mangled)
@@ -99,9 +100,11 @@ class Freestanding16Codegen(FreestandingCodegen):
         self.emitf(
             "cli",
             "xor ax, ax",
-            "mov ds, ax", "mov es, ax", "mov ss, ax",
+            "mov ds, ax",
+            "mov es, ax",
+            "mov ss, ax",
             "mov sp, 0x7C00",
-            "mov [_boot_drive], dl",   # BIOS leaves the boot drive in DL
+            "mov [_boot_drive], dl",  # BIOS leaves the boot drive in DL
         )
 
         # ---- Load the rest of the image (sectors 1..N) via INT 13h AH=42h ----
@@ -110,7 +113,7 @@ class Freestanding16Codegen(FreestandingCodegen):
         # contiguous low-memory image, addressable in real mode.
         self.emitf(
             "mov si, _dap",
-            "mov ah, 0x42",            # extended read (LBA)
+            "mov ah, 0x42",  # extended read (LBA)
             "mov dl, [_boot_drive]",
             "int 0x13",
             "jc _boot_err",
@@ -122,21 +125,24 @@ class Freestanding16Codegen(FreestandingCodegen):
         # ---- Enter 32-bit protected mode -----------------------------------
         self.emitf("lgdt [_gdt16_ptr]")
         self.emitf("mov eax, cr0", "or eax, 1", "mov cr0, eax")
-        self.emitf("jmp dword 0x08:_pm32")   # 0x08 = 32-bit code selector
+        self.emitf("jmp dword 0x08:_pm32")  # 0x08 = 32-bit code selector
 
         # ---- 32-bit protected mode: enable long mode -----------------------
         self.emit("")
         self.emit("BITS 32")
         self.label("_pm32")
         self.emitf(
-            "mov ax, 0x10", "mov ds, ax", "mov es, ax", "mov ss, ax",
+            "mov ax, 0x10",
+            "mov ds, ax",
+            "mov es, ax",
+            "mov ss, ax",
             "mov esp, 0x7C00",
         )
-        self.emitf("mov eax, cr4", "or eax, 0x20", "mov cr4, eax")     # PAE
-        self.emitf("mov eax, _pml4", "mov cr3, eax")                   # CR3
+        self.emitf("mov eax, cr4", "or eax, 0x20", "mov cr4, eax")  # PAE
+        self.emitf("mov eax, _pml4", "mov cr3, eax")  # CR3
         self.emitf("mov ecx, 0xC0000080", "rdmsr", "or eax, 0x100", "wrmsr")  # LME
-        self.emitf("mov eax, cr0", "or eax, 0x80000001", "mov cr0, eax")      # PG|PE
-        self.emitf("jmp 0x18:start64")    # 0x18 = 64-bit code selector
+        self.emitf("mov eax, cr0", "or eax, 0x80000001", "mov cr0, eax")  # PG|PE
+        self.emitf("jmp 0x18:start64")  # 0x18 = 64-bit code selector
 
         # ---- 16-bit error handler ------------------------------------------
         self.emit("")
@@ -149,10 +155,10 @@ class Freestanding16Codegen(FreestandingCodegen):
         # ---- GDT (flat: 32-bit code/data + 64-bit code) ---------------------
         self.emit("align 8")
         self.label("_gdt16")
-        self.emitf("dq 0x0000000000000000")   # null
-        self.emitf("dq 0x00CF9A000000FFFF")   # 0x08 32-bit code
-        self.emitf("dq 0x00CF92000000FFFF")   # 0x10 data
-        self.emitf("dq 0x00AF9A000000FFFF")   # 0x18 64-bit code
+        self.emitf("dq 0x0000000000000000")  # null
+        self.emitf("dq 0x00CF9A000000FFFF")  # 0x08 32-bit code
+        self.emitf("dq 0x00CF92000000FFFF")  # 0x10 data
+        self.emitf("dq 0x00AF9A000000FFFF")  # 0x18 64-bit code
         self.label("_gdt16_end")
         self.label("_gdt16_ptr")
         self.emitf("dw _gdt16_end - _gdt16 - 1")
@@ -166,12 +172,12 @@ class Freestanding16Codegen(FreestandingCodegen):
         # the exact count needs an assemble-time division of a cross-section
         # label difference, which NASM -f bin rejects, so we over-read instead —
         # reading a few unused trailing sectors is harmless.
-        self.emitf("db 0x10")                  # packet size
-        self.emitf("db 0")                     # reserved
+        self.emitf("db 0x10")  # packet size
+        self.emitf("db 0")  # reserved
         self.emitf(f"dw {self.BOOT_READ_SECTORS}")  # sector count (fixed)
-        self.emitf("dw 0x7E00")                # dest offset
-        self.emitf("dw 0x0000")                # dest segment (0x0000:0x7E00)
-        self.emitf("dq 1")                     # starting LBA
+        self.emitf("dw 0x7E00")  # dest offset
+        self.emitf("dw 0x0000")  # dest segment (0x0000:0x7E00)
+        self.emitf("dq 1")  # starting LBA
 
         self.label("_boot_drive")
         self.emitf("db 0")
@@ -206,5 +212,5 @@ class Freestanding16Codegen(FreestandingCodegen):
 
     # Note: the boot code reads a fixed BOOT_READ_SECTORS sectors. Under QEMU's
     # raw disk, reads past end-of-file return zeros, so over-reading is safe and
-    # no explicit padding is needed. (For real hardware, pad the image file to
+    # no explicit padding is needed. (For real hardware, pad the image fiwe cantle to
     # >= (BOOT_READ_SECTORS+1)*512 bytes after the build.)

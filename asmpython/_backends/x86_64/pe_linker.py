@@ -1,0 +1,427 @@
+"""Builtin PE (Windows x64) executable linker -- no gcc/link.exe involved.
+
+Takes the relocatable COFF objects produced by this backend (the user
+program, abi_shims.obj, and the runtime's single object), resolves every
+symbol and relocation itself, builds the import table for the handful of
+msvcrt.dll/kernel32.dll functions actually used, and emits a directly
+loadable PE32+ executable.
+
+Reached via driver.py's --linker builtin (windows + --backend x86-64
+only for now). The mechanism this proves -- merge objects, resolve
+symbols, patch REL32 relocations, build import thunks, lay out a final
+container format -- is shared conceptually with the Linux ELF and macOS
+Mach-O linkers planned as later stages; only the container format and
+import mechanism (PE import table vs ELF PLT/GOT vs Mach-O lazy binding)
+differ.
+"""
+
+from __future__ import annotations
+
+import struct
+
+from .coff_parse import parse_coff, CoffObject
+
+IMAGE_BASE     = 0x140000000
+SECTION_ALIGN  = 0x1000
+FILE_ALIGN     = 0x200
+
+IMAGE_REL_AMD64_REL32 = 4
+
+# Real section names this backend / NASM produce, classified into the
+# four buckets a PE executable actually needs (read-only data and NASM's
+# ".rodata" vs coff.py's ".rdata" both collapse into "rdata").
+_BUCKET_FOR_SECTION = {
+    ".text": "text",
+    ".data": "data",
+    ".rdata": "rdata",
+    ".rodata": "rdata",
+    ".bss": "bss",
+}
+
+# symbol name -> DLL providing it. Covers every extern this backend's own
+# output, abi_shims.asm, and the runtime archive currently reference (see
+# target_windows.py's `extern` lines for the full inventory this was
+# built from). Anything not listed here fails to link with a clear error
+# rather than guessing.
+_DLL_FOR_SYMBOL: dict[str, str] = {}
+for _name in (
+    "malloc", "realloc", "free", "calloc",
+    "printf", "sprintf", "putchar", "puts", "fputs", "fputc",
+    "strlen", "strcmp", "strstr", "_strdup", "_atoi64", "strtoll",
+    "atof", "strtod", "fgets", "fopen", "fgetc", "fclose", "access",
+    "exit", "__acrt_iob_func", "memset", "memcpy", "fmod", "pow",
+    "___chkstk_ms", "fabs", "frexp", "ldexp", "log", "modf", "rand", "sqrt",
+):
+    _DLL_FOR_SYMBOL[_name] = "msvcrt.dll"
+for _name in (
+    "LoadLibraryA", "GetProcAddress", "ExitProcess",
+    "GetSystemTimeAsFileTime", "QueryPerformanceCounter",
+    "QueryPerformanceFrequency", "Sleep", "CloseHandle", "CreateThread",
+    "GetCurrentThreadId", "GetExitCodeThread", "WaitForSingleObject",
+    "InitializeCriticalSection", "EnterCriticalSection",
+    "LeaveCriticalSection", "DeleteCriticalSection",
+):
+    _DLL_FOR_SYMBOL[_name] = "kernel32.dll"
+for _name in (
+    "socket", "bind", "connect", "listen", "accept", "closesocket",
+    "send", "recv", "htons", "inet_addr", "gethostname",
+    "WSAGetLastError", "getsockopt", "setsockopt",
+):
+    _DLL_FOR_SYMBOL[_name] = "ws2_32.dll"
+
+
+def _align(n: int, a: int) -> int:
+    return (n + a - 1) & ~(a - 1)
+
+
+class LinkError(Exception):
+    pass
+
+
+def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
+    parsed: list[CoffObject] = [parse_coff(o) for o in objects]
+
+    # ── 1. Merge .text/.data/.rdata sections, track each object's section
+    # base offset within its bucket so symbol values can be translated. ──
+    bucket_bytes = {"text": bytearray(), "data": bytearray(), "rdata": bytearray()}
+    bucket_align = {"text": 16, "data": 8, "rdata": 1}
+    bss_size = 0
+    # (obj_idx, real_section_name) -> base offset within its bucket (or bss)
+    sect_base: dict[tuple[int, str], int] = {}
+
+    for oi, obj in enumerate(parsed):
+        for sect in obj.sections:
+            bucket = _BUCKET_FOR_SECTION.get(sect.name)
+            if bucket is None:
+                continue
+            if bucket == "bss":
+                bss_size = _align(bss_size, 8)
+                sect_base[(oi, sect.name)] = bss_size
+                # .bss has no raw bytes; its symbols' `value` is an offset
+                # within a zero-initialized region sized by VirtualSize,
+                # which coff_parse doesn't currently expose -- the symbol
+                # table's own values already give us everything needed to
+                # size it correctly via the max symbol value below, so a
+                # second pass over symbols (after this loop) extends
+                # bss_size precisely instead of guessing a size here.
+                continue
+            buf = bucket_bytes[bucket]
+            pad = (-len(buf)) & (bucket_align[bucket] - 1)
+            buf.extend(b"\x90" * pad if bucket == "text" else b"\x00" * pad)
+            sect_base[(oi, sect.name)] = len(buf)
+            buf.extend(sect.data)
+
+    # Size .bss precisely from the symbols actually placed in it (their
+    # value is an offset *within* their own object's .bss; the largest
+    # value + a conservative tail covers every reservation, since this
+    # backend never emits per-symbol sizes, only offsets).
+    for oi, obj in enumerate(parsed):
+        for sym in obj.symbols:
+            if not sym.name or sym.section_number <= 0:
+                continue
+            sect = obj.sections[sym.section_number - 1]
+            if _BUCKET_FOR_SECTION.get(sect.name) != "bss":
+                continue
+            base = sect_base[(oi, sect.name)]
+            bss_size = max(bss_size, base + sym.value + 8)
+
+    # ── 2. Global symbol resolution: name -> ("text"|"data"|"rdata"|"bss", offset). ──
+    global_syms: dict[str, tuple[str, int]] = {}
+    for oi, obj in enumerate(parsed):
+        for sym in obj.symbols:
+            if not sym.name or sym.section_number <= 0:
+                continue
+            sect = obj.sections[sym.section_number - 1]
+            bucket = _BUCKET_FOR_SECTION.get(sect.name)
+            if bucket is None:
+                continue
+            base = sect_base[(oi, sect.name)]
+            global_syms.setdefault(sym.name, (bucket, base + sym.value))
+
+    if entry_symbol not in global_syms:
+        raise LinkError(f"entry symbol {entry_symbol!r} not defined in any input object")
+
+    # ── 3. Collect every relocation target not resolvable as a global
+    # symbol -- those are real DLL imports. ──
+    imports: list[str] = []
+    seen_imports: set[str] = set()
+    for obj in parsed:
+        for sect in obj.sections:
+            for r in sect.relocs:
+                if r.symbol in global_syms or r.symbol in seen_imports:
+                    continue
+                if r.symbol not in _DLL_FOR_SYMBOL:
+                    raise LinkError(
+                        f"undefined symbol {r.symbol!r} has no known DLL "
+                        f"(add it to pe_linker._DLL_FOR_SYMBOL if it's a real import)"
+                    )
+                imports.append(r.symbol)
+                seen_imports.add(r.symbol)
+    # ExitProcess powers the entry stub even if nothing else calls it.
+    if "ExitProcess" not in seen_imports:
+        imports.append("ExitProcess")
+        seen_imports.add("ExitProcess")
+    imports.sort(key=lambda n: (_DLL_FOR_SYMBOL[n], n))
+
+    # ── 4. Lay out .text: merged code, then one 6-byte thunk per import
+    # (`jmp qword [rip+disp32]` into its IAT slot), then the entry stub. ──
+    text_body_len = len(bucket_bytes["text"])
+    thunk_off = {name: text_body_len + i * 6 for i, name in enumerate(imports)}
+    thunk_region_len = 6 * len(imports)
+    entry_stub_off = text_body_len + thunk_region_len
+    # sub rsp,40 ; call rel32(main) ; mov ecx,eax ; call rel32(ExitProcess thunk) ; ud2
+    entry_stub_len = 4 + 5 + 2 + 5 + 2
+    text_total_len = entry_stub_off + entry_stub_len
+
+    # ── 5. Decide PE section RVAs (one page each, in this fixed order). ──
+    rva_text  = SECTION_ALIGN
+    rva_data  = rva_text + _align(text_total_len, SECTION_ALIGN)
+    data_rdata_len = len(bucket_bytes["rdata"]) + len(bucket_bytes["data"])
+    rva_idata = rva_data + _align(data_rdata_len, SECTION_ALIGN) if data_rdata_len else rva_data
+    # .rdata/.data are merged into one RW section here -- see the module
+    # docstring on why a few-section layout was chosen over either a
+    # single RWX blob (security heuristics) or a fully faithful
+    # per-original-section layout (more bookkeeping for no benefit yet).
+    rdata_base_in_section = 0
+    data_base_in_section = len(bucket_bytes["rdata"])
+
+    def resolve(name: str) -> int:
+        """Final absolute address of a global symbol or import thunk."""
+        if name in global_syms:
+            bucket, off = global_syms[name]
+            if bucket == "text":
+                return IMAGE_BASE + rva_text + off
+            if bucket == "rdata":
+                return IMAGE_BASE + rva_data + rdata_base_in_section + off
+            if bucket == "data":
+                return IMAGE_BASE + rva_data + data_base_in_section + off
+            if bucket == "bss":
+                return IMAGE_BASE + rva_bss + off
+        if name in thunk_off:
+            return IMAGE_BASE + rva_text + thunk_off[name]
+        raise LinkError(f"unresolved symbol {name!r}")
+
+    # rva_bss assigned after .idata is sized (placed last); referenced by
+    # `resolve` via closure, fine since resolve() is only called below.
+    # ── 6. Build .idata (import directory + ILT/IAT + hint/name + DLL names). ──
+    dlls: dict[str, list[str]] = {}
+    for name in imports:
+        dlls.setdefault(_DLL_FOR_SYMBOL[name], []).append(name)
+
+    num_dlls = len(dlls)
+    dir_table_len = (num_dlls + 1) * 20
+    off = dir_table_len
+    ilt_off: dict[str, int] = {}
+    iat_off: dict[str, int] = {}
+    for dll, names in dlls.items():
+        ilt_off[dll] = off
+        off += (len(names) + 1) * 8
+    for dll, names in dlls.items():
+        iat_off[dll] = off
+        off += (len(names) + 1) * 8
+    hintname_off: dict[str, int] = {}
+    for name in imports:
+        if len(name) % 2 == 0:
+            off += 1  # keep entries word-aligned (hint:2 + name + NUL [+ pad])
+        hintname_off[name] = off
+        off += 2 + len(name) + 1
+        if (len(name) + 1) % 2:
+            off += 1
+    dllname_off: dict[str, int] = {}
+    for dll in dlls:
+        dllname_off[dll] = off
+        off += len(dll) + 1
+    idata_len = off
+
+    idata = bytearray(idata_len)
+
+    def w32(at: int, v: int) -> None:
+        struct.pack_into("<I", idata, at, v & 0xFFFFFFFF)
+
+    def w64(at: int, v: int) -> None:
+        struct.pack_into("<Q", idata, at, v & 0xFFFFFFFFFFFFFFFF)
+
+    dir_i = 0
+    for dll, names in dlls.items():
+        entry = dir_i * 20
+        w32(entry + 0, rva_idata + ilt_off[dll])
+        w32(entry + 12, rva_idata + dllname_off[dll])
+        w32(entry + 16, rva_idata + iat_off[dll])
+        for j, name in enumerate(names):
+            hn_rva = rva_idata + hintname_off[name]
+            w64(ilt_off[dll] + j * 8, hn_rva)
+            w64(iat_off[dll] + j * 8, hn_rva)
+        dir_i += 1
+    for name in imports:
+        at = hintname_off[name]
+        struct.pack_into("<H", idata, at, 0)
+        idata[at + 2: at + 2 + len(name)] = name.encode("ascii")
+        idata[at + 2 + len(name)] = 0
+    for dll, doff in dllname_off.items():
+        idata[doff: doff + len(dll)] = dll.encode("ascii")
+        idata[doff + len(dll)] = 0
+
+    # ── 7. .bss placed after .idata; now every RVA is known. ──
+    rva_bss = rva_idata + _align(idata_len, SECTION_ALIGN)
+
+    # IAT slot RVA for each imported symbol, needed by the thunks.
+    def iat_slot_rva(name: str) -> int:
+        dll = _DLL_FOR_SYMBOL[name]
+        j = dlls[dll].index(name)
+        return rva_idata + iat_off[dll] + j * 8
+
+    # ── 8. Finalize .text bytes: thunks, entry stub, then patch every
+    # relocation (original object relocs + the entry stub's own two). ──
+    text = bucket_bytes["text"]
+    text.extend(b"\x90" * (text_total_len - len(text)))
+    for name in imports:
+        pos = thunk_off[name]
+        disp = (IMAGE_BASE + iat_slot_rva(name)) - (IMAGE_BASE + rva_text + pos + 6)
+        text[pos:pos + 6] = bytes([0xFF, 0x25]) + struct.pack("<i", disp)
+
+    main_addr = resolve(entry_symbol)
+    exitprocess_addr = resolve("ExitProcess")
+    stub = bytearray()
+    stub += bytes([0x48, 0x83, 0xEC, 0x28])             # sub rsp, 40
+    call1_disp_pos = len(stub) + 1
+    stub += bytes([0xE8, 0, 0, 0, 0])                    # call rel32 main
+    stub += bytes([0x89, 0xC1])                          # mov ecx, eax
+    call2_disp_pos = len(stub) + 1
+    stub += bytes([0xE8, 0, 0, 0, 0])                    # call rel32 ExitProcess thunk
+    stub += bytes([0x0F, 0x0B])                          # ud2 (unreachable)
+    assert len(stub) == entry_stub_len
+    stub_base_addr = IMAGE_BASE + rva_text + entry_stub_off
+    struct.pack_into("<i", stub, call1_disp_pos, main_addr - (stub_base_addr + call1_disp_pos + 4))
+    struct.pack_into(
+        "<i", stub, call2_disp_pos,
+        (IMAGE_BASE + rva_text + thunk_off["ExitProcess"]) - (stub_base_addr + call2_disp_pos + 4),
+    )
+    text[entry_stub_off:entry_stub_off + entry_stub_len] = bytes(stub)
+
+    for oi, obj in enumerate(parsed):
+        for sect in obj.sections:
+            if _BUCKET_FOR_SECTION.get(sect.name) != "text":
+                continue
+            base = sect_base[(oi, sect.name)]
+            for r in sect.relocs:
+                if r.rtype != IMAGE_REL_AMD64_REL32:
+                    raise LinkError(f"unsupported relocation type {r.rtype} for {r.symbol!r}")
+                patch_off = base + r.offset
+                patch_addr = IMAGE_BASE + rva_text + patch_off
+                target_addr = resolve(r.symbol)
+                rel = target_addr - (patch_addr + 4)
+                struct.pack_into("<i", text, patch_off, rel)
+
+    # ── 9. Assemble the PE file. ──
+    rdata_data_blob = bytes(bucket_bytes["rdata"]) + bytes(bucket_bytes["data"])
+
+    entry_rva = rva_text  # process entry = start of merged .text region... see below
+    # The OS entry point must be the stub, not function index 0 of .text.
+    entry_rva = rva_text + entry_stub_off
+
+    sections = [
+        # (name, rva, raw_data, characteristics)
+        (".text", rva_text, bytes(text),
+         0x00000020 | 0x20000000 | 0x40000000),                       # CODE | EXECUTE | READ
+        (".rdata", rva_data, rdata_data_blob,
+         0x00000040 | 0x40000000 | 0x80000000) if rdata_data_blob else None,
+        (".idata", rva_idata, bytes(idata),
+         0x00000040 | 0x40000000),                                    # INITIALIZED_DATA | READ
+        (".bss", rva_bss, b"",
+         0x00000080 | 0x40000000 | 0x80000000) if bss_size else None,  # UNINIT | READ | WRITE
+    ]
+    sections = [s for s in sections if s is not None]
+
+    return _build_pe_image(sections, entry_rva, bss_size if bss_size else 0)
+
+
+def _build_pe_image(
+    sections: list[tuple[str, int, bytes, int]],
+    entry_rva: int,
+    bss_size: int,
+) -> bytes:
+    num_sects = len(sections)
+
+    dos_stub = bytearray(64)
+    dos_stub[0:2] = b"MZ"
+    struct.pack_into("<I", dos_stub, 0x3C, 64)  # e_lfanew
+
+    opt_hdr_size = 112 + 16 * 8  # PE32+ optional header + 16 data directories
+    coff_hdr_off = 64
+    headers_size = coff_hdr_off + 4 + 20 + opt_hdr_size + num_sects * 40
+    headers_size_aligned = _align(headers_size, FILE_ALIGN)
+
+    # Decide file offsets (file-aligned) for each section's raw data.
+    file_off = headers_size_aligned
+    layout = []
+    for name, rva, data, chars in sections:
+        raw_size = _align(len(data), FILE_ALIGN) if data else 0
+        layout.append((name, rva, data, chars, file_off, raw_size))
+        file_off += raw_size
+
+    size_of_image = _align(
+        max((rva + _align(max(len(d), 1), SECTION_ALIGN) for _n, rva, d, *_ in layout), default=SECTION_ALIGN)
+        if not bss_size else
+        max(rva + _align(max(len(d), 1) if d else bss_size, SECTION_ALIGN) for _n, rva, d, *_ in layout),
+        SECTION_ALIGN,
+    )
+
+    idata_entry = next(((rva, len(d)) for n, rva, d, *_ in layout if n == ".idata"), (0, 0))
+
+    coff_hdr = struct.pack(
+        "<HHIIIHH",
+        0x8664,            # IMAGE_FILE_MACHINE_AMD64
+        num_sects,
+        0,
+        0, 0,              # symbol table (none in the final exe)
+        opt_hdr_size,
+        0x0002 | 0x0020 | 0x0200,  # EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE | DEBUG_STRIPPED
+    )
+
+    opt_hdr = bytearray()
+    opt_hdr += struct.pack("<HBB", 0x020B, 0, 0)          # Magic=PE32+, linker ver
+    opt_hdr += struct.pack("<III", 0, 0, 0)               # SizeOfCode/Init/Uninit (informational)
+    opt_hdr += struct.pack("<I", entry_rva)
+    opt_hdr += struct.pack("<I", sections[0][1])          # BaseOfCode
+    opt_hdr += struct.pack("<Q", IMAGE_BASE)
+    opt_hdr += struct.pack("<II", SECTION_ALIGN, FILE_ALIGN)
+    opt_hdr += struct.pack("<HHHHHH", 6, 0, 0, 0, 6, 0)    # OS/Image/Subsystem version
+    opt_hdr += struct.pack("<I", 0)                        # Win32VersionValue
+    opt_hdr += struct.pack("<II", size_of_image, headers_size_aligned)
+    opt_hdr += struct.pack("<I", 0)                        # CheckSum
+    opt_hdr += struct.pack("<HH", 3, 0x0140)                # Subsystem=CONSOLE, DllCharacteristics (NX+terminate)
+    opt_hdr += struct.pack("<QQQQ", 0x100000, 0x1000, 0x100000, 0x1000)  # stack/heap reserve+commit
+    opt_hdr += struct.pack("<I", 0)                         # LoaderFlags
+    opt_hdr += struct.pack("<I", 16)                        # NumberOfRvaAndSizes
+    for i in range(16):
+        if i == 1:  # IMPORT directory
+            opt_hdr += struct.pack("<II", idata_entry[0], idata_entry[1])
+        else:
+            opt_hdr += struct.pack("<II", 0, 0)
+
+    sect_hdrs = bytearray()
+    for name, rva, data, chars, foff, raw_size in layout:
+        name_b = name.encode()[:8].ljust(8, b"\x00")
+        sect_hdrs += struct.pack(
+            "<8sIIIIIIHHI",
+            name_b,
+            _align(max(len(data), 1) if data else bss_size, SECTION_ALIGN),  # VirtualSize
+            rva,
+            raw_size,
+            foff if raw_size else 0,
+            0, 0, 0, 0,
+            chars,
+        )
+
+    header_blob = bytes(dos_stub) + b"PE\x00\x00" + coff_hdr + bytes(opt_hdr) + bytes(sect_hdrs)
+    header_blob = header_blob.ljust(headers_size_aligned, b"\x00")
+
+    body = bytearray()
+    for _name, _rva, data, _chars, foff, raw_size in layout:
+        pad_before = foff - (headers_size_aligned + len(body))
+        if pad_before > 0:
+            body += b"\x00" * pad_before
+        body += data
+        body += b"\x00" * (raw_size - len(data))
+
+    return header_blob + bytes(body)
