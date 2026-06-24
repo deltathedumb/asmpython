@@ -43,6 +43,11 @@ _build/
 # Keep the assembly sources that ship inside assembly packages.
 !**/*.asmpkg/**/*.asm
 
+# Keep the hand-written ABI shim layer bridging the new uasm-backed IR
+# pipeline's standard-ABI calls to the legacy runtime's ad-hoc convention
+# (see ir_lower.py's module docstring) -- this is source, not build output.
+!asmpython/_runtime/abi_shims.asm
+
 # ── Downloaded dependencies (NASM / GCC / embeddable Python) ─────────────────
 /tools/
 /local/
