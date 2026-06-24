@@ -225,6 +225,16 @@ BUILTIN_EXCEPTIONS: frozenset[str] = frozenset({
     "FileNotFoundError",
 })
 
+# Builtin scalar/container type names usable as a bare *value* (not just a
+# call target or an annotation), e.g. `{"type": str}` mimicking argparse's
+# `add_argument(type=str)` convention. asmpython has no first-class type
+# objects -- like a user class or builtin exception used as a value, this
+# loads a stable per-name RTTI id the program never actually inspects (see
+# codegen.py's BUILTIN_TYPE_IDS and class_ids).
+BUILTIN_TYPE_NAMES: frozenset[str] = frozenset({
+    "int", "float", "str", "bool", "list", "dict", "tuple", "set",
+})
+
 
 # Interpreter-only `<module>.<method>` calls: features that require a live
 # Python interpreter (dynamic import / code execution by string) and so cannot
@@ -4501,8 +4511,14 @@ class SemaAnalyzer:
                 e.inferred_type = self.ffi_consts[e.name].ty
                 return
             # A class name used as a value (passed to isinstance, stored, etc.)
-            # is a first-class "type" object. Builtin exception classes count.
-            if e.name in self.classes or e.name in BUILTIN_EXCEPTIONS:
+            # is a first-class "type" object. Builtin exception classes and
+            # builtin scalar/container type names (e.g. `{"type": str}`,
+            # mimicking argparse's `type=str`) count too.
+            if (
+                e.name in self.classes
+                or e.name in BUILTIN_EXCEPTIONS
+                or e.name in BUILTIN_TYPE_NAMES
+            ):
                 e.inferred_type = "type"
                 return
             # A module-level function used as a value (passed, stored in a var).
@@ -5222,6 +5238,7 @@ class SemaAnalyzer:
                         "dict",
                         "list",
                         "set",
+                        "type",
                     ) and not vt.startswith("instance:"):
                         raise SemaError(
                             f"dict value of type {vt} is not supported yet",

@@ -84,6 +84,22 @@ BUILTIN_EXC_IDS: dict[str, int] = {
     "IOError": 19,  # alias for OSError (same id)
 }
 
+# A bare builtin scalar/container type name used as a value (`{"type": str}`,
+# mimicking argparse's `type=str`) -- same RTTI-id trick as class_ids /
+# BUILTIN_EXC_IDS: asmpython has no first-class type objects, so this is just
+# a stable, unique-per-name placeholder the program never actually inspects.
+# Negative so it can never collide with class_ids (which starts at 0).
+BUILTIN_TYPE_IDS: dict[str, int] = {
+    "int": -1,
+    "float": -2,
+    "str": -3,
+    "bool": -4,
+    "list": -5,
+    "dict": -6,
+    "tuple": -7,
+    "set": -8,
+}
+
 
 # --- Function metadata --------------------------------------------------------
 
@@ -3775,6 +3791,12 @@ class Codegen:
             # expressions the compiled program never actually inspects.)
             if expr.name in self.class_ids:
                 self.emitf(f"mov rax, {self.class_ids[expr.name]}")
+                return
+            if expr.name in BUILTIN_TYPE_IDS:
+                # A bare builtin type name as a value (`{"type": str}`,
+                # mimicking argparse's `type=str`) -- same RTTI-id trick,
+                # see BUILTIN_TYPE_IDS.
+                self.emitf(f"mov rax, {BUILTIN_TYPE_IDS[expr.name]}")
                 return
             if expr.name in BUILTIN_EXCEPTIONS:
                 # A bare builtin-exception name as a value (`raise X` without
