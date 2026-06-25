@@ -1198,7 +1198,20 @@ class Codegen:
             if ty is None:
                 ty = "int"
                 if i < len(f_defaults) and f_defaults[i] is not None:
-                    ty = A.expr_type(f_defaults[i])  # type: ignore
+                    # A `=None` default (e.g. `def f(values=None)`, an
+                    # Optional[X] parameter Python idiom) carries no real
+                    # type info of its own -- its underlying literal is an
+                    # IntLit(0, is_none=True), so naively trusting
+                    # `A.expr_type` here would wrongly pin the param to
+                    # "int" and break any later `values[i]`/`len(values)`
+                    # use once a real (non-None) argument is passed. "any"
+                    # is the same register class (a GP-reg pointer/value,
+                    # not xmm0 float) and is already the lenient fallback
+                    # subscript/len()/iteration codegen falls back to.
+                    if A.is_none_expr(f_defaults[i]):
+                        ty = "any"
+                    else:
+                        ty = A.expr_type(f_defaults[i])  # type: ignore
             # Nonlocal params hold a box pointer, not the actual value — treat
             # as int (pointer) regardless of the annotation.
             if p in nonlocal_list:

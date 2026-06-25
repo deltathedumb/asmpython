@@ -869,7 +869,14 @@ class SemaAnalyzer:
                     if r is not None:
                         pinfo[p] = r
                     elif i < len(m_defaults_x) and m_defaults_x[i] is not None:
-                        pinfo[p] = (A.expr_type(m_defaults_x[i]), None, None, None, None)  # type: ignore
+                        # A `=None` default carries no real type of its own
+                        # (its literal is IntLit(0, is_none=True)) -- same
+                        # fix as codegen's param-type setup: "any" instead
+                        # of trusting expr_type's "int", so a later
+                        # `self.x = param` doesn't mistype `self.x` as int
+                        # for an Optional[X]-style parameter.
+                        dty = "any" if A.is_none_expr(m_defaults_x[i]) else A.expr_type(m_defaults_x[i])  # type: ignore
+                        pinfo[p] = (dty, None, None, None, None)
                     else:
                         inferred = self.inferred_param_types.get(f"{c.name}.{m.name}:{i}")
                         if inferred is not None:
@@ -1312,7 +1319,9 @@ class SemaAnalyzer:
                 if resolved is not None:
                     lit = resolved
                 elif j < len(fn_defaults_2) and fn_defaults_2[j] is not None:
-                    lit = (A.expr_type(fn_defaults_2[j]), None, None, None, None)
+                    # Same `=None` carries-no-type-info fix as elsewhere.
+                    dty2 = "any" if A.is_none_expr(fn_defaults_2[j]) else A.expr_type(fn_defaults_2[j])
+                    lit = (dty2, None, None, None, None)
                 else:
                     lit = self.inferred_param_types.get(f"{qualname}:{j}")
             if (
