@@ -827,6 +827,7 @@ class Codegen:
         "_runtime_set_subset",
         "_runtime_sort_str",
         "_runtime_sort_int",
+        "_runtime_sort_items",
         "_runtime_sort_pairs_str",
         "_runtime_sort_pairs_int",
         "_runtime_list_slice",
@@ -2521,8 +2522,11 @@ class Codegen:
                 # Nonlocal: param slot holds box ptr; store value through it.
                 self.gen_expr(stmt.value, info)
                 self.emitf(f"mov rbx, {mem}", "mov [rbx], rax")
-            elif ty == "float":
+            elif ty == "float" or value_t == "float":
                 # Slot expects a float; promote int RHS to float.
+                # Use value_t not ty: if the variable was later re-typed (e.g.
+                # reassigned as "list" inside a try block), ty may be "list"
+                # even though this particular assignment stores a float literal.
                 self._gen_expr_as_float(stmt.value, info, value_t)
                 self.emitf(f"movsd {mem}, xmm0")
             else:
@@ -2721,12 +2725,12 @@ class Codegen:
                 self.gen_expr(stmt.value, info)
                 self.emitf("mov rbx, rax", f"mov rax, {mem}", "call _runtime_dict_update")
                 return
-            if ty == "list" and stmt.op == "+":
+            if ty == "list" and stmt.op == "+" and A.expr_type(stmt.value) != "float":
                 # `xs += other` → extend xs in-place.
                 self.gen_expr(stmt.value, info)
                 self.emitf("mov rbx, rax", f"mov rax, {mem}", "call _runtime_list_extend")
                 return
-            if ty == "str" and stmt.op == "+":
+            if ty == "str" and stmt.op == "+" and A.expr_type(stmt.value) != "float":
                 # `s += other` → concat and rebind.
                 self.gen_expr(stmt.value, info)
                 self.emitf("mov rbx, rax", f"mov rax, {mem}", "call _runtime_str_concat")
@@ -2768,7 +2772,10 @@ class Codegen:
                     self.emitf(f"mov {mem}, rax")
                     return
                 # No dunder found: fall through to integer arithmetic.
-            if ty == "float":
+            if ty == "float" or A.expr_type(stmt.value) == "float":
+                # Use value_t too: the variable's declared type may have been
+                # overwritten (e.g. re-typed as "list" by a later assignment in
+                # a try block), but THIS augassign is still operating on a float.
                 self._gen_expr_as_float(stmt.value, info, A.expr_type(stmt.value))
                 self.emitf("movsd xmm1, xmm0", f"movsd xmm0, {mem}")
                 # Apply float op in place.
@@ -4548,6 +4555,7 @@ class Codegen:
                 "_runtime_dict_items",
                 "_runtime_sort_str",
                 "_runtime_sort_int",
+                "_runtime_sort_items",
                 "_runtime_sort_pairs_str",
                 "_runtime_sort_pairs_int",
                 "_runtime_list_extend",
@@ -4889,6 +4897,7 @@ class Codegen:
         self._emit_dict_update_helper()
         self._emit_dict_items_helper()
         self._emit_sort_helpers()
+        self._emit_sort_items_helper()
         self._emit_sort_pairs_helpers()
         self._emit_list_extend_helper()
         self._emit_list_repeat_helper()
@@ -5249,6 +5258,80 @@ class Codegen:
             )
             self.label(done)
             self.emitf("mov rax, [rbp-8]", "leave", "ret")
+
+    def _emit_sort_items_helper(self) -> None:
+        """`_runtime_sort_items`: insertion sort for a list of 2-tuple headers
+        (as produced by `dict.items()`), sorted by the first slot (string key).
+
+        Each element in the list buffer is a tuple header pointer; dereferencing
+        it + LIST_BUF_OFF gives the tuple's element buffer, whose slot 0 is the
+        key string pointer.
+
+        In:  rax = list header.  Out: rax = same header, sorted in place.
+        Locals [rbp-8..rbp-40]; 40+32 shadow = 80 bytes.
+        """
+        outer = self.fresh("sitems_outer")
+        inner = self.fresh("sitems_inner")
+        place = self.fresh("sitems_place")
+        done = self.fresh("sitems_done")
+        self.label("_runtime_sort_items")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 80")
+        self.emitf(
+            "mov [rbp-8], rax",  # header
+            f"mov rcx, [rax+{self.LIST_LEN_OFF}]",
+            "mov [rbp-40], rcx",  # n
+            "mov qword [rbp-16], 1",  # i
+        )
+        self.label(outer)
+        self.emitf(
+            "mov rcx, [rbp-16]",
+            "cmp rcx, [rbp-40]",
+            f"jge {done}",
+            "mov rax, [rbp-8]",
+            f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+            "mov rax, [rdx+rcx*8]",  # key = buf[i] (tuple header ptr)
+            "mov [rbp-32], rax",     # key (tuple header ptr)
+            "dec rcx",
+            "mov [rbp-24], rcx",     # j
+        )
+        self.label(inner)
+        self.emitf("mov rcx, [rbp-24]", "test rcx, rcx", f"js {place}")
+        # Compare buf[j] vs key by their first tuple slot (the string key).
+        self.emitf(
+            "mov rax, [rbp-8]",
+            f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+            "mov rax, [rdx+rcx*8]",          # buf[j] (tuple header ptr)
+            f"mov rax, [rax+{self.LIST_BUF_OFF}]",  # tuple buf ptr
+            "mov rax, [rax]",                 # tuple buf[0] = key string ptr
+            "mov rbx, [rbp-32]",              # key (tuple header ptr)
+            f"mov rbx, [rbx+{self.LIST_BUF_OFF}]",  # key tuple buf ptr
+            "mov rbx, [rbx]",                 # key tuple buf[0] = key string ptr
+            "call _runtime_str_cmp",          # rax = strcmp(buf[j].key, key.key)
+            "cmp rax, 0",
+            f"jle {place}",
+        )
+        # shift: buf[j+1] = buf[j]; j--
+        self.emitf(
+            "mov rcx, [rbp-24]",
+            "mov rax, [rbp-8]",
+            f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+            "mov rax, [rdx+rcx*8]",
+            "mov [rdx+rcx*8+8], rax",
+            "dec qword [rbp-24]",
+            f"jmp {inner}",
+        )
+        self.label(place)
+        self.emitf(
+            "mov rcx, [rbp-24]",
+            "mov rax, [rbp-8]",
+            f"mov rdx, [rax+{self.LIST_BUF_OFF}]",
+            "mov rbx, [rbp-32]",
+            "mov [rdx+rcx*8+8], rbx",  # buf[j+1] = key
+            "inc qword [rbp-16]",
+            f"jmp {outer}",
+        )
+        self.label(done)
+        self.emitf("mov rax, [rbp-8]", "leave", "ret")
 
     def _emit_sort_pairs_helpers(self) -> None:
         """`_runtime_sort_pairs_str` / `_runtime_sort_pairs_int`: in-place
@@ -7745,6 +7828,7 @@ class Codegen:
             "cmp rbx, 2", "je ._fe_float",
             "cmp rbx, 3", "je ._fe_list",
             "cmp rbx, 4", "je ._fe_dict",
+            "cmp rbx, 5", "je ._fe_items_tuple",
         )
         self._emit_int_to_str()
         self.emitf("leave", "ret")
@@ -7778,6 +7862,52 @@ class Codegen:
             "shr rcx, 4",
             "mov rbx, 1",
             "call _runtime_dict_repr",
+            "leave",
+            "ret",
+        )
+        self.label("._fe_items_tuple")
+        # rax = tuple header ptr (cap=2, len=2, buf_ptr -> [key_str, val_int]).
+        # Output: ('key', val) as a string. Frame: [rbp-8]=tup [rbp-16]=acc.
+        self.emitf(
+            "mov [rbp-8], rax",
+            f"mov rax, [rax+{self.LIST_BUF_OFF}]",  # buf_ptr
+            "mov rbx, [rax]",                        # key str ptr
+            "lea rax, [_runtime_lparen_str]",
+            "call _runtime_str_concat_dup",
+            "mov [rbp-16], rax",                     # acc = "("
+            # quote the key: "'" + key + "'"
+            "lea rax, [_runtime_quote_str]",
+            "mov rbx, [rbp-16]",
+            "xchg rax, rbx",
+            "call _runtime_str_concat",
+            "mov [rbp-16], rax",
+            "mov rax, [rbp-8]",
+            f"mov rax, [rax+{self.LIST_BUF_OFF}]",
+            "mov rbx, [rax]",                        # key str ptr
+            "mov rax, [rbp-16]",
+            "call _runtime_str_concat",
+            "mov [rbp-16], rax",
+            "lea rbx, [_runtime_quote_str]",
+            "call _runtime_str_concat",
+            "mov [rbp-16], rax",
+            # append ", "
+            "lea rbx, [_runtime_comma_str]",
+            "call _runtime_str_concat",
+            "mov [rbp-16], rax",
+            # append value (int): convert via _int_to_str
+            "mov rax, [rbp-8]",
+            f"mov rax, [rax+{self.LIST_BUF_OFF}]",
+            "mov rax, [rax+8]",                      # value int
+        )
+        self._emit_int_to_str()
+        self.emitf(
+            "mov rbx, rax",
+            "mov rax, [rbp-16]",
+            "call _runtime_str_concat",
+            "mov [rbp-16], rax",
+            # append ")"
+            "lea rbx, [_runtime_rparen_str]",
+            "call _runtime_str_concat",
             "leave",
             "ret",
         )
@@ -13415,6 +13545,8 @@ class Codegen:
                     el_kind = arg.list_el_type
                 elif isinstance(arg, A.ListLit):
                     el_kind = arg.el_type
+                elif isinstance(arg, (A.MethodCall, A.Call)):
+                    el_kind = getattr(arg, "list_el_type", "int")
                 else:
                     el_kind = "int"
             sort_key = getattr(e, "sort_key", None)
@@ -13435,6 +13567,8 @@ class Codegen:
                 )
             elif el_kind == "str":
                 self.emitf("call _runtime_sort_str")
+            elif el_kind == "tuple":
+                self.emitf("call _runtime_sort_items")
             else:
                 self.emitf("call _runtime_sort_int")
             if getattr(e, "sort_reverse", None) is not None:
@@ -15092,11 +15226,14 @@ class Codegen:
         the one-level-deep element/value kind when `t` is itself a 'list' or
         'dict' (so _runtime_fmt_elem can recurse via _runtime_list_repr /
         _runtime_dict_repr). Encoding: base kind in bits 0-3 (0=int, 1=str,
-        2=float, 3=list, 4=dict), inner scalar kind in bits 4-7."""
+        2=float, 3=list, 4=dict, 5=items-tuple), inner scalar kind in bits
+        4-7."""
         if t == "list":
             return 3 | (self._value_repr_kind(inner) << 4)
         if t == "dict":
             return 4 | (self._value_repr_kind(inner) << 4)
+        if t == "tuple":
+            return 5  # dict-items style (str, int) tuple
         return self._value_repr_kind(t)
 
     def _emit_container_repr(self, expr, t: str) -> None:
