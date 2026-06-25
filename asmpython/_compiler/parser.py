@@ -31,6 +31,17 @@ class Parser:
         # can resolve calls to them (closures aren't compiled, but parsing
         # must succeed so the self-hosting gauntlet can proceed).
         self._nested_funcs: list = []
+        # Names bound by `import x` / `from x import y` seen so far. Used by
+        # `_eat_decorators` to tell stdlib decorators (e.g. `@lru_cache(...)`,
+        # `@unique`, currently informational no-ops) apart from decorators on
+        # user-defined values (e.g. `@iset.instruction("ADD")`), which get
+        # desugared into a real call instead.
+        self._imported_names: "set[str]" = set()
+        # Desugared general-decorator application exprs awaiting the next
+        # top-level def to attach to. Populated by `_eat_decorators`, drained
+        # by `parse()` right after the decorated def is parsed.
+        self._pending_decorator_exprs: list = []
+        self._deco_tmp_counter = 0
 
     # ---- helpers -----------------------------------------------------------
 
@@ -361,8 +372,12 @@ class Parser:
             # `@dataclass` synthesising __init__, aren't modelled). The one we
             # act on is `@assembly_func`, which marks a raw-NASM function body.
             decorators = self._eat_decorators()
+            pending = self._pending_decorator_exprs
+            self._pending_decorator_exprs = []
             if self._check("KEYWORD", "def"):
-                funcs.append(self._parse_funcdef(decorators=decorators))
+                fdef = self._parse_funcdef(decorators=decorators)
+                funcs.append(fdef)
+                body.extend(self._desugar_decorator_exprs(pending, fdef.name, fdef.pos))
             elif self._check("KEYWORD", "class"):
                 classes.append(self._parse_classdef(decorators=decorators))
             else:
@@ -595,6 +610,19 @@ class Parser:
 
     # Decorator names the parser treats specially.
     _ASM_DECORATOR = "assembly_func"
+    # Bare leading names that stay informational (parsed-and-discarded) even
+    # though they're not one of the dotted-suffix forms below. These are
+    # decorators on values the compiler doesn't model as real callables
+    # (dataclass/property machinery, stdlib decorators with no codegen
+    # backing them yet) — actually calling them would either be meaningless
+    # (`dataclass`, `staticmethod`, `classmethod`, `property` already get
+    # bespoke handling elsewhere) or fail to type-check (`lru_cache`/`unique`
+    # style stdlib decorators that exist as importable names but aren't
+    # modeled as real higher-order functions).
+    _INFORMATIONAL_DECORATORS = {
+        "dataclass", "staticmethod", "classmethod", "property",
+        "abstractmethod", _ASM_DECORATOR,
+    }
 
     def _eat_decorators(self) -> list[str]:
         """Consume zero or more `@expr` lines preceding a def/class.
@@ -602,12 +630,22 @@ class Parser:
         Returns the leading dotted name of each decorator (e.g. `assembly_func`
         for `@assembly_func` or `@assembly_func(symbol="x")`). Callers inspect
         the list for decorators that change codegen; the rest are informational.
+
+        A decorator whose leading name isn't one of the known-informational
+        ones above, isn't a dotted property-accessor form, and isn't a name
+        bound by `import`/`from ... import` is treated as a *general*
+        decorator on a user-defined value (e.g. `@iset.instruction("ADD")`,
+        where `iset` is a plain module-level variable). For those, the full
+        expression is parsed for real and stashed in
+        `self._pending_decorator_exprs` for `parse()` to desugar into an
+        actual call once the decorated def is known.
         """
         names: list[str] = []
         while self._check("OP", "@"):
             self._eat()
             # First NAME (optionally dotted) is the decorator's identity.
             name = None
+            dotted_suffix = False
             if self._check("NAME"):
                 name = self._peek().value
                 # `@<prop>.setter` / `.getter` / `.deleter`: capture the
@@ -626,26 +664,63 @@ class Parser:
                     and self._peek(2).value in ("setter", "getter", "deleter", "imported")
                 ):
                     name = f"{name}.{self._peek(2).value}"
-            # Eat the rest of the line as a free-form decorator expression.
-            # We don't model the call so we just skip until NEWLINE, balancing
-            # any `(` `[` `{` along the way.
-            depth = 0
-            while True:
-                t = self._peek()
-                if t.kind == "NEWLINE" and depth == 0:
+                    dotted_suffix = True
+            is_informational = (
+                dotted_suffix
+                or name in self._INFORMATIONAL_DECORATORS
+                or (name is not None and name in self._imported_names)
+            )
+            if is_informational or name is None:
+                # Eat the rest of the line as a free-form decorator
+                # expression. We don't model the call so we just skip until
+                # NEWLINE, balancing any `(` `[` `{` along the way.
+                depth = 0
+                while True:
+                    t = self._peek()
+                    if t.kind == "NEWLINE" and depth == 0:
+                        self._eat()
+                        break
+                    if t.kind == "EOF":
+                        break
+                    if t.kind == "OP" and t.value in ("(", "[", "{"):
+                        depth += 1
+                    elif t.kind == "OP" and t.value in (")", "]", "}"):
+                        depth -= 1
                     self._eat()
-                    break
-                if t.kind == "EOF":
-                    break
-                if t.kind == "OP" and t.value in ("(", "[", "{"):
-                    depth += 1
-                elif t.kind == "OP" and t.value in (")", "]", "}"):
-                    depth -= 1
-                self._eat()
+            else:
+                # General decorator on a user-defined value: parse the real
+                # expression (e.g. `ternary_1.instruction("000000")`) so it
+                # can be applied for its side effect against the decorated
+                # function once parsed.
+                expr = self._parse_expr()
+                self._expect("NEWLINE")
+                self._pending_decorator_exprs.append(expr)
             if name is not None:
                 names.append(name)  # type: ignore
             self._skip_newlines()
         return names
+
+    def _desugar_decorator_exprs(self, exprs: list, func_name: str, pos) -> list:
+        """Turn deferred general-decorator exprs into real application stmts.
+
+        `@factory(args)` on `def f(...): ...` is modeled as `f` unchanged
+        (registered as a normal top-level function) plus, for each deferred
+        decorator expr, two synthesized module-body statements:
+        `__deco_tmp_N = factory(args)` then a bare `__deco_tmp_N(f)` call.
+        This matches the identity-decorator shape (`return func` after a
+        side effect) used by registration-pattern decorators like
+        `InstructionSet.instruction`, and sidesteps the parser's lack of
+        support for calling an expression's result directly (`expr(...)(...)`
+        doesn't parse) by routing the intermediate closure through a name.
+        """
+        stmts: list = []
+        for expr in exprs:
+            self._deco_tmp_counter += 1
+            tmp_name = f"__deco_tmp_{self._deco_tmp_counter}"
+            stmts.append(A.Assign(target=tmp_name, value=expr, pos=pos))
+            call = A.Call(func=tmp_name, args=[A.Name(name=func_name, pos=pos)], pos=pos)
+            stmts.append(A.ExprStmt(expr=call, pos=pos))
+        return stmts
 
     def _parse_classdef(self, decorators: "list[str] | None" = None) -> A.ClassDef:
         is_dc = bool(decorators and "dataclass" in decorators)
@@ -1730,6 +1805,7 @@ class Parser:
             self._eat()
             alias = self._expect("NAME").value  # type: ignore[assignment]
         self._expect("NEWLINE")
+        self._imported_names.add(alias or name.split(".")[0])
         return A.Import(module=name, alias=alias, pos=kw.pos)  # type: ignore
 
     def _parse_from_import(self) -> A.FromImport:
@@ -1780,6 +1856,7 @@ class Parser:
         if parenthesized:
             self._expect("OP", ")")
         self._expect("NEWLINE")
+        self._imported_names.update(names)
         return A.FromImport(  # type: ignore
             module=module, names=names, orig_names=orig_names, pos=kw.pos, level=level
         )

@@ -909,6 +909,42 @@ class SemaAnalyzer:
                         sig.field_el_types[s.name] = val
                     elif ty == "tuple" and tup:
                         sig.field_tuple_types[s.name] = tup
+            elif (
+                isinstance(s, A.ExprStmt)
+                and isinstance(s.expr, A.MethodCall)
+                and s.expr.method == "append"
+                and len(s.expr.args) == 1
+                and isinstance(s.expr.obj, A.Attr)
+                and isinstance(s.expr.obj.obj, A.Name)
+                and s.expr.obj.obj.name == "self"
+            ):
+                # `self.xs.append(v)` -- a list field initialized empty
+                # (`self.xs = []`) has no element-kind info from its
+                # initializer alone (_literal_shape_el_type returns None for
+                # an empty ListLit). Without this, `field_el_types` is never
+                # set, so every later `self.xs[i]` read/compare defaults to
+                # "int" -- e.g. a `self.names[i] == name` string comparison
+                # then compiles as raw pointer equality instead of
+                # _runtime_str_eq, since the comparison codegen only takes
+                # the string-compare path when a static "str" type is known.
+                fname = s.expr.obj.name
+                if fname not in sig.field_el_types:
+                    el = self._static_value_info(s.expr.args[0], pinfo)[0]
+                    if el != "int":
+                        sig.field_el_types[fname] = el
+            elif (
+                isinstance(s, A.IndexAssign)
+                and isinstance(s.target.obj, A.Attr)
+                and isinstance(s.target.obj.obj, A.Name)
+                and s.target.obj.obj.name == "self"
+            ):
+                # `self.xs[k] = v` -- same gap as `.append()` above, but for
+                # a dict field initialized empty (`self.xs = {}`).
+                fname = s.target.obj.name
+                if sig.fields.get(fname) == "dict" and fname not in sig.field_el_types:
+                    val = self._static_value_info(s.value, pinfo)[0]
+                    if val != "int":
+                        sig.field_el_types[fname] = val
             elif isinstance(s, A.If):
                 self._scan_field_assigns(s.then, sig, pinfo)
                 self._scan_field_assigns(s.orelse, sig, pinfo)
@@ -5429,6 +5465,24 @@ class SemaAnalyzer:
                     )
             return
         if isinstance(e, A.Attr):
+            # `<top-level func>.__code__.co_argcount`: a decorator-factory
+            # pattern (`def deco(n): def wrap(f): table[n] = (f.__code__.co_argcount, f); ...`)
+            # introspects a function's arity at module-init time to validate
+            # call sites later. Functions have no runtime object wrapping
+            # them here (just a bare code-pointer value), so this can't be a
+            # real attribute read — fold it to the statically-known arity
+            # instead. Only the exact 2-level `<Name>.__code__.co_argcount`
+            # shape is recognized; anything else falls through to the normal
+            # (lenient/opaque) attribute-access path below.
+            if (
+                e.name == "co_argcount"
+                and isinstance(e.obj, A.Attr)
+                and e.obj.name == "__code__"
+                and isinstance(e.obj.obj, A.Name)
+                and e.obj.obj.name in self.funcs
+            ):
+                e.inferred_type = "int"
+                return
             # cls.field inside a @classmethod body → rewrite to ClassName.field
             if (
                 isinstance(e.obj, A.Name)
@@ -6184,12 +6238,13 @@ class SemaAnalyzer:
         """Validate and resolve the `key=`/`reverse=` kwargs shared by
         `sorted()`, `min()`/`max()`, and `list.sort()`.
 
-        Only `key=<lambda literal>` and `key=<name bound to a lambda>` are
-        supported (a bare named-function reference currently segfaults via
-        the same indirect-call path used elsewhere, so it's rejected here
-        too). Stamps `e.sort_key` (Optional[expr]), `e.sort_key_ret`
-        ("str"/"int"), and `e.sort_reverse` (Optional[expr]), then clears
-        `e.kwargs` so normal call-arg checks don't see them.
+        `key=<lambda literal>`, `key=<name bound to a lambda>`, and
+        `key=<bare top-level function reference>` are all supported — each
+        resolves to a function-pointer value loaded via the same indirect-call
+        convention (`_emit_sort_keys_list` does `mov rax, [fn]; call rax`).
+        Stamps `e.sort_key` (Optional[expr]), `e.sort_key_ret` ("str"/"int"),
+        and `e.sort_reverse` (Optional[expr]), then clears `e.kwargs` so
+        normal call-arg checks don't see them.
         """
         key_expr = None
         reverse_expr = None
@@ -6205,14 +6260,25 @@ class SemaAnalyzer:
             if isinstance(key_expr, A.Lambda):
                 ret_t = getattr(key_expr, "lambda_ret", "int")
             elif isinstance(key_expr, A.Name):
-                if key_expr.name not in self.lambda_rets:
+                if key_expr.name in self.lambda_rets:
+                    ret_t = self.lambda_rets[key_expr.name]
+                elif key_expr.name in self.funcs:
+                    sig = self.funcs[key_expr.name]
+                    required = sig.arity - sig.n_defaults
+                    if required > 1:
+                        raise SemaError(
+                            f"key= function {key_expr.name!r} must take exactly "
+                            "one argument (the element being compared)",
+                            e.pos,
+                        )
+                    ret_t = sig.ret_type[0] if sig.ret_type is not None else "int"
+                else:
                     raise SemaError(
-                        "key= must be a lambda literal or a name bound to a "
-                        f"lambda (a bare function reference like {key_expr.name!r} "
-                        "isn't supported)",
+                        "key= must be a lambda literal, a name bound to a "
+                        f"lambda, or a top-level function ({key_expr.name!r} "
+                        "is none of these)",
                         e.pos,
                     )
-                ret_t = self.lambda_rets[key_expr.name]
             else:
                 raise SemaError(
                     "key= must be a lambda literal or a name bound to a lambda",
