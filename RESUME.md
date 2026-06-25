@@ -1168,6 +1168,100 @@ is narrowed to one precise remaining cause.**
      by `_gui_sdl.py`, untested) and the largest entry count (39) of any
      *currently-tested* stdlib module — neither confirmed as the cause.
 
+**2026-06-24 session — root-caused and fixed the `copy.deepcopy`-on-AST-
+nodes bug (commit `add2a5f8`); ran the user's new "ultimate test" (gen1
+self-compiling `__main__.py` to produce gen2) and found it still fails,
+narrowed to a precise, much smaller symptom than before.**
+
+**Bug #10 — ROOT-CAUSED AND FIXED**: every observed symptom this session
+(the `@dataclass`-with-defaults segfault, plain-function omitted-default
+segfaults/errors, and `slice_a.py`'s for-loop segfault) traced to ONE
+cause: `sema.py`'s `_bind_args` (fills a call's omitted-default argument
+slots) called `copy.deepcopy()` on AST expression nodes to give each call
+site a fresh node identity. Under gen0 (CPython), `import copy` resolves
+to the real generic stdlib module and works on any object. Under
+self-hosted gen1, the SAME `import copy` statement resolves to
+asmpython's own bundled `stdlib/copy.py` instead — whose `deepcopy()` is
+hard-typed to accept only `list` values and unconditionally reads
+list-header offsets (cap/len/buf) out of whatever it's given. Handed an
+AST node (not a list), it reads garbage through the wrong memory offsets,
+corrupting the cloned default value — explaining the segfaults (garbage
+treated as a pointer and dereferenced) and "list index out of range"
+errors (garbage caught by a bounds check) alike.
+
+**Fix**: removed the top-level `import copy` from `sema.py`; replaced the
+single `copy.deepcopy(fixed_defaults[i])` call in `_bind_args` with a new
+`_clone_default_expr` method that explicitly reconstructs fresh
+`IntLit`/`FloatLit`/`StrLit`/`ListLit`/`DictLit` nodes (the only types
+`parser.py`'s literal-default-value check permits), recursing into nested
+list/dict elements, with a same-reference fallback for any unexpected
+type. 454/455 tests pass (same pre-existing failure), no regressions.
+
+**Verified against a rebuilt gen1** (re-running the original repro
+scripts): `dctest.py`/`dc_b.py`/`dc_f.py`/`dc_h.py` (the
+`@dataclass`/plain-function omitted-default repros) now all correctly
+compile and run, matching gen0 exactly — confirms this was the real fix
+for that whole symptom family.
+
+**Two residual, DISTINCT failures remain post-fix** (not yet root-caused):
+
+1. `dc_g.py` (a call passing all-keyword arguments out of declared
+   order) still fails to compile: `asmpython: list index out of range`.
+2. `slice_a.py` (negative-index list slicing inside a `for` loop) still
+   segfaults at runtime. Re-diffed gen0-vs-gen1 `--emit-asm` output for
+   this file against the NEWLY rebuilt gen1 — byte-for-byte IDENTICAL
+   spurious-instruction divergence as before the fix (`_gen_for_list`
+   taking its `unpack` branch when it shouldn't, via `unpack =
+   bool(stmt.targets)`). Traced `stmt.targets`' construction: `parser.py`'s
+   `_parse_for` (~line 2031) computes `multi = [] if single else targets`
+   then ALWAYS explicitly passes `targets=multi` at both `A.For(...)`
+   call sites (~lines 2064, 2075) — never omitted/defaulted, which rules
+   out the just-fixed `_bind_args`/`_clone_default_expr` path entirely
+   for this specific bug. Built two closer repros to isolate it
+   (a bare ternary-list-vs-variable assignment; the same ternary result
+   passed through a `@dataclass` constructor's keyword arg and read back
+   via attribute) — **both compiled and ran correctly** under gen1,
+   failing to reproduce the bug in isolation. So bug #10's fix is
+   confirmed NOT to touch this; the real mechanism is still open and
+   needs investigation closer to the actual `_parse_for`/`_gen_for_list`
+   shapes (not yet isolated — next session should try reproducing with
+   the exact `multi = [] if single else targets` ternary feeding
+   `A.For(...)`'s `targets=` kwarg specifically, since the minimal
+   repros so far used a hand-rolled dataclass, not `A.For` itself).
+
+**"Ultimate test" run (the user's explicit framing): gen1 compiling
+`asmpython/__main__.py` to produce gen2.** Built cleanly via gen0 to
+confirm gen1 itself is healthy (5.18MB exe), then had gen1 compile the
+same `asmpython/__main__.py` entry point gen0 used to build it.
+**Result: a new, more fundamental bug.** gen1 produced
+`asmpython_gen2.asm` at only **4,426 lines**, versus **~510,000+ lines**
+when gen0 compiles the identical source — with **zero errors/warnings**
+emitted during the compile itself (silent truncation, not a crash). The
+truncated output fails at the assemble step: `error: symbol
+'userfn_main' not defined` (a `call userfn_main` with no matching
+function-label definition anywhere in the file; `grep -c "^userfn_"`
+on the gen2.asm found **zero** function labels at all). This strongly
+suggests gen1's import/module-merging logic is silently failing to
+inline the transitive closure of `__main__.py`'s imports (parser/sema/
+codegen/etc., the entire compiler) the way gen0's whole-program merge
+does — NOT yet root-caused. Next session: instrument or bisect
+`program.py`'s module-merge entry point (the same `_materialize_value_
+imports`/`_merge_import_bindings`/`_collect_import_stmts` machinery
+implicated in earlier `import os` investigations above) specifically
+while gen1 (not gen0) processes a multi-file project, to see where the
+closure stops expanding — likely the next concrete, high-value thread
+given how small and reproducible the symptom is (a fixed, deterministic
+4,426-line output with no error, easy to re-run against any incremental
+fix attempt without needing a full gen1 rebuild each time).
+
+**Merge from `origin/beta` (commit `48d2ded8`)**: a concurrent agent's
+work landed three new commits upstream (general-decorator desugaring,
+dotted-name default args, `=None` default-param mistyping) while this
+investigation was in progress. Conflicts in `parser.py` (two genuinely
+independent `Parser.__init__` features added by each side — kept both)
+and `sema.py` (comment/style-only, no logic divergence) were resolved
+and merged cleanly; 454/455 tests still pass post-merge.
+
 ## Other Notes
 
 - macOS Intel and RPi/Mac ARM64 are plan-steps 4 and 6-8 above, not
