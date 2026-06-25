@@ -91,11 +91,11 @@ class WindowsCodegen(Codegen):
         return True
 
     def _platform_c_name(self, fn) -> str:
-        return getattr(fn, "c_name_windows", None) or fn.c_name
+        return getattr(fn, "c_name_windows", None) or getattr(fn, "c_name", "")
 
     def _platform_const_value(self, c):
         override = getattr(c, "value_windows", None)
-        return override if override is not None else c.value
+        return override if override is not None else getattr(c, "value", "")
 
     def _emit_stack_probe_if_needed(self, frame: int) -> None:
         if frame > _WIN_STACK_PAGE:

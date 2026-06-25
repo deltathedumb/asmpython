@@ -1344,7 +1344,7 @@ class Codegen:
         info.locals_[name] = info.offset
         info.local_types[name] = "buf"
 
-    def _cl_walk_expr(self, info: FuncInfo, expr) -> None:
+    def _cl_walk_expr(self, info: FuncInfo, expr: A.Expr) -> None:
         # Pre-allocate a scratch slot per ListLit / DictLit so codegen
         # never has to extend the frame at emit-time.
         if isinstance(expr, A.ListLit):
@@ -1919,11 +1919,12 @@ class Codegen:
                 bindings = self.imported_modules[expr.obj.name]
                 b = bindings.get(expr.method)
                 if b is not None and hasattr(b, "arg_types"):
+                    b_arg_types: list = getattr(b, "arg_types", [])
                     for k in range(len(expr.args)):
                         self._cl_define(
                             info,
                             f"__ffi_arg_{id(b)}_{k}",
-                            "float" if b.arg_types[k] == "float" else "int",
+                            "float" if b_arg_types[k] == "float" else "int",
                         )
             # handle.func(args) where handle = import_binary(path) and func
             # is @handle.imported: scratch slots for each marshaled arg plus
@@ -1935,10 +1936,11 @@ class Codegen:
                         _funcdef = _fdef
                         break
                 if _funcdef is not None:
+                    _fdef_param_types: list[tuple] = getattr(_funcdef, "param_types", [])
                     for k in range(len(expr.args)):
                         annot = (
-                            _funcdef.param_types[k]
-                            if k < len(_funcdef.param_types)
+                            _fdef_param_types[k]
+                            if k < len(_fdef_param_types)
                             else None
                         )
                         base = annot[0] if annot else "int"
@@ -3809,7 +3811,7 @@ class Codegen:
     # ---- expression codegen -------------------------------------------------
     # Convention: result in RAX. Intermediate stashed on the runtime stack.
 
-    def gen_expr(self, expr, info: FuncInfo) -> None:
+    def gen_expr(self, expr: A.Expr, info: FuncInfo) -> None:
         if isinstance(expr, A.IntLit):
             self.emitf(f"mov rax, {expr.value}")
             return
@@ -11990,7 +11992,7 @@ class Codegen:
         self.emitf(f"movsd xmm1, xmm0", f"movsd xmm0, [rbp{slot:+d}]")
         self._emit_binop_inline_float(e.op)
 
-    def _gen_expr_as_float(self, expr, info: FuncInfo, ty: str) -> None:
+    def _gen_expr_as_float(self, expr: A.Expr, info: FuncInfo, ty: str) -> None:
         """Evaluate expr; ensure result is in xmm0 as a float, promoting if needed."""
         self.gen_expr(expr, info)
         if ty != "float":
@@ -15128,9 +15130,9 @@ class Codegen:
             self.emit("section .bss")
             self.emit("_cwd_buf: resb 4096")
 
-    def _platform_c_name(self, fn) -> str:
+    def _platform_c_name(self, fn: stdlib.Func) -> str:
         """Return the symbol name to use for this target (may differ from fn.c_name)."""
-        return fn.c_name
+        return getattr(fn, "c_name", "")
 
     def _int_arg_regs(self) -> list[str]:
         raise NotImplementedError

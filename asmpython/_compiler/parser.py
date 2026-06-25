@@ -636,7 +636,7 @@ class Parser:
     # modeled as real higher-order functions).
     _INFORMATIONAL_DECORATORS = {
         "dataclass", "staticmethod", "classmethod", "property",
-        "abstractmethod", _ASM_DECORATOR,
+        "abstractmethod", "assembly_func",
     }
 
     def _eat_decorators(self) -> list[str]:

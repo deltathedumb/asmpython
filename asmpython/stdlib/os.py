@@ -50,7 +50,7 @@ BINDINGS = {
     # access(path, mode) -> 0 if the path is accessible for `mode`
     # (mode 0 = existence). On Windows the CRT spells it `_access`; the
     # `asmpython.stdlib.ospath` helpers hide that difference.
-    "_access": Func(arg_types=("str", "int"), ret_type="int", c_name="access"),
+    "_access": Func(arg_types=("str", "int"), ret_type="int", c_name="access", c_name_windows="_access"),
 
     # --- filesystem mutation / queries (used by pathlib.Path) ---------------
     # mkdir(path, mode) -> 0 on success. POSIX mkdir takes (path, mode);

@@ -506,7 +506,8 @@ def _load_module(name: str) -> dict:
             key = key[len(prefix):]
             break
     if key in STDLIB_BINDINGS:
-        return STDLIB_BINDINGS[key]
+        b = STDLIB_BINDINGS[key]
+        return b
     raise SemaError(f"no such module: {name!r}", code=ErrorCode.E_NO_SUCH_MODULE)
 
 
@@ -3916,6 +3917,7 @@ class SemaAnalyzer:
                     el_t not in ("?", "any", "int")
                     and value_t not in ("any", "int")
                     and value_t != el_t
+                    and not (el_t.startswith("instance:") and value_t.startswith("instance:"))
                 ):
                     raise SemaError(
                         f"list[i] = v: list element type is {el_t}, got {value_t}",
@@ -4599,7 +4601,7 @@ class SemaAnalyzer:
                     ):
                         sig.fields[t.name] = value_t
 
-    def _check_expr(self, e, scope: Scope) -> None:
+    def _check_expr(self, e: A.Expr, scope: Scope) -> None:
         if isinstance(e, (A.IntLit, A.FloatLit, A.StrLit)):
             return
         if isinstance(e, A.Name):
@@ -5772,7 +5774,8 @@ class SemaAnalyzer:
                 self._check_ffi_call(
                     fn, e.args, e.pos, scope, label=f"{e.obj.name}.{e.method}"
                 )
-                e.inferred_type = fn.ret_type
+                _fn_ret = getattr(fn, "ret_type", "int")
+                e.inferred_type = _fn_ret if _fn_ret else "int"
                 return
             # `module.Thing(args)` where `module` is a merged *project* module
             # (not an FFI registry module) and `Thing` is a merged class or
@@ -7306,7 +7309,8 @@ class SemaAnalyzer:
         if e.func in self.ffi_funcs:
             fn = self.ffi_funcs[e.func]
             self._check_ffi_call(fn, e.args, e.pos, scope, label=e.func)
-            e.inferred_type = fn.ret_type
+            _fn_ret2 = getattr(fn, "ret_type", "int")
+            e.inferred_type = _fn_ret2 if _fn_ret2 else "int"
             return
         if e.func in self.classes:
             # Constructor call: ClassName(args). If __init__ exists, validate
