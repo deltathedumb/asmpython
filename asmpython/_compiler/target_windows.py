@@ -45,7 +45,7 @@ class WindowsCodegen(Codegen):
             "fopen",
             "fgetc",
             "fclose",
-            "access",
+            "_access",
             "exit",
             "__acrt_iob_func",
             "malloc",
@@ -229,7 +229,8 @@ class WindowsCodegen(Codegen):
             # rax, 0x7FF0000000000000` gets truncated to `cmp rax, 0`, which
             # misidentifies 0.0 as infinity).
             "movq rax, xmm0",
-            "and rax, 0x7FFFFFFFFFFFFFFF",
+            "mov r10, 0x7FFFFFFFFFFFFFFF",
+            "and rax, r10",
             "mov r10, 0x7FF0000000000000",
             "cmp rax, r10",
             f"jne {skip}",

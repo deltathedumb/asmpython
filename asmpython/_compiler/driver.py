@@ -360,6 +360,27 @@ def _run_backend_x86_64(
     return BuildResult(asm_path=out_path, obj_path=out_path, exe_path=out_path)
 
 
+def _run_backend_ternary(module, out_path: Path) -> BuildResult:
+    """Compile a Python module to a flat ternary binary image.
+
+    Output is a .tern file: a sequence of 4-byte little-endian signed
+    integers, one per balanced-ternary memory cell (8-trit values).
+    Load into TernarySystem.mem starting at address 0 and run from PC=0.
+    """
+    from . import ir_lower
+    from .._backends.ternary import __module_backend__ as backend
+
+    ir_mod = ir_lower.lower_module(module)
+    compiled = backend.compile(ir_mod, {})
+    out_bytes = next(iter(compiled.values()))
+
+    out_path = out_path.with_suffix(".tern").resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(out_bytes)
+    print(f"wrote {out_path}")
+    return BuildResult(asm_path=out_path, obj_path=out_path, exe_path=out_path)
+
+
 def _run_backend(
     module,
     target: str,
@@ -392,6 +413,8 @@ def _run_backend(
             module, target, out_path,
             gcc_path=gcc_path, linker=linker,
         )
+    elif backend == "ternary":
+        return _run_backend_ternary(module, out_path)
     elif linker is not None and linker != "gcc":
         raise ValueError(f"--backend legacy only supports --linker gcc, got {linker!r}")
 

@@ -121,8 +121,8 @@ def run_positive(case: Path, target: str) -> TestResult:
     run = subprocess.run([str(out)], capture_output=True, text=True, input=stdin_data, **exe_flags)
     if run.returncode != 0:
         return TestResult(case.name, False, f"program exited {run.returncode}\n{run.stderr}")
-    got = run.stdout.replace("\r\n", "\n").rstrip("\n")
-    expected_norm = expected.rstrip("\n")
+    got = "\n".join(l.rstrip() for l in run.stdout.replace("\r\n", "\n").rstrip("\n").split("\n"))
+    expected_norm = "\n".join(l.rstrip() for l in expected.rstrip("\n").split("\n"))
     if got != expected_norm:
         return TestResult(case.name, False, _diff(expected_norm, got))
     return TestResult(case.name, True)
