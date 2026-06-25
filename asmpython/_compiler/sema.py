@@ -980,6 +980,17 @@ class SemaAnalyzer:
             return ("tuple", None, None, None)
         if isinstance(value, A.Call) and value.func in self.classes:
             return (f"instance:{value.func}", None, None, None)
+        if isinstance(value, A.Comprehension):
+            # `[Trite() for _ in range(16)]` -- elt's syntactic type becomes
+            # the produced list's element kind, same as a literal list would
+            # get from its own elements. `_check_expr` hasn't stamped
+            # `elt`/the comprehension itself yet at this point (field
+            # collection runs before body analysis), so the element kind
+            # can't come from `list_el_type` -- recurse into the same
+            # syntax-only resolution used for literals instead.
+            elt_info = self._literal_arg_type(value.elt)
+            el = elt_info[0] if elt_info is not None else None
+            return ("list", el, None, None)
         return None
 
     def _static_value_info(self, value, pinfo: dict):
@@ -1272,11 +1283,11 @@ class SemaAnalyzer:
                     or sig.returns_self
                 ):
                     continue
-                ty = self._infer_return_type(m, f"{c.name}.{m.name}")
+                ty = self._infer_return_type(m, f"{c.name}.{m.name}", c.name)
                 if ty is not None:
                     sig.ret_type = ty
 
-    def _infer_return_type(self, fn: A.FuncDef, qualname: str):
+    def _infer_return_type(self, fn: A.FuncDef, qualname: str, cls_name: "Optional[str]" = None):
         """(ty, el, val) for every reachable `return` in `fn.body`, if all
         have a value and those values' types are statically knowable
         (`_literal_arg_type`, or a reference to one of `fn`'s parameters whose
@@ -1304,6 +1315,28 @@ class SemaAnalyzer:
                     lit = (A.expr_type(fn_defaults_2[j]), None, None, None, None)
                 else:
                     lit = self.inferred_param_types.get(f"{qualname}:{j}")
+            if (
+                lit is None
+                and cls_name is not None
+                and isinstance(r.value, A.Subscript)
+                and isinstance(r.value.obj, A.Attr)
+                and isinstance(r.value.obj.obj, A.Name)
+                and r.value.obj.obj.name == "self"
+            ):
+                # `return self.xs[i]` (e.g. a `def r(self, i): return
+                # self.registers[i]` accessor) -- the field's already-known
+                # element kind (from `_collect_field_types`, which runs
+                # before this pass) becomes the return type, same as a
+                # param reference does above. Bare-int subscripts (where the
+                # field type is genuinely "int", same as the unresolved
+                # sentinel) just fall through to the int default below, same
+                # outcome either way.
+                fname = r.value.obj.name
+                fty = self._resolve_field_type(cls_name, fname)
+                if fty in ("list", "dict"):
+                    el = self._resolve_field_el(cls_name, fname)
+                    if el != "int":
+                        lit = (el, None, None, None)
             if lit is None:
                 return None
             entry = (lit[0], lit[1], lit[2])
@@ -2408,17 +2441,20 @@ class SemaAnalyzer:
         # `self.x = param` in `__init__` benefits too.
         self._infer_unannotated_params()
 
+        # Infer instance-field types from `self.x = ...` so `obj.x` reads carry
+        # the right static type. Done before any body is checked (top-level or
+        # method) so every field read — including from module-level code — sees
+        # the inferred field types. Must run before `_infer_unannotated_returns`
+        # below: a `def r(self, i): return self.registers[i]` accessor needs
+        # `registers`'s already-known element kind to type its own return,
+        # and neither pass depends on the other's output otherwise.
+        self._collect_field_types()
+
         # Infer return types for functions/methods with no return annotation
         # and no inferred tuple-return shape, from their `return` statements
         # (using the parameter types just inferred above). See
         # `_infer_unannotated_returns`.
         self._infer_unannotated_returns()
-
-        # Infer instance-field types from `self.x = ...` so `obj.x` reads carry
-        # the right static type. Done before any body is checked (top-level or
-        # method) so every field read — including from module-level code — sees
-        # the inferred field types.
-        self._collect_field_types()
 
         self.global_scope = Scope()
         # Module dunders the runtime always provides.

@@ -780,6 +780,23 @@ class Parser:
                 )
             self._skip_newlines()
         self._expect("DEDENT")
+        # A method default referencing a bare name that's actually one of
+        # this class's own class-vars (`DEFAULT_X = ...` above, then later
+        # `def __init__(self, x=DEFAULT_X)`) is valid Python: a class body
+        # executes top-to-bottom, so unqualified names in a default
+        # expression resolve against earlier class-body bindings, not
+        # module globals. Defaults are spliced verbatim into call sites
+        # missing the arg (see codegen's "splice in the literals"), where
+        # the bare name wouldn't resolve at all -- rewrite to `ClassName.X`
+        # so it's a real, globally-resolvable attribute access everywhere.
+        class_var_names = {cv[0] for cv in class_vars}
+        if class_var_names:
+            for m in methods:
+                for i, d in enumerate(m.defaults):
+                    if isinstance(d, A.Name) and d.name in class_var_names:
+                        m.defaults[i] = A.Attr(
+                            obj=A.Name(name=name, pos=d.pos), name=d.name, pos=d.pos
+                        )
         return A.ClassDef(  # type: ignore
             name=name,  # type: ignore
             parent=parent,  # type: ignore
@@ -999,6 +1016,18 @@ class Parser:
             return self._parse_default_list(t)
         if t.kind == "OP" and t.value == "{":
             return self._parse_default_dict(t)
+        if t.kind == "NAME":
+            # A dotted name reference, e.g. `def f(x=Trit.MID)` referencing a
+            # plain-int class constant. Not a literal in syntax, but its
+            # value is fixed at compile time -- evaluated like any other
+            # expression wherever it's spliced into a call missing the arg.
+            self._eat()
+            node: "A.Expr" = A.Name(name=t.value, pos=t.pos)
+            while self._check("OP", "."):
+                self._eat()
+                attr = self._expect("NAME")
+                node = A.Attr(obj=node, name=attr.value, pos=attr.pos)
+            return node
         raise ParseError(
             f"default argument must be a literal (int/float/str/True/False/None/list/dict), got {t.kind} {t.value!r}",
             t.pos,
@@ -2106,6 +2135,8 @@ class Parser:
                 args.append(self._parse_expr())
                 while self._check("OP", ","):
                     self._eat()
+                    if self._check("OP", ")"):
+                        break  # trailing comma
                     args.append(self._parse_expr())
             self._expect("OP", ")")
             if not (1 <= len(args) <= 3):
