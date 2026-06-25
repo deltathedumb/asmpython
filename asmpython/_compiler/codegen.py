@@ -1230,7 +1230,20 @@ class Codegen:
             if ty is None:
                 ty = "int"
                 if i < len(f_defaults) and f_defaults[i] is not None:
-                    ty = A.expr_type(f_defaults[i])  # type: ignore
+                    # A `=None` default (e.g. `def f(values=None)`, an
+                    # Optional[X] parameter Python idiom) carries no real
+                    # type info of its own -- its underlying literal is an
+                    # IntLit(0, is_none=True), so naively trusting
+                    # `A.expr_type` here would wrongly pin the param to
+                    # "int" and break any later `values[i]`/`len(values)`
+                    # use once a real (non-None) argument is passed. "any"
+                    # is the same register class (a GP-reg pointer/value,
+                    # not xmm0 float) and is already the lenient fallback
+                    # subscript/len()/iteration codegen falls back to.
+                    if A.is_none_expr(f_defaults[i]):
+                        ty = "any"
+                    else:
+                        ty = A.expr_type(f_defaults[i])  # type: ignore
             # Nonlocal params hold a box pointer, not the actual value — treat
             # as int (pointer) regardless of the annotation.
             if p in nonlocal_list:
@@ -1249,12 +1262,39 @@ class Codegen:
         info.frame_size = frame
         return info
 
-    def _is_closure_factory_call(self, value) -> bool:
-        """True if `value` is a Call to a function whose body constructs and
-        returns a closure (contains a ClosureBind) -- i.e. calling it
-        produces a closure object, not a plain value.
+    def _closure_factory_body(self, value) -> "Optional[list]":
+        """The body (list of stmts) of the function/method `value` calls, if
+        that callee constructs and returns a closure (its body contains a
+        ClosureBind) -- i.e. calling `value` produces a closure object, not
+        a plain value. None if `value` isn't such a call.
 
-        A.expr_type(value) (sema's static inferred_type) only know about
+        Covers both `w = make_adder(3)` (A.Call) and `w = reg.register("x")`
+        (A.MethodCall) -- a decorator-factory method on a plain object, e.g.
+        the `InstructionSet.instruction` registration pattern, produces a
+        closure exactly the same way a plain factory function does.
+        """
+        if isinstance(value, A.Call) and isinstance(value.func, str):
+            for ff in self.mod.funcs:
+                if ff.name == value.func:
+                    return ff.body
+            return None
+        if isinstance(value, A.MethodCall):
+            obj_type = A.expr_type(value.obj)
+            if not obj_type.startswith("instance:"):
+                return None
+            cls_name = obj_type.split(":", 1)[1]
+            owner = self._resolve_method_owner(cls_name, value.method)
+            if owner is None:
+                return None
+            mdef = self._find_method_def(owner, value.method)
+            return mdef.body if mdef is not None else None
+        return None
+
+    def _is_closure_factory_call(self, value) -> bool:
+        """True if calling `value` produces a closure object rather than a
+        plain value.
+
+        A.expr_type(value) (sema's static inferred_type) only knows about
         the Callable[...] annotation, not this codegen-internal distinction,
         so without this check a variable assigned from such a call never
         gets tagged "closure" -- the call site then takes the plain
@@ -1262,15 +1302,10 @@ class Codegen:
         [MAGIC, fn_ptr, captured_vars...] list, calling the list's own
         header pointer as if it were code (segfault).
         """
-        if not isinstance(value, A.Call) or not isinstance(value.func, str):
+        body = self._closure_factory_body(value)
+        if body is None:
             return False
-        for ff in self.mod.funcs:
-            if ff.name == value.func:
-                for fs in ff.body:
-                    if isinstance(fs, A.ClosureBind):
-                        return True
-                return False
-        return False
+        return any(isinstance(fs, A.ClosureBind) for fs in body)
 
     def _cl_define(self, info: FuncInfo, name: str, ty: str = "int") -> None:
         """Reserve an 8-byte frame slot for `name` (no-op if already present).
@@ -4386,6 +4421,22 @@ class Codegen:
         # "str"/"any" (without !r/!a) stay as-is
 
     def _gen_attr(self, e: A.Attr, info: FuncInfo) -> None:
+        # `<top-level func>.__code__.co_argcount` -- sema folds this to a
+        # statically-known constant (see the matching check in sema.py); emit
+        # it directly rather than treating `func` as a real object with a
+        # `__code__` attribute (it's just a bare code-pointer value).
+        if (
+            e.name == "co_argcount"
+            and isinstance(e.obj, A.Attr)
+            and e.obj.name == "__code__"
+            and isinstance(e.obj.obj, A.Name)
+        ):
+            fname = e.obj.obj.name
+            for f in self.mod.funcs:
+                if f.name == fname:
+                    argcount = len(f.params) - (1 if f.vararg else 0)
+                    self.emitf(f"mov rax, {argcount}")
+                    return
         # Class-level variable read: `ClassName.x`. Loads the static global.
         if isinstance(e.obj, A.Name):
             cv = self.class_var_labels.get(f"{e.obj.name}.{e.name}")
@@ -13671,28 +13722,24 @@ class Codegen:
                             n_free = len(ff.free_vars)
                             break
                     if n_free == 0:
-                        # Indirect: e.func was assigned from a factory call.
-                        # Find the factory name from module body assignments.
-                        factory_name = None
+                        # Indirect: e.func was assigned from a factory call,
+                        # either a plain function call (`w = make(...)`) or a
+                        # method call on a user instance (`w = reg.register(...)`,
+                        # the InstructionSet.instruction registration-decorator
+                        # shape). Find the factory's body so we can read its
+                        # ClosureBind's free_vars count.
+                        factory_body = None
                         all_stmts = list(self.mod.body) + [
                             s for f in self.mod.funcs for s in f.body
                         ]
                         for s in all_stmts:
-                            if (
-                                isinstance(s, A.Assign)
-                                and s.target == e.func
-                                and isinstance(s.value, A.Call)
-                            ):
-                                factory_name = s.value.func
+                            if isinstance(s, A.Assign) and s.target == e.func:
+                                factory_body = self._closure_factory_body(s.value)
                                 break
-                        if factory_name:
-                            # Find the factory function's ClosureBind to get n_free
-                            for ff in self.mod.funcs:
-                                if ff.name == factory_name:
-                                    for fs in ff.body:
-                                        if isinstance(fs, A.ClosureBind):
-                                            n_free = len(fs.free_vars)
-                                            break
+                        if factory_body is not None:
+                            for fs in factory_body:
+                                if isinstance(fs, A.ClosureBind):
+                                    n_free = len(fs.free_vars)
                                     break
                     # closure = [MAGIC, fn_ptr, fv0, fv1, ...]
                     # Build synthetic args: [fv0, fv1, ..., explicit_args...]
@@ -13714,17 +13761,22 @@ class Codegen:
                             self.gen_expr(arg_expr, info)
                             self.emitf("push rax")
                         arg_temps.append(slot)
-                    # Load closure buf.
+                    # Load closure buf. Keep the buf pointer in r11 (not one
+                    # of the arg-passing registers) -- on Windows, arg_reg(0)
+                    # is rcx, so if the buf pointer were held in rcx it would
+                    # get clobbered by the very first free-var write below,
+                    # corrupting every subsequent `[rcx+...]` read once
+                    # n_free >= 2.
                     self.emitf(
                         f"mov rax, {closure_mem}",
-                        f"mov rcx, [rax+{self.LIST_BUF_OFF}]",
+                        f"mov r11, [rax+{self.LIST_BUF_OFF}]",
                         # fn_ptr at buf+8
-                        "mov r10, [rcx+8]",
+                        "mov r10, [r11+8]",
                     )
                     # Place captured vars into arg regs 0..n_free-1.
                     for i in range(n_free):
                         reg = self._arg_reg(i)
-                        self.emitf(f"mov {reg}, [rcx+{(i + 2) * 8}]")
+                        self.emitf(f"mov {reg}, [r11+{(i + 2) * 8}]")
                     # Place explicit args into arg regs n_free..n_free+len(args)-1.
                     for i, (arg_expr, slot) in enumerate(zip(e.args, arg_temps)):
                         reg = self._arg_reg(n_free + i)

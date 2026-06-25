@@ -1,3 +1,6 @@
-# expect-error: default argument must be a literal
+# expect-error: undefined variable 'foo'
 def f(x=foo):
     return x
+
+
+f()
