@@ -1748,6 +1748,7 @@ class SemaAnalyzer:
         try:
             self._check_block(stmts, scope)
         except SemaError as e:
+            print("SEMA_ERR:", e.pos, e.msg)
             self._collected_errors.append(e)
 
     def _collect_gen_locals(self, stmts: list, exclude: set) -> list:
@@ -3311,7 +3312,7 @@ class SemaAnalyzer:
                 is_none=t == "int" and A.is_none_expr(value),
             )
 
-    def _check_stmt(self, s, scope: Scope) -> "Optional[list]":
+    def _check_stmt(self, s: A.Stmt, scope: Scope) -> "Optional[list]":
         if isinstance(s, A.Pass):
             return
         if isinstance(s, A.YieldStmt):
@@ -5609,7 +5610,7 @@ class SemaAnalyzer:
                     return
             # Special-case module attribute: math.pi, math.sqrt(...).
             if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
-                bindings = self.imported_modules[e.obj.name]
+                bindings: dict = self.imported_modules[e.obj.name]
                 if e.name not in bindings:
                     if e.obj.name == "os" and e.name == "environ":
                         # `os.environ` is conceptually a str->str dict. Typing
@@ -5762,7 +5763,7 @@ class SemaAnalyzer:
                 if e.obj.name == "os" and e.method == "cpu_count":
                     e.inferred_type = "int"
                     return
-                bindings = self.imported_modules[e.obj.name]
+                bindings: dict = self.imported_modules[e.obj.name]
                 if e.method not in bindings or not isinstance(
                     bindings[e.method], stdlib.Func
                 ):

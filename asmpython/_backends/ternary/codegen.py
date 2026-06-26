@@ -140,9 +140,9 @@ class TernaryFuncCodegen:
 
     def _emit_fixup(self, emit_fn, label: str) -> None:
         self._emit(emit_fn(0))
-        lo = len(self.words) - 2
-        hi = len(self.words) - 1
-        self.fixups.append((lo, hi, label))
+        # New format: header + 1 operand word; operand is the last word emitted.
+        op_idx = len(self.words) - 1
+        self.fixups.append((op_idx, label))
 
     def _emit_jmp(self, label: str):  self._emit_fixup(E.jmp, label)
     def _emit_jnz(self, label: str):  self._emit_fixup(E.jnz, label)
@@ -281,6 +281,21 @@ class TernaryFuncCodegen:
         if func_name == "printf":
             self._lower_printf(instr, args)
             return
+        if func_name == "mem_load":
+            self._lower_mem_load(instr, args)
+            return
+        if func_name == "mem_store":
+            self._lower_mem_store(instr, args)
+            return
+        if func_name == "diskread":
+            self._lower_diskread(instr, args)
+            return
+        if func_name == "diskwrite":
+            self._lower_diskwrite(instr, args)
+            return
+        if func_name == "call_addr":
+            self._lower_call_addr(instr, args)
+            return
 
         # Move args into r0-r3. Arg registers are always r4+ (fresh temps from
         # ir_lower.py), so no swap conflict with r0-r3 occurs in practice.
@@ -294,6 +309,59 @@ class TernaryFuncCodegen:
 
         self._emit_call(func_name)
 
+        if instr.result is not None:
+            r_res = self._reg_of(instr.result)
+            if r_res != 0:
+                self._emit(E.mov(r_res, 0))
+
+    # ── OS intrinsics ─────────────────────────────────────────────────────────
+
+    def _lower_mem_load(self, instr: IRInstr, args: list) -> None:
+        """mem_load(addr) -> int  — LOAD r_addr, r_result"""
+        assert len(args) >= 1 and isinstance(args[0], IRValue)
+        assert instr.result is not None
+        r_addr = self._reg_of(args[0])
+        r_res  = self._reg_of(instr.result)
+        self._emit(E.load_r(r_addr, r_res))
+
+    def _lower_mem_store(self, instr: IRInstr, args: list) -> None:
+        """mem_store(addr, val) — STORE r_addr, r_val"""
+        assert len(args) >= 2
+        assert isinstance(args[0], IRValue) and isinstance(args[1], IRValue)
+        r_addr = self._reg_of(args[0])
+        r_val  = self._reg_of(args[1])
+        self._emit(E.store_r(r_addr, r_val))
+        if instr.result is not None:
+            r_res = self._reg_of(instr.result)
+            self._emit(E.movi(r_res, 0))
+
+    def _lower_diskread(self, instr: IRInstr, args: list) -> None:
+        """diskread(ram_addr, sector) — DISKREAD r_dst, r_sector"""
+        assert len(args) >= 2
+        assert isinstance(args[0], IRValue) and isinstance(args[1], IRValue)
+        r_dst = self._reg_of(args[0])
+        r_sec = self._reg_of(args[1])
+        self._emit(E.diskread(r_dst, r_sec))
+        if instr.result is not None:
+            r_res = self._reg_of(instr.result)
+            self._emit(E.movi(r_res, 0))
+
+    def _lower_diskwrite(self, instr: IRInstr, args: list) -> None:
+        """diskwrite(ram_addr, sector) — DISKWRITE r_src, r_sector"""
+        assert len(args) >= 2
+        assert isinstance(args[0], IRValue) and isinstance(args[1], IRValue)
+        r_src = self._reg_of(args[0])
+        r_sec = self._reg_of(args[1])
+        self._emit(E.diskwrite(r_src, r_sec))
+        if instr.result is not None:
+            r_res = self._reg_of(instr.result)
+            self._emit(E.movi(r_res, 0))
+
+    def _lower_call_addr(self, instr: IRInstr, args: list) -> None:
+        """call_addr(addr) — indirect CALL via register (for launching loaded programs)"""
+        assert len(args) >= 1 and isinstance(args[0], IRValue)
+        r_addr = self._reg_of(args[0])
+        self._emit(E.call_r(r_addr))
         if instr.result is not None:
             r_res = self._reg_of(instr.result)
             if r_res != 0:
@@ -334,6 +402,13 @@ class TernaryFuncCodegen:
         # Recycle registers of operands whose last use was this instruction.
         self._free_operand_registers(instr)
 
+        # Free the result register immediately if it was allocated but is never
+        # used as an operand (e.g. discarded return value of a void-like call).
+        if instr.result is not None and instr.result.name not in self._last_use:
+            r = self._reg.get(instr.result.name)
+            if r is not None:
+                self._pool.free(r)
+
     # ── Main entry point ──────────────────────────────────────────────────────
 
     def lower(self) -> list[int]:
@@ -359,11 +434,9 @@ class TernaryFuncCodegen:
     def resolve_fixups(self, global_labels: dict[str, int]) -> None:
         """Patch placeholder addresses.  Local labels take precedence."""
         merged = {**global_labels, **self.label_map}
-        for lo_idx, hi_idx, label in self.fixups:
+        for op_idx, label in self.fixups:
             if label not in merged:
                 raise ValueError(
                     f"Unresolved label {label!r} in {self.func.name}"
                 )
-            lo, hi = E.encode_operand(merged[label])
-            self.words[lo_idx] = lo
-            self.words[hi_idx] = hi
+            self.words[op_idx] = merged[label]

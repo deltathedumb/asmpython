@@ -48,13 +48,17 @@ from ..._compiler.ir import ModuleBackend
 
 # ── CLI args ──────────────────────────────────────────────────────────────────
 
-requested_args: list[dict] = []   # no extra CLI flags for ternary
+requested_args: list[dict] = [
+    {"name": "--load-addr", "type": int, "default": 0,
+     "help": "Base RAM address where the binary will be loaded (default 0)."},
+    {"name": "--frame-addr", "type": int, "default": 4000,
+     "help": "Base RAM address for static alloca frames (default 4000)."},
+    {"name": "--lib", "action": "store_true", "default": False,
+     "help": "Emit RET instead of HALT in entry stub (for programs loaded by kernel)."},
+]
 default_linker = "builtin"        # no external linker needed
 
-# Start of static frame region; code must fit before this address.
-# 6561 total cells: code in 0-FRAME_BASE, frames in FRAME_BASE-5999,
-# hardware stack occupies the top ~100 cells (5999-6560).
-_FRAME_BASE = 4000
+_FRAME_BASE = 4000  # kept as fallback; overridden by args["frame_addr"]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -78,49 +82,59 @@ def run_backend_codegen(ir: Any, args: dict) -> dict[str, bytes]:
     """
     Compile IRModule → flat ternary binary image.
 
-    Returns {"output.tern": <bytes>} where each 4-byte LE signed int
-    is one balanced-ternary memory cell.
+    Recognised keys in args:
+      load_addr  (int, default 0)    — RAM address where the binary will be loaded.
+                                        All absolute jump/call targets are offset by this.
+      frame_addr (int, default 4000) — Base RAM address for static alloca slots.
+      lib        (bool, default False)— Use RET instead of HALT in entry stub so
+                                        the caller (kernel) regains control after main().
+
+    Returns {"output.tern": <bytes>} where each 4-byte LE signed int is one
+    balanced-ternary memory cell.
     """
     if not ir.funcs:
         return {"output.tern": b""}
+
+    load_addr  = int(args.get("load_addr",  args.get("load-addr",  0)))
+    frame_base = int(args.get("frame_addr", args.get("frame-addr", _FRAME_BASE)))
+    use_lib    = bool(args.get("lib", False))
 
     global_data: dict[str, object] = {
         g.name: g.value for g in getattr(ir, "data", [])
     }
 
-    # Pre-scan: count alloca slots per function to assign static frames.
+    # Pre-scan: count alloca slots per function, assign static frame addresses.
     alloca_counts = [_count_allocas(f) for f in ir.funcs]
-
     frame_addrs: list[int] = []
-    cursor = _FRAME_BASE
+    cursor = frame_base
     for cnt in alloca_counts:
         frame_addrs.append(cursor)
-        cursor += max(cnt, 1)   # reserve at least 1 cell per function
+        cursor += max(cnt, 1)
 
-    # Reorder so main comes first after the entry stub (address 6).
+    # Reorder: main first (comes right after the entry stub).
     main_idx = _find_main(ir.funcs)
     order = [main_idx] + [i for i in range(len(ir.funcs)) if i != main_idx]
     funcs_ordered = [ir.funcs[i] for i in order]
     frames_ordered = [frame_addrs[i] for i in order]
 
-    # ── First pass: emit all function words ───────────────────────────────────
-    # Entry stub lives at addresses 0-5:
-    #   CALL #main  (4 words: 0, 1, 2, 3)
-    #   HALT        (2 words: 4, 5)
-    # main starts at 6.
-    _STUB_SIZE = 6
+    # ── First pass: emit function words ──────────────────────────────────────
+    # Entry stub (new format, 3 words):
+    #   word 0: CALL header
+    #   word 1: CALL target  (absolute RAM address of main)
+    #   word 2: HALT or RET
+    # With load_addr, the stub in RAM sits at [load_addr .. load_addr+2].
+    # main in RAM starts at load_addr + 3.
+    _STUB_SIZE = 3  # CALL(2 words) + HALT/RET(1 word)
+
     func_start_addr: dict[str, int] = {}
     gens: list[TernaryFuncCodegen] = []
-    all_words: list[int] = E.halt() * 0   # empty
+    all_words: list[int] = [0] * _STUB_SIZE
 
-    # Reserve stub space (filled in after we know main's address).
-    stub_placeholder: list[int] = [0] * _STUB_SIZE
-    all_words = list(stub_placeholder)
-
-    code_cursor = _STUB_SIZE
+    code_cursor = _STUB_SIZE  # offset within the binary (0-based)
     for func, faddr in zip(funcs_ordered, frames_ordered):
-        func_start_addr[func.name] = code_cursor
-        gen = TernaryFuncCodegen(func, code_cursor, faddr, global_data)
+        # Absolute RAM address = binary offset + load_addr
+        func_start_addr[func.name] = code_cursor + load_addr
+        gen = TernaryFuncCodegen(func, code_cursor + load_addr, faddr, global_data)
         words = gen.lower()
         all_words.extend(words)
         code_cursor += len(words)
@@ -129,15 +143,16 @@ def run_backend_codegen(ir: Any, args: dict) -> dict[str, bytes]:
     # ── Second pass: resolve fixups ───────────────────────────────────────────
     for gen in gens:
         gen.resolve_fixups(func_start_addr)
-        # Splice the resolved words back into all_words.
-        start = gen.func_addr
+        # Splice resolved words back; gen.func_addr is absolute RAM addr.
+        bin_start = gen.func_addr - load_addr
         for i, w in enumerate(gen.words):
-            all_words[start + i] = w
+            all_words[bin_start + i] = w
 
     # ── Patch entry stub ──────────────────────────────────────────────────────
-    main_addr = func_start_addr[funcs_ordered[0].name]
-    stub_words = E.call_abs(main_addr) + E.halt()
-    assert len(stub_words) == _STUB_SIZE
+    main_addr = func_start_addr[funcs_ordered[0].name]  # absolute RAM address
+    tail = E.ret_() if use_lib else E.halt()
+    stub_words = E.call_abs(main_addr) + tail
+    assert len(stub_words) == _STUB_SIZE, f"{len(stub_words)} != {_STUB_SIZE}"
     for i, w in enumerate(stub_words):
         all_words[i] = w
 

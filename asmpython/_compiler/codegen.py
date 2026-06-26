@@ -1668,11 +1668,12 @@ class Codegen:
             # FFI call needs one scratch slot per arg.
             if expr.func in self.ffi_funcs:
                 fn = self.ffi_funcs[expr.func]
+                fn_arg_types: list = getattr(fn, "arg_types", [])
                 for k in range(len(expr.args)):
                     self._cl_define(
                         info,
                         f"__ffi_arg_{id(fn)}_{k}",
-                        "float" if fn.arg_types[k] == "float" else "int",
+                        "float" if fn_arg_types[k] == "float" else "int",
                     )
             # Constructor needs a slot to park the freshly-allocated
             # instance ptr across the __init__ call.
@@ -1916,7 +1917,7 @@ class Codegen:
                     self._cl_define(info, f"__listdir_char_{id(path_arg)}")
             # math.sqrt(x) — same FFI scratch reservation.
             if isinstance(expr.obj, A.Name) and expr.obj.name in self.imported_modules:
-                bindings = self.imported_modules[expr.obj.name]
+                bindings: dict = self.imported_modules[expr.obj.name]
                 b = bindings.get(expr.method)
                 if b is not None and hasattr(b, "arg_types"):
                     b_arg_types: list = getattr(b, "arg_types", [])
@@ -4457,7 +4458,7 @@ class Codegen:
                 return
         # Module constant access: math.pi etc.
         if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
-            bindings = self.imported_modules[e.obj.name]
+            bindings: dict = self.imported_modules[e.obj.name]
             b = bindings.get(e.name)
             if b is not None and not hasattr(b, "arg_types"):  # Const
                 self._gen_const_load(b)
@@ -10954,7 +10955,7 @@ class Codegen:
                 return
         # math.sqrt(x), math.pow(a, b) etc.
         if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
-            bindings = self.imported_modules[e.obj.name]
+            bindings: dict = self.imported_modules[e.obj.name]
             b = bindings.get(e.method)
             if b is not None and hasattr(b, "arg_types"):
                 self._gen_ffi_call(b, e.args, info)

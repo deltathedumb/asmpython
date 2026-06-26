@@ -2,10 +2,12 @@
 Balanced ternary arithmetic and instruction encoding for the ternary ISA
 (cpu.py / ternary_1 instruction set).
 
-Encoding layout per instruction:
-  Word 0 (header):  opcode trits 0-5 + operand-count field trits 6-7
-  Word 1 (reftype): one trit per operand: 0 = immediate, -1 = register ref
-  Words 2+:         two words per operand (lo 8 trits, hi 8 trits)
+Encoding layout per instruction — matches cpu.py encode_instruction exactly:
+  Word 0 (header): 16 trits
+      trits  0-5  : opcode (6 trits)
+      trits  6-7  : operand-count field = (n_operands - 4) in balanced ternary
+      trits  8-15 : reftype (one trit per operand slot, -1=register, 0=immediate)
+  Words 1..N: one 16-trit word per operand (register number or immediate value)
 
 Every integer here is the mathematical value of its balanced-ternary
 representation, matching what int(Trite) returns in cpu.py.
@@ -38,36 +40,32 @@ def bt_to_int(trits: list[int]) -> int:
     return acc
 
 
-def encode_operand(value: int) -> tuple[int, int]:
-    """Encode a 16-trit value as (lo_cell, hi_cell)."""
-    t16 = bt_from_int(value, 16)
-    return bt_to_int(t16[:8]), bt_to_int(t16[8:])
-
-
 def encode_instruction(opcode: str, operands: list[tuple[int, bool]]) -> list[int]:
     """
     Encode one ternary instruction to a list of memory-cell integers.
 
     opcode:   6-char string of '0', '+', '-'
     operands: list of (value, is_register)
-              is_register True  → reftype trit -1 (Trit.LO in cpu.py)
+              is_register True  → reftype trit -1 (Trit.LO / register)
               is_register False → reftype trit  0 (Trit.MID / immediate)
+
+    Returns a list of 16-trit integers: [header, op0, op1, ...].
+    The header packs opcode (6) + count (2) + reftype (8) = 16 trits into one
+    word, exactly matching cpu.py's encode_instruction and decode step.
     """
     assert len(opcode) == 6, f"opcode must be 6 chars: {opcode!r}"
     n = len(operands)
 
-    op_trits = [{"0": 0, "+": 1, "-": -1}[c] for c in opcode]
-    count_trits = bt_from_int(n - 4, 2)   # 2-trit field; range -4..+4
-    header = bt_to_int(op_trits + count_trits)
+    op_trits    = [{"0": 0, "+": 1, "-": -1}[c] for c in opcode]   # 6 trits
+    count_trits = bt_from_int(n - 4, 2)                              # 2 trits
+    ref_trits   = [(-1 if is_reg else 0) for (_, is_reg) in operands]
+    ref_trits  += [0] * (8 - len(ref_trits))                         # pad to 8
 
-    rt = [(-1 if is_reg else 0) for (_, is_reg) in operands]
-    rt += [0] * (8 - len(rt))             # pad reftype word to 8 trits
-    reftype = bt_to_int(rt)
+    header = bt_to_int(op_trits + count_trits + ref_trits)           # 16 trits
 
-    words = [header, reftype]
+    words = [header]
     for value, _ in operands:
-        lo, hi = encode_operand(value)
-        words += [lo, hi]
+        words.append(bt_to_int(bt_from_int(value, 16)))
     return words
 
 
@@ -86,44 +84,53 @@ def _e(opcode: str, *ops: tuple[int, bool]) -> list[int]:
 
 
 # ── Named instruction builders ────────────────────────────────────────────────
-# Opcodes from cpu.py's @ternary_1.instruction decorators.
+# Opcodes match cpu.py's @ternary_1.instruction decorators.
 
-def halt():                       return _e("000000")
-def nop():                        return _e("000-++")
-def mov(dst: int, src: int):      return _e("00000-", R(dst), R(src))    # dst = src
-def movi(dst: int, imm: int):     return _e("00++0+", R(dst), I(imm))    # dst = imm
-def load_i(addr: int, dst: int):  return _e("00000+", I(addr), R(dst))   # dst = mem[imm]
-def load_r(base: int, dst: int):  return _e("00000+", R(base), R(dst))   # dst = mem[r]
-def store_i(addr: int, src: int): return _e("0000-0", I(addr), R(src))   # mem[imm] = src
-def store_r(base: int, src: int): return _e("0000-0", R(base), R(src))   # mem[r] = src
-def add(src: int, dst: int):      return _e("0000--", R(src), R(dst))    # dst += src
-def sub(src: int, dst: int):      return _e("0000-+", R(src), R(dst))    # dst -= src
-def mul(src: int, dst: int):      return _e("000+00", R(src), R(dst))    # dst *= src
-def div(src: int, dst: int):      return _e("000+0-", R(src), R(dst))    # dst //= src
-def mod(src: int, dst: int):      return _e("000+0+", R(src), R(dst))    # dst %= src
-def iand(src: int, dst: int):     return _e("0000+0", R(src), R(dst))
-def ior(src: int, dst: int):      return _e("0000+-", R(src), R(dst))
-def ixor(src: int, dst: int):     return _e("0000++", R(src), R(dst))
-def shl(src: int, dst: int):      return _e("000++-", R(src), R(dst))    # dst <<= src
-def shr(src: int, dst: int):      return _e("000+++", R(src), R(dst))    # dst >>= src
-def neg(r: int):                  return _e("000+-0", R(r))
-def cmp_rr(a: int, b: int):       return _e("00+0-0", R(a), R(b))       # FLAGS = b-a
-def cmp_ir(imm: int, b: int):     return _e("00+0-0", I(imm), R(b))     # FLAGS = b-imm
-def jmp(addr: int):               return _e("000-0-", I(addr))
-def jz(addr: int):                return _e("000-0+", I(addr))
-def jnz(addr: int):               return _e("000--0", I(addr))
-def jl(addr: int):                return _e("00+0-+", I(addr))           # jump if NEGATIVE
-def jg(addr: int):                return _e("00+0+0", I(addr))           # jump if ~(NEG|ZERO)
-def jle(addr: int):               return _e("00+0+-", I(addr))           # jump if NEG|ZERO
-def jge(addr: int):               return _e("00+0++", I(addr))           # jump if ~NEG
-def push(r: int):                 return _e("000---", R(r))
-def pop(r: int):                  return _e("000--+", R(r))
-def pushi(imm: int):              return _e("00++00", I(imm))
-def adjsp(delta: int):            return _e("00++0-", I(delta))
-def call_abs(addr: int):          return _e("000-+0", I(addr))
-def ret_():                       return _e("000-+-")
-def out_r(port: int, src: int):   return _e("00++--", I(port), R(src))
-def in_r(port: int, dst: int):    return _e("00++-+", I(port), R(dst))
+def halt():                         return _e("000000")
+def nop():                          return _e("000-++")
+def mov(dst: int, src: int):        return _e("00000-", R(dst), R(src))
+def movi(dst: int, imm: int):       return _e("00++0+", R(dst), I(imm))
+def load_i(addr: int, dst: int):    return _e("00000+", I(addr), R(dst))
+def load_r(base: int, dst: int):    return _e("00000+", R(base), R(dst))
+def store_i(addr: int, src: int):   return _e("0000-0", I(addr), R(src))
+def store_r(base: int, src: int):   return _e("0000-0", R(base), R(src))
+def add(src: int, dst: int):        return _e("0000--", R(src), R(dst))
+def sub(src: int, dst: int):        return _e("0000-+", R(src), R(dst))
+def mul(src: int, dst: int):        return _e("000+00", R(src), R(dst))
+def div_(src: int, dst: int):       return _e("000+0-", R(src), R(dst))
+def mod_(src: int, dst: int):       return _e("000+0+", R(src), R(dst))
+def iand(src: int, dst: int):       return _e("0000+0", R(src), R(dst))
+def ior(src: int, dst: int):        return _e("0000+-", R(src), R(dst))
+def ixor(src: int, dst: int):       return _e("0000++", R(src), R(dst))
+def shl(src: int, dst: int):        return _e("000++-", R(src), R(dst))
+def shr(src: int, dst: int):        return _e("000+++", R(src), R(dst))
+def neg(r: int):                    return _e("000+-0", R(r))
+def inc(r: int):                    return _e("000+--", R(r))
+def dec(r: int):                    return _e("000+-+", R(r))
+def cmp_rr(a: int, b: int):         return _e("00+0-0", R(a), R(b))   # FLAGS = b-a
+def cmp_ir(imm: int, b: int):       return _e("00+0-0", I(imm), R(b)) # FLAGS = b-imm
+def jmp(addr: int):                 return _e("000-0-", I(addr))
+def jmp_r(reg: int):                return _e("000-0-", R(reg))        # JMP register
+def jz(addr: int):                  return _e("000-0+", I(addr))
+def jnz(addr: int):                 return _e("000--0", I(addr))
+def jl(addr: int):                  return _e("00+0-+", I(addr))       # jump if NEGATIVE
+def jg(addr: int):                  return _e("00+0+0", I(addr))       # jump if ~(NEG|ZERO)
+def jle(addr: int):                 return _e("00+0+-", I(addr))       # jump if NEG|ZERO
+def jge(addr: int):                 return _e("00+0++", I(addr))       # jump if ~NEG
+def push(r: int):                   return _e("000---", R(r))
+def pop(r: int):                    return _e("000--+", R(r))
+def pushi(imm: int):                return _e("00++00", I(imm))
+def adjsp(delta: int):              return _e("00++0-", I(delta))
+def call_abs(addr: int):            return _e("000-+0", I(addr))
+def call_r(reg: int):               return _e("000-+0", R(reg))        # CALL register
+def ret_():                         return _e("000-+-")
+def out_r(port: int, src: int):     return _e("00++--", I(port), R(src))
+def in_r(port: int, dst: int):      return _e("00++-+", I(port), R(dst))
+
+# ── Disk I/O instructions (new opcodes added to cpu.py) ───────────────────────
+def diskread(dst: int, sector: int):  return _e("0+000+", R(dst), R(sector))
+def diskwrite(src: int, sector: int): return _e("0+00-0", R(src), R(sector))
+def disksize(dst: int):               return _e("0+00-+", R(dst))
 
 
 def words_to_bytes(words: list[int]) -> bytes:
