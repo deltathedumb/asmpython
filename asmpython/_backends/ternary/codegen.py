@@ -202,8 +202,8 @@ class TernaryFuncCodegen:
             "iadd": lambda: self._emit(E.add (r_b, r_res)),
             "isub": lambda: self._emit(E.sub (r_b, r_res)),
             "imul": lambda: self._emit(E.mul (r_b, r_res)),
-            "idiv": lambda: self._emit(E.div (r_b, r_res)),
-            "irem": lambda: self._emit(E.mod (r_b, r_res)),
+            "idiv": lambda: self._emit(E.div_(r_b, r_res)),
+            "irem": lambda: self._emit(E.mod_(r_b, r_res)),
             "iand": lambda: self._emit(E.iand(r_b, r_res)),
             "ior":  lambda: self._emit(E.ior (r_b, r_res)),
             "ixor": lambda: self._emit(E.ixor(r_b, r_res)),
@@ -296,6 +296,12 @@ class TernaryFuncCodegen:
         if func_name == "call_addr":
             self._lower_call_addr(instr, args)
             return
+        if func_name == "print_char":
+            self._lower_print_char(instr, args)
+            return
+        if func_name == "read_char":
+            self._lower_read_char(instr, args)
+            return
 
         # Move args into r0-r3. Arg registers are always r4+ (fresh temps from
         # ir_lower.py), so no swap conflict with r0-r3 occurs in practice.
@@ -366,6 +372,20 @@ class TernaryFuncCodegen:
             r_res = self._reg_of(instr.result)
             if r_res != 0:
                 self._emit(E.mov(r_res, 0))
+
+    def _lower_print_char(self, instr: IRInstr, args: list) -> None:
+        """print_char(ch) — OUT port 1, r_ch  (character output)"""
+        assert len(args) >= 1 and isinstance(args[0], IRValue)
+        r_ch = self._reg_of(args[0])
+        self._emit(E.out_r(1, r_ch))
+        if instr.result is not None:
+            self._emit(E.movi(self._reg_of(instr.result), 0))
+
+    def _lower_read_char(self, instr: IRInstr, args: list) -> None:
+        """read_char() -> int — IN port 1, r_result  (blocking character input)"""
+        assert instr.result is not None
+        r_res = self._reg_of(instr.result)
+        self._emit(E.in_r(1, r_res))
 
     def _lower_printf(self, instr: IRInstr, args: list) -> None:
         """Map printf(fmt, val) → OUT #0, r_val (port 0 = integer print)."""

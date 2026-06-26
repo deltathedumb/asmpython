@@ -3312,7 +3312,7 @@ class SemaAnalyzer:
                 is_none=t == "int" and A.is_none_expr(value),
             )
 
-    def _check_stmt(self, s: A.Stmt, scope: Scope) -> "Optional[list]":
+    def _check_stmt(self, s, scope: Scope) -> "Optional[list]":
         if isinstance(s, A.Pass):
             return
         if isinstance(s, A.YieldStmt):
@@ -3758,8 +3758,11 @@ class SemaAnalyzer:
             # this only needs to get the right NAME into scope so `audio.x`
             # parses and type-checks instead of falling through to an
             # opaque-int default.
-            bind_name = s.alias if s.alias is not None else s.module.split(".")[0]
-            top_name = s.module.split(".")[0]
+            _im_alias: str = getattr(s, "alias", "") or ""
+            _im_module: str = getattr(s, "module", "") or ""
+            _im_parts: list = _im_module.split(".")
+            top_name: str = _im_parts[0]
+            bind_name: str = _im_alias if _im_alias else top_name
             try:
                 bindings = _load_module(top_name)
             except SemaError:
@@ -3782,12 +3785,16 @@ class SemaAnalyzer:
             # `os.fopen(...)` dispatches through BINDINGS just like a bare
             # `import os`. Names that aren't stdlib modules fall through to the
             # generic handling below.
-            if s.level == 0 and (
-                s.module in ("asmpython.stdlib", "asmpython._stdlib")
-                or s.module.startswith("asmpython.stdlib.")
-                or s.module.startswith("asmpython._stdlib.")
+            _fi_module: str = getattr(s, "module", "") or ""
+            _fi_level: int = getattr(s, "level", 0) or 0
+            _fi_names: list = getattr(s, "names", []) or []
+            _fi_orig_names: list = getattr(s, "orig_names", []) or []
+            if _fi_level == 0 and (
+                _fi_module in ("asmpython.stdlib", "asmpython._stdlib")
+                or _fi_module.startswith("asmpython.stdlib.")
+                or _fi_module.startswith("asmpython._stdlib.")
             ):
-                for name, orig in zip(s.names, s.orig_names or s.names):
+                for name, orig in zip(_fi_names, _fi_orig_names or _fi_names):
                     try:
                         self.imported_modules[name] = _load_module(orig)
                         scope.add(name, "module")
@@ -3806,21 +3813,21 @@ class SemaAnalyzer:
             # `from asmpython.assembly import assembly_func, include`: compiler
             # directives. `assembly_func` is consumed at parse time as a
             # decorator. Bind all names from the package as opaque markers.
-            if s.module in ("asmpython.assembly", "assembly") and s.level == 0:
-                for name in s.names:
+            if _fi_module in ("asmpython.assembly", "assembly") and _fi_level == 0:
+                for name in _fi_names:
                     scope.add(name, "asmdirective")
                 return
             # Relative import or unknown module: accept the syntax and bind
             # each imported name as a dummy int. Self-host needs every source
             # file to *parse*; real cross-file resolution comes later.
-            if s.level > 0 or not s.module:
+            if _fi_level > 0 or not _fi_module:
                 # `from . import ast_nodes as A` (no module name, just dots)
                 # imports sibling *modules* — bind them as modules so
                 # `A.Module(...)` / `A.expr_type(...)` stay lenient. A relative
                 # *name* import (`from .x import Y`) binds an opaque value
                 # ("any") so `Y(...)` / `Y.method()` / `Y.attr` all stay lenient
                 # rather than erroring as operations on an int.
-                if not s.module:
+                if not _fi_module:
                     # No module name at all after the dots: either a sibling-
                     # module import (`from . import ast_nodes as A`, always
                     # aliased in this codebase since the bare name would
@@ -3833,8 +3840,8 @@ class SemaAnalyzer:
                     # loader's _materialize_value_imports already prepended as
                     # a real `Assign` ahead of this statement, so scope[name]
                     # must not be clobbered back to "module".
-                    orig_names = s.orig_names or s.names
-                    for name, orig in zip(s.names, orig_names):
+                    orig_names: list = _fi_orig_names or _fi_names
+                    for name, orig in zip(_fi_names, orig_names):
                         if name != orig:
                             scope.add(name, "module")
                         elif name not in scope:
@@ -3855,15 +3862,15 @@ class SemaAnalyzer:
                 # statement vanished from the compiled output with no error,
                 # since this self-host bootstrapping path is intentionally
                 # lenient about unresolved relative imports.
-                orig_names = s.orig_names or s.names
-                for name, orig in zip(s.names, orig_names):
+                orig_names2: list = _fi_orig_names or _fi_names
+                for name, orig in zip(_fi_names, orig_names2):
                     if name != orig:
                         self.mod.func_aliases[name] = orig
                     if name not in scope:
                         scope.add(name, "any")
                 return
             try:
-                bindings = _load_module(s.module)
+                bindings = _load_module(_fi_module)
             except SemaError:
                 # Unknown absolute module (e.g. `from pathlib import Path`).
                 # Bind each name as an opaque value so `Path(...)`, `Path.cwd()`,
@@ -3875,14 +3882,15 @@ class SemaAnalyzer:
                 # materialized with its REAL type.
                 # For `from bundled_module import orig as local`, register the
                 # alias so codegen can resolve `local` to the merged `orig` symbol.
-                orig_names = s.orig_names or s.names
-                for local, orig in zip(s.names, orig_names):
+                orig_names3: list = _fi_orig_names or _fi_names
+                for local, orig in zip(_fi_names, orig_names3):
                     if local != orig:
                         self.mod.func_aliases[local] = orig
                     if local not in scope:
                         scope.add(local, "any")
                 return
-            for name in s.names:
+            bindings: dict = bindings
+            for name in _fi_names:
                 if name not in bindings:
                     # Unknown binding inside a known module — accept as an
                     # opaque value (mirrors the unknown-module fallback above).
@@ -3893,7 +3901,7 @@ class SemaAnalyzer:
                     self.ffi_funcs[name] = b
                 else:
                     self.ffi_consts[name] = b
-                    scope.add(name, b.ty)
+                    scope.add(name, getattr(b, "ty", "int"))
             return
         if isinstance(s, A.ExprStmt):
             self._check_expr(s.expr, scope)
