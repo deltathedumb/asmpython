@@ -150,6 +150,15 @@ class FuncCodegen:
 
     def _gp(self, val: Any) -> tuple[Reg, bytes]:
         """Get a GP register holding val. Emits a load from stack if spilled."""
+        slot = self.alloc.alloca_slots.get(val.name)
+        if slot is not None:
+            # alloca'd pointers never occupy a register or stack spill slot
+            # of their own -- their "value" is simply the fixed rbp-relative
+            # address regalloc.py recorded for them, recomputed fresh via
+            # lea on every read instead of being cached in a register for
+            # the value's whole (often function-spanning, e.g. a loop's
+            # var/stop/step) lifetime. See the alloca opcode handler.
+            return self._SCRATCH, encode_lea(self._SCRATCH, Mem(Reg.RBP, slot))
         loc = self._loc(val)
         if isinstance(loc, RegLoc):
             return loc.reg, b""
@@ -659,8 +668,11 @@ class FuncCodegen:
             return
 
         if op == "alloca":
-            slot = self.alloc.alloca_slots[r.name]
-            self._emit(encode_lea(self._dst_gp(r), Mem(Reg.RBP, slot)))
+            # No instruction needed here: alloca_slots already records this
+            # name's fixed rbp-relative address (set by regalloc.py), and
+            # every later read of it goes through `_gp`'s alloca special
+            # case (a fresh lea each time) instead of a cached register --
+            # see that method's comment for why.
             return
 
         # ── type conversions ──────────────────────────────────────────────────

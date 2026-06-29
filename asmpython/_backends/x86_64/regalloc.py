@@ -72,13 +72,74 @@ def _is_float(type_name: str) -> bool:
 
 
 def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
-    """Return the (block_idx, instr_idx) of each value's final use."""
+    """Return the (block_idx, instr_idx) of each value's final use.
+
+    A value defined *outside* a loop and read inside it must stay live for
+    the whole loop, not just until its textually-last mention: a back edge
+    (a br/br.t target at or before the branching block) means every block
+    from the target through the branching block re-executes each
+    iteration, and since the value's own definition is outside that range,
+    nothing inside the loop refreshes it -- it's still needed on the next
+    pass even after its "last" textual use. Scanning blocks in plain list
+    order misses this: it sees that last mention, concludes the value is
+    dead, and lets the allocator reuse its register for something else --
+    correct for the textual order, wrong for control flow. Confirmed via a
+    live repro: a for-loop's stop/step pointers (defined once before the
+    loop) got reassigned to a same-iteration temp inside the increment
+    block, corrupting the loop bound on the very next pass.
+
+    This must NOT extend values whose definition is itself inside the same
+    loop (the common case: nearly every temporary a loop body computes) --
+    those are refreshed every iteration before they're read again, so their
+    ordinary textual last-use is already correct, and over-extending them
+    would make almost everything in a loop "alive" simultaneously and
+    exhaust the register pool for no reason.
+    """
+    label_to_idx = {b.label: bi for bi, b in enumerate(func.blocks)}
+
+    # For each block bi, the [start, end] of the widest loop containing it
+    # (its own index for both if bi isn't in any loop). A back edge from
+    # block `src` to block `dst` (dst <= src) means every block in
+    # [dst, src] belongs to one loop spanning exactly that range;
+    # overlapping/nested loops just take the widest start/end seen.
+    loop_start = list(range(len(func.blocks)))
+    loop_end = list(range(len(func.blocks)))
+    for bi, block in enumerate(func.blocks):
+        for instr in block.instrs:
+            if instr.op not in ("br", "br.t"):
+                continue
+            targets = instr.operands[1:] if instr.op == "br.t" else instr.operands
+            for t in targets:
+                ti = label_to_idx.get(str(t))
+                if ti is not None and ti <= bi:
+                    for k in range(ti, bi + 1):
+                        if loop_start[k] > ti:
+                            loop_start[k] = ti
+                        if loop_end[k] < bi:
+                            loop_end[k] = bi
+
+    def_block: dict[str, int] = {}
+    for param in func.params:
+        def_block[param.name] = 0
+    for bi, block in enumerate(func.blocks):
+        for instr in block.instrs:
+            if instr.result is not None:
+                def_block.setdefault(instr.result.name, bi)
+
     last: dict[str, tuple[int, int]] = {}
     for bi, block in enumerate(func.blocks):
         for ii, instr in enumerate(block.instrs):
             for op in instr.operands:
                 if hasattr(op, "name"):
                     last[op.name] = (bi, ii)
+
+    # Extend a use inside a loop to that loop's last block, but only when
+    # the value's definition lies outside the loop's own range -- see the
+    # docstring for why a loop-internal definition doesn't need this.
+    for name, (bi, _ii) in list(last.items()):
+        start, end = loop_start[bi], loop_end[bi]
+        if end > bi and def_block.get(name, bi) < start:
+            last[name] = (end, len(func.blocks[end].instrs))
     return last
 
 
@@ -255,12 +316,16 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
 
             if result is not None and result.name not in locs:
                 if instr.op == "alloca":
-                    # Reserve stack storage; result is a pointer → GP register
+                    # Reserve stack storage; the result name resolves via
+                    # alloca_slots, not a register or spill slot of its own
+                    # -- see codegen.py's `_gp` for why (alloca'd pointers
+                    # are recomputed via lea on every read instead of
+                    # competing for the same fixed-size register pool as
+                    # everything else, often for the whole function).
                     size = int(instr.operands[0]) if instr.operands else 8
                     size = (size + 7) & ~7        # 8-byte align
                     stack_top += size
                     alloca_slots[result.name] = -stack_top
-                    _alloc_gp(result.name)
                 elif _is_float(result.type.name):
                     _alloc_xmm(result.name)
                 else:
@@ -270,15 +335,21 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
             for op in instr.operands:
                 _free_if_dead(op, now)
 
-    # Win64 callers must always leave >= 32 bytes of shadow space below RSP
-    # at any call site, even if nothing was spilled -- the callee is allowed
-    # to spill its own register args there. Functions with few enough locals
-    # to need zero spill/alloca space would otherwise emit `call` with no
-    # `sub rsp` at all, which is fine for calls to other functions compiled
-    # by this same backend (they never touch the caller's shadow space) but
-    # corrupts state on calls to real ABI-compliant code (libc, etc).
-    if abi == "win64" and stack_top < 32:
-        stack_top = 32
+    # Win64 callers must always leave >= 32 bytes of *free* shadow space
+    # directly below RSP at any call site -- the callee is allowed to spill
+    # its own register args there. This must be EXTRA space beyond whatever
+    # locals/spills already occupy, not just a floor on the total frame
+    # size: every alloca/spill slot above is placed at -stack_top (i.e.
+    # right next to where RSP will end up), so merely clamping stack_top to
+    # a minimum of 32 leaves those slots sitting *inside* [RSP, RSP+32) --
+    # exactly the region a callee like printf's varargs spill path will
+    # scribble over, corrupting whatever local happened to land there.
+    # Unconditionally adding 32 guarantees every existing slot (offset <=
+    # -stack_top_before) ends up at <= -(32) from the new RSP, clear of the
+    # shadow zone. Confirmed via a live repro: a 3-slot (24-byte) frame
+    # making a libc call corrupted two of the three locals before this fix.
+    if abi == "win64":
+        stack_top += 32
 
     # ── Align total stack frame to 16 bytes (ABI requirement at call sites) ───
     # _prologue() pushes (len(callee_saved) + 1) registers (the +1 is RBP)

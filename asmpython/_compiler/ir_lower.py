@@ -32,6 +32,7 @@ from .ir import (
     IRModule,
     IRType,
     IRValue,
+    F64,
     I64,
     PTR,
     ir_type_for,
@@ -80,6 +81,7 @@ class _FuncCtx:
         self.terminated = False
         self.slot: dict[str, IRValue] = {}  # var name -> alloca'd ptr
         self.slot_ty: dict[str, IRType] = {}  # var name -> value type in that slot
+        self.loop_stack: list[tuple[str, str]] = []  # (continue_label, break_label)
         self._tmp = 0
         self._blk = 0
 
@@ -127,11 +129,51 @@ _CMPOP = {
     ">": "icmp.gt", ">=": "icmp.ge",
 }
 
+# Only +/-/*/ true-division have a direct backend float op; floor-div/mod/
+# bitwise on floats are rejected by sema already (see ast_nodes.expr_type's
+# "bitwise ops only legal on ints" comment), so there's nothing to lower.
+_FBINOP = {"+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv"}
+
+_FCMPOP = {
+    "==": "fcmp.eq", "!=": "fcmp.ne",
+    "<": "fcmp.lt", "<=": "fcmp.le",
+    ">": "fcmp.gt", ">=": "fcmp.ge",
+}
+
+
+def _value_truthy(ctx: _FuncCtx, v: IRValue) -> IRValue:
+    """Convert an already-lowered value to an I64 0/1-ish value suitable
+    for `br.t` (which does a raw `test reg,reg; jnz` on a GP register).
+    Float values must be converted first since they live in XMM and br.t
+    can't read those directly; everything else (int, and -- same
+    approximation the legacy codegen.py and this file's existing If/While
+    lowering already make -- any heap pointer) passes through as a plain
+    nonzero/zero GP test."""
+    if v.type is F64:
+        zero = ctx.tmp(F64)
+        ctx.emit(IRInstr("const", zero, [0.0]))
+        r = ctx.tmp(I64)
+        ctx.emit(IRInstr("fcmp.ne", r, [v, zero]))
+        return r
+    return v
+
+
+def _lower_truthy(ctx: _FuncCtx, e: A.Expr) -> IRValue:
+    """Lower `e` then convert its value to truthy I64 -- see
+    `_value_truthy`. Use this (not `_value_truthy` directly) whenever `e`
+    hasn't been lowered yet, so it's only evaluated once."""
+    return _value_truthy(ctx, _lower_expr(ctx, e))
+
 
 def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     if isinstance(e, A.IntLit):
         v = ctx.tmp(I64)
         ctx.emit(IRInstr("const", v, [int(e.value)]))
+        return v
+
+    if isinstance(e, A.FloatLit):
+        v = ctx.tmp(F64)
+        ctx.emit(IRInstr("const", v, [float(e.value)]))
         return v
 
     if isinstance(e, A.Name):
@@ -141,7 +183,115 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("load", v, [ptr]))
         return v
 
+    if isinstance(e, A.UnaryOp):
+        operand_ty = A.expr_type(e.operand)
+        if e.op == "+":
+            return _lower_expr(ctx, e.operand)
+        if e.op == "not":
+            # Boolean negation always yields int 0/1, whatever the operand's
+            # own type (matches ast_nodes.expr_type's UnaryOp special case).
+            r = ctx.tmp(I64)
+            if operand_ty == "float":
+                v = _lower_expr(ctx, e.operand)
+                zero = ctx.tmp(F64)
+                ctx.emit(IRInstr("const", zero, [0.0]))
+                ctx.emit(IRInstr("fcmp.eq", r, [v, zero]))
+            else:
+                v = _lower_truthy(ctx, e.operand)
+                zero = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", zero, [0]))
+                ctx.emit(IRInstr("icmp.eq", r, [v, zero]))
+            return r
+        if operand_ty == "float":
+            if e.op != "-":
+                raise LowerError(f"unsupported float unary op {e.op!r}")
+            v = _lower_expr(ctx, e.operand)
+            r = ctx.tmp(F64)
+            ctx.emit(IRInstr("fneg", r, [v]))
+            return r
+        v = _lower_expr(ctx, e.operand)
+        r = ctx.tmp(I64)
+        if e.op == "-":
+            ctx.emit(IRInstr("ineg", r, [v]))
+        elif e.op == "~":
+            ctx.emit(IRInstr("inot", r, [v]))
+        else:
+            raise LowerError(f"unsupported unary op {e.op!r}")
+        return r
+
+    if isinstance(e, A.BoolOp):
+        # Short-circuit: evaluate `left`; if and/or's shortcut condition is
+        # met, that's the result (whichever value it already is, matching
+        # Python's "and"/"or" returning an operand, not a forced bool);
+        # otherwise evaluate and use `right`. Both arms are stored through a
+        # shared slot (the existing memory-SSA pattern) rather than a phi,
+        # since they may produce values of different IRTypes (int vs float)
+        # only in already-ruled-out-by-sema mixed cases -- in practice both
+        # arms share expr_type's promoted type, used here for the slot.
+        res_ty = ir_type_for(A.expr_type(e))
+        tmp_name = f"__boolop_{id(e)}"
+        ptr = ctx.ensure_slot(tmp_name, res_ty)
+        left_v = _lower_expr(ctx, e.left)
+        ctx.emit(IRInstr("store", None, [left_v, ptr]))
+        cond = _value_truthy(ctx, left_v)
+
+        rhs_b = ctx.new_block("boolrhs")
+        merge_b = ctx.new_block("boolend")
+        if e.op == "and":
+            # truthy(left) -> left doesn't short-circuit, evaluate right.
+            ctx.emit(IRInstr("br.t", None, [cond, rhs_b.label, merge_b.label]))
+        elif e.op == "or":
+            # truthy(left) -> short-circuits on left, skip right entirely.
+            ctx.emit(IRInstr("br.t", None, [cond, merge_b.label, rhs_b.label]))
+        else:
+            raise LowerError(f"unsupported boolop {e.op!r}")
+
+        ctx.switch_to(rhs_b)
+        right_v = _lower_expr(ctx, e.right)
+        ctx.emit(IRInstr("store", None, [right_v, ptr]))
+        ctx.emit(IRInstr("br", None, [merge_b.label]))
+
+        ctx.switch_to(merge_b)
+        v = ctx.tmp(res_ty)
+        ctx.emit(IRInstr("load", v, [ptr]))
+        return v
+
+    if isinstance(e, A.IfExp):
+        res_ty = ir_type_for(A.expr_type(e))
+        tmp_name = f"__ifexp_{id(e)}"
+        ptr = ctx.ensure_slot(tmp_name, res_ty)
+
+        then_b = ctx.new_block("ifexpthen")
+        else_b = ctx.new_block("ifexpelse")
+        merge_b = ctx.new_block("ifexpend")
+        cond = _lower_truthy(ctx, e.test)
+        ctx.emit(IRInstr("br.t", None, [cond, then_b.label, else_b.label]))
+
+        ctx.switch_to(then_b)
+        body_v = _lower_expr(ctx, e.body)
+        ctx.emit(IRInstr("store", None, [body_v, ptr]))
+        ctx.emit(IRInstr("br", None, [merge_b.label]))
+
+        ctx.switch_to(else_b)
+        orelse_v = _lower_expr(ctx, e.orelse)
+        ctx.emit(IRInstr("store", None, [orelse_v, ptr]))
+        ctx.emit(IRInstr("br", None, [merge_b.label]))
+
+        ctx.switch_to(merge_b)
+        v = ctx.tmp(res_ty)
+        ctx.emit(IRInstr("load", v, [ptr]))
+        return v
+
     if isinstance(e, A.BinOp):
+        lt, rt = A.expr_type(e.left), A.expr_type(e.right)
+        if lt == "float" or rt == "float":
+            if e.op not in _FBINOP:
+                raise LowerError(f"unsupported float binop {e.op!r}")
+            a = _lower_expr(ctx, e.left)
+            b = _lower_expr(ctx, e.right)
+            v = ctx.tmp(F64)
+            ctx.emit(IRInstr(_FBINOP[e.op], v, [a, b]))
+            return v
         if e.op not in _BINOP:
             raise LowerError(f"unsupported binop {e.op!r}")
         a = _lower_expr(ctx, e.left)
@@ -151,17 +301,27 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         return v
 
     if isinstance(e, A.Compare):
-        # Chained comparison a < b < c -> (a < b) and (b < c); short-circuits
-        # by only evaluating the next term once the previous one is true.
+        # Chained comparison a < b < c -> (a < b) and (b < c). Each pair
+        # picks int or float compare independently based on that pair's own
+        # operand types (e.g. `1 < x < 2.0` compares the first pair as int,
+        # the second as float).
         result: IRValue | None = None
         operands = [_lower_expr(ctx, e.operands[0])]
+        operand_types = [A.expr_type(e.operands[0])]
         for i, op in enumerate(e.ops):
-            if op not in _CMPOP:
-                raise LowerError(f"unsupported compare op {op!r}")
+            rhs_ty = A.expr_type(e.operands[i + 1])
             rhs = _lower_expr(ctx, e.operands[i + 1])
             operands.append(rhs)
+            operand_types.append(rhs_ty)
             step = ctx.tmp(I64)
-            ctx.emit(IRInstr(_CMPOP[op], step, [operands[i], rhs]))
+            if operand_types[i] == "float" or rhs_ty == "float":
+                if op not in _FCMPOP:
+                    raise LowerError(f"unsupported float compare op {op!r}")
+                ctx.emit(IRInstr(_FCMPOP[op], step, [operands[i], rhs]))
+            else:
+                if op not in _CMPOP:
+                    raise LowerError(f"unsupported compare op {op!r}")
+                ctx.emit(IRInstr(_CMPOP[op], step, [operands[i], rhs]))
             if result is None:
                 result = step
             else:
@@ -258,6 +418,35 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         ctx.emit(IRInstr("store", None, [val, ptr]))
         return
 
+    if isinstance(s, A.AugAssign):
+        # `target op= value` -> `target = target op value`, same int/float
+        # binop dispatch as a plain BinOp (the target's current static type
+        # comes from its existing slot, defaulting to int for a first write
+        # -- ensure_slot below mirrors A.Assign's own untyped-slot default).
+        cur_ty = ctx.slot_ty.get(s.target, I64)
+        ptr = ctx.ensure_slot(s.target, cur_ty)
+        cur = ctx.tmp(cur_ty)
+        ctx.emit(IRInstr("load", cur, [ptr]))
+        rhs_ty = A.expr_type(s.value)
+        rhs = _lower_expr(ctx, s.value)
+        if cur_ty is F64 or rhs_ty == "float":
+            if s.op not in _FBINOP:
+                raise LowerError(f"unsupported float augassign op {s.op!r}")
+            res = ctx.tmp(F64)
+            ctx.emit(IRInstr(_FBINOP[s.op], res, [cur, rhs]))
+            if cur_ty is not F64:
+                # First write was int but this op promotes to float -- widen
+                # the slot itself going forward isn't supported (slots are
+                # fixed-type); reject rather than silently truncate back.
+                raise LowerError("augassign int->float promotion needs a float-declared target")
+        else:
+            if s.op not in _BINOP:
+                raise LowerError(f"unsupported augassign op {s.op!r}")
+            res = ctx.tmp(I64)
+            ctx.emit(IRInstr(_BINOP[s.op], res, [cur, rhs]))
+        ctx.emit(IRInstr("store", None, [res, ptr]))
+        return
+
     if isinstance(s, A.AttrAssign):
         # obj.name = value -> _abi_dict_set(obj, name, value); see the
         # A.Attr read path's comment for why this goes through a shim.
@@ -284,7 +473,7 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         return
 
     if isinstance(s, A.If):
-        cond = _lower_expr(ctx, s.test)
+        cond = _lower_truthy(ctx, s.test)
         then_b = ctx.new_block("then")
         else_b = ctx.new_block("else")
         merge_b = ctx.new_block("endif")
@@ -310,17 +499,122 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
 
         ctx.emit(IRInstr("br", None, [head_b.label]))
         ctx.switch_to(head_b)
-        cond = _lower_expr(ctx, s.test)
+        cond = _lower_truthy(ctx, s.test)
         ctx.emit(IRInstr("br.t", None, [cond, body_b.label, end_b.label]))
 
         ctx.switch_to(body_b)
+        ctx.loop_stack.append((head_b.label, end_b.label))
         for st in s.body:
             _lower_stmt(ctx, st)
+        ctx.loop_stack.pop()
         ctx.emit(IRInstr("br", None, [head_b.label]))
 
         ctx.switch_to(end_b)
         for st in s.orelse:
             _lower_stmt(ctx, st)
+        return
+
+    if isinstance(s, A.For):
+        if s.iter is not None:
+            raise LowerError("unsupported stmt For (only range() iteration so far)")
+        if s.targets:
+            raise LowerError("unsupported stmt For (tuple-unpack targets)")
+        args = s.range_args
+        if len(args) == 1:
+            start_e, stop_e, step_e = A.IntLit(0), args[0], A.IntLit(1)
+        elif len(args) == 2:
+            start_e, stop_e, step_e = args[0], args[1], A.IntLit(1)
+        else:
+            start_e, stop_e, step_e = args[0], args[1], args[2]
+
+        var_ptr = ctx.ensure_slot(s.var, I64)
+        ctx.emit(IRInstr("store", None, [_lower_expr(ctx, start_e), var_ptr]))
+        stop_name = f"__for_stop_{id(s)}"
+        step_name = f"__for_step_{id(s)}"
+        stop_ptr = ctx.ensure_slot(stop_name, I64)
+        ctx.emit(IRInstr("store", None, [_lower_expr(ctx, stop_e), stop_ptr]))
+        step_ptr = ctx.ensure_slot(step_name, I64)
+        ctx.emit(IRInstr("store", None, [_lower_expr(ctx, step_e), step_ptr]))
+
+        head_b = ctx.new_block("forhead")
+        pos_b = ctx.new_block("forstepposcheck")
+        neg_b = ctx.new_block("forstepnegcheck")
+        body_b = ctx.new_block("forbody")
+        cont_b = ctx.new_block("forcont")
+        end_b = ctx.new_block("forend")
+
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+        ctx.switch_to(head_b)
+        # Sign of step decided at runtime (it need not be a constant): a
+        # positive step continues while var < stop; non-positive continues
+        # while var > stop. Mirrors codegen.py's legacy _gen_for exactly.
+        step_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", step_v, [step_ptr]))
+        zero = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero, [0]))
+        is_pos = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.gt", is_pos, [step_v, zero]))
+        ctx.emit(IRInstr("br.t", None, [is_pos, pos_b.label, neg_b.label]))
+
+        var_v = ctx.tmp(I64)
+        stop_v = ctx.tmp(I64)
+        ctx.switch_to(pos_b)
+        ctx.emit(IRInstr("load", var_v, [var_ptr]))
+        ctx.emit(IRInstr("load", stop_v, [stop_ptr]))
+        cond_pos = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", cond_pos, [var_v, stop_v]))
+        ctx.emit(IRInstr("br.t", None, [cond_pos, body_b.label, end_b.label]))
+
+        var_v2 = ctx.tmp(I64)
+        stop_v2 = ctx.tmp(I64)
+        ctx.switch_to(neg_b)
+        ctx.emit(IRInstr("load", var_v2, [var_ptr]))
+        ctx.emit(IRInstr("load", stop_v2, [stop_ptr]))
+        cond_neg = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.gt", cond_neg, [var_v2, stop_v2]))
+        ctx.emit(IRInstr("br.t", None, [cond_neg, body_b.label, end_b.label]))
+
+        ctx.switch_to(body_b)
+        ctx.loop_stack.append((cont_b.label, end_b.label))
+        for st in s.body:
+            _lower_stmt(ctx, st)
+        ctx.loop_stack.pop()
+        ctx.emit(IRInstr("br", None, [cont_b.label]))
+
+        ctx.switch_to(cont_b)
+        cur_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", cur_v, [var_ptr]))
+        step_v2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", step_v2, [step_ptr]))
+        next_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", next_v, [cur_v, step_v2]))
+        ctx.emit(IRInstr("store", None, [next_v, var_ptr]))
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+
+        ctx.switch_to(end_b)
+        for st in s.orelse:
+            _lower_stmt(ctx, st)
+        return
+
+    if isinstance(s, A.Break):
+        if not ctx.loop_stack:
+            raise LowerError("'break' outside loop")
+        _, break_label = ctx.loop_stack[-1]
+        ctx.emit(IRInstr("br", None, [break_label]))
+        return
+
+    if isinstance(s, A.Continue):
+        if not ctx.loop_stack:
+            raise LowerError("'continue' not properly in loop")
+        cont_label, _ = ctx.loop_stack[-1]
+        ctx.emit(IRInstr("br", None, [cont_label]))
+        return
+
+    if isinstance(s, (A.Import, A.FromImport)):
+        # Bindings are already resolved by sema (module-level FFI/class/
+        # function tables); nothing to do at the IR level -- there's no
+        # notion of a "module object" in this pipeline yet, just direct
+        # calls to whatever the imported name resolved to.
         return
 
     raise LowerError(f"unsupported stmt {type(s).__name__}")
