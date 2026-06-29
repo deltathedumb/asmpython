@@ -426,10 +426,39 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", None, ["_abi_list_append", list_v, val]))
         return list_v
 
+    if isinstance(e, A.DictLit):
+        dict_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", dict_v, ["_abi_new_instance"]))
+        for k, v in zip(e.keys, e.values):
+            if k is None:
+                raise LowerError("unsupported expr DictLit (** spread)")
+            if not isinstance(k, A.StrLit):
+                raise LowerError("unsupported expr DictLit (non-literal key)")
+            if A.expr_type(v) == "float":
+                raise LowerError("unsupported expr DictLit (float value)")
+            key_name = ctx.mctx.intern_str(k.value)
+            key_ptr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", key_ptr, [key_name]))
+            val = _lower_expr(ctx, v)
+            ctx.emit(IRInstr("call", None, ["_abi_dict_set", dict_v, key_ptr, val]))
+        return dict_v
+
     if isinstance(e, A.Subscript):
         if isinstance(e.index, A.Slice):
             raise LowerError("unsupported expr Subscript (slice)")
         obj_ty = A.expr_type(e.obj)
+        if obj_ty == "dict":
+            if A.expr_type(e.index) != "str":
+                raise LowerError("unsupported expr Subscript (non-str dict key)")
+            if A.expr_type(e) == "float":
+                raise LowerError("unsupported expr Subscript (float dict value)")
+            obj_v = _lower_expr(ctx, e.obj)
+            key_v = _lower_expr(ctx, e.index)
+            zero = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", zero, [0]))
+            v = ctx.tmp(I64)
+            ctx.emit(IRInstr("call", v, ["_abi_dict_get_default", obj_v, key_v, zero]))
+            return v
         if obj_ty != "list":
             raise LowerError(f"unsupported expr Subscript ({obj_ty})")
         if A.expr_type(e) == "float":
@@ -536,6 +565,16 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         if isinstance(target.index, A.Slice):
             raise LowerError("unsupported stmt IndexAssign (slice)")
         obj_ty = A.expr_type(target.obj)
+        if obj_ty == "dict":
+            if A.expr_type(target.index) != "str":
+                raise LowerError("unsupported stmt IndexAssign (non-str dict key)")
+            if A.expr_type(s.value) == "float":
+                raise LowerError("unsupported stmt IndexAssign (float dict value)")
+            obj_v = _lower_expr(ctx, target.obj)
+            key_v = _lower_expr(ctx, target.index)
+            val = _lower_expr(ctx, s.value)
+            ctx.emit(IRInstr("call", None, ["_abi_dict_set", obj_v, key_v, val]))
+            return
         if obj_ty != "list":
             raise LowerError(f"unsupported stmt IndexAssign ({obj_ty})")
         if A.expr_type(s.value) == "float":
