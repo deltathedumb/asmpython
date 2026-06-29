@@ -88,6 +88,21 @@ class _FuncCtx:
         # case of a directly-assigned list literal. Defaults to "int".
         self.slot_el_ty: dict[str, str] = {}
         self.loop_stack: list[tuple[str, str]] = []  # (continue_label, break_label)
+        # One shared, function-entry-defined zero, reused everywhere a
+        # discardable "return value" is needed (print()/list.append() etc.
+        # are all expression-shaped but really void) -- set once by
+        # lower_func right after the entry block exists. Sharing this one
+        # value instead of minting+emitting a fresh never-read `const 0`
+        # at every such call site matters: a value nothing ever reads is a
+        # safe eviction candidate, but the backend has no way to write an
+        # evicted *destination* register's value to memory (only spilled
+        # *reads* are supported) -- so emitting dozens of these per
+        # function used to make `_dst_gp` assert on whichever one got
+        # evicted, even though none of them needed to exist as separate
+        # values in the first place. Safe to read from any block: the
+        # entry block unconditionally executes before everything else in
+        # this architecture (no other function entry point).
+        self.shared_zero: IRValue | None = None
         self._tmp = 0
         self._blk = 0
 
@@ -409,9 +424,7 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             fmt_ptr = ctx.tmp(PTR)
             ctx.emit(IRInstr("global_addr", fmt_ptr, [fmt_name]))
             ctx.emit(IRInstr("call", None, ["printf", fmt_ptr, val]))
-        v = ctx.tmp(I64)
-        ctx.emit(IRInstr("const", v, [0]))
-        return v
+        return ctx.shared_zero
 
     if isinstance(e, A.ListLit):
         n = len(e.elems)
@@ -479,9 +492,7 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 obj_v = _lower_expr(ctx, e.obj)
                 val = _lower_expr(ctx, e.args[0])
                 ctx.emit(IRInstr("call", None, ["_abi_list_append", obj_v, val]))
-                v = ctx.tmp(I64)
-                ctx.emit(IRInstr("const", v, [0]))  # list.append() returns None
-                return v
+                return ctx.shared_zero  # list.append() returns None
             if e.method == "pop" and not e.args:
                 if A.expr_type(e) == "float":
                     raise LowerError("unsupported expr MethodCall (list.pop float element)")
@@ -507,6 +518,61 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("call", v, ["_abi_dict_get_default", obj_v, key_v, default_v]))
                 return v
             raise LowerError(f"unsupported expr MethodCall (dict.{e.method})")
+        if obj_ty == "str":
+            obj_v = _lower_expr(ctx, e.obj)
+            no_arg_str_methods = {
+                "upper": "_abi_str_upper", "lower": "_abi_str_lower",
+                "strip": "_abi_str_strip",
+            }
+            no_arg_int_methods = {"isdigit": "_abi_str_isdigit"}
+            one_arg_int_methods = {
+                "find": "_abi_str_index_of", "count": "_abi_str_count",
+                "startswith": "_abi_str_starts_with", "endswith": "_abi_str_ends_with",
+            }
+            one_arg_str_methods = {"zfill": "_abi_str_zfill", "split": "_abi_str_split"}
+            if e.method in no_arg_str_methods and not e.args:
+                v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", v, [no_arg_str_methods[e.method], obj_v]))
+                return v
+            if e.method in no_arg_int_methods and not e.args:
+                v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", v, [no_arg_int_methods[e.method], obj_v]))
+                return v
+            if e.method in one_arg_int_methods and len(e.args) == 1:
+                if A.expr_type(e.args[0]) != "str":
+                    raise LowerError(f"unsupported expr MethodCall (str.{e.method} non-str arg)")
+                arg_v = _lower_expr(ctx, e.args[0])
+                v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", v, [one_arg_int_methods[e.method], obj_v, arg_v]))
+                return v
+            if e.method == "zfill" and len(e.args) == 1:
+                arg_v = _lower_expr(ctx, e.args[0])
+                v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", v, ["_abi_str_zfill", obj_v, arg_v]))
+                return v
+            if e.method == "split" and len(e.args) == 1:
+                if A.expr_type(e.args[0]) != "str":
+                    raise LowerError("unsupported expr MethodCall (str.split non-str sep)")
+                arg_v = _lower_expr(ctx, e.args[0])
+                v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", v, ["_abi_str_split", obj_v, arg_v]))
+                return v
+            if e.method == "join" and len(e.args) == 1:
+                if A.expr_type(e.args[0]) != "list":
+                    raise LowerError("unsupported expr MethodCall (str.join non-list arg)")
+                arg_v = _lower_expr(ctx, e.args[0])
+                v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", v, ["_abi_str_join", obj_v, arg_v]))
+                return v
+            if e.method == "replace" and len(e.args) == 2:
+                if A.expr_type(e.args[0]) != "str" or A.expr_type(e.args[1]) != "str":
+                    raise LowerError("unsupported expr MethodCall (str.replace non-str arg)")
+                old_v = _lower_expr(ctx, e.args[0])
+                new_v = _lower_expr(ctx, e.args[1])
+                v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", v, ["_abi_str_replace", obj_v, old_v, new_v]))
+                return v
+            raise LowerError(f"unsupported expr MethodCall (str.{e.method})")
         raise LowerError(f"unsupported expr MethodCall ({obj_ty}.{e.method})")
 
     if isinstance(e, A.Attr):
@@ -877,6 +943,8 @@ def lower_func(f: A.FuncDef, mctx: _ModuleCtx, *, visibility: str | None = None)
     ctx = _FuncCtx(mctx)
     entry = ctx.new_block("entry")
     ctx.switch_to(entry)
+    ctx.shared_zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", ctx.shared_zero, [0]))
 
     params: list[IRValue] = []
     for i, pname in enumerate(f.params):

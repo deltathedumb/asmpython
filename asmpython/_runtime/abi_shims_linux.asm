@@ -22,6 +22,18 @@ extern _runtime_str_concat
 extern _runtime_zalloc
 extern _runtime_list_append
 extern _runtime_list_pop
+extern _runtime_str_upper
+extern _runtime_str_lower
+extern _runtime_str_strip
+extern _runtime_str_isdigit
+extern _runtime_str_index_of
+extern _runtime_str_replace
+extern _runtime_str_split
+extern _runtime_str_join
+extern _runtime_str_zfill
+extern _runtime_str_starts_with
+extern _runtime_str_ends_with
+extern _runtime_str_count
 extern malloc
 extern printf
 extern sprintf
@@ -35,6 +47,18 @@ global _abi_new_instance
 global _abi_new_list
 global _abi_list_append
 global _abi_list_pop
+global _abi_str_upper
+global _abi_str_lower
+global _abi_str_strip
+global _abi_str_isdigit
+global _abi_str_index_of
+global _abi_str_replace
+global _abi_str_split
+global _abi_str_join
+global _abi_str_zfill
+global _abi_str_starts_with
+global _abi_str_ends_with
+global _abi_str_count
 
 ; asmlib.hardware's _hw_* symbols, hosted-target bodies -- see
 ; abi_shims.asm's matching comment block; identical behavior, SysV args.
@@ -168,6 +192,90 @@ _abi_list_append:
 _abi_list_pop:
     mov rax, rdi
     call _runtime_list_pop
+    ret
+
+; ---- str methods -- see abi_shims.asm's matching block for the full
+; rationale; SysV args (rdi/rsi/rdx) instead of Win64's (rcx/rdx/r8).
+_abi_str_upper:
+    mov rax, rdi
+    call _runtime_str_upper
+    ret
+_abi_str_lower:
+    mov rax, rdi
+    call _runtime_str_lower
+    ret
+_abi_str_strip:
+    mov rax, rdi
+    call _runtime_str_strip
+    ret
+_abi_str_isdigit:
+    mov rax, rdi
+    call _runtime_str_isdigit
+    ret
+_abi_str_index_of:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_str_index_of
+    pop rbx
+    ret
+_abi_str_split:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    mov rcx, 0                    ; maxsplit=0 is _runtime_str_split's own
+                                   ; "unlimited" sentinel -- see abi_shims.asm's
+                                   ; matching comment. Always RCX regardless of
+                                   ; host OS (the helper's own ad-hoc convention).
+    call _runtime_str_split
+    pop rbx
+    ret
+_abi_str_join:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_str_join
+    pop rbx
+    ret
+_abi_str_zfill:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_str_zfill
+    pop rbx
+    ret
+_abi_str_starts_with:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_str_starts_with
+    pop rbx
+    ret
+_abi_str_ends_with:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_str_ends_with
+    pop rbx
+    ret
+_abi_str_count:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_str_count
+    pop rbx
+    ret
+
+; rax = str_replace(self=rdi, old=rsi, new=rdx) -> result. The 3rd arg
+; must land in RCX -- _runtime_str_replace's own ad-hoc rax/rbx/rcx
+; convention, independent of the host OS's ABI argument registers.
+_abi_str_replace:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    mov rcx, rdx
+    call _runtime_str_replace
+    pop rbx
     ret
 
 ; ---- asmlib.hardware: ring-0-only ops, stubbed (unavailable to ring-3
