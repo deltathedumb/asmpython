@@ -31,6 +31,22 @@ extern _runtime_str_zfill
 extern _runtime_str_starts_with
 extern _runtime_str_ends_with
 extern _runtime_str_count
+extern _runtime_str_capitalize
+extern _runtime_str_isalpha
+extern _runtime_str_isalnum
+extern _runtime_str_islower
+extern _runtime_str_isupper
+extern _runtime_str_isspace
+extern _runtime_str_lstrip
+extern _runtime_str_rstrip
+extern _runtime_str_swapcase
+extern _runtime_str_title
+extern _runtime_str_splitlines
+extern _runtime_str_split_ws
+extern _runtime_str_removeprefix
+extern _runtime_str_removesuffix
+extern _runtime_list_reverse
+extern _runtime_list_extend
 extern malloc
 extern printf
 extern sprintf
@@ -56,6 +72,22 @@ global _abi_str_zfill
 global _abi_str_starts_with
 global _abi_str_ends_with
 global _abi_str_count
+global _abi_str_capitalize
+global _abi_str_isalpha
+global _abi_str_isalnum
+global _abi_str_islower
+global _abi_str_isupper
+global _abi_str_isspace
+global _abi_str_lstrip
+global _abi_str_rstrip
+global _abi_str_swapcase
+global _abi_str_title
+global _abi_str_splitlines
+global _abi_str_split_ws
+global _abi_str_removeprefix
+global _abi_str_removesuffix
+global _abi_list_reverse
+global _abi_list_extend
 
 ; asmpython/stdlib/hardware.py's _hw_* symbols, hosted-target bodies. These
 ; already use the standard Win64 ABI (see codegen.py's target_windows.py /
@@ -290,6 +322,87 @@ _abi_str_replace:
     mov rbx, rdx
     mov rcx, r8
     call _runtime_str_replace
+    pop rbx
+    ret
+
+; ---- more str methods: one-arg (self only), rax=self -> rax=result.
+_abi_str_capitalize:
+    mov rax, rcx
+    call _runtime_str_capitalize
+    ret
+_abi_str_isalpha:
+    mov rax, rcx
+    call _runtime_str_isalpha
+    ret
+_abi_str_isalnum:
+    mov rax, rcx
+    call _runtime_str_isalnum
+    ret
+_abi_str_islower:
+    mov rax, rcx
+    call _runtime_str_islower
+    ret
+_abi_str_isupper:
+    mov rax, rcx
+    call _runtime_str_isupper
+    ret
+_abi_str_isspace:
+    mov rax, rcx
+    call _runtime_str_isspace
+    ret
+_abi_str_lstrip:
+    mov rax, rcx
+    call _runtime_str_lstrip
+    ret
+_abi_str_rstrip:
+    mov rax, rcx
+    call _runtime_str_rstrip
+    ret
+_abi_str_swapcase:
+    mov rax, rcx
+    call _runtime_str_swapcase
+    ret
+_abi_str_title:
+    mov rax, rcx
+    call _runtime_str_title
+    ret
+_abi_str_splitlines:
+    mov rax, rcx
+    call _runtime_str_splitlines
+    ret
+_abi_str_split_ws:
+    mov rax, rcx
+    call _runtime_str_split_ws
+    ret
+
+; ---- more str methods: two-arg (self, arg2), rax=self/rbx=arg2 -> rax=result.
+_abi_str_removeprefix:
+    push rbx
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_str_removeprefix
+    pop rbx
+    ret
+_abi_str_removesuffix:
+    push rbx
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_str_removesuffix
+    pop rbx
+    ret
+
+; ---- list methods.
+; rax = list_reverse(list=rcx) -- in place, also returns the list ptr.
+_abi_list_reverse:
+    mov rax, rcx
+    call _runtime_list_reverse
+    ret
+; list_extend(list=rcx, other=rdx) -> void
+_abi_list_extend:
+    push rbx
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_list_extend
     pop rbx
     ret
 

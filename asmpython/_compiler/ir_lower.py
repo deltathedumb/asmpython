@@ -536,6 +536,23 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 v = ctx.tmp(ir_type_for(A.expr_type(e)))
                 ctx.emit(IRInstr("call", v, ["_abi_list_pop", obj_v]))
                 return v
+            if e.method == "reverse" and not e.args:
+                obj_v = _lower_expr(ctx, e.obj)
+                ctx.emit(IRInstr("call", None, ["_abi_list_reverse", obj_v]))
+                return ctx.shared_zero
+            if e.method == "extend" and len(e.args) == 1 and A.expr_type(e.args[0]) == "list":
+                obj_v = _lower_expr(ctx, e.obj)
+                other_v = _lower_expr(ctx, e.args[0])
+                ctx.emit(IRInstr("call", None, ["_abi_list_extend", obj_v, other_v]))
+                return ctx.shared_zero
+            if e.method == "clear" and not e.args:
+                obj_v = _lower_expr(ctx, e.obj)
+                len_addr = ctx.tmp(PTR)
+                ctx.emit(IRInstr("gep", len_addr, [obj_v, _LIST_LEN_OFF]))
+                zero = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", zero, [0]))
+                ctx.emit(IRInstr("store", None, [zero, len_addr]))
+                return ctx.shared_zero
             raise LowerError(f"unsupported expr MethodCall (list.{e.method})")
         if obj_ty == "dict":
             if e.method == "get" and len(e.args) in (1, 2):
@@ -558,14 +575,24 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             obj_v = _lower_expr(ctx, e.obj)
             no_arg_str_methods = {
                 "upper": "_abi_str_upper", "lower": "_abi_str_lower",
-                "strip": "_abi_str_strip",
+                "strip": "_abi_str_strip", "capitalize": "_abi_str_capitalize",
+                "lstrip": "_abi_str_lstrip", "rstrip": "_abi_str_rstrip",
+                "swapcase": "_abi_str_swapcase", "title": "_abi_str_title",
+                "splitlines": "_abi_str_splitlines",
             }
-            no_arg_int_methods = {"isdigit": "_abi_str_isdigit"}
+            no_arg_int_methods = {
+                "isdigit": "_abi_str_isdigit", "isalpha": "_abi_str_isalpha",
+                "isalnum": "_abi_str_isalnum", "islower": "_abi_str_islower",
+                "isupper": "_abi_str_isupper", "isspace": "_abi_str_isspace",
+            }
             one_arg_int_methods = {
                 "find": "_abi_str_index_of", "count": "_abi_str_count",
                 "startswith": "_abi_str_starts_with", "endswith": "_abi_str_ends_with",
             }
-            one_arg_str_methods = {"zfill": "_abi_str_zfill", "split": "_abi_str_split"}
+            one_arg_str_methods = {
+                "zfill": "_abi_str_zfill", "removeprefix": "_abi_str_removeprefix",
+                "removesuffix": "_abi_str_removesuffix",
+            }
             if e.method in no_arg_str_methods and not e.args:
                 v = ctx.tmp(PTR)
                 ctx.emit(IRInstr("call", v, [no_arg_str_methods[e.method], obj_v]))
@@ -581,10 +608,14 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 v = ctx.tmp(I64)
                 ctx.emit(IRInstr("call", v, [one_arg_int_methods[e.method], obj_v, arg_v]))
                 return v
-            if e.method == "zfill" and len(e.args) == 1:
+            if e.method in one_arg_str_methods and len(e.args) == 1:
                 arg_v = _lower_expr(ctx, e.args[0])
                 v = ctx.tmp(PTR)
-                ctx.emit(IRInstr("call", v, ["_abi_str_zfill", obj_v, arg_v]))
+                ctx.emit(IRInstr("call", v, [one_arg_str_methods[e.method], obj_v, arg_v]))
+                return v
+            if e.method == "split" and not e.args:
+                v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", v, ["_abi_str_split_ws", obj_v]))
                 return v
             if e.method == "split" and len(e.args) == 1:
                 if A.expr_type(e.args[0]) != "str":

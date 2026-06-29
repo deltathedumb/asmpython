@@ -34,6 +34,22 @@ extern _runtime_str_zfill
 extern _runtime_str_starts_with
 extern _runtime_str_ends_with
 extern _runtime_str_count
+extern _runtime_str_capitalize
+extern _runtime_str_isalpha
+extern _runtime_str_isalnum
+extern _runtime_str_islower
+extern _runtime_str_isupper
+extern _runtime_str_isspace
+extern _runtime_str_lstrip
+extern _runtime_str_rstrip
+extern _runtime_str_swapcase
+extern _runtime_str_title
+extern _runtime_str_splitlines
+extern _runtime_str_split_ws
+extern _runtime_str_removeprefix
+extern _runtime_str_removesuffix
+extern _runtime_list_reverse
+extern _runtime_list_extend
 extern malloc
 extern printf
 extern sprintf
@@ -59,6 +75,22 @@ global _abi_str_zfill
 global _abi_str_starts_with
 global _abi_str_ends_with
 global _abi_str_count
+global _abi_str_capitalize
+global _abi_str_isalpha
+global _abi_str_isalnum
+global _abi_str_islower
+global _abi_str_isupper
+global _abi_str_isspace
+global _abi_str_lstrip
+global _abi_str_rstrip
+global _abi_str_swapcase
+global _abi_str_title
+global _abi_str_splitlines
+global _abi_str_split_ws
+global _abi_str_removeprefix
+global _abi_str_removesuffix
+global _abi_list_reverse
+global _abi_list_extend
 
 ; asmlib.hardware's _hw_* symbols, hosted-target bodies -- see
 ; abi_shims.asm's matching comment block; identical behavior, SysV args.
@@ -275,6 +307,85 @@ _abi_str_replace:
     mov rbx, rsi
     mov rcx, rdx
     call _runtime_str_replace
+    pop rbx
+    ret
+
+; ---- more str methods: one-arg (self only), rax=self -> rax=result.
+_abi_str_capitalize:
+    mov rax, rdi
+    call _runtime_str_capitalize
+    ret
+_abi_str_isalpha:
+    mov rax, rdi
+    call _runtime_str_isalpha
+    ret
+_abi_str_isalnum:
+    mov rax, rdi
+    call _runtime_str_isalnum
+    ret
+_abi_str_islower:
+    mov rax, rdi
+    call _runtime_str_islower
+    ret
+_abi_str_isupper:
+    mov rax, rdi
+    call _runtime_str_isupper
+    ret
+_abi_str_isspace:
+    mov rax, rdi
+    call _runtime_str_isspace
+    ret
+_abi_str_lstrip:
+    mov rax, rdi
+    call _runtime_str_lstrip
+    ret
+_abi_str_rstrip:
+    mov rax, rdi
+    call _runtime_str_rstrip
+    ret
+_abi_str_swapcase:
+    mov rax, rdi
+    call _runtime_str_swapcase
+    ret
+_abi_str_title:
+    mov rax, rdi
+    call _runtime_str_title
+    ret
+_abi_str_splitlines:
+    mov rax, rdi
+    call _runtime_str_splitlines
+    ret
+_abi_str_split_ws:
+    mov rax, rdi
+    call _runtime_str_split_ws
+    ret
+
+; ---- more str methods: two-arg (self, arg2), rax=self/rbx=arg2 -> rax=result.
+_abi_str_removeprefix:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_str_removeprefix
+    pop rbx
+    ret
+_abi_str_removesuffix:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_str_removesuffix
+    pop rbx
+    ret
+
+; ---- list methods.
+_abi_list_reverse:
+    mov rax, rdi
+    call _runtime_list_reverse
+    ret
+_abi_list_extend:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_list_extend
     pop rbx
     ret
 
