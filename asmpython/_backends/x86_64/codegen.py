@@ -92,8 +92,18 @@ def _hi(r: "Reg | XmmReg") -> int:
 
 
 def _gp_to_xmm(dst: XmmReg, src: Reg) -> bytes:
-    """MOVQ xmm, r64 — move 64-bit GP value into XMM (bit-for-bit)."""
-    rex = bytes([0x40 | (_hi(dst) << 2) | _hi(src)]) if (_hi(dst) or _hi(src)) else b""
+    """MOVQ xmm, r64 — move 64-bit GP value into XMM (bit-for-bit).
+
+    Needs REX.W set: MOVD (32-bit) and MOVQ (64-bit) share the exact same
+    opcode bytes (66 0F 6E /r) and differ *only* in that bit. Without it,
+    this silently truncated to the low 32 bits -- harmless for f32 values
+    (which fit there already) but for f64 it dropped the entire exponent
+    and most of the mantissa for any value whose low 32 bits happen to be
+    zero (any "round" double like 2.5, 0.5, 4.0, 100.0, ... loads as 0.0),
+    and for fneg's f64 sign-bit mask (1<<63, also zero in its low 32 bits)
+    it made the XOR a no-op -- `-x` on a float silently returned `x`.
+    """
+    rex = bytes([0x48 | (_hi(dst) << 2) | _hi(src)])
     return bytes([0x66]) + rex + bytes([0x0F, 0x6E, 0xC0 | ((int(dst) & 7) << 3) | (int(src) & 7)])
 
 
@@ -396,26 +406,57 @@ class FuncCodegen:
         # phi_elim's parallel-copy handling: only move into a destination
         # once nothing later still needs to read it, breaking cycles with
         # the scratch register.
+        # Win64's variadic ABI (printf/sprintf -- the only variadic externs
+        # this backend calls) shares ONE positional counter across both
+        # register classes (arg i -> rcx/rdx/r8/r9[i] AND xmm0-3[i]), unlike
+        # ordinary Win64 calls which keep separate int/float counters. A
+        # float vararg must additionally be duplicated, bit-for-bit, into
+        # its positional GP register -- the callee can't tell at compile
+        # time which varargs are floats, so MSVC's printf reads the GP slot
+        # for any arg it doesn't already know is a float from the format
+        # string's own position tracking on this ABI. Round-trips through
+        # the (unused-by-the-caller-at-this-point) shadow space below RSP
+        # since there's no GP<->XMM raw-bit-move encoder in this backend.
+        is_win64_vararg = (
+            not is_indirect and self.abi == "win64" and str(target_op) in ("printf", "sprintf")
+        )
+
         gp_pairs: list[tuple[Reg, Reg]] = []
         xmm_pairs: list[tuple[XmmReg, XmmReg]] = []
+        gp_dup_xmm: list[tuple[Reg, XmmReg]] = []
         int_i = xmm_i = 0
-        for av in arg_vals:
+        for arg_i, av in enumerate(arg_vals):
             typ = av.type.name if hasattr(av, "type") else "i64"
             if _is_float(typ):
-                if xmm_i < len(xmm_args):
+                if is_win64_vararg:
+                    if arg_i < len(xmm_args):
+                        dst_x = xmm_args[arg_i]
+                        get = self._xmm_f32 if typ == "f32" else self._xmm
+                        src_x, ld = get(av)
+                        self._emit(ld)
+                        xmm_pairs.append((dst_x, src_x))
+                        if arg_i < len(int_args):
+                            gp_dup_xmm.append((int_args[arg_i], dst_x))
+                elif xmm_i < len(xmm_args):
                     dst_x = xmm_args[xmm_i]; xmm_i += 1
                     get = self._xmm_f32 if typ == "f32" else self._xmm
                     src_x, ld = get(av)
                     self._emit(ld)
                     xmm_pairs.append((dst_x, src_x))
             else:
-                if int_i < len(int_args):
-                    dst_r = int_args[int_i]; int_i += 1
+                idx = arg_i if is_win64_vararg else int_i
+                if not is_win64_vararg:
+                    int_i += 1
+                if idx < len(int_args):
+                    dst_r = int_args[idx]
                     src_r, ld = self._gp(av)
                     self._emit(ld)
                     gp_pairs.append((dst_r, src_r))
         self._sequence_gp_moves(gp_pairs)
         self._sequence_xmm_moves(xmm_pairs)
+        for dst_r, src_x in gp_dup_xmm:
+            self._emit(encode_movsd_mr(Mem(Reg.RSP, 0), src_x))
+            self._emit(encode_mov_rm(dst_r, Mem(Reg.RSP, 0)))
 
         if is_indirect:
             ptr_r, ld = self._gp(target_op)

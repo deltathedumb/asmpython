@@ -398,7 +398,7 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("global_addr", v, [name]))
         return v
 
-    if isinstance(e, A.Call) and e.func == "len" and len(e.args) == 1 and A.expr_type(e.args[0]) == "list":
+    if isinstance(e, A.Call) and e.func == "len" and len(e.args) == 1 and A.expr_type(e.args[0]) in ("list", "tuple"):
         list_v = _lower_expr(ctx, e.args[0])
         len_addr = ctx.tmp(PTR)
         ctx.emit(IRInstr("gep", len_addr, [list_v, _LIST_LEN_OFF]))
@@ -420,7 +420,13 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             arg = e.args[0]
             arg_ty = A.expr_type(arg)
             val = _lower_expr(ctx, arg)
-            fmt_name = ctx.mctx.intern_str("%s\n" if arg_ty == "str" else "%lld\n")
+            if arg_ty == "str":
+                fmt_str = "%s\n"
+            elif arg_ty == "float":
+                fmt_str = "%g\n"
+            else:
+                fmt_str = "%lld\n"
+            fmt_name = ctx.mctx.intern_str(fmt_str)
             fmt_ptr = ctx.tmp(PTR)
             ctx.emit(IRInstr("global_addr", fmt_ptr, [fmt_name]))
             ctx.emit(IRInstr("call", None, ["printf", fmt_ptr, val]))
@@ -438,6 +444,35 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             val = _lower_expr(ctx, el)
             ctx.emit(IRInstr("call", None, ["_abi_list_append", list_v, val]))
         return list_v
+
+    if isinstance(e, A.TupleLit):
+        # Reuses the list layout exactly (per ast_nodes.py's TupleLit
+        # docstring) but elements may be heterogeneous int/float, and the
+        # size is fixed at construction -- so build it via direct buffer
+        # stores at each known compile-time offset rather than
+        # _abi_list_append (which only handles single-typed int/ptr
+        # elements for ListLit).
+        n = len(e.elems)
+        cap_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", cap_v, [max(n, 1)]))
+        tup_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", tup_v, ["_abi_new_list", cap_v]))
+        if n:
+            buf_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", buf_addr, [tup_v, _LIST_BUF_OFF]))
+            buf_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", buf_v, [buf_addr]))
+            for i, el in enumerate(e.elems):
+                val = _lower_expr(ctx, el)
+                slot_addr = ctx.tmp(PTR)
+                ctx.emit(IRInstr("gep", slot_addr, [buf_v, i * 8]))
+                ctx.emit(IRInstr("store", None, [val, slot_addr]))
+        len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", len_addr, [tup_v, _LIST_LEN_OFF]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", len_v, [n]))
+        ctx.emit(IRInstr("store", None, [len_v, len_addr]))
+        return tup_v
 
     if isinstance(e, A.DictLit):
         dict_v = ctx.tmp(PTR)
@@ -472,14 +507,15 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(I64)
             ctx.emit(IRInstr("call", v, ["_abi_dict_get_default", obj_v, key_v, zero]))
             return v
-        if obj_ty != "list":
+        if obj_ty not in ("list", "tuple"):
             raise LowerError(f"unsupported expr Subscript ({obj_ty})")
-        if A.expr_type(e) == "float":
+        result_ty = A.expr_type(e)
+        if obj_ty == "list" and result_ty == "float":
             raise LowerError("unsupported expr Subscript (float element)")
         obj_v = _lower_expr(ctx, e.obj)
         idx_v = _lower_expr(ctx, e.index)
         addr = _list_elem_addr(ctx, obj_v, idx_v)
-        v = ctx.tmp(I64)
+        v = ctx.tmp(F64 if result_ty == "float" else I64)
         ctx.emit(IRInstr("load", v, [addr]))
         return v
 
@@ -690,6 +726,35 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         val = _lower_expr(ctx, s.value)
         ctx.emit(IRInstr("store", None, [val, addr]))
         return
+
+    if isinstance(s, A.TupleAssign):
+        if any(isinstance(t, A.StarTarget) for t in s.targets):
+            raise LowerError("unsupported stmt TupleAssign (starred target)")
+        if not all(isinstance(t, A.Name) for t in s.targets):
+            raise LowerError("unsupported stmt TupleAssign (non-Name target)")
+        names = [t.name for t in s.targets]
+        if len(s.values) == len(names):
+            # Parallel form (a, b = 1, 2 / a, b = b, a): every rhs is
+            # evaluated into a temp *before* any store, so swaps work.
+            vals = [_lower_expr(ctx, v) for v in s.values]
+            for name, val in zip(names, vals):
+                ptr = ctx.ensure_slot(name, val.type)
+                ctx.emit(IRInstr("store", None, [val, ptr]))
+            return
+        if len(s.values) == 1 and A.expr_type(s.values[0]) in ("list", "tuple"):
+            # Single-iterable unpack (a, b = some_tuple_or_list_expr).
+            src_v = _lower_expr(ctx, s.values[0])
+            for i, name in enumerate(names):
+                idx_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", idx_v, [i]))
+                addr = _list_elem_addr(ctx, src_v, idx_v)
+                elem_ty = I64
+                val = ctx.tmp(elem_ty)
+                ctx.emit(IRInstr("load", val, [addr]))
+                ptr = ctx.ensure_slot(name, elem_ty)
+                ctx.emit(IRInstr("store", None, [val, ptr]))
+            return
+        raise LowerError("unsupported stmt TupleAssign (shape)")
 
     if isinstance(s, A.AttrAssign):
         # obj.name = value -> _abi_dict_set(obj, name, value); see the
