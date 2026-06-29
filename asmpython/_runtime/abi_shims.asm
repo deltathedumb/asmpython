@@ -17,6 +17,7 @@ extern _runtime_dict_set
 extern _runtime_dict_contains
 extern _runtime_str_concat
 extern _runtime_zalloc
+extern _runtime_list_append
 extern malloc
 extern printf
 extern sprintf
@@ -27,6 +28,8 @@ global _abi_dict_set
 global _abi_dict_contains
 global _abi_str_concat
 global _abi_new_instance
+global _abi_new_list
+global _abi_list_append
 
 ; asmpython/stdlib/hardware.py's _hw_* symbols, hosted-target bodies. These
 ; already use the standard Win64 ABI (see codegen.py's target_windows.py /
@@ -129,6 +132,43 @@ _abi_new_instance:
     mov [rcx+32], rax            ; DICT_ORDER_OFF
     mov rax, rcx
     add rsp, 48
+    pop rbx
+    ret
+
+; rax = new list with initial capacity cap=rcx (elements; clamped to >=1
+; to avoid zalloc(0)). Mirrors _abi_new_instance's pattern: LIST_HEADER is
+; 24 bytes (cap@0, len@8, buf@16) vs DICT_HEADER's 40, and there's only
+; one zalloc (the element buffer) instead of two.
+_abi_new_list:
+    push rbx
+    sub rsp, 48
+    mov rbx, rcx
+    cmp rbx, 1
+    jge .cap_ok
+    mov rbx, 1
+.cap_ok:
+    mov rcx, 24                  ; LIST_HEADER
+    call malloc
+    mov [rax+0], rbx             ; LIST_CAP_OFF = cap
+    mov qword [rax+8], 0         ; LIST_LEN_OFF
+    mov [rsp+32], rax            ; spill header ptr
+    mov rcx, rbx
+    shl rcx, 3                   ; bytes = cap * 8
+    mov rbx, rcx
+    call _runtime_zalloc
+    mov rcx, [rsp+32]
+    mov [rcx+16], rax            ; LIST_BUF_OFF
+    mov rax, rcx
+    add rsp, 48
+    pop rbx
+    ret
+
+; list_append(list=rcx, value=rdx) -> void
+_abi_list_append:
+    push rbx
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_list_append
     pop rbx
     ret
 

@@ -20,6 +20,7 @@ extern _runtime_dict_set
 extern _runtime_dict_contains
 extern _runtime_str_concat
 extern _runtime_zalloc
+extern _runtime_list_append
 extern malloc
 extern printf
 extern sprintf
@@ -30,6 +31,8 @@ global _abi_dict_set
 global _abi_dict_contains
 global _abi_str_concat
 global _abi_new_instance
+global _abi_new_list
+global _abi_list_append
 
 ; asmlib.hardware's _hw_* symbols, hosted-target bodies -- see
 ; abi_shims.asm's matching comment block; identical behavior, SysV args.
@@ -121,6 +124,41 @@ _abi_new_instance:
     mov [rdi+32], rax            ; DICT_ORDER_OFF
     mov rax, rdi
     add rsp, 48
+    pop rbx
+    ret
+
+; rax = new list with initial capacity cap=rdi (elements; clamped to >=1
+; to avoid zalloc(0)) -- see abi_shims.asm's matching comment.
+_abi_new_list:
+    push rbx
+    sub rsp, 48
+    mov rbx, rdi
+    cmp rbx, 1
+    jge .cap_ok
+    mov rbx, 1
+.cap_ok:
+    mov rdi, 24                  ; LIST_HEADER
+    call malloc
+    mov [rax+0], rbx             ; LIST_CAP_OFF = cap
+    mov qword [rax+8], 0         ; LIST_LEN_OFF
+    mov [rsp+32], rax            ; spill header ptr
+    mov rdi, rbx
+    shl rdi, 3                   ; bytes = cap * 8
+    mov rbx, rdi
+    call _runtime_zalloc
+    mov rdi, [rsp+32]
+    mov [rdi+16], rax            ; LIST_BUF_OFF
+    mov rax, rdi
+    add rsp, 48
+    pop rbx
+    ret
+
+; list_append(list=rdi, value=rsi) -> void
+_abi_list_append:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_list_append
     pop rbx
     ret
 

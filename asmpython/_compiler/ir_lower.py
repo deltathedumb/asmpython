@@ -81,6 +81,12 @@ class _FuncCtx:
         self.terminated = False
         self.slot: dict[str, IRValue] = {}  # var name -> alloca'd ptr
         self.slot_ty: dict[str, IRType] = {}  # var name -> value type in that slot
+        # var name -> asmpython element type ("int"/"str") for a slot known
+        # to hold a list -- there's no general element-type inference here
+        # (unlike sema's own scope.list_el_types), just enough to type a
+        # `for x in <list var>:` loop variable correctly for the common
+        # case of a directly-assigned list literal. Defaults to "int".
+        self.slot_el_ty: dict[str, str] = {}
         self.loop_stack: list[tuple[str, str]] = []  # (continue_label, break_label)
         self._tmp = 0
         self._blk = 0
@@ -139,6 +145,46 @@ _FCMPOP = {
     "<": "fcmp.lt", "<=": "fcmp.le",
     ">": "fcmp.gt", ">=": "fcmp.ge",
 }
+
+
+# LIST_HEADER layout (mirrors codegen.py's Codegen.LIST_*_OFF exactly):
+# cap@0, len@8, buf@16, all 8-byte fields.
+_LIST_LEN_OFF = 8
+_LIST_BUF_OFF = 16
+
+
+def _list_elem_addr(ctx: _FuncCtx, list_v: IRValue, idx_v: IRValue) -> IRValue:
+    """Address of list_v[idx_v], with Python-style negative-index
+    wraparound and no bounds check -- matches codegen.py's own documented
+    silent-corrupt-on-out-of-range behavior for list subscript (raising
+    IndexError needs exception support, not added to this pipeline yet)."""
+    len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_addr, [list_v, _LIST_LEN_OFF]))
+    len_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", len_v, [len_addr]))
+
+    zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero, [0]))
+    is_neg = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", is_neg, [idx_v, zero]))
+    adj = ctx.tmp(I64)
+    ctx.emit(IRInstr("imul", adj, [is_neg, len_v]))  # is_neg is 0/1 -> len_v or 0
+    real_idx = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", real_idx, [idx_v, adj]))
+
+    eight = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", eight, [8]))
+    byte_off = ctx.tmp(I64)
+    ctx.emit(IRInstr("imul", byte_off, [real_idx, eight]))
+
+    buf_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", buf_addr, [list_v, _LIST_BUF_OFF]))
+    buf_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", buf_v, [buf_addr]))
+
+    elem_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", elem_addr, [buf_v, byte_off]))
+    return elem_addr
 
 
 def _value_truthy(ctx: _FuncCtx, v: IRValue) -> IRValue:
@@ -337,6 +383,14 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("global_addr", v, [name]))
         return v
 
+    if isinstance(e, A.Call) and e.func == "len" and len(e.args) == 1 and A.expr_type(e.args[0]) == "list":
+        list_v = _lower_expr(ctx, e.args[0])
+        len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", len_addr, [list_v, _LIST_LEN_OFF]))
+        v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", v, [len_addr]))
+        return v
+
     if isinstance(e, A.Call) and e.func == "print":
         # print(x) -> printf(fmt, x); newline baked into the format string
         # since asmpython's print() always appends one. Only int/str args
@@ -357,6 +411,34 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", None, ["printf", fmt_ptr, val]))
         v = ctx.tmp(I64)
         ctx.emit(IRInstr("const", v, [0]))
+        return v
+
+    if isinstance(e, A.ListLit):
+        n = len(e.elems)
+        cap_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", cap_v, [max(n, 1)]))
+        list_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", list_v, ["_abi_new_list", cap_v]))
+        for el in e.elems:
+            if A.expr_type(el) == "float":
+                raise LowerError("unsupported expr ListLit (float elements)")
+            val = _lower_expr(ctx, el)
+            ctx.emit(IRInstr("call", None, ["_abi_list_append", list_v, val]))
+        return list_v
+
+    if isinstance(e, A.Subscript):
+        if isinstance(e.index, A.Slice):
+            raise LowerError("unsupported expr Subscript (slice)")
+        obj_ty = A.expr_type(e.obj)
+        if obj_ty != "list":
+            raise LowerError(f"unsupported expr Subscript ({obj_ty})")
+        if A.expr_type(e) == "float":
+            raise LowerError("unsupported expr Subscript (float element)")
+        obj_v = _lower_expr(ctx, e.obj)
+        idx_v = _lower_expr(ctx, e.index)
+        addr = _list_elem_addr(ctx, obj_v, idx_v)
+        v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", v, [addr]))
         return v
 
     if isinstance(e, A.Attr):
@@ -416,6 +498,8 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         val = _lower_expr(ctx, s.value)
         ptr = ctx.ensure_slot(s.target, val.type)
         ctx.emit(IRInstr("store", None, [val, ptr]))
+        if isinstance(s.value, A.ListLit):
+            ctx.slot_el_ty[s.target] = s.value.el_type
         return
 
     if isinstance(s, A.AugAssign):
@@ -445,6 +529,22 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             res = ctx.tmp(I64)
             ctx.emit(IRInstr(_BINOP[s.op], res, [cur, rhs]))
         ctx.emit(IRInstr("store", None, [res, ptr]))
+        return
+
+    if isinstance(s, A.IndexAssign):
+        target = s.target
+        if isinstance(target.index, A.Slice):
+            raise LowerError("unsupported stmt IndexAssign (slice)")
+        obj_ty = A.expr_type(target.obj)
+        if obj_ty != "list":
+            raise LowerError(f"unsupported stmt IndexAssign ({obj_ty})")
+        if A.expr_type(s.value) == "float":
+            raise LowerError("unsupported stmt IndexAssign (float element)")
+        obj_v = _lower_expr(ctx, target.obj)
+        idx_v = _lower_expr(ctx, target.index)
+        addr = _list_elem_addr(ctx, obj_v, idx_v)
+        val = _lower_expr(ctx, s.value)
+        ctx.emit(IRInstr("store", None, [val, addr]))
         return
 
     if isinstance(s, A.AttrAssign):
@@ -514,9 +614,84 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             _lower_stmt(ctx, st)
         return
 
+    if isinstance(s, A.For) and s.iter is not None:
+        if s.targets:
+            raise LowerError("unsupported stmt For (tuple-unpack targets)")
+        if A.expr_type(s.iter) != "list":
+            raise LowerError(f"unsupported stmt For (iterating {A.expr_type(s.iter)!r})")
+        if isinstance(s.iter, A.ListLit):
+            el_ty = s.iter.el_type
+        elif isinstance(s.iter, A.Name):
+            el_ty = ctx.slot_el_ty.get(s.iter.name, "int")
+        else:
+            el_ty = "int"
+        if el_ty == "float":
+            raise LowerError("unsupported stmt For (float list elements)")
+        var_ty = ir_type_for(el_ty)
+
+        list_v = _lower_expr(ctx, s.iter)
+        list_ptr = ctx.ensure_slot(f"__for_iter_{id(s)}", PTR)
+        ctx.emit(IRInstr("store", None, [list_v, list_ptr]))
+        idx_ptr = ctx.ensure_slot(f"__for_idx_{id(s)}", I64)
+        zero = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero, [0]))
+        ctx.emit(IRInstr("store", None, [zero, idx_ptr]))
+
+        head_b = ctx.new_block("forlisthead")
+        body_b = ctx.new_block("forlistbody")
+        cont_b = ctx.new_block("forlistcont")
+        end_b = ctx.new_block("forlistend")
+
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+        ctx.switch_to(head_b)
+        idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        cur_list_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", cur_list_v, [list_ptr]))
+        len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", len_addr, [cur_list_v, _LIST_LEN_OFF]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        cond = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", cond, [idx_v, len_v]))
+        ctx.emit(IRInstr("br.t", None, [cond, body_b.label, end_b.label]))
+
+        ctx.switch_to(body_b)
+        # Reload the buffer pointer fresh each iteration (matching
+        # codegen.py's _gen_for_list): an in-body append/extend call may
+        # have reallocated it since the head block's check.
+        body_list_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", body_list_v, [list_ptr]))
+        body_idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", body_idx_v, [idx_ptr]))
+        addr = _list_elem_addr(ctx, body_list_v, body_idx_v)
+        elem_v = ctx.tmp(var_ty)
+        ctx.emit(IRInstr("load", elem_v, [addr]))
+        var_ptr = ctx.ensure_slot(s.var, var_ty)
+        ctx.emit(IRInstr("store", None, [elem_v, var_ptr]))
+
+        ctx.loop_stack.append((cont_b.label, end_b.label))
+        for st in s.body:
+            _lower_stmt(ctx, st)
+        ctx.loop_stack.pop()
+        ctx.emit(IRInstr("br", None, [cont_b.label]))
+
+        ctx.switch_to(cont_b)
+        inc_idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", inc_idx_v, [idx_ptr]))
+        one = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one, [1]))
+        next_idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", next_idx_v, [inc_idx_v, one]))
+        ctx.emit(IRInstr("store", None, [next_idx_v, idx_ptr]))
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+
+        ctx.switch_to(end_b)
+        for st in s.orelse:
+            _lower_stmt(ctx, st)
+        return
+
     if isinstance(s, A.For):
-        if s.iter is not None:
-            raise LowerError("unsupported stmt For (only range() iteration so far)")
         if s.targets:
             raise LowerError("unsupported stmt For (tuple-unpack targets)")
         args = s.range_args
