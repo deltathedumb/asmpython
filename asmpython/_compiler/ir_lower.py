@@ -470,6 +470,45 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("load", v, [addr]))
         return v
 
+    if isinstance(e, A.MethodCall):
+        obj_ty = A.expr_type(e.obj)
+        if obj_ty == "list":
+            if e.method == "append" and len(e.args) == 1:
+                if A.expr_type(e.args[0]) == "float":
+                    raise LowerError("unsupported expr MethodCall (list.append float element)")
+                obj_v = _lower_expr(ctx, e.obj)
+                val = _lower_expr(ctx, e.args[0])
+                ctx.emit(IRInstr("call", None, ["_abi_list_append", obj_v, val]))
+                v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", v, [0]))  # list.append() returns None
+                return v
+            if e.method == "pop" and not e.args:
+                if A.expr_type(e) == "float":
+                    raise LowerError("unsupported expr MethodCall (list.pop float element)")
+                obj_v = _lower_expr(ctx, e.obj)
+                v = ctx.tmp(ir_type_for(A.expr_type(e)))
+                ctx.emit(IRInstr("call", v, ["_abi_list_pop", obj_v]))
+                return v
+            raise LowerError(f"unsupported expr MethodCall (list.{e.method})")
+        if obj_ty == "dict":
+            if e.method == "get" and len(e.args) in (1, 2):
+                if A.expr_type(e.args[0]) != "str":
+                    raise LowerError("unsupported expr MethodCall (dict.get non-str key)")
+                obj_v = _lower_expr(ctx, e.obj)
+                key_v = _lower_expr(ctx, e.args[0])
+                if len(e.args) == 2:
+                    if A.expr_type(e.args[1]) == "float":
+                        raise LowerError("unsupported expr MethodCall (dict.get float default)")
+                    default_v = _lower_expr(ctx, e.args[1])
+                else:
+                    default_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", default_v, [0]))
+                v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", v, ["_abi_dict_get_default", obj_v, key_v, default_v]))
+                return v
+            raise LowerError(f"unsupported expr MethodCall (dict.{e.method})")
+        raise LowerError(f"unsupported expr MethodCall ({obj_ty}.{e.method})")
+
     if isinstance(e, A.Attr):
         # obj.name -> _abi_dict_get_default(obj, name, default=0). Instances
         # are runtime dicts keyed by field name; bridges to the existing,

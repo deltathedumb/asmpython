@@ -21,6 +21,7 @@ extern _runtime_dict_contains
 extern _runtime_str_concat
 extern _runtime_zalloc
 extern _runtime_list_append
+extern _runtime_list_pop
 extern malloc
 extern printf
 extern sprintf
@@ -33,6 +34,7 @@ global _abi_str_concat
 global _abi_new_instance
 global _abi_new_list
 global _abi_list_append
+global _abi_list_pop
 
 ; asmlib.hardware's _hw_* symbols, hosted-target bodies -- see
 ; abi_shims.asm's matching comment block; identical behavior, SysV args.
@@ -160,6 +162,12 @@ _abi_list_append:
     mov rbx, rsi
     call _runtime_list_append
     pop rbx
+    ret
+
+; rax = list_pop(list=rdi) -- see abi_shims.asm's matching comment.
+_abi_list_pop:
+    mov rax, rdi
+    call _runtime_list_pop
     ret
 
 ; ---- asmlib.hardware: ring-0-only ops, stubbed (unavailable to ring-3

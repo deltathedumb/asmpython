@@ -18,6 +18,7 @@ extern _runtime_dict_contains
 extern _runtime_str_concat
 extern _runtime_zalloc
 extern _runtime_list_append
+extern _runtime_list_pop
 extern malloc
 extern printf
 extern sprintf
@@ -30,6 +31,7 @@ global _abi_str_concat
 global _abi_new_instance
 global _abi_new_list
 global _abi_list_append
+global _abi_list_pop
 
 ; asmpython/stdlib/hardware.py's _hw_* symbols, hosted-target bodies. These
 ; already use the standard Win64 ABI (see codegen.py's target_windows.py /
@@ -170,6 +172,14 @@ _abi_list_append:
     mov rbx, rdx
     call _runtime_list_append
     pop rbx
+    ret
+
+; rax = list_pop(list=rcx) -- pops and returns the last element. No
+; underflow check (matches codegen.py's own list.pop() -- an empty-list
+; pop reads/decrements garbage, same pre-existing behavior, not new here).
+_abi_list_pop:
+    mov rax, rcx
+    call _runtime_list_pop
     ret
 
 ; ---- asmlib.hardware: ring-0-only ops, stubbed (unavailable to ring-3
