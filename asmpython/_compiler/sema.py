@@ -668,7 +668,7 @@ class SemaAnalyzer:
             # another module), accept leniently — we can't verify the
             # hierarchy at sema time. If it's not in scope at all, it's a
             # genuinely unknown name and we reject it.
-            if scope is None or name in scope:
+            if scope is None or name in scope.types:
                 return
         raise SemaError(
             f"'{name}' is not an exception type", pos,
@@ -3865,7 +3865,7 @@ class SemaAnalyzer:
                         # already bound (e.g. a materialized value global like
                         # `BINDINGS`): re-binding would clobber its real type.
                         # Uppercase names are constants/classes, not submodules.
-                        if name not in scope:
+                        if name not in scope.types:
                             ty = "any" if orig[:1].isupper() else "module"
                             scope.add(name, ty)
                 return
@@ -3903,7 +3903,7 @@ class SemaAnalyzer:
                     for name, orig in zip(_fi_names, orig_names):
                         if name != orig:
                             scope.add(name, "module")
-                        elif name not in scope:
+                        elif name not in scope.types:
                             scope.add(name, "any")
                     return
                 # `from .sibling import orig as local`: a relative import WITH
@@ -3925,7 +3925,7 @@ class SemaAnalyzer:
                 for name, orig in zip(_fi_names, orig_names2):
                     if name != orig:
                         self.mod.func_aliases[name] = orig
-                    if name not in scope:
+                    if name not in scope.types:
                         scope.add(name, "any")
                 return
             try:
@@ -3945,7 +3945,7 @@ class SemaAnalyzer:
                 for local, orig in zip(_fi_names, orig_names3):
                     if local != orig:
                         self.mod.func_aliases[local] = orig
-                    if local not in scope:
+                    if local not in scope.types:
                         scope.add(local, "any")
                 return
             bindings: dict = bindings
@@ -4235,7 +4235,7 @@ class SemaAnalyzer:
             # `global x, y`: just validates that the names exist at module level.
             # Codegen uses this to skip allocating frame slots for them.
             for nm in s.names:
-                if nm not in scope and nm not in self.global_scope:
+                if nm not in scope.types and nm not in self.global_scope.types:
                     pass  # allow forward-declared globals (assigned before use)
             return
         if isinstance(s, A.Nonlocal):
@@ -4691,10 +4691,10 @@ class SemaAnalyzer:
             # Scope binding takes priority: if the user named a variable the same
             # as a merged stdlib function (e.g. `log = logging.getLogger(...)`
             # shadowing `logging.log`), the variable's type wins.
-            if e.name in self.funcs and e.name not in scope:
+            if e.name in self.funcs and e.name not in scope.types:
                 e.inferred_type = "any"
                 return
-            if e.name not in scope:
+            if e.name not in scope.types:
                 if self.in_lifted:
                     e.inferred_type = "any"
                     return
@@ -7490,7 +7490,7 @@ class SemaAnalyzer:
                 self._check_expr(a, scope)
             e.inferred_type = f"instance:{e.func}"
             return
-        if e.func in scope:
+        if e.func in scope.types:
             # A name bound to a user instance with __call__: dispatch to the
             # method. Normalize args against __call__'s sig (skip self).
             _inst_t = scope.types.get(e.func, "")
