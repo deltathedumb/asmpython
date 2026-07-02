@@ -36,6 +36,10 @@ BINDINGS = {
     "fputs":  Func(arg_types=("str", "str"), ret_type="int", c_name="fputs"),
     # fclose(FILE*) -> 0 on success.
     "fclose": Func(arg_types=("str",), ret_type="int", c_name="fclose"),
+    # fread(buf, size, count, FILE*) -> number of elements read. `buf` is a str
+    # (char pointer), so fread writes directly into the string's backing memory.
+    # Caller must allocate enough space with `" " * n` before calling.
+    "fread":  Func(arg_types=("str", "int", "int", "str"), ret_type="int", c_name="fread"),
     # fflush(FILE*) -> 0 on success (flush buffered output).
     "fflush": Func(arg_types=("str",), ret_type="int", c_name="fflush"),
     # feof(FILE*) -> non-zero once end-of-file has been hit.

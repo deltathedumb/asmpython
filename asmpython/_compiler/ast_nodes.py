@@ -94,7 +94,7 @@ class ClassDef:
 
     name: str
     parent: Optional[str]
-    methods: list["FuncDef"]
+    methods: list[FuncDef]
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     # Class-body variable declarations: parallel list of (name, annot, value)
     # where annot is a parser annotation descriptor or None and value is the

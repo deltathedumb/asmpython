@@ -219,16 +219,27 @@ class Path:
         return os.rmdir(self.p)
 
     def read_text(self, encoding: str = "utf-8") -> str:
-        f = os.fopen(self.p, "r")
+        # Use fseek+ftell to find file size, then fread to read in one shot.
+        # This avoids O(n²) memory from char-by-char concatenation (a 40KB file
+        # would otherwise allocate ~750 MB of leaked string fragments in gen1).
+        f: str = os.fopen(self.p, "r")
         if f == 0:
             return ""
-        out = ""
-        c = os.fgetc(f)
-        while c != -1:
-            out = out + chr(c)
-            c = os.fgetc(f)
+        os.fseek(f, 0, 2)
+        n: int = os.ftell(f)
+        os.fseek(f, 0, 0)
+        if n <= 0:
+            os.fclose(f)
+            return ""
+        # Allocate a mutable buffer of n+1 chars (n data bytes + space for null).
+        # fread in text mode may produce fewer chars than n (CRLF → LF), so we
+        # allocate n+1 and slice to the actual count returned by fread.
+        buf: str = " " * (n + 1)
+        nread: int = os.fread(buf, 1, n, f)
         os.fclose(f)
-        return out
+        if nread <= 0:
+            return ""
+        return buf[0:nread]
 
     def read_bytes(self) -> list[int]:
         f = os.fopen(self.p, "rb")

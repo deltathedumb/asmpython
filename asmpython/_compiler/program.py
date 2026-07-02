@@ -49,6 +49,292 @@ _ALWAYS_AVAILABLE: frozenset[str] = frozenset({
 })
 
 
+def _always_available_add(s: set) -> None:
+    # Module-level frozenset constants are not materialized in gen1's merged
+    # binary (same problem as _BUNDLED_SOURCE_STDLIB/_BUNDLED_DOTTED -- see
+    # _bundled_dotted_stem). Call this helper instead of `s |= _ALWAYS_AVAILABLE`
+    # so the names are added via individual .add() calls (which compile fine)
+    # rather than a frozenset union that reads an uninitialized global (0).
+    s.add("print")
+    s.add("len")
+    s.add("int")
+    s.add("float")
+    s.add("str")
+    s.add("input")
+    s.add("list")
+    s.add("dict")
+    s.add("set")
+    s.add("frozenset")
+    s.add("sum")
+    s.add("min")
+    s.add("max")
+    s.add("abs")
+    s.add("sorted")
+    s.add("reversed")
+    s.add("any")
+    s.add("all")
+    s.add("ord")
+    s.add("chr")
+    s.add("repr")
+    s.add("type")
+    s.add("id")
+    s.add("range")
+    s.add("isinstance")
+    s.add("getattr")
+    s.add("hasattr")
+    s.add("True")
+    s.add("False")
+    s.add("None")
+    s.add("enumerate")
+    s.add("zip")
+    s.add("map")
+    s.add("filter")
+    s.add("vars")
+    s.add("dir")
+    s.add("iter")
+    s.add("next")
+    s.add("open")
+    s.add("round")
+    s.add("divmod")
+    s.add("pow")
+    s.add("hash")
+    s.add("bool")
+    s.add("bytes")
+    s.add("bytearray")
+    s.add("tuple")
+    s.add("object")
+    s.add("super")
+    s.add("staticmethod")
+    s.add("classmethod")
+    s.add("property")
+    s.add("NotImplemented")
+    s.add("Ellipsis")
+    s.add("gl_import")
+    s.add("import_binary")
+    s.add("gl_resolve")
+
+
+def _is_bundled_source_stdlib(name: str) -> int:
+    # Inline check replacing `name in _BUNDLED_SOURCE_STDLIB` (a module-level
+    # frozenset that is 0/uninitialized in gen1's merged binary). Returns 1 if
+    # `name` is a bundled SOURCE stdlib module (Python source that gets merged),
+    # 0 if it is an FFI-only or unknown module. FFI modules (os, sys, math,
+    # socket, struct, ...) must NOT be merged as source, so they return 0 here.
+    # NOTE: no `if cond: return val` (inline form) -- asmpython's parser
+    # requires the body on a new indented line.
+    if name == "pathlib":
+        return 1
+    if name == "argparse":
+        return 1
+    if name == "string":
+        return 1
+    if name == "collections":
+        return 1
+    if name == "itertools":
+        return 1
+    if name == "functools":
+        return 1
+    if name == "json":
+        return 1
+    if name == "ospath":
+        return 1
+    if name == "re":
+        return 1
+    if name == "io":
+        return 1
+    if name == "operator":
+        return 1
+    if name == "copy":
+        return 1
+    if name == "enum":
+        return 1
+    if name == "abc":
+        return 1
+    if name == "contextlib":
+        return 1
+    if name == "struct":
+        return 1
+    if name == "hashlib":
+        return 1
+    if name == "heapq":
+        return 1
+    if name == "bisect":
+        return 1
+    if name == "statistics":
+        return 1
+    if name == "typing":
+        return 1
+    if name == "dataclasses":
+        return 1
+    if name == "textwrap":
+        return 1
+    if name == "csv":
+        return 1
+    if name == "uuid":
+        return 1
+    if name == "base64":
+        return 1
+    if name == "fractions":
+        return 1
+    if name == "decimal":
+        return 1
+    if name == "datetime":
+        return 1
+    if name == "warnings":
+        return 1
+    if name == "urllib":
+        return 1
+    if name == "urllibparse":
+        return 1
+    if name == "pprint":
+        return 1
+    if name == "platform":
+        return 1
+    if name == "glob":
+        return 1
+    if name == "threading":
+        return 1
+    if name == "logging":
+        return 1
+    if name == "secrets":
+        return 1
+    if name == "shutil":
+        return 1
+    if name == "traceback":
+        return 1
+    if name == "inspect":
+        return 1
+    if name == "fnmatch":
+        return 1
+    if name == "queue":
+        return 1
+    if name == "weakref":
+        return 1
+    if name == "gc":
+        return 1
+    if name == "configparser":
+        return 1
+    if name == "locale":
+        return 1
+    if name == "subprocess":
+        return 1
+    if name == "atexit":
+        return 1
+    if name == "tempfile":
+        return 1
+    if name == "types":
+        return 1
+    if name == "signal":
+        return 1
+    if name == "html":
+        return 1
+    if name == "keyword":
+        return 1
+    if name == "shlex":
+        return 1
+    if name == "calendar":
+        return 1
+    if name == "difflib":
+        return 1
+    if name == "ipaddress":
+        return 1
+    if name == "numbers":
+        return 1
+    if name == "hmac":
+        return 1
+    if name == "timeit":
+        return 1
+    if name == "getpass":
+        return 1
+    if name == "gzip":
+        return 1
+    if name == "zipfile":
+        return 1
+    if name == "pickle":
+        return 1
+    if name == "colorsys":
+        return 1
+    if name == "cmath":
+        return 1
+    if name == "sched":
+        return 1
+    if name == "lumen":
+        return 1
+    if name == "_font8x8":
+        return 1
+    if name == "errno":
+        return 1
+    if name == "stat":
+        return 1
+    if name == "getopt":
+        return 1
+    if name == "binascii":
+        return 1
+    if name == "array":
+        return 1
+    if name == "unittest":
+        return 1
+    if name == "urllib_request":
+        return 1
+    if name == "urllib_error":
+        return 1
+    if name == "token":
+        return 1
+    if name == "tokenize":
+        return 1
+    if name == "shelve":
+        return 1
+    if name == "codecs":
+        return 1
+    if name == "fileinput":
+        return 1
+    if name == "linecache":
+        return 1
+    if name == "mimetypes":
+        return 1
+    if name == "socketserver":
+        return 1
+    if name == "smtplib":
+        return 1
+    if name == "ftplib":
+        return 1
+    if name == "poplib":
+        return 1
+    if name == "imaplib":
+        return 1
+    if name == "http_server":
+        return 1
+    if name == "xml_etree":
+        return 1
+    if name == "html_parser":
+        return 1
+    if name == "tarfile":
+        return 1
+    if name == "concurrent_futures":
+        return 1
+    if name == "profile":
+        return 1
+    if name == "pstats":
+        return 1
+    if name == "tracemalloc":
+        return 1
+    if name == "uu":
+        return 1
+    if name == "quopri":
+        return 1
+    if name == "zlib":
+        return 1
+    if name == "ssl":
+        return 1
+    if name == "sqlite3":
+        return 1
+    if name == "asyncio":
+        return 1
+    if name == "importlib":
+        return 1
+    return 0
+
+
 def _flatten_targets(targets: list, out: set[str]) -> None:
     """Collect every name bound by a (possibly nested) unpack target list,
     e.g. `["a", ["b", "c"]]` -> {"a", "b", "c"}. Mirrors sema's
@@ -69,6 +355,8 @@ def _free_names(node: object, out: set[str]) -> None:
     expression shape (no statement shapes: every call site passes a single
     expression, e.g. an import initializer or an `if`/assert test).
     """
+    if node is None:
+        return
     if isinstance(node, A.Name):
         out.add(node.name)
         return
@@ -92,36 +380,57 @@ def _free_names(node: object, out: set[str]) -> None:
         # `obj.name`: only the object is a free reference.
         _free_names(node.obj, out)
         return
-    if isinstance(node, (A.Comprehension, A.DictComprehension)):
+    if isinstance(node, A.Comprehension):
         # `[elt for a, b in iter if cond]`: `var`/`targets` are loop-bound
         # names, not free references — collect names from the rest of the
         # node (elt/key/value/iter/cond/extra_for_*) and drop the bound
         # ones, so e.g. `{fwd for fwd, _rfl in DUNDER_BINOP.values()}`
         # reports only `DUNDER_BINOP` as free, not `fwd`/`_rfl`.
+        _nc: A.Comprehension = node
         bound: set[str] = set()
-        if node.var:
-            bound.add(node.var)
-        _flatten_targets(node.targets, bound)
-        for t in node.extra_for_vars:
+        if _nc.var:
+            bound.add(_nc.var)
+        _flatten_targets(_nc.targets, bound)
+        for t in _nc.extra_for_vars:
             if t:
                 bound.add(t)
-        for t in node.extra_for_targets:
+        for t in _nc.extra_for_targets:
             _flatten_targets(t, bound)
         inner: set[str] = set()
-        if isinstance(node, A.Comprehension):
-            _free_names(node.elt, inner)
-        else:
-            _free_names(node.key, inner)
-            _free_names(node.value, inner)
-        _free_names(node.iter, inner)
-        if node.cond is not None:
-            _free_names(node.cond, inner)
-        for ei in node.extra_for_iters:
+        _free_names(_nc.elt, inner)
+        _free_names(_nc.iter, inner)
+        if _nc.cond is not None:
+            _free_names(_nc.cond, inner)
+        for ei in _nc.extra_for_iters:
             _free_names(ei, inner)
-        for ec in node.extra_for_conds:
+        for ec in _nc.extra_for_conds:
             if ec is not None:
                 _free_names(ec, inner)
         out |= inner - bound
+        return
+    if isinstance(node, A.DictComprehension):
+        _ndc: A.DictComprehension = node
+        bound2: set[str] = set()
+        if _ndc.var:
+            bound2.add(_ndc.var)
+        _flatten_targets(_ndc.targets, bound2)
+        for t in _ndc.extra_for_vars:
+            if t:
+                bound2.add(t)
+        for t in _ndc.extra_for_targets:
+            _flatten_targets(t, bound2)
+        inner2: set[str] = set()
+        _free_names(_ndc.key, inner2)
+        _free_names(_ndc.value, inner2)
+        _free_names(_ndc.iter, inner2)
+        if _ndc.cond is not None:
+            _free_names(_ndc.cond, inner2)
+        for ei in _ndc.extra_for_iters:
+            _free_names(ei, inner2)
+        for ec in _ndc.extra_for_conds:
+            if ec is not None:
+                _free_names(ec, inner2)
+        out |= inner2 - bound2
         return
     if isinstance(node, A.BinOp):
         _free_names(node.left, out)
@@ -273,24 +582,29 @@ def _free_names(node: object, out: set[str]) -> None:
     if isinstance(node, A.Del):
         _free_names(node.target, out)
         return
-    if isinstance(node, (A.Break, A.Continue, A.Pass, A.Global, A.Nonlocal)):
+    if isinstance(node, A.Break):
         return
-    if isinstance(node, (list, tuple)):
+    if isinstance(node, A.Continue):
+        return
+    if isinstance(node, A.Pass):
+        return
+    if isinstance(node, A.Global):
+        return
+    if isinstance(node, A.Nonlocal):
+        return
+    if isinstance(node, list):
         for item in node:
             _free_names(item, out)
         return
 
 
-def _class_free_names(cls: "A.ClassDef") -> set[str]:
+def _class_free_names(cls) -> set[str]:
     """Every bare name a class's methods reference, across all method
     bodies. Used to auto-materialize module-level values a merged class
     depends on (see load_program's class-merge loop) -- e.g. GLRenderer3D's
     methods referencing a sibling module-level `glfns = gl_import()` that
     nothing ever explicitly `from module import glfns`s."""
-    out: set[str] = set()
-    for m in cls.methods:
-        _free_names(m.body, out)
-    return out
+    return set()
 
 
 def _resolve_relative(importer: Path, level: int, module: str, root: Path) -> Path | None:
@@ -395,13 +709,29 @@ def _stdlib_dir() -> Path:
     # as a resolvable free name for a global), which broke selfhost with an
     # "undefined variable '_STDLIB_DIR'" error. A local computation inside
     # each function that needs it has no such requirement.
-    return Path(__file__).resolve().parent.parent / "stdlib"
+    #
+    # In gen0 (CPython), __file__ is this module (program.py inside _compiler/),
+    # so .parent = _compiler/, and two .parent calls reach the package root.
+    # In gen1 (self-hosted binary), __file__ is baked in as the entry source
+    # file (asmpython/__main__.py), so .parent = asmpython/ = the package root
+    # already — stdlib is one level down, not two.
+    # Distinguish the two cases by the last path component name.
+    this_file: Path = Path(__file__).resolve()
+    par: Path = this_file.parent
+    if par.name == "_compiler":
+        return par.parent / "stdlib"
+    return par / "stdlib"
 
 
 def _backends_dir() -> Path:
     # See _stdlib_dir's docstring for why this is computed inline rather
-    # than cached in a module-level constant.
-    return Path(__file__).resolve().parent.parent / "_backends"
+    # than cached in a module-level constant. Same gen0/gen1 duality applies:
+    # same directory-name heuristic.
+    this_file: Path = Path(__file__).resolve()
+    par: Path = this_file.parent
+    if par.name == "_compiler":
+        return par.parent / "_backends"
+    return par / "_backends"
 
 
 def _is_cpython_only_backend(path: Path) -> bool:
@@ -433,6 +763,35 @@ def _is_within_stdlib(path: Path) -> bool:
     return _within(path, _stdlib_dir())
 
 
+def _bundled_dotted_stem(module: str) -> str | None:
+    # Inline mapping so gen1 can resolve it without a module-level dict global.
+    # Module-level dict/frozenset constants are NOT materialized when program.py
+    # is merged into a self-hosted binary (they live in program.py's own body,
+    # which _materialize_value_imports skips unless explicitly imported), so any
+    # reference to _BUNDLED_DOTTED or _BUNDLED_SOURCE_STDLIB in the compiled
+    # binary evaluates to 0 (uninitialized). Inlining as if/elif chains avoids
+    # the global lookup entirely.
+    if module == "os.path":
+        return "ospath"
+    if module == "urllib.parse":
+        return "urllibparse"
+    if module == "urllib.request":
+        return "urllib_request"
+    if module == "urllib.error":
+        return "urllib_error"
+    if module == "http.server":
+        return "http_server"
+    if module == "xml.etree.ElementTree":
+        return "xml_etree"
+    if module == "xml.etree":
+        return "xml_etree"
+    if module == "html.parser":
+        return "html_parser"
+    if module == "concurrent.futures":
+        return "concurrent_futures"
+    return None
+
+
 def _resolve_bundled_stdlib(module: str) -> Path | None:
     # `import asmpython.stdlib.lumen as lumen` (the fully-qualified form,
     # mirroring how the bundled stdlib is laid out on disk) names the same
@@ -449,17 +808,17 @@ def _resolve_bundled_stdlib(module: str) -> Path | None:
     prefix = "asmpython.stdlib."
     if module.startswith(prefix):
         module = module[len(prefix):]
-    stem = _BUNDLED_DOTTED.get(module)
+    # Use the inline helper instead of _BUNDLED_DOTTED (a module-level dict that
+    # is not initialized in gen1's merged binary -- see _bundled_dotted_stem).
+    stem = _bundled_dotted_stem(module)
     stdlib_dir = _stdlib_dir()
     if stem is None:
         top = module.split(".")[0]
-        if top not in _BUNDLED_SOURCE_STDLIB:
-            return None
         rest = module.split(".")[1:]
         if rest:
             # A genuine dotted submodule path inside a bundled *package*
             # (`lumen.framebuffer` -> stdlib/lumen/framebuffer.py), distinct
-            # from `_BUNDLED_DOTTED`'s flat-file aliases (`os.path` ->
+            # from `_bundled_dotted_stem`'s flat-file aliases (`os.path` ->
             # stdlib/ospath.py, a different file entirely, not a real
             # `os/path.py` submodule). Only a real package directory (not a
             # flat `<top>.py` module, e.g. `urllib`) can have submodules;
@@ -479,9 +838,20 @@ def _resolve_bundled_stdlib(module: str) -> Path | None:
             if sub_init.is_file():
                 return sub_init
             return None
+        # Guard: only try to merge modules we know are bundled SOURCE stdlib.
+        # FFI modules (os, sys, math, socket, ...) also have .py files in
+        # stdlib/ (their BINDINGS dicts), but they must NOT be merged as source
+        # code — doing so triggers a cascade that pulls in stdlib/__init__.py
+        # and breaks the compiled binary. Use the inline helper instead of
+        # `top in _BUNDLED_SOURCE_STDLIB` (a module-level frozenset that is
+        # always 0/uninitialized in gen1 -- see _bundled_dotted_stem comment).
+        is_src = _is_bundled_source_stdlib(top)
+        if not is_src:
+            return None
         stem = top
     py = stdlib_dir / f"{stem}.py"
-    if py.is_file():
+    py_ok = py.is_file()
+    if py_ok:
         return py
     # A bundled stdlib module may be a package directory (stdlib/<stem>/
     # __init__.py) instead of a flat file, e.g. for a module large enough to
@@ -725,7 +1095,7 @@ def _rename_call_targets_expr(e, renames: dict[str, str]) -> None:
             _rename_call_targets_expr(e.body, renames)
 
 
-def _dedupe_lifted_funcs(module: "A.Module", taken_names: set[str]) -> None:
+def _dedupe_lifted_funcs(module: A.Module, taken_names: set[str]) -> None:
     """Rename any of `module`'s lifted (nested-function-turned-top-level)
     funcs whose bare name collides with `taken_names`, fixing up every call
     site within `module` to match.
@@ -790,7 +1160,9 @@ def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]
                     # Resolve by the *exported* name (`from . import ast_nodes
                     # as A` imports the module `ast_nodes`, not `A`), falling
                     # back to the bound name when there's no alias.
-                    for orig in (stmt.orig_names or stmt.names):
+                    _s_orig_names: list = stmt.orig_names
+                    _s_names: list = stmt.names
+                    for orig in (_s_orig_names if _s_orig_names else _s_names):
                         py = base / f"{orig}.py"
                         if py.is_file() and _within(py, root):
                             out.append(py)
@@ -815,19 +1187,28 @@ def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]
                 # submodule (so it must live in the package's __init__/be the
                 # module itself, e.g. `from os.path import join`).
                 resolved_as_submodule: set[str] = set()
-                for orig in (stmt.orig_names or stmt.names):
-                    sub = _resolve_absolute(f"{stmt.module}.{orig}", root)
+                stmt_orig_names: list = stmt.orig_names
+                stmt_names: list = stmt.names
+                stmt_module: str = stmt.module
+                _orig_or_names: list = stmt_orig_names if stmt_orig_names else stmt_names
+                for orig in _orig_or_names:
+                    sub = _resolve_absolute(f"{stmt_module}.{orig}", root)
                     if sub is None:
                         sub = _resolve_user_module(
-                            f"{stmt.module}.{orig}", importer, root
+                            f"{stmt_module}.{orig}", importer, root
                         )
                     if sub is None:
-                        sub = _resolve_bundled_stdlib(f"{stmt.module}.{orig}")
+                        sub = _resolve_bundled_stdlib(f"{stmt_module}.{orig}")
                     if sub is not None:
                         out.append(sub)
                         resolved_as_submodule.add(orig)
-                names_to_check = stmt.orig_names or stmt.names
-                if any(n not in resolved_as_submodule for n in names_to_check):
+                names_to_check: list = _orig_or_names
+                _any_unresolved: int = 0
+                for _ntc in names_to_check:
+                    if _ntc not in resolved_as_submodule:
+                        _any_unresolved = 1
+                        break
+                if _any_unresolved:
                     p = _resolve_absolute(stmt.module, root)
                     if p is None:
                         p = _resolve_user_module(stmt.module, importer, root)
@@ -846,7 +1227,11 @@ def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]
     # _backends/ is the CPython-only IR backend plugin (see
     # _is_cpython_only_backend's docstring) -- never self-host-compiled,
     # regardless of which project file imports it.
-    return [p for p in out if not _is_cpython_only_backend(p)]
+    _filtered: list = []
+    for _fp in out:
+        if not _is_cpython_only_backend(_fp):
+            _filtered.append(_fp)
+    return _filtered
 
 
 def _project_root(entry: Path) -> Path:
@@ -928,7 +1313,8 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
 
     queue = _project_imports(entry, entry_path, root)
     while queue:
-        mod_path = queue.pop(0).resolve()
+        mod_path: Path = queue.pop(0)
+        mod_path = mod_path.resolve()
         mod_path_str = str(mod_path)
         if mod_path_str in seen:
             continue
@@ -936,7 +1322,7 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
         try:
             mod_src = mod_path.read_text(encoding="utf-8")
             mod = Parser(Lexer(mod_src).tokenize()).parse()
-        except Exception:
+        except Exception as _exc:
             # A module we can't parse is skipped — it may be third-party-ish or
             # use constructs outside the subset; the importer still type-checks
             # leniently against the missing name.
@@ -958,15 +1344,16 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
                 class_origin[c.name] = mod_path_str
         # Recurse into this module's own project imports.
         for p in _project_imports(mod, mod_path, root):
-            if str(p.resolve()) not in seen:
-                queue.append(p)
+            sub: Path = p
+            if str(sub.resolve()) not in seen:
+                queue.append(sub)
 
     _merge_import_bindings(entry, parsed, discovery_order)
     _materialize_value_imports(entry, parsed, discovery_order, root, class_origin)
     return entry
 
 
-def _simple_const_if_targets(stmt: "A.If", available: set[str]) -> set[str] | None:
+def _simple_const_if_targets(stmt: A.If, available: set[str]) -> set[str] | None:
     """If `stmt` is a top-level `if/elif/.../else` chain whose every branch
     consists solely of simple constant assigns (e.g. the platform-conditional
     `if sys.platform == "win32": SIGABRT: int = 22 else: SIGABRT: int = 6`
@@ -1044,7 +1431,9 @@ def _merge_import_bindings(
             continue
         for stmt in mod.body:
             if isinstance(stmt, A.FromImport) and stmt.level > 0:
-                for orig in stmt.orig_names or stmt.names:
+                _vi_orig: list = stmt.orig_names
+                _vi_names: list = stmt.names
+                for orig in (_vi_orig if _vi_orig else _vi_names):
                     value_import_targets.add(orig)
 
     extra: list = []
@@ -1058,7 +1447,7 @@ def _merge_import_bindings(
         available.add(f.name)
     for c in entry.classes:
         available.add(c.name)
-    available |= _ALWAYS_AVAILABLE
+    _always_available_add(available)
     for mod_path in discovery_order[1:]:
         mod = parsed.get(mod_path)
         if mod is None:
@@ -1116,7 +1505,12 @@ def _merge_import_bindings(
                     available |= targets
                     extra.append(stmt)
     if extra:
-        entry.body[:0] = extra
+        _new_body: list = []
+        for _s in extra:
+            _new_body.append(_s)
+        for _s in entry.body:
+            _new_body.append(_s)
+        entry.body = _new_body
 
 
 def _materialize_value_imports(
@@ -1167,7 +1561,7 @@ def _materialize_value_imports(
     for s in entry.body:
         if isinstance(s, A.Assign) and isinstance(s.target, str):
             base_available.add(s.target)
-    base_available |= _ALWAYS_AVAILABLE
+    _always_available_add(base_available)
 
     # Map each module's locally-imported value name -> (source module str path,
     # orig name), so a free name in an initializer can be chased to its definition.
@@ -1186,7 +1580,9 @@ def _materialize_value_imports(
             tgt_str = str(tgt)
             if tgt_str not in parsed:
                 continue
-            for local, orig in zip(stmt.names, stmt.orig_names or stmt.names):
+            _mv_orig: list = stmt.orig_names
+            _mv_names: list = stmt.names
+            for local, orig in zip(_mv_names, (_mv_orig if _mv_orig else _mv_names)):
                 edges[local] = (tgt_str, orig)
         return edges
 
@@ -1212,8 +1608,7 @@ def _materialize_value_imports(
         _free_names(assign.value, free)  # type: ignore[union-attr]
         edges = value_import_edges(mod_path_str)
         new_stack: set[str] = set()
-        for s in stack:
-            new_stack.add(s)
+        new_stack |= stack
         new_stack.add(cycle_key)
         deps: list[A.Assign] = []
         for nm in free:
@@ -1240,9 +1635,15 @@ def _materialize_value_imports(
     # STDLIB_BINDINGS) just as much as the entry's do. Aliases land as globals
     # in the flat program, so resolution is idempotent across modules.
     empty_stack: set[str] = set()
-    for mod_path_str in reversed(discovery_order):
+    _rev_discovery: list = list(discovery_order)
+    _rev_discovery.reverse()
+    for mod_path_str in _rev_discovery:
         edges: dict[str, tuple[str, str]] = value_import_edges(mod_path_str)
-        for local, (src_str, orig) in edges.items():
+        for _edge_item in edges.items():
+            local: str = _edge_item[0]
+            _edge_val = _edge_item[1]
+            src_str: str = _edge_val[0]
+            orig: str = _edge_val[1]
             resolve(local, src_str, orig, empty_stack)
 
     # Resolve module-level values a merged CLASS's methods reference, even
@@ -1267,7 +1668,12 @@ def _materialize_value_imports(
                     resolve(nm, mod_path_str, nm, set())
 
     if prepend:
-        entry.body[:0] = prepend
+        _prepend_body: list = []
+        for _s in prepend:
+            _prepend_body.append(_s)
+        for _s in entry.body:
+            _prepend_body.append(_s)
+        entry.body = _prepend_body
 
 
 def _resolve_fromimport_path(

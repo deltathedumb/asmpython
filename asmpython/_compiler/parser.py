@@ -1037,7 +1037,7 @@ class Parser:
             # value is fixed at compile time -- evaluated like any other
             # expression wherever it's spliced into a call missing the arg.
             self._eat()
-            node: "A.Expr" = A.Name(name=t.value, pos=t.pos)
+            node: A.Expr = A.Name(name=t.value, pos=t.pos)
             while self._check("OP", "."):
                 self._eat()
                 attr = self._expect("NAME")
@@ -1423,8 +1423,7 @@ class Parser:
         self._expect("NEWLINE")
         return A.ExprStmt(expr=expr, pos=pos)
 
-    @staticmethod
-    def _exc_type_name(e) -> str | None:
+    def _exc_type_name(self, e) -> str | None:
         """The exception class name for an `except` clause's type expression:
         a bare name (`ValueError`) or a dotted attribute (`subprocess.
         CalledProcessError`, `pkg.mod.MyError`) -- in both cases asmpython's
@@ -2583,7 +2582,7 @@ class Parser:
             elems.append(self._parse_expr())
         return A.TupleLit(elems=elems, pos=pos)
 
-    def _absorb_string_concat(self, atom: "A.Expr") -> "A.Expr":
+    def _absorb_string_concat(self, atom: A.Expr) -> A.Expr:
         """Implicit concatenation of adjacent string/f-string literals:
         `"a" "b"`, `f"a" "b"`, `"a" f"b"` all merge into one literal. Inside
         parens, newlines are suppressed, so this also joins literals split

@@ -69,18 +69,23 @@ def exists(p: str) -> int:
 
 
 def read_file(path: str) -> str:
-    """Read the whole file as text, or "" if it can't be opened. Uses the
-    char-at-a-time `fgetc` FFI so no caller buffer is needed."""
-    f = os.fopen(path, "r")
+    """Read the whole file as text, or "" if it can't be opened. Uses
+    fseek/ftell/fread for O(n) memory rather than char-at-a-time O(n²)."""
+    f: str = os.fopen(path, "r")
     if f == 0:
         return ""
-    out = ""
-    c = os.fgetc(f)
-    while c != -1:
-        out = out + chr(c)
-        c = os.fgetc(f)
+    os.fseek(f, 0, 2)
+    n: int = os.ftell(f)
+    os.fseek(f, 0, 0)
+    if n <= 0:
+        os.fclose(f)
+        return ""
+    buf: str = " " * (n + 1)
+    nread: int = os.fread(buf, 1, n, f)
     os.fclose(f)
-    return out
+    if nread <= 0:
+        return ""
+    return buf[0:nread]
 
 
 def getcwd() -> str:

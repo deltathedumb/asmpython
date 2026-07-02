@@ -917,14 +917,15 @@ class Codegen:
                 self.emit(f"{label}: db {body},0")
             for label, val in self.floats:
                 # repr(float) round-trips; special values need hex bit patterns.
-                if val != val:  # nan
+                _flt_val: float = val
+                if _flt_val != _flt_val:  # nan
                     self.emit(f"{label}: dq 0x7ff8000000000000")
-                elif val > 0 and val + 1 == val:  # +inf
+                elif _flt_val > 0 and _flt_val + 1 == _flt_val:  # +inf
                     self.emit(f"{label}: dq 0x7ff0000000000000")
-                elif val < 0 and val - 1 == val:  # -inf
+                elif _flt_val < 0 and _flt_val - 1 == _flt_val:  # -inf
                     self.emit(f"{label}: dq 0xfff0000000000000")
                 else:
-                    self.emit(f"{label}: dq {repr(val)}")
+                    self.emit(f"{label}: dq {repr(_flt_val)}")
             if self.type_name_table:
                 self.emit(f"__type_name_table: dq {', '.join(self.type_name_table)}")
         # bss: one zero-initialized 8-byte slot per module-level variable.
@@ -1179,7 +1180,7 @@ class Codegen:
         """
         if annot is None:
             return None
-        base = annot[0]
+        base: str = annot[0]
         if base in ("int", "str", "float", "list", "dict", "tuple"):
             return base
         if base in ("any", "none", "set"):
@@ -1280,7 +1281,7 @@ class Codegen:
                     return ff.body
             return None
         if isinstance(value, A.MethodCall):
-            obj_type = A.expr_type(value.obj)
+            obj_type: str = A.expr_type(value.obj)
             if not obj_type.startswith("instance:"):
                 return None
             cls_name = obj_type.split(":", 1)[1]
@@ -1374,7 +1375,7 @@ class Codegen:
                 elif isinstance(expr.iter, A.ListLit):
                     var_ty = expr.iter.el_type
                 else:
-                    var_ty = getattr(expr.iter, "list_el_type", "int")
+                    var_ty: str = getattr(expr.iter, "list_el_type", "int")
             if expr.targets:
                 # `for a, b in <iter>`: each flattened target binds to a slot
                 # of the per-iteration element (opaque kind), mirroring
@@ -1470,7 +1471,7 @@ class Codegen:
                 elif isinstance(expr.iter, A.ListLit):
                     var_ty = expr.iter.el_type
                 else:
-                    var_ty = getattr(expr.iter, "list_el_type", "int")
+                    var_ty: str = getattr(expr.iter, "list_el_type", "int")
             if expr.targets:
                 for nm in self._target_names(expr.targets):
                     self._cl_define(info, nm, "any")
@@ -1506,7 +1507,8 @@ class Codegen:
         elif isinstance(expr, A.BinOp):
             # String concat / repeat needs a scratch slot to park the left
             # operand across the right-side evaluation (which may call).
-            lt, rt = A.expr_type(expr.left), A.expr_type(expr.right)
+            lt: str = A.expr_type(expr.left)
+            rt: str = A.expr_type(expr.right)
             if "str" in (lt, rt):
                 self._cl_define(info, f"__binstr_{id(expr)}")
             # List concat (list + list) needs a slot to park the copy while
@@ -1750,7 +1752,7 @@ class Codegen:
                 if not expr.args:
                     pass  # empty list, no scratch needed
                 else:
-                    at = A.expr_type(expr.args[0]) if expr.args else None
+                    at: str = A.expr_type(expr.args[0]) if expr.args else "int"
                     if at == "str":
                         self._cl_define(info, f"__bytes_list_{id(expr)}")
                         self._cl_define(info, f"__bytes_str_{id(expr)}")
@@ -1814,7 +1816,7 @@ class Codegen:
             # set()/frozenset(): an empty set needs a header slot; building
             # from a list/tuple additionally needs iteration-cursor slots.
             if expr.func in ("set", "frozenset"):
-                at = A.expr_type(expr.args[0]) if expr.args else None
+                at: str = A.expr_type(expr.args[0]) if expr.args else "int"
                 if not expr.args:
                     self._cl_define(info, f"__setcall_res_{id(expr)}")
                 elif at in ("list", "tuple"):
@@ -1871,7 +1873,7 @@ class Codegen:
             # Keyword args (kept un-normalized for @dataclass-style ctors) and
             # the class-var default expressions the synthesized init may emit
             # both contain expressions needing slot reservations.
-            kwlist = getattr(expr, "kwargs", [])
+            kwlist: list = getattr(expr, "kwargs", [])
 
             kwlist = kwlist or []
 
@@ -1963,7 +1965,7 @@ class Codegen:
             # `glfns.glClearColor(...)` case just above, just matched via
             # the receiver's static class instead of expr.obj being the
             # handle itself, and offset past `self` in param_types.
-            _recv_ty = A.expr_type(expr.obj)
+            _recv_ty: str = A.expr_type(expr.obj)
             if _recv_ty.startswith("instance:"):
                 _cls_name = _recv_ty[len("instance:"):]
                 _handle = self.imported_method_handle.get(f"{_cls_name}:{expr.method}")
@@ -2006,7 +2008,7 @@ class Codegen:
                     self._cl_define(info, f"__fmt_acc_{id(expr)}")
                 # User-class (and super) method calls pass args through
                 # frame slots; instance calls also park the receiver.
-                obj_t = A.expr_type(expr.obj)
+                obj_t: str = A.expr_type(expr.obj)
                 if obj_t == "set" and expr.method == "add":
                     # set.add(x): park the key across the receiver's eval.
                     self._cl_define(info, f"__setadd_key_{id(expr)}")
@@ -2152,12 +2154,12 @@ class Codegen:
                 info.global_names.update(s.names)
                 continue
             if isinstance(s, A.MultiAssign):
-                ty_ma = A.expr_type(s.value)
+                ty_ma: str = A.expr_type(s.value)
                 self._cl_walk_expr(info, s.value)
                 for nm in s.targets:
                     self._cl_define(info, nm, ty_ma)
             elif isinstance(s, A.Assign):
-                ty_wa = A.expr_type(s.value)
+                ty_wa: str = A.expr_type(s.value)
                 if self._is_closure_factory_call(s.value):
                     ty_wa = "closure"
 
@@ -2256,7 +2258,7 @@ class Codegen:
                     elif isinstance(inner, A.ListLit):
                         el_ty = inner.el_type
                     else:
-                        el_ty = getattr(inner, "list_el_type", "int")
+                        el_ty: str = getattr(inner, "list_el_type", "int")
                 self._cl_define(info, s.targets[0], "int")
                 self._cl_define(info, s.targets[1], el_ty)
                 self._cl_define(info, f"__for_stop_{id(s)}", "int")
@@ -2505,7 +2507,7 @@ class Codegen:
             return
         if isinstance(stmt, A.Assign):
             ty = self._var_type(stmt.target, info)
-            value_t = A.expr_type(stmt.value)
+            value_t: str = A.expr_type(stmt.value)
             mem = self._var_mem(stmt.target, info)
             if (
                 isinstance(stmt.target, str)
@@ -2603,7 +2605,7 @@ class Codegen:
             ):
                 # Sema guarantees plain-name targets in this form.
                 ptr_slot = info.locals_[f"__tupunpack_{id(stmt)}"]
-                rhs_t = A.expr_type(stmt.values[0])
+                rhs_t: str = A.expr_type(stmt.values[0])
                 # String unpack: `a, b, c = "abc"` — extract each char as a
                 # one-char heap string using _runtime_str_getitem.
                 if rhs_t == "str":
@@ -2650,7 +2652,7 @@ class Codegen:
                     # `xs[i] = <tmp>` / `d[k] = <tmp>`, mirroring IndexAssign
                     # codegen but reading the value out of the scratch slot
                     # instead of re-evaluating an RHS expression.
-                    obj_t = A.expr_type(target.obj)
+                    obj_t: str = A.expr_type(target.obj)
                     if obj_t == "dict":
                         self.gen_expr(target.index, info)
                         self.emitf("push rax")
@@ -2825,7 +2827,7 @@ class Codegen:
         if isinstance(stmt, A.While):
             top = self.fresh("while")
             end = self.fresh("endwhile")
-            orelse_w = getattr(stmt, "orelse", [])
+            orelse_w: list = getattr(stmt, "orelse", [])
             if orelse_w:
                 # condition-false → orelse; break → end (past orelse)
                 nat = self.fresh("while_else")
@@ -2894,7 +2896,7 @@ class Codegen:
                     "call _runtime_list_slice_assign",
                 )
                 return
-            obj_t = A.expr_type(stmt.target.obj)
+            obj_t: str = A.expr_type(stmt.target.obj)
             if getattr(stmt.target, "_setitem_class", None) is not None:
                 cls_name = stmt.target._setitem_class  # type: ignore[attr-defined]
                 owner = self._resolve_method_owner(cls_name, "__setitem__")
@@ -3200,7 +3202,7 @@ class Codegen:
                 self.gen_stmt(s, info)
             return
         if stmt.iter is not None:
-            iter_t = A.expr_type(stmt.iter)
+            iter_t: str = A.expr_type(stmt.iter)
             if getattr(stmt, "iter_is_instance", None) is not None:
                 self._gen_for_iter(stmt, info)
                 for s in orelse_stmts:
@@ -3251,7 +3253,7 @@ class Codegen:
         end = self.fresh("endfor")
         pos_branch = self.fresh("for_step_pos")
         body_lbl = self.fresh("for_body")
-        orelse_f = getattr(stmt, "orelse", [])
+        orelse_f: list = getattr(stmt, "orelse", [])
         # cond_end: where condition-false jumps (start of orelse, or end)
         # break_end: where break jumps (past orelse)
         cond_end = self.fresh("for_else") if orelse_f else end
@@ -3461,7 +3463,7 @@ class Codegen:
     def _gen_for_enumerate(self, stmt: A.For, info: FuncInfo) -> None:
         # for i, x in enumerate(inner):  i = index, x = inner[i].
         inner = stmt.iter.args[0]  # type: ignore
-        inner_t = A.expr_type(inner)
+        inner_t: str = A.expr_type(inner)
         is_str = inner_t == "str"
         if inner_t not in ("list", "tuple", "str", "any"):
             raise NotImplementedError(
@@ -3893,7 +3895,7 @@ class Codegen:
                 self.emitf(f"mov rax, {mem}")
             return
         if isinstance(expr, A.UnaryOp):
-            operand_t = A.expr_type(expr.operand)
+            operand_t: str = A.expr_type(expr.operand)
             if operand_t == "float" and expr.op == "-":
                 self.gen_expr(expr.operand, info)
                 # Flip the sign bit directly so -0.0 stays -0.0 (0.0 - 0.0
@@ -4017,12 +4019,12 @@ class Codegen:
             return
         raise NotImplementedError(f"expr {expr}")
 
-    def _gen_named_expr(self, e: "A.NamedExpr", info: FuncInfo) -> None:
+    def _gen_named_expr(self, e: A.NamedExpr, info: FuncInfo) -> None:
         """`target := value` — evaluate `value`, store it into `target`'s
         slot (like an `Assign`), and leave the result in rax/xmm0 so the
         enclosing expression can use it."""
         ty = self._var_type(e.target, info)
-        value_t = A.expr_type(e.value)
+        value_t: str = A.expr_type(e.value)
         mem = self._var_mem(e.target, info)
         if ty == "float":
             self._gen_expr_as_float(e.value, info, value_t)
@@ -4308,9 +4310,9 @@ class Codegen:
         """Evaluate one f-string segment and leave a str pointer in rax
         (int/float go through str(); str segments stay as-is). A plain method
         rather than a closure inside _gen_fstring, so codegen self-compiles."""
-        t = A.expr_type(seg)
-        spec = getattr(seg, "fmt_spec", "")
-        conv = getattr(seg, "conv_flag", "")
+        t: str = A.expr_type(seg)
+        spec: str = getattr(seg, "fmt_spec", "")
+        conv: str = getattr(seg, "conv_flag", "")
         if spec:
             fill, align, body = self._split_fmt_align(spec)
             width, rest, precision = None, body, None
@@ -4468,7 +4470,7 @@ class Codegen:
         # semantics most code expects when fields haven't been initialized yet.
         # An "any" (opaque) value is also treated as an instance dict: at runtime
         # it's a pointer to the same dict layout, so the field read is identical.
-        obj_t = A.expr_type(e.obj)
+        obj_t: str = A.expr_type(e.obj)
         # "str" included: an `except ... as e` binding is typed str (the
         # message), but a raised exception INSTANCE arrives as the same 8-byte
         # pointer — attribute access reads its field dict, mirroring sema's
@@ -9303,7 +9305,7 @@ class Codegen:
         ):
             self._gen_comprehension_enumerate(e, info)
             return
-        iter_t = A.expr_type(e.iter)
+        iter_t: str = A.expr_type(e.iter)
         if iter_t.startswith("instance:"):
             self._gen_comprehension_instance_iter(e, info)
             return
@@ -9476,7 +9478,7 @@ class Codegen:
 
         Mirrors _gen_for_instance_iter but appends elt to a result list
         instead of running body statements."""
-        iter_t = A.expr_type(e.iter)
+        iter_t: str = A.expr_type(e.iter)
         cls_name = iter_t.split(":", 1)[1]
         res = info.locals_[f"__comp_res_{id(e)}"]
         it = info.locals_[f"__comp_iter_{id(e)}"]
@@ -9945,7 +9947,7 @@ class Codegen:
             self.emitf(
                 f"mov rbx, [rbp{slot_off:+d}]", f"mov rcx, [rbx+{self.LIST_BUF_OFF}]"
             )
-            el_t = e.elem_types[i] if i < len(e.elem_types) else "int"
+            el_t: str = e.elem_types[i] if i < len(e.elem_types) else "int"
             if el_t == "float":
                 self.emitf(f"movsd [rcx+{i * 8}], xmm0")
             else:
@@ -9954,7 +9956,7 @@ class Codegen:
 
     def _gen_subscript(self, e: A.Subscript, info: FuncInfo) -> None:
         if isinstance(e.index, A.Slice):
-            obj_t_sl = A.expr_type(e.obj)
+            obj_t_sl: str = A.expr_type(e.obj)
             if obj_t_sl == "list":
                 self._gen_list_slice(e, info)
             else:
@@ -9981,7 +9983,7 @@ class Codegen:
             else:
                 self.emitf("xor rax, rax")
             return
-        obj_t = A.expr_type(e.obj)
+        obj_t: str = A.expr_type(e.obj)
         # An opaque receiver indexed by a STRING is a dict lookup — a str key
         # can never be a list index, and treating the pointer as an index
         # walks off the buffer. Int-indexed opaque values fall through to the
@@ -10085,7 +10087,7 @@ class Codegen:
         if isinstance(arg0, A.Call) and arg0.func == "zip":
             self._gen_list_zip(e, arg0, info)
             return
-        src_t = A.expr_type(arg0)
+        src_t: str = A.expr_type(arg0)
         if src_t in ("list", "tuple", "any"):
             SENTINEL_MIN = "0x8000000000000000"
             SENTINEL_MAX = "0x7fffffffffffffff"
@@ -10420,7 +10422,7 @@ class Codegen:
             self._emit_empty_set(res)
             self.emitf(f"mov rax, [rbp{res:+d}]")
             return
-        at = A.expr_type(e.args[0])
+        at: str = A.expr_type(e.args[0])
         if at in ("set", "dict", "any"):
             # Already a dict-backed value — hand it straight back.
             self.gen_expr(e.args[0], info)
@@ -10447,7 +10449,7 @@ class Codegen:
         elif isinstance(src_arg, A.ListLit):
             src_el_t = src_arg.el_type
         elif isinstance(src_arg, (A.Comprehension, A.Name)):
-            src_el_t = getattr(src_arg, "list_el_type", "int")
+            src_el_t: str = getattr(src_arg, "list_el_type", "int")
         else:
             src_el_t = "int"
         top = self.fresh("setcall")
@@ -10986,7 +10988,7 @@ class Codegen:
         # _gen_dynamic_call as the direct `glfns.glClearColor(...)` case
         # above, just with `self` excluded from the argument list (it's a
         # real asmpython instance pointer, not part of the GL signature).
-        recv_ty = A.expr_type(e.obj)
+        recv_ty: str = A.expr_type(e.obj)
         if recv_ty.startswith("instance:"):
             cls_name = recv_ty[len("instance:"):]
             handle_name = self.imported_method_handle.get(f"{cls_name}:{e.method}")
@@ -11022,7 +11024,7 @@ class Codegen:
                     if cleanup:
                         self.emitf(f"add rsp, {cleanup}")
                     return
-        obj_t = A.expr_type(e.obj)
+        obj_t: str = A.expr_type(e.obj)
         if obj_t == "module" and e.method in self.funcs:
             # `A.expr_type(x)` where `A` is a project module imported via
             # `from . import ast_nodes as A`. Whole-program compilation merged
@@ -11304,7 +11306,7 @@ class Codegen:
             # Sets are dicts keyed by their members (dummy value 1). Mutators
             # map onto the dict runtime.
             if e.method == "update":
-                arg_t = A.expr_type(e.args[0])
+                arg_t: str = A.expr_type(e.args[0])
                 if arg_t in ("list", "tuple"):
                     # s.update(some_list): real Python's set.update() accepts
                     # any iterable, not just another set/dict -- but
@@ -11326,7 +11328,7 @@ class Codegen:
                     self.emitf(f"mov qword [rbp{idx_slot:+d}], 0")
                     loop = self.fresh("setupd_loop")
                     done = self.fresh("setupd_done")
-                    el_t = getattr(e.args[0], "list_el_type", None) or "any"
+                    el_t: str = getattr(e.args[0], "list_el_type", None) or "any"
                     self.label(loop)
                     self.emitf(
                         f"mov rax, [rbp{src_slot:+d}]",
@@ -11525,7 +11527,7 @@ class Codegen:
             self.emitf("pop rbx", "call _runtime_list_extend")
             return
         if e.method == "append":
-            arg_t = A.expr_type(e.args[0])
+            arg_t: str = A.expr_type(e.args[0])
             self.gen_expr(e.args[0], info)
             if arg_t == "float":
                 # Move the double's bit pattern into rax so the runtime helper
@@ -11545,8 +11547,8 @@ class Codegen:
                 self.emitf("movq xmm0, rax")
             return
         if e.method == "sort":
-            obj_t = A.expr_type(e.obj)
-            el_kind = getattr(e.obj, "list_el_type", "int") if isinstance(e.obj, A.Name) else "int"
+            obj_t: str = A.expr_type(e.obj)
+            el_kind: str = getattr(e.obj, "list_el_type", "int") if isinstance(e.obj, A.Name) else "int"
             self.gen_expr(e.obj, info)  # rax = header
             sort_key = getattr(e, "sort_key", None)
             if sort_key is not None:
@@ -11577,7 +11579,7 @@ class Codegen:
             self.emitf("call _runtime_list_reverse", "xor rax, rax")
             return
         if e.method == "clear":
-            obj_t2 = A.expr_type(e.obj)
+            obj_t2: str = A.expr_type(e.obj)
             if obj_t2 in ("list", "tuple"):
                 self.gen_expr(e.obj, info)
                 self.emitf(f"mov qword [rax+{self.LIST_LEN_OFF}], 0", "xor rax, rax")
@@ -11587,7 +11589,7 @@ class Codegen:
                 self.emitf("call _runtime_dict_clear", "xor rax, rax")
             return
         if e.method == "copy":
-            obj_t3 = A.expr_type(e.obj)
+            obj_t3: str = A.expr_type(e.obj)
             if obj_t3 in ("list", "tuple"):
                 SENTINEL_MIN = "0x8000000000000000"
                 SENTINEL_MAX = "0x7fffffffffffffff"
@@ -11629,7 +11631,7 @@ class Codegen:
         if e.method == "count":
             val_slot = info.locals_[f"__lm_val_{id(e)}"]
             hdr_slot = info.locals_[f"__lm_hdr_{id(e)}"]
-            el_t = getattr(e.obj, "list_el_type", "int") if isinstance(e.obj, A.Name) else "int"
+            el_t: str = getattr(e.obj, "list_el_type", "int") if isinstance(e.obj, A.Name) else "int"
             self.gen_expr(e.args[0], info)
             self.emitf(f"mov [rbp{val_slot:+d}], rax")
             self.gen_expr(e.obj, info)  # rax = header
@@ -11688,7 +11690,7 @@ class Codegen:
         if e.method == "remove":
             val_slot = info.locals_[f"__lm_val_{id(e)}"]
             hdr_slot = info.locals_[f"__lm_hdr_{id(e)}"]
-            el_t = getattr(e.obj, "list_el_type", "int") if isinstance(e.obj, A.Name) else "int"
+            el_t: str = getattr(e.obj, "list_el_type", "int") if isinstance(e.obj, A.Name) else "int"
             self.gen_expr(e.args[0], info)
             self.emitf(f"mov [rbp{val_slot:+d}], rax")
             self.gen_expr(e.obj, info)  # rax = header
@@ -11757,7 +11759,8 @@ class Codegen:
         self.emitf("xor rax, rax")
 
     def _gen_binop(self, e: A.BinOp, info: FuncInfo) -> None:
-        lt, rt = A.expr_type(e.left), A.expr_type(e.right)
+        lt: str = A.expr_type(e.left)
+        rt: str = A.expr_type(e.right)
         # Set algebra: `a | b` / `a & b` / `a - b` lower to the same
         # build-a-fresh-set logic as `.union`/`.intersection`/`.difference`.
         if lt == "set" and rt == "set" and e.op in ("|", "&", "-"):
@@ -12002,7 +12005,7 @@ class Codegen:
             # Only a "float"-typed expr already lands its result in xmm0.
             self.emitf("cvtsi2sd xmm0, rax")
 
-    def _gen_truthy_test(self, expr, info: FuncInfo, false_target: str) -> None:
+    def _gen_truthy_test(self, expr: A.Expr, info: FuncInfo, false_target: str) -> None:
         """Evaluate expr; jump to false_target if value is falsy."""
         if isinstance(expr, A.BoolOp):
             # `A.expr_type` of a BoolOp falls back to "int" when its operands
@@ -12012,16 +12015,17 @@ class Codegen:
             # _gen_boolop itself had) — flatten the same-operator chain and
             # truthy-test each real leaf with its own type instead.
             operands: list = []
+            op: str = expr.op
 
-            def flatten_truthy_chain(node) -> None:
-                if isinstance(node, A.BoolOp) and node.op == expr.op:
+            def flatten_truthy_chain(node: A.Expr) -> None:
+                if isinstance(node, A.BoolOp) and node.op == op:
                     flatten_truthy_chain(node.left)
                     flatten_truthy_chain(node.right)
                 else:
                     operands.append(node)
 
             flatten_truthy_chain(expr)
-            if expr.op == "and":
+            if op == "and":
                 # All must be truthy; any falsy one fails the whole test.
                 for operand in operands:
                     self._gen_truthy_test(operand, info, false_target)
@@ -12037,7 +12041,7 @@ class Codegen:
                 self._gen_truthy_test(operands[-1], info, false_target)
                 self.label(pass_lbl)
             return
-        t = A.expr_type(expr)
+        t: str = A.expr_type(expr)
         if t == "float":
             self.gen_expr(expr, info)  # xmm0 = value
             zero_lbl = self.intern_float(0.0)
@@ -12274,7 +12278,7 @@ class Codegen:
                 if negate:
                     self.emitf("xor rax, 1")
                 return
-            rt = A.expr_type(e.operands[1])
+            rt: str = A.expr_type(e.operands[1])
             if rt in ("list", "tuple"):
                 # Tuples share the list [cap,len,buf] layout, so the linear
                 # scan is identical once we know the element kind.
@@ -12297,8 +12301,8 @@ class Codegen:
         # pin (e.g. `tok.value == "("`): content equality is the only correct
         # lowering, since heap-built strings never share pointers with interned
         # literals.
-        lt0 = A.expr_type(e.operands[0])
-        rt0 = A.expr_type(e.operands[1])
+        lt0: str = A.expr_type(e.operands[0])
+        rt0: str = A.expr_type(e.operands[1])
         # `instance == instance` (or `!=`) dispatched by sema to a
         # user-defined `__eq__` (dunder_owner stamped on the node): park lhs
         # across rhs evaluation like a binop dunder, call __eq__, and negate
@@ -12652,7 +12656,7 @@ class Codegen:
         slot = info.locals_[f"__boolop_{id(e)}"]
         stop_truthy = e.op == "or"  # `or` stops (and returns) on a truthy value
         for idx, operand in enumerate(operands[:-1]):
-            t = A.expr_type(operand)
+            t: str = A.expr_type(operand)
             stop_lbl = self.fresh("boolop_stop")
             cont_lbl = self.fresh("boolop_cont")
             if t == "float":
@@ -12737,7 +12741,7 @@ class Codegen:
 
     def _emit_positional_args(
         self,
-        e: "A.Call | A.MethodCall",
+        e: A.Expr,
         args: list,
         info: FuncInfo,
         *,
@@ -12938,7 +12942,7 @@ class Codegen:
         if e.func == "len":
             arg = e.args[0]
             self.gen_expr(arg, info)  # rax = ptr
-            t = A.expr_type(arg)
+            t: str = A.expr_type(arg)
             if t in ("list", "tuple"):
                 # Tuples reuse the list layout, so len lives at LIST_LEN_OFF.
                 self.emitf(f"mov rax, [rax+{self.LIST_LEN_OFF}]")
@@ -12957,7 +12961,7 @@ class Codegen:
                 self._emit_strlen()  # rax = length (string)
             return
         if e.func == "str":
-            arg_t = A.expr_type(e.args[0])
+            arg_t: str = A.expr_type(e.args[0])
             self.gen_expr(e.args[0], info)
             # int/float conversions land in the shared static itoa buffer; str()
             # results are commonly stored (e.g. `[str(x) for x in xs]`), so copy
@@ -13549,7 +13553,7 @@ class Codegen:
                 elif isinstance(arg, A.ListLit):
                     el_kind = arg.el_type
                 elif isinstance(arg, (A.MethodCall, A.Call)):
-                    el_kind = getattr(arg, "list_el_type", "int")
+                    el_kind: str = getattr(arg, "list_el_type", "int")
                 else:
                     el_kind = "int"
             sort_key = getattr(e, "sort_key", None)
@@ -14250,7 +14254,7 @@ class Codegen:
                     break
         return matches
 
-    def _exc_raise_type_id(self, value: "A.Expr") -> int:
+    def _exc_raise_type_id(self, value: A.Expr) -> int:
         """The RTTI id to attach to `raise value`: the exception class's id
         for `raise ExcType` / `raise ExcType(...)`, or EXC_ANY for anything
         else (string messages, variables, etc.)."""
@@ -14784,7 +14788,8 @@ class Codegen:
         # Evaluate args left-to-right, spill each into a scratch frame slot.
         # We use `__ffi_arg<i>` slots that we pre-reserve in _collect_locals.
         slot_offs: list[int] = []
-        for i, (arg, want) in enumerate(zip(args, fn.arg_types)):
+        for i, (arg, want_raw) in enumerate(zip(args, fn.arg_types)):
+            want: str = want_raw
             got = A.expr_type(arg)
             if want == "float":
                 # Always end up with the float in xmm0, then spill.
@@ -15309,9 +15314,9 @@ class Codegen:
 
     def _emit_print_value(self, expr, info: FuncInfo) -> None:
         """Emit code that prints a single typed value (no newline, no space)."""
-        t = A.expr_type(expr)
-        spec = getattr(expr, "fmt_spec", "")
-        conv = getattr(expr, "conv_flag", "")
+        t: str = A.expr_type(expr)
+        spec: str = getattr(expr, "fmt_spec", "")
+        conv: str = getattr(expr, "conv_flag", "")
         # An f-string segment may carry a `:format-spec` (e.g. `{x:.2f}`) or a
         # `!r`/`!s`/`!a` conversion. Route those through the segment
         # formatter (which always yields a str pointer), then print it.

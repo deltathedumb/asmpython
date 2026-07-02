@@ -58,6 +58,7 @@ class WindowsCodegen(Codegen):
             "___chkstk_ms",
             "LoadLibraryA",
             "GetProcAddress",
+            "fflush",
         ):
             self.emit(f"extern {name}")
 
@@ -158,7 +159,7 @@ class WindowsCodegen(Codegen):
         self.emitf("mov rcx, 32", "call putchar")
 
     def _emit_print_newline(self) -> None:
-        self.emitf("mov rcx, 10", "call putchar")
+        self.emitf("mov rcx, 10", "call putchar", "xor rcx, rcx", "call fflush")
 
     def _emit_strlen(self) -> None:
         # strlen takes rcx, returns rax
