@@ -2104,10 +2104,12 @@ class Parser:
             orelse = self._parse_block()
         return A.While(test=test, body=body, pos=kw.pos, orelse=orelse)
 
-    def _parse_for_target(self) -> "str | list":
-        """A single for-loop target: a NAME, or a parenthesized group of NAMEs
-        for nested unpacking (`for i, (a, b) in ...`). A plain name is returned
-        as a str; a group is returned as a list[str]."""
+    def _parse_for_target(self) -> list:
+        """A single for-loop target. Returns a flat list of name strings.
+        A plain name returns a one-element list; a parenthesized group returns
+        all its names flat so callers can always use len(targets)==1 to detect
+        the single-variable case without isinstance checks (which compile to
+        a static False in gen1 when the list element has inferred type 'int')."""
         if self._check("OP", "("):
             self._eat()
             names: list = [self._expect("NAME").value]
@@ -2118,20 +2120,23 @@ class Parser:
                 names.append(self._expect("NAME").value)
             self._expect("OP", ")")
             return names
-        return self._expect("NAME").value  # type: ignore
+        result: list = []
+        result.append(self._expect("NAME").value)
+        return result
 
     def _parse_for(self) -> A.For:
         kw = self._expect("KEYWORD", "for")
         # One or more loop targets: `for x in ...` or `for k, v in ...`.
-        targets = [self._parse_for_target()]
+        targets: list = self._parse_for_target()
         while self._check("OP", ","):
             self._eat()
             if self._check("KEYWORD", "in"):
                 break  # trailing comma before `in`
-            targets.append(self._parse_for_target())
+            for _ft in self._parse_for_target():
+                targets.append(_ft)
         # A single bare name keeps the simple `var` path; any unpacking
         # (multiple targets, or a parenthesized group) goes through `targets`.
-        single = len(targets) == 1 and isinstance(targets[0], str)
+        single = len(targets) == 1
         var = targets[0] if single else ""
         multi = [] if single else targets
         self._expect("KEYWORD", "in")
@@ -2741,13 +2746,14 @@ class Parser:
         self._expect("KEYWORD", "for")
         # One or more loop targets: `for x in ...` or `for k, v in ...`
         # (mirrors `_parse_for`).
-        targets = [self._parse_for_target()]
+        targets: list = self._parse_for_target()
         while self._check("OP", ","):
             self._eat()
             if self._check("KEYWORD", "in"):
                 break  # trailing comma before `in`
-            targets.append(self._parse_for_target())
-        single = len(targets) == 1 and isinstance(targets[0], str)
+            for _ft in self._parse_for_target():
+                targets.append(_ft)
+        single = len(targets) == 1
         var = targets[0] if single else ""
         multi = [] if single else targets
         self._expect("KEYWORD", "in")
@@ -2762,14 +2768,15 @@ class Parser:
         ef_conds: list = []
         while self._check("KEYWORD", "for"):
             self._eat()
-            etargets = [self._parse_for_target()]
+            etargets: list = self._parse_for_target()
             while self._check("OP", ","):
                 self._eat()
                 if self._check("KEYWORD", "in"):
                     break
-                etargets.append(self._parse_for_target())
-            evar2: str = etargets[0] if len(etargets) == 1 and isinstance(etargets[0], str) else ""
-            emulti2: list = [] if len(etargets) == 1 and isinstance(etargets[0], str) else etargets
+                for _ft in self._parse_for_target():
+                    etargets.append(_ft)
+            evar2: str = etargets[0] if len(etargets) == 1 else ""
+            emulti2: list = [] if len(etargets) == 1 else etargets
             self._expect("KEYWORD", "in")
             eiter2 = self._parse_or()
             econd2 = None
@@ -2787,13 +2794,14 @@ class Parser:
         a DictComprehension. Same `for`/`in`/`if` grammar as the list form,
         including multi-target unpacking (`for k, v in ...`)."""
         self._expect("KEYWORD", "for")
-        targets = [self._parse_for_target()]
+        targets: list = self._parse_for_target()
         while self._check("OP", ","):
             self._eat()
             if self._check("KEYWORD", "in"):
                 break  # trailing comma before `in`
-            targets.append(self._parse_for_target())
-        single = len(targets) == 1 and isinstance(targets[0], str)
+            for _ft in self._parse_for_target():
+                targets.append(_ft)
+        single = len(targets) == 1
         var = targets[0] if single else ""
         multi = [] if single else targets
         self._expect("KEYWORD", "in")

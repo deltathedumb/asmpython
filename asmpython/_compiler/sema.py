@@ -2037,7 +2037,7 @@ class SemaAnalyzer:
             if _for_loop.targets:
                 return None
             loop_var = _for_loop.var
-            if not isinstance(loop_var, str):
+            if not loop_var:
                 return None
 
             # Build the iter expression: range_args → range(...), else use iter.
@@ -2889,14 +2889,15 @@ class SemaAnalyzer:
             n = len(z.args)
             if (
                 n >= 2
-                and len(s.targets) == 2
-                and isinstance(s.targets[0], str)
-                and isinstance(s.targets[1], list)
-                and len(s.targets[1]) == n
+                and len(s.targets) == n + 1
+                and s.targets
             ):
+                zip_vars: list = []
+                for _i in range(1, len(s.targets)):
+                    zip_vars.append(s.targets[_i])
                 return (
                     s.targets[0],
-                    list(s.targets[1]),
+                    zip_vars,
                     list(z.args),
                 )
             return None
@@ -5189,8 +5190,8 @@ class SemaAnalyzer:
                 child.dict_value_types.update(scope.dict_value_types)
                 child.dict_inner_value_types.update(scope.dict_inner_value_types)
                 child.tuple_elem_types.update(scope.tuple_elem_types)
-                idx_name = e.targets[0] if isinstance(e.targets[0], str) else None
-                el_name = e.targets[1] if isinstance(e.targets[1], str) else None
+                idx_name: str = e.targets[0] if e.targets else ""
+                el_name: str = e.targets[1] if len(e.targets) > 1 else ""
                 if idx_name:
                     child.add(idx_name, "int")
                 if el_name:
@@ -5310,8 +5311,8 @@ class SemaAnalyzer:
                 child.dict_value_types.update(scope.dict_value_types)
                 child.dict_inner_value_types.update(scope.dict_inner_value_types)
                 child.tuple_elem_types.update(scope.tuple_elem_types)
-                idx_name = e.targets[0] if isinstance(e.targets[0], str) else None
-                el_name = e.targets[1] if isinstance(e.targets[1], str) else None
+                idx_name: str = e.targets[0] if e.targets else ""
+                el_name: str = e.targets[1] if len(e.targets) > 1 else ""
                 if idx_name:
                     child.add(idx_name, "int")
                 if el_name:
