@@ -987,7 +987,7 @@ class SemaAnalyzer:
             return ("int", None, None, None)
         if isinstance(value, A.FloatLit):
             return ("float", None, None, None)
-        if isinstance(value, (A.StrLit, A.FString)):
+        if isinstance(value, A.StrLit) or isinstance(value, A.FString):
             return ("str", None, None, None)
         if isinstance(value, A.ListLit):
             return ("list", None, None, None)
@@ -1037,7 +1037,7 @@ class SemaAnalyzer:
                 self._collect_calls_expr(s.value, out)
             elif isinstance(s, A.TupleAssign):
                 for t in s.targets:
-                    if isinstance(t, (A.Subscript, A.Attr)):
+                    if isinstance(t, A.Subscript) or isinstance(t, A.Attr):
                         self._collect_calls_expr(t, out)
                 for v in s.values:
                     self._collect_calls_expr(v, out)
@@ -1098,14 +1098,14 @@ class SemaAnalyzer:
             # its own by _infer_unannotated_params's callers).
 
     def _collect_calls_expr(self, e, out: list) -> None:
-        if isinstance(e, (A.Call, A.MethodCall)):
-            out.append(e)
         if isinstance(e, A.Call):
+            out.append(e)
             for a in e.args:
                 self._collect_calls_expr(a, out)
             for _kn, kv in e.kwargs:
                 self._collect_calls_expr(kv, out)
         elif isinstance(e, A.MethodCall):
+            out.append(e)
             self._collect_calls_expr(e.obj, out)
             for a in e.args:
                 self._collect_calls_expr(a, out)
@@ -1759,7 +1759,12 @@ class SemaAnalyzer:
         seen: set = set()
         def walk(ss):
             for s in ss:
-                if isinstance(s, (A.Assign, A.AugAssign)):
+                if isinstance(s, A.Assign):
+                    n = s.target
+                    if isinstance(n, str) and n not in exclude and n not in seen:
+                        names.append(n)
+                        seen.add(n)
+                elif isinstance(s, A.AugAssign):
                     n = s.target
                     if isinstance(n, str) and n not in exclude and n not in seen:
                         names.append(n)
@@ -1879,7 +1884,7 @@ class SemaAnalyzer:
                 return A.YieldStmt(value=fix_expr(s.value), pos=s.pos)
             if isinstance(s, A.AttrAssign):
                 return A.AttrAssign(obj=fix_expr(s.obj), name=s.name, value=fix_expr(s.value), pos=s.pos)
-            if isinstance(s, (A.Break, A.Continue, A.Pass)):
+            if isinstance(s, A.Break) or isinstance(s, A.Continue) or isinstance(s, A.Pass):
                 return s
             if isinstance(s, A.Raise):
                 return A.Raise(value=fix_expr(s.value), pos=s.pos)
@@ -1905,11 +1910,18 @@ class SemaAnalyzer:
         # Separate pre-loop stmts from the first while/for loop.
         pre_stmts: list = []
         loop_stmt = None
+        loop_body: list = []
         post_stmts: list = []
         for s in f.body:
             if loop_stmt is None:
-                if isinstance(s, (A.While, A.For)):
+                if isinstance(s, A.While):
+                    _sw: A.While = s
                     loop_stmt = s
+                    loop_body = _sw.body
+                elif isinstance(s, A.For):
+                    _sf: A.For = s
+                    loop_stmt = s
+                    loop_body = _sf.body
                 else:
                     pre_stmts.append(s)
             else:
@@ -1923,14 +1935,27 @@ class SemaAnalyzer:
             for s in stmts:
                 if isinstance(s, A.YieldStmt):
                     return True
-                if isinstance(s, (A.If, A.While, A.For)):
-                    body = getattr(s, 'then', None) or getattr(s, 'body', [])
-                    orelse = getattr(s, 'orelse', []) or []
-                    if has_yield(body) or has_yield(orelse):
+                if isinstance(s, A.If):
+                    _s_if: A.If = s
+                    _if_body: list = _s_if.then
+                    _if_orelse: list = _s_if.orelse or []
+                    if has_yield(_if_body) or has_yield(_if_orelse):
+                        return True
+                elif isinstance(s, A.While):
+                    _s_while: A.While = s
+                    _while_body: list = _s_while.body
+                    _while_orelse: list = _s_while.orelse or []
+                    if has_yield(_while_body) or has_yield(_while_orelse):
+                        return True
+                elif isinstance(s, A.For):
+                    _s_for: A.For = s
+                    _for_body: list = _s_for.body
+                    _for_orelse: list = _s_for.orelse or []
+                    if has_yield(_for_body) or has_yield(_for_orelse):
                         return True
             return False
 
-        if not has_yield(loop_stmt.body):
+        if not has_yield(loop_body):
             return None
 
         # Collect all local variable names (excluding params) for renaming.
@@ -2006,19 +2031,20 @@ class SemaAnalyzer:
                 value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
             ))
 
-        else:  # For loop
+        elif isinstance(loop_stmt, A.For):
+            _for_loop: A.For = loop_stmt
             # Tuple-unpacking for-loop generators are not yet supported.
-            if getattr(loop_stmt, 'targets', []):
+            if _for_loop.targets:
                 return None
-            loop_var = loop_stmt.var
+            loop_var = _for_loop.var
             if not isinstance(loop_var, str):
                 return None
 
             # Build the iter expression: range_args → range(...), else use iter.
-            if loop_stmt.iter is not None:
-                iter_expr = loop_stmt.iter
-            elif loop_stmt.range_args:
-                iter_expr = A.Call(func="range", args=list(loop_stmt.range_args), pos=pos)
+            if _for_loop.iter is not None:
+                iter_expr = _for_loop.iter
+            elif _for_loop.range_args:
+                iter_expr = A.Call(func="range", args=list(_for_loop.range_args), pos=pos)
             else:
                 return None
 
@@ -2071,7 +2097,7 @@ class SemaAnalyzer:
             next_body.append(A.While(
                 test=A.Compare(ops=["<"], operands=_cmp_ops, pos=pos),
                 body=loop_body_prefix + self._gen_body_transform(
-                    loop_stmt.body, [], all_names, pos, result_name
+                    _for_loop.body, [], all_names, pos, result_name
                 ),
                 pos=pos,
             ))
@@ -2129,14 +2155,14 @@ class SemaAnalyzer:
 
     def _rename_expr(self, e, local_names: set):
         """Replace Name(x) with Attr(self, x) for x in local_names."""
-        pos = getattr(e, 'pos', A.SourcePos(0, 0))
         if e is None:
             return None
         if isinstance(e, A.Name):
-            if e.name in local_names:
-                return A.Attr(obj=A.Name(name="self", pos=pos), name=e.name, pos=pos)
+            _en: A.Name = e
+            if _en.name in local_names:
+                return A.Attr(obj=A.Name(name="self", pos=_en.pos), name=_en.name, pos=_en.pos)
             return e
-        if isinstance(e, (A.IntLit, A.FloatLit, A.StrLit)):
+        if isinstance(e, A.IntLit) or isinstance(e, A.FloatLit) or isinstance(e, A.StrLit):
             return e
         if isinstance(e, A.BinOp):
             return A.BinOp(op=e.op, left=self._rename_expr(e.left, local_names), right=self._rename_expr(e.right, local_names), pos=e.pos)
@@ -2200,7 +2226,7 @@ class SemaAnalyzer:
                 ))
             elif isinstance(s, A.AttrAssign):
                 result.append(A.AttrAssign(obj=self._rename_expr(s.obj, local_names), name=s.name, value=self._rename_expr(s.value, local_names), pos=s.pos))
-            elif isinstance(s, (A.Break, A.Continue, A.Pass)):
+            elif isinstance(s, A.Break) or isinstance(s, A.Continue) or isinstance(s, A.Pass):
                 result.append(s)
             elif isinstance(s, A.Return):
                 result.append(A.Return(value=self._rename_expr(s.value, local_names), pos=s.pos))
@@ -2900,7 +2926,9 @@ class SemaAnalyzer:
             return getattr(e, "el_value_type", "int")
         if isinstance(e, A.Name):
             return scope.list_el_value_types.get(e.name, "int")
-        if isinstance(e, (A.Call, A.MethodCall)):
+        if isinstance(e, A.Call):
+            return getattr(e, "el_value_type", "int")
+        if isinstance(e, A.MethodCall):
             return getattr(e, "el_value_type", "int")
         if isinstance(e, A.Attr):
             return getattr(e, "el_value_type", "int")
@@ -2990,7 +3018,9 @@ class SemaAnalyzer:
         site for the bug this guards against: `x: list = []` becoming
         permanently int-only and rejecting later .append()s of any other
         type)."""
-        if isinstance(e, (A.MethodCall, A.Call)):
+        if isinstance(e, A.MethodCall):
+            return getattr(e, "list_el_type", "any")
+        if isinstance(e, A.Call):
             return getattr(e, "list_el_type", "any")
         return "any"
 
@@ -3001,21 +3031,27 @@ class SemaAnalyzer:
         (MethodCall's hardcoded-literal stamps and Call's direct
         annotation-derived stamps are both trusted; transitive shapes
         like Subscript/Attr are not)."""
-        if isinstance(e, (A.MethodCall, A.Call)):
+        if isinstance(e, A.MethodCall):
+            return getattr(e, "value_type", "any")
+        if isinstance(e, A.Call):
             return getattr(e, "value_type", "any")
         return "any"
 
     def _dict_value_type(self, e, scope: Scope) -> str:
         """Value type of a dict-valued expression. 'int' if unknown."""
-        if isinstance(e, (A.DictLit, A.DictComprehension)):
+        if isinstance(e, A.DictLit):
+            return getattr(e, "value_type", "int")
+        if isinstance(e, A.DictComprehension):
             return getattr(e, "value_type", "int")
         if isinstance(e, A.Name):
             return scope.dict_value_types.get(e.name, "int")
         if isinstance(e, A.Attr):
             return getattr(e, "value_type", "int")
-        if isinstance(e, (A.Call, A.MethodCall)):
+        if isinstance(e, A.Call):
             # A function / method annotated `-> dict[.., V]` stamps the value
             # kind onto the call node (sema fills it from the callee's sig).
+            return getattr(e, "value_type", "int")
+        if isinstance(e, A.MethodCall):
             return getattr(e, "value_type", "int")
         if isinstance(e, A.Subscript):
             # A dict read out of an outer container: sema stamped "any" for the
@@ -3097,8 +3133,18 @@ class SemaAnalyzer:
             return list(e.elem_types)
         if isinstance(e, A.Name):
             return list(scope.tuple_elem_types.get(e.name, []))
-        if isinstance(e, (A.Call, A.Subscript, A.Attr, A.MethodCall)):
-            return list(getattr(e, "tuple_elem_types", []))
+        if isinstance(e, A.Call):
+            _e_call: A.Call = e
+            return list(_e_call.tuple_elem_types)
+        if isinstance(e, A.Subscript):
+            _e_sub: A.Subscript = e
+            return list(_e_sub.tuple_elem_types)
+        if isinstance(e, A.Attr):
+            _e_attr: A.Attr = e
+            return list(_e_attr.tuple_elem_types)
+        if isinstance(e, A.MethodCall):
+            _e_mc: A.MethodCall = e
+            return list(_e_mc.tuple_elem_types)
         return []
 
     def _scan_tuple_return(self, stmts: list) -> Optional[list[str]]:
@@ -3141,7 +3187,10 @@ class SemaAnalyzer:
                 s_orelse: list = s.orelse
                 self._collect_tuple_returns(s_then, acc)
                 self._collect_tuple_returns(s_orelse, acc)
-            elif isinstance(s, (A.While, A.For)):
+            elif isinstance(s, A.While):
+                s_body: list = s.body
+                self._collect_tuple_returns(s_body, acc)
+            elif isinstance(s, A.For):
                 s_body: list = s.body
                 self._collect_tuple_returns(s_body, acc)
             elif isinstance(s, A.Try):
@@ -3180,7 +3229,10 @@ class SemaAnalyzer:
                 s_orelse: list = s.orelse
                 self._collect_returns(s_then, acc)
                 self._collect_returns(s_orelse, acc)
-            elif isinstance(s, (A.While, A.For)):
+            elif isinstance(s, A.While):
+                s_body: list = s.body
+                self._collect_returns(s_body, acc)
+            elif isinstance(s, A.For):
                 s_body: list = s.body
                 self._collect_returns(s_body, acc)
             elif isinstance(s, A.Try):
@@ -4618,7 +4670,7 @@ class SemaAnalyzer:
                         sig.fields[t.name] = value_t
 
     def _check_expr(self, e: A.Expr, scope: Scope) -> None:
-        if isinstance(e, (A.IntLit, A.FloatLit, A.StrLit)):
+        if isinstance(e, A.IntLit) or isinstance(e, A.FloatLit) or isinstance(e, A.StrLit):
             return
         if isinstance(e, A.Name):
             if e.name in self.ffi_consts:
@@ -6845,7 +6897,7 @@ class SemaAnalyzer:
                 new_args.append(a)
                 continue
             self._check_expr(a.value, scope)
-            if not isinstance(a.value, (A.Name, A.Subscript, A.Attr)):
+            if not (isinstance(a.value, A.Name) or isinstance(a.value, A.Subscript) or isinstance(a.value, A.Attr)):
                 raise SemaError(
                     "*expr argument unpacking requires a name, subscript, or "
                     "attribute expression (assign the value to a variable "
