@@ -3381,7 +3381,7 @@ class SemaAnalyzer:
             # A nested `def` that captures outer variables.
             # Validate that each free variable is in scope.
             for fv in s.free_vars:
-                if fv not in scope.names and fv not in self.global_scope.names:
+                if fv not in scope.types and fv not in self.global_scope.types:
                     pass  # Accept unknown names; may be a global defined later.
             # Type is "closure" so codegen can distinguish from plain lists.
             scope.add(s.func_name, "closure")
@@ -3519,7 +3519,7 @@ class SemaAnalyzer:
                 self._check_tuple_assign_target(t, vt, scope, s.pos)
             return
         if isinstance(s, A.AugAssign):
-            if s.target not in scope.names:
+            if s.target not in scope.types:
                 raise SemaError(
                     f"augmented assignment to undefined variable {s.target!r}",
                     s.pos,
