@@ -988,8 +988,18 @@ def expr_type(e: Expr) -> str:
         return "set"
     if isinstance(e, FString):
         return "str"
-    if isinstance(e, (Call, Name, MethodCall, Attr)):
-        return e.inferred_type
+    if isinstance(e, Call):
+        _ec: Call = e
+        return _ec.inferred_type
+    if isinstance(e, Name):
+        _en: Name = e
+        return _en.inferred_type
+    if isinstance(e, MethodCall):
+        _em: MethodCall = e
+        return _em.inferred_type
+    if isinstance(e, Attr):
+        _ea: Attr = e
+        return _ea.inferred_type
     if isinstance(e, IfExp):
         return e.inferred_type
     if isinstance(e, NamedExpr):
