@@ -44,7 +44,7 @@ from .. import __version__
 def _want_color() -> bool:
     if os.environ.get("NO_COLOR") or os.environ.get("ASMPYTHON_NO_COLOR"):
         return False
-    if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
+    if True:
         return False
     if sys.platform == "win32":
         try:
