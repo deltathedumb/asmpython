@@ -1025,7 +1025,7 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         ctx.emit(IRInstr("br", None, [cont_label]))
         return
 
-    if isinstance(s, (A.Import, A.FromImport)):
+    if isinstance(s, A.Import) or isinstance(s, A.FromImport):
         # Bindings are already resolved by sema (module-level FFI/class/
         # function tables); nothing to do at the IR level -- there's no
         # notion of a "module object" in this pipeline yet, just direct

@@ -415,7 +415,7 @@ class Parser:
                 Parser._collect_called_names_expr(s.value, out)
             elif isinstance(s, A.TupleAssign):
                 for t in s.targets:
-                    if isinstance(t, (A.Subscript, A.Attr)):
+                    if isinstance(t, A.Subscript) or isinstance(t, A.Attr):
                         Parser._collect_called_names_expr(t, out)
                 for v in s.values:
                     Parser._collect_called_names_expr(v, out)
@@ -1355,12 +1355,12 @@ class Parser:
         # Tuple assignment with at least one subscript/attribute target, e.g.
         # `xs[0], xs[1] = xs[1], xs[0]` or `a, self.x = self.x, a`. Pure
         # NAME-only sequences are handled above by `_parse_tuple_assign`.
-        if isinstance(expr, (A.Name, A.Subscript, A.Attr)) and self._check("OP", ","):
+        if (isinstance(expr, A.Name) or isinstance(expr, A.Subscript) or isinstance(expr, A.Attr)) and self._check("OP", ","):
             targets = [expr]
             while self._check("OP", ","):
                 self._eat()
                 tgt = self._parse_expr()
-                if not isinstance(tgt, (A.Name, A.Subscript, A.Attr)):
+                if not (isinstance(tgt, A.Name) or isinstance(tgt, A.Subscript) or isinstance(tgt, A.Attr)):
                     raise ParseError("cannot assign to this expression", tgt.pos, ErrorCode.P_INVALID_ASSIGN_TARGET)
                 targets.append(tgt)
             self._expect("OP", "=")

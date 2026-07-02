@@ -464,8 +464,17 @@ class Codegen:
                 _walk_expr(e.test)
                 _walk_expr(e.body)
                 _walk_expr(e.orelse)
-            elif isinstance(e, (A.ListLit, A.TupleLit, A.SetLit)):
-                for el in e.elems:
+            elif isinstance(e, A.ListLit):
+                _ell: A.ListLit = e
+                for el in _ell.elems:
+                    _walk_expr(el)
+            elif isinstance(e, A.TupleLit):
+                _elt: A.TupleLit = e
+                for el in _elt.elems:
+                    _walk_expr(el)
+            elif isinstance(e, A.SetLit):
+                _els: A.SetLit = e
+                for el in _els.elems:
                     _walk_expr(el)
             elif isinstance(e, A.DictLit):
                 for k in e.keys:
@@ -2496,7 +2505,7 @@ class Codegen:
             return
         if isinstance(stmt, A.Global):
             return  # handled at _cl_walk time
-        if isinstance(stmt, (A.Import, A.FromImport)):
+        if isinstance(stmt, A.Import) or isinstance(stmt, A.FromImport):
             # Imports are resolved statically by sema; nothing runtime-side.
             return
         if isinstance(stmt, A.MultiAssign):
@@ -10448,8 +10457,12 @@ class Codegen:
             src_el_t = ets[0] if ets else "int"
         elif isinstance(src_arg, A.ListLit):
             src_el_t = src_arg.el_type
-        elif isinstance(src_arg, (A.Comprehension, A.Name)):
-            src_el_t: str = getattr(src_arg, "list_el_type", "int")
+        elif isinstance(src_arg, A.Comprehension):
+            _sc: A.Comprehension = src_arg
+            src_el_t: str = _sc.list_el_type
+        elif isinstance(src_arg, A.Name):
+            _sn: A.Name = src_arg
+            src_el_t: str = _sn.list_el_type
         else:
             src_el_t = "int"
         top = self.fresh("setcall")
@@ -13552,8 +13565,12 @@ class Codegen:
                     el_kind = arg.list_el_type
                 elif isinstance(arg, A.ListLit):
                     el_kind = arg.el_type
-                elif isinstance(arg, (A.MethodCall, A.Call)):
-                    el_kind: str = getattr(arg, "list_el_type", "int")
+                elif isinstance(arg, A.MethodCall):
+                    _amc: A.MethodCall = arg
+                    el_kind: str = _amc.list_el_type
+                elif isinstance(arg, A.Call):
+                    _ac: A.Call = arg
+                    el_kind: str = _ac.list_el_type
                 else:
                     el_kind = "int"
             sort_key = getattr(e, "sort_key", None)

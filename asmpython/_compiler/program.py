@@ -900,15 +900,19 @@ def _collect_import_stmts(module: A.Module) -> list:
 
     def walk(stmts) -> None:
         for s in stmts or []:
-            if isinstance(s, (A.Import, A.FromImport)):
+            if isinstance(s, A.Import) or isinstance(s, A.FromImport):
                 found.append(s)
             elif isinstance(s, A.FuncDef):
                 walk(s.body)
             elif isinstance(s, A.If):
                 walk(s.then)
                 walk(s.orelse)
-            elif isinstance(s, (A.While, A.For)):
-                walk(s.body)
+            elif isinstance(s, A.While):
+                _sw: A.While = s
+                walk(_sw.body)
+            elif isinstance(s, A.For):
+                _sf: A.For = s
+                walk(_sf.body)
             elif isinstance(s, A.Try):
                 walk(s.body)
                 walk(getattr(s, "handler", None))
@@ -951,7 +955,7 @@ def _rename_call_targets(stmts: list, renames: dict[str, str]) -> None:
             _rename_call_targets_expr(s.value, renames)
         elif isinstance(s, A.TupleAssign):
             for t in s.targets:
-                if isinstance(t, (A.Subscript, A.Attr)):
+                if isinstance(t, A.Subscript) or isinstance(t, A.Attr):
                     _rename_call_targets_expr(t, renames)
             for v in s.values:
                 _rename_call_targets_expr(v, renames)
