@@ -556,7 +556,7 @@ class SemaAnalyzer:
 
     def _resolve_class_chain(self, name: str) -> list:
         """[name, parent, grandparent, ...] for a user-defined class."""
-        out: list = []
+        out: list[str] = []
         cur = name
         while cur is not None and cur not in out:
             out.append(cur)
@@ -2358,15 +2358,20 @@ class SemaAnalyzer:
                     for fname, _fannot, fvalue in class_vars_list:
                         params.append(fname)
                         param_types.append(_fannot)  # carry class-var annotation
-                        _func_nm = (
-                            fvalue.func if isinstance(getattr(fvalue, "func", None), str)
-                            else getattr(getattr(fvalue, "func", None), "name", None)
-                        ) if isinstance(fvalue, A.Call) else None
+                        _func_nm = None
+                        if isinstance(fvalue, A.Call):
+                            _fv_call: A.Call = fvalue
+                            _fv_call_func = _fv_call.func
+                            if isinstance(_fv_call_func, str):
+                                _func_nm = _fv_call_func
                         if isinstance(fvalue, A.Call) and _func_nm == "field":
+                            _fv_call2: A.Call = fvalue
                             factory = None
-                            for kn, kv in getattr(fvalue, "kwargs", []) or []:
+                            _fv_call2_kw: list = _fv_call2.kwargs
+                            for kn, kv in _fv_call2_kw:
                                 if kn == "default_factory" and isinstance(kv, A.Name):
-                                    factory = kv.name
+                                    _kv_nm: A.Name = kv
+                                    factory = _kv_nm.name
                             if factory == "list":
                                 defaults.append(A.ListLit(elems=[], pos=c.pos))
                             elif factory == "dict":
@@ -3116,7 +3121,7 @@ class SemaAnalyzer:
             # Distinct kinds per slot as a dedup list (not a set + .pop(): a
             # genexpr-in-set and arbitrary set.pop are outside the compilable
             # subset — same idiom as the tuple-membership check).
-            kinds: list = []
+            kinds: list[str] = []
             for sh in same:
                 if sh[i] not in kinds:
                     kinds.append(sh[i])
@@ -4846,7 +4851,7 @@ class SemaAnalyzer:
                         ets = A.tuple_element_types(e.operands[i + 1])
                         # Distinct non-"any" element kinds, as a list (avoid a
                         # set + next(iter(...)) so this stays self-compilable).
-                        kinds: list = []
+                        kinds: list[str] = []
                         for t in ets:
                             if t != "any" and t not in kinds:
                                 kinds.append(t)
