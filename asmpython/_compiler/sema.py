@@ -871,7 +871,13 @@ class SemaAnalyzer:
                 pinfo: dict = {}
                 m_param_types_x: list = m.param_types
                 m_defaults_x: list = m.defaults
-                for i, p in enumerate(m.params):
+                # Explicit `: list` intermediates: m is opaque to sema (external
+                # FuncDef), so m.params / m.body read back as opaque "any".
+                # Without the cast, enumerate(m.params) / _scan_field_assigns(m.body)
+                # use the wrong codegen path (int/dict ops instead of list ops).
+                m_params_cf: list = m.params
+                m_body_cf: list = m.body
+                for i, p in enumerate(m_params_cf):
                     if i == 0:
                         continue  # self
                     annot = m_param_types_x[i] if i < len(m_param_types_x) else None
@@ -891,7 +897,7 @@ class SemaAnalyzer:
                         inferred = self.inferred_param_types.get(f"{c.name}.{m.name}:{i}")
                         if inferred is not None:
                             pinfo[p] = inferred
-                self._scan_field_assigns(m.body, sig, pinfo)
+                self._scan_field_assigns(m_body_cf, sig, pinfo)
 
     def _scan_field_assigns(self, stmts: list, sig: ClassSig, pinfo: dict) -> None:
         for s in stmts:
@@ -1696,13 +1702,20 @@ class SemaAnalyzer:
                 if "staticmethod" not in mdeco:
                     local_types["self"] = (f"instance:{c.name}", None, None)
                 start = 0 if "staticmethod" in mdeco else 1
+                # Explicit `: list` intermediates: m is opaque to sema so
+                # m.params / m.param_types / m.body return opaque "any".
+                # Slicing or iterating an opaque value uses wrong codegen
+                # path (dict ops instead of list ops), causing SIGSEGV.
+                m_params_ps: list = m.params
+                m_param_types_ps: list = m.param_types
                 method_locals: dict = build_param_types(
-                    m.params[start:], m.param_types[start:]
+                    m_params_ps[start:], m_param_types_ps[start:]
                 )
                 for k, v in method_locals.items():
                     local_types[k] = v
-                collect_annot_locals(m.body, local_types)
-                scan_closurebinds(m.body, local_types)
+                m_body_ps: list = m.body
+                collect_annot_locals(m_body_ps, local_types)
+                scan_closurebinds(m_body_ps, local_types)
 
     # ---- entry --------------------------------------------------------------
 
@@ -2626,21 +2639,25 @@ class SemaAnalyzer:
                 # the _runtime_dict_contains-then-segfault crash whenever a
                 # class with any method (decorated or not) was compiled.
                 mdeco: list[str] = getattr(m, "decorators", [])
+                # Explicit `: list` intermediate: m.params is an opaque
+                # attribute read (m is external/opaque FuncDef), so slicing,
+                # bool-testing, or indexing it directly uses wrong codegen.
+                m_params_chk: list = m.params
                 if "staticmethod" in mdeco:
                     # No implicit receiver: every parameter is a real argument.
                     start = 0
                 elif "classmethod" in mdeco:
                     # First param is `cls` (opaque — asmpython has no class objs).
-                    if m.params:
-                        scope.add(m.params[0], "any")
-                        self.classmethod_cls_param = m.params[0]
+                    if m_params_chk:
+                        scope.add(m_params_chk[0], "any")
+                        self.classmethod_cls_param = m_params_chk[0]
                     start = 1
                 else:
                     scope.add("self", f"instance:{c.name}")
                     start = 1
                 m_param_types: list = m.param_types
                 m_defaults: list = m.defaults
-                for i, p in enumerate(m.params[start:], start=start):
+                for i, p in enumerate(m_params_chk[start:], start=start):
                     annot = m_param_types[i] if i < len(m_param_types) else None
                     default = m_defaults[i] if i < len(m_defaults) else None
                     if (
@@ -2656,7 +2673,8 @@ class SemaAnalyzer:
                         continue
                     inferred = self.inferred_param_types.get(f"{c.name}.{m.name}:{i}")
                     self._seed_param(scope, p, annot, default, inferred)
-                self._try_check_block(m.body, scope)
+                m_body_chk: list = m.body
+                self._try_check_block(m_body_chk, scope)
                 self.in_function = None
                 self.current_class = None
                 self.classmethod_cls_param = None
