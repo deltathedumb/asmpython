@@ -1430,31 +1430,44 @@ class SemaAnalyzer:
             # keeps `xs.append(<anything>)`, element reads, and `for x in xs`
             # lenient instead of mis-typing the element as int.
             return "any"
-        if base in ("int", "str", "float"):
-            return base
-        if base == "bool":
+        # Cast away the "any"/"int" type that gen1's sema assigns to the
+        # unannotated `base` parameter: all string comparisons below and the
+        # f"instance:{_base}" f-string need str-typed operands so gen1's
+        # codegen picks _runtime_str_eq (not raw pointer comparison) and
+        # formats the class name as a string (not an int-to-str decimal).
+        _base: str = base
+        if _base in ("int", "str", "float"):
+            return _base
+        if _base == "bool":
             return "int"
-        if base in ("list", "dict", "tuple"):
+        if _base in ("list", "dict", "tuple"):
             # A nested collection element/value (`dict[str, list[str]]`): every
             # value is an 8-byte pointer, so the container kind passes through.
-            return base
-        if base in ("set", "frozenset"):
+            return _base
+        if _base in ("set", "frozenset"):
             return "set"
-        if base == "object":
+        if _base == "object":
             return "any"
-        if base in self.classes:
-            return f"instance:{base}"
+        if _base in self.classes:
+            return f"instance:{_base}"
         # A capitalized external/imported class (`list[Token]`, `dict[str, Expr]`),
         # or a dotted reference to a class we do model (`list[argparse.Namespace]`).
         # Prefer the modeled class if the leaf matches one; otherwise fall back to
         # an opaque instance so attribute/method access on elements read out of
         # the container stays lenient (mirrors _resolve_annot's handling of a
         # bare external annotation).
-        leaf = base.split(".")[-1] if isinstance(base, str) else ""
-        if leaf in self.classes:
-            return f"instance:{leaf}"
-        if leaf[:1].isupper():
-            return f"instance:{leaf}"
+        # Explicit `: list` / `: str` intermediates: str.split() returns a list
+        # whose subscript [-1] is typed "int" by default (no element annotation
+        # on the result list); without the `: str` cast the f"instance:{_leaf}"
+        # f-string formats the pointer value as a decimal integer instead of the
+        # class name string (the same root bug as the `list[Token]` garbage-addr
+        # error — gen1 emits _emit_int_to_str for "int"-typed f-string slots).
+        _parts: list = _base.split(".")
+        _leaf: str = _parts[-1]
+        if _leaf in self.classes:
+            return f"instance:{_leaf}"
+        if _leaf[:1].isupper():
+            return f"instance:{_leaf}"
         return "int"
 
     def _resolve_annot(self, annot: tuple | None):
@@ -3204,8 +3217,22 @@ class SemaAnalyzer:
         self._collect_tuple_returns(stmts, shapes)
         if not shapes:
             return None
-        arity = len(shapes[0])
-        same = [sh for sh in shapes if len(sh) == arity]
+        # Explicit `: list` intermediate and `: int` arity annotation: shapes[0]
+        # is typed "any" (list element with no el_type) so len(shapes[0]) would
+        # call _emit_strlen on the list header, reading the capacity field as a
+        # C string length (always 1 for small lists) instead of the real arity.
+        # Likewise `len(sh)` in the filter loop needs `_sh: list = sh` so
+        # `len(_sh)` uses the list-length path.  Without these casts every
+        # function that returns a 3-tuple (e.g. `_split_fstring_spec`) appeared
+        # to return a 1-tuple, causing spurious "cannot unpack 1-tuple into 3
+        # target(s)" errors at every unpack call site.
+        _first_shape: list = shapes[0]
+        arity: int = len(_first_shape)
+        same: list = []
+        for sh in shapes:
+            _sh: list = sh
+            if len(_sh) == arity:
+                same.append(_sh)
         merged: list = []
         for i in range(arity):
             # Distinct kinds per slot as a dedup list (not a set + .pop(): a

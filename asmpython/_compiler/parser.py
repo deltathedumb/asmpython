@@ -594,7 +594,7 @@ class Parser:
                 # Same fix as _find_free_vars: explicit `: list` read, not
                 # set(f.params) directly (f.params reads "any"-typed here).
                 f_params: list = f.params
-                own_locals = set(f_params)
+                own_locals: set = set(f_params)
                 if f.vararg:
                     own_locals.add(f.vararg)
                 if f.kwarg:
@@ -2622,7 +2622,15 @@ class Parser:
             else:
                 # Re-lex the expression text and parse it as an expression.
                 inner_toks = Lexer(text).tokenize()
-                inner_parser = Parser(inner_toks)
+                # Explicit `: Parser` annotation: gen1's sema types the
+                # constructor call return as "instance:Parser" (via the
+                # f"instance:{e.func}" path), but without the annotation
+                # the scope-add falls back to the default "int" because
+                # the Call node's inferred_type is read as "any"-typed
+                # (opaque attribute of the external A.Expr parameter),
+                # leaving inner_parser typed "int" and every subsequent
+                # ._check()/_eat() call producing "int has no method" errors.
+                inner_parser: Parser = Parser(inner_toks)
                 expr = inner_parser._parse_expr()
                 # Trailing tokens after the expression are an error.
                 while inner_parser._check("NEWLINE"):
