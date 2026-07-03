@@ -304,6 +304,31 @@ for _fwd, rfl in DUNDER_BINOP.values():
 _dunder_same |= {"__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"}
 DUNDER_SAME_TYPE_OTHER: frozenset[str] = frozenset(_dunder_same)
 
+# str method registry split into two flat dicts so self-compiled sema can
+# use them without len()-on-nested-tuple issues (see Analyzer.STR_METHODS
+# comment for the full explanation).  _STR_METHOD_ARGC stores the expected
+# argument count (int) and _STR_METHOD_RET stores the return type (str).
+# All str methods that accept arguments expect str-typed values.
+_STR_METHOD_ARGC: dict = {
+    "upper": 0, "lower": 0, "casefold": 0, "capitalize": 0, "swapcase": 0,
+    "title": 0, "strip": 0, "lstrip": 0, "rstrip": 0,
+    "startswith": 1, "endswith": 1,
+    "removeprefix": 1, "removesuffix": 1, "count": 1,
+    "replace": 2,
+    "isdigit": 0, "isalpha": 0, "isalnum": 0, "isspace": 0,
+    "isupper": 0, "islower": 0, "isidentifier": 0,
+}
+_STR_METHOD_RET: dict = {
+    "upper": "str", "lower": "str", "casefold": "str", "capitalize": "str",
+    "swapcase": "str", "title": "str", "strip": "str", "lstrip": "str",
+    "rstrip": "str",
+    "startswith": "int", "endswith": "int",
+    "removeprefix": "str", "removesuffix": "str", "count": "int",
+    "replace": "str",
+    "isdigit": "int", "isalpha": "int", "isalnum": "int", "isspace": "int",
+    "isupper": "int", "islower": "int", "isidentifier": "int",
+}
+
 
 @dataclass
 class FuncSig:
@@ -6375,32 +6400,13 @@ class SemaAnalyzer:
             f"internal: unhandled expr {type(e).__name__}", getattr(e, "pos", None)
         )
 
-    # Signature: (arg-types, return-type). The arg-types tuple may be empty.
-    STR_METHODS = {
-        "upper": ((), "str"),
-        "lower": ((), "str"),
-        "casefold": ((), "str"),
-        "capitalize": ((), "str"),
-        "swapcase": ((), "str"),
-        "title": ((), "str"),
-        "strip": ((), "str"),
-        "lstrip": ((), "str"),
-        "rstrip": ((), "str"),
-        "startswith": (("str",), "int"),
-        "endswith": (("str",), "int"),
-        "removeprefix": (("str",), "str"),
-        "removesuffix": (("str",), "str"),
-        "count": (("str",), "int"),
-        "replace": (("str", "str"), "str"),
-        # Character-class predicates (0-arg, bool result) used by the lexer.
-        "isdigit": ((), "int"),
-        "isalpha": ((), "int"),
-        "isalnum": ((), "int"),
-        "isspace": ((), "int"),
-        "isupper": ((), "int"),
-        "islower": ((), "int"),
-        "isidentifier": ((), "int"),
-    }
+    # Intentionally NOT stored as a class variable with nested tuples.
+    # When self-compiled, `self.STR_METHODS.get(name)` returns "any"-typed
+    # and `len(arg_types)` on an opaque tuple calls _emit_strlen on the list
+    # header (reading the capacity field as a C string), giving a garbage
+    # count (always 1) instead of the real arg count.  Two flat int/str dicts
+    # at module level avoid both the opaque dict-get issue and the bad len().
+    # See _check_str_method for how they're used.
 
     def _check_pct_format(self, e: A.BinOp, scope: Scope) -> None:
         """`"...%s..." % (args)` (or `% single_arg`) — printf-style formatting.
@@ -6653,33 +6659,38 @@ class SemaAnalyzer:
                     )
             e.inferred_type = "str"
             return
-        sig = self.STR_METHODS.get(e.method)
-        if sig is None:
-            # An unmodeled method on a str-typed value. asmpython's
-            # `except ... as e` binds the message as a str, but source that uses
-            # the caught value as an exception *object* calls methods on it
-            # (e.g. `e.format(...)` on a CompileError). Check the args and treat
-            # the result as opaque rather than erroring.
+        # Use module-level dicts (not self.STR_METHODS class var) to avoid the
+        # opaque-len crash: under a self-compiled sema, dict.get() returns
+        # "any"-typed, so len(arg_types_tuple) falls back to _emit_strlen on
+        # the tuple header, reading the capacity field as a C string (always 1).
+        # Two flat dicts with `: int` / `: str` annotations give correct types.
+        _n_expected: int = _STR_METHOD_ARGC.get(e.method, -1)
+        if _n_expected < 0:
+            # Unmodeled method on a str-typed value (e.g. `e.format(...)` when
+            # `e` is a caught exception typed as str). Stay lenient: check args
+            # for side effects but treat the result as opaque.
             for a in e.args:
                 self._check_expr(a, scope)
             e.inferred_type = "any"
             return
-        arg_types, ret = sig
-        if len(e.args) != len(arg_types):
+        if len(e.args) != _n_expected:
             raise SemaError(
-                f"str.{e.method}() takes {len(arg_types)} argument(s), got {len(e.args)}",
+                f"str.{e.method}() takes {_n_expected} argument(s), got {len(e.args)}",
                 e.pos,
             )
+        # All str methods that accept arguments require str-typed values.
         _si = 0
-        for a, want in zip(e.args, arg_types):
-            got = A.expr_type(a)
-            if got != want:
+        for a in e.args:
+            self._check_expr(a, scope)
+            got: str = A.expr_type(a)
+            if got not in ("str", "any"):
                 raise SemaError(
-                    f"str.{e.method}() argument {_si + 1}: expected {want}, got {got}",
+                    f"str.{e.method}() argument {_si + 1}: expected str, got {got}",
                     e.pos,
                 )
             _si = _si + 1
-        e.inferred_type = ret
+        _ret: str = _STR_METHOD_RET.get(e.method, "str")
+        e.inferred_type = _ret
 
     def _check_ffi_call(
         self, fn: stdlib.Func, args: list, pos, scope: Scope, *, label: str

@@ -323,7 +323,13 @@ class MultiSemaError(Exception):
             if isinstance(e, str):
                 parts.append(e)
             else:
-                parts.append(e.format(src, filename))
+                # Explicit cast: under a self-compiled binary, `for e in
+                # self.errors` types e as opaque int (list element without
+                # element annotation), so e.format(...) reports "int has no
+                # method 'format'". Casting to CompileError gives gen1's sema
+                # the type it needs to resolve the inherited format() method.
+                _ce: CompileError = e
+                parts.append(_ce.format(src, filename))
         return "\n".join(parts)
 
 
