@@ -47,12 +47,16 @@ extern _runtime_str_removeprefix
 extern _runtime_str_removesuffix
 extern _runtime_list_reverse
 extern _runtime_list_extend
+extern _runtime_setjmp
+extern _runtime_raise
 extern malloc
 extern printf
 extern sprintf
 extern putchar
 
 global _abi_dict_get_default
+global _abi_setjmp
+global _abi_raise
 global _abi_dict_set
 global _abi_dict_contains
 global _abi_str_concat
@@ -624,3 +628,18 @@ _hw_console_get_row:
 _hw_console_get_col:
     mov rax, [_con_col]
     ret
+
+
+; setjmp/raise shims: bridge Win64 ABI (args in rcx/rdx) to asmpython
+; runtime convention (args in rax/rbx).
+_abi_setjmp:
+    ; rcx = jmp_buf ptr (Win64 arg0) -> rax for _runtime_setjmp
+    mov rax, rcx
+    jmp _runtime_setjmp
+
+_abi_raise:
+    ; rcx = exc_msg ptr (Win64 arg0) -> rax
+    ; rdx = exc_type_id  (Win64 arg1) -> rbx
+    mov rax, rcx
+    mov rbx, rdx
+    jmp _runtime_raise

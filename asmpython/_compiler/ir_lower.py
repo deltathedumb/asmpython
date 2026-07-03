@@ -37,10 +37,56 @@ from .ir import (
     PTR,
     ir_type_for,
 )
+from .codegen import BUILTIN_EXC_IDS, BUILTIN_EXC_PARENTS, EXC_ANY
 
 
 class LowerError(Exception):
     pass
+
+
+# jmp_buf layout (mirrors _runtime_setjmp in codegen.py): 8 regs * 8 bytes = 64 bytes.
+_JMP_BUF_SIZE = 64
+
+# Build parent-id map once at module level from BUILTIN_EXC_PARENTS.
+_EXC_PARENT_OF: dict[int, int] = {
+    BUILTIN_EXC_IDS[k]: (BUILTIN_EXC_IDS[v] if v else -1)
+    for k, v in BUILTIN_EXC_PARENTS.items()
+    if k in BUILTIN_EXC_IDS
+}
+
+
+def _exc_raise_type_id_ir(value) -> int:
+    """Type id for `raise value` -- mirrors codegen._exc_raise_type_id."""
+    name = None
+    if isinstance(value, A.Call):
+        name = value.func
+    elif isinstance(value, A.Name):
+        name = value.name
+    if name is not None and name in BUILTIN_EXC_IDS:
+        return BUILTIN_EXC_IDS[name]
+    return EXC_ANY
+
+
+def _exc_matching_ids_ir(types: list) -> list:
+    """Full set of type ids an `except (T1, T2, ...):` catches,
+    including subtypes and EXC_ANY -- mirrors codegen._exc_matching_ids."""
+    ancestor_ids = [BUILTIN_EXC_IDS[t] for t in types if t in BUILTIN_EXC_IDS]
+    matches: list = [EXC_ANY]
+    for a in ancestor_ids:
+        if a not in matches:
+            matches.append(a)
+    for tid in BUILTIN_EXC_IDS.values():
+        for a in ancestor_ids:
+            cur = tid
+            seen: list = []
+            while cur >= 0 and cur not in seen:
+                if cur == a:
+                    if tid not in matches:
+                        matches.append(tid)
+                    break
+                seen.append(cur)
+                cur = _EXC_PARENT_OF.get(cur, -1)
+    return matches
 
 
 class _ModuleCtx:
@@ -134,6 +180,15 @@ class _FuncCtx:
             self.slot[name] = ptr
             self.slot_ty[name] = ty
             self.emit(IRInstr("alloca", ptr, []))
+        return self.slot[name]
+
+    def raw_slot(self, name: str, n_bytes: int) -> IRValue:
+        """Reserve n_bytes of raw stack space (e.g. a jmp_buf), returning a PTR."""
+        if name not in self.slot:
+            ptr = self.tmp(PTR)
+            self.slot[name] = ptr
+            self.slot_ty[name] = PTR
+            self.emit(IRInstr("alloca", ptr, [n_bytes]))
         return self.slot[name]
 
 
@@ -1032,7 +1087,173 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         # calls to whatever the imported name resolved to.
         return
 
+    if isinstance(s, A.Raise):
+        _lower_raise(ctx, s)
+        return
+
+    if isinstance(s, A.Try):
+        _lower_try(ctx, s)
+        return
+
     raise LowerError(f"unsupported stmt {type(s).__name__}")
+
+
+def _load_global(ctx: _FuncCtx, sym: str, ty: IRType) -> IRValue:
+    """Load a 64-bit value from a named global variable (external symbol)."""
+    addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", addr, [sym]))
+    val = ctx.tmp(ty)
+    ctx.emit(IRInstr("load", val, [addr]))
+    return val
+
+
+def _store_global(ctx: _FuncCtx, sym: str, val: IRValue) -> None:
+    """Store a value to a named global variable (external symbol)."""
+    addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", addr, [sym]))
+    ctx.emit(IRInstr("store", None, [val, addr]))
+
+
+def _lower_raise(ctx: _FuncCtx, s: A.Raise) -> None:
+    """Lower `raise expr` or bare `raise` to a call to _abi_raise(msg, type_id)."""
+    if s.value is None:
+        # bare re-raise: forward current active exception unchanged
+        msg_v = _load_global(ctx, "_runtime_exc_msg", PTR)
+        type_v = _load_global(ctx, "_runtime_exc_type", I64)
+        ctx.emit(IRInstr("call", None, ["_abi_raise", msg_v, type_v]))
+    else:
+        exc_id = _exc_raise_type_id_ir(s.value)
+        exc_id_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", exc_id_v, [exc_id]))
+        # Extract or synthesize the message string.
+        if isinstance(s.value, A.Call) and s.value.args and A.expr_type(s.value.args[0]) == "str":
+            msg_v = _lower_expr(ctx, s.value.args[0])
+        elif A.expr_type(s.value) == "str":
+            msg_v = _lower_expr(ctx, s.value)
+        else:
+            empty = ctx.mctx.intern_str("")
+            msg_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("str_global", msg_v, [empty.name]))
+        ctx.emit(IRInstr("call", None, ["_abi_raise", msg_v, exc_id_v]))
+
+
+def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
+    """Lower try/except/finally via setjmp/longjmp through the _abi_* shim layer.
+
+    Follows the same pattern as codegen.py's _gen_try: install a jmp_buf,
+    call _abi_setjmp, branch on the result (0 = normal, nonzero = exception),
+    match handlers in order, re-raise if none match, run finally on every path.
+    """
+    uid = id(s)
+    fin_body = s.finally_body or []
+    body = list(s.body) + list(s.else_body or [])
+
+    handlers: list = []
+    if s.handler:
+        handlers.append((s.handler_types, s.bind_name, s.handler))
+    handlers.extend(s.extra_handlers)
+
+    # Reserve a raw 64-byte jmp_buf on the stack.
+    buf_ptr = ctx.raw_slot(f"__try_buf_{uid}", _JMP_BUF_SIZE)
+
+    # Slots for saved state (parent handler, active exception before this try).
+    parent_ptr = ctx.ensure_slot(f"__try_parent_{uid}", PTR)
+    prev_msg_ptr = ctx.ensure_slot(f"__try_prev_msg_{uid}", PTR)
+    prev_type_ptr = ctx.ensure_slot(f"__try_prev_type_{uid}", I64)
+
+    # --- save current exception state & install our handler ---
+    cur_msg = _load_global(ctx, "_runtime_exc_msg", PTR)
+    ctx.emit(IRInstr("store", None, [cur_msg, prev_msg_ptr]))
+    cur_type = _load_global(ctx, "_runtime_exc_type", I64)
+    ctx.emit(IRInstr("store", None, [cur_type, prev_type_ptr]))
+    cur_top = _load_global(ctx, "_runtime_handler_top", PTR)
+    ctx.emit(IRInstr("store", None, [cur_top, parent_ptr]))
+    _store_global(ctx, "_runtime_handler_top", buf_ptr)
+
+    # setjmp(jmp_buf) -> 0 on direct call, nonzero after longjmp
+    setjmp_result = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", setjmp_result, ["_abi_setjmp", buf_ptr]))
+
+    handler_b = ctx.new_block(f"try_handler_{uid}")
+    body_b = ctx.new_block(f"try_body_{uid}")
+    end_b = ctx.new_block(f"try_end_{uid}")
+
+    ctx.emit(IRInstr("br.t", None, [setjmp_result, handler_b.label, body_b.label]))
+
+    # --- try body (+ else) ---
+    ctx.switch_to(body_b)
+    for st in body:
+        _lower_stmt(ctx, st)
+    if not ctx.terminated:
+        # Normal completion: restore parent handler, run finally, jump to end.
+        parent_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", parent_v, [parent_ptr]))
+        _store_global(ctx, "_runtime_handler_top", parent_v)
+        for fs in fin_body:
+            _lower_stmt(ctx, fs)
+        ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    # --- exception path ---
+    ctx.switch_to(handler_b)
+    # Restore parent handler first (so a raise from inside a handler propagates up).
+    parent_v2 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", parent_v2, [parent_ptr]))
+    _store_global(ctx, "_runtime_handler_top", parent_v2)
+
+    # Build check blocks: one per handler + one "no match" block.
+    n = len(handlers)
+    check_blocks = [ctx.new_block(f"try_check_{uid}_{i}") for i in range(n + 1)]
+    ctx.emit(IRInstr("br", None, [check_blocks[0].label]))
+
+    for hi in range(n):
+        types, bind_name, hbody = handlers[hi]
+        ctx.switch_to(check_blocks[hi])
+        if types:
+            # Type-filtered handler: compare _runtime_exc_type against matching ids.
+            matched_b = ctx.new_block(f"try_run_{uid}_{hi}")
+            exc_type_v = _load_global(ctx, "_runtime_exc_type", I64)
+            for mid in sorted(_exc_matching_ids_ir(types)):
+                mid_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", mid_v, [mid]))
+                eq = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.eq", eq, [exc_type_v, mid_v]))
+                nxt = ctx.new_block(f"try_check_next_{uid}_{hi}_{mid}")
+                ctx.emit(IRInstr("br.t", None, [eq, matched_b.label, nxt.label]))
+                ctx.switch_to(nxt)
+            # None matched -> fall through to next handler
+            ctx.emit(IRInstr("br", None, [check_blocks[hi + 1].label]))
+            ctx.switch_to(matched_b)
+        # Handler matched: optionally bind exception message to a name.
+        if bind_name is not None:
+            bind_ptr = ctx.ensure_slot(bind_name, PTR)
+            exc_msg_v = _load_global(ctx, "_runtime_exc_msg", PTR)
+            ctx.emit(IRInstr("store", None, [exc_msg_v, bind_ptr]))
+        for st in hbody:
+            _lower_stmt(ctx, st)
+        if not ctx.terminated:
+            # Restore active exception state to what it was before this try.
+            prev_msg_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", prev_msg_v, [prev_msg_ptr]))
+            _store_global(ctx, "_runtime_exc_msg", prev_msg_v)
+            prev_type_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", prev_type_v, [prev_type_ptr]))
+            _store_global(ctx, "_runtime_exc_type", prev_type_v)
+            for fs in fin_body:
+                _lower_stmt(ctx, fs)
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    # No handler matched (or no except clauses at all — bare try/finally).
+    ctx.switch_to(check_blocks[n])
+    for fs in fin_body:
+        _lower_stmt(ctx, fs)
+    # Re-raise the unhandled exception.
+    reraise_msg = _load_global(ctx, "_runtime_exc_msg", PTR)
+    reraise_type = _load_global(ctx, "_runtime_exc_type", I64)
+    ctx.emit(IRInstr("call", None, ["_abi_raise", reraise_msg, reraise_type]))
+    # _abi_raise never returns; br to end_b satisfies the IR terminator requirement.
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(end_b)
 
 
 def lower_func(f: A.FuncDef, mctx: _ModuleCtx, *, visibility: str | None = None) -> IRFunc:

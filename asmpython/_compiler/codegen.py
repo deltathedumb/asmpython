@@ -1967,7 +1967,8 @@ class Codegen:
                 and expr.obj.name == "environ"
                 and expr.method == "get"
             ):
-                fn = stdlib.os.BINDINGS["getenv"]
+                _os_b: dict = self.imported_modules["os"]
+                fn = _os_b["getenv"]
                 self._cl_define(info, f"__ffi_arg_{id(fn)}_0", "int")
             # os.getcwd() / os.listdir(path) — scratch slots for inline helpers.
             if isinstance(expr.obj, A.Name) and expr.obj.name in self.imported_modules:
@@ -11467,7 +11468,9 @@ class Codegen:
             and e.obj.name == "environ"
             and e.method == "get"
         ):
-            self._gen_ffi_call(stdlib.os.BINDINGS["getenv"], e.args[:1], info)
+            _os_b: dict = self.imported_modules["os"]
+            _getenv_fn = _os_b["getenv"]
+            self._gen_ffi_call(_getenv_fn, e.args, info)
             end = self.fresh("environ_get_end")
             self.emitf("test rax, rax", f"jnz {end}")
             if len(e.args) > 1:
