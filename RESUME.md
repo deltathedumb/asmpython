@@ -1262,6 +1262,156 @@ independent `Parser.__init__` features added by each side — kept both)
 and `sema.py` (comment/style-only, no logic divergence) were resolved
 and merged cleanly; 454/455 tests still pass post-merge.
 
+**2026-06-25 through 2026-07-02 sessions — isinstance/type-pollution bug
+family, six more real fixes.** Continuing the gen1-self-compiling-
+`__main__.py` thread. Root cause discovered: **any `isinstance(x, (T1,
+T2))` (multi-type tuple form) crashes gen1** (SIGSEGV) regardless of
+whether it matches — single-type `isinstance(x, T)` is fine. Every
+multi-type isinstance across `sema.py`/`codegen.py`/`parser.py`/
+`program.py`/`ir_lower.py` was split into separate single-type checks
+(with explicit narrowing casts where the body needs type-specific
+fields, e.g. `_sw: A.While = s`) to work around it — this needs to stay
+the default going forward, not just a one-time cleanup.
+
+A second, related root bug: `isinstance(targets[0], str)` on a list
+element is **statically resolved by gen1 from the list's inferred
+element type** ("int" by default), not evaluated at runtime — silently
+always `False`. This broke `_parse_for_target`'s single-vs-multi-target
+detection (`var = ""` → `KeyError` in `_gen_for`); fixed (`b07b92c5`) by
+making `_parse_for_target` always return a list and switching every
+caller to `len(targets) == 1` instead.
+
+Also found and fixed, all the same "opaque/unannotated attribute
+defaults to int, breaking whatever gets called on it next" bug class:
+`stdlib.os.BINDINGS["getenv"]` read through a module-attribute chain
+evaluating to null (module attribute chains compile to `xor rax, rax`
+per `stdlib/__init__.py`'s own documented limitation) — fixed
+(`d74621fb`) via `self.imported_modules["os"]["getenv"]` instead; three
+`sema.py` sites using a bare `m.params`/`m.body` (opaque `A.FuncDef`)
+directly inside `enumerate()`/slicing/`len()`, segfaulting on any
+bundled stdlib class with methods — fixed with explicit `: list`
+casts (`8f796682`); four more instances of the same pattern in
+`sema.py`/`parser.py` — a class-name cast, a tuple-arity `len()`, a
+`set()` local, and a `Parser(...)` constructor call needing an
+explicit `: Parser` cast so `._check()`/`._eat()` resolve (`89fe9366`).
+Six codegen.py corruption points from stray edits (garbage strings
+replacing real function bodies) were also found and restored
+(`b07b92c5`).
+
+**2026-07-03/04 session — root-caused and fixed the actual driver.py
+parse crash blocking gen2; started the user-requested x86-64-backend
+migration for gen1 and found (then fixed) three more real, independent
+bugs before hitting the next blocker.**
+
+**Bug #11 — ROOT-CAUSED AND FIXED**: gen1 segfaulted specifically while
+parsing `driver.py` during the gen2 whole-program BFS, after 54+ other
+modules parsed cleanly. Bisected `driver.py` (initial suspects: CRLF
+line endings, then the file's one bytes literal, `b'\x89PNG\r\n\x1a\n'`)
+down to a single line, then to a minimal, fully standalone repro that
+reproduces even via a fresh gen0 build (a real miscompilation bug
+reachable from ordinary source, not specific to gen1's own self-compiled
+state): `x = b'\x89\x89'` alone segfaults; a single `\x89`, or two
+non-hex fallback escapes (`\z\q`), do not. Root cause: `parser.py`'s
+`_parse_primary` BYTES-literal branch did `for c in t.value` where
+`Token.value` is declared `object` (opaque) on the dataclass — sema
+can't see through the read, so the iteration used the wrong codegen
+path, reading heap garbage depending on the resulting string's memory
+layout (confirmed as a heisenbug: the same binary behaved differently
+run directly vs. under gdb). Fixed (`c9c6670a`) by binding `t.value` to
+an explicit `bval: str = t.value` local before iterating. Verified: the
+full, unmodified `driver.py` now parses cleanly standalone (gen0-built
+harness). Debug prints left in `sema.py`/`driver.py`/`program.py` from
+the investigation were removed as part of the same cleanup.
+
+Per user direction, next tried rebuilding gen1 via `--backend x86-64`
+(the custom backend, intended to replace nasm for 2.0) instead of
+legacy/nasm. This immediately hit a much bigger, separate gap: **`ir_
+lower.py` has no comprehension lowering at all** (no `A.Comprehension`/
+`A.DictComprehension` handling whatsoever) — flagged to the user rather
+than silently expanding scope; user chose to fix a second discovered
+blocker first (below), then return to comprehension lowering.
+
+**Bug #12 — three real bugs in `program.py`'s whole-program merge,
+found while diagnosing why `asmpython/__main__.py` failed whole-program
+with ~20 "undefined variable" errors for module-level constants
+(`ZIP_STORED`, `REGTYPE`, `BLOCKSIZE`, `_HEX_DIGITS`, etc.) even though
+every source file compiles cleanly standalone** — affects both backends
+equally, not just x86-64:
+
+1. `_free_names`'s `A.DictComprehension` branch assumed `extra_for_vars`/
+   `extra_for_targets`/`extra_for_iters`/`extra_for_conds` fields
+   mirroring `A.Comprehension` — but `DictComprehension` has no such
+   fields (only ever supports one `for` clause). An `AttributeError` on
+   any merged dict comprehension — what actually surfaced first
+   (`asmpython/__main__.py` itself has one, line 52).
+2. `_class_free_names` — the function `_materialize_value_imports`'s
+   `class_origin` mechanism depends on to auto-pull a module's own
+   top-level constants into scope for a merged class's methods — was a
+   stub that unconditionally `return set()`. Apparently a silent no-op
+   since it was written; implemented it for real (walk each non-
+   `@assembly_func` method body via `_free_names`, minus the method's
+   own params).
+3. The equivalent materialization never existed for plain top-level
+   *functions*, only classes — e.g. `zipfile.py`'s functions referencing
+   `ZIP_STORED` had no origin-tracking at all. Added `func_origin`
+   (mirrors `class_origin`) and `_func_free_names`, plus a resolution
+   pass over `entry.funcs` parallel to the pre-existing class loop.
+
+(Commit `654181b0`.) This fixed most, but not all, of the "undefined
+variable" errors — tracing individual cases with a temporary debug print
+showed `resolve("ZIP_STORED", ...)` returning `True` (successfully
+materialized and prepended to `entry.body`) yet the error still firing
+downstream. A fourth, deeper bug:
+
+**Bug #13 — `_check_block` had no per-statement error recovery, only
+per-block (`_try_check_block`).** `_check_block` runs a plain `while`
+loop calling `_check_stmt` per statement with no internal try/except;
+`_try_check_block` wraps the *entire* call in one try/except. In
+collect-errors mode (the CLI's default — `all_errors = not
+args.one_error`), a `SemaError` on any ONE statement aborts every
+statement after it in that block. The module-level body (`entry.body`)
+is a single block holding every merged/materialized global — so one
+early, unrelated failure meant every later global (including ones
+bug #12 had already correctly resolved and prepended) never got
+registered into `global_scope` at all. Fixed (`4886fa57`) by catching `SemaError`
+per-statement inside `_check_block` when `self.collect_errors` is set,
+logging + continuing to the next statement instead of letting the
+exception propagate out of the whole block. This eliminated the entire
+"undefined variable" cascade.
+
+**Current blocker (not yet fixed): "mixed list element types
+(instance:IRValue and str); mixed-type lists need a tagged-value
+runtime, not yet implemented."** ~86 occurrences, all traced to `ir.py`'s
+own `IRInstr.operands: list  # IRValue | int | float | str` — a field
+*intentionally* documented as heterogeneous, now reachable by
+whole-program sema for the first time now that bugs #12/#13 stopped
+masking it. This is a real, pre-existing gap (heterogeneous/union-typed
+lists aren't supported at all, only homogeneous ones), not a regression
+from this session — it was always going to surface once the merge/
+materialization bugs stopped hiding it. Two directions for next session:
+(a) implement real heterogeneous-list support (a tagged-value runtime,
+as the error names it) — large, general, benefits any future user
+program with a similar shape; (b) narrow the fix to `ir.py` specifically,
+changing `IRInstr.operands` to store everything as a uniform `IRValue`
+(synthesizing "immediate" IRValues for raw int/float/str operands
+instead of storing them bare) — smaller, more targeted, no language-
+level feature needed. Given `ir.py`/`ir_lower.py` are core to the user's
+stated 2.0 direction (x86-64 backend replacing nasm), and comprehension
+lowering (the original ask, still not started) depends on the same
+files, next session should decide (a) vs (b) with the user before
+proceeding, then implement comprehension lowering in `ir_lower.py`.
+
+Also landed this session, found along the way and unrelated to the
+above chain: `project.py`'s `ProjectConfig.from_dict` used `set(cls.__
+dataclass_fields__.keys())` and a dict-comprehension filter, both
+outside asmpython's own compilable subset (dataclass introspection and
+comprehensions over dict items aren't supported) — rewritten with an
+explicit known-fields set and per-field reads (`3f3253be`). `ir_lower.py`
+gained list/str slice lowering (`_abi_list_slice`/`_abi_str_slice`/
+`_abi_list_slice_assign`, added to `abi_shims.asm`) and try/finally
+handler-restore-on-return tracking (`548cdee3`), both pre-existing gaps
+unrelated to the bugs above, closed opportunistically this session.
+
 ## Other Notes
 
 - macOS Intel and RPi/Mac ARM64 are plan-steps 4 and 6-8 above, not
