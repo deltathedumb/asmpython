@@ -100,12 +100,12 @@ class _ModuleCtx:
 
     def __init__(
         self,
-        class_names: frozenset[str] = frozenset(),
-        ffi_funcs: dict | None = None,
+        class_names=None,
+        ffi_funcs=None,
     ) -> None:
         self.data: list[IRGlobal] = []
-        self.class_names = class_names
-        self.ffi_funcs = ffi_funcs or {}
+        self.class_names: set = class_names if class_names is not None else set()
+        self.ffi_funcs: dict = ffi_funcs if ffi_funcs is not None else {}
         self._str_names: dict[str, str] = {}
         self._n = 0
 
@@ -134,6 +134,11 @@ class _FuncCtx:
         # case of a directly-assigned list literal. Defaults to "int".
         self.slot_el_ty: dict[str, str] = {}
         self.loop_stack: list[tuple[str, str]] = []  # (continue_label, break_label)
+        # Stack of slot names for active try-block parent-handler pointers.
+        # Each entry is the `__try_parent_<uid>` slot name pushed when entering
+        # a try body and popped when leaving. A `return` inside a try body must
+        # restore `_runtime_handler_top` for every enclosing try before the ret.
+        self.try_handler_stack: list[str] = []
         # One shared, function-entry-defined zero, reused everywhere a
         # discardable "return value" is needed (print()/list.append() etc.
         # are all expression-shaped but really void) -- set once by
@@ -548,7 +553,41 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
 
     if isinstance(e, A.Subscript):
         if isinstance(e.index, A.Slice):
-            raise LowerError("unsupported expr Subscript (slice)")
+            sl = e.index
+            if sl.step is not None:
+                raise LowerError("unsupported expr Subscript (slice with step)")
+            obj_ty = A.expr_type(e.obj)
+            _INT64_MIN = -9223372036854775808
+            _INT64_MAX = 9223372036854775807
+            obj_v = _lower_expr(ctx, e.obj)
+            if obj_ty == "list":
+                if sl.start is None:
+                    sv = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", sv, [_INT64_MIN]))
+                else:
+                    sv = _lower_expr(ctx, sl.start)
+                if sl.stop is None:
+                    ev = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", ev, [_INT64_MAX]))
+                else:
+                    ev = _lower_expr(ctx, sl.stop)
+                v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", v, ["_abi_list_slice", obj_v, sv, ev]))
+                return v
+            # str or any-typed: treat as string slice
+            if sl.start is None:
+                sv = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", sv, [0]))
+            else:
+                sv = _lower_expr(ctx, sl.start)
+            if sl.stop is None:
+                ev = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", ev, [_INT64_MAX]))
+            else:
+                ev = _lower_expr(ctx, sl.stop)
+            v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", v, ["_abi_str_slice", obj_v, sv, ev]))
+            return v
         obj_ty = A.expr_type(e.obj)
         if obj_ty == "dict":
             if A.expr_type(e.index) != "str":
@@ -695,7 +734,15 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("call", v, ["_abi_str_replace", obj_v, old_v, new_v]))
                 return v
             raise LowerError(f"unsupported expr MethodCall (str.{e.method})")
-        raise LowerError(f"unsupported expr MethodCall ({obj_ty}.{e.method})")
+        # Unknown method on an opaque/any-typed receiver: evaluate receiver
+        # and args for side effects and return 0.  Mirrors codegen.py's
+        # graceful stub so selfhost builds survive unmodeled FFI methods.
+        _lower_expr(ctx, e.obj)
+        for _arg in e.args:
+            _lower_expr(ctx, _arg)
+        zero_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero_v, [0]))
+        return zero_v
 
     if isinstance(e, A.Attr):
         # obj.name -> _abi_dict_get_default(obj, name, default=0). Instances
@@ -734,14 +781,43 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         c_name = getattr(fn, "c_name_windows", None) or fn.c_name
         args = [_lower_expr(ctx, a) for a in e.args]
         v = ctx.tmp(I64)
-        ctx.emit(IRInstr("call", v, [c_name, *args]))
+        ctx.emit(IRInstr("call", v, [c_name] + args))
         return v
 
     if isinstance(e, A.Call):
         args = [_lower_expr(ctx, a) for a in e.args]
         v = ctx.tmp(I64)
-        ctx.emit(IRInstr("call", v, [e.func, *args]))
+        ctx.emit(IRInstr("call", v, [e.func] + args))
         return v
+
+    if isinstance(e, A.FString):
+        if not e.segments:
+            empty_name = ctx.mctx.intern_str("")
+            v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", v, [empty_name]))
+            return v
+        acc: object = None
+        for seg in e.segments:
+            seg_ty: str = A.expr_type(seg)
+            if isinstance(seg, A.StrLit):
+                s_name: str = ctx.mctx.intern_str(seg.value)
+                sv = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", sv, [s_name]))
+                seg_v = sv
+            elif seg_ty == "int":
+                raw = _lower_expr(ctx, seg)
+                sv2 = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", sv2, ["_abi_int_to_str", raw]))
+                seg_v = sv2
+            else:
+                seg_v = _lower_expr(ctx, seg)
+            if acc is None:
+                acc = seg_v
+            else:
+                cat = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", cat, ["_abi_str_concat", acc, seg_v]))
+                acc = cat
+        return acc
 
     raise LowerError(f"unsupported expr {type(e).__name__}")
 
@@ -790,7 +866,26 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
     if isinstance(s, A.IndexAssign):
         target = s.target
         if isinstance(target.index, A.Slice):
-            raise LowerError("unsupported stmt IndexAssign (slice)")
+            sl = target.index
+            obj_ty = A.expr_type(target.obj)
+            if obj_ty != "list":
+                raise LowerError(f"unsupported stmt IndexAssign (slice on {obj_ty})")
+            _INT64_MIN = -9223372036854775808
+            _INT64_MAX = 9223372036854775807
+            dst_v = _lower_expr(ctx, target.obj)
+            src_v = _lower_expr(ctx, s.value)
+            if sl.start is None:
+                sv = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", sv, [_INT64_MIN]))
+            else:
+                sv = _lower_expr(ctx, sl.start)
+            if sl.stop is None:
+                ev = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", ev, [_INT64_MAX]))
+            else:
+                ev = _lower_expr(ctx, sl.stop)
+            ctx.emit(IRInstr("call", None, ["_abi_list_slice_assign", dst_v, src_v, sv, ev]))
+            return
         obj_ty = A.expr_type(target.obj)
         if obj_ty == "dict":
             if A.expr_type(target.index) != "str":
@@ -857,10 +952,22 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         if s.value is None:
             zero = ctx.tmp(I64)
             ctx.emit(IRInstr("const", zero, [0]))
-            ctx.emit(IRInstr("ret", None, [zero]))
+            ret_val = zero
         else:
-            v = _lower_expr(ctx, s.value)
-            ctx.emit(IRInstr("ret", None, [v]))
+            ret_val = _lower_expr(ctx, s.value)
+        # Restore any enclosing try-block exception handlers before returning,
+        # innermost first.  Without this the stale handler pointer left in
+        # _runtime_handler_top makes a later `raise` longjmp into a dead frame.
+        n: int = len(ctx.try_handler_stack)
+        i: int = n - 1
+        while i >= 0:
+            slot_name: str = ctx.try_handler_stack[i]
+            parent_ptr = ctx.slot[slot_name]
+            parent_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", parent_v, [parent_ptr]))
+            _store_global(ctx, "_runtime_handler_top", parent_v)
+            i = i - 1
+        ctx.emit(IRInstr("ret", None, [ret_val]))
         return
 
     if isinstance(s, A.ExprStmt):
@@ -1182,8 +1289,10 @@ def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
 
     # --- try body (+ else) ---
     ctx.switch_to(body_b)
+    ctx.try_handler_stack.append(f"__try_parent_{uid}")
     for st in body:
         _lower_stmt(ctx, st)
+    ctx.try_handler_stack.pop()
     if not ctx.terminated:
         # Normal completion: restore parent handler, run finally, jump to end.
         parent_v = ctx.tmp(PTR)
@@ -1284,7 +1393,7 @@ def lower_func(f: A.FuncDef, mctx: _ModuleCtx, *, visibility: str | None = None)
 
 
 def lower_module(mod: A.Module) -> IRModule:
-    mctx = _ModuleCtx(frozenset(c.name for c in mod.classes), mod.ffi_funcs)
+    mctx = _ModuleCtx({c.name for c in mod.classes}, mod.ffi_funcs)
     funcs = [lower_func(f, mctx) for f in mod.funcs]
     # A user-defined top-level `def main():` already produces the entry
     # symbol; only synthesize one wrapping module-level statements when

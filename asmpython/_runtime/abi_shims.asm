@@ -47,6 +47,9 @@ extern _runtime_str_removeprefix
 extern _runtime_str_removesuffix
 extern _runtime_list_reverse
 extern _runtime_list_extend
+extern _runtime_list_slice
+extern _runtime_list_slice_assign
+extern _runtime_str_slice
 extern _runtime_setjmp
 extern _runtime_raise
 extern malloc
@@ -92,6 +95,10 @@ global _abi_str_removeprefix
 global _abi_str_removesuffix
 global _abi_list_reverse
 global _abi_list_extend
+global _abi_int_to_str
+global _abi_list_slice
+global _abi_list_slice_assign
+global _abi_str_slice
 
 ; asmpython/stdlib/hardware.py's _hw_* symbols, hosted-target bodies. These
 ; already use the standard Win64 ABI (see codegen.py's target_windows.py /
@@ -490,8 +497,10 @@ _con_ch:    resq 1
 _con_ansi1: resq 1
 _con_ansi2: resq 1
 _con_buf:   resb 32
+_abi_int_to_str_buf: resb 32
 
 section .rodata
+_abi_fmt_lld:    db "%lld", 0
 _con_fmt_clear:  db 27, "[2J", 27, "[H", 0
 _con_fmt_color:  db 27, "[%dm", 27, "[%dm", 0
 _con_fmt_cursor: db 27, "[%d;%dH", 0
@@ -643,3 +652,51 @@ _abi_raise:
     mov rax, rcx
     mov rbx, rdx
     jmp _runtime_raise
+
+; _abi_int_to_str(rcx=int64) -> rax = ptr to decimal string in static buf
+; Win64: sprintf(char *buf, const char *fmt, int64 val)
+;   rcx=buf, rdx=fmt, r8=val — move int to r8 first, then set rcx/rdx.
+_abi_int_to_str:
+    sub rsp, 40
+    mov r8, rcx
+    lea rcx, [_abi_int_to_str_buf]
+    lea rdx, [_abi_fmt_lld]
+    xor eax, eax
+    call sprintf
+    lea rax, [_abi_int_to_str_buf]
+    add rsp, 40
+    ret
+
+; _abi_list_slice(rcx=list_ptr, rdx=start, r8=stop) -> rax=new_list
+; Internal _runtime_list_slice: rax=src, rbx=start, rcx=stop
+_abi_list_slice:
+    sub rsp, 40
+    mov rax, rcx
+    mov rbx, rdx
+    mov rcx, r8
+    call _runtime_list_slice
+    add rsp, 40
+    ret
+
+; _abi_list_slice_assign(rcx=dst, rdx=src, r8=start, r9=stop) -> void
+; Internal _runtime_list_slice_assign: rax=dst, rbx=src, rcx=start, rdx=stop
+_abi_list_slice_assign:
+    sub rsp, 40
+    mov rax, rcx
+    mov rbx, rdx
+    mov rcx, r8
+    mov rdx, r9
+    call _runtime_list_slice_assign
+    add rsp, 40
+    ret
+
+; _abi_str_slice(rcx=str_ptr, rdx=start, r8=stop) -> rax=new_str
+; Internal _runtime_str_slice: rax=src, rbx=start, rcx=stop
+_abi_str_slice:
+    sub rsp, 40
+    mov rax, rcx
+    mov rbx, rdx
+    mov rcx, r8
+    call _runtime_str_slice
+    add rsp, 40
+    ret
