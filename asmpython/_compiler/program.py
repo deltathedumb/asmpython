@@ -409,27 +409,19 @@ def _free_names(node: object, out: set[str]) -> None:
         out |= inner - bound
         return
     if isinstance(node, A.DictComprehension):
+        # Unlike A.Comprehension, DictComprehension has no extra_for_*
+        # fields — it only supports a single `for` clause.
         _ndc: A.DictComprehension = node
         bound2: set[str] = set()
         if _ndc.var:
             bound2.add(_ndc.var)
         _flatten_targets(_ndc.targets, bound2)
-        for t in _ndc.extra_for_vars:
-            if t:
-                bound2.add(t)
-        for t in _ndc.extra_for_targets:
-            _flatten_targets(t, bound2)
         inner2: set[str] = set()
         _free_names(_ndc.key, inner2)
         _free_names(_ndc.value, inner2)
         _free_names(_ndc.iter, inner2)
         if _ndc.cond is not None:
             _free_names(_ndc.cond, inner2)
-        for ei in _ndc.extra_for_iters:
-            _free_names(ei, inner2)
-        for ec in _ndc.extra_for_conds:
-            if ec is not None:
-                _free_names(ec, inner2)
         out |= inner2 - bound2
         return
     if isinstance(node, A.BinOp):
@@ -604,7 +596,30 @@ def _class_free_names(cls) -> set[str]:
     depends on (see load_program's class-merge loop) -- e.g. GLRenderer3D's
     methods referencing a sibling module-level `glfns = gl_import()` that
     nothing ever explicitly `from module import glfns`s."""
-    return set()
+    out: set[str] = set()
+    methods: list = cls.methods
+    for m in methods:
+        if m.asm_body is not None:
+            continue  # raw-NASM body, nothing to scan
+        inner: set[str] = set()
+        _free_names(m.body, inner)
+        m_params: list = m.params
+        out |= inner - set(m_params)
+    return out
+
+
+def _func_free_names(f) -> set[str]:
+    """Every bare name a top-level function's body references, minus its own
+    params. Mirrors `_class_free_names` but for plain functions -- used to
+    auto-materialize module-level values a merged function depends on (see
+    `func_origin` in load_program), the function-level counterpart of the
+    class/method case documented on `_class_free_names`."""
+    if f.asm_body is not None:
+        return set()
+    inner: set[str] = set()
+    _free_names(f.body, inner)
+    f_params: list = f.params
+    return inner - set(f_params)
 
 
 def _resolve_relative(importer: Path, level: int, module: str, root: Path) -> Path | None:
@@ -1314,6 +1329,13 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
     # sibling `glfns = gl_import()`) even though nothing ever explicitly
     # `from module import glfns`s -- only `from module import GLRenderer3D`.
     class_origin: dict[str, str] = {}
+    # Same idea, but for plain top-level functions merged in below: a
+    # module's own function bodies referencing that module's own top-level
+    # constants (e.g. zipfile.py's functions reading `ZIP_STORED`) need the
+    # same auto-materialization, since nothing ever explicitly
+    # `from .zipfile import ZIP_STORED` just because `from .zipfile import
+    # some_func` merged the function.
+    func_origin: dict[str, str] = {}
 
     queue = _project_imports(entry, entry_path, root)
     while queue:
@@ -1341,6 +1363,7 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
                 if mod_is_stdlib:
                     f.is_stdlib = True
                 entry.funcs.append(f)
+                func_origin[f.name] = mod_path_str
         for c in mod.classes:
             if c.name not in class_names:
                 class_names.add(c.name)
@@ -1353,7 +1376,7 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
                 queue.append(sub)
 
     _merge_import_bindings(entry, parsed, discovery_order)
-    _materialize_value_imports(entry, parsed, discovery_order, root, class_origin)
+    _materialize_value_imports(entry, parsed, discovery_order, root, class_origin, func_origin)
     return entry
 
 
@@ -1523,6 +1546,7 @@ def _materialize_value_imports(
     discovery_order: list[str],
     root: Path,
     class_origin: dict[str, str] | None = None,
+    func_origin: dict[str, str] | None = None,
 ) -> None:
     """Pull every cross-module *value* import into the entry body as a global,
     transitively.
@@ -1668,6 +1692,26 @@ def _materialize_value_imports(
                 continue
             exports = _toplevel_value_assigns(mod)
             for nm in _class_free_names(cls):
+                if nm in exports:
+                    resolve(nm, mod_path_str, nm, set())
+
+    # Same as above, but for plain top-level FUNCTIONS merged in from other
+    # modules: a function's own body may reference that module's own
+    # top-level constants (e.g. zipfile.py's functions reading `ZIP_STORED`)
+    # even though nothing ever explicitly `from .zipfile import ZIP_STORED`
+    # -- only `from .zipfile import some_func` (which merges the function
+    # unconditionally, same as classes, but previously left its needed
+    # constants unmaterialized).
+    if func_origin:
+        for fn in entry.funcs:
+            mod_path_str = func_origin.get(fn.name)
+            if mod_path_str is None:
+                continue  # entry's own function, nothing to chase
+            mod = parsed.get(mod_path_str)
+            if mod is None:
+                continue
+            exports = _toplevel_value_assigns(mod)
+            for nm in _func_free_names(fn):
                 if nm in exports:
                     resolve(nm, mod_path_str, nm, set())
 
