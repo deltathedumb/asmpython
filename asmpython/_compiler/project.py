@@ -61,10 +61,40 @@ class ProjectConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> tuple["ProjectConfig", list[str]]:
-        fields_ = set(cls.__dataclass_fields__.keys())
-        unknown = sorted(set(data) - fields_)
-        filtered = {k: v for k, v in data.items() if k in fields_}
-        cfg = cls(**filtered)
+        known: set = set()
+        known.add("name")
+        known.add("entry")
+        known.add("output")
+        known.add("target")
+        known.add("output_type")
+        known.add("bundle_mode")
+        known.add("icon")
+        known.add("use_runtime_lib")
+        known.add("library_dirs")
+        known.add("packages")
+        unknown: list = sorted([k for k in data if k not in known])
+        name: str = data["name"] if "name" in data else "project"
+        entry: str = data["entry"] if "entry" in data else "main.py"
+        output: str = data["output"] if "output" in data else None
+        target: list = data["target"] if "target" in data else []
+        output_type: str = data["output_type"] if "output_type" in data else "executable"
+        bundle_mode: str = data["bundle_mode"] if "bundle_mode" in data else "onefile"
+        icon: str = data["icon"] if "icon" in data else None
+        use_runtime_lib: int = data["use_runtime_lib"] if "use_runtime_lib" in data else 0
+        library_dirs: list = data["library_dirs"] if "library_dirs" in data else ["libs"]
+        packages: list = data["packages"] if "packages" in data else []
+        cfg: ProjectConfig = ProjectConfig(
+            name=name,
+            entry=entry,
+            output=output,
+            target=target,
+            output_type=output_type,
+            bundle_mode=bundle_mode,
+            icon=icon,
+            use_runtime_lib=use_runtime_lib,
+            library_dirs=library_dirs,
+            packages=packages,
+        )
         cfg.validate()
         return cfg, unknown
 

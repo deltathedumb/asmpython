@@ -164,6 +164,11 @@ class _FuncCtx:
         self.declared_globals = declared_globals or set()
         self.module_body = module_body
         self.loop_stack: list[tuple[str, str]] = []  # (continue_label, break_label)
+        # Stack of slot names for active try-block parent-handler pointers.
+        # Each entry is the `__try_parent_<uid>` slot name pushed when entering
+        # a try body and popped when leaving. A `return` inside a try body must
+        # restore `_runtime_handler_top` for every enclosing try before the ret.
+        self.try_handler_stack: list[str] = []
         # One shared, function-entry-defined zero, reused everywhere a
         # discardable "return value" is needed (print()/list.append() etc.
         # are all expression-shaped but really void) -- set once by
@@ -2765,7 +2770,15 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(ir_type_for(A.expr_type(e)))
             ctx.emit(IRInstr("call", v, [sym, *args]))
             return v
-        raise LowerError(f"unsupported expr MethodCall ({obj_ty}.{e.method})")
+        # Unknown method on an opaque/any-typed receiver: evaluate receiver
+        # and args for side effects and return 0.  Mirrors codegen.py's
+        # graceful stub so selfhost builds survive unmodeled FFI methods.
+        _lower_expr(ctx, e.obj)
+        for _arg in e.args:
+            _lower_expr(ctx, _arg)
+        zero_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero_v, [0]))
+        return zero_v
 
     if isinstance(e, A.Attr):
         if (
@@ -2823,7 +2836,7 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         c_name = getattr(fn, "c_name_windows", None) or fn.c_name
         args = [_lower_expr(ctx, a) for a in e.args]
         v = ctx.tmp(I64)
-        ctx.emit(IRInstr("call", v, [c_name, *args]))
+        ctx.emit(IRInstr("call", v, [c_name] + args))
         return v
 
     if isinstance(e, A.Call):
@@ -2926,6 +2939,35 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         else:
             ctx.emit(IRInstr("call", v, [e.func, *args]))
         return v
+
+    if isinstance(e, A.FString):
+        if not e.segments:
+            empty_name = ctx.mctx.intern_str("")
+            v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", v, [empty_name]))
+            return v
+        acc: object = None
+        for seg in e.segments:
+            seg_ty: str = A.expr_type(seg)
+            if isinstance(seg, A.StrLit):
+                s_name: str = ctx.mctx.intern_str(seg.value)
+                sv = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", sv, [s_name]))
+                seg_v = sv
+            elif seg_ty == "int":
+                raw = _lower_expr(ctx, seg)
+                sv2 = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", sv2, ["_abi_int_to_str", raw]))
+                seg_v = sv2
+            else:
+                seg_v = _lower_expr(ctx, seg)
+            if acc is None:
+                acc = seg_v
+            else:
+                cat = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", cat, ["_abi_str_concat", acc, seg_v]))
+                acc = cat
+        return acc
 
     raise LowerError(f"unsupported expr {type(e).__name__}")
 
@@ -3063,10 +3105,22 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         if s.value is None:
             zero = ctx.tmp(I64)
             ctx.emit(IRInstr("const", zero, [0]))
-            ctx.emit(IRInstr("ret", None, [zero]))
+            ret_val = zero
         else:
-            v = _lower_expr(ctx, s.value)
-            ctx.emit(IRInstr("ret", None, [v]))
+            ret_val = _lower_expr(ctx, s.value)
+        # Restore any enclosing try-block exception handlers before returning,
+        # innermost first.  Without this the stale handler pointer left in
+        # _runtime_handler_top makes a later `raise` longjmp into a dead frame.
+        n: int = len(ctx.try_handler_stack)
+        i: int = n - 1
+        while i >= 0:
+            slot_name: str = ctx.try_handler_stack[i]
+            parent_ptr = ctx.slot[slot_name]
+            parent_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", parent_v, [parent_ptr]))
+            _store_global(ctx, "_runtime_handler_top", parent_v)
+            i = i - 1
+        ctx.emit(IRInstr("ret", None, [ret_val]))
         return
 
     if isinstance(s, A.ExprStmt):
@@ -3515,8 +3569,10 @@ def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
 
     # --- try body (+ else) ---
     ctx.switch_to(body_b)
+    ctx.try_handler_stack.append(f"__try_parent_{uid}")
     for st in body:
         _lower_stmt(ctx, st)
+    ctx.try_handler_stack.pop()
     if not ctx.terminated:
         # Normal completion: restore parent handler, run finally, jump to end.
         parent_v = ctx.tmp(PTR)

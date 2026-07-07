@@ -1173,8 +1173,8 @@ class Parser:
         failure (the string isn't actually a type expression) falls back to
         unconstrained `any`, matching the previous behaviour."""
         try:
-            sub = Parser(Lexer(src).tokenize())
-            return sub._parse_annot_union()
+            inner_p: Parser = Parser(Lexer(src).tokenize())
+            return inner_p._parse_annot_union()
         except Exception:
             return ("any", None)
 
@@ -2458,9 +2458,13 @@ class Parser:
         elif t.kind == "BYTES":
             # b"..." literal: expand to list[int] of character codes.
             self._eat()
+            # Explicit `: str` annotation: t.value reads as opaque "object"
+            # (Token.value's declared dataclass type), so an unannotated
+            # `for c in t.value` iterates via the wrong (opaque) protocol.
+            bval: str = t.value  # type: ignore
             byte_elems: list = [
                 A.IntLit(value=ord(c), pos=t.pos)
-                for c in t.value  # type: ignore
+                for c in bval
             ]
             atom = A.ListLit(elems=byte_elems, pos=t.pos, el_type="int")
         elif t.kind == "STRING":

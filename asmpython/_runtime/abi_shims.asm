@@ -143,6 +143,7 @@ global _abi_sort_pairs_int
 global _abi_chr
 global _abi_str_to_int
 global _abi_str_to_int_base
+global _abi_int_to_str
 
 ; asmpython/stdlib/hardware.py's _hw_* symbols, hosted-target bodies. These
 ; already use the standard Win64 ABI (see codegen.py's target_windows.py /
@@ -832,8 +833,10 @@ _con_ch:    resq 1
 _con_ansi1: resq 1
 _con_ansi2: resq 1
 _con_buf:   resb 32
+_abi_int_to_str_buf: resb 32
 
 section .rodata
+_abi_fmt_lld:    db "%lld", 0
 _con_fmt_clear:  db 27, "[2J", 27, "[H", 0
 _con_fmt_color:  db 27, "[%dm", 27, "[%dm", 0
 _con_fmt_cursor: db 27, "[%d;%dH", 0
@@ -985,4 +988,18 @@ _abi_raise:
     mov rax, rcx
     mov rbx, rdx
     jmp _runtime_raise
+
+; _abi_int_to_str(rcx=int64) -> rax = ptr to decimal string in static buf
+; Win64: sprintf(char *buf, const char *fmt, int64 val)
+;   rcx=buf, rdx=fmt, r8=val — move int to r8 first, then set rcx/rdx.
+_abi_int_to_str:
+    sub rsp, 40
+    mov r8, rcx
+    lea rcx, [_abi_int_to_str_buf]
+    lea rdx, [_abi_fmt_lld]
+    xor eax, eax
+    call sprintf
+    lea rax, [_abi_int_to_str_buf]
+    add rsp, 40
+    ret
 

@@ -2091,6 +2091,7 @@ class SemaAnalyzer:
         def scan_closurebinds(stmts: list, local_types: dict) -> None:
             for s in stmts:
                 if isinstance(s, A.ClosureBind):
+                    local_types[s.func_name] = ("closure", None, None)
                     fv_types: list = []
                     for fv in s.free_vars:
                         if fv in local_types:
@@ -3257,7 +3258,25 @@ class SemaAnalyzer:
         i = 0
         while i < len(stmts):
             s = stmts[i]
-            extra = self._check_stmt(s, scope)
+            if self.collect_errors:
+                # Per-statement recovery: a single bad statement (e.g. one
+                # merged module's stray top-level expression) must not abort
+                # every statement after it in the same block -- this block is
+                # frequently the WHOLE merged module body, so one early error
+                # would otherwise silently skip registering every later
+                # global (including ones _materialize_value_imports already
+                # successfully resolved), producing spurious "undefined
+                # variable" errors far from the real fault.
+                try:
+                    extra = self._check_stmt(s, scope)
+                except SemaError as e:
+                    _e_str: str = e
+                    print("SEMA_ERR:", _e_str)
+                    self._collected_errors.append(e)
+                    i += 1
+                    continue
+            else:
+                extra = self._check_stmt(s, scope)
             if extra:
                 stmts[i:i] = extra
                 i += len(extra)
