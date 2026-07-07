@@ -72,13 +72,54 @@ internal jump labels in RAW_ASM text", the two-value-kind SSA model) may
 still be relevant to `ir_lower.py`/the x86-64 backend; worth checking before
 assuming anything needs re-deriving from scratch.
 
-**Known gap flagged, not yet fixed**: `ir_lower.py` has no comprehension
-lowering at all (`A.Comprehension`/`A.DictComprehension` unhandled).
+**2026-07-07 merge note**: `origin/beta` and a local branch had independently
+extended `ir_lower.py`/`abi_shims.asm` (list/str slicing, an opaque-receiver
+MethodCall fallback, `_abi_int_to_str`) — merged, keeping the local branch's
+more advanced `_ModuleCtx`/`lower_module` (method lowering, globals,
+`classes_sig`, function-pointer-valued locals) and folding in origin's
+graceful "unknown method -> 0" fallback. **Comprehension lowering
+(`_lower_comprehension`/`_lower_dict_comprehension`) already exists and
+works** (verified: list comp with `if` filter + dict comp, single `for`
+clause only) — the "known gap" this file used to note here was stale by the
+time of the merge; the real remaining gap is multi-`for`-clause/tuple-unpack
+comprehensions, not comprehensions as a whole.
+
+**Bug found and fixed in the same session**: a program with both an explicit
+`def main():` *and* an unguarded top-level `main()` call (valid Python, just
+without the `if __name__ == "__main__":` idiom) executed `main()` **twice**
+under `--backend x86-64` only (legacy backend unaffected). Root cause: the
+linker's synthesized entry stub always does `call __asmpy_module_init;
+call main` whenever a `main` function exists (see `has_module_init` in
+`elf_linker.py`/`pe_linker.py`), but `_module_init_stmts` only stripped the
+*guarded* `if __name__ == "__main__":` form from module-init, not a bare
+`main()` call — so the unguarded call rode along into `__asmpy_module_init`
+*and* got called again by the stub. Fixed by also stripping a bare
+`main()`/`raise SystemExit(main())` top-level statement in
+`_module_init_stmts` (new `_is_bare_main_call` helper).
+
+**Smoke-tested `--backend x86-64` against the first 60 `tests/cases/*.py`**
+(not part of the automated suite, which only exercises the legacy backend):
+34/60 compile+link, 26 don't yet. Common causes: several builtins/methods
+just plain unimplemented in `ir_lower.py` (`list.sort`, `round()`, and
+others not yet triaged), and a handful of libm symbols missing from the
+linkers' symbol→DLL/SO tables (`_DLL_FOR_SYMBOL` in `pe_linker.py` /
+`_SO_FOR_SYMBOL` in `elf_linker.py`) — **verify against the real DLL/libc
+before adding an entry** (`round`/`trunc` are C99 and genuinely **not**
+exported by classic `msvcrt.dll`, confirmed via `ctypes.WinDLL("msvcrt.dll")`
+— don't add them there, they need a real codegen implementation instead, or
+UCRT-specific handling like `__acrt_iob_func`'s stub). Added `abs`/`labs`
+(confirmed real exports on both msvcrt.dll and libc.so.6) as one such fix
+this session. **Next resume point for backend parity**: triage the other 25
+failures from this smoke test the same way (some are one-symbol-table-entry
+fixes, some are real missing `ir_lower.py` codegen work) before assuming
+comprehensions specifically need more attention — they don't, per above.
 
 **Next step on resume**: reconcile this file's plan-step 1 with the actual
-current architecture (this section is that reconciliation); pick up
-comprehension lowering in `ir_lower.py`, then continue closing the gap to
-full parity with `codegen.py` under `--backend x86-64`.
+current architecture (this section is that reconciliation); triage the
+25 remaining backend-parity smoke-test failures noted above (one symbol
+table fix at a time / one missing `ir_lower.py` codegen case at a time),
+continuing to close the gap to full parity with `codegen.py` under
+`--backend x86-64`.
 
 ## Selfhost Status (plan-step 11)
 
@@ -216,3 +257,13 @@ rewritten: `abc`, `argparse`, `array`, `base64`, `binascii`, `collections`,
   `--additional-compiler`/`pyinasmpy` are still wanted — they'd need
   re-porting onto the current `ir_lower.py`/`_backends` architecture, not a
   straight merge.
+- 2026-07-07: found the local working tree (a *different*, separate local
+  session, not `backup-local-2026-07-06` above) had ~4850 uncommitted lines
+  across 19 files that had regressed the 454/455 test suite to 432/455.
+  Root-caused and fixed 6 sema.py bugs restoring 455/455 (including the
+  long-standing pre-existing failure — `_resolve_scalar_annot` crashing on
+  3+-level nested list annotations, now fixed too), committed, then merged
+  `origin/beta` (2 real content conflicts in `ir_lower.py`/`abi_shims.asm`,
+  resolved as described above). Full details in git log for commits
+  `05c461b8`/`c12f36e9`/nearby. Local `beta` is now 2 commits ahead of
+  `origin/beta` — not yet pushed.

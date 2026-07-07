@@ -3869,6 +3869,29 @@ def _is_main_guard_test(expr) -> bool:
     )
 
 
+def _is_bare_main_call(st) -> bool:
+    """A top-level statement that directly invokes `main()`, outside any
+    `if __name__ == "__main__":` guard -- e.g. a bare `main()` line, or
+    `raise SystemExit(main())` written unguarded at module level. The
+    linker's synthesized entry stub already calls `__asmpy_module_init`
+    (whatever this returns) followed unconditionally by `main` whenever an
+    explicit `main` function exists (see `has_module_init` in
+    elf_linker.py/pe_linker.py), so replaying either of these shapes here
+    would call `main()` a second time."""
+    call = None
+    if isinstance(st, A.ExprStmt) and isinstance(st.expr, A.Call):
+        call = st.expr
+    elif (
+        isinstance(st, A.Raise)
+        and isinstance(st.value, A.Call)
+        and st.value.func == "SystemExit"
+        and len(st.value.args) == 1
+        and isinstance(st.value.args[0], A.Call)
+    ):
+        call = st.value.args[0]
+    return call is not None and call.func == "main" and not call.args
+
+
 def _module_init_stmts(mod: A.Module) -> list:
     """Top-level statements that should run before an explicit native main().
 
@@ -3876,11 +3899,15 @@ def _module_init_stmts(mod: A.Module) -> list:
     The built-in x86-64 backend uses the real `main` symbol as the process
     entry when one exists, so replaying that guard at startup would call main()
     twice. Keep every other top-level statement (global initializers/import
-    materialization) and drop only the main-guard wrapper itself.
+    materialization) and drop only the main-guard wrapper itself -- and, for
+    the equally valid unguarded style, a bare top-level call to `main()`
+    itself (see `_is_bare_main_call`).
     """
     out: list = []
     for st in mod.body:
         if isinstance(st, A.If) and _is_main_guard_test(st.test):
+            continue
+        if _is_bare_main_call(st):
             continue
         out.append(st)
     return out

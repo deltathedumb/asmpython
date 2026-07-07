@@ -52,6 +52,7 @@ for _name in (
     "fread", "fseek", "ftell",
     "exit", "__iob_func", "memset", "memcpy", "fmod", "pow",
     "fabs", "frexp", "ldexp", "log", "modf", "rand", "sqrt",
+    "abs", "labs",
 ):
     _DLL_FOR_SYMBOL[_name] = "msvcrt.dll"
 

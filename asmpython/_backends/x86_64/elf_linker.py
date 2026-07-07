@@ -67,6 +67,7 @@ for _name in (
     "atof", "strtod", "fgets", "fopen", "fgetc", "fclose", "fflush", "access",
     "fread", "fseek", "ftell",
     "exit", "memset", "memcpy", "rand", "modf",
+    "abs", "labs",
 ):
     _SO_FOR_SYMBOL[_name] = "libc.so.6"
 for _name in ("fmod", "pow", "fabs", "frexp", "ldexp", "log", "sqrt"):
