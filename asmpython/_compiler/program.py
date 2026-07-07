@@ -1408,6 +1408,18 @@ def _merge_import_bindings(
     """
     seen_keys: set[str] = set()
 
+    def tuple_target_names(stmt) -> list[str] | None:
+        if not isinstance(stmt, A.TupleAssign):
+            return None
+        if len(stmt.values) != 1:
+            return None
+        out: list[str] = []
+        for t in stmt.targets:
+            if not isinstance(t, A.Name):
+                return None
+            out.append(t.name)
+        return out
+
     def key(stmt) -> str:
         if isinstance(stmt, A.Import):
             return "import:" + stmt.module
@@ -1447,6 +1459,11 @@ def _merge_import_bindings(
     for s in entry.body:
         if isinstance(s, A.Assign) and isinstance(s.target, str):
             available.add(s.target)
+        elif isinstance(s, A.TupleAssign):
+            names = tuple_target_names(s)
+            if names is not None:
+                for name in names:
+                    available.add(name)
     for f in entry.funcs:
         available.add(f.name)
     for c in entry.classes:
@@ -1499,6 +1516,20 @@ def _merge_import_bindings(
                 if not free <= available:
                     continue
                 available.add(stmt.target)
+                extra.append(stmt)
+            elif isinstance(stmt, A.TupleAssign):
+                names = tuple_target_names(stmt)
+                if names is None:
+                    continue
+                if any(name in value_import_targets or name in available for name in names):
+                    continue
+                free: set = set()
+                for value in stmt.values:
+                    _free_names(value, free)
+                if not free <= available:
+                    continue
+                for name in names:
+                    available.add(name)
                 extra.append(stmt)
             elif isinstance(stmt, A.If):
                 # Platform-conditional top-level constants (e.g. signal.py's

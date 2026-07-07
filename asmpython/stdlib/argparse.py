@@ -482,7 +482,7 @@ class ArgumentParser:
         print(self.prog + ": error: " + message)
         sys.exit(2)
 
-    def parse_args(self, argv: list[str]) -> Namespace:
+    def parse_args(self, argv: list[str] = None) -> Namespace:
         # `argv=None` (CPython's default) -> the real command-line args,
         # excluding the program name.
         if argv is None:
@@ -491,11 +491,22 @@ class ArgumentParser:
         self._parse_into(argv, ns)
         return ns
 
-    def _parse_into(self, argv: list[str], ns: Namespace) -> None:
+    def parse_known_args(self, argv: list[str] = None):
+        if argv is None:
+            argv = sys.argv[1:]
+        ns = Namespace()
+        extras: list[str] = []
+        self._parse_into(argv, ns, 1, extras)
+        return ns, extras
+
+    def _parse_into(self, argv: list[str], ns: Namespace,
+                    allow_unknown: int = 0, extras: list[str] = None) -> None:
         # Does the real work of parse_args(), but fills in an EXISTING
         # Namespace instead of creating its own — see the module docstring
         # on add_subparsers() for why a sub-parser shares its parent's
         # Namespace rather than returning an independent one.
+        if extras is None:
+            extras = []
         for a in self.specs:
             if a.action == "store_true" or a.action == "count":
                 setattr(ns, a.dest, 0)
@@ -550,6 +561,14 @@ class ArgumentParser:
                         break
                     j = j + 1
                 if matched_i < 0:
+                    if allow_unknown == 1:
+                        extras.append(tok)
+                        if has_inline == 0 and i + 1 < n and argv[i + 1].startswith("-") == 0:
+                            extras.append(argv[i + 1])
+                            i = i + 2
+                        else:
+                            i = i + 1
+                        continue
                     self.error("unrecognized argument: " + tok)
                 matched = self.specs[matched_i]
                 if matched.action == "store_true":
@@ -600,6 +619,10 @@ class ArgumentParser:
                 sub._parse_into(argv[i + 1:], ns)
                 break
             else:
+                if allow_unknown == 1:
+                    extras.append(tok)
+                    i = i + 1
+                    continue
                 self.error("unrecognized argument: " + tok)
             i = i + 1
 

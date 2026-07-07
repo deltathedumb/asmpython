@@ -15,10 +15,23 @@ default rel
 extern _runtime_dict_get_default
 extern _runtime_dict_set
 extern _runtime_dict_contains
+extern _runtime_dict_keys
+extern _runtime_dict_update
 extern _runtime_str_concat
+extern _runtime_str_eq
+extern _runtime_str_cmp
+extern _runtime_int_to_base
+extern _runtime_fmt_elem
+extern _runtime_list_repr
+extern _runtime_dict_repr
+extern _runtime_set_repr
+extern _runtime_str_char_at
+extern _runtime_str_slice
 extern _runtime_zalloc
 extern _runtime_list_append
 extern _runtime_list_pop
+extern _runtime_list_slice
+extern _runtime_list_slice_assign
 extern _runtime_str_upper
 extern _runtime_str_lower
 extern _runtime_str_strip
@@ -26,6 +39,7 @@ extern _runtime_str_isdigit
 extern _runtime_str_index_of
 extern _runtime_str_replace
 extern _runtime_str_split
+extern _runtime_str_rsplit
 extern _runtime_str_join
 extern _runtime_str_zfill
 extern _runtime_str_starts_with
@@ -39,6 +53,9 @@ extern _runtime_str_isupper
 extern _runtime_str_isspace
 extern _runtime_str_lstrip
 extern _runtime_str_rstrip
+extern _runtime_str_ljust
+extern _runtime_str_rjust
+extern _runtime_str_center
 extern _runtime_str_swapcase
 extern _runtime_str_title
 extern _runtime_str_splitlines
@@ -47,23 +64,45 @@ extern _runtime_str_removeprefix
 extern _runtime_str_removesuffix
 extern _runtime_list_reverse
 extern _runtime_list_extend
+extern _runtime_list_insert
+extern _runtime_sort_str
+extern _runtime_sort_int
+extern _runtime_sort_items
+extern _runtime_sort_pairs_str
+extern _runtime_sort_pairs_int
+extern _runtime_chr
 extern _runtime_setjmp
 extern _runtime_raise
 extern malloc
 extern printf
 extern sprintf
 extern putchar
+extern strtoll
 
 global _abi_dict_get_default
 global _abi_setjmp
 global _abi_raise
 global _abi_dict_set
 global _abi_dict_contains
+global _abi_dict_keys
+global _abi_dict_update
 global _abi_str_concat
+global _abi_str_rsplit
+global _abi_int_to_base
+global _abi_fmt_elem
+global _abi_list_repr
+global _abi_dict_repr
+global _abi_set_repr
+global _abi_str_char_at
+global _abi_str_slice
 global _abi_new_instance
 global _abi_new_list
 global _abi_list_append
 global _abi_list_pop
+global _abi_list_slice
+global _abi_list_slice_assign
+global _abi_str_eq
+global _abi_str_cmp
 global _abi_str_upper
 global _abi_str_lower
 global _abi_str_strip
@@ -84,6 +123,9 @@ global _abi_str_isupper
 global _abi_str_isspace
 global _abi_str_lstrip
 global _abi_str_rstrip
+global _abi_str_ljust
+global _abi_str_rjust
+global _abi_str_center
 global _abi_str_swapcase
 global _abi_str_title
 global _abi_str_splitlines
@@ -92,6 +134,15 @@ global _abi_str_removeprefix
 global _abi_str_removesuffix
 global _abi_list_reverse
 global _abi_list_extend
+global _abi_list_insert
+global _abi_sort_str
+global _abi_sort_int
+global _abi_sort_items
+global _abi_sort_pairs_str
+global _abi_sort_pairs_int
+global _abi_chr
+global _abi_str_to_int
+global _abi_str_to_int_base
 
 ; asmpython/stdlib/hardware.py's _hw_* symbols, hosted-target bodies. These
 ; already use the standard Win64 ABI (see codegen.py's target_windows.py /
@@ -117,6 +168,26 @@ global _hw_console_get_row, _hw_console_get_col
 
 section .text
 
+%macro WIN64_RUNTIME_ENTER 0
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+%endmacro
+
+%macro WIN64_RUNTIME_LEAVE 0
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+%endmacro
+
 ; rax = dict_get_default(dict=rcx, key=rdx, default=r8)
 ;
 ; Each shim below uses RBX as scratch (the underlying _runtime_* helper's
@@ -131,40 +202,123 @@ section .text
 ; (entry rsp % 16 == 8, the standard post-`call` invariant; one push
 ; lands on 16-aligned before this shim's own `call`).
 _abi_dict_get_default:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     mov rcx, r8
     call _runtime_dict_get_default
-    pop rbx
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; dict_set(dict=rcx, key=rdx, value=r8) -> void (rax undefined)
 _abi_dict_set:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     mov rcx, r8
     call _runtime_dict_set
-    pop rbx
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; rax = dict_contains(dict=rcx, key=rdx)
 _abi_dict_contains:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     call _runtime_dict_contains
-    pop rbx
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = dict_keys(dict=rcx)
+_abi_dict_keys:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    call _runtime_dict_keys
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; dict_update(dst=rcx, src=rdx) -> void
+_abi_dict_update:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_dict_update
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; rax = str_concat(left=rcx, right=rdx)
 _abi_str_concat:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     call _runtime_str_concat
-    pop rbx
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = int_to_base(n=rcx, base=rdx, prefix=r8)
+_abi_int_to_base:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    mov rcx, r8
+    call _runtime_int_to_base
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = fmt_elem(value=rcx, kind=rdx)
+_abi_fmt_elem:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_fmt_elem
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = list_repr(list=rcx, elem_kind=rdx)
+_abi_list_repr:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_list_repr
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = dict_repr(dict=rcx, key_kind=rdx, value_kind=r8)
+_abi_dict_repr:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    mov rcx, r8
+    call _runtime_dict_repr
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = set_repr(set=rcx, elem_kind=rdx)
+_abi_set_repr:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_set_repr
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = str_char_at(str=rcx, index=rdx)
+_abi_str_char_at:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_str_char_at
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = str_slice(str=rcx, start=rdx, stop=r8)
+_abi_str_slice:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    mov rcx, r8
+    call _runtime_str_slice
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; rax = new empty instance dict (no args). Mirrors the inline sequence
@@ -176,7 +330,7 @@ _abi_str_concat:
 ; RBX survives the call, since this body repeatedly reuses RBX as
 ; _runtime_zalloc's size argument.
 _abi_new_instance:
-    push rbx
+    WIN64_RUNTIME_ENTER
     sub rsp, 48
     mov rcx, 40                  ; DICT_HEADER
     call malloc
@@ -194,7 +348,7 @@ _abi_new_instance:
     mov [rcx+32], rax            ; DICT_ORDER_OFF
     mov rax, rcx
     add rsp, 48
-    pop rbx
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; rax = new list with initial capacity cap=rcx (elements; clamped to >=1
@@ -202,7 +356,7 @@ _abi_new_instance:
 ; 24 bytes (cap@0, len@8, buf@16) vs DICT_HEADER's 40, and there's only
 ; one zalloc (the element buffer) instead of two.
 _abi_new_list:
-    push rbx
+    WIN64_RUNTIME_ENTER
     sub rsp, 48
     mov rbx, rcx
     cmp rbx, 1
@@ -222,55 +376,173 @@ _abi_new_list:
     mov [rcx+16], rax            ; LIST_BUF_OFF
     mov rax, rcx
     add rsp, 48
-    pop rbx
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = strtoll(str=rcx, NULL, 10)
+_abi_str_to_int:
+    sub rsp, 40
+    xor rdx, rdx
+    mov r8, 10
+    call strtoll
+    add rsp, 40
+    ret
+
+; rax = strtoll(str=rcx, NULL, base=rdx)
+_abi_str_to_int_base:
+    sub rsp, 40
+    xor r8d, r8d
+    mov r8, rdx
+    xor rdx, rdx
+    call strtoll
+    add rsp, 40
+    ret
+
+; rax = chr(n=rcx)
+_abi_chr:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    call _runtime_chr
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; sort_str(list=rcx) -> void
+_abi_sort_str:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    call _runtime_sort_str
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; sort_int(list=rcx) -> void
+_abi_sort_int:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    call _runtime_sort_int
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; sort_items(list=rcx) -> void
+_abi_sort_items:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    call _runtime_sort_items
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; sort_pairs_str(elems=rcx, keys=rdx) -> void
+_abi_sort_pairs_str:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_sort_pairs_str
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; sort_pairs_int(elems=rcx, keys=rdx) -> void
+_abi_sort_pairs_int:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_sort_pairs_int
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; list_append(list=rcx, value=rdx) -> void
 _abi_list_append:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     call _runtime_list_append
-    pop rbx
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; rax = list_pop(list=rcx) -- pops and returns the last element. No
 ; underflow check (matches codegen.py's own list.pop() -- an empty-list
 ; pop reads/decrements garbage, same pre-existing behavior, not new here).
 _abi_list_pop:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_list_pop
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = list_slice(src=rcx, start=rdx, stop=r8)
+_abi_list_slice:
+    WIN64_RUNTIME_ENTER
+    mov r10, rdx
+    mov r11, r8
+    mov rax, rcx
+    mov rbx, r10
+    mov rcx, r11
+    call _runtime_list_slice
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; list_slice_assign(dst=rcx, start=rdx, stop=r8, src=r9) -> void
+_abi_list_slice_assign:
+    WIN64_RUNTIME_ENTER
+    mov r10, rdx
+    mov r11, r8
+    mov rax, rcx
+    mov rbx, r9
+    mov rcx, r10
+    mov rdx, r11
+    call _runtime_list_slice_assign
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; ---- str methods: one-arg (self only) helpers, rax=self -> rax=result.
+_abi_str_eq:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_str_eq
+    WIN64_RUNTIME_LEAVE
+    ret
+_abi_str_cmp:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_str_cmp
+    WIN64_RUNTIME_LEAVE
+    ret
 _abi_str_upper:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_upper
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_lower:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_lower
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_strip:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_strip
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_isdigit:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_isdigit
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; ---- str methods: two-arg (self, arg2) helpers, rax=self/rbx=arg2 ->
 ; rax=result. RBX saved/restored same as every other 2-arg shim above.
 _abi_str_index_of:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     call _runtime_str_index_of
-    pop rbx
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_split:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     mov rcx, 0                    ; maxsplit=0 is _runtime_str_split's own
@@ -281,133 +553,203 @@ _abi_str_split:
                                    ; (confirmed via a live repro: -1 zeroed
                                    ; the result's length and split nothing).
     call _runtime_str_split
-    pop rbx
+    WIN64_RUNTIME_LEAVE
+    ret
+_abi_str_rsplit:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    mov rcx, 1
+    call _runtime_str_rsplit
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_join:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx                  ; self (the separator string)
     mov rbx, rdx                  ; the list to join
     call _runtime_str_join
-    pop rbx
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_zfill:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     call _runtime_str_zfill
-    pop rbx
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_starts_with:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     call _runtime_str_starts_with
-    pop rbx
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_ends_with:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     call _runtime_str_ends_with
-    pop rbx
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_count:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     call _runtime_str_count
-    pop rbx
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; rax = str_replace(self=rcx, old=rdx, new=r8) -> result
 _abi_str_replace:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     mov rcx, r8
     call _runtime_str_replace
-    pop rbx
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; ---- more str methods: one-arg (self only), rax=self -> rax=result.
 _abi_str_capitalize:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_capitalize
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_isalpha:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_isalpha
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_isalnum:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_isalnum
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_islower:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_islower
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_isupper:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_isupper
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_isspace:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_isspace
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_lstrip:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_lstrip
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_rstrip:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_rstrip
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_swapcase:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_swapcase
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_title:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_title
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_splitlines:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_splitlines
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_split_ws:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_str_split_ws
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; ---- more str methods: two-arg (self, arg2), rax=self/rbx=arg2 -> rax=result.
 _abi_str_removeprefix:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     call _runtime_str_removeprefix
-    pop rbx
+    WIN64_RUNTIME_LEAVE
     ret
 _abi_str_removesuffix:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     call _runtime_str_removesuffix
-    pop rbx
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; str padding: self=rcx, width=rdx, fillstr=r8. Runtime wants
+; rax=self, rbx=width, rcx=first byte of fillstr.
+_abi_str_ljust:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    movzx rcx, byte [r8]
+    call _runtime_str_ljust
+    WIN64_RUNTIME_LEAVE
+    ret
+_abi_str_rjust:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    movzx rcx, byte [r8]
+    call _runtime_str_rjust
+    WIN64_RUNTIME_LEAVE
+    ret
+_abi_str_center:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    movzx rcx, byte [r8]
+    call _runtime_str_center
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; ---- list methods.
 ; rax = list_reverse(list=rcx) -- in place, also returns the list ptr.
 _abi_list_reverse:
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     call _runtime_list_reverse
+    WIN64_RUNTIME_LEAVE
     ret
 ; list_extend(list=rcx, other=rdx) -> void
 _abi_list_extend:
-    push rbx
+    WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     call _runtime_list_extend
-    pop rbx
+    WIN64_RUNTIME_LEAVE
+    ret
+; list_insert(list=rcx, index=rdx, value=r8) -> void
+_abi_list_insert:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    mov rcx, r8
+    call _runtime_list_insert
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; ---- asmlib.hardware: ring-0-only ops, stubbed (unavailable to ring-3
@@ -643,3 +985,4 @@ _abi_raise:
     mov rax, rcx
     mov rbx, rdx
     jmp _runtime_raise
+

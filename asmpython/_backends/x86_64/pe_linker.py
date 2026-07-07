@@ -48,7 +48,8 @@ for _name in (
     "malloc", "realloc", "free", "calloc",
     "printf", "sprintf", "putchar", "puts", "fputs", "fputc",
     "strlen", "strcmp", "strstr", "_strdup", "_atoi64",
-    "atof", "strtod", "fgets", "fopen", "fgetc", "fclose",
+    "atof", "strtod", "fgets", "fopen", "fgetc", "fclose", "fflush",
+    "fread", "fseek", "ftell",
     "exit", "__iob_func", "memset", "memcpy", "fmod", "pow",
     "fabs", "frexp", "ldexp", "log", "modf", "rand", "sqrt",
 ):
@@ -214,8 +215,10 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
     # shl r10,5 ; add rax,r10 ; add rsp,40 ; ret
     acrt_iob_stub_len = 4 + 3 + 5 + 4 + 3 + 4 + 1
     entry_stub_off = acrt_iob_stub_off + (acrt_iob_stub_len if needs_acrt_iob_stub else 0)
-    # sub rsp,40 ; call rel32(main) ; mov ecx,eax ; call rel32(ExitProcess thunk) ; ud2
-    entry_stub_len = 4 + 5 + 2 + 5 + 2
+    has_module_init = "__asmpy_module_init" in global_syms
+    # sub rsp,40 ; [call rel32(module_init)] ; call rel32(main) ; mov ecx,eax ;
+    # call rel32(ExitProcess thunk) ; ud2
+    entry_stub_len = 4 + (5 if has_module_init else 0) + 5 + 2 + 5 + 2
     text_total_len = entry_stub_off + entry_stub_len
 
     # ── 5. Decide PE section RVAs (one page each, in this fixed order). ──
@@ -248,6 +251,33 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
         if name == _ACRT_IOB_FUNC_STUB_SYM and needs_acrt_iob_stub:
             return IMAGE_BASE + rva_text + acrt_iob_stub_off
         raise LinkError(f"unresolved symbol {name!r}")
+
+    def resolve_local_section(oi: int, name: str) -> int:
+        """Final absolute address of one input object's own section base.
+
+        COFF REL32 relocations against local NASM labels inside data sections
+        are often emitted as relocations against the section symbol itself
+        (e.g. `.rdata`) plus an addend already encoded in the instruction's
+        disp32. Those must resolve to *this object's* merged section base,
+        not whichever same-named section symbol happened to win global name
+        resolution first.
+        """
+        bucket = _BUCKET_FOR_SECTION.get(name)
+        if bucket is None:
+            raise LinkError(f"unhandled local section relocation target {name!r}")
+        key = (oi, name)
+        if key not in sect_base:
+            raise LinkError(f"object {oi} has no section {name!r} for local relocation")
+        off = sect_base[key]
+        if bucket == "text":
+            return IMAGE_BASE + rva_text + off
+        if bucket == "rdata":
+            return IMAGE_BASE + rva_data + rdata_base_in_section + off
+        if bucket == "data":
+            return IMAGE_BASE + rva_data + data_base_in_section + off
+        if bucket == "bss":
+            return IMAGE_BASE + rva_bss + off
+        raise LinkError(f"unknown section bucket {bucket!r} for {name!r}")
 
     # rva_bss assigned after .idata is sized (placed last); referenced by
     # `resolve` via closure, fine since resolve() is only called below.
@@ -352,10 +382,14 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
         )
         text[acrt_iob_stub_off:acrt_iob_stub_off + acrt_iob_stub_len] = bytes(iob)
 
+    init_addr = resolve("__asmpy_module_init") if has_module_init else 0
     main_addr = resolve(entry_symbol)
     exitprocess_addr = resolve("ExitProcess")
     stub = bytearray()
     stub += bytes([0x48, 0x83, 0xEC, 0x28])             # sub rsp, 40
+    if has_module_init:
+        call_init_disp_pos = len(stub) + 1
+        stub += bytes([0xE8, 0, 0, 0, 0])                # call rel32 module init
     call1_disp_pos = len(stub) + 1
     stub += bytes([0xE8, 0, 0, 0, 0])                    # call rel32 main
     stub += bytes([0x89, 0xC1])                          # mov ecx, eax
@@ -364,6 +398,11 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
     stub += bytes([0x0F, 0x0B])                          # ud2 (unreachable)
     assert len(stub) == entry_stub_len
     stub_base_addr = IMAGE_BASE + rva_text + entry_stub_off
+    if has_module_init:
+        struct.pack_into(
+            "<i", stub, call_init_disp_pos,
+            init_addr - (stub_base_addr + call_init_disp_pos + 4),
+        )
     struct.pack_into("<i", stub, call1_disp_pos, main_addr - (stub_base_addr + call1_disp_pos + 4))
     struct.pack_into(
         "<i", stub, call2_disp_pos,
@@ -381,8 +420,12 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
                     raise LinkError(f"unsupported relocation type {r.rtype} for {r.symbol!r}")
                 patch_off = base + r.offset
                 patch_addr = IMAGE_BASE + rva_text + patch_off
-                target_addr = resolve(r.symbol)
-                rel = target_addr - (patch_addr + 4)
+                addend = struct.unpack_from("<i", text, patch_off)[0]
+                if r.symbol in _BUCKET_FOR_SECTION:
+                    target_addr = resolve_local_section(oi, r.symbol)
+                else:
+                    target_addr = resolve(r.symbol)
+                rel = (target_addr + addend) - (patch_addr + 4)
                 struct.pack_into("<i", text, patch_off, rel)
 
     # ── 9. Assemble the PE file. ──

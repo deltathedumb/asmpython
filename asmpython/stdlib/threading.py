@@ -82,18 +82,29 @@ class Thread:
     """A thread of execution backed by CreateThread / pthread_create."""
 
     def __init__(self, target: int = 0, name: str = "",
-                 args: list = [], daemon: int = 0) -> None:
+                 args = None, kwargs = None, daemon: int = 0) -> None:
         self.target: int = target
+        self.target_self: int = 0
         self.name: str = name
-        self.args: list = args
+        self.args: list = [] if args is None else args
+        self.kwargs: dict = {} if kwargs is None else kwargs
         self.daemon: int = daemon
+        self._argc: int = 0
+        self._arg0: int = 0
+        self._arg1: int = 0
+        self._arg2: int = 0
+        self._arg3: int = 0
+        self._arg4: int = 0
+        self._arg5: int = 0
+        self._arg6: int = 0
+        self._arg7: int = 0
         self._handle: str = ""
         self._alive: int = 0
 
     def start(self) -> None:
         """Spawn a new OS thread that calls self.target()."""
         if self.target != 0:
-            handle: str = _threading_create(self.target)
+            handle: str = _threading_create(self)
             self._handle = handle
             self._alive = 1
 
@@ -115,6 +126,61 @@ class Thread:
     def run(self) -> None:
         """Called by trampoline; subclasses override this."""
         pass
+
+
+def _threading_bootstrap(thread: Thread) -> int:
+    target = thread.target
+    if target == 0:
+        return 0
+    argc = thread._argc
+    arg0 = thread._arg0
+    arg1 = thread._arg1
+    arg2 = thread._arg2
+    arg3 = thread._arg3
+    arg4 = thread._arg4
+    arg5 = thread._arg5
+    arg6 = thread._arg6
+    arg7 = thread._arg7
+    if thread.target_self != 0:
+        receiver = thread.target_self
+        if argc == 0:
+            target(receiver)
+        elif argc == 1:
+            target(receiver, arg0)
+        elif argc == 2:
+            target(receiver, arg0, arg1)
+        elif argc == 3:
+            target(receiver, arg0, arg1, arg2)
+        elif argc == 4:
+            target(receiver, arg0, arg1, arg2, arg3)
+        elif argc == 5:
+            target(receiver, arg0, arg1, arg2, arg3, arg4)
+        elif argc == 6:
+            target(receiver, arg0, arg1, arg2, arg3, arg4, arg5)
+        elif argc == 7:
+            target(receiver, arg0, arg1, arg2, arg3, arg4, arg5, arg6)
+        else:
+            target(receiver, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+        return 0
+    if argc == 0:
+        target()
+    elif argc == 1:
+        target(arg0)
+    elif argc == 2:
+        target(arg0, arg1)
+    elif argc == 3:
+        target(arg0, arg1, arg2)
+    elif argc == 4:
+        target(arg0, arg1, arg2, arg3)
+    elif argc == 5:
+        target(arg0, arg1, arg2, arg3, arg4)
+    elif argc == 6:
+        target(arg0, arg1, arg2, arg3, arg4, arg5)
+    elif argc == 7:
+        target(arg0, arg1, arg2, arg3, arg4, arg5, arg6)
+    else:
+        target(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+    return 0
 
 
 class Event:

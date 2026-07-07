@@ -1806,31 +1806,31 @@ class WindowsCodegen(Codegen):
             _cs_lbl, _     = self.intern_string("_cs")
             self.emit("section .text")
 
-            # _threading_trampoline(rcx=fn_ptr) -> rax=0
-            # Called by Win32 on the new thread. rcx is the target function pointer.
+            # _threading_trampoline(rcx=thread_obj_ptr) -> rax=0
+            # Called by Win32 on the new thread. rcx is the Thread instance.
             # Must match LPTHREAD_START_ROUTINE signature.
             self.label("_threading_trampoline")
             self.emitf(
                 "push rbp", "mov rbp, rsp", "sub rsp, 48",
-                "mov [rbp-8], rcx",          # save fn ptr
+                "mov [rbp-8], rcx",          # save thread obj ptr
                 "test rcx, rcx",
                 "jz ._tt_done",
-                "call rcx",                  # call target() with no args
+                "call _threading_bootstrap",
             )
             self.label("._tt_done")
             self.emitf("xor rax, rax", "leave", "ret")
 
-            # _threading_create(rcx=fn_ptr) -> rax=handle (HANDLE, 64-bit)
+            # _threading_create(rcx=thread_obj_ptr) -> rax=handle (HANDLE, 64-bit)
             if "_threading_create" in self.ffi_called:
                 self.label("_threading_create")
                 self.emitf(
                     "push rbp", "mov rbp, rsp", "sub rsp, 80",
-                    "mov [rbp-8], rcx",      # save fn_ptr
-                    # CreateThread(NULL, 0, trampoline, fn_ptr, 0, NULL)
+                    "mov [rbp-8], rcx",      # save thread obj ptr
+                    # CreateThread(NULL, 0, trampoline, thread_obj, 0, NULL)
                     "xor rcx, rcx",          # lpThreadAttributes = NULL
                     "xor rdx, rdx",          # dwStackSize = 0
                     "lea r8, [_threading_trampoline]",  # lpStartAddress
-                    "mov r9, [rbp-8]",       # lpParameter = fn_ptr (passed to trampoline as rcx)
+                    "mov r9, [rbp-8]",       # lpParameter = thread obj (passed to trampoline as rcx)
                     "mov qword [rsp+32], 0", # dwCreationFlags = 0
                     "mov qword [rsp+40], 0", # lpThreadId = NULL
                     "call CreateThread",

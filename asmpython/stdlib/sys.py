@@ -25,6 +25,8 @@ BINDINGS: dict = {
     "prefix": Const(ty="str", value=""),
     # sys.argv -> list[str], built at program startup from argc/argv.
     "argv": Const(ty="list", value="__sys_argv__", el_type="str"),
+    # sys.path -> list[str], mutable import search path seeded empty.
+    "path": Const(ty="list", value="__sys_path__", el_type="str"),
     # sys.stdin / stdout / stderr: FILE* handles (opaque int, not the int fd).
     # Use os.fgetc / os.fputs to perform I/O on them. The C symbol names
     # differ; on Windows UCRT streams live behind __acrt_iob_func(n).

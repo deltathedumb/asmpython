@@ -12,10 +12,11 @@ from __future__ import annotations
 from . import Func
 
 BINDINGS: dict = {
-    # _threading_create(fn_ptr: int) -> handle: str
-    # Spawn a new OS thread that calls fn_ptr(). Returns a 64-bit HANDLE (str slot).
+    # _threading_create(thread_obj: any) -> handle: str
+    # Spawn a new OS thread that boots through the stdlib threading trampoline
+    # using the passed Thread instance. Returns a 64-bit HANDLE (str slot).
     "_threading_create": Func(
-        arg_types=("int",), ret_type="str",
+        arg_types=("any",), ret_type="str",
         c_name="_threading_create",
     ),
     # _threading_join(handle: str) -> int

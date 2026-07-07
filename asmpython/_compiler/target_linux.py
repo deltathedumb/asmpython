@@ -1670,15 +1670,9 @@ class LinuxCodegen(Codegen):
             self.emitf(
                 "push rbp", "mov rbp, rsp", "sub rsp, 32",
                 "mov [rbp-8], rdi",          # save thread-obj ptr
-                # load target fn ptr: dict_get_default(obj, "target", 0)
-                "mov rax, rdi",              # obj ptr already in rax for dict_get_default ABI
-                f"lea rbx, [{_target_lbl}]",
-                "xor rcx, rcx",
-                "call _runtime_dict_get_default",
-                "mov [rbp-16], rax",
-                "test rax, rax",
+                "test rdi, rdi",
                 "jz ._tt_done",
-                "call rax",
+                "call _threading_bootstrap",
             )
             self.label("._tt_done")
             self.emitf("xor rax, rax", "leave", "ret")

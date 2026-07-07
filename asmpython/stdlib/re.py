@@ -49,7 +49,7 @@ class ReMatch:
         self._end: int = end
         self._string: str = string
 
-    def group(self, n: int) -> str:
+    def group(self, n: int = 0) -> str:
         return self._string[self._start:self._end]
 
     def start(self) -> int:
@@ -449,7 +449,7 @@ def subn(pattern: str, repl: str, string: str) -> list:
     return [result, str(count)]
 
 
-def finditer(pattern: str, string: str) -> list:
+def finditer(pattern: str, string: str) -> list[ReMatch]:
     """Return list of Match objects for all non-overlapping matches."""
     results: list = []
     n: int = len(string)

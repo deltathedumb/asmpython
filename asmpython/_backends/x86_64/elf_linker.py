@@ -64,7 +64,8 @@ for _name in (
     "malloc", "realloc", "free", "calloc",
     "printf", "sprintf", "putchar", "puts", "fputs", "fputc",
     "strlen", "strcmp", "strstr", "strdup", "strtoll",
-    "atof", "strtod", "fgets", "fopen", "fgetc", "fclose", "access",
+    "atof", "strtod", "fgets", "fopen", "fgetc", "fclose", "fflush", "access",
+    "fread", "fseek", "ftell",
     "exit", "memset", "memcpy", "rand", "modf",
 ):
     _SO_FOR_SYMBOL[_name] = "libc.so.6"
@@ -188,8 +189,10 @@ def link_elf(objects: list[bytes], entry_symbol: str = "main") -> bytes:
     text_body_len = len(bucket_bytes["text"])
     thunk_off = {name: text_body_len + i * 6 for i, name in enumerate(func_imports)}
     entry_stub_off = text_body_len + 6 * len(func_imports)
-    # and rsp,-16 ; call rel32 main ; mov edi,eax ; call rel32 exit_thunk ; ud2
-    entry_stub_len = 4 + 5 + 2 + 5 + 2
+    has_module_init = "__asmpy_module_init" in global_syms
+    # and rsp,-16 ; [call rel32 module_init] ; call rel32 main ; mov edi,eax ;
+    # call rel32 exit_thunk ; ud2
+    entry_stub_len = 4 + (5 if has_module_init else 0) + 5 + 2 + 5 + 2
     text_total_len = entry_stub_off + entry_stub_len
 
     # ── 5. Decide segment layout (page-aligned: .text, then everything
@@ -328,9 +331,13 @@ def link_elf(objects: list[bytes], entry_symbol: str = "main") -> bytes:
         disp = got_slot_vaddr - (vaddr_text + pos + 6)
         text[pos:pos + 6] = bytes([0xFF, 0x25]) + struct.pack("<i", disp)
 
+    init_addr = resolve("__asmpy_module_init") if has_module_init else 0
     main_addr = resolve(entry_symbol)
     stub = bytearray()
     stub += bytes([0x48, 0x83, 0xE4, 0xF0])     # and rsp, -16
+    if has_module_init:
+        call_init_disp_pos = len(stub) + 1
+        stub += bytes([0xE8, 0, 0, 0, 0])       # call rel32 module init
     call_disp_pos = len(stub) + 1
     stub += bytes([0xE8, 0, 0, 0, 0])           # call rel32 main
     stub += bytes([0x89, 0xC7])                 # mov edi, eax
@@ -339,6 +346,8 @@ def link_elf(objects: list[bytes], entry_symbol: str = "main") -> bytes:
     stub += bytes([0x0F, 0x0B])                 # ud2 (unreachable -- exit() never returns)
     assert len(stub) == entry_stub_len
     stub_addr = vaddr_text + entry_stub_off
+    if has_module_init:
+        struct.pack_into("<i", stub, call_init_disp_pos, init_addr - (stub_addr + call_init_disp_pos + 4))
     struct.pack_into("<i", stub, call_disp_pos, main_addr - (stub_addr + call_disp_pos + 4))
     exit_thunk_addr = vaddr_text + thunk_off["exit"]
     struct.pack_into("<i", stub, call2_disp_pos, exit_thunk_addr - (stub_addr + call2_disp_pos + 4))

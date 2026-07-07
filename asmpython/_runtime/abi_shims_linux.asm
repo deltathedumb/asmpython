@@ -18,10 +18,23 @@ default rel
 extern _runtime_dict_get_default
 extern _runtime_dict_set
 extern _runtime_dict_contains
+extern _runtime_dict_keys
+extern _runtime_dict_update
 extern _runtime_str_concat
+extern _runtime_str_eq
+extern _runtime_str_cmp
+extern _runtime_int_to_base
+extern _runtime_fmt_elem
+extern _runtime_list_repr
+extern _runtime_dict_repr
+extern _runtime_set_repr
+extern _runtime_str_char_at
+extern _runtime_str_slice
 extern _runtime_zalloc
 extern _runtime_list_append
 extern _runtime_list_pop
+extern _runtime_list_slice
+extern _runtime_list_slice_assign
 extern _runtime_str_upper
 extern _runtime_str_lower
 extern _runtime_str_strip
@@ -29,6 +42,7 @@ extern _runtime_str_isdigit
 extern _runtime_str_index_of
 extern _runtime_str_replace
 extern _runtime_str_split
+extern _runtime_str_rsplit
 extern _runtime_str_join
 extern _runtime_str_zfill
 extern _runtime_str_starts_with
@@ -42,6 +56,9 @@ extern _runtime_str_isupper
 extern _runtime_str_isspace
 extern _runtime_str_lstrip
 extern _runtime_str_rstrip
+extern _runtime_str_ljust
+extern _runtime_str_rjust
+extern _runtime_str_center
 extern _runtime_str_swapcase
 extern _runtime_str_title
 extern _runtime_str_splitlines
@@ -50,6 +67,14 @@ extern _runtime_str_removeprefix
 extern _runtime_str_removesuffix
 extern _runtime_list_reverse
 extern _runtime_list_extend
+extern _runtime_list_insert
+extern _runtime_sort_str
+extern _runtime_sort_int
+extern _runtime_sort_items
+extern _runtime_sort_pairs_str
+extern _runtime_sort_pairs_int
+extern _runtime_chr
+extern strtoll
 extern malloc
 extern printf
 extern sprintf
@@ -58,11 +83,25 @@ extern putchar
 global _abi_dict_get_default
 global _abi_dict_set
 global _abi_dict_contains
+global _abi_dict_keys
+global _abi_dict_update
 global _abi_str_concat
+global _abi_str_rsplit
+global _abi_int_to_base
+global _abi_fmt_elem
+global _abi_list_repr
+global _abi_dict_repr
+global _abi_set_repr
+global _abi_str_char_at
+global _abi_str_slice
 global _abi_new_instance
 global _abi_new_list
 global _abi_list_append
 global _abi_list_pop
+global _abi_list_slice
+global _abi_list_slice_assign
+global _abi_str_eq
+global _abi_str_cmp
 global _abi_str_upper
 global _abi_str_lower
 global _abi_str_strip
@@ -83,6 +122,9 @@ global _abi_str_isupper
 global _abi_str_isspace
 global _abi_str_lstrip
 global _abi_str_rstrip
+global _abi_str_ljust
+global _abi_str_rjust
+global _abi_str_center
 global _abi_str_swapcase
 global _abi_str_title
 global _abi_str_splitlines
@@ -91,6 +133,15 @@ global _abi_str_removeprefix
 global _abi_str_removesuffix
 global _abi_list_reverse
 global _abi_list_extend
+global _abi_list_insert
+global _abi_sort_str
+global _abi_sort_int
+global _abi_sort_items
+global _abi_sort_pairs_str
+global _abi_sort_pairs_int
+global _abi_chr
+global _abi_str_to_int
+global _abi_str_to_int_base
 
 ; asmlib.hardware's _hw_* symbols, hosted-target bodies -- see
 ; abi_shims.asm's matching comment block; identical behavior, SysV args.
@@ -152,12 +203,93 @@ _abi_dict_contains:
     pop rbx
     ret
 
+; rax = dict_keys(dict=rdi)
+_abi_dict_keys:
+    mov rax, rdi
+    call _runtime_dict_keys
+    ret
+
+; dict_update(dst=rdi, src=rsi) -> void
+_abi_dict_update:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_dict_update
+    pop rbx
+    ret
+
 ; rax = str_concat(left=rdi, right=rsi)
 _abi_str_concat:
     push rbx
     mov rax, rdi
     mov rbx, rsi
     call _runtime_str_concat
+    pop rbx
+    ret
+
+; rax = int_to_base(n=rdi, base=rsi, prefix=rdx)
+_abi_int_to_base:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    mov rcx, rdx
+    call _runtime_int_to_base
+    pop rbx
+    ret
+
+; rax = fmt_elem(value=rdi, kind=rsi)
+_abi_fmt_elem:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_fmt_elem
+    pop rbx
+    ret
+
+; rax = list_repr(list=rdi, elem_kind=rsi)
+_abi_list_repr:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_list_repr
+    pop rbx
+    ret
+
+; rax = dict_repr(dict=rdi, key_kind=rsi, value_kind=rdx)
+_abi_dict_repr:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    mov rcx, rdx
+    call _runtime_dict_repr
+    pop rbx
+    ret
+
+; rax = set_repr(set=rdi, elem_kind=rsi)
+_abi_set_repr:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_set_repr
+    pop rbx
+    ret
+
+; rax = str_char_at(str=rdi, index=rsi)
+_abi_str_char_at:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_str_char_at
+    pop rbx
+    ret
+
+; rax = str_slice(str=rdi, start=rsi, stop=rdx)
+_abi_str_slice:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    mov rcx, rdx
+    call _runtime_str_slice
     pop rbx
     ret
 
@@ -211,6 +343,74 @@ _abi_new_list:
     pop rbx
     ret
 
+; rax = strtoll(str=rdi, NULL, 10)
+_abi_str_to_int:
+    push rbx
+    xor rsi, rsi
+    mov rdx, 10
+    call strtoll
+    pop rbx
+    ret
+
+; rax = strtoll(str=rdi, NULL, base=rsi)
+_abi_str_to_int_base:
+    push rbx
+    mov rdx, rsi
+    xor rsi, rsi
+    call strtoll
+    pop rbx
+    ret
+
+; rax = chr(n=rdi)
+_abi_chr:
+    push rbx
+    mov rax, rdi
+    call _runtime_chr
+    pop rbx
+    ret
+
+; sort_str(list=rdi) -> void
+_abi_sort_str:
+    push rbx
+    mov rax, rdi
+    call _runtime_sort_str
+    pop rbx
+    ret
+
+; sort_int(list=rdi) -> void
+_abi_sort_int:
+    push rbx
+    mov rax, rdi
+    call _runtime_sort_int
+    pop rbx
+    ret
+
+; sort_items(list=rdi) -> void
+_abi_sort_items:
+    push rbx
+    mov rax, rdi
+    call _runtime_sort_items
+    pop rbx
+    ret
+
+; sort_pairs_str(elems=rdi, keys=rsi) -> void
+_abi_sort_pairs_str:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_sort_pairs_str
+    pop rbx
+    ret
+
+; sort_pairs_int(elems=rdi, keys=rsi) -> void
+_abi_sort_pairs_int:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_sort_pairs_int
+    pop rbx
+    ret
+
 ; list_append(list=rdi, value=rsi) -> void
 _abi_list_append:
     push rbx
@@ -226,8 +426,42 @@ _abi_list_pop:
     call _runtime_list_pop
     ret
 
+; rax = list_slice(src=rdi, start=rsi, stop=rdx)
+_abi_list_slice:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    mov rcx, rdx
+    call _runtime_list_slice
+    pop rbx
+    ret
+
+; list_slice_assign(dst=rdi, start=rsi, stop=rdx, src=rcx) -> void
+_abi_list_slice_assign:
+    push rbx
+    mov rax, rdi
+    mov rbx, rcx
+    mov rcx, rsi
+    call _runtime_list_slice_assign
+    pop rbx
+    ret
+
 ; ---- str methods -- see abi_shims.asm's matching block for the full
 ; rationale; SysV args (rdi/rsi/rdx) instead of Win64's (rcx/rdx/r8).
+_abi_str_eq:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_str_eq
+    pop rbx
+    ret
+_abi_str_cmp:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    call _runtime_str_cmp
+    pop rbx
+    ret
 _abi_str_upper:
     mov rax, rdi
     call _runtime_str_upper
@@ -260,6 +494,14 @@ _abi_str_split:
                                    ; matching comment. Always RCX regardless of
                                    ; host OS (the helper's own ad-hoc convention).
     call _runtime_str_split
+    pop rbx
+    ret
+_abi_str_rsplit:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    mov rcx, 1
+    call _runtime_str_rsplit
     pop rbx
     ret
 _abi_str_join:
@@ -376,6 +618,33 @@ _abi_str_removesuffix:
     pop rbx
     ret
 
+; str padding: self=rdi, width=rsi, fillstr=rdx. Runtime wants
+; rax=self, rbx=width, rcx=first byte of fillstr.
+_abi_str_ljust:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    movzx rcx, byte [rdx]
+    call _runtime_str_ljust
+    pop rbx
+    ret
+_abi_str_rjust:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    movzx rcx, byte [rdx]
+    call _runtime_str_rjust
+    pop rbx
+    ret
+_abi_str_center:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    movzx rcx, byte [rdx]
+    call _runtime_str_center
+    pop rbx
+    ret
+
 ; ---- list methods.
 _abi_list_reverse:
     mov rax, rdi
@@ -386,6 +655,14 @@ _abi_list_extend:
     mov rax, rdi
     mov rbx, rsi
     call _runtime_list_extend
+    pop rbx
+    ret
+_abi_list_insert:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    mov rcx, rdx
+    call _runtime_list_insert
     pop rbx
     ret
 

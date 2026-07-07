@@ -692,6 +692,11 @@ class Call:
     # Keyword arguments: parallel list of (name, expr). Sema maps them onto
     # the callee's positional parameters.
     kwargs: list = field(default_factory=list)
+    # `**expr` unpacking (e.g. `Config(**data)`), extracted out of `args` by
+    # sema before arity checks. Only resolvable against a callee with a
+    # statically known parameter list (function/constructor/`__call__`) --
+    # see DoubleStarred's docstring.
+    dstar: "Expr | None" = None
 
 
 @dataclass
@@ -932,6 +937,25 @@ class Starred:
     knowledge of this node at all.
     """
 
+    value: "Expr" = field(default_factory=lambda: _NO_EXPR)
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class DoubleStarred:
+    """`**expr` used as a call argument, e.g. `Config(**data)`.
+
+    asmpython dicts are runtime hashtables with no statically-known key set,
+    so this can't be expanded the way Starred is (indexing every tuple slot).
+    Instead the parser leaves it attached to the enclosing Call as `Call.dstar`
+    (see Call.dstar) rather than in `args`/`kwargs`, and sema expands it once
+    it knows the callee's declared parameter names: each declared name not
+    already bound positionally or by an explicit keyword becomes
+    `name=expr["name"]`. Only valid where the callee has a statically known
+    parameter list (a plain function, a constructor, or `__call__`) --
+    unresolvable calls (e.g. through a bare function value) reject it.
+    """
+
     value: "Expr"
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
@@ -959,6 +983,7 @@ Expr = (
     | DictComprehension
     | Lambda
     | Starred
+    | DoubleStarred
     | NamedExpr
 )
 

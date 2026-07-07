@@ -1013,6 +1013,7 @@ class Codegen:
         self.emit("_prog_argc: resq 1")
         self.emit("_prog_argv: resq 1")
         self.emit("_sys_argv_list: resq 1")
+        self.emit("_sys_path_list: resq 1")
         self.emit("_argv_hdr: resq 1")
         self.emit("_argv_i: resq 1")
         self.emit("_environ_dict: resq 1")
@@ -1020,6 +1021,7 @@ class Codegen:
         self.label(self.label_main)
         self.emit_entry_prologue(info)
         self._emit_build_argv_list()
+        self._emit_build_sys_path_list()
         self._emit_init_class_vars(info)
         for stmt in top.body:
             self.gen_stmt(stmt, info)
@@ -1093,6 +1095,21 @@ class Codegen:
         )
         self.label(copy_done)
         self.emitf("mov rax, [rel _argv_hdr]", "mov [rel _sys_argv_list], rax")
+
+    def _emit_build_sys_path_list(self) -> None:
+        """Build sys.path as a mutable empty list[str] available at startup."""
+        self._emit_malloc(self.LIST_HEADER)
+        self.emitf(
+            "mov qword [rax+0], 4",
+            "mov qword [rax+8], 0",
+            "mov [rel _argv_hdr], rax",
+            "mov rbx, 32",
+            "call _runtime_zalloc",
+            "mov rcx, [rel _argv_hdr]",
+            "mov [rcx+16], rax",
+            "mov rax, rcx",
+            "mov [rel _sys_path_list], rax",
+        )
 
     # ---- regular function emission ------------------------------------------
 
@@ -7560,19 +7577,20 @@ class Codegen:
 
         # ---- _runtime_str_upper ----------------------------------------------
         # rax = s -> rax = newly-allocated upper-case copy. ASCII only.
-        # Locals [rbp-8..rbp-24] = 24 bytes + 32 shadow = 56, round to 64
-        # (16-aligned). Previously `sub rsp, 48` reserved only 24+32-8=48 -
-        # 8 bytes short of the real shadow-space requirement, so strlen/
-        # malloc's own shadow-space writes (always [rsp..rsp+31] relative
-        # to the call site, per Win64 ABI) clobbered this function's own
-        # `dst` local at [rbp-24], corrupting it before the copy loop ever
-        # read it back. The corrupted pointer was then used as a malloc'd
-        # buffer, which corrupts the heap allocator's own bookkeeping -
-        # the actual segfault this surfaces as happens much later, inside
-        # an unrelated subsequent malloc() call once the heap metadata
-        # itself is damaged, not at this function's own return.
+        # Saves RSI/RDI too: on Win64 they're nonvolatile, and this helper
+        # uses both as copy-loop pointers. Clobbering them leaked garbage
+        # back into the caller whenever regalloc kept a live value there
+        # across `str.upper()`, producing silent miscompares even though the
+        # returned string itself was correct.
         self.label("_runtime_str_upper")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64", "mov [rbp-8], rax")
+        self.emitf(
+            "push rbp",
+            "mov rbp, rsp",
+            "sub rsp, 80",
+            "mov [rbp-32], rsi",
+            "mov [rbp-40], rdi",
+            "mov [rbp-8], rax",
+        )
         self._emit_libc_strlen()
         self.emitf(
             "mov [rbp-16], rax",  # len
@@ -7598,15 +7616,27 @@ class Codegen:
         self.label("._sup_keep")
         self.emitf("mov [rdi], dl", "inc rsi", "inc rdi", "dec rcx", "jmp ._sup_loop")
         self.label("._sup_done")
-        self.emitf("mov byte [rdi], 0", "mov rax, [rbp-24]", "leave", "ret")
+        self.emitf(
+            "mov byte [rdi], 0",
+            "mov rax, [rbp-24]",
+            "mov rsi, [rbp-32]",
+            "mov rdi, [rbp-40]",
+            "leave",
+            "ret",
+        )
 
         # ---- _runtime_str_lower ----------------------------------------------
         # rax = s -> rax = newly-allocated lower-case copy. ASCII only.
-        # Same shadow-space fix as _runtime_str_upper just above (24 bytes
-        # of locals + 32 shadow = 56, round to 64) - this function has the
-        # identical structure and had the identical 8-byte-short bug.
+        # Same nonvolatile-register fix as _runtime_str_upper just above.
         self.label("_runtime_str_lower")
-        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64", "mov [rbp-8], rax")
+        self.emitf(
+            "push rbp",
+            "mov rbp, rsp",
+            "sub rsp, 80",
+            "mov [rbp-32], rsi",
+            "mov [rbp-40], rdi",
+            "mov [rbp-8], rax",
+        )
         self._emit_libc_strlen()
         self.emitf("mov [rbp-16], rax", "inc rax")
         self._emit_libc_malloc_size_in_rax()
@@ -7631,7 +7661,14 @@ class Codegen:
         self.label("._slo_keep")
         self.emitf("mov [rdi], dl", "inc rsi", "inc rdi", "dec rcx", "jmp ._slo_loop")
         self.label("._slo_done")
-        self.emitf("mov byte [rdi], 0", "mov rax, [rbp-24]", "leave", "ret")
+        self.emitf(
+            "mov byte [rdi], 0",
+            "mov rax, [rbp-24]",
+            "mov rsi, [rbp-32]",
+            "mov rdi, [rbp-40]",
+            "leave",
+            "ret",
+        )
 
         # ---- _runtime_str_capitalize ------------------------------------------
         # rax = s -> rax = newly-allocated copy with the first character
@@ -9709,6 +9746,9 @@ class Codegen:
         elif c.ty == "list" and value == "__sys_argv__":
             # sys.argv: list[str] built at program startup (see emit_entry).
             self.emitf("mov rax, [rel _sys_argv_list]")
+        elif c.ty == "list" and value == "__sys_path__":
+            # sys.path: mutable empty list[str] built at program startup.
+            self.emitf("mov rax, [rel _sys_path_list]")
         else:
             raise NotImplementedError(f"const type {c.ty!r}")
 

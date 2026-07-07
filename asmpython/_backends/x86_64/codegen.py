@@ -6,8 +6,8 @@ produced by regalloc.py.  Internal branch targets are fixed up in a second
 pass; unresolved external calls are returned as relocation records so the
 object-file emitter (elf.py / coff.py) can build a proper relocation table.
 
-NOTE: Reg.R11 and XmmReg.XMM15 are reserved as scratch registers and must
-      not be present in the regalloc pool.  Remove them from _GP_POOL and
+NOTE: Reg.R10/Reg.R11 and XmmReg.XMM15 are reserved as scratch registers and
+      must not be present in the regalloc pool. Remove them from _GP_POOL and
       _XMM_POOL in regalloc.py if they ever appear there.
 """
 
@@ -132,6 +132,7 @@ def _is_xmm(type_name: str) -> bool:
 
 class FuncCodegen:
     _SCRATCH     = Reg.R11        # reserved GP scratch — must not be in regalloc pool
+    _SCRATCH2    = Reg.R10        # second GP scratch for addr/value alias cases
     _SCRATCH_XMM = XmmReg.XMM15  # reserved XMM scratch
 
     def __init__(self, func: Any, alloc: AllocResult, abi: str) -> None:
@@ -421,49 +422,131 @@ class FuncCodegen:
             not is_indirect and self.abi == "win64" and str(target_op) in ("printf", "sprintf")
         )
 
-        gp_pairs: list[tuple[Reg, Reg]] = []
-        xmm_pairs: list[tuple[XmmReg, XmmReg]] = []
-        gp_dup_xmm: list[tuple[Reg, XmmReg]] = []
+        gp_reg_args: list[tuple[Reg, Any, int]] = []
+        xmm_reg_args: list[tuple[XmmReg, Any, str, int]] = []
+        gp_dup_slots: list[tuple[Reg, int, str]] = []
+        stack_args: list[tuple[Any, int]] = []
+        win64_saved_regs: list[Reg] = (
+            [Reg.RBX, Reg.RSI, Reg.RDI, Reg.R12, Reg.R13, Reg.R14, Reg.R15]
+            if self.abi == "win64"
+            else []
+        )
         int_i = xmm_i = 0
+        temp_slots = 0
         for arg_i, av in enumerate(arg_vals):
             typ = av.type.name if hasattr(av, "type") else "i64"
-            if _is_float(typ):
-                if is_win64_vararg:
+            if self.abi == "win64":
+                if _is_float(typ):
                     if arg_i < len(xmm_args):
                         dst_x = xmm_args[arg_i]
-                        get = self._xmm_f32 if typ == "f32" else self._xmm
-                        src_x, ld = get(av)
-                        self._emit(ld)
-                        xmm_pairs.append((dst_x, src_x))
-                        if arg_i < len(int_args):
-                            gp_dup_xmm.append((int_args[arg_i], dst_x))
-                elif xmm_i < len(xmm_args):
-                    dst_x = xmm_args[xmm_i]; xmm_i += 1
-                    get = self._xmm_f32 if typ == "f32" else self._xmm
-                    src_x, ld = get(av)
-                    self._emit(ld)
-                    xmm_pairs.append((dst_x, src_x))
+                        xmm_reg_args.append((dst_x, av, typ, temp_slots))
+                        temp_slots += 1
+                        if is_win64_vararg and arg_i < len(int_args):
+                            gp_dup_slots.append((int_args[arg_i], temp_slots - 1, typ))
+                    else:
+                        stack_args.append((av, len(stack_args)))
+                else:
+                    if arg_i < len(int_args):
+                        dst_r = int_args[arg_i]
+                        gp_reg_args.append((dst_r, av, temp_slots))
+                        temp_slots += 1
+                    else:
+                        stack_args.append((av, len(stack_args)))
             else:
-                idx = arg_i if is_win64_vararg else int_i
-                if not is_win64_vararg:
-                    int_i += 1
-                if idx < len(int_args):
-                    dst_r = int_args[idx]
-                    src_r, ld = self._gp(av)
-                    self._emit(ld)
-                    gp_pairs.append((dst_r, src_r))
-        self._sequence_gp_moves(gp_pairs)
-        self._sequence_xmm_moves(xmm_pairs)
-        for dst_r, src_x in gp_dup_xmm:
-            self._emit(encode_movsd_mr(Mem(Reg.RSP, 0), src_x))
-            self._emit(encode_mov_rm(dst_r, Mem(Reg.RSP, 0)))
+                if _is_float(typ):
+                    if xmm_i < len(xmm_args):
+                        dst_x = xmm_args[xmm_i]
+                        xmm_i += 1
+                        xmm_reg_args.append((dst_x, av, typ, temp_slots))
+                        temp_slots += 1
+                    else:
+                        stack_args.append((av, len(stack_args)))
+                else:
+                    if int_i < len(int_args):
+                        dst_r = int_args[int_i]
+                        int_i += 1
+                        gp_reg_args.append((dst_r, av, temp_slots))
+                        temp_slots += 1
+                    else:
+                        stack_args.append((av, len(stack_args)))
 
+        target_temp_slot: int | None = None
         if is_indirect:
+            target_temp_slot = temp_slots
+            temp_slots += 1
+
+        shadow_bytes = 32 if self.abi == "win64" else 0
+        stack_arg_bytes = 8 * len(stack_args)
+        temp_bytes = 8 * temp_slots
+        save_base = shadow_bytes + stack_arg_bytes + temp_bytes
+        save_bytes = 8 * len(win64_saved_regs)
+        stack_bytes = shadow_bytes + stack_arg_bytes + temp_bytes + save_bytes
+        if stack_bytes & 0xF:
+            stack_bytes += 8
+        if stack_bytes:
+            self._emit(encode_sub_ri(Reg.RSP, stack_bytes))
+
+        stack_base = shadow_bytes
+        temp_base = shadow_bytes + stack_arg_bytes
+
+        for i, reg in enumerate(win64_saved_regs):
+            self._emit(encode_mov_mr(Mem(Reg.RSP, save_base + 8 * i), reg))
+
+        for av, stack_i in stack_args:
+            off = stack_base + stack_i * 8
+            typ = av.type.name if hasattr(av, "type") else "i64"
+            if _is_float(typ):
+                get = self._xmm_f32 if typ == "f32" else self._xmm
+                src_x, ld = get(av)
+                self._emit(ld)
+                if typ == "f32":
+                    self._emit(encode_movss_mr(Mem(Reg.RSP, off), src_x))
+                else:
+                    self._emit(encode_movsd_mr(Mem(Reg.RSP, off), src_x))
+            else:
+                src_r, ld = self._gp(av)
+                self._emit(ld)
+                self._emit(encode_mov_mr(Mem(Reg.RSP, off), src_r))
+
+        # Materialize every register-passed argument into its own temporary
+        # call-frame slot first, then load the ABI registers from those slots.
+        # This avoids every scratch-register alias hazard at once: multiple
+        # spilled args no longer fight over R11/XMM15, and register args whose
+        # current homes overlap their eventual ABI destinations can't clobber
+        # each other before they've all been captured.
+        for dst_r, av, temp_i in gp_reg_args:
+            src_r, ld = self._gp(av)
+            self._emit(ld)
+            self._emit(encode_mov_mr(Mem(Reg.RSP, temp_base + 8 * temp_i), src_r))
+        for dst_x, av, typ, temp_i in xmm_reg_args:
+            get = self._xmm_f32 if typ == "f32" else self._xmm
+            src_x, ld = get(av)
+            self._emit(ld)
+            if typ == "f32":
+                self._emit(encode_movss_mr(Mem(Reg.RSP, temp_base + 8 * temp_i), src_x))
+            else:
+                self._emit(encode_movsd_mr(Mem(Reg.RSP, temp_base + 8 * temp_i), src_x))
+        if target_temp_slot is not None:
             ptr_r, ld = self._gp(target_op)
             self._emit(ld)
-            # Use scratch so we don't clobber an argument register
-            if ptr_r != self._SCRATCH:
-                self._emit(encode_mov_rr(self._SCRATCH, ptr_r))
+            self._emit(encode_mov_mr(Mem(Reg.RSP, temp_base + 8 * target_temp_slot), ptr_r))
+
+        for dst_r, _av, temp_i in gp_reg_args:
+            self._emit(encode_mov_rm(dst_r, Mem(Reg.RSP, temp_base + 8 * temp_i)))
+        for dst_x, _av, typ, temp_i in xmm_reg_args:
+            if typ == "f32":
+                self._emit(encode_movss_rm(dst_x, Mem(Reg.RSP, temp_base + 8 * temp_i)))
+            else:
+                self._emit(encode_movsd_rm(dst_x, Mem(Reg.RSP, temp_base + 8 * temp_i)))
+
+        for dst_r, temp_i, typ in gp_dup_slots:
+            if typ == "f32":
+                self._emit(encode_mov_rm32(dst_r, Mem(Reg.RSP, temp_base + 8 * temp_i)))
+            else:
+                self._emit(encode_mov_rm(dst_r, Mem(Reg.RSP, temp_base + 8 * temp_i)))
+
+        if is_indirect:
+            self._emit(encode_mov_rm(self._SCRATCH, Mem(Reg.RSP, temp_base + 8 * target_temp_slot)))
             self._emit(encode_call_r(self._SCRATCH))
         else:
             target   = str(target_op)
@@ -471,16 +554,38 @@ class FuncCodegen:
             self._emit(encode_call_rel32(0))
             self.fixups.append((call_off + 1, target, R_X86_64_PLT32))
 
+        for i, reg in enumerate(win64_saved_regs):
+            self._emit(encode_mov_rm(reg, Mem(Reg.RSP, save_base + 8 * i)))
+
+        if stack_bytes:
+            self._emit(encode_add_ri(Reg.RSP, stack_bytes))
+
         if instr.result is not None:
             rtyp = instr.result.type.name
             if _is_float(rtyp):
-                dst_x = self._dst_xmm(instr.result)
-                if dst_x != XmmReg.XMM0:
-                    self._emit(encode_movsd_rr(dst_x, XmmReg.XMM0))
+                loc = self._loc(instr.result)
+                if isinstance(loc, XmmLoc):
+                    if loc.reg != XmmReg.XMM0:
+                        self._emit(encode_movsd_rr(loc.reg, XmmReg.XMM0))
+                else:
+                    if rtyp == "f32":
+                        self._emit(encode_movss_mr(Mem(Reg.RBP, loc.offset), XmmReg.XMM0))
+                    else:
+                        self._emit(encode_movsd_mr(Mem(Reg.RBP, loc.offset), XmmReg.XMM0))
+            elif _is_xmm(rtyp):
+                loc = self._loc(instr.result)
+                if isinstance(loc, XmmLoc):
+                    if loc.reg != XmmReg.XMM0:
+                        self._emit(encode_movdqa_rr(loc.reg, XmmReg.XMM0))
+                else:
+                    self._emit(encode_movdqu_mr(Mem(Reg.RBP, loc.offset), XmmReg.XMM0))
             else:
-                dst = self._dst_gp(instr.result)
-                if dst != Reg.RAX:
-                    self._emit(encode_mov_rr(dst, Reg.RAX))
+                loc = self._loc(instr.result)
+                if isinstance(loc, RegLoc):
+                    if loc.reg != Reg.RAX:
+                        self._emit(encode_mov_rr(loc.reg, Reg.RAX))
+                else:
+                    self._emit(encode_mov_mr(Mem(Reg.RBP, loc.offset), Reg.RAX))
 
     # ── Per-instruction dispatch ──────────────────────────────────────────────
 
@@ -632,14 +737,30 @@ class FuncCodegen:
             if r is not None and _is_float(r.type.name):
                 bits = struct.pack("<f" if r.type.name == "f32" else "<d", float(v))
                 imm  = int.from_bytes(bits, "little")
+                loc = self._loc(r)
                 self._emit(encode_mov_ri(self._SCRATCH, imm))
-                self._emit(_gp_to_xmm(self._dst_xmm(r), self._SCRATCH))
+                if isinstance(loc, XmmLoc):
+                    self._emit(_gp_to_xmm(loc.reg, self._SCRATCH))
+                else:
+                    self._emit(_gp_to_xmm(self._SCRATCH_XMM, self._SCRATCH))
+                    self._emit(encode_movsd_mr(Mem(Reg.RBP, loc.offset), self._SCRATCH_XMM))
             elif r is not None and _is_xmm(r.type.name):
                 # Zero-initialize a v128 register
-                dst = self._dst_xmm(r)
-                self._emit(encode_pxor(dst, dst))
+                loc = self._loc(r)
+                self._emit(encode_pxor(self._SCRATCH_XMM, self._SCRATCH_XMM))
+                if isinstance(loc, XmmLoc):
+                    if loc.reg != self._SCRATCH_XMM:
+                        self._emit(encode_movdqa_rr(loc.reg, self._SCRATCH_XMM))
+                else:
+                    self._emit(encode_movdqu_mr(Mem(Reg.RBP, loc.offset), self._SCRATCH_XMM))
             else:
-                self._emit(encode_mov_ri(self._dst_gp(r), int(v)))
+                loc = self._loc(r)
+                self._emit(encode_mov_ri(self._SCRATCH, int(v)))
+                if isinstance(loc, RegLoc):
+                    if loc.reg != self._SCRATCH:
+                        self._emit(encode_mov_rr(loc.reg, self._SCRATCH))
+                else:
+                    self._emit(encode_mov_mr(Mem(Reg.RBP, loc.offset), self._SCRATCH))
             return
 
         # ── memory ────────────────────────────────────────────────────────────
@@ -648,19 +769,54 @@ class FuncCodegen:
             self._emit(ld)
             tname = r.type.name
             if tname == "f64":
-                self._emit(encode_movsd_rm(self._dst_xmm(r), Mem(ptr_r)))
+                loc = self._loc(r)
+                if isinstance(loc, XmmLoc):
+                    self._emit(encode_movsd_rm(loc.reg, Mem(ptr_r)))
+                else:
+                    self._emit(encode_movsd_rm(self._SCRATCH_XMM, Mem(ptr_r)))
+                    self._emit(encode_movsd_mr(Mem(Reg.RBP, loc.offset), self._SCRATCH_XMM))
             elif tname == "f32":
-                self._emit(encode_movss_rm(self._dst_xmm(r), Mem(ptr_r)))
+                loc = self._loc(r)
+                if isinstance(loc, XmmLoc):
+                    self._emit(encode_movss_rm(loc.reg, Mem(ptr_r)))
+                else:
+                    self._emit(encode_movss_rm(self._SCRATCH_XMM, Mem(ptr_r)))
+                    self._emit(encode_movss_mr(Mem(Reg.RBP, loc.offset), self._SCRATCH_XMM))
             elif tname == "v128":
-                self._emit(encode_movdqu_rm(self._dst_xmm(r), Mem(ptr_r)))
+                loc = self._loc(r)
+                if isinstance(loc, XmmLoc):
+                    self._emit(encode_movdqu_rm(loc.reg, Mem(ptr_r)))
+                else:
+                    self._emit(encode_movdqu_rm(self._SCRATCH_XMM, Mem(ptr_r)))
+                    self._emit(encode_movdqu_mr(Mem(Reg.RBP, loc.offset), self._SCRATCH_XMM))
             elif tname in ("i8", "u8"):
-                self._emit(encode_movzx_rm8(self._dst_gp(r), Mem(ptr_r)))
+                loc = self._loc(r)
+                if isinstance(loc, RegLoc):
+                    self._emit(encode_movzx_rm8(loc.reg, Mem(ptr_r)))
+                else:
+                    self._emit(encode_movzx_rm8(self._SCRATCH, Mem(ptr_r)))
+                    self._emit(encode_mov_mr(Mem(Reg.RBP, loc.offset), self._SCRATCH))
             elif tname in ("i16", "u16"):
-                self._emit(encode_movzx_rm16(self._dst_gp(r), Mem(ptr_r)))
+                loc = self._loc(r)
+                if isinstance(loc, RegLoc):
+                    self._emit(encode_movzx_rm16(loc.reg, Mem(ptr_r)))
+                else:
+                    self._emit(encode_movzx_rm16(self._SCRATCH, Mem(ptr_r)))
+                    self._emit(encode_mov_mr(Mem(Reg.RBP, loc.offset), self._SCRATCH))
             elif tname in ("i32", "u32"):
-                self._emit(encode_mov_rm32(self._dst_gp(r), Mem(ptr_r)))
+                loc = self._loc(r)
+                if isinstance(loc, RegLoc):
+                    self._emit(encode_mov_rm32(loc.reg, Mem(ptr_r)))
+                else:
+                    self._emit(encode_mov_rm32(self._SCRATCH, Mem(ptr_r)))
+                    self._emit(encode_mov_mr(Mem(Reg.RBP, loc.offset), self._SCRATCH))
             else:  # i64, u64, ptr — full 64-bit
-                self._emit(encode_mov_rm(self._dst_gp(r), Mem(ptr_r)))
+                loc = self._loc(r)
+                if isinstance(loc, RegLoc):
+                    self._emit(encode_mov_rm(loc.reg, Mem(ptr_r)))
+                else:
+                    self._emit(encode_mov_rm(self._SCRATCH, Mem(ptr_r)))
+                    self._emit(encode_mov_mr(Mem(Reg.RBP, loc.offset), self._SCRATCH))
             return
 
         if op == "store":
@@ -683,16 +839,28 @@ class FuncCodegen:
                 self._emit(encode_movdqu_mr(Mem(ptr_r), src_x))
             elif tname in ("i8", "u8"):
                 val_r, v_ld = self._gp(val)
+                store_ptr_r = ptr_r
+                if ptr_r == self._SCRATCH and v_ld:
+                    self._emit(encode_mov_rr(self._SCRATCH2, ptr_r))
+                    store_ptr_r = self._SCRATCH2
                 self._emit(v_ld)
-                self._emit(encode_mov_mr8(Mem(ptr_r), val_r))
+                self._emit(encode_mov_mr8(Mem(store_ptr_r), val_r))
             elif tname in ("i32", "u32"):
                 val_r, v_ld = self._gp(val)
+                store_ptr_r = ptr_r
+                if ptr_r == self._SCRATCH and v_ld:
+                    self._emit(encode_mov_rr(self._SCRATCH2, ptr_r))
+                    store_ptr_r = self._SCRATCH2
                 self._emit(v_ld)
-                self._emit(encode_mov_mr32(Mem(ptr_r), val_r))
+                self._emit(encode_mov_mr32(Mem(store_ptr_r), val_r))
             else:  # i64, u64, ptr
                 val_r, v_ld = self._gp(val)
+                store_ptr_r = ptr_r
+                if ptr_r == self._SCRATCH and v_ld:
+                    self._emit(encode_mov_rr(self._SCRATCH2, ptr_r))
+                    store_ptr_r = self._SCRATCH2
                 self._emit(v_ld)
-                self._emit(encode_mov_mr(Mem(ptr_r), val_r))
+                self._emit(encode_mov_mr(Mem(store_ptr_r), val_r))
             return
 
         if op == "gep":
@@ -823,11 +991,14 @@ class FuncCodegen:
             return
 
         if op in ("global_addr", "str_global"):
-            dst     = self._dst_gp(r)
+            loc     = self._loc(r)
+            dst     = loc.reg if isinstance(loc, RegLoc) else self._SCRATCH
             lea_off = self._pos()
             self._emit(encode_lea_rip(dst, 0))
             # disp32 is at byte 3 (REX + 0x8D + ModRM); R_X86_64_PC32 for data refs
             self.fixups.append((lea_off + 3, str(ops[0]), R_X86_64_PC32))
+            if isinstance(loc, StackLoc):
+                self._emit(encode_mov_mr(Mem(Reg.RBP, loc.offset), dst))
             return
 
         if op == "tls_addr":

@@ -32,7 +32,11 @@ class XmmLoc:
 
 @dataclass(frozen=True)
 class StackLoc:
-    """RBP-relative offset, always negative (grows downward)."""
+    """RBP-relative offset.
+
+    Negative offsets address this function's own frame below RBP; positive
+    offsets address caller-provided incoming stack arguments above it.
+    """
     offset: int
 
 
@@ -54,7 +58,7 @@ class AllocResult:
 # popleft() order: caller-saved first (no push/pop overhead), then callee-saved
 
 _GP_POOL: tuple[Reg, ...] = (
-    Reg.R10, Reg.R9,  Reg.R8,                       # caller-saved (R11 reserved as scratch)
+    Reg.R9,  Reg.R8,                                # caller-saved (R10/R11 reserved as scratch)
     Reg.RDI, Reg.RSI, Reg.RDX, Reg.RCX, Reg.RAX,  # caller-saved
     Reg.RBX, Reg.R12, Reg.R13, Reg.R14, Reg.R15,  # callee-saved
 )
@@ -69,6 +73,10 @@ _WIN64_CALLEE_XMM: frozenset[XmmReg] = frozenset(XmmReg(i) for i in range(6, 16)
 
 def _is_float(type_name: str) -> bool:
     return type_name in ("f32", "f64", "v128")
+
+
+def _slot_size(type_name: str) -> int:
+    return 16 if type_name == "v128" else 8
 
 
 def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
@@ -284,28 +292,49 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
         elif n in in_xmm:
             free_xmm.append(in_xmm.pop(n))
 
-    # ── Assign function parameters to ABI argument registers ──────────────────
+    # ── Assign function parameters to ABI entry locations ─────────────────────
 
+    stack_params: list[str] = []
     int_i = xmm_i = 0
-    for param in func.params:
+    for arg_i, param in enumerate(func.params):
         if _is_float(param.type.name):
-            if xmm_i < len(xmm_args):
-                x = xmm_args[xmm_i]; xmm_i += 1
-                locs[param.name] = XmmLoc(x)
-                in_xmm[param.name] = x
-                if x in free_xmm:
-                    free_xmm.remove(x)
+            if abi == "win64":
+                if arg_i < len(xmm_args):
+                    x = xmm_args[arg_i]
+                    locs[param.name] = XmmLoc(x)
+                    in_xmm[param.name] = x
+                    if x in free_xmm:
+                        free_xmm.remove(x)
+                else:
+                    stack_params.append(param.name)
             else:
-                _alloc_xmm(param.name)
+                if xmm_i < len(xmm_args):
+                    x = xmm_args[xmm_i]; xmm_i += 1
+                    locs[param.name] = XmmLoc(x)
+                    in_xmm[param.name] = x
+                    if x in free_xmm:
+                        free_xmm.remove(x)
+                else:
+                    stack_params.append(param.name)
         else:
-            if int_i < len(int_args):
-                r = int_args[int_i]; int_i += 1
-                locs[param.name] = RegLoc(r)
-                in_gp[param.name] = r
-                if r in free_gp:
-                    free_gp.remove(r)
+            if abi == "win64":
+                if arg_i < len(int_args):
+                    r = int_args[arg_i]
+                    locs[param.name] = RegLoc(r)
+                    in_gp[param.name] = r
+                    if r in free_gp:
+                        free_gp.remove(r)
+                else:
+                    stack_params.append(param.name)
             else:
-                _alloc_gp(param.name)
+                if int_i < len(int_args):
+                    r = int_args[int_i]; int_i += 1
+                    locs[param.name] = RegLoc(r)
+                    in_gp[param.name] = r
+                    if r in free_gp:
+                        free_gp.remove(r)
+                else:
+                    stack_params.append(param.name)
 
     # ── Walk all instructions ─────────────────────────────────────────────────
 
@@ -326,6 +355,9 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
                     size = (size + 7) & ~7        # 8-byte align
                     stack_top += size
                     alloca_slots[result.name] = -stack_top
+                elif instr.op == "call" and result.name in crosses_call:
+                    stack_top += _slot_size(result.type.name)
+                    locs[result.name] = StackLoc(-stack_top)
                 elif _is_float(result.type.name):
                     _alloc_xmm(result.name)
                 else:
@@ -366,6 +398,12 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
     target_residue = 8 if len(used_callee_gp) % 2 == 1 else 0
     if stack_top % 16 != target_residue:
         stack_top += (target_residue - stack_top) % 16
+
+    incoming_stack_base = (
+        48 if abi == "win64" else 16
+    ) + 8 * len(used_callee_gp)
+    for i, name in enumerate(stack_params):
+        locs[name] = StackLoc(incoming_stack_base + 8 * i)
 
     return AllocResult(
         locs             = locs,

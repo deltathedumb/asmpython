@@ -31,6 +31,10 @@ class Parser:
         # can resolve calls to them (closures aren't compiled, but parsing
         # must succeed so the self-hosting gauntlet can proceed).
         self._nested_funcs: list = []
+        # Nested class definitions are lifted the same way. This keeps
+        # function-local helper classes (notably ctypes.Structure declarations)
+        # visible to sema/codegen without modeling Python's local class scope.
+        self._nested_classes: list = []
         # Every name `import X [as Y]` / `from X import ... [as Y]` binds at
         # module scope, accumulated as imports are parsed (which precedes any
         # nested def referencing them, the normal case). _find_free_vars
@@ -402,6 +406,7 @@ class Parser:
         # module level so calls to them resolve in sema).
         Parser._propagate_transitive_free_vars(self._nested_funcs)
         funcs.extend(self._nested_funcs)
+        classes.extend(self._nested_classes)
         return A.Module(funcs=funcs, body=body, classes=classes)
 
     @staticmethod
@@ -1031,6 +1036,8 @@ class Parser:
             return self._parse_default_list(t)
         if t.kind == "OP" and t.value == "{":
             return self._parse_default_dict(t)
+        if t.kind == "OP" and t.value == "(":
+            return self._parse_default_tuple(t)
         if t.kind == "NAME":
             # A dotted name reference, e.g. `def f(x=Trit.MID)` referencing a
             # plain-int class constant. Not a literal in syntax, but its
@@ -1069,6 +1076,23 @@ class Parser:
             elif isinstance(elems[0], A.FloatLit):
                 el_type = "float"
         return A.ListLit(elems=elems, pos=open_tok.pos, el_type=el_type)
+
+    def _parse_default_tuple(self, open_tok: Token) -> "A.TupleLit":
+        """`(a, b, ...)` as a default argument value, e.g.
+        `color: tuple[int, int, int] = (0, 0, 0)`. Per-slot element types are
+        stamped by sema (like any other tuple literal) wherever this default
+        actually gets spliced into a call; a bare `(a)` with no comma is not a
+        tuple (matches TupleLit's normal parsing rule)."""
+        self._eat()  # '('
+        elems: list = []
+        while not self._check("OP", ")"):
+            elems.append(self._parse_default_literal())
+            if self._check("OP", ","):
+                self._eat()
+            else:
+                break
+        self._expect("OP", ")")
+        return A.TupleLit(elems=elems, pos=open_tok.pos)
 
     def _parse_default_dict(self, open_tok: Token) -> "A.DictLit":
         """`{}` as a default argument value. Only the empty dict literal is
@@ -1224,6 +1248,18 @@ class Parser:
             el = inner[0][0] if inner else None
             return ("list", el)
         if name in self._DICT_ANNOTS:
+            if len(inner) >= 2 and inner[1][0] in ("tuple", "Tuple") and inner[1][1]:
+                # dict[K, tuple[T1, T2, ...]]: preserve the per-slot value
+                # kinds so lookups can unpack the returned tuple precisely.
+                slot_bases = [s[0] for s in inner[1][1]]
+                return ("dict", ("tuple", slot_bases))
+            if len(inner) >= 2 and inner[1][0] in self._LIST_ANNOTS:
+                # dict[K, list[T]]: preserve the inner element kind so a
+                # lookup's returned list carries its element type.
+                return ("dict", ("list", inner[1][1]))
+            if len(inner) >= 2 and inner[1][0] in self._DICT_ANNOTS:
+                # dict[K, dict[K2, V]]: preserve the nested dict's value kind.
+                return ("dict", ("dict", inner[1][1]))
             val = inner[1][0] if len(inner) >= 2 else None
             return ("dict", val)
         if name in ("tuple", "Tuple"):
@@ -1293,6 +1329,10 @@ class Parser:
                         pos=fdef.pos,
                     )
                 return A.Pass(pos=fdef.pos)
+            if t.value == "class":
+                cdef = self._parse_classdef(decorators=None)
+                self._nested_classes.append(cdef)
+                return A.Pass(pos=cdef.pos)
             if t.value == "import":
                 return self._parse_import()
             if t.value == "from":
@@ -2216,11 +2256,17 @@ class Parser:
         params: list[str] = []
         if not self._check("OP", ":"):
             params.append(self._expect("NAME").value)
+            if self._check("OP", "="):
+                self._eat()
+                self._parse_expr()
             while self._check("OP", ","):
                 self._eat()
                 if self._check("OP", ":"):
                     break
                 params.append(self._expect("NAME").value)
+                if self._check("OP", "="):
+                    self._eat()
+                    self._parse_expr()
         self._expect("OP", ":")
         body = self._parse_ternary()
         return A.Lambda(params=params, body=body, pos=pos)
@@ -2507,8 +2553,19 @@ class Parser:
         if self._check("OP", ")"):
             self._eat()
             return A.TupleLit(elems=[], pos=lpar.pos)
-        first = self._parse_expr()
+        tuple_has_star = False
+        if self._check("OP", "*"):
+            star_pos = self._eat().pos
+            first = A.Starred(value=self._parse_expr(), pos=star_pos)
+            tuple_has_star = True
+        else:
+            first = self._parse_expr()
         if self._check("KEYWORD", "for"):
+            if isinstance(first, A.Starred):
+                raise ParseError(
+                    "generator expression element cannot be starred",
+                    first.pos,
+                )
             comp = self._parse_comprehension_tail(first, lpar.pos)
             self._expect("OP", ")")
             return comp
@@ -2520,8 +2577,15 @@ class Parser:
             self._eat()
             if self._check("OP", ")"):
                 break  # trailing comma
-            elems.append(self._parse_expr())
+            if self._check("OP", "*"):
+                star_pos2 = self._eat().pos
+                elems.append(A.Starred(value=self._parse_expr(), pos=star_pos2))
+                tuple_has_star = True
+            else:
+                elems.append(self._parse_expr())
         self._expect("OP", ")")
+        if tuple_has_star:
+            return A.ListLit(elems=elems, pos=lpar.pos)
         return A.TupleLit(elems=elems, pos=lpar.pos)
 
     def _parse_call_args(self):
@@ -2544,6 +2608,11 @@ class Parser:
                 name = self._eat().value
                 self._eat()  # '='
                 kwargs.append((name, self._parse_expr()))
+            elif self._check("OP", "**"):
+                # `**expr` may legally follow keyword arguments (it isn't a
+                # positional argument) — Python allows `f(a=1, **kw)`.
+                star_pos = self._eat().pos
+                args.append(A.DoubleStarred(value=self._parse_expr(), pos=star_pos))
             else:
                 if kwargs:
                     raise ParseError(
@@ -2731,8 +2800,17 @@ class Parser:
         start = self._expect("OP", "[").pos
         elems: list = []
         if not self._check("OP", "]"):
-            first = self._parse_expr()
+            if self._check("OP", "*"):
+                star_pos = self._eat().pos
+                first = A.Starred(value=self._parse_expr(), pos=star_pos)
+            else:
+                first = self._parse_expr()
             if self._check("KEYWORD", "for"):
+                if isinstance(first, A.Starred):
+                    raise ParseError(
+                        "list comprehension element cannot be starred",
+                        first.pos,
+                    )
                 comp = self._parse_comprehension_tail(first, start)
                 self._expect("OP", "]")
                 return comp
@@ -2741,7 +2819,11 @@ class Parser:
                 self._eat()
                 if self._check("OP", "]"):
                     break  # trailing comma
-                elems.append(self._parse_expr())
+                if self._check("OP", "*"):
+                    star_pos2 = self._eat().pos
+                    elems.append(A.Starred(value=self._parse_expr(), pos=star_pos2))
+                else:
+                    elems.append(self._parse_expr())
         self._expect("OP", "]")
         return A.ListLit(elems=elems, pos=start)
 
