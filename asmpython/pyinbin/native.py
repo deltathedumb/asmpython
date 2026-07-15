@@ -34,6 +34,7 @@ import _bz2 as _bootstrap_bz2
 import _lzma as _bootstrap_lzma
 import _zstd as _bootstrap_zstd
 import _queue as _bootstrap_queue
+import _multibytecodec as _bootstrap_multibytecodec
 import array as _bootstrap_array
 import bisect as _bootstrap_bisect
 import math as _bootstrap_math
@@ -986,6 +987,11 @@ def create_builtin_module(
             "register_error": lambda name, handler: None,
             "unregister": lambda search_function: None,
             "_unregister_error": lambda name: None,
+        })
+    if name == "_multibytecodec":
+        return _module(name, {
+            key: getattr(_bootstrap_multibytecodec, key)
+            for key in dir(_bootstrap_multibytecodec) if not key.startswith("__")
         })
     if name == "atexit":
         callbacks: list[tuple[Callable[..., object], tuple[object, ...], dict[str, object]]] = []
