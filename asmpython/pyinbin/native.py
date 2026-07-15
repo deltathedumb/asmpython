@@ -37,6 +37,8 @@ import _zstd as _bootstrap_zstd
 import _queue as _bootstrap_queue
 import _multibytecodec as _bootstrap_multibytecodec
 import _csv as _bootstrap_csv
+import _hashlib as _bootstrap_hashlib
+import _operator as _bootstrap_operator
 try:
     import _decimal as _bootstrap_decimal
 except ImportError:
@@ -1042,6 +1044,7 @@ def create_builtin_module(
             "lt": lambda left, right: left < right, "le": lambda left, right: left <= right,
             "gt": lambda left, right: left > right, "ge": lambda left, right: left >= right,
             "contains": lambda container, value: value in container,
+            "_compare_digest": _bootstrap_operator._compare_digest,
             "getitem": lambda value, key: value[key], "setitem": lambda value, key, item: value.__setitem__(key, item),
             "delitem": lambda value, key: value.__delitem__(key), "index": int,
             "length_hint": lambda value, default=0: len(value) if hasattr(value, "__len__") else default,
@@ -1065,6 +1068,12 @@ def create_builtin_module(
             "register_error": lambda name, handler: None,
             "unregister": lambda search_function: None,
             "_unregister_error": lambda name: None,
+        })
+    if name == "_hashlib":
+        return _module(name, {
+            key: getattr(_bootstrap_hashlib, key)
+            for key in dir(_bootstrap_hashlib)
+            if not key.startswith("__")
         })
     if name == "_decimal" and _bootstrap_decimal is not None:
         return _module(name, {
