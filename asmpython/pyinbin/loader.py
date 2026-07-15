@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import os
+import sys as _host_sys
 import typing as _typing
 
 from asmpython._compiler.pyinbin_package import PackedModule, verify_source_bundle
@@ -589,11 +590,19 @@ def run_source(
         break
     namespace.update(default_builtins(loader._import))
     namespace.update({"__name__": "__main__", "__file__": str(path), "__package__": package, "__pyinbin_import__": loader.load})
+    # Host-backed helpers such as argparse consult the process argv directly.
+    # Mirror CPython's script execution while this source runs so diagnostics
+    # do not inherit the outer ``python -m asmpython`` command line.
+    prior_host_argv = _host_sys.argv
+    _host_sys.argv = [str(path)]
     try:
-        return VirtualMachine().run(compile_source(source, str(path)), namespace)
-    except PyException as exc:
-        # CPython's test runner treats module-level SkipTest as a skipped
-        # module; preserve that release-gate behavior for direct execution.
-        if getattr(exc.instance.cls, "__name__", "") == "SkipTest":
-            return None
-        raise
+        try:
+            return VirtualMachine().run(compile_source(source, str(path)), namespace)
+        except PyException as exc:
+            # CPython's test runner treats module-level SkipTest as a skipped
+            # module; preserve that release-gate behavior for direct execution.
+            if getattr(exc.instance.cls, "__name__", "") == "SkipTest":
+                return None
+            raise
+    finally:
+        _host_sys.argv = prior_host_argv

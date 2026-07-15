@@ -9,6 +9,7 @@ provider without changing import semantics.
 from __future__ import annotations
 
 from types import ModuleType, SimpleNamespace
+import sys as _bootstrap_sys
 import types as _bootstrap_types
 from typing import Callable
 from .bytecode import CodeObject
@@ -487,7 +488,10 @@ def create_builtin_module(
                 get_events=lambda *args: 0,
                 restart_events=lambda *args: None,
             ),
-            "executable": "",
+            # Subprocess-based stdlib tests use this path to launch a child
+            # interpreter.  Keep it concrete even while the VM is embedded
+            # in the host process.
+            "executable": _bootstrap_sys.executable,
             "flags": SimpleNamespace(
                 debug=0, inspect=0, interactive=0, optimize=0, dont_write_bytecode=0,
                 no_user_site=0, no_site=0, ignore_environment=0, verbose=0, bytes_warning=0,
