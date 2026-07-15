@@ -95,6 +95,7 @@ class CoroutineObject:
         self.vm = vm
         self.frame = frame
         self.closed = False
+        self.suspended = False
 
     def __await__(self) -> "CoroutineObject":
         return self
@@ -105,9 +106,13 @@ class CoroutineObject:
     def __next__(self) -> object:
         if self.closed:
             raise StopIteration
+        if self.suspended:
+            self.suspended = False
+            self.frame.stack.append(None)
         result = self.vm._run_frame(self.frame)
         if isinstance(result, _Yielded):
             self.frame = result.frame
+            self.suspended = True
             return result.value
         self.closed = True
         raise StopIteration(result)
@@ -115,6 +120,9 @@ class CoroutineObject:
     def send(self, value: object) -> object:
         if self.closed:
             raise StopIteration
+        if self.suspended:
+            self.suspended = False
+            self.frame.stack.append(value)
         return self.__next__()
 
     def throw(self, *args: object) -> object:
@@ -150,9 +158,20 @@ class _AsyncGeneratorAwaitable:
         self.done = True
         if self.error is not None:
             self.owner.frame.pending_exception = self.error
-        result = self.owner.vm._run_frame(self.owner.frame)
+        if self.owner.suspended:
+            self.owner.suspended = False
+            self.owner.frame.stack.append(None)
+        try:
+            result = self.owner.vm._run_frame(self.owner.frame)
+        except (StopIteration, StopAsyncIteration) as exc:
+            # PEP 525 converts an explicit StopIteration escaping an async
+            # generator body into RuntimeError rather than ending iteration.
+            self.owner.closed = True
+            kind = type(exc).__name__
+            raise RuntimeError(f"async generator raised {kind}") from exc
         if isinstance(result, _Yielded):
             self.owner.frame = result.frame
+            self.owner.suspended = True
             raise StopIteration(result.value)
         self.owner.closed = True
         raise StopAsyncIteration
@@ -184,10 +203,18 @@ class _AsyncGeneratorAwaitable:
 class AsyncGeneratorObject:
     """Minimal asynchronous-generator protocol over a resumable VM frame."""
 
-    def __init__(self, vm: "VirtualMachine", frame: "Frame") -> None:
+    def __init__(self, vm: "VirtualMachine", frame: "Frame", function: "Function | None" = None) -> None:
         self.vm = vm
         self.frame = frame
         self.closed = False
+        self.suspended = False
+        self.__name__ = getattr(function, "__name__", frame.code.name)
+        qualname = getattr(function, "__qualname__", frame.code.name)
+        self.__qualname__ = qualname if "." in qualname else f"<module>.{qualname}"
+        self.ag_code = frame.code
+        self.ag_frame = frame
+        self.ag_await = None
+        self.ag_running = False
 
     def __aiter__(self) -> "AsyncGeneratorObject":
         return self
@@ -213,6 +240,7 @@ class AsyncGeneratorObject:
             awaitable = _AsyncGeneratorAwaitable(self)
             awaitable.done = True
             return awaitable
+        self.ag_await = None
         return _AsyncGeneratorAwaitable(self)
 
     def asend(self, value: object) -> _AsyncGeneratorAwaitable:
@@ -1312,7 +1340,7 @@ class VirtualMachine:
                 }
             frame = Frame(code=target.code, globals=target.globals, locals=locals_, closure=target.closure)
             if getattr(target.code, "is_async_generator", False):
-                return AsyncGeneratorObject(self, frame)
+                return AsyncGeneratorObject(self, frame, target)
             if target.code.is_coroutine:
                 return CoroutineObject(self, frame)
             if target.code.is_generator:
@@ -1805,6 +1833,8 @@ class VirtualMachine:
                 elif op is Op.RAISE:
                     value = frame.stack.pop() if frame.stack else frame.active_exception
                     if value is None: raise VMError("RuntimeError: no active exception to reraise")
+                    if isinstance(value, type) and issubclass(value, BaseException):
+                        value = value()
                     if isinstance(value, BaseException):
                         raise value
                     if isinstance(value, PyInstance) and value.cls.is_exception_class():

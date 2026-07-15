@@ -540,7 +540,7 @@ def default_builtins(importer: object | None = None) -> dict[str, object]:
         "EOFError": EOFError, "EnvironmentError": OSError,
         "ValueError": ValueError, "TypeError": TypeError, "SyntaxError": SyntaxError, "KeyError": KeyError,
         "IndexError": IndexError, "ZeroDivisionError": ZeroDivisionError,
-        "StopIteration": StopIteration, "next": next,
+        "StopIteration": StopIteration, "StopAsyncIteration": StopAsyncIteration, "next": next,
         "ImportError": ImportError, "ModuleNotFoundError": ModuleNotFoundError,
         "AttributeError": AttributeError, "LookupError": LookupError,
         "TimeoutError": TimeoutError,
