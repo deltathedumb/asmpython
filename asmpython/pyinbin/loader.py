@@ -180,6 +180,7 @@ def default_builtins() -> dict[str, object]:
         "eval": _dynamic_eval, "exec": _dynamic_exec, "compile": _dynamic_compile,
         "Exception": Exception,
         "BaseException": BaseException, "RuntimeError": RuntimeError,
+        "WindowsError": OSError,
         "Warning": Warning, "UserWarning": UserWarning, "DeprecationWarning": DeprecationWarning,
         "OSError": OSError, "IOError": OSError, "NameError": NameError,
         "UnboundLocalError": UnboundLocalError, "MemoryError": MemoryError,

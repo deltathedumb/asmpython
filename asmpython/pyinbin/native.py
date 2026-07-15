@@ -418,6 +418,7 @@ def create_builtin_module(
             "unpack": _bootstrap_struct.unpack, "unpack_from": _bootstrap_struct.unpack_from,
             "pack_into": _bootstrap_struct.pack_into, "calcsize": _bootstrap_struct.calcsize,
             "iter_unpack": _bootstrap_struct.iter_unpack, "error": _bootstrap_struct.error,
+            "_clearcache": lambda: None,
         })
     if name == "_operator":
         return _module(name, {
@@ -586,12 +587,35 @@ def create_builtin_module(
             def locked(self): return self._locked
             def __enter__(self): self.acquire(); return self
             def __exit__(self, exc_type, exc_value, traceback): self.release(); return False
+        class ThreadHandle:
+            def __init__(self, result=None): self.result, self.done = result, True
+            def join(self, timeout=-1): return None
+            def is_done(self): return self.done
+            def is_alive(self): return not self.done
+            def get_exitcode(self): return 0
+        def start_joinable_thread(function, *args, **kwargs):
+            call_args = kwargs.pop("args", ()) or (args[0] if args else ())
+            result = function(*call_args)
+            return ThreadHandle(result)
         return _module(name, {
             "LockType": Lock, "RLock": Lock, "allocate_lock": Lock,
             "get_ident": lambda: 1, "get_native_id": lambda: 1,
             "stack_size": lambda size=0: 0,
             "start_new_thread": lambda function, args, kwargs=None: function(*args, **(kwargs or {})) or 1,
+            "start_joinable_thread": start_joinable_thread,
+            "ThreadHandle": ThreadHandle,
+            "daemon_threads_allowed": lambda: True,
             "TIMEOUT_MAX": 1e9,
+        })
+    if name == "_signal":
+        return _module(name, {
+            "SIGINT": 2, "SIGTERM": 15, "SIGABRT": 22, "SIGBREAK": 21,
+            "SIG_DFL": 0, "SIG_IGN": 1,
+            "signal": lambda signum, handler: handler,
+            "getsignal": lambda signum: 0,
+            "set_wakeup_fd": lambda fd, *, warn_on_full_buffer=True: -1,
+            "pthread_sigmask": lambda how, mask: set(),
+            "sigpending": lambda: set(), "sigwait": lambda sigset: 0,
         })
     if name == "_contextvars":
         missing = object()
