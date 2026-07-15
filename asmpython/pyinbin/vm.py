@@ -2004,7 +2004,37 @@ class VirtualMachine:
                 elif op is Op.IMPORT_ROOT:
                     loader = frame.globals.get("__pyinbin_import__")
                     if not callable(loader): _raise_typed("ImportError: loader is not configured")
-                    imported = frame.code.names[instr.arg]; loader(imported); frame.stack.append(loader(imported.split(".", 1)[0]))
+                    imported = frame.code.names[instr.arg]
+                    top_level = imported.split(".", 1)[0]
+                    # ``import a.b.c`` (no ``as``) binds the name ``a`` and
+                    # only needs ``a.b.c`` to become importable as a side
+                    # effect of loading ``a`` -- real packages like ``os``
+                    # register virtual submodules dynamically at exec time
+                    # (``os.py`` does ``sys.modules['os.path'] = path``,
+                    # there's no ``os/path.py`` file on disk at all).
+                    # Loading the top-level root first, then the full dotted
+                    # name only if it isn't already present, mirrors that:
+                    # trying the full dotted path first would raise before
+                    # ``os`` ever got a chance to run and register it.
+                    loader(top_level)
+                    if imported != top_level:
+                        try:
+                            loader(imported)
+                        except (ImportError, VMError):
+                            # Loading the parent may have already registered
+                            # this dotted name as a side effect (a real
+                            # ``sys.modules['os.path'] = path``-style virtual
+                            # submodule) -- only swallow the failure if that
+                            # happened; otherwise this genuinely doesn't
+                            # exist and real Python raises ModuleNotFoundError.
+                            try:
+                                sys_module = loader("sys")
+                                modules = getattr(sys_module, "modules", None)
+                            except (ImportError, VMError):
+                                modules = None
+                            if not (isinstance(modules, dict) and imported in modules):
+                                raise
+                    frame.stack.append(loader(top_level))
                 elif op is Op.IMPORT_RELATIVE_FROM:
                     loader = frame.globals.get("__pyinbin_import__")
                     if not callable(loader): _raise_typed("ImportError: loader is not configured")
