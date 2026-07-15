@@ -219,6 +219,15 @@ class PyInstance:
             return object.__getattribute__(self, "cls")
         if name == "__dict__":
             return object.__getattribute__(self, "attributes")
+        if name == "__init__":
+            # ``PyInstance`` has its own real ``__init__`` for VM bookkeeping
+            # (sets ``cls``/``attributes``), which would otherwise shadow the
+            # emulated class's own ``__init__``/``object.__init__`` for any
+            # interpreted code that calls ``instance.__init__(...)``
+            # explicitly (``enum.py``'s ``_simple_enum`` does exactly this).
+            # Route it through the normal VM attribute-lookup fallback
+            # instead of exposing the host constructor.
+            return object.__getattribute__(self, "__getattr__")("__init__")
         return object.__getattribute__(self, name)
 
     def __getattr__(self, name: str) -> object:
@@ -240,6 +249,10 @@ class PyInstance:
             try:
                 fallback = self.cls.lookup("__getattr__")
             except AttributeError:
+                if name == "__init__":
+                    # No class in the MRO defines its own ``__init__``;
+                    # mirror ``object.__init__`` and do nothing.
+                    return lambda *args, **kwargs: None
                 raise AttributeError(f"{self.cls.__name__}.{name}") from None
             if isinstance(fallback, Function):
                 return self.cls.vm._call(fallback, [self, name])
@@ -537,6 +550,15 @@ class PyClass:
             return 0
         if name in {"_value_repr_", "_new_member_", "_missing_", "_iter_member_", "_iter_member_by_value_"}:
             return None
+        if name == "_add_member_":
+            # Real CPython gets this from the ``EnumType`` metaclass, which
+            # the VM never actually runs (classes are built directly via
+            # ``type(name, bases, namespace)``, bypassing metaclass
+            # machinery). Reimplement its essential effect: register the
+            # member under an additional name in ``_member_map_``.
+            def _add_member(name_: str, member: object) -> None:
+                self.attributes.setdefault("_member_map_", {})[name_] = member
+            return _add_member
         if name == "register":
             return lambda subclass: subclass
         if name == "__instancecheck__":
