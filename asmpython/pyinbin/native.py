@@ -11,6 +11,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Callable
 import ast as _bootstrap_ast
+import pickle as _bootstrap_pickle
 import struct as _bootstrap_struct
 import time as _bootstrap_time
 
@@ -421,6 +422,18 @@ def create_builtin_module(
             "pack_into": _bootstrap_struct.pack_into, "calcsize": _bootstrap_struct.calcsize,
             "iter_unpack": _bootstrap_struct.iter_unpack, "error": _bootstrap_struct.error,
             "_clearcache": lambda: None,
+        })
+    if name == "_pickle":
+        return _module(name, {
+            "Pickler": _bootstrap_pickle.Pickler, "Unpickler": _bootstrap_pickle.Unpickler,
+            "dump": _bootstrap_pickle.dump, "dumps": _bootstrap_pickle.dumps,
+            "load": _bootstrap_pickle.load, "loads": _bootstrap_pickle.loads,
+            "PickleBuffer": getattr(_bootstrap_pickle, "PickleBuffer", object),
+            "PickleError": getattr(_bootstrap_pickle, "PickleError", Exception),
+            "PicklingError": getattr(_bootstrap_pickle, "PicklingError", Exception),
+            "UnpicklingError": getattr(_bootstrap_pickle, "UnpicklingError", Exception),
+            "HIGHEST_PROTOCOL": _bootstrap_pickle.HIGHEST_PROTOCOL,
+            "DEFAULT_PROTOCOL": _bootstrap_pickle.DEFAULT_PROTOCOL,
         })
     if name == "_operator":
         return _module(name, {
