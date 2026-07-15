@@ -343,6 +343,21 @@ class VirtualMachine:
                     if op is Op.BUILD_LIST_UNPACK: frame.stack.append(merged)
                     elif op is Op.BUILD_TUPLE_UNPACK: frame.stack.append(tuple(merged))
                     else: frame.stack.append(set(merged))
+                elif op is Op.BUILD_DICT_UNPACK:
+                    count = instr.arg & 0xFFFF
+                    flags = instr.arg >> 16
+                    if len(frame.stack) < count: raise VMError("RuntimeError: dict unpack stack underflow")
+                    values = frame.stack[-count:] if count else []
+                    if count: del frame.stack[-count:]
+                    result: dict[object, object] = {}
+                    for index, value in enumerate(values):
+                        if flags & (1 << index):
+                            if not isinstance(value, dict): raise VMError("TypeError: ** argument must be a mapping")
+                            result.update(value)
+                        else:
+                            if not isinstance(value, tuple) or len(value) != 2: raise VMError("RuntimeError: invalid dict item")
+                            result[value[0]] = value[1]
+                    frame.stack.append(result)
                 elif op is Op.BUILD_DICT:
                     count = instr.arg * 2
                     if len(frame.stack) < count: raise VMError("RuntimeError: dict stack underflow")

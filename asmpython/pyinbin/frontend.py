@@ -238,12 +238,24 @@ class _Lowerer:
                 self.emit(Op.BUILD_SET_UNPACK, len(node.elts) | (flags << 16))
             else:
                 self.emit(Op.BUILD_SET, len(node.elts))
-        elif isinstance(node, ast.Dict) and all(key is not None for key in node.keys):
-            for key, value in zip(node.keys, node.values):
-                assert key is not None
-                self.expr(key)
-                self.expr(value)
-            self.emit(Op.BUILD_DICT, len(node.keys))
+        elif isinstance(node, ast.Dict):
+            if any(key is None for key in node.keys):
+                flags = 0
+                for index, (key, value) in enumerate(zip(node.keys, node.values)):
+                    if key is None:
+                        flags |= 1 << index
+                        self.expr(value)
+                    else:
+                        self.expr(key)
+                        self.expr(value)
+                        self.emit(Op.BUILD_TUPLE, 2)
+                self.emit(Op.BUILD_DICT_UNPACK, len(node.keys) | (flags << 16))
+            else:
+                for key, value in zip(node.keys, node.values):
+                    assert key is not None
+                    self.expr(key)
+                    self.expr(value)
+                self.emit(Op.BUILD_DICT, len(node.keys))
         elif isinstance(node, ast.JoinedStr):
             if not node.values:
                 self.emit(Op.LOAD_CONST, self.constant(""))
