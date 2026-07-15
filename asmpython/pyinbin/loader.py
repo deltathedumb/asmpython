@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import os
 import typing as _typing
 
@@ -53,8 +53,13 @@ class _ModuleRegistry(dict[str, SimpleNamespace]):
         raise KeyError(name)
 
 
-class _ModuleNamespace(SimpleNamespace):
+class _ModuleNamespace(ModuleType):
     """Source-module namespace honoring the module-level ``__getattr__`` hook."""
+
+    def __init__(self, **values: object) -> None:
+        name = str(values.pop("__name__", ""))
+        super().__init__(name)
+        self.__dict__.update(values)
 
     def __getattr__(self, name: str) -> object:
         fallback = self.__dict__.get("__getattr__")
