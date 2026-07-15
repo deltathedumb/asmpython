@@ -36,7 +36,7 @@ def _safe_issubclass(value: object, class_or_tuple: object) -> bool:
         return False
 
 
-class PyinbinImportError(VMError):
+class PyinbinImportError(VMError, ImportError):
     """A source module could not be resolved or executed by pyinbin."""
 
 
@@ -44,10 +44,11 @@ class _ModuleRegistry(dict[str, SimpleNamespace]):
     """Import cache that tolerates introspection of bootstrap-only modules."""
 
     def __missing__(self, name: str) -> SimpleNamespace:
-        module = SimpleNamespace(__name__=name)
         if name == "builtins":
+            module = SimpleNamespace(__name__=name)
             module.__import__ = lambda module_name, *args, **kwargs: None
-        return module
+            return module
+        raise KeyError(name)
 
 
 class SourceLoader:

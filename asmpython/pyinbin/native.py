@@ -33,6 +33,9 @@ import _zstd as _bootstrap_zstd
 import _queue as _bootstrap_queue
 import array as _bootstrap_array
 import bisect as _bootstrap_bisect
+import math as _bootstrap_math
+import _random as _bootstrap_random
+import random as _bootstrap_random_module
 
 
 class _MemoryTextIO:
@@ -333,6 +336,9 @@ def create_builtin_module(
         return _module(name, {
             "modules": module_cache,
             "path": [],
+            "meta_path": [],
+            "path_hooks": [],
+            "path_importer_cache": {},
             "argv": ["pyinbin"],
             "warnoptions": [],
             "platform": "win32",
@@ -348,7 +354,10 @@ def create_builtin_module(
                 events=SimpleNamespace(
                     PY_START=1, PY_RESUME=2, PY_RETURN=4, PY_YIELD=8,
                     PY_THROW=16, PY_UNWIND=32, PY_CALL=64, PY_LINE=128,
-                    PY_INSTRUCTION=256, PY_RESUME_LINE=512,
+                    PY_INSTRUCTION=256, PY_RESUME_LINE=512, LINE=128,
+                    JUMP=1024, BRANCH=2048, CALL=4096, RETURN=8192, RAISE=16384,
+                    STOP_ITERATION=32768, C_RAISE=65536, C_RETURN=131072,
+                    INSTRUCTION=256,
                 ),
                 use_tool_id=lambda *args: None,
                 register_callback=lambda *args: None,
@@ -450,6 +459,22 @@ def create_builtin_module(
             "is_builtin": lambda module_name: 0,
             "is_frozen": lambda module_name: 0,
             "extension_suffixes": lambda: [],
+            "_override_frozen_modules_for_tests": lambda *args: None,
+        })
+    if name == "_random":
+        class RandomBase:
+            @staticmethod
+            def seed(value=None):
+                return None
+            @staticmethod
+            def getrandbits(bits):
+                return 0
+            @staticmethod
+            def random():
+                return 0.5
+        return _module(name, {
+            "Random": RandomBase,
+            "seed": lambda *args, **kwargs: None,
         })
     if name == "_types":
         class _TypePlaceholder:
@@ -561,6 +586,18 @@ def create_builtin_module(
             "CloseKey": lambda *args, **kwargs: None,
             "error": _WinRegError,
         })
+    if name == "pwd":
+        return _module(name, {
+            "getpwnam": lambda name: None,
+            "getpwuid": lambda uid: None,
+            "getpwall": lambda: [],
+        })
+    if name == "grp":
+        return _module(name, {
+            "getgrnam": lambda name: None,
+            "getgrgid": lambda gid: None,
+            "getgrall": lambda: [],
+        })
     if name == "array":
         return _module(name, {
             "array": _bootstrap_array.array,
@@ -568,21 +605,13 @@ def create_builtin_module(
             "_array_reconstructor": _bootstrap_array._array_reconstructor,
         })
     if name == "math":
-        def floor(value: float) -> int:
-            integer = int(value)
-            return integer if integer <= value else integer - 1
-        def ceil(value: float) -> int:
-            integer = int(value)
-            return integer if integer >= value else integer + 1
-        return _module(name, {
-            "pi": 3.141592653589793, "e": 2.718281828459045,
-            "tau": 6.283185307179586, "inf": float("inf"), "nan": float("nan"),
-            "sqrt": lambda value: value ** 0.5, "floor": floor, "ceil": ceil,
-            "fabs": abs, "isfinite": lambda value: value == value and value not in (float("inf"), float("-inf")),
-            "isinf": lambda value: value in (float("inf"), float("-inf")),
-            "isnan": lambda value: value != value, "trunc": int,
-            "gcd": lambda left, right: _gcd(left, right),
-        })
+        values = {
+            key: getattr(_bootstrap_math, key)
+            for key in dir(_bootstrap_math)
+            if not key.startswith("__")
+        }
+        values["gcd"] = _gcd
+        return _module(name, values)
     if name == "errno":
         return _module(name, {
             "EPERM": 1, "ENOENT": 2, "EIO": 5, "EBADF": 9,

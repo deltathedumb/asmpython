@@ -44,6 +44,10 @@ deliverable.
   (`pyinbin/frontend.py`, `pyinbin/vm.py`) — generator expressions now produce
   resumable frames with local closure capture, and host contextlib/descriptors
   can interact with interpreted generator and class-only objects.
+- **Native compatibility breadth** (`pyinbin/native.py`, `pyinbin/loader.py`) —
+  interpreter provenance/constants, monitoring events, random/math/bisect,
+  Windows registry/account stubs, and true `ImportError` propagation now cover
+  more CPython test-support and optional-module paths.
 
 - **IR backend multi-argument `print`** (`ir_lower.py`) — the SSA lowering
   path now supports Python's default space-separated output for multiple
