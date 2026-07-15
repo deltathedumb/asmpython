@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "asmpython"
-version = "1.1.0"
+dynamic = ["version"]
 description = "Compile Python to native x86-64 executables via NASM"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Mabel", email = "harveydjass@gmail.com" }]
 requires-python = ">=3.11"
 keywords = ["compiler", "assembly", "x86-64", "native", "transpiler", "nasm"]
@@ -15,7 +15,6 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
@@ -38,6 +37,9 @@ Changelog = "https://github.com/deltathedumb/asmpython/blob/main/CHANGELOG.md"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["asmpython*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "asmpython.__version__" }
 
 [tool.setuptools.package-data]
 "asmpython" = ["stdlib/**/*.py", "asmlib/*.py", "_runtime/**/*"]

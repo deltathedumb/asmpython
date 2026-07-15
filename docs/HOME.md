@@ -14,6 +14,7 @@ Welcome to the asmpython documentation. Choose a section below:
 
 - **[Changelog](CHANGELOG.md)** — Version history, features added, and bug fixes.
 - **[Roadmap](ROADMAP.md)** — Current status and planned features for upcoming releases.
+- **[Publishing](PUBLISHING.md)** — Release exclusively from the guarded `pypi` branch with Trusted Publishing.
 
 ## Interactive Docs
 

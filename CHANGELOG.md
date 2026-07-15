@@ -3,6 +3,20 @@
 All notable changes to asmpython are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## PyPI packaging correction
+
+- PyPI releases now come exclusively from the dedicated `pypi` branch.
+- Package metadata reads `asmpython.__version__` instead of maintaining a
+  second version literal in `pyproject.toml`.
+- The publishing workflow verifies that the tag points to the current `pypi`
+  tip and that the wheel, sdist, and tag all contain the same normalized
+  version before requesting a Trusted Publishing token.
+- Distribution metadata is checked with `twine check --strict` before upload.
+- Distribution builds use PyPA's `pyproject-build` entry point so the
+  repository's self-hosting `build.py` cannot shadow the installed build tool.
+- Package license metadata now uses an SPDX expression instead of setuptools'
+  deprecated license table and classifier forms.
+
 
 ## [1.2.0] — 2026-06-17 — Graphics everywhere
 
