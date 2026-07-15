@@ -92,6 +92,8 @@ deliverable.
   `threading.Condition`, `Event`, and related synchronization primitives.
 - Added a `_pickle` bootstrap provider with protocol constants, pickler/
   unpickler classes, and standard serialization exception types.
+- Preserved interpreted instance identity through `__class__` and `__dict__`
+  access, preventing host-wrapper leakage during stdlib representation logic.
 
 - **27 new stdlib modules** — full implementations of `token`, `tokenize`,
   `shelve` (pickle-backed, typed getters/setters for complex object persistence),

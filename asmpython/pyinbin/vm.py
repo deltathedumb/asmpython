@@ -167,6 +167,13 @@ class PyInstance:
         self.cls = cls
         self.attributes: dict[str, object] = {}
 
+    def __getattribute__(self, name: str) -> object:
+        if name == "__class__":
+            return object.__getattribute__(self, "cls")
+        if name == "__dict__":
+            return object.__getattribute__(self, "attributes")
+        return object.__getattribute__(self, name)
+
     def __getattr__(self, name: str) -> object:
         if name in self.attributes:
             return self.attributes[name]
@@ -241,7 +248,14 @@ class PyInstance:
         return hash(self._raw_value())
 
     def __repr__(self) -> str:
-        return str(self.attributes.get("name", self._raw_value()))
+        if "name" in self.attributes:
+            return str(self.attributes["name"])
+        raw = self.attributes.get("_value_")
+        if raw is None:
+            return f"<{self.cls.__name__} instance>" if isinstance(self.cls, PyClass) else "<pyinbin instance>"
+        if raw is self or isinstance(raw, PyInstance):
+            return f"<{self.cls.__name__} value>" if isinstance(self.cls, PyClass) else "<pyinbin value>"
+        return str(raw)
 
 
 class PyClass:
