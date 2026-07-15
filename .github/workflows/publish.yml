@@ -3,35 +3,74 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed release tag at the current pypi branch tip
+        required: true
+        type: string
+
+concurrency:
+  group: pypi-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Require the pypi branch tip
+        shell: bash
+        run: |
+          git fetch --no-tags origin +refs/heads/pypi:refs/remotes/origin/pypi
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD^{commit})"
+          test "$(git rev-parse HEAD^{commit})" = "$(git rev-parse refs/remotes/origin/pypi^{commit})"
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install build tooling
-        run: python -m pip install --upgrade build
+        run: python -m pip install --upgrade build packaging twine
 
       - name: Build sdist and wheel
-        run: python -m build
+        # The repository intentionally has a top-level build.py for the
+        # self-host compiler, so `python -m build` would import that file
+        # instead of PyPA's build package.
+        run: pyproject-build --outdir dist .
 
-      - uses: actions/upload-artifact@v4
+      - name: Validate distribution metadata
+        run: |
+          python -m twine check --strict dist/*
+          python scripts/verify_release_artifacts.py --tag "$RELEASE_TAG" --project asmpython dist/*
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
+          if-no-files-found: error
+          retention-days: 7
 
   publish:
     needs: build
     runs-on: ubuntu-latest
-    environment: pypi
+    environment:
+      name: pypi
+      url: https://pypi.org/p/asmpython
     permissions:
-      id-token: write  # required for PyPI trusted publishing
+      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
