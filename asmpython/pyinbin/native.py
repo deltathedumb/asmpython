@@ -984,6 +984,20 @@ def create_builtin_module(
             "_get_running_loop": lambda: None,
             "_set_running_loop": lambda loop: None,
         })
+    if name == "faulthandler":
+        # The VM has no native signal/stack dumper yet.  Expose the public
+        # registration surface so stdlib code can probe it and continue.
+        enabled = {"value": False}
+        return _module(name, {
+            "enable": lambda file=None, all_threads=True: enabled.__setitem__("value", True),
+            "disable": lambda: enabled.__setitem__("value", False),
+            "is_enabled": lambda: enabled["value"],
+            "dump_traceback": lambda file=None, all_threads=True, **kwargs: None,
+            "dump_traceback_later": lambda *args, **kwargs: None,
+            "cancel_dump_traceback_later": lambda: None,
+            "register": lambda *args, **kwargs: None,
+            "unregister": lambda *args, **kwargs: None,
+        })
     if name == "_socket":
         return _module(name, {
             key: getattr(_bootstrap_socket, key)
