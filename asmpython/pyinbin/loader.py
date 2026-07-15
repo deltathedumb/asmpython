@@ -427,6 +427,7 @@ _dynamic_super.__pyinbin_super__ = True
 def default_builtins(importer: object | None = None) -> dict[str, object]:
     """The small explicit bootstrap built-in surface available to bytecode."""
     return {
+        "__debug__": True,
         "print": print, "len": len, "sum": sum, "range": range, "format": format, "open": _open_compat,
         "str": str, "repr": repr, "int": int, "float": float, "bool": bool, "bytes": bytes,
         "NotImplemented": NotImplemented,

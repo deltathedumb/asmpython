@@ -492,6 +492,11 @@ class _Lowerer:
             self.unsupported(target, "assignment target")
 
     def exception_spec(self, node: ast.expr) -> object:
+        if isinstance(node, ast.Constant):
+            # Keep invalid except/except* operands until runtime so CPython's
+            # TypeError contract is preserved instead of rejecting valid test
+            # programs during lowering.
+            return ("literal", node.value)
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == "type" and len(node.args) == 1
                 and isinstance(node.args[0], ast.Name) and not node.keywords):
@@ -855,12 +860,12 @@ class _Lowerer:
             end = len(self.instructions)
             for jump in end_jumps:
                 self.patch(jump, end)
-        elif isinstance(node, ast.Try) and not node.handlers and node.finalbody and not node.orelse:
+        elif isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))) and not node.handlers and node.finalbody and not node.orelse:
             for statement in node.body:
                 self.stmt(statement)
             for statement in node.finalbody:
                 self.stmt(statement)
-        elif isinstance(node, ast.Try) and node.handlers:
+        elif isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))) and node.handlers:
             handler_jump = self.emit(Op.TRY_BEGIN)
             for statement in node.body:
                 self.stmt(statement)

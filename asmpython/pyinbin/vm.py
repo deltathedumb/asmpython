@@ -785,6 +785,8 @@ class VirtualMachine:
         if isinstance(spec, tuple) and len(spec) == 3 and spec[0] == "attr":
             base = self._resolve_exception_spec(frame, spec[1])
             return getattr(base, spec[2])
+        if isinstance(spec, tuple) and len(spec) == 2 and spec[0] == "literal":
+            return spec[1]
         if isinstance(spec, tuple) and len(spec) == 2 and spec[0] == "type_of":
             return type(self._lookup(frame, frame.code.names[spec[1]]))
         if isinstance(spec, tuple) and len(spec) == 4 and spec[0] == "subscript_attr":
@@ -813,7 +815,7 @@ class VirtualMachine:
             try:
                 return isinstance(value, expected)
             except TypeError:
-                return False
+                raise
         return False
 
     def _match_pattern(self, frame: Frame, value: object, spec: object) -> tuple[bool, dict[str, object]]:
