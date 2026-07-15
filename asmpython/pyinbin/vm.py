@@ -48,6 +48,9 @@ class GeneratorObject:
             return result.value
         raise StopIteration(result)
 
+    def send(self, value: object) -> object:
+        return self.__next__()
+
     def __enter__(self) -> object:
         return next(self)
 
@@ -109,8 +112,124 @@ class CoroutineObject:
         self.closed = True
         raise StopIteration(result)
 
+    def send(self, value: object) -> object:
+        if self.closed:
+            raise StopIteration
+        return self.__next__()
+
+    def throw(self, *args: object) -> object:
+        if not args:
+            raise TypeError("throw expected at least 1 argument")
+        error = args[0]
+        if isinstance(error, type) and issubclass(error, BaseException):
+            error = error(*(args[1:2] or ()))
+        if not isinstance(error, BaseException):
+            raise TypeError("exceptions must derive from BaseException")
+        self.frame.pending_exception = error
+        return self.__next__()
+
     def close(self) -> None:
         self.closed = True
+
+
+class _AsyncGeneratorAwaitable:
+    def __init__(self, owner: "AsyncGeneratorObject", error: BaseException | None = None) -> None:
+        self.owner = owner
+        self.error = error
+        self.done = False
+
+    def __await__(self) -> "_AsyncGeneratorAwaitable":
+        return self
+
+    def __iter__(self) -> "_AsyncGeneratorAwaitable":
+        return self
+
+    def __next__(self) -> object:
+        if self.done:
+            raise StopIteration
+        self.done = True
+        if self.error is not None:
+            self.owner.frame.pending_exception = self.error
+        result = self.owner.vm._run_frame(self.owner.frame)
+        if isinstance(result, _Yielded):
+            self.owner.frame = result.frame
+            raise StopIteration(result.value)
+        self.owner.closed = True
+        raise StopAsyncIteration
+
+    def send(self, value: object) -> object:
+        if value is not None:
+            # The bootstrap frame has no dedicated SEND opcode yet; resume
+            # with the same semantics as send(None) rather than losing the
+            # awaitable protocol entirely.
+            return self.__next__()
+        return self.__next__()
+
+    def throw(self, *args: object) -> object:
+        if not args:
+            raise TypeError("throw expected at least 1 argument")
+        error = args[0]
+        if isinstance(error, type) and issubclass(error, BaseException):
+            error = error(*(args[1:2] or ()))
+        if not isinstance(error, BaseException):
+            raise TypeError("exceptions must derive from BaseException")
+        self.error = error
+        self.done = False
+        return self.__next__()
+
+    def close(self) -> None:
+        self.done = True
+
+
+class AsyncGeneratorObject:
+    """Minimal asynchronous-generator protocol over a resumable VM frame."""
+
+    def __init__(self, vm: "VirtualMachine", frame: "Frame") -> None:
+        self.vm = vm
+        self.frame = frame
+        self.closed = False
+
+    def __aiter__(self) -> "AsyncGeneratorObject":
+        return self
+
+    def __iter__(self) -> "AsyncGeneratorObject":
+        # The bootstrap frontend currently lowers async-for through the
+        # ordinary iterator op; expose a synchronous bridge for values that
+        # are already available in the VM frame.
+        return self
+
+    def __next__(self) -> object:
+        awaitable = self.__anext__()
+        try:
+            awaitable.__next__()
+        except StopIteration as stop:
+            return stop.value
+        except StopAsyncIteration:
+            raise StopIteration
+        raise StopIteration
+
+    def __anext__(self) -> _AsyncGeneratorAwaitable:
+        if self.closed:
+            awaitable = _AsyncGeneratorAwaitable(self)
+            awaitable.done = True
+            return awaitable
+        return _AsyncGeneratorAwaitable(self)
+
+    def asend(self, value: object) -> _AsyncGeneratorAwaitable:
+        return self.__anext__()
+
+    def athrow(self, *args: object) -> _AsyncGeneratorAwaitable:
+        if not args:
+            raise TypeError("athrow expected at least 1 argument")
+        error = args[0]
+        if isinstance(error, type) and issubclass(error, BaseException):
+            error = error(*(args[1:2] or ()))
+        if not isinstance(error, BaseException):
+            raise TypeError("exceptions must derive from BaseException")
+        return _AsyncGeneratorAwaitable(self, error)
+
+    def aclose(self) -> _AsyncGeneratorAwaitable:
+        return self.athrow(GeneratorExit())
 
 
 class _ClosureCell:
@@ -1192,6 +1311,8 @@ class VirtualMachine:
                     if name not in target.code.arg_names and name not in target.code.kwonly_names
                 }
             frame = Frame(code=target.code, globals=target.globals, locals=locals_, closure=target.closure)
+            if getattr(target.code, "is_async_generator", False):
+                return AsyncGeneratorObject(self, frame)
             if target.code.is_coroutine:
                 return CoroutineObject(self, frame)
             if target.code.is_generator:

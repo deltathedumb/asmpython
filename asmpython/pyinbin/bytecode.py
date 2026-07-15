@@ -125,6 +125,7 @@ class CodeObject:
     is_coroutine: bool = False
     free_names: list[str] = field(default_factory=list)
     interactive: bool = False
+    is_async_generator: bool = False
 
     def __getattr__(self, name: str) -> object:
         if name == "co_name":

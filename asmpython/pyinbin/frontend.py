@@ -65,6 +65,7 @@ class _Lowerer:
     loop_starts: list[int] = field(default_factory=list)
     is_generator: bool = False
     is_coroutine: bool = False
+    is_async_generator: bool = False
     global_names: set[str] = field(default_factory=set)
     nonlocal_names: set[str] = field(default_factory=set)
     bound_names: set[str] = field(default_factory=set)
@@ -737,6 +738,10 @@ class _Lowerer:
             nested.defer_annotations = self.defer_annotations
             nested.is_function = True
             nested.is_coroutine = isinstance(node, ast.AsyncFunctionDef)
+            nested.is_async_generator = (
+                nested.is_coroutine
+                and any(isinstance(item, (ast.Yield, ast.YieldFrom)) for item in ast.walk(node))
+            )
             nested.posonly_names = [arg.arg for arg in node.args.posonlyargs]
             nested.kwonly_names = [arg.arg for arg in node.args.kwonlyargs]
             nested.vararg_name = node.args.vararg.arg if node.args.vararg else None
@@ -1001,6 +1006,7 @@ class _Lowerer:
             self.is_coroutine,
             sorted(self.free_names | self.nonlocal_names),
             getattr(self, "interactive", False),
+            getattr(self, "is_async_generator", False),
         )
 
 
