@@ -438,6 +438,24 @@ class _Lowerer:
                 self.expr(node.value)
                 self.emit(_BINARY_OPS[type(node.op)])
                 self.emit(Op.SET_ATTR, self.name_index(node.target.attr))
+            elif isinstance(node.target, ast.Subscript):
+                object_name = f"__pyinbin_aug_object_{len(self.instructions)}"
+                index_name = f"__pyinbin_aug_index_{len(self.instructions)}"
+                value_name = f"__pyinbin_aug_value_{len(self.instructions)}"
+                self.expr(node.target.value)
+                self.emit(Op.STORE_NAME, self.name_index(object_name))
+                self.slice_expr(node.target.slice)
+                self.emit(Op.STORE_NAME, self.name_index(index_name))
+                self.emit(Op.LOAD_NAME, self.name_index(object_name))
+                self.emit(Op.LOAD_NAME, self.name_index(index_name))
+                self.emit(Op.GET_ITEM)
+                self.expr(node.value)
+                self.emit(_BINARY_OPS[type(node.op)])
+                self.emit(Op.STORE_NAME, self.name_index(value_name))
+                self.emit(Op.LOAD_NAME, self.name_index(object_name))
+                self.emit(Op.LOAD_NAME, self.name_index(index_name))
+                self.emit(Op.LOAD_NAME, self.name_index(value_name))
+                self.emit(Op.SET_ITEM)
             else:
                 self.unsupported(node, "augmented assignment target")
         elif isinstance(node, ast.Return):
