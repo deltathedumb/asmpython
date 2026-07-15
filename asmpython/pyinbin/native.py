@@ -11,6 +11,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Callable
 import ast as _bootstrap_ast
+import struct as _bootstrap_struct
+import time as _bootstrap_time
 
 
 class _MemoryTextIO:
@@ -344,9 +346,14 @@ def create_builtin_module(
             "AsyncGeneratorType": placeholder,
         })
     if name == "_frozen_importlib":
+        def module_from_spec(spec):
+            module_name = getattr(spec, "name", "")
+            return SimpleNamespace(__name__=module_name, __spec__=spec)
         return _module(name, {
             "BuiltinImporter": object, "FrozenImporter": object,
             "PathFinder": object, "ModuleSpec": object,
+            "module_from_spec": module_from_spec,
+            "_init_module_attrs": lambda *args, **kwargs: None,
         })
     if name == "_frozen_importlib_external":
         def all_suffixes():
@@ -393,6 +400,24 @@ def create_builtin_module(
             "EAGAIN": 11, "ENOMEM": 12, "EACCES": 13, "EEXIST": 17,
             "ENOTDIR": 20, "EINVAL": 22, "ENOSPC": 28, "EPIPE": 32,
             "EWOULDBLOCK": 11, "ECONNRESET": 10054, "ETIMEDOUT": 10060,
+        })
+    if name == "time":
+        return _module(name, {
+            "time": _bootstrap_time.time, "monotonic": _bootstrap_time.monotonic,
+            "perf_counter": _bootstrap_time.perf_counter, "process_time": _bootstrap_time.process_time,
+            "sleep": _bootstrap_time.sleep, "ctime": _bootstrap_time.ctime,
+            "gmtime": _bootstrap_time.gmtime, "localtime": _bootstrap_time.localtime,
+            "strftime": _bootstrap_time.strftime, "strptime": _bootstrap_time.strptime,
+            "struct_time": _bootstrap_time.struct_time, "timezone": _bootstrap_time.timezone,
+            "altzone": getattr(_bootstrap_time, "altzone", 0), "daylight": _bootstrap_time.daylight,
+            "tzname": _bootstrap_time.tzname,
+        })
+    if name == "_struct":
+        return _module(name, {
+            "Struct": _bootstrap_struct.Struct, "pack": _bootstrap_struct.pack,
+            "unpack": _bootstrap_struct.unpack, "unpack_from": _bootstrap_struct.unpack_from,
+            "pack_into": _bootstrap_struct.pack_into, "calcsize": _bootstrap_struct.calcsize,
+            "iter_unpack": _bootstrap_struct.iter_unpack, "error": _bootstrap_struct.error,
         })
     if name == "_operator":
         return _module(name, {

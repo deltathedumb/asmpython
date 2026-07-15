@@ -107,6 +107,18 @@ class SourceLoader:
             self._modules.pop(name, None)
             raise
 
+        # ``enum.global_enum`` publishes these aliases in CPython. Keep the
+        # public ``re`` surface stable while the bootstrap enum metaclass is
+        # still being completed.
+        if name == "re":
+            flags = {
+                "NOFLAG": 0, "ASCII": 256, "IGNORECASE": 2, "LOCALE": 4,
+                "UNICODE": 32, "MULTILINE": 8, "DOTALL": 16, "VERBOSE": 64,
+                "DEBUG": 128,
+            }
+            for flag_name, value in flags.items():
+                namespace.setdefault(flag_name, value)
+
         if parent is not None and child is not None:
             setattr(parent, child, module)
         return module

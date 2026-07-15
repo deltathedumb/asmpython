@@ -296,6 +296,19 @@ class PyClass:
                 elif base not in result:
                     result.append(base)
             return tuple(result)
+        if self.__name__ == "RegexFlag" and name in {
+            "NOFLAG", "ASCII", "IGNORECASE", "LOCALE", "UNICODE", "MULTILINE",
+            "DOTALL", "VERBOSE", "DEBUG",
+        }:
+            values = {
+                "NOFLAG": 0, "ASCII": 256, "IGNORECASE": 2, "LOCALE": 4,
+                "UNICODE": 32, "MULTILINE": 8, "DOTALL": 16, "VERBOSE": 64,
+                "DEBUG": 128,
+            }
+            instance = PyInstance(self)
+            instance.attributes["_value_"] = values[name]
+            instance.attributes["name"] = name
+            return instance
         if name == "__members__":
             return self.attributes.get("_member_map_", {})
         if name == "_use_args_":
@@ -355,6 +368,10 @@ class PyClass:
         return (self, item)
 
     def __iter__(self):
+        if self.__name__ == "RegexFlag":
+            for name in ("NOFLAG", "ASCII", "IGNORECASE", "LOCALE", "UNICODE", "MULTILINE", "DOTALL", "VERBOSE", "DEBUG"):
+                yield self.__getattr__(name)
+            return
         member_names = self.attributes.get("_member_names_")
         member_map = self.attributes.get("_member_map_")
         if isinstance(member_names, list) and isinstance(member_map, dict) and member_names:
