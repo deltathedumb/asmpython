@@ -588,16 +588,6 @@ def cmd_build(args: argparse.Namespace) -> int:
             all_errors=all_errors,
         )
 
-    if cfg is not None and cfg.pyinbin_imports:
-        modules = ", ".join(cfg.pyinbin_imports)
-        print(
-            "asmpython: pyinbin runtime imports are declared for "
-            f"{modules}, but source packaging and the pyinbin runtime loader "
-            "are not available yet",
-            file=sys.stderr,
-        )
-        return 1
-
     # Resolve effective settings: CLI flag wins when given, else the
     # project.json's matching field, else the built-in default.
     cli_targets = None
@@ -653,8 +643,24 @@ def cmd_build(args: argparse.Namespace) -> int:
         """Try target-neutral execution after native codegen rejects source."""
         from asmpython.pyinbin import run_source
 
+        bundle: Path | None = None
+        if cfg is not None and cfg.pyinbin_imports:
+            assert project_dir is not None
+            from .pyinbin_package import PyinbinPackageError, build_source_bundle
+
+            bundle = project_dir / "build" / "pyinbin"
+            try:
+                build_source_bundle(project_dir, cfg.pyinbin_imports, bundle)
+            except PyinbinPackageError as package_error:
+                print(
+                    f"asmpython: native compilation failed: {native_error}\n"
+                    f"asmpython: pyinbin packaging failed: {package_error}",
+                    file=sys.stderr,
+                )
+                return 1
+
         try:
-            run_source(source_path)
+            run_source(source_path, bundle=bundle)
         except Exception as fallback_error:
             print(
                 f"asmpython: native compilation failed: {native_error}\n"
@@ -668,6 +674,9 @@ def cmd_build(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 0
+
+    if cfg is not None and cfg.pyinbin_imports:
+        return pyinbin_fallback(RuntimeError("project declares pyinbin_imports"))
 
     try:
         if single:

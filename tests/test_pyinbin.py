@@ -14,6 +14,7 @@ from asmpython._compiler.pyinbin_package import (
     build_source_bundle,
     verify_source_bundle,
 )
+from asmpython._compiler.project import load_project
 from asmpython.pyinbin import CodeObject, Instruction, Op, VirtualMachine, run_source
 
 
@@ -104,6 +105,15 @@ class PyinbinBundleTests(unittest.TestCase):
                 verify_source_bundle(destination)
 
             self.assertTrue((destination / MANIFEST_NAME).is_file())
+
+    def test_project_manifest_preserves_pyinbin_import_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "project.json"
+            project.write_text(
+                '{"entry":"main.py","pyinbin_imports":["plugins", "vendor.tools"]}\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(load_project(project).pyinbin_imports, ["plugins", "vendor.tools"])
 
 
 class PyinbinSourceTests(unittest.TestCase):

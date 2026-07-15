@@ -19,10 +19,10 @@ The compiler has two import modes:
 2. Pyinbin module: a source module marked for runtime interpretation is
    packaged with the executable and loaded by pyinbin when imported.
 
-Runtime interpretation is deliberately opt-in until pyinbin reaches full
-conformance. A build must fail clearly if a module requires pyinbin but the
-selected target does not package a compatible pyinbin runtime. It must never
-silently run a partial interpreter or fall back to CPython.
+Runtime interpretation is selected by `pyinbin_imports` until pyinbin reaches
+full conformance. A project build packages those roots and executes the entry
+through pyinbin; it reports that no native artifact was produced until the
+target VM is embedded. It must never silently fall back to CPython.
 
 For a native backend rejection (`NotImplementedError` in code generation), the
 CLI now attempts the same source through pyinbin. A successful fallback is an

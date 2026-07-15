@@ -45,6 +45,8 @@ deliverable.
   augmented assignment, power, identity, membership, and richer comparisons
   now run through the bootstrap VM. Native code-generation `NotImplementedError`
   attempts pyinbin before reporting a combined failure.
+- Projects declaring `pyinbin_imports` now package and execute their entry via
+  pyinbin instead of being rejected before build.
 
 - **27 new stdlib modules** — full implementations of `token`, `tokenize`,
   `shelve` (pickle-backed, typed getters/setters for complex object persistence),

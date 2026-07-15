@@ -85,6 +85,7 @@ class ProjectConfig:
         known.add("use_runtime_lib")
         known.add("library_dirs")
         known.add("packages")
+        known.add("pyinbin_imports")
         unknown: list = sorted([k for k in data if k not in known])
         name: str = data["name"] if "name" in data else "project"
         entry: str = data["entry"] if "entry" in data else "main.py"
@@ -96,6 +97,7 @@ class ProjectConfig:
         use_runtime_lib: int = data["use_runtime_lib"] if "use_runtime_lib" in data else 0
         library_dirs: list = data["library_dirs"] if "library_dirs" in data else ["libs"]
         packages: list = data["packages"] if "packages" in data else []
+        pyinbin_imports: list = data["pyinbin_imports"] if "pyinbin_imports" in data else []
         cfg: ProjectConfig = ProjectConfig(
             name=name,
             entry=entry,
@@ -107,6 +109,7 @@ class ProjectConfig:
             use_runtime_lib=use_runtime_lib,
             library_dirs=library_dirs,
             packages=packages,
+            pyinbin_imports=pyinbin_imports,
         )
         cfg.validate()
         return cfg, unknown
