@@ -861,9 +861,21 @@ class PyClass:
     def lookup(self, name: str) -> object:
         if name in self.attributes:
             return self.attributes[name]
-        for base in self.bases:
+        # Walk ``__mro__`` (proper linearization: every PyClass ancestor
+        # before any shared host base like ``object``) rather than each
+        # base's own bases depth-first -- a depth-first per-base walk would
+        # let a mixin's own implicit ``object`` base shadow a sibling base
+        # that should take precedence (e.g. ``class T(Mixin, TestCase)``
+        # incorrectly finding ``object.__init__`` via ``Mixin`` before ever
+        # trying ``TestCase.__init__``).
+        for ancestor in self.__mro__[1:]:
+            attributes = ancestor.attributes if isinstance(ancestor, PyClass) else None
+            if attributes is not None:
+                if name in attributes:
+                    return attributes[name]
+                continue
             try:
-                return base.lookup(name) if isinstance(base, PyClass) else getattr(base, name)
+                return getattr(ancestor, name)
             except AttributeError:
                 pass
         raise AttributeError(name)
@@ -1443,6 +1455,32 @@ class VirtualMachine:
                 # it via ``_value_`` (see ``PyInstance.__getattr__``).
                 instance.attributes["_value_"] = owner(*args[1:], **kwargs)
             return instance
+        objclass = getattr(target, "__objclass__", None)
+        if (
+            isinstance(objclass, type)
+            and objclass is not object
+            and args
+            and isinstance(args[0], PyInstance)
+            and isinstance(args[0].cls, PyClass)
+            and objclass in args[0].cls.__mro__
+        ):
+            # An interpreted subclass of a host extension type (e.g.
+            # ``socket.py``'s ``class socket(_socket.socket)``) may call the
+            # host base's unbound descriptor directly -- not through
+            # ``super()`` -- such as ``_socket.socket.__init__(self, family,
+            # type, proto, fileno)``.  The descriptor's C-level type check
+            # rejects a bare ``PyInstance`` receiver, so give the instance a
+            # real backing host object (constructed with the actual call
+            # args, unlike the zero-arg dict/list/set seeding above) and
+            # delegate to it, mirroring ``PyInstance``'s existing
+            # ``_value_``-backed dunder fast paths.
+            instance = args[0]
+            backing = instance.attributes.get("_value_")
+            if not isinstance(backing, objclass):
+                backing = objclass(*args[1:], **kwargs)
+                instance.attributes["_value_"] = backing
+                return None
+            return target(backing, *args[1:], **kwargs)
         if not callable(target):
             detail = str(target) if isinstance(target, (bool, int, str)) else type(target).__name__
             location = getattr(self, "_current_call_location", getattr(self, "_current_code_name", "<unknown>"))
