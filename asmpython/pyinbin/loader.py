@@ -109,6 +109,23 @@ class SourceLoader:
 
         parts = name.split(".")
         roots = list(self.source_roots)
+        # ``run_source()`` uses the entry file's directory as a source root.
+        # When that directory is nested under an import root (for example
+        # CPython's ``Lib/test/test_importlib``), a bare absolute import must
+        # not resolve a same-named helper beside the test file.  Prefer the
+        # containing root for top-level names while retaining entry-directory
+        # precedence for ordinary project modules.
+        if len(parts) == 1:
+            for child in tuple(roots):
+                for parent in tuple(roots):
+                    if child == parent:
+                        continue
+                    try:
+                        child.relative_to(parent)
+                    except ValueError:
+                        continue
+                    roots = [parent, *[root for root in roots if root != parent]]
+                    break
         sys_module = self._modules.get("sys")
         for entry in getattr(sys_module, "path", ()) if sys_module is not None else ():
             try:
@@ -272,6 +289,17 @@ class SourceLoader:
                              "PathEntryFinder"):
                     if hasattr(parent, attr):
                         setattr(module, attr, getattr(parent, attr))
+                # CPython's importlib.abc also re-exports the ABC machinery
+                # used by callers constructing custom finders/loaders.
+                try:
+                    abc_module = self.load("abc")
+                except (ImportError, ModuleNotFoundError, VMError):
+                    abc_module = None
+                if abc_module is not None:
+                    for attr in ("ABC", "ABCMeta", "abstractmethod", "abstractclassmethod",
+                                 "abstractstaticmethod", "abstractproperty"):
+                        if hasattr(abc_module, attr):
+                            setattr(module, attr, getattr(abc_module, attr))
             elif name.endswith(".machinery"):
                 for attr in ("ModuleSpec", "SourceFileLoader", "SourcelessFileLoader",
                              "FileLoader", "SourceLoader"):
