@@ -430,6 +430,8 @@ def default_builtins(importer: object | None = None) -> dict[str, object]:
         "ArithmeticError": ArithmeticError,
         "WindowsError": OSError,
         "Warning": Warning, "UserWarning": UserWarning, "DeprecationWarning": DeprecationWarning,
+        "PendingDeprecationWarning": PendingDeprecationWarning, "FutureWarning": FutureWarning,
+        "SyntaxWarning": SyntaxWarning, "ImportWarning": ImportWarning, "ResourceWarning": ResourceWarning,
         "OSError": OSError, "IOError": OSError, "NameError": NameError,
         "FileNotFoundError": FileNotFoundError, "NotADirectoryError": NotADirectoryError,
         "UnboundLocalError": UnboundLocalError, "MemoryError": MemoryError,

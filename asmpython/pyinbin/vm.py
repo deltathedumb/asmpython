@@ -350,6 +350,30 @@ class PyInstance:
     def __rxor__(self, other: object) -> object:
         return (other._raw_value() if isinstance(other, PyInstance) else other) ^ self._raw_value()
 
+    def __truediv__(self, other: object) -> object:
+        try:
+            method = self.cls.lookup("__truediv__")
+        except AttributeError:
+            method = None
+        if isinstance(method, Function):
+            return self.cls.vm._call(method, [self, other])
+        if method is not None and method is not self.__truediv__:
+            return method(self, other)
+        right = other._raw_value() if isinstance(other, PyInstance) else other
+        return self._raw_value() / right
+
+    def __rtruediv__(self, other: object) -> object:
+        try:
+            method = self.cls.lookup("__rtruediv__")
+        except AttributeError:
+            method = None
+        if isinstance(method, Function):
+            return self.cls.vm._call(method, [self, other])
+        if method is not None and method is not self.__rtruediv__:
+            return method(self, other)
+        left = other._raw_value() if isinstance(other, PyInstance) else other
+        return left / self._raw_value()
+
     def __invert__(self) -> object:
         return ~self._raw_value()
 
