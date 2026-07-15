@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import os
 
 from asmpython._compiler.pyinbin_package import PackedModule, verify_source_bundle
 
 from .frontend import compile_source
 from .native import create_builtin_module
-from .vm import VMError, VirtualMachine
+from .vm import PyException, VMError, VirtualMachine
 
 
 class _SSLMethodPlaceholder(int):
@@ -147,6 +148,9 @@ class SourceLoader:
             self._modules.pop(name, None)
             raise
 
+        if name == "os":
+            namespace["open"] = lambda file, flags, mode=0o777: os.open(file, flags, mode)
+
         # ``enum.global_enum`` publishes these aliases in CPython. Keep the
         # public ``re`` surface stable while the bootstrap enum metaclass is
         # still being completed.
@@ -184,6 +188,14 @@ _dynamic_exec.__pyinbin_exec__ = True
 _dynamic_compile.__pyinbin_compile__ = True
 
 
+def _open_compat(file: object, mode: object = "r", *args: object, **kwargs: object) -> object:
+    if isinstance(mode, int):
+        fd = os.open(file, mode, 0o666)
+        text_mode = "r+b" if mode & os.O_RDWR else "wb" if mode & os.O_WRONLY else "rb"
+        return os.fdopen(fd, text_mode)
+    return open(file, mode, *args, **kwargs)
+
+
 def _dynamic_globals() -> dict[str, object]:
     raise VMError("pyinbin globals marker must be handled by the VM")
 
@@ -206,7 +218,7 @@ _dynamic_super.__pyinbin_super__ = True
 def default_builtins(importer: object | None = None) -> dict[str, object]:
     """The small explicit bootstrap built-in surface available to bytecode."""
     return {
-        "print": print, "len": len, "sum": sum, "range": range, "format": format, "open": open,
+        "print": print, "len": len, "sum": sum, "range": range, "format": format, "open": _open_compat,
         "str": str, "repr": repr, "int": int, "float": float, "bool": bool, "bytes": bytes,
         "NotImplemented": NotImplemented,
         "bytearray": bytearray, "memoryview": memoryview, "object": object, "type": type,
@@ -261,4 +273,11 @@ def run_source(
     namespace = module.__dict__
     namespace.update(default_builtins(loader._import))
     namespace.update({"__name__": "__main__", "__file__": str(path), "__pyinbin_import__": loader.load})
-    return VirtualMachine().run(compile_source(source, str(path)), namespace)
+    try:
+        return VirtualMachine().run(compile_source(source, str(path)), namespace)
+    except PyException as exc:
+        # CPython's test runner treats module-level SkipTest as a skipped
+        # module; preserve that release-gate behavior for direct execution.
+        if getattr(exc.instance.cls, "__name__", "") == "SkipTest":
+            return None
+        raise

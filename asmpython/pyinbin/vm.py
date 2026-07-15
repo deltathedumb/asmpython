@@ -232,6 +232,9 @@ class PyInstance:
             if isinstance(getter, Function):
                 return self.cls.vm._call(getter, [self])
             return getter(self) if getter is not None else None
+        descriptor_get = getattr(value, "__get__", None)
+        if callable(descriptor_get):
+            return descriptor_get(self, self.cls)
         return value
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -478,6 +481,9 @@ class PyClass:
             return BoundMethod(self.vm, function, self) if isinstance(function, Function) else value.__get__(None, self)
         if isinstance(value, staticmethod):
             return value.__func__
+        descriptor_get = getattr(value, "__get__", None)
+        if callable(descriptor_get):
+            return descriptor_get(None, self)
         return value
 
     def __call__(self, *args: object, **kwargs: object) -> PyInstance:

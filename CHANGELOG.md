@@ -32,6 +32,10 @@ deliverable.
   loader-backed callable `__import__`, stable `__main__` registration,
   exception-safe context-manager cleanup, special-method dispatch for mapping
   instances, and the stream/system hooks needed by unittest and warnings.
+- **Official-suite bootstrap expansion** (`pyinbin/native.py`) — added
+  interpreter/channel exception surfaces, queue/array providers, Windows file
+  flags and handles, callable `os.open` compatibility, and module-level
+  `SkipTest` handling so unsupported platform tests report as skipped.
 
 - **IR backend multi-argument `print`** (`ir_lower.py`) — the SSA lowering
   path now supports Python's default space-separated output for multiple

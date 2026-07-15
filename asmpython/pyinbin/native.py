@@ -30,6 +30,8 @@ import _ctypes as _bootstrap_ctypes
 import _bz2 as _bootstrap_bz2
 import _lzma as _bootstrap_lzma
 import _zstd as _bootstrap_zstd
+import _queue as _bootstrap_queue
+import array as _bootstrap_array
 
 
 class _MemoryTextIO:
@@ -87,6 +89,14 @@ class _MemoryTextIO:
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
         self.close()
         return False
+
+
+def _open_compat(file: object, mode: object = "r", *args: object, **kwargs: object) -> object:
+    if isinstance(mode, int):
+        fd = _bootstrap_os.open(file, mode, 0o666)
+        text_mode = "r+b" if mode & _bootstrap_os.O_RDWR else "wb" if mode & _bootstrap_os.O_WRONLY else "rb"
+        return _bootstrap_os.fdopen(fd, text_mode)
+    return open(file, mode, *args, **kwargs)
 
 
 class _MemoryBytesIO:
@@ -449,6 +459,7 @@ def create_builtin_module(
             "spec_from_loader": spec_from_loader,
             "_find_spec": lambda name, path=None, target=None: None,
             "_resolve_name": resolve_name,
+            "_gcd_import": lambda module_name, package=None, level=0: None,
             "_init_module_attrs": lambda *args, **kwargs: None,
         })
     if name == "_frozen_importlib_external":
@@ -489,6 +500,23 @@ def create_builtin_module(
             "S_ISREG": lambda mode: (mode & 0o170000) == 0o100000,
             "S_ISDIR": lambda mode: (mode & 0o170000) == 0o040000,
             "S_ISLNK": lambda mode: (mode & 0o170000) == 0o120000,
+        })
+    if name == "_queue":
+        return _module(name, {
+            "Empty": _bootstrap_queue.Empty,
+            "SimpleQueue": _bootstrap_queue.SimpleQueue,
+        })
+    if name == "_wmi":
+        class _WMIUnavailable(_BootstrapModule):
+            def __bool__(self) -> bool:
+                return False
+        module = _WMIUnavailable(__name__=name, __package__="", __file__=f"<pyinbin:{name}>")
+        module.exec_query = lambda *args, **kwargs: ""
+        return module
+    if name == "array":
+        return _module(name, {
+            "array": _bootstrap_array.array,
+            "typecodes": _bootstrap_array.typecodes,
         })
     if name == "math":
         def floor(value: float) -> int:
@@ -541,14 +569,38 @@ def create_builtin_module(
             if not key.startswith("__")
         })
     if name == "_interpreters":
+        class InterpreterError(Exception):
+            pass
+        class InterpreterNotFoundError(InterpreterError):
+            pass
+        class NotShareableError(InterpreterError):
+            pass
         return _module(name, {
             "InterpreterID": int,
+            "InterpreterError": InterpreterError,
+            "InterpreterNotFoundError": InterpreterNotFoundError,
+            "NotShareableError": NotShareableError,
+            "is_shareable": lambda obj: True,
             "create": lambda: 0,
             "destroy": lambda interpreter: None,
             "run_string": lambda interpreter, script, shared=None: None,
             "list_all": lambda: [0],
             "get_current": lambda: 0,
             "is_running": lambda interpreter: False,
+        })
+    if name == "_interpqueues":
+        class QueueError(Exception):
+            pass
+        class QueueNotFoundError(QueueError):
+            pass
+        return _module(name, {
+            "QueueError": QueueError,
+            "QueueNotFoundError": QueueNotFoundError,
+            "create": lambda: 0,
+            "destroy": lambda queue: None,
+            "send": lambda *args, **kwargs: None,
+            "recv": lambda *args, **kwargs: None,
+            "list_all": lambda: [0],
         })
     if name == "_sysconfig":
         return _module(name, {"config_vars": _bootstrap_sysconfig.config_vars})
@@ -636,6 +688,7 @@ def create_builtin_module(
             "getwche": lambda: "",
             "kbhit": lambda: False,
             "setmode": lambda fd, mode: None,
+            "get_osfhandle": lambda fd: fd,
         })
     if name == "_pickle":
         return _module(name, {
@@ -757,7 +810,7 @@ def create_builtin_module(
             "BlockingIOError": BlockingIOError,
             "UnsupportedOperation": OSError,
             "DEFAULT_BUFFER_SIZE": 8192,
-            "open": open, "open_code": open,
+            "open": _open_compat, "open_code": _open_compat,
         })
     if name == "_collections":
         class deque(list):
@@ -985,7 +1038,13 @@ def create_builtin_module(
             "_create_environ": lambda: {}, "_exit": lambda status=0: None,
             "defpath": ".", "devnull": "NUL", "curdir": ".", "pardir": "..", "extsep": ".",
             "getcwd": lambda: ".", "getcwdb": lambda: b".", "listdir": lambda path=".": [],
+            "open": lambda path, flags, mode=0o777: _bootstrap_os.open(path, flags, mode),
             "getpid": lambda: 1, "getppid": lambda: 0,
+            "get_osfhandle": lambda fd: fd,
+            "O_RDONLY": _bootstrap_os.O_RDONLY, "O_WRONLY": _bootstrap_os.O_WRONLY,
+            "O_RDWR": _bootstrap_os.O_RDWR, "O_CREAT": _bootstrap_os.O_CREAT,
+            "O_EXCL": _bootstrap_os.O_EXCL, "O_TRUNC": _bootstrap_os.O_TRUNC,
+            "O_BINARY": getattr(_bootstrap_os, "O_BINARY", 0),
             "stat_result": _bootstrap_os.stat_result,
             "terminal_size": _bootstrap_os.terminal_size,
             "getwindowsversion": lambda: SimpleNamespace(major=10, minor=0, build=0, platform=2, service_pack=""),
