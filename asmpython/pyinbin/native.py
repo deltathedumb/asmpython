@@ -36,9 +36,13 @@ import bisect as _bootstrap_bisect
 
 
 class _MemoryTextIO:
-    def __init__(self, initial: str = "") -> None:
+    def __init__(self, initial: str = "", *args: object, **kwargs: object) -> None:
         self._value = initial
         self._position = 0
+        self.encoding = kwargs.get("encoding") or "utf-8"
+        self.errors = kwargs.get("errors") or "strict"
+        self.newlines = None
+        self.mode = kwargs.get("mode", "r")
 
     def write(self, value: object) -> int:
         text = str(value)
@@ -81,6 +85,12 @@ class _MemoryTextIO:
     def readable(self) -> bool:
         return True
 
+    def isatty(self) -> bool:
+        return False
+
+    def fileno(self) -> int:
+        raise OSError("stream has no file descriptor")
+
     def close(self) -> None:
         return None
 
@@ -91,6 +101,17 @@ class _MemoryTextIO:
         self.close()
         return False
 
+
+class _WindowsVersion(tuple):
+    def __new__(cls) -> "_WindowsVersion":
+        return tuple.__new__(cls, (10, 0, 0, 2, "", (10, 0, 0)))
+
+    major = 10
+    minor = 0
+    build = 0
+    platform = 2
+    service_pack = ""
+    platform_version = (10, 0, 0)
 
 def _open_compat(file: object, mode: object = "r", *args: object, **kwargs: object) -> object:
     if isinstance(mode, int):
@@ -354,7 +375,7 @@ def create_builtin_module(
             "exit": lambda code=0: None,
             "getfilesystemencoding": lambda: "utf-8", "getfilesystemencodeerrors": lambda: "surrogatepass",
             "getdefaultencoding": lambda: "utf-8",
-            "getwindowsversion": lambda: SimpleNamespace(major=10, minor=0, build=0, platform=2, service_pack=""),
+            "getwindowsversion": lambda: _WindowsVersion(),
             "setrecursionlimit": lambda value: None,
             "is_finalizing": lambda: False,
             "intern": lambda value: value,
@@ -527,6 +548,19 @@ def create_builtin_module(
         module = _WMIUnavailable(__name__=name, __package__="", __file__=f"<pyinbin:{name}>")
         module.exec_query = lambda *args, **kwargs: ""
         return module
+    if name == "winreg":
+        class _WinRegError(OSError):
+            pass
+        return _module(name, {
+            "HKEY_LOCAL_MACHINE": object(), "HKEY_CURRENT_USER": object(),
+            "KEY_READ": 0x20019, "KEY_WOW64_32KEY": 0x200,
+            "OpenKey": lambda *args, **kwargs: (_ for _ in ()).throw(_WinRegError("not supported")),
+            "OpenKeyEx": lambda *args, **kwargs: (_ for _ in ()).throw(_WinRegError("not supported")),
+            "ConnectRegistry": lambda *args, **kwargs: (_ for _ in ()).throw(_WinRegError("not supported")),
+            "QueryValueEx": lambda *args, **kwargs: (_ for _ in ()).throw(_WinRegError("not supported")),
+            "CloseKey": lambda *args, **kwargs: None,
+            "error": _WinRegError,
+        })
     if name == "array":
         return _module(name, {
             "array": _bootstrap_array.array,
@@ -592,15 +626,26 @@ def create_builtin_module(
             pass
         return _module(name, {
             "InterpreterID": int,
+            "WHENCE_UNKNOWN": 0,
+            "WHENCE_RUNTIME": 1,
+            "WHENCE_LEGACY_CAPI": 2,
+            "WHENCE_CAPI": 3,
+            "WHENCE_XI": 4,
+            "WHENCE_STDLIB": 5,
             "InterpreterError": InterpreterError,
             "InterpreterNotFoundError": InterpreterNotFoundError,
             "NotShareableError": NotShareableError,
             "is_shareable": lambda obj: True,
             "create": lambda: 0,
             "destroy": lambda interpreter: None,
+            "decref": lambda interpreter: None,
+            "incref": lambda interpreter: None,
             "run_string": lambda interpreter, script, shared=None: None,
-            "list_all": lambda: [0],
-            "get_current": lambda: 0,
+            "list_all": lambda *args, **kwargs: [(0, 1)],
+            "get_current": lambda: (0, 1),
+            "get_main": lambda: (0, 1),
+            "whence": lambda interpreter: 1,
+            "get_info": lambda interpreter: SimpleNamespace(id=interpreter, whence=1),
             "is_running": lambda interpreter: False,
         })
     if name == "_interpqueues":
@@ -616,6 +661,7 @@ def create_builtin_module(
             "send": lambda *args, **kwargs: None,
             "recv": lambda *args, **kwargs: None,
             "list_all": lambda: [0],
+            "_register_heap_types": lambda *args, **kwargs: None,
         })
     if name == "_sysconfig":
         return _module(name, {"config_vars": _bootstrap_sysconfig.config_vars})
@@ -704,6 +750,7 @@ def create_builtin_module(
             "kbhit": lambda: False,
             "setmode": lambda fd, mode: None,
             "get_osfhandle": lambda fd: fd,
+            "open_osfhandle": lambda handle, flags: handle,
         })
     if name == "_pickle":
         return _module(name, {
@@ -1069,7 +1116,7 @@ def create_builtin_module(
             "O_BINARY": getattr(_bootstrap_os, "O_BINARY", 0),
             "stat_result": _bootstrap_os.stat_result,
             "terminal_size": _bootstrap_os.terminal_size,
-            "getwindowsversion": lambda: SimpleNamespace(major=10, minor=0, build=0, platform=2, service_pack=""),
+            "getwindowsversion": lambda: _WindowsVersion(),
             "cpu_count": lambda: 1, "process_cpu_count": lambda: 1,
             "_getvolumepathname": lambda path: path,
             "_path_normpath": lambda path: path,

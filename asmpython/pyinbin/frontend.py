@@ -101,6 +101,73 @@ class _Lowerer:
     def comprehension(self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp) -> None:
         # Async comprehensions share the same lowering surface during bootstrap;
         # the native VM will supply awaitable iteration semantics later.
+        if isinstance(node, ast.GeneratorExp):
+            nested = _Lowerer(f"{self.name}.<genexpr>", ["__pyinbin_iter"])
+            nested.is_function = True
+            nested.is_generator = True
+
+            def emit_nested(index: int) -> None:
+                generator = node.generators[index]
+                nested.expr(generator.iter)
+                nested.emit(Op.GET_ITER)
+                start = len(nested.instructions)
+                exit_jump = nested.emit(Op.FOR_ITER)
+                nested.store_sequence(generator.target)
+                filter_jumps: list[int] = []
+                for condition in generator.ifs:
+                    nested.expr(condition)
+                    filter_jumps.append(nested.emit(Op.JUMP_IF_FALSE))
+                if index + 1 < len(node.generators):
+                    emit_nested(index + 1)
+                else:
+                    nested.expr(node.elt)
+                    nested.emit(Op.YIELD_VALUE)
+                continue_target = len(nested.instructions)
+                for jump in filter_jumps:
+                    nested.patch(jump, continue_target)
+                nested.emit(Op.JUMP, start)
+                nested.patch(exit_jump, len(nested.instructions))
+
+            nested.emit(Op.LOAD_NAME, nested.name_index("__pyinbin_iter"))
+            nested.emit(Op.GET_ITER)
+            start = len(nested.instructions)
+            exit_jump = nested.emit(Op.FOR_ITER)
+            nested.store_sequence(node.generators[0].target)
+            filter_jumps: list[int] = []
+            for condition in node.generators[0].ifs:
+                nested.expr(condition)
+                filter_jumps.append(nested.emit(Op.JUMP_IF_FALSE))
+            if len(node.generators) > 1:
+                emit_nested(1)
+            else:
+                nested.expr(node.elt)
+                nested.emit(Op.YIELD_VALUE)
+            continue_target = len(nested.instructions)
+            for jump in filter_jumps:
+                nested.patch(jump, continue_target)
+            nested.emit(Op.JUMP, start)
+            nested.patch(exit_jump, len(nested.instructions))
+            nested.emit(Op.RETURN)
+
+            if self.is_function:
+                outer_bound = (
+                    self.bound_names
+                    | set(self.arg_names)
+                    | set(getattr(self, "kwonly_names", []))
+                    | ({getattr(self, "vararg_name")} if getattr(self, "vararg_name", None) else set())
+                    | ({getattr(self, "kwarg_name")} if getattr(self, "kwarg_name", None) else set())
+                )
+                nested.free_names.update(
+                    (set(nested.names) - nested.bound_names - nested.global_names)
+                    & outer_bound
+                )
+
+            self.expr(node.generators[0].iter)
+            self.emit(Op.GET_ITER)
+            self.emit(Op.MAKE_FUNCTION, self.constant(nested.finish()))
+            self.emit(Op.SWAP)
+            self.emit(Op.CALL, 1)
+            return
         is_dict = isinstance(node, ast.DictComp)
         is_set = isinstance(node, ast.SetComp)
         temp_name = f"__pyinbin_comp_{len(self.constants)}"

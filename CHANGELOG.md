@@ -40,6 +40,10 @@ deliverable.
   entry modules now infer `__package__` from import roots, relative imports can
   resolve package attributes before probing child modules, and asyncio package
   entry tests run through the VM.
+- **Lazy generator expressions and descriptor interoperability**
+  (`pyinbin/frontend.py`, `pyinbin/vm.py`) — generator expressions now produce
+  resumable frames with local closure capture, and host contextlib/descriptors
+  can interact with interpreted generator and class-only objects.
 
 - **IR backend multi-argument `print`** (`ir_lower.py`) — the SSA lowering
   path now supports Python's default space-separated output for multiple

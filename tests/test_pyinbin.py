@@ -287,6 +287,22 @@ class PyinbinSourceTests(unittest.TestCase):
                 run_source(entry)
             self.assertEqual(output.getvalue(), "3\n")
 
+    def test_generator_expressions_are_lazy_and_capture_locals(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "main.py"
+            entry.write_text(
+                "def make(offset):\n"
+                "    return (offset + value for value in [1, 2])\n"
+                "items = make(40)\n"
+                "print(next(items))\n"
+                "print(next(items))\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                run_source(entry)
+            self.assertEqual(output.getvalue(), "41\n42\n")
+
 
 if __name__ == "__main__":
     unittest.main()

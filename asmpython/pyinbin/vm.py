@@ -35,6 +35,7 @@ class GeneratorObject:
     def __init__(self, vm: "VirtualMachine", frame: "Frame") -> None:
         self.vm = vm
         self.frame = frame
+        self._last_yielded: object | None = None
 
     def __iter__(self) -> "GeneratorObject":
         return self
@@ -43,8 +44,31 @@ class GeneratorObject:
         result = self.vm._run_frame(self.frame)
         if isinstance(result, _Yielded):
             self.frame = result.frame
+            self._last_yielded = result.value
             return result.value
         raise StopIteration(result)
+
+    def __enter__(self) -> object:
+        return next(self)
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
+        try:
+            next(self)
+        except StopIteration:
+            return False
+        raise RuntimeError("generator didn't stop")
+
+    def append(self, value: object) -> None:
+        target = self._last_yielded
+        if target is None or not hasattr(target, "append"):
+            raise AttributeError("append")
+        target.append(value)
+
+    def extend(self, values: object) -> None:
+        target = self._last_yielded
+        if target is None or not hasattr(target, "extend"):
+            raise AttributeError("extend")
+        target.extend(values)
 
 
 class CoroutineObject:
@@ -376,6 +400,9 @@ class PyClass:
                 return BoundMethod(self.vm, function, self) if isinstance(function, Function) else value.__get__(None, self)
             if isinstance(value, staticmethod):
                 return value.__func__
+            descriptor_get = getattr(value, "__get__", None)
+            if callable(descriptor_get):
+                return descriptor_get(None, self)
             return value
         if name == "__dict__":
             return attributes
