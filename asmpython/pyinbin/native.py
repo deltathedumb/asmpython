@@ -11,6 +11,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Callable
 import ast as _bootstrap_ast
+import contextlib as _bootstrap_contextlib
 import binascii as _bootstrap_binascii
 import heapq as _bootstrap_heapq
 import marshal as _bootstrap_marshal
@@ -513,6 +514,12 @@ def create_builtin_module(
         })
     if name == "typing":
         return _module(name, {key: getattr(_bootstrap_typing, key) for key in dir(_bootstrap_typing)})
+    if name == "contextlib":
+        return _module(name, {
+            key: getattr(_bootstrap_contextlib, key)
+            for key in dir(_bootstrap_contextlib)
+            if not key.startswith("__")
+        })
     if name == "_typing":
         values = {key: getattr(_bootstrap_typing_native, key) for key in dir(_bootstrap_typing_native)}
         values.setdefault("_idfunc", lambda value: value)
