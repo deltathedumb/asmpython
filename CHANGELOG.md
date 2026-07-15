@@ -47,6 +47,10 @@ deliverable.
   attempts pyinbin before reporting a combined failure.
 - Projects declaring `pyinbin_imports` now package and execute their entry via
   pyinbin instead of being rejected before build.
+- Added bootstrap pyinbin classes, instance attributes, bound methods, and
+  inherited constructors.
+- Added the CPython official `Lib/test` conformance harness and a required
+  release gate for 2.0.0 readiness.
 
 - **27 new stdlib modules** — full implementations of `token`, `tokenize`,
   `shelve` (pickle-backed, typed getters/setters for complex object persistence),

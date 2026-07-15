@@ -190,6 +190,10 @@ pyinbin must require neither CPython nor a Python installation.
 - Interpreter compatibility is measured by a separate pyinbin conformance
   suite. It must not claim full Python support before that suite covers the
   supported import and execution surface.
+- 2.0.0 readiness additionally requires a run of `tests/cpython_conformance.py`
+  against the official CPython `Lib/test` suite. The release gate remains
+  closed until `--required --mode pyinbin` passes for the complete discovered
+  module set, with the CPython baseline recorded alongside it.
 
 The architecture and staged implementation contract live in
 `docs/PYINBIN-DESIGN.md`.

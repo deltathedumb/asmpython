@@ -160,6 +160,26 @@ class PyinbinSourceTests(unittest.TestCase):
                 run_source(entry)
             self.assertEqual(output.getvalue(), "(6, 2)\n")
 
+    def test_classes_methods_and_inheritance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "main.py"
+            entry.write_text(
+                "class Base:\n"
+                "    def __init__(self, value):\n"
+                "        self.value = value\n"
+                "    def doubled(self):\n"
+                "        return self.value * 2\n"
+                "class Child(Base):\n"
+                "    pass\n"
+                "item = Child(21)\n"
+                "print(item.doubled())\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                run_source(entry)
+            self.assertEqual(output.getvalue(), "42\n")
+
 
 if __name__ == "__main__":
     unittest.main()

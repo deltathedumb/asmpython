@@ -966,6 +966,10 @@ def _add_pyinbin_subparser(subparsers: argparse._SubParsersAction) -> argparse.A
     run_p = pyinbin_sub.add_parser("run", formatter_class=_AsmPythonHelp, help="run Python source through pyinbin")
     run_p.add_argument("source", type=Path, help="entry Python source file")
     run_p.add_argument("--bundle", type=Path, default=None, help="verified pyinbin source bundle for imports")
+    run_p.add_argument(
+        "--import-root", type=Path, action="append", default=None,
+        help="additional source root for interpreted imports (repeatable)",
+    )
     return ap
 
 
@@ -1000,7 +1004,7 @@ def cmd_pyinbin_run(args: argparse.Namespace) -> int:
     from asmpython.pyinbin import PyinbinImportError, PyinbinUnsupportedError, VMError, run_source
 
     try:
-        run_source(args.source, bundle=args.bundle)
+        run_source(args.source, bundle=args.bundle, import_roots=args.import_root)
     except (OSError, PyinbinImportError, PyinbinUnsupportedError, VMError) as exc:
         print(f"asmpython: pyinbin: {exc}", file=sys.stderr)
         return 1

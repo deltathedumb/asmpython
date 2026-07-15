@@ -18,10 +18,16 @@ class PyinbinImportError(VMError):
 class SourceLoader:
     """Execute declared Python modules through ``VirtualMachine`` only."""
 
-    def __init__(self, source_root: Path | None = None, bundle: Path | None = None) -> None:
-        if source_root is None and bundle is None:
+    def __init__(
+        self,
+        source_root: Path | None = None,
+        bundle: Path | None = None,
+        import_roots: list[Path] | None = None,
+    ) -> None:
+        if source_root is None and not import_roots and bundle is None:
             raise ValueError("a source root or pyinbin bundle is required")
-        self.source_root = source_root.resolve() if source_root is not None else None
+        roots = ([source_root] if source_root is not None else []) + (import_roots or [])
+        self.source_roots = list(dict.fromkeys(root.resolve() for root in roots))
         self.bundle = bundle.resolve() if bundle is not None else None
         self._modules: dict[str, SimpleNamespace] = {}
         self._bundle_modules: dict[str, PackedModule] = {}
@@ -36,13 +42,13 @@ class SourceLoader:
             path = self.bundle / packed.path
             return path.read_text(encoding="utf-8"), str(path)
 
-        assert self.source_root is not None
         parts = name.split(".")
-        base = self.source_root.joinpath(*parts)
-        candidates = (base.with_suffix(".py"), base / "__init__.py")
-        for path in candidates:
-            if path.is_file():
-                return path.read_text(encoding="utf-8"), str(path)
+        for root in self.source_roots:
+            base = root.joinpath(*parts)
+            candidates = (base.with_suffix(".py"), base / "__init__.py")
+            for path in candidates:
+                if path.is_file():
+                    return path.read_text(encoding="utf-8"), str(path)
         raise PyinbinImportError(f"ImportError: no pyinbin module named {name!r}")
 
     def load(self, name: str) -> SimpleNamespace:
@@ -77,13 +83,18 @@ def default_builtins() -> dict[str, object]:
     return {"print": print, "len": len, "range": range, "str": str, "int": int, "float": float, "bool": bool}
 
 
-def run_source(path: Path, *, bundle: Path | None = None) -> object:
+def run_source(
+    path: Path,
+    *,
+    bundle: Path | None = None,
+    import_roots: list[Path] | None = None,
+) -> object:
     """Run an entry source file through pyinbin, never through ``exec``."""
     path = path.resolve()
     if not path.is_file():
         raise PyinbinImportError(f"source file not found: {path}")
     source = path.read_text(encoding="utf-8")
-    loader = SourceLoader(source_root=path.parent, bundle=bundle) if bundle else SourceLoader(source_root=path.parent)
+    loader = SourceLoader(source_root=path.parent, bundle=bundle, import_roots=import_roots)
     namespace = default_builtins()
     namespace.update({"__name__": "__main__", "__file__": str(path), "__pyinbin_import__": loader.load})
     return VirtualMachine().run(compile_source(source, str(path)), namespace)

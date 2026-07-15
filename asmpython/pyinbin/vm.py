@@ -23,6 +23,71 @@ class Function:
     globals: dict[str, object]
 
 
+class BoundMethod:
+    def __init__(self, vm: "VirtualMachine", function: Function, instance: "PyInstance") -> None:
+        self.vm = vm
+        self.function = function
+        self.instance = instance
+
+    def __call__(self, *args: object) -> object:
+        return self.vm._call(self.function, [self.instance, *args])
+
+
+class PyInstance:
+    def __init__(self, cls: "PyClass") -> None:
+        self.cls = cls
+        self.attributes: dict[str, object] = {}
+
+    def __getattr__(self, name: str) -> object:
+        if name in self.attributes:
+            return self.attributes[name]
+        value = self.cls.lookup(name)
+        if isinstance(value, Function):
+            return BoundMethod(self.cls.vm, value, self)
+        return value
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in {"cls", "attributes"}:
+            object.__setattr__(self, name, value)
+        else:
+            self.attributes[name] = value
+
+
+class PyClass:
+    def __init__(self, vm: "VirtualMachine", name: str, attributes: dict[str, object], bases: list[object]) -> None:
+        self.vm = vm
+        self.__name__ = name
+        self.attributes = attributes
+        self.bases = [base for base in bases if isinstance(base, PyClass)]
+
+    def lookup(self, name: str) -> object:
+        if name in self.attributes:
+            return self.attributes[name]
+        for base in self.bases:
+            try:
+                return base.lookup(name)
+            except AttributeError:
+                pass
+        raise AttributeError(name)
+
+    def __getattr__(self, name: str) -> object:
+        return self.lookup(name)
+
+    def __call__(self, *args: object) -> PyInstance:
+        instance = PyInstance(self)
+        try:
+            initializer = self.lookup("__init__")
+        except AttributeError:
+            initializer = None
+        if isinstance(initializer, Function):
+            self.vm._call(initializer, [instance, *args])
+        elif initializer is not None:
+            raise VMError(f"TypeError: {self.__name__}.__init__ is not callable")
+        elif args:
+            raise VMError(f"TypeError: {self.__name__}() takes 0 argument(s), got {len(args)}")
+        return instance
+
+
 @dataclass
 class Frame:
     code: CodeObject
@@ -126,6 +191,21 @@ class VirtualMachine:
                     raise VMError("TypeError: MAKE_FUNCTION constant must be a CodeObject")
                 nested.validate()
                 frame.stack.append(Function(nested, frame.globals))
+            elif op is Op.MAKE_CLASS:
+                spec = frame.code.constants[instr.arg]
+                if not isinstance(spec, tuple) or len(spec) != 3:
+                    raise VMError("TypeError: MAKE_CLASS constant is invalid")
+                class_name, body, base_count = spec
+                if not isinstance(class_name, str) or not isinstance(body, CodeObject):
+                    raise VMError("TypeError: MAKE_CLASS constant is invalid")
+                if len(frame.stack) < base_count:
+                    raise VMError("RuntimeError: MAKE_CLASS stack underflow")
+                bases = frame.stack[-base_count:] if base_count else []
+                if base_count:
+                    del frame.stack[-base_count:]
+                class_namespace: dict[str, object] = {"__name__": class_name}
+                self._run_frame(Frame(code=body, globals=frame.globals, locals=class_namespace))
+                frame.stack.append(PyClass(self, class_name, class_namespace, bases))
             elif op is Op.CALL:
                 if len(frame.stack) < instr.arg + 1:
                     raise VMError("RuntimeError: CALL stack underflow")

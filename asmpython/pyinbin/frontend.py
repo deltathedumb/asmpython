@@ -179,6 +179,18 @@ class _Lowerer:
             nested.emit(Op.RETURN)
             self.emit(Op.MAKE_FUNCTION, self.constant(nested.finish()))
             self.emit(Op.STORE_NAME, self.name_index(node.name))
+        elif isinstance(node, ast.ClassDef) and not node.keywords and not node.decorator_list:
+            if any(not isinstance(base, ast.Name) for base in node.bases):
+                self.unsupported(node, "class base expression")
+            body = _Lowerer(f"{self.name}.{node.name}")
+            for statement in node.body:
+                body.stmt(statement)
+            body.emit(Op.RETURN)
+            for base in node.bases:
+                self.expr(base)
+            spec = (node.name, body.finish(), len(node.bases))
+            self.emit(Op.MAKE_CLASS, self.constant(spec))
+            self.emit(Op.STORE_NAME, self.name_index(node.name))
         elif isinstance(node, ast.If):
             self.expr(node.test)
             otherwise = self.emit(Op.JUMP_IF_FALSE)

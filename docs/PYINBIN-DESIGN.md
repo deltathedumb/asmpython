@@ -62,7 +62,8 @@ Pyinbin is layered so every dependency can be compiled by asmpython:
 4. Virtual machine: frames, evaluation stack, calls, control flow, exception
    unwinding, generators, and coroutine suspension.
 5. Object model: integers, floats, strings, bytes, lists, tuples, dicts,
-   sets, functions, classes, instances, descriptors, and modules.
+   sets, functions, classes, instances, descriptors, and modules. The bootstrap
+   VM now covers class construction, inheritance, attributes, and bound methods.
 6. Builtins and standard library: Python-level implementations plus explicit
    native bindings where an OS service is needed.
 
