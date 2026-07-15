@@ -1256,6 +1256,39 @@ class VirtualMachine:
             return True, bindings
         return False, {}
 
+    def _lexical_super_class(self, frame: "Frame", instance: object) -> object:
+        """Return the class a zero-arg ``super()`` should start searching
+        from: the class the *currently executing method* is defined in, not
+        ``type(instance)``.
+
+        Real Python resolves bare ``super()`` via the compiler-captured
+        ``__class__`` cell of the enclosing method, so a base class's own
+        ``super().__init__(...)`` call walks its *own* MRO tail -- it never
+        revisits the class it's defined in. Using ``instance.cls`` (the
+        instance's actual runtime class) instead is wrong whenever the
+        instance is a more-derived subclass than the method's defining
+        class: ``SuperProxy`` would restart its walk from
+        ``instance.cls.__mro__[1:]``, land back on the very method
+        currently running (since it's the first entry more-derived than
+        ``object``), and call it again -- infinite recursion for any
+        multi-level class hierarchy where a middle class's ``__init__``
+        calls ``super().__init__()`` (e.g.
+        ``unittest.IsolatedAsyncioTestCase.__init__`` calling
+        ``super().__init__(methodName)`` while ``self`` is some further
+        subclass's instance).
+        """
+        if not isinstance(instance, PyInstance):
+            return object
+        for candidate in frame.globals.values():
+            if not isinstance(candidate, PyClass):
+                continue
+            if any(
+                isinstance(value, Function) and value.code is frame.code
+                for value in candidate.attributes.values()
+            ):
+                return candidate
+        return instance.cls
+
     def _call(self, target: object, args: list[object], kwargs: dict[str, object] | None = None) -> object:
         kwargs = kwargs or {}
         if getattr(target, "__pyinbin_dir__", False):
@@ -1683,7 +1716,7 @@ class VirtualMachine:
                         frame.stack.append(frame.locals)
                     elif getattr(target, "__pyinbin_super__", False) and not args:
                         instance = frame.locals.get("self")
-                        cls = instance.cls if isinstance(instance, PyInstance) else object
+                        cls = self._lexical_super_class(frame, instance)
                         frame.stack.append(SuperProxy(self, cls, instance))
                     else:
                         self._current_call_location = f"{frame.code.name}:{frame.ip}"
@@ -1722,7 +1755,7 @@ class VirtualMachine:
                             kwargs[name] = value
                     if getattr(target, "__pyinbin_super__", False) and not positional and not kwargs:
                         instance = frame.locals.get("self")
-                        cls = instance.cls if isinstance(instance, PyInstance) else object
+                        cls = self._lexical_super_class(frame, instance)
                         frame.stack.append(SuperProxy(self, cls, instance))
                     else:
                         frame.stack.append(self._call(target, positional, kwargs))
