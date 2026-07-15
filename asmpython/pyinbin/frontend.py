@@ -244,6 +244,7 @@ class _Lowerer:
             self.emit(Op.LOAD_CONST, self.constant(None))
         elif isinstance(node, ast.Await):
             self.expr(node.value)
+            self.emit(Op.AWAIT)
         elif isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPS:
             self.expr(node.left)
             self.expr(node.right)

@@ -31,6 +31,14 @@ class _Yielded:
     value: object
 
 
+@dataclass
+class _Awaited:
+    """A value yielded by an awaitable, rather than by the user generator."""
+
+    frame: "Frame"
+    value: object
+
+
 class GeneratorObject:
     def __init__(self, vm: "VirtualMachine", frame: "Frame") -> None:
         self.vm = vm
@@ -42,6 +50,10 @@ class GeneratorObject:
 
     def __next__(self) -> object:
         result = self.vm._run_frame(self.frame)
+        if isinstance(result, _Awaited):
+            self.frame = result.frame
+            self.suspended = True
+            return result.value
         if isinstance(result, _Yielded):
             self.frame = result.frame
             self._last_yielded = result.value
@@ -104,26 +116,28 @@ class CoroutineObject:
         return self
 
     def __next__(self) -> object:
-        if self.closed:
-            raise StopIteration
-        if self.suspended:
-            self.suspended = False
-            self.frame.stack.append(None)
-        result = self.vm._run_frame(self.frame)
-        if isinstance(result, _Yielded):
-            self.frame = result.frame
-            self.suspended = True
-            return result.value
-        self.closed = True
-        raise StopIteration(result)
+        return self.send(None)
 
     def send(self, value: object) -> object:
         if self.closed:
             raise StopIteration
         if self.suspended:
             self.suspended = False
-            self.frame.stack.append(value)
-        return self.__next__()
+            if self.frame.awaiting is not None:
+                self.frame.awaiting_send = value
+            else:
+                self.frame.stack.append(value)
+        result = self.vm._run_frame(self.frame)
+        if isinstance(result, _Awaited):
+            self.frame = result.frame
+            self.suspended = True
+            return result.value
+        if isinstance(result, _Yielded):
+            self.frame = result.frame
+            self.suspended = True
+            return result.value
+        self.closed = True
+        raise StopIteration(result)
 
     def throw(self, *args: object) -> object:
         if not args:
@@ -141,9 +155,12 @@ class CoroutineObject:
 
 
 class _AsyncGeneratorAwaitable:
-    def __init__(self, owner: "AsyncGeneratorObject", error: BaseException | None = None) -> None:
+    def __init__(self, owner: "AsyncGeneratorObject", error: BaseException | None = None,
+                 initial_send: object = None) -> None:
         self.owner = owner
         self.error = error
+        self.initial_send = initial_send
+        self.send_value = initial_send
         self.done = False
 
     def __await__(self) -> "_AsyncGeneratorAwaitable":
@@ -155,12 +172,23 @@ class _AsyncGeneratorAwaitable:
     def __next__(self) -> object:
         if self.done:
             raise StopIteration
-        self.done = True
+        if self.owner.closed:
+            self.done = True
+            raise StopAsyncIteration
+        if self.send_value is not None and not self.owner.suspended:
+            self.done = True
+            raise TypeError("can't send non-None value to a just-started async generator")
         if self.error is not None:
             self.owner.frame.pending_exception = self.error
+            self.error = None
         if self.owner.suspended:
             self.owner.suspended = False
-            self.owner.frame.stack.append(None)
+            if self.owner.suspended_await:
+                self.owner.frame.awaiting_send = self.send_value
+            else:
+                self.owner.frame.stack.append(self.send_value)
+            self.owner.suspended_await = False
+        self.send_value = None
         try:
             result = self.owner.vm._run_frame(self.owner.frame)
         except (StopIteration, StopAsyncIteration) as exc:
@@ -169,19 +197,25 @@ class _AsyncGeneratorAwaitable:
             self.owner.closed = True
             kind = type(exc).__name__
             raise RuntimeError(f"async generator raised {kind}") from exc
+        if isinstance(result, _Awaited):
+            self.owner.frame = result.frame
+            self.owner.suspended = True
+            self.owner.suspended_await = True
+            return result.value
         if isinstance(result, _Yielded):
             self.owner.frame = result.frame
             self.owner.suspended = True
+            self.owner.suspended_await = False
+            self.done = True
             raise StopIteration(result.value)
         self.owner.closed = True
+        self.done = True
         raise StopAsyncIteration
 
     def send(self, value: object) -> object:
-        if value is not None:
-            # The bootstrap frame has no dedicated SEND opcode yet; resume
-            # with the same semantics as send(None) rather than losing the
-            # awaitable protocol entirely.
-            return self.__next__()
+        if self.done:
+            raise StopIteration
+        self.send_value = value
         return self.__next__()
 
     def throw(self, *args: object) -> object:
@@ -208,6 +242,7 @@ class AsyncGeneratorObject:
         self.frame = frame
         self.closed = False
         self.suspended = False
+        self.suspended_await = False
         self.__name__ = getattr(function, "__name__", frame.code.name)
         qualname = getattr(function, "__qualname__", frame.code.name)
         self.__qualname__ = qualname if "." in qualname else f"<module>.{qualname}"
@@ -227,13 +262,16 @@ class AsyncGeneratorObject:
 
     def __next__(self) -> object:
         awaitable = self.__anext__()
-        try:
-            awaitable.__next__()
-        except StopIteration as stop:
-            return stop.value
-        except StopAsyncIteration:
-            raise StopIteration
-        raise StopIteration
+        while True:
+            try:
+                awaitable.__next__()
+            except StopIteration as stop:
+                return stop.value
+            except StopAsyncIteration:
+                raise StopIteration
+            # A synchronous bridge used by the bootstrap async-for lowering
+            # consumes intermediate awaitable values until the async
+            # generator yields its actual item.
 
     def __anext__(self) -> _AsyncGeneratorAwaitable:
         if self.closed:
@@ -244,7 +282,7 @@ class AsyncGeneratorObject:
         return _AsyncGeneratorAwaitable(self)
 
     def asend(self, value: object) -> _AsyncGeneratorAwaitable:
-        return self.__anext__()
+        return _AsyncGeneratorAwaitable(self, initial_send=value)
 
     def athrow(self, *args: object) -> _AsyncGeneratorAwaitable:
         if not args:
@@ -1049,6 +1087,8 @@ class Frame:
     active_exception: Exception | None = None
     pending_exception: BaseException | None = None
     closure: dict[str, object] | None = None
+    awaiting: object | None = None
+    awaiting_send: object = None
 
 
 class VirtualMachine:
@@ -1395,19 +1435,49 @@ class VirtualMachine:
         except TypeError as exc:
             raise
 
+    def _start_awaiting(self, awaitable: object) -> object:
+        dunder_await = getattr(awaitable, "__await__", None)
+        return dunder_await() if dunder_await is not None else awaitable
+
+    def _drive_awaiting(self, frame: "Frame") -> object:
+        """Advance ``frame.awaiting`` one step, forwarding a pending send.
+
+        Raises ``StopIteration`` (with ``.value`` set) once the awaited
+        object is exhausted, matching the protocol ``AWAIT``'s caller
+        expects; otherwise returns the intermediate value the awaited
+        object itself suspended on, which the caller must propagate
+        further out via ``_Awaited``.
+        """
+        send_value = frame.awaiting_send
+        frame.awaiting_send = None
+        sender = getattr(frame.awaiting, "send", None)
+        if sender is not None:
+            return sender(send_value)
+        return next(frame.awaiting)
+
     def _run_frame(self, frame: Frame) -> object:
         instructions = frame.code.instructions
-        while frame.ip < len(instructions):
+        while frame.ip < len(instructions) or frame.awaiting is not None:
             self._current_frame = frame
             self._current_code_name = frame.code.name
-            instr = instructions[frame.ip]
-            frame.ip += 1
-            op = instr.op
+            resuming_await = frame.awaiting is not None
+            if not resuming_await:
+                instr = instructions[frame.ip]
+                frame.ip += 1
+                op = instr.op
             try:
                 if frame.pending_exception is not None:
                     pending = frame.pending_exception
                     frame.pending_exception = None
                     raise pending
+                if resuming_await:
+                    try:
+                        value = self._drive_awaiting(frame)
+                    except StopIteration as stop:
+                        frame.awaiting = None
+                        frame.stack.append(stop.value)
+                        continue
+                    return _Awaited(frame, value)
                 if op is Op.LOAD_CONST:
                     frame.stack.append(frame.code.constants[instr.arg])
                 elif op is Op.LOAD_NAME:
@@ -1862,9 +1932,19 @@ class VirtualMachine:
                     return frame.stack.pop() if frame.stack else None
                 elif op is Op.YIELD_VALUE:
                     return _Yielded(frame, frame.stack.pop())
+                elif op is Op.AWAIT:
+                    awaitable = frame.stack.pop()
+                    frame.awaiting = self._start_awaiting(awaitable)
+                    try:
+                        value = self._drive_awaiting(frame)
+                    except StopIteration as stop:
+                        frame.awaiting = None
+                        frame.stack.append(stop.value)
+                        continue
+                    return _Awaited(frame, value)
                 else:
                     raise VMError(f"RuntimeError: unsupported opcode {op}")
-            except Exception as exc:
+            except BaseException as exc:
                 if isinstance(exc, BaseException) and not isinstance(exc, PyException):
                     tb_frame = _PyTBFrameProxy(frame.code, frame.globals, None)
                     prior = self._synthetic_tracebacks.get(id(exc))
