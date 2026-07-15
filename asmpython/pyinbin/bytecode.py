@@ -117,6 +117,19 @@ class CodeObject:
     is_coroutine: bool = False
     free_names: list[str] = field(default_factory=list)
 
+    def __getattr__(self, name: str) -> object:
+        if name == "co_name":
+            return self.name
+        if name == "co_filename":
+            return "<pyinbin>"
+        if name == "co_firstlineno":
+            return 1
+        if name == "co_argcount":
+            return len(self.arg_names)
+        if name == "co_kwonlyargcount":
+            return len(self.kwonly_names)
+        raise AttributeError(name)
+
     def validate(self) -> None:
         for offset, instr in enumerate(self.instructions):
             if not isinstance(instr.op, Op):

@@ -12,6 +12,15 @@ from .native import create_builtin_module
 from .vm import VMError, VirtualMachine
 
 
+class _SSLMethodPlaceholder(int):
+    PROTOCOL_TLS = 2
+    PROTOCOL_SSLv23 = 2
+    __members__ = {"PROTOCOL_TLS": 2, "PROTOCOL_SSLv23": 2}
+
+    def __new__(cls, value=0):
+        return int.__new__(cls, value)
+
+
 def _safe_isinstance(value: object, class_or_tuple: object) -> bool:
     try:
         return isinstance(value, class_or_tuple)
@@ -101,6 +110,16 @@ class SourceLoader:
         namespace["__package__"] = name if filename.endswith("__init__.py") else name.rsplit(".", 1)[0] if "." in name else ""
         namespace.update(default_builtins())
         namespace["__pyinbin_import__"] = self.load
+        if name == "ssl":
+            namespace.setdefault("_SSLMethod", _SSLMethodPlaceholder)
+            for enum_name in ("Options", "AlertDescription", "SSLErrorNumber"):
+                namespace.setdefault(enum_name, int)
+            namespace.setdefault("CERT_NONE", 0)
+            namespace.setdefault("CERT_OPTIONAL", 1)
+            namespace.setdefault("CERT_REQUIRED", 2)
+            namespace.setdefault("PROTOCOL_TLS", 2)
+            namespace.setdefault("PROTOCOL_TLS_CLIENT", 16)
+            namespace.setdefault("PROTOCOL_TLS_SERVER", 17)
         try:
             VirtualMachine().run(compile_source(source, filename), namespace)
         except Exception:
@@ -191,7 +210,9 @@ def default_builtins() -> dict[str, object]:
         "ValueError": ValueError, "TypeError": TypeError, "KeyError": KeyError,
         "IndexError": IndexError, "ZeroDivisionError": ZeroDivisionError,
         "StopIteration": StopIteration, "next": next,
-        "ImportError": ImportError, "AttributeError": AttributeError, "LookupError": LookupError,
+        "ImportError": ImportError, "ModuleNotFoundError": ModuleNotFoundError,
+        "AttributeError": AttributeError, "LookupError": LookupError,
+        "TimeoutError": TimeoutError,
         "SystemError": SystemError, "NotImplementedError": NotImplementedError,
         "UnicodeError": UnicodeError, "UnicodeDecodeError": UnicodeDecodeError,
         "UnicodeEncodeError": UnicodeEncodeError, "UnicodeTranslateError": UnicodeTranslateError,

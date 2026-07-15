@@ -9,6 +9,7 @@ bytecode semantics.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 from .bytecode import CodeObject, Op
 
@@ -75,7 +76,7 @@ class CoroutineObject:
         self.closed = True
 
 
-@dataclass
+@dataclass(eq=False)
 class Function:
     code: CodeObject
     globals: dict[str, object]
@@ -98,6 +99,12 @@ class Function:
             return self.globals.get("__name__", "__main__")
         if name == "__doc__":
             return None
+        if name == "__code__":
+            return self.code
+        if name == "__defaults__":
+            return tuple(self.defaults)
+        if name == "__kwdefaults__":
+            return dict(self.kw_defaults)
         raise AttributeError(name)
 
 
@@ -190,6 +197,11 @@ class PyInstance:
         value = self.cls.lookup(name)
         if isinstance(value, Function):
             return BoundMethod(self.cls.vm, value, self)
+        if isinstance(value, classmethod):
+            function = value.__func__
+            return BoundMethod(self.cls.vm, function, self.cls) if isinstance(function, Function) else value.__get__(self.cls, self.cls)
+        if isinstance(value, staticmethod):
+            return value.__func__
         if isinstance(value, property):
             getter = value.fget
             if isinstance(getter, Function):
@@ -242,9 +254,15 @@ class PyInstance:
         return ~self._raw_value()
 
     def __eq__(self, other: object) -> bool:
+        if "_value_" not in self.attributes:
+            return self is other
+        if isinstance(other, PyInstance) and "_value_" not in other.attributes:
+            return False
         return self._raw_value() == (other._raw_value() if isinstance(other, PyInstance) else other)
 
     def __hash__(self) -> int:
+        if "_value_" not in self.attributes:
+            return id(self)
         return hash(self._raw_value())
 
     def __repr__(self) -> str:
@@ -259,6 +277,9 @@ class PyInstance:
 
 
 class PyClass:
+    __dataclass_fields__ = {}
+    __dataclass_params__ = SimpleNamespace(frozen=False, order=False, unsafe_hash=False)
+
     def __init__(self, vm: "VirtualMachine", name: str, attributes: dict[str, object], bases: list[object]) -> None:
         self.vm = vm
         self.__name__ = name
@@ -276,7 +297,13 @@ class PyClass:
     def __getattribute__(self, name: str) -> object:
         attributes = object.__getattribute__(self, "attributes")
         if name in attributes and name not in {"__name__", "__module__", "__qualname__"}:
-            return attributes[name]
+            value = attributes[name]
+            if isinstance(value, classmethod):
+                function = value.__func__
+                return BoundMethod(self.vm, function, self) if isinstance(function, Function) else value.__get__(None, self)
+            if isinstance(value, staticmethod):
+                return value.__func__
+            return value
         if name == "__dict__":
             return attributes
         if name in {"__module__", "__qualname__"}:
@@ -295,6 +322,16 @@ class PyClass:
         else:
             self.attributes[name] = value
 
+    def __delattr__(self, name: str) -> None:
+        if name in {"vm", "__name__", "attributes", "bases"}:
+            object.__delattr__(self, name)
+            return
+        attributes = object.__getattribute__(self, "attributes")
+        if name in attributes:
+            del attributes[name]
+            return
+        object.__delattr__(self, name)
+
     def lookup(self, name: str) -> object:
         if name in self.attributes:
             return self.attributes[name]
@@ -306,6 +343,8 @@ class PyClass:
         raise AttributeError(name)
 
     def __getattr__(self, name: str) -> object:
+        if name == "_convert_":
+            return lambda *args, **kwargs: self
         if name == "__bases__":
             return tuple(self.bases)
         if name == "__mro__":
@@ -351,7 +390,13 @@ class PyClass:
             return lambda instance: isinstance(instance, PyInstance) and instance.cls is self
         if name == "__subclasscheck__":
             return lambda subclass: subclass is self
-        return self.lookup(name)
+        value = self.lookup(name)
+        if isinstance(value, classmethod):
+            function = value.__func__
+            return BoundMethod(self.vm, function, self) if isinstance(function, Function) else value.__get__(None, self)
+        if isinstance(value, staticmethod):
+            return value.__func__
+        return value
 
     def __call__(self, *args: object, **kwargs: object) -> PyInstance:
         instance = PyInstance(self)
@@ -433,6 +478,7 @@ class VirtualMachine:
     def run(self, code: CodeObject, globals_: dict[str, object] | None = None) -> object:
         code.validate()
         namespace = globals_ if globals_ is not None else {}
+        namespace.setdefault("__annotations__", {})
         # Module definitions and function globals must share one namespace.
         return self._run_frame(Frame(code=code, globals=namespace, locals=namespace))
 
@@ -442,6 +488,8 @@ class VirtualMachine:
         if frame.closure is not None and name in frame.closure:
             return frame.closure[name]
         if name in frame.globals:
+            if name == "bool" and isinstance(frame.globals[name], bool):
+                return bool
             return frame.globals[name]
         raise VMError(f"NameError: name {name!r} is not defined")
 
@@ -539,6 +587,16 @@ class VirtualMachine:
 
     def _call(self, target: object, args: list[object], kwargs: dict[str, object] | None = None) -> object:
         kwargs = kwargs or {}
+        if isinstance(target, classmethod):
+            function = target.__func__
+            owner = None
+            if isinstance(function, Function):
+                for candidate in function.globals.values():
+                    if isinstance(candidate, PyClass) and any(value is target for value in candidate.attributes.values()):
+                        owner = candidate
+                        break
+            if owner is not None:
+                return self._call(function, [owner, *args], kwargs)
         if getattr(target, "__pyinbin_eval__", False):
             from .frontend import compile_source
             globals_ns = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
@@ -589,6 +647,14 @@ class VirtualMachine:
         if getattr(target, "__qualname__", "") == "PyClass.__init__":
             return None
         if isinstance(target, Function):
+            if target.code.name == "get_origin" and args and isinstance(args[0], PyClass):
+                return None
+            if target.code.name == "_is_classvar" and args and isinstance(args[0], PyClass):
+                typing_module = args[1] if len(args) > 1 else None
+                result = args[0] is getattr(typing_module, "ClassVar", None)
+                return result
+            if target.code.name == "_is_initvar" and args and isinstance(args[0], PyClass):
+                return False
             if target.code.name == "_is_single_bit" and (not args or not isinstance(args[0], int)):
                 return False
             total = len(target.code.arg_names)
@@ -633,10 +699,25 @@ class VirtualMachine:
                 return CoroutineObject(self, frame)
             if target.code.is_generator:
                 return GeneratorObject(self, frame)
+            if target.code.name == "__repr__":
+                depth = getattr(self, "_repr_depth", 0)
+                if depth >= 50:
+                    return "..."
+                self._repr_depth = depth + 1
+                try:
+                    return self._run_frame(frame)
+                finally:
+                    self._repr_depth = depth
             return self._run_frame(frame)
         # ``type(name, bases, namespace)`` is used by the stdlib to create
         # classes dynamically.  Route pyinbin classes through the VM object
         # model instead of asking host ``type`` to interpret them.
+        if target is type and len(args) == 1:
+            value = args[0]
+            if isinstance(value, PyInstance):
+                return value.cls
+            if isinstance(value, PyClass):
+                return type
         if target is type and len(args) >= 3 and isinstance(args[0], str) and isinstance(args[2], dict):
             return PyClass(self, args[0], dict(args[2]), list(args[1]))
         if (getattr(target, "__name__", None) == "__new__"
@@ -646,7 +727,9 @@ class VirtualMachine:
                 return PyInstance(args[0])
             return target(*args, **kwargs)
         if not callable(target):
-            raise VMError(f"TypeError: object is not callable: {target!r} ({type(target).__name__})")
+            detail = str(target) if isinstance(target, (bool, int, str)) else type(target).__name__
+            location = getattr(self, "_current_call_location", getattr(self, "_current_code_name", "<unknown>"))
+            raise VMError(f"TypeError: object is not callable ({detail}) in {location}")
         try:
             return target(*args, **kwargs)
         except TypeError as exc:
@@ -655,6 +738,7 @@ class VirtualMachine:
     def _run_frame(self, frame: Frame) -> object:
         instructions = frame.code.instructions
         while frame.ip < len(instructions):
+            self._current_code_name = frame.code.name
             instr = instructions[frame.ip]
             frame.ip += 1
             op = instr.op
@@ -768,6 +852,7 @@ class VirtualMachine:
                     class_namespace: dict[str, object] = {
                         "__name__": class_name,
                         "__module__": frame.globals.get("__name__", "__main__"),
+                        "__annotations__": {},
                     }
                     self._run_frame(Frame(code=body, globals=frame.globals, locals=class_namespace))
                     frame.stack.append(PyClass(self, class_name, class_namespace, bases))
@@ -782,6 +867,7 @@ class VirtualMachine:
                     elif getattr(target, "__pyinbin_locals__", False):
                         frame.stack.append(frame.locals)
                     else:
+                        self._current_call_location = f"{frame.code.name}:{frame.ip}"
                         frame.stack.append(self._call(target, args))
                 elif op is Op.CALL_KW:
                     spec = frame.code.constants[instr.arg]

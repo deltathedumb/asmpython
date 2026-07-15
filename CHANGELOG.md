@@ -15,6 +15,19 @@ deliverable.
 
 ### Added
 
+- **pyinbin object-model and stdlib bootstrap coverage** (`pyinbin/vm.py`,
+  `pyinbin/native.py`) — interpreted classes now support descriptor binding,
+  class deletion, dataclass metadata, identity-preserving ordinary instances,
+  function metadata, and additional bootstrap providers used by CPython's
+  standard library.
+- **Annotation and f-string lowering** (`pyinbin/frontend.py`) — module and
+  class annotation dictionaries are populated with deferred typing-only
+  annotations, while formatted-value conversions use stable builtin callables
+  even when local names shadow `str` or `repr`.
+- **Official-test release harness** (`tests/cpython_conformance.py`) — the
+  CPython baseline and independent pyinbin runs remain separate release-gate
+  modes for 2.0.0 validation.
+
 - **IR backend multi-argument `print`** (`ir_lower.py`) — the SSA lowering
   path now supports Python's default space-separated output for multiple
   `int`, `str`, and `float` arguments. Arguments are evaluated left-to-right

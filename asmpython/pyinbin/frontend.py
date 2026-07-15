@@ -46,6 +46,14 @@ _COMPARE_OPS = {
 }
 
 
+def _defer_annotation(node: ast.AST) -> bool:
+    """Keep annotations referring to type-checking-only names as strings."""
+    return any(
+        isinstance(item, ast.Name) and item.id in {"ClassVar", "Self", "IO"}
+        for item in ast.walk(node)
+    )
+
+
 @dataclass
 class _Lowerer:
     name: str
@@ -299,13 +307,15 @@ class _Lowerer:
                         self.emit(Op.LOAD_CONST, self.constant(value.value))
                     elif isinstance(value, ast.FormattedValue):
                         if value.format_spec is None:
-                            self.emit(Op.LOAD_NAME, self.name_index("repr" if value.conversion == 114 else "str"))
+                            converter = ascii if value.conversion == 97 else repr if value.conversion == 114 else str
+                            self.emit(Op.LOAD_CONST, self.constant(converter))
                             self.expr(value.value)
                             self.emit(Op.CALL, 1)
                         else:
                             self.emit(Op.LOAD_NAME, self.name_index("format"))
                             if value.conversion in (97, 114, 115):
-                                self.emit(Op.LOAD_NAME, self.name_index("repr" if value.conversion == 114 else "str"))
+                                converter = ascii if value.conversion == 97 else repr if value.conversion == 114 else str
+                                self.emit(Op.LOAD_CONST, self.constant(converter))
                                 self.expr(value.value)
                                 self.emit(Op.CALL, 1)
                             else:
@@ -325,13 +335,15 @@ class _Lowerer:
                 elif isinstance(value, ast.Interpolation):
                     conversion = value.conversion
                     if value.format_spec is None:
-                        self.emit(Op.LOAD_NAME, self.name_index("repr" if conversion == 114 else "str"))
+                        converter = ascii if conversion == 97 else repr if conversion == 114 else str
+                        self.emit(Op.LOAD_CONST, self.constant(converter))
                         self.expr(value.value)
                         self.emit(Op.CALL, 1)
                     else:
                         self.emit(Op.LOAD_NAME, self.name_index("format"))
                         if conversion in (97, 114, 115):
-                            self.emit(Op.LOAD_NAME, self.name_index("repr" if conversion == 114 else "str"))
+                            converter = ascii if conversion == 97 else repr if conversion == 114 else str
+                            self.emit(Op.LOAD_CONST, self.constant(converter))
                             self.expr(value.value)
                             self.emit(Op.CALL, 1)
                         else:
@@ -518,6 +530,8 @@ class _Lowerer:
                     self.emit(Op.LOAD_NAME, self.name_index(temp_name))
                     if isinstance(target, ast.Name):
                         self.store(target)
+                    elif isinstance(target, (ast.Tuple, ast.List)):
+                        self.store_sequence(target)
                     elif isinstance(target, ast.Attribute):
                         self.expr(target.value)
                         self.emit(Op.SWAP)
@@ -536,8 +550,24 @@ class _Lowerer:
                     else:
                         self.unsupported(target, "assignment target")
         elif isinstance(node, ast.AnnAssign) and node.value is None:
+            if isinstance(node.target, ast.Name) and not self.is_function:
+                self.emit(Op.LOAD_NAME, self.name_index("__annotations__"))
+                self.emit(Op.LOAD_CONST, self.constant(node.target.id))
+                if _defer_annotation(node.annotation):
+                    self.emit(Op.LOAD_CONST, self.constant(ast.unparse(node.annotation)))
+                else:
+                    self.expr(node.annotation)
+                self.emit(Op.SET_ITEM)
             return
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            if isinstance(node.target, ast.Name) and not self.is_function:
+                self.emit(Op.LOAD_NAME, self.name_index("__annotations__"))
+                self.emit(Op.LOAD_CONST, self.constant(node.target.id))
+                if _defer_annotation(node.annotation):
+                    self.emit(Op.LOAD_CONST, self.constant(ast.unparse(node.annotation)))
+                else:
+                    self.expr(node.annotation)
+                self.emit(Op.SET_ITEM)
             if isinstance(node.target, ast.Attribute):
                 self.expr(node.target.value)
                 self.expr(node.value)

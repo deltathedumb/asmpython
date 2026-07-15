@@ -11,9 +11,16 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Callable
 import ast as _bootstrap_ast
+import binascii as _bootstrap_binascii
+import heapq as _bootstrap_heapq
+import os as _bootstrap_os
 import pickle as _bootstrap_pickle
+import re as _bootstrap_re
 import struct as _bootstrap_struct
 import time as _bootstrap_time
+import _string as _bootstrap_string
+import _socket as _bootstrap_socket
+import _ssl as _bootstrap_ssl
 
 
 class _MemoryTextIO:
@@ -207,6 +214,14 @@ class _BootstrapModule(SimpleNamespace):
         module_name = self.__dict__.get("__name__")
         if module_name == "nt" and name.startswith("_path_"):
             return lambda *args, **kwargs: False
+        if module_name == "_winapi" and name.isupper():
+            return 0
+        if module_name == "_winapi" and name and name[0].isupper():
+            return lambda *args, **kwargs: 0
+        if module_name == "_ssl" and name.startswith("RAND_"):
+            return lambda *args, **kwargs: None
+        if module_name == "_asyncio" and name.startswith("_"):
+            return lambda *args, **kwargs: None
         if module_name == "_opcode" and name.startswith("get_"):
             return lambda *args, **kwargs: ()
         if module_name == "builtins" and name == "__import__":
@@ -240,6 +255,11 @@ def create_builtin_module(
             "argv": [],
             "warnoptions": [],
             "platform": "win32",
+            "base_prefix": "",
+            "prefix": "",
+            "base_exec_prefix": "",
+            "exec_prefix": "",
+            "executable": "",
             "flags": SimpleNamespace(
                 debug=0, inspect=0, interactive=0, optimize=0, dont_write_bytecode=0,
                 no_user_site=0, no_site=0, ignore_environment=0, verbose=0, bytes_warning=0,
@@ -260,6 +280,7 @@ def create_builtin_module(
             "is_finalizing": lambda: False,
             "intern": lambda value: value,
             "getsizeof": lambda value, default=0: default,
+            "_clear_type_descriptors": lambda *args: None,
             "_getframe": lambda depth=0: _FrameProxy(),
             "_getframemodulename": lambda depth=0: "__main__",
             "stdout": _MemoryTextIO(),
@@ -331,9 +352,12 @@ def create_builtin_module(
             "extension_suffixes": lambda: [],
         })
     if name == "_types":
-        placeholder = object
+        class _TypePlaceholder:
+            pass
+        placeholder = _TypePlaceholder
         return _module(name, {
             "NoneType": type(None), "EllipsisType": type(Ellipsis), "NotImplementedType": type(NotImplemented),
+            "SimpleNamespace": SimpleNamespace,
             "GenericAlias": placeholder, "UnionType": placeholder,
             "MappingProxyType": lambda mapping: mapping,
             "DynamicClassAttribute": property,
@@ -345,6 +369,7 @@ def create_builtin_module(
             "ModuleType": placeholder, "CodeType": placeholder,
             "FrameType": placeholder, "TracebackType": placeholder,
             "CellType": placeholder, "WrapperDescriptorType": placeholder,
+            "GetSetDescriptorType": placeholder,
             "CoroutineType": placeholder, "GeneratorType": placeholder,
             "AsyncGeneratorType": placeholder,
         })
@@ -407,6 +432,8 @@ def create_builtin_module(
     if name == "time":
         return _module(name, {
             "time": _bootstrap_time.time, "monotonic": _bootstrap_time.monotonic,
+            "time_ns": _bootstrap_time.time_ns, "monotonic_ns": _bootstrap_time.monotonic_ns,
+            "perf_counter_ns": _bootstrap_time.perf_counter_ns, "process_time_ns": _bootstrap_time.process_time_ns,
             "perf_counter": _bootstrap_time.perf_counter, "process_time": _bootstrap_time.process_time,
             "sleep": _bootstrap_time.sleep, "ctime": _bootstrap_time.ctime,
             "gmtime": _bootstrap_time.gmtime, "localtime": _bootstrap_time.localtime,
@@ -423,6 +450,63 @@ def create_builtin_module(
             "iter_unpack": _bootstrap_struct.iter_unpack, "error": _bootstrap_struct.error,
             "_clearcache": lambda: None,
         })
+    if name == "_string":
+        return _module(name, {
+            key: getattr(_bootstrap_string, key)
+            for key in dir(_bootstrap_string)
+            if not key.startswith("__")
+        })
+    if name == "_interpreters":
+        return _module(name, {
+            "InterpreterID": int,
+            "create": lambda: 0,
+            "destroy": lambda interpreter: None,
+            "run_string": lambda interpreter, script, shared=None: None,
+            "list_all": lambda: [0],
+            "get_current": lambda: 0,
+            "is_running": lambda interpreter: False,
+        })
+    if name == "_asyncio":
+        return _module(name, {
+            "Future": object,
+            "Task": object,
+            "FutureIter": object,
+            "future_add_to_awaited_by": lambda *args: None,
+            "future_discard_from_awaited_by": lambda *args: None,
+            "get_running_loop": lambda: None,
+            "get_event_loop": lambda: None,
+            "current_task": lambda loop=None: None,
+            "all_tasks": lambda loop=None: set(),
+            "_get_running_loop": lambda: None,
+            "_set_running_loop": lambda loop: None,
+        })
+    if name == "_socket":
+        return _module(name, {
+            key: getattr(_bootstrap_socket, key)
+            for key in dir(_bootstrap_socket)
+            if not key.startswith("__")
+        })
+    if name == "_ssl":
+        values = {
+            key: getattr(_bootstrap_ssl, key)
+            for key in dir(_bootstrap_ssl)
+            if not key.startswith("__")
+        }
+        values.setdefault("_SSLMethod", int)
+        return _module(name, values)
+    if name == "fcntl":
+        return _module(name, {
+            "ioctl": lambda *args, **kwargs: 0,
+            "fcntl": lambda *args, **kwargs: 0,
+            "flock": lambda *args, **kwargs: None,
+        })
+    if name == "msvcrt":
+        return _module(name, {
+            "getwch": lambda: "",
+            "getwche": lambda: "",
+            "kbhit": lambda: False,
+            "setmode": lambda fd, mode: None,
+        })
     if name == "_pickle":
         return _module(name, {
             "Pickler": _bootstrap_pickle.Pickler, "Unpickler": _bootstrap_pickle.Unpickler,
@@ -434,6 +518,37 @@ def create_builtin_module(
             "UnpicklingError": getattr(_bootstrap_pickle, "UnpicklingError", Exception),
             "HIGHEST_PROTOCOL": _bootstrap_pickle.HIGHEST_PROTOCOL,
             "DEFAULT_PROTOCOL": _bootstrap_pickle.DEFAULT_PROTOCOL,
+        })
+    if name == "_heapq":
+        return _module(name, {
+            "heapify": _bootstrap_heapq.heapify,
+            "heappush": _bootstrap_heapq.heappush,
+            "heappop": _bootstrap_heapq.heappop,
+            "heapreplace": _bootstrap_heapq.heapreplace,
+            "heappushpop": _bootstrap_heapq.heappushpop,
+            "nlargest": _bootstrap_heapq.nlargest,
+            "nsmallest": _bootstrap_heapq.nsmallest,
+        })
+    if name == "binascii":
+        return _module(name, {
+            key: getattr(_bootstrap_binascii, key)
+            for key in dir(_bootstrap_binascii)
+            if not key.startswith("__")
+        })
+    if name == "posix":
+        values = {
+            key: getattr(_bootstrap_os, key)
+            for key in dir(_bootstrap_os)
+            if not key.startswith("__")
+        }
+        values.setdefault("_path_splitroot_ex", getattr(_bootstrap_os.path, "splitroot", lambda path: ("", "", path)))
+        values.setdefault("_path_normpath", _bootstrap_os.path.normpath)
+        return _module(name, values)
+    if name == "re":
+        return _module(name, {
+            key: getattr(_bootstrap_re, key)
+            for key in dir(_bootstrap_re)
+            if not key.startswith("__")
         })
     if name == "_operator":
         return _module(name, {
@@ -546,6 +661,10 @@ def create_builtin_module(
     if name == "_winapi":
         return _module(name, {
             "CREATE_NEW_CONSOLE": 0x10, "CREATE_NEW_PROCESS_GROUP": 0x200,
+            "STD_INPUT_HANDLE": -10, "STD_OUTPUT_HANDLE": -11, "STD_ERROR_HANDLE": -12,
+            "STARTF_FORCEONFEEDBACK": 0x40, "STARTF_FORCEOFFFEEDBACK": 0x80, "STARTF_USEPOSITION": 0x4,
+            "STARTF_USESIZE": 0x2, "STARTF_USECOUNTCHARS": 0x8,
+            "STARTF_USEFILLATTRIBUTE": 0x10, "STARTF_USEHOTKEY": 0x80,
             "CREATE_NO_WINDOW": 0x8000000, "DETACHED_PROCESS": 8,
             "STARTF_USESTDHANDLES": 1, "STARTF_USESHOWWINDOW": 1,
             "SW_HIDE": 0, "INFINITE": 0xFFFFFFFF, "WAIT_OBJECT_0": 0,
@@ -773,6 +892,7 @@ def create_builtin_module(
         def chain(*iterables):
             for iterable in iterables:
                 for value in iterable: yield value
+        chain.from_iterable = lambda iterable: chain(*iterable)
         def cycle(iterable):
             saved = []
             for value in iterable:
