@@ -648,6 +648,10 @@ class VirtualMachine:
             return getattr(base, spec[2])
         if isinstance(spec, tuple) and len(spec) == 2 and spec[0] == "type_of":
             return type(self._lookup(frame, frame.code.names[spec[1]]))
+        if isinstance(spec, tuple) and len(spec) == 4 and spec[0] == "subscript_attr":
+            mapping = self._lookup(frame, frame.code.names[spec[1]])
+            owner = self._lookup(frame, frame.code.names[spec[2]])
+            return mapping[getattr(owner, spec[3])]
         if isinstance(spec, tuple):
             return tuple(self._resolve_exception_spec(frame, item) for item in spec)
         return spec

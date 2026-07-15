@@ -496,6 +496,11 @@ class _Lowerer:
                 and node.func.id == "type" and len(node.args) == 1
                 and isinstance(node.args[0], ast.Name) and not node.keywords):
             return ("type_of", self.name_index(node.args[0].id))
+        if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
+                and node.value.id == "Signals" and isinstance(node.slice, ast.Attribute)
+                and isinstance(node.slice.value, ast.Name)):
+            return ("subscript_attr", self.name_index(node.value.id),
+                    self.name_index(node.slice.value.id), node.slice.attr)
         if isinstance(node, ast.Name):
             return self.name_index(node.id)
         if isinstance(node, ast.Attribute):
