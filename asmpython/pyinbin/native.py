@@ -42,6 +42,7 @@ import math as _bootstrap_math
 import cmath as _bootstrap_cmath
 import datetime as _bootstrap_datetime
 import calendar as _bootstrap_calendar
+import errno as _bootstrap_errno
 import typing as _bootstrap_typing
 import _typing as _bootstrap_typing_native
 
@@ -171,6 +172,18 @@ class _WindowsVersion(tuple):
     platform = 2
     service_pack = ""
     platform_version = (10, 0, 0)
+
+
+class _VersionInfo(tuple):
+    major = 3
+    minor = 14
+    micro = 0
+    releaselevel = "final"
+    serial = 0
+    n_fields = 5
+
+    def __new__(cls):
+        return tuple.__new__(cls, (3, 14, 0, "final", 0))
 
 def _open_compat(file: object, mode: object = "r", *args: object, **kwargs: object) -> object:
     if isinstance(mode, int):
@@ -430,9 +443,10 @@ def create_builtin_module(
                 context_aware_warnings=0,
             ),
             "maxsize": (1 << 63) - 1,
+            "int_info": SimpleNamespace(bits_per_digit=30, sizeof_digit=4),
             "byteorder": "little",
             "version": "pyinbin 2.0.0-preview",
-            "version_info": (3, 14, 0, "final", 0),
+            "version_info": _VersionInfo(),
             "builtin_module_names": ("sys", "_io", "_abc", "_locale", "itertools", "math", "nt", "_thread"),
             "implementation": _module("sys.implementation", {"name": "pyinbin"}),
             "hash_info": SimpleNamespace(width=64, modulus=(1 << 61) - 1, inf=314159, nan=0, imag=1000003, algorithm="siphash13", hash_bits=64, seed_bits=128),
@@ -731,6 +745,9 @@ def create_builtin_module(
         })
     if name == "errno":
         return _module(name, {
+            key: getattr(_bootstrap_errno, key)
+            for key in dir(_bootstrap_errno) if key.isupper()
+        } | {
             "EPERM": 1, "ENOENT": 2, "EIO": 5, "EBADF": 9,
             "EAGAIN": 11, "ENOMEM": 12, "EACCES": 13, "EEXIST": 17,
             "ENOTDIR": 20, "EINVAL": 22, "ENOSPC": 28, "EPIPE": 32,
