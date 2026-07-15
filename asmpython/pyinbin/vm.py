@@ -141,9 +141,11 @@ class VirtualMachine:
                     frame.stack.append(self._lookup(frame, frame.code.names[instr.arg]))
                 elif op is Op.STORE_NAME:
                     frame.locals[frame.code.names[instr.arg]] = frame.stack.pop()
+                elif op is Op.STORE_GLOBAL:
+                    frame.globals[frame.code.names[instr.arg]] = frame.stack.pop()
                 elif op is Op.POP_TOP:
                     frame.stack.pop()
-                elif op in (Op.BINARY_ADD, Op.BINARY_SUB, Op.BINARY_MUL, Op.BINARY_DIV, Op.BINARY_FLOORDIV, Op.BINARY_MOD, Op.BINARY_POW):
+                elif op in (Op.BINARY_ADD, Op.BINARY_SUB, Op.BINARY_MUL, Op.BINARY_DIV, Op.BINARY_FLOORDIV, Op.BINARY_MOD, Op.BINARY_POW, Op.BINARY_BITAND, Op.BINARY_BITOR, Op.BINARY_BITXOR, Op.BINARY_LSHIFT, Op.BINARY_RSHIFT):
                     right = frame.stack.pop(); left = frame.stack.pop()
                     if op is Op.BINARY_ADD: frame.stack.append(left + right)
                     elif op is Op.BINARY_SUB: frame.stack.append(left - right)
@@ -151,6 +153,11 @@ class VirtualMachine:
                     elif op is Op.BINARY_DIV: frame.stack.append(left / right)
                     elif op is Op.BINARY_FLOORDIV: frame.stack.append(left // right)
                     elif op is Op.BINARY_POW: frame.stack.append(left ** right)
+                    elif op is Op.BINARY_BITAND: frame.stack.append(left & right)
+                    elif op is Op.BINARY_BITOR: frame.stack.append(left | right)
+                    elif op is Op.BINARY_BITXOR: frame.stack.append(left ^ right)
+                    elif op is Op.BINARY_LSHIFT: frame.stack.append(left << right)
+                    elif op is Op.BINARY_RSHIFT: frame.stack.append(left >> right)
                     else: frame.stack.append(left % right)
                 elif op in (Op.COMPARE_EQ, Op.COMPARE_LT, Op.COMPARE_LE, Op.COMPARE_GT, Op.COMPARE_GE, Op.COMPARE_NE, Op.COMPARE_IS, Op.COMPARE_IS_NOT, Op.COMPARE_IN, Op.COMPARE_NOT_IN):
                     right = frame.stack.pop(); left = frame.stack.pop()

@@ -209,6 +209,23 @@ class PyinbinSourceTests(unittest.TestCase):
                 run_source(entry)
             self.assertEqual(output.getvalue(), "42\n")
 
+    def test_global_statement_updates_module_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "main.py"
+            entry.write_text(
+                "counter = 0\n"
+                "def increment():\n"
+                "    global counter\n"
+                "    counter += 1\n"
+                "increment()\n"
+                "print(counter)\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                run_source(entry)
+            self.assertEqual(output.getvalue(), "1\n")
+
 
 if __name__ == "__main__":
     unittest.main()

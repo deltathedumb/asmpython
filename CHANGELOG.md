@@ -53,6 +53,7 @@ deliverable.
   bootstrap exception builtins.
 - Added package context and relative `from .module import name` execution to
   the pyinbin loader.
+- Added pyinbin bitwise/shift operators and `global` statement semantics.
 - Added the CPython official `Lib/test` conformance harness and a required
   release gate for 2.0.0 readiness.
 

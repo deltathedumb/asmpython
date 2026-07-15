@@ -16,6 +16,7 @@ class Op(IntEnum):
     LOAD_NAME = 2
     STORE_NAME = 3
     POP_TOP = 4
+    STORE_GLOBAL = 5
     BINARY_ADD = 10
     BINARY_SUB = 11
     BINARY_MUL = 12
@@ -54,6 +55,11 @@ class Op(IntEnum):
     UNARY_NEGATIVE = 80
     UNARY_NOT = 81
     BINARY_POW = 16
+    BINARY_BITAND = 17
+    BINARY_BITOR = 18
+    BINARY_BITXOR = 19
+    BINARY_LSHIFT = 100
+    BINARY_RSHIFT = 101
     COMPARE_NE = 25
     COMPARE_IS = 26
     COMPARE_IS_NOT = 27
@@ -81,7 +87,7 @@ class CodeObject:
                 raise ValueError(f"{self.name}: invalid opcode at {offset}")
             if instr.op in (Op.LOAD_CONST, Op.MAKE_FUNCTION, Op.MAKE_CLASS, Op.MATCH_EXCEPTION) and not 0 <= instr.arg < len(self.constants):
                 raise ValueError(f"{self.name}: constant index out of range at {offset}")
-            if instr.op in (Op.LOAD_NAME, Op.STORE_NAME, Op.GET_ATTR, Op.SET_ATTR) and not 0 <= instr.arg < len(self.names):
+            if instr.op in (Op.LOAD_NAME, Op.STORE_NAME, Op.STORE_GLOBAL, Op.GET_ATTR, Op.SET_ATTR) and not 0 <= instr.arg < len(self.names):
                 raise ValueError(f"{self.name}: name index out of range at {offset}")
             if instr.op in (Op.JUMP, Op.JUMP_IF_FALSE, Op.TRY_BEGIN) and not 0 <= instr.arg <= len(self.instructions):
                 raise ValueError(f"{self.name}: jump target out of range at {offset}")

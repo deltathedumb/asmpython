@@ -25,6 +25,11 @@ _BINARY_OPS = {
     ast.FloorDiv: Op.BINARY_FLOORDIV,
     ast.Mod: Op.BINARY_MOD,
     ast.Pow: Op.BINARY_POW,
+    ast.BitAnd: Op.BINARY_BITAND,
+    ast.BitOr: Op.BINARY_BITOR,
+    ast.BitXor: Op.BINARY_BITXOR,
+    ast.LShift: Op.BINARY_LSHIFT,
+    ast.RShift: Op.BINARY_RSHIFT,
 }
 _COMPARE_OPS = {
     ast.Eq: Op.COMPARE_EQ,
@@ -48,6 +53,7 @@ class _Lowerer:
     names: list[str] = field(default_factory=list)
     instructions: list[Instruction] = field(default_factory=list)
     loop_exits: list[list[int]] = field(default_factory=list)
+    global_names: set[str] = field(default_factory=set)
 
     def constant(self, value: object) -> int:
         self.constants.append(value)
@@ -125,7 +131,8 @@ class _Lowerer:
 
     def store(self, target: ast.expr) -> None:
         if isinstance(target, ast.Name):
-            self.emit(Op.STORE_NAME, self.name_index(target.id))
+            op = Op.STORE_GLOBAL if target.id in self.global_names else Op.STORE_NAME
+            self.emit(op, self.name_index(target.id))
         else:
             self.unsupported(target, "assignment target")
 
@@ -133,6 +140,10 @@ class _Lowerer:
         if isinstance(node, ast.Expr):
             self.expr(node.value)
             self.emit(Op.POP_TOP)
+        elif isinstance(node, ast.Global):
+            self.global_names.update(node.names)
+        elif isinstance(node, ast.Nonlocal):
+            self.unsupported(node, "nonlocal")
         elif isinstance(node, ast.Assign) and len(node.targets) == 1:
             if isinstance(node.targets[0], ast.Attribute):
                 self.expr(node.targets[0].value)
