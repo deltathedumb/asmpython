@@ -1113,6 +1113,11 @@ class Frame:
     ip: int = 0
     handlers: list[int] = field(default_factory=list)
     with_contexts: list[object] = field(default_factory=list)
+    # Records the true interleaving order ``handlers``/``with_contexts``
+    # entries were pushed in ("try" or "with"), since the two lists are
+    # otherwise tracked separately and lose that relative nesting -- see
+    # the exception dispatch in ``_run_frame`` for why this matters.
+    protection_order: list[str] = field(default_factory=list)
     active_exception: Exception | None = None
     pending_exception: BaseException | None = None
     closure: dict[str, object] | None = None
@@ -1874,6 +1879,7 @@ class VirtualMachine:
                     context = frame.stack.pop()
                     enter = getattr(context, "__enter__", None) or getattr(context, "__aenter__", None)
                     frame.with_contexts.append(context)
+                    frame.protection_order.append("with")
                     frame.stack.append(context)
                     frame.stack.append(enter() if callable(enter) else context)
                 elif op is Op.WITH_EXIT:
@@ -1883,6 +1889,8 @@ class VirtualMachine:
                         # the compiler still reaches its linear cleanup op.
                         continue
                     context = frame.with_contexts.pop()
+                    if frame.protection_order and frame.protection_order[-1] == "with":
+                        frame.protection_order.pop()
                     if frame.stack:
                         frame.stack.pop()
                     exit_method = getattr(context, "__exit__", None) or getattr(context, "__aexit__", None)
@@ -1985,9 +1993,12 @@ class VirtualMachine:
                     frame.stack.append(not frame.stack.pop())
                 elif op is Op.TRY_BEGIN:
                     frame.handlers.append(instr.arg)
+                    frame.protection_order.append("try")
                 elif op is Op.TRY_END:
                     if not frame.handlers: raise VMError("RuntimeError: TRY_END without TRY_BEGIN")
                     frame.handlers.pop()
+                    if frame.protection_order and frame.protection_order[-1] == "try":
+                        frame.protection_order.pop()
                 elif op is Op.RAISE:
                     value = frame.stack.pop() if frame.stack else frame.active_exception
                     if value is None: raise VMError("RuntimeError: no active exception to reraise")
@@ -2017,7 +2028,21 @@ class VirtualMachine:
                         frame.locals.update(bindings)
                     frame.stack.append(matched)
                 elif op is Op.RETURN:
-                    return frame.stack.pop() if frame.stack else None
+                    result = frame.stack.pop() if frame.stack else None
+                    # A ``return`` inside a ``with`` block jumps straight out
+                    # of this function, skipping the linear WITH_EXIT
+                    # instructions the compiler placed after the body --
+                    # those never execute on this path. Real ``with``
+                    # semantics guarantee __exit__ runs even on early
+                    # return, so drain any still-active contexts here first.
+                    while frame.with_contexts:
+                        context = frame.with_contexts.pop()
+                        if frame.protection_order and frame.protection_order[-1] == "with":
+                            frame.protection_order.pop()
+                        exit_method = getattr(context, "__exit__", None) or getattr(context, "__aexit__", None)
+                        if callable(exit_method):
+                            self._call(exit_method, [None, None, None])
+                    return result
                 elif op is Op.YIELD_VALUE:
                     return _Yielded(frame, frame.stack.pop())
                 elif op is Op.AWAIT:
@@ -2037,42 +2062,55 @@ class VirtualMachine:
                     tb_frame = _PyTBFrameProxy(frame.code, frame.globals, None)
                     prior = self._synthetic_tracebacks.get(id(exc))
                     self._synthetic_tracebacks[id(exc)] = _PyTBProxy(tb_frame, prior)
-                if frame.with_contexts:
-                    # Real ``with`` semantics: unwind every still-active
-                    # context manager innermost-to-outermost, calling each
-                    # ``__exit__`` even after one has already run, until one
-                    # suppresses the exception or the stack is exhausted.
-                    # ``with_contexts`` is a stack, so popping already visits
-                    # them innermost-first.
-                    suppressed = False
-                    unwound = 0
-                    while frame.with_contexts:
-                        context = frame.with_contexts.pop()
-                        unwound += 1
-                        exit_method = getattr(context, "__exit__", None) or getattr(context, "__aexit__", None)
-                        if callable(exit_method):
-                            exc_type = exc.instance.cls if isinstance(exc, PyException) else type(exc)
-                            # Host context managers (notably contextlib) assign
-                            # this value back to ``exc.__traceback__``; synthetic
-                            # VM proxies are intentionally not accepted there.
-                            traceback = getattr(exc, "__traceback__", None)
-                            suppressed = bool(self._call(exit_method, [exc_type, exc, traceback]))
-                            if suppressed:
-                                break
-                    if suppressed:
+                # Unwind ``protection_order`` innermost-first so a ``try/
+                # except`` nested inside a ``with`` block catches the
+                # exception before the ``with``'s own __exit__ ever runs,
+                # and a ``with`` nested inside a ``try/except`` still gets
+                # its __exit__ called before that outer handler fires --
+                # walking ``with_contexts`` and ``handlers`` as two
+                # separately-drained stacks (the previous approach) loses
+                # their relative nesting and always unwound every ``with``
+                # first, which incorrectly ran cleanup for a ``with`` whose
+                # body's own inner ``except`` should have handled the
+                # exception locally without ever reaching that __exit__.
+                suppressed = False
+                unwound_with = 0
+                caught = False
+                while frame.protection_order:
+                    kind = frame.protection_order.pop()
+                    if kind == "try":
+                        frame.ip = frame.handlers.pop()
                         frame.stack.clear()
-                        # Skip the cleanup WITH_EXIT for every context we
-                        # just unwound by hand (a multi-item ``with a, b:``
-                        # emits one WITH_EXIT per item, consecutively).
-                        remaining = unwound
-                        cleanup_index = frame.ip
-                        while remaining and cleanup_index < len(instructions):
-                            if instructions[cleanup_index].op is Op.WITH_EXIT:
-                                remaining -= 1
-                            cleanup_index += 1
-                        frame.ip = cleanup_index
-                        continue
-                if frame.handlers:
-                    frame.ip = frame.handlers.pop(); frame.stack.clear(); frame.stack.append(exc); frame.active_exception = exc; continue
+                        frame.stack.append(exc)
+                        frame.active_exception = exc
+                        caught = True
+                        break
+                    context = frame.with_contexts.pop()
+                    unwound_with += 1
+                    exit_method = getattr(context, "__exit__", None) or getattr(context, "__aexit__", None)
+                    if callable(exit_method):
+                        exc_type = exc.instance.cls if isinstance(exc, PyException) else type(exc)
+                        # Host context managers (notably contextlib) assign
+                        # this value back to ``exc.__traceback__``; synthetic
+                        # VM proxies are intentionally not accepted there.
+                        traceback = getattr(exc, "__traceback__", None)
+                        suppressed = bool(self._call(exit_method, [exc_type, exc, traceback]))
+                        if suppressed:
+                            break
+                if suppressed:
+                    frame.stack.clear()
+                    # Skip the cleanup WITH_EXIT for every context we just
+                    # unwound by hand (a multi-item ``with a, b:`` emits one
+                    # WITH_EXIT per item, consecutively).
+                    remaining = unwound_with
+                    cleanup_index = frame.ip
+                    while remaining and cleanup_index < len(instructions):
+                        if instructions[cleanup_index].op is Op.WITH_EXIT:
+                            remaining -= 1
+                        cleanup_index += 1
+                    frame.ip = cleanup_index
+                    continue
+                if caught:
+                    continue
                 raise
         return None
