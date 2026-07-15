@@ -73,9 +73,26 @@ class _Lowerer:
     is_function: bool = False
     defer_annotations: bool = False
     interactive: bool = False
+    _comp_counter: list[int] = field(default_factory=lambda: [0])
 
     def __post_init__(self) -> None:
         self.bound_names.update(self.arg_names)
+
+    def next_comp_temp(self) -> str:
+        """A name guaranteed unique across nested comprehensions in this
+        function body, even when compiling one comprehension's later
+        ``for`` clause's iterable expression recursively compiles another
+        comprehension (e.g. ``[(i, s) for i in nums for s in [f for f in
+        strs]]``). Deriving the temp name from ``len(self.constants)``
+        instead (the previous approach) could produce the exact same name
+        for both the outer and inner comprehension whenever no new
+        constant happened to be added in between, since both share the
+        same constants list -- the inner's accumulator writes then landed
+        on the outer's own accumulator variable mid-iteration, corrupting
+        it in a way that could keep ``FOR_ITER`` from ever terminating.
+        """
+        self._comp_counter[0] += 1
+        return f"__pyinbin_comp_{self._comp_counter[0]}"
 
     def constant(self, value: object) -> int:
         self.constants.append(value)
@@ -173,7 +190,7 @@ class _Lowerer:
             return
         is_dict = isinstance(node, ast.DictComp)
         is_set = isinstance(node, ast.SetComp)
-        temp_name = f"__pyinbin_comp_{len(self.constants)}"
+        temp_name = self.next_comp_temp()
         self.emit(Op.BUILD_DICT if is_dict else Op.BUILD_SET if is_set else Op.BUILD_LIST, 0)
         self.emit(Op.STORE_NAME, self.name_index(temp_name))
 
