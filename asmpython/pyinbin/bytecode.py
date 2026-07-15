@@ -33,6 +33,10 @@ class Op(IntEnum):
     RETURN = 41
     MAKE_FUNCTION = 42
     MAKE_CLASS = 43
+    TRY_BEGIN = 44
+    TRY_END = 45
+    RAISE = 46
+    MATCH_EXCEPTION = 47
     BUILD_LIST = 50
     BUILD_DICT = 51
     BUILD_TUPLE = 52
@@ -74,11 +78,11 @@ class CodeObject:
         for offset, instr in enumerate(self.instructions):
             if not isinstance(instr.op, Op):
                 raise ValueError(f"{self.name}: invalid opcode at {offset}")
-            if instr.op in (Op.LOAD_CONST, Op.MAKE_FUNCTION, Op.MAKE_CLASS) and not 0 <= instr.arg < len(self.constants):
+            if instr.op in (Op.LOAD_CONST, Op.MAKE_FUNCTION, Op.MAKE_CLASS, Op.MATCH_EXCEPTION) and not 0 <= instr.arg < len(self.constants):
                 raise ValueError(f"{self.name}: constant index out of range at {offset}")
             if instr.op in (Op.LOAD_NAME, Op.STORE_NAME, Op.GET_ATTR, Op.SET_ATTR) and not 0 <= instr.arg < len(self.names):
                 raise ValueError(f"{self.name}: name index out of range at {offset}")
-            if instr.op in (Op.JUMP, Op.JUMP_IF_FALSE) and not 0 <= instr.arg < len(self.instructions):
+            if instr.op in (Op.JUMP, Op.JUMP_IF_FALSE, Op.TRY_BEGIN) and not 0 <= instr.arg <= len(self.instructions):
                 raise ValueError(f"{self.name}: jump target out of range at {offset}")
             if instr.arg < 0:
                 raise ValueError(f"{self.name}: negative operand at {offset}")

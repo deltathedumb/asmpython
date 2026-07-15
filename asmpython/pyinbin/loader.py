@@ -80,7 +80,13 @@ class SourceLoader:
 
 def default_builtins() -> dict[str, object]:
     """The small explicit bootstrap built-in surface available to bytecode."""
-    return {"print": print, "len": len, "range": range, "str": str, "int": int, "float": float, "bool": bool}
+    return {
+        "print": print, "len": len, "range": range, "str": str, "int": int,
+        "float": float, "bool": bool, "Exception": Exception,
+        "BaseException": BaseException, "RuntimeError": RuntimeError,
+        "ValueError": ValueError, "TypeError": TypeError, "KeyError": KeyError,
+        "IndexError": IndexError, "ZeroDivisionError": ZeroDivisionError,
+    }
 
 
 def run_source(

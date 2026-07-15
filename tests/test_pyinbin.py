@@ -180,6 +180,21 @@ class PyinbinSourceTests(unittest.TestCase):
                 run_source(entry)
             self.assertEqual(output.getvalue(), "42\n")
 
+    def test_raise_and_typed_exception_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "main.py"
+            entry.write_text(
+                "try:\n"
+                "    raise ValueError('bad value')\n"
+                "except ValueError as error:\n"
+                "    print(error)\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                run_source(entry)
+            self.assertEqual(output.getvalue(), "bad value\n")
+
 
 if __name__ == "__main__":
     unittest.main()

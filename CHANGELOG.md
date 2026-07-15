@@ -49,6 +49,8 @@ deliverable.
   pyinbin instead of being rejected before build.
 - Added bootstrap pyinbin classes, instance attributes, bound methods, and
   inherited constructors.
+- Added pyinbin `raise`, typed `try/except`, exception matching, and the
+  bootstrap exception builtins.
 - Added the CPython official `Lib/test` conformance harness and a required
   release gate for 2.0.0 readiness.
 

@@ -170,6 +170,11 @@ class _Lowerer:
             else:
                 self.expr(node.value)
                 self.emit(Op.RETURN)
+        elif isinstance(node, ast.Raise) and node.exc is not None and node.cause is None:
+            self.expr(node.exc)
+            self.emit(Op.RAISE)
+        elif isinstance(node, ast.Raise) and node.exc is None:
+            self.emit(Op.RAISE)
         elif isinstance(node, ast.FunctionDef) and not node.decorator_list and not node.args.defaults:
             if node.args.vararg or node.args.kwarg or node.args.kwonlyargs or node.args.posonlyargs:
                 self.unsupported(node, "function argument form")
@@ -228,6 +233,28 @@ class _Lowerer:
             self.patch(exit_jump, end)
             for jump in self.loop_exits.pop():
                 self.patch(jump, end)
+        elif isinstance(node, ast.Try) and not node.finalbody and not node.orelse and len(node.handlers) == 1:
+            handler_jump = self.emit(Op.TRY_BEGIN)
+            for statement in node.body:
+                self.stmt(statement)
+            self.emit(Op.TRY_END)
+            end_jump = self.emit(Op.JUMP)
+            handler = node.handlers[0]
+            self.patch(handler_jump, len(self.instructions))
+            if handler.type is not None:
+                if not isinstance(handler.type, ast.Name):
+                    self.unsupported(handler, "exception type")
+                self.emit(Op.MATCH_EXCEPTION, self.constant(handler.type.id))
+                # Resolve the class object from the surrounding namespace for
+                # the VM's MATCH_EXCEPTION operation.
+                self.constants[-1] = self.name_index(handler.type.id)
+            if handler.name:
+                self.emit(Op.STORE_NAME, self.name_index(handler.name))
+            else:
+                self.emit(Op.POP_TOP)
+            for statement in handler.body:
+                self.stmt(statement)
+            self.patch(end_jump, len(self.instructions))
         elif isinstance(node, ast.Pass):
             return
         elif isinstance(node, ast.Break) and self.loop_exits:
