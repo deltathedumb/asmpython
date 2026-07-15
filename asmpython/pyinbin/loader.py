@@ -271,8 +271,16 @@ def run_source(
     module = SimpleNamespace(__name__="__main__", __file__=str(path))
     loader._modules["__main__"] = module
     namespace = module.__dict__
+    package = ""
+    for root in import_roots or []:
+        try:
+            relative_parent = path.parent.relative_to(root.resolve())
+        except ValueError:
+            continue
+        package = ".".join(relative_parent.parts)
+        break
     namespace.update(default_builtins(loader._import))
-    namespace.update({"__name__": "__main__", "__file__": str(path), "__pyinbin_import__": loader.load})
+    namespace.update({"__name__": "__main__", "__file__": str(path), "__package__": package, "__pyinbin_import__": loader.load})
     try:
         return VirtualMachine().run(compile_source(source, str(path)), namespace)
     except PyException as exc:

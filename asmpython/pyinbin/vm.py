@@ -1207,7 +1207,10 @@ class VirtualMachine:
                             except (AttributeError, ImportError, ModuleNotFoundError):
                                 frame.stack.append(lambda module_name, *args, **kwargs: None)
                         else:
-                            frame.stack.append(loader(f"{base}.{member}"))
+                            try:
+                                frame.stack.append(loader(f"{base}.{member}"))
+                            except (AttributeError, ImportError, ModuleNotFoundError, VMError):
+                                frame.stack.append(getattr(loader(base), member))
                 elif op is Op.UNARY_NEGATIVE:
                     frame.stack.append(-frame.stack.pop())
                 elif op is Op.UNARY_POSITIVE:

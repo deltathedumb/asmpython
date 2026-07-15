@@ -36,6 +36,10 @@ deliverable.
   interpreter/channel exception surfaces, queue/array providers, Windows file
   flags and handles, callable `os.open` compatibility, and module-level
   `SkipTest` handling so unsupported platform tests report as skipped.
+- **Package-entry import semantics** (`pyinbin/loader.py`, `pyinbin/vm.py`) —
+  entry modules now infer `__package__` from import roots, relative imports can
+  resolve package attributes before probing child modules, and asyncio package
+  entry tests run through the VM.
 
 - **IR backend multi-argument `print`** (`ir_lower.py`) — the SSA lowering
   path now supports Python's default space-separated output for multiple

@@ -517,6 +517,7 @@ def create_builtin_module(
         return _module(name, {
             "array": _bootstrap_array.array,
             "typecodes": _bootstrap_array.typecodes,
+            "_array_reconstructor": _bootstrap_array._array_reconstructor,
         })
     if name == "math":
         def floor(value: float) -> int:
