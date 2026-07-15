@@ -35,6 +35,7 @@ import _lzma as _bootstrap_lzma
 import _zstd as _bootstrap_zstd
 import _queue as _bootstrap_queue
 import _multibytecodec as _bootstrap_multibytecodec
+import _csv as _bootstrap_csv
 import array as _bootstrap_array
 import bisect as _bootstrap_bisect
 import math as _bootstrap_math
@@ -460,6 +461,7 @@ def create_builtin_module(
             "__stderr__": _MemoryTextIO(),
             "__stdin__": _MemoryTextIO(),
             "exc_info": lambda: (None, None, None),
+            "exception": lambda: None,
             "excepthook": lambda exc_type, exc_value, traceback: None,
             "unraisablehook": lambda unraisable: None,
             "audit": lambda *args, **kwargs: None,
@@ -1089,6 +1091,7 @@ def create_builtin_module(
         })
     if name == "_opcode":
         return _module(name, {
+            "ENABLE_SPECIALIZATION": False, "ENABLE_SPECIALIZATION_FT": False,
             "stack_effect": lambda opcode, oparg=None, *, jump=None: 0,
             "get_executor": lambda code, offset: None,
             "get_intrinsic1_descs": lambda: (),
@@ -1099,6 +1102,11 @@ def create_builtin_module(
             "has_local": lambda opcode: False,
             "has_exc": lambda opcode: False,
             "has_free": lambda opcode: True,
+        })
+    if name == "_csv":
+        return _module(name, {
+            key: getattr(_bootstrap_csv, key)
+            for key in dir(_bootstrap_csv) if not key.startswith("__")
         })
     if name == "_sre":
         # Bootstrap surface used while importing ``re``. Pattern execution

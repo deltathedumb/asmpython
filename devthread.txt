@@ -1,0 +1,3 @@
+Work on the current 2.0.0 release push. The first 30 CPython official modules pass under pyinbin; the 31-60 slice is 45/60. Do not claim 2.0.0 ready.
+
+Focus on the remaining failures, preferably codec fixture support (`test_codecencodings_*` / `test_codecmaps_*`) and/or `test_build_details`, `test_class` starred class bases, and optional `_testcapi` behavior. Inspect current code before editing. Use apply_patch, run focused conformance tests, commit and push checkpoints, and record findings here. Avoid reverting unrelated work. The primary agent is running a broader conformance slice and will integrate via the shared workspace.

@@ -884,6 +884,12 @@ class VirtualMachine:
         try:
             return target(*args, **kwargs)
         except TypeError as exc:
+            if any(isinstance(arg, PyInstance) for arg in args):
+                raw_args = [arg._raw_value() if isinstance(arg, PyInstance) else arg for arg in args]
+                try:
+                    return target(*raw_args, **kwargs)
+                except TypeError:
+                    pass
             raise
 
     def _run_frame(self, frame: Frame) -> object:
