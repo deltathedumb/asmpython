@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import os
+import genericpath as _host_genericpath
 import sys as _host_sys
 import typing as _typing
 
@@ -361,6 +362,11 @@ class SourceLoader:
         namespace["__pyinbin_loader__"] = self
         namespace["__spec__"] = self.find_spec(name)
         namespace["__loader__"] = self
+        if name == "genericpath":
+            # ntpath/posixpath can reach back into genericpath while the
+            # module is still initializing. Seed this shared helper to match
+            # CPython's circular-import-safe bootstrap order.
+            namespace["_splitext"] = _host_genericpath._splitext
         if self._is_package(name):
             namespace["__path__"] = [str(Path(filename).parent)]
         if name == "ssl":
