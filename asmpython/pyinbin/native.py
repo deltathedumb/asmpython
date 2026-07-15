@@ -36,6 +36,9 @@ import _zstd as _bootstrap_zstd
 import _queue as _bootstrap_queue
 import _multibytecodec as _bootstrap_multibytecodec
 import _csv as _bootstrap_csv
+import _testcapi as _bootstrap_testcapi
+import _testinternalcapi as _bootstrap_testinternalcapi
+import _lsprof as _bootstrap_lsprof
 import array as _bootstrap_array
 import bisect as _bootstrap_bisect
 import math as _bootstrap_math
@@ -1124,6 +1127,21 @@ def create_builtin_module(
         return _module(name, {
             key: getattr(_bootstrap_csv, key)
             for key in dir(_bootstrap_csv) if not key.startswith("__")
+        })
+    if name == "_testcapi":
+        return _module(name, {
+            key: getattr(_bootstrap_testcapi, key)
+            for key in dir(_bootstrap_testcapi) if not key.startswith("__")
+        })
+    if name == "_testinternalcapi":
+        return _module(name, {
+            key: getattr(_bootstrap_testinternalcapi, key)
+            for key in dir(_bootstrap_testinternalcapi) if not key.startswith("__")
+        })
+    if name == "_lsprof":
+        return _module(name, {
+            key: getattr(_bootstrap_lsprof, key)
+            for key in dir(_bootstrap_lsprof) if not key.startswith("__")
         })
     if name == "_sre":
         # Bootstrap surface used while importing ``re``. Pattern execution
