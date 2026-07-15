@@ -659,28 +659,36 @@ class UserString:
 class _NamedTupleBase:
     """Base class returned by namedtuple(). Fields accessed by index."""
 
-    def __init__(self, f0: str = "", f1: str = "", f2: str = "",
-                 f3: str = "", f4: str = "", f5: str = "") -> None:
-        self._fields: list[str] = [f0, f1, f2, f3, f4, f5]
+    def __init__(self, *values: object, **kwargs: object) -> None:
+        # The generated namedtuple subclass owns the field-name metadata;
+        # instances only retain their positional values.  Accepting arbitrary
+        # keyword arguments mirrors object.__init__ for subclasses that use a
+        # custom __new__ (for example doctest.TestResults).
+        self._values: list[object] = list(values)
 
-    def __getitem__(self, i: int) -> str:
-        return self._fields[i]
+    def __getitem__(self, i: int) -> object:
+        return self._values[i]
 
     def __len__(self) -> int:
-        return len(self._fields)
+        return len(self._values)
 
-    def _asdict(self) -> list:
-        return self._fields
+    def _asdict(self) -> dict:
+        return dict(zip(self._fields, self._values))
 
-    def _replace(self, f0: str = "", f1: str = "", f2: str = "",
-                 f3: str = "", f4: str = "", f5: str = "") -> _NamedTupleBase:
-        return _NamedTupleBase(f0, f1, f2, f3, f4, f5)
+    def _replace(self, **changes: object) -> _NamedTupleBase:
+        values = list(self._values)
+        for name, value in changes.items():
+            values[self._fields.index(name)] = value
+        return self.__class__(*values)
 
 
 def namedtuple(typename: str, field_names: str) -> _NamedTupleBase:
-    """Return a _NamedTupleBase class (stub: field names ignored at runtime).
-
-    In CPython this creates a dynamic class with named attributes.
-    In asmpython, fields are accessed positionally via [] or ._fields.
-    """
-    return _NamedTupleBase
+    """Create a lightweight dynamic tuple class with named field descriptors."""
+    if isinstance(field_names, str):
+        names = field_names.replace(",", " ").split()
+    else:
+        names = list(field_names)
+    namespace: dict[str, object] = {"_fields": tuple(names)}
+    for index, name in enumerate(names):
+        namespace[name] = property(lambda value, i=index: value[i])
+    return type(typename, (_NamedTupleBase,), namespace)

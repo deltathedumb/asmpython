@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from types import ModuleType, SimpleNamespace
 from typing import Callable
+from .bytecode import CodeObject
 import ast as _bootstrap_ast
 import contextlib as _bootstrap_contextlib
 import gc as _bootstrap_gc
@@ -36,6 +37,10 @@ import _zstd as _bootstrap_zstd
 import _queue as _bootstrap_queue
 import _multibytecodec as _bootstrap_multibytecodec
 import _csv as _bootstrap_csv
+try:
+    import _decimal as _bootstrap_decimal
+except ImportError:
+    _bootstrap_decimal = None
 import _testcapi as _bootstrap_testcapi
 import _testinternalcapi as _bootstrap_testinternalcapi
 import _lsprof as _bootstrap_lsprof
@@ -158,6 +163,12 @@ class _MemoryTextIO:
 
     def getvalue(self) -> str:
         return self._value
+
+    def truncate(self, size: int | None = None) -> int:
+        target = self._position if size is None else size
+        self._value = self._value[:target]
+        self._position = min(self._position, len(self._value))
+        return target
 
     def flush(self) -> None:
         return None
@@ -487,6 +498,7 @@ def create_builtin_module(
             "builtin_module_names": ("sys", "_io", "_abc", "_locale", "itertools", "math", "nt", "_thread"),
             "implementation": _module("sys.implementation", {"name": "pyinbin"}),
             "hash_info": SimpleNamespace(width=64, modulus=(1 << 61) - 1, inf=314159, nan=0, imag=1000003, algorithm="siphash13", hash_bits=64, seed_bits=128),
+            "float_repr_style": "short",
             "float_info": _module("sys.float_info", {
                 "max": 1.7976931348623157e308, "min": 2.2250738585072014e-308,
                 "epsilon": 2.220446049250313e-16, "mant_dig": 53,
@@ -505,6 +517,8 @@ def create_builtin_module(
             "_clear_type_descriptors": lambda *args: None,
             "_getframe": lambda depth=0: _FrameProxy(),
             "_getframemodulename": lambda depth=0: "__main__",
+            "gettrace": lambda: None, "getprofile": lambda: None,
+            "settrace": lambda func: None, "setprofile": lambda func: None,
             "stdout": _MemoryTextIO(),
             "stderr": _MemoryTextIO(),
             "stdin": _MemoryTextIO(),
@@ -514,11 +528,15 @@ def create_builtin_module(
             "exc_info": lambda: (None, None, None),
             "exception": lambda: None,
             "excepthook": lambda exc_type, exc_value, traceback: None,
+            "displayhook": lambda value: None,
+            "__displayhook__": lambda value: None,
             "unraisablehook": lambda unraisable: None,
             "audit": lambda *args, **kwargs: None,
         })
     if name == "builtins":
-        return _module(name, dict(builtins))
+        module = ModuleType(name)
+        module.__dict__.update(builtins)
+        return module
     if name == "_abc":
         return _module(name, {
             "get_cache_token": lambda: 0,
@@ -624,7 +642,7 @@ def create_builtin_module(
             "MethodWrapperType": placeholder, "WrapperDescriptorType": placeholder,
             "ClassMethodDescriptorType": placeholder, "MethodDescriptorType": placeholder,
             "MemberDescriptorType": placeholder, "ModuleType": ModuleType,
-            "CodeType": placeholder,
+            "CodeType": CodeObject,
             "FrameType": placeholder, "TracebackType": placeholder,
             "CellType": placeholder, "WrapperDescriptorType": placeholder,
             "GetSetDescriptorType": placeholder,
@@ -1044,6 +1062,15 @@ def create_builtin_module(
             "unregister": lambda search_function: None,
             "_unregister_error": lambda name: None,
         })
+    if name == "_decimal" and _bootstrap_decimal is not None:
+        return _module(name, {
+            key: getattr(_bootstrap_decimal, key)
+            for key in dir(_bootstrap_decimal)
+            if not key.startswith("__")
+        } | {
+            "__version__": getattr(_bootstrap_decimal, "__version__", "1.0.0"),
+            "__libmpdec_version__": getattr(_bootstrap_decimal, "__libmpdec_version__", "2.5.1"),
+        })
     if name == "_multibytecodec":
         return _module(name, {
             key: getattr(_bootstrap_multibytecodec, key)
@@ -1327,6 +1354,25 @@ def create_builtin_module(
             def __iter__(self): return iter(())
         return _module(name, {"TokenizerIter": TokenizerIter})
     if name == "nt":
+        def _coerce_path(path: object) -> str | bytes:
+            if isinstance(path, (str, bytes)):
+                return path
+            method = getattr(path, "__fspath__", None)
+            if callable(method):
+                value = method()
+                if isinstance(value, (str, bytes)):
+                    return value
+            for attribute in ("_str", "_raw_paths"):
+                value = getattr(path, attribute, None)
+                if isinstance(value, (str, bytes)):
+                    return value
+            return str(path)
+
+        def fspath(path: object) -> str | bytes:
+            value = _coerce_path(path)
+            if isinstance(value, (str, bytes)):
+                return value
+            raise TypeError("expected str, bytes or os.PathLike object")
         return _module(name, {
             "name": "nt", "sep": "\\", "altsep": "/", "pathsep": ";",
             "_have_functions": (),
@@ -1352,9 +1398,9 @@ def create_builtin_module(
             "_path_isjunction": lambda path: False,
             "_path_exists": lambda path: False,
             "_path_lexists": lambda path: False,
-            "_getfullpathname": lambda path: path,
+            "_getfullpathname": lambda path: _coerce_path(path),
             "_findfirstfile": lambda path: -1,
-            "_getfinalpathname": lambda path: path,
+            "_getfinalpathname": lambda path: _coerce_path(path),
             "readlink": lambda path: path,
             "scandir": lambda path=".": iter(()), "mkdir": lambda path, mode=0o777: None,
             "makedirs": lambda path, mode=0o777: None, "rmdir": lambda path: None,
@@ -1369,11 +1415,12 @@ def create_builtin_module(
             "unsetenv": lambda key: None, "environ": {}, "supports_bytes_environ": False,
             "fsencode": lambda value: value.encode() if isinstance(value, str) else value,
             "fsdecode": lambda value: value.decode() if isinstance(value, bytes) else value,
+            "fspath": fspath,
             "urandom": lambda size: bytes(size), "open": open, "close": lambda fd: None,
             "read": lambda fd, size: b"", "write": lambda fd, data: len(data),
             "access": lambda path, mode: False, "F_OK": 0, "R_OK": 4, "W_OK": 2, "X_OK": 1,
             "_exit": lambda status=0: None,
-            "_path_splitroot_ex": lambda path: ("", "", path),
+            "_path_splitroot_ex": lambda path: ("", "", _coerce_path(path)),
         })
     if name == "itertools":
         def count(start=0, step=1):

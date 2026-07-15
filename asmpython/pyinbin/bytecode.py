@@ -7,7 +7,7 @@ host Python object graph and maps directly onto the future native VM.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import IntEnum
 
 
@@ -134,7 +134,31 @@ class CodeObject:
             return ()
         if name == "co_varnames":
             return tuple(self.arg_names)
+        if name == "co_consts":
+            return tuple(self.constants)
+        if name == "co_names":
+            return tuple(self.names)
+        if name == "co_code":
+            return b""
+        if name in {"co_linetable", "co_lnotab", "co_exceptiontable"}:
+            return b""
+        if name == "co_flags":
+            return 0
+        if name == "co_nlocals":
+            return len(self.arg_names)
+        if name == "co_posonlyargcount":
+            return len(self.posonly_names)
+        if name == "co_qualname":
+            return self.name
         raise AttributeError(name)
+
+    def replace(self, **changes: object) -> "CodeObject":
+        """Return a copy using the subset of CPython code fields we model."""
+        allowed = {
+            key: value for key, value in changes.items()
+            if key in self.__dataclass_fields__
+        }
+        return replace(self, **allowed)
 
     def validate(self) -> None:
         for offset, instr in enumerate(self.instructions):

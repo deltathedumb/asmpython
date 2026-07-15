@@ -47,7 +47,7 @@ class _ModuleRegistry(dict[str, SimpleNamespace]):
 
     def __missing__(self, name: str) -> SimpleNamespace:
         if name == "builtins":
-            module = SimpleNamespace(__name__=name)
+            module = ModuleType(name)
             module.__import__ = lambda module_name, *args, **kwargs: None
             return module
         raise KeyError(name)
@@ -122,6 +122,8 @@ class SourceLoader:
         """Find a source or bootstrap module without executing source twice."""
         if name in self._modules:
             module = self._modules[name]
+            if module is None:
+                raise ModuleNotFoundError(f"import of {name!r} halted; None in sys.modules")
             return getattr(module, "__spec__", None)
         try:
             _, filename = self._source_for(name)
@@ -206,7 +208,10 @@ class SourceLoader:
 
     def load(self, name: str) -> SimpleNamespace:
         if name in self._modules:
-            return self._modules[name]
+            module = self._modules[name]
+            if module is None:
+                raise ModuleNotFoundError(f"import of {name!r} halted; None in sys.modules")
+            return module
         if name == "__future__":
             class _Feature:
                 def __init__(self, optional: tuple, mandatory: tuple | None, flag: int) -> None:
@@ -338,6 +343,13 @@ class SourceLoader:
             self._modules.pop(name, None)
             raise
 
+        # Pure-Python compatibility modules may deliberately replace their
+        # entry in sys.modules (decimal aliases itself to _pydecimal when the
+        # accelerator is blocked). Return that replacement to the importer.
+        replacement = self._modules.get(name)
+        if replacement is not None and replacement is not module:
+            return replacement
+
         if name == "os":
             namespace["open"] = lambda file, flags, mode=0o777: os.open(file, flags, mode)
 
@@ -433,13 +445,17 @@ def default_builtins(importer: object | None = None) -> dict[str, object]:
         "__import__": importer or (lambda name, *args, **kwargs: None),
         "eval": _dynamic_eval, "exec": _dynamic_exec, "compile": _dynamic_compile,
         "Exception": Exception,
-        "BaseException": BaseException, "RuntimeError": RuntimeError,
+        "BaseException": BaseException, "BaseExceptionGroup": BaseExceptionGroup,
+        "ExceptionGroup": ExceptionGroup, "SystemExit": SystemExit,
+        "KeyboardInterrupt": KeyboardInterrupt, "GeneratorExit": GeneratorExit,
+        "RuntimeError": RuntimeError,
         "ArithmeticError": ArithmeticError,
         "BlockingIOError": BlockingIOError,
         "WindowsError": OSError,
         "Warning": Warning, "UserWarning": UserWarning, "DeprecationWarning": DeprecationWarning,
         "PendingDeprecationWarning": PendingDeprecationWarning, "FutureWarning": FutureWarning,
         "SyntaxWarning": SyntaxWarning, "ImportWarning": ImportWarning, "ResourceWarning": ResourceWarning,
+        "BytesWarning": BytesWarning, "EncodingWarning": EncodingWarning,
         "OSError": OSError, "IOError": OSError, "NameError": NameError,
         "ChildProcessError": ChildProcessError, "ConnectionError": ConnectionError,
         "BrokenPipeError": BrokenPipeError, "ConnectionAbortedError": ConnectionAbortedError,

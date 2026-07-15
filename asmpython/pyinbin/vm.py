@@ -152,6 +152,13 @@ class BoundMethod:
     def __call__(self, *args: object, **kwargs: object) -> object:
         return self.vm._call(self.function, [self.instance, *args], kwargs)
 
+    def __getattr__(self, name: str) -> object:
+        if name == "__self__":
+            return self.instance
+        if name == "__func__":
+            return self.function
+        return getattr(self.function, name)
+
 
 class SuperProxy:
     def __init__(self, vm: "VirtualMachine", cls: object, instance: object) -> None:
@@ -181,6 +188,13 @@ class SuperProxy:
                 if isinstance(value, Function) and isinstance(self.instance, PyInstance):
                     return BoundMethod(self.vm, value, self.instance)
                 return value
+        # A VM class may inherit a host/interpreted base without an explicit
+        # ``__new__``.  In that case ``super().__new__`` has the same useful
+        # bootstrap behavior as ``object.__new__``: allocate an instance of
+        # the requested VM class.  Returning the host descriptor lets
+        # ``VirtualMachine._call`` perform that allocation consistently.
+        if name == "__new__":
+            return object.__new__
         return getattr(self.cls, name)
 
 
@@ -279,6 +293,35 @@ class PyInstance:
             object.__setattr__(self, name, value)
         else:
             self.attributes[name] = value
+
+    def __fspath__(self) -> str | bytes:
+        """Expose interpreted ``__fspath__`` methods to host path APIs."""
+        try:
+            method = self.cls.lookup("__fspath__")
+        except AttributeError:
+            raise TypeError(f"expected path-like object, not {self.cls.__name__!r}") from None
+        if isinstance(method, Function):
+            value = self.cls.vm._call(method, [self])
+        else:
+            value = method(self)
+        if not isinstance(value, (str, bytes)):
+            raise TypeError("__fspath__() must return str or bytes")
+        return value
+
+    def __str__(self) -> str:
+        try:
+            method = self.cls.lookup("__str__")
+        except AttributeError:
+            raw = self.attributes.get("_str")
+            return raw if isinstance(raw, str) else f"<{self.cls.__name__} instance>"
+        value = self.cls.vm._call(method, [self]) if isinstance(method, Function) else method(self)
+        return value if isinstance(value, str) else str(value)
+
+    def startswith(self, prefix: object, *args: object) -> bool:
+        return self.__fspath__().startswith(prefix, *args)
+
+    def endswith(self, suffix: object, *args: object) -> bool:
+        return self.__fspath__().endswith(suffix, *args)
 
     def __call__(self, *args: object, **kwargs: object) -> object:
         try:
@@ -407,6 +450,32 @@ class PyInstance:
         if isinstance(other, PyInstance) and "_value_" not in other.attributes:
             return False
         return self._raw_value() == (other._raw_value() if isinstance(other, PyInstance) else other)
+
+    def _compare(self, name: str, other: object) -> object:
+        try:
+            method = self.cls.lookup(name)
+        except AttributeError:
+            method = None
+        if isinstance(method, Function):
+            return self.cls.vm._call(method, [self, other])
+        left = self._raw_value()
+        right = other._raw_value() if isinstance(other, PyInstance) else other
+        if name == "__lt__": return left < right
+        if name == "__le__": return left <= right
+        if name == "__gt__": return left > right
+        return left >= right
+
+    def __lt__(self, other: object) -> object:
+        return self._compare("__lt__", other)
+
+    def __le__(self, other: object) -> object:
+        return self._compare("__le__", other)
+
+    def __gt__(self, other: object) -> object:
+        return self._compare("__gt__", other)
+
+    def __ge__(self, other: object) -> object:
+        return self._compare("__ge__", other)
 
     def __hash__(self) -> int:
         if "_value_" not in self.attributes:
@@ -577,7 +646,31 @@ class PyClass:
         return value
 
     def __call__(self, *args: object, **kwargs: object) -> PyInstance:
-        instance = PyInstance(self)
+        # Honor a user-defined ``__new__`` before initialization.  Namedtuple
+        # subclasses (including doctest.TestResults) rely on this to allocate
+        # an instance and attach extra attributes in ``__new__``.
+        try:
+            allocator = self.lookup("__new__")
+        except AttributeError:
+            allocator = None
+        if isinstance(allocator, staticmethod):
+            allocator = allocator.__func__
+        # ``Enum('Name', type=int)`` is the functional API.  CPython routes
+        # this call through EnumType rather than Enum.__new__; the bootstrap
+        # VM has no metaclass call path, so retain the legacy allocation for
+        # this specific functional form instead of feeding ``type`` to the
+        # value constructor.
+        if self.__name__ in {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"} and any(
+            key in kwargs for key in {"type", "module", "qualname", "start"}
+        ):
+            allocator = None
+        instance = None
+        if isinstance(allocator, Function):
+            instance = self.vm._call(allocator, [self, *args], kwargs)
+            if not isinstance(instance, PyInstance):
+                return instance
+        if instance is None:
+            instance = PyInstance(self)
         try:
             initializer = self.lookup("__init__")
         except AttributeError:
@@ -585,10 +678,14 @@ class PyClass:
         if isinstance(initializer, Function):
             self.vm._call(initializer, [instance, *args], kwargs)
         elif initializer is not None:
-            # Host scalar/exception bases expose slot wrappers that cannot
-            # consume VM instances; native-specialized constructors replace
-            # this bootstrap no-op later.
-            pass
+            # Native facades such as ``_io.StringIO`` can initialize a VM
+            # subclass directly because attribute writes land in its VM
+            # namespace. Scalar/exception slot wrappers may reject that
+            # receiver, so retain the bootstrap fallback for those bases.
+            try:
+                initializer(instance, *args, **kwargs)
+            except (AttributeError, TypeError, ValueError):
+                pass
         if args and not isinstance(initializer, Function):
             # Bootstrap classes that model scalar extension types may not yet
             # have a native ``__new__``; retain the constructor payload so
@@ -1051,12 +1148,17 @@ class VirtualMachine:
                     nested.validate(); frame.stack.append(Function(nested, frame.globals, defaults, kw_defaults, closure, self))
                 elif op is Op.MAKE_CLASS:
                     spec = frame.code.constants[instr.arg]
-                    if not isinstance(spec, tuple) or len(spec) != 3: raise VMError("TypeError: invalid class constant")
-                    class_name, body, base_count = spec
+                    if not isinstance(spec, tuple) or len(spec) not in (3, 4): raise VMError("TypeError: invalid class constant")
+                    class_name, body, base_count = spec[:3]
+                    has_keywords = bool(spec[3]) if len(spec) == 4 else False
                     if not isinstance(class_name, str) or not isinstance(body, CodeObject): raise VMError("TypeError: invalid class constant")
-                    if len(frame.stack) < base_count: raise VMError("RuntimeError: class stack underflow")
+                    if len(frame.stack) < base_count + (1 if has_keywords else 0): raise VMError("RuntimeError: class stack underflow")
+                    class_keywords = frame.stack.pop() if has_keywords else {}
+                    if not isinstance(class_keywords, dict): raise VMError("TypeError: class keyword arguments must be a dict")
                     bases = frame.stack[-base_count:] if base_count else []
                     if base_count: del frame.stack[-base_count:]
+                    if base_count == 1 and isinstance(bases[0], tuple):
+                        bases = list(bases[0])
                     class_namespace: dict[str, object] = {
                         "__name__": class_name,
                         "__module__": frame.globals.get("__name__", "__main__"),
@@ -1066,7 +1168,24 @@ class VirtualMachine:
                     new_member = class_namespace.get("__new__")
                     if isinstance(new_member, Function):
                         class_namespace["__new__"] = staticmethod(new_member)
-                    frame.stack.append(PyClass(self, class_name, class_namespace, bases))
+                    metaclass = class_keywords.pop("metaclass", None)
+                    if metaclass is not None:
+                        if getattr(metaclass, "__name__", "") in {"EnumType", "EnumMeta", "ABCMeta"}:
+                            frame.stack.append(PyClass(self, class_name, class_namespace, bases))
+                            continue
+                        new_method = getattr(metaclass, "__new__", None)
+                        if callable(new_method):
+                            frame.stack.append(self._call(
+                                new_method,
+                                [metaclass, class_name, tuple(bases), class_namespace],
+                                class_keywords,
+                            ))
+                        else:
+                            frame.stack.append(self._call(
+                                metaclass, [class_name, tuple(bases), class_namespace], class_keywords,
+                            ))
+                    else:
+                        frame.stack.append(PyClass(self, class_name, class_namespace, bases))
                 elif op is Op.CALL:
                     if len(frame.stack) < instr.arg + 1:
                         raise VMError(f"RuntimeError: CALL stack underflow in {frame.code.name} at {frame.ip}")
@@ -1136,9 +1255,10 @@ class VirtualMachine:
                     merged: list[object] = []
                     for index, value in enumerate(values):
                         if flags & (1 << index):
-                            if not isinstance(value, (tuple, list, set)):
-                                raise VMError("TypeError: starred value must be iterable")
-                            merged.extend(value)
+                            try:
+                                merged.extend(iter(value))
+                            except TypeError:
+                                raise VMError("TypeError: starred value must be iterable") from None
                         else:
                             merged.append(value)
                     if op is Op.BUILD_LIST_UNPACK: frame.stack.append(merged)

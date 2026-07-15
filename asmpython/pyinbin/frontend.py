@@ -757,9 +757,28 @@ class _Lowerer:
             for statement in node.body:
                 body.stmt(statement)
             body.emit(Op.RETURN)
+            base_flags = sum((1 << index) for index, base in enumerate(node.bases)
+                             if isinstance(base, ast.Starred))
             for base in node.bases:
-                self.expr(base)
-            spec = (node.name, body.finish(), len(node.bases))
+                self.expr(base.value if isinstance(base, ast.Starred) else base)
+            if base_flags:
+                self.emit(Op.BUILD_TUPLE_UNPACK, len(node.bases) | (base_flags << 16))
+                base_count = 1
+            else:
+                base_count = len(node.bases)
+            has_keywords = bool(node.keywords)
+            if has_keywords:
+                for keyword in node.keywords:
+                    if keyword.arg is None:
+                        self.expr(keyword.value)
+                    else:
+                        self.emit(Op.LOAD_CONST, self.constant(keyword.arg))
+                        self.expr(keyword.value)
+                        self.emit(Op.BUILD_TUPLE, 2)
+                self.emit(Op.BUILD_DICT_UNPACK, len(node.keywords) |
+                          (sum((1 << index) for index, keyword in enumerate(node.keywords)
+                               if keyword.arg is None) << 16))
+            spec = (node.name, body.finish(), base_count, has_keywords)
             self.emit(Op.MAKE_CLASS, self.constant(spec))
             for decorator in reversed(node.decorator_list):
                 self.expr(decorator)

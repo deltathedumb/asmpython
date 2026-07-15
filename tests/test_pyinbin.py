@@ -204,6 +204,26 @@ class PyinbinSourceTests(unittest.TestCase):
                 run_source(entry)
             self.assertEqual(output.getvalue(), "42\n")
 
+    def test_namedtuple_subclass_custom_new_preserves_attributes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "main.py"
+            entry.write_text(
+                "from collections import namedtuple\n"
+                "class Result(namedtuple('Result', 'failed attempted')):\n"
+                "    def __new__(cls, failed, attempted, *, skipped=0):\n"
+                "        result = super().__new__(cls, failed, attempted)\n"
+                "        result.skipped = skipped\n"
+                "        return result\n"
+                "value = Result(1, 2, skipped=3)\n"
+                "assert (value.failed, value.attempted, value.skipped) == (1, 2, 3)\n"
+                "print(value._fields)\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                run_source(entry, import_roots=[Path(__file__).parents[1] / "asmpython" / "stdlib"])
+            self.assertEqual(output.getvalue(), "('failed', 'attempted')\n")
+
     def test_raise_and_typed_exception_handler(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             entry = Path(temporary) / "main.py"
