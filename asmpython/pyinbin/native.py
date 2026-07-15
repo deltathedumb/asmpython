@@ -8,7 +8,7 @@ provider without changing import semantics.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Callable
 import ast as _bootstrap_ast
 import contextlib as _bootstrap_contextlib
@@ -99,8 +99,14 @@ import random as _bootstrap_random_module
 
 
 class _MemoryTextIO:
-    def __init__(self, initial: str = "", *args: object, **kwargs: object) -> None:
-        self._value = initial
+    def __init__(self, initial: object = "", *args: object, **kwargs: object) -> None:
+        # TextIOWrapper is often constructed around a host buffered reader.
+        # Materialize that input once so the VM-facing stream remains text.
+        if hasattr(initial, "read") and not isinstance(initial, (str, bytes, bytearray)):
+            initial = initial.read()
+        if isinstance(initial, (bytes, bytearray)):
+            initial = bytes(initial).decode(kwargs.get("encoding") or "utf-8", kwargs.get("errors") or "strict")
+        self._value = str(initial)
         self._position = 0
         self.encoding = kwargs.get("encoding") or "utf-8"
         self.errors = kwargs.get("errors") or "strict"
@@ -121,6 +127,34 @@ class _MemoryTextIO:
             result = self._value[self._position:self._position + size]
             self._position += len(result)
         return result
+
+    def readline(self, size: int = -1) -> str:
+        remaining = self._value[self._position:]
+        end = remaining.find("\n")
+        if end >= 0:
+            end += 1
+        else:
+            end = len(remaining)
+        if size >= 0:
+            end = min(end, size)
+        result = remaining[:end]
+        self._position += len(result)
+        return result
+
+    def readlines(self, hint: int = -1) -> list[str]:
+        lines: list[str] = []
+        total = 0
+        while self._position < len(self._value):
+            line = self.readline()
+            lines.append(line)
+            total += len(line)
+            if hint >= 0 and total >= hint:
+                break
+        return lines
+
+    def writelines(self, lines: object) -> None:
+        for line in lines:
+            self.write(line)
 
     def getvalue(self) -> str:
         return self._value
@@ -589,8 +623,8 @@ def create_builtin_module(
             "BuiltinFunctionType": placeholder, "BuiltinMethodType": placeholder,
             "MethodWrapperType": placeholder, "WrapperDescriptorType": placeholder,
             "ClassMethodDescriptorType": placeholder, "MethodDescriptorType": placeholder,
-            "MemberDescriptorType": placeholder, "ModuleType": SimpleNamespace,
-            "ModuleType": placeholder, "CodeType": placeholder,
+            "MemberDescriptorType": placeholder, "ModuleType": ModuleType,
+            "CodeType": placeholder,
             "FrameType": placeholder, "TracebackType": placeholder,
             "CellType": placeholder, "WrapperDescriptorType": placeholder,
             "GetSetDescriptorType": placeholder,
@@ -1326,8 +1360,11 @@ def create_builtin_module(
             "makedirs": lambda path, mode=0o777: None, "rmdir": lambda path: None,
             "unlink": lambda path: None, "remove": lambda path: None,
             "rename": lambda source, target: None, "replace": lambda source, target: None,
-            "stat": lambda path: SimpleNamespace(st_mode=0o100000),
-            "lstat": lambda path: SimpleNamespace(st_mode=0o100000),
+            # The pure-Python ``os`` facade exposes these results directly;
+            # preserve the complete host stat_result shape for pathlib and
+            # doctest helpers instead of returning only ``st_mode``.
+            "stat": lambda path: _bootstrap_os.stat(path),
+            "lstat": lambda path: _bootstrap_os.lstat(path),
             "getenv": lambda key, default=None: default, "putenv": lambda key, value: None,
             "unsetenv": lambda key: None, "environ": {}, "supports_bytes_environ": False,
             "fsencode": lambda value: value.encode() if isinstance(value, str) else value,

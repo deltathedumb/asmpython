@@ -5,3 +5,4 @@ Current status: first 30/30; first 90 modules 61/90 before the latest dynamic-ex
 Refreshed status: first 90 modules are now 65/90. New remaining failures are unchanged plus optional dbm/lsprof and decimal dynamic exception forms.
 Enum/container bootstrap edits are integrated and pushed, but collections/enum still hit a list-descriptor binding defect; continue investigating without reverting the object-model changes.
 The 120-module gate reached 83/120 before the latest extension providers; `_testcapi`, `_testinternalcapi`, `_lsprof`, and errno/metadata additions are now pushed and their focused tests pass where applicable.
+Latest focused result: `test_collections` and `test_enum` both pass after normalizing host buffered readers in `_MemoryTextIO` and returning complete `nt.stat` results. The attempted 120-module refresh exceeded five minutes due to subprocess accumulation; do not treat it as a new aggregate score.
