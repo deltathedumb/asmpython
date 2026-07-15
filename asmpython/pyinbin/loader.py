@@ -400,6 +400,20 @@ class SourceLoader:
         if replacement is not None and replacement is not module:
             return replacement
 
+        if name == "genericpath":
+            # ``genericpath`` imports ``os``; the pure-Python os facade may
+            # initialize ntpath/posixpath while genericpath is still
+            # incomplete. Re-export the completed public helpers so those
+            # modules retain the same API as CPython after the cycle closes.
+            exports = namespace.get("__all__", ())
+            for path_name in ("ntpath", "posixpath"):
+                path_module = self._modules.get(path_name)
+                if path_module is None:
+                    continue
+                for export in exports:
+                    if export in namespace:
+                        setattr(path_module, export, namespace[export])
+
         if name == "os":
             namespace["open"] = lambda file, flags, mode=0o777: os.open(file, flags, mode)
         elif name == "test.support.os_helper":

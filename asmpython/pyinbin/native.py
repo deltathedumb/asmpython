@@ -1625,6 +1625,9 @@ def create_builtin_module(
             "_findfirstfile": lambda path: -1,
             "_getfinalpathname": lambda path: _coerce_path(path),
             "readlink": lambda path: path,
+            "chmod": lambda path, mode, *, dir_fd=None, follow_symlinks=True: _bootstrap_os.chmod(
+                _coerce_path(path), mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks
+            ),
             "scandir": lambda path=".": _bootstrap_os.scandir(path), "mkdir": lambda path, mode=0o777: _bootstrap_os.mkdir(path, mode),
             "makedirs": lambda path, mode=0o777: _bootstrap_os.makedirs(path, mode, exist_ok=True), "rmdir": lambda path: _bootstrap_os.rmdir(path),
             "unlink": lambda path: _bootstrap_os.unlink(path), "remove": lambda path: _bootstrap_os.remove(path),
