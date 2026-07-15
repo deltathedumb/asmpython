@@ -146,6 +146,7 @@ class _MemoryTextIO:
         self.encoding = kwargs.get("encoding") or "utf-8"
         self.errors = kwargs.get("errors") or "strict"
         self.newlines = None
+        self._fd = kwargs.get("fileno")
         self.mode = kwargs.get("mode", "r")
 
     def write(self, value: object) -> int:
@@ -227,7 +228,9 @@ class _MemoryTextIO:
         return False
 
     def fileno(self) -> int:
-        raise OSError("stream has no file descriptor")
+        if self._fd is None:
+            raise OSError("stream has no file descriptor")
+        return int(self._fd)
 
     def close(self) -> None:
         return None
@@ -556,12 +559,12 @@ def create_builtin_module(
             "_getframemodulename": lambda depth=0: "__main__",
             "gettrace": lambda: None, "getprofile": lambda: None,
             "settrace": lambda func: None, "setprofile": lambda func: None,
-            "stdout": _MemoryTextIO(),
-            "stderr": _MemoryTextIO(),
-            "stdin": _MemoryTextIO(),
-            "__stdout__": _MemoryTextIO(),
-            "__stderr__": _MemoryTextIO(),
-            "__stdin__": _MemoryTextIO(),
+            "stdout": _MemoryTextIO(fileno=1),
+            "stderr": _MemoryTextIO(fileno=2),
+            "stdin": _MemoryTextIO(fileno=0),
+            "__stdout__": _MemoryTextIO(fileno=1),
+            "__stderr__": _MemoryTextIO(fileno=2),
+            "__stdin__": _MemoryTextIO(fileno=0),
             "exc_info": lambda: (None, None, None),
             "exception": lambda: None,
             "excepthook": lambda exc_type, exc_value, traceback: None,
@@ -1605,6 +1608,7 @@ def create_builtin_module(
             "open": lambda path, flags, mode=0o777: _bootstrap_os.open(path, flags, mode),
             "getpid": lambda: 1, "getppid": lambda: 0,
             "get_osfhandle": lambda fd: fd,
+            "isatty": lambda fd: _bootstrap_os.isatty(fd),
             "O_RDONLY": _bootstrap_os.O_RDONLY, "O_WRONLY": _bootstrap_os.O_WRONLY,
             "O_RDWR": _bootstrap_os.O_RDWR, "O_CREAT": _bootstrap_os.O_CREAT,
             "O_EXCL": _bootstrap_os.O_EXCL, "O_TRUNC": _bootstrap_os.O_TRUNC,
