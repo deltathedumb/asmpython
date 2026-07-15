@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 import os
+import typing as _typing
 
 from asmpython._compiler.pyinbin_package import PackedModule, verify_source_bundle
 
@@ -448,6 +449,8 @@ def default_builtins(importer: object | None = None) -> dict[str, object]:
         "staticmethod": staticmethod, "classmethod": classmethod,
         "property": property, "AssertionError": AssertionError,
         "Template": _Template, "Interpolation": _TemplateInterpolation,
+        "TypeVar": _typing.TypeVar, "ParamSpec": _typing.ParamSpec,
+        "TypeVarTuple": _typing.TypeVarTuple,
     }
 
 

@@ -46,9 +46,9 @@ _COMPARE_OPS = {
 }
 
 
-def _defer_annotation(node: ast.AST) -> bool:
+def _defer_annotation(node: ast.AST, force: bool = False) -> bool:
     """Keep annotations referring to type-checking-only names as strings."""
-    return any(
+    return force or any(
         isinstance(item, ast.Name) and item.id in {"ClassVar", "Self", "IO"}
         for item in ast.walk(node)
     )
@@ -70,6 +70,7 @@ class _Lowerer:
     bound_names: set[str] = field(default_factory=set)
     free_names: set[str] = field(default_factory=set)
     is_function: bool = False
+    defer_annotations: bool = False
 
     def __post_init__(self) -> None:
         self.bound_names.update(self.arg_names)
@@ -612,7 +613,7 @@ class _Lowerer:
             if isinstance(node.target, ast.Name) and not self.is_function:
                 self.emit(Op.LOAD_NAME, self.name_index("__annotations__"))
                 self.emit(Op.LOAD_CONST, self.constant(node.target.id))
-                if _defer_annotation(node.annotation):
+                if _defer_annotation(node.annotation, self.defer_annotations):
                     self.emit(Op.LOAD_CONST, self.constant(ast.unparse(node.annotation)))
                 else:
                     self.expr(node.annotation)
@@ -622,7 +623,7 @@ class _Lowerer:
             if isinstance(node.target, ast.Name) and not self.is_function:
                 self.emit(Op.LOAD_NAME, self.name_index("__annotations__"))
                 self.emit(Op.LOAD_CONST, self.constant(node.target.id))
-                if _defer_annotation(node.annotation):
+                if _defer_annotation(node.annotation, self.defer_annotations):
                     self.emit(Op.LOAD_CONST, self.constant(ast.unparse(node.annotation)))
                 else:
                     self.expr(node.annotation)
@@ -682,6 +683,7 @@ class _Lowerer:
             self.emit(Op.RAISE)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             nested = _Lowerer(node.name, [arg.arg for arg in [*node.args.posonlyargs, *node.args.args]])
+            nested.defer_annotations = self.defer_annotations
             nested.is_function = True
             nested.is_coroutine = isinstance(node, ast.AsyncFunctionDef)
             nested.posonly_names = [arg.arg for arg in node.args.posonlyargs]
@@ -719,6 +721,20 @@ class _Lowerer:
             self.emit(Op.STORE_NAME, self.name_index(node.name))
         elif isinstance(node, ast.ClassDef):
             body = _Lowerer(f"{self.name}.{node.name}")
+            body.defer_annotations = self.defer_annotations
+            for type_param in getattr(node, "type_params", []):
+                param_name = getattr(type_param, "name", "")
+                if not param_name:
+                    continue
+                constructor = "TypeVar"
+                if isinstance(type_param, getattr(ast, "ParamSpec", ())):
+                    constructor = "ParamSpec"
+                elif isinstance(type_param, getattr(ast, "TypeVarTuple", ())):
+                    constructor = "TypeVarTuple"
+                body.emit(Op.LOAD_NAME, body.name_index(constructor))
+                body.emit(Op.LOAD_CONST, body.constant(param_name))
+                body.emit(Op.CALL, 1)
+                body.emit(Op.STORE_NAME, body.name_index(param_name))
             for statement in node.body:
                 body.stmt(statement)
             body.emit(Op.RETURN)
@@ -919,6 +935,11 @@ def compile_source(source: str, filename: str = "<pyinbin>") -> CodeObject:
     except SyntaxError as exc:
         raise PyinbinUnsupportedError(f"{filename}:{exc.lineno}: invalid Python syntax: {exc.msg}") from exc
     lowerer = _Lowerer(filename)
+    lowerer.defer_annotations = any(
+        isinstance(statement, ast.ImportFrom) and statement.module == "__future__"
+        and any(alias.name == "annotations" for alias in statement.names)
+        for statement in module.body
+    )
     for statement in module.body:
         lowerer.stmt(statement)
     return lowerer.finish()
