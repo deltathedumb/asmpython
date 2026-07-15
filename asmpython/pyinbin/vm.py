@@ -751,6 +751,33 @@ class PyClass:
                 yield value
 
 
+class _PyTBFrameProxy:
+    """Stand-in for a real ``frame`` object pointing at a pyinbin ``CodeObject``.
+
+    Real CPython frames can't be constructed from Python, so tracebacks that
+    cross a pyinbin ``_run_frame`` boundary get one of these instead of the
+    host interpreter's own frame (which would otherwise leak VM internals
+    like ``vm.py`` line numbers to interpreted code inspecting ``__traceback__``).
+    """
+
+    def __init__(self, code: CodeObject, globals_: dict[str, object], back: "_PyTBFrameProxy | None") -> None:
+        self.f_code = code
+        self.f_globals = globals_
+        self.f_locals = globals_
+        self.f_back = back
+        self.f_lineno = 1
+
+
+class _PyTBProxy:
+    """Stand-in for a real ``traceback`` object chained across pyinbin frames."""
+
+    def __init__(self, frame: _PyTBFrameProxy, tb_next: "_PyTBProxy | None") -> None:
+        self.tb_frame = frame
+        self.tb_next = tb_next
+        self.tb_lineno = frame.f_lineno
+        self.tb_lasti = 0
+
+
 @dataclass
 class Frame:
     code: CodeObject
@@ -766,6 +793,9 @@ class Frame:
 
 class VirtualMachine:
     """Execute validated pyinbin bytecode with explicit frame state."""
+
+    def __init__(self) -> None:
+        self._synthetic_tracebacks: dict[int, "_PyTBProxy"] = {}
 
     def run(self, code: CodeObject, globals_: dict[str, object] | None = None) -> object:
         code.validate()
@@ -1348,7 +1378,10 @@ class VirtualMachine:
                     for item in reversed(unpacked): frame.stack.append(item)
                 elif op is Op.GET_ATTR:
                     target = frame.stack.pop(); name = frame.code.names[instr.arg]
-                    frame.stack.append(getattr(target, name))
+                    if name == "__traceback__" and isinstance(target, BaseException) and not isinstance(target, PyException):
+                        frame.stack.append(self._synthetic_tracebacks.get(id(target), target.__traceback__))
+                    else:
+                        frame.stack.append(getattr(target, name))
                 elif op is Op.SET_ATTR:
                     value = frame.stack.pop(); target = frame.stack.pop()
                     try:
@@ -1510,6 +1543,10 @@ class VirtualMachine:
                 else:
                     raise VMError(f"RuntimeError: unsupported opcode {op}")
             except Exception as exc:
+                if isinstance(exc, BaseException) and not isinstance(exc, PyException):
+                    tb_frame = _PyTBFrameProxy(frame.code, frame.globals, None)
+                    prior = self._synthetic_tracebacks.get(id(exc))
+                    self._synthetic_tracebacks[id(exc)] = _PyTBProxy(tb_frame, prior)
                 if frame.handlers:
                     frame.ip = frame.handlers.pop(); frame.stack.clear(); frame.stack.append(exc); frame.active_exception = exc; continue
                 raise

@@ -102,6 +102,14 @@ class Instruction:
     arg: int = 0
 
 
+def _unwrap_nested_code(item: object) -> object:
+    if isinstance(item, tuple) and len(item) in (2, 3) and isinstance(item[0], CodeObject):
+        return item[0]
+    if isinstance(item, tuple) and len(item) in (3, 4) and isinstance(item[1], CodeObject):
+        return item[1]
+    return item
+
+
 @dataclass
 class CodeObject:
     name: str
@@ -136,7 +144,13 @@ class CodeObject:
         if name == "co_varnames":
             return tuple(self.arg_names)
         if name == "co_consts":
-            return tuple(self.constants)
+            items = [_unwrap_nested_code(item) for item in self.constants]
+            nested = [item for item in items if isinstance(item, CodeObject)]
+            if nested and len(items) > 1 and not isinstance(items[1], CodeObject):
+                first = items[0]
+                rest = [item for item in items[1:] if not isinstance(item, CodeObject)]
+                items = [first, nested[0], *rest, *nested[1:]]
+            return tuple(items)
         if name == "co_names":
             return tuple(self.names)
         if name == "co_code":
