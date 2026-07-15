@@ -71,6 +71,7 @@ class _Lowerer:
     free_names: set[str] = field(default_factory=set)
     is_function: bool = False
     defer_annotations: bool = False
+    interactive: bool = False
 
     def __post_init__(self) -> None:
         self.bound_names.update(self.arg_names)
@@ -551,7 +552,7 @@ class _Lowerer:
     def stmt(self, node: ast.stmt) -> None:
         if isinstance(node, ast.Expr):
             self.expr(node.value)
-            if not isinstance(node.value, ast.Yield):
+            if not self.interactive and not isinstance(node.value, ast.Yield):
                 self.emit(Op.POP_TOP)
         elif hasattr(ast, "TypeAlias") and isinstance(node, ast.TypeAlias):
             self.expr(node.value)
@@ -968,16 +969,18 @@ class _Lowerer:
             self.is_generator,
             self.is_coroutine,
             sorted(self.free_names | self.nonlocal_names),
+            getattr(self, "interactive", False),
         )
 
 
-def compile_source(source: str, filename: str = "<pyinbin>") -> CodeObject:
+def compile_source(source: str, filename: str = "<pyinbin>", mode: str = "exec") -> CodeObject:
     """Parse and lower source for the portable pyinbin VM."""
     try:
-        module = ast.parse(source, filename=filename, mode="exec")
+        module = ast.parse(source, filename=filename, mode=mode)
     except SyntaxError as exc:
         raise PyinbinUnsupportedError(f"{filename}:{exc.lineno}: invalid Python syntax: {exc.msg}") from exc
     lowerer = _Lowerer(filename)
+    lowerer.interactive = mode == "single"
     lowerer.defer_annotations = any(
         isinstance(statement, ast.ImportFrom) and statement.module == "__future__"
         and any(alias.name == "annotations" for alias in statement.names)
@@ -985,4 +988,6 @@ def compile_source(source: str, filename: str = "<pyinbin>") -> CodeObject:
     )
     for statement in module.body:
         lowerer.stmt(statement)
+    if mode == "single":
+        lowerer.emit(Op.RETURN)
     return lowerer.finish()

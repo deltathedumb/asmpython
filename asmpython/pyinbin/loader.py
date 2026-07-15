@@ -426,6 +426,17 @@ _dynamic_super.__pyinbin_super__ = True
 
 def default_builtins(importer: object | None = None) -> dict[str, object]:
     """The small explicit bootstrap built-in surface available to bytecode."""
+    def displayhook(value: object) -> None:
+        if value is None:
+            return
+        sys_module = importer("sys") if callable(importer) else None
+        stream = getattr(sys_module, "stdout", None)
+        if stream is not None and hasattr(stream, "write"):
+            stream.write(repr(value))
+            stream.write("\n")
+        else:
+            print(repr(value))
+
     return {
         "__debug__": True,
         "print": print, "len": len, "sum": sum, "range": range, "format": format, "open": _open_compat,
@@ -445,6 +456,7 @@ def default_builtins(importer: object | None = None) -> dict[str, object]:
         "iter": iter, "globals": _dynamic_globals, "locals": _dynamic_locals,
         "__import__": importer or (lambda name, *args, **kwargs: None),
         "eval": _dynamic_eval, "exec": _dynamic_exec, "compile": _dynamic_compile,
+        "__displayhook__": displayhook,
         "Exception": Exception,
         "BaseException": BaseException, "BaseExceptionGroup": BaseExceptionGroup,
         "ExceptionGroup": ExceptionGroup, "SystemExit": SystemExit,

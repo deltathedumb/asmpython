@@ -453,7 +453,7 @@ def create_builtin_module(
 ) -> SimpleNamespace | None:
     """Return an explicitly supported bootstrap module, if one exists."""
     if name == "sys":
-        return _module(name, {
+        module = _module(name, {
             "modules": module_cache,
             "path": [],
             "meta_path": [],
@@ -539,6 +539,15 @@ def create_builtin_module(
             "unraisablehook": lambda unraisable: None,
             "audit": lambda *args, **kwargs: None,
         })
+        def displayhook(value: object) -> None:
+            if value is None:
+                return
+            stream = module.stdout
+            stream.write(repr(value))
+            stream.write("\n")
+        module.displayhook = displayhook
+        module.__displayhook__ = displayhook
+        return module
     if name == "builtins":
         module = ModuleType(name)
         module.__dict__.update(builtins)

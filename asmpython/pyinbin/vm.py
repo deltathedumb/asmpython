@@ -911,11 +911,18 @@ class VirtualMachine:
             from .frontend import compile_source
             globals_ns = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
             locals_ns = args[2] if len(args) > 2 and isinstance(args[2], dict) else globals_ns
-            self._run_frame(Frame(code=compile_source(str(args[0]), "<exec>"), globals=globals_ns, locals=locals_ns))
+            code = args[0] if isinstance(args[0], CodeObject) else compile_source(str(args[0]), "<exec>")
+            result = self._run_frame(Frame(code=code, globals=globals_ns, locals=locals_ns))
+            if code.interactive and result is not None:
+                displayhook = globals_ns.get("__displayhook__")
+                if callable(displayhook):
+                    self._call(displayhook, [result])
             return None
         if getattr(target, "__pyinbin_compile__", False):
             from .frontend import compile_source
-            return compile_source(str(args[0]), str(args[1]) if len(args) > 1 else "<string>")
+            filename = str(args[1]) if len(args) > 1 else "<string>"
+            mode = str(args[2]) if len(args) > 2 else "exec"
+            return compile_source(str(args[0]), filename, mode)
         if (
             isinstance(target, Function)
             and target.code.name == "compile"
