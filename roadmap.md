@@ -172,6 +172,28 @@ A broad set of language and stdlib improvements shipped alongside the core
 
 A platform-expansion release that broadens asmpython beyond x86-64 Windows/Linux.
 
+#### Pyinbin interpreter — stretch goal
+
+`pyinbin` is a complete, CPython-independent Python interpreter written in
+the asmpython language subset and compiled to a native executable. It is not
+a stub module or a host-Python wrapper: after bootstrap compilation, executing
+pyinbin must require neither CPython nor a Python installation.
+
+- Full source execution: lexer, parser, object model, calls, classes,
+  exceptions, generators, imports, and standard-library module loading.
+- Runtime imports: when a compiled program imports a Python source module that
+  cannot be statically merged into the native program, the compiler packages
+  that source and dispatches it to pyinbin at runtime.
+- Static merging remains the preferred path for modules that asmpython can
+  compile directly; pyinbin fallback must be explicit in build metadata until
+  compatibility coverage is complete, never a silent partial interpreter.
+- Interpreter compatibility is measured by a separate pyinbin conformance
+  suite. It must not claim full Python support before that suite covers the
+  supported import and execution surface.
+
+The architecture and staged implementation contract live in
+`docs/PYINBIN-DESIGN.md`.
+
 **Versioning decided: 2.0.0.** A codebase survey (2026-06-17) confirmed
 `codegen.py` hardcodes x86-64 mnemonics directly in ~3,461 lines of raw
 f-string assembly emission, not through an abstracted instruction layer —

@@ -42,6 +42,10 @@ class ProjectConfig:
     use_runtime_lib: bool = False
     library_dirs: list[str] = field(default_factory=lambda: ["libs"])
     packages: list[str] = field(default_factory=list)
+    # Module roots packaged as Python source for pyinbin runtime imports.
+    # The build currently validates this contract and rejects it clearly until
+    # pyinbin's package/runtime loader is available.
+    pyinbin_imports: list[str] = field(default_factory=list)
 
     def validate(self) -> None:
         for t in self.target:
@@ -55,6 +59,15 @@ class ProjectConfig:
             raise ProjectError(f"invalid bundle_mode {self.bundle_mode!r}")
         if not self.library_dirs:
             raise ProjectError("library_dirs must have at least one entry")
+        if not isinstance(self.pyinbin_imports, list):
+            raise ProjectError("pyinbin_imports must be a list of module roots")
+        seen_pyinbin: list[str] = []
+        for module in self.pyinbin_imports:
+            if not isinstance(module, str) or not module:
+                raise ProjectError("pyinbin_imports entries must be non-empty strings")
+            if module in seen_pyinbin:
+                raise ProjectError(f"pyinbin_imports contains duplicate module root {module!r}")
+            seen_pyinbin.append(module)
 
     def to_dict(self) -> dict:
         return asdict(self)

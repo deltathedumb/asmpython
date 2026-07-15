@@ -228,6 +228,7 @@ def _build_top_parser() -> argparse.ArgumentParser:
     subparsers = ap.add_subparsers(dest="command")
     _add_build_subparser(subparsers)
     _add_package_subparser(subparsers)
+    _add_pyinbin_subparser(subparsers)
     _add_project_subparser(subparsers)
     return ap
 
@@ -587,6 +588,16 @@ def cmd_build(args: argparse.Namespace) -> int:
             all_errors=all_errors,
         )
 
+    if cfg is not None and cfg.pyinbin_imports:
+        modules = ", ".join(cfg.pyinbin_imports)
+        print(
+            "asmpython: pyinbin runtime imports are declared for "
+            f"{modules}, but source packaging and the pyinbin runtime loader "
+            "are not available yet",
+            file=sys.stderr,
+        )
+        return 1
+
     # Resolve effective settings: CLI flag wins when given, else the
     # project.json's matching field, else the built-in default.
     cli_targets = None
@@ -889,6 +900,95 @@ def cmd_package(args: argparse.Namespace) -> int:
     return 2
 
 
+# ── `pyinbin` subcommand ───────────────────────────────────────────────────────
+
+_PYINBIN_DESCRIPTION = """\
+Build source bundles and run supported Python through the pyinbin interpreter. A bundle
+contains the Python modules declared by a project's `pyinbin_imports` field,
+their qualified import names, and SHA-256 integrity metadata.
+
+The bootstrap runtime executes lowered bytecode and routes imports only through
+its explicit source/bundle loader. Native embedding remains a separate target
+backend delivery step.
+"""
+
+
+def _add_pyinbin_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
+    ap = subparsers.add_parser(
+        "pyinbin",
+        usage="asmpython pyinbin {package,run} ...",
+        description=_PYINBIN_DESCRIPTION,
+        formatter_class=_AsmPythonHelp,
+        add_help=False,
+    )
+    meta_grp = ap.add_argument_group("information")
+    meta_grp.add_argument("-h", "--help", action="help", help="show this help message and exit")
+    pyinbin_sub = ap.add_subparsers(dest="pyinbin_action")
+    package_p = pyinbin_sub.add_parser(
+        "package", formatter_class=_AsmPythonHelp, help="package declared runtime-import source roots"
+    )
+    package_p.add_argument("project", type=Path, help="project.json declaring pyinbin_imports")
+    package_p.add_argument(
+        "-o", "--output", type=Path, default=None,
+        help="bundle directory (default: <project>/build/pyinbin)",
+    )
+    run_p = pyinbin_sub.add_parser("run", formatter_class=_AsmPythonHelp, help="run Python source through pyinbin")
+    run_p.add_argument("source", type=Path, help="entry Python source file")
+    run_p.add_argument("--bundle", type=Path, default=None, help="verified pyinbin source bundle for imports")
+    return ap
+
+
+def cmd_pyinbin_package(args: argparse.Namespace) -> int:
+    project_path = args.project
+    if project_path.suffix.lower() != ".json" or not project_path.is_file():
+        print("asmpython: pyinbin package requires an existing project.json", file=sys.stderr)
+        return 2
+    try:
+        cfg = load_project(project_path)
+    except ProjectError as exc:
+        print(f"asmpython: {project_path}: {exc}", file=sys.stderr)
+        return 1
+    if not cfg.pyinbin_imports:
+        print(f"asmpython: {project_path}: no pyinbin_imports declared", file=sys.stderr)
+        return 1
+
+    from .pyinbin_package import PyinbinPackageError, build_source_bundle
+
+    root = project_path.resolve().parent
+    destination = args.output or root / "build" / "pyinbin"
+    try:
+        modules = build_source_bundle(root, cfg.pyinbin_imports, destination)
+    except PyinbinPackageError as exc:
+        print(f"asmpython: pyinbin package failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"asmpython: packaged {len(modules)} pyinbin module(s) -> {destination}")
+    return 0
+
+
+def cmd_pyinbin_run(args: argparse.Namespace) -> int:
+    from asmpython.pyinbin import PyinbinImportError, PyinbinUnsupportedError, VMError, run_source
+
+    try:
+        run_source(args.source, bundle=args.bundle)
+    except (OSError, PyinbinImportError, PyinbinUnsupportedError, VMError) as exc:
+        print(f"asmpython: pyinbin: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_pyinbin(args: argparse.Namespace) -> int:
+    if args.pyinbin_action == "package":
+        return cmd_pyinbin_package(args)
+    if args.pyinbin_action == "run":
+        return cmd_pyinbin_run(args)
+    print(
+        "asmpython: error: `pyinbin` requires a subcommand (package/run); "
+        "try `asmpython pyinbin --help`",
+        file=sys.stderr,
+    )
+    return 2
+
+
 # ── `project` subcommand ────────────────────────────────────────────────────────
 
 _PROJECT_DESCRIPTION = """\
@@ -1049,7 +1149,7 @@ def cmd_project(args: argparse.Namespace) -> int:
 
 # ── argv preprocessing (backward-compat shorthand) ──────────────────────────────
 
-_SUBCOMMANDS = {"build", "package", "project"}
+_SUBCOMMANDS = {"build", "package", "pyinbin", "project"}
 _TOP_LEVEL_ONLY = {"-h", "--help", "-V", "--version"}
 
 
@@ -1087,6 +1187,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_build(args)
     if command == "package":
         return cmd_package(args)
+    if command == "pyinbin":
+        return cmd_pyinbin(args)
     if command == "project":
         return cmd_project(args)
 

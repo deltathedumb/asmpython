@@ -421,6 +421,9 @@ class FuncCodegen:
         is_win64_vararg = (
             not is_indirect and self.abi == "win64" and str(target_op) in ("printf", "sprintf")
         )
+        is_sysv_vararg = (
+            not is_indirect and self.abi == "sysv" and str(target_op) in ("printf", "sprintf")
+        )
 
         gp_reg_args: list[tuple[Reg, Any, int]] = []
         xmm_reg_args: list[tuple[XmmReg, Any, str, int]] = []
@@ -469,6 +472,11 @@ class FuncCodegen:
                         temp_slots += 1
                     else:
                         stack_args.append((av, len(stack_args)))
+
+        if is_sysv_vararg:
+            # SysV AMD64 passes the number of live vector arguments in AL for
+            # variadic calls such as printf/sprintf.
+            self._emit(encode_mov_ri(Reg.RAX, xmm_i))
 
         target_temp_slot: int | None = None
         if is_indirect:

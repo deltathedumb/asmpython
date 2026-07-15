@@ -2205,9 +2205,6 @@ class SemaAnalyzer:
         try:
             self._check_block(stmts, scope)
         except SemaError as e:
-            # gen1: e is the plain message string (not a SemaError object)
-            _e_str: str = e
-            print("SEMA_ERR:", _e_str)
             self._collected_errors.append(e)
 
     def _collect_gen_locals(self, stmts: list, exclude: set) -> list:
@@ -3270,8 +3267,6 @@ class SemaAnalyzer:
                 try:
                     extra = self._check_stmt(s, scope)
                 except SemaError as e:
-                    _e_str: str = e
-                    print("SEMA_ERR:", _e_str)
                     self._collected_errors.append(e)
                     i += 1
                     continue

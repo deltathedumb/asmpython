@@ -15,6 +15,32 @@ deliverable.
 
 ### Added
 
+- **IR backend multi-argument `print`** (`ir_lower.py`) — the SSA lowering
+  path now supports Python's default space-separated output for multiple
+  `int`, `str`, and `float` arguments. Arguments are evaluated left-to-right
+  before output and retained in local slots across `printf` calls. The
+  x86-64 backend now also sets the SysV AMD64 variadic vector-register count,
+  so float output works on both Windows and Linux targets.
+
+- **IR backend float lists** (`ir_lower.py`, x86-64 backend) — list literals,
+  reads/writes, `append`, `pop`, and list loops preserve IEEE-754 payloads
+  through the existing integer-ABI list helpers via explicit IR bitcasts.
+
+- **IR backend float dictionaries** (`ir_lower.py`) — dict literals,
+  subscripts, assignment, and `get()` preserve float values through the
+  dict runtime's word-sized ABI without numeric conversion.
+
+- **IR backend class construction and direct dispatch** (`ir_lower.py`) —
+  class methods now lower to their mangled symbols, constructors pass the
+  allocated instance to `__init__`, and inherited constructors/methods resolve
+  through the class parent chain. Mixed integer/float arithmetic and
+  comparisons now emit explicit integer-to-float promotion.
+
+- **Pyinbin source bundles** (`asmpython pyinbin package`) — projects can now
+  package explicit `pyinbin_imports` module roots into a deterministic source
+  tree with a qualified-module manifest and SHA-256 integrity records. Native
+  runtime loading remains gated on the interpreter/VM implementation.
+
 - **27 new stdlib modules** — full implementations of `token`, `tokenize`,
   `shelve` (pickle-backed, typed getters/setters for complex object persistence),
   `codecs`, `fileinput`, `linecache`, `mimetypes`, `socketserver`, `smtplib`,
@@ -46,6 +72,11 @@ deliverable.
   have broken any analysis that walks the def-use chain (including DCE).
 
 ### Fixed
+
+- **Collected semantic errors crashed before formatting** (`sema.py`): a
+  stale debug print accessed the removed `SemaError.msg` attribute, masking
+  every diagnostic when show-all-errors mode was active. Collection now uses
+  the real exception object and reports all errors normally.
 
 - **Win64 shadow-space violations**: every hand-rolled runtime helper and
   function prologue on the Windows target needs at least 32 bytes of shadow
