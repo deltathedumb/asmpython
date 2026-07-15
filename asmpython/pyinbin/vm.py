@@ -9,6 +9,7 @@ bytecode semantics.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import sys
 
 from .bytecode import CodeObject, Op
 
@@ -187,6 +188,20 @@ class SuperProxy:
                     return lambda *args, **kwargs: None
                 if isinstance(value, Function) and isinstance(self.instance, PyInstance):
                     return BoundMethod(self.vm, value, self.instance)
+                if (
+                    not isinstance(base, PyClass)
+                    and isinstance(self.instance, PyInstance)
+                    and callable(value)
+                ):
+                    # ``base`` is a host type (dict/list/set/...) reached via
+                    # the VM class's MRO. The descriptor found on it (e.g.
+                    # ``dict.__init__``, ``dict.__setitem__``) is unbound and
+                    # requires a real host container as its receiver, not the
+                    # ``PyInstance`` wrapper -- bind it to the instance's
+                    # backing container (creating one on first use) so calls
+                    # like ``super().__init__(mapping)`` actually populate it.
+                    container = self.instance._ensure_container()
+                    return lambda *args, **kwargs: value(container, *args, **kwargs)
                 return value
         # A VM class may inherit a host/interpreted base without an explicit
         # ``__new__``.  In that case ``super().__new__`` has the same useful
@@ -358,17 +373,53 @@ class PyInstance:
             # receiver rather than the VM wrapper instance.
             return iter(method(self._raw_value()))
 
+    def __next__(self) -> object:
+        try:
+            method = self.cls.lookup("__next__")
+        except AttributeError:
+            raw = self.attributes.get("_value_")
+            if raw is not None:
+                return next(raw)
+            raise TypeError(f"{self.cls.__name__} object is not an iterator")
+        if isinstance(method, Function):
+            return self.cls.vm._call(method, [self])
+        try:
+            return method(self)
+        except TypeError:
+            return method(self._raw_value())
+
     def __getitem__(self, item: object) -> object:
         raw = self.attributes.get("_value_")
         if raw is not None:
-            return raw[item]
+            try:
+                return raw[item]
+            except TypeError:
+                # A mutable builtin base may have been initialized through a
+                # descriptor; fall through so the descriptor can receive the
+                # concrete backing container below.
+                pass
         try:
             method = self.cls.lookup("__getitem__")
         except AttributeError:
             raise TypeError(f"{self.cls.__name__} object is not subscriptable")
         if isinstance(method, Function):
             return self.cls.vm._call(method, [self, item])
-        return method(self, item)
+        try:
+            return method(self, item)
+        except TypeError:
+            # Host container descriptors require their concrete list/dict/set
+            # receiver rather than the VM wrapper instance.
+            owner = getattr(method, "__objclass__", None)
+            if owner is dict and not isinstance(raw, dict):
+                raw = {}
+                self.attributes["_value_"] = raw
+            elif owner is list and not isinstance(raw, list):
+                raw = []
+                self.attributes["_value_"] = raw
+            elif owner is set and not isinstance(raw, set):
+                raw = set()
+                self.attributes["_value_"] = raw
+            return method(raw if raw is not None else self._raw_value(), item)
 
     def __setitem__(self, item: object, value: object) -> None:
         raw = self.attributes.get("_value_")
@@ -383,13 +434,33 @@ class PyInstance:
             self.cls.vm._call(method, [self, item, value])
             return
         if method is not None:
-            method(self, item, value)
+            try:
+                method(self, item, value)
+            except TypeError:
+                # Host container descriptors require their concrete list/dict/set
+                # receiver rather than the VM wrapper instance.
+                method(self._raw_value(), item, value)
             return
         raise TypeError(f"{self.cls.__name__} object does not support item assignment")
 
     def _raw_value(self) -> object:
         value = self.attributes.get("_value_")
         return 0 if value is None else value
+
+    def _ensure_container(self) -> object:
+        """Return this instance's backing dict/list/set, creating one if the
+        class mixes in a builtin mutable container but no constructor path
+        has populated ``_value_`` yet (e.g. a ``super().__init__(...)`` call
+        made before any other ``_value_``-setting code runs)."""
+        value = self.attributes.get("_value_")
+        if value is not None:
+            return value
+        for container in (dict, list, set):
+            if isinstance(self.cls, PyClass) and container in self.cls.__mro__:
+                value = container()
+                self.attributes["_value_"] = value
+                return value
+        return self._raw_value()
 
     def __int__(self) -> int:
         return int(self._raw_value())
@@ -1543,6 +1614,8 @@ class VirtualMachine:
                 else:
                     raise VMError(f"RuntimeError: unsupported opcode {op}")
             except Exception as exc:
+                if isinstance(exc, NameError):
+                    print("PYINBIN_NAMEERROR", frame.code.name, str(exc), file=sys.stderr)
                 if isinstance(exc, BaseException) and not isinstance(exc, PyException):
                     tb_frame = _PyTBFrameProxy(frame.code, frame.globals, None)
                     prior = self._synthetic_tracebacks.get(id(exc))

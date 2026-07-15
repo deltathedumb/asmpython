@@ -630,14 +630,16 @@ def create_builtin_module(
     if name == "_random":
         class RandomBase:
             @staticmethod
-            def seed(value=None):
-                return None
+            def seed(*args, **kwargs):
+                value = args[-1] if args else kwargs.get("a")
+                return _bootstrap_random_module.seed(value)
             @staticmethod
-            def getrandbits(bits):
-                return 0
+            def getrandbits(*args, **kwargs):
+                bits = args[-1] if args else kwargs.get("k", 0)
+                return _bootstrap_random_module.getrandbits(bits)
             @staticmethod
-            def random():
-                return 0.5
+            def random(*args, **kwargs):
+                return _bootstrap_random_module.random()
         return _module(name, {
             "Random": RandomBase,
             "seed": lambda *args, **kwargs: None,
@@ -1403,7 +1405,7 @@ def create_builtin_module(
             "_have_functions": (),
             "_create_environ": lambda: {}, "_exit": lambda status=0: None,
             "defpath": ".", "devnull": "NUL", "curdir": ".", "pardir": "..", "extsep": ".",
-            "getcwd": lambda: ".", "getcwdb": lambda: b".", "listdir": lambda path=".": [],
+            "getcwd": lambda: _bootstrap_os.getcwd(), "getcwdb": lambda: _bootstrap_os.getcwdb(), "listdir": lambda path=".": _bootstrap_os.listdir(path),
             "open": lambda path, flags, mode=0o777: _bootstrap_os.open(path, flags, mode),
             "getpid": lambda: 1, "getppid": lambda: 0,
             "get_osfhandle": lambda fd: fd,
@@ -1417,33 +1419,33 @@ def create_builtin_module(
             "cpu_count": lambda: 1, "process_cpu_count": lambda: 1,
             "_getvolumepathname": lambda path: path,
             "_path_normpath": lambda path: path,
-            "_path_isdir": lambda path: False,
-            "_path_isfile": lambda path: False,
-            "_path_islink": lambda path: False,
+            "_path_isdir": lambda path: _bootstrap_os.path.isdir(_coerce_path(path)),
+            "_path_isfile": lambda path: _bootstrap_os.path.isfile(_coerce_path(path)),
+            "_path_islink": lambda path: _bootstrap_os.path.islink(_coerce_path(path)),
             "_path_isjunction": lambda path: False,
-            "_path_exists": lambda path: False,
-            "_path_lexists": lambda path: False,
+            "_path_exists": lambda path: _bootstrap_os.path.exists(_coerce_path(path)),
+            "_path_lexists": lambda path: _bootstrap_os.path.lexists(_coerce_path(path)),
             "_getfullpathname": lambda path: _coerce_path(path),
             "_findfirstfile": lambda path: -1,
             "_getfinalpathname": lambda path: _coerce_path(path),
             "readlink": lambda path: path,
-            "scandir": lambda path=".": iter(()), "mkdir": lambda path, mode=0o777: None,
-            "makedirs": lambda path, mode=0o777: None, "rmdir": lambda path: None,
-            "unlink": lambda path: None, "remove": lambda path: None,
-            "rename": lambda source, target: None, "replace": lambda source, target: None,
+            "scandir": lambda path=".": _bootstrap_os.scandir(path), "mkdir": lambda path, mode=0o777: _bootstrap_os.mkdir(path, mode),
+            "makedirs": lambda path, mode=0o777: _bootstrap_os.makedirs(path, mode, exist_ok=True), "rmdir": lambda path: _bootstrap_os.rmdir(path),
+            "unlink": lambda path: _bootstrap_os.unlink(path), "remove": lambda path: _bootstrap_os.remove(path),
+            "rename": lambda source, target: _bootstrap_os.rename(source, target), "replace": lambda source, target: _bootstrap_os.replace(source, target),
             # The pure-Python ``os`` facade exposes these results directly;
             # preserve the complete host stat_result shape for pathlib and
             # doctest helpers instead of returning only ``st_mode``.
             "stat": lambda path: _bootstrap_os.stat(path),
             "lstat": lambda path: _bootstrap_os.lstat(path),
-            "getenv": lambda key, default=None: default, "putenv": lambda key, value: None,
-            "unsetenv": lambda key: None, "environ": {}, "supports_bytes_environ": False,
+            "getenv": lambda key, default=None: _bootstrap_os.environ.get(key, default), "putenv": lambda key, value: None,
+            "unsetenv": lambda key: None, "environ": dict(_bootstrap_os.environ), "supports_bytes_environ": False,
             "fsencode": lambda value: value.encode() if isinstance(value, str) else value,
             "fsdecode": lambda value: value.decode() if isinstance(value, bytes) else value,
             "fspath": fspath,
-            "urandom": lambda size: bytes(size), "open": open, "close": lambda fd: None,
-            "read": lambda fd, size: b"", "write": lambda fd, data: len(data),
-            "access": lambda path, mode: False, "F_OK": 0, "R_OK": 4, "W_OK": 2, "X_OK": 1,
+            "urandom": lambda size: _bootstrap_os.urandom(size), "open": lambda path, flags, mode=0o777: _bootstrap_os.open(path, flags, mode), "close": lambda fd: _bootstrap_os.close(fd),
+            "read": lambda fd, size: _bootstrap_os.read(fd, size), "write": lambda fd, data: _bootstrap_os.write(fd, data),
+            "access": lambda path, mode: _bootstrap_os.access(_coerce_path(path), mode), "F_OK": 0, "R_OK": 4, "W_OK": 2, "X_OK": 1,
             "_exit": lambda status=0: None,
             "_path_splitroot_ex": lambda path: ("", "", _coerce_path(path)),
         })
