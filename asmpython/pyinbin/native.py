@@ -314,7 +314,8 @@ class _FrameProxy:
         self.f_globals: dict[str, object] = {}
         self.f_locals: dict[str, object] = self.f_globals
         self.f_back: "_FrameProxy | None" = None
-        self.f_code = SimpleNamespace(co_name="<pyinbin>")
+        self.f_code = SimpleNamespace(co_name="<pyinbin>", co_filename="<pyinbin>", co_firstlineno=1)
+        self.f_lineno = 1
 
 
 def _pack_uint32(value: int) -> bytes:

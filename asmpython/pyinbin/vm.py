@@ -314,8 +314,15 @@ class PyInstance:
         except AttributeError:
             raw = self.attributes.get("_str")
             return raw if isinstance(raw, str) else f"<{self.cls.__name__} instance>"
-        value = self.cls.vm._call(method, [self]) if isinstance(method, Function) else method(self)
-        return value if isinstance(value, str) else str(value)
+        try:
+            value = self.cls.vm._call(method, [self]) if isinstance(method, Function) else method(self)
+            return value if isinstance(value, str) else str(value)
+        except (AttributeError, TypeError):
+            args = self.attributes.get("args")
+            if isinstance(args, tuple):
+                return " ".join(str(item) for item in args)
+            raw = self.attributes.get("_value_")
+            return str(raw) if raw is not None else f"<{self.cls.__name__} instance>"
 
     def startswith(self, prefix: object, *args: object) -> bool:
         return self.__fspath__().startswith(prefix, *args)
