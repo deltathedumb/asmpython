@@ -395,35 +395,27 @@ class _Lowerer:
                         self.emit(Op.BINARY_ADD)
                     first = False
         elif hasattr(ast, "TemplateStr") and isinstance(node, ast.TemplateStr):
-            first = True
+            self.emit(Op.LOAD_NAME, self.name_index("Template"))
             for value in node.values:
                 if isinstance(value, ast.Constant):
                     self.emit(Op.LOAD_CONST, self.constant(value.value))
                 elif isinstance(value, ast.Interpolation):
-                    conversion = value.conversion
+                    self.emit(Op.LOAD_NAME, self.name_index("Interpolation"))
+                    self.expr(value.value)
+                    expression = getattr(value, "str", None) or ast.unparse(value.value)
+                    self.emit(Op.LOAD_CONST, self.constant(expression))
+                    conversion = {97: "a", 114: "r", 115: "s"}.get(value.conversion)
+                    self.emit(Op.LOAD_CONST, self.constant(conversion))
                     if value.format_spec is None:
-                        converter = ascii if conversion == 97 else repr if conversion == 114 else str
-                        self.emit(Op.LOAD_CONST, self.constant(converter))
-                        self.expr(value.value)
-                        self.emit(Op.CALL, 1)
+                        self.emit(Op.LOAD_CONST, self.constant(""))
                     else:
-                        self.emit(Op.LOAD_NAME, self.name_index("format"))
-                        if conversion in (97, 114, 115):
-                            converter = ascii if conversion == 97 else repr if conversion == 114 else str
-                            self.emit(Op.LOAD_CONST, self.constant(converter))
-                            self.expr(value.value)
-                            self.emit(Op.CALL, 1)
-                        else:
-                            self.expr(value.value)
+                        self.emit(Op.LOAD_NAME, self.name_index("str"))
                         self.expr(value.format_spec)
-                        self.emit(Op.CALL, 2)
+                        self.emit(Op.CALL, 1)
+                    self.emit(Op.CALL, 4)
                 else:
                     self.unsupported(value, "template string value")
-                if not first:
-                    self.emit(Op.BINARY_ADD)
-                first = False
-            if first:
-                self.emit(Op.LOAD_CONST, self.constant(""))
+            self.emit(Op.CALL, len(node.values))
         elif isinstance(node, ast.Subscript):
             self.expr(node.value)
             if isinstance(node.slice, ast.Slice):

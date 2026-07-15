@@ -1,128 +1,158 @@
-"""importlib: implementation of the import system.
+"""Portable import machinery used by the pyinbin interpreter.
 
-In asmpython, dynamic import is not supported at runtime (all imports are
-resolved at compile time). This module provides the API surface for code
-that references importlib, but most functions raise NotImplementedError.
-
-The constants and simple introspection helpers are fully implemented.
+The compiler still resolves ordinary imports statically, but interpreted code
+can use this module for runtime imports.  The active :class:`SourceLoader` is
+injected as ``__pyinbin_loader__`` by the pyinbin runtime.
 """
 from __future__ import annotations
 
-# ---------------------------------------------------------------------------
-# Simple wrappers that work at compile time
-# ---------------------------------------------------------------------------
+
+def _loader() -> object:
+    try:
+        return __pyinbin_loader__
+    except NameError:
+        raise ImportError("importlib requires an active pyinbin loader")
+
+
+def resolve_name(name: str, package: str, level: int) -> str:
+    if level <= 0:
+        return name
+    if not package:
+        raise ImportError("attempted relative import with no known parent package")
+    parts = package.split(".")
+    if level > len(parts):
+        raise ImportError("attempted relative import beyond top-level package")
+    base = parts[: len(parts) - level + 1]
+    return ".".join(base + ([name] if name else []))
+
+
+class ModuleSpec:
+    """Description of a module and the loader responsible for it."""
+
+    def __init__(self, name: str, loader: object, *, origin: object = None,
+                 loader_state: object = None, is_package: object = None) -> None:
+        self.name = name
+        self.loader = loader
+        self.origin = origin
+        self.loader_state = loader_state
+        self.submodule_search_locations = [] if is_package else None
+        self.has_location = bool(origin and origin != "built-in")
+        self.cached = None
+        self.parent = name if is_package else name.rsplit(".", 1)[0] if "." in name else ""
+
+    def __repr__(self) -> str:
+        return "ModuleSpec(name=" + repr(self.name) + ", loader=" + repr(self.loader) + ")"
+
+
+def _coerce_spec(value: object, name: str) -> object:
+    if value is None:
+        return None
+    if isinstance(value, ModuleSpec):
+        return value
+    is_package = getattr(value, "submodule_search_locations", None) is not None
+    spec = ModuleSpec(name, getattr(value, "loader", _loader()),
+                      origin=getattr(value, "origin", None), is_package=is_package)
+    locations = getattr(value, "submodule_search_locations", None)
+    if locations is not None:
+        spec.submodule_search_locations = locations
+    spec.has_location = bool(getattr(value, "has_location", spec.has_location))
+    return spec
+
 
 def import_module(name: str, package: str = "") -> object:
-    """Import a module by name (raises NotImplementedError at runtime).
-
-    In asmpython all imports are resolved statically at compile time.
-    If you write ``import_module("foo")``, add ``import foo`` to the
-    top of your file so the compiler can include it.
-    """
-    raise NotImplementedError(
-        "importlib.import_module: dynamic import not supported in asmpython; "
-        "use a static 'import' statement instead"
-    )
+    """Import *name* through the active pyinbin loader."""
+    if not isinstance(name, str) or not name:
+        raise TypeError("the 'name' argument must be a non-empty string")
+    if name.startswith("."):
+        level = len(name) - len(name.lstrip("."))
+        name = resolve_name(name[level:], package, level)
+    return _loader().load(name)
 
 
 def reload(module: object) -> object:
-    """Reload a module (raises NotImplementedError)."""
-    raise NotImplementedError("importlib.reload: not supported in asmpython")
+    """Re-execute a module through its pyinbin source loader."""
+    if not hasattr(module, "__name__"):
+        raise TypeError("reload() argument must be a module")
+    return _loader().reload(module)
 
 
 def invalidate_caches() -> None:
-    """Invalidate finder caches (no-op in asmpython)."""
-    pass
+    _loader().invalidate_caches()
 
 
 def find_spec(name: str, package: str = "") -> object:
-    """Find the spec for *name* (returns None in asmpython)."""
-    return None
+    if name.startswith("."):
+        name = resolve_name(name[1:], package, 1)
+    loader = _loader()
+    value = loader.find_spec(name)
+    if value is None:
+        try:
+            _, origin = loader._source_for(name)
+        except Exception:
+            return None
+        value = ModuleSpec(name, loader, origin=origin,
+                           is_package=origin.endswith("__init__.py"))
+    return _coerce_spec(value, name)
 
 
-def find_loader(name: str, path: str = "") -> object:
-    """Find a loader for *name* (returns None in asmpython)."""
-    return None
+def find_loader(name: str, path: object = None) -> object:
+    spec = find_spec(name)
+    return getattr(spec, "loader", None) if spec is not None else None
 
 
-# ---------------------------------------------------------------------------
-# util sub-module equivalents (importlib.util)
-# ---------------------------------------------------------------------------
-
-def util_find_spec(name: str) -> object:
-    """importlib.util.find_spec equivalent (returns None in asmpython)."""
-    return None
-
-
-def util_module_from_spec(spec: object) -> object:
-    """importlib.util.module_from_spec equivalent (raises NotImplementedError)."""
-    raise NotImplementedError("importlib.util.module_from_spec: not supported")
-
-
-def util_spec_from_file_location(name: str, location: str,
-                                  submodule_search_locations: list = []) -> object:
-    """importlib.util.spec_from_file_location equivalent (raises NotImplementedError)."""
-    raise NotImplementedError("importlib.util.spec_from_file_location: not supported")
+def module_from_spec(spec: object) -> object:
+    loader = getattr(spec, "loader", None)
+    module = loader.create_module(spec) if loader is not None and hasattr(loader, "create_module") else None
+    if module is None:
+        module = type("Module", (), {})()
+    module.__name__ = getattr(spec, "name", "")
+    module.__loader__ = loader
+    module.__package__ = getattr(spec, "parent", "")
+    module.__spec__ = spec
+    locations = getattr(spec, "submodule_search_locations", None)
+    if locations is not None:
+        module.__path__ = locations
+    return module
 
 
-# ---------------------------------------------------------------------------
-# ModuleSpec stub
-# ---------------------------------------------------------------------------
+def spec_from_file_location(name: str, location: str, *, loader: object = None,
+                            submodule_search_locations: object = None) -> ModuleSpec:
+    if loader is None:
+        loader = SourceFileLoader(name, location)
+    is_package = submodule_search_locations is not None
+    spec = ModuleSpec(name, loader, origin=location, is_package=is_package)
+    if is_package:
+        spec.submodule_search_locations = submodule_search_locations
+    return spec
 
-class ModuleSpec:
-    """A specification for a module's import-system-related state."""
-
-    def __init__(self, name: str, loader: object, origin: str = "",
-                 loader_state: object = None, is_package: int = 0) -> None:
-        self.name: str = name
-        self.loader: object = loader
-        self.origin: str = origin
-        self.loader_state: object = loader_state
-        self.submodule_search_locations: list = []
-        self.has_location: int = 1 if origin else 0
-        self.parent: str = ""
-        self.cached: str = ""
-
-    def __repr__(self) -> str:
-        return "ModuleSpec(name=" + self.name + ", loader=" + str(self.loader) + ")"
-
-
-# ---------------------------------------------------------------------------
-# abc sub-module stubs (importlib.abc)
-# ---------------------------------------------------------------------------
 
 class Finder:
-    """Abstract base class for import finders (stub)."""
-
     def find_module(self, fullname: str, path: object = None) -> object:
         return None
 
 
 class Loader:
-    """Abstract base class for import loaders (stub)."""
-
-    def create_module(self, spec: ModuleSpec) -> object:
+    def create_module(self, spec: object) -> object:
         return None
 
     def exec_module(self, module: object) -> None:
-        pass
+        return None
 
     def load_module(self, fullname: str) -> object:
-        raise NotImplementedError("Loader.load_module: not supported")
+        spec = find_spec(fullname)
+        module = module_from_spec(spec)
+        self.exec_module(module)
+        return module
 
 
 class ResourceLoader(Loader):
-    """Loader with resource access (stub)."""
-
-    def get_data(self, path: str) -> str:
-        raise NotImplementedError("ResourceLoader.get_data: not supported")
+    def get_data(self, path: str) -> bytes:
+        raise OSError(path)
 
 
 class InspectLoader(Loader):
-    """Loader that can inspect modules (stub)."""
-
-    def is_package(self, fullname: str) -> int:
-        return 0
+    def is_package(self, fullname: str) -> bool:
+        return False
 
     def get_code(self, fullname: str) -> object:
         return None
@@ -131,67 +161,61 @@ class InspectLoader(Loader):
         return ""
 
 
-class SourceLoader(InspectLoader):
-    """Loader for source files (stub)."""
+class ExecutionLoader(InspectLoader):
+    def get_filename(self, fullname: str) -> str:
+        raise ImportError(fullname)
 
-    def get_filename(self, name: str) -> str:
-        return ""
 
+class SourceLoader(ExecutionLoader, ResourceLoader):
     def path_stats(self, path: str) -> dict:
         return {}
 
-    def set_data(self, path: str, data: str) -> None:
-        pass
+    def set_data(self, path: str, data: bytes) -> None:
+        return None
 
 
 class MetaPathFinder(Finder):
-    """Abstract base for meta path finders (stub)."""
-
-    def find_spec(self, fullname: str, path: object, target: object = None) -> object:
+    def find_spec(self, fullname: str, path: object = None, target: object = None) -> object:
         return None
 
     def invalidate_caches(self) -> None:
-        pass
+        return None
 
 
 class PathEntryFinder(Finder):
-    """Abstract base for path entry finders (stub)."""
-
     def find_spec(self, name: str, target: object = None) -> object:
         return None
 
-    def find_loader(self, name: str) -> list:
-        return [None, []]
+    def find_loader(self, name: str) -> object:
+        return None
 
     def invalidate_caches(self) -> None:
-        pass
+        return None
 
 
 class FileLoader(SourceLoader):
-    """Loader for files from the filesystem (stub)."""
-
     def __init__(self, fullname: str, path: str) -> None:
-        self.name: str = fullname
-        self.path: str = path
+        self.name = fullname
+        self.path = path
 
-    def get_filename(self, name: str) -> str:
+    def get_filename(self, fullname: str) -> str:
         return self.path
 
-    def get_data(self, path: str) -> str:
-        f = open(path, "r")
-        data: str = f.read()
-        f.close()
-        return data
+    def get_data(self, path: str) -> bytes:
+        with open(path, "rb") as stream:
+            return stream.read()
 
-    def is_package(self, fullname: str) -> int:
-        return 0
+    def is_package(self, fullname: str) -> bool:
+        return self.path.endswith("__init__.py")
 
 
 class SourceFileLoader(FileLoader):
-    """Loader for Python source files (stub)."""
     pass
 
 
 class SourcelessFileLoader(FileLoader):
-    """Loader for Python bytecode files (stub; no bytecode in asmpython)."""
     pass
+
+
+__all__ = ["import_module", "reload", "invalidate_caches", "find_spec", "find_loader",
+           "ModuleSpec", "module_from_spec", "spec_from_file_location", "resolve_name"]

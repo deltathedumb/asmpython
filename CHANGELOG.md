@@ -36,6 +36,12 @@ deliverable.
   interpreter/channel exception surfaces, queue/array providers, Windows file
   flags and handles, callable `os.open` compatibility, and module-level
   `SkipTest` handling so unsupported platform tests report as skipped.
+- **Interpreter-backed importlib** (`stdlib/importlib.py`, `pyinbin/loader.py`) —
+  dynamic imports now resolve through the active source loader with module
+  specs, reload, file loaders, and `importlib.util`/`importlib.abc` surfaces.
+- **Template-string runtime values** (`pyinbin/frontend.py`, `pyinbin/native.py`) —
+  Python 3.14 template strings preserve interpolation metadata for annotation
+  introspection instead of collapsing to plain strings.
 - **Package-entry import semantics** (`pyinbin/loader.py`, `pyinbin/vm.py`) —
   entry modules now infer `__package__` from import roots, relative imports can
   resolve package attributes before probing child modules, and asyncio package

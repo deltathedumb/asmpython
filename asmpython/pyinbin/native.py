@@ -34,6 +34,54 @@ import _queue as _bootstrap_queue
 import array as _bootstrap_array
 import bisect as _bootstrap_bisect
 import math as _bootstrap_math
+import typing as _bootstrap_typing
+import _typing as _bootstrap_typing_native
+
+
+class _TemplateInterpolation:
+    def __init__(self, value: object, expression: str = "", conversion: object = None,
+                 format_spec: object = "") -> None:
+        self.value = value
+        self.expression = expression
+        self.conversion = conversion
+        self.format_spec = "" if format_spec is None else format_spec
+
+    def __repr__(self) -> str:
+        return "Interpolation(" + repr(self.value) + ", " + repr(self.expression) + ")"
+
+
+class _Template:
+    def __init__(self, *parts: object) -> None:
+        strings: list[str] = [""]
+        interpolations: list[_TemplateInterpolation] = []
+        for part in parts:
+            if isinstance(part, str):
+                strings[-1] += part
+            else:
+                interpolations.append(part)
+                strings.append("")
+        self.strings = tuple(strings)
+        self.interpolations = tuple(interpolations)
+        self._parts = tuple(parts)
+
+    def __iter__(self):
+        return iter(self._parts)
+
+    def __str__(self) -> str:
+        out = ""
+        for part in self._parts:
+            if isinstance(part, str):
+                out += part
+            else:
+                value = part.value
+                if part.conversion == "r":
+                    value = repr(value)
+                elif part.conversion == "s":
+                    value = str(value)
+                elif part.conversion == "a":
+                    value = ascii(value)
+                out += format(value, part.format_spec) if part.format_spec else str(value)
+        return out
 import _random as _bootstrap_random
 import random as _bootstrap_random_module
 
@@ -453,6 +501,8 @@ def create_builtin_module(
         })
     if name == "_imp":
         return _module(name, {
+            "pyc_magic_number_token": 0,
+            "source_hash": lambda key, source: 0,
             "lock_held": lambda: False,
             "acquire_lock": lambda: None,
             "release_lock": lambda: None,
@@ -461,6 +511,13 @@ def create_builtin_module(
             "extension_suffixes": lambda: [],
             "_override_frozen_modules_for_tests": lambda *args: None,
         })
+    if name == "typing":
+        return _module(name, {key: getattr(_bootstrap_typing, key) for key in dir(_bootstrap_typing)})
+    if name == "_typing":
+        values = {key: getattr(_bootstrap_typing_native, key) for key in dir(_bootstrap_typing_native)}
+        values.setdefault("_idfunc", lambda value: value)
+        values.setdefault("NoDefault", getattr(_bootstrap_typing, "NoDefault", None))
+        return _module(name, values)
     if name == "_random":
         class RandomBase:
             @staticmethod
@@ -735,11 +792,13 @@ def create_builtin_module(
             if not key.startswith("__")
         })
     if name == "_ctypes":
-        return _module(name, {
+        values = {
             key: getattr(_bootstrap_ctypes, key)
             for key in dir(_bootstrap_ctypes)
             if not key.startswith("__")
-        })
+        }
+        values.setdefault("__version__", "1.1.0")
+        return _module(name, values)
     if name == "_bz2":
         return _module(name, {
             key: getattr(_bootstrap_bz2, key)

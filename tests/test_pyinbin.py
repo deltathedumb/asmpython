@@ -117,6 +117,24 @@ class PyinbinBundleTests(unittest.TestCase):
 
 
 class PyinbinSourceTests(unittest.TestCase):
+    def test_importlib_dynamic_import_and_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "plugin.py").write_text("VALUE = 42\n", encoding="utf-8")
+            entry = root / "main.py"
+            entry.write_text(
+                "import importlib\n"
+                "plugin = importlib.import_module('plugin')\n"
+                "assert plugin.VALUE == 42\n"
+                "assert importlib.find_spec('plugin').name == 'plugin'\n"
+                "print(plugin.VALUE)\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                run_source(entry)
+            self.assertEqual(output.getvalue(), "42\n")
+
     def test_source_execution_routes_import_through_pyinbin_loader(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

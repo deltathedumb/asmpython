@@ -10,6 +10,7 @@ from asmpython._compiler.pyinbin_package import PackedModule, verify_source_bund
 
 from .frontend import compile_source
 from .native import create_builtin_module
+from .native import _Template, _TemplateInterpolation
 from .vm import PyException, VMError, VirtualMachine
 
 
@@ -51,6 +52,16 @@ class _ModuleRegistry(dict[str, SimpleNamespace]):
         raise KeyError(name)
 
 
+class _ModuleNamespace(SimpleNamespace):
+    """Source-module namespace honoring the module-level ``__getattr__`` hook."""
+
+    def __getattr__(self, name: str) -> object:
+        fallback = self.__dict__.get("__getattr__")
+        if callable(fallback):
+            return fallback(name)
+        raise AttributeError(name)
+
+
 class SourceLoader:
     """Execute declared Python modules through ``VirtualMachine`` only."""
 
@@ -71,6 +82,12 @@ class SourceLoader:
             self._bundle_modules = {module.name: module for module in verify_source_bundle(self.bundle)}
 
     def _source_for(self, name: str) -> tuple[str, str]:
+        # Keep the portable import machinery in control even when an import
+        # root (for example CPython's Lib directory) also contains importlib.
+        if name == "importlib":
+            bundled = Path(__file__).resolve().parents[1] / "stdlib" / "importlib.py"
+            if bundled.is_file():
+                return bundled.read_text(encoding="utf-8"), str(bundled)
         if self.bundle is not None:
             packed = self._bundle_modules.get(name)
             if packed is None:
@@ -86,6 +103,56 @@ class SourceLoader:
                 if path.is_file():
                     return path.read_text(encoding="utf-8"), str(path)
         raise PyinbinImportError(f"ImportError: no pyinbin module named {name!r}")
+
+    def _is_package(self, name: str) -> bool:
+        """Return whether *name* resolves to a package source module."""
+        if self.bundle is not None:
+            packed = self._bundle_modules.get(name)
+            return bool(packed and packed.path.replace("\\", "/").endswith("/__init__.py"))
+        parts = name.split(".")
+        return any((root.joinpath(*parts) / "__init__.py").is_file() for root in self.source_roots)
+
+    def find_spec(self, name: str) -> object | None:
+        """Find a source or bootstrap module without executing source twice."""
+        if name in self._modules:
+            module = self._modules[name]
+            return getattr(module, "__spec__", None)
+        try:
+            _, filename = self._source_for(name)
+        except PyinbinImportError:
+            builtin = create_builtin_module(name, self._modules, default_builtins(self._import))
+            if builtin is None:
+                return None
+            return SimpleNamespace(
+                name=name, loader=self, origin="built-in",
+                submodule_search_locations=None, has_location=False,
+                parent=name.rsplit(".", 1)[0] if "." in name else "",
+            )
+        package = self._is_package(name)
+        return SimpleNamespace(
+            name=name, loader=self, origin=filename,
+            submodule_search_locations=[str(Path(filename).parent)] if package else None,
+            has_location=True, parent=name if package else name.rsplit(".", 1)[0] if "." in name else "",
+        )
+
+    def create_module(self, spec: object) -> object | None:
+        return None
+
+    def exec_module(self, module: object) -> None:
+        name = str(getattr(module, "__name__", ""))
+        loaded = self.load(name)
+        if loaded is not module and hasattr(module, "__dict__"):
+            module.__dict__.update(loaded.__dict__)
+
+    def invalidate_caches(self) -> None:
+        return None
+
+    def reload(self, module: object) -> object:
+        name = str(getattr(module, "__name__", ""))
+        if not name:
+            raise TypeError("reload() argument must be a module")
+        self._modules.pop(name, None)
+        return self.load(name)
 
     def _import(
         self,
@@ -111,6 +178,85 @@ class SourceLoader:
     def load(self, name: str) -> SimpleNamespace:
         if name in self._modules:
             return self._modules[name]
+        if name == "__future__":
+            class _Feature:
+                def __init__(self, optional: tuple, mandatory: tuple | None, flag: int) -> None:
+                    self.optional = optional
+                    self.mandatory = mandatory
+                    self.compiler_flag = flag
+                def getOptionalRelease(self) -> tuple:
+                    return self.optional
+                def getMandatoryRelease(self) -> tuple | None:
+                    return self.mandatory
+            features = {
+                "nested_scopes": ((2, 1, 0, "beta", 1), (2, 2, 0, "alpha", 0), 16),
+                "generators": ((2, 2, 0, "alpha", 1), (2, 3, 0, "final", 0), 0),
+                "division": ((2, 2, 0, "alpha", 2), (3, 0, 0, "alpha", 0), 131072),
+                "absolute_import": ((2, 5, 0, "alpha", 1), (3, 0, 0, "alpha", 0), 262144),
+                "with_statement": ((2, 5, 0, "alpha", 1), (2, 6, 0, "alpha", 0), 524288),
+                "print_function": ((2, 6, 0, "alpha", 2), (3, 0, 0, "alpha", 0), 1048576),
+                "unicode_literals": ((2, 6, 0, "alpha", 2), (3, 0, 0, "alpha", 0), 2097152),
+                "barry_as_FLUFL": ((3, 1, 0, "alpha", 2), (4, 0, 0, "alpha", 0), 4194304),
+                "generator_stop": ((3, 5, 0, "beta", 1), (3, 7, 0, "alpha", 0), 8388608),
+                "annotations": ((3, 7, 0, "beta", 1), None, 16777216),
+            }
+            module = SimpleNamespace(__name__=name, all_feature_names=list(features))
+            for feature_name, values in features.items():
+                setattr(module, feature_name, _Feature(*values))
+            self._modules[name] = module
+            return module
+        if name in ("importlib.util", "importlib.abc", "importlib.machinery",
+                    "importlib._bootstrap", "importlib._bootstrap_external"):
+            parent = self.load("importlib")
+            module = SimpleNamespace(__name__=name, __package__="importlib")
+            if name.endswith(".util"):
+                module.find_spec = parent.find_spec
+                module.module_from_spec = parent.module_from_spec
+                module.spec_from_file_location = parent.spec_from_file_location
+                module.resolve_name = parent.resolve_name
+                module.cache_from_source = lambda path, debug_override=None, *, optimization=None: str(path) + "c"
+                module.source_from_cache = lambda path: str(path)[:-1] if str(path).endswith("c") else path
+            elif name.endswith(".abc"):
+                for attr in ("Finder", "Loader", "ResourceLoader", "InspectLoader",
+                             "ExecutionLoader", "FileLoader", "SourceLoader",
+                             "SourceFileLoader", "SourcelessFileLoader", "MetaPathFinder",
+                             "PathEntryFinder"):
+                    if hasattr(parent, attr):
+                        setattr(module, attr, getattr(parent, attr))
+            elif name.endswith(".machinery"):
+                for attr in ("ModuleSpec", "SourceFileLoader", "SourcelessFileLoader",
+                             "FileLoader", "SourceLoader"):
+                    if hasattr(parent, attr):
+                        setattr(module, attr, getattr(parent, attr))
+                module.SOURCE_SUFFIXES = [".py"]
+                module.BYTECODE_SUFFIXES = [".pyc"]
+                module.EXTENSION_SUFFIXES = []
+                module.all_suffixes = lambda: [".py", ".pyc"]
+                module.PathFinder = object
+                module.FileFinder = object
+                module.BuiltinImporter = object
+                module.FrozenImporter = object
+                module.WindowsRegistryFinder = object
+            elif name.endswith("._bootstrap"):
+                module.ModuleSpec = parent.ModuleSpec
+                module.BuiltinImporter = object
+                module.FrozenImporter = object
+                module._gcd_import = lambda module_name, package=None, level=0: self.load(module_name)
+            else:
+                module.MAGIC_NUMBER = b"pyin"
+                module.SOURCE_SUFFIXES = [".py"]
+                module.BYTECODE_SUFFIXES = [".pyc"]
+                module.EXTENSION_SUFFIXES = []
+                module.SourceFileLoader = parent.SourceFileLoader
+                module.SourcelessFileLoader = parent.SourcelessFileLoader
+                module.FileLoader = parent.FileLoader
+                module.SourceLoader = parent.SourceLoader
+                module.cache_from_source = lambda path, debug_override=None, *, optimization=None: str(path) + "c"
+                module.source_from_cache = lambda path: str(path)[:-1] if str(path).endswith("c") else path
+                module.spec_from_file_location = parent.spec_from_file_location
+            self._modules[name] = module
+            setattr(parent, name.rsplit(".", 1)[1], module)
+            return module
         if name == "collections.abc":
             module = self.load("_collections_abc")
             self._modules[name] = module
@@ -125,14 +271,20 @@ class SourceLoader:
             parent_name, child = name.rsplit(".", 1)
             parent = self.load(parent_name)
         source, filename = self._source_for(name)
-        module = SimpleNamespace(__name__=name, __file__=filename)
+        module = _ModuleNamespace(__name__=name, __file__=filename)
         # Register before execution so a directly self-referential import has
         # stable module identity rather than recursively constructing modules.
         self._modules[name] = module
         namespace = module.__dict__
+        namespace.setdefault("__doc__", None)
         namespace["__package__"] = name if filename.endswith("__init__.py") else name.rsplit(".", 1)[0] if "." in name else ""
         namespace.update(default_builtins(self._import))
         namespace["__pyinbin_import__"] = self.load
+        namespace["__pyinbin_loader__"] = self
+        namespace["__spec__"] = self.find_spec(name)
+        namespace["__loader__"] = self
+        if self._is_package(name):
+            namespace["__path__"] = [str(Path(filename).parent)]
         if name == "ssl":
             namespace.setdefault("_SSLMethod", _SSLMethodPlaceholder)
             for enum_name in ("Options", "AlertDescription", "SSLErrorNumber"):
@@ -143,6 +295,14 @@ class SourceLoader:
             namespace.setdefault("PROTOCOL_TLS", 2)
             namespace.setdefault("PROTOCOL_TLS_CLIENT", 16)
             namespace.setdefault("PROTOCOL_TLS_SERVER", 17)
+        if name == "_pydecimal":
+            # The pure-Python decimal fallback constructs DefaultContext while
+            # defining Context; seed the prototype so its bootstrap path is
+            # valid before the real object is assigned at module bottom.
+            namespace["DefaultContext"] = SimpleNamespace(
+                prec=28, rounding=0, Emin=-999999, Emax=999999,
+                capitals=1, clamp=0, traps={}, flags={},
+            )
         try:
             VirtualMachine().run(compile_source(source, filename), namespace)
         except Exception:
@@ -231,12 +391,13 @@ def default_builtins(importer: object | None = None) -> dict[str, object]:
         "chr": chr, "ord": ord, "bin": bin, "hex": hex, "oct": oct, "ascii": ascii, "divmod": divmod,
         "isinstance": _safe_isinstance, "issubclass": _safe_issubclass, "enumerate": enumerate, "zip": zip,
         "map": map, "filter": filter, "any": any, "all": all, "min": min, "max": max,
-        "abs": abs, "round": round, "id": id, "hash": hash, "sorted": sorted, "reversed": reversed,
+        "abs": abs, "round": round, "pow": pow, "id": id, "hash": hash, "sorted": sorted, "reversed": reversed,
         "iter": iter, "globals": _dynamic_globals, "locals": _dynamic_locals,
         "__import__": importer or (lambda name, *args, **kwargs: None),
         "eval": _dynamic_eval, "exec": _dynamic_exec, "compile": _dynamic_compile,
         "Exception": Exception,
         "BaseException": BaseException, "RuntimeError": RuntimeError,
+        "ArithmeticError": ArithmeticError,
         "WindowsError": OSError,
         "Warning": Warning, "UserWarning": UserWarning, "DeprecationWarning": DeprecationWarning,
         "OSError": OSError, "IOError": OSError, "NameError": NameError,
@@ -254,6 +415,7 @@ def default_builtins(importer: object | None = None) -> dict[str, object]:
         "UnicodeEncodeError": UnicodeEncodeError, "UnicodeTranslateError": UnicodeTranslateError,
         "staticmethod": staticmethod, "classmethod": classmethod,
         "property": property, "AssertionError": AssertionError,
+        "Template": _Template, "Interpolation": _TemplateInterpolation,
     }
 
 
@@ -269,9 +431,10 @@ def run_source(
         raise PyinbinImportError(f"source file not found: {path}")
     source = path.read_text(encoding="utf-8")
     loader = SourceLoader(source_root=path.parent, bundle=bundle, import_roots=import_roots)
-    module = SimpleNamespace(__name__="__main__", __file__=str(path))
+    module = _ModuleNamespace(__name__="__main__", __file__=str(path))
     loader._modules["__main__"] = module
     namespace = module.__dict__
+    namespace.setdefault("__doc__", None)
     package = ""
     for root in import_roots or []:
         try:
