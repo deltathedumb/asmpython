@@ -513,7 +513,13 @@ class PyClass:
         if name == "__members__":
             return self.attributes.get("_member_map_", {})
         if name == "_use_args_":
-            return False
+            # Real CPython derives this from whether the enum's mixed-in
+            # member type has a ``__new__`` that consumes the member value
+            # (``int``/``str`` do; plain ``Enum``/``Flag`` over ``object``
+            # don't). ``enum.py`` runs as real interpreted source here, but
+            # its metaclass-driven ``_find_new_`` never executes, so mirror
+            # its outcome directly from the declared bases.
+            return any(base in (int, str, float) for base in self.__mro__)
         if name == "_member_map_":
             return {}
         if name == "_member_names_":
@@ -563,6 +569,15 @@ class PyClass:
             instance.attributes["_value_"] = args[0] if len(args) == 1 else tuple(args)
             if len(args) > 1:
                 instance.attributes["name"] = args[1]
+        elif "_value_" not in instance.attributes:
+            # A class mixing in a builtin mutable container (``dict``/
+            # ``list``/``set``) with no constructor args still needs a real
+            # backing container for ``__getitem__``/``__setitem__``/``__iter__``
+            # to delegate to (see ``PyInstance``'s ``_value_`` fast paths).
+            for container in (dict, list, set):
+                if container in self.__mro__:
+                    instance.attributes["_value_"] = container()
+                    break
         return instance
 
     def __getitem__(self, item: object) -> object:
@@ -878,11 +893,20 @@ class VirtualMachine:
         if target is type and len(args) >= 3 and isinstance(args[0], str) and isinstance(args[2], dict):
             return PyClass(self, args[0], dict(args[2]), list(args[1]))
         if (getattr(target, "__name__", None) == "__new__"
-                and getattr(target, "__self__", None) is object
-                and args):
-            if isinstance(args[0], PyClass):
-                return PyInstance(args[0])
-            return target(*args, **kwargs)
+                and isinstance(getattr(target, "__self__", None), type)
+                and args and isinstance(args[0], PyClass)):
+            owner = target.__self__
+            instance = PyInstance(args[0])
+            if owner is not object:
+                # A user class mixing in a scalar host type (``IntEnum``'s
+                # ``int``, ``StrEnum``'s ``str``, ...) calls
+                # ``int.__new__(cls, value)``/``str.__new__(cls, value)``
+                # expecting the constructed scalar back; ``cls`` itself
+                # can't be a real ``type`` here, so build the raw value from
+                # the host type directly and let ``PyInstance`` delegate to
+                # it via ``_value_`` (see ``PyInstance.__getattr__``).
+                instance.attributes["_value_"] = owner(*args[1:], **kwargs)
+            return instance
         if not callable(target):
             detail = str(target) if isinstance(target, (bool, int, str)) else type(target).__name__
             location = getattr(self, "_current_call_location", getattr(self, "_current_code_name", "<unknown>"))

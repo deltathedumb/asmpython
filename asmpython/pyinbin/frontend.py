@@ -577,7 +577,17 @@ class _Lowerer:
             else:
                 self.emit(Op.ASSERT)
         elif isinstance(node, ast.Assign):
-            if len(node.targets) == 1 and isinstance(node.targets[0], (ast.Tuple, ast.List)):
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                # The common case: a single plain-name target. Store directly
+                # instead of going through the multi-target fallback below,
+                # which stashes the value under a synthetic
+                # ``__pyinbin_assign_N`` name first -- harmless for ordinary
+                # code, but that extra binding leaks into ``cls.__dict__``
+                # for class-body assignments and confuses anything that
+                # enumerates it (e.g. ``enum``'s member collection).
+                self.expr(node.value)
+                self.store(node.targets[0])
+            elif len(node.targets) == 1 and isinstance(node.targets[0], (ast.Tuple, ast.List)):
                 self.expr(node.value)
                 self.store_sequence(node.targets[0])
             elif len(node.targets) == 1 and isinstance(node.targets[0], ast.Attribute):
