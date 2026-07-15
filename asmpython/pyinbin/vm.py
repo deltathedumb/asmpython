@@ -9,7 +9,6 @@ bytecode semantics.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import sys
 
 from .bytecode import CodeObject, Op
 
@@ -875,6 +874,17 @@ class VirtualMachine:
         # Module definitions and function globals must share one namespace.
         return self._run_frame(Frame(code=code, globals=namespace, locals=namespace))
 
+    def _seed_builtins(self, globals_ns: dict[str, object]) -> None:
+        """Populate missing builtin names, mirroring real CPython's
+        exec()/eval() auto-injecting ``__builtins__`` into a bare globals
+        dict. ``_lookup`` has no builtins fallback of its own -- names must
+        live directly in ``frame.globals`` -- so a caller-supplied dict (e.g.
+        ``exec(code, {})``) needs these merged in up front or every builtin
+        name (``Exception``, ``len``, ...) raises NameError inside it."""
+        from .loader import default_builtins
+        for key, value in default_builtins().items():
+            globals_ns.setdefault(key, value)
+
     def _lookup(self, frame: Frame, name: str) -> object:
         if name in frame.locals:
             return frame.locals[name]
@@ -1003,15 +1013,29 @@ class VirtualMachine:
                 return self._call(function, [owner, *args], kwargs)
         if getattr(target, "__pyinbin_eval__", False):
             from .frontend import compile_source
-            globals_ns = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
-            locals_ns = args[2] if len(args) > 2 and isinstance(args[2], dict) else globals_ns
+            globals_arg = args[1] if len(args) > 1 else None
+            locals_arg = args[2] if len(args) > 2 else None
+            globals_ns = globals_arg if isinstance(globals_arg, dict) else (
+                globals_arg._raw_value() if isinstance(globals_arg, PyInstance) and isinstance(globals_arg._raw_value(), dict) else {}
+            )
+            locals_ns = locals_arg if isinstance(locals_arg, dict) else (
+                locals_arg._raw_value() if isinstance(locals_arg, PyInstance) and isinstance(locals_arg._raw_value(), dict) else globals_ns
+            )
+            self._seed_builtins(globals_ns)
             code = compile_source(f"__pyinbin_result = ({args[0]})", "<eval>")
             self._run_frame(Frame(code=code, globals=globals_ns, locals=locals_ns))
             return locals_ns.get("__pyinbin_result")
         if getattr(target, "__pyinbin_exec__", False):
             from .frontend import compile_source
-            globals_ns = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
-            locals_ns = args[2] if len(args) > 2 and isinstance(args[2], dict) else globals_ns
+            globals_arg = args[1] if len(args) > 1 else None
+            locals_arg = args[2] if len(args) > 2 else None
+            globals_ns = globals_arg if isinstance(globals_arg, dict) else (
+                globals_arg._raw_value() if isinstance(globals_arg, PyInstance) and isinstance(globals_arg._raw_value(), dict) else {}
+            )
+            locals_ns = locals_arg if isinstance(locals_arg, dict) else (
+                locals_arg._raw_value() if isinstance(locals_arg, PyInstance) and isinstance(locals_arg._raw_value(), dict) else globals_ns
+            )
+            self._seed_builtins(globals_ns)
             code = args[0] if isinstance(args[0], CodeObject) else compile_source(str(args[0]), "<exec>")
             result = self._run_frame(Frame(code=code, globals=globals_ns, locals=locals_ns))
             if code.interactive and result is not None:
@@ -1614,8 +1638,6 @@ class VirtualMachine:
                 else:
                     raise VMError(f"RuntimeError: unsupported opcode {op}")
             except Exception as exc:
-                if isinstance(exc, NameError):
-                    print("PYINBIN_NAMEERROR", frame.code.name, str(exc), file=sys.stderr)
                 if isinstance(exc, BaseException) and not isinstance(exc, PyException):
                     tb_frame = _PyTBFrameProxy(frame.code, frame.globals, None)
                     prior = self._synthetic_tracebacks.get(id(exc))

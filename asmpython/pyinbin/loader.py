@@ -102,7 +102,16 @@ class SourceLoader:
             return path.read_text(encoding="utf-8"), str(path)
 
         parts = name.split(".")
-        for root in self.source_roots:
+        roots = list(self.source_roots)
+        sys_module = self._modules.get("sys")
+        for entry in getattr(sys_module, "path", ()) if sys_module is not None else ():
+            try:
+                candidate = Path(str(entry)).resolve()
+            except (TypeError, OSError):
+                continue
+            if candidate not in roots:
+                roots.append(candidate)
+        for root in roots:
             base = root.joinpath(*parts)
             candidates = (base.with_suffix(".py"), base / "__init__.py")
             for path in candidates:
@@ -352,6 +361,11 @@ class SourceLoader:
 
         if name == "os":
             namespace["open"] = lambda file, flags, mode=0o777: os.open(file, flags, mode)
+        elif name == "test.support.os_helper":
+            support = self.load("test.support")
+            force_run = getattr(support, "_force_run", None)
+            if force_run is not None:
+                namespace.setdefault("_force_run", force_run)
 
         # ``enum.global_enum`` publishes these aliases in CPython. Keep the
         # public ``re`` surface stable while the bootstrap enum metaclass is
