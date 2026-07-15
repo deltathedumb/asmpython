@@ -89,6 +89,7 @@ python -m asmpython <source.py> [options]
   --keep                 keep intermediate .obj / .o files
   --check                front-end diagnostics only (no codegen)
   --json                 machine-readable JSON diagnostics on stderr
+  --no-pyinbin-fallback  fail on native rejection instead of interpreting
   --explain <CODE>       print error-code description and exit
   --use-runtime-lib      link pre-built libasmpython_rt (smaller .asm)
   --onefile              single statically-linked binary (default)
@@ -103,6 +104,23 @@ python -m asmpython <source.py> [options]
 Every diagnostic includes an error code in brackets (e.g. `[E002]`). Pass it
 to `asmpython --explain <CODE>` for a full description, or use `--check
 --json` for machine-readable output in editor integrations.
+
+### Ecosystem differential testing
+
+The installed `asmpython-pytest-scout` command finds or accepts pytest
+repositories, clones them, and compares the same pytest launcher under CPython,
+a native asmpython build, and pyinbin. It prints unified output diffs and saves
+a JSON report. Because cloned tests execute untrusted code, execution requires
+an explicit acknowledgement:
+
+```sh
+asmpython-pytest-scout --repo owner/project --allow-untrusted-code
+```
+
+See [docs/PYTEST-SCOUT.md](docs/PYTEST-SCOUT.md) for discovery, dependency,
+isolation, timeout, and engine-selection options. Native differential builds
+use `asmpython build --no-pyinbin-fallback` so a pyinbin fallback can never be
+misreported as a compiled executable.
 
 ---
 

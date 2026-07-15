@@ -3,6 +3,7 @@
 /memory/
 /.vscode/
 /.idea/
+/.asmpython-pytest-scout/
 *.swp
 
 # ── Python bytecode / caches ────────────────────────────────────────────────

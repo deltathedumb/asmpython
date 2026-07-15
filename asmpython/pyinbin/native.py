@@ -28,15 +28,33 @@ import select as _bootstrap_select
 import struct as _bootstrap_struct
 import time as _bootstrap_time
 import _string as _bootstrap_string
-import _sysconfig as _bootstrap_sysconfig
+try:
+    import _sysconfig as _bootstrap_sysconfig
+except ImportError:
+    # ``_sysconfig`` is a newer CPython implementation module and is absent
+    # from supported 3.11/3.12 hosts.  Pyinbin only needs its public
+    # ``config_vars`` mapping, which the portable sysconfig module exposes.
+    import sysconfig as _bootstrap_sysconfig_module
+    _bootstrap_sysconfig = SimpleNamespace(
+        config_vars=_bootstrap_sysconfig_module.get_config_vars()
+    )
 import zlib as _bootstrap_zlib
 import _socket as _bootstrap_socket
 import _ssl as _bootstrap_ssl
-import _overlapped as _bootstrap_overlapped
+try:
+    import _overlapped as _bootstrap_overlapped
+except ImportError:
+    # Windows-only.  Keeping an empty explicit provider lets non-Windows
+    # stdlib code probe the module without making pyinbin itself unimportable.
+    _bootstrap_overlapped = ModuleType("_overlapped")
 import _ctypes as _bootstrap_ctypes
 import _bz2 as _bootstrap_bz2
 import _lzma as _bootstrap_lzma
-import _zstd as _bootstrap_zstd
+try:
+    import _zstd as _bootstrap_zstd
+except ImportError:
+    # Added after the oldest CPython versions supported by asmpython.
+    _bootstrap_zstd = ModuleType("_zstd")
 import _queue as _bootstrap_queue
 import _multibytecodec as _bootstrap_multibytecodec
 import _csv as _bootstrap_csv
@@ -46,8 +64,15 @@ try:
     import _decimal as _bootstrap_decimal
 except ImportError:
     _bootstrap_decimal = None
-import _testcapi as _bootstrap_testcapi
-import _testinternalcapi as _bootstrap_testinternalcapi
+try:
+    import _testcapi as _bootstrap_testcapi
+except ImportError:
+    # Some production Python builds intentionally omit CPython's test module.
+    _bootstrap_testcapi = ModuleType("_testcapi")
+try:
+    import _testinternalcapi as _bootstrap_testinternalcapi
+except ImportError:
+    _bootstrap_testinternalcapi = ModuleType("_testinternalcapi")
 import _lsprof as _bootstrap_lsprof
 import array as _bootstrap_array
 import bisect as _bootstrap_bisect

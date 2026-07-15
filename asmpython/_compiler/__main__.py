@@ -433,6 +433,12 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         "ld involved). Default: whichever the selected --backend prefers "
         "(legacy -> gcc, x86-64 -> builtin)",
     )
+    build_grp.add_argument(
+        "--no-pyinbin-fallback",
+        action="store_true",
+        help="report native compiler rejection as a failure instead of executing "
+        "the source through pyinbin. Useful for differential compiler testing.",
+    )
 
     # Toolchain --------------------------------------------------------------
     tc_grp = ap.add_argument_group("toolchain overrides")
@@ -675,8 +681,20 @@ def cmd_build(args: argparse.Namespace) -> int:
         )
         return 0
 
+    def native_rejection(native_error: Exception) -> int:
+        """Report a native-only failure or use the normal pyinbin fallback."""
+        if not args.no_pyinbin_fallback:
+            return pyinbin_fallback(native_error)
+        if isinstance(native_error, MultiSemaError):
+            print(native_error.format_all(src, str(source_path)), file=sys.stderr)
+        elif isinstance(native_error, CompileError):
+            print(native_error.format(src, str(source_path)), file=sys.stderr)
+        else:
+            print(f"asmpython: native compilation failed: {native_error}", file=sys.stderr)
+        return 1
+
     if cfg is not None and cfg.pyinbin_imports:
-        return pyinbin_fallback(RuntimeError("project declares pyinbin_imports"))
+        return native_rejection(RuntimeError("project declares pyinbin_imports"))
 
     try:
         if single:
@@ -723,11 +741,11 @@ def cmd_build(args: argparse.Namespace) -> int:
         # Give the target-neutral interpreter a chance before reporting a
         # native-only language limitation. This is what makes dynamic imports
         # and other interpreter-capable constructs usable from the CLI.
-        return pyinbin_fallback(me)
+        return native_rejection(me)
     except CompileError as e:
-        return pyinbin_fallback(e)
+        return native_rejection(e)
     except NotImplementedError as e:
-        return pyinbin_fallback(e)
+        return native_rejection(e)
     except Exception as e:
         print(f"asmpython: {e}", file=sys.stderr)
         return 1

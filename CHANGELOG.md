@@ -15,6 +15,17 @@ deliverable.
 
 ### Added
 
+- **Pytest repository differential scout** (`asmpython-pytest-scout`) — searches
+  for or accepts pytest repositories, clones them, prepares isolated virtual
+  environments, and compares native asmpython and pyinbin transcripts against
+  CPython with unified terminal diffs and a complete JSON report.
+- **Native-only build diagnostics** (`--no-pyinbin-fallback`) — conformance
+  tooling can now distinguish a genuine native artifact from successful
+  interpreter fallback execution.
+- **Portable pyinbin bootstrap imports** — optional CPython-version and
+  OS-specific helpers no longer prevent pyinbin from starting on Python
+  3.11/3.12, non-Windows hosts, or production builds without `_testcapi`.
+
 - **pyinbin object-model and stdlib bootstrap coverage** (`pyinbin/vm.py`,
   `pyinbin/native.py`) — interpreted classes now support descriptor binding,
   class deletion, dataclass metadata, identity-preserving ordinary instances,

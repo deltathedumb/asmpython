@@ -29,6 +29,7 @@ classifiers = [
 
 [project.scripts]
 asmpython = "asmpython._compiler.__main__:main"
+asmpython-pytest-scout = "asmpython.tools.pytest_scout:main"
 
 [project.urls]
 Repository = "https://github.com/deltathedumb/asmpython"

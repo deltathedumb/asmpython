@@ -9,6 +9,8 @@ Welcome to the asmpython documentation. Choose a section below:
 ## Understanding asmpython
 
 - **[Feature Breakdown](FEATURE-BREAKDOWN.md)** — Detailed coverage table: what Python features are supported, what's missing, and what's out of scope.
+- **[Pytest Repository Scout](PYTEST-SCOUT.md)** — Clone real pytest projects and compare CPython, native asmpython, and pyinbin with unified diffs.
+- **[CPython Conformance Gate](CPYTHON-CONFORMANCE.md)** — Run the official CPython test modules against pyinbin.
 
 ## Release History
 
