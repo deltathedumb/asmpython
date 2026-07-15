@@ -79,6 +79,10 @@ try:
 except ImportError:
     # Some minimal/embeddable builds omit the expat XML parser extension.
     _bootstrap_pyexpat = None
+try:
+    import _multiprocessing as _bootstrap_multiprocessing
+except ImportError:
+    _bootstrap_multiprocessing = None
 import array as _bootstrap_array
 import bisect as _bootstrap_bisect
 import math as _bootstrap_math
@@ -1045,6 +1049,12 @@ def create_builtin_module(
         return _module(name, {
             key: getattr(_bootstrap_pyexpat, key)
             for key in dir(_bootstrap_pyexpat)
+            if not key.startswith("__")
+        })
+    if name == "_multiprocessing" and _bootstrap_multiprocessing is not None:
+        return _module(name, {
+            key: getattr(_bootstrap_multiprocessing, key)
+            for key in dir(_bootstrap_multiprocessing)
             if not key.startswith("__")
         })
     if name == "_ssl":
