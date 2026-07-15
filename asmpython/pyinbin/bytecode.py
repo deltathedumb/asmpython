@@ -17,6 +17,8 @@ class Op(IntEnum):
     STORE_NAME = 3
     POP_TOP = 4
     STORE_GLOBAL = 5
+    DUP_TOP = 6
+    SWAP = 7
     BINARY_ADD = 10
     BINARY_SUB = 11
     BINARY_MUL = 12
@@ -30,7 +32,11 @@ class Op(IntEnum):
     COMPARE_GE = 24
     JUMP = 30
     JUMP_IF_FALSE = 31
+    JUMP_IF_TRUE = 32
+    JUMP_IF_FALSE_KEEP = 33
+    JUMP_IF_TRUE_KEEP = 34
     CALL = 40
+    CALL_KW = 48
     RETURN = 41
     MAKE_FUNCTION = 42
     MAKE_CLASS = 43
@@ -46,8 +52,12 @@ class Op(IntEnum):
     SET_ITEM = 55
     GET_ITER = 56
     FOR_ITER = 57
+    UNPACK_SEQUENCE = 58
     GET_ATTR = 60
     SET_ATTR = 61
+    DELETE_ATTR = 62
+    DELETE_NAME = 63
+    DELETE_ITEM = 64
     IMPORT_NAME = 70
     IMPORT_FROM = 71
     IMPORT_ROOT = 72
@@ -60,6 +70,7 @@ class Op(IntEnum):
     BINARY_BITXOR = 19
     BINARY_LSHIFT = 100
     BINARY_RSHIFT = 101
+    BINARY_BOOL_AND = 102
     COMPARE_NE = 25
     COMPARE_IS = 26
     COMPARE_IS_NOT = 27
@@ -80,6 +91,10 @@ class CodeObject:
     constants: list[object] = field(default_factory=list)
     names: list[str] = field(default_factory=list)
     arg_names: list[str] = field(default_factory=list)
+    kwonly_names: list[str] = field(default_factory=list)
+    vararg_name: str | None = None
+    kwarg_name: str | None = None
+    posonly_names: list[str] = field(default_factory=list)
 
     def validate(self) -> None:
         for offset, instr in enumerate(self.instructions):
@@ -87,9 +102,9 @@ class CodeObject:
                 raise ValueError(f"{self.name}: invalid opcode at {offset}")
             if instr.op in (Op.LOAD_CONST, Op.MAKE_FUNCTION, Op.MAKE_CLASS, Op.MATCH_EXCEPTION) and not 0 <= instr.arg < len(self.constants):
                 raise ValueError(f"{self.name}: constant index out of range at {offset}")
-            if instr.op in (Op.LOAD_NAME, Op.STORE_NAME, Op.STORE_GLOBAL, Op.GET_ATTR, Op.SET_ATTR) and not 0 <= instr.arg < len(self.names):
+            if instr.op in (Op.LOAD_NAME, Op.STORE_NAME, Op.STORE_GLOBAL, Op.GET_ATTR, Op.SET_ATTR, Op.DELETE_ATTR, Op.DELETE_NAME) and not 0 <= instr.arg < len(self.names):
                 raise ValueError(f"{self.name}: name index out of range at {offset}")
-            if instr.op in (Op.JUMP, Op.JUMP_IF_FALSE, Op.TRY_BEGIN) and not 0 <= instr.arg <= len(self.instructions):
+            if instr.op in (Op.JUMP, Op.JUMP_IF_FALSE, Op.JUMP_IF_TRUE, Op.JUMP_IF_FALSE_KEEP, Op.JUMP_IF_TRUE_KEEP, Op.TRY_BEGIN) and not 0 <= instr.arg <= len(self.instructions):
                 raise ValueError(f"{self.name}: jump target out of range at {offset}")
             if instr.arg < 0:
                 raise ValueError(f"{self.name}: negative operand at {offset}")

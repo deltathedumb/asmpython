@@ -21,6 +21,8 @@ class VMError(Exception):
 class Function:
     code: CodeObject
     globals: dict[str, object]
+    defaults: list[object] = field(default_factory=list)
+    kw_defaults: dict[str, object] = field(default_factory=dict)
 
 
 class BoundMethod:
@@ -29,8 +31,8 @@ class BoundMethod:
         self.function = function
         self.instance = instance
 
-    def __call__(self, *args: object) -> object:
-        return self.vm._call(self.function, [self.instance, *args])
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        return self.vm._call(self.function, [self.instance, *args], kwargs)
 
 
 class PyInstance:
@@ -115,18 +117,47 @@ class VirtualMachine:
             return frame.globals[name]
         raise VMError(f"NameError: name {name!r} is not defined")
 
-    def _call(self, target: object, args: list[object]) -> object:
+    def _call(self, target: object, args: list[object], kwargs: dict[str, object] | None = None) -> object:
+        kwargs = kwargs or {}
         if isinstance(target, Function):
-            if len(args) != len(target.code.arg_names):
+            total = len(target.code.arg_names)
+            required = total - len(target.defaults)
+            if len(args) > total and target.code.vararg_name is None:
                 raise VMError(
-                    f"TypeError: {target.code.name}() takes {len(target.code.arg_names)} argument(s), got {len(args)}"
+                    f"TypeError: {target.code.name}() takes {required} to {total} argument(s), got {len(args)}"
                 )
+            positional = list(args[:total])
+            if len(positional) < total:
+                positional.extend(target.defaults[len(positional) - required:])
+            locals_ = dict(zip(target.code.arg_names, positional))
+            if target.code.vararg_name:
+                locals_[target.code.vararg_name] = tuple(args[total:])
+            for name, value in kwargs.items():
+                if name in target.code.posonly_names:
+                    raise VMError(f"TypeError: {target.code.name}() got positional-only argument passed as keyword: {name!r}")
+                if name in locals_:
+                    locals_[name] = value
+                elif name in target.code.kwonly_names or target.code.kwarg_name:
+                    locals_[name] = value
+                else:
+                    raise VMError(f"TypeError: {target.code.name}() got an unexpected keyword argument {name!r}")
+            for name in target.code.kwonly_names:
+                if name not in locals_:
+                    if name in target.kw_defaults:
+                        locals_[name] = target.kw_defaults[name]
+                    else:
+                        raise VMError(f"TypeError: {target.code.name}() missing keyword-only argument {name!r}")
+            if target.code.kwarg_name:
+                locals_[target.code.kwarg_name] = {
+                    name: value for name, value in kwargs.items()
+                    if name not in target.code.arg_names and name not in target.code.kwonly_names
+                }
             return self._run_frame(
-                Frame(code=target.code, globals=target.globals, locals=dict(zip(target.code.arg_names, args)))
+                Frame(code=target.code, globals=target.globals, locals=locals_)
             )
         if not callable(target):
             raise VMError("TypeError: object is not callable")
-        return target(*args)
+        return target(*args, **kwargs)
 
     def _run_frame(self, frame: Frame) -> object:
         instructions = frame.code.instructions
@@ -145,7 +176,12 @@ class VirtualMachine:
                     frame.globals[frame.code.names[instr.arg]] = frame.stack.pop()
                 elif op is Op.POP_TOP:
                     frame.stack.pop()
-                elif op in (Op.BINARY_ADD, Op.BINARY_SUB, Op.BINARY_MUL, Op.BINARY_DIV, Op.BINARY_FLOORDIV, Op.BINARY_MOD, Op.BINARY_POW, Op.BINARY_BITAND, Op.BINARY_BITOR, Op.BINARY_BITXOR, Op.BINARY_LSHIFT, Op.BINARY_RSHIFT):
+                elif op is Op.DUP_TOP:
+                    frame.stack.append(frame.stack[-1])
+                elif op is Op.SWAP:
+                    if len(frame.stack) < 2: raise VMError("RuntimeError: SWAP stack underflow")
+                    frame.stack[-1], frame.stack[-2] = frame.stack[-2], frame.stack[-1]
+                elif op in (Op.BINARY_ADD, Op.BINARY_SUB, Op.BINARY_MUL, Op.BINARY_DIV, Op.BINARY_FLOORDIV, Op.BINARY_MOD, Op.BINARY_POW, Op.BINARY_BITAND, Op.BINARY_BITOR, Op.BINARY_BITXOR, Op.BINARY_LSHIFT, Op.BINARY_RSHIFT, Op.BINARY_BOOL_AND):
                     right = frame.stack.pop(); left = frame.stack.pop()
                     if op is Op.BINARY_ADD: frame.stack.append(left + right)
                     elif op is Op.BINARY_SUB: frame.stack.append(left - right)
@@ -158,6 +194,7 @@ class VirtualMachine:
                     elif op is Op.BINARY_BITXOR: frame.stack.append(left ^ right)
                     elif op is Op.BINARY_LSHIFT: frame.stack.append(left << right)
                     elif op is Op.BINARY_RSHIFT: frame.stack.append(left >> right)
+                    elif op is Op.BINARY_BOOL_AND: frame.stack.append(bool(left and right))
                     else: frame.stack.append(left % right)
                 elif op in (Op.COMPARE_EQ, Op.COMPARE_LT, Op.COMPARE_LE, Op.COMPARE_GT, Op.COMPARE_GE, Op.COMPARE_NE, Op.COMPARE_IS, Op.COMPARE_IS_NOT, Op.COMPARE_IN, Op.COMPARE_NOT_IN):
                     right = frame.stack.pop(); left = frame.stack.pop()
@@ -175,10 +212,34 @@ class VirtualMachine:
                     frame.ip = instr.arg
                 elif op is Op.JUMP_IF_FALSE:
                     if not frame.stack.pop(): frame.ip = instr.arg
+                elif op is Op.JUMP_IF_TRUE:
+                    if frame.stack.pop(): frame.ip = instr.arg
+                elif op is Op.JUMP_IF_FALSE_KEEP:
+                    value = frame.stack.pop()
+                    if not value: frame.ip = instr.arg
+                elif op is Op.JUMP_IF_TRUE_KEEP:
+                    value = frame.stack.pop()
+                    if value: frame.ip = instr.arg
                 elif op is Op.MAKE_FUNCTION:
-                    nested = frame.code.constants[instr.arg]
+                    spec = frame.code.constants[instr.arg]
+                    default_count = 0
+                    kw_default_count = 0
+                    if isinstance(spec, tuple) and len(spec) == 2:
+                        nested, default_count = spec
+                    elif isinstance(spec, tuple) and len(spec) == 3:
+                        nested, default_count, kw_default_count = spec
+                    else:
+                        nested = spec
                     if not isinstance(nested, CodeObject): raise VMError("TypeError: invalid function constant")
-                    nested.validate(); frame.stack.append(Function(nested, frame.globals))
+                    count = default_count + kw_default_count
+                    if len(frame.stack) < count: raise VMError("RuntimeError: default stack underflow")
+                    values = frame.stack[-count:] if count else []
+                    if count: del frame.stack[-count:]
+                    defaults = values[:default_count]
+                    kw_defaults = {
+                        name: value for name, value in zip(nested.kwonly_names[-kw_default_count:], values[default_count:])
+                    }
+                    nested.validate(); frame.stack.append(Function(nested, frame.globals, defaults, kw_defaults))
                 elif op is Op.MAKE_CLASS:
                     spec = frame.code.constants[instr.arg]
                     if not isinstance(spec, tuple) or len(spec) != 3: raise VMError("TypeError: invalid class constant")
@@ -195,6 +256,36 @@ class VirtualMachine:
                     args = frame.stack[-instr.arg:] if instr.arg else []
                     if instr.arg: del frame.stack[-instr.arg:]
                     frame.stack.append(self._call(frame.stack.pop(), args))
+                elif op is Op.CALL_KW:
+                    spec = frame.code.constants[instr.arg]
+                    if not isinstance(spec, tuple) or len(spec) != 2: raise VMError("RuntimeError: invalid keyword call")
+                    positional_spec, names = spec
+                    if isinstance(positional_spec, int):
+                        positional_spec = tuple(False for _ in range(positional_spec))
+                    if not isinstance(positional_spec, tuple): raise VMError("RuntimeError: invalid positional call")
+                    positional_count = len(positional_spec)
+                    keyword_count = len(names)
+                    if len(frame.stack) < 1 + positional_count + keyword_count: raise VMError("RuntimeError: CALL_KW stack underflow")
+                    values = frame.stack[-keyword_count:] if keyword_count else []
+                    if keyword_count: del frame.stack[-keyword_count:]
+                    raw_positional = frame.stack[-positional_count:] if positional_count else []
+                    if positional_count: del frame.stack[-positional_count:]
+                    target = frame.stack.pop()
+                    positional: list[object] = []
+                    for is_starred, value in zip(positional_spec, raw_positional):
+                        if is_starred:
+                            if not isinstance(value, (tuple, list)): raise VMError("TypeError: * argument must be iterable")
+                            positional.extend(value)
+                        else:
+                            positional.append(value)
+                    kwargs: dict[str, object] = {}
+                    for name, value in zip(names, values):
+                        if name is None:
+                            if not isinstance(value, dict): raise VMError("TypeError: ** argument must be a mapping")
+                            kwargs.update(value)
+                        else:
+                            kwargs[name] = value
+                    frame.stack.append(self._call(target, positional, kwargs))
                 elif op is Op.BUILD_LIST:
                     if len(frame.stack) < instr.arg: raise VMError("RuntimeError: list stack underflow")
                     values = frame.stack[-instr.arg:] if instr.arg else []
@@ -220,10 +311,24 @@ class VirtualMachine:
                 elif op is Op.FOR_ITER:
                     try: frame.stack.append(next(frame.stack[-1]))
                     except StopIteration: frame.stack.pop(); frame.ip = instr.arg
+                elif op is Op.UNPACK_SEQUENCE:
+                    value = frame.stack.pop()
+                    if not isinstance(value, (tuple, list)) or len(value) != instr.arg:
+                        raise VMError("ValueError: unpacking sequence has wrong length")
+                    for item in reversed(value): frame.stack.append(item)
                 elif op is Op.GET_ATTR:
                     frame.stack.append(getattr(frame.stack.pop(), frame.code.names[instr.arg]))
                 elif op is Op.SET_ATTR:
                     value = frame.stack.pop(); setattr(frame.stack.pop(), frame.code.names[instr.arg], value)
+                elif op is Op.DELETE_ATTR:
+                    delattr(frame.stack.pop(), frame.code.names[instr.arg])
+                elif op is Op.DELETE_NAME:
+                    name = frame.code.names[instr.arg]
+                    if name in frame.locals: del frame.locals[name]
+                    elif name in frame.globals: del frame.globals[name]
+                    else: raise VMError(f"NameError: name {name!r} is not defined")
+                elif op is Op.DELETE_ITEM:
+                    index = frame.stack.pop(); value = frame.stack.pop(); del value[index]
                 elif op is Op.IMPORT_NAME:
                     loader = frame.globals.get("__pyinbin_import__")
                     if not callable(loader): raise VMError("ImportError: loader is not configured")

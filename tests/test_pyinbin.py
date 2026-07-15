@@ -226,6 +226,49 @@ class PyinbinSourceTests(unittest.TestCase):
                 run_source(entry)
             self.assertEqual(output.getvalue(), "1\n")
 
+    def test_f_strings_and_repr_conversion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "main.py"
+            entry.write_text(
+                "value = 42\n"
+                "print(f'value={value}')\n"
+                "print(f'{value!r}')\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                run_source(entry)
+            self.assertEqual(output.getvalue(), "value=42\n42\n")
+
+    def test_function_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "main.py"
+            entry.write_text(
+                "def add(left, right=2):\n"
+                "    return left + right\n"
+                "print(add(40))\n"
+                "print(add(40, 3))\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                run_source(entry)
+            self.assertEqual(output.getvalue(), "42\n43\n")
+
+    def test_varargs_keyword_only_and_keyword_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "main.py"
+            entry.write_text(
+                "def total(first, *values, scale=1, **options):\n"
+                "    return (first + sum(values)) * scale + options['bonus']\n"
+                "print(total(1, 2, 3, scale=4, bonus=5))\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                run_source(entry)
+            self.assertEqual(output.getvalue(), "29\n")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -75,7 +75,7 @@ class _Lowerer:
 
     def unsupported(self, node: ast.AST, detail: str | None = None) -> None:
         kind = detail or type(node).__name__
-        raise PyinbinUnsupportedError(f"line {node.lineno}: pyinbin does not support {kind}")
+        raise PyinbinUnsupportedError(f"{self.name}:{node.lineno}: pyinbin does not support {kind}")
 
     def expr(self, node: ast.expr) -> None:
         if isinstance(node, ast.Constant):
@@ -92,15 +92,42 @@ class _Lowerer:
         elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
             self.expr(node.operand)
             self.emit(Op.UNARY_NOT)
-        elif isinstance(node, ast.Compare) and len(node.ops) == len(node.comparators) == 1 and type(node.ops[0]) in _COMPARE_OPS:
-            self.expr(node.left)
-            self.expr(node.comparators[0])
-            self.emit(_COMPARE_OPS[type(node.ops[0])])
-        elif isinstance(node, ast.Call) and not node.keywords:
+        elif isinstance(node, ast.BoolOp) and len(node.values) >= 2:
+            exits: list[int] = []
+            for value in node.values[:-1]:
+                self.expr(value)
+                self.emit(Op.DUP_TOP)
+                exits.append(self.emit(Op.JUMP_IF_FALSE_KEEP if isinstance(node.op, ast.And) else Op.JUMP_IF_TRUE_KEEP))
+            self.expr(node.values[-1])
+            for exit_jump in exits:
+                self.patch(exit_jump, len(self.instructions))
+        elif isinstance(node, ast.Compare) and len(node.ops) == len(node.comparators) and all(type(op) in _COMPARE_OPS for op in node.ops):
+            operands = [node.left, *node.comparators]
+            for index, op in enumerate(node.ops):
+                self.expr(operands[index])
+                self.expr(operands[index + 1])
+                self.emit(_COMPARE_OPS[type(op)])
+                if index:
+                    self.emit(Op.BINARY_BOOL_AND)
+        elif isinstance(node, ast.Call) and not node.keywords and all(not isinstance(arg, ast.Starred) for arg in node.args):
             self.expr(node.func)
             for arg in node.args:
                 self.expr(arg)
             self.emit(Op.CALL, len(node.args))
+        elif isinstance(node, ast.Call):
+            self.expr(node.func)
+            arg_specs: list[bool] = []
+            for arg in node.args:
+                if isinstance(arg, ast.Starred):
+                    self.expr(arg.value)
+                    arg_specs.append(True)
+                else:
+                    self.expr(arg)
+                    arg_specs.append(False)
+            for keyword in node.keywords:
+                self.expr(keyword.value)
+            names = tuple(keyword.arg for keyword in node.keywords)
+            self.emit(Op.CALL_KW, self.constant((tuple(arg_specs), names)))
         elif isinstance(node, ast.List):
             for element in node.elts:
                 self.expr(element)
@@ -119,6 +146,26 @@ class _Lowerer:
                 self.expr(key)
                 self.expr(value)
             self.emit(Op.BUILD_DICT, len(node.keys))
+        elif isinstance(node, ast.JoinedStr):
+            if not node.values:
+                self.emit(Op.LOAD_CONST, self.constant(""))
+            else:
+                first = True
+                for value in node.values:
+                    if isinstance(value, ast.Constant):
+                        self.emit(Op.LOAD_CONST, self.constant(value.value))
+                    elif isinstance(value, ast.FormattedValue) and value.format_spec is None:
+                        if value.conversion == 114:
+                            self.emit(Op.LOAD_NAME, self.name_index("repr"))
+                        else:
+                            self.emit(Op.LOAD_NAME, self.name_index("str"))
+                        self.expr(value.value)
+                        self.emit(Op.CALL, 1)
+                    else:
+                        self.unsupported(value, "formatted string value")
+                    if not first:
+                        self.emit(Op.BINARY_ADD)
+                    first = False
         elif isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Slice):
             self.expr(node.value)
             self.expr(node.slice)
@@ -136,6 +183,14 @@ class _Lowerer:
         else:
             self.unsupported(target, "assignment target")
 
+    def store_sequence(self, target: ast.expr) -> None:
+        if isinstance(target, (ast.Tuple, ast.List)):
+            self.emit(Op.UNPACK_SEQUENCE, len(target.elts))
+            for element in target.elts:
+                self.store_sequence(element)
+        else:
+            self.store(target)
+
     def stmt(self, node: ast.stmt) -> None:
         if isinstance(node, ast.Expr):
             self.expr(node.value)
@@ -144,19 +199,42 @@ class _Lowerer:
             self.global_names.update(node.names)
         elif isinstance(node, ast.Nonlocal):
             self.unsupported(node, "nonlocal")
-        elif isinstance(node, ast.Assign) and len(node.targets) == 1:
-            if isinstance(node.targets[0], ast.Attribute):
-                self.expr(node.targets[0].value)
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self.emit(Op.DELETE_NAME, self.name_index(target.id))
+                elif isinstance(target, ast.Attribute):
+                    self.expr(target.value)
+                    self.emit(Op.DELETE_ATTR, self.name_index(target.attr))
+                elif isinstance(target, ast.Subscript) and not isinstance(target.slice, ast.Slice):
+                    self.expr(target.value)
+                    self.expr(target.slice)
+                    self.emit(Op.DELETE_ITEM)
+                else:
+                    self.unsupported(target, "delete target")
+        elif isinstance(node, ast.Assign):
+            if len(node.targets) == 1 and isinstance(node.targets[0], (ast.Tuple, ast.List)):
                 self.expr(node.value)
-                self.emit(Op.SET_ATTR, self.name_index(node.targets[0].attr))
-            elif isinstance(node.targets[0], ast.Subscript) and not isinstance(node.targets[0].slice, ast.Slice):
-                self.expr(node.targets[0].value)
-                self.expr(node.targets[0].slice)
+                self.store_sequence(node.targets[0])
+            elif len(node.targets) == 1 and isinstance(node.targets[0], ast.Attribute):
+                target = node.targets[0]
+                self.expr(target.value)
+                self.expr(node.value)
+                self.emit(Op.SET_ATTR, self.name_index(target.attr))
+            elif len(node.targets) == 1 and isinstance(node.targets[0], ast.Subscript) and not isinstance(node.targets[0].slice, ast.Slice):
+                target = node.targets[0]
+                self.expr(target.value)
+                self.expr(target.slice)
                 self.expr(node.value)
                 self.emit(Op.SET_ITEM)
             else:
+                if any(not isinstance(target, ast.Name) for target in node.targets):
+                    self.unsupported(node, "chained assignment target")
                 self.expr(node.value)
-                self.store(node.targets[0])
+                for target in node.targets[:-1]:
+                    self.emit(Op.DUP_TOP)
+                    self.store(target)
+                self.store(node.targets[-1])
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
             if isinstance(node.target, ast.Attribute):
                 self.expr(node.target.value)
@@ -173,6 +251,13 @@ class _Lowerer:
                 self.expr(node.value)
                 self.emit(_BINARY_OPS[type(node.op)])
                 self.store(node.target)
+            elif isinstance(node.target, ast.Attribute):
+                self.expr(node.target.value)
+                self.emit(Op.DUP_TOP)
+                self.emit(Op.GET_ATTR, self.name_index(node.target.attr))
+                self.expr(node.value)
+                self.emit(_BINARY_OPS[type(node.op)])
+                self.emit(Op.SET_ATTR, self.name_index(node.target.attr))
             else:
                 self.unsupported(node, "augmented assignment target")
         elif isinstance(node, ast.Return):
@@ -186,18 +271,30 @@ class _Lowerer:
             self.emit(Op.RAISE)
         elif isinstance(node, ast.Raise) and node.exc is None:
             self.emit(Op.RAISE)
-        elif isinstance(node, ast.FunctionDef) and not node.decorator_list and not node.args.defaults:
-            if node.args.vararg or node.args.kwarg or node.args.kwonlyargs or node.args.posonlyargs:
-                self.unsupported(node, "function argument form")
-            nested = _Lowerer(node.name, [arg.arg for arg in node.args.args])
+        elif isinstance(node, ast.FunctionDef):
+            nested = _Lowerer(node.name, [arg.arg for arg in [*node.args.posonlyargs, *node.args.args]])
+            nested.posonly_names = [arg.arg for arg in node.args.posonlyargs]
+            nested.kwonly_names = [arg.arg for arg in node.args.kwonlyargs]
+            nested.vararg_name = node.args.vararg.arg if node.args.vararg else None
+            nested.kwarg_name = node.args.kwarg.arg if node.args.kwarg else None
             for statement in node.body:
                 nested.stmt(statement)
             nested.emit(Op.RETURN)
-            self.emit(Op.MAKE_FUNCTION, self.constant(nested.finish()))
+            for default in node.args.defaults:
+                self.expr(default)
+            kw_default_count = 0
+            for default in node.args.kw_defaults:
+                if default is None:
+                    self.unsupported(node, "required keyword-only argument")
+                self.expr(default)
+                kw_default_count += 1
+            self.emit(Op.MAKE_FUNCTION, self.constant((nested.finish(), len(node.args.defaults), kw_default_count)))
+            for decorator in reversed(node.decorator_list):
+                self.expr(decorator)
+                self.emit(Op.SWAP)
+                self.emit(Op.CALL, 1)
             self.emit(Op.STORE_NAME, self.name_index(node.name))
-        elif isinstance(node, ast.ClassDef) and not node.keywords and not node.decorator_list:
-            if any(not isinstance(base, ast.Name) for base in node.bases):
-                self.unsupported(node, "class base expression")
+        elif isinstance(node, ast.ClassDef) and all(keyword.arg == "metaclass" for keyword in node.keywords):
             body = _Lowerer(f"{self.name}.{node.name}")
             for statement in node.body:
                 body.stmt(statement)
@@ -206,6 +303,10 @@ class _Lowerer:
                 self.expr(base)
             spec = (node.name, body.finish(), len(node.bases))
             self.emit(Op.MAKE_CLASS, self.constant(spec))
+            for decorator in reversed(node.decorator_list):
+                self.expr(decorator)
+                self.emit(Op.SWAP)
+                self.emit(Op.CALL, 1)
             self.emit(Op.STORE_NAME, self.name_index(node.name))
         elif isinstance(node, ast.If):
             self.expr(node.test)
@@ -235,7 +336,7 @@ class _Lowerer:
             self.emit(Op.GET_ITER)
             start = len(self.instructions)
             exit_jump = self.emit(Op.FOR_ITER)
-            self.store(node.target)
+            self.store_sequence(node.target)
             self.loop_exits.append([])
             for statement in node.body:
                 self.stmt(statement)
@@ -244,11 +345,13 @@ class _Lowerer:
             self.patch(exit_jump, end)
             for jump in self.loop_exits.pop():
                 self.patch(jump, end)
-        elif isinstance(node, ast.Try) and not node.finalbody and not node.orelse and len(node.handlers) == 1:
+        elif isinstance(node, ast.Try) and not node.finalbody and len(node.handlers) == 1:
             handler_jump = self.emit(Op.TRY_BEGIN)
             for statement in node.body:
                 self.stmt(statement)
             self.emit(Op.TRY_END)
+            for statement in node.orelse:
+                self.stmt(statement)
             end_jump = self.emit(Op.JUMP)
             handler = node.handlers[0]
             self.patch(handler_jump, len(self.instructions))
@@ -300,7 +403,17 @@ class _Lowerer:
             self.unsupported(node)
 
     def finish(self) -> CodeObject:
-        return CodeObject(self.name, self.instructions, self.constants, self.names, self.arg_names)
+        return CodeObject(
+            self.name,
+            self.instructions,
+            self.constants,
+            self.names,
+            self.arg_names,
+            list(getattr(self, "kwonly_names", [])),
+            getattr(self, "vararg_name", None),
+            getattr(self, "kwarg_name", None),
+            list(getattr(self, "posonly_names", [])),
+        )
 
 
 def compile_source(source: str, filename: str = "<pyinbin>") -> CodeObject:

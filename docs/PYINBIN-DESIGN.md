@@ -66,6 +66,8 @@ Pyinbin is layered so every dependency can be compiled by asmpython:
 5. Object model: integers, floats, strings, bytes, lists, tuples, dicts,
    sets, functions, classes, instances, descriptors, and modules. The bootstrap
    VM now covers class construction, inheritance, attributes, and bound methods.
+   Native-extension modules such as `_io` remain an explicit runtime delivery
+   item; they are not silently imported from the host interpreter.
 6. Builtins and standard library: Python-level implementations plus explicit
    native bindings where an OS service is needed.
 
