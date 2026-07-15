@@ -12,7 +12,7 @@ from asmpython._compiler.pyinbin_package import PackedModule, verify_source_bund
 from .frontend import compile_source
 from .native import create_builtin_module
 from .native import _Template, _TemplateInterpolation
-from .vm import PyException, VMError, VirtualMachine
+from .vm import PyClass, PyException, VMError, VirtualMachine
 
 
 class _SSLMethodPlaceholder(int):
@@ -26,6 +26,12 @@ class _SSLMethodPlaceholder(int):
 
 def _safe_isinstance(value: object, class_or_tuple: object) -> bool:
     try:
+        if class_or_tuple is type and (
+            isinstance(value, PyClass) or type(value).__name__ == "PyClass" or getattr(value, "__mro__", None) is not None
+        ):
+            return True
+        if isinstance(class_or_tuple, tuple):
+            return any(_safe_isinstance(value, item) for item in class_or_tuple)
         return isinstance(value, class_or_tuple)
     except (TypeError, AttributeError):
         return False
@@ -427,8 +433,13 @@ def _dynamic_locals() -> dict[str, object]:
     raise VMError("pyinbin locals marker must be handled by the VM")
 
 
+def _dynamic_dir(value: object = None) -> list[str]:
+    raise VMError("pyinbin dir marker must be handled by the VM")
+
+
 _dynamic_globals.__pyinbin_globals__ = True
 _dynamic_locals.__pyinbin_locals__ = True
+_dynamic_dir.__pyinbin_dir__ = True
 
 
 def _dynamic_super(*args: object, **kwargs: object) -> object:
@@ -462,7 +473,7 @@ def default_builtins(importer: object | None = None) -> dict[str, object]:
         "super": _dynamic_super,
         "list": list, "tuple": tuple, "dict": dict, "set": set, "frozenset": frozenset,
         "complex": complex, "callable": callable, "getattr": getattr, "setattr": setattr,
-        "delattr": delattr, "hasattr": hasattr, "dir": dir, "vars": vars,
+        "delattr": delattr, "hasattr": hasattr, "dir": _dynamic_dir, "vars": vars,
         "chr": chr, "ord": ord, "bin": bin, "hex": hex, "oct": oct, "ascii": ascii, "divmod": divmod,
         "isinstance": _safe_isinstance, "issubclass": _safe_issubclass, "enumerate": enumerate, "zip": zip,
         "map": map, "filter": filter, "any": any, "all": all, "min": min, "max": max,
@@ -476,12 +487,18 @@ def default_builtins(importer: object | None = None) -> dict[str, object]:
         "ExceptionGroup": ExceptionGroup, "SystemExit": SystemExit,
         "KeyboardInterrupt": KeyboardInterrupt, "GeneratorExit": GeneratorExit,
         "RuntimeError": RuntimeError,
+        "BufferError": BufferError,
+        "FloatingPointError": FloatingPointError,
+        "OverflowError": OverflowError,
+        "ReferenceError": ReferenceError,
         "ArithmeticError": ArithmeticError,
         "BlockingIOError": BlockingIOError,
         "WindowsError": OSError,
         "Warning": Warning, "UserWarning": UserWarning, "DeprecationWarning": DeprecationWarning,
         "PendingDeprecationWarning": PendingDeprecationWarning, "FutureWarning": FutureWarning,
+        "RuntimeWarning": RuntimeWarning, "UnicodeWarning": UnicodeWarning,
         "SyntaxWarning": SyntaxWarning, "ImportWarning": ImportWarning, "ResourceWarning": ResourceWarning,
+        "IndentationError": IndentationError, "TabError": TabError,
         "BytesWarning": BytesWarning, "EncodingWarning": EncodingWarning,
         "OSError": OSError, "IOError": OSError, "NameError": NameError,
         "ChildProcessError": ChildProcessError, "ConnectionError": ConnectionError,
@@ -524,6 +541,12 @@ def run_source(
         raise PyinbinImportError(f"source file not found: {path}")
     source = path.read_text(encoding="utf-8")
     loader = SourceLoader(source_root=path.parent, bundle=bundle, import_roots=import_roots)
+    # ``sys.argv[0]`` must be the running script's own path, not the
+    # placeholder used when no script has run yet -- real CPython sets this,
+    # and stdlib code (e.g. test_decimal.py's ``file = sys.argv[0] if
+    # __name__ == '__main__' else __file__``) depends on it being a real,
+    # directory-bearing path rather than a bare command name.
+    loader.load("sys").argv = [str(path)]
     module = _ModuleNamespace(__name__="__main__", __file__=str(path))
     loader._modules["__main__"] = module
     namespace = module.__dict__
