@@ -18,6 +18,28 @@ class VMError(Exception):
 
 
 @dataclass
+class _Yielded:
+    frame: "Frame"
+    value: object
+
+
+class GeneratorObject:
+    def __init__(self, vm: "VirtualMachine", frame: "Frame") -> None:
+        self.vm = vm
+        self.frame = frame
+
+    def __iter__(self) -> "GeneratorObject":
+        return self
+
+    def __next__(self) -> object:
+        result = self.vm._run_frame(self.frame)
+        if isinstance(result, _Yielded):
+            self.frame = result.frame
+            return result.value
+        raise StopIteration(result)
+
+
+@dataclass
 class Function:
     code: CodeObject
     globals: dict[str, object]
@@ -154,6 +176,8 @@ class VirtualMachine:
                 }
             return self._run_frame(
                 Frame(code=target.code, globals=target.globals, locals=locals_)
+            ) if not target.code.is_generator else GeneratorObject(
+                self, Frame(code=target.code, globals=target.globals, locals=locals_)
             )
         if not callable(target):
             raise VMError("TypeError: object is not callable")
@@ -329,12 +353,34 @@ class VirtualMachine:
                     else: raise VMError(f"NameError: name {name!r} is not defined")
                 elif op is Op.DELETE_ITEM:
                     index = frame.stack.pop(); value = frame.stack.pop(); del value[index]
+                elif op is Op.WITH_ENTER:
+                    context = frame.stack.pop()
+                    enter = getattr(context, "__enter__", None)
+                    frame.stack.append(context)
+                    frame.stack.append(enter() if callable(enter) else context)
+                elif op is Op.WITH_EXIT:
+                    context = frame.stack.pop()
+                    exit_method = getattr(context, "__exit__", None)
+                    if callable(exit_method): exit_method(None, None, None)
+                elif op is Op.ASSERT:
+                    message = frame.stack.pop() if instr.arg else None
+                    if not frame.stack.pop(): raise AssertionError(message)
+                elif op is Op.LIST_APPEND:
+                    value = frame.stack.pop(); target = frame.stack.pop(); target.append(value); frame.stack.append(target)
                 elif op is Op.IMPORT_NAME:
                     loader = frame.globals.get("__pyinbin_import__")
                     if not callable(loader): raise VMError("ImportError: loader is not configured")
                     frame.stack.append(loader(frame.code.names[instr.arg]))
                 elif op is Op.IMPORT_FROM:
                     module = frame.stack.pop(); frame.stack.append(getattr(module, frame.code.names[instr.arg]))
+                elif op is Op.IMPORT_STAR:
+                    module = frame.stack.pop()
+                    values = getattr(module, "__dict__", {})
+                    for name, value in values.items():
+                        if not name.startswith("_"): frame.locals[name] = value
+                elif op is Op.BUILD_SLICE:
+                    step = frame.stack.pop(); stop = frame.stack.pop(); start = frame.stack.pop()
+                    frame.stack.append(slice(start, stop, step))
                 elif op is Op.IMPORT_ROOT:
                     loader = frame.globals.get("__pyinbin_import__")
                     if not callable(loader): raise VMError("ImportError: loader is not configured")
@@ -378,6 +424,8 @@ class VirtualMachine:
                     frame.stack.append(value)
                 elif op is Op.RETURN:
                     return frame.stack.pop() if frame.stack else None
+                elif op is Op.YIELD_VALUE:
+                    return _Yielded(frame, frame.stack.pop())
                 else:
                     raise VMError(f"RuntimeError: unsupported opcode {op}")
             except Exception as exc:

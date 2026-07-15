@@ -57,6 +57,9 @@ deliverable.
   keyword-only parameters, `**kwargs`, starred arguments, decorators, chained
   comparisons/assignments, tuple unpacking, f-strings, boolean short-circuit,
   and delete statements.
+- Added resumable generator frames with `yield`, nested list/dict/generator
+  comprehensions, slices, named expressions, `assert`, and basic context
+  manager execution.
 - Added pyinbin bitwise/shift operators and `global` statement semantics.
 - Added the CPython official `Lib/test` conformance harness and a required
   release gate for 2.0.0 readiness.

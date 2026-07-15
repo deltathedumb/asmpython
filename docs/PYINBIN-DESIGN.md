@@ -62,7 +62,8 @@ Pyinbin is layered so every dependency can be compiled by asmpython:
    direct AST evaluator for each target.
 4. Virtual machine: frames, evaluation stack, calls, control flow, exception
    unwinding, generators, and coroutine suspension. The bootstrap VM now has
-   typed `raise`/`try` handling; generator and coroutine support remain open.
+   typed `raise`/`try` handling and resumable `yield` generators; coroutine
+   suspension and full exception/finally parity remain open.
 5. Object model: integers, floats, strings, bytes, lists, tuples, dicts,
    sets, functions, classes, instances, descriptors, and modules. The bootstrap
    VM now covers class construction, inheritance, attributes, and bound methods.

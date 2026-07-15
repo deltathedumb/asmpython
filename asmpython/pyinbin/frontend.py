@@ -53,6 +53,8 @@ class _Lowerer:
     names: list[str] = field(default_factory=list)
     instructions: list[Instruction] = field(default_factory=list)
     loop_exits: list[list[int]] = field(default_factory=list)
+    loop_starts: list[int] = field(default_factory=list)
+    is_generator: bool = False
     global_names: set[str] = field(default_factory=set)
 
     def constant(self, value: object) -> int:
@@ -77,11 +79,64 @@ class _Lowerer:
         kind = detail or type(node).__name__
         raise PyinbinUnsupportedError(f"{self.name}:{node.lineno}: pyinbin does not support {kind}")
 
+    def comprehension(self, node: ast.ListComp | ast.DictComp | ast.GeneratorExp) -> None:
+        if any(generator.is_async for generator in node.generators):
+            self.unsupported(node, "async comprehension")
+        is_dict = isinstance(node, ast.DictComp)
+        temp_name = f"__pyinbin_comp_{len(self.constants)}"
+        self.emit(Op.BUILD_DICT if is_dict else Op.BUILD_LIST, 0)
+        self.emit(Op.STORE_NAME, self.name_index(temp_name))
+
+        def emit_generator(index: int) -> None:
+            generator = node.generators[index]
+            self.expr(generator.iter)
+            self.emit(Op.GET_ITER)
+            start = len(self.instructions)
+            exit_jump = self.emit(Op.FOR_ITER)
+            self.store_sequence(generator.target)
+            filter_jumps: list[int] = []
+            for condition in generator.ifs:
+                self.expr(condition)
+                filter_jumps.append(self.emit(Op.JUMP_IF_FALSE))
+            if index + 1 < len(node.generators):
+                emit_generator(index + 1)
+            elif is_dict:
+                self.emit(Op.LOAD_NAME, self.name_index(temp_name))
+                self.expr(node.key)
+                self.expr(node.value)
+                self.emit(Op.SET_ITEM)
+            else:
+                self.emit(Op.LOAD_NAME, self.name_index(temp_name))
+                self.expr(node.elt)
+                self.emit(Op.LIST_APPEND)
+                self.emit(Op.POP_TOP)
+            continue_target = len(self.instructions)
+            for jump in filter_jumps:
+                self.patch(jump, continue_target)
+            self.emit(Op.JUMP, start)
+            self.patch(exit_jump, len(self.instructions))
+
+        emit_generator(0)
+        self.emit(Op.LOAD_NAME, self.name_index(temp_name))
+
     def expr(self, node: ast.expr) -> None:
         if isinstance(node, ast.Constant):
             self.emit(Op.LOAD_CONST, self.constant(node.value))
         elif isinstance(node, ast.Name):
             self.emit(Op.LOAD_NAME, self.name_index(node.id))
+        elif isinstance(node, ast.NamedExpr):
+            self.expr(node.value)
+            self.emit(Op.DUP_TOP)
+            self.store(node.target)
+        elif isinstance(node, ast.Yield):
+            self.is_generator = True
+            if node.value is None:
+                self.emit(Op.LOAD_CONST, self.constant(None))
+            else:
+                self.expr(node.value)
+            self.emit(Op.YIELD_VALUE)
+        elif isinstance(node, ast.YieldFrom):
+            self.unsupported(node, "yield from")
         elif isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPS:
             self.expr(node.left)
             self.expr(node.right)
@@ -101,6 +156,14 @@ class _Lowerer:
             self.expr(node.values[-1])
             for exit_jump in exits:
                 self.patch(exit_jump, len(self.instructions))
+        elif isinstance(node, ast.IfExp):
+            self.expr(node.test)
+            otherwise = self.emit(Op.JUMP_IF_FALSE)
+            self.expr(node.body)
+            end = self.emit(Op.JUMP)
+            self.patch(otherwise, len(self.instructions))
+            self.expr(node.orelse)
+            self.patch(end, len(self.instructions))
         elif isinstance(node, ast.Compare) and len(node.ops) == len(node.comparators) and all(type(op) in _COMPARE_OPS for op in node.ops):
             operands = [node.left, *node.comparators]
             for index, op in enumerate(node.ops):
@@ -128,10 +191,23 @@ class _Lowerer:
                 self.expr(keyword.value)
             names = tuple(keyword.arg for keyword in node.keywords)
             self.emit(Op.CALL_KW, self.constant((tuple(arg_specs), names)))
+        elif isinstance(node, ast.Lambda):
+            nested = _Lowerer("<lambda>", [arg.arg for arg in [*node.args.posonlyargs, *node.args.args]])
+            nested.posonly_names = [arg.arg for arg in node.args.posonlyargs]
+            nested.kwonly_names = [arg.arg for arg in node.args.kwonlyargs]
+            nested.vararg_name = node.args.vararg.arg if node.args.vararg else None
+            nested.kwarg_name = node.args.kwarg.arg if node.args.kwarg else None
+            nested.expr(node.body)
+            nested.emit(Op.RETURN)
+            for default in node.args.defaults:
+                self.expr(default)
+            self.emit(Op.MAKE_FUNCTION, self.constant((nested.finish(), len(node.args.defaults), 0)))
         elif isinstance(node, ast.List):
             for element in node.elts:
                 self.expr(element)
             self.emit(Op.BUILD_LIST, len(node.elts))
+        elif isinstance(node, (ast.ListComp, ast.DictComp, ast.GeneratorExp)):
+            self.comprehension(node)
         elif isinstance(node, ast.Tuple):
             for element in node.elts:
                 self.expr(element)
@@ -154,21 +230,35 @@ class _Lowerer:
                 for value in node.values:
                     if isinstance(value, ast.Constant):
                         self.emit(Op.LOAD_CONST, self.constant(value.value))
-                    elif isinstance(value, ast.FormattedValue) and value.format_spec is None:
-                        if value.conversion == 114:
-                            self.emit(Op.LOAD_NAME, self.name_index("repr"))
+                    elif isinstance(value, ast.FormattedValue):
+                        if value.format_spec is None:
+                            self.emit(Op.LOAD_NAME, self.name_index("repr" if value.conversion == 114 else "str"))
+                            self.expr(value.value)
+                            self.emit(Op.CALL, 1)
                         else:
-                            self.emit(Op.LOAD_NAME, self.name_index("str"))
-                        self.expr(value.value)
-                        self.emit(Op.CALL, 1)
+                            self.emit(Op.LOAD_NAME, self.name_index("format"))
+                            if value.conversion in (97, 114, 115):
+                                self.emit(Op.LOAD_NAME, self.name_index("repr" if value.conversion == 114 else "str"))
+                                self.expr(value.value)
+                                self.emit(Op.CALL, 1)
+                            else:
+                                self.expr(value.value)
+                            self.expr(value.format_spec)
+                            self.emit(Op.CALL, 2)
                     else:
                         self.unsupported(value, "formatted string value")
                     if not first:
                         self.emit(Op.BINARY_ADD)
                     first = False
-        elif isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Slice):
+        elif isinstance(node, ast.Subscript):
             self.expr(node.value)
-            self.expr(node.slice)
+            if isinstance(node.slice, ast.Slice):
+                for bound in (node.slice.lower, node.slice.upper, node.slice.step):
+                    if bound is None: self.emit(Op.LOAD_CONST, self.constant(None))
+                    else: self.expr(bound)
+                self.emit(Op.BUILD_SLICE)
+            else:
+                self.expr(node.slice)
             self.emit(Op.GET_ITEM)
         elif isinstance(node, ast.Attribute):
             self.expr(node.value)
@@ -194,7 +284,8 @@ class _Lowerer:
     def stmt(self, node: ast.stmt) -> None:
         if isinstance(node, ast.Expr):
             self.expr(node.value)
-            self.emit(Op.POP_TOP)
+            if not isinstance(node.value, ast.Yield):
+                self.emit(Op.POP_TOP)
         elif isinstance(node, ast.Global):
             self.global_names.update(node.names)
         elif isinstance(node, ast.Nonlocal):
@@ -212,6 +303,13 @@ class _Lowerer:
                     self.emit(Op.DELETE_ITEM)
                 else:
                     self.unsupported(target, "delete target")
+        elif isinstance(node, ast.Assert):
+            self.expr(node.test)
+            if node.msg is not None:
+                self.expr(node.msg)
+                self.emit(Op.ASSERT, 1)
+            else:
+                self.emit(Op.ASSERT)
         elif isinstance(node, ast.Assign):
             if len(node.targets) == 1 and isinstance(node.targets[0], (ast.Tuple, ast.List)):
                 self.expr(node.value)
@@ -266,7 +364,7 @@ class _Lowerer:
             else:
                 self.expr(node.value)
                 self.emit(Op.RETURN)
-        elif isinstance(node, ast.Raise) and node.exc is not None and node.cause is None:
+        elif isinstance(node, ast.Raise) and node.exc is not None:
             self.expr(node.exc)
             self.emit(Op.RAISE)
         elif isinstance(node, ast.Raise) and node.exc is None:
@@ -319,32 +417,47 @@ class _Lowerer:
                 self.stmt(statement)
             if end is not None:
                 self.patch(end, len(self.instructions))
-        elif isinstance(node, ast.While) and not node.orelse:
+        elif isinstance(node, ast.While):
             start = len(self.instructions)
             self.expr(node.test)
             exit_jump = self.emit(Op.JUMP_IF_FALSE)
             self.loop_exits.append([])
+            self.loop_starts.append(start)
             for statement in node.body:
                 self.stmt(statement)
+            self.loop_starts.pop()
             self.emit(Op.JUMP, start)
+            else_start = len(self.instructions)
+            self.patch(exit_jump, else_start)
+            for statement in node.orelse:
+                self.stmt(statement)
             end = len(self.instructions)
-            self.patch(exit_jump, end)
             for jump in self.loop_exits.pop():
                 self.patch(jump, end)
-        elif isinstance(node, ast.For) and not node.orelse:
+        elif isinstance(node, ast.For):
             self.expr(node.iter)
             self.emit(Op.GET_ITER)
             start = len(self.instructions)
             exit_jump = self.emit(Op.FOR_ITER)
             self.store_sequence(node.target)
             self.loop_exits.append([])
+            self.loop_starts.append(start)
             for statement in node.body:
                 self.stmt(statement)
+            self.loop_starts.pop()
             self.emit(Op.JUMP, start)
+            else_start = len(self.instructions)
+            self.patch(exit_jump, else_start)
+            for statement in node.orelse:
+                self.stmt(statement)
             end = len(self.instructions)
-            self.patch(exit_jump, end)
             for jump in self.loop_exits.pop():
                 self.patch(jump, end)
+        elif isinstance(node, ast.Try) and not node.handlers and node.finalbody and not node.orelse:
+            for statement in node.body:
+                self.stmt(statement)
+            for statement in node.finalbody:
+                self.stmt(statement)
         elif isinstance(node, ast.Try) and not node.finalbody and len(node.handlers) == 1:
             handler_jump = self.emit(Op.TRY_BEGIN)
             for statement in node.body:
@@ -356,12 +469,17 @@ class _Lowerer:
             handler = node.handlers[0]
             self.patch(handler_jump, len(self.instructions))
             if handler.type is not None:
-                if not isinstance(handler.type, ast.Name):
+                if isinstance(handler.type, ast.Name):
+                    expected = self.name_index(handler.type.id)
+                elif isinstance(handler.type, ast.Tuple) and all(isinstance(element, ast.Name) for element in handler.type.elts):
+                    expected = tuple(element.id for element in handler.type.elts)
+                else:
                     self.unsupported(handler, "exception type")
-                self.emit(Op.MATCH_EXCEPTION, self.constant(handler.type.id))
+                self.emit(Op.MATCH_EXCEPTION, self.constant(expected))
                 # Resolve the class object from the surrounding namespace for
                 # the VM's MATCH_EXCEPTION operation.
-                self.constants[-1] = self.name_index(handler.type.id)
+                if isinstance(handler.type, ast.Name):
+                    self.constants[-1] = expected
             if handler.name:
                 self.emit(Op.STORE_NAME, self.name_index(handler.name))
             else:
@@ -371,6 +489,19 @@ class _Lowerer:
             self.patch(end_jump, len(self.instructions))
         elif isinstance(node, ast.Pass):
             return
+        elif isinstance(node, ast.Continue) and self.loop_starts:
+            self.emit(Op.JUMP, self.loop_starts[-1])
+        elif isinstance(node, ast.With) and len(node.items) == 1:
+            item = node.items[0]
+            self.expr(item.context_expr)
+            self.emit(Op.WITH_ENTER)
+            if item.optional_vars is not None:
+                self.store_sequence(item.optional_vars)
+            else:
+                self.emit(Op.POP_TOP)
+            for statement in node.body:
+                self.stmt(statement)
+            self.emit(Op.WITH_EXIT)
         elif isinstance(node, ast.Break) and self.loop_exits:
             self.loop_exits[-1].append(self.emit(Op.JUMP))
         elif isinstance(node, ast.Import):
@@ -379,6 +510,10 @@ class _Lowerer:
                 self.emit(op, self.name_index(alias.name))
                 self.emit(Op.STORE_NAME, self.name_index(alias.asname or alias.name.split(".")[0]))
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            if len(node.names) == 1 and node.names[0].name == "*":
+                self.emit(Op.IMPORT_NAME, self.name_index(node.module))
+                self.emit(Op.IMPORT_STAR)
+                return
             for alias in node.names:
                 if alias.name == "*":
                     self.unsupported(node, "star import")
@@ -413,6 +548,7 @@ class _Lowerer:
             getattr(self, "vararg_name", None),
             getattr(self, "kwarg_name", None),
             list(getattr(self, "posonly_names", [])),
+            self.is_generator,
         )
 
 

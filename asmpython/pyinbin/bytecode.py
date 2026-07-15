@@ -58,10 +58,17 @@ class Op(IntEnum):
     DELETE_ATTR = 62
     DELETE_NAME = 63
     DELETE_ITEM = 64
+    WITH_ENTER = 65
+    WITH_EXIT = 66
+    ASSERT = 67
+    LIST_APPEND = 68
     IMPORT_NAME = 70
     IMPORT_FROM = 71
     IMPORT_ROOT = 72
     IMPORT_RELATIVE_FROM = 73
+    IMPORT_STAR = 74
+    BUILD_SLICE = 75
+    YIELD_VALUE = 76
     UNARY_NEGATIVE = 80
     UNARY_NOT = 81
     BINARY_POW = 16
@@ -95,6 +102,7 @@ class CodeObject:
     vararg_name: str | None = None
     kwarg_name: str | None = None
     posonly_names: list[str] = field(default_factory=list)
+    is_generator: bool = False
 
     def validate(self) -> None:
         for offset, instr in enumerate(self.instructions):

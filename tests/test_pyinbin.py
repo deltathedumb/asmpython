@@ -269,6 +269,24 @@ class PyinbinSourceTests(unittest.TestCase):
                 run_source(entry)
             self.assertEqual(output.getvalue(), "29\n")
 
+    def test_generators_suspend_and_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "main.py"
+            entry.write_text(
+                "def values():\n"
+                "    yield 1\n"
+                "    yield 2\n"
+                "total = 0\n"
+                "for value in values():\n"
+                "    total += value\n"
+                "print(total)\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                run_source(entry)
+            self.assertEqual(output.getvalue(), "3\n")
+
 
 if __name__ == "__main__":
     unittest.main()
