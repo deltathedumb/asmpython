@@ -32,6 +32,7 @@ import _lzma as _bootstrap_lzma
 import _zstd as _bootstrap_zstd
 import _queue as _bootstrap_queue
 import array as _bootstrap_array
+import bisect as _bootstrap_bisect
 
 
 class _MemoryTextIO:
@@ -321,6 +322,19 @@ def create_builtin_module(
             "platlibdir": "lib",
             "_vpath": "",
             "_jit": SimpleNamespace(is_enabled=lambda: False, is_active=lambda: False),
+            "monitoring": SimpleNamespace(
+                DEBUGGER_ID=0, PROFILER_ID=1, COVERAGE_ID=2,
+                events=SimpleNamespace(
+                    PY_START=1, PY_RESUME=2, PY_RETURN=4, PY_YIELD=8,
+                    PY_THROW=16, PY_UNWIND=32, PY_CALL=64, PY_LINE=128,
+                    PY_INSTRUCTION=256, PY_RESUME_LINE=512,
+                ),
+                use_tool_id=lambda *args: None,
+                register_callback=lambda *args: None,
+                set_events=lambda *args: None,
+                get_events=lambda *args: 0,
+                restart_events=lambda *args: None,
+            ),
             "executable": "",
             "flags": SimpleNamespace(
                 debug=0, inspect=0, interactive=0, optimize=0, dont_write_bytecode=0,
@@ -712,6 +726,13 @@ def create_builtin_module(
             "heappushpop": _bootstrap_heapq.heappushpop,
             "nlargest": _bootstrap_heapq.nlargest,
             "nsmallest": _bootstrap_heapq.nsmallest,
+        })
+    if name == "_bisect":
+        return _module(name, {
+            "bisect_left": _bootstrap_bisect.bisect_left,
+            "bisect_right": _bootstrap_bisect.bisect_right,
+            "insort_left": _bootstrap_bisect.insort_left,
+            "insort_right": _bootstrap_bisect.insort_right,
         })
     if name == "marshal":
         return _module(name, {
