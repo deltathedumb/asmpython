@@ -720,22 +720,12 @@ def cmd_build(args: argparse.Namespace) -> int:
                 linker=args.linker,
             )
     except MultiSemaError as me:
-        # me is just the generic "N semantic error(s)" message string when
-        # self-compiled (see the matching guard in _run_check above for why).
-        if isinstance(me, str):
-            print(me, file=sys.stderr)
-        else:
-            print(me.format_all(src, str(source_path)), file=sys.stderr)
-        return 1
+        # Give the target-neutral interpreter a chance before reporting a
+        # native-only language limitation. This is what makes dynamic imports
+        # and other interpreter-capable constructs usable from the CLI.
+        return pyinbin_fallback(me)
     except CompileError as e:
-        # e is a real CompileError instance under a Python-hosted compiler,
-        # but just a plain message string when self-compiled (see
-        # MultiSemaError's docstring in errors.py for why).
-        if isinstance(e, str):
-            print(e, file=sys.stderr)
-        else:
-            print(e.format(src, str(source_path)), file=sys.stderr)
-        return 1
+        return pyinbin_fallback(e)
     except NotImplementedError as e:
         return pyinbin_fallback(e)
     except Exception as e:
