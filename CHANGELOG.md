@@ -51,6 +51,8 @@ deliverable.
   inherited constructors.
 - Added pyinbin `raise`, typed `try/except`, exception matching, and the
   bootstrap exception builtins.
+- Added package context and relative `from .module import name` execution to
+  the pyinbin loader.
 - Added the CPython official `Lib/test` conformance harness and a required
   release gate for 2.0.0 readiness.
 

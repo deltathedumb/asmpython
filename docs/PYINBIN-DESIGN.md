@@ -52,7 +52,8 @@ native loader and VM are embedded in each target.
 Pyinbin is layered so every dependency can be compiled by asmpython:
 
 1. Source loader: packaged-source lookup, module cache, relative/absolute
-   resolution, and import-cycle handling.
+   resolution, and import-cycle handling. Relative package imports are now
+   executed by the bootstrap loader.
 2. Lexer and parser: produce an interpreter-specific syntax tree. Existing
    compiler front-end code may be shared only after it is itself compilable
    and free of host-only dependencies.

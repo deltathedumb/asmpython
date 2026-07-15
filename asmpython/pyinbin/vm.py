@@ -227,6 +227,21 @@ class VirtualMachine:
                     loader = frame.globals.get("__pyinbin_import__")
                     if not callable(loader): raise VMError("ImportError: loader is not configured")
                     imported = frame.code.names[instr.arg]; loader(imported); frame.stack.append(loader(imported.split(".", 1)[0]))
+                elif op is Op.IMPORT_RELATIVE_FROM:
+                    loader = frame.globals.get("__pyinbin_import__")
+                    if not callable(loader): raise VMError("ImportError: loader is not configured")
+                    spec = frame.code.constants[instr.arg]
+                    if not isinstance(spec, tuple) or len(spec) != 3: raise VMError("ImportError: invalid relative import")
+                    module_name, level, member = spec
+                    package = frame.globals.get("__package__", "")
+                    parts = package.split(".") if isinstance(package, str) and package else []
+                    base_parts = parts[: len(parts) - int(level) + 1]
+                    base = ".".join([*base_parts, module_name] if module_name else base_parts)
+                    if not base: raise VMError("ImportError: relative import beyond top-level package")
+                    if module_name:
+                        frame.stack.append(getattr(loader(base), member))
+                    else:
+                        frame.stack.append(loader(f"{base}.{member}"))
                 elif op is Op.UNARY_NEGATIVE:
                     frame.stack.append(-frame.stack.pop())
                 elif op is Op.UNARY_NOT:

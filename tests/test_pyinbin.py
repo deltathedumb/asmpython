@@ -195,6 +195,20 @@ class PyinbinSourceTests(unittest.TestCase):
                 run_source(entry)
             self.assertEqual(output.getvalue(), "bad value\n")
 
+    def test_relative_imports_use_module_package_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "pkg"
+            package.mkdir()
+            (package / "__init__.py").write_text("from .helper import VALUE\n", encoding="utf-8")
+            (package / "helper.py").write_text("VALUE = 42\n", encoding="utf-8")
+            entry = root / "main.py"
+            entry.write_text("import pkg\nprint(pkg.VALUE)\n", encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                run_source(entry)
+            self.assertEqual(output.getvalue(), "42\n")
+
 
 if __name__ == "__main__":
     unittest.main()

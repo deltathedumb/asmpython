@@ -65,6 +65,7 @@ class SourceLoader:
         # stable module identity rather than recursively constructing modules.
         self._modules[name] = module
         namespace = module.__dict__
+        namespace["__package__"] = name if filename.endswith("__init__.py") else name.rsplit(".", 1)[0] if "." in name else ""
         namespace.update(default_builtins())
         namespace["__pyinbin_import__"] = self.load
         try:

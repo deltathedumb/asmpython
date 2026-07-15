@@ -271,6 +271,20 @@ class _Lowerer:
                 self.emit(Op.IMPORT_NAME, self.name_index(node.module))
                 self.emit(Op.IMPORT_FROM, self.name_index(alias.name))
                 self.emit(Op.STORE_NAME, self.name_index(alias.asname or alias.name))
+        elif isinstance(node, ast.ImportFrom) and node.level > 0 and node.module is not None:
+            for alias in node.names:
+                if alias.name == "*":
+                    self.unsupported(node, "star import")
+                spec = (node.module, node.level, alias.name)
+                self.emit(Op.IMPORT_RELATIVE_FROM, self.constant(spec))
+                self.emit(Op.STORE_NAME, self.name_index(alias.asname or alias.name))
+        elif isinstance(node, ast.ImportFrom) and node.level > 0 and node.module is None:
+            for alias in node.names:
+                if alias.name == "*":
+                    self.unsupported(node, "star import")
+                spec = ("", node.level, alias.name)
+                self.emit(Op.IMPORT_RELATIVE_FROM, self.constant(spec))
+                self.emit(Op.STORE_NAME, self.name_index(alias.asname or alias.name))
         else:
             self.unsupported(node)
 
