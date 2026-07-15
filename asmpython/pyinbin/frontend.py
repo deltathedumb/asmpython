@@ -1029,11 +1029,16 @@ def compile_source(source: str, filename: str = "<pyinbin>", mode: str = "exec")
         raise PyinbinUnsupportedError(f"{filename}:{exc.lineno}: invalid Python syntax: {exc.msg}") from exc
     lowerer = _Lowerer(filename)
     lowerer.interactive = mode == "single"
-    lowerer.defer_annotations = any(
-        isinstance(statement, ast.ImportFrom) and statement.module == "__future__"
-        and any(alias.name == "annotations" for alias in statement.names)
-        for statement in module.body
-    )
+    # CPython 3.14 (PEP 649/749) evaluates module/class-level annotations
+    # lazily by default -- not just under ``from __future__ import
+    # annotations`` (that future-import is now a no-op kept for backward
+    # compatibility). Real code widely relies on this to write annotations
+    # like ``Callable[..., None] | None`` that would otherwise need every
+    # referenced name to already support subscription/``|`` at module
+    # exec time. Defer unconditionally to match; ``not self.is_function``
+    # at each call site already keeps this scoped to module/class-level
+    # bare annotated assignments, not function parameter annotations.
+    lowerer.defer_annotations = True
     for statement in module.body:
         lowerer.stmt(statement)
     if mode == "single":
