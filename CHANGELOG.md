@@ -88,6 +88,8 @@ deliverable.
   as `Thread.__init__` no longer resolve to the VM wrapper implementation.
 - Expanded thread bootstrap metadata, shutdown hooks, exception hooks, and
   signal/time primitives used by the CPython conformance sweep.
+- Added ownership-aware bootstrap locks with reentrant state save/restore for
+  `threading.Condition`, `Event`, and related synchronization primitives.
 
 - **27 new stdlib modules** — full implementations of `token`, `tokenize`,
   `shelve` (pickle-backed, typed getters/setters for complex object persistence),

@@ -581,12 +581,36 @@ def create_builtin_module(
         return _module(name, values)
     if name == "_thread":
         class Lock:
-            def __init__(self) -> None: self._locked = False
+            def __init__(self) -> None:
+                self._locked = False
+                self._owner = None
+                self._count = 0
             def acquire(self, waitflag=True, timeout=-1):
-                self._locked = True
+                owner = 1
+                if self._locked:
+                    if self._owner == owner:
+                        self._count += 1
+                        return True
+                    return False if waitflag is False else False
+                self._locked, self._owner, self._count = True, owner, 1
                 return True
-            def release(self): self._locked = False
+            def release(self):
+                if not self._locked or self._owner != 1:
+                    raise RuntimeError("cannot release un-acquired lock")
+                self._count -= 1
+                if self._count <= 0:
+                    self._locked, self._owner = False, None
             def locked(self): return self._locked
+            def _is_owned(self): return self._locked and self._owner == 1
+            def _release_save(self):
+                if not self._is_owned(): raise RuntimeError("cannot release un-acquired lock")
+                state = (self._count, self._owner)
+                self._locked, self._owner, self._count = False, None, 0
+                return state
+            def _acquire_restore(self, state):
+                self._locked, self._count, self._owner = True, state[0], state[1]
+            def _at_fork_reinit(self):
+                self._locked, self._owner, self._count = False, None, 0
             def __enter__(self): self.acquire(); return self
             def __exit__(self, exc_type, exc_value, traceback): self.release(); return False
         class local:
