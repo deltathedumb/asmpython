@@ -329,7 +329,7 @@ class Function:
             return object.__getattribute__(self, "_metadata")
         return object.__getattribute__(self, name)
 
-    def __call__(self, *args: object, **kwargs: object) -> object:
+    def __call__(self, /, *args: object, **kwargs: object) -> object:
         if self.vm is None:
             raise TypeError(f"{self.code.name} is not attached to a VM")
         return self.vm._call(self, list(args), kwargs)
@@ -368,7 +368,7 @@ class BoundMethod:
         self.function = function
         self.instance = instance
 
-    def __call__(self, *args: object, **kwargs: object) -> object:
+    def __call__(self, /, *args: object, **kwargs: object) -> object:
         return self.vm._call(self.function, [self.instance, *args], kwargs)
 
     def __getattr__(self, name: str) -> object:
@@ -440,7 +440,7 @@ class LRUCacheObject:
         self.cache_info_type = cache_info
         self.cache: dict[object, object] = {}
 
-    def __call__(self, *args: object, **kwargs: object) -> object:
+    def __call__(self, /, *args: object, **kwargs: object) -> object:
         key = (args, tuple(sorted(kwargs.items())))
         if key in self.cache:
             return self.cache[key]
@@ -563,7 +563,7 @@ class PyInstance:
     def endswith(self, suffix: object, *args: object) -> bool:
         return self.__fspath__().endswith(suffix, *args)
 
-    def __call__(self, *args: object, **kwargs: object) -> object:
+    def __call__(self, /, *args: object, **kwargs: object) -> object:
         try:
             method = self.cls.lookup("__call__")
         except AttributeError:
@@ -961,7 +961,17 @@ class PyClass:
             return descriptor_get(None, self)
         return value
 
-    def __call__(self, *args: object, **kwargs: object) -> PyInstance:
+    def __call__(self, /, *args: object, **kwargs: object) -> PyInstance:
+        # ``self`` must be positional-only here: this method stands in for
+        # real ``type.__call__`` (invoked whenever interpreted code writes
+        # ``SomeClass(...)``), and interpreted callers are free to pass a
+        # keyword argument that happens to be spelled ``self`` (e.g.
+        # ``functools.partialmethod(capture, self=1, func=2)``, a real
+        # stdlib stress test of exactly this). A real Python method whose
+        # own parameter is named ``self`` collides with that keyword and
+        # raises "got multiple values for argument 'self'" -- C-level
+        # ``type.__call__`` has no such name to collide with, so this only
+        # affects our host-Python stand-in.
         # The stdlib Enum functional API constructs a new class through its
         # metaclass (``Enum('Name', names)``), not an enum member.  VM classes
         # do not execute host metaclasses, so delegate this specific form to
@@ -1420,6 +1430,18 @@ class VirtualMachine:
                 locals_[target.code.vararg_name] = tuple(args[total:])
             for name, value in kwargs.items():
                 if name in target.code.posonly_names:
+                    # A keyword matching a positional-only parameter's name
+                    # never binds to that parameter -- real Python falls
+                    # through to **kwargs if the function has one (e.g.
+                    # ``def f(a, b, /, **kw)`` called as ``f(1, 2, b=3)``
+                    # puts ``b`` in ``kw``, it doesn't collide with the
+                    # positional-only ``b``), and only raises if there's no
+                    # catch-all to absorb it. The **kwargs rebuild below
+                    # (keyed on "not a positional/kwonly name") already
+                    # includes it correctly, so just skip the reserved-name
+                    # checks below for this entry.
+                    if target.code.kwarg_name:
+                        continue
                     raise VMError(f"TypeError: {target.code.name}() got positional-only argument passed as keyword: {name!r}")
                 if name in locals_:
                     raise VMError(f"TypeError: {target.code.name}() got multiple values for argument {name!r}")
@@ -1443,7 +1465,9 @@ class VirtualMachine:
             if target.code.kwarg_name:
                 locals_[target.code.kwarg_name] = {
                     name: value for name, value in kwargs.items()
-                    if name not in target.code.arg_names and name not in target.code.kwonly_names
+                    if name in target.code.posonly_names or (
+                        name not in target.code.arg_names and name not in target.code.kwonly_names
+                    )
                 }
             frame = Frame(code=target.code, globals=target.globals, locals=locals_, closure=target.closure)
             if getattr(target.code, "is_async_generator", False):
