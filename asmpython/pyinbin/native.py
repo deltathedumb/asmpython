@@ -792,13 +792,9 @@ def create_builtin_module(
             if not key.startswith("__")
         })
     if name == "_ctypes":
-        values = {
-            key: getattr(_bootstrap_ctypes, key)
-            for key in dir(_bootstrap_ctypes)
-            if not key.startswith("__")
-        }
-        values.setdefault("__version__", "1.1.0")
-        return _module(name, values)
+        # The Python ctypes layer requires a matching native ABI; exposing
+        # host interpreter type objects here creates invalid pyinbin layouts.
+        return None
     if name == "_bz2":
         return _module(name, {
             key: getattr(_bootstrap_bz2, key)
