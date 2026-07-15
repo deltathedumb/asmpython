@@ -377,6 +377,12 @@ class PyInstance:
     def __invert__(self) -> object:
         return ~self._raw_value()
 
+    def __neg__(self) -> object:
+        return -self._raw_value()
+
+    def __pos__(self) -> object:
+        return +self._raw_value()
+
     def __eq__(self, other: object) -> bool:
         if "_value_" not in self.attributes:
             return self is other

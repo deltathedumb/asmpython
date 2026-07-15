@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from typing import Callable
 import ast as _bootstrap_ast
 import contextlib as _bootstrap_contextlib
+import gc as _bootstrap_gc
+import unicodedata as _bootstrap_unicodedata
 import binascii as _bootstrap_binascii
 import heapq as _bootstrap_heapq
 import marshal as _bootstrap_marshal
@@ -35,6 +37,9 @@ import _queue as _bootstrap_queue
 import array as _bootstrap_array
 import bisect as _bootstrap_bisect
 import math as _bootstrap_math
+import cmath as _bootstrap_cmath
+import datetime as _bootstrap_datetime
+import calendar as _bootstrap_calendar
 import typing as _bootstrap_typing
 import _typing as _bootstrap_typing_native
 
@@ -429,6 +434,12 @@ def create_builtin_module(
             "builtin_module_names": ("sys", "_io", "_abc", "_locale", "itertools", "math", "nt", "_thread"),
             "implementation": _module("sys.implementation", {"name": "pyinbin"}),
             "hash_info": SimpleNamespace(width=64, modulus=(1 << 61) - 1, inf=314159, nan=0, imag=1000003, algorithm="siphash13", hash_bits=64, seed_bits=128),
+            "float_info": _module("sys.float_info", {
+                "max": 1.7976931348623157e308, "min": 2.2250738585072014e-308,
+                "epsilon": 2.220446049250313e-16, "mant_dig": 53,
+                "dig": 15, "max_exp": 1024, "min_exp": -1021,
+                "max_10_exp": 308, "min_10_exp": -307, "radix": 2,
+            }),
             "getrecursionlimit": lambda: 1000,
             "exit": lambda code=0: None,
             "getfilesystemencoding": lambda: "utf-8", "getfilesystemencodeerrors": lambda: "surrogatepass",
@@ -450,6 +461,7 @@ def create_builtin_module(
             "exc_info": lambda: (None, None, None),
             "excepthook": lambda exc_type, exc_value, traceback: None,
             "unraisablehook": lambda unraisable: None,
+            "audit": lambda *args, **kwargs: None,
         })
     if name == "builtins":
         return _module(name, dict(builtins))
@@ -513,7 +525,10 @@ def create_builtin_module(
             "_override_frozen_modules_for_tests": lambda *args: None,
         })
     if name == "typing":
-        return _module(name, {key: getattr(_bootstrap_typing, key) for key in dir(_bootstrap_typing)})
+        values = {key: getattr(_bootstrap_typing, key) for key in dir(_bootstrap_typing)}
+        values.setdefault("Match", _bootstrap_re.Match)
+        values.setdefault("Pattern", _bootstrap_re.Pattern)
+        return _module(name, values)
     if name == "contextlib":
         return _module(name, {
             key: getattr(_bootstrap_contextlib, key)
@@ -675,7 +690,42 @@ def create_builtin_module(
             if not key.startswith("__")
         }
         values["gcd"] = _gcd
+        values["float_info"] = _module("sys.float_info", {
+            "max": 1.7976931348623157e308, "min": 2.2250738585072014e-308,
+            "epsilon": 2.220446049250313e-16, "mant_dig": 53,
+            "dig": 15, "max_exp": 1024, "min_exp": -1021,
+            "max_10_exp": 308, "min_10_exp": -307, "radix": 2,
+        })
         return _module(name, values)
+    if name == "cmath":
+        return _module(name, {
+            key: getattr(_bootstrap_cmath, key)
+            for key in dir(_bootstrap_cmath) if not key.startswith("__")
+        })
+    if name == "datetime":
+        return _module(name, {
+            key: getattr(_bootstrap_datetime, key)
+            for key in dir(_bootstrap_datetime) if not key.startswith("__")
+        })
+    if name == "calendar":
+        return _module(name, {
+            key: getattr(_bootstrap_calendar, key)
+            for key in dir(_bootstrap_calendar) if not key.startswith("__")
+        })
+    if name == "gc":
+        return _module(name, {
+            "collect": lambda generation=2: 0, "disable": lambda: None,
+            "enable": lambda: None, "isenabled": lambda: True,
+            "get_threshold": lambda: (700, 10, 10), "set_threshold": lambda *args: None,
+            "get_count": lambda: (0, 0, 0), "freeze": lambda: None,
+            "unfreeze": lambda: None, "is_tracked": lambda value: False,
+            "is_finalized": lambda value: False,
+        })
+    if name == "unicodedata":
+        return _module(name, {
+            key: getattr(_bootstrap_unicodedata, key)
+            for key in dir(_bootstrap_unicodedata) if not key.startswith("__")
+        })
     if name == "errno":
         return _module(name, {
             "EPERM": 1, "ENOENT": 2, "EIO": 5, "EBADF": 9,
@@ -934,6 +984,8 @@ def create_builtin_module(
             "lookup_error": lambda name: None,
             "register": lambda search_function: None,
             "register_error": lambda name, handler: None,
+            "unregister": lambda search_function: None,
+            "_unregister_error": lambda name: None,
         })
     if name == "atexit":
         callbacks: list[tuple[Callable[..., object], tuple[object, ...], dict[str, object]]] = []
