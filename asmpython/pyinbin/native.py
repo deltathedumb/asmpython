@@ -644,7 +644,10 @@ def create_builtin_module(
         })
     if name == "_types":
         class _TypePlaceholder:
-            pass
+            # Keep the descriptor attributes exposed by CPython's function
+            # type available to introspection-heavy stdlib tests.
+            __code__ = object()
+            __globals__ = object()
         placeholder = _TypePlaceholder
         return _module(name, {
             "NoneType": type(None), "EllipsisType": type(Ellipsis), "NotImplementedType": type(NotImplemented),

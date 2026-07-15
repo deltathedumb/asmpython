@@ -437,7 +437,7 @@ def default_builtins(importer: object | None = None) -> dict[str, object]:
         else:
             print(repr(value))
 
-    return {
+    builtins = {
         "__debug__": True,
         "print": print, "len": len, "sum": sum, "range": range, "format": format, "open": _open_compat,
         "str": str, "repr": repr, "int": int, "float": float, "bool": bool, "bytes": bytes,
@@ -494,6 +494,8 @@ def default_builtins(importer: object | None = None) -> dict[str, object]:
         "TypeVar": _typing.TypeVar, "ParamSpec": _typing.ParamSpec,
         "TypeVarTuple": _typing.TypeVarTuple,
     }
+    builtins["__builtins__"] = builtins
+    return builtins
 
 
 def run_source(
