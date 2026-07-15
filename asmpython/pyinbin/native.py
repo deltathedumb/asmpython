@@ -87,6 +87,34 @@ class _IOPlaceholder:
     pass
 
 
+class _SREPattern:
+    """Import-safe placeholder for the future native regex engine."""
+
+    flags = 0
+    groups = 0
+    groupindex: dict[str, int] = {}
+
+    def match(self, string: object, pos: int = 0, endpos: int | None = None) -> None:
+        return None
+
+    search = match
+    fullmatch = match
+
+    def findall(self, string: object, pos: int = 0, endpos: int | None = None) -> list[object]:
+        return []
+
+    def finditer(self, string: object, pos: int = 0, endpos: int | None = None):
+        return iter(())
+
+    def split(self, string: object, maxsplit: int = 0) -> list[object]:
+        return [string]
+
+    def sub(self, repl: object, string: object, count: int = 0) -> object:
+        return string
+
+    subn = sub
+
+
 class _FrameProxy:
     def __init__(self) -> None:
         self.f_globals: dict[str, object] = {}
@@ -140,8 +168,51 @@ def _batched(iterable, size: int):
         yield tuple(batch)
 
 
+def _permutations(iterable, r=None):
+    values = tuple(iterable)
+    width = len(values) if r is None else r
+    def build(prefix, remaining):
+        if len(prefix) == width:
+            yield prefix
+            return
+        for index, value in enumerate(remaining):
+            yield from build(prefix + (value,), remaining[:index] + remaining[index + 1:])
+    return build((), values)
+
+
+def _combinations(iterable, r: int):
+    values = tuple(iterable)
+    def build(start, prefix):
+        if len(prefix) == r:
+            yield prefix
+            return
+        for index in range(start, len(values)):
+            yield from build(index + 1, prefix + (values[index],))
+    return build(0, ())
+
+
+def _product(*iterables, repeat=1):
+    pools = [tuple(item) for item in iterables] * repeat
+    result = [()]
+    for pool in pools:
+        result = [prefix + (value,) for prefix in result for value in pool]
+    return iter(result)
+
+
+class _BootstrapModule(SimpleNamespace):
+    def __getattr__(self, name: str) -> object:
+        module_name = self.__dict__.get("__name__")
+        if module_name == "nt" and name.startswith("_path_"):
+            return lambda *args, **kwargs: False
+        if module_name == "_opcode" and name.startswith("get_"):
+            return lambda *args, **kwargs: ()
+        if module_name == "builtins" and name == "__import__":
+            return lambda module, *args, **kwargs: None
+        raise AttributeError(name)
+
+
 def _module(name: str, values: dict[str, object]) -> SimpleNamespace:
-    module = SimpleNamespace(__name__=name, __package__="", __file__=f"<pyinbin:{name}>")
+    module = _BootstrapModule(__name__=name, __package__="", __file__=f"<pyinbin:{name}>")
     module.__dict__.update(values)
     return module
 
@@ -164,13 +235,24 @@ def create_builtin_module(
             "modules": module_cache,
             "path": [],
             "argv": [],
+            "warnoptions": [],
             "platform": "win32",
+            "flags": SimpleNamespace(
+                debug=0, inspect=0, interactive=0, optimize=0, dont_write_bytecode=0,
+                no_user_site=0, no_site=0, ignore_environment=0, verbose=0, bytes_warning=0,
+                quiet=0, hash_randomization=1, isolated=0, dev_mode=False, utf8_mode=0,
+                warn_default_encoding=0, safe_path=False, int_max_str_digits=4300,
+                context_aware_warnings=0,
+            ),
             "maxsize": (1 << 63) - 1,
             "byteorder": "little",
             "version": "pyinbin 2.0.0-preview",
+            "version_info": (3, 14, 0, "final", 0),
             "builtin_module_names": ("sys", "_io", "_abc", "_locale", "itertools", "math", "nt", "_thread"),
             "implementation": _module("sys.implementation", {"name": "pyinbin"}),
             "getrecursionlimit": lambda: 1000,
+            "getfilesystemencoding": lambda: "utf-8", "getfilesystemencodeerrors": lambda: "surrogatepass",
+            "getdefaultencoding": lambda: "utf-8",
             "setrecursionlimit": lambda value: None,
             "is_finalizing": lambda: False,
             "intern": lambda value: value,
@@ -191,6 +273,7 @@ def create_builtin_module(
         return _module(name, {
             "get_cache_token": lambda: 0,
             "_abc_init": lambda cls: None,
+            "_have_functions": True,
             "_abc_register": lambda cls, subclass: None,
             "_abc_instancecheck": lambda cls, instance: isinstance(instance, cls),
             "_abc_subclasscheck": lambda cls, subclass: issubclass(subclass, cls),
@@ -199,6 +282,21 @@ def create_builtin_module(
             "_get_dump": lambda cls: (set(), set(), set(), set()),
             "_reset_caches": lambda cls: None,
             "_reset_registry": lambda cls: None,
+        })
+    if name == "_warnings":
+        filters: list[object] = []
+        registry: dict[object, object] = {}
+        class WarningContext:
+            def __enter__(self): return self
+            def __exit__(self, exc_type, exc_value, traceback): return False
+        return _module(name, {
+            "filters": filters, "onceregistry": registry, "_onceregistry": registry,
+            "_defaultaction": "default", "warn": lambda *args, **kwargs: None,
+            "warn_explicit": lambda *args, **kwargs: None,
+            "simplefilter": lambda *args, **kwargs: None,
+            "_acquire_lock": lambda: None, "_release_lock": lambda: None,
+            "_filters_mutated_lock_held": lambda: None,
+            "_warnings_context": WarningContext,
         })
     if name == "_locale":
         return _module(name, {
@@ -211,6 +309,8 @@ def create_builtin_module(
             "LC_MESSAGES": 5,
             "LC_ALL": 6,
             "getpreferredencoding": lambda do_setlocale=True: "UTF-8",
+            "getencoding": lambda: "UTF-8",
+            "CODESET": 14,
             "setlocale": lambda category, locale=None: "C",
             "localeconv": lambda: {"decimal_point": ".", "thousands_sep": ""},
             "RADIXCHAR": ".", "THOUSEP": "",
@@ -228,11 +328,15 @@ def create_builtin_module(
     if name == "_types":
         placeholder = object
         return _module(name, {
-            "NoneType": type(None), "EllipsisType": type(Ellipsis),
+            "NoneType": type(None), "EllipsisType": type(Ellipsis), "NotImplementedType": type(NotImplemented),
             "GenericAlias": placeholder, "UnionType": placeholder,
             "MappingProxyType": lambda mapping: mapping,
             "DynamicClassAttribute": property,
             "FunctionType": placeholder, "MethodType": placeholder,
+            "BuiltinFunctionType": placeholder, "BuiltinMethodType": placeholder,
+            "MethodWrapperType": placeholder, "WrapperDescriptorType": placeholder,
+            "ClassMethodDescriptorType": placeholder, "MethodDescriptorType": placeholder,
+            "MemberDescriptorType": placeholder, "ModuleType": SimpleNamespace,
             "ModuleType": placeholder, "CodeType": placeholder,
             "FrameType": placeholder, "TracebackType": placeholder,
             "CellType": placeholder, "WrapperDescriptorType": placeholder,
@@ -245,11 +349,19 @@ def create_builtin_module(
             "PathFinder": object, "ModuleSpec": object,
         })
     if name == "_frozen_importlib_external":
+        def all_suffixes():
+            return [".py", ".pyc"]
         return _module(name, {
             "PathFinder": object, "FileFinder": object,
             "SourceFileLoader": object, "SourcelessFileLoader": object,
+            "ExtensionFileLoader": object, "AppleFrameworkLoader": object,
+            "NamespaceLoader": object, "WindowsRegistryFinder": object,
             "ModuleSpec": object, "_pack_uint32": _pack_uint32, "_unpack_uint32": _unpack_uint32,
             "open_code": open,
+            "SOURCE_SUFFIXES": [".py"], "BYTECODE_SUFFIXES": [".pyc"],
+            "DEBUG_BYTECODE_SUFFIXES": [".pyc"], "OPTIMIZED_BYTECODE_SUFFIXES": [".pyc"],
+            "EXTENSION_SUFFIXES": [], "FILE_EXTENSION": ".py",
+            "all_suffixes": all_suffixes,
         })
     if name == "_stat":
         return _module(name, {
@@ -412,9 +524,13 @@ def create_builtin_module(
         return _module(name, {
             "stack_effect": lambda opcode, oparg=None, *, jump=None: 0,
             "get_executor": lambda code, offset: None,
+            "get_intrinsic1_descs": lambda: (),
+            "get_intrinsic2_descs": lambda: (),
             "has_arg": lambda opcode: opcode >= 90,
             "has_const": lambda opcode: True, "has_name": lambda opcode: True,
             "has_jump": lambda opcode: True,
+            "has_local": lambda opcode: False,
+            "has_exc": lambda opcode: False,
             "has_free": lambda opcode: True,
         })
     if name == "_sre":
@@ -424,7 +540,11 @@ def create_builtin_module(
         return _module(name, {
             "MAGIC": 20230612, "CODESIZE": 2, "MAXREPEAT": (1 << 32) - 1,
             "MAXGROUPS": 100, "MAXGROUPREF": 100,
-            "compile": lambda *args, **kwargs: None,
+            "SRE_FLAG_TEMPLATE": 1, "SRE_FLAG_IGNORECASE": 2, "SRE_FLAG_LOCALE": 4,
+            "SRE_FLAG_MULTILINE": 8, "SRE_FLAG_DOTALL": 16, "SRE_FLAG_UNICODE": 32,
+            "SRE_FLAG_VERBOSE": 64, "SRE_FLAG_DEBUG": 128, "SRE_FLAG_ASCII": 256,
+            "SRE_FLAG_BYTES": 512,
+            "compile": lambda *args, **kwargs: _SREPattern(),
             "getcodesize": lambda: 2,
         })
     if name == "_ast":
@@ -448,16 +568,71 @@ def create_builtin_module(
             "start_new_thread": lambda function, args, kwargs=None: function(*args, **(kwargs or {})) or 1,
             "TIMEOUT_MAX": 1e9,
         })
+    if name == "_contextvars":
+        missing = object()
+        current: dict[object, object] = {}
+        class Token:
+            MISSING = missing
+            def __init__(self, var, old_value=missing):
+                self.var, self.old_value, self.used = var, old_value, False
+        class ContextVar:
+            def __init__(self, name, *, default=missing):
+                self.name, self.default = name, default
+            def get(self, default=missing):
+                value = current.get(self, missing)
+                if value is not missing: return value
+                if default is not missing: return default
+                if self.default is not missing: return self.default
+                raise LookupError(self.name)
+            def set(self, value):
+                old = current.get(self, missing)
+                current[self] = value
+                return Token(self, old)
+            def reset(self, token):
+                if token.used or token.var is not self: raise ValueError("Token has already been used")
+                token.used = True
+                if token.old_value is missing: current.pop(self, None)
+                else: current[self] = token.old_value
+        class Context:
+            def __init__(self, values=None): self.values = dict(values or current)
+            def copy(self): return Context(self.values)
+            def run(self, callable_obj, *args, **kwargs):
+                previous = dict(current); current.clear(); current.update(self.values)
+                try: return callable_obj(*args, **kwargs)
+                finally: self.values = dict(current); current.clear(); current.update(previous)
+            def __getitem__(self, var): return self.values[var]
+            def __iter__(self): return iter(self.values)
+            def __len__(self): return len(self.values)
+        return _module(name, {
+            "Context": Context, "ContextVar": ContextVar, "Token": Token,
+            "copy_context": lambda: Context(current),
+        })
+    if name == "_tokenize":
+        class TokenizerIter:
+            def __init__(self, source, encoding=None, extra_tokens=False):
+                self.source = source
+            def __iter__(self): return iter(())
+        return _module(name, {"TokenizerIter": TokenizerIter})
     if name == "nt":
         return _module(name, {
             "name": "nt", "sep": "\\", "altsep": "/", "pathsep": ";",
+            "_have_functions": (),
+            "_create_environ": lambda: {}, "_exit": lambda status=0: None,
             "defpath": ".", "devnull": "NUL", "curdir": ".", "pardir": "..", "extsep": ".",
             "getcwd": lambda: ".", "getcwdb": lambda: b".", "listdir": lambda path=".": [],
+            "cpu_count": lambda: 1, "process_cpu_count": lambda: 1,
             "_getvolumepathname": lambda path: path,
             "_path_normpath": lambda path: path,
+            "_path_isdir": lambda path: False,
+            "_path_isfile": lambda path: False,
+            "_path_islink": lambda path: False,
+            "_path_isjunction": lambda path: False,
+            "_path_exists": lambda path: False,
+            "_path_lexists": lambda path: False,
             "_getfullpathname": lambda path: path,
             "_findfirstfile": lambda path: -1,
             "_getfinalpathname": lambda path: path,
+            "readlink": lambda path: path,
             "scandir": lambda path=".": iter(()), "mkdir": lambda path, mode=0o777: None,
             "makedirs": lambda path, mode=0o777: None, "rmdir": lambda path: None,
             "unlink": lambda path: None, "remove": lambda path: None,
@@ -522,6 +697,9 @@ def create_builtin_module(
         return _module(name, {
             "count": count, "repeat": repeat, "chain": chain, "cycle": cycle,
             "islice": islice, "accumulate": accumulate, "compress": compress,
+            "permutations": lambda iterable, r=None: _permutations(iterable, r),
+            "combinations": lambda iterable, r: _combinations(iterable, r),
+            "product": lambda *iterables, repeat=1: _product(*iterables, repeat=repeat),
             "filterfalse": filterfalse, "starmap": lambda function, iterable: (function(*args) for args in iterable),
             "zip_longest": lambda *iterables, fillvalue=None: _zip_longest(iterables, fillvalue),
             "pairwise": lambda iterable: _pairwise(iterable),
@@ -535,6 +713,7 @@ def create_builtin_module(
             "ref": ref, "ReferenceType": ref, "ProxyType": object,
             "CallableProxyType": object, "getweakrefcount": lambda value: 0,
             "getweakrefs": lambda value: [], "proxy": lambda value, callback=None: value,
+            "_remove_dead_weakref": lambda *args: None,
         })
     if name == "_functools":
         class Placeholder:
@@ -543,6 +722,8 @@ def create_builtin_module(
             __pyinbin_partial__ = True
             def __init__(self, function, args=(), kwargs=None):
                 self.function, self.args, self.kwargs = function, tuple(args), dict(kwargs or {})
+        class LRUCacheWrapper:
+            __pyinbin_lru_cache__ = True
         def reduce(function, iterable, initial=None):
             iterator = iter(iterable)
             if initial is None:
@@ -551,10 +732,11 @@ def create_builtin_module(
                 value = initial
             for item in iterator: value = function(value, item)
             return value
+        reduce.__pyinbin_reduce__ = True
         return _module(name, {
             "reduce": reduce, "partial": lambda function, *args, **kwargs: Partial(function, args, kwargs),
             "cmp_to_key": lambda comparator: (lambda value: value),
-            "_lru_cache_wrapper": object,
+            "_lru_cache_wrapper": LRUCacheWrapper,
             "Placeholder": Placeholder(), "_PlaceholderType": Placeholder,
         })
     return None

@@ -74,6 +74,13 @@ deliverable.
 - Added an explicit bootstrap native-module registry for `sys`, `_io`,
   `_collections`, `_functools`, `_ast`, `_sre`, and related runtime modules;
   this remains a staged bridge toward the standalone native runtime.
+- Expanded the bootstrap registry with context variables, locale and warning
+  state, Windows path probes, iterator primitives, importlib suffix/finder
+  exports, regex flag constants, and additional type metadata needed by the
+  CPython conformance sweep.
+- Added VM support for generic class subscription, host scalar method
+  delegation, class `__bases__`/`__mro__` metadata, and relative import
+  `__import__` fallback resolution.
 
 - **27 new stdlib modules** — full implementations of `token`, `tokenize`,
   `shelve` (pickle-backed, typed getters/setters for complex object persistence),

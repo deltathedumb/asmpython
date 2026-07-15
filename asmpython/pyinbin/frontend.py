@@ -59,6 +59,12 @@ class _Lowerer:
     is_coroutine: bool = False
     global_names: set[str] = field(default_factory=set)
     nonlocal_names: set[str] = field(default_factory=set)
+    bound_names: set[str] = field(default_factory=set)
+    free_names: set[str] = field(default_factory=set)
+    is_function: bool = False
+
+    def __post_init__(self) -> None:
+        self.bound_names.update(self.arg_names)
 
     def constant(self, value: object) -> int:
         self.constants.append(value)
@@ -73,6 +79,8 @@ class _Lowerer:
 
     def emit(self, op: Op, arg: int = 0) -> int:
         self.instructions.append(Instruction(op, arg))
+        if op is Op.STORE_NAME and 0 <= arg < len(self.names):
+            self.bound_names.add(self.names[arg])
         return len(self.instructions) - 1
 
     def patch(self, offset: int, target: int) -> None:
@@ -227,6 +235,11 @@ class _Lowerer:
             nested.kwonly_names = [arg.arg for arg in node.args.kwonlyargs]
             nested.vararg_name = node.args.vararg.arg if node.args.vararg else None
             nested.kwarg_name = node.args.kwarg.arg if node.args.kwarg else None
+            nested.bound_names.update(nested.kwonly_names)
+            if nested.vararg_name:
+                nested.bound_names.add(nested.vararg_name)
+            if nested.kwarg_name:
+                nested.bound_names.add(nested.kwarg_name)
             nested.expr(node.body)
             nested.emit(Op.RETURN)
             for default in node.args.defaults:
@@ -330,6 +343,8 @@ class _Lowerer:
                 if not first:
                     self.emit(Op.BINARY_ADD)
                 first = False
+            if first:
+                self.emit(Op.LOAD_CONST, self.constant(""))
         elif isinstance(node, ast.Subscript):
             self.expr(node.value)
             if isinstance(node.slice, ast.Slice):
@@ -459,6 +474,7 @@ class _Lowerer:
             self.global_names.update(node.names)
         elif isinstance(node, ast.Nonlocal):
             self.nonlocal_names.update(node.names)
+            self.free_names.update(node.names)
         elif isinstance(node, ast.Delete):
             for target in node.targets:
                 if isinstance(target, ast.Name):
@@ -577,6 +593,7 @@ class _Lowerer:
             self.emit(Op.RAISE)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             nested = _Lowerer(node.name, [arg.arg for arg in [*node.args.posonlyargs, *node.args.args]])
+            nested.is_function = True
             nested.is_coroutine = isinstance(node, ast.AsyncFunctionDef)
             nested.posonly_names = [arg.arg for arg in node.args.posonlyargs]
             nested.kwonly_names = [arg.arg for arg in node.args.kwonlyargs]
@@ -584,6 +601,18 @@ class _Lowerer:
             nested.kwarg_name = node.args.kwarg.arg if node.args.kwarg else None
             for statement in node.body:
                 nested.stmt(statement)
+            if self.is_function:
+                outer_bound = (
+                    self.bound_names
+                    | set(self.arg_names)
+                    | set(getattr(self, "kwonly_names", []))
+                    | ({getattr(self, "vararg_name")} if getattr(self, "vararg_name", None) else set())
+                    | ({getattr(self, "kwarg_name")} if getattr(self, "kwarg_name", None) else set())
+                )
+                nested.free_names.update(
+                    (set(nested.names) - nested.bound_names - nested.global_names)
+                    & outer_bound
+                )
             nested.emit(Op.RETURN)
             for default in node.args.defaults:
                 self.expr(default)
@@ -790,7 +819,7 @@ class _Lowerer:
             list(getattr(self, "posonly_names", [])),
             self.is_generator,
             self.is_coroutine,
-            sorted(self.nonlocal_names),
+            sorted(self.free_names | self.nonlocal_names),
         )
 
 

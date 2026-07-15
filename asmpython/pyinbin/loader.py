@@ -35,7 +35,8 @@ class _ModuleRegistry(dict[str, SimpleNamespace]):
 
     def __missing__(self, name: str) -> SimpleNamespace:
         module = SimpleNamespace(__name__=name)
-        self[name] = module
+        if name == "builtins":
+            module.__import__ = lambda module_name, *args, **kwargs: None
         return module
 
 
@@ -140,12 +141,21 @@ _dynamic_globals.__pyinbin_globals__ = True
 _dynamic_locals.__pyinbin_locals__ = True
 
 
+def _dynamic_super(*args: object, **kwargs: object) -> object:
+    raise VMError("pyinbin super marker must be handled by the VM")
+
+
+_dynamic_super.__pyinbin_super__ = True
+
+
 def default_builtins() -> dict[str, object]:
     """The small explicit bootstrap built-in surface available to bytecode."""
     return {
         "print": print, "len": len, "sum": sum, "range": range, "format": format, "open": open,
         "str": str, "repr": repr, "int": int, "float": float, "bool": bool, "bytes": bytes,
         "bytearray": bytearray, "memoryview": memoryview, "object": object, "type": type,
+        "slice": slice,
+        "super": _dynamic_super,
         "list": list, "tuple": tuple, "dict": dict, "set": set, "frozenset": frozenset,
         "complex": complex, "callable": callable, "getattr": getattr, "setattr": setattr,
         "delattr": delattr, "hasattr": hasattr, "dir": dir, "vars": vars,
@@ -158,6 +168,10 @@ def default_builtins() -> dict[str, object]:
         "eval": _dynamic_eval, "exec": _dynamic_exec, "compile": _dynamic_compile,
         "Exception": Exception,
         "BaseException": BaseException, "RuntimeError": RuntimeError,
+        "Warning": Warning, "UserWarning": UserWarning, "DeprecationWarning": DeprecationWarning,
+        "OSError": OSError, "IOError": OSError, "NameError": NameError,
+        "UnboundLocalError": UnboundLocalError, "MemoryError": MemoryError,
+        "EOFError": EOFError, "EnvironmentError": OSError,
         "ValueError": ValueError, "TypeError": TypeError, "KeyError": KeyError,
         "IndexError": IndexError, "ZeroDivisionError": ZeroDivisionError,
         "StopIteration": StopIteration, "next": next,
