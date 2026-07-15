@@ -139,6 +139,17 @@ class VirtualMachine:
             return frame.globals[name]
         raise VMError(f"NameError: name {name!r} is not defined")
 
+    def _resolve_exception_spec(self, frame: Frame, spec: object) -> object:
+        """Resolve a lowered exception name/attribute/tuple specification."""
+        if isinstance(spec, int) and 0 <= spec < len(frame.code.names):
+            return self._lookup(frame, frame.code.names[spec])
+        if isinstance(spec, tuple) and len(spec) == 3 and spec[0] == "attr":
+            base = self._resolve_exception_spec(frame, spec[1])
+            return getattr(base, spec[2])
+        if isinstance(spec, tuple):
+            return tuple(self._resolve_exception_spec(frame, item) for item in spec)
+        return spec
+
     def _call(self, target: object, args: list[object], kwargs: dict[str, object] | None = None) -> object:
         kwargs = kwargs or {}
         if isinstance(target, Function):
@@ -340,6 +351,15 @@ class VirtualMachine:
                     if not isinstance(value, (tuple, list)) or len(value) != instr.arg:
                         raise VMError("ValueError: unpacking sequence has wrong length")
                     for item in reversed(value): frame.stack.append(item)
+                elif op is Op.UNPACK_EX:
+                    value = frame.stack.pop()
+                    before = instr.arg & 0xFFFF
+                    after = instr.arg >> 16
+                    if not isinstance(value, (tuple, list)) or len(value) < before + after:
+                        raise VMError("ValueError: unpacking sequence has wrong length")
+                    middle_end = len(value) - after if after else len(value)
+                    values = [*value[:before], list(value[before:middle_end]), *value[middle_end:]]
+                    for item in reversed(values): frame.stack.append(item)
                 elif op is Op.GET_ATTR:
                     frame.stack.append(getattr(frame.stack.pop(), frame.code.names[instr.arg]))
                 elif op is Op.SET_ATTR:
@@ -355,12 +375,12 @@ class VirtualMachine:
                     index = frame.stack.pop(); value = frame.stack.pop(); del value[index]
                 elif op is Op.WITH_ENTER:
                     context = frame.stack.pop()
-                    enter = getattr(context, "__enter__", None)
+                    enter = getattr(context, "__enter__", None) or getattr(context, "__aenter__", None)
                     frame.stack.append(context)
                     frame.stack.append(enter() if callable(enter) else context)
                 elif op is Op.WITH_EXIT:
                     context = frame.stack.pop()
-                    exit_method = getattr(context, "__exit__", None)
+                    exit_method = getattr(context, "__exit__", None) or getattr(context, "__aexit__", None)
                     if callable(exit_method): exit_method(None, None, None)
                 elif op is Op.ASSERT:
                     message = frame.stack.pop() if instr.arg else None
@@ -416,12 +436,20 @@ class VirtualMachine:
                     raise TypeError("exceptions must derive from BaseException")
                 elif op is Op.MATCH_EXCEPTION:
                     value = frame.stack.pop(); expected = frame.code.constants[instr.arg]
-                    if isinstance(expected, int) and 0 <= expected < len(frame.code.names):
-                        expected = self._lookup(frame, frame.code.names[expected])
+                    expected = self._resolve_exception_spec(frame, expected)
                     if not isinstance(value, BaseException) or not isinstance(expected, type) or not isinstance(value, expected):
                         if isinstance(value, BaseException): raise value
                         raise VMError("RuntimeError: invalid exception value")
                     frame.stack.append(value)
+                elif op is Op.MATCH_EXCEPTION_CHECK:
+                    value = frame.stack.pop(); expected = frame.code.constants[instr.arg]
+                    expected = self._resolve_exception_spec(frame, expected)
+                    matched = (
+                        isinstance(value, BaseException)
+                        and (isinstance(expected, type) or (isinstance(expected, tuple) and all(isinstance(item, type) for item in expected)))
+                        and isinstance(value, expected)
+                    )
+                    frame.stack.extend((value, matched))
                 elif op is Op.RETURN:
                     return frame.stack.pop() if frame.stack else None
                 elif op is Op.YIELD_VALUE:

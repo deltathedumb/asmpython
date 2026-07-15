@@ -61,6 +61,10 @@ deliverable.
   comprehensions, slices, named expressions, `assert`, and basic context
   manager execution.
 - Added pyinbin bitwise/shift operators and `global` statement semantics.
+- Expanded pyinbin lowering with qualified exception types, multiple exception
+  handlers, multi-item and async context-manager syntax, starred unpacking,
+  slice assignment, chained complex targets, `yield from`, `await` pass-through,
+  and required keyword-only parameters.
 - Added the CPython official `Lib/test` conformance harness and a required
   release gate for 2.0.0 readiness.
 

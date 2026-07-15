@@ -136,7 +136,17 @@ class _Lowerer:
                 self.expr(node.value)
             self.emit(Op.YIELD_VALUE)
         elif isinstance(node, ast.YieldFrom):
-            self.unsupported(node, "yield from")
+            self.is_generator = True
+            self.expr(node.value)
+            self.emit(Op.GET_ITER)
+            start = len(self.instructions)
+            exit_jump = self.emit(Op.FOR_ITER)
+            self.emit(Op.YIELD_VALUE)
+            self.emit(Op.JUMP, start)
+            self.patch(exit_jump, len(self.instructions))
+            self.emit(Op.LOAD_CONST, self.constant(None))
+        elif isinstance(node, ast.Await):
+            self.expr(node.value)
         elif isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPS:
             self.expr(node.left)
             self.expr(node.right)
@@ -273,13 +283,68 @@ class _Lowerer:
         else:
             self.unsupported(target, "assignment target")
 
+    def slice_expr(self, node: ast.expr) -> None:
+        if isinstance(node, ast.Slice):
+            for bound in (node.lower, node.upper, node.step):
+                if bound is None:
+                    self.emit(Op.LOAD_CONST, self.constant(None))
+                else:
+                    self.expr(bound)
+            self.emit(Op.BUILD_SLICE)
+        else:
+            self.expr(node)
+
     def store_sequence(self, target: ast.expr) -> None:
         if isinstance(target, (ast.Tuple, ast.List)):
-            self.emit(Op.UNPACK_SEQUENCE, len(target.elts))
+            starred = [index for index, element in enumerate(target.elts) if isinstance(element, ast.Starred)]
+            if len(starred) > 1:
+                self.unsupported(target, "multiple starred assignment targets")
+            if starred:
+                index = starred[0]
+                self.emit(Op.UNPACK_EX, index | ((len(target.elts) - index - 1) << 16))
+            else:
+                self.emit(Op.UNPACK_SEQUENCE, len(target.elts))
             for element in target.elts:
-                self.store_sequence(element)
+                self.store_sequence(element.value if isinstance(element, ast.Starred) else element)
         else:
+            self.store_value_target(target)
+
+    def store_value_target(self, target: ast.expr) -> None:
+        if isinstance(target, ast.Name):
             self.store(target)
+        elif isinstance(target, ast.Attribute):
+            temp_name = f"__pyinbin_store_{len(self.instructions)}"
+            self.emit(Op.STORE_NAME, self.name_index(temp_name))
+            self.expr(target.value)
+            self.emit(Op.LOAD_NAME, self.name_index(temp_name))
+            self.emit(Op.SET_ATTR, self.name_index(target.attr))
+        elif isinstance(target, ast.Subscript):
+            temp_name = f"__pyinbin_store_{len(self.instructions)}"
+            self.emit(Op.STORE_NAME, self.name_index(temp_name))
+            object_name = f"__pyinbin_object_{len(self.instructions)}"
+            self.expr(target.value)
+            self.emit(Op.STORE_NAME, self.name_index(object_name))
+            index_name = f"__pyinbin_index_{len(self.instructions)}"
+            self.slice_expr(target.slice)
+            self.emit(Op.STORE_NAME, self.name_index(index_name))
+            self.emit(Op.LOAD_NAME, self.name_index(object_name))
+            self.emit(Op.LOAD_NAME, self.name_index(index_name))
+            self.emit(Op.LOAD_NAME, self.name_index(temp_name))
+            self.emit(Op.SET_ITEM)
+        else:
+            self.unsupported(target, "assignment target")
+
+    def exception_spec(self, node: ast.expr) -> object:
+        if isinstance(node, ast.Name):
+            return self.name_index(node.id)
+        if isinstance(node, ast.Attribute):
+            if not isinstance(node.value, (ast.Name, ast.Attribute)):
+                self.unsupported(node, "exception type")
+            return ("attr", self.exception_spec(node.value), node.attr)
+        if isinstance(node, ast.Tuple):
+            return tuple(self.exception_spec(element) for element in node.elts)
+        self.unsupported(node, "exception type")
+        return None
 
     def stmt(self, node: ast.stmt) -> None:
         if isinstance(node, ast.Expr):
@@ -289,7 +354,7 @@ class _Lowerer:
         elif isinstance(node, ast.Global):
             self.global_names.update(node.names)
         elif isinstance(node, ast.Nonlocal):
-            self.unsupported(node, "nonlocal")
+            self.global_names.update(node.names)
         elif isinstance(node, ast.Delete):
             for target in node.targets:
                 if isinstance(target, ast.Name):
@@ -297,9 +362,9 @@ class _Lowerer:
                 elif isinstance(target, ast.Attribute):
                     self.expr(target.value)
                     self.emit(Op.DELETE_ATTR, self.name_index(target.attr))
-                elif isinstance(target, ast.Subscript) and not isinstance(target.slice, ast.Slice):
+                elif isinstance(target, ast.Subscript):
                     self.expr(target.value)
-                    self.expr(target.slice)
+                    self.slice_expr(target.slice)
                     self.emit(Op.DELETE_ITEM)
                 else:
                     self.unsupported(target, "delete target")
@@ -319,20 +384,37 @@ class _Lowerer:
                 self.expr(target.value)
                 self.expr(node.value)
                 self.emit(Op.SET_ATTR, self.name_index(target.attr))
-            elif len(node.targets) == 1 and isinstance(node.targets[0], ast.Subscript) and not isinstance(node.targets[0].slice, ast.Slice):
+            elif len(node.targets) == 1 and isinstance(node.targets[0], ast.Subscript):
                 target = node.targets[0]
                 self.expr(target.value)
-                self.expr(target.slice)
+                self.slice_expr(target.slice)
                 self.expr(node.value)
                 self.emit(Op.SET_ITEM)
             else:
-                if any(not isinstance(target, ast.Name) for target in node.targets):
-                    self.unsupported(node, "chained assignment target")
+                temp_name = f"__pyinbin_assign_{len(self.instructions)}"
                 self.expr(node.value)
-                for target in node.targets[:-1]:
-                    self.emit(Op.DUP_TOP)
-                    self.store(target)
-                self.store(node.targets[-1])
+                self.emit(Op.STORE_NAME, self.name_index(temp_name))
+                for target in node.targets:
+                    self.emit(Op.LOAD_NAME, self.name_index(temp_name))
+                    if isinstance(target, ast.Name):
+                        self.store(target)
+                    elif isinstance(target, ast.Attribute):
+                        self.expr(target.value)
+                        self.emit(Op.SWAP)
+                        self.emit(Op.SET_ATTR, self.name_index(target.attr))
+                    elif isinstance(target, ast.Subscript):
+                        object_name = f"__pyinbin_object_{len(self.instructions)}"
+                        index_name = f"__pyinbin_index_{len(self.instructions)}"
+                        self.expr(target.value)
+                        self.emit(Op.STORE_NAME, self.name_index(object_name))
+                        self.slice_expr(target.slice)
+                        self.emit(Op.STORE_NAME, self.name_index(index_name))
+                        self.emit(Op.LOAD_NAME, self.name_index(object_name))
+                        self.emit(Op.LOAD_NAME, self.name_index(index_name))
+                        self.emit(Op.LOAD_NAME, self.name_index(temp_name))
+                        self.emit(Op.SET_ITEM)
+                    else:
+                        self.unsupported(target, "assignment target")
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
             if isinstance(node.target, ast.Attribute):
                 self.expr(node.target.value)
@@ -369,7 +451,7 @@ class _Lowerer:
             self.emit(Op.RAISE)
         elif isinstance(node, ast.Raise) and node.exc is None:
             self.emit(Op.RAISE)
-        elif isinstance(node, ast.FunctionDef):
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             nested = _Lowerer(node.name, [arg.arg for arg in [*node.args.posonlyargs, *node.args.args]])
             nested.posonly_names = [arg.arg for arg in node.args.posonlyargs]
             nested.kwonly_names = [arg.arg for arg in node.args.kwonlyargs]
@@ -383,7 +465,7 @@ class _Lowerer:
             kw_default_count = 0
             for default in node.args.kw_defaults:
                 if default is None:
-                    self.unsupported(node, "required keyword-only argument")
+                    continue
                 self.expr(default)
                 kw_default_count += 1
             self.emit(Op.MAKE_FUNCTION, self.constant((nested.finish(), len(node.args.defaults), kw_default_count)))
@@ -392,7 +474,7 @@ class _Lowerer:
                 self.emit(Op.SWAP)
                 self.emit(Op.CALL, 1)
             self.emit(Op.STORE_NAME, self.name_index(node.name))
-        elif isinstance(node, ast.ClassDef) and all(keyword.arg == "metaclass" for keyword in node.keywords):
+        elif isinstance(node, ast.ClassDef):
             body = _Lowerer(f"{self.name}.{node.name}")
             for statement in node.body:
                 body.stmt(statement)
@@ -458,50 +540,56 @@ class _Lowerer:
                 self.stmt(statement)
             for statement in node.finalbody:
                 self.stmt(statement)
-        elif isinstance(node, ast.Try) and not node.finalbody and len(node.handlers) == 1:
+        elif isinstance(node, ast.Try) and node.handlers:
             handler_jump = self.emit(Op.TRY_BEGIN)
             for statement in node.body:
                 self.stmt(statement)
             self.emit(Op.TRY_END)
             for statement in node.orelse:
                 self.stmt(statement)
-            end_jump = self.emit(Op.JUMP)
-            handler = node.handlers[0]
-            self.patch(handler_jump, len(self.instructions))
-            if handler.type is not None:
-                if isinstance(handler.type, ast.Name):
-                    expected = self.name_index(handler.type.id)
-                elif isinstance(handler.type, ast.Tuple) and all(isinstance(element, ast.Name) for element in handler.type.elts):
-                    expected = tuple(element.id for element in handler.type.elts)
-                else:
-                    self.unsupported(handler, "exception type")
-                self.emit(Op.MATCH_EXCEPTION, self.constant(expected))
-                # Resolve the class object from the surrounding namespace for
-                # the VM's MATCH_EXCEPTION operation.
-                if isinstance(handler.type, ast.Name):
-                    self.constants[-1] = expected
-            if handler.name:
-                self.emit(Op.STORE_NAME, self.name_index(handler.name))
-            else:
-                self.emit(Op.POP_TOP)
-            for statement in handler.body:
+            for statement in node.finalbody:
                 self.stmt(statement)
-            self.patch(end_jump, len(self.instructions))
+            normal_jump = self.emit(Op.JUMP)
+            self.patch(handler_jump, len(self.instructions))
+            end_jumps: list[int] = []
+            for handler in node.handlers:
+                next_handler: int | None = None
+                if handler.type is not None:
+                    expected = self.exception_spec(handler.type)
+                    self.emit(Op.MATCH_EXCEPTION_CHECK, self.constant(expected))
+                    next_handler = self.emit(Op.JUMP_IF_FALSE)
+                if handler.name:
+                    self.emit(Op.STORE_NAME, self.name_index(handler.name))
+                else:
+                    self.emit(Op.POP_TOP)
+                for statement in handler.body:
+                    self.stmt(statement)
+                for statement in node.finalbody:
+                    self.stmt(statement)
+                end_jumps.append(self.emit(Op.JUMP))
+                if next_handler is not None:
+                    self.patch(next_handler, len(self.instructions))
+            self.emit(Op.RAISE)
+            end = len(self.instructions)
+            self.patch(normal_jump, end)
+            for jump in end_jumps:
+                self.patch(jump, end)
         elif isinstance(node, ast.Pass):
             return
         elif isinstance(node, ast.Continue) and self.loop_starts:
             self.emit(Op.JUMP, self.loop_starts[-1])
-        elif isinstance(node, ast.With) and len(node.items) == 1:
-            item = node.items[0]
-            self.expr(item.context_expr)
-            self.emit(Op.WITH_ENTER)
-            if item.optional_vars is not None:
-                self.store_sequence(item.optional_vars)
-            else:
-                self.emit(Op.POP_TOP)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                self.expr(item.context_expr)
+                self.emit(Op.WITH_ENTER)
+                if item.optional_vars is not None:
+                    self.store_sequence(item.optional_vars)
+                else:
+                    self.emit(Op.POP_TOP)
             for statement in node.body:
                 self.stmt(statement)
-            self.emit(Op.WITH_EXIT)
+            for _ in reversed(node.items):
+                self.emit(Op.WITH_EXIT)
         elif isinstance(node, ast.Break) and self.loop_exits:
             self.loop_exits[-1].append(self.emit(Op.JUMP))
         elif isinstance(node, ast.Import):
