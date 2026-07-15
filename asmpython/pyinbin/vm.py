@@ -17,6 +17,39 @@ class VMError(Exception):
     pass
 
 
+_BUILTIN_EXCEPTION_NAMES = frozenset({
+    "NameError", "TypeError", "ValueError", "RuntimeError", "AttributeError",
+    "KeyError", "IndexError", "StopIteration", "StopAsyncIteration",
+    "ZeroDivisionError", "OverflowError", "ArithmeticError", "LookupError",
+    "UnboundLocalError", "NotImplementedError", "OSError", "IOError",
+    "ImportError", "ModuleNotFoundError",
+})
+
+
+def _raise_typed(message: str, *, chain: bool = True) -> None:
+    """Raise a real builtin exception instance for a ``"ExcName: detail"``
+    message, instead of a bare ``VMError`` whose text merely *looks* like
+    one. Interpreted code doing ``except TypeError:``/``except NameError:``
+    around one of these VM-internal error sites needs the real exception
+    type to actually match -- a ``VMError`` carrying the right-looking
+    string never satisfies ``isinstance(exc, TypeError)``. Falls back to
+    ``VMError`` unchanged for messages that don't start with a recognized
+    builtin exception name. Pass ``chain=False`` (equivalent to ``raise ...
+    from None``) to suppress showing an exception already being handled as
+    this one's ``__context__``.
+    """
+    import builtins as _builtins
+    prefix, _, detail = message.partition(": ")
+    exc_cls = getattr(_builtins, prefix, None)
+    if prefix in _BUILTIN_EXCEPTION_NAMES and isinstance(exc_cls, type) and issubclass(exc_cls, BaseException):
+        result: BaseException = exc_cls(detail or message)
+    else:
+        result = VMError(message)
+    if not chain:
+        result.__suppress_context__ = True
+    raise result
+
+
 class PyException(Exception):
     """Host carrier for an exception instance created by the VM object model."""
 
@@ -1169,7 +1202,7 @@ class VirtualMachine:
             if name == "bool" and isinstance(frame.globals[name], bool):
                 return bool
             return frame.globals[name]
-        raise VMError(f"NameError: name {name!r} is not defined")
+        _raise_typed(f"NameError: name {name!r} is not defined")
 
     def _resolve_exception_spec(self, frame: Frame, spec: object) -> object:
         """Resolve a lowered exception name/attribute/tuple specification."""
@@ -1385,11 +1418,11 @@ class VirtualMachine:
             return SuperProxy(self, object, args[0] if args else None)
         if getattr(target, "__pyinbin_lru_cache__", False):
             if len(args) < 4:
-                raise VMError("TypeError: invalid lru cache wrapper arguments")
+                _raise_typed("TypeError: invalid lru cache wrapper arguments")
             return LRUCacheObject(self, args[0], args[1], args[2], args[3])
         if getattr(target, "__pyinbin_reduce__", False):
             if len(args) < 2:
-                raise VMError("TypeError: reduce expected at least 2 arguments")
+                _raise_typed("TypeError: reduce expected at least 2 arguments")
             iterator = iter(args[1])
             if len(args) >= 3:
                 value = args[2]
@@ -1421,7 +1454,7 @@ class VirtualMachine:
             total = len(target.code.arg_names)
             required = total - len(target.defaults)
             if len(args) > total and target.code.vararg_name is None:
-                raise VMError(
+                _raise_typed(
                     f"TypeError: {target.code.name}() takes {required} to {total} argument(s), got {len(args)}"
                 )
             positional = list(args[:total])
@@ -1442,26 +1475,26 @@ class VirtualMachine:
                     # checks below for this entry.
                     if target.code.kwarg_name:
                         continue
-                    raise VMError(f"TypeError: {target.code.name}() got positional-only argument passed as keyword: {name!r}")
+                    _raise_typed(f"TypeError: {target.code.name}() got positional-only argument passed as keyword: {name!r}")
                 if name in locals_:
-                    raise VMError(f"TypeError: {target.code.name}() got multiple values for argument {name!r}")
+                    _raise_typed(f"TypeError: {target.code.name}() got multiple values for argument {name!r}")
                 if name in target.code.arg_names:
                     locals_[name] = value
                 elif name in target.code.kwonly_names or target.code.kwarg_name:
                     locals_[name] = value
                 else:
-                    raise VMError(f"TypeError: {target.code.name}() got an unexpected keyword argument {name!r}")
+                    _raise_typed(f"TypeError: {target.code.name}() got an unexpected keyword argument {name!r}")
             for index, name in enumerate(target.code.arg_names):
                 if name not in locals_:
                     if index < required:
-                        raise VMError(f"TypeError: {target.code.name}() missing required argument: {name!r}")
+                        _raise_typed(f"TypeError: {target.code.name}() missing required argument: {name!r}")
                     locals_[name] = target.defaults[index - required]
             for name in target.code.kwonly_names:
                 if name not in locals_:
                     if name in target.kw_defaults:
                         locals_[name] = target.kw_defaults[name]
                     else:
-                        raise VMError(f"TypeError: {target.code.name}() missing keyword-only argument {name!r}")
+                        _raise_typed(f"TypeError: {target.code.name}() missing keyword-only argument {name!r}")
             if target.code.kwarg_name:
                 locals_[target.code.kwarg_name] = {
                     name: value for name, value in kwargs.items()
@@ -1546,7 +1579,7 @@ class VirtualMachine:
         if not callable(target):
             detail = str(target) if isinstance(target, (bool, int, str)) else type(target).__name__
             location = getattr(self, "_current_call_location", getattr(self, "_current_code_name", "<unknown>"))
-            raise VMError(f"TypeError: object is not callable ({detail}) in {location}")
+            _raise_typed(f"TypeError: object is not callable ({detail}) in {location}")
         try:
             return target(*args, **kwargs)
         except TypeError as exc:
@@ -1615,7 +1648,7 @@ class VirtualMachine:
                 elif op is Op.DUP_TOP:
                     frame.stack.append(frame.stack[-1])
                 elif op is Op.SWAP:
-                    if len(frame.stack) < 2: raise VMError("RuntimeError: SWAP stack underflow")
+                    if len(frame.stack) < 2: _raise_typed("RuntimeError: SWAP stack underflow")
                     frame.stack[-1], frame.stack[-2] = frame.stack[-2], frame.stack[-1]
                 elif op in (Op.BINARY_ADD, Op.BINARY_SUB, Op.BINARY_MUL, Op.BINARY_DIV, Op.BINARY_FLOORDIV, Op.BINARY_MOD, Op.BINARY_POW, Op.BINARY_BITAND, Op.BINARY_BITOR, Op.BINARY_BITXOR, Op.BINARY_LSHIFT, Op.BINARY_RSHIFT, Op.BINARY_BOOL_AND, Op.BINARY_MATMUL):
                     right = frame.stack.pop(); left = frame.stack.pop()
@@ -1624,7 +1657,7 @@ class VirtualMachine:
                         try:
                             frame.stack.append(left - right)
                         except TypeError as exc:
-                            raise VMError(f"{exc} in {frame.code.name}: {left!r} - {right!r}") from exc
+                            raise TypeError(f"{exc} in {frame.code.name}: {left!r} - {right!r}") from exc
                     elif op is Op.BINARY_MUL: frame.stack.append(left * right)
                     elif op is Op.BINARY_DIV: frame.stack.append(left / right)
                     elif op is Op.BINARY_FLOORDIV: frame.stack.append(left // right)
@@ -1637,7 +1670,7 @@ class VirtualMachine:
                             if isinstance(left, int) and callable(right):
                                 frame.stack.append(left)
                                 continue
-                            raise VMError(f"{exc} in {frame.code.name}: {left!r} | {right!r}") from exc
+                            raise TypeError(f"{exc} in {frame.code.name}: {left!r} | {right!r}") from exc
                     elif op is Op.BINARY_BITXOR: frame.stack.append(left ^ right)
                     elif op is Op.BINARY_LSHIFT: frame.stack.append(left << right)
                     elif op is Op.BINARY_RSHIFT: frame.stack.append(left >> right)
@@ -1678,9 +1711,9 @@ class VirtualMachine:
                         nested, default_count, kw_default_count = spec
                     else:
                         nested = spec
-                    if not isinstance(nested, CodeObject): raise VMError("TypeError: invalid function constant")
+                    if not isinstance(nested, CodeObject): _raise_typed("TypeError: invalid function constant")
                     count = default_count + kw_default_count
-                    if len(frame.stack) < count: raise VMError("RuntimeError: default stack underflow")
+                    if len(frame.stack) < count: _raise_typed("RuntimeError: default stack underflow")
                     values = frame.stack[-count:] if count else []
                     if count: del frame.stack[-count:]
                     defaults = values[:default_count]
@@ -1695,13 +1728,13 @@ class VirtualMachine:
                     nested.validate(); frame.stack.append(Function(nested, frame.globals, defaults, kw_defaults, closure, self))
                 elif op is Op.MAKE_CLASS:
                     spec = frame.code.constants[instr.arg]
-                    if not isinstance(spec, tuple) or len(spec) not in (3, 4): raise VMError("TypeError: invalid class constant")
+                    if not isinstance(spec, tuple) or len(spec) not in (3, 4): _raise_typed("TypeError: invalid class constant")
                     class_name, body, base_count = spec[:3]
                     has_keywords = bool(spec[3]) if len(spec) == 4 else False
-                    if not isinstance(class_name, str) or not isinstance(body, CodeObject): raise VMError("TypeError: invalid class constant")
-                    if len(frame.stack) < base_count + (1 if has_keywords else 0): raise VMError("RuntimeError: class stack underflow")
+                    if not isinstance(class_name, str) or not isinstance(body, CodeObject): _raise_typed("TypeError: invalid class constant")
+                    if len(frame.stack) < base_count + (1 if has_keywords else 0): _raise_typed("RuntimeError: class stack underflow")
                     class_keywords = frame.stack.pop() if has_keywords else {}
-                    if not isinstance(class_keywords, dict): raise VMError("TypeError: class keyword arguments must be a dict")
+                    if not isinstance(class_keywords, dict): _raise_typed("TypeError: class keyword arguments must be a dict")
                     bases = frame.stack[-base_count:] if base_count else []
                     if base_count: del frame.stack[-base_count:]
                     if base_count == 1 and isinstance(bases[0], tuple):
@@ -1735,7 +1768,7 @@ class VirtualMachine:
                         frame.stack.append(PyClass(self, class_name, class_namespace, bases))
                 elif op is Op.CALL:
                     if len(frame.stack) < instr.arg + 1:
-                        raise VMError(f"RuntimeError: CALL stack underflow in {frame.code.name} at {frame.ip}")
+                        _raise_typed(f"RuntimeError: CALL stack underflow in {frame.code.name} at {frame.ip}")
                     args = frame.stack[-instr.arg:] if instr.arg else []
                     if instr.arg: del frame.stack[-instr.arg:]
                     target = frame.stack.pop()
@@ -1752,15 +1785,15 @@ class VirtualMachine:
                         frame.stack.append(self._call(target, args))
                 elif op is Op.CALL_KW:
                     spec = frame.code.constants[instr.arg]
-                    if not isinstance(spec, tuple) or len(spec) != 2: raise VMError("RuntimeError: invalid keyword call")
+                    if not isinstance(spec, tuple) or len(spec) != 2: _raise_typed("RuntimeError: invalid keyword call")
                     positional_spec, names = spec
                     if isinstance(positional_spec, int):
                         positional_spec = tuple(False for _ in range(positional_spec))
-                    if not isinstance(positional_spec, tuple): raise VMError("RuntimeError: invalid positional call")
+                    if not isinstance(positional_spec, tuple): _raise_typed("RuntimeError: invalid positional call")
                     positional_count = len(positional_spec)
                     keyword_count = len(names)
                     if len(frame.stack) < 1 + positional_count + keyword_count:
-                        raise VMError(f"RuntimeError: CALL_KW stack underflow in {frame.code.name} at {frame.ip}")
+                        _raise_typed(f"RuntimeError: CALL_KW stack underflow in {frame.code.name} at {frame.ip}")
                     values = frame.stack[-keyword_count:] if keyword_count else []
                     if keyword_count: del frame.stack[-keyword_count:]
                     raw_positional = frame.stack[-positional_count:] if positional_count else []
@@ -1772,13 +1805,13 @@ class VirtualMachine:
                             try:
                                 positional.extend(value)
                             except TypeError:
-                                raise VMError("TypeError: * argument must be iterable")
+                                _raise_typed("TypeError: * argument must be iterable")
                         else:
                             positional.append(value)
                     kwargs: dict[str, object] = {}
                     for name, value in zip(names, values):
                         if name is None:
-                            if not isinstance(value, dict): raise VMError("TypeError: ** argument must be a mapping")
+                            if not isinstance(value, dict): _raise_typed("TypeError: ** argument must be a mapping")
                             kwargs.update(value)
                         else:
                             kwargs[name] = value
@@ -1789,14 +1822,14 @@ class VirtualMachine:
                     else:
                         frame.stack.append(self._call(target, positional, kwargs))
                 elif op is Op.BUILD_LIST:
-                    if len(frame.stack) < instr.arg: raise VMError("RuntimeError: list stack underflow")
+                    if len(frame.stack) < instr.arg: _raise_typed("RuntimeError: list stack underflow")
                     values = frame.stack[-instr.arg:] if instr.arg else []
                     if instr.arg: del frame.stack[-instr.arg:]
                     frame.stack.append(values)
                 elif op in (Op.BUILD_LIST_UNPACK, Op.BUILD_TUPLE_UNPACK, Op.BUILD_SET_UNPACK):
                     count = instr.arg & 0xFFFF
                     flags = instr.arg >> 16
-                    if len(frame.stack) < count: raise VMError("RuntimeError: unpack stack underflow")
+                    if len(frame.stack) < count: _raise_typed("RuntimeError: unpack stack underflow")
                     values = frame.stack[-count:] if count else []
                     if count: del frame.stack[-count:]
                     merged: list[object] = []
@@ -1805,7 +1838,7 @@ class VirtualMachine:
                             try:
                                 merged.extend(iter(value))
                             except TypeError:
-                                raise VMError("TypeError: starred value must be iterable") from None
+                                _raise_typed("TypeError: starred value must be iterable", chain=False)
                         else:
                             merged.append(value)
                     if op is Op.BUILD_LIST_UNPACK: frame.stack.append(merged)
@@ -1814,26 +1847,26 @@ class VirtualMachine:
                 elif op is Op.BUILD_DICT_UNPACK:
                     count = instr.arg & 0xFFFF
                     flags = instr.arg >> 16
-                    if len(frame.stack) < count: raise VMError("RuntimeError: dict unpack stack underflow")
+                    if len(frame.stack) < count: _raise_typed("RuntimeError: dict unpack stack underflow")
                     values = frame.stack[-count:] if count else []
                     if count: del frame.stack[-count:]
                     result: dict[object, object] = {}
                     for index, value in enumerate(values):
                         if flags & (1 << index):
-                            if not isinstance(value, dict): raise VMError("TypeError: ** argument must be a mapping")
+                            if not isinstance(value, dict): _raise_typed("TypeError: ** argument must be a mapping")
                             result.update(value)
                         else:
-                            if not isinstance(value, tuple) or len(value) != 2: raise VMError("RuntimeError: invalid dict item")
+                            if not isinstance(value, tuple) or len(value) != 2: _raise_typed("RuntimeError: invalid dict item")
                             result[value[0]] = value[1]
                     frame.stack.append(result)
                 elif op is Op.BUILD_DICT:
                     count = instr.arg * 2
-                    if len(frame.stack) < count: raise VMError("RuntimeError: dict stack underflow")
+                    if len(frame.stack) < count: _raise_typed("RuntimeError: dict stack underflow")
                     values = frame.stack[-count:] if count else []
                     if count: del frame.stack[-count:]
                     frame.stack.append(dict(zip(values[::2], values[1::2])))
                 elif op in (Op.BUILD_TUPLE, Op.BUILD_SET):
-                    if len(frame.stack) < instr.arg: raise VMError("RuntimeError: collection stack underflow")
+                    if len(frame.stack) < instr.arg: _raise_typed("RuntimeError: collection stack underflow")
                     values = frame.stack[-instr.arg:] if instr.arg else []
                     if instr.arg: del frame.stack[-instr.arg:]
                     frame.stack.append(tuple(values) if op is Op.BUILD_TUPLE else set(values))
@@ -1860,9 +1893,9 @@ class VirtualMachine:
                     try:
                         values = list(value)
                     except TypeError:
-                        raise VMError("TypeError: cannot unpack non-iterable value")
+                        _raise_typed("TypeError: cannot unpack non-iterable value")
                     if len(values) != instr.arg:
-                        raise VMError(f"ValueError: unpacking sequence has wrong length in {frame.code.name}: expected {instr.arg}, got {len(values)}")
+                        _raise_typed(f"ValueError: unpacking sequence has wrong length in {frame.code.name}: expected {instr.arg}, got {len(values)}")
                     for item in reversed(values): frame.stack.append(item)
                 elif op is Op.UNPACK_EX:
                     value = frame.stack.pop()
@@ -1871,9 +1904,9 @@ class VirtualMachine:
                     try:
                         values = list(value)
                     except TypeError:
-                        raise VMError("TypeError: cannot unpack non-iterable value")
+                        _raise_typed("TypeError: cannot unpack non-iterable value")
                     if len(values) < before + after:
-                        raise VMError("ValueError: unpacking sequence has wrong length")
+                        _raise_typed("ValueError: unpacking sequence has wrong length")
                     middle_end = len(values) - after if after else len(values)
                     unpacked = [*values[:before], list(values[before:middle_end]), *values[middle_end:]]
                     for item in reversed(unpacked): frame.stack.append(item)
@@ -1896,7 +1929,7 @@ class VirtualMachine:
                     name = frame.code.names[instr.arg]
                     if name in frame.locals: del frame.locals[name]
                     elif name in frame.globals: del frame.globals[name]
-                    else: raise VMError(f"NameError: name {name!r} is not defined")
+                    else: _raise_typed(f"NameError: name {name!r} is not defined")
                 elif op is Op.DELETE_ITEM:
                     index = frame.stack.pop(); value = frame.stack.pop(); del value[index]
                 elif op is Op.WITH_ENTER:
@@ -1928,7 +1961,7 @@ class VirtualMachine:
                     value = frame.stack.pop(); target = frame.stack.pop(); target.add(value); frame.stack.append(target)
                 elif op is Op.IMPORT_NAME:
                     loader = frame.globals.get("__pyinbin_import__")
-                    if not callable(loader): raise VMError("ImportError: loader is not configured")
+                    if not callable(loader): _raise_typed("ImportError: loader is not configured")
                     frame.stack.append(loader(frame.code.names[instr.arg]))
                 elif op is Op.IMPORT_FROM:
                     module = frame.stack.pop()
@@ -1970,19 +2003,19 @@ class VirtualMachine:
                     frame.stack.append(slice(start, stop, step))
                 elif op is Op.IMPORT_ROOT:
                     loader = frame.globals.get("__pyinbin_import__")
-                    if not callable(loader): raise VMError("ImportError: loader is not configured")
+                    if not callable(loader): _raise_typed("ImportError: loader is not configured")
                     imported = frame.code.names[instr.arg]; loader(imported); frame.stack.append(loader(imported.split(".", 1)[0]))
                 elif op is Op.IMPORT_RELATIVE_FROM:
                     loader = frame.globals.get("__pyinbin_import__")
-                    if not callable(loader): raise VMError("ImportError: loader is not configured")
+                    if not callable(loader): _raise_typed("ImportError: loader is not configured")
                     spec = frame.code.constants[instr.arg]
-                    if not isinstance(spec, tuple) or len(spec) != 3: raise VMError("ImportError: invalid relative import")
+                    if not isinstance(spec, tuple) or len(spec) != 3: _raise_typed("ImportError: invalid relative import")
                     module_name, level, member = spec
                     package = frame.globals.get("__package__", "")
                     parts = package.split(".") if isinstance(package, str) and package else []
                     base_parts = parts[: len(parts) - int(level) + 1]
                     base = ".".join([*base_parts, module_name] if module_name else base_parts)
-                    if not base: raise VMError("ImportError: relative import beyond top-level package")
+                    if not base: _raise_typed("ImportError: relative import beyond top-level package")
                     if module_name:
                         module = loader(base)
                         if member == "*":
@@ -2019,13 +2052,13 @@ class VirtualMachine:
                     frame.handlers.append(instr.arg)
                     frame.protection_order.append("try")
                 elif op is Op.TRY_END:
-                    if not frame.handlers: raise VMError("RuntimeError: TRY_END without TRY_BEGIN")
+                    if not frame.handlers: _raise_typed("RuntimeError: TRY_END without TRY_BEGIN")
                     frame.handlers.pop()
                     if frame.protection_order and frame.protection_order[-1] == "try":
                         frame.protection_order.pop()
                 elif op is Op.RAISE:
                     value = frame.stack.pop() if frame.stack else frame.active_exception
-                    if value is None: raise VMError("RuntimeError: no active exception to reraise")
+                    if value is None: _raise_typed("RuntimeError: no active exception to reraise")
                     if isinstance(value, type) and issubclass(value, BaseException):
                         value = value()
                     if isinstance(value, BaseException):
@@ -2038,7 +2071,7 @@ class VirtualMachine:
                     expected = self._resolve_exception_spec(frame, expected)
                     if not self._exception_matches(value, expected):
                         if isinstance(value, (BaseException, PyException)): raise value
-                        raise VMError("RuntimeError: invalid exception value")
+                        _raise_typed("RuntimeError: invalid exception value")
                     frame.stack.append(value)
                 elif op is Op.MATCH_EXCEPTION_CHECK:
                     value = frame.stack.pop(); expected = frame.code.constants[instr.arg]
@@ -2080,7 +2113,7 @@ class VirtualMachine:
                         continue
                     return _Awaited(frame, value)
                 else:
-                    raise VMError(f"RuntimeError: unsupported opcode {op}")
+                    _raise_typed(f"RuntimeError: unsupported opcode {op}")
             except BaseException as exc:
                 if isinstance(exc, BaseException) and not isinstance(exc, PyException):
                     tb_frame = _PyTBFrameProxy(frame.code, frame.globals, None)

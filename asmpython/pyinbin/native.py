@@ -861,7 +861,7 @@ def create_builtin_module(
             for key in dir(_bootstrap_unicodedata) if not key.startswith("__")
         })
     if name == "errno":
-        return _module(name, {
+        values = {
             key: getattr(_bootstrap_errno, key)
             for key in dir(_bootstrap_errno) if key.isupper()
         } | {
@@ -869,7 +869,11 @@ def create_builtin_module(
             "EAGAIN": 11, "ENOMEM": 12, "EACCES": 13, "EEXIST": 17,
             "ENOTDIR": 20, "EINVAL": 22, "ENOSPC": 28, "EPIPE": 32,
             "EWOULDBLOCK": 11, "ECONNRESET": 10054, "ETIMEDOUT": 10060,
-        })
+        }
+        values["errorcode"] = dict(getattr(_bootstrap_errno, "errorcode", {})) or {
+            code: name_ for name_, code in values.items()
+        }
+        return _module(name, values)
     if name == "time":
         return _module(name, {
             "time": _bootstrap_time.time, "monotonic": _bootstrap_time.monotonic,
