@@ -214,18 +214,30 @@ class _Lowerer:
             self.emit(Op.MAKE_FUNCTION, self.constant((nested.finish(), len(node.args.defaults), 0)))
         elif isinstance(node, ast.List):
             for element in node.elts:
-                self.expr(element)
-            self.emit(Op.BUILD_LIST, len(node.elts))
+                self.expr(element.value if isinstance(element, ast.Starred) else element)
+            if any(isinstance(element, ast.Starred) for element in node.elts):
+                flags = sum((1 << index) for index, element in enumerate(node.elts) if isinstance(element, ast.Starred))
+                self.emit(Op.BUILD_LIST_UNPACK, len(node.elts) | (flags << 16))
+            else:
+                self.emit(Op.BUILD_LIST, len(node.elts))
         elif isinstance(node, (ast.ListComp, ast.DictComp, ast.GeneratorExp)):
             self.comprehension(node)
         elif isinstance(node, ast.Tuple):
             for element in node.elts:
-                self.expr(element)
-            self.emit(Op.BUILD_TUPLE, len(node.elts))
+                self.expr(element.value if isinstance(element, ast.Starred) else element)
+            if any(isinstance(element, ast.Starred) for element in node.elts):
+                flags = sum((1 << index) for index, element in enumerate(node.elts) if isinstance(element, ast.Starred))
+                self.emit(Op.BUILD_TUPLE_UNPACK, len(node.elts) | (flags << 16))
+            else:
+                self.emit(Op.BUILD_TUPLE, len(node.elts))
         elif isinstance(node, ast.Set):
             for element in node.elts:
-                self.expr(element)
-            self.emit(Op.BUILD_SET, len(node.elts))
+                self.expr(element.value if isinstance(element, ast.Starred) else element)
+            if any(isinstance(element, ast.Starred) for element in node.elts):
+                flags = sum((1 << index) for index, element in enumerate(node.elts) if isinstance(element, ast.Starred))
+                self.emit(Op.BUILD_SET_UNPACK, len(node.elts) | (flags << 16))
+            else:
+                self.emit(Op.BUILD_SET, len(node.elts))
         elif isinstance(node, ast.Dict) and all(key is not None for key in node.keys):
             for key, value in zip(node.keys, node.values):
                 assert key is not None

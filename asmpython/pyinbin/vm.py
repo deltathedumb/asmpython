@@ -326,6 +326,23 @@ class VirtualMachine:
                     values = frame.stack[-instr.arg:] if instr.arg else []
                     if instr.arg: del frame.stack[-instr.arg:]
                     frame.stack.append(values)
+                elif op in (Op.BUILD_LIST_UNPACK, Op.BUILD_TUPLE_UNPACK, Op.BUILD_SET_UNPACK):
+                    count = instr.arg & 0xFFFF
+                    flags = instr.arg >> 16
+                    if len(frame.stack) < count: raise VMError("RuntimeError: unpack stack underflow")
+                    values = frame.stack[-count:] if count else []
+                    if count: del frame.stack[-count:]
+                    merged: list[object] = []
+                    for index, value in enumerate(values):
+                        if flags & (1 << index):
+                            if not isinstance(value, (tuple, list, set)):
+                                raise VMError("TypeError: starred value must be iterable")
+                            merged.extend(value)
+                        else:
+                            merged.append(value)
+                    if op is Op.BUILD_LIST_UNPACK: frame.stack.append(merged)
+                    elif op is Op.BUILD_TUPLE_UNPACK: frame.stack.append(tuple(merged))
+                    else: frame.stack.append(set(merged))
                 elif op is Op.BUILD_DICT:
                     count = instr.arg * 2
                     if len(frame.stack) < count: raise VMError("RuntimeError: dict stack underflow")
