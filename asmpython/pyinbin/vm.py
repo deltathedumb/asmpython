@@ -950,6 +950,23 @@ class PyClass:
         return value
 
     def __call__(self, *args: object, **kwargs: object) -> PyInstance:
+        # The stdlib Enum functional API constructs a new class through its
+        # metaclass (``Enum('Name', names)``), not an enum member.  VM classes
+        # do not execute host metaclasses, so delegate this specific form to
+        # the matching host enum family while preserving normal VM calls.
+        if (
+            self.__name__ in {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "ReprEnum"}
+            and len(args) >= 2
+            and isinstance(args[0], str)
+            and (isinstance(args[1], (str, list, tuple, dict)) or hasattr(args[1], "__iter__"))
+        ):
+            import enum as _host_enum
+            family = getattr(_host_enum, self.__name__, _host_enum.Enum)
+            call_kwargs = {
+                key: value for key, value in kwargs.items()
+                if key in {"module", "qualname", "type", "start"}
+            }
+            return family(args[0], args[1], **call_kwargs)
         # Honor a user-defined ``__new__`` before initialization.  Namedtuple
         # subclasses (including doctest.TestResults) rely on this to allocate
         # an instance and attach extra attributes in ``__new__``.
@@ -964,7 +981,7 @@ class PyClass:
         # VM has no metaclass call path, so retain the legacy allocation for
         # this specific functional form instead of feeding ``type`` to the
         # value constructor.
-        if self.__name__ in {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"} and any(
+        if self.__name__ in {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "ReprEnum"} and any(
             key in kwargs for key in {"type", "module", "qualname", "start"}
         ):
             allocator = None
