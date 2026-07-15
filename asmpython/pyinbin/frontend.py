@@ -583,7 +583,7 @@ class _Lowerer:
             self.nonlocal_names.update(node.names)
             self.free_names.update(node.names)
         elif isinstance(node, ast.Delete):
-            for target in node.targets:
+            def delete_target(target: ast.expr) -> None:
                 if isinstance(target, ast.Name):
                     self.emit(Op.DELETE_NAME, self.name_index(target.id))
                 elif isinstance(target, ast.Attribute):
@@ -593,8 +593,13 @@ class _Lowerer:
                     self.expr(target.value)
                     self.slice_expr(target.slice)
                     self.emit(Op.DELETE_ITEM)
+                elif isinstance(target, (ast.Tuple, ast.List)):
+                    for item in target.elts:
+                        delete_target(item)
                 else:
                     self.unsupported(target, "delete target")
+            for target in node.targets:
+                delete_target(target)
         elif isinstance(node, ast.Assert):
             self.expr(node.test)
             if node.msg is not None:
@@ -677,6 +682,11 @@ class _Lowerer:
                 self.expr(node.target.value)
                 self.expr(node.value)
                 self.emit(Op.SET_ATTR, self.name_index(node.target.attr))
+            elif isinstance(node.target, ast.Subscript):
+                self.expr(node.target.value)
+                self.slice_expr(node.target.slice)
+                self.expr(node.value)
+                self.emit(Op.SET_ITEM)
             else:
                 self.expr(node.value)
                 self.store(node.target)
