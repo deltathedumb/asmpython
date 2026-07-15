@@ -42,6 +42,10 @@ deliverable.
 - **Template-string runtime values** (`pyinbin/frontend.py`, `pyinbin/native.py`) —
   Python 3.14 template strings preserve interpolation metadata for annotation
   introspection instead of collapsing to plain strings.
+- **Interpreter fallback and exception matching** (`_compiler/__main__.py`,
+  `pyinbin/frontend.py`, `pyinbin/vm.py`) — compile rejection now gets an
+  interpreter attempt, and dynamic exception expressions such as
+  `except type(error)` resolve correctly.
 - **Package-entry import semantics** (`pyinbin/loader.py`, `pyinbin/vm.py`) —
   entry modules now infer `__package__` from import roots, relative imports can
   resolve package attributes before probing child modules, and asyncio package
