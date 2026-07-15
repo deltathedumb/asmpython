@@ -862,6 +862,32 @@ def create_builtin_module(
             pass
         class NotShareableError(InterpreterError):
             pass
+        def capture_exception(exc):
+            exc_type = type(exc)
+            captured = SimpleNamespace(
+                type=exc_type,
+                msg=str(exc),
+                formatted=f"{getattr(exc_type, '__name__', type(exc).__name__)}: {exc}",
+            )
+            traceback_module = module_cache.get("traceback")
+            if traceback_module is None:
+                return captured
+            try:
+                traceback_exception = getattr(traceback_module, "TracebackException")
+                builder = getattr(traceback_exception, "from_exception")
+                trace = builder(exc)
+                formatter = getattr(trace, "format")
+                try:
+                    lines = formatter(colorize=False)
+                except Exception:
+                    lines = formatter()
+                captured.errdisplay = "".join(lines).rstrip("\n")
+            except Exception:
+                # Formatting is diagnostic only; capture_exception itself
+                # must still provide the stable type/message fields.
+                pass
+            return captured
+
         return _module(name, {
             "InterpreterID": int,
             "WHENCE_UNKNOWN": 0,
@@ -879,6 +905,7 @@ def create_builtin_module(
             "decref": lambda interpreter: None,
             "incref": lambda interpreter: None,
             "run_string": lambda interpreter, script, shared=None: None,
+            "capture_exception": capture_exception,
             "list_all": lambda *args, **kwargs: [(0, 1)],
             "get_current": lambda: (0, 1),
             "get_main": lambda: (0, 1),

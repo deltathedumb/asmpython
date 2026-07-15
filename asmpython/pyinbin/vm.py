@@ -53,10 +53,24 @@ class GeneratorObject:
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
         try:
-            next(self)
+            if exc_type is None:
+                next(self)
+            else:
+                self.throw(exc_type, exc_value, traceback)
         except StopIteration:
             return False
         raise RuntimeError("generator didn't stop")
+
+    def throw(self, *args: object) -> object:
+        if not args:
+            raise TypeError("throw expected at least 1 argument")
+        error = args[0]
+        if isinstance(error, type) and issubclass(error, BaseException):
+            error = error(*(args[1:2] or ()))
+        if not isinstance(error, BaseException):
+            raise TypeError("exceptions must derive from BaseException")
+        self.frame.pending_exception = error
+        return next(self)
 
     def append(self, value: object) -> None:
         target = self._last_yielded
@@ -596,7 +610,15 @@ class PyClass:
                 return value.__func__
             descriptor_get = getattr(value, "__get__", None)
             if callable(descriptor_get):
-                return descriptor_get(None, self)
+                try:
+                    return descriptor_get(None, self)
+                except TypeError:
+                    # Host ``type`` descriptors cannot receive a PyClass
+                    # wrapper.  Its annotations are maintained directly in
+                    # the interpreted class namespace instead.
+                    if name == "__annotations__":
+                        return attributes.get(name, {})
+                    raise
             return value
         if name == "__dict__":
             return attributes
@@ -858,6 +880,7 @@ class Frame:
     handlers: list[int] = field(default_factory=list)
     with_contexts: list[object] = field(default_factory=list)
     active_exception: Exception | None = None
+    pending_exception: BaseException | None = None
     closure: dict[str, object] | None = None
 
 
@@ -866,6 +889,7 @@ class VirtualMachine:
 
     def __init__(self) -> None:
         self._synthetic_tracebacks: dict[int, "_PyTBProxy"] = {}
+        self._current_frame: Frame | None = None
 
     def run(self, code: CodeObject, globals_: dict[str, object] | None = None) -> object:
         code.validate()
@@ -998,9 +1022,19 @@ class VirtualMachine:
 
     def _call(self, target: object, args: list[object], kwargs: dict[str, object] | None = None) -> object:
         kwargs = kwargs or {}
+        if getattr(target, "__pyinbin_dir__", False):
+            if args:
+                value = args[0]
+                if isinstance(value, PyClass):
+                    return sorted(set(value.attributes) | {"__name__", "__module__", "__qualname__", "__dict__", "__mro__", "__bases__"})
+                return sorted(dir(value))
+            frame = self._current_frame
+            if frame is None:
+                return []
+            return sorted(set(frame.locals) | set(frame.globals))
         if (getattr(target, "__name__", None) == "_safe_isinstance"
                 and len(args) == 2 and args[1] is type and isinstance(args[0], PyClass)):
-            return self._current_code_name in {"_is_valid_dispatch_type", "runTests"}
+            return True
         if isinstance(target, classmethod):
             function = target.__func__
             owner = None
@@ -1015,11 +1049,14 @@ class VirtualMachine:
             from .frontend import compile_source
             globals_arg = args[1] if len(args) > 1 else None
             locals_arg = args[2] if len(args) > 2 else None
+            caller = self._current_frame
             globals_ns = globals_arg if isinstance(globals_arg, dict) else (
-                globals_arg._raw_value() if isinstance(globals_arg, PyInstance) and isinstance(globals_arg._raw_value(), dict) else {}
+                globals_arg._raw_value() if isinstance(globals_arg, PyInstance) and isinstance(globals_arg._raw_value(), dict)
+                else caller.globals if caller is not None else {}
             )
             locals_ns = locals_arg if isinstance(locals_arg, dict) else (
-                locals_arg._raw_value() if isinstance(locals_arg, PyInstance) and isinstance(locals_arg._raw_value(), dict) else globals_ns
+                locals_arg._raw_value() if isinstance(locals_arg, PyInstance) and isinstance(locals_arg._raw_value(), dict)
+                else caller.locals if caller is not None else globals_ns
             )
             self._seed_builtins(globals_ns)
             code = compile_source(f"__pyinbin_result = ({args[0]})", "<eval>")
@@ -1029,11 +1066,14 @@ class VirtualMachine:
             from .frontend import compile_source
             globals_arg = args[1] if len(args) > 1 else None
             locals_arg = args[2] if len(args) > 2 else None
+            caller = self._current_frame
             globals_ns = globals_arg if isinstance(globals_arg, dict) else (
-                globals_arg._raw_value() if isinstance(globals_arg, PyInstance) and isinstance(globals_arg._raw_value(), dict) else {}
+                globals_arg._raw_value() if isinstance(globals_arg, PyInstance) and isinstance(globals_arg._raw_value(), dict)
+                else caller.globals if caller is not None else {}
             )
             locals_ns = locals_arg if isinstance(locals_arg, dict) else (
-                locals_arg._raw_value() if isinstance(locals_arg, PyInstance) and isinstance(locals_arg._raw_value(), dict) else globals_ns
+                locals_arg._raw_value() if isinstance(locals_arg, PyInstance) and isinstance(locals_arg._raw_value(), dict)
+                else caller.locals if caller is not None else globals_ns
             )
             self._seed_builtins(globals_ns)
             code = args[0] if isinstance(args[0], CodeObject) else compile_source(str(args[0]), "<exec>")
@@ -1157,6 +1197,11 @@ class VirtualMachine:
                 return type
         if target is type and len(args) >= 3 and isinstance(args[0], str) and isinstance(args[2], dict):
             return PyClass(self, args[0], dict(args[2]), list(args[1]))
+        descriptor = getattr(target, "__self__", None)
+        if (len(args) == 1 and isinstance(args[0], PyClass)
+                and type(descriptor).__name__ == "getset_descriptor"
+                and getattr(descriptor, "__name__", None) == "__annotations__"):
+            return args[0].attributes.get("__annotations__", {})
         if (getattr(target, "__name__", None) == "__new__"
                 and isinstance(getattr(target, "__self__", None), type)
                 and args and isinstance(args[0], PyClass)):
@@ -1184,11 +1229,16 @@ class VirtualMachine:
     def _run_frame(self, frame: Frame) -> object:
         instructions = frame.code.instructions
         while frame.ip < len(instructions):
+            self._current_frame = frame
             self._current_code_name = frame.code.name
             instr = instructions[frame.ip]
             frame.ip += 1
             op = instr.op
             try:
+                if frame.pending_exception is not None:
+                    pending = frame.pending_exception
+                    frame.pending_exception = None
+                    raise pending
                 if op is Op.LOAD_CONST:
                     frame.stack.append(frame.code.constants[instr.arg])
                 elif op is Op.LOAD_NAME:
@@ -1501,7 +1551,10 @@ class VirtualMachine:
                     frame.stack.append(enter() if callable(enter) else context)
                 elif op is Op.WITH_EXIT:
                     if not frame.with_contexts:
-                        raise VMError(f"RuntimeError: with stack underflow in {frame.code.name} at {frame.ip - 1}")
+                        # An exception-path __exit__ may already have
+                        # unwound this context and suppressed the exception;
+                        # the compiler still reaches its linear cleanup op.
+                        continue
                     context = frame.with_contexts.pop()
                     if frame.stack:
                         frame.stack.pop()
@@ -1534,8 +1587,11 @@ class VirtualMachine:
                             try:
                                 child_module = loader(f"{module_name}.{member}")
                                 value = child_module
-                            except (AttributeError, ImportError, ModuleNotFoundError, VMError):
-                                value = getattr(loader(module_name), member)
+                            except (AttributeError, ImportError, ModuleNotFoundError, VMError) as child_error:
+                                try:
+                                    value = getattr(loader(module_name), member)
+                                except AttributeError:
+                                    raise child_error
                     frame.stack.append(value)
                 elif op is Op.IMPORT_STAR:
                     module = frame.stack.pop()
@@ -1642,6 +1698,41 @@ class VirtualMachine:
                     tb_frame = _PyTBFrameProxy(frame.code, frame.globals, None)
                     prior = self._synthetic_tracebacks.get(id(exc))
                     self._synthetic_tracebacks[id(exc)] = _PyTBProxy(tb_frame, prior)
+                if frame.with_contexts:
+                    # Real ``with`` semantics: unwind every still-active
+                    # context manager innermost-to-outermost, calling each
+                    # ``__exit__`` even after one has already run, until one
+                    # suppresses the exception or the stack is exhausted.
+                    # ``with_contexts`` is a stack, so popping already visits
+                    # them innermost-first.
+                    suppressed = False
+                    unwound = 0
+                    while frame.with_contexts:
+                        context = frame.with_contexts.pop()
+                        unwound += 1
+                        exit_method = getattr(context, "__exit__", None) or getattr(context, "__aexit__", None)
+                        if callable(exit_method):
+                            exc_type = exc.instance.cls if isinstance(exc, PyException) else type(exc)
+                            # Host context managers (notably contextlib) assign
+                            # this value back to ``exc.__traceback__``; synthetic
+                            # VM proxies are intentionally not accepted there.
+                            traceback = getattr(exc, "__traceback__", None)
+                            suppressed = bool(self._call(exit_method, [exc_type, exc, traceback]))
+                            if suppressed:
+                                break
+                    if suppressed:
+                        frame.stack.clear()
+                        # Skip the cleanup WITH_EXIT for every context we
+                        # just unwound by hand (a multi-item ``with a, b:``
+                        # emits one WITH_EXIT per item, consecutively).
+                        remaining = unwound
+                        cleanup_index = frame.ip
+                        while remaining and cleanup_index < len(instructions):
+                            if instructions[cleanup_index].op is Op.WITH_EXIT:
+                                remaining -= 1
+                            cleanup_index += 1
+                        frame.ip = cleanup_index
+                        continue
                 if frame.handlers:
                     frame.ip = frame.handlers.pop(); frame.stack.clear(); frame.stack.append(exc); frame.active_exception = exc; continue
                 raise
