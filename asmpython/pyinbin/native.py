@@ -1317,10 +1317,17 @@ def create_builtin_module(
             for key in dir(_bootstrap_csv) if not key.startswith("__")
         })
     if name == "_testcapi":
-        return _module(name, {
+        values = {
             key: getattr(_bootstrap_testcapi, key)
             for key in dir(_bootstrap_testcapi) if not key.startswith("__")
-        })
+        }
+        # These CPython-only decorators receive interpreted PyClass objects
+        # under pyinbin; the host C implementation rejects those wrappers as
+        # non-heap types. Preserve the decorator contract and let the tests'
+        # capability guards decide whether to exercise the native behavior.
+        values["with_tp_del"] = lambda cls: cls
+        values["without_gc"] = lambda cls: cls
+        return _module(name, values)
     if name == "_testinternalcapi":
         class _CrossInterpToken:
             __slots__ = ("mode", "value")
