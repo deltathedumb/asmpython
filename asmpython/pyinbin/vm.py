@@ -646,6 +646,8 @@ class VirtualMachine:
         if isinstance(spec, tuple) and len(spec) == 3 and spec[0] == "attr":
             base = self._resolve_exception_spec(frame, spec[1])
             return getattr(base, spec[2])
+        if isinstance(spec, tuple) and len(spec) == 2 and spec[0] == "type_of":
+            return type(self._lookup(frame, frame.code.names[spec[1]]))
         if isinstance(spec, tuple):
             return tuple(self._resolve_exception_spec(frame, item) for item in spec)
         return spec
