@@ -886,12 +886,6 @@ class VirtualMachine:
         try:
             return target(*args, **kwargs)
         except TypeError as exc:
-            if any(isinstance(arg, PyInstance) for arg in args):
-                raw_args = [arg._raw_value() if isinstance(arg, PyInstance) else arg for arg in args]
-                try:
-                    return target(*raw_args, **kwargs)
-                except TypeError:
-                    pass
             raise
 
     def _run_frame(self, frame: Frame) -> object:
@@ -1014,6 +1008,9 @@ class VirtualMachine:
                         "__annotations__": {},
                     }
                     self._run_frame(Frame(code=body, globals=frame.globals, locals=class_namespace))
+                    new_member = class_namespace.get("__new__")
+                    if isinstance(new_member, Function):
+                        class_namespace["__new__"] = staticmethod(new_member)
                     frame.stack.append(PyClass(self, class_name, class_namespace, bases))
                 elif op is Op.CALL:
                     if len(frame.stack) < instr.arg + 1:
