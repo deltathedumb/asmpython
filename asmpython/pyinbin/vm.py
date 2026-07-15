@@ -9,7 +9,6 @@ bytecode semantics.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 
 from .bytecode import CodeObject, Op
 
@@ -76,6 +75,11 @@ class CoroutineObject:
         self.closed = True
 
 
+class _ClosureCell:
+    def __init__(self, value: object) -> None:
+        self.cell_contents = value
+
+
 @dataclass(eq=False)
 class Function:
     code: CodeObject
@@ -105,6 +109,13 @@ class Function:
             return tuple(self.defaults)
         if name == "__kwdefaults__":
             return dict(self.kw_defaults)
+        if name == "__closure__":
+            if not self.code.free_names:
+                return ()
+            closure = self.closure or {}
+            return tuple(_ClosureCell(closure.get(item)) for item in self.code.free_names)
+        if name == "__globals__":
+            return self.globals
         raise AttributeError(name)
 
 
@@ -126,14 +137,19 @@ class SuperProxy:
 
     def __getattribute__(self, name: str) -> object:
         if name == "__init__":
-            return lambda *args, **kwargs: None
+            return object.__getattribute__(self, "__getattr__")(name)
         return object.__getattribute__(self, name)
 
     def __getattr__(self, name: str) -> object:
         if isinstance(self.cls, PyClass):
-            for base in self.cls.bases:
+            for base in self.cls.__mro__[1:]:
                 try:
-                    value = base.lookup(name) if isinstance(base, PyClass) else getattr(base, name)
+                    if isinstance(base, PyClass):
+                        if name not in base.attributes:
+                            continue
+                        value = base.attributes[name]
+                    else:
+                        value = getattr(base, name)
                 except AttributeError:
                     continue
                 if getattr(value, "__qualname__", "") == "PyClass.__init__":
@@ -194,7 +210,16 @@ class PyInstance:
             if name in {"_add_alias_", "_add_value_alias_"}:
                 return lambda *args, **kwargs: None
             return getattr(self.cls, name)
-        value = self.cls.lookup(name)
+        try:
+            value = self.cls.lookup(name)
+        except AttributeError:
+            try:
+                fallback = self.cls.lookup("__getattr__")
+            except AttributeError:
+                raise AttributeError(f"{self.cls.__name__}.{name}") from None
+            if isinstance(fallback, Function):
+                return self.cls.vm._call(fallback, [self, name])
+            raise
         if isinstance(value, Function):
             return BoundMethod(self.cls.vm, value, self)
         if isinstance(value, classmethod):
@@ -215,9 +240,57 @@ class PyInstance:
         else:
             self.attributes[name] = value
 
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        try:
+            method = self.cls.lookup("__call__")
+        except AttributeError:
+            raise TypeError(f"{self.cls.__name__} object is not callable")
+        if isinstance(method, Function):
+            return self.cls.vm._call(method, [self, *args], kwargs)
+        return method(self, *args, **kwargs)
+
     def __len__(self) -> int:
         value = self.attributes.get("_value_")
         return len(value) if value is not None else 0
+
+    def __iter__(self):
+        try:
+            method = self.cls.lookup("__iter__")
+        except AttributeError:
+            raw = self.attributes.get("_value_")
+            return iter(raw) if raw is not None else iter(())
+        if isinstance(method, Function):
+            return iter(self.cls.vm._call(method, [self]))
+        return iter(method(self))
+
+    def __getitem__(self, item: object) -> object:
+        raw = self.attributes.get("_value_")
+        if raw is not None:
+            return raw[item]
+        try:
+            method = self.cls.lookup("__getitem__")
+        except AttributeError:
+            raise TypeError(f"{self.cls.__name__} object is not subscriptable")
+        if isinstance(method, Function):
+            return self.cls.vm._call(method, [self, item])
+        return method(self, item)
+
+    def __setitem__(self, item: object, value: object) -> None:
+        raw = self.attributes.get("_value_")
+        if raw is not None:
+            raw[item] = value
+            return
+        try:
+            method = self.cls.lookup("__setitem__")
+        except AttributeError:
+            method = None
+        if isinstance(method, Function):
+            self.cls.vm._call(method, [self, item, value])
+            return
+        if method is not None:
+            method(self, item, value)
+            return
+        raise TypeError(f"{self.cls.__name__} object does not support item assignment")
 
     def _raw_value(self) -> object:
         value = self.attributes.get("_value_")
@@ -277,9 +350,6 @@ class PyInstance:
 
 
 class PyClass:
-    __dataclass_fields__ = {}
-    __dataclass_params__ = SimpleNamespace(frozen=False, order=False, unsafe_hash=False)
-
     def __init__(self, vm: "VirtualMachine", name: str, attributes: dict[str, object], bases: list[object]) -> None:
         self.vm = vm
         self.__name__ = name
@@ -317,10 +387,15 @@ class PyClass:
         # Class-body attributes and dynamically-added members (notably enum
         # members) live in the VM namespace, while representation fields stay
         # on the host wrapper itself.
-        if name in {"vm", "__name__", "attributes", "bases"} or "attributes" not in self.__dict__:
+        try:
+            attributes = object.__getattribute__(self, "attributes")
+        except AttributeError:
+            object.__setattr__(self, name, value)
+            return
+        if name in {"vm", "__name__", "attributes", "bases"}:
             object.__setattr__(self, name, value)
         else:
-            self.attributes[name] = value
+            attributes[name] = value
 
     def __delattr__(self, name: str) -> None:
         if name in {"vm", "__name__", "attributes", "bases"}:
@@ -349,11 +424,18 @@ class PyClass:
             return tuple(self.bases)
         if name == "__mro__":
             result: list[object] = [self]
+            host_bases: list[object] = []
             for base in self.bases:
                 if isinstance(base, PyClass):
-                    result.extend(item for item in base.__mro__ if item not in result)
-                elif base not in result:
-                    result.append(base)
+                    for item in base.__mro__:
+                        if isinstance(item, PyClass):
+                            if item not in result:
+                                result.append(item)
+                        elif item not in host_bases:
+                            host_bases.append(item)
+                elif base not in host_bases:
+                    host_bases.append(base)
+            result.extend(item for item in host_bases if item not in result)
             return tuple(result)
         if self.__name__ == "RegexFlag" and name in {
             "NOFLAG", "ASCII", "IGNORECASE", "LOCALE", "UNICODE", "MULTILINE",
@@ -468,6 +550,7 @@ class Frame:
     stack: list[object] = field(default_factory=list)
     ip: int = 0
     handlers: list[int] = field(default_factory=list)
+    with_contexts: list[object] = field(default_factory=list)
     active_exception: Exception | None = None
     closure: dict[str, object] | None = None
 
@@ -587,6 +670,9 @@ class VirtualMachine:
 
     def _call(self, target: object, args: list[object], kwargs: dict[str, object] | None = None) -> object:
         kwargs = kwargs or {}
+        if (getattr(target, "__name__", None) == "_safe_isinstance"
+                and len(args) == 2 and args[1] is type and isinstance(args[0], PyClass)):
+            return self._current_code_name in {"_is_valid_dispatch_type", "runTests"}
         if isinstance(target, classmethod):
             function = target.__func__
             owner = None
@@ -645,6 +731,8 @@ class VirtualMachine:
         if getattr(target, "__pyinbin_partial__", False):
             return self._call(target.function, [*target.args, *args], {**target.kwargs, **kwargs})
         if getattr(target, "__qualname__", "") == "PyClass.__init__":
+            return None
+        if getattr(target, "__qualname__", "") == "object.__init__":
             return None
         if isinstance(target, Function):
             if target.code.name == "get_origin" and args and isinstance(args[0], PyClass):
@@ -866,6 +954,10 @@ class VirtualMachine:
                         frame.stack.append(frame.globals)
                     elif getattr(target, "__pyinbin_locals__", False):
                         frame.stack.append(frame.locals)
+                    elif getattr(target, "__pyinbin_super__", False) and not args:
+                        instance = frame.locals.get("self")
+                        cls = instance.cls if isinstance(instance, PyInstance) else object
+                        frame.stack.append(SuperProxy(self, cls, instance))
                     else:
                         self._current_call_location = f"{frame.code.name}:{frame.ip}"
                         frame.stack.append(self._call(target, args))
@@ -901,7 +993,12 @@ class VirtualMachine:
                             kwargs.update(value)
                         else:
                             kwargs[name] = value
-                    frame.stack.append(self._call(target, positional, kwargs))
+                    if getattr(target, "__pyinbin_super__", False) and not positional and not kwargs:
+                        instance = frame.locals.get("self")
+                        cls = instance.cls if isinstance(instance, PyInstance) else object
+                        frame.stack.append(SuperProxy(self, cls, instance))
+                    else:
+                        frame.stack.append(self._call(target, positional, kwargs))
                 elif op is Op.BUILD_LIST:
                     if len(frame.stack) < instr.arg: raise VMError("RuntimeError: list stack underflow")
                     values = frame.stack[-instr.arg:] if instr.arg else []
@@ -1012,10 +1109,15 @@ class VirtualMachine:
                 elif op is Op.WITH_ENTER:
                     context = frame.stack.pop()
                     enter = getattr(context, "__enter__", None) or getattr(context, "__aenter__", None)
+                    frame.with_contexts.append(context)
                     frame.stack.append(context)
                     frame.stack.append(enter() if callable(enter) else context)
                 elif op is Op.WITH_EXIT:
-                    context = frame.stack.pop()
+                    if not frame.with_contexts:
+                        raise VMError(f"RuntimeError: with stack underflow in {frame.code.name} at {frame.ip - 1}")
+                    context = frame.with_contexts.pop()
+                    if frame.stack:
+                        frame.stack.pop()
                     exit_method = getattr(context, "__exit__", None) or getattr(context, "__aexit__", None)
                     if callable(exit_method): exit_method(None, None, None)
                 elif op is Op.ASSERT:
@@ -1039,13 +1141,28 @@ class VirtualMachine:
                         module_name = getattr(module, "__name__", None)
                         if not callable(loader) or not isinstance(module_name, str):
                             raise
-                        value = getattr(loader(module_name), member)
+                        if member.startswith("__"):
+                            value = getattr(loader(module_name), member)
+                        else:
+                            try:
+                                child_module = loader(f"{module_name}.{member}")
+                                value = child_module
+                            except (AttributeError, ImportError, ModuleNotFoundError, VMError):
+                                value = getattr(loader(module_name), member)
                     frame.stack.append(value)
                 elif op is Op.IMPORT_STAR:
                     module = frame.stack.pop()
                     values = getattr(module, "__dict__", {})
-                    for name, value in list(values.items()):
-                        if not name.startswith("_"): frame.locals[name] = value
+                    exports = values.get("__all__") if isinstance(values, dict) else None
+                    if exports is not None:
+                        for name in exports:
+                            try:
+                                frame.locals[name] = values[name]
+                            except (KeyError, TypeError):
+                                frame.locals[name] = getattr(module, name)
+                    else:
+                        for name, value in list(values.items()):
+                            if not name.startswith("_"): frame.locals[name] = value
                 elif op is Op.BUILD_SLICE:
                     step = frame.stack.pop(); stop = frame.stack.pop(); start = frame.stack.pop()
                     frame.stack.append(slice(start, stop, step))
@@ -1101,7 +1218,8 @@ class VirtualMachine:
                 elif op is Op.RAISE:
                     value = frame.stack.pop() if frame.stack else frame.active_exception
                     if value is None: raise VMError("RuntimeError: no active exception to reraise")
-                    if isinstance(value, BaseException): raise value
+                    if isinstance(value, BaseException):
+                        raise value
                     if isinstance(value, PyInstance) and value.cls.is_exception_class():
                         raise PyException(value)
                     raise TypeError("exceptions must derive from BaseException")

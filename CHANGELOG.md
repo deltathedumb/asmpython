@@ -27,6 +27,11 @@ deliverable.
 - **Official-test release harness** (`tests/cpython_conformance.py`) — the
   CPython baseline and independent pyinbin runs remain separate release-gate
   modes for 2.0.0 validation.
+- **CPython-compatible module and context execution** (`pyinbin/loader.py`,
+  `pyinbin/vm.py`, `pyinbin/native.py`) — interpreted library code now gets a
+  loader-backed callable `__import__`, stable `__main__` registration,
+  exception-safe context-manager cleanup, special-method dispatch for mapping
+  instances, and the stream/system hooks needed by unittest and warnings.
 
 - **IR backend multi-argument `print`** (`ir_lower.py`) — the SSA lowering
   path now supports Python's default space-separated output for multiple

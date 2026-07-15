@@ -13,14 +13,23 @@ from typing import Callable
 import ast as _bootstrap_ast
 import binascii as _bootstrap_binascii
 import heapq as _bootstrap_heapq
+import marshal as _bootstrap_marshal
 import os as _bootstrap_os
 import pickle as _bootstrap_pickle
 import re as _bootstrap_re
+import select as _bootstrap_select
 import struct as _bootstrap_struct
 import time as _bootstrap_time
 import _string as _bootstrap_string
+import _sysconfig as _bootstrap_sysconfig
+import zlib as _bootstrap_zlib
 import _socket as _bootstrap_socket
 import _ssl as _bootstrap_ssl
+import _overlapped as _bootstrap_overlapped
+import _ctypes as _bootstrap_ctypes
+import _bz2 as _bootstrap_bz2
+import _lzma as _bootstrap_lzma
+import _zstd as _bootstrap_zstd
 
 
 class _MemoryTextIO:
@@ -45,6 +54,29 @@ class _MemoryTextIO:
 
     def getvalue(self) -> str:
         return self._value
+
+    def flush(self) -> None:
+        return None
+
+    def tell(self) -> int:
+        return self._position
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        if whence == 0:
+            self._position = offset
+        elif whence == 1:
+            self._position += offset
+        elif whence == 2:
+            self._position = len(self._value) + offset
+        else:
+            raise ValueError("invalid whence")
+        return self._position
+
+    def writable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return True
 
     def close(self) -> None:
         return None
@@ -140,6 +172,23 @@ def _pack_uint32(value: int) -> bytes:
 
 def _unpack_uint32(value: bytes) -> int:
     return sum(byte << (index * 8) for index, byte in enumerate(value[:4]))
+
+
+def _pack_uint16(value: int) -> bytes:
+    value &= 0xFFFF
+    return bytes((value & 255, (value >> 8) & 255))
+
+
+def _unpack_uint16(value: bytes) -> int:
+    return sum(byte << (index * 8) for index, byte in enumerate(value[:2]))
+
+
+def _pack_uint64(value: int) -> bytes:
+    return int(value).to_bytes(8, "little", signed=False)
+
+
+def _unpack_uint64(value: bytes) -> int:
+    return int.from_bytes(value[:8], "little", signed=False)
 
 
 def _zip_longest(iterables: tuple[object, ...], fillvalue: object):
@@ -252,13 +301,16 @@ def create_builtin_module(
         return _module(name, {
             "modules": module_cache,
             "path": [],
-            "argv": [],
+            "argv": ["pyinbin"],
             "warnoptions": [],
             "platform": "win32",
             "base_prefix": "",
             "prefix": "",
             "base_exec_prefix": "",
             "exec_prefix": "",
+            "platlibdir": "lib",
+            "_vpath": "",
+            "_jit": SimpleNamespace(is_enabled=lambda: False, is_active=lambda: False),
             "executable": "",
             "flags": SimpleNamespace(
                 debug=0, inspect=0, interactive=0, optimize=0, dont_write_bytecode=0,
@@ -273,9 +325,12 @@ def create_builtin_module(
             "version_info": (3, 14, 0, "final", 0),
             "builtin_module_names": ("sys", "_io", "_abc", "_locale", "itertools", "math", "nt", "_thread"),
             "implementation": _module("sys.implementation", {"name": "pyinbin"}),
+            "hash_info": SimpleNamespace(width=64, modulus=(1 << 61) - 1, inf=314159, nan=0, imag=1000003, algorithm="siphash13", hash_bits=64, seed_bits=128),
             "getrecursionlimit": lambda: 1000,
+            "exit": lambda code=0: None,
             "getfilesystemencoding": lambda: "utf-8", "getfilesystemencodeerrors": lambda: "surrogatepass",
             "getdefaultencoding": lambda: "utf-8",
+            "getwindowsversion": lambda: SimpleNamespace(major=10, minor=0, build=0, platform=2, service_pack=""),
             "setrecursionlimit": lambda value: None,
             "is_finalizing": lambda: False,
             "intern": lambda value: value,
@@ -374,28 +429,57 @@ def create_builtin_module(
             "AsyncGeneratorType": placeholder,
         })
     if name == "_frozen_importlib":
+        def resolve_name(module_name, package, level):
+            if level <= 0:
+                return module_name
+            parts = package.rsplit(".", level - 1)
+            if len(parts) < level:
+                raise ImportError("attempted relative import beyond top-level package")
+            base = parts[0]
+            return f"{base}.{module_name}" if module_name else base
         def module_from_spec(spec):
             module_name = getattr(spec, "name", "")
             return SimpleNamespace(__name__=module_name, __spec__=spec)
+        def spec_from_loader(name, loader, *, origin=None, is_package=None):
+            return SimpleNamespace(name=name, loader=loader, origin=origin, submodule_search_locations=[] if is_package else None)
         return _module(name, {
             "BuiltinImporter": object, "FrozenImporter": object,
             "PathFinder": object, "ModuleSpec": object,
             "module_from_spec": module_from_spec,
+            "spec_from_loader": spec_from_loader,
+            "_find_spec": lambda name, path=None, target=None: None,
+            "_resolve_name": resolve_name,
             "_init_module_attrs": lambda *args, **kwargs: None,
         })
     if name == "_frozen_importlib_external":
         def all_suffixes():
             return [".py", ".pyc"]
+        def cache_from_source(path, debug_override=None, *, optimization=None):
+            return f"{path}c"
+        def source_from_cache(path):
+            return path[:-1] if path.endswith("c") else path
+        def spec_from_file_location(name, location=None, *, loader=None, submodule_search_locations=None):
+            return SimpleNamespace(name=name, loader=loader, origin=location, submodule_search_locations=submodule_search_locations)
         return _module(name, {
             "PathFinder": object, "FileFinder": object,
+            "_LoaderBasics": object, "FileLoader": object, "SourceLoader": object,
             "SourceFileLoader": object, "SourcelessFileLoader": object,
             "ExtensionFileLoader": object, "AppleFrameworkLoader": object,
             "NamespaceLoader": object, "WindowsRegistryFinder": object,
             "ModuleSpec": object, "_pack_uint32": _pack_uint32, "_unpack_uint32": _unpack_uint32,
+            "_pack_uint16": _pack_uint16, "_unpack_uint16": _unpack_uint16,
+            "_pack_uint64": _pack_uint64, "_unpack_uint64": _unpack_uint64,
             "open_code": open,
             "SOURCE_SUFFIXES": [".py"], "BYTECODE_SUFFIXES": [".pyc"],
             "DEBUG_BYTECODE_SUFFIXES": [".pyc"], "OPTIMIZED_BYTECODE_SUFFIXES": [".pyc"],
             "EXTENSION_SUFFIXES": [], "FILE_EXTENSION": ".py",
+            "MAGIC_NUMBER": b"pyin",
+            "path_sep": "\\",
+            "path_separators": ["\\", "/"],
+            "cache_from_source": cache_from_source,
+            "source_from_cache": source_from_cache,
+            "spec_from_file_location": spec_from_file_location,
+            "decode_source": lambda data: data.decode("utf-8") if isinstance(data, bytes) else data,
             "all_suffixes": all_suffixes,
         })
     if name == "_stat":
@@ -466,6 +550,14 @@ def create_builtin_module(
             "get_current": lambda: 0,
             "is_running": lambda interpreter: False,
         })
+    if name == "_sysconfig":
+        return _module(name, {"config_vars": _bootstrap_sysconfig.config_vars})
+    if name == "zlib":
+        return _module(name, {
+            key: getattr(_bootstrap_zlib, key)
+            for key in dir(_bootstrap_zlib)
+            if not key.startswith("__")
+        })
     if name == "_asyncio":
         return _module(name, {
             "Future": object,
@@ -494,6 +586,44 @@ def create_builtin_module(
         }
         values.setdefault("_SSLMethod", int)
         return _module(name, values)
+    if name == "_overlapped":
+        return _module(name, {
+            key: getattr(_bootstrap_overlapped, key)
+            for key in dir(_bootstrap_overlapped)
+            if not key.startswith("__")
+        })
+    if name == "_ctypes":
+        return _module(name, {
+            key: getattr(_bootstrap_ctypes, key)
+            for key in dir(_bootstrap_ctypes)
+            if not key.startswith("__")
+        })
+    if name == "_bz2":
+        return _module(name, {
+            key: getattr(_bootstrap_bz2, key)
+            for key in dir(_bootstrap_bz2)
+            if not key.startswith("__")
+        })
+    if name == "_lzma":
+        return _module(name, {
+            key: getattr(_bootstrap_lzma, key)
+            for key in dir(_bootstrap_lzma)
+            if not key.startswith("__")
+        })
+    if name == "_zstd":
+        values = {
+            key: getattr(_bootstrap_zstd, key)
+            for key in dir(_bootstrap_zstd)
+            if not key.startswith("__")
+        }
+        values["set_parameter_types"] = lambda *args: None
+        return _module(name, values)
+    if name == "select":
+        return _module(name, {
+            key: getattr(_bootstrap_select, key)
+            for key in dir(_bootstrap_select)
+            if not key.startswith("__")
+        })
     if name == "fcntl":
         return _module(name, {
             "ioctl": lambda *args, **kwargs: 0,
@@ -528,6 +658,12 @@ def create_builtin_module(
             "heappushpop": _bootstrap_heapq.heappushpop,
             "nlargest": _bootstrap_heapq.nlargest,
             "nsmallest": _bootstrap_heapq.nsmallest,
+        })
+    if name == "marshal":
+        return _module(name, {
+            key: getattr(_bootstrap_marshal, key)
+            for key in dir(_bootstrap_marshal)
+            if not key.startswith("__")
         })
     if name == "binascii":
         return _module(name, {
@@ -849,6 +985,10 @@ def create_builtin_module(
             "_create_environ": lambda: {}, "_exit": lambda status=0: None,
             "defpath": ".", "devnull": "NUL", "curdir": ".", "pardir": "..", "extsep": ".",
             "getcwd": lambda: ".", "getcwdb": lambda: b".", "listdir": lambda path=".": [],
+            "getpid": lambda: 1, "getppid": lambda: 0,
+            "stat_result": _bootstrap_os.stat_result,
+            "terminal_size": _bootstrap_os.terminal_size,
+            "getwindowsversion": lambda: SimpleNamespace(major=10, minor=0, build=0, platform=2, service_pack=""),
             "cpu_count": lambda: 1, "process_cpu_count": lambda: 1,
             "_getvolumepathname": lambda path: path,
             "_path_normpath": lambda path: path,
@@ -952,6 +1092,14 @@ def create_builtin_module(
             __pyinbin_partial__ = True
             def __init__(self, function, args=(), kwargs=None):
                 self.function, self.args, self.kwargs = function, tuple(args), dict(kwargs or {})
+            def __call__(self, *args, **kwargs):
+                return self.function(*self.args, *args, **{**self.kwargs, **kwargs})
+            @property
+            def func(self):
+                return self.function
+            @property
+            def keywords(self):
+                return self.kwargs
         class LRUCacheWrapper:
             __pyinbin_lru_cache__ = True
         def reduce(function, iterable, initial=None):

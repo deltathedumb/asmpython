@@ -128,6 +128,12 @@ class CodeObject:
             return len(self.arg_names)
         if name == "co_kwonlyargcount":
             return len(self.kwonly_names)
+        if name == "co_freevars":
+            return tuple(self.free_names)
+        if name == "co_cellvars":
+            return ()
+        if name == "co_varnames":
+            return tuple(self.arg_names)
         raise AttributeError(name)
 
     def validate(self) -> None:

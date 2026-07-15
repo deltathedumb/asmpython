@@ -24,7 +24,7 @@ class _SSLMethodPlaceholder(int):
 def _safe_isinstance(value: object, class_or_tuple: object) -> bool:
     try:
         return isinstance(value, class_or_tuple)
-    except TypeError:
+    except (TypeError, AttributeError):
         return False
 
 
@@ -85,6 +85,27 @@ class SourceLoader:
                     return path.read_text(encoding="utf-8"), str(path)
         raise PyinbinImportError(f"ImportError: no pyinbin module named {name!r}")
 
+    def _import(
+        self,
+        name: str,
+        globals_: dict[str, object] | None = None,
+        locals_: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] | list[str] | None = None,
+        level: int = 0,
+    ) -> SimpleNamespace:
+        """Implement the callable form of ``__import__`` for interpreted code."""
+        if level:
+            package = str((globals_ or {}).get("__package__", ""))
+            parts = package.split(".") if package else []
+            if level > len(parts) + 1:
+                raise ImportError("attempted relative import beyond top-level package")
+            prefix = parts[: len(parts) - level + 1]
+            name = ".".join(prefix + ([name] if name else []))
+        module = self.load(name)
+        if fromlist:
+            return module
+        return self.load(name.split(".", 1)[0])
+
     def load(self, name: str) -> SimpleNamespace:
         if name in self._modules:
             return self._modules[name]
@@ -92,7 +113,7 @@ class SourceLoader:
             module = self.load("_collections_abc")
             self._modules[name] = module
             return module
-        builtin = create_builtin_module(name, self._modules, default_builtins())
+        builtin = create_builtin_module(name, self._modules, default_builtins(self._import))
         if builtin is not None:
             self._modules[name] = builtin
             return builtin
@@ -108,7 +129,7 @@ class SourceLoader:
         self._modules[name] = module
         namespace = module.__dict__
         namespace["__package__"] = name if filename.endswith("__init__.py") else name.rsplit(".", 1)[0] if "." in name else ""
-        namespace.update(default_builtins())
+        namespace.update(default_builtins(self._import))
         namespace["__pyinbin_import__"] = self.load
         if name == "ssl":
             namespace.setdefault("_SSLMethod", _SSLMethodPlaceholder)
@@ -182,29 +203,31 @@ def _dynamic_super(*args: object, **kwargs: object) -> object:
 _dynamic_super.__pyinbin_super__ = True
 
 
-def default_builtins() -> dict[str, object]:
+def default_builtins(importer: object | None = None) -> dict[str, object]:
     """The small explicit bootstrap built-in surface available to bytecode."""
     return {
         "print": print, "len": len, "sum": sum, "range": range, "format": format, "open": open,
         "str": str, "repr": repr, "int": int, "float": float, "bool": bool, "bytes": bytes,
+        "NotImplemented": NotImplemented,
         "bytearray": bytearray, "memoryview": memoryview, "object": object, "type": type,
         "slice": slice,
         "super": _dynamic_super,
         "list": list, "tuple": tuple, "dict": dict, "set": set, "frozenset": frozenset,
         "complex": complex, "callable": callable, "getattr": getattr, "setattr": setattr,
         "delattr": delattr, "hasattr": hasattr, "dir": dir, "vars": vars,
-        "chr": chr, "ord": ord, "bin": bin, "hex": hex, "oct": oct, "ascii": ascii,
+        "chr": chr, "ord": ord, "bin": bin, "hex": hex, "oct": oct, "ascii": ascii, "divmod": divmod,
         "isinstance": _safe_isinstance, "issubclass": _safe_issubclass, "enumerate": enumerate, "zip": zip,
         "map": map, "filter": filter, "any": any, "all": all, "min": min, "max": max,
         "abs": abs, "round": round, "id": id, "hash": hash, "sorted": sorted, "reversed": reversed,
         "iter": iter, "globals": _dynamic_globals, "locals": _dynamic_locals,
-        "__import__": lambda name, *args, **kwargs: None,
+        "__import__": importer or (lambda name, *args, **kwargs: None),
         "eval": _dynamic_eval, "exec": _dynamic_exec, "compile": _dynamic_compile,
         "Exception": Exception,
         "BaseException": BaseException, "RuntimeError": RuntimeError,
         "WindowsError": OSError,
         "Warning": Warning, "UserWarning": UserWarning, "DeprecationWarning": DeprecationWarning,
         "OSError": OSError, "IOError": OSError, "NameError": NameError,
+        "FileNotFoundError": FileNotFoundError, "NotADirectoryError": NotADirectoryError,
         "UnboundLocalError": UnboundLocalError, "MemoryError": MemoryError,
         "EOFError": EOFError, "EnvironmentError": OSError,
         "ValueError": ValueError, "TypeError": TypeError, "KeyError": KeyError,
@@ -233,6 +256,9 @@ def run_source(
         raise PyinbinImportError(f"source file not found: {path}")
     source = path.read_text(encoding="utf-8")
     loader = SourceLoader(source_root=path.parent, bundle=bundle, import_roots=import_roots)
-    namespace = default_builtins()
+    module = SimpleNamespace(__name__="__main__", __file__=str(path))
+    loader._modules["__main__"] = module
+    namespace = module.__dict__
+    namespace.update(default_builtins(loader._import))
     namespace.update({"__name__": "__main__", "__file__": str(path), "__pyinbin_import__": loader.load})
     return VirtualMachine().run(compile_source(source, str(path)), namespace)
