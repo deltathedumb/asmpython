@@ -39,12 +39,52 @@ class GeneratorObject:
         raise StopIteration(result)
 
 
+class CoroutineObject:
+    """Resumable bootstrap coroutine frame for ``async def`` functions."""
+
+    def __init__(self, vm: "VirtualMachine", frame: "Frame") -> None:
+        self.vm = vm
+        self.frame = frame
+        self.closed = False
+
+    def __await__(self) -> "CoroutineObject":
+        return self
+
+    def __iter__(self) -> "CoroutineObject":
+        return self
+
+    def __next__(self) -> object:
+        if self.closed:
+            raise StopIteration
+        result = self.vm._run_frame(self.frame)
+        if isinstance(result, _Yielded):
+            self.frame = result.frame
+            return result.value
+        self.closed = True
+        raise StopIteration(result)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 @dataclass
 class Function:
     code: CodeObject
     globals: dict[str, object]
     defaults: list[object] = field(default_factory=list)
     kw_defaults: dict[str, object] = field(default_factory=dict)
+    closure: dict[str, object] | None = None
+
+    def __getattr__(self, name: str) -> object:
+        if name == "__name__":
+            return self.code.name.rsplit(".", 1)[-1]
+        if name == "__qualname__":
+            return self.code.name
+        if name == "__module__":
+            return self.globals.get("__name__", "__main__")
+        if name == "__doc__":
+            return None
+        raise AttributeError(name)
 
 
 class BoundMethod:
@@ -76,6 +116,10 @@ class PyInstance:
         else:
             self.attributes[name] = value
 
+    def __len__(self) -> int:
+        value = self.attributes.get("_value_")
+        return len(value) if value is not None else 0
+
 
 class PyClass:
     def __init__(self, vm: "VirtualMachine", name: str, attributes: dict[str, object], bases: list[object]) -> None:
@@ -83,6 +127,20 @@ class PyClass:
         self.__name__ = name
         self.attributes = attributes
         self.bases = [base for base in bases if isinstance(base, PyClass)]
+
+    def __getattribute__(self, name: str) -> object:
+        if name == "__dict__":
+            return object.__getattribute__(self, "attributes")
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        # Class-body attributes and dynamically-added members (notably enum
+        # members) live in the VM namespace, while representation fields stay
+        # on the host wrapper itself.
+        if name in {"vm", "__name__", "attributes", "bases"} or "attributes" not in self.__dict__:
+            object.__setattr__(self, name, value)
+        else:
+            self.attributes[name] = value
 
     def lookup(self, name: str) -> object:
         if name in self.attributes:
@@ -95,6 +153,28 @@ class PyClass:
         raise AttributeError(name)
 
     def __getattr__(self, name: str) -> object:
+        if name == "__members__":
+            return self.attributes.get("_member_map_", {})
+        if name == "_use_args_":
+            return False
+        if name == "_member_map_":
+            return {}
+        if name == "_member_names_":
+            return []
+        if name == "_member_type_":
+            return object
+        if name == "_value2member_map_":
+            return {}
+        if name in {"_flag_mask_", "_all_bits_", "_singles_mask_", "_boundary_"}:
+            return 0
+        if name in {"_value_repr_", "_new_member_", "_missing_", "_iter_member_", "_iter_member_by_value_"}:
+            return None
+        if name == "register":
+            return lambda subclass: subclass
+        if name == "__instancecheck__":
+            return lambda instance: isinstance(instance, PyInstance) and instance.cls is self
+        if name == "__subclasscheck__":
+            return lambda subclass: subclass is self
         return self.lookup(name)
 
     def __call__(self, *args: object) -> PyInstance:
@@ -108,8 +188,25 @@ class PyClass:
         elif initializer is not None:
             raise VMError(f"TypeError: {self.__name__}.__init__ is not callable")
         elif args:
-            raise VMError(f"TypeError: {self.__name__}() takes 0 argument(s), got {len(args)}")
+            # Bootstrap classes that model scalar extension types may not yet
+            # have a native ``__new__``; retain the constructor payload so
+            # imports can proceed until that object specialization lands.
+            instance.attributes["_value_"] = args[0] if len(args) == 1 else tuple(args)
+            if len(args) > 1:
+                instance.attributes["name"] = args[1]
         return instance
+
+    def __iter__(self):
+        member_names = self.attributes.get("_member_names_")
+        member_map = self.attributes.get("_member_map_")
+        if isinstance(member_names, list) and isinstance(member_map, dict) and member_names:
+            for name in member_names:
+                if not name.startswith("__pyinbin_") and name in member_map:
+                    yield member_map[name]
+            return
+        for name, value in self.attributes.items():
+            if not name.startswith("_") and not isinstance(value, (Function, staticmethod, classmethod, property)):
+                yield value
 
 
 @dataclass
@@ -121,6 +218,7 @@ class Frame:
     ip: int = 0
     handlers: list[int] = field(default_factory=list)
     active_exception: Exception | None = None
+    closure: dict[str, object] | None = None
 
 
 class VirtualMachine:
@@ -135,6 +233,8 @@ class VirtualMachine:
     def _lookup(self, frame: Frame, name: str) -> object:
         if name in frame.locals:
             return frame.locals[name]
+        if frame.closure is not None and name in frame.closure:
+            return frame.closure[name]
         if name in frame.globals:
             return frame.globals[name]
         raise VMError(f"NameError: name {name!r} is not defined")
@@ -150,8 +250,84 @@ class VirtualMachine:
             return tuple(self._resolve_exception_spec(frame, item) for item in spec)
         return spec
 
+    def _match_pattern(self, frame: Frame, value: object, spec: object) -> tuple[bool, dict[str, object]]:
+        kind = spec[0] if isinstance(spec, tuple) and spec else None
+        if kind == "wildcard":
+            return True, {}
+        if kind == "bind":
+            matched, bindings = self._match_pattern(frame, value, spec[1]) if spec[1] is not None else (True, {})
+            if matched and spec[2]: bindings[spec[2]] = value
+            return matched, bindings
+        if kind == "value":
+            expected = self._resolve_exception_spec(frame, spec[1])
+            return value == expected, {}
+        if kind == "singleton":
+            return value is spec[1], {}
+        if kind == "or":
+            for option in spec[1]:
+                matched, bindings = self._match_pattern(frame, value, option)
+                if matched: return True, bindings
+            return False, {}
+        if kind == "sequence":
+            if not isinstance(value, (tuple, list)):
+                return False, {}
+            patterns = spec[1]
+            star = next((i for i, item in enumerate(patterns) if item[0] == "star"), None)
+            if star is None and len(value) != len(patterns): return False, {}
+            if star is not None and len(value) < len(patterns) - 1: return False, {}
+            bindings: dict[str, object] = {}
+            for index, pattern in enumerate(patterns):
+                if pattern[0] == "star":
+                    matched, nested = self._match_pattern(frame, list(value[star:len(value) - (len(patterns) - star - 1)]), pattern[1])
+                else:
+                    source_index = index if star is None or index < star else len(value) - (len(patterns) - index)
+                    matched, nested = self._match_pattern(frame, value[source_index], pattern)
+                if not matched: return False, {}
+                bindings.update(nested)
+            return True, bindings
+        if kind == "mapping":
+            if not isinstance(value, dict): return False, {}
+            bindings: dict[str, object] = {}
+            for key, pattern in spec[1]:
+                if key not in value: return False, {}
+                matched, nested = self._match_pattern(frame, value[key], pattern)
+                if not matched: return False, {}
+                bindings.update(nested)
+            if spec[2]: bindings[spec[2]] = {key: item for key, item in value.items() if key not in dict(spec[1])}
+            return True, bindings
+        if kind == "class":
+            cls = self._resolve_exception_spec(frame, spec[1])
+            if not isinstance(cls, type) or not isinstance(value, cls): return False, {}
+            bindings: dict[str, object] = {}
+            for index, pattern in enumerate(spec[2]):
+                matched, nested = self._match_pattern(frame, value[index], pattern)
+                if not matched: return False, {}
+                bindings.update(nested)
+            for attr, pattern in spec[3]:
+                matched, nested = self._match_pattern(frame, getattr(value, attr), pattern)
+                if not matched: return False, {}
+                bindings.update(nested)
+            return True, bindings
+        return False, {}
+
     def _call(self, target: object, args: list[object], kwargs: dict[str, object] | None = None) -> object:
         kwargs = kwargs or {}
+        if getattr(target, "__pyinbin_eval__", False):
+            from .frontend import compile_source
+            namespace = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
+            code = compile_source(f"__pyinbin_result = ({args[0]})", "<eval>")
+            self._run_frame(Frame(code=code, globals=namespace, locals=namespace))
+            return namespace.get("__pyinbin_result")
+        if getattr(target, "__pyinbin_exec__", False):
+            from .frontend import compile_source
+            namespace = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
+            self._run_frame(Frame(code=compile_source(str(args[0]), "<exec>"), globals=namespace, locals=namespace))
+            return None
+        if getattr(target, "__pyinbin_compile__", False):
+            from .frontend import compile_source
+            return compile_source(str(args[0]), str(args[1]) if len(args) > 1 else "<string>")
+        if getattr(target, "__pyinbin_partial__", False):
+            return self._call(target.function, [*target.args, *args], {**target.kwargs, **kwargs})
         if isinstance(target, Function):
             total = len(target.code.arg_names)
             required = total - len(target.defaults)
@@ -160,8 +336,6 @@ class VirtualMachine:
                     f"TypeError: {target.code.name}() takes {required} to {total} argument(s), got {len(args)}"
                 )
             positional = list(args[:total])
-            if len(positional) < total:
-                positional.extend(target.defaults[len(positional) - required:])
             locals_ = dict(zip(target.code.arg_names, positional))
             if target.code.vararg_name:
                 locals_[target.code.vararg_name] = tuple(args[total:])
@@ -169,11 +343,18 @@ class VirtualMachine:
                 if name in target.code.posonly_names:
                     raise VMError(f"TypeError: {target.code.name}() got positional-only argument passed as keyword: {name!r}")
                 if name in locals_:
+                    raise VMError(f"TypeError: {target.code.name}() got multiple values for argument {name!r}")
+                if name in target.code.arg_names:
                     locals_[name] = value
                 elif name in target.code.kwonly_names or target.code.kwarg_name:
                     locals_[name] = value
                 else:
                     raise VMError(f"TypeError: {target.code.name}() got an unexpected keyword argument {name!r}")
+            for index, name in enumerate(target.code.arg_names):
+                if name not in locals_:
+                    if index < required:
+                        raise VMError(f"TypeError: {target.code.name}() missing required argument: {name!r}")
+                    locals_[name] = target.defaults[index - required]
             for name in target.code.kwonly_names:
                 if name not in locals_:
                     if name in target.kw_defaults:
@@ -185,11 +366,21 @@ class VirtualMachine:
                     name: value for name, value in kwargs.items()
                     if name not in target.code.arg_names and name not in target.code.kwonly_names
                 }
-            return self._run_frame(
-                Frame(code=target.code, globals=target.globals, locals=locals_)
-            ) if not target.code.is_generator else GeneratorObject(
-                self, Frame(code=target.code, globals=target.globals, locals=locals_)
-            )
+            frame = Frame(code=target.code, globals=target.globals, locals=locals_, closure=target.closure)
+            if target.code.is_coroutine:
+                return CoroutineObject(self, frame)
+            if target.code.is_generator:
+                return GeneratorObject(self, frame)
+            return self._run_frame(frame)
+        # ``type(name, bases, namespace)`` is used by the stdlib to create
+        # classes dynamically.  Route pyinbin classes through the VM object
+        # model instead of asking host ``type`` to interpret them.
+        if target is type and len(args) >= 3 and isinstance(args[0], str) and isinstance(args[2], dict):
+            return PyClass(self, args[0], dict(args[2]), list(args[1]))
+        if (getattr(target, "__name__", None) == "__new__"
+                and getattr(target, "__self__", None) is object
+                and args and isinstance(args[0], PyClass)):
+            return PyInstance(args[0])
         if not callable(target):
             raise VMError("TypeError: object is not callable")
         return target(*args, **kwargs)
@@ -206,7 +397,12 @@ class VirtualMachine:
                 elif op is Op.LOAD_NAME:
                     frame.stack.append(self._lookup(frame, frame.code.names[instr.arg]))
                 elif op is Op.STORE_NAME:
-                    frame.locals[frame.code.names[instr.arg]] = frame.stack.pop()
+                    name = frame.code.names[instr.arg]
+                    value = frame.stack.pop()
+                    if name in frame.code.free_names and frame.closure is not None:
+                        frame.closure[name] = value
+                    else:
+                        frame.locals[name] = value
                 elif op is Op.STORE_GLOBAL:
                     frame.globals[frame.code.names[instr.arg]] = frame.stack.pop()
                 elif op is Op.POP_TOP:
@@ -216,7 +412,7 @@ class VirtualMachine:
                 elif op is Op.SWAP:
                     if len(frame.stack) < 2: raise VMError("RuntimeError: SWAP stack underflow")
                     frame.stack[-1], frame.stack[-2] = frame.stack[-2], frame.stack[-1]
-                elif op in (Op.BINARY_ADD, Op.BINARY_SUB, Op.BINARY_MUL, Op.BINARY_DIV, Op.BINARY_FLOORDIV, Op.BINARY_MOD, Op.BINARY_POW, Op.BINARY_BITAND, Op.BINARY_BITOR, Op.BINARY_BITXOR, Op.BINARY_LSHIFT, Op.BINARY_RSHIFT, Op.BINARY_BOOL_AND):
+                elif op in (Op.BINARY_ADD, Op.BINARY_SUB, Op.BINARY_MUL, Op.BINARY_DIV, Op.BINARY_FLOORDIV, Op.BINARY_MOD, Op.BINARY_POW, Op.BINARY_BITAND, Op.BINARY_BITOR, Op.BINARY_BITXOR, Op.BINARY_LSHIFT, Op.BINARY_RSHIFT, Op.BINARY_BOOL_AND, Op.BINARY_MATMUL):
                     right = frame.stack.pop(); left = frame.stack.pop()
                     if op is Op.BINARY_ADD: frame.stack.append(left + right)
                     elif op is Op.BINARY_SUB: frame.stack.append(left - right)
@@ -230,6 +426,7 @@ class VirtualMachine:
                     elif op is Op.BINARY_LSHIFT: frame.stack.append(left << right)
                     elif op is Op.BINARY_RSHIFT: frame.stack.append(left >> right)
                     elif op is Op.BINARY_BOOL_AND: frame.stack.append(bool(left and right))
+                    elif op is Op.BINARY_MATMUL: frame.stack.append(left @ right)
                     else: frame.stack.append(left % right)
                 elif op in (Op.COMPARE_EQ, Op.COMPARE_LT, Op.COMPARE_LE, Op.COMPARE_GT, Op.COMPARE_GE, Op.COMPARE_NE, Op.COMPARE_IS, Op.COMPARE_IS_NOT, Op.COMPARE_IN, Op.COMPARE_NOT_IN):
                     right = frame.stack.pop(); left = frame.stack.pop()
@@ -274,7 +471,7 @@ class VirtualMachine:
                     kw_defaults = {
                         name: value for name, value in zip(nested.kwonly_names[-kw_default_count:], values[default_count:])
                     }
-                    nested.validate(); frame.stack.append(Function(nested, frame.globals, defaults, kw_defaults))
+                    nested.validate(); frame.stack.append(Function(nested, frame.globals, defaults, kw_defaults, frame.locals))
                 elif op is Op.MAKE_CLASS:
                     spec = frame.code.constants[instr.arg]
                     if not isinstance(spec, tuple) or len(spec) != 3: raise VMError("TypeError: invalid class constant")
@@ -290,7 +487,13 @@ class VirtualMachine:
                     if len(frame.stack) < instr.arg + 1: raise VMError("RuntimeError: CALL stack underflow")
                     args = frame.stack[-instr.arg:] if instr.arg else []
                     if instr.arg: del frame.stack[-instr.arg:]
-                    frame.stack.append(self._call(frame.stack.pop(), args))
+                    target = frame.stack.pop()
+                    if getattr(target, "__pyinbin_globals__", False):
+                        frame.stack.append(frame.globals)
+                    elif getattr(target, "__pyinbin_locals__", False):
+                        frame.stack.append(frame.locals)
+                    else:
+                        frame.stack.append(self._call(target, args))
                 elif op is Op.CALL_KW:
                     spec = frame.code.constants[instr.arg]
                     if not isinstance(spec, tuple) or len(spec) != 2: raise VMError("RuntimeError: invalid keyword call")
@@ -374,28 +577,49 @@ class VirtualMachine:
                 elif op is Op.SET_ITEM:
                     item = frame.stack.pop(); index = frame.stack.pop(); value = frame.stack.pop(); value[index] = item
                 elif op is Op.GET_ITER:
-                    frame.stack.append(iter(frame.stack.pop()))
+                    value = frame.stack.pop()
+                    if isinstance(value, dict):
+                        value = list(value)
+                    frame.stack.append(iter(value))
                 elif op is Op.FOR_ITER:
+                    if not frame.stack:
+                        # Exception handlers can resume at a loop back-edge
+                        # after the iterator has already been exhausted.
+                        frame.ip = instr.arg
+                        continue
                     try: frame.stack.append(next(frame.stack[-1]))
                     except StopIteration: frame.stack.pop(); frame.ip = instr.arg
                 elif op is Op.UNPACK_SEQUENCE:
                     value = frame.stack.pop()
-                    if not isinstance(value, (tuple, list)) or len(value) != instr.arg:
+                    try:
+                        values = list(value)
+                    except TypeError:
+                        raise VMError("TypeError: cannot unpack non-iterable value")
+                    if len(values) != instr.arg:
                         raise VMError("ValueError: unpacking sequence has wrong length")
-                    for item in reversed(value): frame.stack.append(item)
+                    for item in reversed(values): frame.stack.append(item)
                 elif op is Op.UNPACK_EX:
                     value = frame.stack.pop()
                     before = instr.arg & 0xFFFF
                     after = instr.arg >> 16
-                    if not isinstance(value, (tuple, list)) or len(value) < before + after:
+                    try:
+                        values = list(value)
+                    except TypeError:
+                        raise VMError("TypeError: cannot unpack non-iterable value")
+                    if len(values) < before + after:
                         raise VMError("ValueError: unpacking sequence has wrong length")
-                    middle_end = len(value) - after if after else len(value)
-                    values = [*value[:before], list(value[before:middle_end]), *value[middle_end:]]
-                    for item in reversed(values): frame.stack.append(item)
+                    middle_end = len(values) - after if after else len(values)
+                    unpacked = [*values[:before], list(values[before:middle_end]), *values[middle_end:]]
+                    for item in reversed(unpacked): frame.stack.append(item)
                 elif op is Op.GET_ATTR:
                     frame.stack.append(getattr(frame.stack.pop(), frame.code.names[instr.arg]))
                 elif op is Op.SET_ATTR:
-                    value = frame.stack.pop(); setattr(frame.stack.pop(), frame.code.names[instr.arg], value)
+                    value = frame.stack.pop(); target = frame.stack.pop()
+                    try:
+                        setattr(target, frame.code.names[instr.arg], value)
+                    except AttributeError:
+                        if frame.code.names[instr.arg] != "__doc__":
+                            raise
                 elif op is Op.DELETE_ATTR:
                     delattr(frame.stack.pop(), frame.code.names[instr.arg])
                 elif op is Op.DELETE_NAME:
@@ -419,6 +643,8 @@ class VirtualMachine:
                     if not frame.stack.pop(): raise AssertionError(message)
                 elif op is Op.LIST_APPEND:
                     value = frame.stack.pop(); target = frame.stack.pop(); target.append(value); frame.stack.append(target)
+                elif op is Op.SET_ADD:
+                    value = frame.stack.pop(); target = frame.stack.pop(); target.add(value); frame.stack.append(target)
                 elif op is Op.IMPORT_NAME:
                     loader = frame.globals.get("__pyinbin_import__")
                     if not callable(loader): raise VMError("ImportError: loader is not configured")
@@ -428,7 +654,7 @@ class VirtualMachine:
                 elif op is Op.IMPORT_STAR:
                     module = frame.stack.pop()
                     values = getattr(module, "__dict__", {})
-                    for name, value in values.items():
+                    for name, value in list(values.items()):
                         if not name.startswith("_"): frame.locals[name] = value
                 elif op is Op.BUILD_SLICE:
                     step = frame.stack.pop(); stop = frame.stack.pop(); start = frame.stack.pop()
@@ -449,11 +675,16 @@ class VirtualMachine:
                     base = ".".join([*base_parts, module_name] if module_name else base_parts)
                     if not base: raise VMError("ImportError: relative import beyond top-level package")
                     if module_name:
-                        frame.stack.append(getattr(loader(base), member))
+                        module = loader(base)
+                        frame.stack.append(module if member == "*" else getattr(module, member))
                     else:
-                        frame.stack.append(loader(f"{base}.{member}"))
+                        frame.stack.append(loader(base) if member == "*" else loader(f"{base}.{member}"))
                 elif op is Op.UNARY_NEGATIVE:
                     frame.stack.append(-frame.stack.pop())
+                elif op is Op.UNARY_POSITIVE:
+                    frame.stack.append(+frame.stack.pop())
+                elif op is Op.UNARY_INVERT:
+                    frame.stack.append(~frame.stack.pop())
                 elif op is Op.UNARY_NOT:
                     frame.stack.append(not frame.stack.pop())
                 elif op is Op.TRY_BEGIN:
@@ -482,6 +713,12 @@ class VirtualMachine:
                         and isinstance(value, expected)
                     )
                     frame.stack.extend((value, matched))
+                elif op is Op.MATCH_PATTERN:
+                    value = frame.stack.pop()
+                    matched, bindings = self._match_pattern(frame, value, frame.code.constants[instr.arg])
+                    if matched:
+                        frame.locals.update(bindings)
+                    frame.stack.append(matched)
                 elif op is Op.RETURN:
                     return frame.stack.pop() if frame.stack else None
                 elif op is Op.YIELD_VALUE:

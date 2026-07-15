@@ -84,6 +84,11 @@ class Op(IntEnum):
     BUILD_TUPLE_UNPACK = 105
     BUILD_SET_UNPACK = 106
     BUILD_DICT_UNPACK = 107
+    SET_ADD = 108
+    BINARY_MATMUL = 109
+    UNARY_POSITIVE = 110
+    UNARY_INVERT = 111
+    MATCH_PATTERN = 112
     COMPARE_NE = 25
     COMPARE_IS = 26
     COMPARE_IS_NOT = 27
@@ -109,12 +114,14 @@ class CodeObject:
     kwarg_name: str | None = None
     posonly_names: list[str] = field(default_factory=list)
     is_generator: bool = False
+    is_coroutine: bool = False
+    free_names: list[str] = field(default_factory=list)
 
     def validate(self) -> None:
         for offset, instr in enumerate(self.instructions):
             if not isinstance(instr.op, Op):
                 raise ValueError(f"{self.name}: invalid opcode at {offset}")
-            if instr.op in (Op.LOAD_CONST, Op.MAKE_FUNCTION, Op.MAKE_CLASS, Op.MATCH_EXCEPTION) and not 0 <= instr.arg < len(self.constants):
+            if instr.op in (Op.LOAD_CONST, Op.MAKE_FUNCTION, Op.MAKE_CLASS, Op.MATCH_EXCEPTION, Op.MATCH_PATTERN) and not 0 <= instr.arg < len(self.constants):
                 raise ValueError(f"{self.name}: constant index out of range at {offset}")
             if instr.op in (Op.LOAD_NAME, Op.STORE_NAME, Op.STORE_GLOBAL, Op.GET_ATTR, Op.SET_ATTR, Op.DELETE_ATTR, Op.DELETE_NAME) and not 0 <= instr.arg < len(self.names):
                 raise ValueError(f"{self.name}: name index out of range at {offset}")

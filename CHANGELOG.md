@@ -67,6 +67,13 @@ deliverable.
   and required keyword-only parameters.
 - Added the CPython official `Lib/test` conformance harness and a required
   release gate for 2.0.0 readiness.
+- Expanded pyinbin control flow and object semantics with closure capture,
+  coroutine frames, structural `match`, starred unpacking, boolean
+  short-circuit cleanup, dynamic class creation, enum member iteration, and
+  relative star imports.
+- Added an explicit bootstrap native-module registry for `sys`, `_io`,
+  `_collections`, `_functools`, `_ast`, `_sre`, and related runtime modules;
+  this remains a staged bridge toward the standalone native runtime.
 
 - **27 new stdlib modules** — full implementations of `token`, `tokenize`,
   `shelve` (pickle-backed, typed getters/setters for complex object persistence),
