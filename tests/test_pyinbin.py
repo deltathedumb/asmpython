@@ -127,6 +127,12 @@ class PyinbinSourceTests(unittest.TestCase):
                 "plugin = importlib.import_module('plugin')\n"
                 "assert plugin.VALUE == 42\n"
                 "assert importlib.find_spec('plugin').name == 'plugin'\n"
+                "assert importlib.util.find_spec('plugin').name == 'plugin'\n"
+                "spec = importlib.util.spec_from_file_location('plugin_copy', 'plugin.py')\n"
+                "copy = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(copy)\n"
+                "assert copy.VALUE == 42\n"
+                "assert importlib.reload(plugin).VALUE == 42\n"
                 "print(plugin.VALUE)\n",
                 encoding="utf-8",
             )

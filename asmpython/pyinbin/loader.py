@@ -144,6 +144,29 @@ class SourceLoader:
         if loaded is not module and hasattr(module, "__dict__"):
             module.__dict__.update(loaded.__dict__)
 
+    def load_file(self, name: str, filename: str, module: object) -> object:
+        """Execute an explicitly located source file into a supplied module."""
+        file_path = Path(filename)
+        if not file_path.is_file() and self.source_roots:
+            file_path = self.source_roots[0] / file_path
+        source = file_path.read_text(encoding="utf-8")
+        namespace = getattr(module, "__dict__", None)
+        if not isinstance(namespace, dict):
+            namespace = {}
+            for key, value in {
+                "__name__": name, "__file__": str(file_path),
+            }.items():
+                setattr(module, key, value)
+        namespace.setdefault("__name__", name)
+        namespace.setdefault("__file__", str(file_path))
+        namespace.setdefault("__doc__", None)
+        namespace["__package__"] = name.rsplit(".", 1)[0] if "." in name else ""
+        namespace.update(default_builtins(self._import))
+        namespace["__pyinbin_import__"] = self.load
+        namespace["__pyinbin_loader__"] = self
+        VirtualMachine().run(compile_source(source, str(file_path)), namespace)
+        return module
+
     def invalidate_caches(self) -> None:
         return None
 
@@ -326,6 +349,13 @@ class SourceLoader:
         elif name == "threading":
             namespace.setdefault("excepthook", lambda args: None)
             namespace.setdefault("ExceptHookArgs", SimpleNamespace)
+
+        if name == "importlib":
+            # CPython exposes these commonly used submodules on the package
+            # after importlib itself is initialized.
+            self.load("importlib.util")
+            self.load("importlib.abc")
+            self.load("importlib.machinery")
 
         if parent is not None and child is not None:
             setattr(parent, child, module)

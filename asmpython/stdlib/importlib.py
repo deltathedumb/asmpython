@@ -208,6 +208,11 @@ class FileLoader(SourceLoader):
     def is_package(self, fullname: str) -> bool:
         return self.path.endswith("__init__.py")
 
+    def exec_module(self, module: object) -> None:
+        active = _loader()
+        if hasattr(active, "load_file"):
+            active.load_file(self.name, self.path, module)
+
 
 class SourceFileLoader(FileLoader):
     pass
