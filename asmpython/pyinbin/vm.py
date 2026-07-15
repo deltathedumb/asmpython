@@ -75,7 +75,7 @@ class VirtualMachine:
                 frame.locals[frame.code.names[instr.arg]] = frame.stack.pop()
             elif op is Op.POP_TOP:
                 frame.stack.pop()
-            elif op in (Op.BINARY_ADD, Op.BINARY_SUB, Op.BINARY_MUL, Op.BINARY_DIV, Op.BINARY_FLOORDIV, Op.BINARY_MOD):
+            elif op in (Op.BINARY_ADD, Op.BINARY_SUB, Op.BINARY_MUL, Op.BINARY_DIV, Op.BINARY_FLOORDIV, Op.BINARY_MOD, Op.BINARY_POW):
                 right = frame.stack.pop()
                 left = frame.stack.pop()
                 if op is Op.BINARY_ADD:
@@ -88,9 +88,11 @@ class VirtualMachine:
                     frame.stack.append(left / right)
                 elif op is Op.BINARY_FLOORDIV:
                     frame.stack.append(left // right)
+                elif op is Op.BINARY_POW:
+                    frame.stack.append(left ** right)
                 else:
                     frame.stack.append(left % right)
-            elif op in (Op.COMPARE_EQ, Op.COMPARE_LT, Op.COMPARE_LE, Op.COMPARE_GT, Op.COMPARE_GE):
+            elif op in (Op.COMPARE_EQ, Op.COMPARE_LT, Op.COMPARE_LE, Op.COMPARE_GT, Op.COMPARE_GE, Op.COMPARE_NE, Op.COMPARE_IS, Op.COMPARE_IS_NOT, Op.COMPARE_IN, Op.COMPARE_NOT_IN):
                 right = frame.stack.pop()
                 left = frame.stack.pop()
                 if op is Op.COMPARE_EQ:
@@ -101,8 +103,18 @@ class VirtualMachine:
                     frame.stack.append(left <= right)
                 elif op is Op.COMPARE_GT:
                     frame.stack.append(left > right)
-                else:
+                elif op is Op.COMPARE_GE:
                     frame.stack.append(left >= right)
+                elif op is Op.COMPARE_NE:
+                    frame.stack.append(left != right)
+                elif op is Op.COMPARE_IS:
+                    frame.stack.append(left is right)
+                elif op is Op.COMPARE_IS_NOT:
+                    frame.stack.append(left is not right)
+                elif op is Op.COMPARE_IN:
+                    frame.stack.append(left in right)
+                else:
+                    frame.stack.append(left not in right)
             elif op is Op.JUMP:
                 frame.ip = instr.arg
             elif op is Op.JUMP_IF_FALSE:
@@ -137,6 +149,31 @@ class VirtualMachine:
                 if count:
                     del frame.stack[-count:]
                 frame.stack.append(dict(zip(values[::2], values[1::2])))
+            elif op in (Op.BUILD_TUPLE, Op.BUILD_SET):
+                if len(frame.stack) < instr.arg:
+                    raise VMError("RuntimeError: collection stack underflow")
+                values = frame.stack[-instr.arg:] if instr.arg else []
+                if instr.arg:
+                    del frame.stack[-instr.arg:]
+                frame.stack.append(tuple(values) if op is Op.BUILD_TUPLE else set(values))
+            elif op is Op.GET_ITEM:
+                index = frame.stack.pop()
+                value = frame.stack.pop()
+                frame.stack.append(value[index])
+            elif op is Op.SET_ITEM:
+                item = frame.stack.pop()
+                index = frame.stack.pop()
+                value = frame.stack.pop()
+                value[index] = item
+            elif op is Op.GET_ITER:
+                frame.stack.append(iter(frame.stack.pop()))
+            elif op is Op.FOR_ITER:
+                iterator = frame.stack[-1]
+                try:
+                    frame.stack.append(next(iterator))
+                except StopIteration:
+                    frame.stack.pop()
+                    frame.ip = instr.arg
             elif op is Op.GET_ATTR:
                 frame.stack.append(getattr(frame.stack.pop(), frame.code.names[instr.arg]))
             elif op is Op.SET_ATTR:

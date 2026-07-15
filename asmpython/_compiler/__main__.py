@@ -649,6 +649,26 @@ def cmd_build(args: argparse.Namespace) -> int:
     _source_dir = source_path.resolve().parent
     _entry_path = source_path.resolve()
 
+    def pyinbin_fallback(native_error: Exception) -> int:
+        """Try target-neutral execution after native codegen rejects source."""
+        from asmpython.pyinbin import run_source
+
+        try:
+            run_source(source_path)
+        except Exception as fallback_error:
+            print(
+                f"asmpython: native compilation failed: {native_error}\n"
+                f"asmpython: pyinbin fallback failed: {fallback_error}",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            "asmpython: native backend rejected this source; "
+            "pyinbin fallback executed successfully (no native artifact produced)",
+            file=sys.stderr,
+        )
+        return 0
+
     try:
         if single:
             compile_source(
@@ -707,6 +727,8 @@ def cmd_build(args: argparse.Namespace) -> int:
         else:
             print(e.format(src, str(source_path)), file=sys.stderr)
         return 1
+    except NotImplementedError as e:
+        return pyinbin_fallback(e)
     except Exception as e:
         print(f"asmpython: {e}", file=sys.stderr)
         return 1

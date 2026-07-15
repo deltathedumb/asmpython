@@ -24,6 +24,11 @@ conformance. A build must fail clearly if a module requires pyinbin but the
 selected target does not package a compatible pyinbin runtime. It must never
 silently run a partial interpreter or fall back to CPython.
 
+For a native backend rejection (`NotImplementedError` in code generation), the
+CLI now attempts the same source through pyinbin. A successful fallback is an
+execution result, not a fabricated native artifact; if pyinbin also rejects the
+source, both diagnostics are reported and the build fails.
+
 The eventual project metadata is:
 
 ```json

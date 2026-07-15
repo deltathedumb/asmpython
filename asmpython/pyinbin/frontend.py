@@ -24,6 +24,7 @@ _BINARY_OPS = {
     ast.Div: Op.BINARY_DIV,
     ast.FloorDiv: Op.BINARY_FLOORDIV,
     ast.Mod: Op.BINARY_MOD,
+    ast.Pow: Op.BINARY_POW,
 }
 _COMPARE_OPS = {
     ast.Eq: Op.COMPARE_EQ,
@@ -31,6 +32,11 @@ _COMPARE_OPS = {
     ast.LtE: Op.COMPARE_LE,
     ast.Gt: Op.COMPARE_GT,
     ast.GtE: Op.COMPARE_GE,
+    ast.NotEq: Op.COMPARE_NE,
+    ast.Is: Op.COMPARE_IS,
+    ast.IsNot: Op.COMPARE_IS_NOT,
+    ast.In: Op.COMPARE_IN,
+    ast.NotIn: Op.COMPARE_NOT_IN,
 }
 
 
@@ -93,12 +99,24 @@ class _Lowerer:
             for element in node.elts:
                 self.expr(element)
             self.emit(Op.BUILD_LIST, len(node.elts))
+        elif isinstance(node, ast.Tuple):
+            for element in node.elts:
+                self.expr(element)
+            self.emit(Op.BUILD_TUPLE, len(node.elts))
+        elif isinstance(node, ast.Set):
+            for element in node.elts:
+                self.expr(element)
+            self.emit(Op.BUILD_SET, len(node.elts))
         elif isinstance(node, ast.Dict) and all(key is not None for key in node.keys):
             for key, value in zip(node.keys, node.values):
                 assert key is not None
                 self.expr(key)
                 self.expr(value)
             self.emit(Op.BUILD_DICT, len(node.keys))
+        elif isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Slice):
+            self.expr(node.value)
+            self.expr(node.slice)
+            self.emit(Op.GET_ITEM)
         elif isinstance(node, ast.Attribute):
             self.expr(node.value)
             self.emit(Op.GET_ATTR, self.name_index(node.attr))
@@ -120,6 +138,11 @@ class _Lowerer:
                 self.expr(node.targets[0].value)
                 self.expr(node.value)
                 self.emit(Op.SET_ATTR, self.name_index(node.targets[0].attr))
+            elif isinstance(node.targets[0], ast.Subscript) and not isinstance(node.targets[0].slice, ast.Slice):
+                self.expr(node.targets[0].value)
+                self.expr(node.targets[0].slice)
+                self.expr(node.value)
+                self.emit(Op.SET_ITEM)
             else:
                 self.expr(node.value)
                 self.store(node.targets[0])
@@ -131,6 +154,16 @@ class _Lowerer:
             else:
                 self.expr(node.value)
                 self.store(node.target)
+        elif isinstance(node, ast.AugAssign):
+            if type(node.op) not in _BINARY_OPS:
+                self.unsupported(node, "augmented operator")
+            if isinstance(node.target, ast.Name):
+                self.expr(node.target)
+                self.expr(node.value)
+                self.emit(_BINARY_OPS[type(node.op)])
+                self.store(node.target)
+            else:
+                self.unsupported(node, "augmented assignment target")
         elif isinstance(node, ast.Return):
             if node.value is None:
                 self.emit(Op.RETURN)
@@ -169,6 +202,22 @@ class _Lowerer:
             self.patch(exit_jump, end)
             for jump in self.loop_exits.pop():
                 self.patch(jump, end)
+        elif isinstance(node, ast.For) and not node.orelse:
+            self.expr(node.iter)
+            self.emit(Op.GET_ITER)
+            start = len(self.instructions)
+            exit_jump = self.emit(Op.FOR_ITER)
+            self.store(node.target)
+            self.loop_exits.append([])
+            for statement in node.body:
+                self.stmt(statement)
+            self.emit(Op.JUMP, start)
+            end = len(self.instructions)
+            self.patch(exit_jump, end)
+            for jump in self.loop_exits.pop():
+                self.patch(jump, end)
+        elif isinstance(node, ast.Pass):
+            return
         elif isinstance(node, ast.Break) and self.loop_exits:
             self.loop_exits[-1].append(self.emit(Op.JUMP))
         elif isinstance(node, ast.Import):

@@ -41,6 +41,11 @@ deliverable.
   tree with a qualified-module manifest and SHA-256 integrity records. Native
   runtime loading remains gated on the interpreter/VM implementation.
 
+- **Pyinbin fallback execution** — iteration, tuples, sets, subscripting,
+  augmented assignment, power, identity, membership, and richer comparisons
+  now run through the bootstrap VM. Native code-generation `NotImplementedError`
+  attempts pyinbin before reporting a combined failure.
+
 - **27 new stdlib modules** — full implementations of `token`, `tokenize`,
   `shelve` (pickle-backed, typed getters/setters for complex object persistence),
   `codecs`, `fileinput`, `linecache`, `mimetypes`, `socketserver`, `smtplib`,

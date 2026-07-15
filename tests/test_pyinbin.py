@@ -134,6 +134,22 @@ class PyinbinSourceTests(unittest.TestCase):
                 run_source(entry)
             self.assertEqual(output.getvalue(), "42\n")
 
+    def test_iteration_tuples_subscripts_and_augmented_assignment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "main.py"
+            entry.write_text(
+                "values = [1, 2, 3]\n"
+                "total = 0\n"
+                "for value in values:\n"
+                "    total += value\n"
+                "print((total, values[1]))\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                run_source(entry)
+            self.assertEqual(output.getvalue(), "(6, 2)\n")
+
 
 if __name__ == "__main__":
     unittest.main()

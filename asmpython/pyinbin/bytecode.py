@@ -34,6 +34,12 @@ class Op(IntEnum):
     MAKE_FUNCTION = 42
     BUILD_LIST = 50
     BUILD_DICT = 51
+    BUILD_TUPLE = 52
+    BUILD_SET = 53
+    GET_ITEM = 54
+    SET_ITEM = 55
+    GET_ITER = 56
+    FOR_ITER = 57
     GET_ATTR = 60
     SET_ATTR = 61
     IMPORT_NAME = 70
@@ -41,6 +47,12 @@ class Op(IntEnum):
     IMPORT_ROOT = 72
     UNARY_NEGATIVE = 80
     UNARY_NOT = 81
+    BINARY_POW = 16
+    COMPARE_NE = 25
+    COMPARE_IS = 26
+    COMPARE_IS_NOT = 27
+    COMPARE_IN = 28
+    COMPARE_NOT_IN = 29
 
 
 @dataclass(frozen=True)
