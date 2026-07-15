@@ -84,6 +84,10 @@ deliverable.
 - Corrected VM `eval`/`exec` handling of distinct globals and locals mappings,
   enabling stdlib code generators such as `dataclasses` to retrieve generated
   functions from their execution-local namespace.
+- Corrected interpreted-class dunder lookup precedence so explicit methods such
+  as `Thread.__init__` no longer resolve to the VM wrapper implementation.
+- Expanded thread bootstrap metadata, shutdown hooks, exception hooks, and
+  signal/time primitives used by the CPython conformance sweep.
 
 - **27 new stdlib modules** — full implementations of `token`, `tokenize`,
   `shelve` (pickle-backed, typed getters/setters for complex object persistence),

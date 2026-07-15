@@ -118,6 +118,9 @@ class SourceLoader:
             }
             for flag_name, value in flags.items():
                 namespace.setdefault(flag_name, value)
+        elif name == "threading":
+            namespace.setdefault("excepthook", lambda args: None)
+            namespace.setdefault("ExceptHookArgs", SimpleNamespace)
 
         if parent is not None and child is not None:
             setattr(parent, child, module)

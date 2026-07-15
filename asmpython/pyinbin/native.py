@@ -268,6 +268,8 @@ def create_builtin_module(
             "__stderr__": _MemoryTextIO(),
             "__stdin__": _MemoryTextIO(),
             "exc_info": lambda: (None, None, None),
+            "excepthook": lambda exc_type, exc_value, traceback: None,
+            "unraisablehook": lambda unraisable: None,
         })
     if name == "builtins":
         return _module(name, dict(builtins))
@@ -587,23 +589,45 @@ def create_builtin_module(
             def locked(self): return self._locked
             def __enter__(self): self.acquire(); return self
             def __exit__(self, exc_type, exc_value, traceback): self.release(); return False
+        class local:
+            pass
+        class ExceptHookArgs(tuple):
+            def __new__(cls, *args): return tuple.__new__(cls, args)
+            @property
+            def exc_type(self): return self[0] if len(self) > 0 else None
+            @property
+            def exc_value(self): return self[1] if len(self) > 1 else None
+            @property
+            def exc_traceback(self): return self[2] if len(self) > 2 else None
+            @property
+            def thread(self): return self[3] if len(self) > 3 else None
         class ThreadHandle:
             def __init__(self, result=None): self.result, self.done = result, True
             def join(self, timeout=-1): return None
             def is_done(self): return self.done
             def is_alive(self): return not self.done
             def get_exitcode(self): return 0
+            def _set_done(self): self.done = True
         def start_joinable_thread(function, *args, **kwargs):
             call_args = kwargs.pop("args", ()) or (args[0] if args else ())
             result = function(*call_args)
             return ThreadHandle(result)
         return _module(name, {
             "LockType": Lock, "RLock": Lock, "allocate_lock": Lock,
+            "local": local, "_local": local,
             "get_ident": lambda: 1, "get_native_id": lambda: 1,
+            "_get_main_thread_ident": lambda: 1, "_is_main_interpreter": lambda: True,
+            "set_name": lambda ident, name: None, "error": RuntimeError,
+            "_excepthook": lambda *args, **kwargs: None,
+            "_ExceptHookArgs": ExceptHookArgs,
+            "_set_sentinel": lambda: Lock(),
             "stack_size": lambda size=0: 0,
             "start_new_thread": lambda function, args, kwargs=None: function(*args, **(kwargs or {})) or 1,
             "start_joinable_thread": start_joinable_thread,
             "ThreadHandle": ThreadHandle,
+            "_ThreadHandle": ThreadHandle,
+            "_make_thread_handle": lambda ident: ThreadHandle(),
+            "_shutdown": lambda: None,
             "daemon_threads_allowed": lambda: True,
             "TIMEOUT_MAX": 1e9,
         })

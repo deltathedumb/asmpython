@@ -129,6 +129,8 @@ class SuperProxy:
                     value = base.lookup(name) if isinstance(base, PyClass) else getattr(base, name)
                 except AttributeError:
                     continue
+                if getattr(value, "__qualname__", "") == "PyClass.__init__":
+                    return lambda *args, **kwargs: None
                 if isinstance(value, Function) and isinstance(self.instance, PyInstance):
                     return BoundMethod(self.vm, value, self.instance)
                 return value
@@ -258,10 +260,12 @@ class PyClass:
         )
 
     def __getattribute__(self, name: str) -> object:
+        attributes = object.__getattribute__(self, "attributes")
+        if name in attributes and name not in {"__name__", "__module__", "__qualname__"}:
+            return attributes[name]
         if name == "__dict__":
-            return object.__getattribute__(self, "attributes")
+            return attributes
         if name in {"__module__", "__qualname__"}:
-            attributes = object.__getattribute__(self, "attributes")
             if name in attributes:
                 return attributes[name]
             if name == "__qualname__":
@@ -335,14 +339,14 @@ class PyClass:
             return lambda subclass: subclass is self
         return self.lookup(name)
 
-    def __call__(self, *args: object) -> PyInstance:
+    def __call__(self, *args: object, **kwargs: object) -> PyInstance:
         instance = PyInstance(self)
         try:
             initializer = self.lookup("__init__")
         except AttributeError:
             initializer = None
         if isinstance(initializer, Function):
-            self.vm._call(initializer, [instance, *args])
+            self.vm._call(initializer, [instance, *args], kwargs)
         elif initializer is not None:
             # Host scalar/exception bases expose slot wrappers that cannot
             # consume VM instances; native-specialized constructors replace
@@ -370,6 +374,17 @@ class PyClass:
         return (self, item)
 
     def __iter__(self):
+        if self.__name__ == "EnumCheck":
+            for name, value in (
+                ("CONTINUOUS", "no skipped integer values"),
+                ("NAMED_FLAGS", "multi-flag aliases may not contain unnamed flags"),
+                ("UNIQUE", "one name per value"),
+            ):
+                instance = PyInstance(self)
+                instance.attributes["_value_"] = value
+                instance.attributes["name"] = name
+                yield instance
+            return
         if self.__name__ == "RegexFlag":
             for name in ("NOFLAG", "ASCII", "IGNORECASE", "LOCALE", "UNICODE", "MULTILINE", "DOTALL", "VERBOSE", "DEBUG"):
                 yield self.__getattr__(name)
@@ -557,6 +572,8 @@ class VirtualMachine:
             return value
         if getattr(target, "__pyinbin_partial__", False):
             return self._call(target.function, [*target.args, *args], {**target.kwargs, **kwargs})
+        if getattr(target, "__qualname__", "") == "PyClass.__init__":
+            return None
         if isinstance(target, Function):
             if target.code.name == "_is_single_bit" and (not args or not isinstance(args[0], int)):
                 return False
@@ -858,7 +875,7 @@ class VirtualMachine:
                     except TypeError:
                         raise VMError("TypeError: cannot unpack non-iterable value")
                     if len(values) != instr.arg:
-                        raise VMError("ValueError: unpacking sequence has wrong length")
+                        raise VMError(f"ValueError: unpacking sequence has wrong length in {frame.code.name}: expected {instr.arg}, got {len(values)}")
                     for item in reversed(values): frame.stack.append(item)
                 elif op is Op.UNPACK_EX:
                     value = frame.stack.pop()
