@@ -308,6 +308,15 @@ class _Lowerer:
             self.emit(Op.CALL_KW, self.constant((tuple(arg_specs), names)))
         elif isinstance(node, ast.Lambda):
             nested = _Lowerer("<lambda>", [arg.arg for arg in [*node.args.posonlyargs, *node.args.args]])
+            nested.is_function = True
+            nested.parent_bound_names = (
+                set(getattr(self, "parent_bound_names", set()))
+                | set(self.bound_names)
+                | set(self.arg_names)
+                | set(getattr(self, "kwonly_names", []))
+                | ({getattr(self, "vararg_name")} if getattr(self, "vararg_name", None) else set())
+                | ({getattr(self, "kwarg_name")} if getattr(self, "kwarg_name", None) else set())
+            )
             nested.posonly_names = [arg.arg for arg in node.args.posonlyargs]
             nested.kwonly_names = [arg.arg for arg in node.args.kwonlyargs]
             nested.vararg_name = node.args.vararg.arg if node.args.vararg else None
@@ -318,6 +327,15 @@ class _Lowerer:
             if nested.kwarg_name:
                 nested.bound_names.add(nested.kwarg_name)
             nested.expr(node.body)
+            outer_bound = set(getattr(nested, "parent_bound_names", set()))
+            nested.free_names.update(
+                (set(nested.names) - nested.bound_names - nested.global_names) & outer_bound
+            )
+            if self.is_function:
+                self.free_names.update(
+                    name for name in nested.free_names
+                    if name not in self.bound_names and name not in self.global_names
+                )
             nested.emit(Op.RETURN)
             for default in node.args.defaults:
                 self.expr(default)
@@ -708,6 +726,14 @@ class _Lowerer:
             self.emit(Op.RAISE)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             nested = _Lowerer(node.name, [arg.arg for arg in [*node.args.posonlyargs, *node.args.args]])
+            nested.parent_bound_names = (
+                set(getattr(self, "parent_bound_names", set()))
+                | set(self.bound_names)
+                | set(self.arg_names)
+                | set(getattr(self, "kwonly_names", []))
+                | ({getattr(self, "vararg_name")} if getattr(self, "vararg_name", None) else set())
+                | ({getattr(self, "kwarg_name")} if getattr(self, "kwarg_name", None) else set())
+            )
             nested.defer_annotations = self.defer_annotations
             nested.is_function = True
             nested.is_coroutine = isinstance(node, ast.AsyncFunctionDef)
@@ -724,10 +750,15 @@ class _Lowerer:
                     | set(getattr(self, "kwonly_names", []))
                     | ({getattr(self, "vararg_name")} if getattr(self, "vararg_name", None) else set())
                     | ({getattr(self, "kwarg_name")} if getattr(self, "kwarg_name", None) else set())
+                    | set(getattr(self, "parent_bound_names", set()))
                 )
                 nested.free_names.update(
                     (set(nested.names) - nested.bound_names - nested.global_names)
                     & outer_bound
+                )
+                self.free_names.update(
+                    name for name in nested.free_names
+                    if name not in self.bound_names and name not in self.global_names
                 )
             nested.emit(Op.RETURN)
             for default in node.args.defaults:

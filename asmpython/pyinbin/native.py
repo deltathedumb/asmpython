@@ -9,10 +9,12 @@ provider without changing import semantics.
 from __future__ import annotations
 
 from types import ModuleType, SimpleNamespace
+import types as _bootstrap_types
 from typing import Callable
 from .bytecode import CodeObject
 import ast as _bootstrap_ast
 import contextlib as _bootstrap_contextlib
+import copy as _bootstrap_copy
 import gc as _bootstrap_gc
 import unicodedata as _bootstrap_unicodedata
 import binascii as _bootstrap_binascii
@@ -651,23 +653,31 @@ def create_builtin_module(
             __code__ = object()
             __globals__ = object()
         placeholder = _TypePlaceholder
+        try:
+            from .vm import BoundMethod, Function
+        except ImportError:
+            BoundMethod, Function = _bootstrap_types.MethodType, _bootstrap_types.FunctionType
         return _module(name, {
             "NoneType": type(None), "EllipsisType": type(Ellipsis), "NotImplementedType": type(NotImplemented),
             "SimpleNamespace": SimpleNamespace,
-            "GenericAlias": placeholder, "UnionType": placeholder,
+            "GenericAlias": _bootstrap_types.GenericAlias, "UnionType": _bootstrap_types.UnionType,
             "MappingProxyType": lambda mapping: mapping,
             "DynamicClassAttribute": property,
-            "FunctionType": placeholder, "MethodType": placeholder,
-            "BuiltinFunctionType": placeholder, "BuiltinMethodType": placeholder,
-            "MethodWrapperType": placeholder, "WrapperDescriptorType": placeholder,
-            "ClassMethodDescriptorType": placeholder, "MethodDescriptorType": placeholder,
-            "MemberDescriptorType": placeholder, "ModuleType": ModuleType,
+            "FunctionType": Function, "MethodType": BoundMethod,
+            "BuiltinFunctionType": _bootstrap_types.BuiltinFunctionType,
+            "BuiltinMethodType": _bootstrap_types.BuiltinMethodType,
+            "MethodWrapperType": _bootstrap_types.MethodWrapperType,
+            "WrapperDescriptorType": _bootstrap_types.WrapperDescriptorType,
+            "ClassMethodDescriptorType": _bootstrap_types.ClassMethodDescriptorType,
+            "MethodDescriptorType": _bootstrap_types.MethodDescriptorType,
+            "MemberDescriptorType": _bootstrap_types.MemberDescriptorType,
+            "ModuleType": _BootstrapModule,
             "CodeType": CodeObject,
-            "FrameType": placeholder, "TracebackType": placeholder,
-            "CellType": placeholder, "WrapperDescriptorType": placeholder,
-            "GetSetDescriptorType": placeholder,
-            "CoroutineType": placeholder, "GeneratorType": placeholder,
-            "AsyncGeneratorType": placeholder,
+            "FrameType": _FrameProxy, "TracebackType": _bootstrap_types.TracebackType,
+            "CellType": _bootstrap_types.CellType,
+            "GetSetDescriptorType": _bootstrap_types.GetSetDescriptorType,
+            "CoroutineType": _bootstrap_types.CoroutineType, "GeneratorType": _bootstrap_types.GeneratorType,
+            "AsyncGeneratorType": _bootstrap_types.AsyncGeneratorType,
         })
     if name == "_frozen_importlib":
         def resolve_name(module_name, package, level):
@@ -872,6 +882,7 @@ def create_builtin_module(
             traceback_module = module_cache.get("traceback")
             if traceback_module is None:
                 return captured
+            traceback_exception = None
             try:
                 traceback_exception = getattr(traceback_module, "TracebackException")
                 builder = getattr(traceback_exception, "from_exception")
@@ -879,13 +890,32 @@ def create_builtin_module(
                 formatter = getattr(trace, "format")
                 try:
                     lines = formatter(colorize=False)
-                except Exception:
+                except BaseException:
                     lines = formatter()
                 captured.errdisplay = "".join(lines).rstrip("\n")
-            except Exception:
+            except BaseException:
                 # Formatting is diagnostic only; capture_exception itself
                 # must still provide the stable type/message fields.
                 pass
+            if not hasattr(captured, "errdisplay") and traceback_exception is not None:
+                try:
+                    formatter = getattr(traceback_exception, "format")
+                    function = getattr(formatter, "function", formatter)
+                    closure = getattr(function, "closure", None) or {}
+                    for value in closure.values() if isinstance(closure, dict) else ():
+                        if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+                            captured.errdisplay = "".join(value).rstrip("\n")
+                            break
+                    if hasattr(captured, "errdisplay"):
+                        return captured
+                    dummy = SimpleNamespace()
+                    try:
+                        lines = formatter(dummy, colorize=False)
+                    except BaseException:
+                        lines = formatter(dummy)
+                    captured.errdisplay = "".join(lines).rstrip("\n")
+                except BaseException:
+                    pass
             return captured
 
         return _module(name, {
@@ -1249,10 +1279,99 @@ def create_builtin_module(
             for key in dir(_bootstrap_testcapi) if not key.startswith("__")
         })
     if name == "_testinternalcapi":
-        return _module(name, {
+        class _CrossInterpToken:
+            __slots__ = ("mode", "value")
+
+            def __init__(self, mode: str, value: object) -> None:
+                self.mode = mode
+                self.value = value
+
+        values = {
             key: getattr(_bootstrap_testinternalcapi, key)
             for key in dir(_bootstrap_testinternalcapi) if not key.startswith("__")
-        })
+        }
+
+        def _not_shareable(value: object, cause: BaseException | None = None) -> None:
+            interpreters = module_cache.get("_interpreters")
+            error_type = getattr(interpreters, "NotShareableError", RuntimeError)
+            message = f"object of type {type(value).__name__!r} is not shareable"
+            if cause is None:
+                raise error_type(message)
+            raise error_type(message) from cause
+
+        def _mode(args: tuple[object, ...], kwargs: dict[str, object]) -> str:
+            value = kwargs.get("mode", args[0] if args else "pickle")
+            return str(value)
+
+        def _is_xidata_shareable(value: object, *, nested: bool = False) -> bool:
+            if value is None or isinstance(value, (bool, float, str, bytes)):
+                return True
+            if isinstance(value, int):
+                return -(2**63) <= value <= 2**63 - 1
+            if isinstance(value, tuple):
+                return all(_is_xidata_shareable(item, nested=True) for item in value)
+            return False
+
+        def _clone(value: object) -> object:
+            try:
+                return _bootstrap_copy.deepcopy(value)
+            except BaseException:
+                return value
+
+        def get_crossinterp_data(value, *args, **kwargs):
+            mode = _mode(args, kwargs)
+            # Code objects are represented by the portable IR, not by the
+            # host CPython code-object ABI.
+            if isinstance(value, CodeObject):
+                if mode in {"code", "script", "script-pure"}:
+                    return _CrossInterpToken(mode, _clone(value))
+                _not_shareable(value)
+            if mode == "xidata":
+                if isinstance(value, int) and not _is_xidata_shareable(value):
+                    _not_shareable(value, OverflowError("int too large to share"))
+                if _is_xidata_shareable(value):
+                    return _CrossInterpToken(mode, value)
+                if isinstance(value, tuple):
+                    _not_shareable(value)
+                _not_shareable(value)
+            # ``code`` mode intentionally accepts only CodeObject values.
+            if mode == "code":
+                _not_shareable(value)
+            # Preserve VM functions/classes in the same process.  Their
+            # globals and portable code cannot be reconstructed by host
+            # pickle, but identity is the correct result for same-module
+            # definitions and is also safe for the tokenized API.
+            try:
+                from .vm import Function, PyClass
+                if mode in {"pickle", "func", "fallback"} and isinstance(value, (Function, PyClass)):
+                    return _CrossInterpToken(mode, value)
+            except ImportError:
+                pass
+            if mode in {"pickle", "fallback"}:
+                try:
+                    return _CrossInterpToken(mode, _clone(value))
+                except BaseException:
+                    _not_shareable(value)
+            if mode in {"script", "script-pure", "func"}:
+                _not_shareable(value)
+            try:
+                return _bootstrap_testinternalcapi.get_crossinterp_data(value, *args, **kwargs)
+            except BaseException as exc:
+                interpreters = module_cache.get("_interpreters")
+                error_type = getattr(interpreters, "NotShareableError", RuntimeError)
+                raise error_type(str(exc)) from exc
+        def restore_crossinterp_data(value, *args, **kwargs):
+            if isinstance(value, _CrossInterpToken):
+                return _clone(value.value) if value.mode in {"pickle", "fallback", "code", "script", "script-pure"} else value.value
+            try:
+                return _bootstrap_testinternalcapi.restore_crossinterp_data(value, *args, **kwargs)
+            except BaseException as exc:
+                interpreters = module_cache.get("_interpreters")
+                error_type = getattr(interpreters, "NotShareableError", RuntimeError)
+                raise error_type(str(exc)) from exc
+        values["get_crossinterp_data"] = get_crossinterp_data
+        values["restore_crossinterp_data"] = restore_crossinterp_data
+        return _module(name, values)
     if name == "_lsprof":
         return _module(name, {
             key: getattr(_bootstrap_lsprof, key)

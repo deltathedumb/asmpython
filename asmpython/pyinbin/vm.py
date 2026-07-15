@@ -126,6 +126,23 @@ class Function:
     kw_defaults: dict[str, object] = field(default_factory=dict)
     closure: dict[str, object] | None = None
     vm: "VirtualMachine | None" = None
+    _metadata: dict[str, object] = field(default_factory=dict, init=False, repr=False)
+
+    class _CodeDescriptor:
+        def __get__(self, instance: object, owner: type) -> object:
+            return self if instance is None else instance.code
+
+    class _GlobalsDescriptor:
+        def __get__(self, instance: object, owner: type) -> object:
+            return self if instance is None else instance.globals
+
+    __code__ = _CodeDescriptor()
+    __globals__ = _GlobalsDescriptor()
+
+    def __getattribute__(self, name: str) -> object:
+        if name == "__dict__":
+            return object.__getattribute__(self, "_metadata")
+        return object.__getattribute__(self, name)
 
     def __call__(self, *args: object, **kwargs: object) -> object:
         if self.vm is None:
@@ -133,6 +150,9 @@ class Function:
         return self.vm._call(self, list(args), kwargs)
 
     def __getattr__(self, name: str) -> object:
+        metadata = object.__getattribute__(self, "_metadata")
+        if name in metadata:
+            return metadata[name]
         if name == "__name__":
             return self.code.name.rsplit(".", 1)[-1]
         if name == "__qualname__":
@@ -1332,9 +1352,9 @@ class VirtualMachine:
                         name: value for name, value in zip(nested.kwonly_names[-kw_default_count:], values[default_count:])
                     }
                     closure = {
-                        name: frame.locals[name]
+                        name: (frame.locals[name] if name in frame.locals else frame.closure[name])
                         for name in nested.free_names
-                        if name in frame.locals
+                        if name in frame.locals or (frame.closure is not None and name in frame.closure)
                     }
                     nested.validate(); frame.stack.append(Function(nested, frame.globals, defaults, kw_defaults, closure, self))
                 elif op is Op.MAKE_CLASS:
