@@ -81,6 +81,9 @@ deliverable.
 - Added VM support for generic class subscription, host scalar method
   delegation, class `__bases__`/`__mro__` metadata, and relative import
   `__import__` fallback resolution.
+- Corrected VM `eval`/`exec` handling of distinct globals and locals mappings,
+  enabling stdlib code generators such as `dataclasses` to retrieve generated
+  functions from their execution-local namespace.
 
 - **27 new stdlib modules** — full implementations of `token`, `tokenize`,
   `shelve` (pickle-backed, typed getters/setters for complex object persistence),

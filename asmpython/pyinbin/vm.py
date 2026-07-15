@@ -264,6 +264,8 @@ class PyClass:
             attributes = object.__getattribute__(self, "attributes")
             if name in attributes:
                 return attributes[name]
+            if name == "__qualname__":
+                return object.__getattribute__(self, "__name__")
         return object.__getattribute__(self, name)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -510,14 +512,16 @@ class VirtualMachine:
         kwargs = kwargs or {}
         if getattr(target, "__pyinbin_eval__", False):
             from .frontend import compile_source
-            namespace = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
+            globals_ns = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
+            locals_ns = args[2] if len(args) > 2 and isinstance(args[2], dict) else globals_ns
             code = compile_source(f"__pyinbin_result = ({args[0]})", "<eval>")
-            self._run_frame(Frame(code=code, globals=namespace, locals=namespace))
-            return namespace.get("__pyinbin_result")
+            self._run_frame(Frame(code=code, globals=globals_ns, locals=locals_ns))
+            return locals_ns.get("__pyinbin_result")
         if getattr(target, "__pyinbin_exec__", False):
             from .frontend import compile_source
-            namespace = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
-            self._run_frame(Frame(code=compile_source(str(args[0]), "<exec>"), globals=namespace, locals=namespace))
+            globals_ns = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
+            locals_ns = args[2] if len(args) > 2 and isinstance(args[2], dict) else globals_ns
+            self._run_frame(Frame(code=compile_source(str(args[0]), "<exec>"), globals=globals_ns, locals=locals_ns))
             return None
         if getattr(target, "__pyinbin_compile__", False):
             from .frontend import compile_source
@@ -611,7 +615,7 @@ class VirtualMachine:
                 return PyInstance(args[0])
             return target(*args, **kwargs)
         if not callable(target):
-            raise VMError("TypeError: object is not callable")
+            raise VMError(f"TypeError: object is not callable: {target!r} ({type(target).__name__})")
         try:
             return target(*args, **kwargs)
         except TypeError as exc:
@@ -830,7 +834,8 @@ class VirtualMachine:
                     if instr.arg: del frame.stack[-instr.arg:]
                     frame.stack.append(tuple(values) if op is Op.BUILD_TUPLE else set(values))
                 elif op is Op.GET_ITEM:
-                    index = frame.stack.pop(); value = frame.stack.pop(); frame.stack.append(value[index])
+                    index = frame.stack.pop(); value = frame.stack.pop()
+                    frame.stack.append(value[index])
                 elif op is Op.SET_ITEM:
                     item = frame.stack.pop(); index = frame.stack.pop(); value = frame.stack.pop(); value[index] = item
                 elif op is Op.GET_ITER:
