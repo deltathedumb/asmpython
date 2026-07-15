@@ -288,7 +288,12 @@ class PyInstance:
             return iter(raw) if raw is not None else iter(())
         if isinstance(method, Function):
             return iter(self.cls.vm._call(method, [self]))
-        return iter(method(self))
+        try:
+            return iter(method(self))
+        except TypeError:
+            # Host container descriptors require their concrete list/dict/set
+            # receiver rather than the VM wrapper instance.
+            return iter(method(self._raw_value()))
 
     def __getitem__(self, item: object) -> object:
         raw = self.attributes.get("_value_")

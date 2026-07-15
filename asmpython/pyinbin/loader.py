@@ -445,7 +445,7 @@ def default_builtins(importer: object | None = None) -> dict[str, object]:
         "FileNotFoundError": FileNotFoundError, "NotADirectoryError": NotADirectoryError,
         "UnboundLocalError": UnboundLocalError, "MemoryError": MemoryError,
         "EOFError": EOFError, "EnvironmentError": OSError,
-        "ValueError": ValueError, "TypeError": TypeError, "KeyError": KeyError,
+        "ValueError": ValueError, "TypeError": TypeError, "SyntaxError": SyntaxError, "KeyError": KeyError,
         "IndexError": IndexError, "ZeroDivisionError": ZeroDivisionError,
         "StopIteration": StopIteration, "next": next,
         "ImportError": ImportError, "ModuleNotFoundError": ModuleNotFoundError,
