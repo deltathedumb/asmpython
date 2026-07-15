@@ -909,10 +909,25 @@ class _Lowerer:
             for jump in end_jumps:
                 self.patch(jump, end)
         elif isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))) and not node.handlers and node.finalbody and not node.orelse:
+            # A bare ``try/finally`` (no ``except``) still needs real
+            # exception protection: without a TRY_BEGIN/TRY_END pair, an
+            # exception raised in the body (including one injected from
+            # outside via ``generator.close()``/``throw()``) skips the
+            # finally block entirely instead of running cleanup before
+            # propagating -- purely sequential body-then-finally lowering
+            # only covers the no-exception fallthrough case.
+            handler_jump = self.emit(Op.TRY_BEGIN)
             for statement in node.body:
                 self.stmt(statement)
+            self.emit(Op.TRY_END)
             for statement in node.finalbody:
                 self.stmt(statement)
+            normal_jump = self.emit(Op.JUMP)
+            self.patch(handler_jump, len(self.instructions))
+            for statement in node.finalbody:
+                self.stmt(statement)
+            self.emit(Op.RAISE)
+            self.patch(normal_jump, len(self.instructions))
         elif isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))) and node.handlers:
             handler_jump = self.emit(Op.TRY_BEGIN)
             for statement in node.body:

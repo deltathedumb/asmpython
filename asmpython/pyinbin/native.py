@@ -74,6 +74,11 @@ try:
 except ImportError:
     _bootstrap_testinternalcapi = ModuleType("_testinternalcapi")
 import _lsprof as _bootstrap_lsprof
+try:
+    import pyexpat as _bootstrap_pyexpat
+except ImportError:
+    # Some minimal/embeddable builds omit the expat XML parser extension.
+    _bootstrap_pyexpat = None
 import array as _bootstrap_array
 import bisect as _bootstrap_bisect
 import math as _bootstrap_math
@@ -1034,6 +1039,12 @@ def create_builtin_module(
         return _module(name, {
             key: getattr(_bootstrap_socket, key)
             for key in dir(_bootstrap_socket)
+            if not key.startswith("__")
+        })
+    if name == "pyexpat" and _bootstrap_pyexpat is not None:
+        return _module(name, {
+            key: getattr(_bootstrap_pyexpat, key)
+            for key in dir(_bootstrap_pyexpat)
             if not key.startswith("__")
         })
     if name == "_ssl":

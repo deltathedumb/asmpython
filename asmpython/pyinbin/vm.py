@@ -132,6 +132,13 @@ class GeneratorObject:
             raise AttributeError("extend")
         target.extend(values)
 
+    def close(self) -> None:
+        try:
+            self.throw(GeneratorExit)
+        except (StopIteration, GeneratorExit):
+            return
+        raise RuntimeError("generator ignored GeneratorExit")
+
 
 class CoroutineObject:
     """Resumable bootstrap coroutine frame for ``async def`` functions."""
