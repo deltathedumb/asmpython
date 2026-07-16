@@ -40,6 +40,8 @@ extern _runtime_str_index_of
 extern _runtime_str_replace
 extern _runtime_str_split
 extern _runtime_str_rsplit
+extern _runtime_str_partition
+extern _runtime_str_rpartition
 extern _runtime_str_join
 extern _runtime_str_zfill
 extern _runtime_str_starts_with
@@ -98,6 +100,8 @@ global _abi_dict_keys
 global _abi_dict_update
 global _abi_str_concat
 global _abi_str_rsplit
+global _abi_str_partition
+global _abi_str_rpartition
 global _abi_int_to_base
 global _abi_fmt_elem
 global _abi_list_repr
@@ -293,11 +297,28 @@ _abi_int_to_base:
     ret
 
 ; rax = fmt_elem(value=rcx, kind=rdx)
+; rax = fmt_elem(value=rcx, kind=rdx) -> always a freshly-owned string.
+; _runtime_fmt_elem's int (kind 0) and float (kind 2) branches return a
+; raw pointer into the shared static itoa_str_buf, not a fresh
+; allocation (str/list/dict/tuple kinds already allocate). That's
+; invisible to a caller that immediately concats or prints the result
+; once, but this pipeline's print()/f-string lowering computes ALL of a
+; multi-arg call's formatted strings up front before a single shared
+; call (e.g. one printf with several %s), so two int/float args in the
+; same call alias the same buffer -- the second call's sprintf
+; overwrites the first's already-computed pointer's target before
+; anything reads it, silently making every such arg show the LAST one's
+; value. Confirmed via a live repro: `print(a, some_list, b)` where a/b
+; are opaque ("any"-typed, e.g. from a starred-unpack target) ints both
+; printed b's value. Dup unconditionally here rather than special-casing
+; by kind -- cheap, and correctness matters far more than one avoidable
+; allocation for the str/list/dict/tuple kinds that didn't need it.
 _abi_fmt_elem:
     WIN64_RUNTIME_ENTER
     mov rax, rcx
     mov rbx, rdx
     call _runtime_fmt_elem
+    call _runtime_str_concat_dup
     WIN64_RUNTIME_LEAVE
     ret
 
@@ -588,6 +609,26 @@ _abi_str_rsplit:
     mov rbx, rdx
     mov rcx, 1
     call _runtime_str_rsplit
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = str_partition(str=rcx, sep=rdx) -> 3-tuple (before, sep-or-"",
+; after) list ptr, split at the FIRST occurrence of sep.
+_abi_str_partition:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_str_partition
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = str_rpartition(str=rcx, sep=rdx) -> 3-tuple (before, sep-or-"",
+; after) list ptr, split at the LAST occurrence of sep.
+_abi_str_rpartition:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_str_rpartition
     WIN64_RUNTIME_LEAVE
     ret
 _abi_str_join:
@@ -1069,6 +1110,18 @@ _abi_round_f64:
 ; spellings don't match Python's), else sprintf "%g" then scan the result
 ; for a byte that already marks it non-integral/non-finite and append
 ; ".0" if none is found before the nul terminator.
+;
+; NOTE: the NaN/inf branches return a pointer to a genuine static string
+; constant (safe to alias, never mutated) but the .finite path's result
+; is a pointer into the shared _abi_float_to_str_buf -- every branch
+; dups through _runtime_str_concat_dup at .done before returning so ALL
+; paths return an owned copy uniformly, not just the one that actually
+; needed it. Same class of bug as _abi_fmt_elem's fix: this pipeline's
+; print()/f-string lowering computes every arg of a multi-arg call up
+; front before one shared call, so two float args in the same call
+; alias the same buffer otherwise -- confirmed via a live repro
+; (`f1, *fmid, f2 = floats; print(f1, fmid, f2)` printed f2's value
+; for both f1 and f2).
 _abi_float_to_str:
     sub rsp, 40
     ucomisd xmm0, xmm0
@@ -1124,6 +1177,7 @@ _abi_float_to_str:
 .fixup_done:
     lea rax, [_abi_float_to_str_buf]
 .done:
+    call _runtime_str_concat_dup
     add rsp, 40
     ret
 

@@ -1406,11 +1406,43 @@ def _collect_module_globals(stmts: list, out: dict[str, IRType], list_el_ty: dic
                     if isinstance(target, A.Name):
                         out.setdefault(target.name, ir_type_for(A.expr_type(value)))
             elif len(s.values) == 1 and A.expr_type(s.values[0]) in ("list", "tuple"):
+                rhs_t = A.expr_type(s.values[0])
+                has_star = any(isinstance(t, A.StarTarget) for t in s.targets)
+                # A starred unpack (`a, *rest, b = xs`) always sources from
+                # a single homogeneous list -- every plain target shares
+                # ONE element type (_iter_element_type), unlike a plain
+                # tuple-unpack (`a, b = some_tuple`) where each target has
+                # its own per-index type from tuple_elem_types. Using the
+                # tuple-only source for a list RHS (the pre-existing bug
+                # this comment is fixing) silently fell back to "any" for
+                # every target, which _lower_expr_as_str then treats as an
+                # opaque PTR-shaped value -- register-allocates and
+                # marshals differently from the true I64 the value
+                # actually is, corrupting multi-arg print() calls that mix
+                # it with a genuinely-int-typed argument.
+                # NOTE: intentionally NOT named list_el_ty -- that's this
+                # function's own dict parameter (list_el_ty: dict[str,
+                # str]), and Python has no block scoping, so reassigning
+                # it here would shadow the parameter for the rest of the
+                # function's remaining statements/recursive calls.
+                # Confirmed as a real bug the hard way: a later plain
+                # `A.Assign` list statement crashed with 'str' object has
+                # no attribute 'setdefault' once this shadowed it.
+                uniform_el_ty = _iter_element_type(s.values[0]) if (rhs_t == "list" or has_star) else None
                 elem_types = getattr(s.values[0], "tuple_elem_types", [])
                 for i, target in enumerate(s.targets):
+                    if isinstance(target, A.StarTarget):
+                        # `*rest` always binds a fresh list (the
+                        # "leftover" slice) regardless of the source's own
+                        # element type.
+                        out.setdefault(target.name, PTR)
+                        continue
                     if not isinstance(target, A.Name):
                         continue
-                    elem_ty = elem_types[i] if i < len(elem_types) else "any"
+                    if uniform_el_ty is not None:
+                        elem_ty = uniform_el_ty
+                    else:
+                        elem_ty = elem_types[i] if i < len(elem_types) else "any"
                     out.setdefault(target.name, ir_type_for(elem_ty))
         elif isinstance(s, A.For):
             iter_ty = "any"
@@ -1497,6 +1529,50 @@ def _store_loop_target(ctx: _FuncCtx, target, value: IRValue, ty: str) -> None:
             elem = ctx.tmp(PTR)
             ctx.emit(IRInstr("load", elem, [addr]))
             _store_loop_target(ctx, sub, elem, "any")
+
+
+def _store_tuple_assign_target(ctx: _FuncCtx, target: A.Expr, val: IRValue) -> None:
+    """Store `val` (already evaluated) into a parallel-form TupleAssign
+    target -- Name, Subscript (dict/list, non-slice), or Attr. Ports
+    codegen.py's per-target dispatch in its TupleAssign parallel-form
+    loop; `val` is pre-evaluated by the caller (all RHS values are
+    evaluated before any store, so `a, b = b, a` swaps correctly)."""
+    if isinstance(target, A.Name):
+        ptr = _name_ptr(ctx, target.name, ctx.mctx.global_types.get(target.name, val.type))
+        ctx.emit(IRInstr("store", None, [val, ptr]))
+        return
+    if isinstance(target, A.Subscript):
+        obj_ty = A.expr_type(target.obj)
+        if obj_ty == "dict":
+            obj_v = _lower_expr(ctx, target.obj)
+            key_v = _lower_dict_key(ctx, target.index)
+            store_val = val
+            if val.type is F64:
+                iv = ctx.tmp(I64)
+                ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
+                store_val = iv
+            ctx.emit(IRInstr("call", None, ["_abi_dict_set", obj_v, key_v, store_val]))
+            return
+        if obj_ty != "list":
+            raise LowerError(f"unsupported stmt TupleAssign (Subscript target {obj_ty})")
+        obj_v = _lower_expr(ctx, target.obj)
+        idx_v = _lower_expr(ctx, target.index)
+        addr = _list_elem_addr(ctx, obj_v, idx_v)
+        ctx.emit(IRInstr("store", None, [val, addr]))
+        return
+    if isinstance(target, A.Attr):
+        obj_v = _lower_expr(ctx, target.obj)
+        name = ctx.mctx.intern_str(target.name)
+        key_ptr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", key_ptr, [name]))
+        store_val = val
+        if val.type is F64:
+            iv = ctx.tmp(I64)
+            ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
+            store_val = iv
+        ctx.emit(IRInstr("call", None, ["_abi_dict_set", obj_v, key_ptr, store_val]))
+        return
+    raise LowerError(f"unsupported stmt TupleAssign (target {type(target).__name__})")
 
 
 def _lower_tuple_repr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
@@ -2257,29 +2333,14 @@ def _lower_isinstance(ctx: _FuncCtx, e: A.Call) -> IRValue:
     return out
 
 
-def _lower_sorted(ctx: _FuncCtx, e: A.Call) -> IRValue:
-    arg = e.args[0]
-    arg_t = A.expr_type(arg)
-    if arg_t in ("set", "dict"):
-        src_v = _lower_expr(ctx, arg)
-        out_v = ctx.tmp(PTR)
-        ctx.emit(IRInstr("call", out_v, ["_abi_dict_keys", src_v]))
-        el_kind = "str"
-    else:
-        src_v = _lower_expr(ctx, arg)
-        start_v = ctx.tmp(I64)
-        stop_v = ctx.tmp(I64)
-        ctx.emit(IRInstr("const", start_v, [-9223372036854775808]))
-        ctx.emit(IRInstr("const", stop_v, [9223372036854775807]))
-        out_v = ctx.tmp(PTR)
-        ctx.emit(IRInstr("call", out_v, ["_abi_list_slice", src_v, start_v, stop_v]))
-        if isinstance(arg, A.Name):
-            el_kind = getattr(arg, "list_el_type", "int") or "int"
-        elif isinstance(arg, A.ListLit):
-            el_kind = arg.el_type or "int"
-        else:
-            el_kind = getattr(arg, "list_el_type", "int") or "int"
-
+def _lower_sort_inplace(ctx: _FuncCtx, e, out_v: IRValue, el_kind: str) -> IRValue:
+    """Sort `out_v` (a real list value, already the caller's to mutate --
+    `_lower_sorted` passes a fresh clone, `list.sort()` passes the
+    original list directly) according to `e`'s sort_key/sort_reverse
+    attributes (stamped by sema's _check_sort_kwargs, shared by
+    sorted()/list.sort()/min()/max()). Returns out_v unchanged (the
+    caller decides what to do with it -- sorted() returns it, list.sort()
+    discards it since Python's sort() returns None)."""
     sort_key = getattr(e, "sort_key", None)
     if sort_key is not None:
         if not isinstance(sort_key, A.Lambda) or len(sort_key.params) != 1:
@@ -2382,6 +2443,31 @@ def _lower_sorted(ctx: _FuncCtx, e: A.Call) -> IRValue:
         ctx.emit(IRInstr("br", None, [done_b.label]))
         ctx.switch_to(done_b)
     return out_v
+
+
+def _lower_sorted(ctx: _FuncCtx, e: A.Call) -> IRValue:
+    arg = e.args[0]
+    arg_t = A.expr_type(arg)
+    if arg_t in ("set", "dict"):
+        src_v = _lower_expr(ctx, arg)
+        out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out_v, ["_abi_dict_keys", src_v]))
+        el_kind = "str"
+    else:
+        src_v = _lower_expr(ctx, arg)
+        start_v = ctx.tmp(I64)
+        stop_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", start_v, [-9223372036854775808]))
+        ctx.emit(IRInstr("const", stop_v, [9223372036854775807]))
+        out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out_v, ["_abi_list_slice", src_v, start_v, stop_v]))
+        if isinstance(arg, A.Name):
+            el_kind = getattr(arg, "list_el_type", "int") or "int"
+        elif isinstance(arg, A.ListLit):
+            el_kind = arg.el_type or "int"
+        else:
+            el_kind = getattr(arg, "list_el_type", "int") or "int"
+    return _lower_sort_inplace(ctx, e, out_v, el_kind)
 
 
 def _lower_fstring(ctx: _FuncCtx, e: A.FString) -> IRValue:
@@ -3368,6 +3454,100 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("const", zero, [0]))
                 ctx.emit(IRInstr("store", None, [zero, len_addr]))
                 return ctx.shared_zero
+            if e.method == "copy" and not e.args:
+                obj_v = _lower_expr(ctx, e.obj)
+                start_v = ctx.tmp(I64)
+                stop_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", start_v, [-9223372036854775808]))
+                ctx.emit(IRInstr("const", stop_v, [9223372036854775807]))
+                out = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", out, ["_abi_list_slice", obj_v, start_v, stop_v]))
+                return out
+            if e.method == "count" and len(e.args) == 1:
+                el_t = (
+                    getattr(e.obj, "list_el_type", "int")
+                    if isinstance(e.obj, A.Name)
+                    else "int"
+                ) or "int"
+                val_v = _lower_expr(ctx, e.args[0])
+                obj_v = _lower_expr(ctx, e.obj)
+                len_addr = ctx.tmp(PTR)
+                ctx.emit(IRInstr("gep", len_addr, [obj_v, _LIST_LEN_OFF]))
+                len_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", len_v, [len_addr]))
+                idx_ptr = ctx.ensure_slot(f"__lcount_idx_{id(e)}", I64)
+                cnt_ptr = ctx.ensure_slot(f"__lcount_cnt_{id(e)}", I64)
+                zero = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", zero, [0]))
+                ctx.emit(IRInstr("store", None, [zero, idx_ptr]))
+                zero2 = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", zero2, [0]))
+                ctx.emit(IRInstr("store", None, [zero2, cnt_ptr]))
+
+                head_b = ctx.new_block("lcounthead")
+                body_b = ctx.new_block("lcountbody")
+                match_b = ctx.new_block("lcountmatch")
+                cont_b = ctx.new_block("lcountcont")
+                end_b = ctx.new_block("lcountend")
+
+                ctx.emit(IRInstr("br", None, [head_b.label]))
+                ctx.switch_to(head_b)
+                idx_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+                cond = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.lt", cond, [idx_v, len_v]))
+                ctx.emit(IRInstr("br.t", None, [cond, body_b.label, end_b.label]))
+
+                ctx.switch_to(body_b)
+                elem_addr = _list_elem_addr(ctx, obj_v, idx_v)
+                elem_v = ctx.tmp(PTR if el_t == "str" else I64)
+                ctx.emit(IRInstr("load", elem_v, [elem_addr]))
+                if el_t == "str":
+                    is_eq = ctx.tmp(I64)
+                    ctx.emit(IRInstr("call", is_eq, ["_abi_str_eq", elem_v, val_v]))
+                else:
+                    is_eq = ctx.tmp(I64)
+                    ctx.emit(IRInstr("icmp.eq", is_eq, [elem_v, val_v]))
+                ctx.emit(IRInstr("br.t", None, [is_eq, match_b.label, cont_b.label]))
+
+                ctx.switch_to(match_b)
+                cur_cnt = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", cur_cnt, [cnt_ptr]))
+                one_c = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", one_c, [1]))
+                next_cnt = ctx.tmp(I64)
+                ctx.emit(IRInstr("iadd", next_cnt, [cur_cnt, one_c]))
+                ctx.emit(IRInstr("store", None, [next_cnt, cnt_ptr]))
+                ctx.emit(IRInstr("br", None, [cont_b.label]))
+
+                ctx.switch_to(cont_b)
+                cur_idx = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", cur_idx, [idx_ptr]))
+                one_i = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", one_i, [1]))
+                next_idx = ctx.tmp(I64)
+                ctx.emit(IRInstr("iadd", next_idx, [cur_idx, one_i]))
+                ctx.emit(IRInstr("store", None, [next_idx, idx_ptr]))
+                ctx.emit(IRInstr("br", None, [head_b.label]))
+
+                ctx.switch_to(end_b)
+                out = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", out, [cnt_ptr]))
+                return out
+            if e.method == "sort":
+                # In-place sort (unlike sorted(), no clone first) -- reuses
+                # sorted()'s key/reverse machinery via _lower_sort_inplace,
+                # sema's shared _check_sort_kwargs stamps the same
+                # sort_key/sort_key_ret/sort_reverse attrs onto this
+                # MethodCall node either way.
+                obj_v = _lower_expr(ctx, e.obj)
+                el_kind = (
+                    getattr(e.obj, "list_el_type", "int")
+                    if isinstance(e.obj, A.Name)
+                    else "int"
+                ) or "int"
+                _lower_sort_inplace(ctx, e, obj_v, el_kind)
+                return ctx.shared_zero  # list.sort() returns None
             raise LowerError(f"unsupported expr MethodCall (list.{e.method})")
         if obj_ty == "dict":
             if e.method == "get" and len(e.args) in (1, 2):
@@ -3606,6 +3786,13 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 "lstrip": "_abi_str_lstrip", "rstrip": "_abi_str_rstrip",
                 "swapcase": "_abi_str_swapcase", "title": "_abi_str_title",
                 "splitlines": "_abi_str_splitlines",
+                # casefold: no true Unicode casefolding here, same
+                # simplification codegen.py's STR_METHOD_RUNTIME table
+                # makes (maps to the identical lower-casing helper).
+                "casefold": "_abi_str_lower",
+            }
+            one_arg_list_methods = {
+                "partition": "_abi_str_partition", "rpartition": "_abi_str_rpartition",
             }
             no_arg_int_methods = {
                 "isdigit": "_abi_str_isdigit", "isalpha": "_abi_str_isalpha",
@@ -3644,6 +3831,11 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 arg_v = _lower_expr(ctx, e.args[0])
                 v = ctx.tmp(PTR)
                 ctx.emit(IRInstr("call", v, [one_arg_str_methods[e.method], obj_v, arg_v]))
+                return v
+            if e.method in one_arg_list_methods and len(e.args) == 1:
+                arg_v = _lower_expr(ctx, e.args[0])
+                v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", v, [one_arg_list_methods[e.method], obj_v, arg_v]))
                 return v
             if e.method in pad_methods and len(e.args) in (1, 2):
                 width_v = _lower_expr(ctx, e.args[0])
@@ -4160,19 +4352,83 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         return
 
     if isinstance(s, A.TupleAssign):
+        if len(s.values) == len(s.targets) and not any(
+            isinstance(t, A.StarTarget) for t in s.targets
+        ):
+            # Parallel form (a, b = 1, 2 / a, b = b, a / xs[i], xs[j] =
+            # xs[j], xs[i] / p.x, p.y = p.y, p.x): every rhs is evaluated
+            # into a temp *before* any store, so swaps work. Unlike the
+            # single-iterable unpack form below, Subscript/Attr targets
+            # are allowed here (sema only permits plain names for
+            # single-iterable unpack -- see TupleAssign's docstring).
+            vals = [_lower_expr(ctx, v) for v in s.values]
+            for target, val in zip(s.targets, vals):
+                _store_tuple_assign_target(ctx, target, val)
+            return
         if any(isinstance(t, A.StarTarget) for t in s.targets):
-            raise LowerError("unsupported stmt TupleAssign (starred target)")
+            if len(s.values) != 1 or A.expr_type(s.values[0]) != "list":
+                raise LowerError("unsupported stmt TupleAssign (starred target shape)")
+            if not all(isinstance(t, (A.Name, A.StarTarget)) for t in s.targets):
+                raise LowerError("unsupported stmt TupleAssign (starred target, non-Name target)")
+            # `a, *rest = xs` / `*init, last = xs` / `a, *mid, b = xs`
+            # (xs: list[T]). Evaluate xs once; plain targets before the
+            # star read xs[0..n_before-1], plain targets after the star
+            # read from the end (xs[len-n_after..len-1]), and the star
+            # target becomes _abi_list_slice(xs, n_before, len - n_after)
+            # -- mirrors codegen.py's TupleAssign-with-StarTarget handling.
+            star_i = next(i for i, t in enumerate(s.targets) if isinstance(t, A.StarTarget))
+            n_before = star_i
+            n_after = len(s.targets) - star_i - 1
+            el_ty = _iter_element_type(s.values[0])
+            src_v = _lower_expr(ctx, s.values[0])
+            src_ptr = ctx.ensure_slot(f"__tupunpack_{id(s)}", PTR)
+            ctx.emit(IRInstr("store", None, [src_v, src_ptr]))
+
+            for i in range(n_before):
+                cur_src = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", cur_src, [src_ptr]))
+                idx_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", idx_v, [i]))
+                addr = _list_elem_addr(ctx, cur_src, idx_v)
+                val = ctx.tmp(ir_type_for(el_ty))
+                ctx.emit(IRInstr("load", val, [addr]))
+                _store_loop_target(ctx, s.targets[i].name, val, el_ty)
+
+            for j in range(n_after):
+                cur_src2 = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", cur_src2, [src_ptr]))
+                len_addr = ctx.tmp(PTR)
+                ctx.emit(IRInstr("gep", len_addr, [cur_src2, _LIST_LEN_OFF]))
+                len_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", len_v, [len_addr]))
+                n_after_j = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", n_after_j, [n_after - j]))
+                idx_v2 = ctx.tmp(I64)
+                ctx.emit(IRInstr("isub", idx_v2, [len_v, n_after_j]))
+                addr2 = _list_elem_addr(ctx, cur_src2, idx_v2)
+                val2 = ctx.tmp(ir_type_for(el_ty))
+                ctx.emit(IRInstr("load", val2, [addr2]))
+                _store_loop_target(ctx, s.targets[star_i + 1 + j].name, val2, el_ty)
+
+            rest_src = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", rest_src, [src_ptr]))
+            rest_len_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", rest_len_addr, [rest_src, _LIST_LEN_OFF]))
+            rest_len = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", rest_len, [rest_len_addr]))
+            n_after_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", n_after_v, [n_after]))
+            stop_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("isub", stop_v, [rest_len, n_after_v]))
+            start_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", start_v, [n_before]))
+            rest_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", rest_v, ["_abi_list_slice", rest_src, start_v, stop_v]))
+            _store_loop_target(ctx, s.targets[star_i].name, rest_v, "list")
+            return
         if not all(isinstance(t, A.Name) for t in s.targets):
             raise LowerError("unsupported stmt TupleAssign (non-Name target)")
         names = [t.name for t in s.targets]
-        if len(s.values) == len(names):
-            # Parallel form (a, b = 1, 2 / a, b = b, a): every rhs is
-            # evaluated into a temp *before* any store, so swaps work.
-            vals = [_lower_expr(ctx, v) for v in s.values]
-            for name, val in zip(names, vals):
-                ptr = _name_ptr(ctx, name, ctx.mctx.global_types.get(name, val.type))
-                ctx.emit(IRInstr("store", None, [val, ptr]))
-            return
         if len(s.values) == 1 and A.expr_type(s.values[0]) in ("list", "tuple"):
             # Single-iterable unpack (a, b = some_tuple_or_list_expr).
             src_v = _lower_expr(ctx, s.values[0])

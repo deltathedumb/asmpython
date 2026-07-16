@@ -411,12 +411,69 @@ of each other: `list.sort`, `str.rpartition`/`casefold` `MethodCall`s,
 parser, unexplored), starred/non-Name tuple-assign targets, walrus
 operator, `sorted(key=...)` lambda body.
 
+**Seventh follow-up** (2026-07-16, commits after the sixth): cleared most
+of the remaining scattered 1-60 gaps. Implemented `list.sort()` (extracted
+`_lower_sorted`'s key/reverse logic into a shared `_lower_sort_inplace`
+helper, used both by `sorted()`-after-clone and `sort()`-in-place),
+`list.copy()` (full-range `_abi_list_slice`), `list.count(x)` (IR loop,
+`_abi_str_eq` for str elements else `icmp.eq`), `str.casefold` (aliased to
+the existing `_abi_str_lower` — fine for this backend's ASCII-only string
+support), and `str.rpartition` (new `_abi_str_rpartition` shim). Also
+closed both tuple-assign gaps: parallel-form (`a, b = x, y`) now supports
+`Subscript`/`Attr` targets (new `_store_tuple_assign_target` helper, not
+just `Name`), and starred-unpack (`a, *rest, b = xs`) now lowers via IR
+block loops computing before/after slices plus an `_abi_list_slice` for
+the middle, storing each via `_store_loop_target`.
+
+While wiring starred-unpack, found a **pre-existing** (not newly
+introduced) bug: `_collect_module_globals` typed plain-`Name` targets
+sharing a `TupleAssign` with a `StarTarget` via `tuple_elem_types`
+(always empty for a list RHS) instead of `_iter_element_type`, silently
+defaulting them to `"any"`. Fixed by computing a shared `uniform_el_ty`
+via `_iter_element_type` whenever the RHS is list-typed or a `StarTarget`
+is present.
+
+Chasing that fix's runtime symptom (first/last values in a starred-unpack
+print all showing the *last* value) surfaced a real, previously-unknown
+**bug class**: `_runtime_fmt_elem` and `_abi_float_to_str` both return a
+pointer into a **fixed shared static buffer** (`itoa_str_buf` /
+`_abi_float_to_str_buf`) — safe for one value, but this backend's
+print()/f-string design computes *every* arg's formatted string up front
+before making one shared call, so two `"any"`-typed int/float values
+formatted in the same multi-arg call silently alias and the later
+sprintf overwrites the earlier result before anything reads it (repro:
+`f1, *fmid, f2 = [1.5,2.5,3.5,4.5]; print(f1, fmid, f2)` printed `f2`'s
+value for both `f1` and `f2`). Fixed at both shim sites by
+unconditionally dup'ing the result via the existing
+`_runtime_str_concat_dup` before returning. Audited every other static
+buffer in `abi_shims.asm`: no further instances (the pre-existing
+`_abi_int_to_str_buf` single call site already dup'd correctly). **Any
+future `_abi_*` shim that returns a pointer into a shared/static buffer
+must dup before returning if it can ever be alive concurrently with
+another such result — which is the normal case for this backend's
+multi-arg call lowering.**
+
+Verified: `tests.runner` 481/489 throughout (no regressions). Full
+build+run+expected-output sweep on tests/cases went 232→242 passing
+(~440 total), no regressions. `164_statistics_module.py`'s pre-existing
+float-garbage mismatch (`6.95186e-310`) confirmed via git-stash A/B diff
+to predate this session's changes — a distinct, not-yet-investigated bug,
+not caused by the buffer-aliasing fix (if anything the fix is a
+prerequisite for eventually diagnosing it correctly).
+
+Remaining scattered gaps: `str.format`/bare `format()` builtin (third
+mini-language, unexplored — `A.parse_format_fields` likely its shared
+parser), walrus operator (`NamedExpr`), `sorted(key=...)` lambda body
+(not yet re-verified after the `_lower_sort_inplace` refactor — should
+be unaffected since the refactor only moved code, didn't change logic,
+but not explicitly re-tested).
+
 **Next step on resume**: two reasonable directions, pick based on what's
 more valuable to unblock next:
 
-1. Clear the remaining scattered 1-60 build failures (small, independent
-   fixes, same pattern as most of this session — likely a few hours
-   total) to push the smoke-test corpus even closer to 60/60.
+1. Finish the remaining scattered gaps above (walrus operator,
+   `str.format`, re-verify `sorted(key=...)`) — small, independent,
+   same pattern as the rest of this push.
 2. Given the "Everything Python" bar (run essentially any unmodified
    real-world Python program, native-first with pyinbin fallback), pivot
    to validating against **real-world Python programs** beyond this
