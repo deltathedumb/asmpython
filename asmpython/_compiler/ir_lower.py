@@ -1224,6 +1224,24 @@ def _resolve_method_owner(ctx: _FuncCtx, class_name: str, method: str) -> str | 
     return None
 
 
+def _virtual_dispatch_rows(ctx: _FuncCtx, class_name: str, method: str) -> list[tuple[int, str]]:
+    """[(class_id, owner)] for every user class that is `class_name` or
+    descends from it and resolves `method` somewhere on its chain --
+    mirrors codegen.py's _virtual_dispatch_rows exactly. A method call on a
+    `class_name`-typed receiver can bind statically only when every row
+    shares one owner; with overrides in play the call must dispatch on the
+    instance's runtime __class__ id instead, since the static type names
+    the base but the receiver at runtime may be a subclass."""
+    rows: list[tuple[int, str]] = []
+    for cname, cid in ctx.mctx.class_ids.items():
+        if class_name not in _resolve_class_chain(ctx, cname):
+            continue
+        owner = _resolve_method_owner(ctx, cname, method)
+        if owner is not None:
+            rows.append((cid, owner))
+    return rows
+
+
 def _subclass_ids(ctx: _FuncCtx, target: str) -> list[int]:
     ids: list[int] = []
     for name, cid in ctx.mctx.class_ids.items():
@@ -2864,13 +2882,78 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 return v
             raise LowerError(f"unsupported expr MethodCall (str.{e.method})")
         if obj_ty.startswith("instance:"):
+            # Walk the inheritance chain for the method's actual defining
+            # class -- a static instance:Dog type doesn't mean Dog itself
+            # defines every method; an inherited-but-not-overridden one
+            # (e.g. a base class's @property with no subclass override)
+            # is only ever emitted as Animal__greeting, never Dog__greeting.
             cls_name = obj_ty.split(":", 1)[1]
-            sym = f"{cls_name}__{e.method}"
+            owner = _resolve_method_owner(ctx, cls_name, e.method) or cls_name
             obj_v = _lower_expr(ctx, e.obj)
             args = [obj_v] + [_lower_expr(ctx, a) for a in e.args]
-            v = ctx.tmp(ir_type_for(A.expr_type(e)))
-            ctx.emit(IRInstr("call", v, [sym, *args]))
-            return v
+            res_ty = ir_type_for(A.expr_type(e))
+
+            rows = _virtual_dispatch_rows(ctx, cls_name, e.method)
+            owners: list[str] = []
+            for _cid, ow in rows:
+                if ow not in owners:
+                    owners.append(ow)
+            if len(owners) <= 1:
+                # No subclass overrides this method -- bind statically.
+                v = ctx.tmp(res_ty)
+                ctx.emit(IRInstr("call", v, [f"{owner}__{e.method}", *args]))
+                return v
+
+            # Subclasses override this method: dispatch on the receiver's
+            # runtime __class__ id (mirrors codegen.py's
+            # _virtual_dispatch_rows call site exactly, just as a chain of
+            # blocks instead of a chain of labels+jumps). Pre-create every
+            # block up front (check_i / hit_i pairs, default, end) so each
+            # br.t below always targets an already-known label -- no
+            # forward-reference patching needed.
+            key_sym = ctx.mctx.intern_str("__class__")
+            key_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", key_v, [key_sym]))
+            untagged = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", untagged, [-1]))
+            class_id = ctx.tmp(I64)
+            ctx.emit(IRInstr("call", class_id, ["_abi_dict_get_default", obj_v, key_v, untagged]))
+
+            res_ptr = ctx.ensure_slot(f"__vdisp_res_{id(e)}", res_ty)
+            other_owners = [ow for ow in owners if ow != owner]
+            check_blocks = [ctx.new_block(f"vdispcheck{i}") for i in range(len(other_owners))]
+            hit_blocks = [ctx.new_block(f"vdisphit{i}") for i in range(len(other_owners))]
+            default_b = ctx.new_block("vdispdefault")
+            end_b = ctx.new_block("vdispend")
+
+            ctx.emit(IRInstr("br", None, [(check_blocks[0] if check_blocks else default_b).label]))
+
+            for i, ow in enumerate(other_owners):
+                ctx.switch_to(check_blocks[i])
+                cid = next(c for c, o in rows if o == ow)
+                cid_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", cid_v, [cid]))
+                is_match = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.eq", is_match, [class_id, cid_v]))
+                next_label = check_blocks[i + 1].label if i + 1 < len(check_blocks) else default_b.label
+                ctx.emit(IRInstr("br.t", None, [is_match, hit_blocks[i].label, next_label]))
+
+                ctx.switch_to(hit_blocks[i])
+                mv = ctx.tmp(res_ty)
+                ctx.emit(IRInstr("call", mv, [f"{ow}__{e.method}", *args]))
+                ctx.emit(IRInstr("store", None, [mv, res_ptr]))
+                ctx.emit(IRInstr("br", None, [end_b.label]))
+
+            ctx.switch_to(default_b)
+            dv = ctx.tmp(res_ty)
+            ctx.emit(IRInstr("call", dv, [f"{owner}__{e.method}", *args]))
+            ctx.emit(IRInstr("store", None, [dv, res_ptr]))
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+
+            ctx.switch_to(end_b)
+            out = ctx.tmp(res_ty)
+            ctx.emit(IRInstr("load", out, [res_ptr]))
+            return out
         if obj_ty == "type" and isinstance(e.obj, A.Name) and e.obj.name in ctx.mctx.class_names:
             sym = f"{e.obj.name}__{e.method}"
             args = [ctx.shared_zero] + [_lower_expr(ctx, a) for a in e.args]

@@ -94,20 +94,41 @@ directly to `ir.py`'s IR, feeding a real custom backend under
   NASM + gcc as the assemble/link step, wired up via `--backend x86-64`.
 - `_backends/ternary/`: an early speculative ISA backend (uASM-related).
 
-**Last confirmed status** (carried forward, re-verify before trusting):
-smoke-tested `--backend x86-64` against the first 60 `tests/cases/*.py`
-(not part of the automated suite, which exercises the legacy backend only):
-34/60 compiled+linked. Remaining gaps were a mix of unimplemented
-builtins/methods in `ir_lower.py` and missing libm symbol-table entries in
-the linkers (`_DLL_FOR_SYMBOL`/`_SO_FOR_SYMBOL`) — **verify against the real
-DLL/libc before adding an entry** (some C99 functions genuinely aren't
-exported by classic `msvcrt.dll`).
+**Last confirmed status** (2026-07-16, commit `fc688dfd`): smoke-tested
+`--backend x86-64` against the first 60 `tests/cases/*.py` (not part of the
+automated suite, which exercises the legacy backend only): 39/60
+compiled+linked (up from 34/60). Fixed along the way: a real general bug
+where any top-level `for x in <list>:` wrote its loop variable to an unused
+local stack slot while every read resolved it as a module global, so the
+variable always read back as zero — silently corrupting any module-scope
+for-loop; missing `round`/`divmod`/`hex`/`oct`/`bin`/`bool`/`repr`/`input`
+builtins and a broken `pow(int,int)` (was routed through msvcrt's
+double-only `pow`, corrupting output) that were previously falling through
+to a blind "assume it's a real DLL symbol" call path; `print()`/`str()` only
+handled str/int/float, printing lists/dicts/tuples/instances as raw pointer
+values and `True`/`False`/`None` as `1`/`0`/`None`-via-wrong-path — both now
+delegate to `_lower_expr_as_str`, the repr helper f-strings already used.
+Spot-checked full build+run+expected-output byte-for-byte match on the
+newly-fixed cases (101, 106, 108, 127) — all exact. `tests.runner` still
+481/489, no regressions.
+
+Remaining 1-60 failures are a mix of: float support (list/dict/tuple float
+elements, float binops `%`/`**`, float params — `'RegLoc' object has no
+attribute 'offset'` on `120_float_params.py`/`121_float_instance_attrs.py`
+looks like a distinct regalloc bug worth its own investigation), several
+unimplemented `MethodCall`s (`list.sort`, `dict.pop`, `str.rpartition`/
+`casefold`/`format`), `del` statement, starred/non-Name tuple-assign
+targets, walrus operator, `sorted(key=...)` lambda body, and two
+undefined-symbol gaps (`trunc`, `Dog__greeting` — the latter smells like a
+property/method-resolution bug, not a missing libm entry).
 
 **Next step on resume**: triage the remaining backend-parity smoke-test
 failures (one symbol-table fix or one missing `ir_lower.py` codegen case at a
 time) toward full parity with `codegen.py` under `--backend x86-64` — this is
 the direct predecessor of the newly-confirmed "make the IR-based backend the
-default" workload item.
+default" workload item. Suggest starting with `Dog__greeting` (property
+resolution) since it may be a quick, high-value fix, then the float-params
+`RegLoc.offset` crash since float support blocks several other cases.
 
 ## Selfhost Status (plan-step 11)
 
