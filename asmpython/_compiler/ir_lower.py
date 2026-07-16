@@ -163,6 +163,18 @@ class _FuncCtx:
         self.local_names = local_names or set()
         self.declared_globals = declared_globals or set()
         self.module_body = module_body
+        # Names currently shadowed by an active comprehension's own loop
+        # variable, tracked as a stack of sets (nested comprehensions push
+        # their own on top). A comprehension variable is ALWAYS local, in
+        # real Python, even at module scope (PEP 572 explicitly carves
+        # comprehensions out as their own scope) -- but `_is_global_name`
+        # below has no other way to know that, since `local_names` is
+        # deliberately left empty at module scope (module_body=True), where
+        # almost everything else really is a global. Checked before
+        # `_is_global_name`'s normal logic; popped once the comprehension
+        # finishes lowering. See `_lower_comprehension`/
+        # `_lower_dict_comprehension`'s push/pop around the loop-var slot.
+        self.comprehension_shadows: list[set[str]] = []
         self.loop_stack: list[tuple[str, str]] = []  # (continue_label, break_label)
         # Stack of slot names for active try-block parent-handler pointers.
         # Each entry is the `__try_parent_<uid>` slot name pushed when entering
@@ -758,20 +770,64 @@ def _lower_comprehension(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
         var_ty = ir_type_for(elem_kind)
         elem_v = ctx.tmp(var_ty)
         ctx.emit(IRInstr("load", elem_v, [elem_addr]))
-    var_ptr = ctx.ensure_slot(e.var, var_ty)
-    ctx.emit(IRInstr("store", None, [elem_v, var_ptr]))
-    if e.cond is not None:
-        cond_v = _lower_truthy(ctx, e.cond)
-        ctx.emit(IRInstr("br.t", None, [cond_v, append_b.label, cont_b.label]))
+    shadow_names: set = set()
+    if e.targets:
+        # `[elt for a, b in xs]` (tuple-unpack) -- was completely
+        # unhandled: this whole branch didn't exist, so `e.var` (always
+        # "" for this shape, per the parser) was used as the slot name
+        # unconditionally, silently storing the per-iteration tuple
+        # element under an empty-string-named slot and leaving `a`/`b`
+        # unbound inside `e.elt`/`e.cond` -- they then resolved through
+        # whatever `_is_global_name` happened to find (a stale value or
+        # an unrelated global), not the real per-iteration tuple slot.
+        # Confirmed via `[k for k, v in d.items() if v >= 2]` printing
+        # `['c', 'c', 'c']` (the LAST key, read three times) instead of
+        # `['b', 'c']`. Mirrors A.For's identical tuple-target unpack
+        # (see the list-For lowering above) -- elem_v here is the
+        # per-iteration tuple/2-tuple value; each target reads one slot
+        # out of it via _list_elem_addr (tuples share the list layout).
+        elem_types = getattr(e.iter, "tuple_elem_types", [])
+        for i, target in enumerate(e.targets):
+            idx = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", idx, [i]))
+            item_addr = _list_elem_addr(ctx, elem_v, idx)
+            target_ty = elem_types[i] if i < len(elem_types) else "any"
+            item_v = ctx.tmp(ir_type_for(target_ty))
+            ctx.emit(IRInstr("load", item_v, [item_addr]))
+            _store_loop_target(ctx, target, item_v, target_ty)
+            if isinstance(target, str):
+                shadow_names.add(target)
     else:
-        ctx.emit(IRInstr("br", None, [append_b.label]))
+        var_ptr = ctx.ensure_slot(e.var, var_ty)
+        ctx.emit(IRInstr("store", None, [elem_v, var_ptr]))
+        shadow_names.add(e.var)
+    # A comprehension's own loop variable(s) are ALWAYS local in real
+    # Python, even at module scope (PEP 572 carves comprehensions out as
+    # their own scope) -- `ensure_slot`/`_store_loop_target` above already
+    # get this right (always allocate a local slot), but a bare reference
+    # to the SAME name inside `e.cond`/`e.elt` would otherwise resolve as
+    # the module global of the same name if one exists (`_is_global_name`
+    # has no other way to know this particular `x` means the
+    # comprehension's `x`, not the module's). Confirmed via a minimal
+    # repro: `x = 7; xs = [x * 2 for x in [1,2,3]]` read the global `x`
+    # (7) inside the comprehension body instead of the loop variable,
+    # producing `[14, 14, 14]` instead of `[2, 4, 6]`.
+    ctx.comprehension_shadows.append(shadow_names)
+    try:
+        if e.cond is not None:
+            cond_v = _lower_truthy(ctx, e.cond)
+            ctx.emit(IRInstr("br.t", None, [cond_v, append_b.label, cont_b.label]))
+        else:
+            ctx.emit(IRInstr("br", None, [append_b.label]))
 
-    ctx.switch_to(append_b)
-    cur_out_v = ctx.tmp(PTR)
-    ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
-    item_v = _lower_expr(ctx, e.elt)
-    ctx.emit(IRInstr("call", None, ["_abi_list_append", cur_out_v, item_v]))
-    ctx.emit(IRInstr("br", None, [cont_b.label]))
+        ctx.switch_to(append_b)
+        cur_out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
+        item_v = _lower_expr(ctx, e.elt)
+        ctx.emit(IRInstr("call", None, ["_abi_list_append", cur_out_v, item_v]))
+        ctx.emit(IRInstr("br", None, [cont_b.label]))
+    finally:
+        ctx.comprehension_shadows.pop()
 
     ctx.switch_to(cont_b)
     inc_idx_v = ctx.tmp(I64)
@@ -1591,6 +1647,9 @@ def _collect_module_globals(stmts: list, out: dict[str, IRType], list_el_ty: dic
 
 
 def _is_global_name(ctx: _FuncCtx, name: str) -> bool:
+    for shadow_set in ctx.comprehension_shadows:
+        if name in shadow_set:
+            return False
     if name in ctx.declared_globals:
         return True
     if ctx.module_body:

@@ -910,28 +910,92 @@ baseline**:
 OK=258  MISMATCH=21  CRASH=42  BUILD_FAIL=117
 ```
 
-**Next step on resume**: continue the same triage pattern. The mismatch
-bucket proved worth investigating (2 real bugs, 24→21) — keep working
-through the remaining 21 before assuming the crash/build-failure buckets
-are higher-value; the general lesson from all four passes holds: most
-"real" bugs are shared-root-cause classes affecting many files at once,
-not one-off issues, and several so far were "sema has the info,
-ir_lower.py doesn't check for it somewhere" rather than requiring deep
-gdb investigation — check that hypothesis first. Then the 42 crashes
-(group by symptom before fixing one at a time), then the 117 build
-failures (each is a clear "unsupported expr/stmt X" `LowerError` message
-— `str.format`/bare `format()` builtin, a third format mini-language, is
-a known unimplemented gap likely responsible for a chunk of these). The
-ad-hoc sweep script used throughout all four passes (scratch dir, not
-yet committed) is worth promoting to a real
-`tests/backend_correctness.py` next time — re-run it after every fix
-batch, not just at the start/end, since a single fix can measurably move
-the needle, and note the sweep's aggregate counts have some run-to-run
-noise (a case or two flipping between OK/CRASH/timeout across identical
-runs) — always confirm a specific fix via direct build+run of the
-affected case(s), not just the before/after totals. Given the
-"Everything Python" bar (run essentially any unmodified real-world
-Python program), once this corpus is closer to 100%, pivot to validating
+**Triage pass five** (2026-07-16, same-day follow-up): two comprehension-
+scoping bugs plus one genuine **register-allocator correctness bug** —
+the most severe finding of the day.
+
+1. **List/set comprehensions at module scope with a loop variable
+   shadowing a module global** (`x = 7; xs = [x * 2 for x in [1,2,3]]`)
+   silently read the *global* inside `e.elt`/`e.cond`, not the
+   comprehension's own local loop variable — `_lower_comprehension`
+   never had the `comprehension_shadows`-style protection the earlier
+   for-loop shadow fixes established. Added a
+   `ctx.comprehension_shadows` stack (list of sets), checked first in
+   `_is_global_name`, pushed/popped around the comprehension body.
+   Confirmed fixing `416_comp_global_shadow.py` (was `[14,14,14]`,
+   now `[2,4,6]`).
+2. **List/dict comprehensions with tuple-unpack targets**
+   (`[k for k, v in d.items()]`) had **zero handling** in
+   `_lower_comprehension` (only `_lower_dict_comprehension` had it) —
+   `e.var` is always `""` for this shape (per the parser), and got used
+   as a slot name unconditionally, silently corrupting every read.
+   Added the missing `e.targets` branch, mirroring `A.For`'s identical
+   tuple-unpack pattern (`_list_elem_addr` per slot +
+   `_store_loop_target`). Confirmed fixing `421_dict_comp_filter.py`
+   (`['c','c','c']` → `['b','c']`).
+3. **The big one**: a real x86-64 register-allocator correctness bug in
+   `_backends/x86_64/codegen.py`'s `_div` (backs `idiv`/`irem`/`udiv`/
+   `urem`, i.e. `//` and `%` on ints). When the allocator happened to
+   assign a division's *dividend* operand a permanent home of `RAX`,
+   `_div` skipped the `mov RAX, a_r` copy as a no-op ("already there")
+   — but `idiv`/`div` unconditionally clobber `RAX:RDX` as scratch
+   space regardless, silently destroying the dividend's value with
+   nothing to restore it for a later read that trusts regalloc's
+   decision it still lives in RAX. Real, general-purpose bug: any
+   program dividing the same value twice in a row (not contrived —
+   `n % 2 == 0`'s own floor-div-mod correction sequence does exactly
+   this internally) is a potential trigger whenever regalloc happens to
+   pick RAX for that value, which depends on unrelated register
+   pressure earlier in the function (why this took real effort to
+   isolate — a minimal repro needed the *exact* combination of prior
+   code to reproduce). Root-caused via IR analysis + a live gdb
+   single-step trace of the compiled binary (watched RAX go from the
+   real dividend value to the first division's leftover quotient,
+   directly causing the wrong branch). Fixed by bouncing the dividend
+   into the second scratch register (`_SCRATCH2`/R10) before the
+   division when it's in RAX, restoring it into RAX afterward — unless
+   the division's own result also landed in RAX, in which case
+   restoring would clobber the real answer (guarded via `dst !=
+   Reg.RAX`). Confirmed fixing `78_dict_comprehension.py` exactly (all
+   8 lines) and, transitively, the earlier `409_...`/`445_...`-style
+   float-comparison-adjacent mismatches that likely shared this root
+   cause without anyone having isolated it yet.
+
+Verified: `tests.runner` 475/483 throughout. Sweep: 258→263 OK,
+16 mismatches remaining (down from 21; the regalloc fix alone likely
+explains most of the drop, given how general the bug class is).
+
+**Cumulative sweep numbers, all five triage passes this session, from
+the `OK=245 MISMATCH=24 CRASH=42 BUILD_FAIL=127` session-start
+baseline**:
+
+```text
+OK=263  MISMATCH=16  CRASH=42  BUILD_FAIL=117
+```
+
+**Next step on resume**: continue the same triage pattern. Given the
+`_div` bug's severity and generality, it's worth specifically
+re-auditing `codegen.py` for OTHER instructions with the same "skip the
+copy when the operand is already in the destination register" shortcut
+that also clobber that register as scratch space (multiply, shift-by-CL
+if `Reg.RCX` is involved, anything else touching a fixed x86 register
+implicitly) — this exact bug SHAPE (not just this exact instruction)
+may recur elsewhere in the file. Otherwise: group the remaining 42
+crashes by symptom before fixing one at a time, then the 117 build
+failures (each is a clear "unsupported expr/stmt X" `LowerError`
+message — `str.format`/bare `format()` builtin, a third format
+mini-language, is a known unimplemented gap likely responsible for a
+chunk of these), then the remaining 16 mismatches. The ad-hoc sweep
+script used throughout all five passes (scratch dir, not yet committed)
+is worth promoting to a real `tests/backend_correctness.py` next time —
+re-run it after every fix batch, not just at the start/end, since a
+single fix can measurably move the needle, and note the sweep's
+aggregate counts have some run-to-run noise (a case or two flipping
+between OK/CRASH/timeout across identical runs) — always confirm a
+specific fix via direct build+run of the affected case(s), not just the
+before/after totals. Given the "Everything Python" bar (run essentially
+any unmodified real-world Python program), once this corpus is closer to
+100%, pivot to validating
 against real-world stdlib-only scripts or CPython's own `Lib/test/`
 suite (already pyinbin's conformance oracle) — passing this 440-case
 hand-written corpus was never meant to be the definition of "done," just

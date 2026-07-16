@@ -307,7 +307,26 @@ class FuncCodegen:
         b_r, b_ld = self._gp(b)
         self._emit(a_ld + b_ld)
 
-        if a_r != Reg.RAX:
+        # `idiv`/`div` unconditionally clobber RAX:RDX as scratch, regardless
+        # of where `a` started. If regalloc happened to give `a` a PERMANENT
+        # home of RAX (a real possibility -- RAX is an ordinary pool
+        # register here, not reserved), skipping the `mov RAX, a_r` "because
+        # it's already there" leaves nothing preserving `a`'s value: any
+        # later read of `a` trusts regalloc's decision that it still lives
+        # in RAX, but the division has already overwritten it. This is
+        # silent, not a crash -- confirmed via a real repro (`n % 2 == 0`
+        # lowers to idiv then irem on the same dividend `n`; when `n`'s
+        # home is RAX, the second division reads the FIRST division's
+        # quotient instead of `n`, corrupting the remainder) and a gdb
+        # single-step trace showing RAX going 2 -> 1 (idiv's quotient) ->
+        # read as if it were still 2 for the following irem. Preserve `a`
+        # in the second scratch register before the divide, and restore it
+        # into RAX afterward so any later `_gp(a)` call (which trusts
+        # regalloc's RAX-resident answer) still finds the right value.
+        a_in_rax = a_r == Reg.RAX
+        if a_in_rax:
+            self._emit(encode_mov_rr(self._SCRATCH2, Reg.RAX))
+        else:
             self._emit(encode_mov_rr(Reg.RAX, a_r))
         if b_r == Reg.RDX:
             self._emit(encode_mov_rr(self._SCRATCH, b_r))
@@ -324,6 +343,8 @@ class FuncCodegen:
         result_reg = Reg.RAX if op in ("idiv", "udiv") else Reg.RDX
         if dst != result_reg:
             self._emit(encode_mov_rr(dst, result_reg))
+        if a_in_rax and dst != Reg.RAX:
+            self._emit(encode_mov_rr(Reg.RAX, self._SCRATCH2))
 
     # ── Shifts ────────────────────────────────────────────────────────────────
 
