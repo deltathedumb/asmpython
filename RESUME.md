@@ -45,6 +45,19 @@ formalize the backend system as a versioned SDK, real memory management
 User's explicit instruction attached to this addendum: "stop expanding
 partial stdlib breadth until these foundations are complete."
 
+**Expanded again 2026-07-16** ("Everything Python" directive): 2.0.0 must be
+able to run essentially any unmodified real-world Python program end-to-end
+(native-first, pyinbin fallback for anything not yet native-compilable) —
+not just the existing test-suite scenarios. This raises the bar on
+language/stdlib conformance and makes broad architecture/OS backend
+coverage (ARM64, macOS, Raspberry Pi — "a lot for common architectures",
+explicitly not an unbounded backend list) a real requirement rather than a
+stretch goal. Does not reorder the confirmed work order below; sharpens
+what "done" means at each stage, especially stdlib/conformance breadth and
+backend parity. Directive: work continuously through the confirmed order
+without stopping for check-ins between items — checkpoint via commits +
+this file, not via pausing.
+
 **Tangential, NOT active work**: user is also building **uASM**, a modular
 machine-code compiler with swappable backends/frontends, currently depending
 on asmpython. Plan: finish 2.0.0 first, fork asmpython into a uASM-facing
