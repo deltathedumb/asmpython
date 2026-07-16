@@ -378,6 +378,18 @@ class Function:
     def __getattribute__(self, name: str) -> object:
         if name == "__dict__":
             return object.__getattribute__(self, "_metadata")
+        if name == "__annotations__":
+            # Real Python's function __annotations__ is a per-instance
+            # attribute; a dataclass named Function otherwise exposes its
+            # OWN field type annotations here instead (code: CodeObject,
+            # globals: dict[...], ...) since that's a genuine class-level
+            # __annotations__ dict that plain attribute lookup finds before
+            # __getattr__ ever gets a chance to run. Real CPython resolves
+            # a lazy __annotate__-backed __annotations__ transparently on
+            # first access (format=VALUE); do the same here rather than
+            # exposing the raw unparsed-string storage.
+            annotate = object.__getattribute__(self, "__getattr__")("__annotate__")
+            return annotate(1)
         return object.__getattribute__(self, name)
 
     def __call__(self, /, *args: object, **kwargs: object) -> object:
@@ -410,6 +422,35 @@ class Function:
             return tuple(_ClosureCell(closure.get(item)) for item in self.code.free_names)
         if name == "__globals__":
             return self.globals
+        if name == "__annotate__":
+            # PEP 649: real functions always have a callable __annotate__
+            # (format) -> dict, even if annotations are empty. Callers like
+            # functools.singledispatch's bare @register check for this
+            # attribute's mere presence to decide whether a decorated
+            # function carries usable annotations at all. Annotations are
+            # stored as unparsed source strings (deferred, like real
+            # lazy annotations -- a self-referential annotation such as
+            # `def copy(self) -> deque:` inside `class deque:` itself needs
+            # this, since eager evaluation would hit deque before its own
+            # class body finishes). Format.STRING (4) returns those strings
+            # directly; any other format resolves them via eval() against
+            # the function's defining globals, same as real annotationlib
+            # does for a lazy __annotate__ function.
+            annotations = self._metadata.get("__annotations__", {})
+            function_globals = self.globals
+
+            def _annotate(format: int = 1, _annotations: dict = annotations, _globals: dict = function_globals) -> dict:
+                if format == 4:
+                    return dict(_annotations)
+                resolved = {}
+                for key, source in _annotations.items():
+                    try:
+                        resolved[key] = eval(source, _globals)
+                    except BaseException:
+                        resolved[key] = source
+                return resolved
+
+            return _annotate
         raise AttributeError(name)
 
 
@@ -1784,7 +1825,15 @@ class VirtualMachine:
                     spec = frame.code.constants[instr.arg]
                     default_count = 0
                     kw_default_count = 0
-                    if isinstance(spec, tuple) and len(spec) == 2:
+                    annotations: dict[str, object] = {}
+                    if isinstance(spec, tuple) and len(spec) == 4:
+                        # The 4th slot is the annotations dict itself (arg
+                        # name -> unparsed source string), a pure compile-
+                        # time constant -- no bytecode/stack involvement,
+                        # unlike defaults, since annotations here are
+                        # deferred strings rather than evaluated values.
+                        nested, default_count, kw_default_count, annotations = spec
+                    elif isinstance(spec, tuple) and len(spec) == 2:
                         nested, default_count = spec
                     elif isinstance(spec, tuple) and len(spec) == 3:
                         nested, default_count, kw_default_count = spec
@@ -1804,7 +1853,11 @@ class VirtualMachine:
                         for name in nested.free_names
                         if name in frame.locals or (frame.closure is not None and name in frame.closure)
                     }
-                    nested.validate(); frame.stack.append(Function(nested, frame.globals, defaults, kw_defaults, closure, self))
+                    nested.validate()
+                    function = Function(nested, frame.globals, defaults, kw_defaults, closure, self)
+                    if annotations:
+                        function._metadata["__annotations__"] = dict(annotations)
+                    frame.stack.append(function)
                 elif op is Op.MAKE_CLASS:
                     spec = frame.code.constants[instr.arg]
                     if not isinstance(spec, tuple) or len(spec) not in (3, 4): _raise_typed("TypeError: invalid class constant")

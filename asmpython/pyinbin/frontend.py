@@ -843,7 +843,34 @@ class _Lowerer:
                     continue
                 self.expr(default)
                 kw_default_count += 1
-            self.emit(Op.MAKE_FUNCTION, self.constant((nested.finish(), len(node.args.defaults), kw_default_count)))
+            # Parameter/return annotations. Stored as unparsed source
+            # strings (a compile-time constant, no bytecode needed) rather
+            # than evaluated eagerly -- a self-referential annotation like
+            # `def copy(self) -> deque:` inside `class deque:` itself would
+            # break under eager evaluation, since the class's own name
+            # isn't bound yet while its body (and the methods within it)
+            # are still being defined; this is exactly the problem PEP 649
+            # laziness solves for real Python. Deferring to strings matches
+            # that same real-Python behavior and gives interpreted
+            # functions a real __annotations__/__annotate__ (needed by
+            # e.g. functools.singledispatch's bare ``@register``, which
+            # otherwise rejects the function outright).
+            annotated_args = [
+                *node.args.posonlyargs, *node.args.args,
+                *([node.args.vararg] if node.args.vararg else []),
+                *node.args.kwonlyargs,
+                *([node.args.kwarg] if node.args.kwarg else []),
+            ]
+            annotations = {
+                arg.arg: ast.unparse(arg.annotation)
+                for arg in annotated_args if arg.annotation is not None
+            }
+            if node.returns is not None:
+                annotations["return"] = ast.unparse(node.returns)
+            self.emit(
+                Op.MAKE_FUNCTION,
+                self.constant((nested.finish(), len(node.args.defaults), kw_default_count, annotations)),
+            )
             for decorator in reversed(node.decorator_list):
                 self.expr(decorator)
                 self.emit(Op.SWAP)
