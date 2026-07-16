@@ -107,16 +107,17 @@ _REGISTRY: dict = {
 }
 
 
-def register_extension(cls: type) -> type:
-    """Register a `CompilerExtension` subclass under `cls.name`.
+def register_extension(cls_or_instance):
+    """Register a `CompilerExtension` under its own `.name`.
 
-    Public hook for a future built-in extension to add itself to `_REGISTRY`.
-    Not exposed as a third-party plugin/entry-point mechanism -- see
-    docs/EXTENSIONS.md's security notes for why that's a deliberately
-    separate, unsolved problem.
+    Accepts either a subclass (the in-tree built-in convention -- a fresh
+    instance is constructed per activation) or an already-constructed
+    instance (the `asmpython.Extension(...)` public-API convention -- see
+    `asmpython/extend.py`, which calls this directly). Returns whatever was
+    passed in, so it also works as a class decorator for the subclass case.
     """
-    _REGISTRY[cls.name] = cls
-    return cls
+    _REGISTRY[cls_or_instance.name] = cls_or_instance
+    return cls_or_instance
 
 
 def _version_tuple(v: str) -> tuple:
@@ -147,10 +148,24 @@ class ExtensionContext:
         return name in self._active
 
     def handler_for(self, keyword: str) -> Optional[tuple]:
-        """Returns (extension_name, handler_method_name) for a contextual
-        statement keyword claimed by a currently-active extension, or None.
-        """
-        return self._stmt_handlers.get(keyword)
+        """Returns (extension_name, callable) for a contextual statement
+        keyword claimed by a currently-active extension, or None. The
+        callable takes `(parser, pos)` and returns a real `A.Stmt` node --
+        see `parser.py`'s dispatch loop for the call site. `statement_
+        handlers()` may declare a handler either as a bound-method name
+        (a string, resolved against the extension instance here -- the
+        in-tree convention, e.g. `ConstantsExtension`) or as a plain
+        callable directly (the `asmpython.Extension(...)` public-API
+        convention, since a dynamically-registered extension has no
+        subclass of its own to hang a method off of) -- both resolve to a
+        real callable by the time this returns."""
+        entry = self._stmt_handlers.get(keyword)
+        if entry is None:
+            return None
+        ext_name, handler = entry
+        if isinstance(handler, str):
+            handler = getattr(self._active[ext_name], handler)
+        return (ext_name, handler)
 
     def activate(self, name: str, pos: Optional[SourcePos] = None) -> None:
         """Activate extension `name`. Transactional: on any failure, no
@@ -162,15 +177,22 @@ class ExtensionContext:
                 pos,
                 ErrorCode.P_EXTENSION_ALREADY_ACTIVE,
             )
-        ext_cls = _REGISTRY.get(name)
-        if ext_cls is None:
+        registered = _REGISTRY.get(name)
+        if registered is None:
             hint = _did_you_mean(name, _REGISTRY.keys())
             msg = f"unknown extension {name!r}"
             if hint:
                 msg += f" (did you mean {hint!r}?)"
             raise ExtensionError(msg, pos, ErrorCode.P_UNKNOWN_EXTENSION)
 
-        instance = ext_cls()
+        # In-tree built-ins register a CLASS (a fresh instance per
+        # activation, since a class can carry real per-activation instance
+        # state); a dynamically-built `asmpython.Extension(...)` registers
+        # an already-constructed CompilerExtension INSTANCE directly (it
+        # has no subclass of its own to instantiate, and its metadata/
+        # handlers are fixed data with nothing meaningful to reset between
+        # activations).
+        instance = registered() if isinstance(registered, type) else registered
 
         # Conflict check (read-only): does this extension conflict with any
         # currently-active extension, or vice versa?

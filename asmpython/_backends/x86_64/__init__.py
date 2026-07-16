@@ -166,17 +166,28 @@ def run_backend_link(objects: list[bytes], args: dict) -> dict[str, bytes]:
     target_os, _abi = _resolve(args.get("target_os", "auto"), args.get("abi", "auto"))
     linker_name = args.get("linker") or default_linker
     ctx = {**args, "objects": objects, "target_os": target_os}
-    # A static dispatch rather than a name -> module dict: asmpython has no
-    # first-class module values, so a dict holding module references and
-    # calling `.link()` on whatever comes out isn't representable under
-    # self-hosted compilation (modules aren't real heap values there).
+    # The two built-in linkers stay a static if/elif rather than living in
+    # the dict registry themselves: asmpython has no first-class module
+    # values today, so a dict holding *these* two module references
+    # wouldn't be representable under self-hosted compilation (see
+    # RESUME.md's "First-class module values" pending item). The
+    # third-party registry below (asmpython._linkers.get_linker) is a
+    # plain Python dict too, but it's only ever consulted under
+    # CPython-hosted compilation -- a third-party linker registered via
+    # `asmpython.Linker(...)` has no self-host story yet either way, so
+    # this doesn't make anything self-host-unsafe that wasn't already.
     if linker_name == "gcc":
         out_bytes = _gcc_linker.link(ctx)
     elif linker_name == "builtin":
         out_bytes = _builtin_linker.link(ctx)
     else:
-        have = ", ".join(_LINKER_NAMES)
-        raise ValueError(f"unknown linker {linker_name!r} (have: {have})")
+        from ..._linkers import get_linker, registered_names
+
+        third_party = get_linker(linker_name)
+        if third_party is None:
+            have = ", ".join(_LINKER_NAMES + registered_names())
+            raise ValueError(f"unknown linker {linker_name!r} (have: {have})")
+        out_bytes = third_party.link(ctx)
     ext = ".exe" if target_os == "windows" else ""
     return {f"output{ext}": out_bytes}
 

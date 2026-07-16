@@ -30,6 +30,13 @@ class FakeA(CompilerExtension):
     def statement_handlers(self) -> dict:
         return {"using_a": "handle_a"}
 
+    def handle_a(self, parser, pos):
+        """Real dummy handler so `ExtensionContext.handler_for` -- which
+        resolves a string handler name into an actual bound-method
+        callable -- has something genuine to resolve against, instead of
+        the string sitting unresolved."""
+        raise NotImplementedError("dummy handler, never actually invoked by these tests")
+
 
 class FakeBRequiresA(CompilerExtension):
     name = "fake_b"
@@ -88,7 +95,12 @@ class ActivationTests(unittest.TestCase):
         ctx = ExtensionContext()
         ctx.activate("fake_a")
         self.assertTrue(ctx.is_active("fake_a"))
-        self.assertEqual(ctx.handler_for("using_a"), ("fake_a", "handle_a"))
+        # handler_for resolves the string handler name into a real bound
+        # method -- check identity against the active instance's own
+        # handle_a, not a raw (name, "handle_a") string pair.
+        ext_name, handler = ctx.handler_for("using_a")
+        self.assertEqual(ext_name, "fake_a")
+        self.assertEqual(handler, ctx._active["fake_a"].handle_a)
 
     def test_duplicate_activation_raises_and_leaves_state_unchanged(self) -> None:
         ctx = ExtensionContext()
@@ -147,7 +159,9 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(cm.exception.code, ErrorCode.P_EXTENSION_CONFLICT)
         self.assertFalse(ctx.is_active("fake_dup_stmt"))
         # fake_a's own handler must remain untouched.
-        self.assertEqual(ctx.handler_for("using_a"), ("fake_a", "handle_a"))
+        ext_name, handler = ctx.handler_for("using_a")
+        self.assertEqual(ext_name, "fake_a")
+        self.assertEqual(handler, ctx._active["fake_a"].handle_a)
 
 
 class RetractionTests(unittest.TestCase):

@@ -1421,6 +1421,21 @@ class Parser:
                 ErrorCode.P_CONST_WITHOUT_EXTENSION,
             )
 
+        # Third-party extension statement handlers (asmpython.Extension(...),
+        # registered via --ext). Unlike `const`/`match`, a plugin-registered
+        # keyword has no built-in shape lookahead the parser can check ahead
+        # of time -- the whole point is the plugin decides its own grammar.
+        # So once active, the keyword is unconditionally a statement prefix:
+        # a real, documented trade-off (it can no longer double as a plain
+        # variable name for the rest of this compile), acceptable because it
+        # only ever applies when the invoker explicitly opted in via --ext.
+        if t.kind == "NAME":
+            handler = self.ext_ctx.handler_for(t.value)
+            if handler is not None:
+                _ext_name, callback = handler
+                self._eat()  # the keyword itself
+                return callback(self, t.pos)
+
         # Assignment / aug-assignment vs expression statement.
         if t.kind == "NAME":
             nxt = self._peek(1)

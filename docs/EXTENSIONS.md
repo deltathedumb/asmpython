@@ -142,19 +142,106 @@ Defined in `asmpython/_compiler/extensions.py`:
   its own fresh instance). `register_extension(cls)` is the public hook for
   registering a new built-in extension.
 
-**Current v1 simplification:** with exactly one built-in extension,
-`parser.py` dispatches `const` directly (guarded by
-`self.ext_ctx.is_active("constants")`) rather than routing through the
-generic `ExtensionContext.handler_for(...)` indirection. The generic
-dispatch path still exists and is fully exercised by
-`tests/test_extensions.py`'s dummy extensions -- it's simply not yet wired
-into the parser's main dispatch loop, since doing so for a single extension
-would add indirection with no present benefit. A second built-in extension
-would be the natural point to wire it in.
+**`const` stays a special case:** `parser.py` dispatches `const` directly
+(guarded by `self.ext_ctx.is_active("constants")`) rather than routing
+through the generic `ExtensionContext.handler_for(...)` indirection --
+`const` has its own dedicated shape lookahead (`_looks_like_const_decl`),
+which a generic dispatch mechanism has no way to replicate for an
+arbitrary third-party keyword (see below). This is unrelated to how many
+extensions are registered; it's a property of `const`'s specific grammar.
 
-A public, third-party-facing way to author and register a new extension
-(`asmpython.Extension(...)`) and load it via `--ext path/to/plugin.py` is
-planned but not yet implemented as of this writing.
+## User-authored extensions
+
+`asmpython.Extension(...)` (defined in `asmpython/extend.py`, exposed as
+`asmpython.Extension`) is the public, third-party-facing way to register a
+new extension without touching this file's source. A plugin is an
+ordinary Python file, run by the *host* CPython interpreter (never
+compiled by asmpython itself), loaded via `--ext path/to/plugin.py`:
+
+```python
+# my_plugin.py
+import asmpython
+
+def handle_let(parser, pos):
+    from asmpython._compiler import ast_nodes as A
+
+    name = parser._expect("NAME").value
+    parser._expect("OP", "=")
+    value = parser._parse_expr()
+    parser._expect("NEWLINE")
+    return A.Assign(target=name, value=value, pos=pos)
+
+asmpython.Extension(id="let_binding", statement_handlers={"let": handle_let})
+```
+
+```sh
+asmpython build myfile.py --ext my_plugin.py
+```
+
+`--ext` accepts either a bare registered id (`constants`) or a filesystem
+path (distinguished by whether it names an existing file) -- a path is
+exec'd first, so the plugin's `Extension(...)` call registers before
+activation is attempted; the id it registers is then what actually gets
+activated. A single `--ext path/to/plugin.py` is therefore enough to both
+load and activate a plugin defining exactly one extension. A plugin that
+registers zero or more than one `Extension` is a build-time error (there'd
+be no unambiguous id for `--ext` to activate); register each and pass
+their ids explicitly via separate `--ext` flags in that case.
+
+**Statement-handler contract:** each `statement_handlers` value is a
+callable `(parser, pos) -> ast_nodes.Stmt`. `parser` is the live
+`asmpython._compiler.parser.Parser` instance, already positioned just past
+the claimed keyword -- the callback drives it directly via its private
+`_eat`/`_check`/`_expect`/`_parse_expr`/etc. methods and constructs a real
+node from `asmpython._compiler.ast_nodes` (a private module -- there is no
+separate public AST surface yet, so this is the de facto contract for
+now). Internally, this reuses the exact same `ExtensionContext.
+handler_for(...)` generic-dispatch mechanism `docs/EXTENSIONS.md` already
+described as "exists but nothing consumes it yet" before this feature --
+`parser.py`'s main statement-dispatch loop now checks it for every bare
+`NAME` token, right after the `const`-specific check.
+
+**Important trade-off, by design:** unlike `const`/`match`, a
+plugin-claimed keyword has no shape lookahead the parser can check ahead
+of time (the whole point is the plugin decides its own grammar) -- so once
+its extension is active, the keyword unconditionally becomes a statement
+prefix for the rest of that compile. It can no longer double as a plain
+variable name. This only ever applies when the invoker explicitly opted
+in via `--ext`, matching the "no consent, no grammar change" principle
+this whole activation model is built on.
+
+This is v1, deliberately narrow: an extension can declare metadata
+(id/version/requires/conflicts, reusing the exact same transactional
+activation machinery as the built-in `constants`) and claim new
+statement-prefix keywords. The end goal is letting an extension reshape
+the language far more broadly -- up to and including replacing it with a
+different grammar entirely -- which is not implemented yet.
+
+## Backends and linkers
+
+The same "public registration API, activated via a CLI flag" pattern
+extends to codegen backends and linkers:
+
+- `asmpython.Backend(name=..., impl=...)` registers a third-party codegen
+  backend, reachable via `--backend NAME`. `impl` must conform to
+  `asmpython._compiler.ir.IRBackend` (`compile(module, args) -> dict[str,
+  bytes]` and `link(objects, args) -> dict[str, bytes]`; `requested_args`/
+  `default_linker` optional). Driver.py's `_run_backend_registered`
+  handles it with a plain compile-then-link-then-write, the same shape as
+  the built-in `ternary` backend -- no bespoke per-backend wiring the way
+  `x86-64` gets (ABI shims, runtime object linking, GCC resolution).
+- `asmpython.Linker(name=..., impl=...)` registers a third-party linker,
+  reachable via `--linker NAME`. `impl` must expose `link(ctx: dict) ->
+  bytes` (`requested_args` optional).
+
+Both registries (`asmpython/_backends/__init__.py`, `asmpython/_linkers/
+__init__.py`) are plain Python dicts, consulted only as a fallback after
+the built-in names (`legacy`/`x86-64`/`ternary` for backends, `gcc`/
+`builtin` for linkers) — CPython-hosted compilation only, **not yet safe
+under self-hosting**: asmpython's self-hosted subset has no first-class
+module/object values storable in a dict today, and these registries hold
+live backend/linker objects. See RESUME.md's "Pending 2.0.0 workload"
+section, "First-class module values", for the tracked follow-up.
 
 ## Current lexer limitation
 
@@ -260,3 +347,12 @@ The extension system is entirely a frontend concern:
   since `tests/runner.py`'s existing harness never drives `program.py`'s
   whole-program merge path). Run via `python -m unittest
   tests.test_program_isolation`.
+- `tests/test_extend.py` -- `unittest`-based coverage for the public
+  `asmpython.Extension`/`Backend`/`Linker` authoring API: metadata-only
+  registration and activation, a real statement-handler round-trip
+  (registers a trivial `let NAME = value` extension and confirms it
+  produces a real `A.Assign` node when active and an ordinary identifier
+  when not), the statement-prefix collision diagnostic firing across two
+  independently plugin-registered extensions, and `Backend`/`Linker`
+  registration retrievability. Run via `python -m unittest
+  tests.test_extend`.

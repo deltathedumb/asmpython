@@ -391,6 +391,41 @@ def _run_backend_ternary(module, out_path: Path) -> BuildResult:
     return BuildResult(asm_path=out_path, obj_path=out_path, exe_path=out_path)
 
 
+def _run_backend_registered(module, backend_name: str, out_path: Path) -> BuildResult:
+    """Compile+link `module` via a third-party `IRBackend` registered under
+    `backend_name` (see `asmpython._backends.get_backend`/
+    `asmpython.Backend(...)`, the public authoring API). Mirrors
+    `_run_backend_ternary`'s simple compile-then-link-then-write shape --
+    third-party backends get no bespoke per-backend wiring beyond the
+    `IRBackend` contract itself (`requested_args`/`default_linker`/
+    `compile`/`link`)."""
+    from . import ir_lower
+    from .._backends import get_backend
+
+    backend = get_backend(backend_name)
+    if backend is None:
+        names = ["legacy", "x86-64", "ternary", *_registered_backend_names()]
+        raise ValueError(f"unknown backend {backend_name!r} (have: {', '.join(names)})")
+
+    ir_mod = ir_lower.lower_module(module)
+    compiled = backend.compile(ir_mod, {})
+    program_obj = next(iter(compiled.values()))
+    linked = backend.link([program_obj], {})
+    out_bytes = next(iter(linked.values()))
+
+    out_path = out_path.resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(out_bytes)
+    print(f"wrote {out_path}")
+    return BuildResult(asm_path=out_path, obj_path=out_path, exe_path=out_path)
+
+
+def _registered_backend_names() -> list[str]:
+    from .._backends import registered_names
+
+    return registered_names()
+
+
 def _run_backend(
     module,
     target: str,
@@ -425,6 +460,10 @@ def _run_backend(
         )
     elif backend == "ternary":
         return _run_backend_ternary(module, out_path)
+    elif backend != "legacy":
+        # Not one of the two built-in IR-backend names -- check the
+        # third-party registry (asmpython.Backend(...)) before giving up.
+        return _run_backend_registered(module, backend, out_path)
     elif linker is not None and linker != "gcc":
         raise ValueError(f"--backend legacy only supports --linker gcc, got {linker!r}")
 

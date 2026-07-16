@@ -161,22 +161,101 @@ confirmed via git-stash A/B). All 18 `test_extensions.py`/
 program correctly; the same file without `--ext constants` fails with the
 expected `P018` diagnostic mentioning `--ext constants`.
 
-**Next**: a public, third-party-facing authoring API is still pending —
-`asmpython.Extension(id=...)` (mirroring today's internal
-`register_extension()`/`CompilerExtension`, but with a public surface) plus
-`--ext` accepting either a bare registered name OR a filesystem path to a
-plugin file (loaded/exec'd first, registering whatever it defines, before
-activation by id) — not yet implemented as of this checkpoint. The user
-also asked for the same public-registration pattern extended to compiler
-backends and linkers (`asmpython.Backend(...)`/`asmpython.Linker(...)`),
-which today are hardcoded if/elif dispatch, not registries at all: backend
-selection in `driver.py`'s `_run_backend` (~line 404, `--backend legacy|
-x86-64|ternary`), linker selection in `_backends/x86_64/__init__.py`'s
-`run_backend_link` (~line 166-179, `_LINKER_NAMES` list + hardcoded
-`if linker_name == "gcc": ... elif == "builtin": ...`) — both would need a
-real name→implementation dict plus a `register_backend`/`register_linker`
-hook before a `Backend`/`Linker` authoring API has anywhere to register
-into.
+**Part B — public authoring API — DONE** (2026-07-16, same day): built the
+public `asmpython.Extension`/`Backend`/`Linker` authoring API and the
+backend/linker registries it needed to register into. User explicitly
+scoped the self-hosting concern out of this checkpoint: a Python
+dict-based registry works fine under CPython-hosted compilation, and
+"asmpython has no first-class module values" (the reason the x86-64
+backend's linker dispatch was hardcoded if/elif to begin with) is now a
+separately tracked pending item ("First-class module values" below), not
+something this work needed to solve first.
+
+- **Backend/linker registries**: new `asmpython/_backends/__init__.py`
+  (`register_backend`/`get_backend`/`registered_names`, plain dict) and
+  additions to the existing `asmpython/_linkers/__init__.py`
+  (`register_linker`/`get_linker`/`registered_names`). `driver.py`'s
+  `_run_backend` keeps `legacy`/`x86-64`/`ternary` as special cases (too
+  much bespoke per-backend wiring, especially x86-64's ABI shims/runtime
+  linking/GCC resolution, to genericize) but falls through to a new
+  `_run_backend_registered` (plain compile→link→write, mirroring
+  `_run_backend_ternary`'s simple shape) for any other `--backend` name.
+  `_backends/x86_64/__init__.py`'s `run_backend_link` keeps `gcc`/
+  `builtin` hardcoded the same way, falling through to `_linkers.
+  get_linker` for anything else. `__main__.py`'s `--backend`/`--linker`
+  argparse args dropped their `choices=(...)` constraint (a fixed choice
+  list can't validate a name that isn't known until plugin-load time).
+- **`asmpython/extend.py`** (new, public — exposed as `asmpython.
+  Extension`/`Backend`/`Linker` via `asmpython/__init__.py`):
+  - `Extension(id, *, version="1.0", requires=None, conflicts=None,
+    statement_handlers=None)` registers immediately at construction (no
+    separate `.register()` call) by wrapping itself in a thin
+    `CompilerExtension` instance and calling `extensions.
+    register_extension(...)` — generalized to accept an already-built
+    instance, not just a class (an in-tree built-in still registers a
+    class for the "fresh instance per activation" case; a dynamically-
+    built `Extension` has no subclass of its own and nothing meaningful to
+    reset between activations, so it registers itself directly).
+  - `Backend(name, impl)` / `Linker(name, impl)` register directly into
+    the two registries above. `impl` must conform to `IRBackend`'s
+    `compile`/`link` (backend) or a bare `link(ctx)` (linker) contract.
+  - **Statement-handler dispatch, genuinely new plumbing**: a plugin's
+    `statement_handlers={"kw": callable}` entry needed the parser to
+    actually *call* something for a dynamically-registered keyword, not
+    just record it — `ExtensionContext.handler_for` (previously
+    documented as "exists but nothing consumes it yet") now resolves
+    either the in-tree string-method-name convention OR an already-real
+    callable into a genuine callable either way, and `parser.py`'s main
+    statement-dispatch loop gained a real check (right after the
+    `const`-specific one): for any bare `NAME` token, if `ext_ctx.
+    handler_for(t.value)` returns a handler, eat the keyword and call
+    `callback(self, pos)`, expecting a real `A.Stmt` node back. The
+    handler drives the live `Parser` instance directly via its private
+    `_eat`/`_check`/`_expect`/`_parse_expr` methods and constructs nodes
+    from the private `asmpython._compiler.ast_nodes` module — documented
+    as the de facto contract since there's no separate public AST surface
+    yet. **Real, deliberate trade-off**: unlike `const`/`match`, a
+    plugin-claimed keyword has no shape lookahead (the plugin decides its
+    own grammar), so once active it's unconditionally a statement prefix
+    — can't double as a plain identifier anymore. Only applies when the
+    invoker explicitly activated it via `--ext`.
+  - `--ext` (`__main__.py`) now accepts either a bare registered id or a
+    filesystem path (`_resolve_ext_flags`/`_load_ext_plugin`): a path is
+    exec'd in the host CPython process (never compiled by asmpython)
+    before/instead of a `--ext id`, and the id it registers is what
+    actually activates — before/after diffing the extension registry's
+    keys to find what a plugin file added. Errors clearly if a plugin
+    registers zero or more than one `Extension` (ambiguous which id
+    `--ext path.py` alone should activate).
+- Fixed two pre-existing `tests/test_extensions.py` assertions that
+  checked `handler_for`'s return value as a raw unresolved `(name,
+  "handle_a")` string pair — now that `handler_for` genuinely resolves to
+  a callable, `FakeA` needed a real (if never-actually-invoked) `handle_a`
+  method to resolve against, and the assertions check identity against
+  the resolved bound method instead of the old string.
+- New `tests/test_extend.py`: metadata-only registration+activation, a
+  real statement-handler round-trip (`let NAME = value` end to end,
+  confirmed producing a real `A.Assign` when active vs. an ordinary
+  identifier when the extension that claims it was never activated),
+  cross-plugin statement-prefix collision, `Backend`/`Linker`
+  registration retrievability.
+
+Verified: `tests.runner` still 475/483 (no regressions). All 18
+`test_extensions.py`/`test_program_isolation.py` tests pass (2 fixed for
+the `handler_for` resolution change), plus all 6 new `test_extend.py`
+tests. End-to-end CLI spot-check: a real external plugin file defining
+`let x = 5` (via `asmpython.Extension(id="let_binding",
+statement_handlers={"let": handle_let})`) loaded via `--ext path/to/
+plugin.py`, compiled with `--backend x86-64`, and run — printed `5`
+correctly. `Backend`/`Linker` registration spot-checked directly (no full
+custom-backend implementation attempted — that's a much larger, separate
+effort, out of scope here). A plugin registering zero extensions fails
+with a clear, direct error rather than silently doing nothing.
+
+`docs/EXTENSIONS.md` rewritten with two new sections ("User-authored
+extensions", "Backends and linkers") documenting all of the above in
+full, including the shape-lookahead trade-off and the self-hosting
+caveat on both registries.
 
 ## IR Migration Status — architecture changed mid-flight
 
@@ -753,6 +832,28 @@ tracked effort after roadmap docs are updated:
   behave equivalently).
 - Backend system as a versioned public SDK: serialized IR, capability
   declarations, validation, conformance tests.
+- **First-class module values** (new 2026-07-16): real Python parity for
+  `import x` producing a genuine storable/dict-able value with working
+  attribute access (`d = {"gcc": gcc_module}; d["gcc"].link(...)`), not
+  just a compile-time namespace lookup as today. Motivated by
+  `_backends/x86_64/__init__.py`'s linker dispatch (~line 166-179), which
+  has an explicit comment explaining it uses hardcoded if/elif instead of
+  a name→module dict specifically because "asmpython has no first-class
+  module values" and such a dict "isn't representable under self-hosted
+  compilation" — the same constraint would block a clean `asmpython.
+  Backend(...)`/`asmpython.Linker(...)` registry once self-hosting is a
+  real requirement. This is a foundational object-model feature (sema's
+  type system, the runtime object model, both codegen backends), not
+  scoped to any one registry — sized similarly to a language-level feature
+  like the walrus operator, but for a much more central construct.
+  Deliberately NOT attempted as a side effect of the Backend/Linker
+  registry work below; scope it as its own effort when picked up. Until
+  then, `asmpython/_backends/__init__.py`'s and `asmpython/_linkers/
+  __init__.py`'s registries (see "Extension System" above) use plain
+  Python dicts under CPython-hosted compilation only — fine for now since
+  self-hosting these two `_backends`/`_linkers` files specifically isn't
+  yet a confirmed near-term requirement, but flagged here so whoever picks
+  up self-hosting next knows this dispatch will need revisiting.
 - Reproducible/hermetic builds: lockfiles, content hashes, signed package
   metadata, safe archive extraction, machine-readable build manifests.
 - Keep ARM64/macOS/Pi/optimization/custom-backend work, but prioritize
