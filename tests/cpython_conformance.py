@@ -32,7 +32,10 @@ def discover(lib_root: Path, pattern: str, limit: int | None) -> list[Path]:
         raise FileNotFoundError(f"CPython test package not found: {test_root}")
     paths: list[Path] = []
     for path in sorted(test_root.glob(pattern)):
-        if path.is_file():
+        if path.is_file() and path.suffix == ".py":
+            # ``test_*`` also matches non-module fixtures test modules load
+            # as data (e.g. test_difflib_expect.html) -- only real Python
+            # source is an importable module.
             paths.append(path)
         elif path.is_dir() and (path / "__main__.py").is_file():
             paths.append(path / "__main__.py")
