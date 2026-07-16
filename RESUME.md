@@ -695,30 +695,43 @@ should re-run a full sweep with exit-code checking (not just stdout
 diffing — several of these are crashes, not wrong-output) to get a real
 current baseline before further parity work.
 
-**Next step on resume**: two reasonable directions, pick based on what's
-more valuable to unblock next:
+**Real baseline established** (2026-07-16, same-day follow-up): ran the
+exit-code-aware full sweep the note above called for. Real numbers across
+all 438 `tests/cases/*.py`:
 
-1. Re-run a full, exit-code-aware build+run+expected-output sweep across
-   all of `tests/cases/*.py` to get an accurate current baseline (see
-   note above — the previous "232/242" figure is unreliable), then triage
-   from there. `str.format`/bare `format()` builtin is still a known
-   unimplemented mini-language.
-2. Given the "Everything Python" bar (run essentially any unmodified
-   real-world Python program, native-first with pyinbin fallback), pivot
-   to validating against **real-world Python programs** beyond this
-   project's own hand-written test corpus — the corpus is necessarily
-   narrow (~440 hand-authored cases) and passing it doesn't guarantee
-   broad real-code compatibility. Consider running a batch of actual
-   PyPI-package-free stdlib-only scripts (or CPython's own `Lib/test/`
-   suite, already used as pyinbin's conformance oracle per the pyinbin
-   section below) through `--backend x86-64` to find the next tier of
-   gaps a hand-written smoke corpus wouldn't surface.
+```text
+OK=245  MISMATCH=24  CRASH=42  BUILD_FAIL=127  (56% passing)
+```
 
-Either way, this is still all in service of the confirmed work order's
-"finish the IR-based x86-64 backend and make it the default" pending
-item — parity work doesn't stop being valuable just because the
-smoke-test corpus is clean, since that corpus was never meant to be
-the definition of "done."
+This is the actual current state — **do not use "232/242" or any
+"4x/60" smoke-corpus figure as a stand-in for full-corpus parity**. 127
+build failures (unimplemented features), 42 runtime crashes (a real
+correctness bug class, not just missing features), 24 wrong-output
+mismatches. Full triage of all three buckets not yet done — this is a
+large, multi-session task. Sweep script (not yet committed to the repo,
+lived in a scratch dir this session — worth promoting to a real
+`tests/backend_correctness.py` next time) builds+runs every case under
+`--backend x86-64 --no-pyinbin-fallback` (auto-passing `--ext` flags read
+from each case's `# ext:` marker) and buckets by exit code + stdout diff
+rather than stdout diff alone, which is what the earlier, unreliable
+sweeps missed (a nonzero-exit crash with empty stdout was previously
+indistinguishable from "silently produced no output").
+
+**Next step on resume**: triage the 127 build failures first (cheapest
+fixes, same pattern as the earlier smoke-corpus push — each is
+"unsupported expr/stmt X", diagnosable directly from the LowerError
+message), then the 42 crashes (likely several recurring bug classes, not
+42 independent bugs — worth grouping by symptom before fixing one at a
+time), then the 24 mismatches last (correctness bugs in already-working
+code, higher risk of subtle regressions to introduce while fixing).
+`str.format`/bare `format()` builtin is a known unimplemented
+mini-language likely responsible for a chunk of the build failures.
+Given the "Everything Python" bar (run essentially any unmodified
+real-world Python program), once this corpus is closer to 100%, pivot to
+validating against real-world stdlib-only scripts or CPython's own
+`Lib/test/` suite (already pyinbin's conformance oracle) — passing this
+440-case hand-written corpus was never meant to be the definition of
+"done," just the nearest checkpoint before that.
 
 **When new Win64 ABI shims are added going forward, verify stack-slot
 placement (must be at/above rsp+32) and argument-register assignment
@@ -731,14 +744,72 @@ sometimes on a delayed/second call.**
 Selfhost = asmpython (gen0, built by CPython) compiling its own source to
 produce gen1, and gen1 compiling the same source again to produce gen2.
 
-**Last confirmed blocker**: gen1 compiling `asmpython/__main__.py` produces a
+**Front-end gauntlet progress** (2026-07-16, same-day follow-up): the
+`python -m selfhost.check` LEX→PARSE→SEMA gauntlet (a cheaper, earlier
+signal than the full gen1/gen2 build below — measures whether the
+compiler's own source is even accepted by its own front end, before ever
+trying to codegen/assemble it) went **16/19 → 18/19 files passing**. Two
+real bugs found and fixed:
+
+1. `codegen.py` itself failed SEMA (`zip() arguments must be lists or
+   tuples`) on its own `for i, (zn, ze) in enumerate(zip(znames,
+   zexprs)):` loop (`_cl_walk`, ~line 2348). Root cause: `znames`/`zexprs`
+   come from unpacking `self._for_zip_spec(s)`'s tuple return, and sema's
+   `_scan_tuple_return`/`_collect_tuple_returns` (which infers a
+   function's tuple-return per-slot types by scanning its `return a, b,
+   c` statements) read `A.expr_type(el)` on each returned expression --
+   but this scan runs on the RAW, not-yet-type-checked function body, so
+   an expression like `list(s.targets)` (a real list-producing builtin
+   call) still carried the *parser's* placeholder default
+   (`Call.inferred_type` defaults to `"int"`), not its real kind. Fixed
+   with two additions: `_scan_slot_kind` (recognizes `list`/`tuple`/
+   `dict`/`set`/`sorted` builtin-constructor calls and list-literals
+   directly, instead of trusting an unchecked node's `inferred_type`) and
+   `_collect_local_annots` (a flat local-variable-name → annotated-type
+   table scanned once per function, so a bare-`Name` return slot
+   referencing an annotated local like `zip_vars: list = []` resolves
+   correctly too). This is a real, generally-applicable sema gap — any
+   function returning a tuple containing a `list(...)`/`sorted(...)`/etc.
+   call or an annotated local variable was previously vulnerable to the
+   same silent mistyping; not just this one call site.
+2. `driver.py` crashed SEMA outright (`AttributeError: 'MultiAssign'
+   object has no attribute 'values'`) in `_param_usage_hints`'s inner
+   `scan_stmts` (~line 1614) — a stray plural `s.values` on an
+   `A.MultiAssign` node, which only ever has a single `.value` (`a = b =
+   c = value` evaluates the RHS once). The other two `A.MultiAssign`
+   handling sites in `sema.py` already used the correct singular field;
+   this one was an isolated typo. Fixed by reading `s.value` directly (no
+   loop needed, matching the other two sites' pattern).
+
+**Remaining gate**: `__main__.py` fails SEMA with `exec() is not
+supported: it requires a Python interpreter and cannot be compiled to
+native code` — at the new `_load_ext_plugin` function (this session's
+`--ext path/to/plugin.py` loading, see "Extension System" above), which
+genuinely, irreducibly needs a real Python `exec()` to run an arbitrary
+third-party plugin file. This is not a bug to fix so much as a real
+design question: either (a) the CLI driver (`__main__.py`) is
+deliberately excluded from asmpython's self-hosted subset (a common
+bootstrapping-compiler pattern — the compiler CORE self-hosts; the
+outermost CLI shell stays CPython-only), or (b) plugin loading is
+redesigned to avoid `exec()` under self-hosted compilation specifically
+(e.g. only available when the compiler itself is CPython-hosted). Neither
+implemented yet — flagged here for whoever picks up self-host next to
+make a real decision on, rather than silently left as an unexplained
+gauntlet failure.
+
+**Last confirmed gen1/gen2 build blocker** (older, not re-verified this
+session — the front-end gauntlet above is a necessary but not sufficient
+precondition for this): gen1 compiling `asmpython/__main__.py` produces a
 gen2 `.asm` truncated to ~4,426 lines (vs. gen0's ~510,000+), zero function
 labels emitted, failing to assemble. Not yet root-caused — likely
 `program.py`'s whole-program-merge import closure silently failing to expand
 for gen1 specifically. Two other known-open issues found along the way:
 `import os` (alone, unused) segfaults gen1 specifically; `isinstance(x, T)`
 in gen1-produced code always returns `False` for the *first*-declared class
-in a program (2nd/3rd+ classes work).
+in a program (2nd/3rd+ classes work). **Should be re-verified fresh** given
+how much has changed since this was last confirmed (the front-end gauntlet
+alone went from 16/19 to 18/19 this session) — it's possible some or all of
+this is already stale.
 
 A long chain of real bugs (set operators, closure free-var type inference,
 Win64 shadow-space corruption, boolop truthiness on containers/floats,

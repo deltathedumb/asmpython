@@ -1611,8 +1611,7 @@ class SemaAnalyzer:
                     scan_expr(s.target)
                     scan_expr(s.value)
                 elif isinstance(s, A.MultiAssign):
-                    for v in s.values:
-                        scan_expr(v)
+                    scan_expr(s.value)
                 elif isinstance(s, A.Try):
                     scan_stmts(s.body)
                     scan_stmts(s.handler)
@@ -3747,8 +3746,19 @@ class SemaAnalyzer:
         "any". This keeps unpack arity stable while not over-committing the slot
         type for functions with heterogeneous returns (e.g. `_resolve_annot`,
         whose slots are sometimes a name and sometimes None)."""
+        # Local annotated variables (`name: list = []`) declared anywhere in
+        # this function body, so a `return (a, local_var, b)` slot that's a
+        # bare Name referencing one of these can resolve its real kind
+        # instead of falling back to the parser's uninitialized default
+        # (see _scan_slot_kind's docstring for why that default is unsafe
+        # here). Deliberately NOT scope-aware (doesn't track which branch a
+        # declaration is reachable from) -- a flat "last annotation wins"
+        # table is enough for this best-effort scan; genuine shadowing
+        # across branches is rare enough not to special-case.
+        local_annots: dict = {}
+        self._collect_local_annots(stmts, local_annots)
         shapes: list = []
-        self._collect_tuple_returns(stmts, shapes)
+        self._collect_tuple_returns(stmts, shapes, local_annots)
         if not shapes:
             return None
         # Explicit `: list` intermediate and `: int` arity annotation: shapes[0]
@@ -3779,7 +3789,65 @@ class SemaAnalyzer:
             merged.append(kinds[0] if len(kinds) == 1 else "any")
         return merged
 
-    def _collect_tuple_returns(self, stmts: list, acc: list) -> None:
+    def _collect_local_annots(self, stmts: list, acc: dict) -> None:
+        """Flat `name -> base kind` table of every annotated local
+        assignment (`name: list = []`) reachable in `stmts`, for
+        `_collect_tuple_returns`/`_scan_slot_kind` to resolve a bare-Name
+        return slot against. Not scope-aware (a later declaration with the
+        same name anywhere in the function overwrites an earlier one,
+        regardless of which branch either is reachable from) -- fine for
+        this best-effort scan; see `_scan_tuple_return`'s call site for
+        why genuine per-branch shadowing isn't worth tracking here."""
+        for s in stmts:
+            if isinstance(s, A.Assign) and s.annot is not None:
+                acc[s.target] = s.annot[0]
+            elif isinstance(s, A.If):
+                s_then: list = s.then
+                s_orelse: list = s.orelse
+                self._collect_local_annots(s_then, acc)
+                self._collect_local_annots(s_orelse, acc)
+            elif isinstance(s, A.While):
+                s_body: list = s.body
+                self._collect_local_annots(s_body, acc)
+            elif isinstance(s, A.For):
+                s_body: list = s.body
+                self._collect_local_annots(s_body, acc)
+            elif isinstance(s, A.Try):
+                st_body: list = s.body
+                st_handler: list = s.handler
+                self._collect_local_annots(st_body, acc)
+                self._collect_local_annots(st_handler, acc)
+
+    def _scan_slot_kind(self, el, local_annots: dict) -> str:
+        """Best-effort static kind of a tuple-return slot expression, for
+        use by `_collect_tuple_returns` -- which runs on a RAW, not-yet-
+        type-checked function body (that's the whole point: inferring a
+        tuple return's shape has to happen before the body is normally
+        analyzed, since callers may need it first). `A.expr_type` alone
+        isn't safe here: for node kinds sema itself stamps during normal
+        checking (`Call`/`MethodCall`/`Name`/etc.), reading it now just
+        returns the parser's placeholder default (`Call.inferred_type`
+        defaults to "int", so `list(x)` -- a real list-returning builtin
+        call -- would otherwise be scanned as "int", silently corrupting
+        every caller that unpacks this slot). Recognize the builtin
+        container constructors and locally-annotated variables directly;
+        anything else still falls back to `A.expr_type`, which is safe for
+        literals/already-typed nodes."""
+        if isinstance(el, A.ListLit):
+            return "list"
+        if isinstance(el, A.Call) and el.func in ("list", "sorted"):
+            return "list"
+        if isinstance(el, A.Call) and el.func == "tuple":
+            return "tuple"
+        if isinstance(el, A.Call) and el.func in ("dict",):
+            return "dict"
+        if isinstance(el, A.Call) and el.func in ("set",):
+            return "set"
+        if isinstance(el, A.Name) and el.name in local_annots:
+            return local_annots[el.name]
+        return A.expr_type(el)
+
+    def _collect_tuple_returns(self, stmts: list, acc: list, local_annots: dict) -> None:
         # Same explicit `: list` intermediates as _collect_returns, and for
         # the same reason: s.then/s.orelse/s.body/s.handler are opaque
         # attribute reads that must not be passed directly into a recursive
@@ -3791,24 +3859,24 @@ class SemaAnalyzer:
                     if isinstance(el, A.Name) and el.name in self._tuple_scan_globals.types:
                         slots.append(self._tuple_scan_globals.types[el.name])
                     else:
-                        slots.append(A.expr_type(el))
+                        slots.append(self._scan_slot_kind(el, local_annots))
                 acc.append(slots)
             elif isinstance(s, A.If):
                 s_then: list = s.then
                 s_orelse: list = s.orelse
-                self._collect_tuple_returns(s_then, acc)
-                self._collect_tuple_returns(s_orelse, acc)
+                self._collect_tuple_returns(s_then, acc, local_annots)
+                self._collect_tuple_returns(s_orelse, acc, local_annots)
             elif isinstance(s, A.While):
                 s_body: list = s.body
-                self._collect_tuple_returns(s_body, acc)
+                self._collect_tuple_returns(s_body, acc, local_annots)
             elif isinstance(s, A.For):
                 s_body: list = s.body
-                self._collect_tuple_returns(s_body, acc)
+                self._collect_tuple_returns(s_body, acc, local_annots)
             elif isinstance(s, A.Try):
                 st_body: list = s.body
                 st_handler: list = s.handler
-                self._collect_tuple_returns(st_body, acc)
-                self._collect_tuple_returns(st_handler, acc)
+                self._collect_tuple_returns(st_body, acc, local_annots)
+                self._collect_tuple_returns(st_handler, acc, local_annots)
 
     def _method_returns_self(self, stmts: list) -> bool:
         """True if every reachable `return` in `stmts` is `return self`, and
