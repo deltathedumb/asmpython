@@ -1606,6 +1606,11 @@ def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr, repr_mode: bool = False) -> IRV
         out = ctx.tmp(PTR)
         ctx.emit(IRInstr("call", out, ["_abi_int_to_base", n, base, prefix]))
         return out
+    if ty == "float":
+        f_v = _lower_expr(ctx, e)
+        out = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out, ["_abi_float_to_str", f_v]))
+        return out
     if ty == "tuple":
         return _lower_tuple_repr(ctx, e)
     if ty == "list":
@@ -1673,6 +1678,50 @@ def _lower_type_name_attr(ctx: _FuncCtx, e: A.Attr) -> IRValue:
     sym = ctx.mctx.intern_str(name)
     out = ctx.tmp(PTR)
     ctx.emit(IRInstr("global_addr", out, [sym]))
+    return out
+
+
+def _lower_int_pow(ctx: _FuncCtx, base_v: IRValue, exp_v: IRValue, tag: int) -> IRValue:
+    """base_v ** exp_v for two ints -- a non-negative-exponent multiply
+    loop, matching codegen.py's pow() semantics exactly (no libc `pow`:
+    that's double-only, and calling it with int args here would be the
+    same GP/XMM ABI mismatch this whole file's other float-cell bitcast
+    fixes exist to avoid). Shared by the pow() builtin and the "**"
+    operator on two ints -- `tag` (typically id(the call/binop node))
+    keeps each call site's loop-carried slots distinct."""
+    res_ptr = ctx.ensure_slot(f"__pow_res_{tag}", I64)
+    exp_ptr = ctx.ensure_slot(f"__pow_exp_{tag}", I64)
+    one = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one, [1]))
+    ctx.emit(IRInstr("store", None, [one, res_ptr]))
+    ctx.emit(IRInstr("store", None, [exp_v, exp_ptr]))
+    head_b = ctx.new_block("powhead")
+    body_b = ctx.new_block("powbody")
+    end_b = ctx.new_block("powend")
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+    ctx.switch_to(head_b)
+    cur_exp = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", cur_exp, [exp_ptr]))
+    zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero, [0]))
+    keep_going = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.gt", keep_going, [cur_exp, zero]))
+    ctx.emit(IRInstr("br.t", None, [keep_going, body_b.label, end_b.label]))
+    ctx.switch_to(body_b)
+    cur_res = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", cur_res, [res_ptr]))
+    next_res = ctx.tmp(I64)
+    ctx.emit(IRInstr("imul", next_res, [cur_res, base_v]))
+    ctx.emit(IRInstr("store", None, [next_res, res_ptr]))
+    one2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one2, [1]))
+    next_exp = ctx.tmp(I64)
+    ctx.emit(IRInstr("isub", next_exp, [cur_exp, one2]))
+    ctx.emit(IRInstr("store", None, [next_exp, exp_ptr]))
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+    ctx.switch_to(end_b)
+    out = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", out, [res_ptr]))
     return out
 
 
@@ -2236,13 +2285,34 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", v, ["_abi_str_concat", lhs, rhs]))
             return v
         if lt == "float" or rt == "float":
-            if e.op not in _FBINOP:
+            if e.op not in _FBINOP and e.op not in ("%", "**"):
                 raise LowerError(f"unsupported float binop {e.op!r}")
             a = _lower_expr(ctx, e.left)
+            if lt != "float":
+                a_f = ctx.tmp(F64)
+                ctx.emit(IRInstr("sitofp", a_f, [a]))
+                a = a_f
             b = _lower_expr(ctx, e.right)
+            if rt != "float":
+                b_f = ctx.tmp(F64)
+                ctx.emit(IRInstr("sitofp", b_f, [b]))
+                b = b_f
+            if e.op in ("%", "**"):
+                # No direct SSE instruction for float mod/pow -- both route
+                # through the matching real libc double(double,double)
+                # export (fmod/pow), same as codegen.py's
+                # _emit_call_libc_double_double.
+                v = ctx.tmp(F64)
+                c_name = "fmod" if e.op == "%" else "pow"
+                ctx.emit(IRInstr("call", v, [c_name, a, b]))
+                return v
             v = ctx.tmp(F64)
             ctx.emit(IRInstr(_FBINOP[e.op], v, [a, b]))
             return v
+        if e.op == "**":
+            a = _lower_expr(ctx, e.left)
+            b = _lower_expr(ctx, e.right)
+            return _lower_int_pow(ctx, a, b, id(e))
         if e.op not in _BINOP:
             raise LowerError(f"unsupported binop {e.op!r}")
         a = _lower_expr(ctx, e.left)
@@ -2393,33 +2463,23 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         return v
 
     if isinstance(e, A.Call) and e.func == "print":
-        # print(x) -> printf(fmt, x); newline baked into the format string
-        # since asmpython's print() always appends one. Any argument that
-        # isn't already str/float routes through _lower_expr_as_str (the
-        # same repr machinery f-strings use), so list/dict/tuple/set/
-        # instance/None args print their real repr instead of a raw
-        # %lld-formatted pointer value. Multiple args are joined with a
-        # single space, matching CPython's default sep=" ".
+        # print(x) -> printf("%s\n", x); newline baked into the format
+        # string since asmpython's print() always appends one. Every
+        # argument routes through _lower_expr_as_str (the same repr
+        # machinery f-strings use) so list/dict/tuple/set/instance/None/
+        # float args print their real CPython-style text instead of a raw
+        # %lld-formatted pointer value or C's bare (non-".0") %g float
+        # text. Multiple args are joined with a single space, matching
+        # CPython's default sep=" ".
         if not e.args:
             fmt_name = ctx.mctx.intern_str("\n")
             fmt_ptr = ctx.tmp(PTR)
             ctx.emit(IRInstr("global_addr", fmt_ptr, [fmt_name]))
             ctx.emit(IRInstr("call", None, ["printf", fmt_ptr]))
         else:
-            fmt_parts: list[str] = []
-            call_args: list[IRValue] = []
-            for i, arg in enumerate(e.args):
-                arg_ty = A.expr_type(arg)
-                if i:
-                    fmt_parts.append(" ")
-                if arg_ty == "float":
-                    fmt_parts.append("%g")
-                    call_args.append(_lower_expr(ctx, arg))
-                else:
-                    fmt_parts.append("%s")
-                    call_args.append(_lower_expr_as_str(ctx, arg))
-            fmt_parts.append("\n")
-            fmt_name = ctx.mctx.intern_str("".join(fmt_parts))
+            fmt_parts = ["%s"] * len(e.args)
+            call_args = [_lower_expr_as_str(ctx, arg) for arg in e.args]
+            fmt_name = ctx.mctx.intern_str(" ".join(fmt_parts) + "\n")
             fmt_ptr = ctx.tmp(PTR)
             ctx.emit(IRInstr("global_addr", fmt_ptr, [fmt_name]))
             ctx.emit(IRInstr("call", None, ["printf", fmt_ptr, *call_args]))
@@ -2495,9 +2555,15 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 other_v = _lower_expr(ctx, el.value)
                 ctx.emit(IRInstr("call", None, ["_abi_list_extend", list_v, other_v]))
                 continue
-            if A.expr_type(el) == "float":
-                raise LowerError("unsupported expr ListLit (float elements)")
             val = _lower_expr(ctx, el)
+            if A.expr_type(el) == "float":
+                # _abi_list_append's cell is a plain 8-byte int slot (same
+                # constraint as _abi_dict_set -- see A.AttrAssign's
+                # matching comment); store the float's raw bits, read back
+                # via bitcast_i2f wherever an element is loaded as "float".
+                iv = ctx.tmp(I64)
+                ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
+                val = iv
             ctx.emit(IRInstr("call", None, ["_abi_list_append", list_v, val]))
         return list_v
 
@@ -2541,10 +2607,13 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         for k, v in zip(e.keys, e.values):
             if k is None:
                 raise LowerError("unsupported expr DictLit (** spread)")
-            if A.expr_type(v) == "float":
-                raise LowerError("unsupported expr DictLit (float value)")
             key_ptr = _lower_dict_key(ctx, k)
             val = _lower_expr(ctx, v)
+            if A.expr_type(v) == "float":
+                # Same int-only-cell constraint as A.AttrAssign/A.ListLit.
+                iv = ctx.tmp(I64)
+                ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
+                val = iv
             ctx.emit(IRInstr("call", None, ["_abi_dict_set", dict_v, key_ptr, val]))
         return dict_v
 
@@ -2622,8 +2691,6 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         if obj_ty not in ("list", "tuple"):
             raise LowerError(f"unsupported expr Subscript ({obj_ty})")
         result_ty = A.expr_type(e)
-        if obj_ty == "list" and result_ty == "float":
-            raise LowerError("unsupported expr Subscript (float element)")
         obj_v = _lower_expr(ctx, e.obj)
         idx_v = _lower_expr(ctx, e.index)
         addr = _list_elem_addr(ctx, obj_v, idx_v)
@@ -2641,6 +2708,48 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             if fn is not None and hasattr(fn, "c_name"):
                 c_name = getattr(fn, "c_name_windows", None) or fn.c_name
                 args = [_lower_expr(ctx, a) for a in e.args]
+                if c_name in ("fmax", "fmin") and len(args) == 2:
+                    # Neither fmax nor fmin (nor an MS-spelled _fmax/_fmin)
+                    # is a real classic-msvcrt.dll export -- SSE2's MAXSD/
+                    # MINSD compute the same IEEE-754 result directly, so
+                    # route through the _abi_fmax_f64/_abi_fmin_f64 shims
+                    # instead of an unresolvable DLL import.
+                    shim = "_abi_fmax_f64" if c_name == "fmax" else "_abi_fmin_f64"
+                    v = ctx.tmp(F64)
+                    ctx.emit(IRInstr("call", v, [shim, *args]))
+                    return v
+                if c_name == "exp2" and len(args) == 1:
+                    # exp2 isn't a real msvcrt.dll export either, but
+                    # exp2(x) == pow(2.0, x) exactly, and pow is.
+                    two = ctx.tmp(F64)
+                    ctx.emit(IRInstr("const", two, [2.0]))
+                    v = ctx.tmp(F64)
+                    ctx.emit(IRInstr("call", v, ["pow", two, args[0]]))
+                    return v
+                ret_conv = getattr(fn, "ret_conv", None)
+                if ret_conv == "f2i":
+                    if c_name == "trunc" and len(args) == 1:
+                        # trunc(x) IS "truncate toward zero", exactly what
+                        # cvttsd2si already computes -- no libm call
+                        # needed at all, which conveniently sidesteps
+                        # trunc not being a real msvcrt.dll export (unlike
+                        # floor/ceil) that this backend's own linker (no
+                        # gcc/mingw static-shim aliasing available) could
+                        # otherwise resolve.
+                        v = ctx.tmp(I64)
+                        ctx.emit(IRInstr("fptosi", v, [args[0]]))
+                        return v
+                    # The C symbol (e.g. libm's floor/ceil) actually
+                    # returns a double in xmm0, but asmpython's ret_type
+                    # narrows it to int (matching CPython's math.floor/
+                    # ceil/trunc) -- call with an f64 result then truncate
+                    # toward zero, mirroring codegen.py's cvttsd2si path
+                    # for the same ret_conv flag.
+                    fv = ctx.tmp(F64)
+                    ctx.emit(IRInstr("call", fv, [c_name, *args]))
+                    v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("fptosi", v, [fv]))
+                    return v
                 ret_ty = getattr(fn, "ret_type", "int") or "int"
                 v = ctx.tmp(ir_type_for(ret_ty))
                 ctx.emit(IRInstr("call", v, [c_name, *args]))
@@ -2701,15 +2810,25 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             if e.method == "get" and len(e.args) in (1, 2):
                 obj_v = _lower_expr(ctx, e.obj)
                 key_v = _lower_dict_key(ctx, e.args[0])
+                res_is_float = A.expr_type(e) == "float"
                 if len(e.args) == 2:
-                    if A.expr_type(e.args[1]) == "float":
-                        raise LowerError("unsupported expr MethodCall (dict.get float default)")
                     default_v = _lower_expr(ctx, e.args[1])
+                    if res_is_float and A.expr_type(e.args[1]) == "float":
+                        dv = ctx.tmp(I64)
+                        ctx.emit(IRInstr("bitcast_f2i", dv, [default_v]))
+                        default_v = dv
                 else:
                     default_v = ctx.tmp(I64)
                     ctx.emit(IRInstr("const", default_v, [0]))
                 v = ctx.tmp(I64)
                 ctx.emit(IRInstr("call", v, ["_abi_dict_get_default", obj_v, key_v, default_v]))
+                if res_is_float:
+                    # Same int-only-cell constraint as every other dict/
+                    # attribute float site -- read the bits back as a real
+                    # double (see A.Attr's matching bitcast_i2f comment).
+                    fv = ctx.tmp(F64)
+                    ctx.emit(IRInstr("bitcast_i2f", fv, [v]))
+                    return fv
                 return v
             if e.method == "update" and len(e.args) == 1:
                 obj_v = _lower_expr(ctx, e.obj)
@@ -2991,6 +3110,16 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("const", zero, [0]))
         v = ctx.tmp(I64)
         ctx.emit(IRInstr("call", v, ["_abi_dict_get_default", obj_val, key_ptr, zero]))
+        if A.expr_type(e) == "float":
+            # Every dict/instance-attribute cell is a plain 8-byte int slot
+            # (_abi_dict_set/get_default only ever move GP-sized values);
+            # a float attribute's bits went in via bitcast_f2i on write
+            # (see A.AttrAssign below) and must come back out the same way,
+            # not as a numeric int->float conversion (sitofp would treat
+            # the raw bit pattern as an integer value, corrupting it).
+            fv = ctx.tmp(F64)
+            ctx.emit(IRInstr("bitcast_i2f", fv, [v]))
+            return fv
         return v
 
     if isinstance(e, A.Call) and e.func in ctx.mctx.class_names:
@@ -3130,47 +3259,14 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", out, ["_abi_divmod", a_v, b_v]))
             return out
         if e.func == "pow" and len(e.args) == 2:
-            # pow(base, exp) -- integer exponentiation loop, matching
-            # codegen.py's non-negative-exponent semantics exactly (no
-            # libc `pow`: that's double-only and this call site's args are
-            # ints, an ABI mismatch the generic call fallthrough doesn't
-            # catch since `pow` happens to already be a real DLL export).
+            # pow(base, exp) -- ints only take the loop; a float either
+            # side goes through the earlier A.BinOp-style libc `pow` call
+            # via the "**" operator's own dispatch, not this builtin-call
+            # site (arg type mismatch is exactly what made this path
+            # necessary in the first place -- see _lower_int_pow).
             base_v = _lower_expr(ctx, e.args[0])
             exp_v = _lower_expr(ctx, e.args[1])
-            res_ptr = ctx.ensure_slot(f"__pow_res_{id(e)}", I64)
-            exp_ptr = ctx.ensure_slot(f"__pow_exp_{id(e)}", I64)
-            one = ctx.tmp(I64)
-            ctx.emit(IRInstr("const", one, [1]))
-            ctx.emit(IRInstr("store", None, [one, res_ptr]))
-            ctx.emit(IRInstr("store", None, [exp_v, exp_ptr]))
-            head_b = ctx.new_block("powhead")
-            body_b = ctx.new_block("powbody")
-            end_b = ctx.new_block("powend")
-            ctx.emit(IRInstr("br", None, [head_b.label]))
-            ctx.switch_to(head_b)
-            cur_exp = ctx.tmp(I64)
-            ctx.emit(IRInstr("load", cur_exp, [exp_ptr]))
-            zero = ctx.tmp(I64)
-            ctx.emit(IRInstr("const", zero, [0]))
-            keep_going = ctx.tmp(I64)
-            ctx.emit(IRInstr("icmp.gt", keep_going, [cur_exp, zero]))
-            ctx.emit(IRInstr("br.t", None, [keep_going, body_b.label, end_b.label]))
-            ctx.switch_to(body_b)
-            cur_res = ctx.tmp(I64)
-            ctx.emit(IRInstr("load", cur_res, [res_ptr]))
-            next_res = ctx.tmp(I64)
-            ctx.emit(IRInstr("imul", next_res, [cur_res, base_v]))
-            ctx.emit(IRInstr("store", None, [next_res, res_ptr]))
-            one2 = ctx.tmp(I64)
-            ctx.emit(IRInstr("const", one2, [1]))
-            next_exp = ctx.tmp(I64)
-            ctx.emit(IRInstr("isub", next_exp, [cur_exp, one2]))
-            ctx.emit(IRInstr("store", None, [next_exp, exp_ptr]))
-            ctx.emit(IRInstr("br", None, [head_b.label]))
-            ctx.switch_to(end_b)
-            out = ctx.tmp(I64)
-            ctx.emit(IRInstr("load", out, [res_ptr]))
-            return out
+            return _lower_int_pow(ctx, base_v, exp_v, id(e))
         if e.func == "bool" and len(e.args) == 1:
             arg = e.args[0]
             arg_t = A.expr_type(arg)
@@ -3239,7 +3335,7 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", out, ["_abi_input"]))
             return out
         args = [_lower_expr(ctx, a) for a in e.args]
-        v = ctx.tmp(I64)
+        v = ctx.tmp(ir_type_for(A.expr_type(e)))
         if e.func in ctx.slot_ty and e.func not in ctx.mctx.func_names:
             target = _lower_expr(ctx, A.Name(name=e.func, pos=e.pos))
             ctx.emit(IRInstr("call", v, [target, *args]))
@@ -3316,10 +3412,21 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         rhs_ty = A.expr_type(s.value)
         rhs = _lower_expr(ctx, s.value)
         if cur_ty is F64 or rhs_ty == "float":
-            if s.op not in _FBINOP:
+            if s.op not in _FBINOP and s.op not in ("%", "**"):
                 raise LowerError(f"unsupported float augassign op {s.op!r}")
+            if rhs_ty != "float":
+                # e.g. `x_float += 1`: promote the int RHS before fadd, same
+                # as a plain BinOp -- fadd on a mismatched i64 operand would
+                # silently read garbage (int and float share no bit layout).
+                rhs_f = ctx.tmp(F64)
+                ctx.emit(IRInstr("sitofp", rhs_f, [rhs]))
+                rhs = rhs_f
             res = ctx.tmp(F64)
-            ctx.emit(IRInstr(_FBINOP[s.op], res, [cur, rhs]))
+            if s.op in ("%", "**"):
+                c_name = "fmod" if s.op == "%" else "pow"
+                ctx.emit(IRInstr("call", res, [c_name, cur, rhs]))
+            else:
+                ctx.emit(IRInstr(_FBINOP[s.op], res, [cur, rhs]))
             if cur_ty is not F64:
                 # First write was int but this op promotes to float -- widen
                 # the slot itself going forward isn't supported (slots are
@@ -3360,17 +3467,18 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             return
         obj_ty = A.expr_type(target.obj)
         if obj_ty == "dict":
-            if A.expr_type(s.value) == "float":
-                raise LowerError("unsupported stmt IndexAssign (float dict value)")
             obj_v = _lower_expr(ctx, target.obj)
             key_v = _lower_dict_key(ctx, target.index)
             val = _lower_expr(ctx, s.value)
+            if A.expr_type(s.value) == "float":
+                # Same int-only-cell constraint as A.AttrAssign/A.ListLit.
+                iv = ctx.tmp(I64)
+                ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
+                val = iv
             ctx.emit(IRInstr("call", None, ["_abi_dict_set", obj_v, key_v, val]))
             return
         if obj_ty != "list":
             raise LowerError(f"unsupported stmt IndexAssign ({obj_ty})")
-        if A.expr_type(s.value) == "float":
-            raise LowerError("unsupported stmt IndexAssign (float element)")
         obj_v = _lower_expr(ctx, target.obj)
         idx_v = _lower_expr(ctx, target.index)
         addr = _list_elem_addr(ctx, obj_v, idx_v)
@@ -3415,6 +3523,16 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         key_ptr = ctx.tmp(PTR)
         ctx.emit(IRInstr("global_addr", key_ptr, [name]))
         val = _lower_expr(ctx, s.value)
+        if A.expr_type(s.value) == "float":
+            # Bitcast the float's raw bits into a GP-sized value before the
+            # shim call -- _abi_dict_set's own calling convention only
+            # moves int-sized args, and the "call" IR op would otherwise
+            # route an F64-typed value through an XMM argument register,
+            # which _abi_dict_set never reads. See the A.Attr read path's
+            # matching bitcast_i2f for the reverse.
+            iv = ctx.tmp(I64)
+            ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
+            val = iv
         ctx.emit(IRInstr("call", None, ["_abi_dict_set", obj_val, key_ptr, val]))
         return
 

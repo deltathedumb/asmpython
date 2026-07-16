@@ -36,6 +36,7 @@ from .encoder import (
     encode_movsd_rr, encode_addsd, encode_subsd, encode_mulsd, encode_divsd,
     encode_movsd_rm, encode_movsd_mr, encode_ucomisd,
     encode_cvtsi2sd, encode_cvttsd2si,
+    encode_movq_xmm_gp, encode_movq_gp_xmm,
     encode_movss_rr, encode_addss, encode_subss, encode_mulss, encode_divss,
     encode_movss_rm, encode_movss_mr, encode_ucomiss,
     encode_cvtsi2ss, encode_cvttss2si,
@@ -948,6 +949,26 @@ class FuncCodegen:
             src_x, ld = self._xmm(ops[0])
             dst = self._dst_xmm(r)
             self._emit(ld); self._emit(_cvtsd2ss(dst, src_x))
+            return
+
+        if op == "bitcast_i2f":
+            # Raw 64-bit reinterpret, not a numeric conversion (unlike
+            # sitofp): the exact bits of a GP-typed IR value become an f64.
+            # Needed wherever a float value has been carried through an
+            # int-only storage slot (dict/list cell, generic "call" arg
+            # marshaling) and must be read back as a real double.
+            src_r, ld = self._gp(ops[0])
+            dst = self._dst_xmm(r)
+            self._emit(ld); self._emit(encode_movq_xmm_gp(dst, src_r))
+            return
+
+        if op == "bitcast_f2i":
+            # Reverse of bitcast_i2f -- an f64's raw bits into a GP
+            # register, for storing a float into one of those int-only
+            # slots.
+            src_x, ld = self._xmm(ops[0])
+            dst = self._dst_gp(r)
+            self._emit(ld); self._emit(encode_movq_gp_xmm(dst, src_x))
             return
 
         # ── control flow ──────────────────────────────────────────────────────

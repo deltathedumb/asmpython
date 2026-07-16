@@ -383,6 +383,23 @@ def encode_cvttsd2si(dst: Reg, src: XmmReg) -> bytes:
     return bytes([0xF2]) + rex + bytes([0x0F, 0x2C, _modrm(0b11, int(dst), int(src))])
 
 
+def encode_movq_xmm_gp(dst: XmmReg, src: Reg) -> bytes:
+    """MOVQ xmm, r64 — raw 64-bit bit-move GP -> XMM (no numeric
+    conversion, unlike CVTSI2SD): the exact bits of an integer register
+    become the exact bits of a double. Used to bitcast a float's already-
+    integer-typed IR value (e.g. read out of a dict/list slot that only
+    stores 8-byte cells) back into a real double, and the reverse
+    (encode_movq_gp_xmm) to store a float into one of those slots."""
+    rex = _rex(w=1, r=_hi(dst), b=_hi(src))
+    return bytes([0x66]) + rex + bytes([0x0F, 0x6E, _modrm(0b11, int(dst), int(src))])
+
+
+def encode_movq_gp_xmm(dst: Reg, src: XmmReg) -> bytes:
+    """MOVQ r64, xmm — raw 64-bit bit-move XMM -> GP (see encode_movq_xmm_gp)."""
+    rex = _rex(w=1, r=_hi(src), b=_hi(dst))
+    return bytes([0x66]) + rex + bytes([0x0F, 0x7E, _modrm(0b11, int(src), int(dst))])
+
+
 # ── SSE scalar float (f32) ────────────────────────────────────────────────────
 
 def encode_movss_rr(dst: XmmReg, src: XmmReg) -> bytes: return _sse(0xF3, 0x10, dst, src)

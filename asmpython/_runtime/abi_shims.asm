@@ -149,6 +149,9 @@ global _abi_int_to_str
 global _abi_divmod
 global _abi_input
 global _abi_round_f64
+global _abi_float_to_str
+global _abi_fmax_f64
+global _abi_fmin_f64
 
 ; asmpython/stdlib/hardware.py's _hw_* symbols, hosted-target bodies. These
 ; already use the standard Win64 ABI (see codegen.py's target_windows.py /
@@ -839,6 +842,7 @@ _con_ansi1: resq 1
 _con_ansi2: resq 1
 _con_buf:   resb 32
 _abi_int_to_str_buf: resb 32
+_abi_float_to_str_buf: resb 40
 
 section .rodata
 _abi_fmt_lld:    db "%lld", 0
@@ -846,6 +850,10 @@ _con_fmt_clear:  db 27, "[2J", 27, "[H", 0
 _con_fmt_color:  db 27, "[%dm", 27, "[%dm", 0
 _con_fmt_cursor: db 27, "[%d;%dH", 0
 _con_fmt_s:      db "%s", 0
+_abi_fmt_g:      db "%g", 0
+_abi_str_nan:    db "nan", 0
+_abi_str_pinf:   db "inf", 0
+_abi_str_ninf:   db "-inf", 0
 
 section .text
 
@@ -1034,5 +1042,83 @@ _abi_input:
 ; codegen.py uses for round(float)).
 _abi_round_f64:
     roundsd xmm0, xmm0, 0
+    ret
+
+; rax = float_to_str(xmm0) -> ptr to a nul-terminated CPython-style float
+; repr ("2.0" not C's bare "2"; "nan"/"inf"/"-inf" not UCRT's "1.#QNAN"/
+; "1.#INF"). Ports codegen.py's target_windows.py _emit_float_to_str +
+; _emit_float_repr_fixup exactly: detect NaN/inf up front (UCRT's sprintf
+; spellings don't match Python's), else sprintf "%g" then scan the result
+; for a byte that already marks it non-integral/non-finite and append
+; ".0" if none is found before the nul terminator.
+_abi_float_to_str:
+    sub rsp, 40
+    ucomisd xmm0, xmm0
+    jp .is_nan
+    movq rax, xmm0
+    mov r10, 0x7FFFFFFFFFFFFFFF
+    and rax, r10
+    mov r10, 0x7FF0000000000000
+    cmp rax, r10
+    jne .finite
+    movq rax, xmm0
+    test rax, rax
+    jns .pinf
+    lea rax, [_abi_str_ninf]
+    jmp .done
+.pinf:
+    lea rax, [_abi_str_pinf]
+    jmp .done
+.is_nan:
+    lea rax, [_abi_str_nan]
+    jmp .done
+.finite:
+    movq r8, xmm0
+    lea rdx, [_abi_fmt_g]
+    lea rcx, [_abi_float_to_str_buf]
+    xor eax, eax
+    call sprintf
+    lea rbx, [_abi_float_to_str_buf]
+.scan:
+    mov cl, [rbx]
+    test cl, cl
+    jz .append
+    cmp cl, '.'
+    je .fixup_done
+    cmp cl, 'e'
+    je .fixup_done
+    cmp cl, 'E'
+    je .fixup_done
+    cmp cl, 'n'
+    je .fixup_done
+    cmp cl, 'N'
+    je .fixup_done
+    cmp cl, 'i'
+    je .fixup_done
+    cmp cl, 'I'
+    je .fixup_done
+    inc rbx
+    jmp .scan
+.append:
+    mov byte [rbx], '.'
+    mov byte [rbx+1], '0'
+    mov byte [rbx+2], 0
+.fixup_done:
+    lea rax, [_abi_float_to_str_buf]
+.done:
+    add rsp, 40
+    ret
+
+; xmm0 = fmax_f64(xmm0=a, xmm1=b) -> max(a, b). classic msvcrt.dll exports
+; neither fmax nor _fmax (a C99 addition with no MS-spelled equivalent,
+; unlike copysign/hypot's _copysign/_hypot), but SSE2's MAXSD computes the
+; same IEEE-754 result directly -- no libm call needed at all.
+_abi_fmax_f64:
+    maxsd xmm0, xmm1
+    ret
+
+; xmm0 = fmin_f64(xmm0=a, xmm1=b) -> min(a, b). Same rationale as fmax.
+_abi_fmin_f64:
+    minsd xmm0, xmm1
     ret
 

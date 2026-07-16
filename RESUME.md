@@ -94,41 +94,108 @@ directly to `ir.py`'s IR, feeding a real custom backend under
   NASM + gcc as the assemble/link step, wired up via `--backend x86-64`.
 - `_backends/ternary/`: an early speculative ISA backend (uASM-related).
 
-**Last confirmed status** (2026-07-16, commit `fc688dfd`): smoke-tested
-`--backend x86-64` against the first 60 `tests/cases/*.py` (not part of the
-automated suite, which exercises the legacy backend only): 39/60
-compiled+linked (up from 34/60). Fixed along the way: a real general bug
-where any top-level `for x in <list>:` wrote its loop variable to an unused
-local stack slot while every read resolved it as a module global, so the
-variable always read back as zero — silently corrupting any module-scope
-for-loop; missing `round`/`divmod`/`hex`/`oct`/`bin`/`bool`/`repr`/`input`
-builtins and a broken `pow(int,int)` (was routed through msvcrt's
-double-only `pow`, corrupting output) that were previously falling through
-to a blind "assume it's a real DLL symbol" call path; `print()`/`str()` only
-handled str/int/float, printing lists/dicts/tuples/instances as raw pointer
-values and `True`/`False`/`None` as `1`/`0`/`None`-via-wrong-path — both now
-delegate to `_lower_expr_as_str`, the repr helper f-strings already used.
-Spot-checked full build+run+expected-output byte-for-byte match on the
-newly-fixed cases (101, 106, 108, 127) — all exact. `tests.runner` still
-481/489, no regressions.
+**Last confirmed status** (2026-07-16, commits `fc688dfd`..`HEAD`):
+smoke-tested `--backend x86-64` against the first 60 `tests/cases/*.py` (not
+part of the automated suite, which exercises the legacy backend only):
+**48/60 compiled+linked** (up from 34/60 at session start). `tests.runner`
+still 481/489 throughout, no regressions at any checkpoint. Full list of
+fixes this session, roughly in dependency order:
 
-Remaining 1-60 failures are a mix of: float support (list/dict/tuple float
-elements, float binops `%`/`**`, float params — `'RegLoc' object has no
-attribute 'offset'` on `120_float_params.py`/`121_float_instance_attrs.py`
-looks like a distinct regalloc bug worth its own investigation), several
-unimplemented `MethodCall`s (`list.sort`, `dict.pop`, `str.rpartition`/
-`casefold`/`format`), `del` statement, starred/non-Name tuple-assign
-targets, walrus operator, `sorted(key=...)` lambda body, and two
-undefined-symbol gaps (`trunc`, `Dog__greeting` — the latter smells like a
-property/method-resolution bug, not a missing libm entry).
+- A real general bug where any top-level `for x in <list>:` wrote its loop
+  variable to an unused local stack slot while every read resolved it as a
+  module global, so the variable always read back as zero — silently
+  corrupting any module-scope for-loop. Fixed by routing the single-target
+  write through the same `_store_loop_target`/`_name_ptr` helper the
+  tuple-unpack/`enumerate()` loop forms already used correctly.
+- Missing `round`/`divmod`/`hex`/`oct`/`bin`/`bool`/`repr`/`input` builtins
+  and a broken `pow(int,int)` (routed through msvcrt's double-only `pow`,
+  corrupting output) — all were falling through to a blind "assume it's a
+  real DLL symbol" call path.
+- `print()`/`str()` only handled str/int/float, printing lists/dicts/
+  tuples/instances as raw pointer values and `True`/`False`/`None` as
+  `1`/`0`/wrong-path text — both now delegate to `_lower_expr_as_str`, the
+  repr helper f-strings already used; added a proper heterogeneous tuple
+  repr (`"(a, b)"`, 1-tuple trailing comma) alongside the existing uniform
+  list/dict/set repr.
+- Instance `MethodCall` built its symbol from the receiver's *static* type
+  instead of walking the inheritance chain (an inherited-but-unoverridden
+  method/property never linked); fixed, and separately added real virtual
+  dispatch (a base-class method calling an overridden method needs the
+  receiver's *runtime* `__class__` id, not its static type) — ported
+  `codegen.py`'s `_virtual_dispatch_rows` design as a pre-built chain of
+  check/hit IR blocks.
+- Mixed int+float arithmetic (`a + b` where one side is int, other float)
+  emitted `fadd` directly on an un-promoted i64 operand with no `sitofp` —
+  fixed for both `BinOp` and `AugAssign`.
+- A user-function/lambda call's result was unconditionally typed `i64`
+  regardless of the callee's real return type, corrupting every
+  float-returning function call (garbage via wrong register class) — fixed
+  to use the call expression's own inferred type.
+- **New `bitcast_i2f`/`bitcast_f2i` IR ops** (raw 64-bit GP↔XMM bit-move,
+  `MOVQ`, not a numeric `sitofp`/`fptosi` conversion) plus two new x86-64
+  encoder functions, to fix the whole class of "float value stored through
+  an int-only 8-byte cell" bugs: instance attributes, dict literals/`.get()`
+  default, list literals, `IndexAssign` into a dict — all `_abi_dict_set`/
+  `_abi_list_append`-based storage only ever moves GP-sized values, so a
+  raw F64 `call` arg silently corrupted the marshaled register. (Direct
+  memory `load`/`store` of a float slot, e.g. list/tuple element read,
+  needed **no** bitcast — bits are bits in memory regardless of which mov
+  variant touches them; only the GP/XMM *register* crossing needs one.)
+- New `_abi_round_f64`/`_abi_divmod`/`_abi_input`/`_abi_float_to_str`/
+  `_abi_fmax_f64`/`_abi_fmin_f64` shims in `abi_shims.asm`.
+  `_abi_float_to_str` ports `codegen.py`'s NaN/inf detection +
+  `%g`-then-append-".0"-if-no-decimal-point fixup, fixing bare
+  `print(float)`/`str(float)` (was printing C's bare `"2"` instead of
+  Python's `"2.0"`, or UCRT's `"1.#QNAN"` instead of `"nan"`).
+  `fmax`/`fmin` route through `MAXSD`/`MINSD` directly (neither is a real
+  msvcrt.dll export under any spelling); `exp2` rewrites to `pow(2.0, x)`
+  at the IR level for the same reason.
+- `pe_linker.py`'s `_DLL_FOR_SYMBOL`/`_SYMBOL_ALIASES` gained `floor`/
+  `ceil`/`difftime` (real exports, verified against the live system
+  `msvcrt.dll`'s export table, not just NASM emitting the call) and
+  `copysign`→`_copysign`/`hypot`→`_hypot` aliases (MS-prefixed spelling,
+  same pattern as the existing `access`/`strtoll` aliases). `trunc` has no
+  real or aliased export at all — rewritten to a bare `fptosi` at the IR
+  level (`trunc(x)` IS "truncate toward zero", no libm call needed).
+- Float `%`/`**` binops (both `BinOp` and `AugAssign`) route to real libc
+  `fmod`/`pow`; int `**` reuses the same non-negative-exponent multiply
+  loop as the `pow()` builtin (extracted into a shared `_lower_int_pow`
+  helper).
 
-**Next step on resume**: triage the remaining backend-parity smoke-test
-failures (one symbol-table fix or one missing `ir_lower.py` codegen case at a
-time) toward full parity with `codegen.py` under `--backend x86-64` — this is
-the direct predecessor of the newly-confirmed "make the IR-based backend the
-default" workload item. Suggest starting with `Dog__greeting` (property
-resolution) since it may be a quick, high-value fix, then the float-params
-`RegLoc.offset` crash since float support blocks several other cases.
+Spot-checked full build+run+expected-output byte-for-byte match on every
+case fixed this session (100, 101, 106, 108, 109, 117, 118, 119, 120, 121,
+122, 124, 127) — all exact except **109_pct_format.py segfaults at
+runtime** (compiles now, previously didn't reach that far) — `%`-style
+string formatting (`"%s is %d" % (...)`) has zero implementation in this
+backend, a large separate feature, not attempted this session.
+
+Remaining 1-60 build failures: several unimplemented `MethodCall`s
+(`list.sort`, `dict.pop`, `str.rpartition`/`casefold`/`format`), `del`
+statement, starred/non-Name tuple-assign targets, walrus operator,
+`sorted(key=...)` lambda body. A broader **build+run+expected-output**
+sweep (not just build-success) on 1-60 also surfaces real, likely
+pre-existing (not re-verified individually this session, but confirmed
+not new via git-stash A/B diffing on a sample) runtime bugs worth
+prioritizing next: `03_fib.py`/`04_loops.py`/`12_list_grow.py`/
+`115_loop_else.py` all print all-zeros or wrong values from what looks
+like a **second, distinct for-loop/while-loop variable bug** (not the
+module-scope-global one fixed this session — these use local/function-
+scope loop vars); `114_bare_raise.py`/`131_except_dispatch.py` print
+`(null)` instead of exception messages; `132_dict_union.py`/
+`133_dict_unpack.py`/`104_set_methods.py`/`123_set_discard_remove_copy_pop.py`
+produce empty or wrong output; f-string format-spec support (alignment,
+width, precision, thousands-grouping, binary/hex-with-prefix) is
+entirely unimplemented (silently ignores the spec and prints the plain
+value).
+
+**Next step on resume**: the local/function-scope for-loop bug
+(03/04/12/115) is likely high-value and possibly a quick fix analogous to
+this session's module-scope one — check the local-scope `for` lowering
+path's write side the same way. After that, `del` statement and the
+tuple-assign/starred-target gaps look like the next-cheapest wins toward
+full parity with `codegen.py` under `--backend x86-64` — the direct
+predecessor of the newly-confirmed "make the IR-based backend the
+default" workload item.
 
 ## Selfhost Status (plan-step 11)
 
@@ -264,3 +331,8 @@ native compilation where fallback or semantic differences remain.
   one agent concurrently against the same git working tree/branch (`beta`).
   Check `devthread.txt` for another agent's in-progress notes before assuming
   you have the tree to yourself.
+- `codegen.py`'s `_emit_float_repr_fixup` docstring (~line 16334) has a block
+  of corrupted/garbage text embedded in it (random character runs, not
+  malicious, looks like an accidental paste/edit artifact) — harmless (it's
+  a comment, the code below it is correct and unaffected) but worth cleaning
+  up next time that function is touched.

@@ -52,7 +52,7 @@ for _name in (
     "fread", "fseek", "ftell",
     "exit", "__iob_func", "memset", "memcpy", "fmod", "pow",
     "fabs", "frexp", "ldexp", "log", "modf", "rand", "sqrt",
-    "abs", "labs",
+    "abs", "labs", "floor", "ceil", "difftime",
 ):
     _DLL_FOR_SYMBOL[_name] = "msvcrt.dll"
 
@@ -68,6 +68,8 @@ for _name in (
 _SYMBOL_ALIASES: dict[str, str] = {
     "access": "_access",
     "strtoll": "_strtoi64",
+    "copysign": "_copysign",
+    "hypot": "_hypot",
 }
 for _ref, _real in _SYMBOL_ALIASES.items():
     _DLL_FOR_SYMBOL[_real] = "msvcrt.dll"
