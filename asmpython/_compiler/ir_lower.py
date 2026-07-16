@@ -1340,9 +1340,95 @@ def _collect_declared_globals(stmts: list, out: set[str]) -> None:
             _collect_declared_globals(s.finally_body, out)
 
 
+def _walk_named_exprs(e) -> list:
+    """Recursively find every `A.NamedExpr` (walrus `target := value`)
+    reachable from expression `e`, including inside comprehensions/IfExp/
+    boolops/etc. A walrus target binds in the *enclosing* scope (PEP 572),
+    not the comprehension's own loop scope, so callers that classify names
+    as module-global vs. local need to see these even though they aren't
+    top-level `A.Assign` statements."""
+    out: list = []
+    if e is None:
+        return out
+    if isinstance(e, A.NamedExpr):
+        out.append(e)
+        out.extend(_walk_named_exprs(e.value))
+        return out
+    if isinstance(e, (A.BinOp,)):
+        out.extend(_walk_named_exprs(e.left))
+        out.extend(_walk_named_exprs(e.right))
+    elif isinstance(e, A.UnaryOp):
+        out.extend(_walk_named_exprs(e.operand))
+    elif isinstance(e, A.BoolOp):
+        out.extend(_walk_named_exprs(e.left))
+        out.extend(_walk_named_exprs(e.right))
+    elif isinstance(e, A.Compare):
+        for o in e.operands:
+            out.extend(_walk_named_exprs(o))
+    elif isinstance(e, A.IfExp):
+        out.extend(_walk_named_exprs(e.test))
+        out.extend(_walk_named_exprs(e.body))
+        out.extend(_walk_named_exprs(e.orelse))
+    elif isinstance(e, A.Call):
+        for a in e.args:
+            out.extend(_walk_named_exprs(a))
+    elif isinstance(e, A.MethodCall):
+        out.extend(_walk_named_exprs(e.obj))
+        for a in e.args:
+            out.extend(_walk_named_exprs(a))
+    elif isinstance(e, A.Attr):
+        out.extend(_walk_named_exprs(e.obj))
+    elif isinstance(e, A.Subscript):
+        out.extend(_walk_named_exprs(e.obj))
+        if isinstance(e.index, A.Slice):
+            out.extend(_walk_named_exprs(e.index.start))
+            out.extend(_walk_named_exprs(e.index.stop))
+            out.extend(_walk_named_exprs(e.index.step))
+        else:
+            out.extend(_walk_named_exprs(e.index))
+    elif isinstance(e, A.ListLit):
+        for el in e.elems:
+            out.extend(_walk_named_exprs(el))
+    elif isinstance(e, A.TupleLit):
+        for el in e.elems:
+            out.extend(_walk_named_exprs(el))
+    elif isinstance(e, A.SetLit):
+        for el in e.elems:
+            out.extend(_walk_named_exprs(el))
+    elif isinstance(e, A.DictLit):
+        for k, v in zip(e.keys, e.values):
+            out.extend(_walk_named_exprs(k))
+            out.extend(_walk_named_exprs(v))
+    elif isinstance(e, A.FString):
+        for seg in e.segments:
+            if not isinstance(seg, str):
+                out.extend(_walk_named_exprs(seg))
+    elif isinstance(e, A.Comprehension):
+        out.extend(_walk_named_exprs(e.iter))
+        out.extend(_walk_named_exprs(e.cond))
+        out.extend(_walk_named_exprs(e.elt))
+    elif isinstance(e, A.DictComprehension):
+        out.extend(_walk_named_exprs(e.iter))
+        out.extend(_walk_named_exprs(e.cond))
+        out.extend(_walk_named_exprs(e.key))
+        out.extend(_walk_named_exprs(e.value))
+    return out
+
+
+def _register_named_expr_names(exprs: list, out: set[str]) -> None:
+    for e in exprs:
+        for ne in _walk_named_exprs(e):
+            out.add(ne.target)
+
+
 def _collect_bound_names(stmts: list, out: set[str]) -> None:
     for s in stmts:
+        if isinstance(s, A.ExprStmt):
+            _register_named_expr_names([s.expr], out)
+        elif isinstance(s, A.Return):
+            _register_named_expr_names([s.value], out)
         if isinstance(s, A.Assign) and isinstance(s.target, str):
+            _register_named_expr_names([s.value], out)
             out.add(s.target)
         elif isinstance(s, A.AugAssign):
             out.add(s.target)
@@ -1379,16 +1465,31 @@ def _collect_bound_names(stmts: list, out: set[str]) -> None:
             _collect_bound_names(s.else_body, out)
             _collect_bound_names(s.finally_body, out)
         elif isinstance(s, A.If):
+            _register_named_expr_names([s.test], out)
             _collect_bound_names(s.then, out)
             _collect_bound_names(s.orelse, out)
         elif isinstance(s, A.While):
+            _register_named_expr_names([s.test], out)
             _collect_bound_names(s.body, out)
             _collect_bound_names(s.orelse, out)
 
 
+def _register_named_expr_globals(exprs: list, out: dict[str, IRType], list_el_ty: dict[str, str]) -> None:
+    for e in exprs:
+        for ne in _walk_named_exprs(e):
+            out.setdefault(ne.target, ir_type_for(A.expr_type(ne.value)))
+            if A.expr_type(ne.value) == "list":
+                list_el_ty.setdefault(ne.target, getattr(ne.value, "list_el_type", "int"))
+
+
 def _collect_module_globals(stmts: list, out: dict[str, IRType], list_el_ty: dict[str, str]) -> None:
     for s in stmts:
+        if isinstance(s, A.ExprStmt):
+            _register_named_expr_globals([s.expr], out, list_el_ty)
+        elif isinstance(s, A.Return):
+            _register_named_expr_globals([s.value], out, list_el_ty)
         if isinstance(s, A.Assign) and isinstance(s.target, str):
+            _register_named_expr_globals([s.value], out, list_el_ty)
             out.setdefault(s.target, ir_type_for(A.expr_type(s.value)))
             if A.expr_type(s.value) == "list":
                 list_el_ty.setdefault(s.target, getattr(s.value, "list_el_type", "int"))
@@ -1480,9 +1581,11 @@ def _collect_module_globals(stmts: list, out: dict[str, IRType], list_el_ty: dic
             _collect_module_globals(s.else_body, out, list_el_ty)
             _collect_module_globals(s.finally_body, out, list_el_ty)
         elif isinstance(s, A.If):
+            _register_named_expr_globals([s.test], out, list_el_ty)
             _collect_module_globals(s.then, out, list_el_ty)
             _collect_module_globals(s.orelse, out, list_el_ty)
         elif isinstance(s, A.While):
+            _register_named_expr_globals([s.test], out, list_el_ty)
             _collect_module_globals(s.body, out, list_el_ty)
             _collect_module_globals(s.orelse, out, list_el_ty)
 
@@ -2765,7 +2868,17 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(I64)
             ctx.emit(IRInstr("const", v, [BUILTIN_TYPE_IDS[e.name]]))
             return v
-        ty = ctx.mctx.global_types.get(e.name, ctx.slot_ty.get(e.name, I64))
+        # A local can shadow an unrelated module-level global of the same
+        # name (e.g. `x = 0.0` at module scope, `for x in xs:` inside a
+        # function that never declared `global x`) -- when that's the
+        # case, this read must use the LOCAL slot's own type, not the
+        # unrelated global's, or a stale/mismatched-type load corrupts
+        # downstream register-class selection (int vs xmm). Mirrors
+        # _name_ptr's own is-this-actually-global check.
+        if _is_global_name(ctx, e.name):
+            ty = ctx.mctx.global_types.get(e.name, ctx.slot_ty.get(e.name, I64))
+        else:
+            ty = ctx.slot_ty.get(e.name, ctx.mctx.global_types.get(e.name, I64))
         ptr = _name_ptr(ctx, e.name, ty)
         v = ctx.tmp(ty)
         ctx.emit(IRInstr("load", v, [ptr]))
@@ -2778,6 +2891,17 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         v = ctx.tmp(PTR)
         ctx.emit(IRInstr("global_addr", v, [name]))
         return v
+
+    if isinstance(e, A.NamedExpr):
+        # `target := value` -- evaluate value, store into target's slot
+        # (same scope resolution as a plain `target = value` Assign), and
+        # yield the value so the enclosing expression can use it.
+        val = _lower_expr(ctx, e.value)
+        ptr = _name_ptr(ctx, e.target, ctx.mctx.global_types.get(e.target, val.type))
+        ctx.emit(IRInstr("store", None, [val, ptr]))
+        if not _is_global_name(ctx, e.target) and A.expr_type(e.value) == "list":
+            ctx.slot_el_ty[e.target] = getattr(e.value, "list_el_type", "int")
+        return val
 
     if isinstance(e, A.UnaryOp):
         operand_ty = A.expr_type(e.operand)

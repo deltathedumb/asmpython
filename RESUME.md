@@ -468,12 +468,74 @@ parser), walrus operator (`NamedExpr`), `sorted(key=...)` lambda body
 be unaffected since the refactor only moved code, didn't change logic,
 but not explicitly re-tested).
 
+**Eighth follow-up** (2026-07-16, commits after the seventh): implemented
+the walrus operator (`A.NamedExpr`, `target := value`). Two parts:
+
+1. `_lower_expr`'s new `A.NamedExpr` case (mirrors `codegen.py`'s
+   `_gen_named_expr`): evaluate `value`, store into `target`'s slot via
+   `_name_ptr` (same scope resolution a plain `Assign` uses), return the
+   stored value so the enclosing expression can consume it.
+2. A walrus target binds in the *enclosing* scope (PEP 572), not nested
+   inside whatever expression it appears in — it can appear inside an
+   `If`/`While` condition, a comprehension, or any nested expression, not
+   just as a top-level statement. Neither `_collect_module_globals` (which
+   decides module-global slot types) nor `_collect_bound_names` (which
+   seeds a function's local-name set) walked *into* expressions looking
+   for these, so a walrus target used inside a condition was never
+   registered at all. Added a generic recursive `_walk_named_exprs(e)`
+   expression walker (covers BinOp/UnaryOp/BoolOp/Compare/IfExp/Call/
+   MethodCall/Attr/Subscript/list-tuple-set-dict literals/FString/
+   comprehensions) plus `_register_named_expr_globals`/
+   `_register_named_expr_names` wrappers, wired into both collectors at
+   every statement site that carries a raw expression (`ExprStmt`,
+   `Return`, `Assign.value`, `If.test`, `While.test`).
+
+Testing `128_walrus.py` (module-scope `if`/`while`/ternary/comprehension
+forms plus a function-body form) surfaced a **separate, genuinely
+pre-existing bug**, unrelated to walrus itself: a function-local variable
+that shadows an unrelated module-level global of a *different type*
+crashed the backend (`AttributeError: 'XmmLoc' object has no attribute
+'offset'` deep in register allocation). Root cause: `_lower_expr`'s
+`A.Name` read case computed the load's IR type via
+`ctx.mctx.global_types.get(e.name, ctx.slot_ty.get(e.name, I64))` —
+checking the *module-global* type table **before** checking whether this
+particular occurrence of the name is actually local. `_name_ptr` (used
+right below it for the actual pointer) already did this check correctly
+(`_is_global_name`); the type computation above it didn't. Repro: a
+module-level `x = 0.0` plus a function with `for x in xs: total += x *
+x` (never `global x`) read `x` back as a stale F64-typed load from an
+I64-typed local slot. Fixed by checking `_is_global_name(ctx, e.name)`
+first and picking the type table in the matching order. This is the
+same "global-vs-local write/read mismatch" bug *class* documented
+earlier this session (for-loop vars, range-for vars, exception bindings)
+but a new *instance* of it — the earlier fixes were all about the
+*write* side using the wrong helper; this one is the *read* side using
+the wrong type-lookup order.
+
+Verified: `tests.runner` 481/489 (no regressions). `128_walrus.py` exact
+match on `--backend x86-64`. A full build+run+expected-output sweep
+across all ~439 `tests/cases/*.py` surfaced a substantially larger set of
+mismatches/crashes than the "232/242" figure quoted in the seventh
+follow-up — spot-checked several (`87_lambda.py`, `64_multi_return.py`)
+via git-stash A/B diffing and confirmed byte-identical crash behavior
+before this session's changes, so these are pre-existing gaps the
+smoke-test-only (`tests/cases` 1-60) corpus never exercised, not
+regressions from walrus or the shadow-name fix. **The "232/242" number
+should not be treated as a reliable full-corpus baseline going
+forward** — it likely came from an earlier/narrower sweep methodology.
+Whoever picks up the "validate against a broader corpus" direction below
+should re-run a full sweep with exit-code checking (not just stdout
+diffing — several of these are crashes, not wrong-output) to get a real
+current baseline before further parity work.
+
 **Next step on resume**: two reasonable directions, pick based on what's
 more valuable to unblock next:
 
-1. Finish the remaining scattered gaps above (walrus operator,
-   `str.format`, re-verify `sorted(key=...)`) — small, independent,
-   same pattern as the rest of this push.
+1. Re-run a full, exit-code-aware build+run+expected-output sweep across
+   all of `tests/cases/*.py` to get an accurate current baseline (see
+   note above — the previous "232/242" figure is unreliable), then triage
+   from there. `str.format`/bare `format()` builtin is still a known
+   unimplemented mini-language.
 2. Given the "Everything Python" bar (run essentially any unmodified
    real-world Python program, native-first with pyinbin fallback), pivot
    to validating against **real-world Python programs** beyond this
