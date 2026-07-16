@@ -6,22 +6,22 @@ pointer to *current state*, not a full session-by-session journal.
 
 ## Directive
 
-"Continue dev until we hit 2.0.0 ready," scoped 2026-06-18 as: garbage
-collector, optimizations, selfhost-capable, ARM support, Mac support (Intel +
-Apple Silicon), Raspberry Pi support (OS + bare metal). Running as an
-autonomous `/loop` — see the user's `loop` skill for how to act without
-supervision (continue established work, commit/push on clear continuations,
-don't invent new scope, stay reversible).
+Original scope (2026-06-18): "Continue dev until we hit 2.0.0 ready" —
+garbage collector, optimizations, selfhost-capable, ARM support, Mac support
+(Intel + Apple Silicon), Raspberry Pi support (OS + bare metal).
 
-See `docs/ROADMAP.md`'s 2.0.0 "Milestones" table (M0 Foundation, M1 Porting,
-M2 Runtime polish, M3 Optimization tier-1, M4 Ecosystem/UX, M99 Stretch) for
-milestone-level exit criteria. The numbered work order below is the
-day-to-day sequencing within that structure.
+**Expanded 2026-07-15** with a large, explicitly-confirmed workload addendum
+(not yet started — see "Pending 2.0.0 workload" below) and a completed
+compiler-extension-system feature (see "Extension System" below, done first
+per the user's own sequencing choice: finish the bounded, independent
+extension work before touching roadmap docs or scoping the larger program).
+
+See `docs/ROADMAP.md`'s 2.0.0 section for the platform/perf/ecosystem
+breakdown. The numbered work order below is day-to-day sequencing.
 
 **Confirmed work order** (real dependency chain, user-confirmed):
 
-1. IR migration (see "IR Migration Status" below — **architecture changed
-   mid-flight**, read that section before resuming).
+1. IR migration (see "IR Migration Status" below).
 2. Linear-scan register allocator.
 3. New backend lowering; validate parity vs the test suite.
 4. macOS Intel x86-64 target.
@@ -31,13 +31,19 @@ day-to-day sequencing within that structure.
 8. Raspberry Pi bare metal (freestanding ARM64 — new work).
 9. Garbage collector (refcounting).
 10. Optimization passes beyond the existing peephole dead-store pass.
-11. **Selfhost** (asmpython compiling itself) — became the dominant focus of
-    many sessions; see "Selfhost Status" below. Originally scoped
-    "opportunistic, never blocking" but has absorbed most recent work because
-    it's directly exercising the new backend on a large real program.
+11. **Selfhost** (asmpython compiling itself) — see "Selfhost Status" below.
 12. Stdlib completion — see "Stdlib Status" below.
 13. Release pass: CODE_OF_CONDUCT/CONTRIBUTING/SECURITY/issue templates,
     CHANGELOG, version bump off `-preview`.
+
+**Newly confirmed, not yet sequenced into the numbered list above** (2026-07-15,
+see "Pending 2.0.0 workload" below for the full item list): finish the
+IR-based x86-64 backend as the default replacing the legacy backend, embed
+pyinbin into produced executables for native/interpreted hybrid execution,
+formalize the backend system as a versioned SDK, real memory management
+(refcounting/ownership/cycles), deterministic fixed-point self-hosting.
+User's explicit instruction attached to this addendum: "stop expanding
+partial stdlib breadth until these foundations are complete."
 
 **Tangential, NOT active work**: user is also building **uASM**, a modular
 machine-code compiler with swappable backends/frontends, currently depending
@@ -45,162 +51,91 @@ on asmpython. Plan: finish 2.0.0 first, fork asmpython into a uASM-facing
 frontend afterward, as a separate effort. Don't let this influence IR/backend
 design decisions above.
 
+## Extension System — DONE (2026-07-15, commit `1a40ee30`)
+
+Added `extend <name>` / `retract <name>` / `const NAME [: annot] = value` to
+the native compiler (`asmpython/_compiler/`, not pyinbin) as real contextual-
+keyword syntax across lexer/parser/AST/sema/shared-IR/legacy-codegen — not
+runtime calls, not source preprocessing. Full design: `docs/EXTENSIONS.md`.
+
+Key points for anyone touching this next: new `extensions.py`
+(`ExtensionContext`/`CompilerExtension`, transactional activate/retract,
+fresh per-`Parser` instance, so isolation across modules/invocations is
+automatic); `const` locks a name against every rebinding form via one shared
+`sema.py` helper (`_require_assignable`) but leaves the referenced object's
+own mutability untouched; `ConstDecl` normalizes to a plain `Assign` at the
+top of `ir_lower.py`/`codegen.py`'s dispatchers, so the IR-based x86-64/
+ternary backends needed zero extension-specific code. One known, deliberately
+unfixed scope gap: a couple of `program.py` whole-program-merge helpers
+(`_simple_const_if_targets`, an "already available" dedup check) still don't
+recognize `ConstDecl` — only matters for platform-conditional `const` hoists
+across module boundaries, not the 44 shipped test scenarios.
+
+**Side-effect fix**: `tests/runner.py`'s negative-test runner was missing
+`--no-pyinbin-fallback`, so every `cases_fail` test (not just this feature's
+new ones) was silently checking the pyinbin fallback's unrelated error text
+instead of the real native-compiler diagnostic. Fixed — see corrected test
+baseline below.
+
 ## IR Migration Status — architecture changed mid-flight
 
 **Original plan (superseded)**: a from-scratch SSA IR builder, `ssa_build.py`,
-built incrementally node-kind-by-node-kind alongside `ir.py`/`ir_builder.py`,
-targeting a to-be-written `X86_64Target` lowering that would eventually
-replace `codegen.py`'s direct-emission entirely. This got substantial
-coverage (primitive arithmetic, control flow, strings, lists/dicts/sets/
-tuples, comprehensions, f-strings incl. full format-spec support, global
-reads/writes) before being **superseded**.
+built incrementally alongside `ir.py`/`ir_builder.py`, targeting a
+to-be-written `X86_64Target` lowering that would eventually replace
+`codegen.py`'s direct-emission entirely. Got substantial coverage before
+being superseded. **`ssa_build.py` no longer exists in the tree.**
 
 **Current approach**: `asmpython/_compiler/ir_lower.py` lowers the AST
-directly to `ir.py`'s IR (a lighter-weight, more incremental strategy than
-`ssa_build.py`'s ground-up rewrite), feeding a real custom backend under
+directly to `ir.py`'s IR, feeding a real custom backend under
 `asmpython/_backends/`:
 
 - `_backends/x86_64/`: custom encoder, register allocator (`regalloc.py`),
-  phi elimination (`phi_elim.py`), COFF/ELF/PE readers and linkers
-  (`coff.py`, `elf.py`, `elf_linker.py`, `pe_linker.py`) — **replacing NASM +
-  gcc as the assemble/link step**, wired up via `--backend x86-64`.
+  phi elimination (`phi_elim.py`), COFF/ELF/PE readers and linkers — replacing
+  NASM + gcc as the assemble/link step, wired up via `--backend x86-64`.
 - `_backends/ternary/`: an early speculative ISA backend (uASM-related).
 
-**`ssa_build.py` no longer exists in the tree** — deleted when this pivot
-happened. Its design lessons (RAW_ASM argument-register convention, "no
-internal jump labels in RAW_ASM text", the two-value-kind SSA model) may
-still be relevant to `ir_lower.py`/the x86-64 backend; worth checking before
-assuming anything needs re-deriving from scratch.
+**Last confirmed status** (carried forward, re-verify before trusting):
+smoke-tested `--backend x86-64` against the first 60 `tests/cases/*.py`
+(not part of the automated suite, which exercises the legacy backend only):
+34/60 compiled+linked. Remaining gaps were a mix of unimplemented
+builtins/methods in `ir_lower.py` and missing libm symbol-table entries in
+the linkers (`_DLL_FOR_SYMBOL`/`_SO_FOR_SYMBOL`) — **verify against the real
+DLL/libc before adding an entry** (some C99 functions genuinely aren't
+exported by classic `msvcrt.dll`).
 
-**2026-07-07 merge note**: `origin/beta` and a local branch had independently
-extended `ir_lower.py`/`abi_shims.asm` (list/str slicing, an opaque-receiver
-MethodCall fallback, `_abi_int_to_str`) — merged, keeping the local branch's
-more advanced `_ModuleCtx`/`lower_module` (method lowering, globals,
-`classes_sig`, function-pointer-valued locals) and folding in origin's
-graceful "unknown method -> 0" fallback. **Comprehension lowering
-(`_lower_comprehension`/`_lower_dict_comprehension`) already exists and
-works** (verified: list comp with `if` filter + dict comp, single `for`
-clause only) — the "known gap" this file used to note here was stale by the
-time of the merge; the real remaining gap is multi-`for`-clause/tuple-unpack
-comprehensions, not comprehensions as a whole.
-
-**Bug found and fixed in the same session**: a program with both an explicit
-`def main():` *and* an unguarded top-level `main()` call (valid Python, just
-without the `if __name__ == "__main__":` idiom) executed `main()` **twice**
-under `--backend x86-64` only (legacy backend unaffected). Root cause: the
-linker's synthesized entry stub always does `call __asmpy_module_init;
-call main` whenever a `main` function exists (see `has_module_init` in
-`elf_linker.py`/`pe_linker.py`), but `_module_init_stmts` only stripped the
-*guarded* `if __name__ == "__main__":` form from module-init, not a bare
-`main()` call — so the unguarded call rode along into `__asmpy_module_init`
-*and* got called again by the stub. Fixed by also stripping a bare
-`main()`/`raise SystemExit(main())` top-level statement in
-`_module_init_stmts` (new `_is_bare_main_call` helper).
-
-**Smoke-tested `--backend x86-64` against the first 60 `tests/cases/*.py`**
-(not part of the automated suite, which only exercises the legacy backend):
-34/60 compile+link, 26 don't yet. Common causes: several builtins/methods
-just plain unimplemented in `ir_lower.py` (`list.sort`, `round()`, and
-others not yet triaged), and a handful of libm symbols missing from the
-linkers' symbol→DLL/SO tables (`_DLL_FOR_SYMBOL` in `pe_linker.py` /
-`_SO_FOR_SYMBOL` in `elf_linker.py`) — **verify against the real DLL/libc
-before adding an entry** (`round`/`trunc` are C99 and genuinely **not**
-exported by classic `msvcrt.dll`, confirmed via `ctypes.WinDLL("msvcrt.dll")`
-— don't add them there, they need a real codegen implementation instead, or
-UCRT-specific handling like `__acrt_iob_func`'s stub). Added `abs`/`labs`
-(confirmed real exports on both msvcrt.dll and libc.so.6) as one such fix
-this session. **Next resume point for backend parity**: triage the other 25
-failures from this smoke test the same way (some are one-symbol-table-entry
-fixes, some are real missing `ir_lower.py` codegen work) before assuming
-comprehensions specifically need more attention — they don't, per above.
-
-**Next step on resume**: reconcile this file's plan-step 1 with the actual
-current architecture (this section is that reconciliation); triage the
-25 remaining backend-parity smoke-test failures noted above (one symbol
-table fix at a time / one missing `ir_lower.py` codegen case at a time),
-continuing to close the gap to full parity with `codegen.py` under
-`--backend x86-64`.
+**Next step on resume**: triage the remaining backend-parity smoke-test
+failures (one symbol-table fix or one missing `ir_lower.py` codegen case at a
+time) toward full parity with `codegen.py` under `--backend x86-64` — this is
+the direct predecessor of the newly-confirmed "make the IR-based backend the
+default" workload item.
 
 ## Selfhost Status (plan-step 11)
 
 Selfhost = asmpython (gen0, built by CPython) compiling its own source to
-produce gen1, and gen1 compiling the same source again to produce gen2 (the
-"ultimate test" of self-consistency). This has consumed most recent session
-time because it exercises the new backend against a large real program.
+produce gen1, and gen1 compiling the same source again to produce gen2.
 
-**Current blocker**: gen1 compiling `asmpython/__main__.py` produces a
+**Last confirmed blocker**: gen1 compiling `asmpython/__main__.py` produces a
 gen2 `.asm` truncated to ~4,426 lines (vs. gen0's ~510,000+), zero function
-labels emitted, failing to assemble (`userfn_main` undefined). Not yet
-root-caused — likely `program.py`'s whole-program-merge import closure
-silently failing to expand for gen1 specifically. Two other known-open,
-not-yet-fixed issues found along the way:
-- `import os` (alone, unused) segfaults gen1 specifically (works for
-  `math`/`sys`/`random`/`gc`/`io`/`re`) — narrowed to gen1's own
-  self-compile-time materialization of `STDLIB_BINDINGS["os"]`, not `os.py`'s
-  content (content edits don't change the crash).
-- `isinstance(x, T)` in code gen1 *produces* always returns `False` for the
-  *first*-declared class in a program (2nd/3rd+ classes work) — a
-  wrong-output bug, not a crash. Root cause not found.
+labels emitted, failing to assemble. Not yet root-caused — likely
+`program.py`'s whole-program-merge import closure silently failing to expand
+for gen1 specifically. Two other known-open issues found along the way:
+`import os` (alone, unused) segfaults gen1 specifically; `isinstance(x, T)`
+in gen1-produced code always returns `False` for the *first*-declared class
+in a program (2nd/3rd+ classes work).
 
-**Bugs found and fixed this arc** (chronological; each was independently
-real and verified against gen0/gen1 with no regressions — full repros and
-gdb traces in git history if needed):
-
-1. `set |=` / `set` comparison operators fell back to raw pointer ops
-   instead of dispatching to set-specific runtime helpers.
-2. Closure free-variable type inference defaulted unannotated container
-   literals to `"int"`, misreading list/dict headers.
-3. `_runtime_dict_items` spilled a value into the Win64 shadow space,
-   corrupting a concurrent `malloc` call.
-4. `_gen_boolop`/truthiness tested raw pointer-nonzero, wrong for empty
-   containers and floats (crashed every function with ≥1 parameter).
-5. `driver.py` passed a list to a `subprocess.run()` stub that only accepts
-   a string; a related `os.environ` opaque-attribute NULL-deref.
-6. `argparse.py`'s `_convert` wrapped `None` (unset flag) in a broken `Path`
-   instead of passing it through.
-7. An empty-then-appended list of tuples (`reg_loads`) had no sema
-   type-inference path, silently typed `"any"`, breaking int→str dispatch.
-8. Same "opaque `any` treated as the wrong runtime shape" bug class via
-   `set(getattr(f, "nonlocal_vars", []))`.
-9. A chain of `getattr(..., default)`-returns-opaque bugs (six occurrences),
-   plus `cls_def = None` reassigned in a loop never narrowing past `None`.
-   Partially fixed; some of this arc's symptoms were later found (below) to
-   have a different root cause (`copy.deepcopy` on AST nodes, and a
-   `program.py` `key()` missing an `isinstance` arm for `FromImport`).
-10. `sema.py`'s `_bind_args` called `copy.deepcopy()` on AST nodes — under
-    self-hosting this resolves to asmpython's own `stdlib/copy.py`
-    (list-only, wrong memory layout for a non-list object) instead of
-    CPython's generic `copy`. Fixed via an explicit AST-node cloner
-    (`_clone_default_expr`).
-11. `parser.py`'s bytes-literal handling iterated an opaque (`object`-typed)
-    `Token.value` field directly; fixed by binding to an explicit `str`
-    local first.
-12. Three `program.py` whole-program-merge bugs: `DictComprehension`
-    assumed `Comprehension`'s multi-`for` fields; `_class_free_names` was a
-    stub always returning `set()`; no equivalent origin-tracking existed for
-    plain top-level functions at all (only classes). All three fixed
-    (`func_origin`/`_func_free_names` added).
-13. `_check_block` had no per-statement error recovery in collect-errors
-    mode (only per-block) — one early unrelated `SemaError` silently
-    dropped every later statement in the same block, including globals
-    bug #12 had already resolved. Fixed with per-statement try/except.
-
-**Also fixed, general hardening** (not part of the bug-number sequence):
-multi-type `isinstance(x, (T1, T2))` crashes gen1 outright — every call site
-across the compiler's own source was split into single-type checks as a
-standing workaround (keep doing this going forward, don't reintroduce the
-tuple form in compiler source); `isinstance()` on a list element is resolved
-statically from the list's inferred type, not at runtime — affects
-`_parse_for_target`'s target-count detection, fixed by always returning a
-list; several more opaque-attribute-defaults-to-int sites patched with
-explicit type casts.
+A long chain of real bugs (set operators, closure free-var type inference,
+Win64 shadow-space corruption, boolop truthiness on containers/floats,
+opaque-`any`-typed-as-wrong-shape bugs, `copy.deepcopy` resolving to
+asmpython's own list-only stdlib shim under self-hosting, three
+`program.py` whole-program-merge bugs, missing per-statement error recovery)
+were found and fixed across earlier sessions — full list in `git log -p --
+RESUME.md` on an older commit if needed.
 
 **Toolchain notes**: `build/*.exe` binaries can get externally wiped
 (Windows Defender quarantining unsigned freshly-built exes) — just rebuild.
 Avoid output filenames containing "update"/"install"/"setup"/"patch"
-(triggers UAC). Space-containing toolchain paths (`C:\Program Files\NASM`)
-aren't handled by `_resolve_tool`'s `Path.is_file()` — use space-free copies
-for selfhost testing.
+(triggers UAC). Space-containing toolchain paths aren't handled by
+`_resolve_tool`'s `Path.is_file()` — use space-free copies.
 
 ## Stdlib Status (plan-step 12)
 
@@ -208,62 +143,103 @@ Most of the user's explicitly-requested module list is complete or
 rewritten: `abc`, `argparse`, `array`, `base64`, `binascii`, `collections`,
 `contextlib`, `copy`, `csv`, `errno`, `functools`, `gc`, `getopt`, `inspect`,
 `itertools`, `json`, `locale`, `pickle`, `queue`, `signal`, `stat`, `types`,
-`unittest`, `urllib` (request/error), `zipfile`. Also present: `tarfile`,
+`unittest`, `urllib` (request/error), `zipfile`, plus `tarfile`,
 `concurrent_futures`, `token`/`tokenize`, `shelve`, `codecs`, `fileinput`,
 `linecache`, `mimetypes`, `socketserver`, `smtplib`, `ftplib`, `poplib`,
 `imaplib`, `http_server`, `xml_etree`, `html_parser`, `profile`, `pstats`,
 `tracemalloc`, `uu`, `quopri`, `zlib`, `ssl`, `sqlite3`, `asyncio`,
-`importlib`.
+`importlib`. **Per the 2026-07-15 workload addendum: do not expand this
+further until the foundational items above (IR-backend-as-default, hybrid
+execution, memory management, self-host correctness) are complete.**
 
-**Notable constraints vs. CPython** (by design, not bugs):
-- `functools.lru_cache`/`cache`/`wraps` are pass-through stubs (no real
-  memoization — needs a dict keyed by arbitrary argument tuples).
-- `copy.copy`/`deepcopy` accept `list` only in the generic form; use
-  `copy_dict`/`deepcopy_dict` for dicts (no runtime `isinstance` dispatch on
-  an opaque parameter).
-- `queue.join()` busy-spins in single-threaded programs.
-- `pickle` uses a text format, not CPython's binary protocol.
-- `unittest.main()` doesn't auto-discover tests (no reflection); build a
-  `TestSuite` explicitly.
-- `urllib.request` is HTTP-only (no TLS/ssl runtime).
+**Notable constraints vs. CPython** (by design, not bugs): `functools.
+lru_cache`/`cache`/`wraps` are pass-through stubs (no real memoization);
+`copy.copy`/`deepcopy` accept `list` only in the generic form (`copy_dict`/
+`deepcopy_dict` for dicts); `queue.join()` busy-spins single-threaded;
+`pickle` uses a text format, not CPython's binary protocol; `unittest.main()`
+doesn't auto-discover tests; `urllib.request` is HTTP-only (no TLS/ssl
+runtime). **Missing entirely**: `multiprocessing`, full `xml` (beyond
+`ElementTree`).
 
-**Missing entirely**: `multiprocessing`, full `xml` (beyond `ElementTree`).
+## pyinbin (separate from all of the above)
+
+`asmpython/pyinbin/` is a from-scratch Python bytecode VM (not the native
+compiler), used as a fallback so CPython stdlib / arbitrary Python source can
+run without native codegen support for every language feature. Has its own
+object model (`PyClass`/`PyInstance` emulate classes without real CPython
+type machinery — metaclass behavior is hardcoded stubs, a recurring source
+of subtle bugs). Conformance gate: `tests/cpython_conformance.py` runs real
+CPython's `Lib/test/test_*` modules through pyinbin; `tests/
+exhaustive_runner.py` is a generated-grammar-coverage tool using real CPython
+as oracle (198/200 last confirmed, two known gaps: `except*`/exception
+groups unimplemented, `type(a_module).__name__` reports the wrong name).
+Extensive bug-fixing history (generator `.send()`, `super()` lexical
+resolution, PEP 649 deferred annotations, try/finally exception safety,
+match-statement literals) — check `devthread.txt` and recent commits before
+re-deriving from scratch.
+
+## Test suite baseline
+
+`python -m tests.runner` — **481/489 passing** as of 2026-07-15 (commit
+`1a40ee30`, after fixing the `--no-pyinbin-fallback` gap described above).
+The remaining 8 failures are pre-existing and unrelated: `collections`
+stdlib depth (`151_collections_module.py`, `166_ordereddict_methods.py`,
+`167_counter_operators.py`, `191_collections_module.py`,
+`228_collections_depth.py`, `250_collections_depth.py`,
+`296_collections_namedtuple.py`) and one environment issue
+(`53_dynamic_import.py`). If the count regresses toward the old, wrong
+baseline (~434/459), check whether `tests/runner.py`'s `run_negative()`
+still passes `--no-pyinbin-fallback` before re-diagnosing from scratch.
+
+## Pending 2.0.0 workload (confirmed, NOT yet started)
+
+Added to the required 2.0.0 workload 2026-07-15, to be scoped as its own
+tracked effort after roadmap docs are updated:
+
+- Finish the IR-based x86-64 backend and make it the default, fully
+  replacing the legacy backend after parity.
+- Run the full suite against native/pyinbin/CPython baselines; convert every
+  mismatch into a regression test.
+- Embed pyinbin into produced executables so native and interpreted code can
+  coexist and call across a defined bridge without CPython.
+- Automatic native/pyinbin partitioning, plus optional `@native`/`@dynamic`
+  hints.
+- `native-only`/`interpreted`/hybrid execution modes.
+- Build-explanation report (why each function/module was compiled,
+  interpreted, packaged, or rejected).
+- HIR/MIR/LIR-style staging as the IR evolves; explicit `python`/`native`/
+  `freestanding` semantic profiles.
+- Real memory management: refcounting, safe ownership across calls/
+  containers/exceptions, constant immortality, cycle handling.
+- Deterministic fixed-point self-hosting (gen1 builds gen2, gen2/gen3
+  behave equivalently).
+- Backend system as a versioned public SDK: serialized IR, capability
+  declarations, validation, conformance tests.
+- Reproducible/hermetic builds: lockfiles, content hashes, signed package
+  metadata, safe archive extraction, machine-readable build manifests.
+- Keep ARM64/macOS/Pi/optimization/custom-backend work, but prioritize
+  backend parity, hybrid execution, memory safety, self-host correctness
+  first.
+
+User's explicit instruction: work incrementally, preserve existing
+functionality, commit coherent milestones, and do not claim compatibility or
+native compilation where fallback or semantic differences remain.
 
 ## Notes for whoever resumes this
 
-- The 454/455-passing test suite (`python -m tests.runner`) has one known,
-  pre-existing, unrelated failure throughout this entire history — not a
-  regression signal.
+- `docs/EXTENSIONS.md` documents the newly-shipped extension system in full;
+  read it before touching `extend`/`retract`/`const` or before designing a
+  second built-in extension.
 - A `999_comprehensive_codegen.py` test case has its `# expect:` block
-  captured by actually running the file under real CPython (not
-  hand-transcribed), specifically to catch wrong-but-plausible expected
-  output a human wouldn't notice either. Known gap: `print(d.items())`
-  prints raw pointer integers instead of formatted tuples (needs a
-  tuple-element repr path in `_runtime_list_repr`).
+  captured by actually running the file under real CPython, specifically to
+  catch wrong-but-plausible expected output a human wouldn't notice. Known
+  gap: `print(d.items())` prints raw pointer integers instead of formatted
+  tuples.
 - When investigating a self-host-only crash: `print()` calls inside
-  `SemaAnalyzer`/`Codegen` methods produce no visible output when compiled
-  into a selfhosted binary if the bug being chased is itself "method calls
-  silently don't execute" — don't waste time debugging via prints in that
-  situation; use gdb breakpoints/backtraces or debug output from a plain
-  top-level function instead.
-- 2026-07-06: `origin/beta` and a local session diverged significantly (81
-  commits) while an autonomous session was working from an older checkout.
-  That session's local-only work (a `--additional-compiler` CLI flag using
-  the FFI/`STDLIB_BINDINGS` mechanism, a `pyinasmpy` stdlib module written
-  in the compilable subset, and `ssa_build.py` increments now superseded by
-  the `ir_lower.py` pivot above) was preserved on branch
-  `backup-local-2026-07-06` (pushed to origin) rather than merged, to avoid
-  corrupting actively-evolving shared state. Worth a look if
-  `--additional-compiler`/`pyinasmpy` are still wanted — they'd need
-  re-porting onto the current `ir_lower.py`/`_backends` architecture, not a
-  straight merge.
-- 2026-07-07: found the local working tree (a *different*, separate local
-  session, not `backup-local-2026-07-06` above) had ~4850 uncommitted lines
-  across 19 files that had regressed the 454/455 test suite to 432/455.
-  Root-caused and fixed 6 sema.py bugs restoring 455/455 (including the
-  long-standing pre-existing failure — `_resolve_scalar_annot` crashing on
-  3+-level nested list annotations, now fixed too), committed, then merged
-  `origin/beta` (2 real content conflicts in `ir_lower.py`/`abi_shims.asm`,
-  resolved as described above). Full details in git log for commits
-  `05c461b8`/`c12f36e9`/nearby. Local `beta` is now 2 commits ahead of
-  `origin/beta` — not yet pushed.
+  `SemaAnalyzer`/`Codegen` methods can produce no visible output when the bug
+  being chased is itself "method calls silently don't execute" — use gdb
+  breakpoints/backtraces instead of prints in that situation.
+- Multi-agent shared workspace: this project is sometimes worked by more than
+  one agent concurrently against the same git working tree/branch (`beta`).
+  Check `devthread.txt` for another agent's in-progress notes before assuming
+  you have the tree to yourself.
