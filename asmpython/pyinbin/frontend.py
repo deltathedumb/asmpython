@@ -63,6 +63,14 @@ class _Lowerer:
     instructions: list[Instruction] = field(default_factory=list)
     loop_exits: list[list[int]] = field(default_factory=list)
     loop_starts: list[int] = field(default_factory=list)
+    # Whether each active loop (parallel stack to loop_exits/loop_starts)
+    # left an iterator on the value stack that a ``break`` needs to pop
+    # before jumping out -- ``for`` loops keep their GET_ITER result on the
+    # stack across iterations (FOR_ITER's own normal-exhaustion path pops
+    # it before falling through), but ``break``'s raw JUMP skipped that pop
+    # entirely, leaving a stale iterator on the stack that the next FOR_ITER
+    # up the nesting (if any) would then wrongly treat as its own.
+    loop_needs_pop: list[bool] = field(default_factory=list)
     is_generator: bool = False
     is_coroutine: bool = False
     is_async_generator: bool = False
@@ -563,7 +571,16 @@ class _Lowerer:
             return ("star", self.pattern_spec(ast.MatchAs(name=node.name)))
         if isinstance(node, ast.MatchValue):
             if isinstance(node.value, ast.Constant):
-                return ("value", node.value.value)
+                # Must wrap as ("literal", value), not the bare value --
+                # _resolve_exception_spec (which _match_pattern's "value"
+                # case delegates to) treats any plain int as an index into
+                # frame.code.names, since that function's original purpose
+                # was resolving *named* exception-type specs. A bare literal
+                # like `case 1:` was being silently reinterpreted as "look
+                # up code.names[1]" instead of the literal 1, matching
+                # whatever name happened to sit at that index (which could
+                # easily be the match subject's own temp variable).
+                return ("value", ("literal", node.value.value))
             return ("value", self.exception_spec(node.value))
         if isinstance(node, ast.MatchSingleton):
             return ("singleton", node.value)
@@ -748,6 +765,10 @@ class _Lowerer:
             else:
                 self.expr(node.value)
                 self.emit(Op.RETURN)
+        elif isinstance(node, ast.Raise) and node.exc is not None and node.cause is not None:
+            self.expr(node.exc)
+            self.expr(node.cause)
+            self.emit(Op.RAISE_FROM)
         elif isinstance(node, ast.Raise) and node.exc is not None:
             self.expr(node.exc)
             self.emit(Op.RAISE)
@@ -872,9 +893,11 @@ class _Lowerer:
             exit_jump = self.emit(Op.JUMP_IF_FALSE)
             self.loop_exits.append([])
             self.loop_starts.append(start)
+            self.loop_needs_pop.append(False)
             for statement in node.body:
                 self.stmt(statement)
             self.loop_starts.pop()
+            self.loop_needs_pop.pop()
             self.emit(Op.JUMP, start)
             else_start = len(self.instructions)
             self.patch(exit_jump, else_start)
@@ -891,9 +914,11 @@ class _Lowerer:
             self.store_sequence(node.target)
             self.loop_exits.append([])
             self.loop_starts.append(start)
+            self.loop_needs_pop.append(True)
             for statement in node.body:
                 self.stmt(statement)
             self.loop_starts.pop()
+            self.loop_needs_pop.pop()
             self.emit(Op.JUMP, start)
             else_start = len(self.instructions)
             self.patch(exit_jump, else_start)
@@ -996,6 +1021,8 @@ class _Lowerer:
             for _ in reversed(node.items):
                 self.emit(Op.WITH_EXIT)
         elif isinstance(node, ast.Break) and self.loop_exits:
+            if self.loop_needs_pop and self.loop_needs_pop[-1]:
+                self.emit(Op.POP_TOP)
             self.loop_exits[-1].append(self.emit(Op.JUMP))
         elif isinstance(node, ast.Import):
             for alias in node.names:

@@ -83,6 +83,27 @@ try:
     import _multiprocessing as _bootstrap_multiprocessing
 except ImportError:
     _bootstrap_multiprocessing = None
+try:
+    import _datetime as _bootstrap_datetime_native
+except ImportError:
+    _bootstrap_datetime_native = None
+try:
+    import _blake2 as _bootstrap_blake2
+except ImportError:
+    _bootstrap_blake2 = None
+try:
+    import _symtable as _bootstrap_symtable
+except ImportError:
+    _bootstrap_symtable = None
+try:
+    import _tracemalloc as _bootstrap_tracemalloc
+except ImportError:
+    _bootstrap_tracemalloc = None
+try:
+    import _testconsole as _bootstrap_testconsole
+except ImportError:
+    # Windows-only debug-build test helper.
+    _bootstrap_testconsole = None
 import array as _bootstrap_array
 import bisect as _bootstrap_bisect
 import math as _bootstrap_math
@@ -1055,6 +1076,36 @@ def create_builtin_module(
         return _module(name, {
             key: getattr(_bootstrap_multiprocessing, key)
             for key in dir(_bootstrap_multiprocessing)
+            if not key.startswith("__")
+        })
+    if name == "_datetime" and _bootstrap_datetime_native is not None:
+        return _module(name, {
+            key: getattr(_bootstrap_datetime_native, key)
+            for key in dir(_bootstrap_datetime_native)
+            if not key.startswith("__")
+        })
+    if name == "_blake2" and _bootstrap_blake2 is not None:
+        return _module(name, {
+            key: getattr(_bootstrap_blake2, key)
+            for key in dir(_bootstrap_blake2)
+            if not key.startswith("__")
+        })
+    if name == "_symtable" and _bootstrap_symtable is not None:
+        return _module(name, {
+            key: getattr(_bootstrap_symtable, key)
+            for key in dir(_bootstrap_symtable)
+            if not key.startswith("__")
+        })
+    if name == "_tracemalloc" and _bootstrap_tracemalloc is not None:
+        return _module(name, {
+            key: getattr(_bootstrap_tracemalloc, key)
+            for key in dir(_bootstrap_tracemalloc)
+            if not key.startswith("__")
+        })
+    if name == "_testconsole" and _bootstrap_testconsole is not None:
+        return _module(name, {
+            key: getattr(_bootstrap_testconsole, key)
+            for key in dir(_bootstrap_testconsole)
             if not key.startswith("__")
         })
     if name == "_ssl":

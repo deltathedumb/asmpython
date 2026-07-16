@@ -94,6 +94,17 @@ class GeneratorObject:
         raise StopIteration(result)
 
     def send(self, value: object) -> object:
+        # ``x = yield 1`` compiles to LOAD_CONST/YIELD_VALUE/STORE_NAME;
+        # YIELD_VALUE already popped the yielded value and suspended past
+        # itself, so resuming needs the sent value pushed back onto the
+        # stack for STORE_NAME to consume. A fresh, not-yet-started
+        # generator (frame.ip == 0) has nothing to resume into yet --
+        # send() there must behave like next() (real Python requires
+        # value is None in that case and raises TypeError otherwise).
+        if self.frame.ip != 0:
+            self.frame.stack.append(value)
+        elif value is not None:
+            raise TypeError("can't send non-None value to a just-started generator")
         return self.__next__()
 
     def __enter__(self) -> object:
@@ -564,8 +575,23 @@ class PyInstance:
     def __setattr__(self, name: str, value: object) -> None:
         if name in {"cls", "attributes"}:
             object.__setattr__(self, name, value)
-        else:
-            self.attributes[name] = value
+            return
+        # A data descriptor (property, or anything else exposing __set__)
+        # found in the class's MRO must run its setter instead of writing
+        # straight into the instance's attribute dict -- unconditionally
+        # writing here meant every @x.setter was silently never invoked;
+        # plain `c.x = value` just clobbered `_value_`-style storage
+        # directly regardless of any property named `x`.
+        if isinstance(self.cls, PyClass):
+            try:
+                descriptor = self.cls.lookup(name)
+            except AttributeError:
+                descriptor = None
+            descriptor_set = getattr(descriptor, "__set__", None)
+            if callable(descriptor_set):
+                descriptor_set(self, value)
+                return
+        self.attributes[name] = value
 
     def __fspath__(self) -> str | bytes:
         """Expose interpreted ``__fspath__`` methods to host path APIs."""
@@ -1251,6 +1277,26 @@ class VirtualMachine:
                 raise
         return False
 
+    def _pattern_isinstance(self, value: object, cls: object) -> bool:
+        """``isinstance``-equivalent for a ``case ClassName(...):`` pattern
+        where ``ClassName`` may be a VM-emulated ``PyClass`` rather than a
+        real host ``type``. Host ``isinstance(value, cls)`` raises
+        ``TypeError`` for a non-type ``cls`` (a plain ``PyClass``
+        instance), so every class pattern against an interpreted class
+        silently failed to match at all before this -- walk the MRO by hand
+        instead when ``cls`` is a ``PyClass``.
+        """
+        if isinstance(cls, PyClass):
+            if not isinstance(value, PyInstance):
+                return False
+            return cls in value.cls.__mro__
+        if not isinstance(cls, type):
+            return False
+        try:
+            return isinstance(value, cls)
+        except TypeError:
+            return False
+
     def _match_pattern(self, frame: Frame, value: object, spec: object) -> tuple[bool, dict[str, object]]:
         kind = spec[0] if isinstance(spec, tuple) and spec else None
         if kind == "wildcard":
@@ -1298,7 +1344,7 @@ class VirtualMachine:
             return True, bindings
         if kind == "class":
             cls = self._resolve_exception_spec(frame, spec[1])
-            if not isinstance(cls, type) or not isinstance(value, cls): return False, {}
+            if not self._pattern_isinstance(value, cls): return False, {}
             bindings: dict[str, object] = {}
             for index, pattern in enumerate(spec[2]):
                 matched, nested = self._match_pattern(frame, value[index], pattern)
@@ -1969,7 +2015,20 @@ class VirtualMachine:
                 elif op is Op.IMPORT_NAME:
                     loader = frame.globals.get("__pyinbin_import__")
                     if not callable(loader): _raise_typed("ImportError: loader is not configured")
-                    frame.stack.append(loader(frame.code.names[instr.arg]))
+                    imported = frame.code.names[instr.arg]
+                    top_level = imported.split(".", 1)[0]
+                    if imported != top_level:
+                        # ``import a.b.c as x`` binds ``x`` to the full
+                        # dotted submodule, unlike bare ``import a.b.c``
+                        # (Op.IMPORT_ROOT) which binds just ``a`` -- but the
+                        # same virtual-submodule-registration issue applies:
+                        # ``a.b`` may only become resolvable as a side effect
+                        # of executing ``a`` itself (e.g. os.py's
+                        # ``sys.modules['os.path'] = path``), so load the
+                        # root first to give that side effect a chance to
+                        # run before attempting the full dotted name.
+                        loader(top_level)
+                    frame.stack.append(loader(imported))
                 elif op is Op.IMPORT_FROM:
                     module = frame.stack.pop()
                     member = frame.code.names[instr.arg]
@@ -2101,6 +2160,22 @@ class VirtualMachine:
                     if isinstance(value, BaseException):
                         raise value
                     if isinstance(value, PyInstance) and value.cls.is_exception_class():
+                        raise PyException(value)
+                    raise TypeError("exceptions must derive from BaseException")
+                elif op is Op.RAISE_FROM:
+                    cause = frame.stack.pop()
+                    value = frame.stack.pop()
+                    if isinstance(cause, type) and issubclass(cause, BaseException):
+                        cause = cause()
+                    if isinstance(value, type) and issubclass(value, BaseException):
+                        value = value()
+                    if isinstance(value, BaseException):
+                        value.__cause__ = cause
+                        value.__suppress_context__ = True
+                        raise value
+                    if isinstance(value, PyInstance) and value.cls.is_exception_class():
+                        value.attributes["__cause__"] = cause
+                        value.attributes["__suppress_context__"] = True
                         raise PyException(value)
                     raise TypeError("exceptions must derive from BaseException")
                 elif op is Op.MATCH_EXCEPTION:

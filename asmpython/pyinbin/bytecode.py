@@ -95,6 +95,7 @@ class Op(IntEnum):
     COMPARE_IN = 28
     COMPARE_NOT_IN = 29
     AWAIT = 113
+    RAISE_FROM = 114
 
 
 @dataclass(frozen=True)
