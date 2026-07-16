@@ -2904,6 +2904,26 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         return val
 
     if isinstance(e, A.UnaryOp):
+        owner = getattr(e, "dunder_owner", None)
+        if owner is not None:
+            # `-instance`/`+instance`/`~instance` where sema resolved a
+            # real `__neg__`/`__pos__`/`__invert__` method on the operand's
+            # class (see sema.py's UnaryOp check, which stamps dunder_owner/
+            # dunder_method the same way BinOp's dunder overload check
+            # does, just above this one). Without this check, the operand
+            # -- a real object/instance pointer -- silently fell through to
+            # the plain-int `ineg`/`inot` path below (or, for `+`, was
+            # returned completely unmodified, skipping __pos__ entirely),
+            # treating the pointer as a raw integer to negate/invert --
+            # corrupts it into a bogus address, confirmed via gdb crashing
+            # deep in application code on the very next dereference of the
+            # "negated" pointer (test case: `-a` on a `Vec` instance with a
+            # real `__neg__`).
+            method = e.dunder_method  # type: ignore[attr-defined]
+            operand_v = _lower_expr(ctx, e.operand)
+            v = ctx.tmp(ir_type_for(A.expr_type(e)))
+            ctx.emit(IRInstr("call", v, [f"{owner}__{method}", operand_v]))
+            return v
         operand_ty = A.expr_type(e.operand)
         if e.op == "+":
             return _lower_expr(ctx, e.operand)
@@ -3104,9 +3124,55 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
 
     if isinstance(e, A.Compare):
         if len(e.ops) == 1 and e.ops[0] in ("in", "not in"):
+            contains_owner = getattr(e, "dunder_contains_owner", None)
+            if contains_owner is not None:
+                # `x in obj` / `x not in obj` where sema resolved a real
+                # `__contains__` on obj's class -- _lower_membership only
+                # ever handles dict/set/list/tuple haystacks and raises a
+                # clean LowerError otherwise, so a custom-`__contains__`
+                # class (e.g. `367_custom_contains.py`'s Bag) previously
+                # failed to build at all rather than silently misbehaving.
+                needle_v = _lower_expr(ctx, e.operands[0])
+                hay_v = _lower_expr(ctx, e.operands[1])
+                v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", v, [f"{contains_owner}____contains__", hay_v, needle_v]))
+                if getattr(e, "dunder_contains_negate", False):
+                    zero = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", zero, [0]))
+                    inv = ctx.tmp(I64)
+                    ctx.emit(IRInstr("icmp.eq", inv, [v, zero]))
+                    return inv
+                return v
             return _lower_membership(
                 ctx, e.operands[0], e.operands[1], e.ops[0] == "not in"
             )
+        owner = getattr(e, "dunder_owner", None)
+        if owner is not None and len(e.ops) == 1:
+            # `a == b` / `a < b` / etc. where sema resolved a real
+            # `__eq__`/`__lt__`/etc. on one side's class (mirrors A.BinOp's
+            # dunder_owner check above -- this one was missing entirely
+            # until this fix, so every instance comparison silently fell
+            # through to the chained-comparison path below, which compares
+            # the two operands' raw pointer values (object identity) --
+            # not a crash, but silently wrong whenever a class defines a
+            # real __eq__/__lt__/etc. Confirmed via a minimal repro: a
+            # Point class with `__eq__` comparing x/y fields printed False
+            # for two field-equal-but-distinct Point instances.
+            method = e.dunder_method  # type: ignore[attr-defined]
+            reflected = getattr(e, "dunder_reflected", False)
+            negate = getattr(e, "dunder_negate", False)
+            lhs = _lower_expr(ctx, e.operands[0])
+            rhs = _lower_expr(ctx, e.operands[1])
+            args = [rhs, lhs] if reflected else [lhs, rhs]
+            v = ctx.tmp(I64)
+            ctx.emit(IRInstr("call", v, [f"{owner}__{method}", *args]))
+            if negate:
+                zero = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", zero, [0]))
+                inv = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.eq", inv, [v, zero]))
+                return inv
+            return v
         if len(e.ops) == 1:
             lt0 = A.expr_type(e.operands[0])
             rt0 = A.expr_type(e.operands[1])
@@ -4388,6 +4454,21 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             out = ctx.tmp(PTR)
             ctx.emit(IRInstr("call", out, ["_abi_input"]))
             return out
+        call_owner = getattr(e, "dunder_call_owner", None)
+        if call_owner is not None:
+            # `obj(...)` where `obj` is a variable holding an instance with
+            # a real `__call__` method (e.g. `add5 = Adder(5); add5(3)`).
+            # Without this check, this fell through to the plain-name-call
+            # path below, which treats `e.func` (here just the variable
+            # name `add5`) as either a class name or a callable slot --
+            # neither matches, so it ended up trying to CALL the instance's
+            # own dict/struct pointer as if it were a code address. Confirmed
+            # crashing via a minimal repro (`class Adder: __call__` style).
+            obj_v = _lower_expr(ctx, A.Name(name=e.func, pos=e.pos))
+            args = [obj_v] + [_lower_expr(ctx, a) for a in e.args]
+            v = ctx.tmp(ir_type_for(A.expr_type(e)))
+            ctx.emit(IRInstr("call", v, [f"{call_owner}____call__", *args]))
+            return v
         args = [_lower_expr(ctx, a) for a in e.args]
         v = ctx.tmp(ir_type_for(A.expr_type(e)))
         if e.func in ctx.slot_ty and e.func not in ctx.mctx.func_names:
@@ -5404,6 +5485,10 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
         elif isinstance(node, A.Lambda):
             add_func(getattr(node, "func_name", None))
         elif isinstance(node, A.BinOp):
+            owner = getattr(node, "dunder_owner", None)
+            if owner is not None:
+                add(owner, getattr(node, "dunder_method", None))
+        elif isinstance(node, A.UnaryOp):
             owner = getattr(node, "dunder_owner", None)
             if owner is not None:
                 add(owner, getattr(node, "dunder_method", None))

@@ -786,25 +786,117 @@ reruns. Final sweep numbers after all three fixes, from the
 OK=252  MISMATCH=24  CRASH=44  BUILD_FAIL=118
 ```
 
+**Triage pass two** (2026-07-16, same-day follow-up): two more real
+crash bugs, both in the same family as the module-attribute bug above —
+sema had the right information (`dunder_owner`/`dunder_call_owner`
+stamped correctly) but `ir_lower.py`'s lowering or reachability walker
+didn't check it in every place it needed to:
+
+1. **Unary dunder operators** (`-instance`/`+instance`/`~instance`
+   calling `__neg__`/`__pos__`/`__invert__`): `A.UnaryOp`'s lowering had
+   no `dunder_owner` check at all (unlike `A.BinOp`, which already had
+   one) — fell through to plain `ineg`/`inot` on the raw instance
+   pointer, corrupting it (confirmed via gdb: crash in application code
+   on the very next dereference of the "negated" pointer). Fixing the
+   lowering alone wasn't enough: the reachability walker (which decides
+   which methods actually get emitted) also never checked `A.UnaryOp` for
+   `dunder_owner` — `BinOp`/`Compare` did — so `Vec.__neg__` was correctly
+   *called* by the fixed lowering but didn't exist in the output at all
+   until this second, matching fix was added too.
+2. **Calling an instance via `__call__`** (`add5 = Adder(5); add5(3)`):
+   sema already stamped `e.dunder_call_owner` correctly on the `A.Call`
+   node — it was even already used by the reachability walker (so
+   `Adder.__call__` DID get emitted) — but nothing in `_lower_expr`'s
+   actual `A.Call` handling ever checked it. The call site fell through
+   to the generic "call this variable as if it were a function pointer"
+   path, which tried to invoke the instance's own struct/dict pointer as
+   executable code. Added a real dispatch case checking `dunder_call_owner`
+   before the generic fallback.
+
+Verified: `tests.runner` 475/483 throughout. Sweep: 252→254 OK,
+crashes 44→42.
+
+**Cumulative sweep numbers, both triage passes, from the
+`OK=245 MISMATCH=24 CRASH=42 BUILD_FAIL=127` session-start baseline**:
+
+```text
+OK=254  MISMATCH=24  CRASH=42  BUILD_FAIL=118
+```
+
+**Triage pass three** (2026-07-16, same-day follow-up): audited every
+`dunder_owner`/`dunder_call_owner`/`dunder_contains_owner` attribute
+sema stamps against every place `ir_lower.py` could plausibly need to
+check it — the exact recommendation from pass two's writeup, since every
+bug found so far was "sema has the right info, ir_lower.py just doesn't
+check for it in one specific place." Found two more:
+
+1. **`A.Compare`'s lowering had no `dunder_owner` check at all** (unlike
+   `A.BinOp`, which already had one) — `a == b` / `a < b` / etc. on
+   instances with a real `__eq__`/`__lt__`/etc. silently fell through to
+   the generic chained-comparison path, which compares the two operands'
+   raw pointer values (object identity), not their field-wise equality.
+   Not a crash — silently *wrong output*, confirmed via a minimal repro
+   (a `Point` class with `__eq__` comparing x/y fields printed `False`
+   for two field-equal-but-distinct instances instead of `True`). Fixed
+   with a `dunder_owner` check mirroring `BinOp`'s, handling the
+   `dunder_negate` flag `!=`/reflected comparisons already carry. The
+   reachability walker already covered `A.Compare` (unlike the
+   `A.UnaryOp` case in pass two), so no second fix was needed here.
+2. **Custom `__contains__` had no lowering path at all**: `x in obj` /
+   `x not in obj` on an instance with `__contains__` hit
+   `_lower_membership`'s hard `LowerError("unsupported compare
+   membership")` guard, since that helper only ever handled dict/set/
+   list/tuple haystacks. A clean build failure, not a silent-wrong-output
+   bug like the others in this stretch. Fixed with a `dunder_contains_owner`
+   check at the `A.Compare` `in`/`not in` dispatch site, added before
+   falling through to `_lower_membership` (left unchanged). Confirmed
+   fixing `367_custom_contains.py` exactly (all three membership checks:
+   present, absent, negated).
+
+Verified: `tests.runner` 475/483 throughout. Sweep after all fixes in
+this stretch (unary dunders, `__call__`, `Compare` dunder_owner,
+`__contains__`): 254→255 OK, 118→117 build failures (the sweep's overall
+totals showed some run-to-run noise — a couple of cases flip between
+OK/CRASH/timeout across otherwise-identical runs, likely toolchain/
+environment flakiness rather than anything code-related; `367_custom_
+contains.py`'s fix was independently confirmed via direct build+run,
+not just the aggregate count).
+
+**Cumulative sweep numbers, all three triage passes this session, from
+the `OK=245 MISMATCH=24 CRASH=42 BUILD_FAIL=127` session-start
+baseline**:
+
+```text
+OK=255  MISMATCH=24  CRASH=42  BUILD_FAIL=117
+```
+
 **Next step on resume**: continue the same triage pattern — group the
-remaining 44 crashes by symptom before fixing one at a time (several are
-likely the same root cause manifesting across different test files, as
-`str * int` and the module-attribute bug both were), then the 118 build
-failures (each is a clear "unsupported expr/stmt X" `LowerError` message
-— `str.format`/bare `format()` builtin, a third format mini-language, is
-a known unimplemented gap likely responsible for a chunk of these), then
+remaining 42 crashes by symptom before fixing one at a time (the pattern
+so far: most "real" bugs are shared-root-cause classes affecting many
+files at once, not one-off issues — `str * int`, module-attribute
+access, unary dunders, `__call__`, `Compare` dunders, and `__contains__`
+each individually moved several files at once, and every single one was
+"sema has the info, ir_lower.py doesn't check for it somewhere" — worth
+assuming that's still true and grepping for the next one before assuming
+a crash needs deep gdb investigation), then the 117 build failures (each
+is a clear "unsupported expr/stmt X" `LowerError` message —
+`str.format`/bare `format()` builtin, a third format mini-language, is a
+known unimplemented gap likely responsible for a chunk of these), then
 the 24 mismatches last (correctness bugs in already-working code, higher
-regression risk to fix). The ad-hoc sweep script used throughout this
-pass (scratch dir, not yet committed) is worth promoting to a real
-`tests/backend_correctness.py` next time — re-run it after every fix
-batch, not just at the start/end, since a single fix can measurably move
-the needle (module-attribute alone: +4 OK, -4 crashes). Given the
-"Everything Python" bar (run essentially any unmodified real-world Python
-program), once this corpus is closer to 100%, pivot to validating against
-real-world stdlib-only scripts or CPython's own `Lib/test/` suite (already
-pyinbin's conformance oracle) — passing this 440-case hand-written corpus
-was never meant to be the definition of "done," just the nearest
-checkpoint before that.
+regression risk to fix). The ad-hoc sweep script used throughout all
+three passes (scratch dir, not yet committed) is worth promoting to a
+real `tests/backend_correctness.py` next time — re-run it after every
+fix batch, not just at the start/end, since a single fix can measurably
+move the needle, and note the sweep's aggregate counts have some
+run-to-run noise (a case or two flipping between OK/CRASH/timeout across
+identical runs) — always confirm a specific fix via direct build+run of
+the affected case(s), not just the before/after totals. Given the
+"Everything Python" bar (run essentially any unmodified real-world
+Python program), once this corpus is closer to 100%, pivot to validating
+against real-world stdlib-only scripts or CPython's own `Lib/test/`
+suite (already pyinbin's conformance oracle) — passing this 440-case
+hand-written corpus was never meant to be the definition of "done," just
+the nearest checkpoint before that.
 
 **When new Win64 ABI shims are added going forward, verify stack-slot
 placement (must be at/above rsp+32) and argument-register assignment
