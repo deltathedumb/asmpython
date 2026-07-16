@@ -1725,6 +1725,58 @@ def _lower_int_pow(ctx: _FuncCtx, base_v: IRValue, exp_v: IRValue, tag: int) -> 
     return out
 
 
+def _lower_int_floordivmod(ctx: _FuncCtx, a: IRValue, b: IRValue, want: str, tag: int) -> IRValue:
+    """a // b or a % b for two ints, `want` selects which -- x86's IDIV
+    (the IR "idiv"/"irem" ops) truncates toward zero, but Python's // and
+    % floor toward -inf, so when the (nonzero) remainder's sign differs
+    from the divisor's, correct: quotient -= 1, remainder += divisor.
+    Matches codegen.py's inline correction (and _runtime_divmod's
+    identical one) exactly, just as IR blocks instead of jcc chains --
+    same reasoning as this file's other codegen.py ports (see
+    _virtual_dispatch_rows/_lower_int_pow)."""
+    raw_q = ctx.tmp(I64)
+    ctx.emit(IRInstr("idiv", raw_q, [a, b]))
+    raw_r = ctx.tmp(I64)
+    ctx.emit(IRInstr("irem", raw_r, [a, b]))
+
+    zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero, [0]))
+    r_nonzero = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.ne", r_nonzero, [raw_r, zero]))
+
+    check_b = ctx.new_block("floordivmodcheck")
+    fix_b = ctx.new_block("floordivmodfix")
+    end_b = ctx.new_block("floordivmodend")
+    q_ptr = ctx.ensure_slot(f"__floordiv_q_{tag}", I64)
+    r_ptr = ctx.ensure_slot(f"__floordiv_r_{tag}", I64)
+    ctx.emit(IRInstr("store", None, [raw_q, q_ptr]))
+    ctx.emit(IRInstr("store", None, [raw_r, r_ptr]))
+    ctx.emit(IRInstr("br.t", None, [r_nonzero, check_b.label, end_b.label]))
+
+    ctx.switch_to(check_b)
+    signs_xor = ctx.tmp(I64)
+    ctx.emit(IRInstr("ixor", signs_xor, [raw_r, b]))
+    diff_sign = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", diff_sign, [signs_xor, zero]))
+    ctx.emit(IRInstr("br.t", None, [diff_sign, fix_b.label, end_b.label]))
+
+    ctx.switch_to(fix_b)
+    one = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one, [1]))
+    fixed_q = ctx.tmp(I64)
+    ctx.emit(IRInstr("isub", fixed_q, [raw_q, one]))
+    fixed_r = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", fixed_r, [raw_r, b]))
+    ctx.emit(IRInstr("store", None, [fixed_q, q_ptr]))
+    ctx.emit(IRInstr("store", None, [fixed_r, r_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(end_b)
+    out = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", out, [q_ptr if want == "//" else r_ptr]))
+    return out
+
+
 def _lower_isinstance(ctx: _FuncCtx, e: A.Call) -> IRValue:
     targets: list[str] = []
     cls_arg = e.args[1]
@@ -2313,6 +2365,13 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             a = _lower_expr(ctx, e.left)
             b = _lower_expr(ctx, e.right)
             return _lower_int_pow(ctx, a, b, id(e))
+        if e.op in ("//", "%"):
+            # Plain "idiv"/"irem" truncate toward zero (raw x86 IDIV); //
+            # and % need floor-toward-(-inf) semantics -- see
+            # _lower_int_floordivmod's docstring.
+            a = _lower_expr(ctx, e.left)
+            b = _lower_expr(ctx, e.right)
+            return _lower_int_floordivmod(ctx, a, b, e.op, id(e))
         if e.op not in _BINOP:
             raise LowerError(f"unsupported binop {e.op!r}")
         a = _lower_expr(ctx, e.left)
@@ -3432,6 +3491,12 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
                 # the slot itself going forward isn't supported (slots are
                 # fixed-type); reject rather than silently truncate back.
                 raise LowerError("augassign int->float promotion needs a float-declared target")
+        elif s.op in ("//", "%"):
+            # See _lower_int_floordivmod's docstring -- plain idiv/irem
+            # truncate toward zero, // and % need floor-toward-(-inf).
+            res = _lower_int_floordivmod(ctx, cur, rhs, s.op, id(s))
+            ctx.emit(IRInstr("store", None, [res, ptr]))
+            return
         else:
             if s.op not in _BINOP:
                 raise LowerError(f"unsupported augassign op {s.op!r}")
@@ -3595,12 +3660,22 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
     if isinstance(s, A.While):
         head_b = ctx.new_block("whilehead")
         body_b = ctx.new_block("whilebody")
+        # `break` must skip the `else` clause entirely (Python's for/while-
+        # else only runs on natural exhaustion, never on break) -- so
+        # break's target (end_b, pushed onto loop_stack below) has to be a
+        # separate block placed AFTER orelse's, not the same block orelse
+        # itself runs in. natural_b is where the condition-false edge goes;
+        # it falls through into orelse then into end_b, while break jumps
+        # straight to end_b, bypassing orelse. Mirrors codegen.py's
+        # top/nat/end three-label design for A.While exactly.
+        natural_b = ctx.new_block("whilenatural") if s.orelse else None
         end_b = ctx.new_block("whileend")
 
         ctx.emit(IRInstr("br", None, [head_b.label]))
         ctx.switch_to(head_b)
         cond = _lower_truthy(ctx, s.test)
-        ctx.emit(IRInstr("br.t", None, [cond, body_b.label, end_b.label]))
+        false_target = natural_b.label if natural_b is not None else end_b.label
+        ctx.emit(IRInstr("br.t", None, [cond, body_b.label, false_target]))
 
         ctx.switch_to(body_b)
         ctx.loop_stack.append((head_b.label, end_b.label))
@@ -3609,9 +3684,13 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         ctx.loop_stack.pop()
         ctx.emit(IRInstr("br", None, [head_b.label]))
 
+        if natural_b is not None:
+            ctx.switch_to(natural_b)
+            for st in s.orelse:
+                _lower_stmt(ctx, st)
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+
         ctx.switch_to(end_b)
-        for st in s.orelse:
-            _lower_stmt(ctx, st)
         return
 
     if isinstance(s, A.For) and s.iter is not None:
@@ -3643,6 +3722,8 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             head_b = ctx.new_block("forenumhead")
             body_b = ctx.new_block("forenumbody")
             cont_b = ctx.new_block("forenumcont")
+            # break-must-skip-else design, see A.While above.
+            natural_b = ctx.new_block("forenumnatural") if s.orelse else None
             end_b = ctx.new_block("forenumend")
 
             ctx.emit(IRInstr("br", None, [head_b.label]))
@@ -3661,7 +3742,8 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
                 ctx.emit(IRInstr("load", len_v, [len_addr]))
             cond = ctx.tmp(I64)
             ctx.emit(IRInstr("icmp.lt", cond, [idx_v, len_v]))
-            ctx.emit(IRInstr("br.t", None, [cond, body_b.label, end_b.label]))
+            false_target = natural_b.label if natural_b is not None else end_b.label
+            ctx.emit(IRInstr("br.t", None, [cond, body_b.label, false_target]))
 
             ctx.switch_to(body_b)
             body_list_v = ctx.tmp(PTR)
@@ -3694,9 +3776,13 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             ctx.emit(IRInstr("store", None, [next_idx_v, idx_ptr]))
             ctx.emit(IRInstr("br", None, [head_b.label]))
 
+            if natural_b is not None:
+                ctx.switch_to(natural_b)
+                for st in s.orelse:
+                    _lower_stmt(ctx, st)
+                ctx.emit(IRInstr("br", None, [end_b.label]))
+
             ctx.switch_to(end_b)
-            for st in s.orelse:
-                _lower_stmt(ctx, st)
             return
         iter_t = A.expr_type(s.iter)
         if iter_t not in ("list", "dict", "str", "any"):
@@ -3736,6 +3822,8 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         head_b = ctx.new_block("forlisthead")
         body_b = ctx.new_block("forlistbody")
         cont_b = ctx.new_block("forlistcont")
+        # break-must-skip-else design, see A.While above.
+        natural_b = ctx.new_block("forlistnatural") if s.orelse else None
         end_b = ctx.new_block("forlistend")
 
         ctx.emit(IRInstr("br", None, [head_b.label]))
@@ -3753,7 +3841,8 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             ctx.emit(IRInstr("load", len_v, [len_addr]))
         cond = ctx.tmp(I64)
         ctx.emit(IRInstr("icmp.lt", cond, [idx_v, len_v]))
-        ctx.emit(IRInstr("br.t", None, [cond, body_b.label, end_b.label]))
+        false_target = natural_b.label if natural_b is not None else end_b.label
+        ctx.emit(IRInstr("br.t", None, [cond, body_b.label, false_target]))
 
         ctx.switch_to(body_b)
         # Reload the buffer pointer fresh each iteration (matching
@@ -3802,9 +3891,13 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         ctx.emit(IRInstr("store", None, [next_idx_v, idx_ptr]))
         ctx.emit(IRInstr("br", None, [head_b.label]))
 
+        if natural_b is not None:
+            ctx.switch_to(natural_b)
+            for st in s.orelse:
+                _lower_stmt(ctx, st)
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+
         ctx.switch_to(end_b)
-        for st in s.orelse:
-            _lower_stmt(ctx, st)
         return
 
     if isinstance(s, A.For):
@@ -3818,7 +3911,14 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         else:
             start_e, stop_e, step_e = args[0], args[1], args[2]
 
-        var_ptr = ctx.ensure_slot(s.var, I64)
+        # Same global-vs-local write-site bug class as the generic list-For
+        # path (see that branch's _store_loop_target fix): a bare
+        # ctx.ensure_slot() here always makes a local stack slot, but a
+        # module-scope `for i in range(...):` needs i to write through the
+        # module global read-side (_name_ptr / _is_global_name) resolves
+        # for every other read of `i` -- otherwise every read outside this
+        # loop's own body sees the zero-initialized global instead.
+        var_ptr = _name_ptr(ctx, s.var, I64)
         ctx.emit(IRInstr("store", None, [_lower_expr(ctx, start_e), var_ptr]))
         stop_name = f"__for_stop_{id(s)}"
         step_name = f"__for_step_{id(s)}"
@@ -3832,7 +3932,13 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         neg_b = ctx.new_block("forstepnegcheck")
         body_b = ctx.new_block("forbody")
         cont_b = ctx.new_block("forcont")
+        # Same break-must-skip-else design as A.While above: the
+        # condition-false edges (from both pos_b/neg_b) target natural_b
+        # (falls into orelse then end_b), while `break` targets end_b
+        # directly, bypassing orelse.
+        natural_b = ctx.new_block("fornatural") if s.orelse else None
         end_b = ctx.new_block("forend")
+        false_target = natural_b.label if natural_b is not None else end_b.label
 
         ctx.emit(IRInstr("br", None, [head_b.label]))
         ctx.switch_to(head_b)
@@ -3854,7 +3960,7 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         ctx.emit(IRInstr("load", stop_v, [stop_ptr]))
         cond_pos = ctx.tmp(I64)
         ctx.emit(IRInstr("icmp.lt", cond_pos, [var_v, stop_v]))
-        ctx.emit(IRInstr("br.t", None, [cond_pos, body_b.label, end_b.label]))
+        ctx.emit(IRInstr("br.t", None, [cond_pos, body_b.label, false_target]))
 
         var_v2 = ctx.tmp(I64)
         stop_v2 = ctx.tmp(I64)
@@ -3863,7 +3969,7 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         ctx.emit(IRInstr("load", stop_v2, [stop_ptr]))
         cond_neg = ctx.tmp(I64)
         ctx.emit(IRInstr("icmp.gt", cond_neg, [var_v2, stop_v2]))
-        ctx.emit(IRInstr("br.t", None, [cond_neg, body_b.label, end_b.label]))
+        ctx.emit(IRInstr("br.t", None, [cond_neg, body_b.label, false_target]))
 
         ctx.switch_to(body_b)
         ctx.loop_stack.append((cont_b.label, end_b.label))
@@ -3882,9 +3988,13 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         ctx.emit(IRInstr("store", None, [next_v, var_ptr]))
         ctx.emit(IRInstr("br", None, [head_b.label]))
 
+        if natural_b is not None:
+            ctx.switch_to(natural_b)
+            for st in s.orelse:
+                _lower_stmt(ctx, st)
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+
         ctx.switch_to(end_b)
-        for st in s.orelse:
-            _lower_stmt(ctx, st)
         return
 
     if isinstance(s, A.Break):

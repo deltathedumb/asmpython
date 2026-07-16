@@ -169,33 +169,64 @@ runtime** (compiles now, previously didn't reach that far) — `%`-style
 string formatting (`"%s is %d" % (...)`) has zero implementation in this
 backend, a large separate feature, not attempted this session.
 
+**Follow-up session** (same day, commits after `f4cdf6ba`): the
+"03/04/12/115 print zeros" symptom flagged above turned out to be **two
+separate bugs, not the module-scope-global one re-appearing**:
+
+1. `03_fib.py`/`04_loops.py`/`12_list_grow.py` use `for i in range(...):`
+   (not a list literal) at module scope — a *third* lowering path
+   (`A.For` with `s.range_args`, distinct from both the list-`For` path
+   fixed earlier and the `enumerate`-`For` path) had the exact same
+   `ctx.ensure_slot()`-instead-of-`_name_ptr()` bug. Fixed the same way.
+2. `115_loop_else.py`: **every** loop form with an `else` clause (`While`,
+   range-`For`, list-`For`, `enumerate`-`For`) routed `break` to the same
+   block that unconditionally ran the `else` body next — so `else` always
+   ran even after a `break`, when Python's for/while-`else` should only
+   run on natural exhaustion. Fixed by giving each loop form a separate
+   `natural` block (condition-false edge) that falls into the `else` body
+   then into a distinct `end` block, while `break` (via `loop_stack`)
+   targets `end` directly, bypassing `else` — ported `codegen.py`'s
+   `top`/`nat`/`end` three-label design as three-block chains.
+
+Also found and fixed a **third, unrelated, pervasive bug** while sweeping
+for more: plain `idiv`/`irem` (the IR ops backing `//`/`%`) truncate
+toward zero (raw x86 `IDIV` semantics) with no floor-toward-`-inf`
+correction, so any negative-operand `//`/`%` was silently wrong (`-7 // 2`
+gave `-3` instead of `-4`). Fixed via a new shared `_lower_int_floordivmod`
+helper (ported `codegen.py`'s/`_runtime_divmod`'s identical
+sign-mismatch-then-adjust correction as IR blocks) used by both `BinOp`
+and `AugAssign`.
+
+Verified: `tests.runner` still 481/489 (no regressions). Full
+build+run+expected-output sweep on 1-60 went 29/60 → 34/60 exact matches
+across this follow-up (was 21/60 before the whole day's work started).
+
 Remaining 1-60 build failures: several unimplemented `MethodCall`s
 (`list.sort`, `dict.pop`, `str.rpartition`/`casefold`/`format`), `del`
 statement, starred/non-Name tuple-assign targets, walrus operator,
-`sorted(key=...)` lambda body. A broader **build+run+expected-output**
-sweep (not just build-success) on 1-60 also surfaces real, likely
-pre-existing (not re-verified individually this session, but confirmed
-not new via git-stash A/B diffing on a sample) runtime bugs worth
-prioritizing next: `03_fib.py`/`04_loops.py`/`12_list_grow.py`/
-`115_loop_else.py` all print all-zeros or wrong values from what looks
-like a **second, distinct for-loop/while-loop variable bug** (not the
-module-scope-global one fixed this session — these use local/function-
-scope loop vars); `114_bare_raise.py`/`131_except_dispatch.py` print
-`(null)` instead of exception messages; `132_dict_union.py`/
-`133_dict_unpack.py`/`104_set_methods.py`/`123_set_discard_remove_copy_pop.py`
-produce empty or wrong output; f-string format-spec support (alignment,
-width, precision, thousands-grouping, binary/hex-with-prefix) is
-entirely unimplemented (silently ignores the spec and prints the plain
-value).
+`sorted(key=...)` lambda body. Remaining build+run mismatches on 1-60
+(all re-confirmed pre-existing, not new): `114_bare_raise.py`/
+`131_except_dispatch.py` print `(null)` instead of exception messages;
+`132_dict_union.py`/`133_dict_unpack.py`/`104_set_methods.py`/
+`123_set_discard_remove_copy_pop.py` produce empty or wrong output;
+f-string format-spec support (alignment, width, precision,
+thousands-grouping, binary/hex-with-prefix) is entirely unimplemented
+(silently ignores the spec and prints the plain value); `109_pct_format.py`
+segfaults (`%`-style string formatting has zero implementation, a
+separate large feature).
 
-**Next step on resume**: the local/function-scope for-loop bug
-(03/04/12/115) is likely high-value and possibly a quick fix analogous to
-this session's module-scope one — check the local-scope `for` lowering
-path's write side the same way. After that, `del` statement and the
-tuple-assign/starred-target gaps look like the next-cheapest wins toward
-full parity with `codegen.py` under `--backend x86-64` — the direct
-predecessor of the newly-confirmed "make the IR-based backend the
-default" workload item.
+**Next step on resume**: `del` statement and the tuple-assign/
+starred-target gaps look like the next-cheapest build-success wins.
+For runtime correctness, the `(null)` exception-message bug
+(114/131) is probably a quick, high-value fix — likely the exception
+payload's message pointer isn't being threaded through the same way
+class/id are. F-string format specs are a bigger, self-contained feature
+(worth a dedicated pass: parse the `:spec` mini-language once, drive
+alignment/width/precision/base/grouping from one shared formatter) that
+would close out most of the remaining fstring_* cases at once. All of
+this is toward full parity with `codegen.py` under `--backend x86-64` —
+the direct predecessor of the newly-confirmed "make the IR-based backend
+the default" workload item.
 
 ## Selfhost Status (plan-step 11)
 
