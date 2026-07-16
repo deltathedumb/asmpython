@@ -717,21 +717,94 @@ rather than stdout diff alone, which is what the earlier, unreliable
 sweeps missed (a nonzero-exit crash with empty stdout was previously
 indistinguishable from "silently produced no output").
 
-**Next step on resume**: triage the 127 build failures first (cheapest
-fixes, same pattern as the earlier smoke-corpus push — each is
-"unsupported expr/stmt X", diagnosable directly from the LowerError
-message), then the 42 crashes (likely several recurring bug classes, not
-42 independent bugs — worth grouping by symptom before fixing one at a
-time), then the 24 mismatches last (correctness bugs in already-working
-code, higher risk of subtle regressions to introduce while fixing).
-`str.format`/bare `format()` builtin is a known unimplemented
-mini-language likely responsible for a chunk of the build failures.
-Given the "Everything Python" bar (run essentially any unmodified
-real-world Python program), once this corpus is closer to 100%, pivot to
-validating against real-world stdlib-only scripts or CPython's own
-`Lib/test/` suite (already pyinbin's conformance oracle) — passing this
-440-case hand-written corpus was never meant to be the definition of
-"done," just the nearest checkpoint before that.
+**Triage pass one** (2026-07-16, same-day follow-up — user directive:
+"finish all 2.0.0 steps," working the confirmed order sequentially,
+checkpointing each fix): three real bugs found and fixed, re-measured
+after each:
+
+1. **Missing msvcrt.dll symbol-table entries**: `pe_linker.py`'s
+   `_DLL_FOR_SYMBOL` was missing ~25 real exports (`cos`/`sin`/`tan`/
+   `asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`exp`/`srand`/
+   `getenv`/`clock`/`remove`/`_stat64`/`_getpid`/`time`/`gmtime`/
+   `localtime`/`mktime`/`_mkdir`/`_rmdir`/`_chdir`/`_getcwd`/`_access`),
+   each confirmed a real export via `ctypes.WinDLL('msvcrt.dll')`
+   attribute lookup against the live system DLL (no `dumpbin` in this
+   environment; an equivalent, tool-free confirmation method). Sweep:
+   245→247 OK, build failures 127→118.
+2. **`"str" * int` (repeat) silently corrupted, not just unimplemented**:
+   fell through to the plain-int `imul` path, multiplying the string's
+   raw *pointer value* by the count and handing the garbage result to
+   `printf` as if it were a real string — confirmed via gdb (SIGSEGV
+   inside msvcrt.dll's `ungetwc`, called from `printf`, after the string
+   arg's corrupted pointer led printf's internal state astray). This
+   affected any program using `str * int` at all — a very common idiom
+   (separator lines, padding) — which is why so many otherwise-unrelated
+   crashing cases shared the exact same `exit=3221225477`
+   (`STATUS_ACCESS_VIOLATION`) signature. Fixed with a proper
+   `_abi_str_repeat` shim (wraps the existing `_runtime_str_repeat`,
+   already used by the legacy backend) and a new `ir_lower.py` `BinOp`
+   case routing both `"str" * int` and `int * "str"` through it (mirrors
+   `codegen.py`'s `_gen_binop_str`, which always resolves the string
+   operand first regardless of source order).
+3. **Module-attribute access on a merged stdlib module segfaulted**
+   (`string.ascii_lowercase`, `cmath.pi`, etc.): the generic instance-
+   attribute fallback (`obj.name -> _abi_dict_get_default(obj, name,
+   default)`) treated the module NAME (`string`) as if it were a real
+   runtime dict/instance pointer — but a module name is a compile-time-
+   only namespace, never bound to any variable, so `_lower_expr` on it
+   silently allocated a fresh, never-initialized stack slot and read
+   garbage from it as the "dict" pointer. Confirmed via gdb + a minimal
+   repro (`import string; print(len(string.ascii_lowercase))`) crashing
+   identically. Fixed in `ir_lower.py`: when `e.obj` is a `Name` typed
+   `"module"` by sema AND the attribute name is a real materialized
+   global (`program.py`'s whole-program merge already hoists a merged
+   module's top-level `Assign`s as plain globals under their bare name),
+   read that global directly instead of going through the dict-lookup
+   fallback. **Guarded to only apply when the global actually exists**:
+   a pure-FFI-binding-table module like `math.py` (`Const`/`Func` entries
+   in a `BINDINGS` dict, never real `Assign` statements `program.py`
+   would hoist) has no such global at all — `math.pi`-style access
+   remains a separate, still-open gap (falls through to the old,
+   already-broken-before-this-session behavior, confirmed not made worse:
+   `ir_lower.py` has no `ffi_consts` handling for either `A.Name` or
+   `A.Attr` today). This also needed a matching sema fix
+   (`obj_t == "module"` previously always collapsed to `inferred_type =
+   "any"`, discarding real available type info — now checks
+   `self.global_scope.types` first) and, once sema started correctly
+   reporting `float` for these attributes, exposed a **pre-existing bug
+   in the legacy `codegen.py` backend too**: its own module-attribute
+   read never did the `movq xmm0, rax` bit-reinterpret a float result
+   needs (unlike the dict/instance-attribute case right above it, which
+   already did) — fixed to match. Sweep: 248→252 OK, crashes 48→44.
+
+Verified: `tests.runner` 475/483 (matching the pre-session baseline
+exactly) after every fix in this pass, confirmed via repeated full
+reruns. Final sweep numbers after all three fixes, from the
+`OK=245 MISMATCH=24 CRASH=42 BUILD_FAIL=127` starting point above:
+
+```text
+OK=252  MISMATCH=24  CRASH=44  BUILD_FAIL=118
+```
+
+**Next step on resume**: continue the same triage pattern — group the
+remaining 44 crashes by symptom before fixing one at a time (several are
+likely the same root cause manifesting across different test files, as
+`str * int` and the module-attribute bug both were), then the 118 build
+failures (each is a clear "unsupported expr/stmt X" `LowerError` message
+— `str.format`/bare `format()` builtin, a third format mini-language, is
+a known unimplemented gap likely responsible for a chunk of these), then
+the 24 mismatches last (correctness bugs in already-working code, higher
+regression risk to fix). The ad-hoc sweep script used throughout this
+pass (scratch dir, not yet committed) is worth promoting to a real
+`tests/backend_correctness.py` next time — re-run it after every fix
+batch, not just at the start/end, since a single fix can measurably move
+the needle (module-attribute alone: +4 OK, -4 crashes). Given the
+"Everything Python" bar (run essentially any unmodified real-world Python
+program), once this corpus is closer to 100%, pivot to validating against
+real-world stdlib-only scripts or CPython's own `Lib/test/` suite (already
+pyinbin's conformance oracle) — passing this 440-case hand-written corpus
+was never meant to be the definition of "done," just the nearest
+checkpoint before that.
 
 **When new Win64 ABI shims are added going forward, verify stack-slot
 placement (must be at/above rsp+32) and argument-register assignment

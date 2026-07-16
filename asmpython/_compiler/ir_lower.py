@@ -3027,6 +3027,23 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             # shared parser both sides use, so they can't drift) and
             # lower to the same lit/arg concat chain as f-strings.
             return _lower_pct_format(ctx, e)
+        if e.op == "*" and "str" in (lt, rt):
+            # `"str" * int` / `int * "str"` (repeat) -- was previously
+            # falling through to the plain-int `imul` path below, which
+            # multiplied the string's raw POINTER value by the count and
+            # fed the resulting garbage address to printf as if it were a
+            # real string -- corrupts printf's internal state badly enough
+            # to crash inside libc itself (confirmed via gdb: SIGSEGV
+            # inside msvcrt.dll's ungetwc, called from printf), not just
+            # "prints garbage". `_runtime_str_repeat` (rax=str ptr,
+            # rbx=count) always wants the string first regardless of
+            # source order, matching codegen.py's `_gen_binop_str`.
+            str_e, count_e = (e.left, e.right) if lt == "str" else (e.right, e.left)
+            str_v = _lower_expr(ctx, str_e)
+            count_v = _lower_expr(ctx, count_e)
+            v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", v, ["_abi_str_repeat", str_v, count_v]))
+            return v
         if lt in ("dict", "set") and rt in ("dict", "set") and e.op == "|":
             # `d1 | d2` (PEP 584): a fresh dict/set with left's entries then
             # right's merged on top (right wins on key conflicts) -- same
@@ -4103,6 +4120,37 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             and len(e.obj.args) == 1
         ):
             return _lower_type_name_attr(ctx, e)
+        if isinstance(e.obj, A.Name) and A.expr_type(e.obj) == "module" and e.name in ctx.mctx.global_types:
+            # `module.NAME` (e.g. `string.ascii_lowercase`) -- a merged
+            # stdlib module is a compile-time-only namespace, not a real
+            # runtime value; `e.obj` (the module name) was never bound to
+            # any variable/slot at all. Falling through to the generic
+            # instance-attribute path below (which treats `_lower_expr(ctx,
+            # e.obj)` as a real dict/instance pointer) read an uninitialized
+            # stack slot as that pointer and called _abi_dict_get_default on
+            # garbage -- a guaranteed segfault, confirmed via gdb (crash
+            # inside msvcrt.dll after reading uninitialized stack memory as
+            # a dict header). `program.py`'s whole-program merge already
+            # hoists a merged module's top-level values as plain globals
+            # under their bare name (no module-name prefix -- see the
+            # IRGlobal entries `lower_module` emits for e.g. `string.py`'s
+            # `ascii_lowercase`), so this is just a direct global read --
+            # but ONLY when `e.name` is actually a real materialized global
+            # (`ctx.mctx.global_types` check): a pure-FFI-binding module
+            # like `math.py` (whose `pi`/`sqrt`/etc. are `Const`/`Func`
+            # binding-table entries, never real `Assign` statements
+            # `program.py` would hoist) has no such global at all, and
+            # `math.pi`-style access is a separate, pre-existing,
+            # not-yet-fixed gap (ir_lower.py has no `ffi_consts` handling
+            # for either `A.Name` or `A.Attr` today) -- falls through to
+            # the generic path below unchanged for that case, same
+            # (already broken) behavior as before this fix, not worse.
+            ty = ctx.mctx.global_types[e.name]
+            ptr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", ptr, [e.name]))
+            v = ctx.tmp(ty)
+            ctx.emit(IRInstr("load", v, [ptr]))
+            return v
         # obj.name -> _abi_dict_get_default(obj, name, default=0). Instances
         # are runtime dicts keyed by field name; bridges to the existing,
         # tested _runtime_dict_get_default via the ABI shim (see

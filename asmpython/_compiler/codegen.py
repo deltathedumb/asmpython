@@ -4634,6 +4634,15 @@ class Codegen:
             # if it exists; else 0 (opaque-lenient, mirrors unset fields).
             if e.name in self.global_vars:
                 self.emitf(f"mov rax, [rel {self._global_label(e.name)}]")
+                if A.expr_type(e) == "float":
+                    # A float global's bits are stored via the same 8-byte
+                    # `mov [label], rax`-shaped write every other global
+                    # uses -- reading it back into rax is the right BITS,
+                    # but a consumer expecting a float result (e.g. an
+                    # `fcmp`) needs it in xmm0, not reinterpreted as an
+                    # int. Mirrors the dict/instance-attribute case just
+                    # above this one, which already does this.
+                    self.emitf("movq xmm0, rax")
                 return
             self.emitf("xor rax, rax")
             return

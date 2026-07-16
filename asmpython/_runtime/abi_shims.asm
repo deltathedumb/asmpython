@@ -18,6 +18,7 @@ extern _runtime_dict_contains
 extern _runtime_dict_keys
 extern _runtime_dict_update
 extern _runtime_str_concat
+extern _runtime_str_repeat
 extern _runtime_str_eq
 extern _runtime_str_cmp
 extern _runtime_int_to_base
@@ -99,6 +100,7 @@ global _abi_dict_contains
 global _abi_dict_keys
 global _abi_dict_update
 global _abi_str_concat
+global _abi_str_repeat
 global _abi_str_rsplit
 global _abi_str_partition
 global _abi_str_rpartition
@@ -283,6 +285,15 @@ _abi_str_concat:
     mov rax, rcx
     mov rbx, rdx
     call _runtime_str_concat
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = str_repeat(s=rcx, n=rdx) -- "str" * int
+_abi_str_repeat:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_str_repeat
     WIN64_RUNTIME_LEAVE
     ret
 

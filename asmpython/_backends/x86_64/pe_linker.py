@@ -53,6 +53,17 @@ for _name in (
     "exit", "__iob_func", "memset", "memcpy", "fmod", "pow",
     "fabs", "frexp", "ldexp", "log", "modf", "rand", "sqrt",
     "abs", "labs", "floor", "ceil", "difftime",
+    # Added triaging the x86-64 backend's full-corpus parity sweep
+    # (2026-07-16) -- each confirmed a real msvcrt.dll export via
+    # ctypes.WinDLL('msvcrt.dll') attribute lookup against the live
+    # system DLL (dumpbin isn't installed in this environment; this is
+    # an equivalent, tool-free way to confirm a symbol is real rather
+    # than guessing).
+    "cos", "sin", "tan", "asin", "acos", "atan", "atan2",
+    "sinh", "cosh", "tanh", "exp",
+    "srand", "getenv", "clock", "remove", "_stat64", "_getpid",
+    "time", "gmtime", "localtime", "mktime",
+    "_mkdir", "_rmdir", "_chdir", "_getcwd", "_access",
 ):
     _DLL_FOR_SYMBOL[_name] = "msvcrt.dll"
 

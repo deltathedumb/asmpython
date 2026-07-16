@@ -6702,9 +6702,32 @@ class SemaAnalyzer:
                 else:
                     e.inferred_type = "any"
                 return
-            if obj_t in ("module", "any"):
-                # Attribute of a module asmpython doesn't model (e.g.
-                # `sys.stderr`), or of an already-opaque value. Stay lenient.
+            if obj_t == "module":
+                # A merged stdlib module's own top-level value declarations
+                # (e.g. `string.py`'s `ascii_lowercase: str = "..."`) are
+                # hoisted into this module's `body` as plain `Assign`
+                # statements by `program.py`'s whole-program merge (see
+                # `_toplevel_value_assigns`), and checked -- registering
+                # their real type into `self.global_scope` -- before any
+                # statement referencing them via `module.NAME` can run
+                # (source order). Use that real type when known, instead of
+                # unconditionally collapsing to "any": an unqualified "any"
+                # here previously made `len(module.NAME)` on a genuine `str`
+                # constant route through the generic dict/list-length GEP
+                # path instead of `strlen`, silently reading the wrong
+                # field and returning garbage (confirmed via
+                # `len(string.ascii_lowercase)` returning a huge garbage
+                # int instead of 26). Falls back to "any" for anything
+                # genuinely unmodeled (`sys.stderr`, an FFI module attr,
+                # etc.), same as before.
+                e.inferred_type = self.global_scope.types.get(e.name, "any")
+                if e.inferred_type == "list":
+                    e.list_el_type = self.global_scope.list_el_types.get(e.name, "int")
+                elif e.inferred_type == "dict":
+                    e.value_type = self.global_scope.dict_value_types.get(e.name, "int")
+                return
+            if obj_t == "any":
+                # Attribute of an already-opaque value. Stay lenient.
                 e.inferred_type = "any"
                 return
             if obj_t == "str":
