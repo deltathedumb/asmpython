@@ -1123,7 +1123,19 @@ class PyClass:
             return self.vm._call(getter, [item])
         if callable(getter):
             return getter(item)
-        return (self, item)
+        # No real ``Generic``/ABC metaclass runs for an interpreted class
+        # without its own ``__class_getitem__`` (e.g. ``os.PathLike``,
+        # which normally gets this from being a real ``Generic`` subclass).
+        # A bare ``(self, item)`` tuple satisfied nothing that expects a
+        # real generic-alias object -- notably ``typing.Union[str,
+        # os.PathLike[str]]`` rejected it outright since a raw PyClass
+        # isn't a ``type``. ``types.GenericAlias`` accepts any object as
+        # its origin (it doesn't require a real ``type``), and typing's own
+        # validation already knows how to handle a GenericAlias, so this
+        # satisfies both without needing to emulate the ABC/Generic
+        # metaclass machinery.
+        import types as _types
+        return _types.GenericAlias(self, item if isinstance(item, tuple) else (item,))
 
     def __iter__(self):
         if self.__name__ == "EnumCheck":
