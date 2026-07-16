@@ -73,6 +73,8 @@ extern _runtime_sort_pairs_int
 extern _runtime_chr
 extern _runtime_setjmp
 extern _runtime_raise
+extern _runtime_divmod
+extern _runtime_input
 extern malloc
 extern printf
 extern sprintf
@@ -144,6 +146,9 @@ global _abi_chr
 global _abi_str_to_int
 global _abi_str_to_int_base
 global _abi_int_to_str
+global _abi_divmod
+global _abi_input
+global _abi_round_f64
 
 ; asmpython/stdlib/hardware.py's _hw_* symbols, hosted-target bodies. These
 ; already use the standard Win64 ABI (see codegen.py's target_windows.py /
@@ -1001,5 +1006,33 @@ _abi_int_to_str:
     call sprintf
     lea rax, [_abi_int_to_str_buf]
     add rsp, 40
+    ret
+
+; rax = divmod(a=rcx, b=rdx) -> 2-tuple ptr (floor-division quotient,
+; floor-mod remainder), matching _runtime_divmod's floor semantics (the
+; same helper //, % use) and its own zero-division raise.
+_abi_divmod:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_divmod
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = input() -> ptr to the most recent input line (\n stripped). No args:
+; any prompt is the caller's job (print it before calling this, same
+; contract as target_windows.py's _emit_input_line).
+_abi_input:
+    WIN64_RUNTIME_ENTER
+    call _runtime_input
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; xmm0 = round_f64(xmm0) -> round-half-to-even to the nearest integral
+; double (mode 0 = SSE4.1 round-to-nearest, ties-to-even -- matches
+; CPython's round() banker's rounding, same instruction the legacy
+; codegen.py uses for round(float)).
+_abi_round_f64:
+    roundsd xmm0, xmm0, 0
     ret
 

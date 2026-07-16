@@ -1475,15 +1475,109 @@ def _store_loop_target(ctx: _FuncCtx, target, value: IRValue, ty: str) -> None:
             _store_loop_target(ctx, sub, elem, "any")
 
 
-def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr) -> IRValue:
+def _lower_tuple_repr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
+    """Tuple value -> repr string "(a, b, c)", matching codegen.py's
+    _emit_tuple_repr_inline exactly (including the CPython 1-tuple
+    trailing-comma special case, "(x,)"). Tuple slots are heterogeneous
+    and their types are known at compile time, so this unrolls per
+    element rather than looping like _abi_list_repr does for a
+    uniformly-typed list."""
+    kinds = A.tuple_element_types(e)
+    if "float" in kinds:
+        # _abi_fmt_elem expects a float element's raw bits pre-moved into
+        # a GP register (the ad-hoc convention codegen.py's own inline
+        # movq-to-rax uses) -- this pipeline's `call` op instead routes an
+        # F64-typed IR value through an XMM argument register, an ABI
+        # mismatch with no bitcast IR op yet to bridge it. Same
+        # already-known gap as float list/dict elements elsewhere in this
+        # file; reject cleanly rather than emit a call that reads garbage.
+        raise LowerError("unsupported expr TupleLit repr (float element)")
+    obj = _lower_expr(ctx, e)
+    buf_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", buf_addr, [obj, _LIST_BUF_OFF]))
+    buf_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", buf_v, [buf_addr]))
+
+    lparen = ctx.mctx.intern_str("(")
+    acc = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", acc, [lparen]))
+
+    for i, k in enumerate(kinds):
+        if i > 0:
+            comma = ctx.mctx.intern_str(", ")
+            comma_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", comma_v, [comma]))
+            new_acc = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", new_acc, ["_abi_str_concat", acc, comma_v]))
+            acc = new_acc
+        elem_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", elem_addr, [buf_v, i * 8]))
+        elem_v = ctx.tmp(F64 if k == "float" else I64)
+        ctx.emit(IRInstr("load", elem_v, [elem_addr]))
+        kind_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", kind_v, [_value_repr_kind(k)]))
+        elem_repr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", elem_repr, ["_abi_fmt_elem", elem_v, kind_v]))
+        new_acc2 = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", new_acc2, ["_abi_str_concat", acc, elem_repr]))
+        acc = new_acc2
+
+    close_text = ",)" if len(kinds) == 1 else ")"
+    close = ctx.mctx.intern_str(close_text)
+    close_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", close_v, [close]))
+    out = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", out, ["_abi_str_concat", acc, close_v]))
+    return out
+
+
+def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr, repr_mode: bool = False) -> IRValue:
     ty = A.expr_type(e)
     if ty == "str":
-        return _lower_expr(ctx, e)
+        s = _lower_expr(ctx, e)
+        if not repr_mode:
+            return s
+        # repr(str) quote-wraps: matches codegen.py's repr() (`'` + text + `'`).
+        q_name = ctx.mctx.intern_str("'")
+        q = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", q, [q_name]))
+        opened = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", opened, ["_abi_str_concat", q, s]))
+        out = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out, ["_abi_str_concat", opened, q]))
+        return out
     if ty == "int":
         if A.is_none_expr(e):
             name = ctx.mctx.intern_str("None")
             out = ctx.tmp(PTR)
             ctx.emit(IRInstr("global_addr", out, [name]))
+            return out
+        if A.is_bool_expr(e):
+            n_v = _lower_expr(ctx, e)
+            zero = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", zero, [0]))
+            is_zero = ctx.tmp(I64)
+            ctx.emit(IRInstr("icmp.eq", is_zero, [n_v, zero]))
+            false_b = ctx.new_block("boolstrfalse")
+            true_b = ctx.new_block("boolstrtrue")
+            end_b = ctx.new_block("boolstrend")
+            res_ptr = ctx.ensure_slot(f"__bool_str_{id(e)}", PTR)
+            ctx.emit(IRInstr("br.t", None, [is_zero, false_b.label, true_b.label]))
+            ctx.switch_to(false_b)
+            false_name = ctx.mctx.intern_str("False")
+            false_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", false_v, [false_name]))
+            ctx.emit(IRInstr("store", None, [false_v, res_ptr]))
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+            ctx.switch_to(true_b)
+            true_name = ctx.mctx.intern_str("True")
+            true_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", true_v, [true_name]))
+            ctx.emit(IRInstr("store", None, [true_v, res_ptr]))
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+            ctx.switch_to(end_b)
+            out = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", out, [res_ptr]))
             return out
         n = _lower_expr(ctx, e)
         base = ctx.tmp(I64)
@@ -1494,7 +1588,9 @@ def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         out = ctx.tmp(PTR)
         ctx.emit(IRInstr("call", out, ["_abi_int_to_base", n, base, prefix]))
         return out
-    if ty == "list" or ty == "tuple":
+    if ty == "tuple":
+        return _lower_tuple_repr(ctx, e)
+    if ty == "list":
         obj = _lower_expr(ctx, e)
         kind = ctx.tmp(I64)
         ctx.emit(IRInstr("const", kind, [_list_repr_kind(e)]))
@@ -1519,7 +1615,7 @@ def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         return out
     if ty.startswith("instance:"):
         cls_name = ty.split(":", 1)[1]
-        resolved = _resolve_str_dunder(ctx, cls_name)
+        resolved = _resolve_str_dunder(ctx, cls_name, repr_first=repr_mode)
         if resolved is not None:
             owner, method = resolved
             obj = _lower_expr(ctx, e)
@@ -2280,28 +2376,35 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
 
     if isinstance(e, A.Call) and e.func == "print":
         # print(x) -> printf(fmt, x); newline baked into the format string
-        # since asmpython's print() always appends one. Only int/str args
-        # for now -- float/list/dict printing needs the runtime helpers
-        # (_emit_float_to_str etc.), not yet wired into this pipeline.
+        # since asmpython's print() always appends one. Any argument that
+        # isn't already str/float routes through _lower_expr_as_str (the
+        # same repr machinery f-strings use), so list/dict/tuple/set/
+        # instance/None args print their real repr instead of a raw
+        # %lld-formatted pointer value. Multiple args are joined with a
+        # single space, matching CPython's default sep=" ".
         if not e.args:
             fmt_name = ctx.mctx.intern_str("\n")
             fmt_ptr = ctx.tmp(PTR)
             ctx.emit(IRInstr("global_addr", fmt_ptr, [fmt_name]))
             ctx.emit(IRInstr("call", None, ["printf", fmt_ptr]))
         else:
-            arg = e.args[0]
-            arg_ty = A.expr_type(arg)
-            val = _lower_expr(ctx, arg)
-            if arg_ty == "str":
-                fmt_str = "%s\n"
-            elif arg_ty == "float":
-                fmt_str = "%g\n"
-            else:
-                fmt_str = "%lld\n"
-            fmt_name = ctx.mctx.intern_str(fmt_str)
+            fmt_parts: list[str] = []
+            call_args: list[IRValue] = []
+            for i, arg in enumerate(e.args):
+                arg_ty = A.expr_type(arg)
+                if i:
+                    fmt_parts.append(" ")
+                if arg_ty == "float":
+                    fmt_parts.append("%g")
+                    call_args.append(_lower_expr(ctx, arg))
+                else:
+                    fmt_parts.append("%s")
+                    call_args.append(_lower_expr_as_str(ctx, arg))
+            fmt_parts.append("\n")
+            fmt_name = ctx.mctx.intern_str("".join(fmt_parts))
             fmt_ptr = ctx.tmp(PTR)
             ctx.emit(IRInstr("global_addr", fmt_ptr, [fmt_name]))
-            ctx.emit(IRInstr("call", None, ["printf", fmt_ptr, val]))
+            ctx.emit(IRInstr("call", None, ["printf", fmt_ptr, *call_args]))
         return ctx.shared_zero
 
     if isinstance(e, A.Call) and e.func == "getattr" and len(e.args) in (2, 3):
@@ -2845,34 +2948,13 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
 
     if isinstance(e, A.Call):
         if e.func == "str" and len(e.args) == 1:
-            arg = e.args[0]
-            arg_t = A.expr_type(arg)
-            if arg_t == "str":
-                return _lower_expr(ctx, arg)
-            if arg_t == "int":
-                if A.is_none_expr(arg):
-                    name = ctx.mctx.intern_str("None")
-                    out = ctx.tmp(PTR)
-                    ctx.emit(IRInstr("global_addr", out, [name]))
-                    return out
-                arg_v = _lower_expr(ctx, arg)
-                base = ctx.tmp(I64)
-                empty_v = ctx.tmp(PTR)
-                empty_name = ctx.mctx.intern_str("")
-                ctx.emit(IRInstr("const", base, [10]))
-                ctx.emit(IRInstr("global_addr", empty_v, [empty_name]))
-                out = ctx.tmp(PTR)
-                ctx.emit(IRInstr("call", out, ["_abi_int_to_base", arg_v, base, empty_v]))
-                return out
-            if arg_t.startswith("instance:"):
-                resolved = _resolve_str_dunder(ctx, arg_t.split(":", 1)[1])
-                if resolved is not None:
-                    owner, method = resolved
-                    obj_v = _lower_expr(ctx, arg)
-                    out = ctx.tmp(PTR)
-                    ctx.emit(IRInstr("call", out, [f"{owner}__{method}", obj_v]))
-                    return out
-            raise LowerError(f"unsupported expr Call (str {arg_t})")
+            # Delegates to _lower_expr_as_str, the general str-coercion
+            # helper f-strings/print() already use -- it covers bool/None
+            # (this hand-rolled version used to fall through to plain
+            # decimal conversion for True/False, printing "1"/"0") plus
+            # tuple/list/dict/set, which this call site never supported at
+            # all.
+            return _lower_expr_as_str(ctx, e.args[0])
         if e.func == "int" and len(e.args) in (1, 2):
             arg = e.args[0]
             arg_t = A.expr_type(arg)
@@ -2925,6 +3007,8 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             out = ctx.tmp(PTR)
             ctx.emit(IRInstr("call", out, ["_abi_chr", n_v]))
             return out
+        if e.func == "repr" and len(e.args) == 1:
+            return _lower_expr_as_str(ctx, e.args[0], repr_mode=True)
         if e.func == "reversed" and len(e.args) == 1:
             src_v = _lower_expr(ctx, e.args[0])
             start_v = ctx.tmp(I64)
@@ -2935,6 +3019,142 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", v, ["_abi_list_slice", src_v, start_v, stop_v]))
             ctx.emit(IRInstr("call", None, ["_abi_list_reverse", v]))
             return v
+        if e.func == "round" and len(e.args) == 1:
+            arg_t = A.expr_type(e.args[0])
+            if arg_t == "float":
+                f_v = _lower_expr(ctx, e.args[0])
+                rounded = ctx.tmp(F64)
+                ctx.emit(IRInstr("call", rounded, ["_abi_round_f64", f_v]))
+                out = ctx.tmp(I64)
+                ctx.emit(IRInstr("fptosi", out, [rounded]))
+                return out
+            # round(int) / round(bool) is the identity.
+            return _lower_expr(ctx, e.args[0])
+        if e.func in ("hex", "oct", "bin") and len(e.args) == 1:
+            n_v = _lower_expr(ctx, e.args[0])
+            base = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", base, [{"hex": 16, "oct": 8, "bin": 2}[e.func]]))
+            prefix_name = ctx.mctx.intern_str({"hex": "0x", "oct": "0o", "bin": "0b"}[e.func])
+            prefix_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", prefix_v, [prefix_name]))
+            out = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", out, ["_abi_int_to_base", n_v, base, prefix_v]))
+            return out
+        if e.func == "divmod" and len(e.args) == 2:
+            a_v = _lower_expr(ctx, e.args[0])
+            b_v = _lower_expr(ctx, e.args[1])
+            out = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", out, ["_abi_divmod", a_v, b_v]))
+            return out
+        if e.func == "pow" and len(e.args) == 2:
+            # pow(base, exp) -- integer exponentiation loop, matching
+            # codegen.py's non-negative-exponent semantics exactly (no
+            # libc `pow`: that's double-only and this call site's args are
+            # ints, an ABI mismatch the generic call fallthrough doesn't
+            # catch since `pow` happens to already be a real DLL export).
+            base_v = _lower_expr(ctx, e.args[0])
+            exp_v = _lower_expr(ctx, e.args[1])
+            res_ptr = ctx.ensure_slot(f"__pow_res_{id(e)}", I64)
+            exp_ptr = ctx.ensure_slot(f"__pow_exp_{id(e)}", I64)
+            one = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", one, [1]))
+            ctx.emit(IRInstr("store", None, [one, res_ptr]))
+            ctx.emit(IRInstr("store", None, [exp_v, exp_ptr]))
+            head_b = ctx.new_block("powhead")
+            body_b = ctx.new_block("powbody")
+            end_b = ctx.new_block("powend")
+            ctx.emit(IRInstr("br", None, [head_b.label]))
+            ctx.switch_to(head_b)
+            cur_exp = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", cur_exp, [exp_ptr]))
+            zero = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", zero, [0]))
+            keep_going = ctx.tmp(I64)
+            ctx.emit(IRInstr("icmp.gt", keep_going, [cur_exp, zero]))
+            ctx.emit(IRInstr("br.t", None, [keep_going, body_b.label, end_b.label]))
+            ctx.switch_to(body_b)
+            cur_res = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", cur_res, [res_ptr]))
+            next_res = ctx.tmp(I64)
+            ctx.emit(IRInstr("imul", next_res, [cur_res, base_v]))
+            ctx.emit(IRInstr("store", None, [next_res, res_ptr]))
+            one2 = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", one2, [1]))
+            next_exp = ctx.tmp(I64)
+            ctx.emit(IRInstr("isub", next_exp, [cur_exp, one2]))
+            ctx.emit(IRInstr("store", None, [next_exp, exp_ptr]))
+            ctx.emit(IRInstr("br", None, [head_b.label]))
+            ctx.switch_to(end_b)
+            out = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", out, [res_ptr]))
+            return out
+        if e.func == "bool" and len(e.args) == 1:
+            arg = e.args[0]
+            arg_t = A.expr_type(arg)
+            val = _lower_expr(ctx, arg)
+            if arg_t.startswith("instance:"):
+                cls_name = arg_t.split(":", 1)[1]
+                owner = _resolve_method_owner(ctx, cls_name, "__bool__")
+                method = "__bool__"
+                if owner is None:
+                    owner = _resolve_method_owner(ctx, cls_name, "__len__")
+                    method = "__len__"
+                if owner is not None:
+                    v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("call", v, [f"{owner}__{method}", val]))
+                    return _value_truthy(ctx, v)
+                return _value_truthy(ctx, val)
+            if arg_t in ("list", "tuple", "dict", "set", "str"):
+                # A container/str value can be a NULL pointer (an Optional
+                # holding None); None is falsy too, so skip the
+                # length/first-byte read when val is already NULL --
+                # reading through a NULL pointer here would segfault.
+                zero = ctx.tmp(PTR)
+                ctx.emit(IRInstr("const", zero, [0]))
+                is_null = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.eq", is_null, [val, zero]))
+                null_b = ctx.new_block("boolnull")
+                live_b = ctx.new_block("boollive")
+                end_b = ctx.new_block("boolend")
+                res_ptr = ctx.ensure_slot(f"__bool_res_{id(e)}", I64)
+                ctx.emit(IRInstr("br.t", None, [is_null, null_b.label, live_b.label]))
+                ctx.switch_to(null_b)
+                fz = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", fz, [0]))
+                ctx.emit(IRInstr("store", None, [fz, res_ptr]))
+                ctx.emit(IRInstr("br", None, [end_b.label]))
+                ctx.switch_to(live_b)
+                if arg_t == "str":
+                    ch = ctx.tmp(U8)
+                    ctx.emit(IRInstr("load", ch, [val]))
+                    count_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("zext", count_v, [ch]))
+                else:
+                    len_addr = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("gep", len_addr, [val, _LIST_LEN_OFF]))
+                    count_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("load", count_v, [len_addr]))
+                cz = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", cz, [0]))
+                nz = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.ne", nz, [count_v, cz]))
+                ctx.emit(IRInstr("store", None, [nz, res_ptr]))
+                ctx.emit(IRInstr("br", None, [end_b.label]))
+                ctx.switch_to(end_b)
+                out = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", out, [res_ptr]))
+                return out
+            return _value_truthy(ctx, val)
+        if e.func == "input" and len(e.args) in (0, 1):
+            if e.args:
+                prompt_v = _lower_expr_as_str(ctx, e.args[0])
+                fmt_name = ctx.mctx.intern_str("%s")
+                fmt_ptr = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", fmt_ptr, [fmt_name]))
+                ctx.emit(IRInstr("call", None, ["printf", fmt_ptr, prompt_v]))
+            out = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", out, ["_abi_input"]))
+            return out
         args = [_lower_expr(ctx, a) for a in e.args]
         v = ctx.tmp(I64)
         if e.func in ctx.slot_ty and e.func not in ctx.mctx.func_names:
@@ -3363,8 +3583,7 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
                 ctx.emit(IRInstr("load", item_v, [item_addr]))
                 _store_loop_target(ctx, target, item_v, target_ty)
         else:
-            var_ptr = ctx.ensure_slot(s.var, var_ty)
-            ctx.emit(IRInstr("store", None, [elem_v, var_ptr]))
+            _store_loop_target(ctx, s.var, elem_v, el_ty)
 
         ctx.loop_stack.append((cont_b.label, end_b.label))
         for st in s.body:
