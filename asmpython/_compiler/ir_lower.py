@@ -112,6 +112,7 @@ class _ModuleCtx:
         classes_sig: dict | None = None,
         global_types: dict[str, IRType] | None = None,
         global_list_el_ty: dict[str, str] | None = None,
+        classes: list | None = None,
     ) -> None:
         self.data: list[IRGlobal] = []
         self.class_names = class_names
@@ -126,6 +127,30 @@ class _ModuleCtx:
         self.class_ids: dict[str, int] = {
             name: i for i, name in enumerate(sorted(class_names))
         }
+        # `class C: x = 5` (plain class, not @dataclass -- a dataclass's
+        # class vars are per-instance fields, handled entirely differently)
+        # static class-level variables: `ClassName.attr` reads/writes a
+        # real dedicated global, one per (class, var) pair, initialized
+        # from its default expression at module-init time. Mirrors
+        # codegen.py's `class_var_labels`/`class_var_defaults` exactly
+        # (`__cv_<Class>__<var>` label convention) -- this was previously
+        # entirely unimplemented on this backend: `ClassName.attr` fell
+        # through to the generic instance-attribute dict-lookup fallback,
+        # which treated the class's raw RTTI id (a small integer, e.g. 0)
+        # as if it were a real object pointer and dereferenced it,
+        # crashing (confirmed via gdb: SIGSEGV reading near address 0).
+        self.class_var_labels: dict[tuple[str, str], str] = {}
+        self.class_var_defaults: list[tuple[str, "A.Expr"]] = []
+        for cls in classes or []:
+            if getattr(cls, "is_dataclass", False):
+                continue
+            for cv in getattr(cls, "class_vars", []) or []:
+                cvname, _annot, cvdefault = cv
+                if cvdefault is None:
+                    continue
+                label = f"__cv_{cls.name}__{cvname}"
+                self.class_var_labels[(cls.name, cvname)] = label
+                self.class_var_defaults.append((label, cvdefault))
         self._str_names: dict[str, str] = {}
         self._n = 0
 
@@ -4332,6 +4357,34 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             and len(e.obj.args) == 1
         ):
             return _lower_type_name_attr(ctx, e)
+        if isinstance(e.obj, A.Name) and (e.obj.name, e.name) in ctx.mctx.class_var_labels:
+            # `ClassName.attr` (a plain class's own static class-level
+            # variable, e.g. `class Config: version = 5`) -- reads the
+            # dedicated `__cv_<Class>__<attr>` global lower_module()
+            # registers and initializes at startup (mirrors codegen.py's
+            # class_var_labels convention exactly). Previously entirely
+            # unhandled here: `e.obj` (`Config`) is a class name, never
+            # bound to any real variable/slot, so `_lower_expr(ctx, e.obj)`
+            # fell through to `A.Name`'s "class name used as a value" case
+            # and returned the class's raw numeric RTTI id (e.g. 0) --
+            # which then got used as if it were a real dict/instance
+            # POINTER for the generic attribute fallback below, crashing
+            # (confirmed via gdb: SIGSEGV dereferencing near address 0,
+            # i.e. whatever small integer the class's RTTI id happened to
+            # be). `sema.py`'s own Attr check (~line 6602) has the matching
+            # "class-level variable read" branch but only sets the node's
+            # *type*; it never called `_check_expr` on `e.obj` either, so
+            # `e.obj.inferred_type` was left at the parser's placeholder
+            # default too -- both sides of this bug independently trace
+            # back to "a node's own fields were read without the node ever
+            # going through normal type-checking/lowering."
+            label = ctx.mctx.class_var_labels[(e.obj.name, e.name)]
+            ty = ctx.mctx.global_types.get(label, ir_type_for(A.expr_type(e)))
+            ptr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", ptr, [label]))
+            v = ctx.tmp(ty)
+            ctx.emit(IRInstr("load", v, [ptr]))
+            return v
         if isinstance(e.obj, A.Name) and A.expr_type(e.obj) == "module" and e.name in ctx.mctx.global_types:
             # `module.NAME` (e.g. `string.ascii_lowercase`) -- a merged
             # stdlib module is a compile-time-only namespace, not a real
@@ -4844,6 +4897,19 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         raise LowerError("unsupported stmt TupleAssign (shape)")
 
     if isinstance(s, A.AttrAssign):
+        if isinstance(s.obj, A.Name) and (s.obj.name, s.name) in ctx.mctx.class_var_labels:
+            # `ClassName.attr = value` -- writes the dedicated
+            # `__cv_<Class>__<attr>` global directly. See the matching
+            # A.Attr READ-side branch's comment for the full story; this is
+            # its write-side counterpart, needed for the same reason (e.g.
+            # `Config.version = 10` after reading `Config.version` earlier
+            # in the same test).
+            label = ctx.mctx.class_var_labels[(s.obj.name, s.name)]
+            val = _lower_expr(ctx, s.value)
+            ptr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", ptr, [label]))
+            ctx.emit(IRInstr("store", None, [val, ptr]))
+            return
         # obj.name = value -> _abi_dict_set(obj, name, value); see the
         # A.Attr read path's comment for why this goes through a shim.
         obj_val = _lower_expr(ctx, s.obj)
@@ -5807,14 +5873,36 @@ def lower_module(mod: A.Module) -> IRModule:
         getattr(mod, "classes_sig", {}),
         global_types,
         global_list_el_ty,
+        mod.classes,
     )
+    # Register each class-var global's type into `global_types` (and
+    # therefore `global_names`, computed from it in `_ModuleCtx.__init__`)
+    # too -- not just `mctx.data` -- so `_is_global_name`/`_name_ptr`
+    # correctly resolve the synthesized init-statement writes below (and
+    # any `ClassName.attr` read/write elsewhere) as real global accesses
+    # rather than falling back to a same-named local slot.
+    for label, default_expr in mctx.class_var_defaults:
+        global_types[label] = ir_type_for(A.expr_type(default_expr))
+    mctx.global_names = frozenset(global_types)
     for name in sorted(global_types):
         mctx.data.append(IRGlobal(name=name, type=global_types[name], value=None))
     funcs = [lower_func(f, mctx) for f in top_funcs]
     funcs.extend(lower_func(f, mctx) for f in method_funcs)
+    # Class-level variable globals (`__cv_<Class>__<var>`) are initialized
+    # from their default expressions at startup, before any other
+    # module-level code runs -- mirrors codegen.py's `_emit_init_class_vars`
+    # (runtime init via a real expression eval, matching how a `class C: x
+    # = some_call()` default would need to behave, not a pure compile-time
+    # constant fold). Prepended to whichever init body runs first, since
+    # `ClassName.attr` may be read from the very first module-level
+    # statement.
+    class_var_init_stmts: list = [
+        A.Assign(target=label, value=default_expr, pos=default_expr.pos)
+        for label, default_expr in mctx.class_var_defaults
+    ]
     has_explicit_main = any(f.name == "main" for f in mod.funcs)
     if has_explicit_main:
-        init_body = _module_init_stmts(mod)
+        init_body = class_var_init_stmts + _module_init_stmts(mod)
         if init_body:
             init_body_fn = A.FuncDef(
                 name="__asmpy_module_init",
@@ -5825,6 +5913,6 @@ def lower_module(mod: A.Module) -> IRModule:
     else:
         # No explicit main(): preserve the existing script model where the
         # module body itself becomes the process entry function.
-        main_body = A.FuncDef(name="main", params=[], body=list(mod.body))
+        main_body = A.FuncDef(name="main", params=[], body=class_var_init_stmts + list(mod.body))
         funcs.append(lower_func(main_body, mctx, visibility="global", module_body=True))
     return IRModule(funcs=funcs, data=mctx.data)

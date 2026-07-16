@@ -973,20 +973,92 @@ baseline**:
 OK=263  MISMATCH=16  CRASH=42  BUILD_FAIL=117
 ```
 
-**Next step on resume**: continue the same triage pattern. Given the
-`_div` bug's severity and generality, it's worth specifically
-re-auditing `codegen.py` for OTHER instructions with the same "skip the
-copy when the operand is already in the destination register" shortcut
-that also clobber that register as scratch space (multiply, shift-by-CL
-if `Reg.RCX` is involved, anything else touching a fixed x86 register
-implicitly) — this exact bug SHAPE (not just this exact instruction)
-may recur elsewhere in the file. Otherwise: group the remaining 42
-crashes by symptom before fixing one at a time, then the 117 build
-failures (each is a clear "unsupported expr/stmt X" `LowerError`
-message — `str.format`/bare `format()` builtin, a third format
-mini-language, is a known unimplemented gap likely responsible for a
+**Audit follow-up, done same day**: re-audited `codegen.py` for every
+other "skip the copy when the operand is already in the destination
+register" shortcut touching a fixed x86 register, per the concern
+above. Checked all four remaining sites: `_shift`'s `cnt_r != Reg.RCX`
+(shift-by-CL only *reads* CL's low bits, doesn't clobber the rest of
+RCX — safe), the call-result move's `loc.reg != Reg.RAX` (end of the
+call sequence, nothing clobbers RAX afterward — safe), and `ret`'s
+`src_r != Reg.RAX` (immediately followed by the epilogue/`ret`, nothing
+clobbers RAX in between — safe). **`_div` was the only genuinely unsafe
+instance of this pattern** — it's specifically dangerous there because
+`idiv`/`div` clobber RAX:RDX as an intrinsic side effect of the
+instruction itself (not as an ABI convention the surrounding code
+controls), which none of the other sites do. No further instances of
+this bug shape found; the fix was correctly scoped.
+
+**Triage pass six** (2026-07-16, same-day follow-up): a genuinely
+**missing feature**, not a small oversight — plain-class static
+class-level variables (`class Config: version = 5`) were entirely
+unimplemented on the x86-64 backend. `ClassName.attr` crashed
+unconditionally: `e.obj` (`Config`) is a class name, never bound to any
+real variable/slot, so `_lower_expr` fell through to `A.Name`'s
+"class name used as a value" case and returned the class's raw numeric
+RTTI id (e.g. `0`) — which then got used as if it were a real
+dict/instance *pointer* by the generic attribute-access fallback,
+crashing (confirmed via gdb: SIGSEGV dereferencing near address 0, the
+class's own RTTI id). Root cause on the sema side too: sema's matching
+"class-level variable read" branch (~line 6602) only ever set the
+`Attr` node's own type — it never called `_check_expr` on `e.obj`
+either, so `e.obj.inferred_type` was left at the parser's placeholder
+default. Both halves of the bug independently trace back to "a node's
+fields were read without the node ever going through normal type-
+checking/lowering," the same shape as several earlier fixes today.
+
+Implemented the full feature, mirroring `codegen.py`'s existing
+`class_var_labels`/`__cv_<Class>__<var>` convention exactly:
+`_ModuleCtx` now takes the module's `classes` list and builds
+`class_var_labels`/`class_var_defaults` (skipping `@dataclass` classes,
+whose class vars are per-instance fields, not static — same exclusion
+`codegen.py` makes); `lower_module()` registers one real `IRGlobal` per
+class var and prepends genuine *runtime*-init `A.Assign` statements
+(matching `codegen.py`'s `_emit_init_class_vars` — a class var's
+default can be any expression, not just a literal, so this can't be a
+compile-time constant fold) to whichever init body runs first, covering
+both the `has_explicit_main` and script-model paths; new `A.Attr`
+read + `A.AttrAssign` write branches recognize `(ClassName, attr)` in
+`class_var_labels` before falling through to the generic (wrong)
+instance-attribute path. `Counter.total += 5`-style augmented writes
+work for free, since sema already desugars those to a plain
+`AttrAssign` with an expanded value expression that reads through the
+new read-side branch.
+
+Confirmed fixing `99_class_vars.py` (all 5 lines: int/str/float class
+vars, reassignment, `+=` on a separate class) and, as a bonus,
+`368_classmethod_cls_field.py` (a previously separate crash-bucket
+entry that turned out to share this exact root cause via sema's
+`cls.field` inside `@classmethod` → `ClassName.field` rewrite).
+
+**Audit follow-up** (same checkpoint): per the earlier `_div` bug's
+severity, re-audited `codegen.py` for the same "skip the register copy
+because the operand is already in the destination register" shortcut
+elsewhere — checked `_shift`'s RCX check, the call-result move, and
+`ret`'s RAX move. All three are safe (none clobber the register as an
+*intrinsic* side effect the way `idiv`/`div` do — shift-by-CL only
+reads CL's low bits, and the other two have nothing after them that
+would clobber the register before it's consumed). `_div` was the only
+genuinely unsafe instance; no further fix needed, just documented.
+
+Verified: `tests.runner` 475/483 throughout. Sweep: 263→268 OK,
+crashes 42→37 (the class-var feature closed 5 crash-bucket entries at
+once — a real, general feature gap, not a one-off).
+
+**Cumulative sweep numbers, all six triage passes this session, from
+the `OK=245 MISMATCH=24 CRASH=42 BUILD_FAIL=127` session-start
+baseline**:
+
+```text
+OK=268  MISMATCH=16  CRASH=37  BUILD_FAIL=117
+```
+
+**Next step on resume**: continue the same triage pattern — group the
+remaining 37 crashes by symptom before fixing one at a time, then the
+117 build failures (each is a clear "unsupported expr/stmt X"
+`LowerError` message — `str.format`/bare `format()` builtin, a third
+format mini-language, is a known unimplemented gap likely responsible for a
 chunk of these), then the remaining 16 mismatches. The ad-hoc sweep
-script used throughout all five passes (scratch dir, not yet committed)
+script used throughout all six passes (scratch dir, not yet committed)
 is worth promoting to a real `tests/backend_correctness.py` next time —
 re-run it after every fix batch, not just at the start/end, since a
 single fix can measurably move the needle, and note the sweep's
