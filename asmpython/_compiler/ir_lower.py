@@ -2056,6 +2056,45 @@ def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr, repr_mode: bool = False) -> IRV
             out = ctx.tmp(PTR)
             ctx.emit(IRInstr("global_addr", out, [name]))
             return out
+        if getattr(e, "dict_get_none_default", False):
+            # `d.get(k)` (no explicit default): the runtime sentinel for
+            # "key missing" is a plain 0 -- ambiguous at compile time with
+            # a real int value of 0, so (unlike is_none_expr above) this
+            # needs a runtime branch, not a static one. Mirrors
+            # codegen.py's _emit_print_value handling of the same flag
+            # (a runtime `test rax, rax` / print "None" if zero). Was
+            # entirely unchecked here before this fix -- d.get("missing")
+            # printed "0" instead of "None".
+            n_v = _lower_expr(ctx, e)
+            zero = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", zero, [0]))
+            is_zero = ctx.tmp(I64)
+            ctx.emit(IRInstr("icmp.eq", is_zero, [n_v, zero]))
+            none_b = ctx.new_block("dictgetnone")
+            val_b = ctx.new_block("dictgetval")
+            end_b = ctx.new_block("dictgetend")
+            res_ptr = ctx.ensure_slot(f"__dictget_str_{id(e)}", PTR)
+            ctx.emit(IRInstr("br.t", None, [is_zero, none_b.label, val_b.label]))
+            ctx.switch_to(none_b)
+            none_name = ctx.mctx.intern_str("None")
+            none_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", none_v, [none_name]))
+            ctx.emit(IRInstr("store", None, [none_v, res_ptr]))
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+            ctx.switch_to(val_b)
+            base = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", base, [10]))
+            prefix_name = ctx.mctx.intern_str("")
+            prefix = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", prefix, [prefix_name]))
+            val_str = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", val_str, ["_abi_int_to_base", n_v, base, prefix]))
+            ctx.emit(IRInstr("store", None, [val_str, res_ptr]))
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+            ctx.switch_to(end_b)
+            out = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", out, [res_ptr]))
+            return out
         if A.is_bool_expr(e):
             n_v = _lower_expr(ctx, e)
             zero = ctx.tmp(I64)
@@ -2094,6 +2133,35 @@ def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr, repr_mode: bool = False) -> IRV
         return out
     if ty == "float":
         f_v = _lower_expr(ctx, e)
+        if getattr(e, "dict_get_none_default", False):
+            # Same "d.get(k) with no explicit default: 0 means key missing"
+            # sentinel as the int branch above -- IEEE754 0.0 is all-zero
+            # bits, so this is still a genuine zero test, just via fcmp
+            # against a float 0.0 constant instead of an integer compare.
+            zero = ctx.tmp(F64)
+            ctx.emit(IRInstr("const", zero, [0.0]))
+            is_zero = ctx.tmp(I64)
+            ctx.emit(IRInstr("fcmp.eq", is_zero, [f_v, zero]))
+            none_b = ctx.new_block("dictgetnonef")
+            val_b = ctx.new_block("dictgetvalf")
+            end_b = ctx.new_block("dictgetendf")
+            res_ptr = ctx.ensure_slot(f"__dictget_strf_{id(e)}", PTR)
+            ctx.emit(IRInstr("br.t", None, [is_zero, none_b.label, val_b.label]))
+            ctx.switch_to(none_b)
+            none_name = ctx.mctx.intern_str("None")
+            none_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", none_v, [none_name]))
+            ctx.emit(IRInstr("store", None, [none_v, res_ptr]))
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+            ctx.switch_to(val_b)
+            val_str = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", val_str, ["_abi_float_to_str", f_v]))
+            ctx.emit(IRInstr("store", None, [val_str, res_ptr]))
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+            ctx.switch_to(end_b)
+            out = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", out, [res_ptr]))
+            return out
         out = ctx.tmp(PTR)
         ctx.emit(IRInstr("call", out, ["_abi_float_to_str", f_v]))
         return out
@@ -3310,23 +3378,42 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         return v
 
     if isinstance(e, A.Call) and e.func == "print":
-        # print(x) -> printf("%s\n", x); newline baked into the format
-        # string since asmpython's print() always appends one. Every
-        # argument routes through _lower_expr_as_str (the same repr
-        # machinery f-strings use) so list/dict/tuple/set/instance/None/
-        # float args print their real CPython-style text instead of a raw
-        # %lld-formatted pointer value or C's bare (non-".0") %g float
-        # text. Multiple args are joined with a single space, matching
-        # CPython's default sep=" ".
+        # print(x) -> printf("%s...%s<end>", x, ...); every argument routes
+        # through _lower_expr_as_str (the same repr machinery f-strings
+        # use) so list/dict/tuple/set/instance/None/float args print their
+        # real CPython-style text instead of a raw %lld-formatted pointer
+        # value or C's bare (non-".0") %g float text. `sep`/`end` keyword
+        # args (default " "/"\n") are baked directly into the literal
+        # format string at compile time -- mirrors codegen.py's _gen_print,
+        # which only ever supports a literal `A.StrLit` sep/end (matching
+        # every real call site in this codebase; a non-literal sep/end
+        # isn't attempted by either backend). This was previously entirely
+        # unimplemented on this backend: sep/end were silently ignored,
+        # always falling back to the CPython default " "/"\n" regardless
+        # of what the call site actually passed.
+        sep_str = " "
+        end_str = "\n"
+        for kn, kv in e.kwargs:
+            if kn == "sep" and isinstance(kv, A.StrLit):
+                sep_str = kv.value
+            elif kn == "end" and isinstance(kv, A.StrLit):
+                end_str = kv.value
+        # sep/end are baked directly into the printf format string (unlike
+        # codegen.py's approach of emitting them as separate literal-string
+        # writes) -- a literal `%` in either would otherwise be misread as
+        # a conversion specifier by printf itself. Escape defensively.
+        sep_str = sep_str.replace("%", "%%")
+        end_str = end_str.replace("%", "%%")
         if not e.args:
-            fmt_name = ctx.mctx.intern_str("\n")
             fmt_ptr = ctx.tmp(PTR)
-            ctx.emit(IRInstr("global_addr", fmt_ptr, [fmt_name]))
-            ctx.emit(IRInstr("call", None, ["printf", fmt_ptr]))
+            if end_str:
+                fmt_name = ctx.mctx.intern_str(end_str)
+                ctx.emit(IRInstr("global_addr", fmt_ptr, [fmt_name]))
+                ctx.emit(IRInstr("call", None, ["printf", fmt_ptr]))
         else:
             fmt_parts = ["%s"] * len(e.args)
             call_args = [_lower_expr_as_str(ctx, arg) for arg in e.args]
-            fmt_name = ctx.mctx.intern_str(" ".join(fmt_parts) + "\n")
+            fmt_name = ctx.mctx.intern_str(sep_str.join(fmt_parts) + end_str)
             fmt_ptr = ctx.tmp(PTR)
             ctx.emit(IRInstr("global_addr", fmt_ptr, [fmt_name]))
             ctx.emit(IRInstr("call", None, ["printf", fmt_ptr, *call_args]))

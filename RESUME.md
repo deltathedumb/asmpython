@@ -870,27 +870,66 @@ baseline**:
 OK=255  MISMATCH=24  CRASH=42  BUILD_FAIL=117
 ```
 
-**Next step on resume**: continue the same triage pattern — group the
-remaining 42 crashes by symptom before fixing one at a time (the pattern
-so far: most "real" bugs are shared-root-cause classes affecting many
-files at once, not one-off issues — `str * int`, module-attribute
-access, unary dunders, `__call__`, `Compare` dunders, and `__contains__`
-each individually moved several files at once, and every single one was
-"sema has the info, ir_lower.py doesn't check for it somewhere" — worth
-assuming that's still true and grepping for the next one before assuming
-a crash needs deep gdb investigation), then the 117 build failures (each
-is a clear "unsupported expr/stmt X" `LowerError` message —
-`str.format`/bare `format()` builtin, a third format mini-language, is a
-known unimplemented gap likely responsible for a chunk of these), then
-the 24 mismatches last (correctness bugs in already-working code, higher
-regression risk to fix). The ad-hoc sweep script used throughout all
-three passes (scratch dir, not yet committed) is worth promoting to a
-real `tests/backend_correctness.py` next time — re-run it after every
-fix batch, not just at the start/end, since a single fix can measurably
-move the needle, and note the sweep's aggregate counts have some
-run-to-run noise (a case or two flipping between OK/CRASH/timeout across
-identical runs) — always confirm a specific fix via direct build+run of
-the affected case(s), not just the before/after totals. Given the
+**Triage pass four** (2026-07-16, same-day follow-up): moved into the
+mismatch bucket (silently-wrong output, not crashes/build-failures) —
+motivated directly by the `Compare` dunder bug in pass three, which
+proved this bucket can hide real correctness bugs the exit-code-based
+sweep buckets can't surface on their own. Two more fixes:
+
+1. **`print(sep=..., end=...)` was entirely unimplemented on this
+   backend** — the keyword args were silently ignored, always falling
+   back to CPython's defaults (`" "`/`"\n"`) regardless of what the call
+   site passed. `codegen.py` (legacy backend) already had this fully
+   working; ported its sep/end extraction into `ir_lower.py`'s `print()`
+   lowering, baking the literal sep/end text directly into the printf
+   format string (with `%` doubled to `%%` defensively, since a literal
+   `%` in sep/end would otherwise be misread as a conversion specifier —
+   codegen.py avoids this differently, emitting sep/end as separate
+   literal-string writes rather than baking into the format string).
+   Confirmed fixing `418_print_sep_end.py` exactly (all 5 lines).
+2. **`dict.get(key)` with no explicit default silently printed `0`/`0.0`
+   instead of `None`** for a missing key: sema stamps a real
+   `dict_get_none_default` flag (the runtime sentinel for "key missing"
+   is a plain zero, which is ambiguous at compile time with a real `0`
+   value, so this needs a *runtime* check, unlike the static
+   `is_none_expr`/`is_bool_expr` checks already handled) but
+   `_lower_expr_as_str` (the print/str-coercion helper) never checked it
+   for either the `int` or `float` case. Added the missing runtime
+   zero-check branches (mirroring `codegen.py`'s existing
+   `_emit_print_value` handling of the same flag) for both. Confirmed
+   fixing `88_dict_get_no_default.py` and `412_dict_get_none.py` exactly.
+
+Verified: `tests.runner` 475/483 throughout. Sweep: 255→258 OK,
+21 mismatches remaining (down from 24).
+
+**Cumulative sweep numbers, all four triage passes this session, from
+the `OK=245 MISMATCH=24 CRASH=42 BUILD_FAIL=127` session-start
+baseline**:
+
+```text
+OK=258  MISMATCH=21  CRASH=42  BUILD_FAIL=117
+```
+
+**Next step on resume**: continue the same triage pattern. The mismatch
+bucket proved worth investigating (2 real bugs, 24→21) — keep working
+through the remaining 21 before assuming the crash/build-failure buckets
+are higher-value; the general lesson from all four passes holds: most
+"real" bugs are shared-root-cause classes affecting many files at once,
+not one-off issues, and several so far were "sema has the info,
+ir_lower.py doesn't check for it somewhere" rather than requiring deep
+gdb investigation — check that hypothesis first. Then the 42 crashes
+(group by symptom before fixing one at a time), then the 117 build
+failures (each is a clear "unsupported expr/stmt X" `LowerError` message
+— `str.format`/bare `format()` builtin, a third format mini-language, is
+a known unimplemented gap likely responsible for a chunk of these). The
+ad-hoc sweep script used throughout all four passes (scratch dir, not
+yet committed) is worth promoting to a real
+`tests/backend_correctness.py` next time — re-run it after every fix
+batch, not just at the start/end, since a single fix can measurably move
+the needle, and note the sweep's aggregate counts have some run-to-run
+noise (a case or two flipping between OK/CRASH/timeout across identical
+runs) — always confirm a specific fix via direct build+run of the
+affected case(s), not just the before/after totals. Given the
 "Everything Python" bar (run essentially any unmodified real-world
 Python program), once this corpus is closer to 100%, pivot to validating
 against real-world stdlib-only scripts or CPython's own `Lib/test/`
