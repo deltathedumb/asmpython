@@ -2405,6 +2405,87 @@ def _lower_fstring(ctx: _FuncCtx, e: A.FString) -> IRValue:
     return acc
 
 
+def _lower_pct_format(ctx: _FuncCtx, e: A.BinOp) -> IRValue:
+    """`"...%s/%d/%f..." % (args)` -- ports codegen.py's
+    _gen_str_pct_format. e.left is sema-validated to be a literal format
+    string; A.parse_pct_format is the single shared parser sema and this
+    both use, so they can't drift out of sync. `%s`/`%r` reuse
+    _lower_fstring_segment (stamping conv_flag="r" onto the arg node
+    in-place for %r, same trick codegen.py's version uses) plus
+    _abi_str_ljust/rjust for a width; %d/%i/%u/%o/%x/%X and %e/%E/%f/%F/
+    %g/%G go through _abi_int_fmt/_abi_float_fmt with a printf format
+    built from the flags/width/precision, translating Python's int
+    conversions to the ll-sized C equivalents."""
+    assert isinstance(e.left, A.StrLit)
+    pieces, _ = A.parse_pct_format(e.left.value)
+    args: list = e.right.elems if isinstance(e.right, A.TupleLit) else [e.right]
+    arg_pos = 0
+
+    def lower_piece(piece: tuple) -> IRValue:
+        nonlocal arg_pos
+        if piece[0] == "lit":
+            name = ctx.mctx.intern_str(piece[1])
+            v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", v, [name]))
+            return v
+        _, flags, width, precision, conv = piece
+        arg = args[arg_pos]
+        arg_pos += 1
+        if conv in ("s", "r"):
+            if conv == "r":
+                arg.conv_flag = "r"  # type: ignore[attr-defined]
+            val = _lower_fstring_segment(ctx, arg)
+            if width:
+                w_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", w_v, [int(width)]))
+                fill_name = ctx.mctx.intern_str(" ")
+                fill_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", fill_v, [fill_name]))
+                helper = "_abi_str_ljust" if "-" in flags else "_abi_str_rjust"
+                out = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", out, [helper, val, w_v, fill_v]))
+                return out
+            return val
+        if conv in "diouxX":
+            cconv = {"i": "d", "u": "d", "d": "d", "o": "o", "x": "x", "X": "X"}[conv]
+            cfmt = "%" + flags + width + precision + "ll" + cconv
+            fmt_name = ctx.mctx.intern_str(cfmt)
+            fmt_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", fmt_v, [fmt_name]))
+            n_v = _lower_expr(ctx, arg)
+            out = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", out, ["_abi_int_fmt", n_v, fmt_v]))
+            return out
+        # eEfFgG: Python defaults precision to 6, same as C, when omitted.
+        prec = precision if precision else ".6"
+        cfmt = "%" + flags + width + prec + conv
+        fmt_name = ctx.mctx.intern_str(cfmt)
+        fmt_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", fmt_v, [fmt_name]))
+        arg_ty = A.expr_type(arg)
+        f_v = _lower_expr(ctx, arg)
+        if arg_ty != "float":
+            fv2 = ctx.tmp(F64)
+            ctx.emit(IRInstr("sitofp", fv2, [f_v]))
+            f_v = fv2
+        out = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out, ["_abi_float_fmt", f_v, fmt_v]))
+        return out
+
+    if not pieces:
+        empty = ctx.mctx.intern_str("")
+        out = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", out, [empty]))
+        return out
+    acc = lower_piece(pieces[0])
+    for piece in pieces[1:]:
+        rhs = lower_piece(piece)
+        joined = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", joined, ["_abi_str_concat", acc, rhs]))
+        acc = joined
+    return acc
+
+
 def _emit_instance_field_set(ctx: _FuncCtx, obj_v: IRValue, name: str, val_v: IRValue) -> None:
     key_name = ctx.mctx.intern_str(name)
     key_ptr = ctx.tmp(PTR)
@@ -2729,6 +2810,13 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(PTR)
             ctx.emit(IRInstr("call", v, ["_abi_str_concat", lhs, rhs]))
             return v
+        if e.op == "%" and lt == "str":
+            # `"...%s/%d/%f..." % (args)` -- sema already validated e.left
+            # is a literal format string and stamped nothing extra; parse
+            # it the same way sema did (A.parse_pct_format is the single
+            # shared parser both sides use, so they can't drift) and
+            # lower to the same lit/arg concat chain as f-strings.
+            return _lower_pct_format(ctx, e)
         if lt in ("dict", "set") and rt in ("dict", "set") and e.op == "|":
             # `d1 | d2` (PEP 584): a fresh dict/set with left's entries then
             # right's merged on top (right wins on key conflicts) -- same

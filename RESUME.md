@@ -372,24 +372,73 @@ full suite beyond the first 60 (`13`, `35`, `92`, `141`
 zeropad-grouping-combo, `438` advanced) — all exact matches, confirming
 no regressions in the broader corpus either.
 
-**Next step on resume**: `%`-style string formatting (`109_pct_format`/
-`111_pct_repr`) is the last big scoped feature area — CPython's `%`
-operator on a string LHS with a tuple/dict RHS, its own mini-language
-(check `codegen.py`'s existing implementation, likely `_gen_pct_format`
-or similar, as the port source — same approach as the f-string work:
-port the compile-time spec-parsing verbatim, express the codegen
-decisions as `_abi_*` calls). After that, the remaining build-failures
-(`list.sort`, `str.rpartition`/`casefold`, `str.format`/`format()`
-builtin, starred/non-Name tuple-assign targets, walrus operator,
-`sorted(key=...)` lambda body) are smaller, scattered gaps like the ones
-cleared earlier this session. All of this is toward full parity with
-`codegen.py` under `--backend x86-64` — the direct predecessor of the
-newly-confirmed "make the IR-based backend the default" workload item.
+**Sixth follow-up** (same day, commits after `9025eb12`): implemented
+`%`-style string formatting (`"...%s/%d/%f..." % (args)`). This one was
+fast and low-risk compared to the f-string work: `A.parse_pct_format`
+(`ast_nodes.py`) is already a **shared** compile-time parser both sema
+(validation) and `codegen.py` (lowering) use, so there was no parsing
+logic to port, just the codegen decision tree — and every primitive it
+needs (`_abi_int_fmt`/`_abi_float_fmt`/`_abi_str_ljust`/`_abi_str_rjust`/
+`_abi_str_concat`, plus `_lower_fstring_segment` reused as-is for `%s`/
+`%r`) already existed from the f-string pass just before it. New
+`_lower_pct_format` in `ir_lower.py`, wired into `BinOp`'s `%` dispatch
+ahead of the int/float `%` (fmod) path, mirroring `codegen.py`'s own
+"str ops dispatch before float/int" precedence. Fixed
+`109_pct_format.py`/`111_pct_repr.py` on the first attempt — both exact
+matches, no follow-up bugs (the two Win64 ABI shim bugs from the
+f-string pass were already fixed and this feature reuses those same
+shims, so it inherited the fix for free).
+
+Verified: `tests.runner` still 481/489 (no regressions). Full
+build+run+expected-output sweep on tests/cases 1-60: **49/60 exact
+matches, ZERO mismatches** — every 1-60 case that builds now produces
+byte-for-byte correct output; the remaining 10/60 are build failures
+only (unimplemented features listed below), not correctness bugs.
+Full-suite sweep (all ~440 cases) also confirmed no regressions:
+230→232 passing, mismatches 66→64 (exactly the 2 pct-format cases
+fixed, nothing new broken).
+
+**This closes out the "smoke-test corpus parity" push** (all six
+same-day follow-ups, `fc688dfd` through this commit): x86-64 backend
+build-success on tests/cases 1-60 went 34/60→50/60 across the whole
+session, and — more importantly — every case that builds is now
+verified byte-for-byte correct against its expected output, which
+wasn't true even for many of the 34 that built at session start.
+Remaining 1-60 build failures, all smaller/scattered and independent
+of each other: `list.sort`, `str.rpartition`/`casefold` `MethodCall`s,
+`str.format`/bare `format()` builtin (a third, separate mini-language —
+`A.parse_format_fields` in `ast_nodes.py` is presumably its shared
+parser, unexplored), starred/non-Name tuple-assign targets, walrus
+operator, `sorted(key=...)` lambda body.
+
+**Next step on resume**: two reasonable directions, pick based on what's
+more valuable to unblock next:
+
+1. Clear the remaining scattered 1-60 build failures (small, independent
+   fixes, same pattern as most of this session — likely a few hours
+   total) to push the smoke-test corpus even closer to 60/60.
+2. Given the "Everything Python" bar (run essentially any unmodified
+   real-world Python program, native-first with pyinbin fallback), pivot
+   to validating against **real-world Python programs** beyond this
+   project's own hand-written test corpus — the corpus is necessarily
+   narrow (~440 hand-authored cases) and passing it doesn't guarantee
+   broad real-code compatibility. Consider running a batch of actual
+   PyPI-package-free stdlib-only scripts (or CPython's own `Lib/test/`
+   suite, already used as pyinbin's conformance oracle per the pyinbin
+   section below) through `--backend x86-64` to find the next tier of
+   gaps a hand-written smoke corpus wouldn't surface.
+
+Either way, this is still all in service of the confirmed work order's
+"finish the IR-based x86-64 backend and make it the default" pending
+item — parity work doesn't stop being valuable just because the
+smoke-test corpus is clean, since that corpus was never meant to be
+the definition of "done."
+
 **When new Win64 ABI shims are added going forward, verify stack-slot
 placement (must be at/above rsp+32) and argument-register assignment
 (shared positional index, not per-type) explicitly — both bug classes
-above assembled cleanly and only failed at runtime, sometimes on a
-delayed/second call.**
+found this session assembled cleanly and only failed at runtime,
+sometimes on a delayed/second call.**
 
 ## Selfhost Status (plan-step 11)
 
