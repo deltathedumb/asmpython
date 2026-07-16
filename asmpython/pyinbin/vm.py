@@ -1252,6 +1252,18 @@ class VirtualMachine:
             mapping = self._lookup(frame, frame.code.names[spec[1]])
             owner = self._lookup(frame, frame.code.names[spec[2]])
             return mapping[getattr(owner, spec[3])]
+        if isinstance(spec, tuple) and len(spec) == 2 and spec[0] == "expr":
+            # An ``except`` type expression too dynamic to resolve at
+            # compile time (e.g. ``except ftperrors():`` -- a function call
+            # returning the actual type/tuple, evaluated fresh each time,
+            # exactly like real Python re-evaluates the handler's type
+            # expression on every exception). Run the small nested code
+            # object the frontend compiled for it, sharing this frame's
+            # globals/locals/closure so free-variable references resolve.
+            nested_frame = Frame(
+                code=spec[1], globals=frame.globals, locals=frame.locals, closure=frame.closure,
+            )
+            return self._run_frame(nested_frame)
         if isinstance(spec, tuple):
             return tuple(self._resolve_exception_spec(frame, item) for item in spec)
         return spec
@@ -1335,12 +1347,14 @@ class VirtualMachine:
         if kind == "mapping":
             if not isinstance(value, dict): return False, {}
             bindings: dict[str, object] = {}
-            for key, pattern in spec[1]:
+            resolved_keys = [self._resolve_exception_spec(frame, key_spec) for key_spec, _ in spec[1]]
+            for key, (_, pattern) in zip(resolved_keys, spec[1]):
                 if key not in value: return False, {}
                 matched, nested = self._match_pattern(frame, value[key], pattern)
                 if not matched: return False, {}
                 bindings.update(nested)
-            if spec[2]: bindings[spec[2]] = {key: item for key, item in value.items() if key not in dict(spec[1])}
+            if spec[2]:
+                bindings[spec[2]] = {key: item for key, item in value.items() if key not in resolved_keys}
             return True, bindings
         if kind == "class":
             cls = self._resolve_exception_spec(frame, spec[1])

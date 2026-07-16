@@ -1779,6 +1779,30 @@ def create_builtin_module(
             predicate = predicate or bool
             for value in iterable:
                 if not predicate(value): yield value
+        def groupby(iterable, key=None):
+            keyfunc = key if key is not None else (lambda value: value)
+            iterator = iter(iterable)
+            exhausted = False
+            current_key = current_value = object()
+            def _advance():
+                nonlocal current_key, current_value, exhausted
+                try:
+                    current_value = next(iterator)
+                except StopIteration:
+                    exhausted = True
+                    return
+                current_key = keyfunc(current_value)
+            _advance()
+            while not exhausted:
+                target_key = current_key
+                def _sub_iter(target_key=target_key):
+                    nonlocal current_key
+                    while not exhausted and current_key == target_key:
+                        yield current_value
+                        _advance()
+                yield target_key, _sub_iter()
+                while not exhausted and current_key == target_key:
+                    _advance()
         return _module(name, {
             "count": count, "repeat": repeat, "chain": chain, "cycle": cycle,
             "islice": islice, "accumulate": accumulate, "compress": compress,
@@ -1789,6 +1813,7 @@ def create_builtin_module(
             "zip_longest": lambda *iterables, fillvalue=None: _zip_longest(iterables, fillvalue),
             "pairwise": lambda iterable: _pairwise(iterable),
             "batched": lambda iterable, n: _batched(iterable, n),
+            "groupby": groupby,
         })
     if name == "_weakref":
         class ref:

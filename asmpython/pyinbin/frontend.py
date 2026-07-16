@@ -560,8 +560,17 @@ class _Lowerer:
             return ("attr", self.exception_spec(node.value), node.attr)
         if isinstance(node, ast.Tuple):
             return tuple(self.exception_spec(element) for element in node.elts)
-        self.unsupported(node, "exception type")
-        return None
+        # Any other expression (e.g. ``except ftperrors():`` -- a function
+        # call whose return value is the actual exception type/tuple to
+        # match, evaluated fresh each time the handler is reached, exactly
+        # like real Python) -- compile it as a tiny nested code object
+        # sharing this frame's globals/closure, evaluated by
+        # _resolve_exception_spec at runtime instead of requiring the type
+        # expression to be statically resolvable at compile time.
+        nested = _Lowerer(f"{self.name}.<except-expr>")
+        nested.expr(node)
+        nested.emit(Op.RETURN)
+        return ("expr", nested.finish())
 
     def pattern_spec(self, node: ast.pattern) -> object:
         if isinstance(node, ast.MatchAs):
@@ -591,9 +600,20 @@ class _Lowerer:
         if isinstance(node, ast.MatchMapping):
             pairs = []
             for key, pattern in zip(node.keys, node.patterns):
-                if not isinstance(key, ast.Constant):
-                    self.unsupported(node, "mapping pattern key")
-                pairs.append((key.value, self.pattern_spec(pattern)))
+                if isinstance(key, ast.Constant):
+                    key_spec = ("literal", key.value)
+                else:
+                    # A mapping-pattern key need not be a bare literal (e.g.
+                    # ``case {-0-0j: ...}:`` -- a unary-negated complex
+                    # literal parses as a BinOp/UnaryOp, not ast.Constant).
+                    # Real Python evaluates the key expression at match time;
+                    # do the same via a tiny nested code object instead of
+                    # rejecting anything not already a plain constant.
+                    nested = _Lowerer(f"{self.name}.<pattern-key>")
+                    nested.expr(key)
+                    nested.emit(Op.RETURN)
+                    key_spec = ("expr", nested.finish())
+                pairs.append((key_spec, self.pattern_spec(pattern)))
             return ("mapping", tuple(pairs), node.rest)
         if isinstance(node, ast.MatchClass):
             cls = self.exception_spec(node.cls)
