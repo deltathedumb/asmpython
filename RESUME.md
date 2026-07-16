@@ -314,15 +314,82 @@ the ones cleared this session, likely worth another pass once the two
 big format features are done (or interleaved, since they're independent
 of each other).
 
-**Next step on resume**: pick one of the two format-spec features
-(f-string specs are probably higher-value — they appear in 5 of the
-remaining 60 smoke cases vs. 2 for `%`-format) and do it as a real,
-scoped feature addition rather than one-off patches, given the pattern
-this session repeatedly found: quick fixes compound fast when the
-underlying primitives (bitcast ops, `_name_ptr`, the `_abi_dict_*` shim
-family) are already in place. All of this is toward full parity with
+**Fifth follow-up** (same day, commits after `94096058`): implemented
+f-string format specs in full — alignment/fill/width, zero-pad, thousands
+grouping (`,`/`_`, including the zero-pad+grouping combo), binary `b`/`#b`
+with width/sign accounting, str precision truncation, `!r`/`!s`/`!a`
+conversion flags, and bool/None-formats-as-underlying-int. Ported
+`codegen.py`'s `_gen_fstring_segment`/`_gen_fstring_aligned`/spec-parsing
+helpers (`_cfmt_for_spec`, `_split_fmt_align`, etc. — all pure compile-time
+string manipulation, since `fmt_spec` is always a literal captured at lex
+time; `f"{x:{width}}"`-style runtime specs aren't supported by either
+backend) into new `ir_lower.py` functions (`_lower_fstring_segment`/
+`_lower_fstring_aligned`/`_lower_int_value_str`), threading each segment's
+`fmt_spec`/`conv_flag` (parser-stamped attributes, not AST fields) through
+to six new `_abi_*` shims: `_abi_str_truncate`, `_abi_int_to_binary`,
+`_abi_group_digits`, `_abi_group_digits_zeropad`, `_abi_int_fmt`,
+`_abi_float_fmt`. Also deleted a confirmed-dead, less-capable duplicate
+f-string lowering branch in `ir_lower.py` (unreachable — an earlier
+`isinstance(e, A.FString)` check in the same function always matched
+first).
+
+Two real, non-obvious Win64 ABI bugs found and fixed while building
+`_abi_int_fmt`/`_abi_float_fmt` (both call `sprintf` with a
+caller-supplied format string, needing a fresh malloc'd buffer per call
+unlike the other shims' shared-static-buffer or register-only patterns):
+
+1. **Shadow-space corruption**: a shim that stores its own locals at
+   `[rsp+16]`/`[rsp+24]` while later calling another function (`malloc`
+   then `sprintf`) gets those locals silently overwritten — Win64
+   callees are allowed to scribble anywhere in `[rsp, rsp+32)` as their
+   own shadow space. Confirmed via gdb: `rax` held `42` (the raw int
+   argument) instead of a valid pointer at the point of a crash, because
+   the "stash the malloc'd buffer pointer" slot lived inside that
+   64-callee-writable region. Fixed by moving all shim-local storage to
+   `[rsp+32, ...)`, above the shadow space.
+2. **Wrong argument register for `_abi_float_fmt`**: this backend's
+   `call` IR op assigns Win64 argument registers using **one shared
+   positional index across both the integer and float register
+   classes** (not independent per-class counters) — confirmed by reading
+   `_backends/x86_64/codegen.py`'s `_call`. So for a 2-arg call whose
+   *first* argument is float-typed (`_abi_float_fmt(value, fmt_ptr)`),
+   the second (non-float) argument lands in **RDX** (the second
+   positional slot), not RCX (which would be arg0's slot if arg0 were
+   non-float). The shim initially assumed RCX, which doesn't fail to
+   assemble or obviously crash — it silently reads uninitialized/garbage
+   RDX as the format-string pointer, producing empty output on some
+   inputs and a delayed segfault on a second call once corrupted heap
+   state caught up. Any future `_abi_*` shim taking a float as its
+   *first* IR-level argument alongside other args needs this same
+   positional-index reasoning, not "float args go in xmm, everything
+   else starts from rcx."
+
+Verified: `tests.runner` still 481/489 (no regressions). Full
+build+run+expected-output sweep on 1-60 went 42/60 → **47/60 exact
+matches** (only the two `%`-format cases remain as mismatches on 1-60).
+Also spot-checked every other fstring_*/format-related test case in the
+full suite beyond the first 60 (`13`, `35`, `92`, `141`
+zeropad-grouping-combo, `438` advanced) — all exact matches, confirming
+no regressions in the broader corpus either.
+
+**Next step on resume**: `%`-style string formatting (`109_pct_format`/
+`111_pct_repr`) is the last big scoped feature area — CPython's `%`
+operator on a string LHS with a tuple/dict RHS, its own mini-language
+(check `codegen.py`'s existing implementation, likely `_gen_pct_format`
+or similar, as the port source — same approach as the f-string work:
+port the compile-time spec-parsing verbatim, express the codegen
+decisions as `_abi_*` calls). After that, the remaining build-failures
+(`list.sort`, `str.rpartition`/`casefold`, `str.format`/`format()`
+builtin, starred/non-Name tuple-assign targets, walrus operator,
+`sorted(key=...)` lambda body) are smaller, scattered gaps like the ones
+cleared earlier this session. All of this is toward full parity with
 `codegen.py` under `--backend x86-64` — the direct predecessor of the
 newly-confirmed "make the IR-based backend the default" workload item.
+**When new Win64 ABI shims are added going forward, verify stack-slot
+placement (must be at/above rsp+32) and argument-register assignment
+(shared positional index, not per-type) explicitly — both bug classes
+above assembled cleanly and only failed at runtime, sometimes on a
+delayed/second call.**
 
 ## Selfhost Status (plan-step 11)
 

@@ -1555,6 +1555,307 @@ def _lower_tuple_repr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     return out
 
 
+# ── f-string format-spec parsing (pure, compile-time; ports codegen.py's
+# identically-named methods verbatim -- see that file's docstrings for the
+# full rationale on each). fmt_spec is always a literal string captured at
+# lex time (f"{x:{width}}"-style runtime specs aren't supported by either
+# backend), so all of this is ordinary Python string manipulation
+# producing compile-time constants, not IR.
+
+def _cfmt_for_spec(spec: str, t: str) -> str | None:
+    if not spec:
+        return None
+    if t == "float":
+        if spec and spec[-1] in "feEgG":
+            return "%" + spec
+        return None
+    if t == "int":
+        if spec and spec[-1] in "dxXo":
+            conv = spec[-1]
+            flags = spec[:-1]
+            return "%" + flags + "ll" + conv
+        if spec.isdigit() or (spec.startswith("0") and spec[1:].isdigit()):
+            return "%" + spec + "lld"
+        return None
+    return None
+
+
+def _parse_binary_spec(body: str) -> tuple[int, bool] | None:
+    if not body.endswith("b"):
+        return None
+    rest = body[:-1]
+    if rest and rest[0] in "+- ":
+        rest = rest[1:]
+    prefix_flag = rest.startswith("#")
+    if prefix_flag:
+        rest = rest[1:]
+    if rest and not rest.isdigit():
+        return None
+    return (int(rest) if rest else 0), prefix_flag
+
+
+def _strip_grouping_option(spec: str) -> tuple[str | None, str]:
+    if "," in spec:
+        idx = spec.find(",")
+        return ",", spec[:idx] + spec[idx + 1:]
+    if "_" in spec:
+        idx2 = spec.find("_")
+        return "_", spec[:idx2] + spec[idx2 + 1:]
+    return None, spec
+
+
+def _split_fmt_align(spec: str) -> tuple[str, str | None, str]:
+    if len(spec) >= 2 and spec[1] in "<>^=":
+        return spec[0], spec[1], spec[2:]
+    if len(spec) >= 1 and spec[0] in "<>^=":
+        return " ", spec[0], spec[1:]
+    return " ", None, spec
+
+
+def _split_fmt_width(body: str, t: str) -> tuple[int | None, str]:
+    if t == "str":
+        i = 0
+        while i < len(body) and body[i].isdigit():
+            i += 1
+        if i > 0 and body[i:] in ("", "s"):
+            return int(body[:i]), ""
+        return None, body
+    i = 0
+    while i < len(body) and body[i] in "+- #":
+        i += 1
+    prefix = body[:i]
+    j = i
+    if j < len(body) and body[j] == "0":
+        j += 1
+    k = j
+    while k < len(body) and body[k].isdigit():
+        k += 1
+    if k == j:
+        return None, body
+    return int(body[j:k]), prefix + body[k:]
+
+
+def _split_str_width_precision(body: str) -> tuple[int | None, int | None]:
+    i = 0
+    while i < len(body) and body[i].isdigit():
+        i += 1
+    width = int(body[:i]) if i > 0 else None
+    j = i
+    precision = None
+    if j < len(body) and body[j] == ".":
+        k = j + 1
+        while k < len(body) and body[k].isdigit():
+            k += 1
+        if k > j + 1:
+            precision = int(body[j + 1:k])
+            j = k
+    if j < len(body) and body[j] == "s":
+        j += 1
+    if j != len(body):
+        return None, None
+    return width, precision
+
+
+def _lower_int_value_str(ctx: _FuncCtx, seg: A.Expr, rest: str) -> IRValue:
+    """Evaluate int-typed `seg`, returning its formatted-string form (per
+    the numeric format-spec `rest`, before any alignment/width padding) --
+    ports codegen.py's _gen_int_value_str."""
+    sep, rest = _strip_grouping_option(rest)
+    binspec = _parse_binary_spec(rest) if rest else None
+    if binspec is not None:
+        width, prefix_flag = binspec
+        n_v = _lower_expr(ctx, seg)
+        width_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", width_v, [width]))
+        pfx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", pfx_v, [1 if prefix_flag else 0]))
+        out = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out, ["_abi_int_to_binary", n_v, width_v, pfx_v]))
+        return out
+    cfmt = _cfmt_for_spec(rest, "int") if rest else None
+    n_v = _lower_expr(ctx, seg)
+    if cfmt is not None:
+        fmt_name = ctx.mctx.intern_str(cfmt)
+        fmt_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", fmt_v, [fmt_name]))
+        buf_name = ctx.mctx.intern_str("")
+        out = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out, ["_abi_int_fmt", n_v, fmt_v]))
+    else:
+        base_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", base_v, [10]))
+        empty_name = ctx.mctx.intern_str("")
+        empty_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", empty_v, [empty_name]))
+        out = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out, ["_abi_int_to_base", n_v, base_v, empty_v]))
+    if sep is not None:
+        sep_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", sep_v, [ord(sep)]))
+        grouped = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", grouped, ["_abi_group_digits", out, sep_v]))
+        out = grouped
+    return out
+
+
+def _lower_fstring_aligned(
+    ctx: _FuncCtx, seg: A.Expr, t: str, conv: str,
+    width: int | None, fill: str, align: str, rest: str,
+    precision: int | None,
+) -> IRValue:
+    """Ports codegen.py's _gen_fstring_aligned: evaluate `seg` to its
+    (unpadded) string form, then pad/justify to `width` with `fill`."""
+    if t == "str":
+        val = _lower_expr_as_str(ctx, seg, repr_mode=conv in ("r", "a"))
+        if precision is not None:
+            prec_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", prec_v, [precision]))
+            trunc = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", trunc, ["_abi_str_truncate", val, prec_v]))
+            val = trunc
+    elif t == "float":
+        sep, rest2 = _strip_grouping_option(rest) if rest else (None, rest)
+        cfmt = _cfmt_for_spec(rest2, "float") if rest2 else None
+        f_v = _lower_expr(ctx, seg)
+        if cfmt is not None:
+            fmt_name = ctx.mctx.intern_str(cfmt)
+            fmt_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", fmt_v, [fmt_name]))
+            val = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", val, ["_abi_float_fmt", f_v, fmt_v]))
+        else:
+            val = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", val, ["_abi_float_to_str", f_v]))
+        if sep is not None:
+            sep_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", sep_v, [ord(sep)]))
+            grouped = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", grouped, ["_abi_group_digits", val, sep_v]))
+            val = grouped
+    else:
+        # A non-empty format spec on a bool/None formats the underlying
+        # int value (0/1), not "True"/"False"/"None" -- matches CPython's
+        # int.__format__ (bool has no __format__ override).
+        val = _lower_int_value_str(ctx, seg, rest)
+
+    helper = {"<": "_abi_str_ljust", ">": "_abi_str_rjust", "^": "_abi_str_center"}[align]
+    fill_name = ctx.mctx.intern_str(fill if fill else " ")
+    fill_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", fill_v, [fill_name]))
+    width_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", width_v, [width if width is not None else 0]))
+    out = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", out, [helper, val, width_v, fill_v]))
+    return out
+
+
+def _lower_fstring_segment(ctx: _FuncCtx, seg: A.Expr) -> IRValue:
+    """Evaluate one f-string segment to a str value, honoring its
+    fmt_spec/conv_flag (stamped by the parser -- see ast_nodes.py's
+    FString docstring). Ports codegen.py's _gen_fstring_segment."""
+    t = A.expr_type(seg)
+    spec: str = getattr(seg, "fmt_spec", "")
+    conv: str = getattr(seg, "conv_flag", "")
+    if spec:
+        fill, align, body = _split_fmt_align(spec)
+        width: int | None = None
+        rest = body
+        precision: int | None = None
+        if t == "str":
+            width, precision = _split_str_width_precision(body)
+            rest = ""
+            if align is None and width is not None:
+                fill, align = " ", "<"
+        elif align is not None:
+            width, rest = _split_fmt_width(body, t)
+        if align in ("<", ">", "^") and t in ("str", "int", "float"):
+            return _lower_fstring_aligned(ctx, seg, t, conv, width, fill, align, rest, precision)
+        if t == "str" and precision is not None:
+            val = _lower_expr_as_str(ctx, seg, repr_mode=conv in ("r", "a"))
+            prec_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", prec_v, [precision]))
+            out = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", out, ["_abi_str_truncate", val, prec_v]))
+            return out
+        if t in ("int", "float"):
+            sep, body2 = _strip_grouping_option(body)
+            if t == "int":
+                binspec = _parse_binary_spec(body2)
+                if binspec is not None:
+                    bwidth, prefix_flag = binspec
+                    n_v = _lower_expr(ctx, seg)
+                    width_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", width_v, [bwidth]))
+                    pfx_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", pfx_v, [1 if prefix_flag else 0]))
+                    out = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("call", out, ["_abi_int_to_binary", n_v, width_v, pfx_v]))
+                    return out
+            # Zero-pad width + grouping (`f"{n:015,}"`): zero-pad the
+            # integer part so the *grouped* result reaches `zwidth` chars,
+            # via _abi_group_digits_zeropad instead of a plain cfmt
+            # zero-pad (which would double-count against the separators).
+            zwidth = None
+            if (
+                sep is not None
+                and len(body2) >= 2
+                and body2[0] == "0"
+                and body2[1].isdigit()
+            ):
+                zwidth, body2 = _split_fmt_width(body2, t)
+            cfmt = _cfmt_for_spec(body2, t)
+            if cfmt is not None or sep is not None:
+                if t == "float":
+                    v = _lower_expr(ctx, seg)
+                    if cfmt is not None:
+                        fmt_name = ctx.mctx.intern_str(cfmt)
+                        fmt_v = ctx.tmp(PTR)
+                        ctx.emit(IRInstr("global_addr", fmt_v, [fmt_name]))
+                        out = ctx.tmp(PTR)
+                        ctx.emit(IRInstr("call", out, ["_abi_float_fmt", v, fmt_v]))
+                    else:
+                        out = ctx.tmp(PTR)
+                        ctx.emit(IRInstr("call", out, ["_abi_float_to_str", v]))
+                else:
+                    v = _lower_expr(ctx, seg)
+                    if cfmt is not None:
+                        fmt_name = ctx.mctx.intern_str(cfmt)
+                        fmt_v = ctx.tmp(PTR)
+                        ctx.emit(IRInstr("global_addr", fmt_v, [fmt_name]))
+                        out = ctx.tmp(PTR)
+                        ctx.emit(IRInstr("call", out, ["_abi_int_fmt", v, fmt_v]))
+                    else:
+                        base_v = ctx.tmp(I64)
+                        ctx.emit(IRInstr("const", base_v, [10]))
+                        empty_name = ctx.mctx.intern_str("")
+                        empty_v = ctx.tmp(PTR)
+                        ctx.emit(IRInstr("global_addr", empty_v, [empty_name]))
+                        out = ctx.tmp(PTR)
+                        ctx.emit(IRInstr("call", out, ["_abi_int_to_base", v, base_v, empty_v]))
+                if sep is not None:
+                    sep_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", sep_v, [ord(sep)]))
+                    if zwidth is not None:
+                        zwidth_v = ctx.tmp(I64)
+                        ctx.emit(IRInstr("const", zwidth_v, [zwidth]))
+                        grouped = ctx.tmp(PTR)
+                        ctx.emit(IRInstr("call", grouped, ["_abi_group_digits_zeropad", out, zwidth_v, sep_v]))
+                        out = grouped
+                    else:
+                        grouped = ctx.tmp(PTR)
+                        ctx.emit(IRInstr("call", grouped, ["_abi_group_digits", out, sep_v]))
+                        out = grouped
+                # No dup-to-own-a-copy step needed here (unlike
+                # codegen.py's _runtime_str_concat_dup after a cfmt hit):
+                # _abi_int_fmt/_abi_float_fmt already malloc a fresh
+                # buffer per call, unlike codegen.py's shared static
+                # itoa_str_buf sprintf target.
+                return out
+    # Fallback: no spec, or a spec this dispatcher didn't handle above
+    # (matches codegen.py falling through to the default str() path).
+    return _lower_expr_as_str(ctx, seg, repr_mode=conv in ("r", "a"))
+
+
 def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr, repr_mode: bool = False) -> IRValue:
     ty = A.expr_type(e)
     if ty == "str":
@@ -2089,9 +2390,15 @@ def _lower_fstring(ctx: _FuncCtx, e: A.FString) -> IRValue:
         out = ctx.tmp(PTR)
         ctx.emit(IRInstr("global_addr", out, [empty]))
         return out
-    acc = _lower_expr_as_str(ctx, e.segments[0])
+    # _lower_fstring_segment (not the plain default-str-conversion
+    # _lower_expr_as_str) so each segment's fmt_spec/conv_flag (stamped
+    # by the parser -- see FString's docstring in ast_nodes.py) actually
+    # takes effect. A literal StrLit chunk has neither attr, so it falls
+    # straight through to the same plain-str path either function would
+    # take -- safe to route uniformly.
+    acc = _lower_fstring_segment(ctx, e.segments[0])
     for seg in e.segments[1:]:
-        rhs = _lower_expr_as_str(ctx, seg)
+        rhs = _lower_fstring_segment(ctx, seg)
         joined = ctx.tmp(PTR)
         ctx.emit(IRInstr("call", joined, ["_abi_str_concat", acc, rhs]))
         acc = joined
@@ -3637,35 +3944,6 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         else:
             ctx.emit(IRInstr("call", v, [e.func, *args]))
         return v
-
-    if isinstance(e, A.FString):
-        if not e.segments:
-            empty_name = ctx.mctx.intern_str("")
-            v = ctx.tmp(PTR)
-            ctx.emit(IRInstr("global_addr", v, [empty_name]))
-            return v
-        acc: object = None
-        for seg in e.segments:
-            seg_ty: str = A.expr_type(seg)
-            if isinstance(seg, A.StrLit):
-                s_name: str = ctx.mctx.intern_str(seg.value)
-                sv = ctx.tmp(PTR)
-                ctx.emit(IRInstr("global_addr", sv, [s_name]))
-                seg_v = sv
-            elif seg_ty == "int":
-                raw = _lower_expr(ctx, seg)
-                sv2 = ctx.tmp(PTR)
-                ctx.emit(IRInstr("call", sv2, ["_abi_int_to_str", raw]))
-                seg_v = sv2
-            else:
-                seg_v = _lower_expr(ctx, seg)
-            if acc is None:
-                acc = seg_v
-            else:
-                cat = ctx.tmp(PTR)
-                ctx.emit(IRInstr("call", cat, ["_abi_str_concat", acc, seg_v]))
-                acc = cat
-        return acc
 
     raise LowerError(f"unsupported expr {type(e).__name__}")
 

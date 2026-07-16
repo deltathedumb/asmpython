@@ -79,6 +79,10 @@ extern _runtime_list_del
 extern _runtime_dict_pop
 extern _runtime_dict_clear
 extern _runtime_str_concat_dup
+extern _runtime_str_truncate
+extern _runtime_int_to_binary
+extern _runtime_group_digits
+extern _runtime_group_digits_zeropad
 extern malloc
 extern printf
 extern sprintf
@@ -160,6 +164,12 @@ global _abi_list_del
 global _abi_dict_pop
 global _abi_dict_clear
 global _abi_str_concat_dup
+global _abi_str_truncate
+global _abi_int_to_binary
+global _abi_group_digits
+global _abi_group_digits_zeropad
+global _abi_int_fmt
+global _abi_float_fmt
 
 ; asmpython/stdlib/hardware.py's _hw_* symbols, hosted-target bodies. These
 ; already use the standard Win64 ABI (see codegen.py's target_windows.py /
@@ -1170,5 +1180,128 @@ _abi_str_concat_dup:
     mov rax, rcx
     call _runtime_str_concat_dup
     WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = str_truncate(str=rcx, maxlen=rdx) -- f-string str precision
+; (`f"{x:.5}"`): first `maxlen` chars, or the whole string if already
+; shorter. Fresh allocation.
+_abi_str_truncate:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_str_truncate
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = int_to_binary(value=rcx, width=rdx, prefix_flag=r8) -- f-string
+; binary spec (`f"{n:08b}"` / `f"{n:#010b}"`): zero-padded to `width`
+; total chars (sign/prefix counted toward it, matching CPython), with an
+; optional "0b" prefix. Fresh allocation.
+_abi_int_to_binary:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    mov rcx, r8
+    call _runtime_int_to_binary
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = group_digits(numstr=rcx, sep_byte=rdx) -- f-string thousands
+; grouping (`f"{n:,}"` / `f"{n:_}"`): inserts `sep_byte` every 3 digits in
+; the integer part (after any leading '-', before any '.'). Fresh
+; allocation.
+_abi_group_digits:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_group_digits
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = group_digits_zeropad(numstr=rcx, width=rdx, sep_byte=r8) -- the
+; zero-pad+grouping combo (`f"{n:015,}"`): zero-pads the integer part so
+; the *grouped* result reaches `width` chars, then groups. Fresh
+; allocation.
+_abi_group_digits_zeropad:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    mov rcx, r8
+    call _runtime_group_digits_zeropad
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = int_fmt(value=rcx, fmt_ptr=rdx) -- f-string numeric format specs
+; that translate to a C printf format (e.g. "%05lld", "%llx", "%3lld" --
+; see ir_lower.py's _cfmt_for_spec). Unlike _abi_int_to_str's fixed
+; decimal buffer, the caller-supplied format can request extra width/
+; precision, so this mallocs a fresh, generously-sized buffer per call
+; instead of reusing a shared static one (avoids needing a
+; concat-dup-to-own-a-copy step at every call site, and stays correct if
+; two formatted values are alive at once, e.g. inside one f-string).
+_abi_int_fmt:
+    ; 56 bytes (entry rsp%16==8, so N%16 must ==8 to leave rsp 16-aligned
+    ; before each `call` below -- 56 is the smallest such N that still
+    ; fits [0,32) shadow space + 3 8-byte locals above it).
+    ; [0,32) is shadow space malloc/sprintf are free to scribble on as
+    ; callees (Win64 ABI requirement); this shim's own locals must live
+    ; at/above +32 or a callee's shadow-space write silently corrupts
+    ; them -- confirmed via gdb on a first attempt that stored locals at
+    ; +16/+24 (inside the shadow region) and read back garbage (sprintf's
+    ; own return value, then the raw int argument) after the first `call`.
+    sub rsp, 56
+    mov [rsp+40], rcx          ; value
+    mov [rsp+48], rdx          ; fmt_ptr
+    mov rcx, 64
+    call malloc
+    mov [rsp+32], rax          ; stash buf ptr -- rcx/rdx/r8 are volatile
+                                ; across the sprintf call below, so the
+                                ; buffer pointer can't just sit in a
+                                ; register and survive it
+    mov rcx, rax
+    mov rdx, [rsp+48]
+    mov r8, [rsp+40]
+    xor eax, eax
+    call sprintf
+    mov rax, [rsp+32]
+    add rsp, 56
+    ret
+
+; rax = float_fmt(value=xmm0, fmt_ptr=rdx) -- float counterpart of
+; _abi_int_fmt (e.g. "%.2f", "%10.3e"). NOTE the fmt_ptr register: this
+; is arg1 of a 2-arg call where arg0 is float-typed, and this pipeline's
+; `call` op assigns Win64 argument registers by ONE SHARED positional
+; index across both register classes (arg0 float -> xmm0, arg1 non-float
+; -> the *second* positional GP slot RDX, not RCX -- RCX would be the
+; register for a non-float arg0). Getting this wrong doesn't fail to
+; assemble; it silently reads garbage/uninitialized rdx as the format
+; string, which happened to already look enough like *some* valid
+; pointer to limp through a first call and corrupt state that crashed
+; the second one -- confirmed by tracing arg-register assignment in
+; codegen.py's _call (the shared int_i/xmm_i-vs-single-arg_i counter
+; logic) after this shim silently produced empty/garbage output instead
+; of erroring.
+;
+; Once value is in xmm0 and fmt_ptr in rdx, sprintf's own variadic ABI
+; still needs the double vararg mirrored into its positional GP slot
+; (the 3rd sprintf argument, since buf/fmt are the two fixed params
+; ahead of it) -- moved via a raw bit copy through the stack, matching
+; codegen.py's _emit_float_fmt.
+_abi_float_fmt:
+    ; See _abi_int_fmt's comment: locals must live at/above +32, clear of
+    ; the [0,32) shadow space malloc/sprintf are free to scribble on.
+    sub rsp, 56
+    mov [rsp+40], rdx          ; fmt_ptr
+    movsd [rsp+48], xmm0       ; value
+    mov rcx, 64
+    call malloc
+    mov [rsp+32], rax          ; stash buf ptr (rcx/rdx/r8 volatile below)
+    mov rcx, rax
+    mov rdx, [rsp+40]
+    mov r8, [rsp+48]
+    xor eax, eax
+    call sprintf
+    mov rax, [rsp+32]
+    add rsp, 56
     ret
 
