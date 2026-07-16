@@ -135,8 +135,12 @@ def run_negative(case: Path, target: str) -> TestResult:
 
     BUILD.mkdir(parents=True, exist_ok=True)
     out = BUILD / case.stem
+    # --no-pyinbin-fallback: without it, the CLI's pyinbin fallback runs
+    # after native compilation fails and its own (unrelated) error message
+    # replaces the real, formatted native error in stderr -- these tests
+    # exist specifically to check the *native compiler's* diagnostic text.
     cmd = [sys.executable, "-m", "asmpython", str(case), "--target", target,
-           "--emit-asm", "-o", str(out)]
+           "--emit-asm", "--no-pyinbin-fallback", "-o", str(out)]
     if _use_runtime_lib:
         cmd.append("--use-runtime-lib")
     cp = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)

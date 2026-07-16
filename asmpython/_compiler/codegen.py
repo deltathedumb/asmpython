@@ -289,6 +289,14 @@ class Codegen:
                 and s.target not in bound_in_frame
             ):
                 self.global_vars[s.target] = A.expr_type(s.value)
+            elif (
+                isinstance(s, A.ConstDecl)
+                and s.name not in bound_in_frame
+            ):
+                # const NAME = value is module-scope-only (enforced by the
+                # parser), so it's always a global slot, never a frame local
+                # -- same collection as a plain top-level A.Assign.
+                self.global_vars[s.name] = A.expr_type(s.value)
             elif isinstance(s, A.If):
                 self._collect_if_globals(s, bound_in_frame, self.global_vars)
         # RTTI: each user class gets a small integer id. Instances are tagged
@@ -2246,6 +2254,15 @@ class Codegen:
 
     def _cl_walk(self, info: FuncInfo, stmts: list) -> None:
         for s in stmts:
+            if isinstance(s, A.ConstDecl):
+                # Same normalize-at-entry approach as gen_stmt/_lower_stmt:
+                # this frame-layout pre-pass reserves scratch slots (e.g. the
+                # __listlit_<id> slot a ListLit initializer needs) by walking
+                # A.Assign; without this, `const XS = [1, 2, 3]` never gets
+                # its list literal's scratch slot registered here, and the
+                # later emit-time lookup in codegen's ListLit handling
+                # KeyErrors on the missing slot name.
+                s = A.Assign(target=s.name, value=s.value, pos=s.pos, annot=s.annotation)
             if isinstance(s, A.Global):
                 info.global_names.update(s.names)
                 continue
@@ -2516,6 +2533,15 @@ class Codegen:
     # ---- statement codegen --------------------------------------------------
 
     def gen_stmt(self, stmt, info: FuncInfo) -> None:
+        if isinstance(stmt, A.ConstDecl):
+            # Same normalize-at-entry rationale as ir_lower.py's _lower_stmt:
+            # ConstDecl lowers identically to an ordinary initialized Assign
+            # once sema has already validated/locked it, so every legacy
+            # backend subclass (Linux/Windows/Freestanding/Freestanding16)
+            # gets this for free via the shared base-class dispatch here.
+            stmt = A.Assign(
+                target=stmt.name, value=stmt.value, pos=stmt.pos, annot=stmt.annotation
+            )
         if isinstance(stmt, A.Pass):
             return
         if isinstance(stmt, A.ClosureBind):

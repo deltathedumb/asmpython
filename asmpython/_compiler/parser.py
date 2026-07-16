@@ -5,6 +5,7 @@ from __future__ import annotations
 from .lexer import Token, Lexer
 from .errors import ErrorCode, ParseError
 from . import ast_nodes as A
+from . import extensions
 
 
 AUG_OPS = {
@@ -58,6 +59,16 @@ class Parser:
         # by `parse()` right after the decorated def is parsed.
         self._pending_decorator_exprs: list = []
         self._deco_tmp_counter = 0
+        # Per-Parser compiler-extension state (extend/retract/const). Fresh
+        # per instance -- see extensions.py's module docstring for the
+        # isolation guarantees this gives for free. `_suite_depth` counts
+        # how many nested suites (function/class/if/loop/try/with bodies)
+        # we're currently inside, so `extend`/`retract` (and, while
+        # `constants` is active, `const`) can be rejected uniformly outside
+        # module scope without checking at each of `_parse_block`'s many
+        # call sites individually.
+        self.ext_ctx = extensions.ExtensionContext()
+        self._suite_depth = 0
 
     # ---- helpers -----------------------------------------------------------
 
@@ -407,6 +418,12 @@ class Parser:
         Parser._propagate_transitive_free_vars(self._nested_funcs)
         funcs.extend(self._nested_funcs)
         classes.extend(self._nested_classes)
+        # `extend`/`retract` are parse-time-only directives: they've already
+        # done their job (mutating self.ext_ctx as each was parsed) and carry
+        # no runtime semantics, so they're filtered out here rather than
+        # forwarded to sema/ir_lower/codegen, none of which need to handle
+        # them.
+        body = [s for s in body if not isinstance(s, (A.Extend, A.Retract))]
         return A.Module(funcs=funcs, body=body, classes=classes)
 
     @staticmethod
@@ -786,6 +803,27 @@ class Parser:
                 # Class-body string literal (docstring) — drop the line.
                 self._eat()
                 self._expect("NEWLINE")
+            elif (
+                self._check("NAME", "extend") and self._looks_like_extend_stmt()
+            ) or (
+                self._check("NAME", "retract") and self._looks_like_retract_stmt()
+            ) or (
+                self._check("NAME", "const") and self._looks_like_const_decl()
+            ):
+                # `extend`/`retract`/`const` shape detected inside a class
+                # body: class bodies never go through the module-level
+                # `_parse_stmt`/`_parse_block` dispatch (this loop is its own
+                # bespoke suite), so `_suite_depth` alone can't catch this
+                # nesting -- raise the same scope-violation diagnostic
+                # directly instead of falling through to `_parse_class_var`,
+                # which would otherwise misread `extend`/`retract`/`const` as
+                # a class-body field name and choke on the unconsumed
+                # extension-name token that follows it.
+                raise ParseError(
+                    "'extend'/'retract'/'const' may only appear at module scope",
+                    self._peek().pos,
+                    ErrorCode.P_EXTENSION_SCOPE,
+                )
             elif self._check("NAME"):
                 # Class-body variable: `name [: type] [= value]`. Captured so
                 # sema can type `self.NAME` reads (e.g. a set/dict constant used
@@ -1274,15 +1312,19 @@ class Parser:
         self._expect("NEWLINE")
         self._skip_newlines()
         self._expect("INDENT")
-        stmts: list = []
-        while not self._check("DEDENT"):
-            self._skip_newlines()
-            if self._check("DEDENT"):
-                break
-            stmts.append(self._parse_stmt())
-            self._skip_newlines()
-        self._expect("DEDENT")
-        return stmts
+        self._suite_depth += 1
+        try:
+            stmts: list = []
+            while not self._check("DEDENT"):
+                self._skip_newlines()
+                if self._check("DEDENT"):
+                    break
+                stmts.append(self._parse_stmt())
+                self._skip_newlines()
+            self._expect("DEDENT")
+            return stmts
+        finally:
+            self._suite_depth -= 1
 
     # ---- statements --------------------------------------------------------
 
@@ -1365,6 +1407,31 @@ class Parser:
         # so `match = 5` / `match(x)` / `match.foo` keep working as before.
         if t.kind == "NAME" and t.value == "match" and self._looks_like_match_stmt():
             return self._parse_match()
+
+        # `extend`/`retract`/`const` are contextual (soft) keywords too --
+        # ordinary NAME tokens the lexer never distinguishes from any other
+        # identifier. Each has its own speculative lookahead so `extend = 5`,
+        # `retract = False`, `const = 10`, `extend.attr = 1`, etc. keep
+        # working exactly as plain assignments/expressions when the shape
+        # doesn't match a directive/declaration.
+        if t.kind == "NAME" and t.value == "extend" and self._looks_like_extend_stmt():
+            return self._parse_extend()
+        if t.kind == "NAME" and t.value == "retract" and self._looks_like_retract_stmt():
+            return self._parse_retract()
+        if t.kind == "NAME" and t.value == "const" and self._looks_like_const_decl():
+            if self.ext_ctx.is_active("constants"):
+                return self._parse_const_decl()
+            # Shape matches a const-declaration attempt, but the `constants`
+            # extension was never activated in this file -- a clearer,
+            # earlier diagnostic than falling through to ordinary assignment
+            # parsing (which would just try to assign to a bare `const`
+            # name and then choke on the unconsumed `NAME` that follows it).
+            raise ParseError(
+                "'const' declarations require the 'constants' extension "
+                "(add 'extend constants' before this declaration)",
+                t.pos,
+                ErrorCode.P_CONST_WITHOUT_EXTENSION,
+            )
 
         # Assignment / aug-assignment vs expression statement.
         if t.kind == "NAME":
@@ -1564,6 +1631,135 @@ class Parser:
             with_stmt = A.With(expr=expr, name=name, body=body, pos=kw.pos)
             body = [with_stmt]
         return with_stmt
+
+    def _parse_dotted_name(self) -> str:
+        """Consume `NAME ('.' NAME)*` and return it joined with dots.
+        Shared by the real extend/retract parsers and their lookahead twins
+        so the two can never drift apart on what counts as a valid extension
+        name shape."""
+        parts = [self._expect("NAME").value]
+        while self._check("OP", "."):
+            self._eat()
+            parts.append(self._expect("NAME").value)
+        return ".".join(parts)  # type: ignore[arg-type]
+
+    def _looks_like_extend_stmt(self) -> bool:
+        """`extend` is a soft keyword: only `extend <dotted-name>` followed by
+        NEWLINE is a directive. `extend = 5`, `extend(x)`, `extend.attr = 1`,
+        `extend.attr()` all remain ordinary NAME-led statements -- mirrors
+        `_looks_like_match_stmt`'s speculate-then-rewind idiom."""
+        save = self.i
+        self._eat()  # 'extend'
+        ok = False
+        try:
+            self._parse_dotted_name()
+            ok = self._check("NEWLINE")
+        except ParseError:
+            ok = False
+        self.i = save
+        return ok
+
+    def _looks_like_retract_stmt(self) -> bool:
+        save = self.i
+        self._eat()  # 'retract'
+        ok = False
+        try:
+            self._parse_dotted_name()
+            ok = self._check("NEWLINE")
+        except ParseError:
+            ok = False
+        self.i = save
+        return ok
+
+    def _looks_like_const_decl(self) -> bool:
+        """`const` is a soft keyword: only `const NAME [: annotation] [= ...]`
+        is a declaration shape. Checks NAME first (not `OP =` directly) so
+        bare `const = 5` (constants inactive OR active) never intercepts --
+        that shape has no NAME between `const` and `=`, so it always falls
+        through to ordinary assignment parsing regardless of extension
+        state. A missing initializer (`const NAME` / `const NAME: T` with no
+        `=`) still counts as matching the shape -- rather than falling
+        through to ordinary statement parsing (which would choke on the
+        unconsumed NAME with a confusing generic P_EXPECTED_TOKEN error),
+        this lets `_parse_const_decl` run and raise the precise
+        P_CONST_NO_INITIALIZER diagnostic instead. This lookahead is also
+        used, independent of whether `constants` is active, purely to detect
+        "this looks like someone tried to write a const-decl shape" for the
+        P_CONST_WITHOUT_EXTENSION diagnostic."""
+        save = self.i
+        self._eat()  # 'const'
+        ok = False
+        try:
+            if not self._check("NAME"):
+                ok = False
+            else:
+                self._eat()
+                if self._check("OP", ":"):
+                    self._eat()
+                    self._parse_type_annotation()
+                ok = self._check("NEWLINE") or self._check("OP", "=")
+        except ParseError:
+            ok = False
+        self.i = save
+        return ok
+
+    def _parse_extend(self) -> A.Extend:
+        kw = self._eat()  # 'extend'
+        if self._suite_depth != 0:
+            raise ParseError(
+                "'extend' may only appear at module scope",
+                kw.pos,
+                ErrorCode.P_EXTENSION_SCOPE,
+            )
+        name = self._parse_dotted_name()
+        pos = kw.pos
+        self._expect("NEWLINE")
+        self.ext_ctx.activate(name, pos)
+        return A.Extend(name=name, pos=pos)
+
+    def _parse_retract(self) -> A.Retract:
+        kw = self._eat()  # 'retract'
+        if self._suite_depth != 0:
+            raise ParseError(
+                "'retract' may only appear at module scope",
+                kw.pos,
+                ErrorCode.P_EXTENSION_SCOPE,
+            )
+        name = self._parse_dotted_name()
+        pos = kw.pos
+        self._expect("NEWLINE")
+        self.ext_ctx.retract(name, pos)
+        return A.Retract(name=name, pos=pos)
+
+    def _parse_const_decl(self) -> A.ConstDecl:
+        kw = self._expect("NAME", "const")
+        if self._suite_depth != 0:
+            raise ParseError(
+                "'const' may only appear at module scope",
+                kw.pos,
+                ErrorCode.P_EXTENSION_SCOPE,
+            )
+        name_tok = self._expect("NAME")
+        annotation = None
+        if self._check("OP", ":"):
+            self._eat()
+            annotation = self._parse_type_annotation()
+        if not self._check("OP", "="):
+            raise ParseError(
+                "'const' declarations require an initializer "
+                "('const NAME = value')",
+                name_tok.pos,
+                ErrorCode.P_CONST_NO_INITIALIZER,
+            )
+        self._eat()  # '='
+        value = self._parse_tuple_rhs()
+        self._expect("NEWLINE")
+        return A.ConstDecl(
+            name=name_tok.value,  # type: ignore[arg-type]
+            value=value,
+            pos=kw.pos,
+            annotation=annotation,
+        )
 
     def _looks_like_match_stmt(self) -> bool:
         """`match` is a soft keyword: only `match <expr>:` followed by

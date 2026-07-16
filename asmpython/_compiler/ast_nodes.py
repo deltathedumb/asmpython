@@ -124,6 +124,42 @@ class Assign:
 
 
 @dataclass
+class ConstDecl:
+    """`const NAME [: annotation] = value` -- only recognised when the
+    `constants` compiler extension is active (see `_compiler/extensions.py`).
+    Mirrors `Assign` exactly (same field shapes, renamed target -> name) so
+    sema/ir_lower/codegen can reuse `Assign`'s handling for it near-verbatim
+    once the const-only-once check has run; the only extra semantics are (a)
+    an initializer is mandatory (no bare `const NAME` form) and (b) the name
+    is permanently locked against every future rebinding form."""
+
+    name: str
+    value: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    annotation: object = None
+
+
+@dataclass
+class Extend:
+    """`extend <extension_name>` module-level directive. Transient: consumed
+    entirely during parsing to activate an extension in the per-Parser
+    `ExtensionContext` and filtered out of the final `Module.body` before
+    sema/ir_lower/codegen ever see it -- it carries no runtime semantics."""
+
+    name: str
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class Retract:
+    """`retract <extension_name>` module-level directive -- the transient
+    counterpart to `Extend`. See `Extend` for lifetime notes."""
+
+    name: str
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
 class AugAssign:
     target: str
     op: str  # "+", "-", "*", "//", "%", "&", "|", "^", "<<", ">>"

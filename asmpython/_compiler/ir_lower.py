@@ -1374,6 +1374,10 @@ def _collect_module_globals(stmts: list, out: dict[str, IRType], list_el_ty: dic
             out.setdefault(s.target, ir_type_for(A.expr_type(s.value)))
             if A.expr_type(s.value) == "list":
                 list_el_ty.setdefault(s.target, getattr(s.value, "list_el_type", "int"))
+        elif isinstance(s, A.ConstDecl):
+            out.setdefault(s.name, ir_type_for(A.expr_type(s.value)))
+            if A.expr_type(s.value) == "list":
+                list_el_ty.setdefault(s.name, getattr(s.value, "list_el_type", "int"))
         elif isinstance(s, A.MultiAssign):
             ty = ir_type_for(A.expr_type(s.value))
             for target in s.targets:
@@ -2973,6 +2977,16 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
 
 
 def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
+    if isinstance(s, A.ConstDecl):
+        # Normalize at entry rather than duplicating Assign's lowering in a
+        # parallel branch: any future bugfix/feature added to A.Assign's
+        # lowering automatically covers ConstDecl too, with zero risk of the
+        # two paths drifting apart. Sema has already enforced the const-lock
+        # semantics by this point (ir_lower never sees a rebinding of a
+        # const name) -- ConstDecl lowers to exactly the same store as an
+        # ordinary initialized assignment.
+        s = A.Assign(target=s.name, value=s.value, pos=s.pos, annot=s.annotation)
+
     if isinstance(s, A.Pass):
         return
 

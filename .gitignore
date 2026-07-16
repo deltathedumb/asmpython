@@ -69,6 +69,20 @@ _scratch*.*
 _probe*.*
 _tmp*.*
 
+# CPython stdlib conformance fixtures (test.support.os_helper, tempfile, etc.)
+# create these directly in the repo root's CWD when pyinbin runs the official
+# Lib/test suite from here -- they're process-local scratch, not repo content.
+/tmp*/
+/Tmp*/
+/@test_1_tmp*
+/scratch_*.py
+/full_conformance*.txt
+/runner_out*.txt
+
+# Local scratch directory for one-off manual testing (temp scripts, probe
+# output, etc.) -- use this instead of littering the repo root.
+/tmp/
+
 # Zip for some reason
 asmpython.zip
 

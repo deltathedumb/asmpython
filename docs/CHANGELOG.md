@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Compiler extension system**: `extend <name>` / `retract <name>`
+  module-scope directives activate/deactivate opt-in compiler syntax
+  extensions, implemented as real lexer/parser/AST/sema/IR syntax rather
+  than runtime calls or source preprocessing. First built-in extension:
+  `constants` (`const NAME [: annotation] = value`, permanently locking the
+  name against reassignment/augmented-assignment/`del`/destructuring/
+  rebinding, while leaving the referenced object's own mutability
+  unaffected). See `docs/EXTENSIONS.md`.
+
 ### Changed
 
 - **Lumen renamed and consolidated**: `gui`, `framebuffer`, and `audio` are

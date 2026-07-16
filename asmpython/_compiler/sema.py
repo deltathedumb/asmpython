@@ -558,6 +558,19 @@ class SemaAnalyzer:
         # Module-level names (imports + top-level assignments). Populated by
         # analyze() before function/method bodies are checked.
         self.global_scope: Scope = Scope()
+        # Names ever declared `const` (via the `constants` compiler
+        # extension), mapped to their declaration's SourcePos. This is a
+        # SEPARATE side-table rather than something tracked through `Scope`,
+        # because `Scope` is flat and function-local scopes are seeded by
+        # COPYING module globals (`_seed_globals_into`) rather than chaining
+        # to a parent -- so `name in scope.types` inside a function body
+        # cannot distinguish "this is the module-level const" from "an
+        # ordinary function-local that happens to share the name after
+        # seeding". Once a name is recorded here it is locked forever: even
+        # after `retract constants`, a name declared const while the
+        # extension was active remains const for the rest of the module (see
+        # extensions.py's retract() docstring).
+        self.const_names: dict = {}
         self.loop_depth = 0
         self.in_function: Optional[str] = None
         self.in_lifted: bool = False  # True when checking a lifted nested func
@@ -3848,12 +3861,34 @@ class SemaAnalyzer:
                 self._collect_returns(st_else, acc)
                 self._collect_returns(st_finally, acc)
 
+    def _require_assignable(self, name: str, pos) -> None:
+        """Raise E_CONST_REASSIGNED if `name` was ever declared `const`.
+
+        This is the single shared check used by every statement form that
+        can bind/rebind a name -- plain assignment, augmented assignment,
+        `del`, multi-assign, tuple/list destructuring (including starred),
+        `for` loop targets, `except ... as` binding, and import aliases --
+        so a const name can never be rebound through any of them. Mutating
+        an object a const name refers to (e.g. `values.append(3)` after
+        `const values = [1, 2]`) is unaffected: this only guards *rebinding
+        the name itself*, never method calls/subscript-writes on the value
+        it holds.
+        """
+        if name in self.const_names:
+            raise SemaError(
+                f"cannot reassign const {name!r} (declared at "
+                f"line {self.const_names[name].line})",
+                pos,
+                ErrorCode.E_CONST_REASSIGNED,
+            )
+
     def _bind_name_from_value(
         self, target: str, value, scope: Scope, annot: tuple | None = None
     ) -> None:
         """Bind `target` in `scope` to the static type of `value`, the same
         way a plain `target = value` assignment would. Shared by `A.Assign`
         and `A.NamedExpr` (the walrus operator `target := value`)."""
+        self._require_assignable(target, getattr(value, "pos", None))
         # Remember a name bound directly to a lambda, so a later `name(...)`
         # call recovers the lambda's result type instead of defaulting int.
         if isinstance(value, A.Lambda):
@@ -4010,6 +4045,34 @@ class SemaAnalyzer:
             # the opaque-attribute bug class everywhere else this session.
             self._bind_name_from_value(s.target, s.value, scope, s.annot)
             return
+        if isinstance(s, A.ConstDecl):
+            # Reuses _bind_name_from_value's own const-lock check (harmless
+            # to call twice for a genuinely fresh const name: the name isn't
+            # in self.const_names yet at this point, so it's a no-op here
+            # and only becomes load-bearing if this exact name is declared
+            # `const` a second time).
+            self._require_assignable(s.name, s.pos)
+            if s.name in self.funcs or s.name in self.classes:
+                # Only catchable in this direction: def/class names are
+                # collected in a pre-pass that runs before module-body
+                # statements (including this ConstDecl) are walked at all,
+                # so `self.funcs`/`self.classes` are fully populated here
+                # regardless of source order. The reverse order (`const foo
+                # = 1` followed later by `def foo(): ...`) can't be caught
+                # the same way -- and real CPython doesn't reject that
+                # shape either (the later def just clobbers the earlier
+                # binding) -- so this asymmetry is deliberate, not a bug.
+                # See docs/EXTENSIONS.md.
+                raise SemaError(
+                    f"cannot declare const {s.name!r}: a function or class "
+                    f"with that name already exists",
+                    s.pos,
+                    ErrorCode.E_CONST_REDEFINED,
+                )
+            self._check_expr(s.value, scope)
+            self._bind_name_from_value(s.name, s.value, scope, s.annotation)
+            self.const_names[s.name] = s.pos
+            return
         if isinstance(s, A.TupleAssign):
             # Resolve the RHS first so tuple-returning calls have their type
             # set before we decide between unpack and parallel forms.
@@ -4038,6 +4101,8 @@ class SemaAnalyzer:
                     )
                 el = self._list_el_type(s.values[0], scope)
                 el_bound = el if el != "int" else "any"
+                for t in s.targets:
+                    self._require_assignable(t.name, s.pos)
                 for t in s.targets:
                     if isinstance(t, A.StarTarget):
                         scope.add(t.name, "list", el_type=el)
@@ -4072,6 +4137,7 @@ class SemaAnalyzer:
                     s.values[0], (A.TupleLit, A.Call, A.MethodCall)
                 )
                 for i, t in enumerate(s.targets):
+                    self._require_assignable(t.name, s.pos)
                     slot = ets[i] if i < len(ets) else "any"
                     scope.add(
                         t.name,
@@ -4104,6 +4170,7 @@ class SemaAnalyzer:
                 elif A.expr_type(s.values[0]) == "str":
                     el = "str"
                 for t in s.targets:
+                    self._require_assignable(t.name, s.pos)
                     scope.add(t.name, el)
                 return
             # Parallel form: `a, b = e1, e2`.
@@ -4139,6 +4206,7 @@ class SemaAnalyzer:
                 self._check_tuple_assign_target(t, vt, scope, s.pos)
             return
         if isinstance(s, A.AugAssign):
+            self._require_assignable(s.target, s.pos)
             if s.target not in scope.types:
                 raise SemaError(
                     f"augmented assignment to undefined variable {s.target!r}",
@@ -4195,6 +4263,25 @@ class SemaAnalyzer:
             self._check_block(getattr(s, "orelse", []), scope)
             return
         if isinstance(s, A.For):
+            # Guard every possible loop-target name against const-rebinding
+            # up front, before any of the zip/enumerate/multi-target/
+            # single-var sub-dispatch below runs -- this covers all shapes
+            # in one place rather than patching each of their scope.add
+            # call sites individually. `s.targets` entries are normally a
+            # name (str); nested unpacking (e.g. `for i, (a, b) in ...`)
+            # can nest a list[str], so flatten recursively.
+            def _flatten_for_targets(names) -> list:
+                flat: list = []
+                for n in names:
+                    if isinstance(n, list):
+                        flat.extend(_flatten_for_targets(n))
+                    else:
+                        flat.append(n)
+                return flat
+
+            for _nm in _flatten_for_targets([s.var] if not s.targets else s.targets):
+                self._require_assignable(_nm, s.pos)
+
             # zip(A, B) / enumerate(zip(A, B)): parallel iteration with an
             # optional index. Recognized before the plain-enumerate handler.
             zspec = self._for_zip_spec(s)
@@ -4460,6 +4547,7 @@ class SemaAnalyzer:
             _im_parts: list = _im_module.split(".")
             top_name: str = _im_parts[0]
             bind_name: str = _im_alias if _im_alias else top_name
+            self._require_assignable(bind_name, s.pos)
             try:
                 bindings = _load_module(top_name)
             except SemaError:
@@ -4494,6 +4582,7 @@ class SemaAnalyzer:
                 for name, orig in zip(_fi_names, _fi_orig_names or _fi_names):
                     try:
                         self.imported_modules[name] = _load_module(orig)
+                        self._require_assignable(name, s.pos)
                         scope.add(name, "module")
                     except SemaError:
                         # A stdlib *submodule* that isn't an FFI binding set
@@ -4504,6 +4593,7 @@ class SemaAnalyzer:
                         # `BINDINGS`): re-binding would clobber its real type.
                         # Uppercase names are constants/classes, not submodules.
                         if name not in scope.types:
+                            self._require_assignable(name, s.pos)
                             ty = "any" if orig[:1].isupper() else "module"
                             scope.add(name, ty)
                 return
@@ -4512,6 +4602,7 @@ class SemaAnalyzer:
             # decorator. Bind all names from the package as opaque markers.
             if _fi_module in ("asmpython.assembly", "assembly") and _fi_level == 0:
                 for name in _fi_names:
+                    self._require_assignable(name, s.pos)
                     scope.add(name, "asmdirective")
                 return
             # Relative import or unknown module: accept the syntax and bind
@@ -4540,8 +4631,10 @@ class SemaAnalyzer:
                     orig_names: list = _fi_orig_names or _fi_names
                     for name, orig in zip(_fi_names, orig_names):
                         if name != orig:
+                            self._require_assignable(name, s.pos)
                             scope.add(name, "module")
                         elif name not in scope.types:
+                            self._require_assignable(name, s.pos)
                             scope.add(name, "any")
                     return
                 # `from .sibling import orig as local`: a relative import WITH
@@ -4564,6 +4657,7 @@ class SemaAnalyzer:
                     if name != orig:
                         self.mod.func_aliases[name] = orig
                     if name not in scope.types:
+                        self._require_assignable(name, s.pos)
                         scope.add(name, "any")
                 return
             try:
@@ -4584,6 +4678,7 @@ class SemaAnalyzer:
                     if local != orig:
                         self.mod.func_aliases[local] = orig
                     if local not in scope.types:
+                        self._require_assignable(local, s.pos)
                         scope.add(local, "any")
                 return
             bindings: dict = bindings
@@ -4591,6 +4686,7 @@ class SemaAnalyzer:
                 if name not in bindings:
                     # Unknown binding inside a known module — accept as an
                     # opaque value (mirrors the unknown-module fallback above).
+                    self._require_assignable(name, s.pos)
                     scope.add(name, "any")
                     continue
                 b = bindings[name]
@@ -4598,6 +4694,7 @@ class SemaAnalyzer:
                     self.ffi_funcs[name] = b
                 else:
                     self.ffi_consts[name] = b
+                    self._require_assignable(name, s.pos)
                     scope.add(name, getattr(b, "ty", "int"))
             return
         if isinstance(s, A.ExprStmt):
@@ -4776,12 +4873,14 @@ class SemaAnalyzer:
             # (asmpython's native exception payload). Codegen relies on this
             # being `str` so `print(e)` prints it correctly.
             if s.bind_name is not None:
+                self._require_assignable(s.bind_name, s.pos)
                 scope.add(s.bind_name, "str")
             self._check_block(s.handler, scope)
             for types, bind_name, hbody in s.extra_handlers:
                 for name in types:
                     self._check_exc_type_name(name, s.pos, scope)
                 if bind_name is not None:
+                    self._require_assignable(bind_name, s.pos)
                     scope.add(bind_name, "str")
                 self._check_block(hbody, scope)
             self._check_block(s.else_body, scope)
@@ -4879,6 +4978,7 @@ class SemaAnalyzer:
             self._check_expr(s.value, scope)
             vt: str = A.expr_type(s.value)
             for nm in s.targets:
+                self._require_assignable(nm, s.pos)
                 scope.add(nm, vt)
             return
         if isinstance(s, A.Global):
@@ -4893,6 +4993,12 @@ class SemaAnalyzer:
             return
         if isinstance(s, A.Del):
             # `del x` or `del x[k]`: type-check the target expression leniently.
+            # Only a bare `del CONST_NAME` (an A.Name target) rebinds/removes
+            # the name itself and is rejected; `del const_list[i]` mutates
+            # the referenced container, which the constants extension always
+            # permits (see ConstDecl's docstring on binding-vs-mutation).
+            if isinstance(s.target, A.Name):
+                self._require_assignable(s.target.name, s.pos)
             try:
                 self._check_expr(s.target, scope)
             except Exception:
@@ -5253,6 +5359,7 @@ class SemaAnalyzer:
         into scope. Mirrors the equivalent checks in IndexAssign/AttrAssign
         (`xs[0], xs[1] = ...`, `self.x, self.y = ...`)."""
         if isinstance(t, A.Name):
+            self._require_assignable(t.name, pos)
             scope.add(t.name, value_t)
             return
         if isinstance(t, A.Subscript):

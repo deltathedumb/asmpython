@@ -233,6 +233,24 @@ optimisation pass:
   Multiboot — a new boot/hardware layer, not a port of the existing one.
 - UART output in place of VGA text mode for early console.
 
+#### Compiler extension system ✓
+
+Extension-controlled custom syntax, built on the existing lexer/parser/AST/
+sema/shared-IR pipeline — not runtime function calls, not source
+preprocessing. `extend <name>` / `retract <name>` are module-scope-only,
+forward-only, per-file, transactional directives that activate/deactivate a
+`CompilerExtension` (declarative name/version/requires/conflicts/statement
+handlers) inside a fresh per-`Parser` `ExtensionContext`. First and only
+built-in extension: `constants` (`const NAME [: annotation] = value`,
+name-rebinding lock, not deep immutability). See `docs/EXTENSIONS.md` for
+the full design, limitations (current lexer's token-form ceiling, the
+def/class-vs-const ordering asymmetry), and test coverage
+(`tests/cases/45x_const_*.py`, `tests/cases_fail/const_*.py`/`extend_*.py`/
+`retract_*.py`, `tests/test_extensions.py`,
+`tests/test_program_isolation.py`). Backend-neutral: `ConstDecl` lowers
+identically to an ordinary initialized assignment, so the IR-based x86-64/
+ternary backends need no extension-specific code.
+
 #### Android (.apk) — exploratory, not committed for 2.0.0
 
 - Different deployment model from the other targets: packaging

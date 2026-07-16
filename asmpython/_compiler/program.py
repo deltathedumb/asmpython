@@ -966,6 +966,8 @@ def _rename_call_targets(stmts: list, renames: dict[str, str]) -> None:
     for s in stmts:
         if isinstance(s, A.Assign):
             _rename_call_targets_expr(s.value, renames)
+        elif isinstance(s, A.ConstDecl):
+            _rename_call_targets_expr(s.value, renames)
         elif isinstance(s, A.AugAssign):
             _rename_call_targets_expr(s.value, renames)
         elif isinstance(s, A.TupleAssign):
@@ -1269,11 +1271,27 @@ def _toplevel_value_assigns(module: A.Module) -> dict[str, A.Stmt]:
     """Top-level `name = <expr>` (and annotated) assignments in a module, keyed
     by target name. These are the module's exported *values* — a sibling that
     does `from .mod import name` is referring to one of these. Only plain
-    name-target assigns count (not attribute/subscript writes)."""
+    name-target assigns count (not attribute/subscript writes).
+
+    A module-level `const NAME = value` (from the `constants` compiler
+    extension) is just as much an exported value as an ordinary assignment
+    -- normalized here into an equivalent `A.Assign` (same "normalize at
+    entry" approach used by ir_lower.py/codegen.py) so every downstream
+    consumer of this dict, which assumes plain `A.Assign` shape, keeps
+    working unchanged. Whether the imported name stays const-locked in the
+    *importing* module is out of scope here: each module's own Parser/sema
+    run independently (see extensions.py's isolation guarantees), so the
+    importer only ever sees a plain value, never the origin module's
+    const-ness.
+    """
     out: dict[str, A.Stmt] = {}
     for s in module.body:
         if isinstance(s, A.Assign) and isinstance(s.target, str):
             out[s.target] = s
+        elif isinstance(s, A.ConstDecl):
+            out[s.name] = A.Assign(
+                target=s.name, value=s.value, pos=s.pos, annot=s.annotation
+            )
     return out
 
 
