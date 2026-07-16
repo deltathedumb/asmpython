@@ -4048,10 +4048,47 @@ def _store_global(ctx: _FuncCtx, sym: str, val: IRValue) -> None:
 def _lower_raise(ctx: _FuncCtx, s: A.Raise) -> None:
     """Lower `raise expr` or bare `raise` to a call to _abi_raise(msg, type_id)."""
     if s.value is None:
-        # bare re-raise: forward current active exception unchanged
+        # Bare re-raise: forward the currently active exception unchanged.
+        # _runtime_exc_msg is NULL until the first raise ever happens, so
+        # a bare `raise` with nothing active must report the same error
+        # CPython does (RuntimeError: No active exception to reraise)
+        # instead of blindly forwarding a NULL message/stale type id --
+        # mirrors codegen.py's _gen_stmt Raise handling exactly.
         msg_v = _load_global(ctx, "_runtime_exc_msg", PTR)
+        zero = ctx.tmp(PTR)
+        ctx.emit(IRInstr("const", zero, [0]))
+        has_exc = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.ne", has_exc, [msg_v, zero]))
+
+        has_b = ctx.new_block("reraisehas")
+        none_b = ctx.new_block("reraisenone")
+        after_b = ctx.new_block("reraiseafter")
+        msg_ptr = ctx.ensure_slot(f"__reraise_msg_{id(s)}", PTR)
+        type_ptr = ctx.ensure_slot(f"__reraise_type_{id(s)}", I64)
+        ctx.emit(IRInstr("br.t", None, [has_exc, has_b.label, none_b.label]))
+
+        ctx.switch_to(has_b)
         type_v = _load_global(ctx, "_runtime_exc_type", I64)
-        ctx.emit(IRInstr("call", None, ["_abi_raise", msg_v, type_v]))
+        ctx.emit(IRInstr("store", None, [msg_v, msg_ptr]))
+        ctx.emit(IRInstr("store", None, [type_v, type_ptr]))
+        ctx.emit(IRInstr("br", None, [after_b.label]))
+
+        ctx.switch_to(none_b)
+        no_exc_name = ctx.mctx.intern_str("No active exception to reraise")
+        no_exc_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", no_exc_v, [no_exc_name]))
+        runtime_err_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", runtime_err_v, [BUILTIN_EXC_IDS["RuntimeError"]]))
+        ctx.emit(IRInstr("store", None, [no_exc_v, msg_ptr]))
+        ctx.emit(IRInstr("store", None, [runtime_err_v, type_ptr]))
+        ctx.emit(IRInstr("br", None, [after_b.label]))
+
+        ctx.switch_to(after_b)
+        final_msg = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", final_msg, [msg_ptr]))
+        final_type = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", final_type, [type_ptr]))
+        ctx.emit(IRInstr("call", None, ["_abi_raise", final_msg, final_type]))
     else:
         exc_id = _exc_raise_type_id_ir(s.value)
         exc_id_v = ctx.tmp(I64)
@@ -4157,8 +4194,15 @@ def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
             ctx.emit(IRInstr("br", None, [check_blocks[hi + 1].label]))
             ctx.switch_to(matched_b)
         # Handler matched: optionally bind exception message to a name.
+        # _collect_module_globals registers a module-scope `except X as e:`
+        # bind_name as a global, so the write here must go through the
+        # same global-vs-local check every other read of that name uses
+        # (_name_ptr) -- a bare ctx.ensure_slot() always makes a local
+        # slot, which every module-scope read then misses entirely,
+        # reading the zero-initialized global instead (same bug class as
+        # the for-loop variable fixes elsewhere in this file).
         if bind_name is not None:
-            bind_ptr = ctx.ensure_slot(bind_name, PTR)
+            bind_ptr = _name_ptr(ctx, bind_name, PTR)
             exc_msg_v = _load_global(ctx, "_runtime_exc_msg", PTR)
             ctx.emit(IRInstr("store", None, [exc_msg_v, bind_ptr]))
         for st in hbody:

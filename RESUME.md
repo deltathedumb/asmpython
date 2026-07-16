@@ -201,32 +201,57 @@ Verified: `tests.runner` still 481/489 (no regressions). Full
 build+run+expected-output sweep on 1-60 went 29/60 → 34/60 exact matches
 across this follow-up (was 21/60 before the whole day's work started).
 
+**Second follow-up** (same day, commits after `9f867684`): fixed the
+`(null)` exception-message bug (114/131) — it was **two** more bugs, both
+found by tracing IR/runtime state directly rather than guessing:
+
+1. A module-scope `except X as e:`'s `bind_name` write used
+   `ctx.ensure_slot()` (always local) while `_collect_module_globals`
+   correctly registers `A.Try.bind_name` as a module global and every
+   *read* of `e` resolved through that global — the fourth occurrence of
+   this exact write/read mismatch bug class found this day (for-loop
+   vars, range-for, now exception bindings). Fixed the same way
+   (`_name_ptr` instead of `ensure_slot`).
+2. Bare `raise` with no active exception (`_runtime_exc_msg` still NULL,
+   nothing ever raised) blindly forwarded the NULL message/stale type id
+   instead of substituting CPython's `RuntimeError("No active exception
+   to reraise")` — `codegen.py` has this exact NULL-check/substitution
+   that `ir_lower.py`'s bare-raise path never had. Ported it as an IR
+   block (has-exception / substitute-then-raise / merge).
+
+Verified: `tests.runner` still 481/489. Full build+run+expected-output
+sweep on 1-60 went 34/60 → 36/60 exact matches.
+
 Remaining 1-60 build failures: several unimplemented `MethodCall`s
 (`list.sort`, `dict.pop`, `str.rpartition`/`casefold`/`format`), `del`
 statement, starred/non-Name tuple-assign targets, walrus operator,
-`sorted(key=...)` lambda body. Remaining build+run mismatches on 1-60
-(all re-confirmed pre-existing, not new): `114_bare_raise.py`/
-`131_except_dispatch.py` print `(null)` instead of exception messages;
-`132_dict_union.py`/`133_dict_unpack.py`/`104_set_methods.py`/
+`sorted(key=...)` lambda body. Remaining build+run mismatches on 1-60 (all
+re-confirmed pre-existing, not new): `132_dict_union.py`/
+`133_dict_unpack.py`/`104_set_methods.py`/
 `123_set_discard_remove_copy_pop.py` produce empty or wrong output;
 f-string format-spec support (alignment, width, precision,
 thousands-grouping, binary/hex-with-prefix) is entirely unimplemented
 (silently ignores the spec and prints the plain value); `109_pct_format.py`
-segfaults (`%`-style string formatting has zero implementation, a
-separate large feature).
+/`111_pct_repr.py` segfault (`%`-style string formatting has zero
+implementation, a separate large feature).
 
 **Next step on resume**: `del` statement and the tuple-assign/
 starred-target gaps look like the next-cheapest build-success wins.
-For runtime correctness, the `(null)` exception-message bug
-(114/131) is probably a quick, high-value fix — likely the exception
-payload's message pointer isn't being threaded through the same way
-class/id are. F-string format specs are a bigger, self-contained feature
-(worth a dedicated pass: parse the `:spec` mini-language once, drive
-alignment/width/precision/base/grouping from one shared formatter) that
-would close out most of the remaining fstring_* cases at once. All of
-this is toward full parity with `codegen.py` under `--backend x86-64` —
-the direct predecessor of the newly-confirmed "make the IR-based backend
-the default" workload item.
+Given this session found the same write/read global-vs-local mismatch
+bug **four separate times** in four different lowering sites (module-
+scope for-loop var, range-for var, exception bind_name, and originally
+the list-for var), it's worth a **grep audit**: search `ir_lower.py` for
+every remaining bare `ctx.ensure_slot(<name>, ...)` call where `<name>`
+is a source-level identifier (not a compiler-internal `__foo_{id}` temp)
+and verify each one goes through `_name_ptr` instead, rather than waiting
+to find the fifth occurrence via another failing test case. F-string
+format specs are a bigger, self-contained feature (worth a dedicated
+pass: parse the `:spec` mini-language once, drive alignment/width/
+precision/base/grouping from one shared formatter) that would close out
+most of the remaining fstring_* cases at once. All of this is toward full
+parity with `codegen.py` under `--backend x86-64` — the direct
+predecessor of the newly-confirmed "make the IR-based backend the
+default" workload item.
 
 ## Selfhost Status (plan-step 11)
 
