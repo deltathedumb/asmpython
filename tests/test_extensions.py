@@ -202,10 +202,16 @@ class ParserIsolationTests(unittest.TestCase):
         from asmpython._compiler.lexer import Lexer
         from asmpython._compiler.parser import Parser
 
-        src_a = "extend constants\nconst X = 1\n"
+        # Activation now happens via the `--ext` CLI flag (passed into
+        # Parser.__init__ as `active_extensions`), not in-source directives
+        # -- so isolation here means "activating constants for mod_a's
+        # Parser instance must not leak into mod_b's separately-constructed
+        # instance", the same property program.py's per-module fresh-Parser
+        # construction depends on.
+        src_a = "const X = 1\n"
         src_b = "const = 5\nprint(const)\n"
 
-        mod_a = Parser(Lexer(src_a).tokenize()).parse()
+        mod_a = Parser(Lexer(src_a).tokenize(), frozenset({"constants"})).parse()
         mod_b = Parser(Lexer(src_b).tokenize()).parse()
 
         # mod_a's constants activation must not leak into mod_b's parse: its

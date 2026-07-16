@@ -1,5 +1,6 @@
+# ext: constants
 # expect-error: only appear at module scope
 try:
-    extend constants
+    const X = 1
 except Exception:
     pass

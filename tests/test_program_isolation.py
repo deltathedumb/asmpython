@@ -1,4 +1,4 @@
-"""Cross-module (whole-program) extension-state isolation test.
+"""Cross-module (whole-program) extension-activation test.
 
 This is NOT a `tests/cases*` glob member -- it needs real multi-file
 `program.py` whole-program merging, which `tests/runner.py`'s existing
@@ -11,10 +11,17 @@ or via `python -m unittest tests.test_program_isolation`, matching the
 `unittest.TestCase` convention already used by `tests/test_pyinbin.py` and
 `tests/test_pytest_scout.py`.
 
-Each module `program.py` merges gets its own fresh `Parser` (and therefore
-its own fresh `ExtensionContext` -- see `extensions.py`'s module docstring),
-so `extend constants` in one file must never leak into another file's parse,
-even when one imports the other.
+Extension activation is now driven entirely by the `--ext` CLI flag (never
+by in-source directives -- a program's grammar never changes without the
+invoker's explicit, outside-the-source opt-in). `load_program`'s
+`active_extensions` parameter is applied *uniformly* to every module a
+whole-program compile merges (see `program.py`'s two `Parser(...)`
+construction sites), so there is no more per-file variance to test for --
+these tests instead confirm that uniform activation actually reaches every
+merged module (an imported module that needs `constants` parses instead of
+being silently dropped), and that leaving it off leaves `const` a plain
+identifier and makes any real `const` declaration a hard parse error, in
+the entry module exactly like every other module.
 """
 
 from __future__ import annotations
@@ -24,20 +31,22 @@ import unittest
 from pathlib import Path
 
 from asmpython._compiler import ast_nodes as A
+from asmpython._compiler.errors import ParseError
 from asmpython._compiler.program import load_program
 
 
 class ProgramIsolationTests(unittest.TestCase):
-    def test_const_activation_does_not_leak_into_imported_module(self) -> None:
+    def test_active_extensions_reach_every_merged_module(self) -> None:
+        """helper.py's own `const Y = 5` only parses successfully (rather
+        than being silently dropped from the merge, per program.py's
+        existing leniency toward modules it can't parse) when `constants`
+        is active for the whole compile -- proving activation reaches
+        imported modules, not just the entry module."""
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / "__init__.py").write_text("")
-            (root / "helper.py").write_text(
-                "const = 99          # ordinary variable name -- constants "
-                "NOT active here\nprint(const)\n"
-            )
+            (root / "helper.py").write_text("const Y = 5\ndef use_y():\n    return Y\n")
             main_src = (
-                "extend constants\n"
                 "const SHARED = 1\n"
                 "from . import helper\n"
                 "print(SHARED)\n"
@@ -45,76 +54,59 @@ class ProgramIsolationTests(unittest.TestCase):
             main_path = root / "main.py"
             main_path.write_text(main_src)
 
-            mod = load_program(main_src, main_path)
+            mod = load_program(main_src, main_path, active_extensions=frozenset({"constants"}))
 
-            # Must not raise (proving helper.py's bare `const = 99` parsed as
-            # a plain assignment, unaffected by main.py's own `extend
-            # constants` -- because helper.py gets its own fresh
-            # Parser/ExtensionContext at program.py's second Parser(...)
-            # construction site).
-            self.assertTrue(
-                any(
-                    isinstance(s, A.Assign) and s.target == "const"
-                    for s in mod.body
-                )
-            )
-            # main.py's own const declaration must still be a real ConstDecl.
+            # main.py's own const declaration parsed as a real ConstDecl.
             self.assertTrue(
                 any(
                     isinstance(s, A.ConstDecl) and s.name == "SHARED"
                     for s in mod.body
                 )
             )
-            # No leaked Extend/Retract directives in the merged module --
-            # they're filtered out per-module before program.py ever merges
-            # anything (Parser.parse()'s final filter step).
-            self.assertFalse(
-                any(isinstance(s, (A.Extend, A.Retract)) for s in mod.body)
-            )
+            # helper.py's use_y() function was merged in at all -- proving
+            # helper.py parsed successfully (a module that fails to parse
+            # is silently skipped entirely, including its funcs).
+            self.assertTrue(any(f.name == "use_y" for f in mod.funcs))
 
-    def test_const_without_own_extend_is_silently_dropped_not_raised(self) -> None:
-        """helper2.py does `const Y = 5` WITHOUT its own `extend constants` --
-        proving activation genuinely does not leak downstream into imported
-        modules' own parses.
-
-        IMPORTANT CAVEAT: per program.py's existing exception handling
-        around its second Parser(...) construction site (a module that
-        fails to parse is silently skipped, not propagated as a
-        whole-program failure), the actual observable behavior here is that
-        helper2.py is silently DROPPED from the whole-program merge rather
-        than load_program raising an exception. This test checks for THAT
-        actual behavior, not a raised exception -- a raised exception would
-        contradict program.py's own existing, deliberate leniency toward
-        modules it can't parse (they may be third-party-ish or use
-        constructs outside the supported subset).
-        """
+    def test_extensions_off_by_default_and_uniform_across_entry_and_imports(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / "__init__.py").write_text("")
-            (root / "helper2.py").write_text("const Y = 5\nprint(Y)\n")
-            main_src = (
-                "extend constants\n"
-                "const SHARED = 1\n"
-                "from . import helper2\n"
-                "print(SHARED)\n"
+            (root / "helper.py").write_text(
+                "const = 99          # ordinary variable name -- constants "
+                "is not active anywhere in this compile\nprint(const)\n"
             )
+            main_src = "const = 1\nfrom . import helper\nprint(const)\n"
             main_path = root / "main.py"
             main_path.write_text(main_src)
 
-            # Must not raise -- helper2.py is simply dropped from the merge.
+            # No active_extensions passed -- default is none active.
             mod = load_program(main_src, main_path)
 
-            self.assertFalse(
+            # main.py's own `const = 1` must have parsed as a plain
+            # assignment, not a ConstDecl, since constants was never
+            # activated for this compile.
+            self.assertTrue(
                 any(
-                    isinstance(s, A.ExprStmt)
-                    and isinstance(s.expr, A.Call)
-                    and s.expr.func == "print"
-                    and s.expr.args
-                    and isinstance(s.expr.args[0], A.Name)
-                    and s.expr.args[0].name == "Y"
+                    isinstance(s, A.Assign) and s.target == "const"
                     for s in mod.body
                 )
             )
+            self.assertFalse(any(isinstance(s, A.ConstDecl) for s in mod.body))
+
+    def test_real_const_declaration_without_activation_is_a_hard_parse_error(self) -> None:
+        """A real `const NAME = value` shape in the entry module, with no
+        `--ext constants`, is a real ParseError (P_CONST_WITHOUT_EXTENSION)
+        that propagates -- unlike an imported module's parse failure, the
+        entry module's own parse failure is never silently swallowed."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            main_src = "const SHARED = 1\nprint(SHARED)\n"
+            main_path = root / "main.py"
+            main_path.write_text(main_src)
+
+            with self.assertRaises(ParseError):
+                load_program(main_src, main_path)
 
 
 if __name__ == "__main__":

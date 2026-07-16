@@ -86,6 +86,21 @@ def _parse_stdin(src: str) -> str:
     return out + "\n"
 
 
+def _parse_ext(src: str) -> list[str]:
+    """Read a `# ext: name1, name2` marker line and return the extension
+    names to activate via `--ext`, one `--ext NAME` pair per name. A test
+    case that needs an opt-in compiler-syntax extension (e.g. `constants`,
+    for `const NAME = value`) declares it this way instead of an in-source
+    `extend` directive -- activation is CLI-only, matching how a real
+    invocation would enable it."""
+    for raw in src.splitlines():
+        s = raw.strip()
+        if s.startswith("# ext:"):
+            names = s[len("# ext:"):].strip()
+            return [n.strip() for n in names.split(",") if n.strip()]
+    return []
+
+
 def _detect_target() -> str:
     if sys.platform == "win32":
         return "windows"
@@ -106,9 +121,12 @@ def run_positive(case: Path, target: str) -> TestResult:
         import re as _re
         stem = _re.sub(r"(?i)(update|install|setup|patch)", "test", stem)
     out = BUILD / (stem + (".exe" if target == "windows" else ""))
+    src_text = case.read_text(encoding="utf-8")
     cmd = [sys.executable, "-m", "asmpython", str(case), "--target", target, "-o", str(out)]
     if _use_runtime_lib:
         cmd.append("--use-runtime-lib")
+    for ext_name in _parse_ext(src_text):
+        cmd += ["--ext", ext_name]
     # On Windows, compile without creationflags (adding CREATE_NO_WINDOW to gcc
     # causes it to mark the output exe for UAC elevation).  Run the compiled exe
     # with CREATE_NO_WINDOW to suppress the UAC prompt.
@@ -129,7 +147,8 @@ def run_positive(case: Path, target: str) -> TestResult:
 
 
 def run_negative(case: Path, target: str) -> TestResult:
-    expected = _parse_expect(case.read_text(encoding="utf-8"), "expect-error")
+    src_text = case.read_text(encoding="utf-8")
+    expected = _parse_expect(src_text, "expect-error")
     if expected is None:
         return TestResult(case.name, False, "no `# expect-error:` block found")
 
@@ -143,6 +162,8 @@ def run_negative(case: Path, target: str) -> TestResult:
            "--emit-asm", "--no-pyinbin-fallback", "-o", str(out)]
     if _use_runtime_lib:
         cmd.append("--use-runtime-lib")
+    for ext_name in _parse_ext(src_text):
+        cmd += ["--ext", ext_name]
     cp = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
     if cp.returncode == 0:
         return TestResult(case.name, False, "expected compile to fail, but it succeeded")

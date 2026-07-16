@@ -3,87 +3,72 @@
 ## Overview
 
 The native compiler (`asmpython/_compiler/`) supports opt-in syntax
-extensions, activated per-file with module-level directives:
+extensions, activated for an entire compile *invocation* via the `--ext`
+CLI flag:
 
-```python
-extend constants
-const MAX_USERS = 100
-retract constants
-const MAX_USERS_2 = 100   # invalid: constants is no longer active
+```sh
+asmpython build myfile.py --ext constants
 ```
 
-`extend <name>` activates a compiler extension for the rest of the current
-module; `retract <name>` deactivates it. The only built-in extension is
+```python
+const MAX_USERS = 100
+```
+
+`--ext NAME` (repeatable: `--ext constants --ext other`) activates a
+compiler extension for the whole build. The only built-in extension is
 `constants`, which adds `const NAME [: annotation] = value` declarations.
+Off by default — a source file's grammar never changes without this
+explicit, outside-the-source opt-in from whoever invokes the compiler.
 
 This is implemented as real compiler syntax handled by the existing lexer,
 recursive-descent parser, AST, semantic analyzer, and shared IR
-lowering/legacy codegen -- not as runtime function calls, and not through
+lowering/legacy codegen — not as runtime function calls, and not through
 source-text preprocessing.
 
-## Contextual (soft) keywords
+**There is no in-source activation directive.** An earlier design used
+`extend <name>` / `retract <name>` module-level statements for forward-only,
+per-file activation; this was removed in favor of CLI-only activation so a
+program's grammar is never a function of anything the program's own source
+controls. If you're looking for `extend`/`retract`, they no longer exist —
+use `--ext NAME` instead.
 
-`extend`, `retract`, and `const` are never added to the lexer's `KEYWORDS`
-set -- they tokenize as plain `NAME`, exactly like `match` already does. The
-parser recognizes each one only when a speculative lookahead confirms the
-right shape (`_looks_like_extend_stmt`, `_looks_like_retract_stmt`,
-`_looks_like_const_decl` in `parser.py`, following the same
+## Contextual (soft) keyword
+
+`const` is never added to the lexer's `KEYWORDS` set -- it tokenizes as
+plain `NAME`, exactly like `match` already does. The parser recognizes it
+only when a speculative lookahead confirms the right shape
+(`_looks_like_const_decl` in `parser.py`, following the same
 save-position/parse/rewind idiom as the existing `_looks_like_match_stmt`).
 
-This means all three remain ordinary identifiers whenever the shape doesn't
-match or the relevant extension isn't active:
+This means `const` remains an ordinary identifier whenever the shape doesn't
+match or `constants` isn't active for this build:
 
 ```python
-extend = 5          # ordinary assignment
-retract = False      # ordinary assignment
-const = 10           # ordinary assignment (no NAME follows `const`)
-extend.attr = 1       # ordinary attribute assignment
+const = 10           # ordinary assignment
+const.attr = 1        # ordinary attribute assignment
 ```
 
-## `extend` / `retract` semantics
+## Activation semantics
 
-- **Module-scope only.** Both directives are rejected anywhere nested --
-  inside a function, class body, `if`/`for`/`while`/`try`/`with`, or any
-  other suite -- with `ExtensionScopeError`-equivalent diagnostic
-  `P012: 'extend'/'retract' may only appear at module scope`. Enforced via a
-  single `Parser._suite_depth` counter incremented/decremented by
-  `_parse_block` (covering all of its call sites at once) plus an explicit
-  check inside `_parse_classdef`'s own bespoke class-body loop (which does
-  not go through `_parse_block`).
-- **Forward-only, per-file, transactional.** Activation/retraction only
-  affects parsing from that point forward in the current file. Every
-  `Parser` owns a fresh `ExtensionContext` (see below), so there is no way
-  for one file's directives to affect another file, or an earlier compiler
-  run to affect a later one.
-- **Duplicate activation is an error** (`P013: extension 'X' is already
-  active`), not idempotent -- this is intentional so a stray double
-  `extend constants` is caught rather than silently ignored.
-- **Retracting an inactive extension is an error** (`P014: extension 'X' is
-  not active`).
-- Retracting only changes what grammar/handlers are active *going forward*.
-  It does not erase semantics already attached to already-parsed
-  declarations: `extend constants; const MAX = 100; retract constants` still
-  leaves `MAX` permanently const-locked for the rest of the module.
-- Extensions declare `requires`/`conflicts`. Activating one loads/validates
-  its dependencies first (missing dependency: `P016`; version mismatch:
-  `P016`); conflicting extensions can't be active simultaneously (`P015`,
-  checked in both directions); retracting an extension another active
-  extension depends on is blocked (`P017`).
-
-## The built-in `constants` extension
-
-```python
-extend constants
-const MAX_USERS = 100
-const RATE: float = 0.05
-```
-
-- `const NAME = value` requires an initializer. `const NAME` alone is a hard
-  error (`P010`), regardless of whether an annotation is present.
-- `const NAME: annotation = value` uses the compiler's existing
+- **Whole-invocation, uniform across every module.** `--ext` applies to
+  the entire compile — the entry module and every module a whole-program
+  compile merges in (`program.py`'s `load_program` builds a fresh `Parser`
+  per module, but passes the same `active_extensions` set to each one).
+  There is no way for one file to opt in while a sibling file opts out;
+  activation is a property of the *build*, not of any individual file.
+- **`const NAME = value` requires an initializer.** `const NAME` alone is a
+  hard error (`P010`), regardless of whether an annotation is present.
+- **`const NAME: annotation = value`** uses the compiler's existing
   `_parse_type_annotation`/annotation-validation machinery -- a mismatched
   initializer (`const count: int = "five"`) fails with the normal type-error
   diagnostics, unchanged.
+- **Module-scope only.** `const` is rejected anywhere nested -- inside a
+  function, class body, `if`/`for`/`while`/`try`/`with`, or any other suite
+  -- with diagnostic `P012: 'const' may only appear at module scope`.
+  Enforced via a single `Parser._suite_depth` counter incremented/
+  decremented by `_parse_block` (covering all of its call sites at once)
+  plus an explicit check inside `_parse_classdef`'s own bespoke class-body
+  loop (which does not go through `_parse_block`).
 - **Binding, not deep immutability.** `const` locks the *name* against every
   future rebinding form: direct reassignment, augmented assignment (`+=`
   etc.), `del`, multiple assignment (`a = b = ...`), tuple/list
@@ -113,22 +98,24 @@ const RATE: float = 0.05
 ## Module isolation and parallel-compilation isolation
 
 Every `Parser` instance owns its own fresh `ExtensionContext`
-(`Parser.__init__` sets `self.ext_ctx = ExtensionContext()`). No extension
-state is ever stored globally. This gives three isolation guarantees for
-free:
+(`Parser.__init__` sets `self.ext_ctx = ExtensionContext()`, then activates
+each name in `active_extensions` immediately, before any token is parsed).
+No extension state is ever stored globally. This gives three isolation
+guarantees for free:
 
 1. **Two `Parser` instances in the same process never share state** --
    verified directly in `tests/test_extensions.py`.
-2. **Whole-program compiles never leak extension state between modules.**
-   `program.py`'s `load_program` builds a genuinely fresh `Parser` for the
-   entry module and for every imported module it merges (two separate
-   `Parser(...)` construction sites) -- so `main.py` doing `extend constants`
-   has zero effect on how `helper.py` parses, even when `main.py` imports
-   `helper.py`. Verified in `tests/test_program_isolation.py`, including the
-   nuance that a helper module using `const` without its own `extend
-   constants` simply fails to parse and is silently dropped from the merge
-   (matching `program.py`'s existing, deliberate leniency toward modules it
-   can't parse) rather than aborting the whole-program compile.
+2. **Whole-program compiles apply the same activation set to every merged
+   module.** `program.py`'s `load_program` builds a genuinely fresh
+   `Parser` for the entry module and for every imported module it merges
+   (two separate `Parser(...)` construction sites), both fed the same
+   `active_extensions` — so a project's grammar is consistent across every
+   file. Verified in `tests/test_program_isolation.py`, including the
+   nuance that a helper module that fails to parse (e.g. because the build
+   didn't pass `--ext constants` but the helper uses `const`) is silently
+   dropped from the merge (matching `program.py`'s existing, deliberate
+   leniency toward modules it can't parse) rather than aborting the whole
+   compile.
 3. **Separate compiler invocations trivially can't leak state** -- separate
    OS processes never share Python object state. No test needed; this is
    just how processes work.
@@ -147,6 +134,9 @@ Defined in `asmpython/_compiler/extensions.py`:
   dependency, duplicate statement-prefix registration, blocked retraction)
   runs and completes *before* any state mutation, so a failed
   activation/retraction call leaves the context completely unchanged.
+  `retract` has no CLI-facing use today (there's no way to retract
+  mid-build), but remains a real, tested method on `ExtensionContext` for
+  programmatic/future use.
 - `_REGISTRY`: a module-level dict of extension name -> `CompilerExtension`
   subclass (class references, not instances -- each activation constructs
   its own fresh instance). `register_extension(cls)` is the public hook for
@@ -155,12 +145,16 @@ Defined in `asmpython/_compiler/extensions.py`:
 **Current v1 simplification:** with exactly one built-in extension,
 `parser.py` dispatches `const` directly (guarded by
 `self.ext_ctx.is_active("constants")`) rather than routing through the
-generic `ExtensionContext.handler_for("const")` indirection. The generic
+generic `ExtensionContext.handler_for(...)` indirection. The generic
 dispatch path still exists and is fully exercised by
 `tests/test_extensions.py`'s dummy extensions -- it's simply not yet wired
 into the parser's main dispatch loop, since doing so for a single extension
 would add indirection with no present benefit. A second built-in extension
 would be the natural point to wire it in.
+
+A public, third-party-facing way to author and register a new extension
+(`asmpython.Extension(...)`) and load it via `--ext path/to/plugin.py` is
+planned but not yet implemented as of this writing.
 
 ## Current lexer limitation
 
@@ -206,7 +200,7 @@ hooks (they currently run arbitrary Python with full `ExtensionContext`
 access), a trust/signing story for third-party extension code, and a
 reproducibility guarantee (the same source file should compile identically
 regardless of which extensions happen to be installed/registered in a given
-compiler environment, unless the file's own `extend` directives explicitly
+compiler environment, unless the invocation's own `--ext` flags explicitly
 opt in). None of this is needed for the built-in `constants` extension --
 it ships in-tree and is trusted like any other compiler source -- but a
 future extension author shouldn't assume the registry is already hardened
@@ -216,16 +210,14 @@ for arbitrary third-party use.
 
 The extension system is entirely a frontend concern:
 
-- `Extend`/`Retract` are transient AST nodes: they mutate the parser's
-  `ExtensionContext` as they're parsed and are then filtered out of the
-  final `Module.body` (see `Parser.parse()`) before sema, IR lowering, or
-  codegen ever run. None of those stages need to know these directives
-  existed.
-- `ConstDecl` is permanent (it reaches sema/IR-lowering/codegen), but after
-  semantic validation it lowers *exactly* like an ordinary initialized
-  `Assign` -- `ir_lower.py`'s `_lower_stmt` and `codegen.py`'s `gen_stmt`
-  each normalize a `ConstDecl` into an equivalent `Assign` at the top of the
-  function, before any other dispatch runs. This means:
+- `ConstDecl` is the only extension-defined AST node that reaches later
+  phases (there's no more `Extend`/`Retract` transient-node pair; activation
+  is settled by the CLI before parsing starts and needs no in-tree AST
+  representation at all). After semantic validation, `ConstDecl` lowers
+  *exactly* like an ordinary initialized `Assign` -- `ir_lower.py`'s
+  `_lower_stmt` and `codegen.py`'s `gen_stmt` each normalize a `ConstDecl`
+  into an equivalent `Assign` at the top of the function, before any other
+  dispatch runs. This means:
   - The IR-based backends (`asmpython/_backends/x86_64/`,
     `asmpython/_backends/ternary/`) need zero extension-specific code --
     they only ever consume already-lowered IR, and a `ConstDecl` produces
@@ -245,23 +237,26 @@ The extension system is entirely a frontend concern:
 ## Testing
 
 - `tests/cases/45x_const_*.py` (positive: compiles and runs, stdout-diffed)
-  and `tests/cases_fail/const_*.py` / `extend_*.py` / `retract_*.py`
-  (negative: `# expect-error: <substring>`) -- the standard
-  `tests/runner.py` convention, covering activation/deactivation, typed
-  constants, the initializer requirement, every rebinding form, the
-  mutation-vs-rebinding distinction, unknown extensions, duplicate
-  activation, retraction of an inactive extension, module-scope violations
-  for `extend`/`retract`/`const`, the def/class-vs-const ordering asymmetry,
-  and the plain-variable non-regression cases (`extend`/`retract`/`const`
-  used as ordinary identifiers).
+  and `tests/cases_fail/const_*.py` (negative: `# expect-error: <substring>`)
+  -- the standard `tests/runner.py` convention. A case that needs an
+  extension active declares it via a `# ext: constants` marker comment
+  (parsed by `tests/runner.py`'s `_parse_ext`, which appends `--ext NAME`
+  to the compile command) instead of an in-source `extend` directive.
+  Covers activation via `--ext`, typed constants, the initializer
+  requirement, every rebinding form, the mutation-vs-rebinding distinction,
+  module-scope violations for `const` across every suite shape (function/
+  class/if/loop/try), the def/class-vs-const ordering asymmetry, and the
+  plain-variable non-regression case (`const` used as an ordinary
+  identifier when `constants` isn't active).
 - `tests/test_extensions.py` -- `unittest`-based unit tests for
   `ExtensionContext`'s dependency/conflict/cycle/transactional-rollback
   logic, using small dummy `CompilerExtension` subclasses (the only
   built-in extension, `constants`, has no dependents/conflicts of its own
   to exercise this against), plus a same-process two-`Parser`-instances
-  isolation test.
+  isolation test (one constructed with `constants` in `active_extensions`,
+  the other without).
 - `tests/test_program_isolation.py` -- new, non-globbed whole-program
-  cross-module isolation test (not part of the `tests/cases*` convention,
+  cross-module activation test (not part of the `tests/cases*` convention,
   since `tests/runner.py`'s existing harness never drives `program.py`'s
   whole-program merge path). Run via `python -m unittest
   tests.test_program_isolation`.

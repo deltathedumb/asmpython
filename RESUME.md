@@ -64,7 +64,7 @@ on asmpython. Plan: finish 2.0.0 first, fork asmpython into a uASM-facing
 frontend afterward, as a separate effort. Don't let this influence IR/backend
 design decisions above.
 
-## Extension System — DONE (2026-07-15, commit `1a40ee30`)
+## Extension System — DONE (2026-07-15, commit `1a40ee30`; activation model redesigned 2026-07-16, see below)
 
 Added `extend <name>` / `retract <name>` / `const NAME [: annot] = value` to
 the native compiler (`asmpython/_compiler/`, not pyinbin) as real contextual-
@@ -89,6 +89,94 @@ across module boundaries, not the 44 shipped test scenarios.
 new ones) was silently checking the pyinbin fallback's unrelated error text
 instead of the real native-compiler diagnostic. Fixed — see corrected test
 baseline below.
+
+**Activation model redesigned** (2026-07-16, commit after `2b702c51`): the
+user explicitly rejected in-source `extend`/`retract` directives — "at
+first i thought itd be fine but at second thought i dont want to change
+python at all without user consent (via `--ext` being the way users add,
+and by default adding none)". Replaced entirely with a `--ext NAME` CLI
+flag (repeatable), activated once per compile invocation and applied
+*uniformly* to every module a whole-program compile merges (never
+per-file, never toggleable mid-source) — a program's grammar is now a
+property of the build, not of anything the source itself controls.
+
+- `parser.py`: deleted `_parse_extend`/`_parse_retract`/
+  `_looks_like_extend_stmt`/`_looks_like_retract_stmt`/`_parse_dotted_name`
+  and their dispatch sites (module-level + the class-body bespoke
+  scope-violation check, now `const`-only). `Parser.__init__` gained an
+  `active_extensions: frozenset[str] | None` param, activating each name
+  against a fresh `ExtensionContext` immediately at construction — before
+  any token is parsed — instead of extension activation being something
+  parsing itself could mutate.
+- `ast_nodes.py`: deleted the now-pointless `Extend`/`Retract` transient
+  AST node classes (nothing produces them anymore).
+- `driver.py`/`program.py`/`__main__.py`: threaded `active_extensions`
+  through `_compile_program` → `compile_source`/`compile_targets` →
+  `load_program` (applied to both of its `Parser(...)` construction sites
+  — entry module and every merged import) → every `Parser(...)` call.
+  New `--ext NAME` argparse flag (`action="append"`, default `None` →
+  `frozenset()`), wired into both the build path and `--check`.
+- `errors.py`: retired the `extend`/`retract`-specific wording on
+  P011/P012/P018 (now describe `--ext`/`const` instead); P013/P014/P017
+  (duplicate-activation / not-active / retract-blocked) are still real,
+  tested `ExtensionContext` API behavior but effectively unreachable via
+  the CLI now (`--ext` is deduped into a `frozenset` before activation,
+  and there's no in-source retraction) — codes kept allocated, comments
+  updated to say so.
+- `docs/EXTENSIONS.md`: rewritten for the new model end-to-end.
+- Test suite: deleted `tests/cases_fail/extend_*.py` (7 files) and
+  `retract_*.py` (2 files) outright — they tested directive syntax that no
+  longer exists. Added four `const_outside_module_scope_{function,class,
+  loop,try}.py` negative cases (the const-based equivalent, covering the
+  same five suite shapes the deleted extend-scope tests did — `if` was
+  already covered by the pre-existing `const_outside_module_scope.py`).
+  Renamed `const_without_extend.py` → `const_without_activation.py`.
+  Deleted `454_const_retract_then_plain.py` (tested `retract` specifically,
+  no equivalent concept exists anymore). Every remaining `const_*` test
+  (13 negative + 3 positive) now declares its needed extension via a new
+  `# ext: constants` marker-comment convention (must appear *before* the
+  `# expect`/`# expect-error` block — `_parse_expect`'s collector absorbs
+  every subsequent `#`-line once it starts, so a marker placed after would
+  get swallowed into the expected-output/error text) instead of an
+  in-source `extend constants` line; `tests/runner.py` gained a
+  `_parse_ext` helper that reads this marker and appends `--ext NAME` to
+  the compiled command. `tests/test_extensions.py`'s one source-syntax
+  test (`ParserIsolationTests`) now constructs one `Parser` with
+  `active_extensions={"constants"}` and one without, instead of
+  `"extend constants\n..."` source text. `tests/test_program_isolation.py`
+  rewritten from scratch — the old file specifically tested *per-file*
+  activation variance (`main.py` opts in, `helper.py` doesn't), a scenario
+  that no longer exists by design; replaced with tests confirming `--ext`
+  reaches every merged module uniformly, and that a real `const` shape in
+  the entry module without activation is a hard `ParseError` (not silently
+  dropped — only an *imported* module's parse failure is ever silently
+  skipped, per `program.py`'s pre-existing leniency).
+
+Verified: `tests.runner` 475/483 (matches the 482/493 pre-change baseline
+exactly once the deliberate net file-count change is accounted for — same
+8 pre-existing, unrelated `collections`/pyinbin failures in both runs,
+confirmed via git-stash A/B). All 18 `test_extensions.py`/
+`test_program_isolation.py` unit tests pass. End-to-end CLI spot-check:
+`asmpython build ... --ext constants` compiles and runs a real `const`
+program correctly; the same file without `--ext constants` fails with the
+expected `P018` diagnostic mentioning `--ext constants`.
+
+**Next**: a public, third-party-facing authoring API is still pending —
+`asmpython.Extension(id=...)` (mirroring today's internal
+`register_extension()`/`CompilerExtension`, but with a public surface) plus
+`--ext` accepting either a bare registered name OR a filesystem path to a
+plugin file (loaded/exec'd first, registering whatever it defines, before
+activation by id) — not yet implemented as of this checkpoint. The user
+also asked for the same public-registration pattern extended to compiler
+backends and linkers (`asmpython.Backend(...)`/`asmpython.Linker(...)`),
+which today are hardcoded if/elif dispatch, not registries at all: backend
+selection in `driver.py`'s `_run_backend` (~line 404, `--backend legacy|
+x86-64|ternary`), linker selection in `_backends/x86_64/__init__.py`'s
+`run_backend_link` (~line 166-179, `_LINKER_NAMES` list + hardcoded
+`if linker_name == "gcc": ... elif == "builtin": ...`) — both would need a
+real name→implementation dict plus a `register_backend`/`register_linker`
+hook before a `Backend`/`Linker` authoring API has anywhere to register
+into.
 
 ## IR Migration Status — architecture changed mid-flight
 

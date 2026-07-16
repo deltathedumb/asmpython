@@ -566,10 +566,8 @@ class SemaAnalyzer:
         # to a parent -- so `name in scope.types` inside a function body
         # cannot distinguish "this is the module-level const" from "an
         # ordinary function-local that happens to share the name after
-        # seeding". Once a name is recorded here it is locked forever: even
-        # after `retract constants`, a name declared const while the
-        # extension was active remains const for the rest of the module (see
-        # extensions.py's retract() docstring).
+        # seeding". Once a name is recorded here it is locked forever for
+        # the rest of the module.
         self.const_names: dict = {}
         self.loop_depth = 0
         self.in_function: Optional[str] = None

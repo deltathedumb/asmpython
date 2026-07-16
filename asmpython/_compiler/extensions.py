@@ -1,11 +1,14 @@
 """Compiler-extension registry and per-compilation extension state.
 
 This module gives the parser a way to accept extra, opt-in syntax --
-declared via `extend <name>` / `retract <name>` module directives -- without
-any global mutable state and without the lexer or parser's core grammar
-tables ever being modified. Everything here is scoped to a single
-`ExtensionContext` instance, and every `Parser` owns exactly one fresh
-instance (see `Parser.__init__`), so extension activation:
+activated per compile *invocation* via the `--ext NAME` CLI flag (never by
+in-source directives: a program's grammar never changes without the
+invoker's explicit, outside-the-source opt-in) -- without any global mutable
+state and without the lexer or parser's core grammar tables ever being
+modified. Everything here is scoped to a single `ExtensionContext` instance,
+and every `Parser` owns exactly one fresh instance, pre-activated at
+construction time from the CLI's `--ext` list (see `Parser.__init__`), so
+extension activation:
 
   - never leaks between two `Parser` instances in the same process
     (confirmed exercised by `tests/test_extensions.py`),

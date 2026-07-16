@@ -1309,7 +1309,12 @@ def _rename_assign(stmt: A.Assign, new_target: str) -> A.Assign:
     )
 
 
-def load_program(entry_src: str, entry_path: Path) -> A.Module:
+def load_program(
+    entry_src: str,
+    entry_path: Path,
+    *,
+    active_extensions: "frozenset[str] | None" = None,
+) -> A.Module:
     """Parse the entry module and every reachable project module, merging their
     top-level funcs, classes, AND imported value globals into the entry Module.
     Returns the merged unit.
@@ -1320,11 +1325,16 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
     that value's initializer assignment, prepended to the entry body so it runs
     (and is collected as a global) before the code that uses it. Other module-
     level side-effecting statements are still not run.
+
+    `active_extensions` (from the `--ext` CLI flag) is applied to every
+    module this merge parses -- entry and every reachable import -- so a
+    whole-program compile's grammar is uniform across files rather than
+    varying per module.
     """
     entry_path = entry_path.resolve()
     root = _project_root(entry_path)
 
-    entry = Parser(Lexer(entry_src).tokenize()).parse()
+    entry = Parser(Lexer(entry_src).tokenize(), active_extensions).parse()
 
     seen: list[str] = [str(entry_path)]
     # Names already defined so merges don't duplicate (first definition wins).
@@ -1365,7 +1375,7 @@ def load_program(entry_src: str, entry_path: Path) -> A.Module:
         seen.append(mod_path_str)
         try:
             mod_src = mod_path.read_text(encoding="utf-8")
-            mod = Parser(Lexer(mod_src).tokenize()).parse()
+            mod = Parser(Lexer(mod_src).tokenize(), active_extensions).parse()
         except Exception as _exc:
             # A module we can't parse is skipped — it may be third-party-ish or
             # use constructs outside the subset; the importer still type-checks

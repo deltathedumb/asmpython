@@ -1,4 +1,4 @@
 # ext: constants
 # expect-error: only appear at module scope
-if True:
+for i in range(3):
     const X = 1

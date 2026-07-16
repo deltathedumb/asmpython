@@ -67,14 +67,21 @@ class ErrorCode:
     P_INVALID_ANNOTATION    = 108  # P008: invalid type annotation
     P_MULTILINE_IMPORT      = 109  # P009: multi-line parenthesised import
     P_CONST_NO_INITIALIZER  = 110  # P010: const declaration missing an initializer
-    P_UNKNOWN_EXTENSION     = 111  # P011: extend/retract names an unknown extension
-    P_EXTENSION_SCOPE       = 112  # P012: extend/retract/const used outside module scope
-    P_EXTENSION_ALREADY_ACTIVE = 113  # P013: extend names an already-active extension
-    P_EXTENSION_NOT_ACTIVE  = 114  # P014: retract names an extension that isn't active
+    P_UNKNOWN_EXTENSION     = 111  # P011: --ext names an unknown extension
+    P_EXTENSION_SCOPE       = 112  # P012: const used outside module scope
+    # P013/P014/P017 are reachable only via direct ExtensionContext.activate/
+    # retract() API use (see tests/test_extensions.py) -- --ext is deduped
+    # into a set before activation and has no in-source retraction, so a real
+    # CLI invocation can no longer trigger a duplicate-activation or
+    # retract-related diagnostic. Codes are kept allocated for API stability
+    # and because a future CLI feature (per-extension version pins, etc.)
+    # could make them reachable again.
+    P_EXTENSION_ALREADY_ACTIVE = 113  # P013: activate() called on an already-active extension
+    P_EXTENSION_NOT_ACTIVE  = 114  # P014: retract() called on an extension that isn't active
     P_EXTENSION_CONFLICT    = 115  # P015: extension conflicts with another active extension
     P_EXTENSION_MISSING_DEP = 116  # P016: extension activation is missing a dependency
-    P_EXTENSION_RETRACT_BLOCKED = 117  # P017: retract blocked by a dependent active extension
-    P_CONST_WITHOUT_EXTENSION  = 118  # P018: const used without the constants extension active
+    P_EXTENSION_RETRACT_BLOCKED = 117  # P017: retract() blocked by a dependent active extension
+    P_CONST_WITHOUT_EXTENSION  = 118  # P018: const used without --ext constants
 
     # ---- Semantic (E) ------------------------------------------------------
     # Name resolution
@@ -176,14 +183,14 @@ ERROR_DESCRIPTIONS: dict[str, str] = {
     _code_label(ErrorCode.P_INVALID_ANNOTATION):    "Invalid type annotation.",
     _code_label(ErrorCode.P_MULTILINE_IMPORT):      "Multi-line parenthesised imports are not supported.  Use one 'from X import Y' per line.",
     _code_label(ErrorCode.P_CONST_NO_INITIALIZER):  "A 'const' declaration requires an initializer.  'const NAME' alone is invalid; write 'const NAME = value'.",
-    _code_label(ErrorCode.P_UNKNOWN_EXTENSION):     "'extend'/'retract' names an extension that is not registered.",
-    _code_label(ErrorCode.P_EXTENSION_SCOPE):       "'extend', 'retract', and 'const' are only valid at module scope.",
-    _code_label(ErrorCode.P_EXTENSION_ALREADY_ACTIVE): "'extend' names an extension that is already active in this module.",
-    _code_label(ErrorCode.P_EXTENSION_NOT_ACTIVE):  "'retract' names an extension that is not currently active in this module.",
+    _code_label(ErrorCode.P_UNKNOWN_EXTENSION):     "'--ext' names an extension that is not registered.",
+    _code_label(ErrorCode.P_EXTENSION_SCOPE):       "'const' is only valid at module scope.",
+    _code_label(ErrorCode.P_EXTENSION_ALREADY_ACTIVE): "An extension was activated twice for the same compile.",
+    _code_label(ErrorCode.P_EXTENSION_NOT_ACTIVE):  "An extension was retracted that was not active.",
     _code_label(ErrorCode.P_EXTENSION_CONFLICT):    "The extension conflicts with another extension that is already active.",
     _code_label(ErrorCode.P_EXTENSION_MISSING_DEP): "The extension requires another extension that is not active and could not be loaded.",
     _code_label(ErrorCode.P_EXTENSION_RETRACT_BLOCKED): "Cannot retract this extension: another active extension depends on it.",
-    _code_label(ErrorCode.P_CONST_WITHOUT_EXTENSION): "'const' declarations require the 'constants' extension.  Add 'extend constants' before this declaration.",
+    _code_label(ErrorCode.P_CONST_WITHOUT_EXTENSION): "'const' declarations require the 'constants' extension.  Add '--ext constants' to the compile command.",
     # Semantic – name resolution
     _code_label(ErrorCode.E_UNDEFINED_NAME):        "Name is not defined in the current scope.  Check for typos or missing imports.",
     _code_label(ErrorCode.E_UNDEFINED_FUNC):        "Call to an undefined function.  The function may not be imported or may be defined after the call site.",

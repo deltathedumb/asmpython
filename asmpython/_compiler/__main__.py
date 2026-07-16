@@ -439,6 +439,16 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         help="report native compiler rejection as a failure instead of executing "
         "the source through pyinbin. Useful for differential compiler testing.",
     )
+    build_grp.add_argument(
+        "--ext",
+        metavar="NAME",
+        action="append",
+        default=None,
+        help="activate an opt-in compiler-syntax extension for this build "
+        "(e.g. 'constants', for 'const NAME = value' declarations). "
+        "Repeatable. Off by default -- a source file's grammar never "
+        "changes without this explicit flag.",
+    )
 
     # Toolchain --------------------------------------------------------------
     tc_grp = ap.add_argument_group("toolchain overrides")
@@ -463,7 +473,13 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
 
 
 def _run_check(
-    src: str, source_path, *, source_dir, as_json: bool, all_errors: bool = False
+    src: str,
+    source_path,
+    *,
+    source_dir,
+    as_json: bool,
+    all_errors: bool = False,
+    active_extensions: "frozenset[str] | None" = None,
 ) -> int:
     """Front-end-only check (lex / parse / sema). Returns 0 if clean, 1 if any
     diagnostic was found. With `as_json`, prints a JSON array of diagnostics on
@@ -482,7 +498,7 @@ def _run_check(
 
     try:
         tokens = Lexer(src).tokenize()
-        module = Parser(tokens).parse()
+        module = Parser(tokens, active_extensions).parse()
         sema_analyze(module, source_dir=source_dir, collect_errors=all_errors)
     except MultiSemaError as me:
         # me itself is a real MultiSemaError instance under a Python-hosted
@@ -592,6 +608,7 @@ def cmd_build(args: argparse.Namespace) -> int:
             source_dir=source_path.resolve().parent,
             as_json=args.json,
             all_errors=all_errors,
+            active_extensions=frozenset(args.ext) if args.ext else frozenset(),
         )
 
     # Resolve effective settings: CLI flag wins when given, else the
@@ -696,6 +713,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     if cfg is not None and cfg.pyinbin_imports:
         return native_rejection(RuntimeError("project declares pyinbin_imports"))
 
+    active_extensions = frozenset(args.ext) if args.ext else frozenset()
     try:
         if single:
             compile_source(
@@ -716,6 +734,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 all_errors=all_errors,
                 backend=args.backend,
                 linker=args.linker,
+                active_extensions=active_extensions,
             )
         else:
             compile_targets(
@@ -736,6 +755,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 all_errors=all_errors,
                 backend=args.backend,
                 linker=args.linker,
+                active_extensions=active_extensions,
             )
     except MultiSemaError as me:
         # Give the target-neutral interpreter a chance before reporting a

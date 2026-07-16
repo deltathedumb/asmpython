@@ -285,13 +285,23 @@ def _compile_program(
     entry_path: Path | None,
     whole_program: bool,
     all_errors: bool,
+    active_extensions: "frozenset[str] | None" = None,
 ):
-    """Lex / parse / sema (target-independent front-end). Returns the typed module."""
+    """Lex / parse / sema (target-independent front-end). Returns the typed module.
+
+    `active_extensions` is the set of opt-in compiler-syntax extensions
+    (e.g. `constants`) activated for this whole compile invocation via the
+    `--ext` CLI flag -- never by in-source directives. Applied uniformly to
+    every `Parser` this compile constructs, including every module a
+    whole-program compile merges in (see `load_program`), so a project's
+    grammar is consistent across every file regardless of which module
+    happens to use the extended syntax.
+    """
     if whole_program and entry_path is not None:
-        module = load_program(src, entry_path)
+        module = load_program(src, entry_path, active_extensions=active_extensions)
     else:
         tokens = Lexer(src).tokenize()
-        module = Parser(tokens).parse()
+        module = Parser(tokens, active_extensions).parse()
     sema_analyze(module, source_dir=source_dir, collect_errors=all_errors)
     return module
 
@@ -681,6 +691,7 @@ def compile_source(
     all_errors: bool = False,
     backend: str = "legacy",
     linker: str | None = None,
+    active_extensions: "frozenset[str] | None" = None,
 ) -> BuildResult:
     module = _compile_program(
         src,
@@ -688,6 +699,7 @@ def compile_source(
         entry_path=entry_path,
         whole_program=whole_program,
         all_errors=all_errors,
+        active_extensions=active_extensions,
     )
     return _run_backend(
         module,
@@ -728,6 +740,7 @@ def compile_targets(
     all_errors: bool = False,
     backend: str = "legacy",
     linker: str | None = None,
+    active_extensions: "frozenset[str] | None" = None,
 ) -> list[BuildResult]:
     """Compile src for multiple targets, sharing the front-end (lex/parse/sema).
 
@@ -741,6 +754,7 @@ def compile_targets(
         entry_path=entry_path,
         whole_program=whole_program,
         all_errors=all_errors,
+        active_extensions=active_extensions,
     )
     results: list[BuildResult] = []
     for target, out_path in zip(targets, out_paths):
