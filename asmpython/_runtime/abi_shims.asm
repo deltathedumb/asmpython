@@ -75,6 +75,8 @@ extern _runtime_setjmp
 extern _runtime_raise
 extern _runtime_divmod
 extern _runtime_input
+extern _runtime_list_del
+extern _runtime_dict_pop
 extern malloc
 extern printf
 extern sprintf
@@ -152,6 +154,8 @@ global _abi_round_f64
 global _abi_float_to_str
 global _abi_fmax_f64
 global _abi_fmin_f64
+global _abi_list_del
+global _abi_dict_pop
 
 ; asmpython/stdlib/hardware.py's _hw_* symbols, hosted-target bodies. These
 ; already use the standard Win64 ABI (see codegen.py's target_windows.py /
@@ -1120,5 +1124,27 @@ _abi_fmax_f64:
 ; xmm0 = fmin_f64(xmm0=a, xmm1=b) -> min(a, b). Same rationale as fmax.
 _abi_fmin_f64:
     minsd xmm0, xmm1
+    ret
+
+; list_del(list=rcx, idx=rdx) -- `del xs[i]`, shifts elements down in
+; place. No return value used by any caller (the `del` statement discards
+; whatever _runtime_list_del itself returns, if anything).
+_abi_list_del:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_list_del
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; dict_pop(dict=rcx, key=rdx) -- `del d[key]`. Raises KeyError via
+; _runtime_raise (already wired through _abi_raise's shared path) if the
+; key isn't present, matching CPython's del semantics.
+_abi_dict_pop:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_dict_pop
+    WIN64_RUNTIME_LEAVE
     ret
 

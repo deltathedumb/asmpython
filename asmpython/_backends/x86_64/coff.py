@@ -181,7 +181,15 @@ def build_coff(
     data = bytearray()
     data_off: dict[str, int] = {}
     for g in data_globs:
-        data = bytearray(_align(len(data), 8))
+        # Pad up to 8-byte alignment in place -- reassigning `data` to a
+        # fresh bytearray(_align(...)) here (as this used to) discards
+        # every earlier global's already-written bytes, replacing them
+        # with zeros of the same length. Silently harmless only because
+        # every data_globs value so far has itself been zero (module
+        # globals are runtime-initialized via a `store`, never a
+        # compile-time nonzero .data initializer), but a real bug should
+        # this backend ever gain compile-time-constant global initializers.
+        data.extend(b"\x00" * (_align(len(data), 8) - len(data)))
         data_off[g.name] = len(data)
         data.extend(_global_bytes(g))
     data_bytes = bytes(data)

@@ -301,7 +301,10 @@ def build_elf(
     data = bytearray()
     data_off: dict[str, int] = {}
     for g in data_globs:
-        data = bytearray(_align(len(data), 8))  # 8-byte align each global
+        # Pad up to 8-byte alignment in place -- see coff.py's build_coff
+        # for why reassigning `data` to a fresh bytearray(_align(...))
+        # here instead discards every earlier global's bytes.
+        data.extend(b"\x00" * (_align(len(data), 8) - len(data)))
         data_off[g.name] = len(data)
         data.extend(_global_bytes(g))
     data_bytes = bytes(data)
@@ -318,7 +321,7 @@ def build_elf(
     tdata = bytearray()
     tdata_off: dict[str, int] = {}
     for g in tdata_globs:
-        tdata = bytearray(_align(len(tdata), 8))
+        tdata.extend(b"\x00" * (_align(len(tdata), 8) - len(tdata)))
         tdata_off[g.name] = len(tdata)
         tdata.extend(_global_bytes(g))
     tdata_bytes = bytes(tdata)

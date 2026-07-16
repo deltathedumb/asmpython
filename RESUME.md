@@ -222,36 +222,63 @@ found by tracing IR/runtime state directly rather than guessing:
 Verified: `tests.runner` still 481/489. Full build+run+expected-output
 sweep on 1-60 went 34/60 → 36/60 exact matches.
 
-Remaining 1-60 build failures: several unimplemented `MethodCall`s
-(`list.sort`, `dict.pop`, `str.rpartition`/`casefold`/`format`), `del`
-statement, starred/non-Name tuple-assign targets, walrus operator,
-`sorted(key=...)` lambda body. Remaining build+run mismatches on 1-60 (all
-re-confirmed pre-existing, not new): `132_dict_union.py`/
-`133_dict_unpack.py`/`104_set_methods.py`/
-`123_set_discard_remove_copy_pop.py` produce empty or wrong output;
-f-string format-spec support (alignment, width, precision,
-thousands-grouping, binary/hex-with-prefix) is entirely unimplemented
-(silently ignores the spec and prints the plain value); `109_pct_format.py`
-/`111_pct_repr.py` segfault (`%`-style string formatting has zero
+**Third follow-up** (same day, commits after `4a0bf26d`): implemented
+`del` statement (`del x` / `del xs[i]` / `del d[key]`, new
+`_abi_list_del`/`_abi_dict_pop` shims), `dict.pop(key[, default])`, dict
+literal `**spread` (was silently inserting garbage instead of raising or
+working — sema represents a spread key as a sentinel `Name("**")`, not
+`None` as the dead code here assumed, so the intended reject-with-
+`LowerError` never actually fired), and the dict/set union operators `|`/
+`|=` (PEP 584 — were routing through plain integer `ior`, corrupting two
+raw struct-header pointers instead of merging entries; `132_dict_union.py`
+segfaulted). Also found and fixed **two pre-existing, unrelated object-
+writer bugs** while chasing an `UnicodeDecodeError` in the COFF linker on
+`134_dict_order.py`:
+
+- `_collect_module_globals`'s `A.For` handler always registered `s.var`
+  as a module global, even for a tuple-unpack loop (`for k, v in ...:`)
+  where the bound names live in `s.targets` and `s.var` is legitimately
+  `''` — registering the empty string produced a COFF symbol with no
+  name at all, which the linker's reader couldn't decode. Fixed by only
+  registering `s.var` when `s.targets` is empty.
+- `coff.py`'s/`elf.py`'s `.data`-section builders reassigned their
+  `bytearray` to a fresh zero-filled one on every global (meant to pad to
+  8-byte alignment), silently discarding every earlier global's bytes.
+  Currently harmless in practice (every `.data` global today is
+  runtime-initialized via a `store`, never a nonzero compile-time
+  initializer, so the discarded bytes were always zero anyway) but a real
+  latent bug the moment this backend gains compile-time-constant
+  initializers. Fixed to pad in place instead.
+
+Verified: `tests.runner` still 481/489 (no regressions). Full
+build+run+expected-output sweep on 1-60 went 36/60 → 40/60 exact matches,
+build-failures 12 → 10.
+
+Remaining 1-60 build failures: `list.sort`, `str.rpartition`/`casefold`/
+`format` `MethodCall`s, starred/non-Name tuple-assign targets, walrus
+operator, `sorted(key=...)` lambda body. Remaining build+run mismatches
+(all re-confirmed pre-existing, not new): `104_set_methods.py`/
+`123_set_discard_remove_copy_pop.py` produce empty output (a full set-
+method sweep, distinct from the dict.pop just added); f-string
+format-spec support (alignment, width, precision, thousands-grouping,
+binary/hex-with-prefix) is entirely unimplemented; `109_pct_format.py`/
+`111_pct_repr.py` segfault (`%`-style string formatting has zero
 implementation, a separate large feature).
 
-**Next step on resume**: `del` statement and the tuple-assign/
-starred-target gaps look like the next-cheapest build-success wins.
-Given this session found the same write/read global-vs-local mismatch
-bug **four separate times** in four different lowering sites (module-
-scope for-loop var, range-for var, exception bind_name, and originally
-the list-for var), it's worth a **grep audit**: search `ir_lower.py` for
-every remaining bare `ctx.ensure_slot(<name>, ...)` call where `<name>`
-is a source-level identifier (not a compiler-internal `__foo_{id}` temp)
-and verify each one goes through `_name_ptr` instead, rather than waiting
-to find the fifth occurrence via another failing test case. F-string
-format specs are a bigger, self-contained feature (worth a dedicated
-pass: parse the `:spec` mini-language once, drive alignment/width/
-precision/base/grouping from one shared formatter) that would close out
-most of the remaining fstring_* cases at once. All of this is toward full
-parity with `codegen.py` under `--backend x86-64` — the direct
-predecessor of the newly-confirmed "make the IR-based backend the
-default" workload item.
+**Next step on resume**: set methods (`104`/`123`) are likely a quick
+follow-on to the dict work just done — sets are dict-backed in this
+codebase (str-keyed, dummy value), so `.discard`/`.remove`/`.copy`/
+no-arg `.pop()` probably reuse the same `_abi_dict_*` shims with
+CPython's slightly different semantics (KeyError on `.remove()` miss,
+silent no-op on `.discard()` miss) layered on top — see
+`codegen.py`'s `e.method in ("discard", "remove")` handling (~line 12001)
+for the exact port target. F-string format specs are a bigger,
+self-contained feature (worth a dedicated pass: parse the `:spec`
+mini-language once, drive alignment/width/precision/base/grouping from
+one shared formatter) that would close out most of the remaining
+fstring_* cases at once. All of this is toward full parity with
+`codegen.py` under `--backend x86-64` — the direct predecessor of the
+newly-confirmed "make the IR-based backend the default" workload item.
 
 ## Selfhost Status (plan-step 11)
 

@@ -1423,7 +1423,13 @@ def _collect_module_globals(stmts: list, out: dict[str, IRType], list_el_ty: dic
                     iter_ty = s.target_types[0]
             else:
                 iter_ty = _iter_element_type(s.iter)
-            out.setdefault(s.var, ir_type_for(iter_ty))
+            # A tuple-unpack for-loop (`for k, v in ...:`) carries its bound
+            # names in s.targets, leaving s.var empty ('') -- registering
+            # that empty string as a "global" corrupts the COFF symbol
+            # table downstream (an unnamed external symbol the object
+            # writer can't serialize). Only single-target loops use s.var.
+            if not s.targets:
+                out.setdefault(s.var, ir_type_for(iter_ty))
             _collect_module_globals(s.body, out, list_el_ty)
             _collect_module_globals(s.orelse, out, list_el_ty)
         elif isinstance(s, A.With):
@@ -2336,6 +2342,20 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(PTR)
             ctx.emit(IRInstr("call", v, ["_abi_str_concat", lhs, rhs]))
             return v
+        if lt in ("dict", "set") and rt in ("dict", "set") and e.op == "|":
+            # `d1 | d2` (PEP 584): a fresh dict/set with left's entries then
+            # right's merged on top (right wins on key conflicts) -- same
+            # "new = {}; new.update(left); new.update(right)" codegen.py
+            # uses for both dict union and set union (sets are dicts keyed
+            # by member, so _abi_dict_update already does the right thing
+            # for either).
+            lhs = _lower_expr(ctx, e.left)
+            rhs = _lower_expr(ctx, e.right)
+            new_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", new_v, ["_abi_new_instance"]))
+            ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, lhs]))
+            ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, rhs]))
+            return new_v
         if lt == "float" or rt == "float":
             if e.op not in _FBINOP and e.op not in ("%", "**"):
                 raise LowerError(f"unsupported float binop {e.op!r}")
@@ -2664,8 +2684,17 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         dict_v = ctx.tmp(PTR)
         ctx.emit(IRInstr("call", dict_v, ["_abi_new_instance"]))
         for k, v in zip(e.keys, e.values):
-            if k is None:
-                raise LowerError("unsupported expr DictLit (** spread)")
+            if isinstance(k, A.Name) and k.name == "**":
+                # `**other` (PEP 448): sema represents a dict-literal
+                # spread as a sentinel Name("**") key (not a None key --
+                # that check never matched, silently falling through to
+                # evaluating Name("**") as an ordinary key expression and
+                # inserting garbage). Merge other's entries in, in source
+                # order, so later entries win on key conflicts -- same
+                # semantics as dict.update().
+                other_v = _lower_expr(ctx, v)
+                ctx.emit(IRInstr("call", None, ["_abi_dict_update", dict_v, other_v]))
+                continue
             key_ptr = _lower_dict_key(ctx, k)
             val = _lower_expr(ctx, v)
             if A.expr_type(v) == "float":
@@ -2888,6 +2917,43 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     fv = ctx.tmp(F64)
                     ctx.emit(IRInstr("bitcast_i2f", fv, [v]))
                     return fv
+                return v
+            if e.method == "pop" and len(e.args) in (1, 2):
+                # d.pop(key[, default]): with a default, check containment
+                # first and return the default without raising when the
+                # key is absent; without one, _abi_dict_pop's own
+                # _runtime_dict_pop already raises KeyError on a miss.
+                key_v = _lower_dict_key(ctx, e.args[0])
+                res_ty = ir_type_for(A.expr_type(e))
+                if len(e.args) == 2:
+                    obj_v = _lower_expr(ctx, e.obj)
+                    has_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("call", has_v, ["_abi_dict_contains", obj_v, key_v]))
+                    found_b = ctx.new_block("dictpopfound")
+                    missing_b = ctx.new_block("dictpopmissing")
+                    end_b = ctx.new_block("dictpopend")
+                    res_ptr = ctx.ensure_slot(f"__dictpop_res_{id(e)}", res_ty)
+                    ctx.emit(IRInstr("br.t", None, [has_v, found_b.label, missing_b.label]))
+
+                    ctx.switch_to(missing_b)
+                    default_v = _lower_expr(ctx, e.args[1])
+                    ctx.emit(IRInstr("store", None, [default_v, res_ptr]))
+                    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+                    ctx.switch_to(found_b)
+                    obj_v2 = _lower_expr(ctx, e.obj)
+                    popped_v = ctx.tmp(res_ty)
+                    ctx.emit(IRInstr("call", popped_v, ["_abi_dict_pop", obj_v2, key_v]))
+                    ctx.emit(IRInstr("store", None, [popped_v, res_ptr]))
+                    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+                    ctx.switch_to(end_b)
+                    out = ctx.tmp(res_ty)
+                    ctx.emit(IRInstr("load", out, [res_ptr]))
+                    return out
+                obj_v = _lower_expr(ctx, e.obj)
+                v = ctx.tmp(res_ty)
+                ctx.emit(IRInstr("call", v, ["_abi_dict_pop", obj_v, key_v]))
                 return v
             if e.method == "update" and len(e.args) == 1:
                 obj_v = _lower_expr(ctx, e.obj)
@@ -3470,6 +3536,12 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         ctx.emit(IRInstr("load", cur, [ptr]))
         rhs_ty = A.expr_type(s.value)
         rhs = _lower_expr(ctx, s.value)
+        if s.op == "|" and rhs_ty in ("dict", "set"):
+            # `d |= other` (PEP 584) / `s |= other`: merge other's entries
+            # into the target in place -- the header pointer itself
+            # doesn't change, unlike the fresh-dict `|` BinOp above.
+            ctx.emit(IRInstr("call", None, ["_abi_dict_update", cur, rhs]))
+            return
         if cur_ty is F64 or rhs_ty == "float":
             if s.op not in _FBINOP and s.op not in ("%", "**"):
                 raise LowerError(f"unsupported float augassign op {s.op!r}")
@@ -4021,6 +4093,30 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
     if isinstance(s, A.Raise):
         _lower_raise(ctx, s)
         return
+
+    if isinstance(s, A.Del):
+        # `del x` -> zero the slot so a later (illegal, sema should have
+        # already rejected it) read can't observe a stale value. `del
+        # xs[i]` / `del d[key]` -> _abi_list_del/_abi_dict_pop, discarding
+        # whatever they return -- matches codegen.py's _gen_stmt Del.
+        tgt = s.target
+        if isinstance(tgt, A.Name):
+            ty = ctx.mctx.global_types.get(tgt.name, ctx.slot_ty.get(tgt.name, I64))
+            ptr = _name_ptr(ctx, tgt.name, ty)
+            zero = ctx.tmp(ty)
+            ctx.emit(IRInstr("const", zero, [0]))
+            ctx.emit(IRInstr("store", None, [zero, ptr]))
+            return
+        if isinstance(tgt, A.Subscript):
+            obj_v = _lower_expr(ctx, tgt.obj)
+            if A.expr_type(tgt.obj) == "list":
+                idx_v = _lower_expr(ctx, tgt.index)
+                ctx.emit(IRInstr("call", None, ["_abi_list_del", obj_v, idx_v]))
+            else:
+                key_v = _lower_dict_key(ctx, tgt.index)
+                ctx.emit(IRInstr("call", None, ["_abi_dict_pop", obj_v, key_v]))
+            return
+        raise LowerError(f"unsupported stmt Del ({type(tgt).__name__})")
 
     if isinstance(s, A.Try):
         _lower_try(ctx, s)
