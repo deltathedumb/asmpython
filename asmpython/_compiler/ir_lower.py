@@ -1783,6 +1783,86 @@ def _lower_int_floordivmod(ctx: _FuncCtx, a: IRValue, b: IRValue, want: str, tag
     return out
 
 
+def _lower_set_setop(ctx: _FuncCtx, obj_e: A.Expr, other_e: A.Expr, method: str, tag: int) -> IRValue:
+    """s.union(o) / s.intersection(o) / s.difference(o) -- ports
+    codegen.py's _gen_set_setop exactly. union is a fresh set with both
+    operands merged in (right wins on conflicts, though sets have no
+    payload so that's moot); intersection/difference iterate self's keys,
+    keeping (intersection) or dropping (difference) each one based on its
+    membership in other."""
+    obj_v = _lower_expr(ctx, obj_e)
+    other_v = _lower_expr(ctx, other_e)
+    new_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", new_v, ["_abi_new_instance"]))
+
+    if method == "union":
+        ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, obj_v]))
+        ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, other_v]))
+        return new_v
+
+    keys_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", obj_v]))
+    keys_ptr = ctx.ensure_slot(f"__setop_keys_{tag}", PTR)
+    ctx.emit(IRInstr("store", None, [keys_v, keys_ptr]))
+    idx_ptr = ctx.ensure_slot(f"__setop_idx_{tag}", I64)
+    zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero, [0]))
+    ctx.emit(IRInstr("store", None, [zero, idx_ptr]))
+
+    head_b = ctx.new_block("setopheread")
+    body_b = ctx.new_block("setopbody")
+    keep_b = ctx.new_block("setopkeep")
+    cont_b = ctx.new_block("setopcont")
+    end_b = ctx.new_block("setopend")
+
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+    ctx.switch_to(head_b)
+    idx_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+    len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_addr, [keys_v, _LIST_LEN_OFF]))
+    len_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", len_v, [len_addr]))
+    cond = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", cond, [idx_v, len_v]))
+    ctx.emit(IRInstr("br.t", None, [cond, body_b.label, end_b.label]))
+
+    ctx.switch_to(body_b)
+    key_addr = _list_elem_addr(ctx, keys_v, idx_v)
+    key_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", key_v, [key_addr]))
+    has_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", has_v, ["_abi_dict_contains", other_v, key_v]))
+    zero2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero2, [0]))
+    if method == "intersection":
+        should_keep = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.ne", should_keep, [has_v, zero2]))
+    else:
+        should_keep = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.eq", should_keep, [has_v, zero2]))
+    ctx.emit(IRInstr("br.t", None, [should_keep, keep_b.label, cont_b.label]))
+
+    ctx.switch_to(keep_b)
+    one_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one_v, [1]))
+    ctx.emit(IRInstr("call", None, ["_abi_dict_set", new_v, key_v, one_v]))
+    ctx.emit(IRInstr("br", None, [cont_b.label]))
+
+    ctx.switch_to(cont_b)
+    inc_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", inc_v, [idx_ptr]))
+    one2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one2, [1]))
+    next_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", next_v, [inc_v, one2]))
+    ctx.emit(IRInstr("store", None, [next_v, idx_ptr]))
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+
+    ctx.switch_to(end_b)
+    return new_v
+
+
 def _lower_isinstance(ctx: _FuncCtx, e: A.Call) -> IRValue:
     targets: list[str] = []
     cls_arg = e.args[1]
@@ -3031,6 +3111,96 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("load", final_out, [out_ptr]))
                 return final_out
             raise LowerError(f"unsupported expr MethodCall (dict.{e.method})")
+        if obj_ty == "set":
+            # Sets are dicts keyed by their members (dummy value 1, str
+            # keys only) -- every mutator maps onto the dict runtime, same
+            # design as codegen.py's set handling.
+            def _set_member_key(arg: A.Expr) -> IRValue:
+                key_v = _lower_expr(ctx, arg)
+                if A.expr_type(arg) == "int":
+                    # A static buffer from _abi_int_to_str isn't safe to
+                    # store as a long-lived dict key (it's overwritten by
+                    # the next int->str conversion) -- duplicate it first.
+                    s_v = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("call", s_v, ["_abi_int_to_str", key_v]))
+                    dup_v = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("call", dup_v, ["_abi_str_concat_dup", s_v]))
+                    return dup_v
+                return key_v
+            if e.method == "add" and len(e.args) == 1:
+                key_v = _set_member_key(e.args[0])
+                obj_v = _lower_expr(ctx, e.obj)
+                one_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", one_v, [1]))
+                ctx.emit(IRInstr("call", None, ["_abi_dict_set", obj_v, key_v, one_v]))
+                return ctx.shared_zero
+            if e.method == "clear" and not e.args:
+                obj_v = _lower_expr(ctx, e.obj)
+                ctx.emit(IRInstr("call", None, ["_abi_dict_clear", obj_v]))
+                return ctx.shared_zero
+            if e.method in ("union", "intersection", "difference") and len(e.args) == 1:
+                return _lower_set_setop(ctx, e.obj, e.args[0], e.method, id(e))
+            if e.method in ("discard", "remove") and len(e.args) == 1:
+                key_v = _set_member_key(e.args[0])
+                if e.method == "discard":
+                    obj_v = _lower_expr(ctx, e.obj)
+                    has_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("call", has_v, ["_abi_dict_contains", obj_v, key_v]))
+                    pop_b = ctx.new_block("setdiscardpop")
+                    end_b = ctx.new_block("setdiscardend")
+                    ctx.emit(IRInstr("br.t", None, [has_v, pop_b.label, end_b.label]))
+                    ctx.switch_to(pop_b)
+                    obj_v2 = _lower_expr(ctx, e.obj)
+                    ctx.emit(IRInstr("call", None, ["_abi_dict_pop", obj_v2, key_v]))
+                    ctx.emit(IRInstr("br", None, [end_b.label]))
+                    ctx.switch_to(end_b)
+                else:
+                    obj_v = _lower_expr(ctx, e.obj)
+                    ctx.emit(IRInstr("call", None, ["_abi_dict_pop", obj_v, key_v]))
+                return ctx.shared_zero
+            if e.method == "copy" and not e.args:
+                obj_v = _lower_expr(ctx, e.obj)
+                new_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", new_v, ["_abi_new_instance"]))
+                ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, obj_v]))
+                return new_v
+            if e.method == "pop" and not e.args:
+                # Remove and return an arbitrary member (the first live
+                # key), raising KeyError if the set is empty.
+                obj_v = _lower_expr(ctx, e.obj)
+                keys_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", obj_v]))
+                len_addr = ctx.tmp(PTR)
+                ctx.emit(IRInstr("gep", len_addr, [keys_v, _LIST_LEN_OFF]))
+                len_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", len_v, [len_addr]))
+                zero = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", zero, [0]))
+                nonempty = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.ne", nonempty, [len_v, zero]))
+                ok_b = ctx.new_block("setpopok")
+                empty_b = ctx.new_block("setpopempty")
+                ctx.emit(IRInstr("br.t", None, [nonempty, ok_b.label, empty_b.label]))
+
+                ctx.switch_to(empty_b)
+                msg_name = ctx.mctx.intern_str("KeyError: 'pop from an empty set'")
+                msg_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", msg_v, [msg_name]))
+                exc_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", exc_v, [BUILTIN_EXC_IDS["KeyError"]]))
+                ctx.emit(IRInstr("call", None, ["_abi_raise", msg_v, exc_v]))
+                ctx.emit(IRInstr("br", None, [ok_b.label]))
+
+                ctx.switch_to(ok_b)
+                idx0 = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", idx0, [0]))
+                first_addr = _list_elem_addr(ctx, keys_v, idx0)
+                first_key = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", first_key, [first_addr]))
+                obj_v2 = _lower_expr(ctx, e.obj)
+                ctx.emit(IRInstr("call", None, ["_abi_dict_pop", obj_v2, first_key]))
+                return first_key
+            raise LowerError(f"unsupported expr MethodCall (set.{e.method})")
         if obj_ty == "str":
             obj_v = _lower_expr(ctx, e.obj)
             if e.method == "encode":

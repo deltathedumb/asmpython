@@ -254,29 +254,60 @@ Verified: `tests.runner` still 481/489 (no regressions). Full
 build+run+expected-output sweep on 1-60 went 36/60 → 40/60 exact matches,
 build-failures 12 → 10.
 
-Remaining 1-60 build failures: `list.sort`, `str.rpartition`/`casefold`/
-`format` `MethodCall`s, starred/non-Name tuple-assign targets, walrus
-operator, `sorted(key=...)` lambda body. Remaining build+run mismatches
-(all re-confirmed pre-existing, not new): `104_set_methods.py`/
-`123_set_discard_remove_copy_pop.py` produce empty output (a full set-
-method sweep, distinct from the dict.pop just added); f-string
-format-spec support (alignment, width, precision, thousands-grouping,
-binary/hex-with-prefix) is entirely unimplemented; `109_pct_format.py`/
-`111_pct_repr.py` segfault (`%`-style string formatting has zero
-implementation, a separate large feature).
+**Fourth follow-up** (same day, commits after `691766c8`): implemented
+the full set-method surface (`.add`/`.clear`/`.union`/`.intersection`/
+`.difference`/`.discard`/`.remove`/`.copy`/no-arg `.pop()`) — sets are
+dict-backed here (str-keyed, dummy value 1 per member), so this ported
+`codegen.py`'s `_gen_set_setop`/discard-remove/copy/pop design onto the
+same `_abi_dict_*` shims already built for dict support, plus two new
+shims (`_abi_dict_clear`, `_abi_str_concat_dup` — the latter needed
+because an int set-member must be duplicated off `_abi_int_to_str`'s
+shared static buffer before being stored as a long-lived dict key).
+Fixed `104_set_methods.py`/`123_set_discard_remove_copy_pop.py` (were
+segfaulting: unimplemented set methods fell through to the generic
+"unknown method → return 0" stub, and subsequent `x in <that 0>` deref'd
+a null pointer).
 
-**Next step on resume**: set methods (`104`/`123`) are likely a quick
-follow-on to the dict work just done — sets are dict-backed in this
-codebase (str-keyed, dummy value), so `.discard`/`.remove`/`.copy`/
-no-arg `.pop()` probably reuse the same `_abi_dict_*` shims with
-CPython's slightly different semantics (KeyError on `.remove()` miss,
-silent no-op on `.discard()` miss) layered on top — see
-`codegen.py`'s `e.method in ("discard", "remove")` handling (~line 12001)
-for the exact port target. F-string format specs are a bigger,
-self-contained feature (worth a dedicated pass: parse the `:spec`
-mini-language once, drive alignment/width/precision/base/grouping from
-one shared formatter) that would close out most of the remaining
-fstring_* cases at once. All of this is toward full parity with
+Verified: `tests.runner` still 481/489. Full build+run+expected-output
+sweep on 1-60 went 40/60 → **42/60 exact matches**, build-failures 10.
+
+**Remaining 1-60 gaps are now down to two self-contained feature areas**
+(everything smaller/scattered has been cleared this session):
+
+1. **F-string format specs** (`135`/`136`/`137`/`138`/`110_fstring_conv`):
+   alignment, width, precision, thousands-grouping, binary/hex-with-
+   prefix, and `!r`/`!s` conversion flags are entirely unimplemented —
+   the `:spec` (and `!conv`) mini-language is silently ignored and the
+   plain value prints instead. Worth a dedicated pass: parse the spec
+   once into a small struct (fill-char, align, sign, width, grouping,
+   precision, type), then drive one shared formatter off it — this would
+   close out most/all of the remaining fstring_* cases at once. Look at
+   how `codegen.py` already parses/applies these specs (search for
+   `format_spec` / `_gen_fstring_segment`) and port that parsing, not the
+   codegen, since the IR side just needs the same decisions expressed as
+   `_abi_*` calls instead of inline asm.
+2. **`%`-style string formatting** (`109_pct_format`/`111_pct_repr`):
+   `"%s is %d" % (...)` has zero implementation in this backend and
+   segfaults at runtime (compiles as an unrelated/unchecked expression,
+   then crashes). A separate, comparably-sized feature to format specs
+   — CPython's `%` operator on a string LHS with a tuple/dict RHS,
+   its own mini-language (again worth checking `codegen.py`'s existing
+   implementation as the port source).
+
+Build-failures beyond format specs: `list.sort`, `str.rpartition`/
+`casefold` `MethodCall`s, starred/non-Name tuple-assign targets, walrus
+operator, `sorted(key=...)` lambda body — smaller, scattered gaps like
+the ones cleared this session, likely worth another pass once the two
+big format features are done (or interleaved, since they're independent
+of each other).
+
+**Next step on resume**: pick one of the two format-spec features
+(f-string specs are probably higher-value — they appear in 5 of the
+remaining 60 smoke cases vs. 2 for `%`-format) and do it as a real,
+scoped feature addition rather than one-off patches, given the pattern
+this session repeatedly found: quick fixes compound fast when the
+underlying primitives (bitcast ops, `_name_ptr`, the `_abi_dict_*` shim
+family) are already in place. All of this is toward full parity with
 `codegen.py` under `--backend x86-64` — the direct predecessor of the
 newly-confirmed "make the IR-based backend the default" workload item.
 

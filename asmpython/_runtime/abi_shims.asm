@@ -77,6 +77,8 @@ extern _runtime_divmod
 extern _runtime_input
 extern _runtime_list_del
 extern _runtime_dict_pop
+extern _runtime_dict_clear
+extern _runtime_str_concat_dup
 extern malloc
 extern printf
 extern sprintf
@@ -156,6 +158,8 @@ global _abi_fmax_f64
 global _abi_fmin_f64
 global _abi_list_del
 global _abi_dict_pop
+global _abi_dict_clear
+global _abi_str_concat_dup
 
 ; asmpython/stdlib/hardware.py's _hw_* symbols, hosted-target bodies. These
 ; already use the standard Win64 ABI (see codegen.py's target_windows.py /
@@ -1145,6 +1149,26 @@ _abi_dict_pop:
     mov rax, rcx
     mov rbx, rdx
     call _runtime_dict_pop
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; dict_clear(dict=rcx) -- `d.clear()` / `s.clear()` (sets are dict-backed).
+_abi_dict_clear:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    call _runtime_dict_clear
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = str_concat_dup(str=rcx) -> a fresh heap copy of str (concat with
+; the empty string). Used to turn an int member into an owned, freshly-
+; allocated str key before inserting it into a set (set members are
+; always str-keyed; a plain _abi_int_to_str value is a static shared
+; buffer, not safe to store as a long-lived dict key).
+_abi_str_concat_dup:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    call _runtime_str_concat_dup
     WIN64_RUNTIME_LEAVE
     ret
 
