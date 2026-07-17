@@ -6736,6 +6736,10 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         return
 
     if isinstance(s, A.For) and s.iter is not None:
+        iter_is_instance = getattr(s, "iter_is_instance", None)
+        if iter_is_instance is not None:
+            _lower_for_iter_protocol(ctx, s, iter_is_instance)
+            return
         zspec = _for_zip_spec(s)
         if zspec is not None:
             _lower_for_zip(ctx, s, zspec)
@@ -7206,6 +7210,136 @@ def _lower_raise(ctx: _FuncCtx, s: A.Raise) -> None:
         ctx.emit(IRInstr("call", None, ["_abi_raise", msg_v, exc_id_v]))
 
 
+def _lower_for_iter_protocol(ctx: _FuncCtx, s: A.For, cls_name: str) -> None:
+    """`for x in obj` where obj is a user class defining __iter__/__next__
+    (sema stamps `s.iter_is_instance = cls_name` after validating both
+    methods exist -- see sema.py's A.For handling). Was entirely
+    unimplemented: fell through to the generic For fallback's
+    LowerError, since `A.expr_type(s.iter)` is `"instance:X"`, not one
+    of the list/dict/str/any shapes that fallback accepts.
+
+    Lowers exactly like codegen.py's `_gen_for_iter`:
+        iterator = obj.__iter__()
+        loop:
+            setjmp(buf) -- 0 normally, nonzero after a longjmp
+            if exception: StopIteration -> end; else re-raise
+            var = iterator.__next__()
+            body
+            jmp loop
+        end:
+    Ported as IR blocks + the same `_abi_setjmp`/`_abi_raise`/
+    `_runtime_handler_top` primitives `_lower_try` already uses. One
+    `try_regions` entry per setjmp installation so regalloc.py's
+    false-loop-detection exclusion (`_last_uses`'s try_regions-based
+    fix, see its own docstring) covers this construct's backward
+    branches too -- otherwise the same false "loop over the whole
+    try/except" liveness bug that fix addresses would misfire on the
+    real, genuine loop this statement also contains.
+    """
+    uid = id(s)
+    owner = _resolve_method_owner(ctx, cls_name, "__iter__") or cls_name
+    next_owner = _resolve_method_owner(ctx, cls_name, "__next__") or cls_name
+
+    obj_v = _lower_expr(ctx, s.iter)
+    iter_ptr = ctx.ensure_slot(f"__for_iter_obj_{uid}", PTR)
+    ctx.emit(IRInstr("store", None, [obj_v, iter_ptr]))
+    iter_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", iter_v, [f"{owner}____iter__", obj_v]))
+    ctx.emit(IRInstr("store", None, [iter_v, iter_ptr]))
+
+    buf_ptr = ctx.raw_slot(f"__for_iter_buf_{uid}", _JMP_BUF_SIZE)
+    parent_ptr = ctx.ensure_slot(f"__for_iter_parent_{uid}", PTR)
+    prev_msg_ptr = ctx.ensure_slot(f"__for_iter_prev_msg_{uid}", PTR)
+    prev_type_ptr = ctx.ensure_slot(f"__for_iter_prev_type_{uid}", I64)
+
+    top_b = ctx.new_block(f"for_iter_top_{uid}")
+    handler_b = ctx.new_block(f"for_iter_handler_{uid}")
+    body_b = ctx.new_block(f"for_iter_body_{uid}")
+    cont_b = ctx.new_block(f"for_iter_cont_{uid}")
+    end_b = ctx.new_block(f"for_iter_end_{uid}")
+    natural_b = ctx.new_block(f"for_iter_natural_{uid}") if s.orelse else None
+    ctx.emit(IRInstr("br", None, [top_b.label]))
+
+    ctx.switch_to(top_b)
+    cur_msg = _load_global(ctx, "_runtime_exc_msg", PTR)
+    ctx.emit(IRInstr("store", None, [cur_msg, prev_msg_ptr]))
+    cur_type = _load_global(ctx, "_runtime_exc_type", I64)
+    ctx.emit(IRInstr("store", None, [cur_type, prev_type_ptr]))
+    cur_top = _load_global(ctx, "_runtime_handler_top", PTR)
+    ctx.emit(IRInstr("store", None, [cur_top, parent_ptr]))
+    _store_global(ctx, "_runtime_handler_top", buf_ptr)
+
+    setjmp_block_index = ctx.blocks.index(ctx.cur)
+    setjmp_result = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", setjmp_result, ["_abi_setjmp", buf_ptr]))
+    ctx.emit(IRInstr("br.t", None, [setjmp_result, handler_b.label, body_b.label]))
+
+    ctx.switch_to(body_b)
+    # Handler must stay INSTALLED across the __next__ call -- that's the
+    # call that can raise StopIteration -- and only get restored to the
+    # parent AFTER it returns normally. Mirrors codegen.py's
+    # `_gen_for_iter`: the handler-chain restore happens right after
+    # `emit_call(__next__)`, not before. (Confirmed via a real repro:
+    # restoring the handler chain BEFORE the __next__ call means
+    # _runtime_handler_top is NULL/back-to-the-outer-scope by the time
+    # __next__ actually raises, so `raise StopIteration(...)` inside it
+    # finds no installed handler at all and terminates the process
+    # instead of being caught here.)
+    cur_iter = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", cur_iter, [iter_ptr]))
+    # Element type comes from __next__'s own declared return annotation
+    # (mirrors sema.py's identical `next_sig.ret_type[0]` lookup when it
+    # stamped `s.iter_is_instance` -- that's how it typed `s.var` in
+    # scope in the first place, so re-deriving it the same way here
+    # keeps the two in agreement).
+    next_sig = ctx.mctx.classes_sig.get(next_owner)
+    next_msig = next_sig.methods.get("__next__") if next_sig is not None else None
+    el_kind = "any"
+    if next_msig is not None and getattr(next_msig, "ret_type", None):
+        el_kind = next_msig.ret_type[0]
+    next_v = ctx.tmp(ir_type_for(el_kind))
+    ctx.emit(IRInstr("call", next_v, [f"{next_owner}____next__", cur_iter]))
+    parent_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", parent_v, [parent_ptr]))
+    _store_global(ctx, "_runtime_handler_top", parent_v)
+    _store_loop_target(ctx, s.var, next_v, el_kind)
+
+    ctx.loop_stack.append((cont_b.label, end_b.label))
+    for st in s.body:
+        _lower_stmt(ctx, st)
+    ctx.loop_stack.pop()
+    ctx.emit(IRInstr("br", None, [cont_b.label]))
+
+    ctx.switch_to(cont_b)
+    ctx.emit(IRInstr("br", None, [top_b.label]))
+
+    ctx.switch_to(handler_b)
+    parent_v2 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", parent_v2, [parent_ptr]))
+    _store_global(ctx, "_runtime_handler_top", parent_v2)
+    exc_type_v = _load_global(ctx, "_runtime_exc_type", I64)
+    stop_iter_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", stop_iter_v, [BUILTIN_EXC_IDS["StopIteration"]]))
+    is_stop = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_stop, [exc_type_v, stop_iter_v]))
+    reraise_b = ctx.new_block(f"for_iter_reraise_{uid}")
+    ctx.emit(IRInstr("br.t", None, [is_stop, (natural_b or end_b).label, reraise_b.label]))
+
+    ctx.switch_to(reraise_b)
+    reraise_msg = _load_global(ctx, "_runtime_exc_msg", PTR)
+    ctx.emit(IRInstr("call", None, ["_abi_raise", reraise_msg, exc_type_v]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    if natural_b is not None:
+        ctx.switch_to(natural_b)
+        for st in s.orelse:
+            _lower_stmt(ctx, st)
+        ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.try_regions.append((setjmp_block_index, len(ctx.blocks) - 1))
+    ctx.switch_to(end_b)
+
+
 def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
     """Lower try/except/finally via setjmp/longjmp through the _abi_* shim layer.
 
@@ -7596,6 +7730,17 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
             cls_name = A.expr_type(node.test).split(":", 1)[1]
             for mname in ("__bool__", "__len__"):
                 add_resolved(cls_name, mname)
+        elif isinstance(node, A.For) and getattr(node, "iter_is_instance", None) is not None:
+            # `for x in obj:` on a user class with __iter__/__next__ --
+            # same two-part "lowering fixed, walker not fixed" shape as
+            # every other dunder-dispatch fix this session. sema.py
+            # already validated both methods exist when it stamped
+            # `iter_is_instance` (see its own A.For handling), so no
+            # inheritance-chain resolution is needed here beyond what
+            # `add_resolved` already does.
+            cls_name = node.iter_is_instance
+            add_resolved(cls_name, "__iter__")
+            add_resolved(cls_name, "__next__")
         elif isinstance(node, A.AugAssign) and A.expr_type(node.value).startswith("instance:"):
             # `v1 += v2` on a user instance dispatches to
             # `__iadd__`/`__add__` (see `_lower_stmt`'s AugAssign case,

@@ -2211,6 +2211,62 @@ minimal 5-line repro, dispatched to a background investigation, not
 yet root-caused as of this note. `tests.runner` 475/483 confirmed
 after the `_lower_sort_key_call` fast-path fix.
 
+**Sixteenth checkpoint** (same day): implemented the `for x in obj:`
+iterator protocol (`__iter__`/`__next__`) from scratch -- new
+`_lower_for_iter_protocol` in `ir_lower.py`, wired in wherever sema
+stamps `s.iter_is_instance` (already fully validated by sema, which
+requires both methods exist on the class before stamping it). Ports
+codegen.py's `_gen_for_iter` design: install a fresh setjmp handler
+each loop iteration, call `__next__`, catch `StopIteration` via the
+same `_abi_setjmp`/`_abi_raise`/`_runtime_handler_top` machinery
+`_lower_try` already uses, re-raise anything else. One `try_regions`
+entry per iteration's setjmp installation so regalloc.py's
+try-region-based false-loop-detection exclusion (fixed earlier this
+session) also covers this construct's own backward branches. Also
+added the matching reachability-walker case (`__iter__`/`__next__`
+kept reachable) -- same two-part shape as every other dunder-dispatch
+fix this session.
+
+**Real bug found and fixed while verifying** (confirmed via a minimal
+repro, not guessed): the handler-chain restore (`_runtime_handler_top`
+reset back to the parent handler) was originally placed BEFORE the
+`__next__` call instead of after -- meaning by the time `__next__`
+actually raised `StopIteration` on loop exhaustion, no handler was
+installed at all, so the exception went fully unhandled and terminated
+the process instead of being caught. Moved the restore to after the
+`__next__` call returns (matching codegen.py's own ordering, which
+this port had gotten backwards initially). Confirmed fixing
+`366_custom_iter.py` exactly (all 5 lines).
+
+**Known related gap, not attempted**: comprehensions iterating over a
+custom `__iter__`/`__next__` instance (e.g. `[x*x for x in
+Counter(1,4)]`, `430_custom_iterator.py`) go through a completely
+separate lowering path (`A.Comprehension`, not `A.For`) that doesn't
+check `iter_is_instance` at all -- a real, additional feature gap
+beyond this checkpoint's scope. Real Python generator functions
+(`yield`, `442_generators.py`/`450_generator_for_loop.py`/
+`451_generator_yield_in_if.py`) are a much larger, unrelated feature
+(coroutine-style suspend/resume) -- confirmed via a grep that this
+compiler has ZERO generator support anywhere, including the legacy
+NASM backend, not something this checkpoint attempted or should be
+mistaken for a quick follow-on to the iterator-protocol work above.
+
+Verified: `tests.runner` 475/483.
+
+**Process note for future sessions**: dispatching multiple parallel
+background Explore-agent investigations that read/reference
+`ir_lower.py` while the main session is ALSO actively editing that
+same file risks a background agent's own throwaway test-modification
+silently overwriting unsaved main-session work when both share the
+file on disk -- this happened once this session (a stray
+`# TEMP-INVESTIGATION-EDIT` comment landed in the committed diff and,
+worse, an in-progress iterator-protocol implementation was lost
+entirely and had to be redone from scratch). Mitigation applied for
+the rest of this session: explicitly instruct every dispatched
+investigation agent not to touch files under `asmpython/`, and commit
+real work promptly rather than leaving it uncommitted across a long
+stretch with agents running in parallel.
+
 ## Selfhost Status (plan-step 11)
 
 Selfhost = asmpython (gen0, built by CPython) compiling its own source to
