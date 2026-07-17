@@ -2170,6 +2170,47 @@ scratch.
 
 Verified: `tests.runner` 475/483 throughout.
 
+**Follow-up to the fifteenth checkpoint** (same day): the investigation
+into the str-element `sorted(key=...)` bug flagged above came back with
+a root cause. sema.py's Lambda type-checking (`_check_expr`'s
+`A.Lambda` case) seeds EVERY lambda parameter as `"any"` regardless of
+the real call-site element type -- `inner_scope.add(p, "any")`,
+unconditional, for every lambda everywhere in the compiler, not just
+sort keys. Inside a synthesized lambda body, `len(w)` therefore
+type-checks `w` as `"any"`, and `ir_lower.py`'s `len()` lowering
+branches on that static type: `str` calls `strlen`, but `any` reads a
+LIST-style length header field (`gep [ptr+8]; load`) instead. A real
+(unheadered) Python str has no such field -- that read silently
+reinterprets the string's own character bytes 8-15 as a 64-bit length
+integer, producing per-string "keys" that are actually garbage
+bytes-as-an-int. Confirmed via gdb: `item_v`/RCX into the call is the
+correct string pointer every iteration; RAX coming back is the garbage
+"length." This is a real, general sema gap (also affects `map()`/
+`filter()` over str calling `len()` inside their lambda) -- fixing it
+properly means threading each call site's known element type into
+Lambda type-checking, a broader change than felt safe to make blind
+this late in a long session (risk of subtly affecting self-hosting or
+other Lambda call sites in ways not caught by the 483-case suite).
+Took the narrower, safer fix instead: a new shared `_lower_sort_key_call`
+helper (`ir_lower.py`, used by both `_lower_sort_inplace` and
+`_lower_minmax`) adds a dedicated fast path for the specific `lambda w:
+len(w)` shape over str elements -- calls `strlen` directly, bypassing
+the mistyped general synthesized-function-call path for exactly this
+common case. General non-fast-path str-element lambda bodies still
+raise `LowerError` rather than risk more silently-wrong output; int-
+element lambda bodies of any shape already worked via the general path
+(confirmed correct, unaffected). Fixed `112_sort_key.py`'s first 7 of
+9 lines exactly (`sorted(key=len)`, `min`/`max(key=len)`) -- the
+remaining 2 lines (`nums.sort(key=lambda x: -x)`, `names.sort(key=...,
+reverse=True)`) not yet re-verified as of this note, and a SEPARATE,
+newly-found bug affects them: plain `min(words)`/`max(words)` (no
+`key=`) return the wrong element (the list's first element, unchanged)
+specifically when preceded by both a `min(..., key=...)` AND a
+`max(..., key=...)` call earlier in the same function -- isolated to a
+minimal 5-line repro, dispatched to a background investigation, not
+yet root-caused as of this note. `tests.runner` 475/483 confirmed
+after the `_lower_sort_key_call` fast-path fix.
+
 ## Selfhost Status (plan-step 11)
 
 Selfhost = asmpython (gen0, built by CPython) compiling its own source to

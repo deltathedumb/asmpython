@@ -2976,6 +2976,73 @@ def _lower_isinstance(ctx: _FuncCtx, e: A.Call) -> IRValue:
     return out
 
 
+def _lower_sort_key_call(ctx: _FuncCtx, sort_key: A.Lambda, el_kind: str, item_v: IRValue) -> IRValue | None:
+    """Compute a `key=` lambda's result for one element, shared by
+    `_lower_sort_inplace` and `_lower_minmax`. Returns None if the
+    lambda body isn't one of the supported shapes (caller decides what
+    to do -- currently always `raise LowerError`, kept at each call site
+    rather than centralized here so the error message stays specific to
+    the caller).
+
+    `lambda w: len(w)` over str elements gets a dedicated fast path
+    (direct `strlen` call) rather than routing through the general
+    synthesized-function call. Root cause (confirmed via a background
+    gdb investigation): sema.py's Lambda type-checking seeds EVERY
+    lambda parameter as `"any"` regardless of the actual call-site
+    element type (`inner_scope.add(p, "any")`, unconditional) -- so
+    inside the synthesized function body, `len(w)` type-checks `w` as
+    `"any"`, and `ir_lower.py`'s `len()` lowering branches on that
+    static type: `str` calls `strlen`, but `any`/`dict`/`set` reads a
+    LIST-style length header field via `gep [ptr+8]; load` instead. A
+    real (unheadered) Python str has no such field -- that `load`
+    silently reinterprets the string's OWN character bytes 8-15 as a
+    64-bit length integer, producing a per-string "key" that's actually
+    garbage bytes-as-an-int, scrambling comparisons. This is a real,
+    general sema gap (also affects `map()`/`filter()` over str calling
+    `len()` inside their lambda), not something safe to fix narrowly
+    here beyond this one shape -- call `strlen` directly instead,
+    bypassing the mistyped general path for exactly this common case.
+    General non-fast-path str-element lambda bodies still aren't
+    supported (returns None); int-element lambda bodies of any shape
+    ARE supported via the general synthesized-function-call path,
+    confirmed correct via direct testing.
+    """
+    param = sort_key.params[0]
+    key_body = sort_key.body
+    if isinstance(key_body, A.Name) and key_body.name == param:
+        return item_v
+    if (
+        isinstance(key_body, A.Subscript)
+        and isinstance(key_body.obj, A.Name)
+        and key_body.obj.name == param
+        and isinstance(key_body.index, A.IntLit)
+    ):
+        key_idx = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", key_idx, [int(key_body.index.value)]))
+        key_addr = _list_elem_addr(ctx, item_v, key_idx)
+        key_v = ctx.tmp(ir_type_for(A.expr_type(key_body)))
+        ctx.emit(IRInstr("load", key_v, [key_addr]))
+        return key_v
+    if (
+        el_kind == "str"
+        and isinstance(key_body, A.Call)
+        and key_body.func == "len"
+        and len(key_body.args) == 1
+        and isinstance(key_body.args[0], A.Name)
+        and key_body.args[0].name == param
+    ):
+        key_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", key_v, ["strlen", item_v]))
+        return key_v
+    if el_kind == "int":
+        fn_name = sort_key.func_name  # type: ignore[attr-defined]
+        key_ty = ir_type_for(getattr(sort_key, "lambda_ret", "int"))
+        key_v = ctx.tmp(key_ty)
+        ctx.emit(IRInstr("call", key_v, [fn_name, item_v]))
+        return key_v
+    return None
+
+
 def _lower_sort_inplace(ctx: _FuncCtx, e, out_v: IRValue, el_kind: str) -> IRValue:
     """Sort `out_v` (a real list value, already the caller's to mutate --
     `_lower_sorted` passes a fresh clone, `list.sort()` passes the
@@ -2988,8 +3055,6 @@ def _lower_sort_inplace(ctx: _FuncCtx, e, out_v: IRValue, el_kind: str) -> IRVal
     if sort_key is not None:
         if not isinstance(sort_key, A.Lambda) or len(sort_key.params) != 1:
             raise LowerError("unsupported expr Call (sorted key)")
-        param = sort_key.params[0]
-        key_body = sort_key.body
         len_addr = ctx.tmp(PTR)
         ctx.emit(IRInstr("gep", len_addr, [out_v, _LIST_LEN_OFF]))
         len_v = ctx.tmp(I64)
@@ -3030,40 +3095,8 @@ def _lower_sort_inplace(ctx: _FuncCtx, e, out_v: IRValue, el_kind: str) -> IRVal
         item_addr = _list_elem_addr(ctx, body_elems, body_idx)
         item_v = ctx.tmp(PTR if el_kind not in ("int", "float") else ir_type_for(el_kind))
         ctx.emit(IRInstr("load", item_v, [item_addr]))
-        if isinstance(key_body, A.Name) and key_body.name == param:
-            key_v = item_v
-        elif (
-            isinstance(key_body, A.Subscript)
-            and isinstance(key_body.obj, A.Name)
-            and key_body.obj.name == param
-            and isinstance(key_body.index, A.IntLit)
-        ):
-            key_idx = ctx.tmp(I64)
-            ctx.emit(IRInstr("const", key_idx, [int(key_body.index.value)]))
-            key_addr = _list_elem_addr(ctx, item_v, key_idx)
-            key_v = ctx.tmp(ir_type_for(A.expr_type(key_body)))
-            ctx.emit(IRInstr("load", key_v, [key_addr]))
-        elif el_kind in ("int", "str"):  # TEMP-INVESTIGATION-EDIT
-            # General case: call the lambda's own already-synthesized
-            # function (every A.Lambda gets one -- see sema.py's Lambda
-            # handling) rather than pattern-matching the body's AST shape
-            # -- covers any lambda body over int elements (e.g. `lambda
-            # x: -x`), not just the identity/tuple-index fast paths
-            # above. Mirrors list(filter(...))/list(map(...))'s own
-            # "call the synthesized function" lowering just above this.
-            # Confirmed correct for int elements via direct testing;
-            # deliberately NOT extended to str elements yet -- that
-            # combination (str list elements + a general, non-fast-path
-            # lambda key body) produces silently WRONG sort output for a
-            # reason not yet root-caused (under investigation), so it's
-            # safer to keep raising the LowerError below for that case
-            # than to ship code with a known-wrong-but-not-understood
-            # failure mode.
-            fn_name = sort_key.func_name  # type: ignore[attr-defined]
-            key_ty = ir_type_for(getattr(sort_key, "lambda_ret", "int"))
-            key_v = ctx.tmp(key_ty)
-            ctx.emit(IRInstr("call", key_v, [fn_name, item_v]))
-        else:
+        key_v = _lower_sort_key_call(ctx, sort_key, el_kind, item_v)
+        if key_v is None:
             raise LowerError("unsupported expr Call (sorted key lambda body)")
         cur_keys = ctx.tmp(PTR)
         ctx.emit(IRInstr("load", cur_keys, [keys_ptr]))
@@ -3192,10 +3225,10 @@ def _lower_minmax(ctx: _FuncCtx, e: A.Call) -> IRValue:
     key_ty = "int"
     if isinstance(sort_key, A.Lambda):
         key_ty = getattr(sort_key, "lambda_ret", "int")
-        fn_name = sort_key.func_name  # type: ignore[attr-defined]
         best_key_ptr = ctx.ensure_slot(f"__minmax1_bestkey_{id(e)}", ir_type_for(key_ty))
-        first_key = ctx.tmp(ir_type_for(key_ty))
-        ctx.emit(IRInstr("call", first_key, [fn_name, first_el]))
+        first_key = _lower_sort_key_call(ctx, sort_key, el_ty, first_el)
+        if first_key is None:
+            raise LowerError("unsupported expr Call (min/max key lambda body)")
         ctx.emit(IRInstr("store", None, [first_key, best_key_ptr]))
 
     idx_ptr = ctx.ensure_slot(f"__minmax1_idx_{id(e)}", I64)
@@ -3223,8 +3256,9 @@ def _lower_minmax(ctx: _FuncCtx, e: A.Call) -> IRValue:
     cand_el = ctx.tmp(el_ir_ty)
     ctx.emit(IRInstr("load", cand_el, [cand_addr]))
     if isinstance(sort_key, A.Lambda):
-        cand_key = ctx.tmp(ir_type_for(key_ty))
-        ctx.emit(IRInstr("call", cand_key, [fn_name, cand_el]))
+        cand_key = _lower_sort_key_call(ctx, sort_key, el_ty, cand_el)
+        if cand_key is None:
+            raise LowerError("unsupported expr Call (min/max key lambda body)")
         best_key_v = ctx.tmp(ir_type_for(key_ty))
         ctx.emit(IRInstr("load", best_key_v, [best_key_ptr]))
         better = _minmax_is_better(ctx, cand_key, best_key_v, key_ty, want_max)
