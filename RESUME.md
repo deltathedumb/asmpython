@@ -1366,6 +1366,57 @@ related-but-separate gap), and `172_base64_module.py`/
 `358_calendar_module.py`/`369_dunder_bool.py` (unrelated, not yet
 triaged individually).
 
+**Triage pass ten** (2026-07-16, same-day follow-up): `369_dunder_bool.py`
+turned out to be a real, general bug, not a one-off — `if obj:` /
+`while obj:` on a user instance never checked `__bool__`/`__len__` at
+all. `_value_truthy` (the shared helper backing every truthiness site:
+`If`, `While`, ternary, `not`, list-comprehension conditions,
+`sorted(reverse=...)`) only special-cased `float`; "any heap pointer"
+(including a live instance) passed through as a raw nonzero test —
+the SAME dunder-dispatch gap class found repeatedly earlier this
+session (BinOp/UnaryOp/Compare/Call all needed their own `dunder_owner`
+checks added one at a time), just never checked for truthiness
+specifically until now. Confirmed as a genuine INFINITE LOOP, not a
+crash: `while c:` on a `Counter` instance with `__bool__` returning
+`self.n > 0` never terminated (the loop condition always saw `c`'s own
+nonzero pointer), ticking `c.n` down through -300+ before the sweep's
+10-second timeout killed it — exactly the `[CRASH]`-bucket "run error:
+... timed out after 10 seconds" entries the sweep script has been
+reporting all session for this file. Fixed in `_lower_truthy` (the
+wrapper every real call site already uses, not `_value_truthy`
+directly): when the condition expression's type is `instance:X`, check
+`__bool__` then `__len__` (matching CPython's precedence, and mirroring
+codegen.py's `_gen_truthy_test`) before falling back to "any live
+instance is truthy." Needed a SECOND fix, the exact same two-part
+shape as the earlier unary-dunder bug: the reachability walker had no
+way to know an `A.If`/`A.While` node's `.test` field implies a
+`__bool__`/`__len__` call (that dispatch decision isn't stamped
+anywhere on the AST the way `dunder_owner` is for BinOp/Compare), so
+the lowering was correct but the method it called was never emitted —
+an unresolved-symbol link error (`undefined symbol 'Box____bool__'`)
+until a matching walker case was added. `A.BoolOp` (`and`/`or`) has its
+own separate lowering path that does NOT go through `_lower_truthy` —
+left unaudited for now (no test case in this session's corpus exercises
+an instance operand there), flagged as a follow-up rather than silently
+assumed fine.
+
+Verified: `tests.runner` 475/483. Confirmed fixing `369_dunder_bool.py`
+exactly (all 10 lines, including the previously-infinite `while c:`
+loop terminating correctly). Full sweep: `OK=299 MISMATCH=12 CRASH=10
+BUILD_FAIL=117`, up from `OK=298 MISMATCH=12 CRASH=11 BUILD_FAIL=117`
+before this pass — +1 OK, -1 crash, exactly `369_dunder_bool.py`.
+
+**Cumulative sweep numbers after ten triage passes this session, from
+the `OK=245 MISMATCH=24 CRASH=42 BUILD_FAIL=127` session-start
+baseline**:
+
+```text
+OK=299  MISMATCH=12  CRASH=10  BUILD_FAIL=117
+```
+
+56% → 68% of the full 438-case corpus passing. The crash bucket has
+gone from 42 to 10 across all ten passes.
+
 ## Selfhost Status (plan-step 11)
 
 Selfhost = asmpython (gen0, built by CPython) compiling its own source to

@@ -1294,6 +1294,39 @@ def _lower_truthy(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     """Lower `e` then convert its value to truthy I64 -- see
     `_value_truthy`. Use this (not `_value_truthy` directly) whenever `e`
     hasn't been lowered yet, so it's only evaluated once."""
+    t = A.expr_type(e)
+    if t.startswith("instance:"):
+        # `if obj:` / `while obj:` on a user instance -- Python truthiness
+        # calls `__bool__` (or, if absent, `__len__`) rather than testing
+        # the instance POINTER itself, which is always a non-NULL truthy
+        # value for any live instance. `_value_truthy`'s generic "any heap
+        # pointer passes through as a raw nonzero test" fallback had no
+        # dunder awareness at all here (unlike BinOp/UnaryOp/Compare/
+        # Call, which all gained their own dunder_owner checks earlier
+        # this session) -- confirmed via `369_dunder_bool.py`'s
+        # `while c:` (a Counter with __bool__ returning `self.n > 0`)
+        # looping forever: the loop condition always saw c's own nonzero
+        # pointer and never terminated. Mirrors codegen.py's
+        # `_gen_truthy_test` exactly: `__bool__` takes precedence over
+        # `__len__` (matches CPython); a call result of 0 is falsy,
+        # nonzero is truthy (already the right sense for `__len__`'s
+        # count too, and `__bool__`'s own inferred_type is "int" so a
+        # real True/False return already lowers to 1/0).
+        cls_name = t.split(":", 1)[1]
+        for mname in ("__bool__", "__len__"):
+            owner = _resolve_method_owner(ctx, cls_name, mname)
+            if owner is not None:
+                obj_v = _lower_expr(ctx, e)
+                v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", v, [f"{owner}__{mname}", obj_v]))
+                return v
+        # No __bool__/__len__: any live (non-NULL) instance is truthy --
+        # still must evaluate `e` for its side effects even though the
+        # result is unconditionally truthy.
+        _lower_expr(ctx, e)
+        one = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one, [1]))
+        return one
     return _value_truthy(ctx, _lower_expr(ctx, e))
 
 
@@ -6011,6 +6044,22 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
             owner = getattr(node, "_getitem_class", None)
             if owner is not None:
                 add_resolved(owner, "__getitem__")
+        elif isinstance(node, (A.If, A.While)) and A.expr_type(node.test).startswith("instance:"):
+            # `if obj:` / `while obj:` on a user instance dispatches to
+            # `__bool__`/`__len__` (see `_lower_truthy`'s own new dunder
+            # check) -- that dispatch decision isn't stamped anywhere on
+            # the AST node itself (unlike BinOp/UnaryOp/Compare's
+            # dunder_owner), so this walker never knew to keep the
+            # method reachable. Without this, `_lower_truthy` correctly
+            # LOWERED the call, but the method it called was never
+            # EMITTED into the final binary at all -- an unresolved
+            # symbol at link time (confirmed via
+            # `369_dunder_bool.py`: `undefined symbol 'Box____bool__'`),
+            # the exact same two-part "lowering fixed, walker not fixed"
+            # bug shape as the earlier unary-dunder fix this session.
+            cls_name = A.expr_type(node.test).split(":", 1)[1]
+            for mname in ("__bool__", "__len__"):
+                add_resolved(cls_name, mname)
         elif isinstance(node, A.FString):
             for seg in node.segments:
                 seg_ty = A.expr_type(seg)
