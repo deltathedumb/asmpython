@@ -2387,6 +2387,59 @@ def _lower_fstring_segment(ctx: _FuncCtx, seg: A.Expr) -> IRValue:
     return _lower_expr_as_str(ctx, seg, repr_mode=conv in ("r", "a"))
 
 
+def _lower_str_format(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
+    """`"...".format(args)` with a literal format string -- entirely
+    unimplemented before this. Ports codegen.py's `_gen_str_format`
+    exactly: parse the literal into (lit-text | arg-reference) pieces
+    via `A.parse_format_fields` (a shared parser sema's own validation
+    pass also uses, so the two stay in sync), then for each arg-
+    reference piece, stamp `fmt_spec`/`conv_flag` onto the referenced
+    argument expression and reuse `_lower_fstring_segment` -- the exact
+    same per-segment formatting f-strings already use, since `.format()`
+    supports the identical `[[fill]align]width.precision` mini-language
+    and `!r`/`!s`/`!a` conversions. Only supports a literal format
+    string (`e.obj` is `A.StrLit`) -- caller only dispatches here in
+    that case; a `.format()` call on a general str expression falls
+    through to the generic str-method dispatch and its "unknown method"
+    error, matching codegen.py's own scope (a runtime-computed format
+    string would need the mini-language parsed at RUNTIME, a much
+    larger feature no caller in this test suite needs).
+    """
+    fmt = e.obj.value  # type: ignore[attr-defined]
+    pieces = A.parse_format_fields(fmt)
+    if not pieces:
+        empty = ctx.mctx.intern_str("")
+        out = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", out, [empty]))
+        return out
+
+    def emit_piece(kind, val, spec, conv) -> IRValue:
+        if kind == "lit":
+            name = ctx.mctx.intern_str(val)
+            v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", v, [name]))
+            return v
+        if isinstance(val, str):
+            arg = None
+            for kw_name, kw_arg in e.kwargs or []:
+                if kw_name == val:
+                    arg = kw_arg
+                    break
+        else:
+            arg = e.args[val]
+        arg.fmt_spec = spec  # type: ignore[attr-defined]
+        arg.conv_flag = conv  # type: ignore[attr-defined]
+        return _lower_fstring_segment(ctx, arg)
+
+    acc = emit_piece(*pieces[0])
+    for kind, val, spec, conv in pieces[1:]:
+        piece_v = emit_piece(kind, val, spec, conv)
+        new_acc = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", new_acc, ["_abi_str_concat", acc, piece_v]))
+        acc = new_acc
+    return acc
+
+
 def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr, repr_mode: bool = False) -> IRValue:
     ty = A.expr_type(e)
     if ty == "str":
@@ -2694,11 +2747,18 @@ def _emit_float_divzero_check(ctx: _FuncCtx, divisor: IRValue, op: str, tag: int
     raise), so this was a real correctness gap, not a crash-safety one:
     confirmed via a real repro that these three silently returned
     `inf`/`inf`/`nan` instead of raising a catchable exception. Message
-    text matches CPython exactly (`"float division by zero"` for `/`,
-    `"float floor division by zero"` for `//`, `"float modulo"` for `%`
-    -- these differ from the plain `"division by zero"` int-division
-    message and from each other). Same raise_b-before-ok_b block-
-    ordering rule as `_emit_int_divzero_check` (see its own docstring).
+    text is the same plain `"division by zero"` int-division uses --
+    an earlier version of this function used per-operator CPython-
+    historical message variants (`"float division by zero"` etc.),
+    which turned out to be WRONG for the CPython version this project
+    targets: verified directly against the live interpreter (`try:
+    5.0/0.0 ... except ZeroDivisionError as e: print(e)` and the `//`/`%`
+    equivalents) that all three print the identical plain message, no
+    "float"/operator-specific variant at all. `op` is kept as a
+    parameter (unused for the message now) since callers already pass
+    it and it documents which operator triggered the check. Same
+    raise_b-before-ok_b block-ordering rule as `_emit_int_divzero_check`
+    (see its own docstring).
     """
     zero = ctx.tmp(F64)
     ctx.emit(IRInstr("const", zero, [0.0]))
@@ -2709,12 +2769,7 @@ def _emit_float_divzero_check(ctx: _FuncCtx, divisor: IRValue, op: str, tag: int
     ctx.emit(IRInstr("br.t", None, [nonzero, ok_b.label, raise_b.label]))
 
     ctx.switch_to(raise_b)
-    text = {
-        "/": "float division by zero",
-        "//": "float floor division by zero",
-        "%": "float modulo",
-    }[op]
-    msg_name = ctx.mctx.intern_str(text)
+    msg_name = ctx.mctx.intern_str("division by zero")
     msg_v = ctx.tmp(PTR)
     ctx.emit(IRInstr("global_addr", msg_v, [msg_name]))
     exc_v = ctx.tmp(I64)
@@ -5616,6 +5671,8 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("call", None, ["_abi_dict_pop", obj_v2, first_key]))
                 return first_key
             raise LowerError(f"unsupported expr MethodCall (set.{e.method})")
+        if obj_ty == "str" and e.method == "format" and isinstance(e.obj, A.StrLit):
+            return _lower_str_format(ctx, e)
         if obj_ty == "str":
             obj_v = _lower_expr(ctx, e.obj)
             if e.method == "encode":
@@ -6126,6 +6183,27 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             return out
         if e.func == "repr" and len(e.args) == 1:
             return _lower_expr_as_str(ctx, e.args[0], repr_mode=True)
+        if e.func == "format" and len(e.args) in (1, 2):
+            # format(value[, spec]) -- entirely unimplemented before this;
+            # fell through to the generic bare-symbol-call fallback,
+            # linking against a nonexistent `format` DLL symbol. Reuses
+            # `_lower_fstring_segment`'s spec-parsing/formatting machinery
+            # exactly like `_lower_str_format` does for `"...".format()`
+            # -- stamp `fmt_spec` (a compile-time literal, same
+            # requirement f-strings/`.format()` already have -- a
+            # runtime-computed spec string isn't supported by any of the
+            # three) onto the value expression and reuse the shared
+            # per-value formatter.
+            val_arg = e.args[0]
+            if len(e.args) == 2:
+                spec_arg = e.args[1]
+                if not isinstance(spec_arg, A.StrLit):
+                    raise LowerError("unsupported expr Call (format() with a non-literal spec)")
+                val_arg.fmt_spec = spec_arg.value  # type: ignore[attr-defined]
+            else:
+                val_arg.fmt_spec = ""  # type: ignore[attr-defined]
+            val_arg.conv_flag = ""  # type: ignore[attr-defined]
+            return _lower_fstring_segment(ctx, val_arg)
         if e.func == "reversed" and len(e.args) == 1:
             src_v = _lower_expr(ctx, e.args[0])
             start_v = ctx.tmp(I64)

@@ -2398,11 +2398,54 @@ made newly visible via a cleaner sweep signal):
    `_emit_float_divzero_check` (same `raise_b`-before-`ok_b` block-
    ordering rule as the int version), with CPython's exact three
    distinct message texts (`"float division by zero"`,
-   `"float floor division by zero"`, `"float modulo"`). Fixed
-   `305_zero_division.py` exactly (all 7 lines).
+   `"float floor division by zero"`, `"float modulo"`) -- **this
+   turned out to be WRONG, corrected in the very next checkpoint
+   below**: those per-operator variants are an OLDER CPython message
+   convention this project's target version doesn't use. Fixed
+   `305_zero_division.py` exactly (all 7 lines) with the (soon-to-be-
+   corrected) per-operator messages.
 
 Verified: `tests.runner` 475/483 after every fix in this whole
 checkpoint.
+
+**Nineteenth checkpoint** (same day): implemented `str.format()` (a
+literal format string only, e.g. `"{} and {}".format(a, b)` --
+matches codegen.py's own scope) and the bare `format(value[, spec])`
+builtin, both entirely unimplemented before this. Both reuse
+`_lower_fstring_segment` (the shared per-value formatter f-strings
+already use, covering the full `[[fill]align]width.precision`
+mini-language and `!r`/`!s`/`!a` conversions) rather than
+reimplementing formatting logic: `_lower_str_format` parses the
+literal via the shared `A.parse_format_fields` (already used by
+sema's own validation pass, so the two stay in sync) into
+literal/arg-reference pieces and stamps `fmt_spec`/`conv_flag` onto
+each referenced argument expression before formatting it; the bare
+`format()` builtin does the same for its single value argument
+(spec must be a compile-time string literal, matching the
+requirement f-strings/`.format()` already have). Fixed
+`86_str_format.py`, `139_str_format_spec.py`, `142_str_format_named.py`,
+and `414_format_builtin.py` exactly (all lines, all four files).
+
+**Correction to the eighteenth checkpoint's float-divzero fix**: while
+running the sweep for this checkpoint, `305_zero_division.py` showed a
+MISMATCH -- the differentiated per-operator messages
+(`"float division by zero"`/`"float floor division by zero"`/
+`"float modulo"`) added in the eighteenth checkpoint don't match this
+project's target CPython version. Verified directly against the live
+interpreter (`try: 5.0/0.0 ... except ZeroDivisionError as e:
+print(e)` and the `//`/`%` equivalents): all three print the exact
+same plain `"division by zero"` message, no operator-specific variant
+at all -- confirming the ORIGINAL test file's `# expect:` block
+(all six lines reading `"division by zero"`) was correct all along,
+and it was the fix's assumption about CPython's message format that
+was wrong. Fixed `_emit_float_divzero_check` to use the plain message
+for all three operators. A good reminder to verify assumptions about
+exact CPython behavior against the live interpreter rather than
+memory/prior-version conventions, especially for message text that
+looks superficially plausible.
+
+Verified: `tests.runner` 475/483 after every fix in this whole
+checkpoint, including the correction.
 
 ## Selfhost Status (plan-step 11)
 
