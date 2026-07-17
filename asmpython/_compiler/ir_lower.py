@@ -112,6 +112,7 @@ class _ModuleCtx:
         func_names: frozenset[str] = frozenset(),
         func_sigs: dict | None = None,
         ffi_funcs: dict | None = None,
+        ffi_consts: dict | None = None,
         imported_modules: dict | None = None,
         classes_sig: dict | None = None,
         global_types: dict[str, IRType] | None = None,
@@ -123,6 +124,13 @@ class _ModuleCtx:
         self.func_names = func_names
         self.func_sigs = func_sigs or {}
         self.ffi_funcs = ffi_funcs or {}
+        # FFI constants (e.g. `from math import pi`) -- a bare name bound
+        # to a compile-time-known scalar value (stdlib.Const), NOT a real
+        # runtime global. `_lower_expr`'s A.Name case checks this BEFORE
+        # falling back to the generic slot/global lookup (see there for
+        # why: without this, the name silently became an uninitialized
+        # local defaulting to I64, corrupting anything that read it).
+        self.ffi_consts = ffi_consts or {}
         self.imported_modules = imported_modules or {}
         self.classes_sig = classes_sig or {}
         self.global_types = global_types or {}
@@ -2666,7 +2674,47 @@ def _emit_int_divzero_check(ctx: _FuncCtx, divisor: IRValue, tag: int) -> None:
     ctx.emit(IRInstr("br.t", None, [nonzero, ok_b.label, raise_b.label]))
 
     ctx.switch_to(raise_b)
-    msg_name = ctx.mctx.intern_str("ZeroDivisionError: division by zero")
+    msg_name = ctx.mctx.intern_str("division by zero")
+    msg_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", msg_v, [msg_name]))
+    exc_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", exc_v, [BUILTIN_EXC_IDS["ZeroDivisionError"]]))
+    ctx.emit(IRInstr("call", None, ["_abi_raise", msg_v, exc_v]))
+    ctx.emit(IRInstr("br", None, [ok_b.label]))
+
+    ctx.switch_to(ok_b)
+
+
+def _emit_float_divzero_check(ctx: _FuncCtx, divisor: IRValue, op: str, tag: int) -> None:
+    """Raise ZeroDivisionError if `divisor` (an F64) is 0.0, for float
+    `/`/`//`/`%`. Unlike int division (a hardware SIGFPE), a float divide
+    by zero is well-defined IEEE-754 (inf/nan) and doesn't crash on its
+    own -- but Python raises ZeroDivisionError for all three of these
+    operators on floats too (`5.0 / 0.0`, `5.0 // 0.0`, `5.0 % 0.0` all
+    raise), so this was a real correctness gap, not a crash-safety one:
+    confirmed via a real repro that these three silently returned
+    `inf`/`inf`/`nan` instead of raising a catchable exception. Message
+    text matches CPython exactly (`"float division by zero"` for `/`,
+    `"float floor division by zero"` for `//`, `"float modulo"` for `%`
+    -- these differ from the plain `"division by zero"` int-division
+    message and from each other). Same raise_b-before-ok_b block-
+    ordering rule as `_emit_int_divzero_check` (see its own docstring).
+    """
+    zero = ctx.tmp(F64)
+    ctx.emit(IRInstr("const", zero, [0.0]))
+    nonzero = ctx.tmp(I64)
+    ctx.emit(IRInstr("fcmp.ne", nonzero, [divisor, zero]))
+    raise_b = ctx.new_block(f"fdivzero_raise_{tag}")
+    ok_b = ctx.new_block(f"fdivzero_ok_{tag}")
+    ctx.emit(IRInstr("br.t", None, [nonzero, ok_b.label, raise_b.label]))
+
+    ctx.switch_to(raise_b)
+    text = {
+        "/": "float division by zero",
+        "//": "float floor division by zero",
+        "%": "float modulo",
+    }[op]
+    msg_name = ctx.mctx.intern_str(text)
     msg_v = ctx.tmp(PTR)
     ctx.emit(IRInstr("global_addr", msg_v, [msg_name]))
     exc_v = ctx.tmp(I64)
@@ -2710,7 +2758,7 @@ def _emit_list_index_bounds_check(ctx: _FuncCtx, list_v: IRValue, idx_v: IRValue
     ctx.emit(IRInstr("br.t", None, [in_range, ok_b.label, raise_b.label]))
 
     ctx.switch_to(raise_b)
-    msg_name = ctx.mctx.intern_str("IndexError: list index out of range")
+    msg_name = ctx.mctx.intern_str("list index out of range")
     msg_v = ctx.tmp(PTR)
     ctx.emit(IRInstr("global_addr", msg_v, [msg_name]))
     exc_v = ctx.tmp(I64)
@@ -2743,9 +2791,18 @@ def _emit_dict_key_check(ctx: _FuncCtx, dict_v: IRValue, key_v: IRValue, tag: in
     ctx.emit(IRInstr("br.t", None, [has_v, ok_b.label, raise_b.label]))
 
     ctx.switch_to(raise_b)
-    msg_name = ctx.mctx.intern_str("KeyError")
+    # Real Python's KeyError message (str(e)) is the missing key's OWN
+    # repr, quoted (e.g. `'missing'`) -- key_v is always a real string
+    # pointer here (int keys are pre-stringified by _lower_dict_key for
+    # the lookup itself), so build the quoted form directly rather than
+    # leaving a bare "KeyError" placeholder.
+    quote_name = ctx.mctx.intern_str("'")
+    quote_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", quote_v, [quote_name]))
+    opened_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", opened_v, ["_abi_str_concat", quote_v, key_v]))
     msg_v = ctx.tmp(PTR)
-    ctx.emit(IRInstr("global_addr", msg_v, [msg_name]))
+    ctx.emit(IRInstr("call", msg_v, ["_abi_str_concat", opened_v, quote_v]))
     exc_v = ctx.tmp(I64)
     ctx.emit(IRInstr("const", exc_v, [BUILTIN_EXC_IDS["KeyError"]]))
     ctx.emit(IRInstr("call", None, ["_abi_raise", msg_v, exc_v]))
@@ -3614,6 +3671,50 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(I64)
             ctx.emit(IRInstr("const", v, [BUILTIN_TYPE_IDS[e.name]]))
             return v
+        if e.name in ctx.mctx.ffi_consts and e.name not in ctx.slot_ty:
+            # `from math import pi` -- a bare name bound to a stdlib.Const,
+            # not a real runtime global at all (the binding table itself
+            # IS the value, resolved at COMPILE time). Was entirely
+            # unhandled: fell through to the generic slot/global fallback
+            # below, which allocated a fresh, never-initialized local
+            # slot defaulting to I64 and read GARBAGE stack memory as the
+            # constant's value -- confirmed via a real repro (`from math
+            # import pi, sqrt; print(int(sqrt(pi * pi)))`) crashing the
+            # COMPILER itself (not the compiled binary): the garbage
+            # I64-typed value flowed into `pi * pi`'s `fmul`, and
+            # regalloc allocated it a GP register to match its wrong
+            # type, so codegen's XMM-only binop path hit a `RegLoc`
+            # where it expected a `StackLoc`. Mirrors the existing
+            # `module.CONST`-style `A.Attr` FFI-const handling elsewhere
+            # in this file (see its own much longer comment for the
+            # `value_windows` override rationale) -- same value
+            # resolution, just for the from-import bare-name spelling
+            # instead of the module-attribute spelling. `e.name not in
+            # ctx.slot_ty` guards against a local variable shadowing the
+            # imported constant's name (rare but real -- a function-local
+            # `pi = 3` inside code that also imported `math.pi` at module
+            # scope must read the LOCAL, not the FFI constant).
+            b = ctx.mctx.ffi_consts[e.name]
+            value = getattr(b, "value_windows", None)
+            if value is None:
+                value = getattr(b, "value", None)
+            if b.ty == "str" and isinstance(value, str):
+                name = ctx.mctx.intern_str(value)
+                v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", v, [name]))
+                return v
+            if b.ty == "int" and isinstance(value, (int, bool)):
+                v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", v, [int(value)]))
+                return v
+            if b.ty == "float" and isinstance(value, (int, float)):
+                v = ctx.tmp(F64)
+                ctx.emit(IRInstr("const", v, [float(value)]))
+                return v
+            # Anything else (list-typed constants, etc.) falls through to
+            # the generic path unchanged -- a separate, smaller,
+            # not-yet-scoped gap, same as the module.CONST case's own
+            # matching fallthrough note.
         # A local can shadow an unrelated module-level global of the same
         # name (e.g. `x = 0.0` at module scope, `for x in xs:` inside a
         # function that never declared `global x`) -- when that's the
@@ -3881,6 +3982,8 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 b_f = ctx.tmp(F64)
                 ctx.emit(IRInstr("sitofp", b_f, [b]))
                 b = b_f
+            if e.op in ("/", "//", "%"):
+                _emit_float_divzero_check(ctx, b, e.op, id(e))
             if e.op in ("%", "**"):
                 # No direct SSE instruction for float mod/pow -- both route
                 # through the matching real libc double(double,double)
@@ -5495,7 +5598,7 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("br.t", None, [nonempty, ok_b.label, empty_b.label]))
 
                 ctx.switch_to(empty_b)
-                msg_name = ctx.mctx.intern_str("KeyError: 'pop from an empty set'")
+                msg_name = ctx.mctx.intern_str("'pop from an empty set'")
                 msg_v = ctx.tmp(PTR)
                 ctx.emit(IRInstr("global_addr", msg_v, [msg_name]))
                 exc_v = ctx.tmp(I64)
@@ -5871,16 +5974,48 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
 
     if isinstance(e, A.Call) and e.func in ctx.mctx.ffi_funcs:
         # A bound stdlib FFI function (e.g. asmlib.hardware.in_byte/cpuid/
-        # disable_interrupts): call its real c_name symbol, not the
-        # asmpython-level name. All of hardware.py's bindings take plain
-        # int args (no float, no >4-arg overflow), which is exactly what a
-        # normal "call" IR op already marshals -- the same standard-ABI
-        # argument passing _gen_ffi_call does by hand in the legacy
-        # codegen.py for the same bindings.
+        # disable_interrupts, or a real libm export like math.sqrt): call
+        # its real c_name symbol, not the asmpython-level name. Argument
+        # marshaling is exactly what a normal "call" IR op already does
+        # (the same standard-ABI argument passing _gen_ffi_call does by
+        # hand in the legacy codegen.py for the same bindings) -- but the
+        # RESULT type must follow the binding's own declared `ret_type`,
+        # not be hardcoded I64: hardware.py's bindings are genuinely all
+        # int, but math.py's aren't (sqrt/sin/cos/... return float, in
+        # XMM0, not RAX). Was hardcoded I64 unconditionally -- confirmed
+        # via a real repro (`int(sqrt(49))`): the call's result got typed
+        # I64 despite the real ABI return coming back in XMM0, so the
+        # immediately-following `fptosi` (which expects an F64 SOURCE
+        # location) fed it a value the allocator had placed in a GP
+        # register, tripping codegen's `_dst_xmm`-style location-kind
+        # assert (`'RegLoc' object has no attribute 'offset'`).
         fn = ctx.mctx.ffi_funcs[e.func]
         c_name = getattr(fn, "c_name_windows", None) or fn.c_name
-        args = [_lower_expr(ctx, a) for a in e.args]
-        v = ctx.tmp(I64)
+        args = []
+        for i, a in enumerate(e.args):
+            av = _lower_expr(ctx, a)
+            # Coerce an int-typed argument to float when the binding
+            # declares a float parameter (e.g. `sqrt(49)` -- a bare int
+            # literal into a `("float",)`-typed binding): without this,
+            # the raw integer bits get passed through unconverted and
+            # reinterpreted as a double bit pattern on the callee side,
+            # producing garbage (confirmed: `sqrt(49)` silently returned
+            # `0` instead of `7`). No reverse case needed -- a real
+            # Python float literal/expression passed to an int-typed
+            # parameter isn't valid input this compiler needs to handle
+            # leniently, unlike this int-into-float direction, which is
+            # extremely common (any bare int literal argument).
+            if (
+                i < len(fn.arg_types)
+                and fn.arg_types[i] == "float"
+                and av.type is not F64
+            ):
+                fv = ctx.tmp(F64)
+                ctx.emit(IRInstr("sitofp", fv, [av]))
+                av = fv
+            args.append(av)
+        res_ty = F64 if fn.ret_type == "float" else I64
+        v = ctx.tmp(res_ty)
         ctx.emit(IRInstr("call", v, [c_name] + args))
         return v
 
@@ -7945,6 +8080,7 @@ def lower_module(mod: A.Module) -> IRModule:
         frozenset(f.name for f in top_funcs) | frozenset(f.name for f in method_funcs),
         func_sigs,
         mod.ffi_funcs,
+        getattr(mod, "ffi_consts", {}),
         getattr(mod, "imported_modules", {}),
         getattr(mod, "classes_sig", {}),
         global_types,

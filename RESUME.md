@@ -2319,13 +2319,90 @@ implemented immediately. Three more real fixes:
    exactly (all 3 lines, including a heterogeneous `(int, str, float)`
    tuple).
 
-Verified: `tests.runner` 475/483 after each fix. `999_comprehensive_
-codegen.py` (which needed the tuple-float-repr fix) still doesn't
-build -- next gap is `'RegLoc' object has no attribute 'offset'`, a
-different, not-yet-investigated codegen assertion mismatch (same
-symptom class as the pre-existing `17_from_import.py` build failure --
-worth checking whether they share a root cause next time this is
-picked up, not yet confirmed either way).
+Verified: `tests.runner` 475/483 after each fix.
+
+**Eighteenth checkpoint** (same day): the `'RegLoc' object has no
+attribute 'offset'` compiler crash flagged above (affecting both
+`17_from_import.py` and `999_comprehensive_codegen.py`) came back from
+a background gdb/traceback investigation with TWO real root causes,
+both fixed:
+
+1. **`ir_lower.py` never handled bare-name FFI constants at all**
+   (`from math import pi; pi`, as opposed to the module-attribute
+   spelling `math.pi`, which a PRIOR session checkpoint already fixed).
+   `_ModuleCtx` didn't even receive/store `mod.ffi_consts` -- a bare
+   `pi` reference fell all the way through `_lower_expr`'s `A.Name`
+   case to the generic slot/global fallback, which allocated a fresh,
+   NEVER-INITIALIZED local slot defaulting to I64 type and read garbage
+   stack memory as the constant's value. That wrong-typed garbage then
+   flowed into a genuinely-float operation (`pi * pi`), and since
+   regalloc allocates registers by IR type, it placed the value in a GP
+   register to match its (wrong) I64 type -- so codegen's XMM-only
+   float-binop path crashed expecting a stack-relative float location
+   and got a plain register instead. This crashed the COMPILER itself,
+   not just the compiled binary. Fixed by threading `mod.ffi_consts`
+   into `_ModuleCtx` (mirrors how `mod.ffi_funcs` was already threaded)
+   and adding a real `A.Name` case for it, mirroring the EXISTING
+   `module.CONST`-style `A.Attr` FFI-const handling elsewhere in this
+   file almost verbatim (same `value`/`value_windows` resolution, same
+   str/int/float dispatch) -- just for the from-import bare-name
+   spelling instead of the module-attribute spelling.
+2. **FFI function calls never coerced int-typed arguments to match a
+   float-typed parameter**: `sqrt(49)` (a bare int literal into a
+   `("float",)`-declared binding) passed the literal's raw integer bits
+   through unconverted, which the callee then reinterpreted as a
+   double bit pattern -- silently returning garbage (`0` instead of
+   `7`) rather than crashing, a second, independent bug from the same
+   background investigation. Fixed by checking each argument against
+   `fn.arg_types[i]` and inserting `sitofp` when the declared parameter
+   is `"float"` but the lowered argument's IR type isn't already F64.
+
+Both bugs needed to occur TOGETHER for the specific crash symptom
+(`pi * pi` feeding `sqrt(...)` feeding `int(...)`) -- either fix alone
+would have resolved a real but different-shaped defect. Fixed
+`17_from_import.py` exactly (all 4 lines: `math.pi`, `int(sqrt(49))`,
+`math.e`, `int(sqrt(pi*pi))`).
+
+**Also fixed while investigating `305_zero_division.py`'s own flagged
+regression** (found via the sweep run right after this checkpoint's
+earlier fixes, not caused by anything in this specific checkpoint --
+a pre-existing correctness gap the exception-raising work this session
+made newly visible via a cleaner sweep signal):
+
+1. **Every new exception message this session added included a
+   redundant `"ClassName:"` prefix baked into the raw message text**
+   (`"ZeroDivisionError: division by zero"`,
+   `"IndexError: list index out of range"`, a bare `"KeyError"` with
+   no message at all, `"KeyError: 'pop from an empty set'"`) --
+   `str(exception)`/`print(e)` in real Python is just the message
+   itself, with CPython's REPL/traceback printer adding the
+   `ClassName:` prefix separately only for UNCAUGHT exceptions.
+   Confirmed the correct convention by checking an existing, correct
+   case (`ValueError`'s message has no prefix). Fixed all four
+   messages (`_emit_int_divzero_check`'s "division by zero",
+   `_emit_list_index_bounds_check`'s "list index out of range",
+   `_emit_dict_key_check`'s KeyError message -- upgraded from a bare
+   placeholder to the real quoted-key-repr CPython uses, e.g.
+   `'missing'`, built from the actual runtime key value via
+   `_abi_str_concat` -- and the pre-existing set.pop()-on-empty
+   message). The `ZeroDivisionError`/pop-from-empty-set instances
+   predate this session (not something introduced by this session's
+   own new exception-raising work), confirming this was a real,
+   pre-existing bug pattern, not a regression from anything just added.
+2. **Float `/`/`//`/`%` by zero never raised at all**: unlike int
+   division (`_emit_int_divzero_check`, a hardware-SIGFPE-avoidance
+   check that already existed), float division by zero is
+   well-defined IEEE-754 (`inf`/`nan`) and doesn't crash on its own --
+   but Python raises `ZeroDivisionError` for all three of these float
+   operators too, and this backend simply never checked. New
+   `_emit_float_divzero_check` (same `raise_b`-before-`ok_b` block-
+   ordering rule as the int version), with CPython's exact three
+   distinct message texts (`"float division by zero"`,
+   `"float floor division by zero"`, `"float modulo"`). Fixed
+   `305_zero_division.py` exactly (all 7 lines).
+
+Verified: `tests.runner` 475/483 after every fix in this whole
+checkpoint.
 
 ## Selfhost Status (plan-step 11)
 
