@@ -6987,6 +6987,31 @@ class SemaAnalyzer:
                     if kt not in ("str", "any", "int") and not kt.startswith("instance:"):
                         raise SemaError("dict.get() key must be a str", e.pos)
                     e.inferred_type = self._dict_value_type(e.obj, scope)
+                    # A dict with no tracked value kind (e.g. `d: dict = {}`,
+                    # never populated with a literal at declaration time --
+                    # `_dict_value_type` deliberately falls back to "any" for
+                    # these, by design, so other dict operations stay
+                    # lenient) leaves `_lower_expr_as_str` with NO way to
+                    # runtime-dispatch how to print the result: this
+                    # backend's dict/list slots carry no runtime type tag,
+                    # only a compile-time-known "kind" byte baked in at
+                    # lowering time, so an "any"-typed print() argument
+                    # silently formats as a raw int regardless of the
+                    # actual value (confirmed: d.get("k", "Hello") on a
+                    # dict with no other type info printed "Hello"'s
+                    # pointer as a decimal integer instead of the string).
+                    # When there's a two-arg default with a KNOWN concrete
+                    # type, that's the best available signal for what this
+                    # call actually returns -- use it instead of "any".
+                    # Doesn't help the one-arg `d.get(k)` form (no default
+                    # to borrow a type from) or a genuinely heterogeneous
+                    # dict (not supported by this compiler's model anyway;
+                    # dict values are treated as homogeneously-typed
+                    # elsewhere too, e.g. _dict_inner_value_type).
+                    if e.inferred_type == "any" and len(e.args) == 2:
+                        default_t = A.expr_type(e.args[1])
+                        if default_t in ("str", "int", "float"):
+                            e.inferred_type = default_t
                     if e.inferred_type == "list":
                         e.list_el_type = self._dict_inner_value_type(e.obj, scope)
                         if e.list_el_type == "tuple":
@@ -8060,6 +8085,24 @@ class SemaAnalyzer:
             and self.current_class is not None
         ):
             e.func = self.current_class
+        # Resolve import alias (from mod import orig as local) for bundled-source
+        # stdlib functions, BEFORE any builtin-name dispatch below -- so a
+        # locally-aliased name that happens to collide with a builtin (e.g.
+        # `from fnmatch import fnfilter as filter`) resolves to the real
+        # merged function instead of being treated as the builtin `filter`.
+        # Moved here (was previously much further down, after the
+        # `BUILTINS`-dispatch block's own early `return`s) because a
+        # colliding name never reached the old location at all: `"filter"`
+        # matched `BUILTINS` first and returned before alias resolution ever
+        # ran. Explicit `: str` read, not a bare `e.func in
+        # self.mod.func_aliases` subscript: e is this function's own
+        # `A.Call` parameter, an external/opaque type to sema, so e.func
+        # reads "any"-typed despite always holding a real string.
+        func_name: str = e.func
+        if func_name in self.mod.func_aliases and func_name not in self.funcs:
+            resolved = self.mod.func_aliases[func_name]
+            if resolved in self.funcs:
+                e.func = resolved
         e.args = self._expand_starred_args(e.args, scope)
         # Builtins are shadowable: after whole-program merge a call like
         # `re.compile(...)` rewrites to a plain `compile(...)`, and that must
@@ -8475,32 +8518,6 @@ class SemaAnalyzer:
                         "str() requires a scalar, container, or object", e.pos
                     )
             return
-        # Resolve import alias (from mod import orig as local) for bundled-source
-        # stdlib functions so type-checking and inference use the real FuncSig.
-        #
-        # Explicit `: str` read, not a bare `e.func in self.mod.func_aliases`
-        # subscript: e is this function's own `A.Call` parameter, an
-        # external/opaque type to sema, so e.func reads "any"-typed despite
-        # always holding a real string. _gen_subscript's opaque-receiver
-        # dispatch only promotes an "any" object to a dict lookup when the
-        # INDEX is statically "str" -- with e.func opaque instead, that
-        # check failed and `self.mod.func_aliases[e.func]` fell through to
-        # the list-indexing default, treating the string pointer as a raw
-        # integer offset. This was the actual root cause behind a much
-        # bigger symptom: `from .sema import analyze as sema_analyze` is
-        # exactly the kind of aliased import this lookup resolves, and
-        # driver.py's `sema_analyze(module, ...)` call site went through
-        # this exact code when the compiler's own source was self-compiled
-        # -- when the lookup corrupted `resolved`, sema_analyze never
-        # resolved to a real function, and the entire call silently
-        # vanished from the compiled output (no crash, no error -- codegen
-        # just had nothing it could call), explaining why sema appeared to
-        # never run at all in the selfhosted binary.
-        func_name: str = e.func
-        if func_name in self.mod.func_aliases and func_name not in self.funcs:
-            resolved = self.mod.func_aliases[func_name]
-            if resolved in self.funcs:
-                e.func = resolved
         if e.func in self.funcs:
             sig = self.funcs[e.func]
             self._expand_dstar_kwarg(e, sig.param_names, scope)

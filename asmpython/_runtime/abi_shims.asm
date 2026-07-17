@@ -37,6 +37,7 @@ extern _runtime_str_upper
 extern _runtime_str_lower
 extern _runtime_str_strip
 extern _runtime_str_isdigit
+extern _runtime_str_to_int
 extern _runtime_str_index_of
 extern _runtime_str_replace
 extern _runtime_str_split
@@ -442,13 +443,20 @@ _abi_new_list:
     WIN64_RUNTIME_LEAVE
     ret
 
-; rax = strtoll(str=rcx, NULL, 10)
+; rax = int(str=rcx) -- raises ValueError (via _runtime_raise) on a
+; non-numeric/empty string, matching Python's int() semantics. Used to
+; call raw strtoll directly with NO validation at all (a real bug: any
+; failed parse silently returned 0 instead of raising, so e.g.
+; `int("abc")` couldn't be caught by `except ValueError`) -- fixed by
+; routing through the same _runtime_str_to_int the legacy codegen.py
+; backend already uses (rax=str in, rax=int out; skips/requires
+; leading+trailing whitespace exactly like CPython's int(), raises on
+; anything else including an all-whitespace or empty string).
 _abi_str_to_int:
-    sub rsp, 40
-    xor rdx, rdx
-    mov r8, 10
-    call strtoll
-    add rsp, 40
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    call _runtime_str_to_int
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; rax = strtoll(str=rcx, NULL, base=rdx)

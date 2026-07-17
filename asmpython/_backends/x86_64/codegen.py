@@ -160,8 +160,27 @@ class FuncCodegen:
     def _loc(self, val: Any) -> Location:
         return self.alloc.locs[val.name]
 
-    def _gp(self, val: Any) -> tuple[Reg, bytes]:
-        """Get a GP register holding val. Emits a load from stack if spilled."""
+    def _gp(self, val: Any, alt_scratch: bool = False) -> tuple[Reg, bytes]:
+        """Get a GP register holding val. Emits a load from stack if spilled.
+
+        `alt_scratch`: use R10 (_SCRATCH2) instead of R11 (_SCRATCH) for the
+        spilled/alloca case. Every two-operand helper below (`_binop_gp`/
+        `_binop_simd`/`_cmp_set`/`_div`) calls `_gp` independently for each
+        operand -- when BOTH operands are simultaneously stack-spilled (no
+        real register), both calls return the SAME shared scratch register
+        and the second `_gp`'s load silently clobbers the first's before
+        either is read, corrupting the op into effectively `b OP b`.
+        Confirmed via a real repro: `self._coef // some_call()` inside an
+        instance method (the field read stays live across the call, gets
+        spilled; the call's return value is also stack-homed once past the
+        callee-saved-register restore) computed `b // b` (always 1) instead
+        of `a // b`, disassembly showing two back-to-back `mov r11, [slot]`
+        loads with only the second surviving. Passing `alt_scratch=True` for
+        the SECOND operand of every such helper guarantees the two operands
+        can never collide, without needing per-call-site collision
+        detection.
+        """
+        scratch = self._SCRATCH2 if alt_scratch else self._SCRATCH
         slot = self.alloc.alloca_slots.get(val.name)
         if slot is not None:
             # alloca'd pointers never occupy a register or stack spill slot
@@ -170,11 +189,11 @@ class FuncCodegen:
             # lea on every read instead of being cached in a register for
             # the value's whole (often function-spanning, e.g. a loop's
             # var/stop/step) lifetime. See the alloca opcode handler.
-            return self._SCRATCH, encode_lea(self._SCRATCH, Mem(Reg.RBP, slot))
+            return scratch, encode_lea(scratch, Mem(Reg.RBP, slot))
         loc = self._loc(val)
         if isinstance(loc, RegLoc):
             return loc.reg, b""
-        return self._SCRATCH, encode_mov_rm(self._SCRATCH, Mem(Reg.RBP, loc.offset))
+        return scratch, encode_mov_rm(scratch, Mem(Reg.RBP, loc.offset))
 
     def _xmm(self, val: Any) -> tuple[XmmReg, bytes]:
         """Get an XMM register holding val (f64 / v128). Emits load if spilled."""
@@ -230,7 +249,7 @@ class FuncCodegen:
         """dst = rr_fn(a, b) — loads a into dst first, then applies op with b."""
         dst       = self._dst_gp(result)
         a_r, a_ld = self._gp(a)
-        b_r, b_ld = self._gp(b)
+        b_r, b_ld = self._gp(b, alt_scratch=True)
         self._emit(a_ld + b_ld)
         if a_r != dst:
             self._emit(encode_mov_rr(dst, a_r))
@@ -253,6 +272,12 @@ class FuncCodegen:
         a_x, a_ld = self._xmm(a)
         b_x, b_ld = self._xmm(b)
         self._emit(a_ld + b_ld)
+        # NOTE: unlike _binop_gp/_cmp_set/_div, this doesn't need an
+        # alt-scratch second operand -- _xmm has only one scratch XMM
+        # register (XMM15) and no second one exists yet. If a
+        # both-spilled-simultaneously bug is ever found here (mirroring
+        # the GP-side R11 collision this comment's siblings guard against),
+        # it needs a real second XMM scratch register added first.
         if a_x != dst:
             self._emit(encode_movdqa_rr(dst, a_x))
         self._emit(rr_fn(dst, b_x))
@@ -265,7 +290,7 @@ class FuncCodegen:
         # movzx doesn't touch flags, so it's safe to sequence post-setcc.
         dst       = self._dst_gp(result)
         a_r, a_ld = self._gp(a)
-        b_r, b_ld = self._gp(b)
+        b_r, b_ld = self._gp(b, alt_scratch=True)
         self._emit(a_ld + b_ld)
         self._emit(encode_cmp_rr(a_r, b_r))
         self._emit(encode_setcc(cc, dst))
@@ -304,7 +329,19 @@ class FuncCodegen:
         op = instr.op
         a, b = instr.operands[0], instr.operands[1]
         a_r, a_ld = self._gp(a)
-        b_r, b_ld = self._gp(b)
+        # `a_in_rax` below ALSO needs R10 (_SCRATCH2) to preserve `a` when
+        # a's permanent home IS RAX -- computed before loading b so b's own
+        # scratch choice can avoid colliding with it. If both a and b are
+        # simultaneously stack-spilled, _gp would otherwise hand both the
+        # SAME shared scratch (R11), making b's load clobber a's before
+        # either is read (see _gp's own docstring for the confirmed
+        # repro/disassembly) -- alt_scratch routes b through R10 instead.
+        # But when a_in_rax is ALSO true, R10 is already claimed for a's
+        # save, so b must fall back to R11 in that specific combination
+        # (safe there: a_in_rax means a_r == RAX, a REAL register, so a's
+        # own load never touched R11 to begin with).
+        a_in_rax = a_r == Reg.RAX
+        b_r, b_ld = self._gp(b, alt_scratch=not a_in_rax)
         self._emit(a_ld + b_ld)
 
         # `idiv`/`div` unconditionally clobber RAX:RDX as scratch, regardless
@@ -323,7 +360,6 @@ class FuncCodegen:
         # in the second scratch register before the divide, and restore it
         # into RAX afterward so any later `_gp(a)` call (which trusts
         # regalloc's RAX-resident answer) still finds the right value.
-        a_in_rax = a_r == Reg.RAX
         if a_in_rax:
             self._emit(encode_mov_rr(self._SCRATCH2, Reg.RAX))
         else:

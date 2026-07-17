@@ -69,7 +69,8 @@ def median(data: list) -> float:
         return 0.0
     sorted_data: list = _sort(data)
     if n % 2 == 1:
-        return sorted_data[n // 2]
+        mid: int = sorted_data[n // 2]
+        return mid
     return (sorted_data[n // 2 - 1] + sorted_data[n // 2]) / 2.0
 
 
@@ -80,8 +81,10 @@ def median_low(data: list) -> float:
         return 0.0
     sorted_data: list = _sort(data)
     if n % 2 == 1:
-        return sorted_data[n // 2]
-    return sorted_data[n // 2 - 1]
+        mid: int = sorted_data[n // 2]
+        return mid
+    low: int = sorted_data[n // 2 - 1]
+    return low
 
 
 def median_high(data: list) -> float:
@@ -90,7 +93,8 @@ def median_high(data: list) -> float:
     if n == 0:
         return 0.0
     sorted_data: list = _sort(data)
-    return sorted_data[n // 2]
+    high: int = sorted_data[n // 2]
+    return high
 
 
 def mode(data: list) -> int:

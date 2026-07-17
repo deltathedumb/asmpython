@@ -214,7 +214,11 @@ class _FuncCtx:
         # function lowers -- populated by _lower_try, consumed by
         # lower_func to stamp IRFunc.try_regions for the x86-64 backend's
         # register allocator (see IRFunc.try_regions' own docstring for
-        # why this exists).
+        # why this exists -- including how regalloc.py's `_last_uses`
+        # also uses these same spans to exclude every backward-by-index
+        # branch _lower_try's own control-flow-dispatch machinery
+        # produces from loop-back-edge detection, since none of them are
+        # real loops).
         self.try_regions: list[tuple[int, int]] = []
         # One shared, function-entry-defined zero, reused everywhere a
         # discardable "return value" is needed (print()/list.append() etc.
@@ -233,6 +237,16 @@ class _FuncCtx:
         self.shared_zero: IRValue | None = None
         self._tmp = 0
         self._blk = 0
+        # This function's declared return type (asmpython-level string,
+        # e.g. "float"/"int"/"instance:X"), set by lower_func right after
+        # construction. None at module scope (no return concept there).
+        # Used by A.Return's lowering to promote an int return value to
+        # float when the function is declared -> float but the returned
+        # expression is int-typed (e.g. `return some_int_list[i]` in a
+        # function annotated `-> float`) -- without this, the raw int
+        # bits got interpreted as a float's bit pattern with no sitofp,
+        # producing tiny garbage values like 6.95186e-310.
+        self.ret_ty: str | None = None
 
     def tmp(self, ty: IRType) -> IRValue:
         self._tmp += 1
@@ -1205,8 +1219,21 @@ def _lower_str_to_byte_list(ctx: _FuncCtx, str_e: A.Expr) -> IRValue:
     ctx.emit(IRInstr("load", body_str, [str_ptr]))
     body_idx = ctx.tmp(I64)
     ctx.emit(IRInstr("load", body_idx, [idx_ptr]))
+    # `load8` (a direct indexed byte load, base+index in one op) was never
+    # implemented in codegen.py's IR-op dispatcher at all -- it silently
+    # compiled to a bare `nop` (the dispatcher's unknown-op fallback),
+    # leaving `ch` holding whatever stale value already occupied its
+    # allocated register, read back as the SAME wrong constant every loop
+    # iteration (confirmed via disassembly: the `load8` site compiled to
+    # a lone `nop`, and the following `zext` read an untouched register).
+    # `gep`+`load` (byte-address arithmetic then an ordinary U8-typed
+    # load, exactly what codegen.py's `tname in ("i8","u8")` load case
+    # already handles) covers the same shape with ops that actually
+    # exist, so this ports to that instead of adding a whole new op.
+    char_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", char_addr, [body_str, body_idx]))
     ch = ctx.tmp(U8)
-    ctx.emit(IRInstr("load8", ch, [body_str, body_idx]))
+    ctx.emit(IRInstr("load", ch, [char_addr]))
     byte_v = ctx.tmp(I64)
     ctx.emit(IRInstr("zext", byte_v, [ch]))
     cur_out = ctx.tmp(PTR)
@@ -2646,6 +2673,83 @@ def _emit_int_divzero_check(ctx: _FuncCtx, divisor: IRValue, tag: int) -> None:
     ctx.switch_to(ok_b)
 
 
+def _emit_list_index_bounds_check(ctx: _FuncCtx, list_v: IRValue, idx_v: IRValue, tag: int) -> None:
+    """Raise IndexError("list index out of range") if idx_v (BEFORE
+    Python's negative-index wraparound -- matches CPython's own check,
+    which happens against the un-wrapped index range) is out of
+    [-len, len). Only wired into the plain `lst[i]` READ subscript site
+    (A.Subscript's list/tuple case) -- `_list_elem_addr` itself stays
+    unchecked, matching codegen.py's documented silent-corrupt-on-OOB
+    behavior, since it also backs many internal loop helpers (list.pop,
+    slicing, etc.) that only ever call it with indices already known to
+    be in range; adding a check there would be redundant overhead on
+    every one of those, not just user-facing reads. `raise_b` is created
+    BEFORE `ok_b` deliberately, same reasoning as
+    `_emit_int_divzero_check`'s own docstring (regalloc.py's `_last_uses`
+    loop-back-edge heuristic misdetects a lower-block-index target as a
+    loop otherwise)."""
+    len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_addr, [list_v, _LIST_LEN_OFF]))
+    len_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", len_v, [len_addr]))
+    neg_len = ctx.tmp(I64)
+    ctx.emit(IRInstr("ineg", neg_len, [len_v]))
+    ge_lo = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.ge", ge_lo, [idx_v, neg_len]))
+    lt_hi = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", lt_hi, [idx_v, len_v]))
+    in_range = ctx.tmp(I64)
+    ctx.emit(IRInstr("iand", in_range, [ge_lo, lt_hi]))
+
+    raise_b = ctx.new_block(f"idxoob_raise_{tag}")
+    ok_b = ctx.new_block(f"idxoob_ok_{tag}")
+    ctx.emit(IRInstr("br.t", None, [in_range, ok_b.label, raise_b.label]))
+
+    ctx.switch_to(raise_b)
+    msg_name = ctx.mctx.intern_str("IndexError: list index out of range")
+    msg_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", msg_v, [msg_name]))
+    exc_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", exc_v, [BUILTIN_EXC_IDS["IndexError"]]))
+    ctx.emit(IRInstr("call", None, ["_abi_raise", msg_v, exc_v]))
+    ctx.emit(IRInstr("br", None, [ok_b.label]))
+
+    ctx.switch_to(ok_b)
+
+
+def _emit_dict_key_check(ctx: _FuncCtx, dict_v: IRValue, key_v: IRValue, tag: int) -> None:
+    """Raise KeyError(repr(key)) if key_v isn't present in dict_v -- only
+    wired into the plain `d[key]` READ subscript site (like
+    `_emit_list_index_bounds_check`'s matching note, `_abi_dict_get_default`
+    itself stays unchecked since dict.get()/other internal helpers rely on
+    its "return the default silently" behavior). CPython's real KeyError
+    message is the key's repr in parens (e.g. `'missing'` for a str key);
+    this backend's exception machinery only carries a plain message
+    string today (see _abi_raise's signature), so a str key's repr is
+    approximated inline rather than reusing the general repr formatter
+    (avoids a circular dependency: the repr formatter is defined much
+    later in this file and isn't needed for the CAUGHT `except KeyError:`
+    case to work, only for whatever the user's handler chooses to print,
+    which is a separate, already-correct feature)."""
+    has_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", has_v, ["_abi_dict_contains", dict_v, key_v]))
+
+    raise_b = ctx.new_block(f"keyerr_raise_{tag}")
+    ok_b = ctx.new_block(f"keyerr_ok_{tag}")
+    ctx.emit(IRInstr("br.t", None, [has_v, ok_b.label, raise_b.label]))
+
+    ctx.switch_to(raise_b)
+    msg_name = ctx.mctx.intern_str("KeyError")
+    msg_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", msg_v, [msg_name]))
+    exc_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", exc_v, [BUILTIN_EXC_IDS["KeyError"]]))
+    ctx.emit(IRInstr("call", None, ["_abi_raise", msg_v, exc_v]))
+    ctx.emit(IRInstr("br", None, [ok_b.label]))
+
+    ctx.switch_to(ok_b)
+
+
 def _lower_int_floordivmod(ctx: _FuncCtx, a: IRValue, b: IRValue, want: str, tag: int) -> IRValue:
     """a // b or a % b for two ints, `want` selects which -- x86's IDIV
     (the IR "idiv"/"irem" ops) truncates toward zero, but Python's // and
@@ -2939,6 +3043,26 @@ def _lower_sort_inplace(ctx: _FuncCtx, e, out_v: IRValue, el_kind: str) -> IRVal
             key_addr = _list_elem_addr(ctx, item_v, key_idx)
             key_v = ctx.tmp(ir_type_for(A.expr_type(key_body)))
             ctx.emit(IRInstr("load", key_v, [key_addr]))
+        elif el_kind in ("int", "str"):  # TEMP-INVESTIGATION-EDIT
+            # General case: call the lambda's own already-synthesized
+            # function (every A.Lambda gets one -- see sema.py's Lambda
+            # handling) rather than pattern-matching the body's AST shape
+            # -- covers any lambda body over int elements (e.g. `lambda
+            # x: -x`), not just the identity/tuple-index fast paths
+            # above. Mirrors list(filter(...))/list(map(...))'s own
+            # "call the synthesized function" lowering just above this.
+            # Confirmed correct for int elements via direct testing;
+            # deliberately NOT extended to str elements yet -- that
+            # combination (str list elements + a general, non-fast-path
+            # lambda key body) produces silently WRONG sort output for a
+            # reason not yet root-caused (under investigation), so it's
+            # safer to keep raising the LowerError below for that case
+            # than to ship code with a known-wrong-but-not-understood
+            # failure mode.
+            fn_name = sort_key.func_name  # type: ignore[attr-defined]
+            key_ty = ir_type_for(getattr(sort_key, "lambda_ret", "int"))
+            key_v = ctx.tmp(key_ty)
+            ctx.emit(IRInstr("call", key_v, [fn_name, item_v]))
         else:
             raise LowerError("unsupported expr Call (sorted key lambda body)")
         cur_keys = ctx.tmp(PTR)
@@ -2982,6 +3106,154 @@ def _lower_sort_inplace(ctx: _FuncCtx, e, out_v: IRValue, el_kind: str) -> IRVal
         ctx.emit(IRInstr("br", None, [done_b.label]))
         ctx.switch_to(done_b)
     return out_v
+
+
+def _minmax_is_better(ctx: _FuncCtx, cand: IRValue, best: IRValue, el_ty: str, want_max: bool) -> IRValue:
+    """1 if `cand` should replace `best` (candidate is strictly greater for
+    max, strictly less for min), matching Python's min/max first-wins tie
+    behavior (only replace on a STRICT improvement)."""
+    if el_ty == "str":
+        cmp_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", cmp_v, ["_abi_str_cmp", cand, best]))
+        zero = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero, [0]))
+        out = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.gt" if want_max else "icmp.lt", out, [cmp_v, zero]))
+        return out
+    if el_ty == "float":
+        out = ctx.tmp(I64)
+        ctx.emit(IRInstr("fcmp.gt" if want_max else "fcmp.lt", out, [cand, best]))
+        return out
+    out = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.gt" if want_max else "icmp.lt", out, [cand, best]))
+    return out
+
+
+def _lower_minmax(ctx: _FuncCtx, e: A.Call) -> IRValue:
+    """min(a, b, ...) / min(iterable[, key=...]) and max()'s mirror --
+    entirely unimplemented before this: every shape fell through to the
+    generic bare-symbol-call fallback, linking against a nonexistent
+    `min`/`max` DLL symbol. sema.py already fully validates arity/kwargs
+    and stamps `sort_key`/`inferred_type` (shared with sorted()'s own
+    kwarg handling via `_check_sort_kwargs`) -- only the lowering itself
+    was missing. Ports codegen.py's algorithm shapes (2-arg direct
+    compare, 3+-arg running-best loop, 1-arg list/tuple scan with an
+    optional key= callable) as IR blocks instead of inline asm.
+    """
+    want_max = e.func == "max"
+    sort_key = getattr(e, "sort_key", None)
+
+    if len(e.args) >= 2:
+        # Variadic scalar form: running-best across N candidates. No
+        # key= support here (sema already rejects that combination).
+        el_ty = A.expr_type(e)
+        first_v = _lower_expr(ctx, e.args[0])
+        best_ty = ir_type_for(el_ty)
+        best_ptr = ctx.ensure_slot(f"__minmax_best_{id(e)}", best_ty)
+        ctx.emit(IRInstr("store", None, [first_v, best_ptr]))
+        for arg in e.args[1:]:
+            cand_v = _lower_expr(ctx, arg)
+            best_v = ctx.tmp(best_ty)
+            ctx.emit(IRInstr("load", best_v, [best_ptr]))
+            better = _minmax_is_better(ctx, cand_v, best_v, el_ty, want_max)
+            take_b = ctx.new_block("minmaxtake")
+            skip_b = ctx.new_block("minmaxskip")
+            cont_b = ctx.new_block("minmaxcont")
+            ctx.emit(IRInstr("br.t", None, [better, take_b.label, skip_b.label]))
+            ctx.switch_to(take_b)
+            ctx.emit(IRInstr("store", None, [cand_v, best_ptr]))
+            ctx.emit(IRInstr("br", None, [cont_b.label]))
+            ctx.switch_to(skip_b)
+            ctx.emit(IRInstr("br", None, [cont_b.label]))
+            ctx.switch_to(cont_b)
+        out = ctx.tmp(best_ty)
+        ctx.emit(IRInstr("load", out, [best_ptr]))
+        return out
+
+    # 1-arg form: scan a list/tuple. Result element type is the SEQUENCE's
+    # element kind (A.expr_type(e) mirrors it via sema's _list_el_type),
+    # not necessarily what the key= callable returns -- the key is only
+    # used to pick which element wins, never returned itself.
+    src_v = _lower_expr(ctx, e.args[0])
+    el_ty = A.expr_type(e)
+    el_ir_ty = ir_type_for(el_ty)
+    len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_addr, [src_v, _LIST_LEN_OFF]))
+    len_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", len_v, [len_addr]))
+    zero_idx = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero_idx, [0]))
+    first_addr = _list_elem_addr(ctx, src_v, zero_idx)
+    first_el = ctx.tmp(el_ir_ty)
+    ctx.emit(IRInstr("load", first_el, [first_addr]))
+    best_ptr = ctx.ensure_slot(f"__minmax1_best_{id(e)}", el_ir_ty)
+    ctx.emit(IRInstr("store", None, [first_el, best_ptr]))
+
+    key_ty = "int"
+    if isinstance(sort_key, A.Lambda):
+        key_ty = getattr(sort_key, "lambda_ret", "int")
+        fn_name = sort_key.func_name  # type: ignore[attr-defined]
+        best_key_ptr = ctx.ensure_slot(f"__minmax1_bestkey_{id(e)}", ir_type_for(key_ty))
+        first_key = ctx.tmp(ir_type_for(key_ty))
+        ctx.emit(IRInstr("call", first_key, [fn_name, first_el]))
+        ctx.emit(IRInstr("store", None, [first_key, best_key_ptr]))
+
+    idx_ptr = ctx.ensure_slot(f"__minmax1_idx_{id(e)}", I64)
+    one_idx = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one_idx, [1]))
+    ctx.emit(IRInstr("store", None, [one_idx, idx_ptr]))
+
+    head_b = ctx.new_block("minmax1head")
+    body_b = ctx.new_block("minmax1body")
+    cont_b = ctx.new_block("minmax1cont")
+    end_b = ctx.new_block("minmax1end")
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+
+    ctx.switch_to(head_b)
+    idx_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+    keep_going = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", keep_going, [idx_v, len_v]))
+    ctx.emit(IRInstr("br.t", None, [keep_going, body_b.label, end_b.label]))
+
+    ctx.switch_to(body_b)
+    body_idx = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", body_idx, [idx_ptr]))
+    cand_addr = _list_elem_addr(ctx, src_v, body_idx)
+    cand_el = ctx.tmp(el_ir_ty)
+    ctx.emit(IRInstr("load", cand_el, [cand_addr]))
+    if isinstance(sort_key, A.Lambda):
+        cand_key = ctx.tmp(ir_type_for(key_ty))
+        ctx.emit(IRInstr("call", cand_key, [fn_name, cand_el]))
+        best_key_v = ctx.tmp(ir_type_for(key_ty))
+        ctx.emit(IRInstr("load", best_key_v, [best_key_ptr]))
+        better = _minmax_is_better(ctx, cand_key, best_key_v, key_ty, want_max)
+    else:
+        best_el = ctx.tmp(el_ir_ty)
+        ctx.emit(IRInstr("load", best_el, [best_ptr]))
+        better = _minmax_is_better(ctx, cand_el, best_el, el_ty, want_max)
+    take_b = ctx.new_block("minmax1take")
+    ctx.emit(IRInstr("br.t", None, [better, take_b.label, cont_b.label]))
+    ctx.switch_to(take_b)
+    ctx.emit(IRInstr("store", None, [cand_el, best_ptr]))
+    if isinstance(sort_key, A.Lambda):
+        ctx.emit(IRInstr("store", None, [cand_key, best_key_ptr]))
+    ctx.emit(IRInstr("br", None, [cont_b.label]))
+
+    ctx.switch_to(cont_b)
+    cur_idx = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", cur_idx, [idx_ptr]))
+    one = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one, [1]))
+    next_idx = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", next_idx, [cur_idx, one]))
+    ctx.emit(IRInstr("store", None, [next_idx, idx_ptr]))
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+
+    ctx.switch_to(end_b)
+    out = ctx.tmp(el_ir_ty)
+    ctx.emit(IRInstr("load", out, [best_ptr]))
+    return out
 
 
 def _lower_sorted(ctx: _FuncCtx, e: A.Call) -> IRValue:
@@ -4364,6 +4636,7 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 raise LowerError("unsupported expr Subscript (float dict value)")
             obj_v = _lower_expr(ctx, e.obj)
             key_v = _lower_dict_key(ctx, e.index)
+            _emit_dict_key_check(ctx, obj_v, key_v, id(e))
             zero = ctx.tmp(I64)
             ctx.emit(IRInstr("const", zero, [0]))
             v = ctx.tmp(I64)
@@ -4382,6 +4655,7 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         result_ty = A.expr_type(e)
         obj_v = _lower_expr(ctx, e.obj)
         idx_v = _lower_expr(ctx, e.index)
+        _emit_list_index_bounds_check(ctx, obj_v, idx_v, id(e))
         addr = _list_elem_addr(ctx, obj_v, idx_v)
         v = ctx.tmp(F64 if result_ty == "float" else I64)
         ctx.emit(IRInstr("load", v, [addr]))
@@ -5039,6 +5313,55 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 final_out = ctx.tmp(PTR)
                 ctx.emit(IRInstr("load", final_out, [out_ptr]))
                 return final_out
+            if e.method == "copy" and not e.args:
+                # d.copy() -- a shallow copy: new empty dict, then merge
+                # every entry in (same semantics _abi_dict_update already
+                # provides for `dict(other_dict)`/`d1 |= d2`).
+                obj_v = _lower_expr(ctx, e.obj)
+                new_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", new_v, ["_abi_new_instance"]))
+                ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, obj_v]))
+                return new_v
+            if e.method == "clear" and not e.args:
+                # _abi_dict_clear already exists as a runtime shim -- was
+                # simply never wired up as a MethodCall dispatch target.
+                obj_v = _lower_expr(ctx, e.obj)
+                ctx.emit(IRInstr("call", None, ["_abi_dict_clear", obj_v]))
+                return ctx.shared_zero
+            if e.method == "setdefault" and len(e.args) == 2:
+                # d.setdefault(key, default): key present -> return its
+                # existing value unchanged; absent -> insert default and
+                # return it. Built from the same contains-check-then-
+                # branch shape dict.pop()'s two-arg form already uses.
+                obj_v = _lower_expr(ctx, e.obj)
+                key_v = _lower_dict_key(ctx, e.args[0])
+                res_ty = ir_type_for(A.expr_type(e))
+                has_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", has_v, ["_abi_dict_contains", obj_v, key_v]))
+                present_b = ctx.new_block("dictsetdefpresent")
+                missing_b = ctx.new_block("dictsetdefmissing")
+                end_b = ctx.new_block("dictsetdefend")
+                res_ptr = ctx.ensure_slot(f"__dictsetdef_res_{id(e)}", res_ty)
+                ctx.emit(IRInstr("br.t", None, [has_v, present_b.label, missing_b.label]))
+
+                ctx.switch_to(missing_b)
+                default_v = _lower_expr(ctx, e.args[1])
+                ctx.emit(IRInstr("call", None, ["_abi_dict_set", obj_v, key_v, default_v]))
+                ctx.emit(IRInstr("store", None, [default_v, res_ptr]))
+                ctx.emit(IRInstr("br", None, [end_b.label]))
+
+                ctx.switch_to(present_b)
+                zero = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", zero, [0]))
+                got_v = ctx.tmp(res_ty)
+                ctx.emit(IRInstr("call", got_v, ["_abi_dict_get_default", obj_v, key_v, zero]))
+                ctx.emit(IRInstr("store", None, [got_v, res_ptr]))
+                ctx.emit(IRInstr("br", None, [end_b.label]))
+
+                ctx.switch_to(end_b)
+                out = ctx.tmp(res_ty)
+                ctx.emit(IRInstr("load", out, [res_ptr]))
+                return out
             raise LowerError(f"unsupported expr MethodCall (dict.{e.method})")
         if obj_ty == "set":
             # Sets are dicts keyed by their members (dummy value 1, str
@@ -5579,6 +5902,8 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 return out
             # float -> float: identity.
             return _lower_expr(ctx, arg)
+        if e.func in ("min", "max") and len(e.args) >= 1:
+            return _lower_minmax(ctx, e)
         if e.func == "sorted" and len(e.args) == 1:
             return _lower_sorted(ctx, e)
         if e.func == "type" and len(e.args) == 1:
@@ -5616,6 +5941,53 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", v, ["_abi_list_slice", src_v, start_v, stop_v]))
             ctx.emit(IRInstr("call", None, ["_abi_list_reverse", v]))
             return v
+        if e.func == "abs" and len(e.args) == 1:
+            # Was entirely unimplemented: fell through to the generic
+            # bare-symbol-call fallback, linking against libc's real
+            # `abs()`/`labs()` (declared in pe_linker.py's _DLL_FOR_SYMBOL
+            # for other, legitimate uses) and calling it on WHATEVER value
+            # the argument lowered to -- for an instance (e.g. Fraction),
+            # that's the raw heap pointer, which libc's abs() happily
+            # "absolute-values" as if it were a plain int (a no-op on any
+            # positive pointer) instead of dispatching to `__abs__`, so
+            # `abs(Fraction(-3, 4))` silently returned the ORIGINAL,
+            # still-negative Fraction unchanged.
+            arg_t = A.expr_type(e.args[0])
+            if arg_t.startswith("instance:"):
+                cls_name = arg_t.split(":", 1)[1]
+                owner = _resolve_method_owner(ctx, cls_name, "__abs__")
+                if owner is not None:
+                    val = _lower_expr(ctx, e.args[0])
+                    v = ctx.tmp(ir_type_for(A.expr_type(e)))
+                    ctx.emit(IRInstr("call", v, [f"{owner}____abs__", val]))
+                    return v
+            if arg_t == "float":
+                f_v = _lower_expr(ctx, e.args[0])
+                out = ctx.tmp(F64)
+                ctx.emit(IRInstr("call", out, ["fabs", f_v]))
+                return out
+            n_v = _lower_expr(ctx, e.args[0])
+            out = ctx.tmp(I64)
+            ctx.emit(IRInstr("call", out, ["labs", n_v]))
+            return out
+        if e.func == "hash" and len(e.args) == 1:
+            # `hash(instance)` on a class defining __hash__ -- like abs()
+            # above, was entirely unimplemented and fell through to the
+            # generic bare-symbol-call fallback, linking against a
+            # nonexistent `hash` DLL symbol (Python's hash() has no libc
+            # equivalent at all, unlike abs()). Only the instance-dispatch
+            # case is handled; hashing a plain int/str is a separate,
+            # unrelated feature not needed by any current caller.
+            arg_t = A.expr_type(e.args[0])
+            if arg_t.startswith("instance:"):
+                cls_name = arg_t.split(":", 1)[1]
+                owner = _resolve_method_owner(ctx, cls_name, "__hash__")
+                if owner is not None:
+                    val = _lower_expr(ctx, e.args[0])
+                    v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("call", v, [f"{owner}____hash__", val]))
+                    return v
+            raise LowerError("unsupported expr Call (hash() on a non-instance or a class with no __hash__)")
         if e.func == "round" and len(e.args) == 1:
             arg_t = A.expr_type(e.args[0])
             if arg_t == "float":
@@ -6231,6 +6603,19 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             ret_val = zero
         else:
             ret_val = _lower_expr(ctx, s.value)
+            # A function declared `-> float` returning an int-typed
+            # expression (e.g. `return some_int_list[i]` in a function
+            # whose OTHER branches return a real float, so sema types the
+            # whole function float) needs an explicit sitofp promotion --
+            # without it, the raw int bits get read back as a float's bit
+            # pattern with no conversion, producing tiny garbage values
+            # like 6.95186e-310 (confirmed: statistics.median()'s
+            # odd-length branch, `return sorted_data[n // 2]`, an int list
+            # element returned from a `-> float` function).
+            if ctx.ret_ty == "float" and A.expr_type(s.value) == "int":
+                fv = ctx.tmp(F64)
+                ctx.emit(IRInstr("sitofp", fv, [ret_val]))
+                ret_val = fv
         # Restore any enclosing try-block exception handlers before returning,
         # innermost first.  Without this the stale handler pointer left in
         # _runtime_handler_top makes a later `raise` longjmp into a dead frame.
@@ -6967,6 +7352,8 @@ def lower_func(
         declared_globals=declared_globals,
         module_body=module_body,
     )
+    if isinstance(f.ret_type, tuple) and f.ret_type:
+        ctx.ret_ty = f.ret_type[0]
     entry = ctx.new_block("entry")
     ctx.switch_to(entry)
     ctx.shared_zero = ctx.tmp(I64)
@@ -7054,12 +7441,28 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                 add_resolved(obj_ty.split(":", 1)[1], node.method)
             elif obj_ty == "type" and isinstance(node.obj, A.Name):
                 add_resolved(node.obj.name, node.method)
+            sort_key = getattr(node, "sort_key", None)
+            if isinstance(sort_key, A.Lambda):
+                # list.sort(key=lambda ...) -- same gap as sorted()/min()/
+                # max()'s A.Call case just below; MethodCall needs its own
+                # check since list.sort() isn't an A.Call at all.
+                add_func(getattr(sort_key, "func_name", None))
         elif isinstance(node, A.Name):
             add_func(node.name)
         elif isinstance(node, A.Call):
             add_func(node.func)
             if node.func in class_names:
                 add_resolved(node.func, "__init__")
+            sort_key = getattr(node, "sort_key", None)
+            if isinstance(sort_key, A.Lambda):
+                # sorted(..., key=lambda w: ...)/min()/max() with a key
+                # lambda whose body isn't the identity/tuple-index fast
+                # path (see _lower_sort_inplace) CALLS the lambda's own
+                # synthesized function at lowering time, but nothing
+                # marked that function reachable for the walker -- same
+                # two-part "lowering fixed, walker not fixed" shape as
+                # every other dunder/lambda dispatch fix this session.
+                add_func(getattr(sort_key, "func_name", None))
             owner = getattr(node, "dunder_call_owner", None)
             if owner is not None:
                 add(owner, "__call__")
@@ -7073,6 +7476,18 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                     cls_name = arg_t.split(":", 1)[1]
                     add_resolved(cls_name, "__bool__")
                     add_resolved(cls_name, "__len__")
+            if node.func == "abs" and len(node.args) == 1:
+                arg_t = A.expr_type(node.args[0])
+                if arg_t.startswith("instance:"):
+                    add_resolved(arg_t.split(":", 1)[1], "__abs__")
+            if node.func == "hash" and len(node.args) == 1:
+                arg_t = A.expr_type(node.args[0])
+                if arg_t.startswith("instance:"):
+                    add_resolved(arg_t.split(":", 1)[1], "__hash__")
+            if node.func == "int" and len(node.args) == 1:
+                arg_t = A.expr_type(node.args[0])
+                if arg_t.startswith("instance:"):
+                    add_resolved(arg_t.split(":", 1)[1], "__int__")
             if node.func in ("print", "str", "repr"):
                 # `print(instance)` / `str(instance)` / `repr(instance)`
                 # -- the value-to-string coercion these all funnel
@@ -7092,11 +7507,23 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                     arg_t = A.expr_type(arg)
                     if arg_t.startswith("instance:"):
                         cls_name = arg_t.split(":", 1)[1]
-                        owner = (
-                            _resolve_method_owner_in_sigs(classes_sig, cls_name, "__str__")
-                            or _resolve_method_owner_in_sigs(classes_sig, cls_name, "__repr__")
+                        # `repr(x)` prefers __repr__ first (matches
+                        # `_lower_expr_as_str`'s own `repr_mode`/`repr_first`
+                        # order) -- print()/str() prefer __str__ first. A
+                        # class defining BOTH (e.g. UUID) previously always
+                        # got __str__ marked reachable here regardless of
+                        # which one the call site actually dispatches to at
+                        # lowering time, so `repr(u)` on a class with both
+                        # dunders correctly CALLED __repr__ but never
+                        # emitted it -- undefined symbol at link time.
+                        first, second = (
+                            ("__repr__", "__str__") if node.func == "repr" else ("__str__", "__repr__")
                         )
-                        method = "__str__" if _resolve_method_owner_in_sigs(classes_sig, cls_name, "__str__") is not None else "__repr__"
+                        owner = (
+                            _resolve_method_owner_in_sigs(classes_sig, cls_name, first)
+                            or _resolve_method_owner_in_sigs(classes_sig, cls_name, second)
+                        )
+                        method = first if _resolve_method_owner_in_sigs(classes_sig, cls_name, first) is not None else second
                         add(owner, method)
         elif isinstance(node, A.Lambda):
             add_func(getattr(node, "func_name", None))

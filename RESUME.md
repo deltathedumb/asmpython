@@ -1881,6 +1881,295 @@ func.py`, `448_kwargs_annot.py`, `198_bytes_literal.py`,
 module.py`/`271_statistics_depth.py`, `10_input.py` — the rest of the
 current 15-entry MISMATCH bucket, none individually triaged yet.
 
+**Fourteenth checkpoint** (2026-07-17, same-day follow-up — "final 100%
+push with no stops" directive, dispatched several bugs to background
+Explore-agent investigations in parallel rather than idle-waiting on
+any single one): a large batch of real bugs found and fixed, several
+via gdb/objdump-verified background investigations rather than guessed.
+
+1. **MD5 register-allocation bug** (the note above's flagged
+   investigation, resolved): a variable-count shift's own RESULT
+   register, when allocated to RCX, self-clobbers -- `codegen.py`'s
+   `_shift` internally stages the runtime count into RCX as a physical
+   intermediate step (`mov dst, val` then `mov rcx, cnt` then `shr cl,
+   dst`); if `dst` happens to ALSO be RCX, the second move overwrites
+   the first before the shift executes, computing `count >> count`
+   instead of `value >> count`. Root-caused via disassembly (confirmed:
+   `mov %r13,%rcx` / `mov %rdx,%rcx` / `shr %cl,%rcx` — the value load
+   clobbered before use). Fixed in `regalloc.py`'s
+   `_compute_crosses_var_shift`: the shift's own result name is now
+   ALSO flagged for `avoid_rcx` (previously only the shift's two
+   OPERANDS were excluded from the hazard set, on the reasoning that a
+   value merely defined-or-dying at the shift has no conflict with
+   owning RCX for that one instruction -- true for the operands, false
+   for the result, since the result's physical register is exactly
+   where the count gets staged). Fixed `196_hashlib_module.py`/
+   `225_hashlib_module.py`/`229_base64_module.py`'s MD5 hexdigest
+   corruption (every 4th hex-pair zeroed) exactly.
+2. **`from X import Y as Z` where Z collides with a builtin name**:
+   sema's `func_aliases` resolution (`self.mod.func_aliases[func_name]`
+   lookup, meant to resolve e.g. `from fnmatch import fnfilter as
+   filter`) lived AFTER the `if e.func in BUILTINS:` dispatch block's
+   own early returns in `_check_call` -- so a locally-aliased name that
+   happens to match a real Python builtin (`filter`) always matched the
+   builtin branch first and never reached alias resolution at all.
+   Moved the alias-resolution block to the TOP of `_check_call`, before
+   any builtin-name dispatch. Fixed `184_fnmatch_module.py`.
+3. **`repr(x)` on a class defining BOTH `__str__` and `__repr__`**: the
+   reachability walker's `print`/`str`/`repr` case always preferred
+   marking `__str__` reachable when both exist, regardless of which
+   dunder the call site's OWN lowering actually dispatches to
+   (`_lower_expr_as_str`'s `repr_mode`/`repr_first` flag correctly
+   prefers `__repr__` for an explicit `repr()` call) -- so `repr(u)` on
+   a `UUID`-style class correctly CALLED `__repr__` at lowering time but
+   the method was never EMITTED, undefined-symbol link error. Fixed by
+   passing `node.func == "repr"` through to pick the matching
+   preference order in the walker too. Fixed `170_uuid_module.py`.
+4. **`abs(instance)`/`hash(instance)` were entirely unimplemented**:
+   both fell through to the generic bare-symbol-call fallback, linking
+   against libc's real `abs()`/`labs()` (a legitimate DLL symbol for
+   OTHER uses) or a nonexistent `hash` symbol -- `abs(Fraction(-3,4))`
+   silently returned the Fraction's raw heap pointer "absolute-valued"
+   as a plain int (a no-op on any positive pointer) instead of
+   dispatching to `__abs__`, so the Fraction came back unchanged, still
+   negative. Added real `abs()`/`hash()` builtin-call lowering (instance
+   dispatch to `__abs__`/`__hash__`, with `abs()` also handling
+   int/float natively via `labs`/`fabs`) plus matching reachability-
+   walker cases. Fixed `378_fractions_arithmetic.py`'s sign bug and
+   `377_dunder_abs_hash.py` exactly.
+5. **A function declared `-> float` returning an int-typed expression**
+   (e.g. `return sorted_data[n // 2]`, an int list element, in a
+   function whose OTHER branches return a real float so sema types the
+   whole function float) needed an explicit `sitofp` promotion at the
+   `return` site -- without it, the raw int bits got read back as a
+   float's bit pattern with zero conversion, producing tiny garbage
+   values like `6.95186e-310`. Added `ctx.ret_ty` (the function's
+   declared return type, threaded from `A.FuncDef.ret_type` into
+   `lower_func`) and a matching promotion in `A.Return`'s lowering, plus
+   fixed `asmpython/stdlib/statistics.py`'s `median`/`median_low`/
+   `median_high` to route their odd-length/even-length int-return
+   branches through an explicit `: int` local first (needed because a
+   bare list-subscript read's static type is `"any"`, not `"int"`, in
+   this compiler's model -- the `sitofp` promotion only fires on a
+   provably-int expression, by design, since "any" is also what a
+   genuinely-float list element's subscript read looks like and
+   promoting THAT would double-convert and corrupt it). Fixed
+   `164_statistics_module.py`/`230_statistics_module.py`/
+   `271_statistics_depth.py` exactly.
+6. **Shared-scratch-register (R11) collision in `codegen.py`'s
+   `_div`/`_binop_gp`/`_cmp_set`**: `_gp(val)` returns the SAME fixed
+   scratch register (R11) for ANY spilled/alloca value; these three
+   helpers call `_gp` independently for both operands, so when BOTH are
+   simultaneously stack-spilled, the second operand's load silently
+   clobbers the first's before either is read -- effectively computing
+   `b OP b` instead of `a OP b`. Root-caused via a background gdb/
+   objdump investigation (confirmed: `self._coef // some_call()` inside
+   an instance method -- the field read stays live across the call and
+   gets spilled, the call's return value is ALSO stack-homed once past
+   the callee-saved restore sequence -- disassembled to two back-to-back
+   `mov r11, [slot]` loads, only the second surviving, computing `b //
+   b` = 1 always). Fixed by giving `_gp` a new `alt_scratch` parameter
+   (routes the spilled/alloca case through R10 instead of R11) and
+   passing `alt_scratch=True` for the SECOND operand of `_binop_gp`/
+   `_cmp_set`/`_div` -- `_div` needed extra care since it ALSO uses R10
+   to preserve a RAX-resident `a` across the divide instruction itself;
+   computed `a_in_rax` before loading `b` so `b`'s scratch choice can
+   avoid that collision (falls back to R11 in that specific combination,
+   safe there because `a_in_rax` means `a` never touched R11 to begin
+   with). `_binop_simd` left alone (XMM has only one scratch register,
+   XMM15 -- would need a second one added first to apply the same fix,
+   not needed by any current failing case). Fixed
+   `202_decimal_module.py`'s `Decimal.__int__` returning 1 instead of 7
+   exactly (`78 // 10`).
+7. **List subscript reads had NO bounds check at all** (documented as
+   such, "raising IndexError needs exception support" -- exception
+   support has existed in this backend for a while now, this was simply
+   never wired up): `lst[10]` on a 3-element list silently read out-of-
+   bounds memory instead of raising a catchable `IndexError`. Added
+   `_emit_list_index_bounds_check` (mirrors `_emit_int_divzero_check`'s
+   raise_b-created-before-ok_b block-ordering pattern exactly, same
+   reasoning) wired into ONLY the plain `lst[i]` READ subscript site
+   (not the shared `_list_elem_addr` helper itself, which many internal
+   loop helpers -- list.pop, slicing, etc. -- call with indices already
+   known in-range; checking there would be redundant on every one of
+   those). Checks against the PRE-wraparound index range
+   (`[-len, len)`), matching CPython's own check order.
+8. **Dict subscript reads had NO KeyError check either**: `d["missing"]`
+   silently returned 0 (`_abi_dict_get_default` with a zero default)
+   instead of raising. Added `_emit_dict_key_check` (same block-ordering
+   pattern), wired into the `A.Subscript` dict-read site only (`.get()`
+   itself stays unchecked -- it's SUPPOSED to return the default
+   silently). Fixed `417_keyerror_catchable.py` exactly (all 3 lines,
+   including catching via the `LookupError`/`Exception` parent classes
+   -- `KeyError`'s `BUILTIN_EXC_PARENTS` chain was already correct, just
+   never exercised before).
+9. **`int(non-numeric-string)` never raised `ValueError`**: the x86-64
+   backend's `_abi_str_to_int` ABI shim bypassed the legacy backend's
+   already-correct `_runtime_str_to_int` (which DOES validate and raise
+   -- confirmed present and correct in the shared runtime .asm) entirely,
+   calling raw `strtoll` directly with no validation at all. Fixed by
+   routing `_abi_str_to_int` through `_runtime_str_to_int` like every
+   other ABI shim wraps its runtime counterpart. Fixed
+   `408_int_valueerror.py` exactly (all 5 lines, including the
+   empty-string case).
+10. **`dict.get(key, default)` on a dict with no tracked value type**
+    (`d: dict = {}`, never populated with a literal at declaration --
+    `_dict_value_type` deliberately falls back to `"any"` for these, by
+    design, so other dict operations stay lenient) had no way to
+    runtime-dispatch how to PRINT the result: this backend's dict/list
+    slots carry no runtime type tag, only a compile-time-known "kind"
+    byte baked in at lowering time (`_lower_expr_as_str`'s fallback for
+    an "any"-typed value hardcodes `kind=0`, i.e. "format as int",
+    regardless of the value's real type) -- `d.get("k", "Hello")`
+    printed the STRING POINTER as a raw decimal integer instead of
+    dereferencing it as a string. Root-caused via a background gdb
+    investigation that confirmed the pointer value WAS correct end to
+    end (`_abi_dict_get_default`/`_runtime_dict_lookup_slot` all
+    execute correctly) -- purely a formatting-dispatch bug, and general
+    (also affects e.g. `list.pop()` on a similarly-untyped list, not
+    dict-specific). Fixed at the type-inference level rather than the
+    runtime-tagging level (a bigger, not-yet-justified redesign): when
+    `dict.get()`'s tracked value type is `"any"` but the two-arg
+    DEFAULT has a known concrete type (str/int/float), sema now infers
+    the whole call's result as that type instead of `"any"` -- the best
+    available signal when nothing else is tracked, and consistent with
+    this compiler's existing "dict values are homogeneously typed"
+    model elsewhere. Fixed `448_kwargs_annot.py` exactly (a `**kwargs:
+    str` function using `kwargs.get("greeting", "Hello")`).
+11. **Register-allocator false-loop detection for try/except's own
+    control-flow branches** (found chasing a NEW corruption the
+    IndexError bounds-check feature exposed, via a second background
+    gdb investigation): `regalloc.py`'s `_last_uses` loop-back-edge
+    heuristic treats ANY backward-by-block-index `br`/`br.t` as a loop.
+    `_lower_try` produces at least two shapes of genuinely non-loop
+    backward branches: a normal-completion `br` back to the try's own
+    `end_b` (created early, before the per-handler check blocks), and a
+    per-handler type-match `br.t` whose "matched" target sits at a
+    LOWER index once more than one exception id needs checking (a
+    one-shot dispatch, not a loop). Both got misidentified as one big
+    "loop", force-extending the liveness of every value referenced
+    anywhere in that span (including dead handler blocks on the taken
+    path) all the way to the region's end -- starving the callee-saved
+    register pool for an unrelated later value crossing a call, which
+    fell through to a caller-saved register the call then clobbered
+    (confirmed: a string literal's address silently replaced by an
+    unrelated int value after two prior try/except blocks in the same
+    function exhausted the callee-saved pool). This is a PRE-EXISTING
+    regalloc gap, not something the IndexError feature introduced --
+    it just needed enough register pressure from extra blocks to
+    surface. Fixed generally: any backward branch whose target falls
+    inside a `try_regions` span, `(setjmp_bi, end_bi]`, is now excluded
+    from loop-back-edge detection outright (`_lower_try` never emits a
+    genuine loop of its own, so every backward-looking branch found
+    strictly within one of its regions is a dispatch artifact, not a
+    real loop -- a nested loop inside a try BODY is unaffected, since
+    its own back edge targets a block the loop itself created, and this
+    exclusion only ever WIDENS what's ignored as a loop, never
+    suppresses a real one whose target lies outside every try_regions
+    span). Fixed `446_list_indexerror.py` exactly (all 4 lines).
+
+12. **`bytes(str)`/`str.encode()` appended every element as the SAME
+    wrong constant** (found via the background investigation flagged in
+    item 11's writeup, root-caused and fixed same checkpoint): the IR
+    op `"load8"` (an indexed byte load, base+index in one instruction)
+    that `_lower_str_to_byte_list` emitted was NEVER implemented in
+    `codegen.py`'s op dispatcher at all -- it silently fell through to
+    the unknown-op catch-all, which emits a bare `nop` "to keep offsets
+    consistent." `ch` (the destination) was therefore never written;
+    the following `zext` read whatever stale value already occupied
+    `ch`'s allocated register, the SAME value every loop iteration
+    since nothing in the loop body ever wrote it (confirmed via
+    disassembly: the `load8` call site compiled to a lone `nop`,
+    `zext` immediately after read an untouched register). Grepping
+    confirmed `load8` had exactly one emission site in the whole
+    codebase and zero consumers anywhere in codegen.py/regalloc.py --
+    genuinely dead-on-arrival IR, not a partial implementation. Fixed
+    by rewriting `_lower_str_to_byte_list` to use `gep`+`load` instead
+    (byte-address arithmetic via the already-correctly-implemented
+    `gep` op, then an ordinary U8-typed `load` -- codegen.py's existing
+    `tname in ("i8","u8")` load case already handles exactly this
+    shape) rather than adding a whole new op for a single call site.
+    Fixed `198_bytes_literal.py` exactly (all 11 lines) and `str.
+    encode()` (the function's other call site) directly verified too.
+
+Verified: `tests.runner` 475/483 throughout, checked after every
+sub-fix in this stretch, not just at the end (including this final
+fix).
+
+`10_input.py` triaged and found to be a FALSE POSITIVE in the scratch
+sweep script's own MISMATCH/CRASH bucketing, not a real backend bug:
+the scratch sweep (never committed, lives in this session's scratch
+dir) has no `# stdin:` block support at all (unlike `tests.runner`,
+which does), so any test needing piped input reads EOF immediately.
+Confirmed by building and running it directly with real stdin piped
+in (`printf 'Claude\n42\n' | ./exe`) -- produces the exact expected
+output, `name: hello, Claude` / `n: 84`. Sweep script worth promoting
+to a real `tests/backend_correctness.py` with stdin support next time,
+per the standing note from when it was first written.
+
+Still open, not yet triaged this checkpoint: `75_assembly_func.py`
+(uses `@assembly_func`, raw inline-NASM function bodies -- confirmed
+`asm_body`/`asm_symbol` are threaded through class-method copying in
+`ir_lower.py` but never actually consulted anywhere in `lower_func`/
+`_lower_stmt`; this backend emits machine code directly with no NASM
+assembler in the loop at all, unlike the legacy backend, so supporting
+this needs either an embedded assembler or hand-decoding whatever
+subset of NASM mnemonics real `@assembly_func` bodies in the test
+suite use -- a real, separate feature, not a quick fix, not attempted
+this checkpoint).
+
+**Fifteenth checkpoint** (2026-07-17, same-day follow-up, moving into
+the build-failure bucket now that MISMATCH/CRASH are essentially
+closed out): several dict methods and `min`/`max` implemented from
+scratch.
+
+1. **`dict.copy()`/`dict.clear()`/`dict.setdefault(key, default)`**:
+   `.clear()` had an existing `_abi_dict_clear` runtime shim that was
+   simply never wired up as a `MethodCall` dispatch target; `.copy()`
+   (new empty dict + `_abi_dict_update`, same shallow-merge semantics
+   `dict(other_dict)` already uses) and `.setdefault()` (contains-check
+   -> branch, mirrors `.pop()`'s own two-arg branch shape) were
+   implemented new. Fixed `103_dict_methods.py` exactly (all 10 lines).
+2. **`min()`/`max()` were entirely unimplemented**: every shape (2-arg
+   direct compare, 3+-arg variadic, 1-arg list scan, `key=` callable)
+   fell through to the generic bare-symbol-call fallback, linking
+   against a nonexistent `min`/`max` DLL symbol -- despite sema.py
+   already fully validating arity/kwargs and stamping `sort_key`/
+   `inferred_type` (shared with `sorted()`'s own `_check_sort_kwargs`).
+   New `_lower_minmax`/`_minmax_is_better` port codegen.py's algorithm
+   shapes (running-best loop for the variadic form; list/tuple scan
+   with an optional key-lambda call for the 1-arg form) as IR blocks.
+   Also added a matching reachability-walker case for `min`/`max`'s
+   (and `sorted()`'s) `sort_key` lambda -- same "lowering fixed, walker
+   not fixed" two-part shape as every other lambda/dunder dispatch fix
+   this session. Fixed `411_max_min_variadic.py` exactly (all 6 lines)
+   and the `key=`-lambda form directly verified (str list, `min`/`max`
+   by length).
+3. **`sorted(xs, key=lambda ...)`/`list.sort(key=...)` with a
+   non-fast-path lambda body** (e.g. `lambda w: len(w)`, as opposed to
+   the two narrow shapes `_lower_sort_inplace` already handled --
+   identity `lambda w: w` and tuple-index `lambda w: w[i]`): extended
+   the SAME "call the lambda's own synthesized function" pattern used
+   for `min`/`max` above and for `list(filter(...))`/`list(map(...))`
+   earlier this session. Confirmed CORRECT for int list elements via
+   direct testing (`sorted(ints, key=lambda x: -x)`). **Deliberately
+   NOT extended to str list elements** -- that specific combination (str
+   elements + a general non-fast-path key lambda) was found to produce
+   silently WRONG sort output (not reversed, not unsorted, some other
+   scrambled order) via a root-cause investigation still in progress as
+   of this checkpoint; every other combination this function already
+   handled (str/int elements with the two fast-path key shapes, int
+   elements with a general key lambda) verified correct. Left the str
+   case raising its pre-existing `LowerError` rather than shipping code
+   with a known-wrong, not-yet-understood failure mode -- a clean build
+   failure is strictly better than silently wrong output for a
+   from-scratch native compiler aiming at "run any Python code
+   correctly." `112_sort_key.py` therefore still fails to build (same
+   bucket as before this checkpoint, not a new regression) pending that
+   investigation's result.
+
+Verified: `tests.runner` 475/483 throughout.
+
 ## Selfhost Status (plan-step 11)
 
 Selfhost = asmpython (gen0, built by CPython) compiling its own source to

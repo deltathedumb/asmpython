@@ -93,6 +93,12 @@ class IRFunc:
     # recorded. The x86-64 backend's regalloc.py consumes this to treat
     # each region as one liveness span, the same way it already does for
     # loop back-edges.
+    #
+    # Also consumed by regalloc.py's _last_uses to exclude every backward-
+    # by-block-index branch _lower_try's control-flow-dispatch machinery
+    # produces (a normal-completion `br` back to the try's own `end_b`, a
+    # per-handler type-match `br.t` whose matched-target sits at a lower
+    # index) from loop-back-edge detection -- none of them are real loops.
     try_regions: list[tuple[int, int]] = field(default_factory=list)
 
 

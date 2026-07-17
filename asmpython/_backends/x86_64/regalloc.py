@@ -105,6 +105,44 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
     """
     label_to_idx = {b.label: bi for bi, b in enumerate(func.blocks)}
 
+    # try/except lowering (ir_lower.py's _lower_try) produces MULTIPLE
+    # backward-by-block-index branches that are NOT loops:
+    #  - a normal-completion `br` back to the try's own `end_b` (created
+    #    EARLY, right after handler_b/body_b, before the per-handler
+    #    check_blocks) from a later-indexed block (the body-ok path, a
+    #    matched-handler path, the re-raise path) -- the try's own
+    #    convergent exit point.
+    #  - a per-handler type-match `br.t` whose "matched" target
+    #    (`try_run_*`, created BEFORE the mid-loop that builds the
+    #    `try_check_next_*` chain checking each candidate exception id)
+    #    sits at a LOWER index than the `br.t` emitting it, once more than
+    #    one exception id needs checking -- a one-shot dispatch, not a
+    #    loop, but backward by index all the same.
+    # Without excluding these, the loop-back-edge scan below misidentifies
+    # the whole enclosing span as one "loop", force-extending the liveness
+    # of every value referenced anywhere in it (including inside handler
+    # blocks that never execute on the taken path) all the way to the
+    # region's end -- confirmed via a real repro: a value pinned by this
+    # false loop starved the callee-saved register pool for an unrelated
+    # later value crossing a call, which fell through to a caller-saved
+    # register the call then clobbered (silently corrupting a string
+    # pointer into an unrelated int). Rather than tracking every such
+    # helper block individually, exclude any backward branch whose TARGET
+    # falls inside a try_regions span, (setjmp_bi, end_bi] -- _lower_try
+    # never emits a genuine loop of its own, so every backward-looking
+    # branch found strictly within one of its regions is one of these
+    # dispatch artifacts, not a real loop needing liveness extension
+    # (nested loops inside a try BODY are unaffected: their own back edges
+    # target blocks the loop itself created, at or after the try's
+    # setjmp_bi, but a genuine loop's back edge stays within the loop's
+    # own narrower span and this broader try-region exclusion only ever
+    # widens what's IGNORED as a loop, never suppresses a real one whose
+    # target lies outside every try_regions span).
+    try_regions = getattr(func, "try_regions", ())
+
+    def _in_try_region(idx: int) -> bool:
+        return any(setjmp_bi < idx <= end_bi for setjmp_bi, end_bi in try_regions)
+
     # For each block bi, the [start, end] of the widest loop containing it
     # (its own index for both if bi isn't in any loop). A back edge from
     # block `src` to block `dst` (dst <= src) means every block in
@@ -119,7 +157,7 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
             targets = instr.operands[1:] if instr.op == "br.t" else instr.operands
             for t in targets:
                 ti = label_to_idx.get(str(t))
-                if ti is not None and ti <= bi:
+                if ti is not None and ti <= bi and not _in_try_region(ti):
                     for k in range(ti, bi + 1):
                         if loop_start[k] > ti:
                             loop_start[k] = ti
@@ -287,6 +325,20 @@ def _compute_crosses_var_shift(func: Any) -> set[str]:
     not a value it clobbers out from under someone else; a value dying
     at (or defined by) the shift itself has no conflict with owning RCX
     for that one instruction.
+
+    The shift's own RESULT is a different story and IS flagged: unlike
+    a value merely dying at this instruction, `codegen.py`'s `_shift`
+    physically stages the runtime count into RCX as an intermediate step
+    (`mov dst, val_r` then `mov rcx, cnt_r` then `shr cl, dst`) -- if the
+    allocator picks RCX as the shift's OWN destination register, the
+    second move (staging the count) clobbers the value the first move
+    just wrote, before the shift instruction itself ever executes.
+    Confirmed via disassembly of a real corruption: a variable-count
+    `(v >> 8) & 0xFF` byte extraction, with the shift's result allocated
+    to RCX, produced `mov rcx, v` / `mov rcx, 8` (clobbering v) / `shr
+    cl, rcx` -- computing `8 >> 8` (zero) instead of `v >> 8`. Every 4th
+    value in a 4-shift extraction loop landed in RCX by allocator chance,
+    matching the corruption's exact stride.
     """
     def_pos: dict[str, tuple[int, int]] = {}
     use_positions: dict[str, list[tuple[int, int]]] = {}
@@ -325,6 +377,11 @@ def _compute_crosses_var_shift(func: Any) -> set[str]:
             if any(cb == db and di < si < ui for (cb, si) in var_shift_positions):
                 crosses.add(name)
                 break
+
+    for bi, block in enumerate(func.blocks):
+        for ii, instr in enumerate(block.instrs):
+            if (bi, ii) in var_shift_positions and instr.result is not None:
+                crosses.add(instr.result.name)
     return crosses
 
 
