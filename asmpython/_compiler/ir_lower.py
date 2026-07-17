@@ -4669,6 +4669,92 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("call", out_v, ["_abi_list_slice", src_v, min_v, max_v]))
         return out_v
 
+    if isinstance(e, A.Call) and e.func == "dict" and len(e.args) in (0, 1):
+        # `dict()` -> fresh empty dict; `dict(other)` -> shallow copy (via
+        # dict.update's own merge helper); `dict(pairs)` (sema flags this
+        # shape via `e.dict_from_pairs`) -> iterate a list of 2-element
+        # tuples/lists and insert each (k, v). Mirrors codegen.py's
+        # `_gen_dict_call` exactly, including reading each pair's raw
+        # 8-byte key/value cells directly (no _lower_dict_key conversion
+        # needed -- a str key's cell IS already the interned-string
+        # pointer _abi_dict_set wants). Was entirely unimplemented: `dict`
+        # as a bare symbol fell through to a direct-symbol-call linking
+        # against a nonexistent DLL import.
+        if not e.args:
+            out_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", out_v, ["_abi_new_instance"]))
+            return out_v
+        if getattr(e, "dict_from_pairs", False):
+            pairs_v = _lower_expr(ctx, e.args[0])
+            pairs_ptr = ctx.ensure_slot(f"__dfp_it_{id(e)}", PTR)
+            ctx.emit(IRInstr("store", None, [pairs_v, pairs_ptr]))
+            len_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", len_addr, [pairs_v, _LIST_LEN_OFF]))
+            len_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", len_v, [len_addr]))
+            idx_ptr = ctx.ensure_slot(f"__dfp_idx_{id(e)}", I64)
+            zero_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", zero_v, [0]))
+            ctx.emit(IRInstr("store", None, [zero_v, idx_ptr]))
+            res_v0 = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", res_v0, ["_abi_new_instance"]))
+            res_ptr = ctx.ensure_slot(f"__dfp_res_{id(e)}", PTR)
+            ctx.emit(IRInstr("store", None, [res_v0, res_ptr]))
+
+            head_b = ctx.new_block("dfphead")
+            body_b = ctx.new_block("dfpbody")
+            end_b = ctx.new_block("dfpend")
+            ctx.emit(IRInstr("br", None, [head_b.label]))
+
+            ctx.switch_to(head_b)
+            idx_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+            cond_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, len_v]))
+            ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
+
+            ctx.switch_to(body_b)
+            idx_v2 = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
+            pairs_v2 = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", pairs_v2, [pairs_ptr]))
+            pair_addr = _list_elem_addr(ctx, pairs_v2, idx_v2)
+            pair_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", pair_v, [pair_addr]))
+            pair_buf_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", pair_buf_addr, [pair_v, _LIST_BUF_OFF]))
+            pair_buf_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", pair_buf_v, [pair_buf_addr]))
+            key_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", key_addr, [pair_buf_v, 0]))
+            key_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", key_v, [key_addr]))
+            val_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", val_addr, [pair_buf_v, 8]))
+            val_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", val_v, [val_addr]))
+            res_v1 = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", res_v1, [res_ptr]))
+            ctx.emit(IRInstr("call", None, ["_abi_dict_set", res_v1, key_v, val_v]))
+            one_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", one_v, [1]))
+            next_idx = ctx.tmp(I64)
+            ctx.emit(IRInstr("iadd", next_idx, [idx_v2, one_v]))
+            ctx.emit(IRInstr("store", None, [next_idx, idx_ptr]))
+            ctx.emit(IRInstr("br", None, [head_b.label]))
+
+            ctx.switch_to(end_b)
+            final_res = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", final_res, [res_ptr]))
+            return final_res
+        # dict(other): shallow copy via the same merge helper dict.update()
+        # uses.
+        src_v = _lower_expr(ctx, e.args[0])
+        out_v0 = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out_v0, ["_abi_new_instance"]))
+        ctx.emit(IRInstr("call", None, ["_abi_dict_update", out_v0, src_v]))
+        return out_v0
+
     if isinstance(e, A.Call) and e.func in ("set", "frozenset") and len(e.args) in (0, 1):
         # `set(x)`/`frozenset(x)` -- sets are dict-backed (str-keyed,
         # dummy int value 1 per member) in this codebase, matching
