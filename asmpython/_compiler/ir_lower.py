@@ -6088,6 +6088,36 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("call", v, ["_abi_str_replace", obj_v, old_v, new_v]))
                 return v
             raise LowerError(f"unsupported expr MethodCall (str.{e.method})")
+        if obj_ty.startswith("super:"):
+            # super().method(args): dispatch statically to the base
+            # class's method (never virtual -- codegen.py's own
+            # `super:` handling does the same), with the *current*
+            # method's `self` as the receiver. sema stamps `e.obj`'s
+            # inferred_type as `super:<Base>` (see sema.py's `super()`
+            # check) and already validated this only appears inside a
+            # method, so `self` always has a bound param slot here. Was
+            # entirely unimplemented on this backend: `super` as a bare
+            # symbol fell through to a direct-symbol-call linking
+            # against a nonexistent DLL import.
+            parent = obj_ty.split(":", 1)[1]
+            owner = _resolve_method_owner(ctx, parent, e.method)
+            if owner is None:
+                # Base isn't a user class this backend can dispatch to
+                # (e.g. `class Foo(Exception)` calling
+                # `super().__init__(msg)`) -- no extra base state to
+                # initialize, matching codegen.py's own no-op here.
+                # Still evaluate args for side effects.
+                for a in e.args:
+                    _lower_expr(ctx, a)
+                return ctx.shared_zero
+            self_ptr = _name_ptr(ctx, "self", PTR)
+            self_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", self_v, [self_ptr]))
+            args = [self_v] + [_lower_expr(ctx, a) for a in e.args]
+            res_ty = ir_type_for(A.expr_type(e))
+            v = ctx.tmp(res_ty)
+            ctx.emit(IRInstr("call", v, [f"{owner}__{e.method}", *args]))
+            return v
         if obj_ty.startswith("instance:"):
             # Walk the inheritance chain for the method's actual defining
             # class -- a static instance:Dog type doesn't mean Dog itself
@@ -8154,6 +8184,16 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
         if isinstance(node, A.MethodCall):
             obj_ty = A.expr_type(node.obj)
             if obj_ty.startswith("instance:"):
+                add_resolved(obj_ty.split(":", 1)[1], node.method)
+            elif obj_ty.startswith("super:"):
+                # super().method(...): dispatches statically to the base
+                # class's OWN method (never a subclass override -- see
+                # ir_lower.py's `super:` MethodCall lowering), so mark
+                # exactly that resolved owner reachable. Same
+                # "lowering fixed, walker not fixed" shape as every other
+                # dunder/lambda dispatch gap this session -- add_resolved
+                # already handles the None-owner (non-user-class base)
+                # case as a no-op.
                 add_resolved(obj_ty.split(":", 1)[1], node.method)
             elif obj_ty == "type" and isinstance(node.obj, A.Name):
                 add_resolved(node.obj.name, node.method)
