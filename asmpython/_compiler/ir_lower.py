@@ -4182,7 +4182,17 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             if operand_types[i] == "float" or rhs_ty == "float":
                 if op not in _FCMPOP:
                     raise LowerError(f"unsupported float compare op {op!r}")
-                ctx.emit(IRInstr(_FCMPOP[op], step, [operands[i], rhs]))
+                lv = operands[i]
+                if operand_types[i] != "float":
+                    lv_f = ctx.tmp(F64)
+                    ctx.emit(IRInstr("sitofp", lv_f, [lv]))
+                    lv = lv_f
+                rv = rhs
+                if rhs_ty != "float":
+                    rv_f = ctx.tmp(F64)
+                    ctx.emit(IRInstr("sitofp", rv_f, [rhs]))
+                    rv = rv_f
+                ctx.emit(IRInstr(_FCMPOP[op], step, [lv, rv]))
             else:
                 if op not in _CMPOP:
                     raise LowerError(f"unsupported compare op {op!r}")
