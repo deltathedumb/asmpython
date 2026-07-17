@@ -1572,6 +1572,64 @@ OK=305  MISMATCH=13  CRASH=3  BUILD_FAIL=117
 56% → 70% of the full 438-case corpus passing. The crash bucket has
 gone from 42 down to just 3 across all twelve passes.
 
+**Triage pass thirteen** (2026-07-16, same-day follow-up — "final push,
+no stops" directive): closed out the crash bucket entirely (**0
+crashes**), then moved straight into build-failure triage.
+
+1. **`os.listdir([path])` implemented** — ported codegen.py's
+   `_emit_os_listdir` (shells out to `dir /b [path]` via `_popen`,
+   reads the piped output char-by-char via `fgetc`, splits on `\n`
+   skipping `\r`, appends each non-empty line to a fresh list) as a new
+   `_lower_os_listdir` IR-block helper, wired in next to the
+   `getcwd`/`cpu_count` special cases. Needed `_popen`/`_pclose` added
+   to `pe_linker._DLL_FOR_SYMBOL` (confirmed real msvcrt.dll exports).
+   Confirmed fixing `156_os_listdir.py` exactly.
+2. **`os._stat(path, buf)`'s `"list_buf"` FFI arg-type marker was
+   never implemented** — a `list[int]`'s underlying DATA BUFFER
+   pointer (not its 24-byte header) needs to be passed as the raw
+   out-parameter, matching codegen.py's existing handling exactly. Adds
+   a `gep`+`load` at `LIST_BUF_OFF` before the arg reaches the call.
+   Without it, `os._stat`'s writes scrambled the buffer list's own
+   header bookkeeping instead of writing into the real backing array.
+   Confirmed fixing `301_ospath_isdir_isfile.py`/
+   `302_pathlib_isdir_isfile.py` exactly (8 and 6 lines respectively).
+
+   **The crash bucket sweep result after these two fixes: `CRASH=0`.**
+   Every crash-bucket entry from the session-start baseline of 42 is
+   now fixed.
+
+3. **`needle in haystack` (substring membership on two strings) was
+   entirely unimplemented** — `_lower_membership` only ever handled
+   dict/set/list/tuple haystacks, hard-erroring on `str`. Fixed by
+   reusing the existing `_abi_str_index_of` shim (already built for
+   `str.find`/`str.index`): found iff the returned index isn't `-1`.
+   Confirmed fixing `34_str_in.py` exactly (all 6 lines) — likely fixes
+   6 more build-failure entries sharing this exact message
+   (`170_uuid_module.py`, `259_string_module.py`,
+   `275_configparser_read_string.py`, `291_configparser_file_io.py`,
+   `359_ipaddress_module.py`, `40_list_str_build.py` — not yet
+   individually spot-checked).
+4. **The bare `float(...)` builtin was entirely unimplemented** — `int(...)`
+   had a real conversion dispatch (str/float/instance-`__int__`
+   cases); `float(...)` had none at all, falling through to a
+   direct-symbol-call linking against a nonexistent symbol `float`.
+   Ported codegen.py's exact logic: `float("nan"/"inf"/"-inf")` emit
+   the IEEE-754 bit pattern directly (sidesteps UCRT `strtod` quirks);
+   `float(str)` otherwise calls `strtod(ptr, NULL)` directly (a real
+   libm/libc call with a plain float result — no ABI shim needed, an
+   ordinary IR `call` already marshals a float return correctly);
+   `float(int)` is `sitofp`; `float(float)` is identity. Confirmed
+   fixing `14_floats.py` exactly (all 11 lines) — likely fixes some of
+   the other 5 build-failure entries sharing this message
+   (`148_math_extended.py`, `219_datetime_depth.py`,
+   `257_configparser_module.py`, `360_operator_complete.py`,
+   `364_cmath_module.py` — not yet individually spot-checked).
+
+Verified: `tests.runner` 475/483 after every sub-fix. Full sweep
+numbers: see the sweep result file (update on next resume if this line
+is stale) — expect a meaningful jump in both OK and a drop in
+BUILD_FAIL given how many entries these last two fixes are shared by.
+
 ## Selfhost Status (plan-step 11)
 
 Selfhost = asmpython (gen0, built by CPython) compiling its own source to

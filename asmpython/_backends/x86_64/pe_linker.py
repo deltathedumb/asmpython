@@ -49,7 +49,7 @@ for _name in (
     "printf", "sprintf", "putchar", "puts", "fputs", "fputc",
     "strlen", "strcmp", "strstr", "_strdup", "_atoi64",
     "atof", "strtod", "fgets", "fopen", "fgetc", "fclose", "fflush",
-    "fread", "fseek", "ftell",
+    "fread", "fseek", "ftell", "_popen", "_pclose",
     "exit", "__iob_func", "memset", "memcpy", "fmod", "pow",
     "fabs", "frexp", "ldexp", "log", "modf", "rand", "sqrt",
     "abs", "labs", "floor", "ceil", "difftime",

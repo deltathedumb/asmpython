@@ -435,6 +435,24 @@ def _lower_membership(ctx: _FuncCtx, needle_e: A.Expr, hay_e: A.Expr, negate: bo
             ctx.emit(IRInstr("icmp.eq", inv, [result, zero]))
             return inv
         return result
+    if hay_ty == "str":
+        # `needle in haystack` (substring test) -- `_abi_str_index_of`
+        # already exists (used by str.find/str.index) and returns -1
+        # when the needle isn't found, exactly the membership test this
+        # needs: found iff the returned index != -1. Was previously
+        # entirely unimplemented on this backend (a hard LowerError),
+        # unlike list/tuple/dict/set membership which all had real
+        # lowering already.
+        needle_v = _lower_expr(ctx, needle_e)
+        hay_v = _lower_expr(ctx, hay_e)
+        idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", idx_v, ["_abi_str_index_of", hay_v, needle_v]))
+        neg1 = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", neg1, [-1]))
+        result = ctx.tmp(I64)
+        op = "icmp.eq" if negate else "icmp.ne"
+        ctx.emit(IRInstr(op, result, [idx_v, neg1]))
+        return result
     if hay_ty not in ("list", "tuple"):
         raise LowerError(f"unsupported compare membership ({hay_ty})")
     needle_v = _lower_expr(ctx, needle_e)
@@ -1191,6 +1209,138 @@ def _lower_str_to_byte_list(ctx: _FuncCtx, str_e: A.Expr) -> IRValue:
     final_out = ctx.tmp(PTR)
     ctx.emit(IRInstr("load", final_out, [out_ptr]))
     return final_out
+
+
+def _lower_os_listdir(ctx: _FuncCtx, path_arg) -> IRValue:
+    """`os.listdir([path])` -> list[str]. Ports codegen.py's
+    `_emit_os_listdir` (Windows target) IR-op-for-instruction: shells
+    out to `dir /b [path]` via `_popen`/`fgetc`/`_pclose` (no direct
+    Win32 FindFirstFile/FindNextFile binding exists in this codebase's
+    curated FFI surface, and this backend has no directory-listing
+    runtime helper of its own) rather than a native directory-walk API,
+    reading the piped output char-by-char, splitting on `\\n` (skipping
+    `\\r`), and appending each non-empty line to a fresh list. Was
+    entirely unimplemented on this backend -- every call fell through
+    to the generic opaque-receiver stub, which returns a plain 0, later
+    crashing when the caller used that as a real list pointer."""
+    if path_arg is not None:
+        pfx_name = ctx.mctx.intern_str("dir /b ")
+        pfx_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", pfx_v, [pfx_name]))
+        path_v = _lower_expr(ctx, path_arg)
+        cmd_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", cmd_v, ["_abi_str_concat", pfx_v, path_v]))
+    else:
+        cmd_name = ctx.mctx.intern_str("dir /b")
+        cmd_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", cmd_v, [cmd_name]))
+
+    mode_name = ctx.mctx.intern_str("r")
+    mode_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", mode_v, [mode_name]))
+    pipe_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", pipe_v, ["_popen", cmd_v, mode_v]))
+    pipe_ptr = ctx.ensure_slot(f"__listdir_pipe_{id(path_arg)}", PTR)
+    ctx.emit(IRInstr("store", None, [pipe_v, pipe_ptr]))
+
+    acc_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", acc_v, ["_abi_new_list", ctx.shared_zero]))
+    acc_ptr = ctx.ensure_slot(f"__listdir_acc_{id(path_arg)}", PTR)
+    ctx.emit(IRInstr("store", None, [acc_v, acc_ptr]))
+
+    empty_name = ctx.mctx.intern_str("")
+    empty_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", empty_v, [empty_name]))
+    line0_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", line0_v, ["_abi_str_concat_dup", empty_v]))
+    line_ptr = ctx.ensure_slot(f"__listdir_line_{id(path_arg)}", PTR)
+    ctx.emit(IRInstr("store", None, [line0_v, line_ptr]))
+
+    loop_b = ctx.new_block("listdir_loop")
+    nl_b = ctx.new_block("listdir_nl")
+    skip_b = ctx.new_block("listdir_skip")
+    append_b = ctx.new_block("listdir_append")
+    reset_b = ctx.new_block("listdir_reset")
+    body_b = ctx.new_block("listdir_body")
+    done_b = ctx.new_block("listdir_done")
+    ctx.emit(IRInstr("br", None, [loop_b.label]))
+
+    ctx.switch_to(loop_b)
+    pipe_v2 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", pipe_v2, [pipe_ptr]))
+    c_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", c_v, ["fgetc", pipe_v2]))
+    c_ext = ctx.tmp(I64)
+    ctx.emit(IRInstr("sext", c_ext, [IRValue(c_v.name, IRType("i32"))]))
+    neg1 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", neg1, [-1]))
+    is_eof = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_eof, [c_ext, neg1]))
+    ctx.emit(IRInstr("br.t", None, [is_eof, done_b.label, body_b.label]))
+
+    ctx.switch_to(body_b)
+    ten = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", ten, [10]))
+    is_nl = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_nl, [c_ext, ten]))
+    cr_check_b = ctx.new_block("listdir_crcheck")
+    ctx.emit(IRInstr("br.t", None, [is_nl, nl_b.label, cr_check_b.label]))
+
+    ctx.switch_to(cr_check_b)
+    thirteen = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", thirteen, [13]))
+    is_cr = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_cr, [c_ext, thirteen]))
+    append_char_b = ctx.new_block("listdir_appendchar")
+    ctx.emit(IRInstr("br.t", None, [is_cr, loop_b.label, append_char_b.label]))
+
+    ctx.switch_to(append_char_b)
+    ch_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", ch_v, ["_abi_chr", c_ext]))
+    cur_line_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", cur_line_v, [line_ptr]))
+    new_line_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", new_line_v, ["_abi_str_concat", cur_line_v, ch_v]))
+    ctx.emit(IRInstr("store", None, [new_line_v, line_ptr]))
+    ctx.emit(IRInstr("br", None, [loop_b.label]))
+
+    ctx.switch_to(nl_b)
+    line_for_len_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", line_for_len_v, [line_ptr]))
+    len_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", len_v, ["strlen", line_for_len_v]))
+    zero_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero_v, [0]))
+    is_empty = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_empty, [len_v, zero_v]))
+    ctx.emit(IRInstr("br.t", None, [is_empty, skip_b.label, append_b.label]))
+
+    ctx.switch_to(append_b)
+    acc_v2 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", acc_v2, [acc_ptr]))
+    line_v2 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", line_v2, [line_ptr]))
+    ctx.emit(IRInstr("call", None, ["_abi_list_append", acc_v2, line_v2]))
+    ctx.emit(IRInstr("br", None, [skip_b.label]))
+
+    ctx.switch_to(skip_b)
+    ctx.emit(IRInstr("br", None, [reset_b.label]))
+
+    ctx.switch_to(reset_b)
+    empty_v2 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", empty_v2, [empty_name]))
+    fresh_line_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", fresh_line_v, ["_abi_str_concat_dup", empty_v2]))
+    ctx.emit(IRInstr("store", None, [fresh_line_v, line_ptr]))
+    ctx.emit(IRInstr("br", None, [loop_b.label]))
+
+    ctx.switch_to(done_b)
+    pipe_v3 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", pipe_v3, [pipe_ptr]))
+    ctx.emit(IRInstr("call", None, ["_pclose", pipe_v3]))
+    result_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", result_v, [acc_ptr]))
+    return result_v
 
 
 def _lower_int_to_bytes(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
@@ -3938,6 +4088,8 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 v = ctx.tmp(I64)
                 ctx.emit(IRInstr("const", v, [1]))
                 return v
+            if e.obj.name == "os" and e.method == "listdir" and len(e.args) <= 1:
+                return _lower_os_listdir(ctx, e.args[0] if e.args else None)
             bindings = ctx.mctx.imported_modules[e.obj.name]
             fn = bindings.get(e.method)
             if fn is not None and hasattr(fn, "c_name"):
@@ -3962,6 +4114,25 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                         fv = ctx.tmp(F64)
                         ctx.emit(IRInstr("sitofp", fv, [av]))
                         av = fv
+                    if i < len(arg_types) and arg_types[i] == "list_buf":
+                        # `os._stat(path, buf)`-style bindings pass a
+                        # `list[int]`'s underlying DATA BUFFER (not its
+                        # 24-byte header) as a raw out-parameter pointer,
+                        # matching codegen.py's own `list_buf` handling
+                        # exactly (see its comment on `_gen_ffi_call`).
+                        # Without this, `av` was still the list's HEADER
+                        # pointer -- the C function wrote its struct
+                        # fields into the header's cap/len/buf_ptr words
+                        # instead of the real backing array, corrupting
+                        # the list's own bookkeeping (confirmed via
+                        # `ospath.isdir`/`isfile`: `os._stat`'s writes
+                        # scrambled the buffer list's length/capacity,
+                        # later crashing on any read of it).
+                        buf_v = ctx.tmp(PTR)
+                        ctx.emit(IRInstr("gep", buf_v, [av, _LIST_BUF_OFF]))
+                        buf_ptr_v = ctx.tmp(PTR)
+                        ctx.emit(IRInstr("load", buf_ptr_v, [buf_v]))
+                        av = buf_ptr_v
                     args.append(av)
                 if c_name in ("fmax", "fmin") and len(args) == 2:
                     # Neither fmax nor fmin (nor an MS-spelled _fmax/_fmin)
@@ -4812,6 +4983,48 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     out = ctx.tmp(I64)
                     ctx.emit(IRInstr("call", out, [f"{owner}____int__", obj_v]))
                     return out
+            return _lower_expr(ctx, arg)
+        if e.func == "float" and len(e.args) == 1:
+            arg = e.args[0]
+            arg_t = A.expr_type(arg)
+            # float("nan")/float("inf")/float("-inf") emit the bit
+            # pattern directly rather than relying on strtod (matches
+            # codegen.py's own special-case, since UCRT's strtod
+            # historically had "nan"/"inf" parsing quirks).
+            if isinstance(arg, A.StrLit):
+                s = arg.value.strip().lower()
+                if s == "nan":
+                    out = ctx.tmp(F64)
+                    ctx.emit(IRInstr("const", out, [float("nan")]))
+                    return out
+                if s in ("inf", "+inf", "infinity", "+infinity"):
+                    out = ctx.tmp(F64)
+                    ctx.emit(IRInstr("const", out, [float("inf")]))
+                    return out
+                if s in ("-inf", "-infinity"):
+                    out = ctx.tmp(F64)
+                    ctx.emit(IRInstr("const", out, [float("-inf")]))
+                    return out
+            if arg_t == "str":
+                # float(str) was entirely unimplemented on this backend
+                # -- `e.func` (the bare name "float") fell through to
+                # the generic direct-symbol-call fallback, linking
+                # against a nonexistent symbol `float`. strtod(ptr,
+                # NULL) parses directly into XMM0 -- no ABI shim needed,
+                # a plain IR call with a float result already marshals
+                # correctly.
+                str_v = _lower_expr(ctx, arg)
+                null_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("const", null_v, [0]))
+                out = ctx.tmp(F64)
+                ctx.emit(IRInstr("call", out, ["strtod", str_v, null_v]))
+                return out
+            if arg_t == "int":
+                int_v = _lower_expr(ctx, arg)
+                out = ctx.tmp(F64)
+                ctx.emit(IRInstr("sitofp", out, [int_v]))
+                return out
+            # float -> float: identity.
             return _lower_expr(ctx, arg)
         if e.func == "sorted" and len(e.args) == 1:
             return _lower_sorted(ctx, e)
