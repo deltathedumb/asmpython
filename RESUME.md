@@ -1246,6 +1246,91 @@ cracked triage pass seven's setjmp/longjmp bug after several false starts
 real, necessary bugs, but neither alone explained the crash; the
 watchpoint immediately identified the third, actual culprit).**
 
+**Triage pass eight** (2026-07-16, same-day follow-up): two fixes,
+both closing multiple crash-bucket entries at once:
+
+1. **FFI-module-constant access** (`os.sep`, `math.pi`,
+   `_audio_sdl.MIX_DEFAULT_FORMAT`-style attribute reads on a pure
+   FFI-binding-table stdlib module) — the exact gap flagged as
+   "not-yet-fixed" in pass one's `string.ascii_lowercase` comment.
+   `ir_lower.py` had zero `ffi_consts`/binding-table-`Const` handling
+   for `A.Attr` at all: sema already resolves the right TYPE (via
+   `imported_modules[module].get(name)`, an existing branch), but
+   nothing on the ir_lower side ever consulted the same table for the
+   VALUE, so every access fell through to the generic instance-
+   attribute fallback — reading the module name (never bound to any
+   real variable) as an uninitialized stack slot treated as a dict
+   pointer, guaranteed segfault. Fixed by mirroring codegen.py's
+   `_gen_const_load`/`_platform_const_value` exactly: resolve the
+   `Const`'s value at COMPILE time (the binding table itself IS the
+   value — nothing to load from memory), preferring `value_windows`
+   when present (this backend only targets Windows PE output), and
+   materializing it as a real IR constant (`intern_str`+`global_addr`
+   for str, plain `const` for int/float). Confirmed fixing 5
+   crash-bucket entries in one shot: `test_audio_constants.py`,
+   `test_gui_constants.py`, `test_gui_joystick_constants.py`,
+   `243_platform_module.py`, `266_platform_depth.py`, plus turning
+   `16_import_math.py`'s crash into a (separately fixed, see below)
+   mismatch and fixing `299_signal_module.py` — all exact matches.
+
+2. **FFI function calls never promoted an int-literal argument to
+   float for a binding declaring a `float` parameter** — surfaced by
+   fix 1 turning `16_import_math.py` from a crash into a wrong-output
+   mismatch (`math.sqrt(16)` printed `0` instead of `4`). The
+   `MethodCall` FFI-dispatch path (`ctx.mctx.imported_modules[...]`,
+   used for e.g. `math.sqrt`/`math.pow`/`math.hypot`) lowered every
+   argument via a bare `_lower_expr(ctx, a)` with no reference to the
+   binding's own declared `arg_types` — an int-literal argument stayed
+   an I64 IR value, which the call's own ABI marshaling (keyed off the
+   VALUE's type, not the callee's signature) places in a GP register;
+   the real C symbol (libm's `sqrt`, taking a `double` in XMM0) read
+   garbage from XMM0 instead. Fixed by promoting via `sitofp` whenever
+   `arg_types[i] == "float"` and the lowered value isn't already F64 —
+   mirrors the same int→float promotion every other numeric-binop call
+   site in this file already does. Confirmed fixing `16_import_math.py`
+   exactly (all 7 lines).
+
+**Separately found, NOT yet fixed** — a distinct, deeper bug in
+whole-program-merge module scoping, NOT a backend bug: `os.getcwd()`
+and `ospath.isdir()`/`isfile()`-style calls to a REAL Python-source
+wrapper function (defined in `ospath.py`/`pathlib.py`, merged in by
+`program.py`'s whole-program compile, as opposed to a pure FFI
+binding-table `Func`) still crash. Root cause identified but not yet
+fixed: under `whole_program=True` compilation specifically, the `os`
+`A.Name`'s `inferred_type` comes back `"int"` instead of `"module"`
+(confirmed via a direct AST dump) — `Import`'s sema handling correctly
+does `scope.add(bind_name, "module")`, so something in the
+whole-program merge path overwrites or shadows that binding before
+`os.getcwd()` is type-checked. This affects every remaining
+`os`/`ospath`/`pathlib`-based crash in the bucket
+(`155_os_module.py`, `156_os_listdir.py`, `301_ospath_isdir_isfile.py`,
+`302_pathlib_isdir_isfile.py`, `93_os_file_io.py`/`255_os_file_io.py`'s
+timeouts) — worth its own dedicated investigation (start by comparing
+against `string.py`, which DOES resolve correctly under whole-program
+merge, to find what's different about `os`/`ospath`'s merge path)
+rather than a quick patch, since it's sema/program.py scoping, not
+ir_lower.py.
+
+Verified: `tests.runner` 475/483 throughout, checked after each fix.
+Full sweep: `OK=297 MISMATCH=12 CRASH=12 BUILD_FAIL=117`, up from
+`OK=287 MISMATCH=12 CRASH=22 BUILD_FAIL=117` before this pass — +10 OK,
+-10 crashes, mismatches flat (the `16_import_math.py` crash→mismatch→OK
+round-trip within this same pass nets to zero change in that column).
+
+**Cumulative sweep numbers after eight triage passes this session, from
+the `OK=245 MISMATCH=24 CRASH=42 BUILD_FAIL=127` session-start
+baseline**:
+
+```text
+OK=297  MISMATCH=12  CRASH=12  BUILD_FAIL=117
+```
+
+61% → 68% of the full 438-case corpus passing. The crash bucket alone
+has gone from 42 to 12 across all eight passes — the remaining 12 are
+almost entirely the whole-program-merge `os`/`ospath`/`pathlib` gap
+just above (5 entries) plus base64/hashlib/calendar/dunder_bool
+(unrelated, not yet triaged individually).
+
 ## Selfhost Status (plan-step 11)
 
 Selfhost = asmpython (gen0, built by CPython) compiling its own source to

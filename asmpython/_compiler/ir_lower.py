@@ -3826,7 +3826,27 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             fn = bindings.get(e.method)
             if fn is not None and hasattr(fn, "c_name"):
                 c_name = getattr(fn, "c_name_windows", None) or fn.c_name
-                args = [_lower_expr(ctx, a) for a in e.args]
+                arg_types = getattr(fn, "arg_types", None) or ()
+                args = []
+                for i, a in enumerate(e.args):
+                    av = _lower_expr(ctx, a)
+                    # `math.sqrt(16)` etc: the binding declares a `float`
+                    # parameter (the real C symbol, e.g. libm's `sqrt`,
+                    # takes a double in XMM0), but an int-LITERAL argument
+                    # lowers to a plain I64 value with no promotion --
+                    # placed in a GP register by the call's own ABI
+                    # marshaling (keyed off the VALUE's own IR type, not
+                    # the callee's declared signature), so the C function
+                    # read garbage from XMM0 instead of the real argument.
+                    # Confirmed via 16_import_math.py: math.sqrt(16)
+                    # printed 0 instead of 4. Promote here, mirroring the
+                    # same int->float promotion every other numeric-binop
+                    # call site in this file already does.
+                    if i < len(arg_types) and arg_types[i] == "float" and av.type is not F64:
+                        fv = ctx.tmp(F64)
+                        ctx.emit(IRInstr("sitofp", fv, [av]))
+                        av = fv
+                    args.append(av)
                 if c_name in ("fmax", "fmin") and len(args) == 2:
                     # Neither fmax nor fmin (nor an MS-spelled _fmax/_fmin)
                     # is a real classic-msvcrt.dll export -- SSE2's MAXSD/
@@ -4479,6 +4499,52 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(ty)
             ctx.emit(IRInstr("load", v, [ptr]))
             return v
+        if (
+            isinstance(e.obj, A.Name)
+            and e.obj.name in ctx.mctx.imported_modules
+            and e.name not in ctx.mctx.global_types
+        ):
+            # `module.CONST` on a pure-FFI-binding-table module (e.g.
+            # `os.sep`, `math.pi`) -- the previous branch below only
+            # covers modules whose top-level values got hoisted as real
+            # `Assign` statements by program.py's whole-program merge
+            # (`string.py`'s `ascii_lowercase`); a binding-table `Const`
+            # entry (`os.py`'s `BINDINGS = {"sep": Const(ty="str",
+            # value="/", value_windows="\\"), ...}`) never becomes a real
+            # global at all, so it fell all the way through to the
+            # generic instance-attribute fallback below, which treated
+            # the module name (never bound to any real variable) as an
+            # uninitialized stack slot read as a dict/instance pointer --
+            # a guaranteed segfault (confirmed via gdb, same crash shape
+            # as the `string.ascii_lowercase` bug this mirrors). Mirrors
+            # codegen.py's `_gen_const_load`/`_platform_const_value`
+            # exactly: a `Const`'s value is resolved at COMPILE time (the
+            # binding table itself IS the "global", there's nothing to
+            # load from memory), with the same `value_windows` override
+            # convention (this backend currently only targets Windows PE
+            # output, so unconditionally prefer it when present, matching
+            # target_windows.py's `_platform_const_value`).
+            b = ctx.mctx.imported_modules[e.obj.name].get(e.name)
+            if b is not None and not hasattr(b, "arg_types"):  # a Const, not a Func
+                value = getattr(b, "value_windows", None)
+                if value is None:
+                    value = getattr(b, "value", None)
+                if b.ty == "str" and isinstance(value, str):
+                    name = ctx.mctx.intern_str(value)
+                    v = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("global_addr", v, [name]))
+                    return v
+                if b.ty == "int" and isinstance(value, (int, bool)):
+                    v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", v, [int(value)]))
+                    return v
+                if b.ty == "float" and isinstance(value, (int, float)):
+                    v = ctx.tmp(F64)
+                    ctx.emit(IRInstr("const", v, [float(value)]))
+                    return v
+                # Anything else (list-typed sys.argv/sys.path sentinels,
+                # etc.) falls through unchanged -- a separate, smaller,
+                # not-yet-scoped gap, same as before this fix.
         if isinstance(e.obj, A.Name) and A.expr_type(e.obj) == "module" and e.name in ctx.mctx.global_types:
             # `module.NAME` (e.g. `string.ascii_lowercase`) -- a merged
             # stdlib module is a compile-time-only namespace, not a real
