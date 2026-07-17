@@ -1630,6 +1630,257 @@ numbers: see the sweep result file (update on next resume if this line
 is stale) — expect a meaningful jump in both OK and a drop in
 BUILD_FAIL given how many entries these last two fixes are shared by.
 
+**Triage pass thirteen** (2026-07-16, same-day follow-up — "final push,
+no stops" directive): closed the crash bucket to **0** (via
+`os.listdir()` and `os._stat`'s `"list_buf"` FFI arg marker, see
+pass thirteen's earlier writeup above this section title — this pass
+continues straight into build-failure triage without a checkpoint
+gap), then implemented a large cluster of previously-missing builtins
+and dunder-dispatch reachability cases:
+
+1. **`needle in haystack` substring membership** — `_lower_membership`
+   only handled dict/set/list/tuple; reused the existing
+   `_abi_str_index_of` shim (found iff index != -1).
+2. **Bare `float(...)` builtin** — `int(...)` already had a real
+   conversion dispatch; `float(...)` had none at all. Ported
+   codegen.py's nan/inf bit-pattern special case plus
+   strtod/sitofp/identity for str/int/float args.
+3. **`d.contains(x)` / `d.keys()` / `d.values()`** MethodCall shapes —
+   `items()` and for-in-dict already worked; these three didn't. All
+   reuse existing `_abi_dict_contains`/`_abi_dict_keys`/
+   `_abi_dict_get_default` shims.
+4. **`list.append`/`insert`/`pop` on a float element** — all three were
+   hard `LowerError`s; a list cell is a raw 8-byte int slot, so a float
+   needs its bits bitcast to/from I64 around the runtime call (mirrors
+   codegen.py's `movq rax, xmm0` / `movq xmm0, rax` exactly). Float
+   list element READS already worked; only the mutating methods were
+   missing.
+5. **`for a, b[, c] in zip(A, B[, C])` and `for i, (a, b) in
+   enumerate(zip(A, B))`** — entirely unimplemented; ported
+   codegen.py's `_for_zip_spec`/`_gen_for_zip` (N iterables walked in
+   lockstep, stopping at the shortest, matching real Python `zip()`
+   semantics — this backend maintains its own copy of `_for_zip_spec`,
+   same as sema.py and codegen.py each independently do, since sema
+   never rewrites `s.iter`/`s.targets` into a canonical shape).
+6. **`enumerate(xs, start)` / `enumerate(xs, start=N)`** — rejected
+   outright by a `len(args) == 1` guard. Added a second internal
+   counter for the displayed index, separate from the array-position
+   counter driving the loop condition.
+7. **`range(...)` as a real value** (not a `for` loop's own iterable,
+   which has unrelated special-case handling) — materializes a real
+   `list[int]` via a new `_abi_range_list` ABI shim (the underlying
+   `_runtime_range_list` already existed; only the shim wrapping it
+   for the IR `call` op's calling convention was missing).
+8. **`list(x)`/`tuple(x)` shallow copy** from an existing list/tuple —
+   a full-range `_abi_list_slice` (they share the same heap layout, so
+   a full copy IS a shallow copy, matching codegen.py's own
+   `_gen_list_call` simple case).
+9. **`set(x)`/`frozenset(x)` constructor** (empty, dict/set passthrough,
+   and building from a list/tuple by inserting each element as a
+   str-keyed dummy-value-1 member) — codegen.py's `_gen_set_call`
+   ported. **Found and fixed a genuine register-allocator-adjacent bug
+   while doing this**: the first draft reused the same SSA temp for the
+   source list pointer AND the freshly-materialized set across the
+   loop's back-edge instead of storing them into slots and reloading
+   each iteration (the established pattern every other loop helper in
+   this file already follows) — a register-allocation dump showed the
+   source-list-pointer temp and a later same-block `const 1` temp (the
+   dict-set dummy value) landing in the SAME physical register (RBX),
+   since a plain last-use scan saw the list pointer's last read as
+   happening before that later temp's definition point in the same
+   block. Confirmed via gdb: on the second loop iteration, "the list
+   pointer" register actually held `1`, and dereferencing `1+8`
+   segfaulted. Fixed by switching to the store-and-reload-per-iteration
+   pattern; no `regalloc.py` changes needed. Confirmed fixing
+   `449_int_set.py` exactly (all 8 lines, including the
+   `{x for x in range(5)}` set-comprehension shape that had triggered
+   the bug via sema's own comprehension-then-`set()`-wrap desugaring).
+10. **`sum(xs[, start])`** — a plain integer-accumulation loop over a
+    list/tuple buffer.
+11. **`len(obj)` / `bool(obj)` on a user instance with `__len__`/
+    `__bool__`** — neither had ANY instance-typed dispatch case at all
+    (only str/list/tuple/dict/set/any/int were covered for `len()`;
+    `bool()` already had lowering but the reachability walker never
+    knew to keep the dunder methods it called reachable). Both needed
+    matching reachability-walker cases, the same two-part
+    "lowering-then-walker" shape as several earlier dunder fixes this
+    session.
+12. **`list(filter(pred, xs))` / `list(map(fn, xs))`** with `pred`
+    either `None` (truthy filter) or a lambda — entirely unimplemented.
+    Unlike codegen.py's `_gen_list_filter`/`_gen_list_map` (which
+    inline the lambda body directly for speed), this calls the
+    lambda's own already-synthesized function (every `A.Lambda` gets
+    one via sema) — simpler and equally correct, one extra `call` per
+    element.
+13. **`print(instance)` / `str(instance)` / `repr(instance)` never kept
+    a resolved `__str__`/`__repr__` reachable** — only an f-string
+    SEGMENT's instance-typed value had this walker check; a plain
+    `print(a)` on a `Fraction`-style instance correctly CALLED
+    `__str__` at lowering time but the method was never EMITTED into
+    the binary (`undefined symbol 'Fraction____str__'`). Mirrors the
+    f-string case's own `__str__`-then-`__repr__` fallback order.
+
+Confirmed fixing (exact output match unless noted): `34_str_in.py`,
+`14_floats.py`, `19_dicts.py`, `56_dict_keys_values.py`,
+`21_dict_grow.py`, `437_dict_iter.py`, `61_dict_of_instance.py`,
+`39_list_float.py`, `41_list_float_sum.py`,
+`202_ir_backend_float_lists.py`, `74_zip.py`, `388_zip_three.py`,
+`129_enumerate_start.py`, `387_enumerate_start.py`,
+`91_range_value.py`, `409_list_repeat.py`,
+`425_generator_pipeline.py`, `87_set_add.py`,
+`84_set_frozenset_ctor.py`, `419_set_comp_str.py`, `449_int_set.py`,
+`435_custom_len_bool.py`, `208_weakref_module.py`,
+`371_io_context_manager.py`, `426_minheap.py`, `391_filter_none.py`,
+`405_filter_map_lambda.py`, `173_fractions_module.py`. Also found a
+separate, NOT-yet-fixed bug while checking these: `378_fractions_
+arithmetic.py` now BUILDS AND RUNS (reachability fix worked) but
+produces `-3/4` instead of the expected `3/4` on one line — a sign-
+normalization bug somewhere in the Fraction stdlib module or its
+arithmetic dunders, unrelated to reachability, flagged for a future
+mismatch-bucket pass. `184_fnmatch_module.py`'s `filter(names,
+"*.py")` also remains unfixed — that's `fnmatch.filter` (a stdlib
+module function sharing a name with the Python builtin), a different,
+narrower gap than the `list(filter(...))` shape fixed here.
+
+Verified: `tests.runner` 475/483 after every sub-fix, checked
+throughout (not just at the end). Full sweep: `OK=351 MISMATCH=15
+CRASH=1 BUILD_FAIL=71` (before this pass's own final `random.*` addition
+below — see that entry for the fully-final numbers).
+
+**Same-checkpoint follow-up: `random.randint`/`random`/`randrange`/
+`uniform` implemented.** `_random_randint`/`_random_random`/etc. are
+`c_name`-bound `Func` entries in `random.py`'s own `BINDINGS`, but
+those symbols were never real C functions anywhere — `random.py`'s own
+docstring says they're meant to be "implemented as inline NASM helpers
+in the target subclasses," and `codegen.py`'s `target_windows.py` DOES
+have exactly that (labels generated only when actually called), but
+this backend had no equivalent at all. Ported the identical formulas
+directly as IR ops (`randint(a,b) = a + rand() % (b-a+1)`,
+`randrange(stop) = rand() % stop`, `random() = rand() / 32768.0`,
+`uniform(a,b) = a + (rand()/32768.0)*(b-a)`) rather than hand-written
+asm labels — confirmed producing the EXACT SAME deterministic sequence
+as the legacy backend for `random.seed(42); randint(1,10)` twice
+(`6`, `1`), which is what `149_random_extended.py`'s `# expect:` block
+was written against.
+
+**Found and fixed an import-alias bug while doing this**: the first
+draft matched on `e.obj.name == "random"` (the call site's own LOCAL
+name for the module) — but a module can be imported under any alias
+(`secrets.py` itself does `import random as _random`), and matching
+the literal alias string missed every aliased call site entirely.
+Fixed by matching on the resolved BINDING's own `c_name` attribute
+instead (`ctx.mctx.imported_modules[e.obj.name].get(e.method)`, which
+resolves through the alias to the real binding regardless of what
+local name imported it) — alias-independent, matching how every other
+FFI dispatch in this file already keys off the resolved binding, not
+the module's spelling at the call site.
+
+Confirmed fixing `149_random_extended.py` (all 4 lines exactly),
+`213_secrets_module.py` (all 3 lines, via the aliased-import fix),
+`223_uuid_depth.py`, `295_uuid_extras.py` (both build+run correctly
+now, needed `randint` transitively through `uuid.py`'s own use of it).
+`170_uuid_module.py` remains open (needs `UUID.__repr__` reachability,
+a narrower variant of the `print`/`str`/`repr` walker fix above that
+doesn't fit any of its existing cases — not yet investigated).
+
+Verified: `tests.runner` 475/483.
+
+**`A.AugAssign` had zero instance-dunder dispatch** (found right after
+the `random.*` addition above, via the sweep's one new-looking crash,
+`429_dunder_iadd.py`, `exit=3221225477`/STATUS_ACCESS_VIOLATION):
+`v1 += v2` on two instances (e.g. two `Vector`s) fell through to the
+generic `_BINOP["+"]` path, `iadd`-ing two raw object pointers together
+— confirmed via gdb SIGSEGV, the same "raw pointer arithmetic" bug
+shape that recurred all session for every dunder-dispatch site that was
+initially missed. Fixed with a new `_AUGASSIGN_DUNDER` map (mirrors
+sema.py's `DUNDER_BINOP` but for the in-place-then-fallback semantics
+augmented assignment needs: `{"+": ("__iadd__", "__add__"), ...}`,
+covering `+ - * / // % ** & | ^ << >>`) plus a dispatch block in
+`_lower_stmt`'s `A.AugAssign` case (checks `cur_ty is PTR and
+rhs_ty.startswith("instance:")`, resolves `__iadd__` first, falls back
+to `__add__` if the class has no in-place override) and a matching
+reachability-walker case (`A.AugAssign` with an instance-typed RHS) —
+same two-part shape as every other dunder-dispatch fix this session
+(lowering alone isn't enough; the walker independently needs to know
+the method is reachable or it never gets emitted). Confirmed fixing
+`429_dunder_iadd.py` exactly (all 9 lines).
+
+Verified: `tests.runner` 475/483 after this fix too, no regressions.
+
+**Final sweep for this whole stretch** (range/list/set/sum/len/bool/
+filter/map/Fraction batch + `random.*` + the AugAssign fix, all
+together): the crash bucket, which had briefly shown 1 after the
+`random.*` sweep, is back to **zero** — confirmed both by the sweep and
+a direct build+run spot-check.
+
+```text
+OK=356  MISMATCH=15  CRASH=0  BUILD_FAIL=67  TOTAL=438
+```
+
+Up from `OK=351 MISMATCH=15 CRASH=1 BUILD_FAIL=71` (the sweep just
+before this stretch). The crash bucket has been at 0 twice now this
+session (briefly after triage pass twelve, then again here) — every
+new crash that's appeared since has been a genuine new one surfaced by
+that stretch's own fixes reaching further into the corpus, not
+flakiness; each has been chased down and fixed the same day.
+
+Remaining known gaps, not yet fixed (each independently confirmed,
+not guessed):
+
+- `378_fractions_arithmetic.py`: builds+runs correctly now but prints
+  `-3/4` instead of `3/4` on one line — a sign-normalization bug in
+  the `Fraction` stdlib module or its dunders, unrelated to
+  reachability (that part is fixed).
+- `170_uuid_module.py`: needs `UUID.__repr__` reachability, a narrower
+  case the existing `print`/`str`/`repr` walker fix doesn't cover.
+- `184_fnmatch_module.py`: `from fnmatch import fnfilter as filter`
+  hits sema's real-module `FromImport` path (`fnmatch` is a whole-
+  program-mergeable `asmpython/stdlib/fnmatch.py` module, not an FFI
+  binding), which correctly registers `self.mod.func_aliases["filter"]
+  = "fnfilter"` — but `ir_lower.py` never consults `func_aliases` at
+  all for a bare-name `A.Call`, so `filter(names, "*.py")` falls
+  through all the way to "assume it's a real DLL symbol" and fails to
+  link. This is broader than fnmatch specifically: **any** `from X
+  import Y as Z` where `X` is a real mergeable module (not an FFI
+  binding) and `Z` collides with a builtin name will hit this same gap
+  — worth a general fix (thread `func_aliases` resolution into
+  whatever `A.Call` bare-name fallback exists, checked before the
+  builtin-name special cases) rather than a `fnmatch`-specific patch.
+
+**New register-allocation bug found while chasing `196_hashlib_module.py`/
+`225_hashlib_module.py`/`229_base64_module.py`'s MISMATCH entries**
+(2026-07-17, same-day follow-up; NOT yet fixed, under active
+investigation): MD5's `hexdigest()` output has every 4th hex-pair
+zeroed (`5d414000bc4b2a00b9719d001017c500` instead of
+`5d41402abc4b2a76b9719d911017c592`). Confirmed via git-stash A/B that
+this predates the whole `range/list/set/.../AugAssign` stretch above —
+a pre-existing bug, not a new regression. Bisected to a minimal ~80-line
+repro (saved at `BUG_REPRO_md5.py` in this session's scratch dir):
+a `process(state, m)` function with a 64-iteration loop containing an
+`if/elif/elif/else` chain that computes two values (`f`, `g`) across
+its branches, where one line combines TWO separate list-index reads in
+one sum (`f + a + _MD5_K[i] + m[g]` — `_MD5_K` indexed by the loop var
+`i` directly, `m` indexed by the branch-computed `g`) feeding into a
+rotate (reproduces identically whether the rotate is a real function
+call or fully inlined, so it is NOT about the call itself). `process()`
+itself computes the *correct* result (confirmed: printing `state[0..3]`
+right after it returns gives exactly the right values) — the
+corruption only appears in a completely separate, unrelated loop
+*afterward* that extracts bytes from `state` via `list.append()` calls.
+This means something about lowering/allocating registers for the
+two-list-read-plus-branching pattern inside `process()` leaves stale
+allocator state that then corrupts an unrelated later loop's 2nd
+`append()` argument — a cross-function-boundary liveness bug, not a
+same-function one like every prior regalloc bug fixed this session.
+Dispatched to a background Explore-agent investigation (gdb + IR
+tracing) rather than guessed at; check its findings on next resume
+before attempting a fix. Also re-verify `408_int_valueerror.py`,
+`417_keyerror_catchable.py`, `446_list_indexerror.py`, `75_assembly_
+func.py`, `448_kwargs_annot.py`, `198_bytes_literal.py`,
+`202_decimal_module.py`, `164_statistics_module.py`/`230_statistics_
+module.py`/`271_statistics_depth.py`, `10_input.py` — the rest of the
+current 15-entry MISMATCH bucket, none individually triaged yet.
+
 ## Selfhost Status (plan-step 11)
 
 Selfhost = asmpython (gen0, built by CPython) compiling its own source to

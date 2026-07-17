@@ -281,6 +281,25 @@ _BINOP = {
     "<<": "shl", ">>": "shr",
 }
 
+# AugAssign operator -> (in-place dunder, plain dunder) for instance-typed
+# operands. Mirrors sema.py's DUNDER_BINOP (forward-op half only -- an
+# augmented assignment's RHS is never the reflected side) plus the
+# in-place variant CPython checks first (`__iadd__`/`__isub__`/etc.).
+_AUGASSIGN_DUNDER = {
+    "+": ("__iadd__", "__add__"),
+    "-": ("__isub__", "__sub__"),
+    "*": ("__imul__", "__mul__"),
+    "/": ("__itruediv__", "__truediv__"),
+    "//": ("__ifloordiv__", "__floordiv__"),
+    "%": ("__imod__", "__mod__"),
+    "**": ("__ipow__", "__pow__"),
+    "&": ("__iand__", "__and__"),
+    "|": ("__ior__", "__or__"),
+    "^": ("__ixor__", "__xor__"),
+    "<<": ("__ilshift__", "__lshift__"),
+    ">>": ("__irshift__", "__rshift__"),
+}
+
 _CMPOP = {
     "==": "icmp.eq", "!=": "icmp.ne",
     "is": "icmp.eq", "is not": "icmp.ne",
@@ -3710,6 +3729,27 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("load", v, [len_addr]))
         return v
 
+    if (
+        isinstance(e, A.Call)
+        and e.func == "len"
+        and len(e.args) == 1
+        and A.expr_type(e.args[0]).startswith("instance:")
+    ):
+        # `len(obj)` on a user instance with a real `__len__` -- was
+        # entirely unhandled (only str/list/tuple/dict/set/any/int
+        # arguments to `len()` had a dispatch case), falling through to
+        # a direct-symbol-call linking against a nonexistent symbol
+        # `len`. Mirrors the same dunder-dispatch pattern established
+        # throughout this file for `__bool__`/`__call__`/etc.
+        cls_name = A.expr_type(e.args[0]).split(":", 1)[1]
+        owner = _resolve_method_owner(ctx, cls_name, "__len__")
+        if owner is None:
+            raise LowerError(f"unsupported expr Call (len() on {cls_name!r} with no __len__)")
+        obj_v = _lower_expr(ctx, e.args[0])
+        v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", v, [f"{owner}____len__", obj_v]))
+        return v
+
     if isinstance(e, A.Call) and e.func == "len" and len(e.args) == 1 and A.expr_type(e.args[0]) in ("dict", "set", "any", "int"):
         obj_v = _lower_expr(ctx, e.args[0])
         len_addr = ctx.tmp(PTR)
@@ -3843,6 +3883,330 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
 
     if isinstance(e, A.Call) and e.func == "isinstance" and len(e.args) == 2:
         return _lower_isinstance(ctx, e)
+
+    if (
+        isinstance(e, A.Call)
+        and e.func == "list"
+        and len(e.args) == 1
+        and isinstance(e.args[0], A.Call)
+        and e.args[0].func in ("filter", "map")
+        and len(e.args[0].args) == 2
+    ):
+        # `list(filter(pred, xs))` / `list(map(fn, xs))` -- pred/fn is
+        # either `None` (filter's truthy-test shorthand) or a lambda.
+        # Unlike codegen.py's `_gen_list_filter`/`_gen_list_map` (which
+        # inline the lambda BODY directly into the loop for speed),
+        # this calls the lambda's own already-synthesized function
+        # (every `A.Lambda` gets one, see sema.py's Lambda handling) --
+        # simpler and equally correct, just one extra `call` per
+        # element. Was entirely unimplemented: `filter`/`map` as bare
+        # symbols fell through to a direct-symbol-call linking against
+        # a nonexistent symbol.
+        inner = e.args[0]
+        fn_arg, xs_expr = inner.args[0], inner.args[1]
+        is_filter = inner.func == "filter"
+        is_truthy_filter = is_filter and A.is_none_expr(fn_arg)
+        if not is_truthy_filter and not isinstance(fn_arg, A.Lambda):
+            raise LowerError(f"unsupported expr Call ({inner.func}() with a non-lambda predicate)")
+        xs_v = _lower_expr(ctx, xs_expr)
+        xs_ptr = ctx.ensure_slot(f"__listcall_xs_{id(e)}", PTR)
+        ctx.emit(IRInstr("store", None, [xs_v, xs_ptr]))
+        len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", len_addr, [xs_v, _LIST_LEN_OFF]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        one_cap = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one_cap, [1]))
+        real_cap_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", real_cap_v, [len_v, one_cap]))
+        out_v0 = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out_v0, ["_abi_new_list", real_cap_v]))
+        out_ptr = ctx.ensure_slot(f"__listcall_out_{id(e)}", PTR)
+        ctx.emit(IRInstr("store", None, [out_v0, out_ptr]))
+        idx_ptr = ctx.ensure_slot(f"__listcall_idx_{id(e)}", I64)
+        zero_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero_v, [0]))
+        ctx.emit(IRInstr("store", None, [zero_v, idx_ptr]))
+        el_ty = _iter_element_type(xs_expr)
+
+        head_b = ctx.new_block("listcallhead")
+        body_b = ctx.new_block("listcallbody")
+        keep_b = ctx.new_block("listcallkeep") if is_filter else None
+        skip_b = ctx.new_block("listcallskip") if is_filter else None
+        cont_b = ctx.new_block("listcallcont")
+        end_b = ctx.new_block("listcallend")
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+        ctx.switch_to(head_b)
+        idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        cond_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, len_v]))
+        ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
+
+        ctx.switch_to(body_b)
+        idx_v2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
+        xs_v2 = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", xs_v2, [xs_ptr]))
+        addr = _list_elem_addr(ctx, xs_v2, idx_v2)
+        elem_v = ctx.tmp(ir_type_for(el_ty))
+        ctx.emit(IRInstr("load", elem_v, [addr]))
+
+        if is_truthy_filter:
+            keep_v = _value_truthy(ctx, elem_v)
+            ctx.emit(IRInstr("br.t", None, [keep_v, keep_b.label, skip_b.label]))
+            ctx.switch_to(keep_b)
+            out_v1 = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", out_v1, [out_ptr]))
+            ctx.emit(IRInstr("call", None, ["_abi_list_append", out_v1, elem_v]))
+            ctx.emit(IRInstr("br", None, [cont_b.label]))
+            ctx.switch_to(skip_b)
+            ctx.emit(IRInstr("br", None, [cont_b.label]))
+        elif is_filter:
+            fn_name = fn_arg.func_name  # type: ignore[attr-defined]
+            keep_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("call", keep_v, [fn_name, elem_v]))
+            keep_truthy = _value_truthy(ctx, keep_v)
+            ctx.emit(IRInstr("br.t", None, [keep_truthy, keep_b.label, skip_b.label]))
+            ctx.switch_to(keep_b)
+            out_v1 = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", out_v1, [out_ptr]))
+            ctx.emit(IRInstr("call", None, ["_abi_list_append", out_v1, elem_v]))
+            ctx.emit(IRInstr("br", None, [cont_b.label]))
+            ctx.switch_to(skip_b)
+            ctx.emit(IRInstr("br", None, [cont_b.label]))
+        else:
+            fn_name = fn_arg.func_name  # type: ignore[attr-defined]
+            mapped_ty = ir_type_for(getattr(fn_arg, "lambda_ret", "int"))
+            mapped_v = ctx.tmp(mapped_ty)
+            ctx.emit(IRInstr("call", mapped_v, [fn_name, elem_v]))
+            out_v1 = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", out_v1, [out_ptr]))
+            store_v = mapped_v
+            if mapped_ty is F64:
+                iv = ctx.tmp(I64)
+                ctx.emit(IRInstr("bitcast_f2i", iv, [mapped_v]))
+                store_v = iv
+            ctx.emit(IRInstr("call", None, ["_abi_list_append", out_v1, store_v]))
+            ctx.emit(IRInstr("br", None, [cont_b.label]))
+
+        ctx.switch_to(cont_b)
+        one_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one_v, [1]))
+        next_idx = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", next_idx, [idx_v2, one_v]))
+        ctx.emit(IRInstr("store", None, [next_idx, idx_ptr]))
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+
+        ctx.switch_to(end_b)
+        final_out = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", final_out, [out_ptr]))
+        return final_out
+
+    if (
+        isinstance(e, A.Call)
+        and e.func in ("list", "tuple")
+        and len(e.args) == 1
+        and A.expr_type(e.args[0]) in ("list", "tuple", "any")
+    ):
+        # `list(x)`/`tuple(x)` from an existing list/tuple source: a
+        # shallow copy (they share the same heap layout, so a full-range
+        # slice IS a shallow copy). Mirrors codegen.py's `_gen_list_call`
+        # simple case exactly -- the `filter(...)`/`map(...)`/`zip(...)`-
+        # wrapped forms it also special-cases are separate, larger
+        # features not covered here. Was entirely unhandled: `list(...)`
+        # as a plain value (not a `for` loop's own iterable, which has
+        # unrelated special-case handling) fell through to a
+        # direct-symbol-call linking against a nonexistent symbol
+        # `list`.
+        src_v = _lower_expr(ctx, e.args[0])
+        min_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", min_v, [-9223372036854775808]))
+        max_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", max_v, [9223372036854775807]))
+        out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out_v, ["_abi_list_slice", src_v, min_v, max_v]))
+        return out_v
+
+    if isinstance(e, A.Call) and e.func in ("set", "frozenset") and len(e.args) in (0, 1):
+        # `set(x)`/`frozenset(x)` -- sets are dict-backed (str-keyed,
+        # dummy int value 1 per member) in this codebase, matching
+        # codegen.py's `_gen_set_call` exactly. Was entirely
+        # unimplemented as a plain value expression: `set()`/`set(xs)`
+        # fell through to a direct-symbol-call linking against a
+        # nonexistent symbol `set`.
+        if not e.args:
+            out_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", out_v, ["_abi_new_instance"]))
+            return out_v
+        arg_t = A.expr_type(e.args[0])
+        if arg_t in ("set", "dict", "any"):
+            # Already dict-backed -- hand it straight back (sets/dicts
+            # share membership semantics closely enough that this
+            # codebase's set implementation reuses the same backing
+            # store, same as codegen.py's identical shortcut).
+            return _lower_expr(ctx, e.args[0])
+        if arg_t not in ("list", "tuple"):
+            raise LowerError(f"unsupported expr Call (set() from {arg_t!r})")
+        # `src_v`/`out_v` are stored into slots and RELOADED at every
+        # use (rather than reusing the same SSA temp across the loop's
+        # back-edge) -- confirmed via a real crash + register-allocation
+        # dump that reusing the raw temps let the allocator place a
+        # same-block, later-defined value (the per-iteration dummy `1`
+        # dict-set value) into the SAME physical register as the
+        # still-needed source-list pointer, since a plain last-use scan
+        # saw the list pointer's last read as happening BEFORE that
+        # later temp's definition point in the SAME block -- on the
+        # second iteration the "list pointer" register actually held
+        # `1`, and dereferencing `1+8` segfaulted. Every other loop
+        # helper in this file (_lower_for_zip, _lower_os_listdir, etc.)
+        # already uses this store-and-reload pattern for exactly this
+        # reason; this was the one loop that didn't.
+        src_v0 = _lower_expr(ctx, e.args[0])
+        src_ptr = ctx.ensure_slot(f"__setcall_src_{id(e)}", PTR)
+        ctx.emit(IRInstr("store", None, [src_v0, src_ptr]))
+        out_v0 = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out_v0, ["_abi_new_instance"]))
+        out_ptr = ctx.ensure_slot(f"__setcall_out_{id(e)}", PTR)
+        ctx.emit(IRInstr("store", None, [out_v0, out_ptr]))
+        len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", len_addr, [src_v0, _LIST_LEN_OFF]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        idx_ptr = ctx.ensure_slot(f"__setcall_idx_{id(e)}", I64)
+        zero_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero_v, [0]))
+        ctx.emit(IRInstr("store", None, [zero_v, idx_ptr]))
+        el_ty = _iter_element_type(e.args[0])
+
+        head_b = ctx.new_block("setcallhead")
+        body_b = ctx.new_block("setcallbody")
+        end_b = ctx.new_block("setcallend")
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+        ctx.switch_to(head_b)
+        idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        cond_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, len_v]))
+        ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
+
+        ctx.switch_to(body_b)
+        idx_v2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
+        src_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", src_v, [src_ptr]))
+        addr = _list_elem_addr(ctx, src_v, idx_v2)
+        elem_v = ctx.tmp(ir_type_for(el_ty))
+        ctx.emit(IRInstr("load", elem_v, [addr]))
+        if el_ty == "int":
+            base10 = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", base10, [10]))
+            empty_name = ctx.mctx.intern_str("")
+            empty_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", empty_v, [empty_name]))
+            key_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", key_v, ["_abi_int_to_base", elem_v, base10, empty_v]))
+        else:
+            key_v = elem_v
+        out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", out_v, [out_ptr]))
+        one_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one_v, [1]))
+        ctx.emit(IRInstr("call", None, ["_abi_dict_set", out_v, key_v, one_v]))
+        next_idx = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", next_idx, [idx_v2, one_v]))
+        ctx.emit(IRInstr("store", None, [next_idx, idx_ptr]))
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+
+        ctx.switch_to(end_b)
+        final_out = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", final_out, [out_ptr]))
+        return final_out
+
+    if isinstance(e, A.Call) and e.func == "sum" and len(e.args) in (1, 2):
+        # `sum(xs[, start])`: integer accumulation over a list/tuple
+        # buffer. Was entirely unimplemented, falling through to a
+        # direct-symbol-call linking against a nonexistent symbol `sum`.
+        xs_v = _lower_expr(ctx, e.args[0])
+        acc_ptr = ctx.ensure_slot(f"__sum_acc_{id(e)}", I64)
+        if len(e.args) == 2:
+            start_v = _lower_expr(ctx, e.args[1])
+            ctx.emit(IRInstr("store", None, [start_v, acc_ptr]))
+        else:
+            zero0 = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", zero0, [0]))
+            ctx.emit(IRInstr("store", None, [zero0, acc_ptr]))
+        len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", len_addr, [xs_v, _LIST_LEN_OFF]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        idx_ptr = ctx.ensure_slot(f"__sum_idx_{id(e)}", I64)
+        zero1 = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero1, [0]))
+        ctx.emit(IRInstr("store", None, [zero1, idx_ptr]))
+
+        head_b = ctx.new_block("sumhead")
+        body_b = ctx.new_block("sumbody")
+        end_b = ctx.new_block("sumend")
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+        ctx.switch_to(head_b)
+        idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        cond_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, len_v]))
+        ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
+
+        ctx.switch_to(body_b)
+        idx_v2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
+        addr = _list_elem_addr(ctx, xs_v, idx_v2)
+        elem_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", elem_v, [addr]))
+        acc_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", acc_v, [acc_ptr]))
+        new_acc = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", new_acc, [acc_v, elem_v]))
+        ctx.emit(IRInstr("store", None, [new_acc, acc_ptr]))
+        one_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one_v, [1]))
+        next_idx = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", next_idx, [idx_v2, one_v]))
+        ctx.emit(IRInstr("store", None, [next_idx, idx_ptr]))
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+
+        ctx.switch_to(end_b)
+        final_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", final_v, [acc_ptr]))
+        return final_v
+
+    if isinstance(e, A.Call) and e.func == "range" and len(e.args) in (1, 2, 3):
+        # `range(...)` used as a real VALUE (e.g. `list(range(5))`), not
+        # a `for` loop's own iterable -- that shape is lowered specially
+        # (via `s.range_args`) and never reaches this generic A.Call
+        # path at all. Materializes a real list[int], matching
+        # codegen.py's `_runtime_range_list` exactly (now wired up via a
+        # new `_abi_range_list` shim, previously nonexistent -- this
+        # whole shape was entirely unhandled, falling through to a
+        # direct-symbol-call linking against a nonexistent symbol
+        # `range`).
+        if len(e.args) == 1:
+            start_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", start_v, [0]))
+            stop_v = _lower_expr(ctx, e.args[0])
+            step_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", step_v, [1]))
+        elif len(e.args) == 2:
+            start_v = _lower_expr(ctx, e.args[0])
+            stop_v = _lower_expr(ctx, e.args[1])
+            step_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", step_v, [1]))
+        else:
+            start_v = _lower_expr(ctx, e.args[0])
+            stop_v = _lower_expr(ctx, e.args[1])
+            step_v = _lower_expr(ctx, e.args[2])
+        out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out_v, ["_abi_range_list", start_v, stop_v, step_v]))
+        return out_v
 
     if isinstance(e, A.Call) and e.func in ("bytes", "bytearray"):
         if not e.args:
@@ -4090,6 +4454,90 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 return v
             if e.obj.name == "os" and e.method == "listdir" and len(e.args) <= 1:
                 return _lower_os_listdir(ctx, e.args[0] if e.args else None)
+            # The random.* special cases below match on the resolved
+            # BINDING's own `c_name` (`_random_randint` etc.), not on
+            # `e.obj.name == "random"` -- a module can be imported under
+            # any local alias (`import random as _random`, as
+            # secrets.py itself does), and `e.obj.name` is that LOCAL
+            # alias, not the real module identity. Matching on the
+            # alias string missed every aliased-import call site
+            # entirely (confirmed via `213_secrets_module.py`, whose
+            # own `_random.randint(...)` calls fell through to the
+            # generic FFI dispatch below, unresolved).
+            _random_fn = ctx.mctx.imported_modules[e.obj.name].get(e.method)
+            _random_c_name = getattr(_random_fn, "c_name", None)
+            if _random_c_name == "_random_randint" and len(e.args) == 2:
+                # `random.randint(a, b) -> a + rand() % (b - a + 1)`.
+                # Bound to a `c_name="_random_randint"` Func entry in
+                # random.py's own BINDINGS, but that symbol was never a
+                # real C function anywhere -- random.py's own docstring
+                # says it's meant to be "implemented as inline NASM
+                # helpers in the target subclasses", and codegen.py's
+                # target_windows.py DOES have exactly that (`label
+                # "_random_randint"`, generated only into the output
+                # binary when actually called) -- this backend had no
+                # equivalent at all. Ported the identical formula
+                # directly as IR ops instead of a hand-written asm
+                # label, matching codegen.py's own algorithm exactly
+                # (confirmed via the legacy backend producing the same
+                # `random.seed(42); randint(1,10)` sequence this test's
+                # `# expect:` block was written against).
+                a_v = _lower_expr(ctx, e.args[0])
+                b_v = _lower_expr(ctx, e.args[1])
+                r_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", r_v, ["rand"]))
+                range_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("isub", range_v, [b_v, a_v]))
+                one_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", one_v, [1]))
+                span_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("iadd", span_v, [range_v, one_v]))
+                rem_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("irem", rem_v, [r_v, span_v]))
+                out = ctx.tmp(I64)
+                ctx.emit(IRInstr("iadd", out, [rem_v, a_v]))
+                return out
+            if _random_c_name == "_random_random" and not e.args:
+                # `random.random() -> rand() / 32768.0`, matching
+                # codegen.py's `_random_random`/`_rand_inv` constant.
+                r_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", r_v, ["rand"]))
+                r_f = ctx.tmp(F64)
+                ctx.emit(IRInstr("sitofp", r_f, [r_v]))
+                inv_v = ctx.tmp(F64)
+                ctx.emit(IRInstr("const", inv_v, [1.0 / 32768.0]))
+                out = ctx.tmp(F64)
+                ctx.emit(IRInstr("fmul", out, [r_f, inv_v]))
+                return out
+            if _random_c_name == "_random_randrange" and len(e.args) == 1:
+                # `random.randrange(stop) -> rand() % stop`.
+                stop_v = _lower_expr(ctx, e.args[0])
+                r_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", r_v, ["rand"]))
+                out = ctx.tmp(I64)
+                ctx.emit(IRInstr("irem", out, [r_v, stop_v]))
+                return out
+            if _random_c_name == "_random_uniform" and len(e.args) == 2:
+                # `random.uniform(a, b) -> a + (rand()/32768.0) * (b - a)`,
+                # matching codegen.py's `_random_uniform` and the shared
+                # `_rand_inv = 1.0/32768` constant it uses.
+                a_v = _lower_expr(ctx, e.args[0])
+                b_v = _lower_expr(ctx, e.args[1])
+                r_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", r_v, ["rand"]))
+                r_f = ctx.tmp(F64)
+                ctx.emit(IRInstr("sitofp", r_f, [r_v]))
+                inv_v = ctx.tmp(F64)
+                ctx.emit(IRInstr("const", inv_v, [1.0 / 32768.0]))
+                frac_v = ctx.tmp(F64)
+                ctx.emit(IRInstr("fmul", frac_v, [r_f, inv_v]))
+                span_v = ctx.tmp(F64)
+                ctx.emit(IRInstr("fsub", span_v, [b_v, a_v]))
+                scaled_v = ctx.tmp(F64)
+                ctx.emit(IRInstr("fmul", scaled_v, [frac_v, span_v]))
+                out = ctx.tmp(F64)
+                ctx.emit(IRInstr("fadd", out, [scaled_v, a_v]))
+                return out
             bindings = ctx.mctx.imported_modules[e.obj.name]
             fn = bindings.get(e.method)
             if fn is not None and hasattr(fn, "c_name"):
@@ -5508,6 +5956,42 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         ctx.emit(IRInstr("load", cur, [ptr]))
         rhs_ty = A.expr_type(s.value)
         rhs = _lower_expr(ctx, s.value)
+        if cur_ty is PTR and rhs_ty.startswith("instance:") and s.op in _AUGASSIGN_DUNDER:
+            # `v1 += v2` etc. on a user instance -- was entirely
+            # unhandled: AugAssign had no instance-typed dispatch at
+            # all, so this fell all the way through to the generic
+            # int-BinOp fallback at the bottom, `iadd`-ing the two
+            # OBJECT POINTERS together as if they were plain integers.
+            # Confirmed via gdb: SIGSEGV, the exact same "raw pointer
+            # arithmetic" corruption shape as every other missing-
+            # dunder-dispatch bug this session. Checks the in-place
+            # dunder (`__iadd__`) first (CPython precedence: in-place
+            # mutates the receiver and returns it, or another object,
+            # which is REBOUND to the target either way -- Python
+            # itself always re-assigns after an augmented op, even for
+            # `__iadd__`, since e.g. `int.__iadd__` doesn't exist and
+            # falls back to `__add__`'s fresh-object return), falling
+            # back to the plain dunder (`__add__`) if no in-place
+            # override exists. Derives the class name from the RHS's
+            # own resolved type rather than the target's -- `s.target`
+            # is a bare string with no cached `inferred_type` of its
+            # own to query (unlike every other dunder-dispatch site in
+            # this file, which reads a real AST expression node); this
+            # is exactly right for the overwhelmingly common real case
+            # (`v1 += v2` where both sides share a class) and doesn't
+            # regress anything that was unsupported a moment ago.
+            inplace_dunder, dunder = _AUGASSIGN_DUNDER[s.op]
+            cls_name = rhs_ty.split(":", 1)[1]
+            owner = _resolve_method_owner(ctx, cls_name, inplace_dunder)
+            method = inplace_dunder
+            if owner is None:
+                owner = _resolve_method_owner(ctx, cls_name, dunder)
+                method = dunder
+            if owner is not None:
+                res = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", res, [f"{owner}__{method}", cur, rhs]))
+                ctx.emit(IRInstr("store", None, [res, ptr]))
+                return
         if s.op == "|" and rhs_ty in ("dict", "set"):
             # `d |= other` (PEP 584) / `s |= other`: merge other's entries
             # into the target in place -- the header pointer itself
@@ -6579,6 +7063,41 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
             owner = getattr(node, "dunder_call_owner", None)
             if owner is not None:
                 add(owner, "__call__")
+            if node.func == "len" and len(node.args) == 1:
+                arg_t = A.expr_type(node.args[0])
+                if arg_t.startswith("instance:"):
+                    add_resolved(arg_t.split(":", 1)[1], "__len__")
+            if node.func == "bool" and len(node.args) == 1:
+                arg_t = A.expr_type(node.args[0])
+                if arg_t.startswith("instance:"):
+                    cls_name = arg_t.split(":", 1)[1]
+                    add_resolved(cls_name, "__bool__")
+                    add_resolved(cls_name, "__len__")
+            if node.func in ("print", "str", "repr"):
+                # `print(instance)` / `str(instance)` / `repr(instance)`
+                # -- the value-to-string coercion these all funnel
+                # through (`_lower_expr_as_str`) dispatches to
+                # `__str__`/`__repr__` at LOWERING time, but nothing
+                # marked that dispatch reachable for the WALKER -- only
+                # an f-string SEGMENT's instance-typed value had this
+                # check (see the `A.FString` case below). A plain
+                # `print(a)` on a `Fraction`-style instance therefore
+                # correctly CALLED `__str__` but the method was never
+                # EMITTED into the binary at all -- the same two-part
+                # "lowering fixed, walker not fixed" shape as every
+                # other dunder-dispatch bug this session. Mirrors the
+                # f-string case's own __str__-then-__repr__ fallback
+                # order exactly.
+                for arg in node.args:
+                    arg_t = A.expr_type(arg)
+                    if arg_t.startswith("instance:"):
+                        cls_name = arg_t.split(":", 1)[1]
+                        owner = (
+                            _resolve_method_owner_in_sigs(classes_sig, cls_name, "__str__")
+                            or _resolve_method_owner_in_sigs(classes_sig, cls_name, "__repr__")
+                        )
+                        method = "__str__" if _resolve_method_owner_in_sigs(classes_sig, cls_name, "__str__") is not None else "__repr__"
+                        add(owner, method)
         elif isinstance(node, A.Lambda):
             add_func(getattr(node, "func_name", None))
         elif isinstance(node, A.BinOp):
@@ -6616,6 +7135,22 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
             cls_name = A.expr_type(node.test).split(":", 1)[1]
             for mname in ("__bool__", "__len__"):
                 add_resolved(cls_name, mname)
+        elif isinstance(node, A.AugAssign) and A.expr_type(node.value).startswith("instance:"):
+            # `v1 += v2` on a user instance dispatches to
+            # `__iadd__`/`__add__` (see `_lower_stmt`'s AugAssign case,
+            # `_AUGASSIGN_DUNDER`) -- same two-part shape as every other
+            # dunder-dispatch fix this session: the lowering resolves
+            # and CALLS the right method, but nothing told this walker
+            # to keep it reachable, so it was correctly called but never
+            # emitted (undefined symbol at link time). Mirrors the
+            # lowering's own class-name derivation: reads it off the
+            # RHS's resolved type, since `s.target`/`node.target` here
+            # is a bare string with no cached type of its own.
+            cls_name = A.expr_type(node.value).split(":", 1)[1]
+            inplace_dunder, dunder = _AUGASSIGN_DUNDER.get(node.op, (None, None))
+            if inplace_dunder is not None:
+                add_resolved(cls_name, inplace_dunder)
+                add_resolved(cls_name, dunder)
         elif isinstance(node, A.FString):
             for seg in node.segments:
                 seg_ty = A.expr_type(seg)

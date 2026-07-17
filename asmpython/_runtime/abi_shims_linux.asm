@@ -69,6 +69,7 @@ extern _runtime_list_reverse
 extern _runtime_list_extend
 extern _runtime_list_repeat
 extern _runtime_list_insert
+extern _runtime_range_list
 extern _runtime_sort_str
 extern _runtime_sort_int
 extern _runtime_sort_items
@@ -136,6 +137,7 @@ global _abi_list_reverse
 global _abi_list_extend
 global _abi_list_repeat
 global _abi_list_insert
+global _abi_range_list
 global _abi_sort_str
 global _abi_sort_int
 global _abi_sort_items
@@ -672,6 +674,14 @@ _abi_list_insert:
     mov rbx, rsi
     mov rcx, rdx
     call _runtime_list_insert
+    pop rbx
+    ret
+_abi_range_list:
+    push rbx
+    mov rax, rdi
+    mov rbx, rsi
+    mov rcx, rdx
+    call _runtime_range_list
     pop rbx
     ret
 
