@@ -4008,6 +4008,30 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ret_ty = getattr(fn, "ret_type", "int") or "int"
                 v = ctx.tmp(ir_type_for(ret_ty))
                 ctx.emit(IRInstr("call", v, [c_name, *args]))
+                if ret_ty == "int" and ret_conv != "ptr":
+                    # A real C `int` is 32-bit -- the callee returns it in
+                    # EAX with the upper 32 bits of RAX left UNSPECIFIED
+                    # by the calling convention, but every asmpython
+                    # value is a full 64-bit slot. Without sign-
+                    # extending, a result like `fgetc()`'s EOF sentinel
+                    # (`-1`) read back as `0x00000000FFFFFFFF`
+                    # (4294967295) instead of `-1`, so `while c != -1:`
+                    # never terminated -- confirmed via
+                    # `93_os_file_io.py`/`255_os_file_io.py` both timing
+                    # out in the sweep instead of crashing (same
+                    # "genuinely infinite, not a crash" shape as the
+                    # earlier `__bool__`/`__len__` truthiness bug).
+                    # codegen.py's `_gen_ffi_call` has always had this
+                    # exact `movsxd rax, eax` fix (see its own comment);
+                    # this backend's FFI call-return path had no
+                    # equivalent at all. `ret_conv == "ptr"` is excluded
+                    # since that flag means the C function genuinely
+                    # returns a real 64-bit pointer/handle in RAX (e.g.
+                    # SDL_CreateWindow) -- sign-extending just EAX would
+                    # truncate it to 32 bits.
+                    ext = ctx.tmp(I64)
+                    ctx.emit(IRInstr("sext", ext, [IRValue(v.name, IRType("i32"))]))
+                    v = ext
                 return v
         if obj_ty == "list":
             if e.method == "append" and len(e.args) == 1:

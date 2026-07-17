@@ -1486,6 +1486,92 @@ OK=301  MISMATCH=12  CRASH=9  BUILD_FAIL=116
 
 56% → 69% of the full 438-case corpus passing.
 
+**Triage pass twelve** (2026-07-16, same-day follow-up): two more
+real bugs, both fitting recurring bug SHAPES from earlier this
+session — closing 6 crash-bucket entries between them.
+
+1. **FFI `int`-returning calls never sign-extended their result.** A
+   real C `int` is 32-bit — the callee returns it in EAX with the
+   upper 32 bits of RAX left UNSPECIFIED by the calling convention, but
+   every asmpython value is a full 64-bit slot. `codegen.py`'s
+   `_gen_ffi_call` has always had the fix for this (`movsxd rax, eax`,
+   with its own comment explaining exactly this), but `ir_lower.py`'s
+   FFI call-return path had no equivalent at all — the result register
+   was used as-is. `os.fgetc(f)`'s EOF sentinel (`-1`) read back as
+   `0x00000000FFFFFFFF` (4294967295) instead of `-1`, so `while c !=
+   -1:` never terminated. Confirmed as a genuine INFINITE LOOP, not a
+   crash — the same "shows up as a sweep timeout, not a segfault"
+   shape as pass ten's `__bool__`/`__len__` bug. Fixed by emitting a
+   new `sext` IR instruction (already implemented in `codegen.py`,
+   just never emitted from anywhere in `ir_lower.py`) immediately after
+   any FFI call whose `ret_type == "int"` (excluding `ret_conv ==
+   "ptr"`, which means the C function genuinely returns a real 64-bit
+   pointer/handle — e.g. `SDL_CreateWindow` — where sign-extending just
+   EAX would truncate it). Confirmed fixing `93_os_file_io.py`/
+   `255_os_file_io.py` exactly (both were "timed out after 10 seconds"
+   sweep entries).
+
+2. **A variable-count shift (`x >> y` where `y` isn't a compile-time
+   constant) could silently clobber an unrelated live value in RCX.**
+   x86's variable-count `shl`/`shr`/`sar` hard-requires the count in
+   CL, so `codegen.py`'s `_shift` unconditionally does `mov rcx,
+   cnt_r` — but `regalloc.py` had no notion that this implicitly
+   clobbers RCX, the same hazard SHAPE as the `_div`/RAX bug from pass
+   five (a fixed-register instruction clobbering something the
+   allocator didn't know to protect) but for a different instruction
+   and register. Root-caused by a dispatched Explore subagent (same
+   methodology as pass five's original `_div` investigation) on this
+   minimal repro:
+   ```python
+   def enc(data: list[int], alphabet: str) -> list[int]:
+       out: list[int] = []
+       ...
+       while i + 3 <= n:
+           triple = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2]
+           out.append(ord(alphabet[(triple >> 18) & 0x3F]))
+           out.append(ord(alphabet[(triple >> 12) & 0x3F]))
+           ...
+   ```
+   The allocator placed the SECOND string-index call's `alphabet`
+   pointer argument in RCX; the `>> 12` shift's own `mov rcx, cnt_r`
+   then clobbered it before the call read it, and the corrupted
+   "pointer" crashed inside `strlen` (a value the crash's own gdb
+   trace showed as `0x3F` nearby was a red herring — the sibling mask
+   constant threaded through an adjacent register in the same
+   instruction sequence, not itself the corrupted operand). Fixed via
+   a new `_compute_crosses_var_shift` in `regalloc.py` (mirroring
+   `_compute_crosses_call`'s exact shape: a full-function pre-pass
+   flagging every value whose live range spans a variable-count shift,
+   excluding the shift's own two operands) and a new `avoid_rcx` hard
+   constraint on `_take_gp` (unlike `crosses_call`'s callee-saved
+   *preference*, this is a hard exclusion — RCX is never a safe choice
+   for a flagged value, so skip straight to eviction rather than
+   accepting it). Confirmed fixing `172_base64_module.py` (all 10
+   lines) and, as a bonus, ALL FOUR remaining crash-bucket entries that
+   turned out to share this exact root cause: `196_hashlib_module.py`,
+   `225_hashlib_module.py`, `229_base64_module.py` (hashlib's SHA/MD5
+   implementations are heavy variable-shift users) — 6 crash-bucket
+   entries closed by one fix, the largest single-fix impact since pass
+   six's class-var feature (5 entries).
+
+Verified: `tests.runner` 475/483 throughout. Full sweep: `OK=305
+MISMATCH=13 CRASH=3 BUILD_FAIL=117`, up from `OK=301 MISMATCH=12
+CRASH=9 BUILD_FAIL=116` before this pass — +4 OK, -6 crashes (exactly
+the five confirmed above plus one more), +1 mismatch/+1 build-fail
+(within the sweep's documented run-to-run noise — always trust the
+direct build+run spot-checks over the aggregate deltas alone).
+
+**Cumulative sweep numbers after twelve triage passes this session,
+from the `OK=245 MISMATCH=24 CRASH=42 BUILD_FAIL=127` session-start
+baseline**:
+
+```text
+OK=305  MISMATCH=13  CRASH=3  BUILD_FAIL=117
+```
+
+56% → 70% of the full 438-case corpus passing. The crash bucket has
+gone from 42 down to just 3 across all twelve passes.
+
 ## Selfhost Status (plan-step 11)
 
 Selfhost = asmpython (gen0, built by CPython) compiling its own source to

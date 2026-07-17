@@ -260,6 +260,74 @@ def _compute_crosses_call(func: Any) -> set[str]:
     return crosses
 
 
+def _compute_crosses_var_shift(func: Any) -> set[str]:
+    """Names of values whose live range spans a variable-count `shl`/`shr`/
+    `sar` instruction (one whose shift-count operand is a runtime value,
+    not a compile-time constant) -- these values must not be allocated to
+    RCX, since x86's variable-count shift hard-requires the count in CL
+    and `codegen.py`'s `_shift` unconditionally does `mov rcx, cnt_r`
+    with no save/restore of whatever the allocator previously put there.
+
+    Same hazard class as `_compute_crosses_call`'s callee-saved-register
+    rule (a fixed-register instruction clobbering something the
+    allocator didn't know to protect), but for a single hard-coded
+    register rather than the whole caller-saved set, and triggered by a
+    specific instruction shape rather than every `call`. Confirmed via a
+    real crash: `alphabet[(triple >> 12) & 0x3F]`, a variable-count `>>`
+    (`triple` isn't a compile-time constant) inside a loop with two
+    string-index calls back to back -- the SECOND call's own string
+    pointer argument happened to land in RCX, then the shift's own
+    unconditional `mov rcx, cnt_r` clobbered it before the call read it,
+    corrupting the pointer into garbage that then crashed `strlen`
+    inside the runtime's string-length helper.
+
+    Deliberately excludes the shift instruction's OWN two operands (the
+    value being shifted and the shift count) from being flagged here --
+    the instruction is a legitimate DEFINING use of the count into RCX,
+    not a value it clobbers out from under someone else; a value dying
+    at (or defined by) the shift itself has no conflict with owning RCX
+    for that one instruction.
+    """
+    def_pos: dict[str, tuple[int, int]] = {}
+    use_positions: dict[str, list[tuple[int, int]]] = {}
+    var_shift_positions: list[tuple[int, int]] = []
+
+    for param in func.params:
+        def_pos[param.name] = (0, -1)
+
+    for bi, block in enumerate(func.blocks):
+        for ii, instr in enumerate(block.instrs):
+            if instr.op in ("shl", "shr", "sar") and not isinstance(instr.operands[1], int):
+                var_shift_positions.append((bi, ii))
+            if instr.result is not None:
+                def_pos.setdefault(instr.result.name, (bi, ii))
+            for op in instr.operands:
+                if hasattr(op, "name"):
+                    use_positions.setdefault(op.name, []).append((bi, ii))
+
+    shift_operand_names: set[str] = set()
+    for bi, block in enumerate(func.blocks):
+        for ii, instr in enumerate(block.instrs):
+            if (bi, ii) in var_shift_positions:
+                for op in instr.operands:
+                    if hasattr(op, "name"):
+                        shift_operand_names.add(op.name)
+
+    crosses: set[str] = set()
+    for name, uses in use_positions.items():
+        if name in shift_operand_names:
+            continue
+        db, di = def_pos.get(name, (0, -1))
+        for (ub, ui) in uses:
+            if ub != db:
+                crosses.add(name)
+                break
+            if any(cb == db and di < si < ui for (cb, si) in var_shift_positions):
+                crosses.add(name)
+                break
+    return crosses
+
+
 # ── Main allocator ────────────────────────────────────────────────────────────
 
 def allocate(func: Any, abi: str = "sysv") -> AllocResult:
@@ -288,11 +356,12 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
 
     last_use  = _last_uses(func)
     crosses_call = _compute_crosses_call(func)
+    crosses_var_shift = _compute_crosses_var_shift(func)
     now: tuple[int, int] = (-1, -1)  # updated each instruction
 
     # ── inner helpers that close over the mutable state ───────────────────────
 
-    def _take_gp(prefer_callee_saved: bool = False) -> Reg:
+    def _take_gp(prefer_callee_saved: bool = False, avoid_rcx: bool = False) -> Reg:
         nonlocal stack_top
         if prefer_callee_saved:
             # A value crossing a call must not land in a caller-saved
@@ -306,6 +375,31 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
             for i, r in enumerate(free_gp):
                 if r in callee_gp:
                     return free_gp.pop(i)
+        if avoid_rcx:
+            # A value crossing a variable-count shl/shr/sar must not land
+            # in RCX -- `_shift`'s codegen unconditionally does `mov rcx,
+            # cnt_r` for the shift count with no save/restore, trusting
+            # the allocator never put a still-live value there (see
+            # `_compute_crosses_var_shift`'s docstring for the real crash
+            # this was found from). Unlike `prefer_callee_saved` above,
+            # this is a hard exclusion, not just a preference -- ANY
+            # non-RCX register is safe, so skip straight to eviction if
+            # RCX is the only one free rather than accepting it.
+            for i, r in enumerate(free_gp):
+                if r != Reg.RCX:
+                    return free_gp.pop(i)
+            if free_gp:  # only RCX free -- evict something else instead
+                victim = _pick_evict(
+                    {n: r for n, r in in_gp.items() if r != Reg.RCX} or in_gp,
+                    last_use, now,
+                )
+                stack_top += 8
+                locs[victim] = StackLoc(-stack_top)
+                freed = in_gp.pop(victim)
+                free_gp.append(freed)
+                for i, r in enumerate(free_gp):
+                    if r != Reg.RCX:
+                        return free_gp.pop(i)
         if free_gp:
             return free_gp.pop(0)
         victim = _pick_evict(in_gp, last_use, now)
@@ -327,7 +421,10 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
         return free_xmm.pop(0)
 
     def _alloc_gp(name: str) -> None:
-        r = _take_gp(prefer_callee_saved=name in crosses_call)
+        r = _take_gp(
+            prefer_callee_saved=name in crosses_call,
+            avoid_rcx=name in crosses_var_shift,
+        )
         locs[name] = RegLoc(r)
         in_gp[name] = r
         if r in callee_gp:
