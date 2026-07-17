@@ -2267,6 +2267,66 @@ investigation agent not to touch files under `asmpython/`, and commit
 real work promptly rather than leaving it uncommitted across a long
 stretch with agents running in parallel.
 
+**Seventeenth checkpoint** (same day): the min/max-sequential-call
+investigation flagged two checkpoints ago came back with a root cause,
+implemented immediately. Three more real fixes:
+
+1. **`regalloc.py`'s `_take_gp(prefer_callee_saved=True)` silently fell
+   back to a caller-saved register when no callee-saved one was free**,
+   instead of evicting -- the exact "prefer X, else silently accept
+   anything" hazard class already fixed twice this session for
+   `avoid_rcx` (variable shifts) and try/except regions, just never
+   applied to THIS allocator rule. Confirmed via a background gdb
+   investigation: with enough register pressure (three prior
+   `sorted()`/`min(key=)`/`max(key=)` calls in the same function
+   exhausting all 5 callee-saved GP registers), a 4th call-crossing
+   value (a list's cached `len`, read before a loop and used again
+   after a `call _abi_str_cmp` inside it) landed in RAX -- which
+   `_abi_str_cmp`'s own return value then clobbered one iteration
+   later, corrupting the loop's bound check and silently truncating it
+   to a single pass. Fixed by mirroring `avoid_rcx`'s own eviction
+   fallback: if no callee-saved register is free, evict a
+   callee-saved-HELD value to stack rather than accepting a
+   caller-saved one. Fixed `112_sort_key.py` completely (all 9 lines,
+   the last 2 of which hadn't even been re-verified before this fix).
+   This is a broad allocator-correctness fix, not scoped to min/max --
+   any function with enough concurrent call-crossing live values could
+   have hit the same silent corruption.
+2. **`int / int` (true division) had no lowering path at all**: Python's
+   `/` is ALWAYS float division, even for two int operands (`6 / 3` is
+   `2.0`), unlike every other arithmetic op -- but the float-promotion
+   branch in `A.BinOp`'s lowering only activated when at least one
+   operand was ALREADY float-typed, so pure-int `/` fell through to the
+   int-only `_BINOP` table (which deliberately has no `/` entry) and
+   hit the generic "unsupported binop" fallback. Fixed by also entering
+   the float-promotion branch when `e.op == "/"`, regardless of operand
+   types (the branch already handles promoting non-float operands via
+   `sitofp`).
+3. **Float `//` (floor division) had no lowering path either**:
+   `_FBINOP` (the direct-SSE-instruction table) has no floor op, and
+   the `%`/`**` special-case (routing through a real libc call) didn't
+   cover `//`. Fixed with `fdiv` then a real `floor(double)` libc call
+   (confirmed a real msvcrt.dll export, already used by other float
+   builtins per `pe_linker.py`'s `_DLL_FOR_SYMBOL`).
+4. **Tuple `repr()`/`print()` with a float element** was a documented,
+   deliberately-rejected gap (`raise LowerError("unsupported expr
+   TupleLit repr (float element)")`) rather than a bug: `_abi_fmt_elem`
+   expects a float element's raw bits pre-moved into a GP register (the
+   same ad-hoc convention this file already bridges everywhere else a
+   float value crosses into a GP-only call convention -- dict/list
+   storage, etc.) via `bitcast_f2i`, but this one call site never had
+   that bitcast. Added it, closing the gap. Fixed `90_print_tuple.py`
+   exactly (all 3 lines, including a heterogeneous `(int, str, float)`
+   tuple).
+
+Verified: `tests.runner` 475/483 after each fix. `999_comprehensive_
+codegen.py` (which needed the tuple-float-repr fix) still doesn't
+build -- next gap is `'RegLoc' object has no attribute 'offset'`, a
+different, not-yet-investigated codegen assertion mismatch (same
+symptom class as the pre-existing `17_from_import.py` build failure --
+worth checking whether they share a root cause next time this is
+picked up, not yet confirmed either way).
+
 ## Selfhost Status (plan-step 11)
 
 Selfhost = asmpython (gen0, built by CPython) compiling its own source to

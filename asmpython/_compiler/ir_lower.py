@@ -2026,15 +2026,6 @@ def _lower_tuple_repr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     element rather than looping like _abi_list_repr does for a
     uniformly-typed list."""
     kinds = A.tuple_element_types(e)
-    if "float" in kinds:
-        # _abi_fmt_elem expects a float element's raw bits pre-moved into
-        # a GP register (the ad-hoc convention codegen.py's own inline
-        # movq-to-rax uses) -- this pipeline's `call` op instead routes an
-        # F64-typed IR value through an XMM argument register, an ABI
-        # mismatch with no bitcast IR op yet to bridge it. Same
-        # already-known gap as float list/dict elements elsewhere in this
-        # file; reject cleanly rather than emit a call that reads garbage.
-        raise LowerError("unsupported expr TupleLit repr (float element)")
     obj = _lower_expr(ctx, e)
     buf_addr = ctx.tmp(PTR)
     ctx.emit(IRInstr("gep", buf_addr, [obj, _LIST_BUF_OFF]))
@@ -2057,10 +2048,23 @@ def _lower_tuple_repr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("gep", elem_addr, [buf_v, i * 8]))
         elem_v = ctx.tmp(F64 if k == "float" else I64)
         ctx.emit(IRInstr("load", elem_v, [elem_addr]))
+        fmt_v = elem_v
+        if k == "float":
+            # _abi_fmt_elem expects a float element's raw bits pre-moved
+            # into a GP register (the ad-hoc convention codegen.py's own
+            # inline movq-to-rax uses) -- this pipeline's `call` op
+            # otherwise routes an F64-typed IR value through an XMM
+            # argument register instead, an ABI mismatch. Same bitcast
+            # pattern used everywhere else in this file a float value
+            # needs to cross into a GP-only call convention (dict/list
+            # storage, etc).
+            iv = ctx.tmp(I64)
+            ctx.emit(IRInstr("bitcast_f2i", iv, [elem_v]))
+            fmt_v = iv
         kind_v = ctx.tmp(I64)
         ctx.emit(IRInstr("const", kind_v, [_value_repr_kind(k)]))
         elem_repr = ctx.tmp(PTR)
-        ctx.emit(IRInstr("call", elem_repr, ["_abi_fmt_elem", elem_v, kind_v]))
+        ctx.emit(IRInstr("call", elem_repr, ["_abi_fmt_elem", fmt_v, kind_v]))
         new_acc2 = ctx.tmp(PTR)
         ctx.emit(IRInstr("call", new_acc2, ["_abi_str_concat", acc, elem_repr]))
         acc = new_acc2
@@ -3853,8 +3857,19 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, lhs]))
             ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, rhs]))
             return new_v
-        if lt == "float" or rt == "float":
-            if e.op not in _FBINOP and e.op not in ("%", "**"):
+        if lt == "float" or rt == "float" or e.op == "/":
+            # `/` (true division) is ALWAYS float division in Python, even
+            # for two int operands (`6 / 3` is `2.0`, not `2`) -- unlike
+            # every other arithmetic op, which stays int-typed for two int
+            # operands. `_BINOP` (the pure-int op table just below this
+            # whole float-promotion block) has no `/` entry at all for
+            # exactly this reason: reaching it with `/` and two int
+            # operands would otherwise hit the "unsupported binop" fallback
+            # a few lines down. Force this branch (which already handles
+            # promoting a non-float operand via `sitofp`) even when NEITHER
+            # operand is float-typed, so `int / int` still gets a real
+            # float result instead of never being reachable at all.
+            if e.op not in _FBINOP and e.op not in ("%", "**", "//"):
                 raise LowerError(f"unsupported float binop {e.op!r}")
             a = _lower_expr(ctx, e.left)
             if lt != "float":
@@ -3874,6 +3889,17 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 v = ctx.tmp(F64)
                 c_name = "fmod" if e.op == "%" else "pow"
                 ctx.emit(IRInstr("call", v, [c_name, a, b]))
+                return v
+            if e.op == "//":
+                # Float floor division: `a // b` is `floor(a / b)`. No
+                # direct SSE instruction for either the divide-then-floor
+                # combo or floor alone -- `fdiv` then a real libc
+                # `floor(double)` call (a confirmed real msvcrt.dll export,
+                # already used elsewhere in pe_linker.py's _DLL_FOR_SYMBOL).
+                q = ctx.tmp(F64)
+                ctx.emit(IRInstr("fdiv", q, [a, b]))
+                v = ctx.tmp(F64)
+                ctx.emit(IRInstr("call", v, ["floor", q]))
                 return v
             v = ctx.tmp(F64)
             ctx.emit(IRInstr(_FBINOP[e.op], v, [a, b]))

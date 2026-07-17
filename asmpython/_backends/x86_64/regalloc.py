@@ -424,14 +424,35 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
             # A value crossing a call must not land in a caller-saved
             # register -- `_call`'s codegen clobbers those freely with no
             # save/restore, trusting the allocator never put a still-live
-            # value there. Prefer any free callee-saved register first;
-            # only fall through to the normal pool if none is free (rare
-            # enough in practice that the residual risk is acceptable
-            # rather than building full eviction-aware callee-saved
-            # reservation for it).
+            # value there. This is a HARD exclusion, not just a
+            # preference: if no callee-saved register is free, evict a
+            # callee-saved HOLDER to stack rather than silently falling
+            # through to a caller-saved register (mirrors `avoid_rcx`'s
+            # own eviction fallback just below). Confirmed via a real
+            # repro and gdb trace: with high enough register pressure
+            # (three prior sorted()/min(key=)/max(key=) calls in the
+            # same function), every callee-saved GP register was already
+            # occupied by the time a 4th call-crossing value (a list's
+            # `len`, read before a loop, used again after a `call
+            # _abi_str_cmp` inside it) needed one -- the old code fell
+            # through to RAX, which `_abi_str_cmp`'s own return value
+            # then clobbered one iteration later, corrupting the loop's
+            # own bound check and silently truncating it to one pass.
             for i, r in enumerate(free_gp):
                 if r in callee_gp:
                     return free_gp.pop(i)
+            if free_gp:  # only caller-saved free -- evict a callee-saved holder instead
+                victim = _pick_evict(
+                    {n: r for n, r in in_gp.items() if r in callee_gp} or in_gp,
+                    last_use, now,
+                )
+                stack_top += 8
+                locs[victim] = StackLoc(-stack_top)
+                freed = in_gp.pop(victim)
+                free_gp.append(freed)
+                for i, r in enumerate(free_gp):
+                    if r in callee_gp:
+                        return free_gp.pop(i)
         if avoid_rcx:
             # A value crossing a variable-count shl/shr/sar must not land
             # in RCX -- `_shift`'s codegen unconditionally does `mov rcx,
