@@ -5211,6 +5211,162 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     raise LowerError(f"unsupported expr {type(e).__name__}")
 
 
+def _for_zip_spec(s: A.For):
+    """Recognize `for a, b[, c...] in zip(A, B[, C...])` and
+    `for i, (a, b[, c...]) in enumerate(zip(A, B[, C...]))`.
+
+    Returns (idx_name_or_None, names_list, exprs_list) when `s` matches,
+    otherwise None. Mirrors sema.py's/codegen.py's own `_for_zip_spec`
+    exactly (each stage keeps its own copy rather than sharing one --
+    sema only registers TYPES into scope from this shape, it never
+    rewrites `s.iter`/`s.targets` into some canonical form, so every
+    later stage that needs to recognize `zip()` has to re-detect it from
+    the same raw AST shape independently)."""
+    it = s.iter
+    if it is None or not isinstance(it, A.Call):
+        return None
+    if it.func == "zip":
+        n = len(it.args)
+        if n >= 2 and len(s.targets) == n and all(isinstance(t, str) for t in s.targets):
+            return (None, list(s.targets), list(it.args))
+        return None
+    if (
+        it.func == "enumerate"
+        and len(it.args) == 1
+        and isinstance(it.args[0], A.Call)
+        and it.args[0].func == "zip"
+    ):
+        z = it.args[0]
+        n = len(z.args)
+        if n >= 2 and len(s.targets) == n + 1 and s.targets:
+            zip_vars = [s.targets[i] for i in range(1, len(s.targets))]
+            return (s.targets[0], zip_vars, list(z.args))
+        return None
+    return None
+
+
+def _lower_for_zip(ctx: _FuncCtx, s: A.For, zspec) -> None:
+    """`for a, b[, c...] in zip(A, B[, C...])` / `enumerate(zip(...))`.
+
+    Walks N list buffers in lockstep, stopping at the shortest (Python's
+    real `zip()` semantics -- silently truncates to the shortest input,
+    never errors on a length mismatch). Ports codegen.py's `_gen_for_zip`
+    IR-op-for-instruction. Was entirely unimplemented on this backend:
+    `A.For`'s only recognized shapes were a plain range()-style loop and
+    single-iterable list/enumerate iteration -- a bare `zip()` (with or
+    without an enclosing `enumerate`) fell through to `range_args`
+    handling, which unconditionally raises on any non-empty
+    `s.targets` (`s.targets` here is the parallel-target NAME LIST zip
+    loops use, treated by that code as "unsupported tuple-unpack
+    targets")."""
+    idx_name, znames, zexprs = zspec
+    n = len(znames)
+
+    iter_ptrs = [ctx.ensure_slot(f"__zip_{k}_{id(s)}", PTR) for k in range(n)]
+    for k, ze in enumerate(zexprs):
+        v = _lower_expr(ctx, ze)
+        ctx.emit(IRInstr("store", None, [v, iter_ptrs[k]]))
+
+    stop_ptr = ctx.ensure_slot(f"__zip_stop_{id(s)}", I64)
+    first_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", first_v, [iter_ptrs[0]]))
+    first_len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", first_len_addr, [first_v, _LIST_LEN_OFF]))
+    stop_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", stop_v, [first_len_addr]))
+    ctx.emit(IRInstr("store", None, [stop_v, stop_ptr]))
+    for k in range(1, n):
+        cur_stop = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", cur_stop, [stop_ptr]))
+        it_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", it_v, [iter_ptrs[k]]))
+        len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", len_addr, [it_v, _LIST_LEN_OFF]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        is_shorter = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", is_shorter, [len_v, cur_stop]))
+        min_ptr = ctx.ensure_slot(f"__zip_min_{k}_{id(s)}", I64)
+        shorter_b = ctx.new_block(f"zipmin_shorter_{k}")
+        keep_b = ctx.new_block(f"zipmin_keep_{k}")
+        after_b = ctx.new_block(f"zipmin_after_{k}")
+        ctx.emit(IRInstr("br.t", None, [is_shorter, shorter_b.label, keep_b.label]))
+        ctx.switch_to(shorter_b)
+        ctx.emit(IRInstr("store", None, [len_v, min_ptr]))
+        ctx.emit(IRInstr("br", None, [after_b.label]))
+        ctx.switch_to(keep_b)
+        ctx.emit(IRInstr("store", None, [cur_stop, min_ptr]))
+        ctx.emit(IRInstr("br", None, [after_b.label]))
+        ctx.switch_to(after_b)
+        new_stop = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", new_stop, [min_ptr]))
+        ctx.emit(IRInstr("store", None, [new_stop, stop_ptr]))
+
+    i_ptr = ctx.ensure_slot(f"__zip_i_{id(s)}", I64)
+    zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero, [0]))
+    ctx.emit(IRInstr("store", None, [zero, i_ptr]))
+
+    head_b = ctx.new_block("forziphead")
+    body_b = ctx.new_block("forzipbody")
+    cont_b = ctx.new_block("forzipcont")
+    natural_b = ctx.new_block("forzipnatural") if s.orelse else None
+    end_b = ctx.new_block("forzipend")
+    false_target = natural_b.label if natural_b is not None else end_b.label
+
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+    ctx.switch_to(head_b)
+    i_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_v, [i_ptr]))
+    stop_v2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", stop_v2, [stop_ptr]))
+    cond = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", cond, [i_v, stop_v2]))
+    ctx.emit(IRInstr("br.t", None, [cond, body_b.label, false_target]))
+
+    ctx.switch_to(body_b)
+    i_v2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_v2, [i_ptr]))
+    for k in range(n):
+        it_v2 = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", it_v2, [iter_ptrs[k]]))
+        elem_ty = _iter_element_type(zexprs[k])
+        addr = _list_elem_addr(ctx, it_v2, i_v2)
+        val = ctx.tmp(F64 if elem_ty == "float" else I64)
+        ctx.emit(IRInstr("load", val, [addr]))
+        _store_loop_target(ctx, znames[k], val, elem_ty)
+    if idx_name is not None:
+        i_v3 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", i_v3, [i_ptr]))
+        _store_loop_target(ctx, idx_name, i_v3, "int")
+
+    ctx.loop_stack.append((cont_b.label, end_b.label))
+    for st in s.body:
+        _lower_stmt(ctx, st)
+    ctx.loop_stack.pop()
+    if not ctx.terminated:
+        ctx.emit(IRInstr("br", None, [cont_b.label]))
+
+    ctx.switch_to(cont_b)
+    inc_i = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", inc_i, [i_ptr]))
+    one = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one, [1]))
+    next_i = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", next_i, [inc_i, one]))
+    ctx.emit(IRInstr("store", None, [next_i, i_ptr]))
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+
+    if natural_b is not None:
+        ctx.switch_to(natural_b)
+        for st in s.orelse:
+            _lower_stmt(ctx, st)
+        if not ctx.terminated:
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(end_b)
+
+
 def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
     if isinstance(s, A.ConstDecl):
         # Normalize at entry rather than duplicating Assign's lowering in a
@@ -5572,11 +5728,19 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         return
 
     if isinstance(s, A.For) and s.iter is not None:
+        zspec = _for_zip_spec(s)
+        if zspec is not None:
+            _lower_for_zip(ctx, s, zspec)
+            return
+        _enum_start_kwarg = None
+        for _kn, _kv in getattr(s.iter, "kwargs", None) or []:
+            if _kn == "start":
+                _enum_start_kwarg = _kv
         if (
             s.targets
             and isinstance(s.iter, A.Call)
             and s.iter.func == "enumerate"
-            and len(s.iter.args) == 1
+            and len(s.iter.args) in (1, 2)
             and len(s.targets) == 2
         ):
             src_e = s.iter.args[0]
@@ -5593,9 +5757,27 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             list_ptr = ctx.ensure_slot(f"__for_iter_{id(s)}", PTR)
             ctx.emit(IRInstr("store", None, [list_v, list_ptr]))
             idx_ptr = ctx.ensure_slot(f"__for_idx_{id(s)}", I64)
+            # `enumerate(xs, start)` -- the index target counts up from
+            # `start` instead of 0 (a separate counter from the internal
+            # array-position index driving the loop condition/element
+            # reads below, which must still start at 0 regardless of
+            # `start`). `_start_arg` accepts either the 2nd positional
+            # arg or a `start=` keyword, matching sema's own
+            # `_enum_start_kwarg`/`_enum_n_args` handling exactly. This
+            # whole enumerate-with-start shape was previously entirely
+            # unrecognized (the `len(s.iter.args) == 1` guard rejected
+            # it outright), falling through to the generic For handler's
+            # unconditional "iterating 'int'" error on `s.range_args`.
+            _start_arg = s.iter.args[1] if len(s.iter.args) == 2 else _enum_start_kwarg
+            display_idx_ptr = ctx.ensure_slot(f"__for_display_idx_{id(s)}", I64)
             zero = ctx.tmp(I64)
             ctx.emit(IRInstr("const", zero, [0]))
             ctx.emit(IRInstr("store", None, [zero, idx_ptr]))
+            if _start_arg is not None:
+                start_v = _lower_expr(ctx, _start_arg)
+                ctx.emit(IRInstr("store", None, [start_v, display_idx_ptr]))
+            else:
+                ctx.emit(IRInstr("store", None, [zero, display_idx_ptr]))
 
             head_b = ctx.new_block("forenumhead")
             body_b = ctx.new_block("forenumbody")
@@ -5628,7 +5810,9 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             ctx.emit(IRInstr("load", body_list_v, [list_ptr]))
             body_idx_v = ctx.tmp(I64)
             ctx.emit(IRInstr("load", body_idx_v, [idx_ptr]))
-            _store_loop_target(ctx, s.targets[0], body_idx_v, "int")
+            body_display_idx_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", body_display_idx_v, [display_idx_ptr]))
+            _store_loop_target(ctx, s.targets[0], body_display_idx_v, "int")
             if src_t == "str":
                 elem_v = ctx.tmp(PTR)
                 ctx.emit(IRInstr("call", elem_v, ["_abi_str_char_at", body_list_v, body_idx_v]))
@@ -5652,6 +5836,13 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             next_idx_v = ctx.tmp(I64)
             ctx.emit(IRInstr("iadd", next_idx_v, [inc_idx_v, one]))
             ctx.emit(IRInstr("store", None, [next_idx_v, idx_ptr]))
+            inc_display_idx_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", inc_display_idx_v, [display_idx_ptr]))
+            one2 = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", one2, [1]))
+            next_display_idx_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("iadd", next_display_idx_v, [inc_display_idx_v, one2]))
+            ctx.emit(IRInstr("store", None, [next_display_idx_v, display_idx_ptr]))
             ctx.emit(IRInstr("br", None, [head_b.label]))
 
             if natural_b is not None:
