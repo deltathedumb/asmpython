@@ -4374,6 +4374,42 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("load", out, [res_ptr]))
         return out
 
+    if isinstance(e, A.Call) and e.func == "hasattr" and len(e.args) == 2:
+        # hasattr(obj, name) -> dict_contains(obj, name) (0/1); None ->
+        # False without dereferencing. Mirrors codegen.py's own
+        # `hasattr` handling and this file's own `getattr` case just
+        # above (same none_b/live_b/end_b shape). Was entirely
+        # unimplemented: `hasattr` as a bare symbol fell through to a
+        # direct-symbol-call linking against a nonexistent DLL import.
+        obj_v = _lower_expr(ctx, e.args[0])
+        name_v = _lower_expr(ctx, e.args[1])
+        res_ptr = ctx.ensure_slot(f"__hasattr_res_{id(e)}", I64)
+        none_b = ctx.new_block("hasattrnone")
+        live_b = ctx.new_block("hasattrlive")
+        end_b = ctx.new_block("hasattrend")
+        zero = ctx.tmp(PTR if obj_v.type == PTR else I64)
+        ctx.emit(IRInstr("const", zero, [0]))
+        is_none = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.eq", is_none, [obj_v, zero]))
+        ctx.emit(IRInstr("br.t", None, [is_none, none_b.label, live_b.label]))
+
+        ctx.switch_to(none_b)
+        false_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", false_v, [0]))
+        ctx.emit(IRInstr("store", None, [false_v, res_ptr]))
+        ctx.emit(IRInstr("br", None, [end_b.label]))
+
+        ctx.switch_to(live_b)
+        got_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", got_v, ["_abi_dict_contains", obj_v, name_v]))
+        ctx.emit(IRInstr("store", None, [got_v, res_ptr]))
+        ctx.emit(IRInstr("br", None, [end_b.label]))
+
+        ctx.switch_to(end_b)
+        out = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", out, [res_ptr]))
+        return out
+
     if isinstance(e, A.Call) and e.func == "setattr" and len(e.args) == 3:
         obj_v = _lower_expr(ctx, e.args[0])
         name_v = _lower_expr(ctx, e.args[1])
