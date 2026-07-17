@@ -4820,6 +4820,78 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("load", final_v, [acc_ptr]))
         return final_v
 
+    if isinstance(e, A.Call) and e.func in ("any", "all") and len(e.args) == 1:
+        # `any(xs)`/`all(xs)`: scan a list/tuple buffer testing each
+        # element for truthiness, short-circuiting on the first hit.
+        # Mirrors codegen.py's raw-8-byte-slot scan (elements are
+        # int/ptr-typed cells; float elements would need _value_truthy,
+        # not exercised by any test case yet). Was entirely
+        # unimplemented: `any`/`all` as bare symbols fell through to a
+        # direct-symbol-call linking against a nonexistent DLL import.
+        is_all = e.func == "all"
+        xs_v = _lower_expr(ctx, e.args[0])
+        len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", len_addr, [xs_v, _LIST_LEN_OFF]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        idx_ptr = ctx.ensure_slot(f"__aa_idx_{id(e)}", I64)
+        zero0 = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero0, [0]))
+        ctx.emit(IRInstr("store", None, [zero0, idx_ptr]))
+
+        res_ptr = ctx.ensure_slot(f"__aa_res_{id(e)}", I64)
+        head_b = ctx.new_block("aahead")
+        body_b = ctx.new_block("aabody")
+        cont_b = ctx.new_block("aacont")
+        hit_b = ctx.new_block("aahit")
+        end_b = ctx.new_block("aaend")
+        join_b = ctx.new_block("aajoin")
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+
+        ctx.switch_to(head_b)
+        idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        cond_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, len_v]))
+        ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
+
+        ctx.switch_to(body_b)
+        idx_v2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
+        addr = _list_elem_addr(ctx, xs_v, idx_v2)
+        elem_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", elem_v, [addr]))
+        truthy_v = _value_truthy(ctx, elem_v)
+        if is_all:
+            ctx.emit(IRInstr("br.t", None, [truthy_v, cont_b.label, hit_b.label]))
+        else:
+            ctx.emit(IRInstr("br.t", None, [truthy_v, hit_b.label, cont_b.label]))
+
+        ctx.switch_to(cont_b)
+        one_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one_v, [1]))
+        next_idx = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", next_idx, [idx_v2, one_v]))
+        ctx.emit(IRInstr("store", None, [next_idx, idx_ptr]))
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+
+        ctx.switch_to(hit_b)
+        hit_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", hit_v, [0 if is_all else 1]))
+        ctx.emit(IRInstr("store", None, [hit_v, res_ptr]))
+        ctx.emit(IRInstr("br", None, [join_b.label]))
+
+        ctx.switch_to(end_b)
+        end_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", end_v, [1 if is_all else 0]))
+        ctx.emit(IRInstr("store", None, [end_v, res_ptr]))
+        ctx.emit(IRInstr("br", None, [join_b.label]))
+
+        ctx.switch_to(join_b)
+        final_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", final_v, [res_ptr]))
+        return final_v
+
     if isinstance(e, A.Call) and e.func == "range" and len(e.args) in (1, 2, 3):
         # `range(...)` used as a real VALUE (e.g. `list(range(5))`), not
         # a `for` loop's own iterable -- that shape is lowered specially
