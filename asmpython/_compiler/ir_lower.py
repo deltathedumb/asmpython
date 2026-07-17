@@ -4389,6 +4389,147 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         and e.func == "list"
         and len(e.args) == 1
         and isinstance(e.args[0], A.Call)
+        and e.args[0].func == "zip"
+        and len(e.args[0].args) >= 2
+    ):
+        # `list(zip(A, B[, C...]))` -- builds a fresh list of N-element
+        # tuples, walking the source lists in lockstep and stopping at
+        # the shortest (real zip() truncation semantics). Ports
+        # codegen.py's `_gen_list_zip` IR-op-for-instruction: each
+        # iteration allocates a fresh tuple header+buffer (same layout
+        # A.TupleLit uses) and appends its pointer via _abi_list_append
+        # (which already handles pointer-typed elements, see e.g. the
+        # dict.items()-pairs lowering). Was entirely unimplemented:
+        # `zip` as a bare symbol fell through to a direct-symbol-call
+        # linking against a nonexistent DLL import.
+        zip_call = e.args[0]
+        n = len(zip_call.args)
+        it_ptrs = [ctx.ensure_slot(f"__lzip_it{k}_{id(e)}", PTR) for k in range(n)]
+        el_tys = [_iter_element_type(ze) for ze in zip_call.args]
+        for k, ze in enumerate(zip_call.args):
+            v = _lower_expr(ctx, ze)
+            ctx.emit(IRInstr("store", None, [v, it_ptrs[k]]))
+
+        stop_ptr = ctx.ensure_slot(f"__lzip_stop_{id(e)}", I64)
+        first_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", first_v, [it_ptrs[0]]))
+        first_len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", first_len_addr, [first_v, _LIST_LEN_OFF]))
+        stop_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", stop_v, [first_len_addr]))
+        ctx.emit(IRInstr("store", None, [stop_v, stop_ptr]))
+        for k in range(1, n):
+            cur_stop = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", cur_stop, [stop_ptr]))
+            it_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", it_v, [it_ptrs[k]]))
+            len_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", len_addr, [it_v, _LIST_LEN_OFF]))
+            len_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", len_v, [len_addr]))
+            is_shorter = ctx.tmp(I64)
+            ctx.emit(IRInstr("icmp.lt", is_shorter, [len_v, cur_stop]))
+            min_ptr = ctx.ensure_slot(f"__lzip_min_{k}_{id(e)}", I64)
+            shorter_b = ctx.new_block(f"lzipmin_shorter_{k}")
+            keep_b = ctx.new_block(f"lzipmin_keep_{k}")
+            after_b = ctx.new_block(f"lzipmin_after_{k}")
+            ctx.emit(IRInstr("br.t", None, [is_shorter, shorter_b.label, keep_b.label]))
+            ctx.switch_to(shorter_b)
+            ctx.emit(IRInstr("store", None, [len_v, min_ptr]))
+            ctx.emit(IRInstr("br", None, [after_b.label]))
+            ctx.switch_to(keep_b)
+            ctx.emit(IRInstr("store", None, [cur_stop, min_ptr]))
+            ctx.emit(IRInstr("br", None, [after_b.label]))
+            ctx.switch_to(after_b)
+            new_stop = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", new_stop, [min_ptr]))
+            ctx.emit(IRInstr("store", None, [new_stop, stop_ptr]))
+
+        res_ptr = ctx.ensure_slot(f"__lzip_res_{id(e)}", PTR)
+        stop_v0 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", stop_v0, [stop_ptr]))
+        one_cap = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one_cap, [1]))
+        real_cap_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", real_cap_v, [stop_v0, one_cap]))
+        res_v0 = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", res_v0, ["_abi_new_list", real_cap_v]))
+        ctx.emit(IRInstr("store", None, [res_v0, res_ptr]))
+
+        idx_ptr = ctx.ensure_slot(f"__lzip_idx_{id(e)}", I64)
+        zero_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero_v, [0]))
+        ctx.emit(IRInstr("store", None, [zero_v, idx_ptr]))
+
+        head_b = ctx.new_block("lziphead")
+        body_b = ctx.new_block("lzipbody")
+        cont_b = ctx.new_block("lzipcont")
+        end_b = ctx.new_block("lzipend")
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+
+        ctx.switch_to(head_b)
+        idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        stop_v2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", stop_v2, [stop_ptr]))
+        cond_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, stop_v2]))
+        ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
+
+        ctx.switch_to(body_b)
+        idx_v2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
+        n_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", n_v, [n]))
+        tup_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", tup_v, ["_abi_new_list", n_v]))
+        tup_buf_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", tup_buf_addr, [tup_v, _LIST_BUF_OFF]))
+        tup_buf_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", tup_buf_v, [tup_buf_addr]))
+        for k in range(n):
+            it_v2 = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", it_v2, [it_ptrs[k]]))
+            addr = _list_elem_addr(ctx, it_v2, idx_v2)
+            el_v = ctx.tmp(F64 if el_tys[k] == "float" else I64)
+            ctx.emit(IRInstr("load", el_v, [addr]))
+            store_v = el_v
+            if el_tys[k] == "float":
+                iv = ctx.tmp(I64)
+                ctx.emit(IRInstr("bitcast_f2i", iv, [el_v]))
+                store_v = iv
+            slot_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", slot_addr, [tup_buf_v, k * 8]))
+            ctx.emit(IRInstr("store", None, [store_v, slot_addr]))
+        tup_len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", tup_len_addr, [tup_v, _LIST_LEN_OFF]))
+        n_v2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", n_v2, [n]))
+        ctx.emit(IRInstr("store", None, [n_v2, tup_len_addr]))
+
+        res_v1 = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", res_v1, [res_ptr]))
+        ctx.emit(IRInstr("call", None, ["_abi_list_append", res_v1, tup_v]))
+        ctx.emit(IRInstr("br", None, [cont_b.label]))
+
+        ctx.switch_to(cont_b)
+        one_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one_v, [1]))
+        next_idx = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", next_idx, [idx_v2, one_v]))
+        ctx.emit(IRInstr("store", None, [next_idx, idx_ptr]))
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+
+        ctx.switch_to(end_b)
+        final_res = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", final_res, [res_ptr]))
+        return final_res
+
+    if (
+        isinstance(e, A.Call)
+        and e.func == "list"
+        and len(e.args) == 1
+        and isinstance(e.args[0], A.Call)
         and e.args[0].func in ("filter", "map")
         and len(e.args[0].args) == 2
     ):
