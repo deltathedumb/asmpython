@@ -3822,6 +3822,66 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         if obj_ty == "int" and e.method == "to_bytes":
             return _lower_int_to_bytes(ctx, e)
         if isinstance(e.obj, A.Name) and e.obj.name in ctx.mctx.imported_modules:
+            # `os.getcwd()`/`os.cpu_count()`: inline codegen helpers, not
+            # real BINDINGS entries (no single C symbol covers Python's
+            # `getcwd()` semantics -- it needs a scratch buffer plus a
+            # dup, matching codegen.py's `_emit_os_getcwd`/sema.py's
+            # matching special case). This backend previously had NO
+            # handling at all for either -- both fell through to the
+            # generic "unknown method on opaque receiver" stub further
+            # down, which evaluates the receiver/args for side effects
+            # and returns a plain 0 -- but sema had already typed the
+            # call's result as `str`/`list`, so the caller's later use
+            # of that "0" as a string/list pointer crashed immediately
+            # (confirmed via gdb on `os.getcwd()`; codegen.py handles the
+            # identical call correctly, confirming this was backend-
+            # specific, not a stdlib/merge issue). Uses `malloc` for the
+            # scratch buffer rather than porting codegen.py's static
+            # `_cwd_buf` BSS reservation -- this backend's IRGlobal has
+            # no raw-byte-buffer reservation mechanism yet, and a runtime
+            # malloc is just as correct for a call this infrequent.
+            if e.obj.name == "os" and e.method == "getcwd" and not e.args:
+                size_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", size_v, [4096]))
+                buf_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", buf_v, ["malloc", size_v]))
+                got_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", got_v, ["_getcwd", buf_v, size_v]))
+                zero_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("const", zero_v, [0]))
+                ok_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.ne", ok_v, [got_v, zero_v]))
+                ok_b = ctx.new_block("getcwdok")
+                fail_b = ctx.new_block("getcwdfail")
+                end_b = ctx.new_block("getcwdend")
+                res_ptr = ctx.ensure_slot(f"__getcwd_res_{id(e)}", PTR)
+                ctx.emit(IRInstr("br.t", None, [ok_v, ok_b.label, fail_b.label]))
+
+                ctx.switch_to(ok_b)
+                dup_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", dup_v, ["_abi_str_concat_dup", buf_v]))
+                ctx.emit(IRInstr("store", None, [dup_v, res_ptr]))
+                ctx.emit(IRInstr("br", None, [end_b.label]))
+
+                ctx.switch_to(fail_b)
+                empty_name = ctx.mctx.intern_str("")
+                empty_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", empty_v, [empty_name]))
+                ctx.emit(IRInstr("store", None, [empty_v, res_ptr]))
+                ctx.emit(IRInstr("br", None, [end_b.label]))
+
+                ctx.switch_to(end_b)
+                out = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", out, [res_ptr]))
+                return out
+            if e.obj.name == "os" and e.method == "cpu_count" and not e.args:
+                # asmpython has no nullability tracking, so (matching
+                # sema.py's/codegen.py's own simplification) this is
+                # always a plain positive-int constant, never the real
+                # `os.cpu_count() -> int | None`.
+                v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", v, [1]))
+                return v
             bindings = ctx.mctx.imported_modules[e.obj.name]
             fn = bindings.get(e.method)
             if fn is not None and hasattr(fn, "c_name"):

@@ -1293,43 +1293,78 @@ both closing multiple crash-bucket entries at once:
 **Separately found, NOT yet fixed** — a distinct, deeper bug in
 whole-program-merge module scoping, NOT a backend bug: `os.getcwd()`
 and `ospath.isdir()`/`isfile()`-style calls to a REAL Python-source
-wrapper function (defined in `ospath.py`/`pathlib.py`, merged in by
-`program.py`'s whole-program compile, as opposed to a pure FFI
-binding-table `Func`) still crash. Root cause identified but not yet
-fixed: under `whole_program=True` compilation specifically, the `os`
-`A.Name`'s `inferred_type` comes back `"int"` instead of `"module"`
-(confirmed via a direct AST dump) — `Import`'s sema handling correctly
-does `scope.add(bind_name, "module")`, so something in the
-whole-program merge path overwrites or shadows that binding before
-`os.getcwd()` is type-checked. This affects every remaining
-`os`/`ospath`/`pathlib`-based crash in the bucket
-(`155_os_module.py`, `156_os_listdir.py`, `301_ospath_isdir_isfile.py`,
-`302_pathlib_isdir_isfile.py`, `93_os_file_io.py`/`255_os_file_io.py`'s
-timeouts) — worth its own dedicated investigation (start by comparing
-against `string.py`, which DOES resolve correctly under whole-program
-merge, to find what's different about `os`/`ospath`'s merge path)
-rather than a quick patch, since it's sema/program.py scoping, not
-ir_lower.py.
+wrapper function (defined in `ospath.py`/`pathlib.py`) still crash.
+
+**Correction from this section's first draft**: initially misdiagnosed
+as a whole-program-merge scoping bug (an AST dump of `os.getcwd()`
+showed the `os` `A.Name` typed `"int"`, which looked like `Import`'s
+`scope.add(bind_name, "module")` was getting overridden). That
+diagnosis was WRONG — re-investigating for triage pass nine found the
+real cause: `os.getcwd()`/`os.listdir()`/`os.cpu_count()` are
+deliberately NOT real `BINDINGS` entries at all (see `sema.py`
+~line 6777's own comment: "inline codegen helpers not in BINDINGS, no
+C symbol") — `Python`'s `getcwd()` needs a scratch buffer plus a dup
+call, not a single C function call a plain `Func` binding can express,
+so sema special-cases these three names by NAME string match and
+short-circuits BEFORE the generic `bindings` type lookup that would've
+produced `"module"`/`"str"` — the `"int"` I saw was simply
+`_check_expr`'s DEFAULT for an unresolved `A.Name`, an artifact of
+testing the isolated repro slightly differently, not a real merge bug.
+codegen.py has matching hand-written inline emitters
+(`_emit_os_getcwd`/`_emit_os_listdir`) that `ir_lower.py` had ZERO
+equivalent of — every call fell through to the generic "unknown method
+on opaque receiver" stub, which evaluates args for side effects and
+returns a plain 0, but sema had already typed the call's result as a
+real `str`/`list` value, so the caller's later use of that `0` as a
+string/list pointer crashed immediately.
+
+**Triage pass nine** (2026-07-16, same-day follow-up): implemented
+`os.getcwd()` and `os.cpu_count()` as new inline-emitter cases in
+`ir_lower.py`'s `MethodCall` FFI-dispatch, ported from codegen.py's
+`_emit_os_getcwd` logic but using a runtime `malloc(4096)` scratch
+buffer instead of porting codegen.py's static `_cwd_buf` BSS
+reservation (this backend's `IRGlobal` has no raw-byte-buffer
+reservation mechanism yet, and a runtime malloc is just as correct for
+a call this infrequent — not worth building new backend infrastructure
+for): `malloc` → real `_getcwd(buf, size)` DLL call (the exact symbol
+already confirmed resolvable from pass one's `_DLL_FOR_SYMBOL`
+additions) → branch on NULL (failure) vs. dup-via-`_abi_str_concat_dup`
+(success, mirroring codegen.py's fail/done branches exactly).
+`cpu_count()` is a trivial `const 1` (asmpython has no nullability
+tracking, so — matching sema.py's/codegen.py's own simplification —
+this is always a plain positive int, never the real `int | None`).
+Confirmed fixing `155_os_module.py` exactly (all 9 lines). `os.listdir()`
+deliberately left unimplemented — codegen.py's own version shells out to
+`dir /b` via `_popen` and parses line-by-line, real complexity worth its
+own dedicated pass, not a quick follow-on here. `301_ospath_isdir_isfile.py`/
+`302_pathlib_isdir_isfile.py` (different functions, `isdir`/`isfile`,
+not yet investigated) and `93_os_file_io.py`/`255_os_file_io.py` (file
+I/O, likely a related-but-separate gap) remain open crashes.
 
 Verified: `tests.runner` 475/483 throughout, checked after each fix.
-Full sweep: `OK=297 MISMATCH=12 CRASH=12 BUILD_FAIL=117`, up from
-`OK=287 MISMATCH=12 CRASH=22 BUILD_FAIL=117` before this pass — +10 OK,
--10 crashes, mismatches flat (the `16_import_math.py` crash→mismatch→OK
-round-trip within this same pass nets to zero change in that column).
+Sweep: `OK=298 MISMATCH=12 CRASH=11 BUILD_FAIL=117`, up from
+`OK=297 MISMATCH=12 CRASH=12 BUILD_FAIL=117` before this pass — +1 OK,
+-1 crash, exactly `155_os_module.py` as expected (this pass deliberately
+scoped to just `getcwd`/`cpu_count`, not the harder `listdir`).
 
-**Cumulative sweep numbers after eight triage passes this session, from
+**Cumulative sweep numbers after nine triage passes this session, from
 the `OK=245 MISMATCH=24 CRASH=42 BUILD_FAIL=127` session-start
 baseline**:
 
 ```text
-OK=297  MISMATCH=12  CRASH=12  BUILD_FAIL=117
+OK=298  MISMATCH=12  CRASH=11  BUILD_FAIL=117
 ```
 
-61% → 68% of the full 438-case corpus passing. The crash bucket alone
-has gone from 42 to 12 across all eight passes — the remaining 12 are
-almost entirely the whole-program-merge `os`/`ospath`/`pathlib` gap
-just above (5 entries) plus base64/hashlib/calendar/dunder_bool
-(unrelated, not yet triaged individually).
+56% → 68% of the full 438-case corpus passing. The crash bucket alone
+has gone from 42 to 11 across all nine passes — the remaining 11 are:
+`156_os_listdir.py` (needs the `_popen`-based listdir port, deliberately
+deferred), `301_ospath_isdir_isfile.py`/`302_pathlib_isdir_isfile.py`
+(different functions, not yet investigated), `93_os_file_io.py`/
+`255_os_file_io.py` (file I/O, times out rather than crashing — likely a
+related-but-separate gap), and `172_base64_module.py`/
+`196_hashlib_module.py`/`225_hashlib_module.py`/`229_base64_module.py`/
+`358_calendar_module.py`/`369_dunder_bool.py` (unrelated, not yet
+triaged individually).
 
 ## Selfhost Status (plan-step 11)
 
