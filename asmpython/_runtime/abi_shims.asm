@@ -67,6 +67,7 @@ extern _runtime_str_removeprefix
 extern _runtime_str_removesuffix
 extern _runtime_list_reverse
 extern _runtime_list_extend
+extern _runtime_list_repeat
 extern _runtime_list_insert
 extern _runtime_sort_str
 extern _runtime_sort_int
@@ -150,6 +151,7 @@ global _abi_str_removeprefix
 global _abi_str_removesuffix
 global _abi_list_reverse
 global _abi_list_extend
+global _abi_list_repeat
 global _abi_list_insert
 global _abi_sort_str
 global _abi_sort_int
@@ -819,6 +821,14 @@ _abi_list_extend:
     mov rax, rcx
     mov rbx, rdx
     call _runtime_list_extend
+    WIN64_RUNTIME_LEAVE
+    ret
+; list_repeat(list=rcx, count=rdx) -> rax
+_abi_list_repeat:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_list_repeat
     WIN64_RUNTIME_LEAVE
     ret
 ; list_insert(list=rcx, index=rdx, value=r8) -> void

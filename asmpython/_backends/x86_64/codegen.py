@@ -451,9 +451,39 @@ class FuncCodegen:
         xmm_reg_args: list[tuple[XmmReg, Any, str, int]] = []
         gp_dup_slots: list[tuple[Reg, int, str]] = []
         stack_args: list[tuple[Any, int]] = []
+        # `_abi_setjmp` is the one call in this backend that can "return
+        # twice": once normally (falling through), and once more via a
+        # LATER `_abi_raise` -> `_runtime_longjmp` jumping directly back
+        # to this call's own return address, arbitrarily far in the
+        # future, after arbitrarily many other calls have executed inside
+        # the try body in between. This ephemeral win64_saved_regs save
+        # area (an RSP-relative scratch region below the function's own
+        # permanent frame, "returned" to the free pool the instant this
+        # call's normal epilogue restores from it) is only ever safe
+        # because ordinary call/return is strictly nested -- but setjmp's
+        # SECOND "return" via longjmp violates that: any call made from
+        # inside the try body after the first return (e.g. the `_abi_
+        # raise` call itself, or anything the body/handler does) is free
+        # to reuse this exact same stack memory for its OWN temp-save
+        # area, since nothing marks it "still needed" once the first,
+        # normal return already consumed it once. Confirmed via a
+        # hardware watchpoint: the exact address holding this call's
+        # saved RDI got overwritten by `_abi_raise`'s own argument-
+        # marshaling temp area moments before the longjmp fired, so the
+        # "restored" RDI after longjmp was actually raise's leftover
+        # scratch data (0 in the repro) -- corrupting whatever value
+        # (e.g. a for-loop's own loop-variable address) was live across
+        # the try in a register _call's convention assumes it's
+        # protecting. `_runtime_setjmp`/`_runtime_longjmp` already save
+        # every register that matters (rbx/rbp/r12-r15/rsi/rdi/rsp) into
+        # the DURABLE jmp_buf itself (see abi_shims.asm), so this outer
+        # ephemeral save is pure redundancy for this one call site --
+        # and actively unsafe. Skip it here; every other call site keeps
+        # the normal protection.
+        skip_saved_regs = not is_indirect and str(target_op) == "_abi_setjmp"
         win64_saved_regs: list[Reg] = (
             [Reg.RBX, Reg.RSI, Reg.RDI, Reg.R12, Reg.R13, Reg.R14, Reg.R15]
-            if self.abi == "win64"
+            if self.abi == "win64" and not skip_saved_regs
             else []
         )
         int_i = xmm_i = 0

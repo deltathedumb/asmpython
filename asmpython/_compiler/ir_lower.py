@@ -48,8 +48,12 @@ class LowerError(Exception):
 
 U8 = IRType("u8")
 
-# jmp_buf layout (mirrors _runtime_setjmp in codegen.py): 8 regs * 8 bytes = 64 bytes.
-_JMP_BUF_SIZE = 64
+# jmp_buf layout (mirrors _runtime_setjmp in codegen.py): rbx/rbp/r12-r15/
+# rsp/retaddr in the first 8 slots (0-56), rsi/rdi in slots 8-9 (64, 72) --
+# 10 regs * 8 bytes = 80 bytes. rsi/rdi were added after the first 8 slots
+# were already established elsewhere; kept at the end rather than
+# renumbering to avoid touching every other offset in this file.
+_JMP_BUF_SIZE = 80
 
 # Build parent-id map once at module level from BUILTIN_EXC_PARENTS.
 _EXC_PARENT_OF: dict[int, int] = {
@@ -206,6 +210,12 @@ class _FuncCtx:
         # a try body and popped when leaving. A `return` inside a try body must
         # restore `_runtime_handler_top` for every enclosing try before the ret.
         self.try_handler_stack: list[str] = []
+        # (setjmp_block_index, end_block_index) per try/except this
+        # function lowers -- populated by _lower_try, consumed by
+        # lower_func to stamp IRFunc.try_regions for the x86-64 backend's
+        # register allocator (see IRFunc.try_regions' own docstring for
+        # why this exists).
+        self.try_regions: list[tuple[int, int]] = []
         # One shared, function-entry-defined zero, reused everywhere a
         # discardable "return value" is needed (print()/list.append() etc.
         # are all expression-shaped but really void) -- set once by
@@ -1297,6 +1307,23 @@ def _resolve_class_chain(ctx: _FuncCtx, name: str) -> list[str]:
     return out
 
 
+def _resolved_method_is_static(ctx: _FuncCtx, class_name: str, method: str) -> bool:
+    """True when `ClassName.method` resolves to a real @staticmethod --
+    used at the `ClassName.method(...)` call site to decide whether to
+    pass the usual implicit receiver arg (self/cls, via ctx.shared_zero)
+    at all. A staticmethod has none in its actual Python signature."""
+    owner = _resolve_method_owner(ctx, class_name, method)
+    if owner is None:
+        return False
+    sig = ctx.mctx.classes_sig.get(owner)
+    if sig is None:
+        return False
+    msig = sig.methods.get(method)
+    if msig is None:
+        return False
+    return "staticmethod" in getattr(msig, "decorators", [])
+
+
 def _resolve_method_owner(ctx: _FuncCtx, class_name: str, method: str) -> str | None:
     for cname in _resolve_class_chain(ctx, class_name):
         sig = ctx.mctx.classes_sig.get(cname)
@@ -2363,6 +2390,37 @@ def _lower_int_pow(ctx: _FuncCtx, base_v: IRValue, exp_v: IRValue, tag: int) -> 
     return out
 
 
+def _emit_int_divzero_check(ctx: _FuncCtx, divisor: IRValue, tag: int) -> None:
+    """Raise ZeroDivisionError("division by zero") if `divisor` is 0,
+    matching CPython's message text (codegen.py's own
+    `_runtime_zerodiv_msg`) -- otherwise a zero divisor reaches the raw
+    x86 `idiv`/`irem` IR ops directly, which fault with SIGFPE at the
+    hardware level: an uncatchable hard crash instead of a normal
+    Python-level exception a `try`/`except ZeroDivisionError` can catch.
+    Confirmed via gdb (`idiv %r13` faulting with r13=0) on a `divide(a,
+    b): return a // b` call site with b=0 -- this backend's `idiv`/`irem`
+    previously had NO zero-check at all, unlike codegen.py's inline jcc
+    before every division."""
+    zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero, [0]))
+    nonzero = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.ne", nonzero, [divisor, zero]))
+    ok_b = ctx.new_block(f"divzero_ok_{tag}")
+    raise_b = ctx.new_block(f"divzero_raise_{tag}")
+    ctx.emit(IRInstr("br.t", None, [nonzero, ok_b.label, raise_b.label]))
+
+    ctx.switch_to(raise_b)
+    msg_name = ctx.mctx.intern_str("ZeroDivisionError: division by zero")
+    msg_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", msg_v, [msg_name]))
+    exc_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", exc_v, [BUILTIN_EXC_IDS["ZeroDivisionError"]]))
+    ctx.emit(IRInstr("call", None, ["_abi_raise", msg_v, exc_v]))
+    ctx.emit(IRInstr("br", None, [ok_b.label]))
+
+    ctx.switch_to(ok_b)
+
+
 def _lower_int_floordivmod(ctx: _FuncCtx, a: IRValue, b: IRValue, want: str, tag: int) -> IRValue:
     """a // b or a % b for two ints, `want` selects which -- x86's IDIV
     (the IR "idiv"/"irem" ops) truncates toward zero, but Python's // and
@@ -2372,6 +2430,7 @@ def _lower_int_floordivmod(ctx: _FuncCtx, a: IRValue, b: IRValue, want: str, tag
     identical one) exactly, just as IR blocks instead of jcc chains --
     same reasoning as this file's other codegen.py ports (see
     _virtual_dispatch_rows/_lower_int_pow)."""
+    _emit_int_divzero_check(ctx, b, tag)
     raw_q = ctx.tmp(I64)
     ctx.emit(IRInstr("idiv", raw_q, [a, b]))
     raw_r = ctx.tmp(I64)
@@ -3215,6 +3274,39 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             count_v = _lower_expr(ctx, count_e)
             v = ctx.tmp(PTR)
             ctx.emit(IRInstr("call", v, ["_abi_str_repeat", str_v, count_v]))
+            return v
+        if e.op == "+" and "list" in (lt, rt):
+            # `xs + ys` (list concat, also reached via `xs += ys`'s
+            # AugAssign-as-BinOp normalization) -- previously fell through
+            # entirely to the plain-int `+` path at the bottom of this
+            # function, adding the two lists' raw HEADER POINTERS together
+            # as if they were integers and returning the resulting bogus
+            # address as the "concatenated list" -- corrupts immediately on
+            # the very next `len()`/index read (confirmed via gdb). Mirrors
+            # codegen.py's `_runtime_list_slice` (full-range shallow copy of
+            # the left operand, so the original `xs` is never mutated) then
+            # `_runtime_list_extend` (append every element of the right
+            # operand onto that copy) pattern exactly.
+            lhs = _lower_expr(ctx, e.left)
+            min_v = ctx.tmp(I64)
+            max_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", min_v, [-9223372036854775808]))
+            ctx.emit(IRInstr("const", max_v, [9223372036854775807]))
+            copy_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", copy_v, ["_abi_list_slice", lhs, min_v, max_v]))
+            rhs = _lower_expr(ctx, e.right)
+            ctx.emit(IRInstr("call", None, ["_abi_list_extend", copy_v, rhs]))
+            return copy_v
+        if e.op == "*" and "list" in (lt, rt):
+            # `xs * n` / `n * xs` (list repetition) -- same missing-case
+            # shape as the `+` concat fix just above; falls through to
+            # `_abi_list_repeat` exactly like codegen.py's
+            # `_runtime_list_repeat`.
+            list_e, count_e = (e.left, e.right) if lt == "list" else (e.right, e.left)
+            list_v = _lower_expr(ctx, list_e)
+            count_v = _lower_expr(ctx, count_e)
+            v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", v, ["_abi_list_repeat", list_v, count_v]))
             return v
         if lt in ("dict", "set") and rt in ("dict", "set") and e.op == "|":
             # `d1 | d2` (PEP 584): a fresh dict/set with left's entries then
@@ -4335,7 +4427,9 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             return out
         if obj_ty == "type" and isinstance(e.obj, A.Name) and e.obj.name in ctx.mctx.class_names:
             sym = f"{e.obj.name}__{e.method}"
-            args = [ctx.shared_zero] + [_lower_expr(ctx, a) for a in e.args]
+            is_static = _resolved_method_is_static(ctx, e.obj.name, e.method)
+            call_args = [_lower_expr(ctx, a) for a in e.args]
+            args = call_args if is_static else [ctx.shared_zero] + call_args
             v = ctx.tmp(ir_type_for(A.expr_type(e)))
             ctx.emit(IRInstr("call", v, [sym, *args]))
             return v
@@ -4670,7 +4764,25 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             return v
         args = [_lower_expr(ctx, a) for a in e.args]
         v = ctx.tmp(ir_type_for(A.expr_type(e)))
-        if e.func in ctx.slot_ty and e.func not in ctx.mctx.func_names:
+        # A call through a plain variable (not a real function/class name)
+        # -- e.g. `double = lambda x: x*2; double(21)`, or a lambda/func
+        # passed in as a parameter (`def apply(g, v): return g(v)`). This
+        # must check BOTH local slots (ctx.slot_ty) and module globals
+        # (ctx.mctx.global_types), not just locals: a module-scope
+        # `name = lambda ...` never gets a local slot at all (it's a real
+        # global, per _is_global_name), so the old locals-only check fell
+        # through to the plain-symbol-call branch below with the bare
+        # variable name as the call target -- linking against a
+        # nonexistent symbol `double` instead of loading the function
+        # pointer the global actually holds. Confirmed via gdb: segfault
+        # at the very first lambda-call test case, before even reaching
+        # user code.
+        is_callable_var = (
+            e.func not in ctx.mctx.func_names
+            and e.func not in ctx.mctx.class_names
+            and (e.func in ctx.slot_ty or e.func in ctx.mctx.global_types)
+        )
+        if is_callable_var:
             target = _lower_expr(ctx, A.Name(name=e.func, pos=e.pos))
             ctx.emit(IRInstr("call", v, [target, *args]))
         else:
@@ -4721,6 +4833,24 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             # into the target in place -- the header pointer itself
             # doesn't change, unlike the fresh-dict `|` BinOp above.
             ctx.emit(IRInstr("call", None, ["_abi_dict_update", cur, rhs]))
+            return
+        if s.op == "+" and cur_ty is PTR and A.expr_type(s.value) == "list":
+            # `xs += other` (list): extend xs IN PLACE (same header pointer
+            # -- no rebind needed) rather than the plain-BinOp `+` case's
+            # fresh-copy-then-extend, matching codegen.py's `_runtime_list_
+            # extend`-only convention for AugAssign specifically. Before
+            # this fix, AugAssign had no list-aware branch at all and fell
+            # through to the plain-int `_BINOP["+"]` path at the bottom,
+            # OR-ing/adding the two raw list header pointers together as
+            # integers -- corrupts the slot on the very next read.
+            ctx.emit(IRInstr("call", None, ["_abi_list_extend", cur, rhs]))
+            return
+        if s.op == "+" and cur_ty is PTR and rhs_ty == "str":
+            # `s += other` (str): immutable -- concat to a NEW pointer and
+            # rebind the slot, unlike the list case just above.
+            res = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", res, ["_abi_str_concat", cur, rhs]))
+            ctx.emit(IRInstr("store", None, [res, ptr]))
             return
         if cur_ty is F64 or rhs_ty == "float":
             if s.op not in _FBINOP and s.op not in ("%", "**"):
@@ -5454,7 +5584,7 @@ def _lower_raise(ctx: _FuncCtx, s: A.Raise) -> None:
         else:
             empty = ctx.mctx.intern_str("")
             msg_v = ctx.tmp(PTR)
-            ctx.emit(IRInstr("str_global", msg_v, [empty.name]))
+            ctx.emit(IRInstr("global_addr", msg_v, [empty]))
         ctx.emit(IRInstr("call", None, ["_abi_raise", msg_v, exc_id_v]))
 
 
@@ -5492,6 +5622,7 @@ def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
     _store_global(ctx, "_runtime_handler_top", buf_ptr)
 
     # setjmp(jmp_buf) -> 0 on direct call, nonzero after longjmp
+    setjmp_block_index = ctx.blocks.index(ctx.cur)
     setjmp_result = ctx.tmp(I64)
     ctx.emit(IRInstr("call", setjmp_result, ["_abi_setjmp", buf_ptr]))
 
@@ -5583,6 +5714,21 @@ def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
     # _abi_raise never returns; br to end_b satisfies the IR terminator requirement.
     ctx.emit(IRInstr("br", None, [end_b.label]))
 
+    # Record the full [setjmp block, last handler-related block] span.
+    # NOTE: end_b's own index is NOT the right upper bound -- it's
+    # created early (right after handler_b/body_b, before the per-handler
+    # check_blocks), so blocks created later (the check_blocks handling
+    # each `except` clause, which is where a bound exception name or any
+    # value read inside the handler body actually lives) sit at HIGHER
+    # indices than end_b itself. The true upper bound is simply the last
+    # block index this whole _lower_try call has produced so far -- every
+    # block it creates, in creation order, is part of this try
+    # (including nested try/except inside a handler/finally body, which
+    # is fine: a nested try's own narrower region is recorded separately
+    # and both cover the value correctly). See IRFunc.try_regions'
+    # docstring for why the x86-64 backend's regalloc.py needs this.
+    ctx.try_regions.append((setjmp_block_index, len(ctx.blocks) - 1))
+
     ctx.switch_to(end_b)
 
 
@@ -5597,6 +5743,23 @@ def lower_func(
     _collect_declared_globals(f.body, declared_globals)
     local_names: set[str] = set()
     if not module_body:
+        # Seed with the function's own PARAMETERS before scanning the body
+        # -- _collect_bound_names only walks statements (assign targets,
+        # for-loop vars, etc.), never f.params, so a parameter that the
+        # body only ever READS (never reassigns) was previously absent
+        # from local_names entirely. When that parameter's name happens to
+        # collide with an unrelated module-level global declared elsewhere
+        # in the same file (e.g. `def split(lo, hi): ... ` alongside a
+        # later top-level `lo, hi = minmax(...)`), _is_global_name's
+        # non-module-scope fallback (`return name in
+        # ctx.mctx.global_names`) misrouted every read of the parameter to
+        # `global_addr` the unrelated global instead of the parameter's
+        # own stack slot -- silently reading/dividing by whatever
+        # (possibly zero/uninitialized) value that global happened to
+        # hold. Confirmed via IR dump + gdb: SIGFPE from `idiv` with a
+        # divisor of 0, traced back to `split`'s `lo`/`hi` params being
+        # lowered as `global_addr ['lo']`/`['hi']` instead of local slots.
+        local_names.update(f.params)
         _collect_bound_names(f.body, local_names)
         local_names.difference_update(declared_globals)
     ctx = _FuncCtx(
@@ -5627,7 +5790,14 @@ def lower_func(
         ctx.emit(IRInstr("const", zero, [0]))
         ctx.emit(IRInstr("ret", None, [zero]))
 
-    return IRFunc(name=f.name, params=params, ret_type=I64, blocks=ctx.blocks, visibility=visibility)
+    return IRFunc(
+        name=f.name,
+        params=params,
+        ret_type=I64,
+        blocks=ctx.blocks,
+        visibility=visibility,
+        try_regions=ctx.try_regions,
+    )
 
 
 def _resolve_method_owner_in_sigs(classes_sig: dict, class_name: str, method: str) -> str | None:
@@ -5776,7 +5946,15 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
             if (cls.name, m.name) not in needed:
                 continue
             param_types = list(m.param_types)
-            if param_types:
+            # @staticmethod has no implicit self/cls receiver at all -- its
+            # params[0] (if any) is a genuine, ordinary user parameter, not
+            # the receiver this "any"-stamp is meant to widen. Forcing it
+            # to "any" unconditionally clobbered e.g. `add(a, b)`'s first
+            # real int param, while the call site (ir_lower's MethodCall
+            # lowering, `ClassName.method(...)`) still passes only the
+            # user's actual args with no receiver -- an arg-count/type
+            # mismatch that crashed at the assembly level.
+            if param_types and "staticmethod" not in m.decorators:
                 param_types[0] = ("any", None, None, [], None)
             out_methods.append(
                 A.FuncDef(

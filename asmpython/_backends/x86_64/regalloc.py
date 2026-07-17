@@ -148,6 +148,65 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
         start, end = loop_start[bi], loop_end[bi]
         if end > bi and def_block.get(name, bi) < start:
             last[name] = (end, len(func.blocks[end].instrs))
+
+    # try/except handler blocks are reached via an IMPLICIT control
+    # transfer -- a `call _abi_setjmp` followed by a br.t on its result,
+    # where the "handler taken" edge only becomes real at runtime via
+    # `_abi_raise` -> `_runtime_longjmp` jumping directly back to the
+    # setjmp call site, with NO ordinary br/br.t edge from inside the try
+    # body to the handler blocks for the plain last-use scan above to
+    # see. Worse, ir_lower.py's _lower_try (via ctx.new_block()) allocates
+    # the handler blocks AFTER the try's own continuation block in the
+    # function's block list (e.g. a for-loop's `Lforcont` increment
+    # block, right after the loop body, ends up EARLIER in block-list
+    # order than the handler blocks that conceptually run BEFORE it on
+    # the exception path) -- so a value defined before the try (e.g. the
+    # loop variable's global address, computed once before the loop and
+    # reused every iteration) that is ALSO read inside the handler looked,
+    # to a plain textual scan, already dead by the time the handler
+    # block's def/use got recorded: its last "real" use was the loop's
+    # own continuation block, which sits earlier in the list. The
+    # allocator then freely reused that value's register for something
+    # the handler computes -- confirmed via gdb/objdump: a for loop's own
+    # loop-variable address, live in RDI across a `try` whose `except`
+    # branch prints that same loop variable, read back as a corrupted/
+    # NULL pointer on the very next iteration after the exception fired,
+    # segfaulting the following loop's own unrelated code (which reused
+    # the same now-scrambled physical register).
+    #
+    # Fix: ir_lower.py stamps the exact [setjmp_block_index,
+    # end_block_index] span per try statement onto IRFunc.try_regions
+    # (computed directly from the blocks it just created -- no label
+    # parsing needed). Only extend values actually REFERENCED somewhere
+    # inside the region (setjmp_bi, end_bi] -- e.g. read inside a handler
+    # block -- to stay live through the region's end; a value merely
+    # defined earlier and last used before the try even starts (the
+    # common case: nearly everything in the try's own condition/header
+    # blocks) has no reason to be pinned all the way through the handler
+    # and must NOT be force-extended, or it wrongly outlives its real
+    # last use and starves the allocator's register pool / crashes the
+    # "GP result expected" assert when a short-lived value like a `br.t`
+    # condition gets evicted to a stack slot it was never meant to need.
+    try_regions = getattr(func, "try_regions", ())
+    if try_regions:
+        region_referenced: dict[int, set[str]] = {}
+        for bi, block in enumerate(func.blocks):
+            for instr in block.instrs:
+                for op in instr.operands:
+                    if not hasattr(op, "name"):
+                        continue
+                    for ri, (setjmp_bi, end_bi) in enumerate(try_regions):
+                        if setjmp_bi < bi <= end_bi:
+                            region_referenced.setdefault(ri, set()).add(op.name)
+        for name, (bi, _ii) in list(last.items()):
+            db = def_block.get(name, bi)
+            for ri, (setjmp_bi, end_bi) in enumerate(try_regions):
+                if (
+                    db <= setjmp_bi
+                    and name in region_referenced.get(ri, ())
+                    and end_bi > last[name][0]
+                ):
+                    last[name] = (end_bi, len(func.blocks[end_bi].instrs))
     return last
 
 

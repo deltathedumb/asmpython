@@ -81,6 +81,19 @@ class IRFunc:
     ret_type: IRType | None
     blocks: list[IRBlock] = field(default_factory=list)
     visibility: Visibility = Visibility.UNDEFINED
+    # (setjmp_block_index, end_block_index) per try/except statement this
+    # function lowers -- see ir_lower.py's _lower_try. The exception
+    # handler blocks a setjmp call can transfer to via longjmp are NOT
+    # connected to it by any ordinary br/br.t edge (the transfer only
+    # happens through the runtime jmp_buf mechanism), and _lower_try
+    # allocates them AFTER the try's own post-loop-body continuation
+    # block in block-list order -- so a value defined before the try and
+    # read inside the handler can look, to a plain block-list-order
+    # liveness scan, already dead by the time the handler's use is
+    # recorded. The x86-64 backend's regalloc.py consumes this to treat
+    # each region as one liveness span, the same way it already does for
+    # loop back-edges.
+    try_regions: list[tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass

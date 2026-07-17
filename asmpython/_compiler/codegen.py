@@ -9688,7 +9688,19 @@ class Codegen:
         # input/output. Here rax holds the jmp_buf pointer.
         # Output: rax = 0 on initial call; nonzero after longjmp.
         self.label("_runtime_setjmp")
-        # Save callee-saved registers and the return frame state.
+        # Save callee-saved (non-volatile) registers and the return frame
+        # state. Win64's non-volatile GP register set is RBX/RBP/RDI/RSI/
+        # RSP/R12-R15 -- RSI/RDI were previously missing here despite being
+        # just as non-volatile as RBX/R12-R15, so any value the register
+        # allocator placed in RSI/RDI across a try block (live both before
+        # the `call _runtime_setjmp` and after a later longjmp back into
+        # the handler) silently held POST-LONGJMP GARBAGE instead of its
+        # real value -- whatever RSI/RDI happened to contain deep inside
+        # the raise/longjmp call chain. Confirmed via gdb/objdump: a `for`
+        # loop's own loop-variable global address, kept live in RDI across
+        # an inner try/except, read back as a NULL pointer after the
+        # `except` handler ran and control returned to the loop, causing a
+        # segfault on the very next dereference through it.
         self.emitf(
             "mov [rax+0],  rbx",
             "mov [rax+8],  rbp",
@@ -9696,6 +9708,8 @@ class Codegen:
             "mov [rax+24], r13",
             "mov [rax+32], r14",
             "mov [rax+40], r15",
+            "mov [rax+64], rsi",
+            "mov [rax+72], rdi",
         )
         # Save rsp at the point just after our caller did `call _runtime_setjmp`.
         # When we entered, the call instruction pushed the return address, so
@@ -9719,6 +9733,8 @@ class Codegen:
             "mov r13, [rcx+24]",
             "mov r14, [rcx+32]",
             "mov r15, [rcx+40]",
+            "mov rsi, [rcx+64]",
+            "mov rdi, [rcx+72]",
             "mov rsp, [rcx+48]",
             "jmp [rcx+56]",
         )

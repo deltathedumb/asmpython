@@ -1044,7 +1044,7 @@ Verified: `tests.runner` 475/483 throughout. Sweep: 263→268 OK,
 crashes 42→37 (the class-var feature closed 5 crash-bucket entries at
 once — a real, general feature gap, not a one-off).
 
-**Cumulative sweep numbers, all six triage passes this session, from
+**Cumulative sweep numbers after six triage passes this session, from
 the `OK=245 MISMATCH=24 CRASH=42 BUILD_FAIL=127` session-start
 baseline**:
 
@@ -1052,22 +1052,178 @@ baseline**:
 OK=268  MISMATCH=16  CRASH=37  BUILD_FAIL=117
 ```
 
-**Next step on resume**: continue the same triage pattern — group the
-remaining 37 crashes by symptom before fixing one at a time, then the
-117 build failures (each is a clear "unsupported expr/stmt X"
-`LowerError` message — `str.format`/bare `format()` builtin, a third
-format mini-language, is a known unimplemented gap likely responsible for a
-chunk of these), then the remaining 16 mismatches. The ad-hoc sweep
-script used throughout all six passes (scratch dir, not yet committed)
-is worth promoting to a real `tests/backend_correctness.py` next time —
-re-run it after every fix batch, not just at the start/end, since a
-single fix can measurably move the needle, and note the sweep's
-aggregate counts have some run-to-run noise (a case or two flipping
-between OK/CRASH/timeout across identical runs) — always confirm a
-specific fix via direct build+run of the affected case(s), not just the
-before/after totals. Given the "Everything Python" bar (run essentially
-any unmodified real-world Python program), once this corpus is closer to
-100%, pivot to validating
+(See triage pass seven below for the current, further-updated numbers —
+`OK=287 MISMATCH=12 CRASH=22 BUILD_FAIL=117`.)
+
+**Triage pass seven** (2026-07-16, same-day follow-up): crash-bucket
+triage, six fixes:
+
+1. **Lambda/closure calls through a variable never routed indirectly.**
+   `double = lambda x: x*2; double(21)` (and any function value passed
+   through a parameter, e.g. `def apply(g, v): return g(v)`) crashed:
+   `A.Call` lowering's indirect-vs-direct dispatch only checked
+   `ctx.slot_ty` (LOCAL slots), never `ctx.mctx.global_types` (module
+   globals) — a module-scope `name = lambda ...` is a real global, not a
+   local slot, so it fell to the direct-symbol-call fallback, linking
+   against a nonexistent symbol `double` instead of loading the function
+   pointer the global actually held. Fixed by checking both tables.
+
+2. **`@staticmethod` called via `ClassName.method(...)` always passed an
+   implicit receiver arg it doesn't have.** Both the reachability walker
+   (which force-stamps `param_types[0]` to `"any"` assuming every method
+   has an implicit self/cls) and the `MethodCall` lowering (which always
+   prepended `ctx.shared_zero` as arg 0) treated static methods the same
+   as instance/class methods — clobbering a static method's real first
+   parameter and creating an arg-count mismatch. Fixed both sites to
+   check the resolved method's `"staticmethod" in decorators`.
+
+3. **List `+`/`*` (concat/repeat) never implemented on this backend at
+   all** — fell through to the plain-int `+`/`*` path, adding/multiplying
+   the two lists' raw header POINTERS as integers. Added proper
+   `_abi_list_slice`(full range, shallow copy)+`_abi_list_extend` for
+   `+` (mirrors codegen.py's `_runtime_list_slice`+`_runtime_list_extend`
+   pattern) and a new `_abi_list_repeat` ABI shim (mirroring the
+   existing `_abi_str_repeat` convention exactly, register-for-register)
+   for `*`. Also added the missing `AugAssign` cases: `xs += other`
+   (list) extends in place with no rebind; `s += other` (str) concats to
+   a fresh pointer and rebinds — AugAssign had no list/str-aware branch
+   at all previously, falling through to the same raw-pointer-arithmetic
+   bug.
+
+4. **THE major finding of this pass: function parameters silently read
+   the wrong memory when their name collides with an unrelated
+   module-level global.** `def split(lo, hi): ...` alongside a later
+   top-level `lo, hi = minmax(...)` in the SAME file — `lower_func`'s
+   `local_names` was seeded only by scanning the function body's
+   assignment targets/for-loop vars (`_collect_bound_names`), never by
+   the function's OWN PARAMETERS. A parameter the body only ever READS
+   (never reassigns) was therefore entirely absent from `local_names`,
+   so `_is_global_name`'s non-module-scope fallback (`return name in
+   ctx.mctx.global_names`) misrouted every read of that parameter to
+   `global_addr` the unrelated same-named global instead of the
+   parameter's own stack slot. Silent, not a crash by itself — but
+   `64_multi_return.py` divided by the resulting (zero/uninitialized)
+   value, SIGFPE. Fixed by seeding `local_names` with `f.params` before
+   the body scan. This single fix incidentally also fixed
+   `427_bst_recursive.py` (a recursive `root` parameter shadowing
+   pattern) as a bonus — confirming it's a general, not one-off, gap.
+
+5. **Integer `//`/`%` had NO zero-divisor check at all on this
+   backend** — a genuine `b=0` reached the raw `idiv`/`irem` IR ops
+   directly, hardware-faulting with SIGFPE (uncatchable — not even a
+   `try`/`except ZeroDivisionError` around it could intercept a signal).
+   codegen.py's legacy backend has always raised a normal, catchable
+   `ZeroDivisionError` here; this backend never ported that check. Added
+   `_emit_int_divzero_check` (branch + `_abi_raise` with
+   `BUILTIN_EXC_IDS["ZeroDivisionError"]`, message text matching
+   codegen.py's `_runtime_zerodiv_msg` exactly) at the single choke
+   point (`_lower_int_floordivmod`, shared by `//`, `%`, and their
+   AugAssign forms). `_abi_divmod` (the `divmod()` builtin) already had
+   its own equivalent check in `_runtime_divmod` — untouched.
+
+6. **The deepest bug this session, arguably the whole IR-migration
+   effort: try/except's setjmp/longjmp mechanism could silently corrupt
+   a register-allocated value that outlives the try, whenever the
+   protected try body itself makes ANY function call before an
+   exception fires.** Two independent, compounding defects, both fixed:
+
+   - **a)** `_runtime_setjmp`/`_runtime_longjmp` (the actual jmp_buf
+     save/restore in codegen.py's runtime generator, shared by both
+     backends) never saved/restored RSI/RDI — despite both being
+     genuinely non-volatile/callee-saved on the Win64 ABI, exactly like
+     RBX/R12-R15 which WERE already saved. Grew the jmp_buf from 64 to
+     80 bytes (`ir_lower.py`'s `_JMP_BUF_SIZE`) and added the two extra
+     slots.
+   - **b)** The x86-64 backend's register allocator (`regalloc.py`)
+     computes a value's live range from block-LIST order, but
+     `_lower_try` allocates a try's exception-handler blocks (reached
+     only via the IMPLICIT setjmp/longjmp control transfer, no ordinary
+     `br`/`br.t` edge) physically AFTER the try's own post-loop-body
+     continuation block in that list. A value defined before the try and
+     read only inside the handler (e.g. a for-loop's own loop-variable
+     address, printed in the `except` clause) looked, to the plain
+     last-use scan, already dead by the time the handler's use was
+     recorded — freeing its register for reuse mid-loop. Fixed
+     structurally: `ir_lower.py`'s `_lower_try` now stamps the exact
+     `[setjmp_block_index, last_block_index]` span onto a new
+     `IRFunc.try_regions` field (computed directly from the blocks it
+     just created — no fragile label parsing); `regalloc.py`'s
+     `_last_uses` extends any value defined before the region and
+     referenced anywhere inside it to stay live through the region's
+     end, mirroring the existing loop-back-edge extension.
+   - **c) Fixing (a) and (b) alone was NOT enough** — confirmed via a
+     hardware watchpoint that the actual corruption was a THIRD,
+     independent defect: `_call`'s own codegen wraps every call
+     (including `_abi_setjmp`) in an EPHEMERAL win64_saved_regs
+     save/restore using RSP-relative scratch space "below" the
+     function's permanent frame — safe for ordinary calls (strictly
+     nested call/return), but unsafe for `_abi_setjmp` specifically,
+     since it can "return" a SECOND time (via a LATER `_abi_raise` ->
+     `longjmp` jumping back to the same return address, arbitrarily far
+     in the future). Any call made inside the try body between the two
+     returns (here: `_abi_raise` itself) is free to reuse that exact
+     same ephemeral stack memory for its own temp-save area, since
+     nothing marks it "still in use" after the first, normal return
+     already consumed it once — corrupting the value `_abi_setjmp`'s
+     call site thought it was protecting. Since `_runtime_setjmp`/
+     `_runtime_longjmp` (fix (a), just above) already save every
+     register that matters into the DURABLE jmp_buf, this outer
+     ephemeral save was pure redundancy for this one call site, and
+     actively unsafe. Fixed by skipping `win64_saved_regs` entirely for
+     calls specifically to `_abi_setjmp`.
+
+   Confirmed via `28_exceptions_loop.py` (exact 7-line match) — this
+   pattern (a `for` loop wrapping a `try`/`except` that reads a
+   loop-scope variable in the handler, with a second loop afterward)
+   is common enough that this was almost certainly corrupting other
+   exception-handling test cases too, possibly contributing to some of
+   the still-open mismatch-bucket entries.
+
+Verified: `tests.runner` 475/483 throughout (checked after every
+sub-fix, not just at the end).
+
+**Investigation note, resolved by the same fix**: during this pass, a
+minimal repro (`for i in range(5): try: ... except as e: print("raised
+at", i)`, *without* a second loop afterward) printed `"raised at 3"`
+**five times** instead of once, with `i` NOT correctly advancing —
+initially flagged as a possibly-separate wrong-output bug. Re-confirmed
+after fix 6c (the `_abi_setjmp` win64_saved_regs skip) landed: this
+repro now produces the exact expected output (`raised at 3` /
+`survived`, nothing else). It was the SAME corruption, just manifesting
+as wrong output instead of a hard crash in this narrower shape (no
+second loop to dereference the scrambled pointer against) — not two
+bugs, one bug with two visible symptoms depending on what surrounding
+code happened to reuse the corrupted register for next.
+
+Full-corpus sweep: **`OK=287 MISMATCH=12 CRASH=22 BUILD_FAIL=117`**,
+up from `OK=268 MISMATCH=16 CRASH=37 BUILD_FAIL=117` before this pass —
++19 OK, -4 mismatches, -15 crashes from six fixes, the large jump
+consistent with the setjmp/longjmp bug (fix 6) having been silently
+corrupting a broad swath of exception-handling test cases, not just the
+one it was diagnosed from.
+
+**Next step on resume**: continue the same triage pattern on whatever
+crash/build-failure/mismatch entries remain per the latest sweep
+(`sweep_v12_result.txt` in the scratch dir) — group by symptom before
+fixing one at a time. FFI-module-constant access (`_audio_sdl.CONST`,
+`_gui_sdl.CONST`, `math.pi`-style) is a confirmed, still-open, distinct
+crash-bucket entry (builds fine, crashes at runtime) — same root cause
+class as the earlier `string.ascii_lowercase` fix but for CONSTANTS
+specifically rather than functions; a real but separate feature gap,
+not yet scoped. After crashes: the 117 build failures (each a clear
+"unsupported expr/stmt X" `LowerError` message — `str.format`/bare
+`format()` builtin, a third format mini-language, is a known
+unimplemented gap likely responsible for a chunk of these), then the
+remaining mismatches. The ad-hoc sweep script used throughout all seven
+passes (scratch dir, not yet committed) is worth promoting to a real
+`tests/backend_correctness.py` next time — re-run it after every fix
+batch, not just at the start/end, since a single fix can measurably move
+the needle, and note the sweep's aggregate counts have some run-to-run
+noise (a case or two flipping between OK/CRASH/timeout across identical
+runs) — always confirm a specific fix via direct build+run of the
+affected case(s), not just the before/after totals. Given the
+"Everything Python" bar (run essentially any unmodified real-world
+Python program), once this corpus is closer to 100%, pivot to validating
 against real-world stdlib-only scripts or CPython's own `Lib/test/`
 suite (already pyinbin's conformance oracle) — passing this 440-case
 hand-written corpus was never meant to be the definition of "done," just
@@ -1076,8 +1232,19 @@ the nearest checkpoint before that.
 **When new Win64 ABI shims are added going forward, verify stack-slot
 placement (must be at/above rsp+32) and argument-register assignment
 (shared positional index, not per-type) explicitly — both bug classes
-found this session assembled cleanly and only failed at runtime,
-sometimes on a delayed/second call.**
+found earlier this session assembled cleanly and only failed at
+runtime, sometimes on a delayed/second call.**
+
+**When debugging a register-allocator/codegen correctness bug that only
+reproduces with a specific combination of surrounding code (not in
+isolation): a hardware watchpoint on the exact suspect memory address
+(`watch *(long*)0xADDR` in gdb) is far more direct than reasoning about
+stack offset arithmetic by hand or trying to infer corruption from
+register dumps at a handful of breakpoints — it was what actually
+cracked triage pass seven's setjmp/longjmp bug after several false starts
+(the RSI/RDI jmp_buf fix and the try_regions liveness fix were both
+real, necessary bugs, but neither alone explained the crash; the
+watchpoint immediately identified the third, actual culprit).**
 
 ## Selfhost Status (plan-step 11)
 
