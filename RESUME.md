@@ -1417,6 +1417,75 @@ OK=299  MISMATCH=12  CRASH=10  BUILD_FAIL=117
 56% → 68% of the full 438-case corpus passing. The crash bucket has
 gone from 42 to 10 across all ten passes.
 
+**Triage pass eleven** (2026-07-16, same-day follow-up): found and
+fixed a genuine REGRESSION introduced by this same session's own pass
+seven (`_emit_int_divzero_check`, the `//`/`%` zero-divisor check).
+Investigating `358_calendar_module.py`'s SIGFPE crash (a real
+divide-by-zero fault reaching hardware, from a divisor that was never
+actually zero in the source) narrowed to `calendar.py`'s `weekday()`:
+`h: int = (day + (13*(month+1))//5 + k + k//4 + j//4 - 2*j) % 7` — four
+`//`/`%` operations chained in one expression. A `git checkout` A/B
+diff against the immediately-prior commit (before the zero-check
+existed at all) confirmed the SAME source built and ran correctly
+without it, isolating the zero-check itself as the cause rather than
+some unrelated pre-existing bug.
+
+Root cause: `_emit_int_divzero_check` created its `ok_b` block BEFORE
+`raise_b`, so `raise_b`'s own `br` back to `ok_b` — needed only to give
+the (in practice always-dead, since `_abi_raise` never returns
+normally) block a valid IR terminator — was a branch to a LOWER
+block-list index. `regalloc.py`'s `_last_uses` loop-back-edge
+detection (added originally for genuine `for`/`while` loops) can't
+distinguish "real loop" from "this happens to also be a backward
+branch" — it saw this pattern and mis-classified the whole
+`[ok_b, raise_b]` block range as a loop, spuriously force-extending the
+liveness of every value touched anywhere in that range. `weekday()`'s
+four chained divisions each generate their own divzero-check pair at a
+successively higher block index, so this false "loop" classification,
+repeated four times in sequence, ended up scrambling which physical
+register still held an EARLIER division's result by the time a LATER
+division read it as its own dividend/divisor — a different, unrelated
+value's register bleeding through as a divisor that happened to be 0.
+
+Fixed by simply creating `raise_b` before `ok_b`: `ok_b`'s index is now
+the HIGHER one, so `raise_b`'s `br` back to it is an ordinary forward
+edge, never matching the back-edge pattern at all. No change to
+`regalloc.py` itself was needed this time — unlike the setjmp/longjmp
+bug, this didn't need new cross-function liveness-region metadata, just
+avoiding the accidental backward branch in the first place.
+
+**Process note**: this is the session's first confirmed case of a fix
+introducing its OWN regression, caught only because triage pass eight
+happened to exercise a test case (`calendar_module`) whose real-world
+code shape (several divisions chained in one expression) differed from
+every div-by-zero test case exercised while pass seven's fix was being
+verified. Worth remembering for future backend work: a new block-
+creation helper should default to creating its "success"/"continue"
+path FIRST when it can, specifically to avoid handing the loop-detector
+an accidental backward edge — this is now the second bug (after the
+setjmp/longjmp one) traced back to `_last_uses`'s block-list-order
+assumption not matching a helper's actual block-creation order.
+
+Verified: `tests.runner` 475/483. Confirmed fixing `358_calendar_module.py`
+exactly (all 5 lines) and re-confirmed `436_multi_except.py` (pass
+seven's own original divzero test case) still passes. Full sweep:
+`OK=301 MISMATCH=12 CRASH=9 BUILD_FAIL=116`, up from `OK=299 MISMATCH=12
+CRASH=10 BUILD_FAIL=117` before this pass — +2 OK, -1 crash, -1
+build-failure (the regression was evidently corrupting more than just
+`358_calendar_module.py`; the extra +1 beyond the expected single-crash
+fix confirms a second, previously-silent build-failure case also hit
+the same chained-division shape).
+
+**Cumulative sweep numbers after eleven triage passes this session,
+from the `OK=245 MISMATCH=24 CRASH=42 BUILD_FAIL=127` session-start
+baseline**:
+
+```text
+OK=301  MISMATCH=12  CRASH=9  BUILD_FAIL=116
+```
+
+56% → 69% of the full 438-case corpus passing.
+
 ## Selfhost Status (plan-step 11)
 
 Selfhost = asmpython (gen0, built by CPython) compiling its own source to

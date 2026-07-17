@@ -2438,8 +2438,31 @@ def _emit_int_divzero_check(ctx: _FuncCtx, divisor: IRValue, tag: int) -> None:
     ctx.emit(IRInstr("const", zero, [0]))
     nonzero = ctx.tmp(I64)
     ctx.emit(IRInstr("icmp.ne", nonzero, [divisor, zero]))
-    ok_b = ctx.new_block(f"divzero_ok_{tag}")
+    # `raise_b` created BEFORE `ok_b` deliberately -- its own `br` back to
+    # `ok_b` is otherwise a branch to a LOWER block-list index, which
+    # regalloc.py's `_last_uses` loop-back-edge detection (see its own
+    # docstring) mistakes for a genuine loop back-edge, spuriously
+    # force-extending the liveness of every value touched anywhere in
+    # that "loop" range -- for a function chaining several `//`/`%`
+    # expressions (e.g. calendar.py's `weekday()`: `(day + (13 * (month
+    # + 1)) // 5 + k + k // 4 + j // 4 - 2 * j) % 7`, four divisions in
+    # one expression), each division's own divzero-check pair sits at a
+    # HIGHER block index than the previous one's, so this false "loop"
+    # detection chained across them ends up scrambling which physical
+    # register still holds an earlier division's result by the time a
+    # LATER division reads it as its own dividend/divisor -- confirmed
+    # via gdb + a git-checkout A/B diff against the immediately prior
+    # commit (before this zero-check existed at all): `weekday()` reads
+    # a divisor of 0 that was never 0 in the source, a genuinely
+    # different value's register bleeding through. Creating `raise_b`
+    # first makes `ok_b`'s index the higher one, so `raise_b`'s `br`
+    # becomes an ordinary FORWARD edge -- not a loop by any definition,
+    # and never falsely detected as one. (`raise_b` is dead code on
+    # every real execution path in practice -- `_abi_raise` either
+    # longjmps to an active handler or exits the process -- but the IR
+    # still needs a terminator for it.)
     raise_b = ctx.new_block(f"divzero_raise_{tag}")
+    ok_b = ctx.new_block(f"divzero_ok_{tag}")
     ctx.emit(IRInstr("br.t", None, [nonzero, ok_b.label, raise_b.label]))
 
     ctx.switch_to(raise_b)
