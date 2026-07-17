@@ -4206,24 +4206,47 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 return v
         if obj_ty == "list":
             if e.method == "append" and len(e.args) == 1:
-                if A.expr_type(e.args[0]) == "float":
-                    raise LowerError("unsupported expr MethodCall (list.append float element)")
                 obj_v = _lower_expr(ctx, e.obj)
                 val = _lower_expr(ctx, e.args[0])
+                if A.expr_type(e.args[0]) == "float":
+                    # A list cell is a raw 8-byte int slot -- bitcast the
+                    # double's bits into an I64 so the runtime append
+                    # helper (which just copies 8 raw bytes) doesn't need
+                    # to know or care it's really a float. Mirrors
+                    # codegen.py's `movq rax, xmm0` before its own
+                    # _runtime_list_append call exactly. Was previously a
+                    # hard LowerError -- float lists (`xs: list[float] =
+                    # []; xs.append(1.5)`) were entirely unbuildable on
+                    # this backend even though float list ELEMENT READS
+                    # already worked fine elsewhere.
+                    iv = ctx.tmp(I64)
+                    ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
+                    val = iv
                 ctx.emit(IRInstr("call", None, ["_abi_list_append", obj_v, val]))
                 return ctx.shared_zero  # list.append() returns None
             if e.method == "insert" and len(e.args) == 2:
-                if A.expr_type(e.args[1]) == "float":
-                    raise LowerError("unsupported expr MethodCall (list.insert float element)")
                 obj_v = _lower_expr(ctx, e.obj)
                 idx_v = _lower_expr(ctx, e.args[0])
                 val_v = _lower_expr(ctx, e.args[1])
+                if A.expr_type(e.args[1]) == "float":
+                    iv = ctx.tmp(I64)
+                    ctx.emit(IRInstr("bitcast_f2i", iv, [val_v]))
+                    val_v = iv
                 ctx.emit(IRInstr("call", None, ["_abi_list_insert", obj_v, idx_v, val_v]))
                 return ctx.shared_zero
             if e.method == "pop" and not e.args:
-                if A.expr_type(e) == "float":
-                    raise LowerError("unsupported expr MethodCall (list.pop float element)")
                 obj_v = _lower_expr(ctx, e.obj)
+                if A.expr_type(e) == "float":
+                    # Reverse of append's bitcast: the popped 8-byte
+                    # cell holds a double's raw bits, read back as I64
+                    # by _abi_list_pop -- bitcast to F64 before use.
+                    # Mirrors codegen.py's `movq xmm0, rax` after its
+                    # own _runtime_list_pop call.
+                    iv = ctx.tmp(I64)
+                    ctx.emit(IRInstr("call", iv, ["_abi_list_pop", obj_v]))
+                    fv = ctx.tmp(F64)
+                    ctx.emit(IRInstr("bitcast_i2f", fv, [iv]))
+                    return fv
                 v = ctx.tmp(ir_type_for(A.expr_type(e)))
                 ctx.emit(IRInstr("call", v, ["_abi_list_pop", obj_v]))
                 return v
@@ -4416,6 +4439,88 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 src_v = _lower_expr(ctx, e.args[0])
                 ctx.emit(IRInstr("call", None, ["_abi_dict_update", obj_v, src_v]))
                 return ctx.shared_zero
+            if e.method == "contains" and len(e.args) == 1:
+                # `d.contains(x)` -- an asmpython convenience alias for
+                # `x in d` (used directly as a method in several test
+                # cases, e.g. `19_dicts.py`). `_abi_dict_contains` is
+                # already the exact shim `x in d`'s own Compare-membership
+                # lowering calls; was simply never wired up as a
+                # MethodCall too.
+                obj_v = _lower_expr(ctx, e.obj)
+                key_v = _lower_dict_key(ctx, e.args[0])
+                v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", v, ["_abi_dict_contains", obj_v, key_v]))
+                return v
+            if e.method == "keys" and not e.args:
+                # `d.keys()` alone (not chained into a for-loop, which
+                # has its own separate dict-keys iteration path) -- just
+                # the plain list-of-keys value. `_abi_dict_keys` already
+                # exists and is used by several other call sites
+                # (items(), for-in-dict, etc.); this MethodCall shape
+                # alone was never wired up.
+                obj_v = _lower_expr(ctx, e.obj)
+                v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", v, ["_abi_dict_keys", obj_v]))
+                return v
+            if e.method == "values" and not e.args:
+                obj_v = _lower_expr(ctx, e.obj)
+                keys_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", obj_v]))
+                len_addr = ctx.tmp(PTR)
+                ctx.emit(IRInstr("gep", len_addr, [keys_v, _LIST_LEN_OFF]))
+                len_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", len_v, [len_addr]))
+                out_v = _new_list_from_len(ctx, len_v)
+                out_ptr = ctx.ensure_slot(f"__dictvalues_out_{id(e)}", PTR)
+                keys_ptr = ctx.ensure_slot(f"__dictvalues_keys_{id(e)}", PTR)
+                idx_ptr = ctx.ensure_slot(f"__dictvalues_idx_{id(e)}", I64)
+                dict_ptr = ctx.ensure_slot(f"__dictvalues_dict_{id(e)}", PTR)
+                ctx.emit(IRInstr("store", None, [out_v, out_ptr]))
+                ctx.emit(IRInstr("store", None, [keys_v, keys_ptr]))
+                ctx.emit(IRInstr("store", None, [obj_v, dict_ptr]))
+                zero_i = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", zero_i, [0]))
+                ctx.emit(IRInstr("store", None, [zero_i, idx_ptr]))
+
+                head_b = ctx.new_block("dictvalueshead")
+                body_b = ctx.new_block("dictvaluesbody")
+                end_b = ctx.new_block("dictvaluesend")
+                ctx.emit(IRInstr("br", None, [head_b.label]))
+                ctx.switch_to(head_b)
+                idx_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+                cond_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, len_v]))
+                ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
+
+                ctx.switch_to(body_b)
+                idx_v2 = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
+                keys_v2 = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", keys_v2, [keys_ptr]))
+                key_addr = _list_elem_addr(ctx, keys_v2, idx_v2)
+                key_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", key_v, [key_addr]))
+                dict_v2 = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", dict_v2, [dict_ptr]))
+                zero_default = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", zero_default, [0]))
+                value_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", value_v, ["_abi_dict_get_default", dict_v2, key_v, zero_default]))
+                out_v2 = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", out_v2, [out_ptr]))
+                ctx.emit(IRInstr("call", None, ["_abi_list_append", out_v2, value_v]))
+                one_i = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", one_i, [1]))
+                next_idx = ctx.tmp(I64)
+                ctx.emit(IRInstr("iadd", next_idx, [idx_v2, one_i]))
+                ctx.emit(IRInstr("store", None, [next_idx, idx_ptr]))
+                ctx.emit(IRInstr("br", None, [head_b.label]))
+
+                ctx.switch_to(end_b)
+                final_out = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", final_out, [out_ptr]))
+                return final_out
             if e.method == "items" and not e.args:
                 obj_v = _lower_expr(ctx, e.obj)
                 keys_v = ctx.tmp(PTR)
