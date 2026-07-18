@@ -7376,6 +7376,18 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
                 val = iv
             ctx.emit(IRInstr("call", None, ["_abi_dict_set", obj_v, key_v, val]))
             return
+        setitem_cls = getattr(target, "_setitem_class", "")
+        if setitem_cls or obj_ty.startswith("instance:"):
+            # `dd[key] = value` on a user instance with __setitem__ (sema
+            # already validated this and stamped `_setitem_class` on the
+            # target Subscript) -- mirrors A.Subscript's own __getitem__
+            # dispatch just above in this file (`f"{cls_name}____getitem__"`).
+            cls_name = setitem_cls or obj_ty.split(":", 1)[1]
+            obj_v = _lower_expr(ctx, target.obj)
+            idx_v = _lower_expr(ctx, target.index)
+            val = _lower_expr(ctx, s.value)
+            ctx.emit(IRInstr("call", None, [f"{cls_name}____setitem__", obj_v, idx_v, val]))
+            return
         if obj_ty != "list":
             raise LowerError(f"unsupported stmt IndexAssign ({obj_ty})")
         obj_v = _lower_expr(ctx, target.obj)
@@ -8669,6 +8681,14 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
             owner = getattr(node, "_getitem_class", None)
             if owner is not None:
                 add_resolved(owner, "__getitem__")
+            setitem_owner = getattr(node, "_setitem_class", None)
+            if setitem_owner is not None:
+                # `dd[key] = value` on an instance (sema stamps
+                # `_setitem_class` on the IndexAssign's `target` Subscript,
+                # mirroring `_getitem_class` on a read-side Subscript) --
+                # same "lowering dispatches to __setitem__, walker didn't
+                # know" gap as every other dunder fixed this session.
+                add_resolved(setitem_owner, "__setitem__")
         elif isinstance(node, (A.If, A.While)) and A.expr_type(node.test).startswith("instance:"):
             # `if obj:` / `while obj:` on a user instance dispatches to
             # `__bool__`/`__len__` (see `_lower_truthy`'s own new dunder
