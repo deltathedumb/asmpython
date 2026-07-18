@@ -452,10 +452,21 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         default=None,
         help="activate an opt-in compiler-syntax extension for this build: "
         "a built-in id (e.g. 'constants', for 'const NAME = value' "
-        "declarations) or a path to a plugin file defining one via "
-        "asmpython.extend.Extension(...) (see asmpython/extend.py). Repeatable. "
-        "Off by default -- a source file's grammar never changes without "
-        "this explicit flag.",
+        "declarations) or a path to a plugin file (bare .py or a .apx "
+        "package) defining one via asmpython.extend.Extension(...) (see "
+        "asmpython/extend.py). Repeatable. Off by default -- a source "
+        "file's grammar never changes without this explicit flag.",
+    )
+    build_grp.add_argument(
+        "--apm",
+        metavar="PATH",
+        action="append",
+        default=None,
+        help="load a .apm package (bare .py or a zip): may register any "
+        "combination of extensions/backends/linkers/mlang configs from one "
+        "file, plus run an on_load(asmpython) behavior-modification hook. "
+        "Any extensions it registers activate automatically, same as a "
+        "single .apx passed via --ext. Repeatable.",
     )
 
     # Toolchain --------------------------------------------------------------
@@ -606,7 +617,8 @@ def _resolve_ext_flags(ext_values: "list[str] | None") -> frozenset:
 
 
 def _load_ext_plugin(path: Path) -> str:
-    """Exec a plugin file and return the id of the extension it registered.
+    """Exec a plugin file (bare .py or a .apx package zip) and return the id
+    of the extension it registered.
 
     Requires the plugin to register exactly one `asmpython.extend.Extension(...)`
     (a `Backend`/`Linker`-only plugin has no extension id to activate --
@@ -615,18 +627,24 @@ def _load_ext_plugin(path: Path) -> str:
     more than one, since `--ext path.py` alone wouldn't know which id to
     activate in either case.
     """
+    from . import apkg
+
     before = set(_registered_extension_ids())
-    src = path.read_text(encoding="utf-8")
-    ns: dict = {"__name__": f"asmpython_ext_plugin_{path.stem}", "__file__": str(path)}
     try:
-        exec(compile(src, str(path), "exec"), ns)
+        src, display_name, kind = apkg.read_entry_source(path)
+        ns: dict = {"__name__": f"asmpython_ext_plugin_{path.stem}", "__file__": str(path)}
+        exec(compile(src, display_name, "exec"), ns)
+    except apkg.ApkgError as e:
+        raise RuntimeError(f"failed to load extension plugin {path}: {e}") from e
     except Exception as e:
         raise RuntimeError(f"failed to load extension plugin {path}: {e}") from e
     after = set(_registered_extension_ids())
     new_ids = after - before
     if len(new_ids) == 0:
+        hint = f" (its manifest declares kind={kind!r})" if kind and kind != "extension" else ""
         raise RuntimeError(
             f"extension plugin {path} did not register any asmpython.extend.Extension(...)"
+            f"{hint}"
         )
     if len(new_ids) > 1:
         raise RuntimeError(
@@ -640,6 +658,94 @@ def _registered_extension_ids() -> list[str]:
     from .extensions import _REGISTRY
 
     return list(_REGISTRY.keys())
+
+
+def _load_backend_plugin(path: Path) -> str:
+    """Exec a plugin file (bare .py or a .apb package zip) and return the
+    name of the backend it registered. Mirrors `_load_ext_plugin` exactly,
+    diffing `asmpython._backends._REGISTRY` instead of the extension
+    registry, since a Backend has no id-based activation step -- its
+    registered name IS what `--backend` selects."""
+    from . import apkg
+    from asmpython import _backends
+
+    before = set(_backends._REGISTRY.keys())
+    try:
+        src, display_name, kind = apkg.read_entry_source(path)
+        ns: dict = {"__name__": f"asmpython_backend_plugin_{path.stem}", "__file__": str(path)}
+        exec(compile(src, display_name, "exec"), ns)
+    except apkg.ApkgError as e:
+        raise RuntimeError(f"failed to load backend plugin {path}: {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"failed to load backend plugin {path}: {e}") from e
+    after = set(_backends._REGISTRY.keys())
+    new_names = after - before
+    if len(new_names) == 0:
+        hint = f" (its manifest declares kind={kind!r})" if kind and kind != "backend" else ""
+        raise RuntimeError(
+            f"backend plugin {path} did not register any asmpython.backend.Backend(...)"
+            f"{hint}"
+        )
+    if len(new_names) > 1:
+        raise RuntimeError(
+            f"backend plugin {path} registered multiple backends "
+            f"({', '.join(sorted(new_names))}) -- a .apb package should register exactly one"
+        )
+    return next(iter(new_names))
+
+
+def _load_linker_plugin(path: Path) -> str:
+    """Exec a plugin file (bare .py or a .apl package zip) and return the
+    name of the linker it registered. Mirrors `_load_backend_plugin`."""
+    from . import apkg
+    from asmpython import _linkers
+
+    before = set(_linkers._REGISTRY.keys())
+    try:
+        src, display_name, kind = apkg.read_entry_source(path)
+        ns: dict = {"__name__": f"asmpython_linker_plugin_{path.stem}", "__file__": str(path)}
+        exec(compile(src, display_name, "exec"), ns)
+    except apkg.ApkgError as e:
+        raise RuntimeError(f"failed to load linker plugin {path}: {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"failed to load linker plugin {path}: {e}") from e
+    after = set(_linkers._REGISTRY.keys())
+    new_names = after - before
+    if len(new_names) == 0:
+        hint = f" (its manifest declares kind={kind!r})" if kind and kind != "linker" else ""
+        raise RuntimeError(
+            f"linker plugin {path} did not register any asmpython.linker.Linker(...)"
+            f"{hint}"
+        )
+    if len(new_names) > 1:
+        raise RuntimeError(
+            f"linker plugin {path} registered multiple linkers "
+            f"({', '.join(sorted(new_names))}) -- a .apl package should register exactly one"
+        )
+    return next(iter(new_names))
+
+
+def _resolve_backend_flag(value: "str | None") -> "str | None":
+    """Resolve --backend's value: a bare registered name passes through
+    unchanged; a filesystem path (bare .py or .apb package) is loaded first
+    and its registered name is used instead. Mirrors `_resolve_ext_flags`'s
+    single-value shape."""
+    if value is None:
+        return None
+    p = Path(value)
+    if p.is_file():
+        return _load_backend_plugin(p)
+    return value
+
+
+def _resolve_linker_flag(value: "str | None") -> "str | None":
+    """Resolve --linker's value. Mirrors `_resolve_backend_flag`."""
+    if value is None:
+        return None
+    p = Path(value)
+    if p.is_file():
+        return _load_linker_plugin(p)
+    return value
 
 
 def cmd_build(args: argparse.Namespace) -> int:
@@ -728,7 +834,12 @@ def cmd_build(args: argparse.Namespace) -> int:
     # `legacy` for the whole build in that rare case rather than picking
     # one target's default arbitrarily; pass `--backend` explicitly to
     # override.
-    effective_backend = args.backend
+    try:
+        effective_backend = _resolve_backend_flag(args.backend)
+        args.linker = _resolve_linker_flag(args.linker)
+    except RuntimeError as e:
+        print(f"asmpython: error: {e}", file=sys.stderr)
+        return 1
     if effective_backend is None:
         _freestanding_targets = {"freestanding", "freestanding16"}
         if any(t in _freestanding_targets for t in targets):
@@ -812,9 +923,15 @@ def cmd_build(args: argparse.Namespace) -> int:
     if cfg is not None and cfg.pyinbin_imports:
         return native_rejection(RuntimeError("project declares pyinbin_imports"))
 
+    from . import apkg
+
     try:
-        active_extensions = _resolve_ext_flags(args.ext)
-    except RuntimeError as e:
+        active_extensions = set(_resolve_ext_flags(args.ext))
+        for apm_path in (args.apm or []):
+            result = apkg.load_module_package(Path(apm_path))
+            active_extensions.update(result.extension_ids)
+        active_extensions = frozenset(active_extensions)
+    except (RuntimeError, apkg.ApkgError) as e:
         print(f"asmpython: error: {e}", file=sys.stderr)
         return 1
     try:
