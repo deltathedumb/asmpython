@@ -346,7 +346,27 @@ def _run_backend_x86_64(
     build_runtime(target)  # ensures runtime_object_path's file is current
     runtime_obj = runtime_object_path(target).read_bytes()
 
-    effective_linker = linker or backend.default_linker
+    # asmpython.mlang: any Code(...) literal sema.py compiled via a real
+    # external compiler (mlang_support._run_mlang_code) contributes its
+    # own object file here. That object's real g++/gcc output carries
+    # sections (.pdata/.xdata on Windows, .eh_frame on Linux, etc.) the
+    # builtin from-scratch linker's narrow COFF/ELF parsers don't
+    # recognize and silently drop -- confirmed unsafe for arbitrary
+    # compiler output, unlike this backend's own program/shim/runtime
+    # objects (which are deliberately kept to what those parsers handle).
+    # Force the fully-generic gcc-link-arbitrary-objects path whenever
+    # mlang is in play, regardless of what --linker the invocation asked
+    # for, rather than trying to extend the builtin linker's symbol
+    # tables to cover libstdc++/exception-handling metadata -- a losing
+    # game against arbitrary C++ output.
+    mlang_objects = getattr(module, "mlang_objects", [])
+    if mlang_objects and linker not in (None, "gcc"):
+        raise ValueError(
+            f"--linker {linker!r} can't be used with asmpython.mlang "
+            f"(embedded Code(...) needs the gcc linker to safely handle "
+            f"real compiler output) -- omit --linker or pass --linker gcc"
+        )
+    effective_linker = "gcc" if mlang_objects else (linker or backend.default_linker)
     gcc = None
     if effective_linker == "gcc":
         gcc = _resolve_tool("gcc", override=gcc_path, env_var="ASMPYTHON_GCC")
@@ -355,11 +375,13 @@ def _run_backend_x86_64(
         "target_os": target,
         "abi": abi,
         "entry_symbol": "main",
-        "linker": linker,
+        "linker": "gcc" if mlang_objects else linker,
         "gcc_path": gcc,
         "extra_args": ["-mconsole"] if target == "windows" else [],
     }
-    linked = backend.link([program_obj, shim_obj, runtime_obj], link_args)
+    objects = [program_obj, shim_obj, runtime_obj]
+    objects += [obj_bytes for obj_bytes, _obj_ext in mlang_objects]
+    linked = backend.link(objects, link_args)
     out_bytes = next(iter(linked.values()))
 
     out_path = out_path.resolve()

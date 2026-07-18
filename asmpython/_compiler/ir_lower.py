@@ -118,12 +118,17 @@ class _ModuleCtx:
         global_types: dict[str, IRType] | None = None,
         global_list_el_ty: dict[str, str] | None = None,
         classes: list | None = None,
+        mlang_code_funcs: dict | None = None,
     ) -> None:
         self.data: list[IRGlobal] = []
         self.class_names = class_names
         self.func_names = func_names
         self.func_sigs = func_sigs or {}
         self.ffi_funcs = ffi_funcs or {}
+        # asmpython.mlang: uid -> {method_name: mlang_support.MlangFuncSig},
+        # one entry per Code(...) literal sema.py's _inject_mlang_if_needed
+        # found and compiled. Consulted by A.MethodCall's `mlang:` case.
+        self.mlang_code_funcs = mlang_code_funcs or {}
         # FFI constants (e.g. `from math import pi`) -- a bare name bound
         # to a compile-time-known scalar value (stdlib.Const), NOT a real
         # runtime global. `_lower_expr`'s A.Name case checks this BEFORE
@@ -6277,6 +6282,33 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("call", v, ["_abi_str_replace", obj_v, old_v, new_v]))
                 return v
             raise LowerError(f"unsupported expr MethodCall (str.{e.method})")
+        if obj_ty.startswith("mlang:"):
+            # code.add(1, 2) where `code`'s static type is a `mlang:<uid>`
+            # marker (see sema.py's _inject_mlang_if_needed / the
+            # MethodCall `mlang:` dispatch it feeds). The receiver
+            # (`code` itself) is purely a compile-time marker -- there is
+            # no real runtime Code object, so `e.obj` is intentionally
+            # NOT lowered/loaded here (unlike every other MethodCall
+            # case): the call goes straight to the resolved C ABI symbol
+            # (== the exported function's own name, guaranteed unmangled
+            # by mlang_support's extern "C" auto-wrap), exactly like an
+            # ordinary ffi_funcs call.
+            uid = obj_ty.split(":", 1)[1]
+            sig = ctx.mctx.mlang_code_funcs.get(uid, {}).get(e.method)
+            if sig is None:
+                raise LowerError(f"unsupported expr MethodCall (mlang Code.{e.method})")
+            args = []
+            for a, arg_ty in zip(e.args, sig.arg_types):
+                av = _lower_expr(ctx, a)
+                if arg_ty == "float" and av.type is not F64:
+                    fv = ctx.tmp(F64)
+                    ctx.emit(IRInstr("sitofp", fv, [av]))
+                    av = fv
+                args.append(av)
+            res_ty = F64 if sig.ret_type == "float" else I64
+            v = ctx.tmp(res_ty)
+            ctx.emit(IRInstr("call", v, [e.method, *args]))
+            return v
         if obj_ty.startswith("super:"):
             # super().method(args): dispatch statically to the base
             # class's method (never virtual -- codegen.py's own
@@ -7163,6 +7195,22 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         return
 
     if isinstance(s, A.Assign):
+        if A.expr_type(s.value).startswith("mlang:"):
+            # `code = ml.Code(config, source)`: the RHS is a compile-time-
+            # only marker (see the `mlang:` MethodCall case above) --
+            # sema.py's _inject_mlang_if_needed already ran the real
+            # compiler and recorded the exported signatures keyed by this
+            # same uid; `code` itself never becomes a real runtime value
+            # (no Code object exists at runtime), so store a harmless
+            # null placeholder rather than evaluating `ml.Code(...)` as
+            # an ordinary MethodCall (which would incorrectly dispatch
+            # through the ffi_funcs/imported_modules machinery for a
+            # method that was never a real FFI binding).
+            ptr = _name_ptr(ctx, s.target, PTR)
+            zero = ctx.tmp(PTR)
+            ctx.emit(IRInstr("const", zero, [0]))
+            ctx.emit(IRInstr("store", None, [zero, ptr]))
+            return
         val = _lower_expr(ctx, s.value)
         ptr = _name_ptr(ctx, s.target, ctx.mctx.global_types.get(s.target, val.type))
         ctx.emit(IRInstr("store", None, [val, ptr]))
@@ -8763,6 +8811,7 @@ def lower_module(mod: A.Module) -> IRModule:
         global_types,
         global_list_el_ty,
         mod.classes,
+        getattr(mod, "mlang_code_funcs", {}),
     )
     # Register each class-var global's type into `global_types` (and
     # therefore `global_names`, computed from it in `_ModuleCtx.__init__`)

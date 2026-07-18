@@ -960,6 +960,22 @@ class Codegen:
         "_runtime_list_insert",
         "_runtime_dict_clear",
         "_runtime_dict_pop",
+        # Found missing 2026-07-17 while wiring asmpython.mlang's forced
+        # gcc-linker path: abi_shims.asm (the x86-64 IR backend's ABI
+        # shim layer) `extern`s these six, but they were never in this
+        # list, so generate_runtime_only() never emitted `global` for
+        # them -- NASM's default visibility left them file-local (`t` in
+        # nm, not `T`). Invisible under the default `builtin` linker
+        # (its own simplified symbol-merge doesn't distinguish local vs.
+        # global), but a hard link failure under `--linker gcc` for any
+        # program calling repr()/list(range(...))/a raw string-dup helper
+        # -- i.e. most real programs, not just mlang-using ones.
+        "_runtime_fmt_elem",
+        "_runtime_str_concat_dup",
+        "_runtime_list_repr",
+        "_runtime_dict_repr",
+        "_runtime_set_repr",
+        "_runtime_range_list",
     ]
 
     def emit_externs(self) -> None:

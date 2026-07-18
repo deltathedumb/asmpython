@@ -584,6 +584,14 @@ class SemaAnalyzer:
         self.imported_modules: dict[str, dict] = {}
         self.ffi_funcs: dict[str, stdlib.Func] = {}
         self.ffi_consts: dict[str, stdlib.Const] = {}
+        # asmpython.mlang support: uid (str(id(assign_stmt))) -> the
+        # mlang_support.MlangResult's `funcs` dict for that Code(...)
+        # literal, plus the compiled object bytes each such uid maps to
+        # (mlang_objects), consumed by driver.py's link step. Populated by
+        # _inject_mlang_if_needed, consulted by A.MethodCall's `mlang:`
+        # dispatch above.
+        self.mlang_code_funcs: dict[str, dict] = {}
+        self.mlang_objects: "list[tuple[bytes, str]]" = []
         self._tuple_scan_globals: Scope = Scope()
         # name -> per-slot element kinds for functions that return a tuple
         # (i.e. have a `return a, b` somewhere). Lets `q, r = f()` recover
@@ -2206,6 +2214,120 @@ class SemaAnalyzer:
         except Exception:
             pass
 
+    def _mlang_resolve_config(self, e) -> "tuple[str, str, tuple, bool] | None":
+        """Statically resolve `e` (an mlang Config expression) to
+        `(exe, frontend, compile_args, infer_signatures)`. Only the two
+        built-in `ml.builtins.gcc.cpp`/`ml.builtins.gcc.c` configs are
+        recognized in this first version -- a user-authored `ml.Config(...)`
+        literal isn't statically evaluated here (that would need a general
+        constant-folding evaluator this compiler doesn't have); returns
+        None for anything else, and the caller raises a clear SemaError."""
+        # e is an Attr chain: ml.builtins.gcc.cpp -> Attr(Attr(Attr(Name(ml),
+        # "builtins"), "gcc"), "cpp").
+        names: list[str] = []
+        cur = e
+        while isinstance(cur, A.Attr):
+            names.append(cur.name)
+            cur = cur.obj
+        if not isinstance(cur, A.Name):
+            return None
+        names.append(cur.name)
+        names.reverse()  # e.g. ["ml", "builtins", "gcc", "cpp"]
+        if len(names) != 4 or names[1:3] != ["builtins", "gcc"]:
+            return None
+        if names[3] == "cpp":
+            return ("g++", "cpp", ("-c", "-x", "c++", "{src}", "-o", "{out}"), True)
+        if names[3] == "c":
+            return ("gcc", "c", ("-c", "-x", "c", "{src}", "-o", "{out}"), True)
+        return None
+
+    def _inject_mlang_if_needed(self) -> None:
+        """If the module imports `asmpython.mlang`, find every
+        `target = <alias>.Code(config, source[, exports=...])` assignment
+        (module or function scope), shell out to the configured compiler
+        via `mlang_support._run_mlang_code`, and stamp `target`'s static
+        type as a `mlang:<uid>` marker (mirrors the `super:<Base>`/
+        `instance:<Class>` marker-type pattern already used elsewhere --
+        see A.MethodCall's own `mlang:` dispatch for how that marker is
+        later consumed). `self.mlang_code_funcs[uid]` and
+        `self.mlang_objects` are populated here; driver.py's link step
+        reads the latter to append the compiled object(s) and force the
+        gcc linker."""
+        alias = None
+        for stmt in self.mod.body:
+            if isinstance(stmt, A.Import) and stmt.module in ("asmpython.mlang", "mlang"):
+                alias = stmt.alias or stmt.module.rsplit(".", 1)[-1]
+                break
+            if isinstance(stmt, A.FromImport) and stmt.module in ("asmpython.mlang", "mlang"):
+                # `from asmpython.mlang import Code, Config, builtins` --
+                # Code(...) is called bare, not qualified: recognized as an
+                # A.Call(func="Code", ...) instead of A.MethodCall. Not yet
+                # supported in this first version (only the `import ... as
+                # ml; ml.Code(...)` qualified form is) -- no alias to key
+                # the scan on, so this import shape is silently inert
+                # rather than half-working.
+                return
+        if alias is None:
+            return
+
+        from . import mlang_support as _mlang
+
+        def _scan(stmts: list) -> None:
+            for s in stmts:
+                if (
+                    isinstance(s, A.Assign)
+                    and isinstance(s.value, A.MethodCall)
+                    and isinstance(s.value.obj, A.Name)
+                    and s.value.obj.name == alias
+                    and s.value.method == "Code"
+                    and len(s.value.args) >= 2
+                ):
+                    call = s.value
+                    config = self._mlang_resolve_config(call.args[0])
+                    if config is None:
+                        raise SemaError(
+                            "mlang Code(...)'s first argument must be a "
+                            "built-in config (ml.builtins.gcc.cpp / "
+                            "ml.builtins.gcc.c) -- user-authored Config(...) "
+                            "literals aren't statically resolvable yet",
+                            call.pos,
+                        )
+                    if not isinstance(call.args[1], A.StrLit):
+                        raise SemaError(
+                            "mlang Code(...)'s source argument must be a "
+                            "string literal",
+                            call.pos,
+                        )
+                    exe, frontend, compile_args, infer_signatures = config
+                    source = call.args[1].value
+                    try:
+                        result = _mlang._run_mlang_code(
+                            exe, frontend, compile_args, infer_signatures, source, {}
+                        )
+                    except _mlang.MlangError as exc:
+                        raise SemaError(str(exc), call.pos) from exc
+                    uid = str(id(s))
+                    self.mlang_code_funcs[uid] = result.funcs
+                    self.mlang_objects.append((result.obj_bytes, result.obj_ext))
+                    # Stamp the Code(...) call's own inferred_type -- same
+                    # mechanism sema.py's super() check uses
+                    # (`e.inferred_type = f"super:{parent}"`), so
+                    # A.expr_type(s.value) naturally returns this marker
+                    # and _bind_name_from_value's `t = A.expr_type(value)`
+                    # binds `target` to it with no further plumbing.
+                    call.inferred_type = "mlang:" + uid
+                for attr in ("body", "then", "orelse", "handler", "finally_body", "else_body"):
+                    sub = getattr(s, attr, None)
+                    if isinstance(sub, list):
+                        _scan(sub)
+
+        _scan(self.mod.body)
+        for f in self.mod.funcs:
+            _scan(f.body)
+        for c in self.mod.classes:
+            for m in c.methods:
+                _scan(m.body)
+
     def _try_check_block(self, stmts: list, scope: "Scope") -> None:
         """Run `_check_block` and, in collect-errors mode, stash any SemaError
         instead of propagating it so analysis continues in other bodies."""
@@ -2773,6 +2895,11 @@ class SemaAnalyzer:
         # Inject stdlib Assembly class if the user imported it, so the
         # constructor and method calls resolve through the normal class path.
         self._inject_assembly_class_if_needed()
+        # Compile every asmpython.mlang Code(...) literal (shells out to the
+        # configured external compiler) and stamp each one's assignment
+        # target with a mlang:<uid> marker type, before any other analysis
+        # needs to resolve `code.add(...)`-style calls against it.
+        self._inject_mlang_if_needed()
         # Transform generator functions (functions with yield) into factory +
         # iterator class pairs before any other analysis.
         new_funcs: list = []
@@ -3251,6 +3378,8 @@ class SemaAnalyzer:
         self.mod.imported_modules = self.imported_modules
         self.mod.ffi_funcs = self.ffi_funcs
         self.mod.ffi_consts = self.ffi_consts
+        self.mod.mlang_code_funcs = self.mlang_code_funcs
+        self.mod.mlang_objects = self.mlang_objects
         # Codegen needs to look up methods by class chain for dispatch.
         self.mod.classes_sig = self.classes
         self.mod.funcs_sig = self.funcs
@@ -6770,6 +6899,49 @@ class SemaAnalyzer:
                     "native code",
                     e.pos,
                 )
+            # `ml.Code(config, source)` itself: _inject_mlang_if_needed
+            # already ran (before this normal _check_block/_check_stmt
+            # pass even starts) and stamped this exact node's
+            # inferred_type to a `mlang:<uid>` marker directly. Without
+            # this short-circuit, falling through to the generic
+            # MethodCall dispatch below would re-typecheck `Code` as an
+            # ordinary attribute lookup on the `ml` "module" (bound as a
+            # plain opaque `scope.add(bind_name, "module")` dummy, since
+            # `asmpython.mlang` isn't a real stdlib registry entry) and
+            # silently overwrite the stamp back to "any" -- confirmed as
+            # a real bug via a full IR dump: `code`'s type came out
+            # "any" and `code.add(1, 2)` never reached this file's own
+            # `mlang:` MethodCall case below at all, compiling to a
+            # constant 0 with no call to `add` ever emitted.
+            if isinstance(e.obj, A.Name) and e.method == "Code" and str(e.inferred_type).startswith("mlang:"):
+                for a in e.args:
+                    self._check_expr(a, scope)
+                return
+            # mlang Code(...) call: code.add(1, 2) where `code`'s static
+            # type is a `mlang:<uid>` marker (stamped by
+            # _inject_mlang_if_needed's Code(...)-assignment scan, mirrors
+            # the `super:<Base>`/`instance:<Class>` marker-type pattern
+            # already used elsewhere -- see that function's own docstring
+            # for the full mechanism). The synthesized signature table
+            # (self.mlang_code_funcs[uid]) was already built by shelling
+            # out to the configured compiler during that same scan.
+            self._check_expr(e.obj, scope)
+            _obj_t_mlang = A.expr_type(e.obj)
+            if _obj_t_mlang.startswith("mlang:"):
+                uid = _obj_t_mlang.split(":", 1)[1]
+                funcs = self.mlang_code_funcs.get(uid, {})
+                if e.method not in funcs:
+                    raise SemaError(
+                        f"mlang Code(...) has no exported function {e.method!r} "
+                        f"(known: {', '.join(sorted(funcs)) or '<none>'})",
+                        e.pos,
+                    )
+                sig = funcs[e.method]
+                fn = stdlib.Func(arg_types=sig.arg_types, ret_type=sig.ret_type, c_name=e.method)
+                self._check_ffi_call(fn, e.args, e.pos, scope, label=f"Code.{e.method}")
+                e.inferred_type = sig.ret_type
+                e._mlang_call = True  # type: ignore[attr-defined]
+                return
             # Module function call: math.sqrt(x), math.pow(a, b).
             if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
                 # os.getcwd() / os.listdir(path): inline codegen helpers not in
