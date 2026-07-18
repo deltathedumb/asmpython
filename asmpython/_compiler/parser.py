@@ -923,20 +923,6 @@ class Parser:
                 # Class-body string literal (docstring) — drop the line.
                 self._eat()
                 self._expect("NEWLINE")
-            elif self._check("NAME", "const") and self._looks_like_const_decl():
-                # `const` shape detected inside a class body: class bodies
-                # never go through the module-level `_parse_stmt`/
-                # `_parse_block` dispatch (this loop is its own bespoke
-                # suite), so `_suite_depth` alone can't catch this nesting --
-                # raise the same scope-violation diagnostic directly instead
-                # of falling through to `_parse_class_var`, which would
-                # otherwise misread `const` as a class-body field name and
-                # choke on the unconsumed name token that follows it.
-                raise ParseError(
-                    "'const' may only appear at module scope",
-                    self._peek().pos,
-                    ErrorCode.P_EXTENSION_SCOPE,
-                )
             elif self._check("NAME"):
                 # Class-body variable: `name [: type] [= value]`. Captured so
                 # sema can type `self.NAME` reads (e.g. a set/dict constant used
@@ -1536,26 +1522,6 @@ class Parser:
         if t.kind == "NAME" and t.value == "match" and self._looks_like_match_stmt():
             return self._parse_match()
 
-        # `const` is a contextual (soft) keyword too -- an ordinary NAME
-        # token the lexer never distinguishes from any other identifier.
-        # Its own speculative lookahead means `const = 10` keeps working
-        # exactly as a plain assignment when the shape doesn't match a
-        # declaration.
-        if t.kind == "NAME" and t.value == "const" and self._looks_like_const_decl():
-            if self.ext_ctx.is_active("constants"):
-                return self._parse_const_decl()
-            # Shape matches a const-declaration attempt, but the `constants`
-            # extension wasn't activated for this compile run -- a clearer,
-            # earlier diagnostic than falling through to ordinary assignment
-            # parsing (which would just try to assign to a bare `const`
-            # name and then choke on the unconsumed `NAME` that follows it).
-            raise ParseError(
-                "'const' declarations require the 'constants' extension "
-                "(pass '--ext constants' on the command line)",
-                t.pos,
-                ErrorCode.P_CONST_WITHOUT_EXTENSION,
-            )
-
         # `final class` / `sealed class` nested inside a function body:
         # lifted to module level exactly like an ordinary nested `class`
         # (see the KEYWORD "class" branch above) -- append to
@@ -1799,68 +1765,6 @@ class Parser:
             body = [with_stmt]
         return with_stmt
 
-    def _looks_like_const_decl(self) -> bool:
-        """`const` is a soft keyword: only `const NAME [: annotation] [= ...]`
-        is a declaration shape. Checks NAME first (not `OP =` directly) so
-        bare `const = 5` (constants inactive OR active) never intercepts --
-        that shape has no NAME between `const` and `=`, so it always falls
-        through to ordinary assignment parsing regardless of extension
-        state. A missing initializer (`const NAME` / `const NAME: T` with no
-        `=`) still counts as matching the shape -- rather than falling
-        through to ordinary statement parsing (which would choke on the
-        unconsumed NAME with a confusing generic P_EXPECTED_TOKEN error),
-        this lets `_parse_const_decl` run and raise the precise
-        P_CONST_NO_INITIALIZER diagnostic instead. This lookahead is also
-        used, independent of whether `constants` is active, purely to detect
-        "this looks like someone tried to write a const-decl shape" for the
-        P_CONST_WITHOUT_EXTENSION diagnostic."""
-        save = self.i
-        self._eat()  # 'const'
-        ok = False
-        try:
-            if not self._check("NAME"):
-                ok = False
-            else:
-                self._eat()
-                if self._check("OP", ":"):
-                    self._eat()
-                    self._parse_type_annotation()
-                ok = self._check("NEWLINE") or self._check("OP", "=")
-        except ParseError:
-            ok = False
-        self.i = save
-        return ok
-
-    def _parse_const_decl(self) -> A.ConstDecl:
-        kw = self._expect("NAME", "const")
-        if self._suite_depth != 0:
-            raise ParseError(
-                "'const' may only appear at module scope",
-                kw.pos,
-                ErrorCode.P_EXTENSION_SCOPE,
-            )
-        name_tok = self._expect("NAME")
-        annotation = None
-        if self._check("OP", ":"):
-            self._eat()
-            annotation = self._parse_type_annotation()
-        if not self._check("OP", "="):
-            raise ParseError(
-                "'const' declarations require an initializer "
-                "('const NAME = value')",
-                name_tok.pos,
-                ErrorCode.P_CONST_NO_INITIALIZER,
-            )
-        self._eat()  # '='
-        value = self._parse_tuple_rhs()
-        self._expect("NEWLINE")
-        return A.ConstDecl(
-            name=name_tok.value,  # type: ignore[arg-type]
-            value=value,
-            pos=kw.pos,
-            annotation=annotation,
-        )
-
     def _looks_like_final_class(self) -> bool:
         """`final` is a soft keyword: only `final class ...` is the class-
         finality shape (an ordinary `final = 5` or `final.method()` keeps
@@ -1886,8 +1790,8 @@ class Parser:
         if self.ext_ctx.is_active("final"):
             return self._parse_final_class()
         raise ParseError(
-            "'final class' requires the 'final' extension "
-            "(pass '--ext final' on the command line)",
+            "'final class' is not supported -- asmpython's compiler-"
+            "extension system was withdrawn (see archived/extensions/)",
             self._peek().pos,
             ErrorCode.P_FINAL_WITHOUT_EXTENSION,
         )
@@ -1912,8 +1816,8 @@ class Parser:
         if self.ext_ctx.is_active("sealed"):
             return self._parse_sealed_class()
         raise ParseError(
-            "'sealed class' requires the 'sealed' extension "
-            "(pass '--ext sealed' on the command line)",
+            "'sealed class' is not supported -- asmpython's compiler-"
+            "extension system was withdrawn (see archived/extensions/)",
             self._peek().pos,
             ErrorCode.P_SEALED_WITHOUT_EXTENSION,
         )
@@ -1980,8 +1884,9 @@ class Parser:
         if self.ext_ctx.is_active("enum"):
             return self._parse_enum_decl()
         raise ParseError(
-            "'enum' declarations require the 'enum' extension "
-            "(pass '--ext enum' on the command line)",
+            "'enum' declarations are not supported -- asmpython's "
+            "compiler-extension system was withdrawn (see "
+            "archived/extensions/)",
             self._peek().pos,
             ErrorCode.P_ENUM_WITHOUT_EXTENSION,
         )
@@ -2054,8 +1959,9 @@ class Parser:
         if self.ext_ctx.is_active("interface"):
             return self._parse_interface_decl()
         raise ParseError(
-            "'interface' declarations require the 'interface' extension "
-            "(pass '--ext interface' on the command line)",
+            "'interface' declarations are not supported -- asmpython's "
+            "compiler-extension system was withdrawn (see "
+            "archived/extensions/)",
             self._peek().pos,
             ErrorCode.P_INTERFACE_WITHOUT_EXTENSION,
         )

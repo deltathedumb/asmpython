@@ -446,27 +446,15 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         "the source through pyinbin. Useful for differential compiler testing.",
     )
     build_grp.add_argument(
-        "--ext",
-        metavar="NAME_OR_PATH",
-        action="append",
-        default=None,
-        help="activate an opt-in compiler-syntax extension for this build: "
-        "a built-in id (e.g. 'constants', for 'const NAME = value' "
-        "declarations) or a path to a plugin file (bare .py or a .apx "
-        "package) defining one via asmpython.extend.Extension(...) (see "
-        "asmpython/extend.py). Repeatable. Off by default -- a source "
-        "file's grammar never changes without this explicit flag.",
-    )
-    build_grp.add_argument(
         "--apm",
         metavar="PATH",
         action="append",
         default=None,
-        help="load a .apm package (bare .py or a zip): may register any "
-        "combination of extensions/backends/linkers/mlang configs from one "
+        help="load a .apm package (bare .py or a zip): may register a "
+        "custom backend/linker and/or mlang Config instances from one "
         "file, plus run an on_load(asmpython) behavior-modification hook. "
-        "Any extensions it registers activate automatically, same as a "
-        "single .apx passed via --ext. Repeatable.",
+        "Repeatable. (Compiler-syntax extensions are no longer "
+        "supported -- a .apm registering one will fail to load.)",
     )
 
     # Toolchain --------------------------------------------------------------
@@ -589,75 +577,6 @@ def _run_check(
     if as_json:
         print("[]")
     return 0
-
-
-def _resolve_ext_flags(ext_values: "list[str] | None") -> frozenset:
-    """Resolve `--ext` values into a set of extension ids to activate.
-
-    Each value is either a bare registered id (e.g. `constants`) or a
-    filesystem path to a plugin file (e.g. `my_plugin.py`) -- distinguished
-    by whether it names an existing file, matching how `asmpython.
-    Extension`'s own docs describe `--ext`. A path is exec'd first (in the
-    *host* CPython process, never compiled by asmpython) so its
-    `asmpython.extend.Extension(...)`/`asmpython.backend.Backend(...)`/`asmpython.linker.Linker(...)` calls register
-    before activation is attempted, then its registered extension's `id` is
-    what actually gets activated -- so `--ext my_plugin.py` alone is enough
-    to both load and activate a plugin-defined extension in one flag.
-    """
-    if not ext_values:
-        return frozenset()
-    ids: set[str] = set()
-    for value in ext_values:
-        p = Path(value)
-        if p.is_file():
-            ids.add(_load_ext_plugin(p))
-        else:
-            ids.add(value)
-    return frozenset(ids)
-
-
-def _load_ext_plugin(path: Path) -> str:
-    """Exec a plugin file (bare .py or a .apx package zip) and return the id
-    of the extension it registered.
-
-    Requires the plugin to register exactly one `asmpython.extend.Extension(...)`
-    (a `Backend`/`Linker`-only plugin has no extension id to activate --
-    use `--backend`/`--linker` to select those instead, no `--ext` needed
-    for them at all). Raises a clear error if the plugin registers zero or
-    more than one, since `--ext path.py` alone wouldn't know which id to
-    activate in either case.
-    """
-    from . import apkg
-
-    before = set(_registered_extension_ids())
-    try:
-        src, display_name, kind = apkg.read_entry_source(path)
-        ns: dict = {"__name__": f"asmpython_ext_plugin_{path.stem}", "__file__": str(path)}
-        exec(compile(src, display_name, "exec"), ns)
-    except apkg.ApkgError as e:
-        raise RuntimeError(f"failed to load extension plugin {path}: {e}") from e
-    except Exception as e:
-        raise RuntimeError(f"failed to load extension plugin {path}: {e}") from e
-    after = set(_registered_extension_ids())
-    new_ids = after - before
-    if len(new_ids) == 0:
-        hint = f" (its manifest declares kind={kind!r})" if kind and kind != "extension" else ""
-        raise RuntimeError(
-            f"extension plugin {path} did not register any asmpython.extend.Extension(...)"
-            f"{hint}"
-        )
-    if len(new_ids) > 1:
-        raise RuntimeError(
-            f"extension plugin {path} registered multiple extensions "
-            f"({', '.join(sorted(new_ids))}) -- pass each by id via --ext instead"
-        )
-    return next(iter(new_ids))
-
-
-def _registered_extension_ids() -> list[str]:
-    from .extensions import _REGISTRY
-
-    return list(_REGISTRY.keys())
 
 
 def _load_backend_plugin(path: Path) -> str:
@@ -783,18 +702,12 @@ def cmd_build(args: argparse.Namespace) -> int:
     all_errors = not args.one_error
 
     if args.check:
-        try:
-            check_extensions = _resolve_ext_flags(args.ext)
-        except RuntimeError as e:
-            print(f"asmpython: error: {e}", file=sys.stderr)
-            return 1
         return _run_check(
             src,
             source_path,
             source_dir=source_path.resolve().parent,
             as_json=args.json,
             all_errors=all_errors,
-            active_extensions=check_extensions,
         )
 
     # Resolve effective settings: CLI flag wins when given, else the
@@ -926,11 +839,9 @@ def cmd_build(args: argparse.Namespace) -> int:
     from . import apkg
 
     try:
-        active_extensions = set(_resolve_ext_flags(args.ext))
+        active_extensions: frozenset = frozenset()
         for apm_path in (args.apm or []):
-            result = apkg.load_module_package(Path(apm_path))
-            active_extensions.update(result.extension_ids)
-        active_extensions = frozenset(active_extensions)
+            apkg.load_module_package(Path(apm_path))
     except (RuntimeError, apkg.ApkgError) as e:
         print(f"asmpython: error: {e}", file=sys.stderr)
         return 1

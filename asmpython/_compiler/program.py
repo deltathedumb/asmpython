@@ -1326,10 +1326,10 @@ def load_program(
     (and is collected as a global) before the code that uses it. Other module-
     level side-effecting statements are still not run.
 
-    `active_extensions` (from the `--ext` CLI flag) is applied to every
-    module this merge parses -- entry and every reachable import -- so a
-    whole-program compile's grammar is uniform across files rather than
-    varying per module.
+    `active_extensions` is always empty now -- the opt-in compiler-syntax
+    extension system was withdrawn (see `archived/extensions/`). The
+    parameter is kept only so this function's signature doesn't need to
+    change.
     """
     entry_path = entry_path.resolve()
     root = _project_root(entry_path)

@@ -3503,16 +3503,17 @@ class SemaAnalyzer:
             sig.is_immutable = "immutable" in c.decorators
             if sig.is_immutable and not self._ext_active("immutable"):
                 raise SemaError(
-                    f"@immutable on class {c.name} requires the 'immutable' "
-                    f"extension (pass '--ext immutable' on the command line)",
+                    f"@immutable on class {c.name} is not supported -- "
+                    f"asmpython's compiler-extension system was withdrawn "
+                    f"(see archived/extensions/)",
                     c.pos,
                     ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
                 )
             if getattr(c, "implements_interface", None) is not None and not self._ext_active("interface"):
                 raise SemaError(
                     f"class {c.name}'s interface={c.implements_interface!r} "
-                    f"requires the 'interface' extension (pass '--ext "
-                    f"interface' on the command line)",
+                    f"is not supported -- asmpython's compiler-extension "
+                    f"system was withdrawn (see archived/extensions/)",
                     c.pos,
                     ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
                 )
@@ -3522,16 +3523,17 @@ class SemaAnalyzer:
                 if ("private" in f_decos or "protected" in f_decos) and not self._ext_active("access"):
                     raise SemaError(
                         f"@{'private' if 'private' in f_decos else 'protected'} on "
-                        f"{c.name}.{fname} requires the 'access' extension "
-                        f"(pass '--ext access' on the command line)",
+                        f"{c.name}.{fname} is not supported -- asmpython's "
+                        f"compiler-extension system was withdrawn (see "
+                        f"archived/extensions/)",
                         c.pos,
                         ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
                     )
                 if "immutable" in f_decos and not self._ext_active("immutable"):
                     raise SemaError(
-                        f"@immutable on {c.name}.{fname} requires the "
-                        f"'immutable' extension (pass '--ext immutable' on "
-                        f"the command line)",
+                        f"@immutable on {c.name}.{fname} is not supported -- "
+                        f"asmpython's compiler-extension system was "
+                        f"withdrawn (see archived/extensions/)",
                         c.pos,
                         ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
                     )
@@ -3583,15 +3585,17 @@ class SemaAnalyzer:
                 if ("private" in deco or "protected" in deco) and not self._ext_active("access"):
                     raise SemaError(
                         f"@{'private' if 'private' in deco else 'protected'} on "
-                        f"{c.name}.{m.name} requires the 'access' extension "
-                        f"(pass '--ext access' on the command line)",
+                        f"{c.name}.{m.name} is not supported -- asmpython's "
+                        f"compiler-extension system was withdrawn (see "
+                        f"archived/extensions/)",
                         m.pos,
                         ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
                     )
                 if "final" in deco and not self._ext_active("final"):
                     raise SemaError(
-                        f"@final on {c.name}.{m.name} requires the 'final' "
-                        f"extension (pass '--ext final' on the command line)",
+                        f"@final on {c.name}.{m.name} is not supported -- "
+                        f"asmpython's compiler-extension system was "
+                        f"withdrawn (see archived/extensions/)",
                         m.pos,
                         ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
                     )
@@ -4879,8 +4883,9 @@ class SemaAnalyzer:
         has_mutable_params_deco = "mutable_params" in f.decorators
         if has_mutable_params_deco and not self._ext_active("const_params"):
             raise SemaError(
-                f"@mutable_params on {f.name} requires the 'const_params' "
-                f"extension (pass '--ext const_params' on the command line)",
+                f"@mutable_params on {f.name} is not supported -- "
+                f"asmpython's compiler-extension system was withdrawn "
+                f"(see archived/extensions/)",
                 f.pos,
                 ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
             )

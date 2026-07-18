@@ -289,13 +289,10 @@ def _compile_program(
 ):
     """Lex / parse / sema (target-independent front-end). Returns the typed module.
 
-    `active_extensions` is the set of opt-in compiler-syntax extensions
-    (e.g. `constants`) activated for this whole compile invocation via the
-    `--ext` CLI flag -- never by in-source directives. Applied uniformly to
-    every `Parser` this compile constructs, including every module a
-    whole-program compile merges in (see `load_program`), so a project's
-    grammar is consistent across every file regardless of which module
-    happens to use the extended syntax.
+    `active_extensions` is always empty now -- the opt-in compiler-syntax
+    extension system was withdrawn (see `asmpython/_compiler/extensions.py`
+    and `archived/extensions/`). The parameter is kept only so this
+    function's signature (and every caller's) doesn't need to change.
     """
     if whole_program and entry_path is not None:
         module = load_program(src, entry_path, active_extensions=active_extensions)
