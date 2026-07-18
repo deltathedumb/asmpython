@@ -488,6 +488,33 @@ def _run_backend(
     _asm_stem_suffix: str = "",
 ) -> BuildResult:
     """Target-specific back-end: codegen -> nasm -> gcc."""
+    if backend == "x86-64" and (
+        any(getattr(f, "asm_body", None) is not None for f in module.funcs)
+        or any(
+            getattr(m, "asm_body", None) is not None
+            for c in module.classes
+            for m in c.methods
+        )
+    ):
+        # `@assembly_func` (raw inline NASM function/method bodies): only
+        # the legacy (NASM-text codegen.py) backend actually emits the
+        # NASM -- ir_lower.py's lower_func never inspects FuncDef.asm_body
+        # at all, so under the default x86-64 backend the real body is
+        # silently skipped and the function falls through to its ordinary
+        # (empty, docstring-only) statement body's implicit `return 0`.
+        # Confirmed via tests/cases/75_assembly_func.py: legacy prints the
+        # correct 42/7/100; x86-64 compiles cleanly (no error at all) and
+        # prints 0/0/51 -- a silent wrong-output miscompile, not a loud
+        # failure. Refuse clearly instead, mirroring the overload
+        # extension's own x86-64-only guard just below (same shape,
+        # opposite backend).
+        raise ValueError(
+            "this program uses '@assembly_func' (raw inline NASM), which "
+            "is only supported on --backend legacy today -- --backend "
+            "x86-64 silently discards the assembly body instead of "
+            "raising an error, so this is refused explicitly rather than "
+            "risk a wrong-output build"
+        )
     if backend != "x86-64" and getattr(module, "uses_overload", False):
         # `overload` extension: dispatch/symbol-mangling is only wired up
         # in the x86-64 IR backend today. The legacy (NASM-text codegen.py)
