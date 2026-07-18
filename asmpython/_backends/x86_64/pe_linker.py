@@ -178,12 +178,50 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
         for sym in obj.symbols:
             if not sym.name or sym.section_number <= 0:
                 continue
+            # NASM's own dot-prefixed local labels (`._mic_no` etc, which
+            # every generated function reuses freely, by design, as
+            # purely-internal jump targets, plus real section-name
+            # symbols like `.rodata`/`.text`) must NOT participate in
+            # cross-object duplicate-name detection below; only a real
+            # duplicate top-level definition is an actual bug. Matched
+            # by NAME (leading `.`), not IMAGE_SYM_CLASS_STATIC storage
+            # class: several of this backend's own shim functions
+            # (abi_shims.asm's math.*/random.* additions) are bare,
+            # intentionally-callable-cross-object labels that were never
+            # given an explicit `global` NASM directive -- they still
+            # come out IMAGE_SYM_CLASS_STATIC despite being real,
+            # intended external entry points (confirmed via a real
+            # regression: filtering by storage class alone broke every
+            # one of them). The proper fix is adding `global` directives
+            # to those shim files; until that's done, name-based
+            # filtering is what actually matches this codebase's real
+            # authoring convention.
+            if sym.name.startswith("."):
+                continue
             sect = obj.sections[sym.section_number - 1]
             bucket = _BUCKET_FOR_SECTION.get(sect.name)
             if bucket is None:
                 continue
             base = sect_base[(oi, sect.name)]
-            global_syms.setdefault(sym.name, (bucket, base + sym.value))
+            if sym.name in global_syms:
+                # Two merged objects both define the same external
+                # symbol name -- e.g. a user global variable and an
+                # unrelated whole-program-merged stdlib function
+                # happening to share a bare name (confirmed real bug:
+                # `log = logging.getLogger(...)` colliding with
+                # logging.py's own top-level `def log(...)`, previously
+                # silently resolved to whichever definition's symbol
+                # happened to appear first in the merged table, corrupting
+                # the OTHER one's every reference into a wrong address).
+                # Fail loudly instead of guessing.
+                raise LinkError(
+                    f"duplicate external symbol {sym.name!r} defined in "
+                    f"more than one merged object -- likely a name "
+                    f"collision between unrelated definitions (a global "
+                    f"variable and a function, or two merged modules) "
+                    f"rather than a genuine intentional redefinition"
+                )
+            global_syms[sym.name] = (bucket, base + sym.value)
 
     if entry_symbol not in global_syms:
         raise LinkError(f"entry symbol {entry_symbol!r} not defined in any input object")
@@ -214,6 +252,20 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
                 if r.symbol == _ACRT_IOB_FUNC_STUB_SYM:
                     needs_acrt_iob_stub = True
                     _want_import("__iob_func")
+                    continue
+                if r.symbol in _BUCKET_FOR_SECTION:
+                    # A relocation against a SECTION symbol itself (e.g.
+                    # NASM emitting `.rodata`/`.text` as the relocation
+                    # target for a rip-relative load with no dedicated
+                    # global label) -- resolved per-object via
+                    # resolve_local_section in the real patching pass
+                    # below (step 8), never a DLL import candidate.
+                    # Excluded from global_syms's cross-object duplicate-
+                    # collision check (every object legitimately has its
+                    # own local `.rodata` etc; that's expected merging,
+                    # not a name collision), so it must be excluded here
+                    # too or this pre-scan wrongly treats it as an
+                    # unresolved external needing a DLL.
                     continue
                 if r.symbol in global_syms or r.symbol in seen_imports:
                     continue

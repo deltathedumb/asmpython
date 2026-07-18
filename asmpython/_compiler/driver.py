@@ -346,6 +346,23 @@ def _run_backend_x86_64(
     build_runtime(target)  # ensures runtime_object_path's file is current
     runtime_obj = runtime_object_path(target).read_bytes()
 
+    # threading_shims.asm (Windows only) provides _threading_create/
+    # _threading_join/etc, kept as a SEPARATE object from the always-
+    # linked shim_obj above specifically because _threading_trampoline
+    # references _threading_bootstrap, a real user-program-level
+    # function that only exists in a program that actually imports
+    # threading -- declaring that extern in the always-linked object
+    # broke every program's link step (see threading_shims.asm's own
+    # header comment). Only append it when the merged program actually
+    # defines _threading_bootstrap (a direct, reliable signal that
+    # stdlib/threading.py's source was pulled in), rather than trying to
+    # infer "imports threading" from module aliasing.
+    extra_objs: list[bytes] = []
+    if target == "windows" and any(f.name == "_threading_bootstrap" for f in module.funcs):
+        from .._runtime.build import build_threading_shims
+
+        extra_objs.append(build_threading_shims(target).read_bytes())
+
     # asmpython.mlang: any Code(...) literal sema.py compiled via a real
     # external compiler (mlang_support._run_mlang_code) contributes its
     # own object file here. Default to the gcc linker when mlang is in
@@ -380,6 +397,7 @@ def _run_backend_x86_64(
         "extra_args": ["-mconsole"] if target == "windows" else [],
     }
     objects = [program_obj, shim_obj, runtime_obj]
+    objects += extra_objs
     objects += [obj_bytes for obj_bytes, _obj_ext in mlang_objects]
     linked = backend.link(objects, link_args)
     out_bytes = next(iter(linked.values()))

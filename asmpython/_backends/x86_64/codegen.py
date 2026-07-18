@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .encoder import (
     Reg, XmmReg, CC, Mem,
@@ -210,14 +210,60 @@ class FuncCodegen:
         return self._SCRATCH_XMM, encode_movss_rm(self._SCRATCH_XMM, Mem(Reg.RBP, loc.offset))
 
     def _dst_gp(self, result: Any) -> Reg:
+        """GP register to compute `result` into. Asserts a RegLoc -- use
+        `_dst_gp_spillable` at any call site that must also tolerate a
+        StackLoc (regalloc legitimately spills under real register
+        pressure; this assert-only form is for call sites already proven
+        safe, or being incrementally migrated)."""
         loc = self._loc(result)
         assert isinstance(loc, RegLoc), f"GP result expected for {result.name}"
         return loc.reg
 
     def _dst_xmm(self, result: Any) -> XmmReg:
+        """XMM register to compute `result` into. See `_dst_gp`'s
+        docstring -- `_dst_xmm_spillable` is the StackLoc-tolerant form."""
         loc = self._loc(result)
         assert isinstance(loc, XmmLoc), f"XMM result expected for {result.name}"
         return loc.reg
+
+    def _dst_gp_spillable(self, result: Any, alt_scratch: bool = False) -> "tuple[Reg, Callable[[], None]]":
+        """Like `_dst_gp`, but tolerates regalloc having spilled `result`
+        to a StackLoc (a real, legitimate outcome under high register
+        pressure -- confirmed via a real crash on 196_hashlib_module.py's
+        MD5 block processing, 400+ live temporaries in one function).
+        Returns `(reg_to_compute_into, spill)`: `reg_to_compute_into` is
+        the real assigned register for a RegLoc, or a scratch register
+        for a StackLoc; the caller MUST call `spill()` immediately after
+        finishing the computation that writes into that register (a
+        no-op for the RegLoc case, an actual store for the StackLoc
+        case). Mirrors the existing correct global_addr/str_global
+        pattern (this file, `_instr`'s `op in ("global_addr",
+        "str_global")` branch) generalized into a reusable helper.
+
+        `alt_scratch=True` routes the spilled case through `_SCRATCH2`
+        instead of `_SCRATCH` -- required whenever an operand was ALSO
+        loaded via `_gp`'s own (default `_SCRATCH`) spill path earlier
+        in the same instruction, or the two would alias the same
+        register and the destination write would clobber the still-
+        needed operand. Same collision this session already fixed once
+        for `_binop_gp`/`_cmp_set`/`_div`'s own operand-vs-operand
+        spills -- this is the destination-vs-operand version of the
+        identical hazard."""
+        loc = self._loc(result)
+        if isinstance(loc, RegLoc):
+            return loc.reg, lambda: None
+        assert isinstance(loc, StackLoc), f"GP result expected for {result.name}"
+        scratch = self._SCRATCH2 if alt_scratch else self._SCRATCH
+        return scratch, lambda: self._emit(encode_mov_mr(Mem(Reg.RBP, loc.offset), scratch))
+
+    def _dst_xmm_spillable(self, result: Any) -> "tuple[XmmReg, Callable[[], None]]":
+        """XMM counterpart of `_dst_gp_spillable` -- see its docstring."""
+        loc = self._loc(result)
+        if isinstance(loc, XmmLoc):
+            return loc.reg, lambda: None
+        assert isinstance(loc, StackLoc), f"XMM result expected for {result.name}"
+        scratch = self._SCRATCH_XMM
+        return scratch, lambda: self._emit(encode_movsd_mr(Mem(Reg.RBP, loc.offset), scratch))
 
     # ── Prologue / epilogue ───────────────────────────────────────────────────
 
@@ -246,14 +292,58 @@ class FuncCodegen:
     # ── Pattern helpers ───────────────────────────────────────────────────────
 
     def _binop_gp(self, result: Any, a: Any, b: Any, rr_fn) -> None:
-        """dst = rr_fn(a, b) — loads a into dst first, then applies op with b."""
-        dst       = self._dst_gp(result)
+        """dst = rr_fn(a, b) — loads a into dst first, then applies op with b.
+
+        `dst` is `result`'s own register when regalloc gave it a RegLoc
+        (the common case). When `result` is spilled to a StackLoc
+        instead (a real, legitimate outcome under high register
+        pressure -- confirmed crash on 196_hashlib_module.py's SHA/MD5
+        processing), the op is computed in place on `a_r` ONLY when
+        `a_r` is safe to clobber -- i.e. `a` ITSELF was already spilled,
+        so `a_r` is a throwaway scratch copy of `a`'s value, not `a`'s
+        real backing register. If `a` has a genuine RegLoc (so `a_r` IS
+        that live register, needed by any later instruction that reads
+        `a` again), the op is computed into `_SCRATCH2` instead, leaving
+        `a`'s real register untouched.
+
+        A real bug lived here previously: an earlier version ALWAYS
+        computed `rr_fn(a_r, b_r)` in place unconditionally, before even
+        checking `result`'s own location -- this corrupts `a`'s live
+        register whenever `a` is reused after this instruction (e.g.
+        `x = a + b; y = a + c`), regardless of whether `result` was
+        spilled at all. Confirmed via a real regression this introduced:
+        102_list_methods.py and several other previously-passing tests
+        hung or mis-executed once that version landed.
+        """
         a_r, a_ld = self._gp(a)
         b_r, b_ld = self._gp(b, alt_scratch=True)
         self._emit(a_ld + b_ld)
-        if a_r != dst:
-            self._emit(encode_mov_rr(dst, a_r))
-        self._emit(rr_fn(dst, b_r))
+        loc = self._loc(result)
+        if isinstance(loc, RegLoc):
+            dst = loc.reg
+            if a_r != dst:
+                self._emit(encode_mov_rr(dst, a_r))
+            self._emit(rr_fn(dst, b_r))
+            return
+        assert isinstance(loc, StackLoc), f"GP result expected for {result.name}"
+        a_loc = self._loc(a)
+        if isinstance(a_loc, RegLoc):
+            # a_r IS a's real, possibly-still-live register -- must not
+            # mutate it. Can't just reuse _SCRATCH2 as a third register
+            # either: b_r may already alias _SCRATCH2 (b's own spill-load
+            # used alt_scratch=True), so writing a_r's copy there first
+            # would clobber b_r before rr_fn reads it. push/pop a real
+            # stack slot instead of trying to find a third GP scratch
+            # register (this backend only reserves two).
+            self._emit(encode_push(a_r))
+            self._emit(rr_fn(a_r, b_r))
+            self._emit(encode_mov_mr(Mem(Reg.RBP, loc.offset), a_r))
+            self._emit(encode_pop(a_r))
+        else:
+            # a was itself spilled -- a_r is a throwaway scratch copy,
+            # safe to mutate in place.
+            self._emit(rr_fn(a_r, b_r))
+            self._emit(encode_mov_mr(Mem(Reg.RBP, loc.offset), a_r))
 
     def _binop_xmm(self, result: Any, a: Any, b: Any, rr_fn, f32: bool = False) -> None:
         get = self._xmm_f32 if f32 else self._xmm
@@ -961,7 +1051,7 @@ class FuncCodegen:
 
         if op == "gep":
             ptr_r, p_ld = self._gp(ops[0])
-            dst = self._dst_gp(r)
+            dst, spill = self._dst_gp_spillable(r, alt_scratch=True)
             self._emit(p_ld)
             if isinstance(ops[1], int):
                 self._emit(encode_lea(dst, Mem(ptr_r, ops[1])))
@@ -970,6 +1060,7 @@ class FuncCodegen:
                 self._emit(i_ld)
                 if ptr_r != dst: self._emit(encode_mov_rr(dst, ptr_r))
                 self._emit(encode_add_rr(dst, idx_r))
+            spill()
             return
 
         if op == "alloca":
@@ -983,10 +1074,11 @@ class FuncCodegen:
         # ── type conversions ──────────────────────────────────────────────────
         if op == "sext":
             src_r, ld = self._gp(ops[0])
-            dst = self._dst_gp(r)
+            dst, spill = self._dst_gp_spillable(r, alt_scratch=True)
             self._emit(ld)
             bits = int(ops[0].type.name[1:])
             self._emit(encode_movsx(dst, src_r, bits))
+            spill()
             return
 
         if op == "zext":

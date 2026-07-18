@@ -8476,13 +8476,46 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
     def add_resolved(class_name: str, method: str) -> None:
         add(_resolve_method_owner_in_sigs(classes_sig, class_name, method), method)
 
+    def add_resolved_virtual(class_name: str, method: str) -> None:
+        # Walker-side counterpart to ir_lower.py's own `_virtual_dispatch_
+        # rows` (used at LOWERING time to emit a runtime __class__-id
+        # dispatch chain whenever more than one subclass overrides a
+        # method) -- that function makes lowering correctly CALL every
+        # subclass override's real symbol, but nothing previously marked
+        # those overrides reachable for THIS walker, which only ever
+        # looked upward from the receiver's own static type
+        # (add_resolved/_resolve_method_owner_in_sigs). Any user class
+        # that is `class_name` or descends from it and resolves `method`
+        # anywhere on its own chain needs its owner marked reachable too
+        # -- not just the statically-resolved owner -- since the
+        # receiver's runtime __class__ may be any of them. Same
+        # "lowering fixed, walker not fixed" shape as every other
+        # dunder/lambda/super() dispatch gap fixed this session; mirrors
+        # `_virtual_dispatch_rows`'s downward scan but reimplemented
+        # against the module-level `classes_sig` dict (no live `ctx` /
+        # `class_ids` exists yet at this walker's point in the pipeline).
+        add_resolved(class_name, method)
+        for cname in classes_sig:
+            seen: set[str] = set()
+            cur = cname
+            descends = False
+            while cur is not None and cur not in seen:
+                seen.add(cur)
+                if cur == class_name:
+                    descends = True
+                    break
+                sig = classes_sig.get(cur)
+                cur = sig.parent if sig is not None else None
+            if descends:
+                add_resolved(cname, method)
+
     def visit(node) -> None:
         if node is None or isinstance(node, (str, int, float, bool)):
             return
         if isinstance(node, A.MethodCall):
             obj_ty = A.expr_type(node.obj)
             if obj_ty.startswith("instance:"):
-                add_resolved(obj_ty.split(":", 1)[1], node.method)
+                add_resolved_virtual(obj_ty.split(":", 1)[1], node.method)
             elif obj_ty.startswith("super:"):
                 # super().method(...): dispatches statically to the base
                 # class's OWN method (never a subclass override -- see
@@ -8495,6 +8528,10 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                 add_resolved(obj_ty.split(":", 1)[1], node.method)
             elif obj_ty == "type" and isinstance(node.obj, A.Name):
                 add_resolved(node.obj.name, node.method)
+            # `node.obj` (the receiver) is visited (or deliberately
+            # skipped, for a bare Name) once, uniformly for both
+            # MethodCall and Attr, in the generic dataclass-field
+            # recursion below -- see its own comment for why.
             sort_key = getattr(node, "sort_key", None)
             if isinstance(sort_key, A.Lambda):
                 # list.sort(key=lambda ...) -- same gap as sorted()/min()/
@@ -8664,8 +8701,43 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                 visit(item)
             return
         if is_dataclass(node):
+            # `node.obj` on a MethodCall is the RECEIVER expression, not a
+            # free-standing name reference -- the MethodCall branch above
+            # already interprets it fully via A.expr_type(node.obj)
+            # (instance:/super:/type dispatch). Re-visiting it here as an
+            # ordinary field would hit the generic `elif isinstance(node,
+            # A.Name): add_func(node.name)` case on its own separate top-
+            # level visit() call, spuriously marking any MODULE-LEVEL
+            # FUNCTION that happens to share the receiver variable's bare
+            # name as reachable (e.g. `log = logging.getLogger(...);
+            # log.error(...)` colliding with logging.py's own unrelated
+            # top-level `def log(...)` function) -- confirmed as a real
+            # bug via a background investigation: the walker doesn't
+            # track variable/scope bindings at all, so it can't otherwise
+            # tell "this Name is a receiver expression" from "this Name
+            # is a genuine function-value reference" by field position
+            # alone once both branches see the same bare Name node twice.
+            # Skipping `obj` here is safe -- MethodCall's own branch
+            # already fully handles it; nothing else needs a second visit.
+            # A.Attr (`log.name`, plain attribute access, no call at all)
+            # has the identical exposure with no dedicated branch above
+            # to have "already handled" it -- confirmed as a second real
+            # instance of the same collision (236_logging_module.py's
+            # `log = logging.getLogger(...); print(log.name)`, caught
+            # only after pe_linker.py's new duplicate-symbol check turned
+            # the prior silent corruption into a loud, correct error).
+            # For both node types, only SKIP a bare-Name `.obj` (nothing
+            # further to discover there); a non-Name receiver (a chained
+            # call/attr expression) still needs its own visit for any
+            # reachable calls nested inside it.
+            if isinstance(node, (A.MethodCall, A.Attr)):
+                if not isinstance(node.obj, A.Name):
+                    visit(node.obj)
+                skip_field = "obj"
+            else:
+                skip_field = None
             for f in fields(node):
-                if f.name == "pos":
+                if f.name == "pos" or f.name == skip_field:
                     continue
                 visit(getattr(node, f.name))
 

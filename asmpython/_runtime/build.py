@@ -174,6 +174,43 @@ def build_abi_shims(target: str, *, force: bool = False) -> Path:
     return obj_path
 
 
+# Windows-only for now (threading_shims.asm is Win32-thread-API-based;
+# a Linux/pthread equivalent hasn't been written -- 178_threading_stubs.py/
+# 235_threading_module.py only ever ran on windows this session anyway).
+_THREADING_SHIM_TARGETS = {
+    "windows": ("threading_shims.asm", "win64", "threading_shims.obj"),
+}
+
+
+def build_threading_shims(target: str, *, force: bool = False) -> Path:
+    """Assemble the threading ABI shim layer -- kept as a SEPARATE object
+    from build_abi_shims's (always-linked) output specifically because
+    _threading_trampoline references _threading_bootstrap, a real user-
+    program-level function that only exists in programs that import
+    threading. Declaring that extern in the always-linked shim object
+    broke every program's link step (an unresolved relocation regardless
+    of whether the referencing code path runs) -- see threading_shims.asm's
+    own header comment. driver.py only appends this object to the link
+    set when the compiled program actually needs it."""
+    if target not in _THREADING_SHIM_TARGETS:
+        have = ", ".join(sorted(_THREADING_SHIM_TARGETS))
+        raise ValueError(f"unknown target {target!r} for build_threading_shims (have: {have})")
+    src_name, nasm_fmt, obj_name = _THREADING_SHIM_TARGETS[target]
+    src_path = Path(__file__).resolve().parent / src_name
+    out_dir = _build_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    obj_path = out_dir / obj_name
+
+    if obj_path.exists() and not force:
+        if obj_path.stat().st_mtime >= src_path.stat().st_mtime:
+            return obj_path
+
+    nasm = _which("nasm")
+    _run([nasm, "-f", nasm_fmt, "-w-label-redef-late", str(src_path), "-o", str(obj_path)])
+    print(f"wrote {obj_path}")
+    return obj_path
+
+
 def build_runtime_shared(target: str, *, force: bool = False) -> Path:
     """Build the runtime as a shared library (.dll/.so) for --onedir bundles.
 

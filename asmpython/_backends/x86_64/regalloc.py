@@ -251,9 +251,21 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
 def _pick_evict(in_reg: dict[str, Any],
                 last_use: dict[str, tuple[int, int]],
                 now: tuple[int, int]) -> str:
-    """Belady: evict the value used furthest in the future (or already dead)."""
+    """Belady: evict the value used furthest in the future (or already dead).
+
+    `<` not `<=` against `now`: a value whose last use IS `now` is being
+    read at this very instruction (e.g. as an operand of the instruction
+    whose own destination we're allocating a register for) -- not yet
+    dead. Using `<=` treated such a value as already-dead-priority
+    (_INF), so it could get evicted out from under an instruction still
+    reading it as an operand, corrupting the result. Confirmed via a
+    direct trace on a real crash (196_hashlib_module.py's MD5 block
+    processing): `%t41 = imul(...)` used as `%t43 = iadd(%t41, %t42)`'s
+    own operand at the SAME instruction shared its last-use with `now`,
+    got evicted, and _dst_gp later asserted on the resulting bogus
+    location."""
     _INF = (10**9, 10**9)
-    return max(in_reg, key=lambda n: _INF if last_use.get(n, (-1, -1)) <= now else last_use[n])
+    return max(in_reg, key=lambda n: _INF if last_use.get(n, (-1, -1)) < now else last_use[n])
 
 
 def _compute_crosses_call(func: Any) -> set[str]:

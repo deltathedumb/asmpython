@@ -1783,3 +1783,184 @@ _math_isclose:
     leave
     ret
 
+; random.choice/shuffle/sample/getrandbits -- ported directly from
+; target_windows.py's legacy-backend inline shims (same symbol names,
+; same algorithms/register conventions). Unlike random.random/randint/
+; uniform/randrange (special-cased as inline IR ops in ir_lower.py, not
+; routed through this file at all), these four fall through to the
+; generic FFI-call path expecting real symbols -- none existed here,
+; undefined-symbol BUILD_FAILs for every choice/shuffle/sample/
+; getrandbits test case.
+
+extern rand
+; _random_choice(rcx=list_hdr) -> rax = element at random index
+_random_choice:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 56
+    mov [rbp-8], rcx
+    mov rax, [rcx+8]
+    mov [rbp-16], rax
+    call rand
+    xor rdx, rdx
+    div qword [rbp-16]
+    mov rcx, rdx
+    mov rax, [rbp-8]
+    mov rax, [rax+16]
+    mov rax, [rax+rcx*8]
+    leave
+    ret
+
+; _random_shuffle(rcx=list_hdr) -- Fisher-Yates shuffle in-place
+_random_shuffle:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 72
+    mov [rbp-8], rcx
+    mov rax, [rcx+8]
+    mov [rbp-16], rax
+._rs_loop:
+    cmp qword [rbp-16], 1
+    jle ._rs_done
+    call rand
+    xor rdx, rdx
+    div qword [rbp-16]
+    mov [rbp-24], rdx
+    mov r8, [rbp-8]
+    mov r8, [r8+16]
+    mov r9, [rbp-16]
+    dec r9
+    mov rax, [r8+r9*8]
+    mov rcx, [rbp-24]
+    mov rbx, [r8+rcx*8]
+    mov [r8+r9*8], rbx
+    mov [r8+rcx*8], rax
+    dec qword [rbp-16]
+    jmp ._rs_loop
+._rs_done:
+    xor rax, rax
+    leave
+    ret
+
+; _random_sample(rcx=list_hdr, rdx=k) -> rax = new list of k unique elements
+; Strategy: copy source buf, do k-step partial Fisher-Yates, return the
+; last k slots. Frame layout (offsets from rbp): -8=src_hdr, -16=n,
+; -24=k, -32=copy_buf, -40=i/fill_index, -48=result_hdr, -56=result_buf,
+; -64=j_scratch.
+_random_sample:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 96
+    mov [rbp-8], rcx
+    mov [rbp-24], rdx
+    mov rax, [rcx+8]
+    mov [rbp-16], rax
+    mov rcx, rax
+    shl rcx, 3
+    call malloc
+    mov [rbp-32], rax
+    mov rsi, [rbp-8]
+    mov rsi, [rsi+16]
+    mov rdi, [rbp-32]
+    mov rcx, [rbp-16]
+    xor rax, rax
+._rsam_cp:
+    cmp rax, rcx
+    jge ._rsam_cp_end
+    mov rbx, [rsi+rax*8]
+    mov [rdi+rax*8], rbx
+    inc rax
+    jmp ._rsam_cp
+._rsam_cp_end:
+    mov rax, [rbp-16]
+    mov [rbp-40], rax
+._rsam_fy:
+    mov rax, [rbp-40]
+    mov rbx, [rbp-16]
+    sub rbx, [rbp-24]
+    cmp rax, rbx
+    jle ._rsam_fy_end
+    push rdi
+    call rand
+    pop rdi
+    xor rdx, rdx
+    div qword [rbp-40]
+    mov [rbp-64], rdx
+    mov rdi, [rbp-32]
+    mov r9, [rbp-40]
+    dec r9
+    mov rcx, [rbp-64]
+    mov rax, [rdi+r9*8]
+    mov rbx, [rdi+rcx*8]
+    mov [rdi+r9*8], rbx
+    mov [rdi+rcx*8], rax
+    dec qword [rbp-40]
+    jmp ._rsam_fy
+._rsam_fy_end:
+    push rdi
+    mov rcx, 24
+    call malloc
+    pop rdi
+    mov [rbp-48], rax
+    mov rbx, [rbp-24]
+    mov [rax+0], rbx
+    mov [rax+8], rbx
+    push rdi
+    mov rcx, [rbp-24]
+    shl rcx, 3
+    call malloc
+    pop rdi
+    mov [rbp-56], rax
+    mov rcx, [rbp-48]
+    mov [rcx+16], rax
+    mov rax, [rbp-16]
+    sub rax, [rbp-24]
+    mov [rbp-40], rax
+    xor rbx, rbx
+._rsam_fill:
+    mov rcx, [rbp-16]
+    cmp rbx, [rbp-24]
+    jge ._rsam_fill_end
+    mov rdi, [rbp-32]
+    mov rax, [rbp-40]
+    add rax, rbx
+    mov r8, [rdi+rax*8]
+    mov rdi, [rbp-56]
+    mov [rdi+rbx*8], r8
+    inc rbx
+    jmp ._rsam_fill
+._rsam_fill_end:
+    mov rax, [rbp-48]
+    leave
+    ret
+
+; _random_getrandbits(rcx=k) -> rax: k random bits (1-64)
+; NOTE: ported faithfully from the legacy source, which clobbers r12
+; (callee-saved per Win64 ABI) without saving/restoring it -- a latent
+; bug inherited from the port source, not introduced here. Not fixed as
+; part of this port (out of scope: fixing bugs in code being ported
+; verbatim, versus fixing THIS backend's own bugs).
+_random_getrandbits:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    mov [rbp-8], rcx
+    xor rbx, rbx
+    xor r12, r12
+._rgb_loop:
+    cmp r12, [rbp-8]
+    jge ._rgb_done
+    call rand
+    shl rbx, 15
+    or rbx, rax
+    add r12, 15
+    jmp ._rgb_loop
+._rgb_done:
+    mov rcx, [rbp-8]
+    mov rax, 1
+    shl rax, cl
+    dec rax
+    and rax, rbx
+    leave
+    ret
+
