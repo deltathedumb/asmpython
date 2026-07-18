@@ -410,6 +410,20 @@ class Parser:
         body: list = []
         self._skip_newlines()
         while not self._check("EOF"):
+            # `assign_decorators` extension: `@decorator` above an
+            # assignment. Must be detected BEFORE `_eat_decorators()` runs
+            # below -- that call unconditionally consumes any leading `@`
+            # line, and a bare (non-informational, non-imported) decorator
+            # name would fall into its "general decorator expression"
+            # branch, which only knows how to apply to a following `def`.
+            # `_looks_like_assign_decorator` peeks (not `_eat_decorators`'
+            # own always-consuming loop), so a plain `@decorator` above
+            # `def`/`class` is completely unaffected -- this only fires
+            # when the extension is active at all.
+            if self.ext_ctx.is_active("assign_decorators") and self._looks_like_assign_decorator():
+                body.extend(self._parse_assign_decorator_stmt())
+                self._skip_newlines()
+                continue
             # Decorators are accepted; most are dropped (their semantics, e.g.
             # `@dataclass` synthesising __init__, aren't modelled). The one we
             # act on is `@assembly_func`, which marks a raw-NASM function body.
@@ -1425,6 +1439,14 @@ class Parser:
                 self._skip_newlines()
                 if self._check("DEDENT"):
                     break
+                # `assign_decorators` extension: see the matching check in
+                # `parse()`'s module-level loop for why this must happen
+                # before any decorator-consuming call, and why a plain
+                # decorator above a nested `def`/`class` is unaffected.
+                if self.ext_ctx.is_active("assign_decorators") and self._looks_like_assign_decorator():
+                    stmts.extend(self._parse_assign_decorator_stmt())
+                    self._skip_newlines()
+                    continue
                 stmts.append(self._parse_stmt())
                 self._skip_newlines()
             self._expect("DEDENT")
@@ -2036,6 +2058,156 @@ class Parser:
             "(pass '--ext interface' on the command line)",
             self._peek().pos,
             ErrorCode.P_INTERFACE_WITHOUT_EXTENSION,
+        )
+
+    def _looks_like_assign_decorator(self) -> bool:
+        """`assign_decorators` extension: only `@NAME` followed by NEWLINE
+        then a statement that ISN'T `def`/`class` (or another `@`-prefixed
+        decorator line -- multiple stacked decorators only make sense for
+        the def/class case, not this one) is this shape. A plain `@deco`
+        above `def`/`class` must keep going through the existing decorator
+        machinery completely untouched -- checked via save/rewind, the
+        same idiom every other soft-keyword lookahead in this parser uses."""
+        save = self.i
+        ok = False
+        if self._check("OP", "@"):
+            self._eat()
+            if self._check("NAME"):
+                self._eat()
+                # Dotted (`@mod.deco`) or called (`@deco(...)`) forms are
+                # handled (and rejected with a precise error) inside
+                # _parse_assign_decorator_stmt itself -- here, just confirm
+                # the line ends in NEWLINE eventually and doesn't lead into
+                # `def`/`class`/another `@`.
+                while self._check("OP", "."):
+                    self._eat()
+                    if not self._check("NAME"):
+                        break
+                    self._eat()
+                if self._check("OP", "("):
+                    depth = 0
+                    while True:
+                        tk = self._peek()
+                        if tk.kind == "EOF":
+                            break
+                        if tk.kind == "OP" and tk.value == "(":
+                            depth += 1
+                        elif tk.kind == "OP" and tk.value == ")":
+                            depth -= 1
+                            if depth == 0:
+                                self._eat()
+                                break
+                        self._eat()
+                if self._check("NEWLINE"):
+                    self._eat()
+                    while self._check("NEWLINE"):
+                        self._eat()
+                    ok = not (
+                        self._check("KEYWORD", "def")
+                        or self._check("KEYWORD", "class")
+                        or self._check("OP", "@")
+                    )
+        self.i = save
+        return ok
+
+    def _parse_assign_decorator_stmt(self) -> list:
+        """`assign_decorators` extension: `@decorator` above an assignment
+        statement. Returns a LIST of statements (unlike every other
+        `_parse_*` statement helper, which returns exactly one) since the
+        desugaring is inherently multi-statement -- callers (`parse()`'s
+        module-level loop and `_parse_block`) extend their statement list
+        with the result instead of appending a single node.
+
+        Confirmed exact semantics: `@decorator` above `x = 5` desugars to
+        `x = 5; decorator(x, 5)` -- the assignment stands unchanged, then a
+        synthetic call passes the bound name's value and the initializer
+        value as two positional args, purely for side effects (return
+        value discarded, never feeds back into the binding). For a
+        single-call tuple-unpack target, `@decorator` above `(a, b) = f()`
+        desugars to `__deco_tmp_N = f(); a, b = __deco_tmp_N;
+        decorator((a, b), __deco_tmp_N)` -- a synthetic temp guarantees
+        `f()` evaluates exactly once (reused for both the unpack and the
+        second decorator arg), reusing the existing
+        `_deco_tmp_counter`/`__deco_tmp_N` naming convention
+        `_desugar_decorator_exprs` already established for the unrelated
+        def-decorator-factory case.
+
+        Unlike every other decorator use in this grammar (always `def`/
+        `class`), this is a genuinely new decorator-application TARGET, so
+        it's handled as its own small parser-level desugaring rather than
+        reusing `_eat_decorators`/`_desugar_decorator_exprs` (those exist
+        to solve a different problem: applying a factory's *return value*
+        as a wrapper, whereas this calls `decorator` itself directly, one
+        call, no wrapper indirection needed -- so no `expr(...)(...)`
+        parsing limitation to route around here).
+        """
+        self._eat()  # '@'
+        deco_pos = self._peek().pos
+        deco_name_tok = self._expect("NAME")
+        deco_call_name = deco_name_tok.value
+        while self._check("OP", "."):
+            # A dotted decorator target (`@mod.decorator`) has no direct
+            # call-by-name representation (A.Call.func is a bare str, the
+            # callee must be a plain top-level function name) -- reject
+            # explicitly rather than silently miscompiling to the wrong
+            # callee.
+            raise ParseError(
+                "'@decorator' above an assignment only supports a plain "
+                "function name, not a dotted attribute",
+                deco_pos,
+                ErrorCode.P_ASSIGN_DECORATOR_UNSUPPORTED_TARGET,
+            )
+        self._expect("NEWLINE")
+        self._skip_newlines()
+        stmt = self._parse_stmt()
+        if isinstance(stmt, A.Assign):
+            # Both decorator args reference the bound NAME (not `stmt.value`
+            # -- reusing that raw RHS expression node directly here would
+            # make codegen re-evaluate/re-execute it a second time wherever
+            # it's lowered, silently double-running any side effect the
+            # initializer has; confirmed via a real test with a
+            # side-effecting call as the RHS producing the wrong count
+            # before this fix). Reading the name twice after a real
+            # assignment is always safe and side-effect-free.
+            call = A.Call(
+                func=deco_call_name,
+                args=[
+                    A.Name(name=stmt.target, pos=deco_pos),
+                    A.Name(name=stmt.target, pos=deco_pos),
+                ],
+                pos=deco_pos,
+            )
+            return [stmt, A.ExprStmt(expr=call, pos=deco_pos)]
+        if isinstance(stmt, A.TupleAssign) and len(stmt.values) == 1:
+            target_names = [t for t in stmt.targets if isinstance(t, A.Name)]
+            if len(target_names) != len(stmt.targets):
+                raise ParseError(
+                    "'@decorator' above an assignment only supports a "
+                    "single-target or single-call tuple-unpack assignment",
+                    deco_pos,
+                    ErrorCode.P_ASSIGN_DECORATOR_UNSUPPORTED_TARGET,
+                )
+            self._deco_tmp_counter += 1
+            tmp_name = f"__deco_tmp_{self._deco_tmp_counter}"
+            tmp_assign = A.Assign(target=tmp_name, value=stmt.values[0], pos=deco_pos)
+            stmt.values = [A.Name(name=tmp_name, pos=deco_pos)]
+            call = A.Call(
+                func=deco_call_name,
+                args=[
+                    A.TupleLit(
+                        elems=[A.Name(name=t.name, pos=deco_pos) for t in target_names],
+                        pos=deco_pos,
+                    ),
+                    A.Name(name=tmp_name, pos=deco_pos),
+                ],
+                pos=deco_pos,
+            )
+            return [tmp_assign, stmt, A.ExprStmt(expr=call, pos=deco_pos)]
+        raise ParseError(
+            "'@decorator' above an assignment only supports a "
+            "single-target or single-call tuple-unpack assignment",
+            deco_pos,
+            ErrorCode.P_ASSIGN_DECORATOR_UNSUPPORTED_TARGET,
         )
 
     def _looks_like_match_stmt(self) -> bool:
