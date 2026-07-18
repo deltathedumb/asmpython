@@ -89,6 +89,9 @@ class ErrorCode:
     P_FINAL_WITHOUT_EXTENSION  = 120  # P020: 'final class' used without --ext final
     P_SEALED_WITHOUT_EXTENSION = 121  # P021: 'sealed class' used without --ext sealed
     P_ENUM_WITHOUT_EXTENSION   = 122  # P022: 'enum' declaration used without --ext enum
+    P_INTERFACE_WITHOUT_EXTENSION = 123  # P023: 'interface' declaration used without --ext interface
+    P_INTERFACE_STUB_BODY      = 124  # P024: interface method stub body contains real code
+    P_ASSIGN_DECORATOR_UNSUPPORTED_TARGET = 125  # P025: @decorator above a non-assignment or parallel-tuple statement
 
     # ---- Semantic (E) ------------------------------------------------------
     # Name resolution
@@ -165,6 +168,24 @@ class ErrorCode:
     E_ENUM_UNKNOWN_MEMBER        = 292  # E092: no such member on this enum type
     E_ENUM_TYPE_MISMATCH         = 293  # E093: comparing members of two different enum types
 
+    # Compiler extensions (wave 2: readonly_params, const_params,
+    # no_global_mutation, no_shadowing, must_use, no_implicit_any,
+    # interface, assign_decorators, overload). See docs/EXTENSIONS.md.
+    E_READONLY_PARAM_REASSIGNED  = 294  # E094: cannot reassign a @readonly/const_params-locked parameter
+    E_READONLY_UNKNOWN_PARAM     = 295  # E095: @readonly names a parameter that doesn't exist
+    E_UNDECLARED_GLOBAL_MUTATION = 296  # E096: reassigning a module-level name without 'global'
+    E_SHADOWED_GLOBAL            = 297  # E097: a local/param name shadows a module-level name (or a captured free variable)
+    E_MUST_USE_DISCARDED         = 298  # E098: @must_use function's return value discarded as a bare statement
+    E_IMPLICIT_ANY_PARAM         = 299  # E099: parameter has no annotation, default, or inferrable usage
+    E_IMPLICIT_ANY_ASSIGN        = 300  # E100: assignment's value has no inferrable concrete type
+    E_INTERFACE_REDEFINED        = 301  # E101: interface name collides with a function or class
+    E_INTERFACE_UNKNOWN          = 302  # E102: interface=Name names an undeclared interface
+    E_INTERFACE_METHOD_MISSING   = 303  # E103: class does not implement a required interface method
+    E_INTERFACE_METHOD_MISMATCH  = 304  # E104: implemented method's signature doesn't match the interface stub
+    E_OVERLOAD_AMBIGUOUS         = 305  # E105: call matches two or more @overload signatures equally well
+    E_OVERLOAD_NO_MATCH          = 306  # E106: call matches no @overload signature
+    E_OVERLOAD_INCOMPATIBLE      = 307  # E107: two @overload signatures are indistinguishable
+
 
 def _code_label(code: int) -> str:
     """Return the human-readable code label, e.g. 1 -> 'L001', 212 -> 'E012'."""
@@ -215,6 +236,9 @@ ERROR_DESCRIPTIONS: dict[str, str] = {
     _code_label(ErrorCode.P_FINAL_WITHOUT_EXTENSION): "'final class' requires the 'final' extension.  Add '--ext final' to the compile command.",
     _code_label(ErrorCode.P_SEALED_WITHOUT_EXTENSION): "'sealed class' requires the 'sealed' extension.  Add '--ext sealed' to the compile command.",
     _code_label(ErrorCode.P_ENUM_WITHOUT_EXTENSION): "'enum' declarations require the 'enum' extension.  Add '--ext enum' to the compile command.",
+    _code_label(ErrorCode.P_INTERFACE_WITHOUT_EXTENSION): "'interface' declarations require the 'interface' extension.  Add '--ext interface' to the compile command.",
+    _code_label(ErrorCode.P_INTERFACE_STUB_BODY): "An 'interface' method stub's body must be exactly 'pass' -- no real statements.",
+    _code_label(ErrorCode.P_ASSIGN_DECORATOR_UNSUPPORTED_TARGET): "'@decorator' above an assignment only supports a single-target or single-call tuple-unpack assignment.",
     # Semantic – name resolution
     _code_label(ErrorCode.E_UNDEFINED_NAME):        "Name is not defined in the current scope.  Check for typos or missing imports.",
     _code_label(ErrorCode.E_UNDEFINED_FUNC):        "Call to an undefined function.  The function may not be imported or may be defined after the call site.",
@@ -277,6 +301,20 @@ ERROR_DESCRIPTIONS: dict[str, str] = {
     _code_label(ErrorCode.E_ENUM_REDEFINED): "An 'enum' name collides with a function or class of the same name.",
     _code_label(ErrorCode.E_ENUM_UNKNOWN_MEMBER): "No such member on this enum type.",
     _code_label(ErrorCode.E_ENUM_TYPE_MISMATCH): "Comparing members of two different enum types.",
+    _code_label(ErrorCode.E_READONLY_PARAM_REASSIGNED): "Cannot reassign a parameter locked by '@readonly' or the 'const_params' extension.",
+    _code_label(ErrorCode.E_READONLY_UNKNOWN_PARAM): "'@readonly' names a parameter that doesn't exist on this function.",
+    _code_label(ErrorCode.E_UNDECLARED_GLOBAL_MUTATION): "Reassigning a module-level name from inside a function requires a 'global' declaration.",
+    _code_label(ErrorCode.E_SHADOWED_GLOBAL): "This name shadows a module-level global (or, inside a nested function, a captured variable).",
+    _code_label(ErrorCode.E_MUST_USE_DISCARDED): "The return value of this '@must_use' call is discarded.",
+    _code_label(ErrorCode.E_IMPLICIT_ANY_PARAM): "This parameter has no annotation, default, or inferrable usage -- its type cannot be determined.",
+    _code_label(ErrorCode.E_IMPLICIT_ANY_ASSIGN): "This assignment's value has no inferrable concrete type.",
+    _code_label(ErrorCode.E_INTERFACE_REDEFINED): "An 'interface' name collides with a function or class of the same name.",
+    _code_label(ErrorCode.E_INTERFACE_UNKNOWN): "'interface=' names an interface that was never declared.",
+    _code_label(ErrorCode.E_INTERFACE_METHOD_MISSING): "This class does not implement a method required by its interface.",
+    _code_label(ErrorCode.E_INTERFACE_METHOD_MISMATCH): "This method's signature does not match its interface's stub.",
+    _code_label(ErrorCode.E_OVERLOAD_AMBIGUOUS): "This call matches two or more '@overload' signatures equally well.",
+    _code_label(ErrorCode.E_OVERLOAD_NO_MATCH): "This call matches no '@overload' signature.",
+    _code_label(ErrorCode.E_OVERLOAD_INCOMPATIBLE): "Two '@overload' signatures are indistinguishable from each other.",
 }
 
 

@@ -3178,6 +3178,7 @@ class SemaAnalyzer:
                 kwarg=f.kwarg,
                 ret_tuple=(r[3] if r is not None and r[0] == "tuple" else None),
                 ret_bool=(_raw_ret_base == "bool"),
+                decorators=list(getattr(f, "decorators", [])),
             )
 
         # A lightweight top-level prepass for tuple-return inference. This

@@ -177,6 +177,114 @@ class EnumExtension(CompilerExtension):
     conflicts: set = set()
 
 
+# ---------------------------------------------------------------------------
+# Wave-2 extension library
+# ---------------------------------------------------------------------------
+# Nine more built-in extensions, same conventions as wave 1: compile-time-only,
+# opt-in, enforced via SemaAnalyzer._ext_active(name). `interface` and
+# `overload` introduce genuinely new statement-prefix syntax (interface's own
+# top-level block; overload doesn't need new grammar, just a decorator, but
+# changes call-site dispatch); `assign_decorators` introduces a new
+# decorator-application TARGET (assignments, not just def/class) with its own
+# parser-level desugaring. The rest are pure additional sema strictness or a
+# new per-function name-lock mechanism, no new syntax. See docs/EXTENSIONS.md.
+class ReadonlyParamsExtension(CompilerExtension):
+    """`readonly_params`: @readonly(name, ...) locks named params against
+    reassignment inside the function body."""
+
+    name = "readonly_params"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = set()
+
+
+class ConstParamsExtension(CompilerExtension):
+    """`const_params`: every parameter is implicitly locked against
+    reassignment unless the function is @mutable_params."""
+
+    name = "const_params"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = set()
+
+
+class NoGlobalMutationExtension(CompilerExtension):
+    """`no_global_mutation`: forbid reassigning a module-level name from
+    inside a function body without an explicit `global` declaration."""
+
+    name = "no_global_mutation"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = set()
+
+
+class NoShadowingExtension(CompilerExtension):
+    """`no_shadowing`: forbid a function param/local from sharing a name
+    with a module-level global (first-bind only), or a lifted function's
+    own local from shadowing one of its own captured free variables.
+
+    Narrower than general lexical shadow detection -- see this compiler's
+    flat, non-parent-chained Scope architecture (docs/EXTENSIONS.md)."""
+
+    name = "no_shadowing"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = set()
+
+
+class MustUseExtension(CompilerExtension):
+    """`must_use`: @must_use on a function/method errors if a call site
+    discards its return value as a bare statement."""
+
+    name = "must_use"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = set()
+
+
+class NoImplicitAnyExtension(CompilerExtension):
+    """`no_implicit_any`: error on an unannotated, uninferrable function
+    parameter, or an unannotated assignment whose value is genuinely opaque
+    -- narrower than a blanket "any" ban (see docs/EXTENSIONS.md)."""
+
+    name = "no_implicit_any"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = set()
+
+
+class InterfaceExtension(CompilerExtension):
+    """`interface`: `interface Name:` declares a structural method-signature
+    contract; `class X(interface=Name):` must implement every stub."""
+
+    name = "interface"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = set()
+
+
+class AssignDecoratorsExtension(CompilerExtension):
+    """`assign_decorators`: @decorator above an assignment statement
+    desugars to the assignment followed by decorator(name, value) for
+    side effects; the decorator's return value is discarded."""
+
+    name = "assign_decorators"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = set()
+
+
+class OverloadExtension(CompilerExtension):
+    """`overload`: @overload-decorated same-named functions/methods with
+    differing signatures dispatch by argument count/type at call sites,
+    resolved and mangled to distinct symbols at compile time."""
+
+    name = "overload"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = set()
+
+
 # Class references (not instances) -- looked up by name at activation time so
 # each activation constructs its own fresh instance.
 _REGISTRY: dict = {
@@ -187,6 +295,15 @@ _REGISTRY: dict = {
     "sealed": SealedExtension,
     "exhaustive_switch": ExhaustiveSwitchExtension,
     "enum": EnumExtension,
+    "readonly_params": ReadonlyParamsExtension,
+    "const_params": ConstParamsExtension,
+    "no_global_mutation": NoGlobalMutationExtension,
+    "no_shadowing": NoShadowingExtension,
+    "must_use": MustUseExtension,
+    "no_implicit_any": NoImplicitAnyExtension,
+    "interface": InterfaceExtension,
+    "assign_decorators": AssignDecoratorsExtension,
+    "overload": OverloadExtension,
 }
 
 
