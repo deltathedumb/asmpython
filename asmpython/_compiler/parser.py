@@ -416,6 +416,10 @@ class Parser:
                 body.extend(self._desugar_decorator_exprs(pending, fdef.name, fdef.pos))
             elif self._check("KEYWORD", "class"):
                 classes.append(self._parse_classdef(decorators=decorators))
+            elif self._check("NAME", "final") and self._looks_like_final_class():
+                classes.append(self._dispatch_final_class())
+            elif self._check("NAME", "sealed") and self._looks_like_sealed_class():
+                classes.append(self._dispatch_sealed_class())
             else:
                 body.append(self._parse_stmt())
             self._skip_newlines()
@@ -772,21 +776,57 @@ class Parser:
         start = self._expect("KEYWORD", "class").pos
         name = self._expect("NAME").value
         parent = None
+        sealed_permits: list = []
         if self._check("OP", "("):
             self._eat()
             if not self._check("OP", ")"):
-                # First base class, possibly dotted (`module.Base`). Every
-                # consumer (sema's class table, codegen's chain walker) keys
-                # by bare class name, so only the leaf survives.
-                parent = self._expect("NAME").value
-                while self._check("OP", "."):
-                    self._eat()
+                # `sealed class X(permits=A, B):` -- the `sealed` extension's
+                # explicit subclass permit-list. Recognized as a keyword-arg
+                # shape (bare NAME immediately followed by `=`) so it can't
+                # be confused with a genuine base class name (which is never
+                # followed by `=` here). Captures the comma-separated NAME
+                # list that follows into `sealed_permits`; parsed regardless
+                # of whether `sealed` is actually active for this class (the
+                # sema-side is_sealed check is what's gated on activation --
+                # a `permits=` clause on an otherwise-ordinary class with no
+                # `sealed` prefix is simply never consulted).
+                if (
+                    self._check("NAME", "permits")
+                    and self._peek(1).kind == "OP"
+                    and self._peek(1).value == "="
+                ):
+                    self._eat()  # 'permits'
+                    self._eat()  # '='
+                    sealed_permits.append(self._expect("NAME").value)
+                    while self._check("OP", ","):
+                        self._eat()
+                        sealed_permits.append(self._expect("NAME").value)
+                else:
+                    # First base class, possibly dotted (`module.Base`). Every
+                    # consumer (sema's class table, codegen's chain walker) keys
+                    # by bare class name, so only the leaf survives.
                     parent = self._expect("NAME").value
-                # Extra bases / keyword bases (multiple inheritance, metaclass=)
-                # aren't modelled — single inheritance only. Skip the rest so
-                # the source still parses.
+                    while self._check("OP", "."):
+                        self._eat()
+                        parent = self._expect("NAME").value
+                # Extra bases / keyword bases (multiple inheritance, metaclass=,
+                # or a `permits=` clause after a real base class) aren't
+                # modelled beyond the sealed-permits capture above -- single
+                # inheritance only. Skip the rest so the source still parses.
                 while self._check("OP", ","):
                     self._eat()
+                    if (
+                        self._check("NAME", "permits")
+                        and self._peek(1).kind == "OP"
+                        and self._peek(1).value == "="
+                    ):
+                        self._eat()  # 'permits'
+                        self._eat()  # '='
+                        sealed_permits.append(self._expect("NAME").value)
+                        while self._check("OP", ","):
+                            self._eat()
+                            sealed_permits.append(self._expect("NAME").value)
+                        break
                     self._parse_expr()
             self._expect("OP", ")")
         self._expect("OP", ":")
@@ -869,6 +909,7 @@ class Parser:
             is_dataclass=is_dc,
             decorators=class_decorators,
             field_decorators=field_decorators,
+            sealed_permits=sealed_permits,
         )
 
     def _parse_class_var(self):
@@ -1434,6 +1475,20 @@ class Parser:
                 ErrorCode.P_CONST_WITHOUT_EXTENSION,
             )
 
+        # `final class` / `sealed class` nested inside a function body:
+        # lifted to module level exactly like an ordinary nested `class`
+        # (see the KEYWORD "class" branch above) -- append to
+        # _nested_classes and leave a A.Pass placeholder in the enclosing
+        # body.
+        if t.kind == "NAME" and t.value == "final" and self._looks_like_final_class():
+            cdef = self._dispatch_final_class()
+            self._nested_classes.append(cdef)
+            return A.Pass(pos=cdef.pos)
+        if t.kind == "NAME" and t.value == "sealed" and self._looks_like_sealed_class():
+            cdef = self._dispatch_sealed_class()
+            self._nested_classes.append(cdef)
+            return A.Pass(pos=cdef.pos)
+
         # Third-party extension statement handlers (asmpython.extend.Extension(...),
         # registered via --ext). Unlike `const`/`match`, a plugin-registered
         # keyword has no built-in shape lookahead the parser can check ahead
@@ -1708,6 +1763,63 @@ class Parser:
             value=value,
             pos=kw.pos,
             annotation=annotation,
+        )
+
+    def _looks_like_final_class(self) -> bool:
+        """`final` is a soft keyword: only `final class ...` is the class-
+        finality shape (an ordinary `final = 5` or `final.method()` keeps
+        working). Mirrors `_looks_like_const_decl`'s save/rewind idiom."""
+        save = self.i
+        self._eat()  # 'final'
+        ok = self._check("KEYWORD", "class")
+        self.i = save
+        return ok
+
+    def _parse_final_class(self) -> A.ClassDef:
+        kw = self._expect("NAME", "final")
+        cdef = self._parse_classdef(decorators=None)
+        cdef.is_final = True
+        cdef.pos = kw.pos
+        return cdef
+
+    def _dispatch_final_class(self) -> A.ClassDef:
+        """Shared by both the module-level and nested-statement dispatch
+        sites: parse `final class ...` if the extension is active, else
+        raise the precise "shape matched but not activated" diagnostic
+        (mirrors `const`'s own dispatch, see _parse_stmt)."""
+        if self.ext_ctx.is_active("final"):
+            return self._parse_final_class()
+        raise ParseError(
+            "'final class' requires the 'final' extension "
+            "(pass '--ext final' on the command line)",
+            self._peek().pos,
+            ErrorCode.P_FINAL_WITHOUT_EXTENSION,
+        )
+
+    def _looks_like_sealed_class(self) -> bool:
+        """`sealed` is a soft keyword, same shape-check as `final`."""
+        save = self.i
+        self._eat()  # 'sealed'
+        ok = self._check("KEYWORD", "class")
+        self.i = save
+        return ok
+
+    def _parse_sealed_class(self) -> A.ClassDef:
+        kw = self._expect("NAME", "sealed")
+        cdef = self._parse_classdef(decorators=None)
+        cdef.is_sealed = True
+        cdef.pos = kw.pos
+        return cdef
+
+    def _dispatch_sealed_class(self) -> A.ClassDef:
+        """Shared dispatch helper -- see `_dispatch_final_class`."""
+        if self.ext_ctx.is_active("sealed"):
+            return self._parse_sealed_class()
+        raise ParseError(
+            "'sealed class' requires the 'sealed' extension "
+            "(pass '--ext sealed' on the command line)",
+            self._peek().pos,
+            ErrorCode.P_SEALED_WITHOUT_EXTENSION,
         )
 
     def _looks_like_match_stmt(self) -> bool:

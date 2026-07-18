@@ -3332,6 +3332,55 @@ class SemaAnalyzer:
                     seen.add(cur)
                     cur = self.classes[cur].parent
 
+        # `final`/`sealed` extensions: enforce subclassing restrictions.
+        # Both walk the DIRECT parent only (not the full ancestor chain) --
+        # a class is final/sealed against its own immediate subclasses;
+        # whether THOSE subclasses can themselves be further subclassed is a
+        # separate, independent check against their own is_final/is_sealed.
+        if self._ext_active("final") or self._ext_active("sealed"):
+            for c in self.mod.classes:
+                if c.parent is None or c.parent not in self.classes:
+                    continue
+                parent_sig = self.classes[c.parent]
+                if self._ext_active("final") and parent_sig.is_final:
+                    raise SemaError(
+                        f"cannot subclass {c.parent!r}: it is a 'final class'",
+                        c.pos,
+                        ErrorCode.E_FINAL_CLASS_SUBCLASSED,
+                    )
+                if self._ext_active("sealed") and parent_sig.is_sealed:
+                    if c.name not in parent_sig.sealed_permits:
+                        raise SemaError(
+                            f"cannot subclass {c.parent!r}: it is a 'sealed "
+                            f"class' and {c.name!r} is not in its permits list",
+                            c.pos,
+                            ErrorCode.E_SEALED_SUBCLASS_NOT_PERMITTED,
+                        )
+
+        # `final` extension: enforce non-overridable methods. Walks the full
+        # ancestor chain (not just the direct parent) so re-overriding two
+        # levels down is also caught, e.g. Grandparent has @final def f(),
+        # Parent doesn't mention f, Child def f() must still be rejected.
+        if self._ext_active("final"):
+            for c in self.mod.classes:
+                sig = self.classes[c.name]
+                cur = sig.parent
+                seen = {c.name}
+                while cur is not None and cur not in seen:
+                    seen.add(cur)
+                    ancestor_sig = self.classes.get(cur)
+                    if ancestor_sig is None:
+                        break
+                    collision = sig.methods.keys() & ancestor_sig.final_methods
+                    if collision:
+                        raise SemaError(
+                            f"cannot override {cur}.{sorted(collision)[0]}(): "
+                            f"it is declared @final",
+                            c.pos,
+                            ErrorCode.E_FINAL_METHOD_OVERRIDDEN,
+                        )
+                    cur = ancestor_sig.parent
+
         # Top-level body first, so module-level names (imports and top-level
         # assignments) are recorded as globals and become visible inside
         # function/method bodies. In CPython a function reads module globals at

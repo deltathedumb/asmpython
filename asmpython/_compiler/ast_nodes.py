@@ -117,6 +117,15 @@ class ClassDef:
     # existing unpacking sites touched) and avoids padding every ordinary
     # field with an always-empty 4th tuple element.
     field_decorators: dict = field(default_factory=dict)
+    # `final` extension: set when the class was declared `final class Name:`
+    # (a soft-keyword statement prefix, not a decorator -- unlike @final on
+    # a method, a class-level "no subclasses at all" restriction reads more
+    # naturally attached to the class statement itself).
+    is_final: bool = False
+    # `sealed` extension: set when declared `sealed class Name(permits=A, B):`.
+    # `sealed_permits` holds the leaf names of the permitted subclasses.
+    is_sealed: bool = False
+    sealed_permits: list = field(default_factory=list)
 
 
 # ---- Statements -------------------------------------------------------------
