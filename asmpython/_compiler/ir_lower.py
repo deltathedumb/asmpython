@@ -6772,13 +6772,14 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", out, ["labs", n_v]))
             return out
         if e.func == "hash" and len(e.args) == 1:
-            # `hash(instance)` on a class defining __hash__ -- like abs()
-            # above, was entirely unimplemented and fell through to the
-            # generic bare-symbol-call fallback, linking against a
+            # `hash(instance)` on a class defining __hash__, `hash(str)`
+            # (FNV-1a via the dict runtime's own string hasher), and
+            # `hash(int/float/bool)` (identity -- the raw value itself,
+            # matching codegen.py's own "value already in rax" comment).
+            # Was entirely unimplemented for every case, falling through
+            # to the generic bare-symbol-call fallback, linking against a
             # nonexistent `hash` DLL symbol (Python's hash() has no libc
-            # equivalent at all, unlike abs()). Only the instance-dispatch
-            # case is handled; hashing a plain int/str is a separate,
-            # unrelated feature not needed by any current caller.
+            # equivalent at all, unlike abs()).
             arg_t = A.expr_type(e.args[0])
             if arg_t.startswith("instance:"):
                 cls_name = arg_t.split(":", 1)[1]
@@ -6788,6 +6789,24 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     v = ctx.tmp(I64)
                     ctx.emit(IRInstr("call", v, [f"{owner}____hash__", val]))
                     return v
+                raise LowerError("unsupported expr Call (hash() on a non-instance or a class with no __hash__)")
+            if arg_t == "str":
+                val = _lower_expr(ctx, e.args[0])
+                v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", v, ["_abi_hash_string", val]))
+                return v
+            if arg_t in ("int", "bool", "any"):
+                return _lower_expr(ctx, e.args[0])
+            if arg_t == "float":
+                # Identity hash on the raw bits, same as codegen.py's
+                # "value already in rax" comment -- CPython's real
+                # float-hash algorithm (normalizing e.g. hash(2.0) ==
+                # hash(2)) isn't replicated here, matching the existing
+                # int/bool simplification's own precedent.
+                val = _lower_expr(ctx, e.args[0])
+                v = ctx.tmp(I64)
+                ctx.emit(IRInstr("bitcast_f2i", v, [val]))
+                return v
             raise LowerError("unsupported expr Call (hash() on a non-instance or a class with no __hash__)")
         if e.func == "round" and len(e.args) == 1:
             arg_t = A.expr_type(e.args[0])

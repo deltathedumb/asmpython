@@ -638,6 +638,18 @@ _abi_str_index_of_start:
     WIN64_RUNTIME_LEAVE
     ret
 
+; rax = hash_string(s=rcx) -- backs hash(s) for str (FNV-1a 64-bit, same
+; hasher the dict runtime itself uses for string keys). Thin wrapper over
+; the already-linked _runtime_hash_string (rax=str ptr -> rax=hash, no
+; RBX/etc scratch to preserve).
+extern _runtime_hash_string
+_abi_hash_string:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    call _runtime_hash_string
+    WIN64_RUNTIME_LEAVE
+    ret
+
 ; rax = str_expandtabs(self=rcx, tabsize=rdx) -- str.expandtabs([tabsize]);
 ; the no-arg Python default (tabsize=8) is applied by the CALLER (see
 ; ir_lower.py's expandtabs case), matching codegen.py's own
