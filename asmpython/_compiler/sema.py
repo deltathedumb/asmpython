@@ -410,6 +410,17 @@ class ClassSig:
     field_inner_value_types: dict[str, str] = field(default_factory=dict)
     field_value_tuple_types: dict[str, list] = field(default_factory=dict)
     field_tuple_types: dict[str, list] = field(default_factory=dict)
+    # Wave-1 extensions (access/final/sealed): method/field name -> modifier
+    # state, populated during signature collection regardless of whether the
+    # owning extension is active (cheap to always record; enforcement itself
+    # is what's gated on _ext_active). "public" is the implicit default for
+    # anything absent from `access`/`field_access`.
+    access: dict[str, str] = field(default_factory=dict)
+    field_access: dict[str, str] = field(default_factory=dict)
+    is_final: bool = False
+    final_methods: set = field(default_factory=set)
+    is_sealed: bool = False
+    sealed_permits: list = field(default_factory=list)
 
 
 @dataclass
@@ -812,6 +823,69 @@ class SemaAnalyzer:
                 return cur in BUILTIN_EXCEPTIONS
             cur = cls.parent
         return False
+
+    def _class_descends_from(self, class_name: Optional[str], ancestor: str) -> bool:
+        """True if `class_name` is `ancestor` or a (possibly indirect) subclass."""
+        cur = class_name
+        seen = set()
+        while cur is not None and cur not in seen:
+            if cur == ancestor:
+                return True
+            seen.add(cur)
+            cls: ClassSig = self.classes.get(cur)
+            cur = cls.parent if cls is not None else None
+        return False
+
+    def _check_access(
+        self, owner_cls: str, member_name: str, is_field: bool, pos
+    ) -> None:
+        """Enforce the `access` extension's @private/@protected modifiers.
+
+        `owner_cls` is the class the read/call/assignment was resolved
+        against (e.g. `A.expr_type(e.obj)`'s "instance:<Class>"); walks the
+        parent chain to find which class in that chain actually *declares*
+        `member_name` (mirrors `_resolve_field_type`'s own walk) so a
+        modifier declared on a base class is enforced against subclass
+        instances too. No-op if the extension isn't active, the member
+        isn't found (some other check reports that), or it's public
+        (absent from the access dict is the implicit public default).
+        """
+        if not self._ext_active("access"):
+            return
+        cur = owner_cls
+        seen = set()
+        declaring_cls = None
+        level = None
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            cls: ClassSig = self.classes.get(cur)
+            if cls is None:
+                return
+            table = cls.field_access if is_field else cls.access
+            if member_name in table:
+                declaring_cls, level = cur, table[member_name]
+                break
+            cur = cls.parent
+        if level is None or level == "public":
+            return
+        if level == "private":
+            if self.current_class != declaring_cls:
+                raise SemaError(
+                    f"{declaring_cls}.{member_name!r} is private and can only "
+                    f"be accessed from {declaring_cls}'s own methods",
+                    pos,
+                    ErrorCode.E_PRIVATE_ACCESS_VIOLATION,
+                )
+        elif level == "protected":
+            if self.current_class is None or not self._class_descends_from(
+                self.current_class, declaring_cls
+            ):
+                raise SemaError(
+                    f"{declaring_cls}.{member_name!r} is protected and can only "
+                    f"be accessed from {declaring_cls} or one of its subclasses",
+                    pos,
+                    ErrorCode.E_PROTECTED_ACCESS_VIOLATION,
+                )
 
     def _resolve_field_type(self, class_name: str, field_name: str) -> Optional[str]:
         """Walk the parent chain to find the static type of an instance field.
@@ -3093,10 +3167,55 @@ class SemaAnalyzer:
                     f"class name {c.name!r} collides with existing name", c.pos
                 )
             sig = ClassSig(name=c.name, parent=c.parent, pos=c.pos)
+            sig.is_final = getattr(c, "is_final", False)
+            sig.is_sealed = getattr(c, "is_sealed", False)
+            sig.sealed_permits = list(getattr(c, "sealed_permits", []) or [])
+            for fname, f_decos in getattr(c, "field_decorators", {}).items():
+                if ("private" in f_decos or "protected" in f_decos) and not self._ext_active("access"):
+                    raise SemaError(
+                        f"@{'private' if 'private' in f_decos else 'protected'} on "
+                        f"{c.name}.{fname} requires the 'access' extension "
+                        f"(pass '--ext access' on the command line)",
+                        c.pos,
+                        ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
+                    )
+                if "immutable" in f_decos and not self._ext_active("immutable"):
+                    raise SemaError(
+                        f"@immutable on {c.name}.{fname} requires the "
+                        f"'immutable' extension (pass '--ext immutable' on "
+                        f"the command line)",
+                        c.pos,
+                        ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
+                    )
+                if "private" in f_decos:
+                    sig.field_access[fname] = "private"
+                elif "protected" in f_decos:
+                    sig.field_access[fname] = "protected"
             for m in c.methods:
                 deco: list[str] = getattr(m, "decorators", [])
                 is_static = "staticmethod" in deco
                 is_classm = "classmethod" in deco
+                if ("private" in deco or "protected" in deco) and not self._ext_active("access"):
+                    raise SemaError(
+                        f"@{'private' if 'private' in deco else 'protected'} on "
+                        f"{c.name}.{m.name} requires the 'access' extension "
+                        f"(pass '--ext access' on the command line)",
+                        m.pos,
+                        ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
+                    )
+                if "final" in deco and not self._ext_active("final"):
+                    raise SemaError(
+                        f"@final on {c.name}.{m.name} requires the 'final' "
+                        f"extension (pass '--ext final' on the command line)",
+                        m.pos,
+                        ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
+                    )
+                if "private" in deco:
+                    sig.access[m.name] = "private"
+                elif "protected" in deco:
+                    sig.access[m.name] = "protected"
+                if "final" in deco:
+                    sig.final_methods.add(m.name)
                 if not (is_static or is_classm):
                     if not m.params or m.params[0] != "self":
                         raise SemaError(
@@ -5022,6 +5141,7 @@ class SemaAnalyzer:
             if obj_t.startswith("instance:"):
                 cls_name = obj_t.split(":", 1)[1]
                 if cls_name in self.classes:
+                    self._check_access(cls_name, s.name, is_field=True, pos=s.pos)
                     resolved = self._resolve_method(cls_name, s.name)
                     if resolved is not None and "property" in resolved[1].decorators:
                         setter_name = self._resolve_setter(cls_name, s.name)
@@ -6820,6 +6940,7 @@ class SemaAnalyzer:
                     resolved = self._resolve_method(cls, e.name)
                     if resolved is not None and "property" in resolved[1].decorators:
                         _owner, sig = resolved
+                        self._check_access(cls, e.name, is_field=False, pos=e.pos)
                         obj_expr = e.obj
                         e.__class__ = A.MethodCall  # type: ignore[assignment]
                         e.obj = obj_expr  # type: ignore[attr-defined]
@@ -6842,6 +6963,7 @@ class SemaAnalyzer:
                         else:
                             e.inferred_type = "int"
                         return
+                    self._check_access(cls, e.name, is_field=True, pos=e.pos)
                     ft = self._resolve_field_type(cls, e.name)
                     e.inferred_type = ft if ft is not None else "any"
                     # Carry the collection element/value kinds so a later
@@ -7421,6 +7543,8 @@ class SemaAnalyzer:
             elif obj_t.startswith("instance:"):
                 class_name = obj_t.split(":", 1)[1]
                 resolved = self._resolve_method(class_name, e.method)
+                if resolved is not None:
+                    self._check_access(class_name, e.method, is_field=False, pos=e.pos)
                 if resolved is None:
                     # `obj.field(args)` where `field` isn't a real method but
                     # IS an instance-typed field whose class has __call__

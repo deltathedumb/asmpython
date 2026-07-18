@@ -107,6 +107,16 @@ class ClassDef:
     is_dataclass: bool = False
     # Decorator names collected by the parser (e.g. ["dataclass", "frozen"]).
     decorators: list = field(default_factory=list)
+    # Per-field decorator names (e.g. {"balance": ["private"]}) for class-body
+    # variables carrying their own decorator line, used by the `access` and
+    # `immutable` compiler extensions. A SEPARATE dict rather than widening
+    # `class_vars`'s tuple shape: `class_vars` is unpacked as a bare 3-tuple
+    # at ~8 call sites across parser/sema/codegen/ir_lower (e.g. `for fname,
+    # _fannot, fvalue in c.class_vars`), and most fields never carry a
+    # decorator at all, so a parallel sparse dict is both lower-risk (zero
+    # existing unpacking sites touched) and avoids padding every ordinary
+    # field with an always-empty 4th tuple element.
+    field_decorators: dict = field(default_factory=dict)
 
 
 # ---- Statements -------------------------------------------------------------

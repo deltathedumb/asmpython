@@ -659,6 +659,13 @@ class Parser:
     _INFORMATIONAL_DECORATORS = {
         "dataclass", "staticmethod", "classmethod", "property",
         "abstractmethod", "assembly_func",
+        # Wave-1 compiler-extension decorators (access/immutable/final).
+        # Parsed unconditionally like every other informational decorator --
+        # whether they're *meaningful* (i.e. the owning extension is active)
+        # is a semantic-phase question (SemaAnalyzer._ext_active), not a
+        # parse-phase one, so a stray `@private` with `--ext access` absent
+        # parses fine and is caught later with a precise E087 diagnostic.
+        "private", "protected", "public", "immutable", "final",
     }
 
     def _eat_decorators(self) -> list[str]:
@@ -760,7 +767,8 @@ class Parser:
         return stmts
 
     def _parse_classdef(self, decorators: "list[str] | None" = None) -> A.ClassDef:
-        is_dc = bool(decorators and "dataclass" in decorators)
+        class_decorators = list(decorators) if decorators else []
+        is_dc = "dataclass" in class_decorators
         start = self._expect("KEYWORD", "class").pos
         name = self._expect("NAME").value
         parent = None
@@ -787,6 +795,7 @@ class Parser:
         self._expect("INDENT")
         methods: list[A.FuncDef] = []
         class_vars: list = []
+        field_decorators: dict = {}
         while not self._check("DEDENT"):
             self._skip_newlines()
             if self._check("DEDENT"):
@@ -822,7 +831,10 @@ class Parser:
                 # sema can type `self.NAME` reads (e.g. a set/dict constant used
                 # for membership). @dataclass-style annotation-only fields are
                 # captured too (value None).
-                class_vars.append(self._parse_class_var())
+                cv = self._parse_class_var()
+                class_vars.append(cv)
+                if decorators:
+                    field_decorators[cv[0]] = decorators
             else:
                 raise ParseError(
                     "class bodies may only contain 'def' methods, field "
@@ -855,7 +867,8 @@ class Parser:
             pos=start,  # type: ignore
             class_vars=class_vars,
             is_dataclass=is_dc,
-            decorators=list(decorators) if decorators else [],
+            decorators=class_decorators,
+            field_decorators=field_decorators,
         )
 
     def _parse_class_var(self):
