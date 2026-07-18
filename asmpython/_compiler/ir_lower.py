@@ -5180,16 +5180,18 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     if isinstance(e, A.Subscript):
         if isinstance(e.index, A.Slice):
             obj_ty = A.expr_type(e.obj)
+            SENTINEL_MIN = -9223372036854775808
+            SENTINEL_MAX = 9223372036854775807
             if obj_ty in ("list", "tuple") and e.index.step is None:
                 obj_v = _lower_expr(ctx, e.obj)
                 if e.index.start is None:
                     start_v = ctx.tmp(I64)
-                    ctx.emit(IRInstr("const", start_v, [-9223372036854775808]))
+                    ctx.emit(IRInstr("const", start_v, [SENTINEL_MIN]))
                 else:
                     start_v = _lower_expr(ctx, e.index.start)
                 if e.index.stop is None:
                     stop_v = ctx.tmp(I64)
-                    ctx.emit(IRInstr("const", stop_v, [9223372036854775807]))
+                    ctx.emit(IRInstr("const", stop_v, [SENTINEL_MAX]))
                 else:
                     stop_v = _lower_expr(ctx, e.index.stop)
                 v = ctx.tmp(PTR)
@@ -5209,6 +5211,52 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     stop_v = _lower_expr(ctx, e.index.stop)
                 v = ctx.tmp(PTR)
                 ctx.emit(IRInstr("call", v, ["_abi_str_slice", obj_v, start_v, stop_v]))
+                return v
+            if obj_ty in ("list", "tuple") and e.index.step is not None:
+                # xs[start:stop:step] -- _abi_list_slice_step mirrors
+                # codegen.py's own _gen_list_slice's step branch exactly:
+                # SENTINEL_MIN for a missing start, SENTINEL_MAX for a
+                # missing stop (list's runtime helper always uses this
+                # fixed pair, unlike the str version below). Was entirely
+                # unimplemented: any list/tuple slice with an explicit
+                # step fell through to a LowerError.
+                obj_v = _lower_expr(ctx, e.obj)
+                if e.index.start is None:
+                    start_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", start_v, [SENTINEL_MIN]))
+                else:
+                    start_v = _lower_expr(ctx, e.index.start)
+                if e.index.stop is None:
+                    stop_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", stop_v, [SENTINEL_MAX]))
+                else:
+                    stop_v = _lower_expr(ctx, e.index.stop)
+                step_v = _lower_expr(ctx, e.index.step)
+                v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", v, ["_abi_list_slice_step", obj_v, start_v, stop_v, step_v]))
+                return v
+            if obj_ty == "str" and e.index.step is not None:
+                # s[start:stop:step] -- _abi_str_slice_step mirrors
+                # codegen.py's own _gen_str_slice_step exactly: a missing
+                # stop ALWAYS passes SENTINEL_MIN (not MAX), regardless of
+                # step's sign -- the runtime helper inspects step itself
+                # to pick the direction-correct default. Was entirely
+                # unimplemented: any str slice with an explicit step fell
+                # through to a LowerError.
+                obj_v = _lower_expr(ctx, e.obj)
+                if e.index.start is None:
+                    start_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", start_v, [SENTINEL_MIN]))
+                else:
+                    start_v = _lower_expr(ctx, e.index.start)
+                if e.index.stop is None:
+                    stop_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", stop_v, [SENTINEL_MIN]))
+                else:
+                    stop_v = _lower_expr(ctx, e.index.stop)
+                step_v = _lower_expr(ctx, e.index.step)
+                v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", v, ["_abi_str_slice_step", obj_v, start_v, stop_v, step_v]))
                 return v
             raise LowerError("unsupported expr Subscript (slice)")
         obj_ty = A.expr_type(e.obj)

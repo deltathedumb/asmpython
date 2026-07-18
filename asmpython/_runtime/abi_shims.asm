@@ -650,6 +650,44 @@ _abi_str_expandtabs:
     call _runtime_str_expandtabs
     WIN64_RUNTIME_LEAVE
     ret
+
+; rax = list_slice_step(src=rcx, start=rdx, stop=r8, step=r9) -- backs
+; xs[start:stop:step] once a step is present (a plain xs[start:stop]
+; still uses the simpler _abi_list_slice, unaffected). Sentinels for
+; missing endpoints (INT64_MIN=start, INT64_MAX=stop) match codegen.py's
+; own _gen_list_slice exactly -- caller (ir_lower.py) fills those in
+; before calling. Mirrors codegen.py's own register convention for
+; _runtime_list_slice_step: rax=src, rbx=start, rcx=stop, rdx=step.
+extern _runtime_list_slice_step
+_abi_list_slice_step:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    mov rcx, r8
+    mov rdx, r9
+    call _runtime_list_slice_step
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = str_slice_step(s=rcx, start=rdx, stop=r8, step=r9) -- backs
+; s[start:stop:step] once a step is present (a plain s[start:stop] still
+; uses the simpler _abi_str_slice, unaffected). Sentinel for a missing
+; stop is INT64_MIN either way (the runtime itself picks the direction-
+; correct default from step's sign) -- matches codegen.py's own
+; _gen_str_slice_step comment exactly. Mirrors codegen.py's own register
+; convention for _runtime_str_slice_step: rax=s, rbx=start, rcx=stop,
+; r8=step (note: step is r8 here, NOT rdx like the list version above --
+; a real asymmetry between the two runtime helpers, not a typo).
+extern _runtime_str_slice_step
+_abi_str_slice_step:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    mov rcx, r8
+    mov r8, r9
+    call _runtime_str_slice_step
+    WIN64_RUNTIME_LEAVE
+    ret
 _abi_str_split:
     WIN64_RUNTIME_ENTER
     mov rax, rcx
