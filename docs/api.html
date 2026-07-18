@@ -194,7 +194,11 @@ asmpython.linker.Linker(name=<span class="str">"my_linker"</span>, impl=MyLinker
      extension: a new statement-prefix keyword handled by your own parser
      callback. Unlike <code>backend</code>/<code>linker</code>, an extension
      plugin is typically loaded straight from a file via <code>--ext</code>,
-     rather than imported as an installed package.</p>
+     rather than imported as an installed package. This section covers the
+     registration <em>API</em> for writing your own — for the built-in
+     extensions that ship with the compiler (constants, access, immutable,
+     final, sealed, exhaustive_switch, enum), see the
+     <a href="stdlib.html#ext-catalog">extension catalog</a>.</p>
 
   <pre><div class="lang">python</div><code><span class="cmt"># my_plugin.py</span>
 <span class="kw2">import</span> asmpython
