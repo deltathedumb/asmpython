@@ -20,6 +20,6 @@ see `asmpython.extend` for the full contract:
 
 from .extend import Backend, Extension, Linker
 
-__version__ = "2.0.0-preview"
+__version__ = "3.14-preview"
 
 __all__ = ["Backend", "Extension", "Linker", "__version__"]

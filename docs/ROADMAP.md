@@ -168,11 +168,11 @@ A broad set of language and stdlib improvements shipped alongside the core
 ## Planned
 ` Any listed implementations may change on release. `
 
-### 2.0.0 — Compatibility overhaul: ARM and macOS
+### 3.14 — Compatibility overhaul: ARM and macOS
 
 A platform-expansion release that broadens asmpython beyond x86-64 Windows/Linux.
 
-**Versioning decided: 2.0.0.** A codebase survey (2026-06-17) confirmed
+**Versioning decided: 3.14.** A codebase survey (2026-06-17) confirmed
 `codegen.py` hardcodes x86-64 mnemonics directly in ~3,461 lines of raw
 f-string assembly emission, not through an abstracted instruction layer —
 the existing `_arg_reg` / `_assign_arg_regs` / `emit_func_prologue` hooks
@@ -180,7 +180,7 @@ only abstract calling-convention bookkeeping (register assignment, stack
 frame size), not instruction selection itself. ARM64 cannot be added as a
 parallel target subclass the way Linux/Windows were; it requires
 restructuring codegen around a proper IR that both x86-64 and AArch64
-backends lower from. Per the criterion below, that makes this 2.0.0.
+backends lower from. Per the criterion below, that makes this 3.14.
 
 #### ARM64 support
 
@@ -251,7 +251,7 @@ def/class-vs-const ordering asymmetry), and test coverage
 identically to an ordinary initialized assignment, so the IR-based x86-64/
 ternary backends need no extension-specific code.
 
-#### Android (.apk) — exploratory, not committed for 2.0.0
+#### Android (.apk) — exploratory, not committed for 3.14
 
 - Different deployment model from the other targets: packaging
   (Gradle/dex/AndroidManifest/`apksigner`) and JNI calling convention, not
@@ -260,12 +260,12 @@ ternary backends need no extension-specific code.
   `gcc -shared`. Reaching a real APK means adding `JNIEnv*`/`jobject` ABI
   awareness, an NDK (clang+bionic) toolchain path, and ARM64 codegen
   (above) for real devices.
-- Likely follow-up release after 2.0.0's ARM64 work lands, not part of it.
+- Likely follow-up release after 3.14's ARM64 work lands, not part of it.
 
-#### Scope decision: 1.3.0 vs 2.0.0 — resolved, see note above
+#### Scope decision: 1.3.0 vs 3.14 — resolved, see note above
 
 ARM64 needs the IR rewrite (confirmed 2026-06-17 survey), so this is
-2.0.0: a meaningful internal architecture change even though the
+3.14: a meaningful internal architecture change even though the
 Python-level language surface is unchanged.
 
 ---

@@ -1,4 +1,4 @@
-# 2.0.0 Resume
+# 3.14 Resume
 
 Full historical detail for everything summarized in this file is recoverable
 via `git log -p -- RESUME.md`. This file is intentionally kept short — it's a
@@ -6,17 +6,17 @@ pointer to *current state*, not a full session-by-session journal.
 
 ## Directive
 
-Original scope (2026-06-18): "Continue dev until we hit 2.0.0 ready" —
+Original scope (2026-06-18): "Continue dev until we hit 3.14 ready" —
 garbage collector, optimizations, selfhost-capable, ARM support, Mac support
 (Intel + Apple Silicon), Raspberry Pi support (OS + bare metal).
 
 **Expanded 2026-07-15** with a large, explicitly-confirmed workload addendum
-(not yet started — see "Pending 2.0.0 workload" below) and a completed
+(not yet started — see "Pending 3.14 workload" below) and a completed
 compiler-extension-system feature (see "Extension System" below, done first
 per the user's own sequencing choice: finish the bounded, independent
 extension work before touching roadmap docs or scoping the larger program).
 
-See `docs/ROADMAP.md`'s 2.0.0 section for the platform/perf/ecosystem
+See `docs/ROADMAP.md`'s 3.14 section for the platform/perf/ecosystem
 breakdown. The numbered work order below is day-to-day sequencing.
 
 **Confirmed work order** (real dependency chain, user-confirmed):
@@ -37,7 +37,7 @@ breakdown. The numbered work order below is day-to-day sequencing.
     CHANGELOG, version bump off `-preview`.
 
 **Newly confirmed, not yet sequenced into the numbered list above** (2026-07-15,
-see "Pending 2.0.0 workload" below for the full item list): finish the
+see "Pending 3.14 workload" below for the full item list): finish the
 IR-based x86-64 backend as the default replacing the legacy backend, embed
 pyinbin into produced executables for native/interpreted hybrid execution,
 formalize the backend system as a versioned SDK, real memory management
@@ -45,7 +45,7 @@ formalize the backend system as a versioned SDK, real memory management
 User's explicit instruction attached to this addendum: "stop expanding
 partial stdlib breadth until these foundations are complete."
 
-**Expanded again 2026-07-16** ("Everything Python" directive): 2.0.0 must be
+**Expanded again 2026-07-16** ("Everything Python" directive): 3.14 must be
 able to run essentially any unmodified real-world Python program end-to-end
 (native-first, pyinbin fallback for anything not yet native-compilable) —
 not just the existing test-suite scenarios. This raises the bar on
@@ -60,7 +60,7 @@ this file, not via pausing.
 
 **Tangential, NOT active work**: user is also building **uASM**, a modular
 machine-code compiler with swappable backends/frontends, currently depending
-on asmpython. Plan: finish 2.0.0 first, fork asmpython into a uASM-facing
+on asmpython. Plan: finish 3.14 first, fork asmpython into a uASM-facing
 frontend afterward, as a separate effort. Don't let this influence IR/backend
 design decisions above.
 
@@ -718,7 +718,7 @@ sweeps missed (a nonzero-exit crash with empty stdout was previously
 indistinguishable from "silently produced no output").
 
 **Triage pass one** (2026-07-16, same-day follow-up — user directive:
-"finish all 2.0.0 steps," working the confirmed order sequentially,
+"finish all 3.14 steps," working the confirmed order sequentially,
 checkpointing each fix): three real bugs found and fixed, re-measured
 after each:
 
@@ -2587,9 +2587,9 @@ stdlib depth (`151_collections_module.py`, `166_ordereddict_methods.py`,
 baseline (~434/459), check whether `tests/runner.py`'s `run_negative()`
 still passes `--no-pyinbin-fallback` before re-diagnosing from scratch.
 
-## Pending 2.0.0 workload (confirmed, NOT yet started)
+## Pending 3.14 workload (confirmed, NOT yet started)
 
-Added to the required 2.0.0 workload 2026-07-15, to be scoped as its own
+Added to the required 3.14 workload 2026-07-15, to be scoped as its own
 tracked effort after roadmap docs are updated:
 
 - Finish the IR-based x86-64 backend and make it the default, fully

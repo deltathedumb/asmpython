@@ -561,7 +561,7 @@ def create_builtin_module(
             "maxsize": (1 << 63) - 1,
             "int_info": SimpleNamespace(bits_per_digit=30, sizeof_digit=4, default_max_str_digits=4300),
             "byteorder": "little",
-            "version": "pyinbin 2.0.0-preview",
+            "version": "pyinbin 3.14-preview",
             "version_info": _VersionInfo(),
             "builtin_module_names": ("sys", "_io", "_abc", "_locale", "itertools", "math", "nt", "_thread"),
             "implementation": _module("sys.implementation", {"name": "pyinbin"}),

@@ -4,9 +4,11 @@ All notable changes to asmpython are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
-## [2.0.0-preview] — in progress — Win64 ABI fixes, stdlib depth, SSA optimisation
+## [3.14.0-preview] — in progress — Win64 ABI fixes, stdlib depth, SSA optimisation
 
-Versioned 2.0.0 (not 1.3.0): the ARM64/macOS platform work planned for this
+Versioned 3.14 (not 1.3.0), matching CPython's own version number so users
+don't have to look up which asmpython release corresponds to which CPython
+target: the ARM64/macOS platform work planned for this
 release needs codegen restructured around an IR layer rather than a parallel
 target subclass — see `roadmap.md` for the full reasoning. Selfhosting
 (asmpython compiling itself) is a stretch goal for this release, not part of
@@ -37,7 +39,7 @@ deliverable.
   even when local names shadow `str` or `repr`.
 - **Official-test release harness** (`tests/cpython_conformance.py`) — the
   CPython baseline and independent pyinbin runs remain separate release-gate
-  modes for 2.0.0 validation.
+  modes for 3.14 validation.
 - **CPython-compatible module and context execution** (`pyinbin/loader.py`,
   `pyinbin/vm.py`, `pyinbin/native.py`) — interpreted library code now gets a
   loader-backed callable `__import__`, stable `__main__` registration,
@@ -121,7 +123,7 @@ deliverable.
   slice assignment, chained complex targets, `yield from`, `await` pass-through,
   and required keyword-only parameters.
 - Added the CPython official `Lib/test` conformance harness and a required
-  release gate for 2.0.0 readiness.
+  release gate for 3.14 readiness.
 - Expanded pyinbin control flow and object semantics with closure capture,
   coroutine frames, structural `match`, starred unpacking, boolean
   short-circuit cleanup, dynamic class creation, enum member iteration, and

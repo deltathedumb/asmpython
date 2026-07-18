@@ -691,10 +691,10 @@ _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "gzip", "zipfile", "pickle",
     "colorsys", "cmath", "sched",
     "lumen", "_font8x8",
-    # 2.0.0 stdlib additions (batch 1)
+    # 3.14 stdlib additions (batch 1)
     "errno", "stat", "getopt", "binascii", "array", "unittest",
     "urllib_request", "urllib_error",
-    # 2.0.0 stdlib additions (batch 2)
+    # 3.14 stdlib additions (batch 2)
     "token", "tokenize", "shelve", "codecs", "fileinput", "linecache",
     "mimetypes", "socketserver", "smtplib", "ftplib", "poplib", "imaplib",
     "http_server", "xml_etree", "html_parser", "tarfile",

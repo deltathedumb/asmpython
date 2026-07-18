@@ -1,9 +1,9 @@
-# asmpython IR design (2.0.0)
+# asmpython IR design (3.14)
 
 Status: implementation in progress. This document is the reference for
 the codegen rewrite that makes ARM64 (and any future architecture) a real
 second backend instead of x86-64 being hardcoded into the shared compiler
-core. See `roadmap.md` for why this is versioned 2.0.0 rather than 1.3.0.
+core. See `roadmap.md` for why this is versioned 3.14 rather than 1.3.0.
 
 **Progress as of 2026-06-17** (see git log for the actual commits):
 `ir.py` (the data model) and `ir_builder.py` (ergonomic construction
@@ -82,7 +82,7 @@ lines) found:
 
 Conclusion: ARM64 needs a real intermediate representation that x86-64 is
 re-expressed on top of, not a parallel target subclass. This is why the
-release is 2.0.0, not 1.3.0 (see `roadmap.md`'s decision criterion).
+release is 3.14, not 1.3.0 (see `roadmap.md`'s decision criterion).
 
 ## Scope and non-goals
 

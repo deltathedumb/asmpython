@@ -23,7 +23,7 @@ and consulted by `run_backend_link` as the fallback after the two builtins.
 This registry is plain-Python-dict-based (CPython-hosted compilation only)
 -- NOT yet safe to self-host, since it holds live module/callable
 references and asmpython's self-hosted subset has no first-class module
-values today (see RESUME.md's "Pending 2.0.0 workload" section, "First-class
+values today (see RESUME.md's "Pending 3.14 workload" section, "First-class
 module values").
 """
 

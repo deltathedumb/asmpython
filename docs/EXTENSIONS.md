@@ -240,7 +240,7 @@ the built-in names (`legacy`/`x86-64`/`ternary` for backends, `gcc`/
 `builtin` for linkers) — CPython-hosted compilation only, **not yet safe
 under self-hosting**: asmpython's self-hosted subset has no first-class
 module/object values storable in a dict today, and these registries hold
-live backend/linker objects. See RESUME.md's "Pending 2.0.0 workload"
+live backend/linker objects. See RESUME.md's "Pending 3.14 workload"
 section, "First-class module values", for the tracked follow-up.
 
 ## Current lexer limitation

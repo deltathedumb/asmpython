@@ -6,7 +6,7 @@ Pyinbin is a native Python interpreter implemented in asmpython source and
 compiled by asmpython. The produced executable must not depend on CPython, a
 Python installation, or host-Python extension modules at runtime.
 
-Pyinbin is a 2.0.0 stretch goal. It is a distinct execution engine, not an
+Pyinbin is a 3.14 stretch goal. It is a distinct execution engine, not an
 FFI-backed stdlib shim and not an alias for the compiler's existing static
 whole-program import merger.
 
@@ -99,9 +99,9 @@ only in asmpython's generated code and native FFI layer.
 6. Full conformance pass against the project test suite plus dedicated
    CPython-parity tests, then enable runtime import routing by default.
 
-## Relationship To 2.0.0
+## Relationship To 3.14
 
 Pyinbin progresses alongside the SSA/ARM64/macOS work but does not replace
 the target-neutral IR migration. The IR work is required to compile pyinbin
-for every 2.0.0 target; pyinbin is required for runtime execution of packaged
+for every 3.14 target; pyinbin is required for runtime execution of packaged
 Python-source imports that cannot be statically merged.

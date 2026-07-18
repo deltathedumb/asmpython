@@ -1,6 +1,6 @@
 # expect:
 # 9223372036854775807
-# asmpython 2.0.0-preview
+# asmpython 3.14-preview
 # 1
 import sys
 

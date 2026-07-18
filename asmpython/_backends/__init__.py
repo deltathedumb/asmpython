@@ -19,7 +19,7 @@ write, mirroring `_run_backend_ternary`'s simple shape.
 Plain-Python-dict-based (CPython-hosted compilation only) -- NOT yet safe
 to self-host, since it holds live backend objects and asmpython's
 self-hosted subset has no first-class module/object values stored in dicts
-today (see RESUME.md's "Pending 2.0.0 workload" section, "First-class
+today (see RESUME.md's "Pending 3.14 workload" section, "First-class
 module values").
 """
 

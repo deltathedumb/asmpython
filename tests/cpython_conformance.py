@@ -3,7 +3,7 @@
 This is a release-gate tool, not a replacement for the workspace runner. It
 keeps a CPython baseline and an independent pyinbin result for the same module
 set. ``--required`` makes any pyinbin failure fail the command, which is the
-condition required before declaring 2.0.0 ready.
+condition required before declaring 3.14 ready.
 """
 
 from __future__ import annotations

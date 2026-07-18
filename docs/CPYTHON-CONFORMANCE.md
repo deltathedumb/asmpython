@@ -18,6 +18,6 @@ python -m tests.cpython_conformance --mode both --required --jobs 4
 ```
 
 `--required` makes any pyinbin failure fail the command. A green workspace
-suite is not sufficient for 2.0.0 readiness: the full official-suite command,
+suite is not sufficient for 3.14 readiness: the full official-suite command,
 its interpreter version, and its pass/fail counts must be recorded in the
 release checklist before the version is called ready.
