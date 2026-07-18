@@ -4435,6 +4435,33 @@ class SemaAnalyzer:
                 self._collect_returns(st_else, acc)
                 self._collect_returns(st_finally, acc)
 
+    def _check_must_use(self, e) -> None:
+        """`must_use` extension: a bare `ExprStmt` wrapping a call to a
+        `@must_use`-decorated function/method discards its return value --
+        raise. Only the literal bare-statement case is in scope (no
+        dead-store analysis on a captured-but-unused result) -- an
+        assignment or a call nested inside another expression is never
+        flagged, matching the roster's own narrow spec."""
+        if not self._ext_active("must_use"):
+            return
+        sig = None
+        if isinstance(e, A.Call):
+            sig = self.funcs.get(e.func)
+        elif isinstance(e, A.MethodCall):
+            obj_t = A.expr_type(e.obj)
+            if obj_t.startswith("instance:"):
+                cls_name = obj_t.split(":", 1)[1]
+                resolved = self._resolve_method(cls_name, e.method)
+                if resolved is not None:
+                    sig = resolved[1]
+        if sig is not None and "must_use" in getattr(sig, "decorators", []):
+            raise SemaError(
+                f"the return value of {getattr(e, 'func', None) or getattr(e, 'method', '?')}"
+                f"(...) is discarded, but it is marked @must_use",
+                getattr(e, "pos", None),
+                ErrorCode.E_MUST_USE_DISCARDED,
+            )
+
     def _check_no_shadowing_global(self, name: str, pos) -> None:
         """`no_shadowing` extension, case (a): a function param/first-local
         sharing a name with a real module-level global
@@ -5400,6 +5427,7 @@ class SemaAnalyzer:
             return
         if isinstance(s, A.ExprStmt):
             self._check_expr(s.expr, scope)
+            self._check_must_use(s.expr)
             return
         if isinstance(s, A.IndexAssign):
             self._check_expr(s.target.obj, scope)
