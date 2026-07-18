@@ -14711,14 +14711,18 @@ class Codegen:
             cleanup = self._load_call_operands(
                 e, offs, info, start_reg=0, arg_types=arg_types
             )
-            self.emit_call(self._user_symbol(e.func))
+            self.emit_call(self._user_symbol(getattr(e, "resolved_overload_symbol", None) or e.func))
             if cleanup:
                 self.emitf(f"add rsp, {cleanup}")
             return
         # Sema has normalized e.args to a complete positional list (defaults
         # filled, keyword args placed, varargs packed), so no _fill_defaults.
         cleanup = self._emit_positional_args(e, e.args, info, start_reg=0)
-        self.emit_call(self._user_symbol(e.func))
+        # `overload` extension: sema stamps the resolved (mangled) symbol
+        # for a dispatched overload call -- the bare e.func name was never
+        # actually emitted as a real symbol once each source-level
+        # @overload def was renamed to its own mangled name.
+        self.emit_call(self._user_symbol(getattr(e, "resolved_overload_symbol", None) or e.func))
         if cleanup:
             self.emitf(f"add rsp, {cleanup}")
 

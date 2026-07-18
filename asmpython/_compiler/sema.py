@@ -355,6 +355,15 @@ class FuncSig:
     # positions at call sites.
     param_names: list = field(default_factory=list)
     param_defaults: list = field(default_factory=list)
+    # `overload` extension: resolved per-parameter static types, parallel to
+    # `param_names` ("int"/"str"/"float"/"any" per slot, "any" for an
+    # unannotated/uninferrable parameter). Populated at registration time
+    # from the same annotation resolution every other FuncSig field already
+    # uses -- previously computed and discarded, never stored, since
+    # ordinary (non-overloaded) call resolution only ever needed arity, not
+    # per-parameter types. Needed here because overload dispatch has to
+    # pick the best-matching signature by argument type, not just count.
+    param_types: list = field(default_factory=list)
     # Name of the `*args` parameter (the trailing list slot), or None.
     vararg: Optional[str] = None
     # Name of the `**kwargs` parameter (the trailing dict slot), or None.
@@ -515,6 +524,23 @@ class Scope:
         return name in self.types
 
 
+# `overload` extension: single canonical symbol-mangling scheme, called
+# from every resolved-overload-call site (sema, and both codegen backends'
+# call-emission, which read A.Call.resolved_overload_symbol back rather
+# than re-deriving it) and from the function-definition-emission side
+# (codegen/ir_lower, for the actual compiled symbol each @overload def
+# gets). Suffix is arity plus a short type tag per parameter (i=int,
+# f=float, s=str, a=any) -- enough to disambiguate same-arity overloads
+# differing only by parameter type, without a full serialized-signature
+# mangling scheme this wave's 6 real configs don't need.
+_OVERLOAD_TYPE_TAG = {"int": "i", "float": "f", "str": "s"}
+
+
+def _overload_symbol(name: str, sig) -> str:
+    tags = "".join(_OVERLOAD_TYPE_TAG.get(t, "a") for t in sig.param_types)
+    return f"{name}__ov{sig.arity}{tags}"
+
+
 def _count_defaults(defaults: list) -> int:
     """How many trailing parameters carry a default (None = no default).
     A plain loop — `sum(genexpr)` is outside the compilable subset."""
@@ -593,6 +619,17 @@ class SemaAnalyzer:
         # `class X(interface=Name):` conformance-checking has the interface's
         # method table ready when it processes each class.
         self.interface_methods: dict = {}
+        # `overload` extension: name -> list[FuncSig], populated ONLY for
+        # names where every same-named def/method is @overload-marked (a
+        # deliberately additive, parallel structure -- self.funcs/
+        # ClassSig.methods stay single-FuncSig-per-name for the ordinary,
+        # non-overloaded case, unchanged; call-resolution sites check
+        # overload_sets FIRST and only fall through to the existing
+        # single-lookup logic when the name isn't in it, minimizing the
+        # blast radius across the ~10 call-resolution sites that assume
+        # one signature per name).
+        self.overload_sets: dict = {}
+        self.method_overload_sets: dict = {}  # (class_name, method) -> list[FuncSig]
         # Variable name -> return type of the lambda bound to it, so an indirect
         # call `f(...)` on a name-bound lambda gets the right result type.
         self.lambda_rets: dict[str, str] = {}
@@ -3176,8 +3213,87 @@ class SemaAnalyzer:
                 new_funcs.append(f)
         self.mod.funcs = new_funcs
         self.mod.classes = list(self.mod.classes) + new_classes
+        # `overload` extension pre-pass: group same-named module-level defs
+        # where EVERY copy is @overload-marked into self.overload_sets,
+        # before the main signature-collection loop runs -- that loop's
+        # own redefinition guard (below) is what actually skips building
+        # a single self.funcs[name] entry for these names, so this has to
+        # happen first. A name with some (not all) copies marked
+        # @overload, or with 2+ copies while the extension is inactive,
+        # falls straight through to the existing E003 hard-error --
+        # unchanged behavior.
+        _overload_funcdef_ids: set = set()
+        if self._ext_active("overload"):
+            by_name: dict = {}
+            for f in self.mod.funcs:
+                by_name.setdefault(f.name, []).append(f)
+            for name, group in by_name.items():
+                if len(group) < 2:
+                    continue
+                if not all("overload" in getattr(g, "decorators", []) for g in group):
+                    continue
+                sigs: list = []
+                for g in group:
+                    r = self._resolve_annot(g.ret_type)
+                    sigs.append(FuncSig(
+                        name=g.name,
+                        arity=len(g.params),
+                        n_defaults=_count_defaults(g.defaults),
+                        pos=g.pos,
+                        ret_type=(r[0], r[1], r[2]) if r is not None else None,
+                        param_names=list(g.params),
+                        param_defaults=list(g.defaults),
+                        param_types=self._resolve_param_types(g),
+                        vararg=g.vararg,
+                        kwarg=g.kwarg,
+                        decorators=list(getattr(g, "decorators", [])),
+                    ))
+                self._check_overload_group_distinct(name, sigs, group[0].pos)
+                self.overload_sets[name] = sigs
+                # Rename each real FuncDef to its mangled symbol IN PLACE --
+                # both codegen backends compile a function under its own
+                # `.name` attribute directly, so this is what actually
+                # makes each overload land at a distinct symbol. Sema-side
+                # dispatch (above) reads the mangled name back via
+                # _overload_symbol(name, sig) applied to the ORIGINAL name +
+                # the matched FuncSig, so it must produce the identical
+                # string this rename uses -- both derive it from the same
+                # (original name, sig) pair via the one shared helper.
+                for g, sig in zip(group, sigs):
+                    g.name = _overload_symbol(name, sig)
+                    _overload_funcdef_ids.add(id(g))
+
         # First pass: collect function signatures so forward references resolve.
         for f in self.mod.funcs:
+            if id(f) in _overload_funcdef_ids:
+                # Handled by the pre-pass above -- register only the FIRST
+                # occurrence into self.funcs (so plain, non-dispatch-aware
+                # code paths that read self.funcs[name] directly, e.g.
+                # simple existence checks, still find *something* real; the
+                # actual multi-signature dispatch reads overload_sets
+                # instead, never this single entry, for these names) and
+                # skip the ordinary redefinition guard for every copy.
+                if f.name not in self.funcs:
+                    r = self._resolve_annot(f.ret_type)
+                    _raw_ret_base = f.ret_type[0] if f.ret_type else None
+                    self.funcs[f.name] = FuncSig(
+                        name=f.name,
+                        arity=len(f.params),
+                        n_defaults=_count_defaults(f.defaults),
+                        pos=f.pos,
+                        ret_type=(r[0], r[1], r[2]) if r is not None else None,
+                        ret_list_tuple_types=(r[3] if r is not None and r[1] == "tuple" else None),
+                        ret_inner_el_type=(r[4] if r is not None and r[1] in ("list", "dict") else None),
+                        param_names=list(f.params),
+                        param_defaults=list(f.defaults),
+                        param_types=self._resolve_param_types(f),
+                        vararg=f.vararg,
+                        kwarg=f.kwarg,
+                        ret_tuple=(r[3] if r is not None and r[0] == "tuple" else None),
+                        ret_bool=(_raw_ret_base == "bool"),
+                        decorators=list(getattr(f, "decorators", [])),
+                    )
+                continue
             if f.name in self.funcs:
                 if getattr(f, "is_lifted", False):
                     # A nested `def` is lifted to a module-level function keyed
@@ -3213,6 +3329,7 @@ class SemaAnalyzer:
                 ret_inner_el_type=(r[4] if r is not None and r[1] in ("list", "dict") else None),
                 param_names=list(f.params),
                 param_defaults=list(f.defaults),
+                param_types=self._resolve_param_types(f),
                 vararg=f.vararg,
                 kwarg=f.kwarg,
                 ret_tuple=(r[3] if r is not None and r[0] == "tuple" else None),
@@ -3422,6 +3539,43 @@ class SemaAnalyzer:
                     sig.field_access[fname] = "private"
                 elif "protected" in f_decos:
                     sig.field_access[fname] = "protected"
+            # `overload` extension: same pre-pass pattern as the module-
+            # level one above, scoped to this one class's own methods.
+            # Unlike module-level functions, plain method redefinition has
+            # NO existing hard-error to preserve (confirmed: sig.methods[
+            # m.name] = FuncSig(...) below just silently overwrites on a
+            # second same-named method today) -- so this only needs to
+            # rename/register the @overload-marked group; nothing to
+            # "skip past a guard" for.
+            if self._ext_active("overload"):
+                m_by_name: dict = {}
+                for m0 in c.methods:
+                    m_by_name.setdefault(m0.name, []).append(m0)
+                for mname, mgroup in m_by_name.items():
+                    if len(mgroup) < 2:
+                        continue
+                    if not all("overload" in getattr(g, "decorators", []) for g in mgroup):
+                        continue
+                    msigs: list = []
+                    for g in mgroup:
+                        mr0 = self._resolve_annot(g.ret_type)
+                        msigs.append(FuncSig(
+                            name=g.name,
+                            arity=len(g.params),
+                            n_defaults=_count_defaults(g.defaults),
+                            pos=g.pos,
+                            ret_type=(mr0[0], mr0[1], mr0[2]) if mr0 is not None else None,
+                            param_names=list(g.params),
+                            param_defaults=list(g.defaults),
+                            param_types=self._resolve_param_types(g),
+                            vararg=g.vararg,
+                            kwarg=g.kwarg,
+                            decorators=list(getattr(g, "decorators", [])),
+                        ))
+                    self._check_overload_group_distinct(f"{c.name}.{mname}", msigs, mgroup[0].pos)
+                    self.method_overload_sets[(c.name, mname)] = msigs
+                    for g, msig in zip(mgroup, msigs):
+                        g.name = _overload_symbol(mname, msig)
             for m in c.methods:
                 deco: list[str] = getattr(m, "decorators", [])
                 is_static = "staticmethod" in deco
@@ -3863,6 +4017,11 @@ class SemaAnalyzer:
         self.mod.ffi_consts = self.ffi_consts
         self.mod.mlang_code_funcs = self.mlang_code_funcs
         self.mod.mlang_objects = self.mlang_objects
+        # `overload` extension: whether this module actually uses it, so
+        # driver.py can raise a clear "not supported on this backend"
+        # error for --backend legacy instead of silently miscompiling --
+        # see the module docstring note on codegen.py's own overload gap.
+        self.mod.uses_overload = bool(self.overload_sets) or bool(self.method_overload_sets)
         # Codegen needs to look up methods by class chain for dispatch.
         self.mod.classes_sig = self.classes
         self.mod.funcs_sig = self.funcs
@@ -4538,6 +4697,91 @@ class SemaAnalyzer:
                 st_finally: list = s.finally_body
                 self._collect_returns(st_else, acc)
                 self._collect_returns(st_finally, acc)
+
+    def _resolve_param_types(self, f) -> list:
+        """`overload` extension: resolve each parameter's static type from
+        its annotation, `"any"` when unannotated (dispatch simply treats
+        an unannotated param as matching anything -- no attempt to reuse
+        the default/usage-hint inference machinery here, since that's
+        keyed to a single concrete function body, not a group of
+        candidate signatures sharing a name)."""
+        param_types: list = []
+        f_param_types: list = getattr(f, "param_types", []) or []
+        for i in range(len(f.params)):
+            annot = f_param_types[i] if i < len(f_param_types) else None
+            resolved = self._resolve_annot(annot)
+            param_types.append(resolved[0] if resolved is not None else "any")
+        return param_types
+
+    def _check_overload_group_distinct(self, name: str, sigs: list, pos) -> None:
+        """`overload` extension: reject a group of @overload signatures
+        that are indistinguishable from each other (same arity AND same
+        param_types) -- dispatch could never pick between them."""
+        seen: set = set()
+        for sig in sigs:
+            key = (sig.arity, tuple(sig.param_types))
+            if key in seen:
+                raise SemaError(
+                    f"two @overload signatures for {name!r} are "
+                    f"indistinguishable (same parameter count and types)",
+                    pos,
+                    ErrorCode.E_OVERLOAD_INCOMPATIBLE,
+                )
+            seen.add(key)
+
+    def _resolve_overload(self, name: str, sigs: list, args: list, pos, implicit_self: bool = False):
+        """`overload` extension: pick the best-matching FuncSig from `sigs`
+        for a call site's `args`. Filters by arity match first (accounting
+        for defaults, same as ordinary single-signature arity checking),
+        then scores the arity-matching candidates by how many parameters
+        have an EXACT static-type match against the call site's argument
+        types (an unannotated "any" parameter matches anything but scores
+        lower than a real match) -- the highest-scoring candidate wins;
+        a tie or zero arity-matching candidates is an error. Deliberately
+        simpler than full overload resolution (no covariance/promotion
+        rules) -- a documented v1 simplification, not every C++/Java
+        overload-resolution edge case.
+
+        `implicit_self`: True for a method-form overload call, where
+        `sig.arity`/`sig.param_types` include the `self` receiver
+        (index 0) but the call-site `args` never do -- every comparison
+        below is offset by 1 to account for that.
+        """
+        offset = 1 if implicit_self else 0
+        n = len(args)
+        arity_matches = [
+            s for s in sigs
+            if (s.arity - offset - s.n_defaults) <= n <= (s.arity - offset)
+        ]
+        if not arity_matches:
+            raise SemaError(
+                f"no @overload signature for {name!r} accepts {n} "
+                f"argument(s)",
+                pos,
+                ErrorCode.E_OVERLOAD_NO_MATCH,
+            )
+        arg_types = [A.expr_type(a) for a in args]
+        scored: list = []
+        for s in arity_matches:
+            score = 0
+            for i, at in enumerate(arg_types):
+                pt_idx = i + offset
+                pt = s.param_types[pt_idx] if pt_idx < len(s.param_types) else "any"
+                if pt == at:
+                    score += 2
+                elif pt == "any":
+                    score += 1
+            scored.append((score, s))
+        best = max(sc for sc, _ in scored)
+        winners = [s for sc, s in scored if sc == best]
+        if len(winners) > 1:
+            raise SemaError(
+                f"call to {name!r} is ambiguous: matches {len(winners)} "
+                f"@overload signatures equally well",
+                pos,
+                ErrorCode.E_OVERLOAD_AMBIGUOUS,
+            )
+        return winners[0]
 
     def _check_must_use(self, e) -> None:
         """`must_use` extension: a bare `ExprStmt` wrapping a call to a
@@ -8117,6 +8361,20 @@ class SemaAnalyzer:
                 return
             elif obj_t.startswith("instance:"):
                 class_name = obj_t.split(":", 1)[1]
+                ov_key = (class_name, e.method)
+                if ov_key in self.method_overload_sets:
+                    for a in e.args:
+                        self._check_expr(a, scope)
+                    ov_sig = self._resolve_overload(
+                        f"{class_name}.{e.method}",
+                        self.method_overload_sets[ov_key],
+                        e.args,
+                        e.pos,
+                        implicit_self=True,
+                    )
+                    e.resolved_overload_symbol = _overload_symbol(e.method, ov_sig)
+                    e.inferred_type = ov_sig.ret_type[0] if ov_sig.ret_type is not None else "int"
+                    return
                 resolved = self._resolve_method(class_name, e.method)
                 if resolved is not None:
                     self._check_access(class_name, e.method, is_field=False, pos=e.pos)
@@ -9420,6 +9678,21 @@ class SemaAnalyzer:
                     raise SemaError(
                         "str() requires a scalar, container, or object", e.pos
                     )
+            return
+        if e.func in self.overload_sets:
+            for a in e.args:
+                self._check_expr(a, scope)
+            sig = self._resolve_overload(e.func, self.overload_sets[e.func], e.args, e.pos)
+            e.resolved_overload_symbol = _overload_symbol(e.func, sig)
+            self._bind_args(
+                e, sig.param_names, sig.param_defaults, sig.vararg, e.pos, e.func,
+                kwarg=sig.kwarg,
+            )
+            if sig.ret_type is not None:
+                ret_tuple_ov: tuple = sig.ret_type  # type: ignore
+                e.inferred_type = ret_tuple_ov[0]
+            else:
+                e.inferred_type = "int"
             return
         if e.func in self.funcs:
             sig = self.funcs[e.func]

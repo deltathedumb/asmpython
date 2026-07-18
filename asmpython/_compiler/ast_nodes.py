@@ -35,6 +35,9 @@ class Module:
     # Maps local_name -> original_name so codegen can resolve the real symbol.
     # Populated by sema during FromImport analysis.
     func_aliases: dict = field(default_factory=dict)  # local -> original
+    # `overload` extension: True if this module has any @overload-dispatched
+    # call sites. Only supported on --backend x86-64 today -- see driver.py.
+    uses_overload: bool = False
 
 
 @dataclass
@@ -778,6 +781,13 @@ class Call:
     # statically known parameter list (function/constructor/`__call__`) --
     # see DoubleStarred's docstring.
     dstar: "Expr | None" = None
+    # `overload` extension: the mangled symbol name of the specific
+    # @overload signature sema resolved this call to, or None for an
+    # ordinary (non-overloaded) call. Set by SemaAnalyzer._resolve_overload,
+    # consumed by codegen/ir_lower's call-emission sites so a resolved
+    # overload call jumps to the right symbol instead of the bare (and
+    # therefore ambiguous) function name.
+    resolved_overload_symbol: "str | None" = None
 
 
 @dataclass
@@ -927,6 +937,10 @@ class MethodCall:
     tuple_elem_types: list = field(default_factory=list)
     # Keyword arguments: parallel list of (name, expr).
     kwargs: list = field(default_factory=list)
+    # `overload` extension: mirrors A.Call.resolved_overload_symbol -- the
+    # mangled symbol a resolved @overload method call dispatches to, or
+    # None for an ordinary (non-overloaded) method call.
+    resolved_overload_symbol: "str | None" = None
 
 
 @dataclass

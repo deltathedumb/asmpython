@@ -6358,8 +6358,16 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     owners.append(ow)
             if len(owners) <= 1:
                 # No subclass overrides this method -- bind statically.
+                # `overload` extension: sema stamps the resolved (mangled,
+                # bare-name) symbol for a dispatched overload method call --
+                # combine it with `owner` the same way an ordinary method's
+                # bare name is combined, since codegen's own class-name-
+                # prefixing step already ran on the RENAMED (mangled)
+                # FuncDef during sema's overload pre-pass.
+                resolved_ov_m = getattr(e, "resolved_overload_symbol", None)
+                method_part = resolved_ov_m if resolved_ov_m is not None else e.method
                 v = ctx.tmp(res_ty)
-                ctx.emit(IRInstr("call", v, [f"{owner}__{e.method}", *args]))
+                ctx.emit(IRInstr("call", v, [f"{owner}__{method_part}", *args]))
                 return v
 
             # Subclasses override this method: dispatch on the receiver's
@@ -7015,7 +7023,14 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             target = _lower_expr(ctx, A.Name(name=e.func, pos=e.pos))
             ctx.emit(IRInstr("call", v, [target, *args]))
         else:
-            ctx.emit(IRInstr("call", v, [e.func, *args]))
+            # `overload` extension: sema resolved this call to one specific
+            # @overload signature and stamped its real (mangled) compiled
+            # symbol here -- jump there instead of the bare, ambiguous name
+            # (which was never actually emitted as a real symbol once the
+            # source-level defs were each renamed to their own mangled
+            # names during sema's overload pre-pass).
+            call_target = getattr(e, "resolved_overload_symbol", None) or e.func
+            ctx.emit(IRInstr("call", v, [call_target, *args]))
         return v
 
     raise LowerError(f"unsupported expr {type(e).__name__}")
@@ -8514,8 +8529,15 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
             return
         if isinstance(node, A.MethodCall):
             obj_ty = A.expr_type(node.obj)
+            # `overload` extension: a resolved overload method call's real
+            # target is its mangled method name (node.method is the
+            # original, ambiguous, never-actually-emitted bare name --
+            # every source-level @overload method was renamed to its own
+            # mangled name during sema's per-class overload pre-pass).
+            resolved_ov_m = getattr(node, "resolved_overload_symbol", None)
+            dispatch_method = resolved_ov_m if resolved_ov_m is not None else node.method
             if obj_ty.startswith("instance:"):
-                add_resolved_virtual(obj_ty.split(":", 1)[1], node.method)
+                add_resolved_virtual(obj_ty.split(":", 1)[1], dispatch_method)
             elif obj_ty.startswith("super:"):
                 # super().method(...): dispatches statically to the base
                 # class's OWN method (never a subclass override -- see
@@ -8541,7 +8563,17 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
         elif isinstance(node, A.Name):
             add_func(node.name)
         elif isinstance(node, A.Call):
-            add_func(node.func)
+            # `overload` extension: a resolved overload call's real target
+            # is its mangled symbol (node.func is the original, ambiguous,
+            # never-actually-emitted bare name -- every source-level
+            # @overload def was renamed to its own mangled symbol during
+            # sema's pre-pass, so add_func(node.func) alone would never
+            # mark the real, called-into symbol reachable at all).
+            resolved_ov = getattr(node, "resolved_overload_symbol", None)
+            if resolved_ov is not None:
+                add_func(resolved_ov)
+            else:
+                add_func(node.func)
             if node.func in class_names:
                 add_resolved(node.func, "__init__")
             sort_key = getattr(node, "sort_key", None)

@@ -491,6 +491,21 @@ def _run_backend(
     _asm_stem_suffix: str = "",
 ) -> BuildResult:
     """Target-specific back-end: codegen -> nasm -> gcc."""
+    if backend != "x86-64" and getattr(module, "uses_overload", False):
+        # `overload` extension: dispatch/symbol-mangling is only wired up
+        # in the x86-64 IR backend today. The legacy (NASM-text codegen.py)
+        # backend's call-emission path for a resolved-overload call was
+        # investigated and found to route through machinery deeper than
+        # this wave's scope (the call site for an overloaded function
+        # isn't emitted at all under --use-runtime-lib, a separate gap from
+        # the two symbol-lookup sites this wave already fixed) -- rather
+        # than silently miscompile (confirmed: prints "(null)" instead of
+        # dispatching), refuse clearly and point at the supported backend.
+        raise ValueError(
+            "this program uses the 'overload' extension, which is only "
+            "supported on --backend x86-64 today (not 'legacy' or any "
+            "other registered backend)"
+        )
     if backend == "x86-64":
         if emit_asm_only or keep_assembly:
             raise ValueError("--backend x86-64 has no assembly stage; drop --emit-asm/--keep-assembly")
