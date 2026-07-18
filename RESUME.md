@@ -2907,6 +2907,28 @@ tracked effort after roadmap docs are updated:
   near-one-line), leaving (3b) and (5f) as the two genuinely large
   remaining items, and (4) as out-of-scope-as-assessed unless the
   lazy-stdlib-sema idea is separately picked up.
+  **DONE 2026-07-18** (same-day follow-through): items (1) threading/
+  random shims, (2) virtual-dispatch reachability walker, and (3a) the
+  `_pick_evict` one-liner are all fixed and committed; (3b) (`_dst_gp`/
+  `_dst_xmm`'s spill-fallback gap) was also fully fixed for `gep`/
+  `sext`/`_binop_gp` specifically (the exact call sites the two
+  crashing test files needed), not migrated across all ~27 call sites —
+  the remaining ones stay on assert-only `_dst_gp`/`_dst_xmm` until a
+  real crash proves another one needs it too. Two ADDITIONAL real bugs
+  were found and fixed along the way, not in the original triage: a
+  `_binop_gp` correctness bug introduced by the first draft of the
+  spill-fallback fix (mutated an operand's live register in place
+  regardless of whether that operand stayed live afterward — caused a
+  real regression, caught via direct testing before it shipped) and a
+  reachability-walker symbol-collision bug (a bare-name receiver
+  variable spuriously marked an unrelated same-named module-level
+  function reachable, corrupting the OTHER symbol's every reference —
+  root-caused via a background investigation, see the pe_linker.py
+  entry below for the linker-side hardening that also came out of this).
+  `tests.runner --backend x86-64 --no-pyinbin-fallback`: 445/483 ->
+  459/483, no regressions (`--backend legacy` still 475/483). Items (4)
+  (collections/namedtuple) and (5) (comprehension/closure/generator
+  cluster) remain untouched, per the priority order above.
 - **x86-64 backend: builtin (from-scratch) linker can't read real
   gcc/g++ output at all — needs a bigobj-format COFF parser (new
   2026-07-18, found while removing mlang's hard gcc-linker requirement
