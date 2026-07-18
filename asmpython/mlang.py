@@ -11,13 +11,19 @@ build.
     result = code.add(1, 2)
 
 `ml.builtins.gcc.cpp`/`ml.builtins.gcc.c` are ready-made `Config`s for the
-common case (a real `g++`/`gcc` found on PATH). Configure a different
-toolchain with `Config(...)` directly:
+common case (a real `g++`/`gcc` found on PATH). Also built in:
+`ml.builtins.rust` (`rustc`, staticlib output, signature inference
+supported) and `ml.builtins.nasm.win64`/`ml.builtins.nasm.elf64` (raw
+NASM, one `Config` per object format -- see their own docstring for why
+there's no single `ml.builtins.nasm`). C# and Java are NOT built in --
+see the note at the bottom of this file for why (a real, structural
+toolchain-interop gap, not an oversight). Configure a different toolchain
+with `Config(...)` directly:
 
-    rust = ml.Config(
-        exe="rustc",
-        frontend="rust",
-        compile_args=["--crate-type", "staticlib", "-o", "{out}", "{src}"],
+    zig = ml.Config(
+        exe="zig",
+        frontend="zig",
+        compile_args=["build-obj", "-femit-bin={out}", "{src}"],
     )
 
 `ml.Code(config, source[, exports=...])` compiles `source` with `config`'s
@@ -166,8 +172,105 @@ class _GccFrontends:
     )
 
 
+class _RustFrontend:
+    """`ml.builtins.rust` -- a ready-made `Config` for `rustc` found on
+    PATH, compiling to a `staticlib` (a real linkable object, not a `.rlib`
+    -- `crate-type=staticlib` is what makes `#[no_mangle] pub extern "C"
+    fn ...` exports resolvable by the same C ABI/linker step every other
+    mlang frontend uses). Opts into signature inference: functions matching
+    `#[no_mangle] pub extern "C" fn NAME(...) -> TYPE {` are recognized
+    directly from source text (see `mlang_support.py`'s `_RUST_SIG_RE`) --
+    a separate grammar from the C-family one, since Rust's syntax doesn't
+    match it (`fn`/`->` instead of a leading return type, `pub`/`#[...]`
+    attribute lines, etc.).
+
+    `-C panic=abort -C opt-level=2`: without these, even trivial arithmetic
+    (`a * b` at debug-mode overflow-check settings) references Rust's
+    panic-unwinding runtime (`core::panicking::panic_const_mul_overflow`,
+    `core::panicking::panic_cannot_unwind`, ...), which a bare
+    `--crate-type staticlib` build never defines -- confirmed via a real
+    link failure with these flags absent. `panic=abort` removes the
+    unwind-runtime dependency entirely (a panic becomes a hard process
+    abort, which is the right semantics for code embedded in a non-Rust
+    host binary anyway); `opt-level=2` additionally optimizes away the
+    overflow-check branches themselves in the common case."""
+
+    def __new__(cls):
+        return Config(
+            exe="rustc",
+            frontend="rust",
+            compile_args=[
+                "--crate-type", "staticlib", "--emit", "obj",
+                "-C", "panic=abort", "-C", "opt-level=2",
+                "-o", "{out}", "{src}",
+            ],
+            infer_signatures=True,
+        )
+
+
+class _NasmFrontends:
+    """`ml.builtins.nasm.win64` / `ml.builtins.nasm.elf64` -- ready-made
+    `Config`s for `nasm` found on PATH, targeting the two object formats
+    asmpython itself builds for (Windows PE64/COFF and Linux ELF64). Unlike
+    every other built-in config, there is no single `ml.builtins.nasm` --
+    NASM's object format is a real, unpapered-over target choice (`-f
+    win64` vs `-f elf64` produce genuinely different, non-interchangeable
+    object files), and `Config`/`Code` resolve fully at compile time with
+    no notion of the eventual build's target OS to pick one automatically
+    (sema's mlang recognition pass is explicitly target-independent -- see
+    `_compiler/sema.py`'s `_inject_mlang_if_needed`). Pick the one matching
+    your `--target`, same as you already have to know your target for
+    anything else target-specific.
+
+    Signature inference is NOT supported (`infer_signatures=False`): raw
+    NASM has no function-signature syntax at all to scan for -- every
+    `Code(...)` using either of these needs an explicit `exports=`."""
+
+    win64 = Config(
+        exe="nasm",
+        frontend="asm",
+        compile_args=["-f", "win64", "{src}", "-o", "{out}"],
+        infer_signatures=False,
+    )
+    elf64 = Config(
+        exe="nasm",
+        frontend="asm",
+        compile_args=["-f", "elf64", "{src}", "-o", "{out}"],
+        infer_signatures=False,
+    )
+
+
 class _Builtins:
     gcc = _GccFrontends()
+    rust = _RustFrontend()
+    nasm = _NasmFrontends()
 
 
 builtins = _Builtins()
+
+# NOTE on C# and Java: neither is a built-in config, and this is a real
+# architecture gap, not an oversight.
+#
+# Both only produce a genuinely linkable object file via ahead-of-time
+# native compilation (.NET Native AOT / GraalVM native-image) rather than
+# their ordinary managed-runtime compilers (csc/javac output isn't native
+# machine code at all, so it can never be linked into a native binary).
+#
+# GraalVM's native-image has no flag that stops short of a final, fully
+# linked executable or shared library -- confirmed via its own
+# --help-extra, no object-only output mode exists. There is nothing for
+# mlang to extract.
+#
+# .NET Native AOT DOES leave a real linkable .obj behind (confirmed via a
+# real `dotnet publish -p:PublishAot=true` run) -- but that object has
+# real external dependencies on ~15 of the AOT runtime's own MSVC-format
+# static libraries (GC, PInvoke thunks, exception handling). Cross-linking
+# those with asmpython's actual toolchain (GNU ld, via --linker gcc, or
+# asmpython's own from-scratch --linker builtin) was tested directly and
+# fails on real symbol-resolution errors -- MSVC-produced .lib archives
+# and GNU binutils don't reliably interoperate. The only linker that
+# reliably links this object is real MSVC link.exe, which asmpython has no
+# wrapper for today (only gcc.py and its own builtin PE linker). Adding
+# one is a legitimate, scoped follow-up (a new `--linker msvc` backend
+# shelling to real link.exe, discoverable via vswhere.exe) -- not
+# attempted here, since it's a new linker backend, not an mlang config.

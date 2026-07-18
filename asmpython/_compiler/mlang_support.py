@@ -40,10 +40,20 @@ class MlangResult:
     """One compiled `Code(...)` literal's result: the object file bytes
     (already `extern "C"`-safe -- inferred functions are re-wrapped before
     compilation if not already, see `_wrap_extern_c`) plus each exported
-    function's real C ABI symbol name and signature."""
+    function's real C ABI symbol name and signature.
 
-    obj_bytes: bytes
-    obj_ext: str  # ".o" or ".obj", matching what the configured compiler emits
+    `objects` is a list, not a single blob, because most frontends produce
+    exactly one self-contained object file but at least one (C# via .NET
+    Native AOT) genuinely needs several: `dotnet publish`'s AOT compiler
+    emits one object with zero unresolved symbols internally, but the
+    final link step it would normally run itself pulls in ~15 additional
+    static libraries (GC, eventpipe, zlib/brotli, globalization -- the
+    managed runtime's own native support code) that a plain single-object
+    model can't represent. Every entry is appended to the final build's
+    object list the same way, in order -- see driver.py's `objects +=
+    [obj_bytes for obj_bytes, _obj_ext in mlang_objects]`."""
+
+    objects: "list[tuple[bytes, str]]"  # [(bytes, ".o" or ".obj" or ".lib"), ...]
     funcs: "dict[str, MlangFuncSig]"  # name -> signature, c_name == name always
 
 
@@ -114,6 +124,71 @@ def _wrap_extern_c(source: str, func_names: "set[str]") -> str:
     return _SIG_RE.sub(_add_extern_c, source)
 
 
+# Restricted Rust top-level function-signature grammar: matches
+#   #[no_mangle]
+#   pub extern "C" fn NAME(NAME: TYPE, NAME: TYPE, ...) [-> TYPE] {
+# Unlike the C-family grammar, this is NOT auto-wrapped the way plain C++
+# functions get wrapped in `extern "C"` -- `#[no_mangle] pub extern "C"`
+# has to already be exactly right by construction (there's no single-line
+# rewrite that turns an arbitrary `fn foo(...)` into that shape safely:
+# Rust's default is name-mangled + not exported, so a function missing
+# this attribute pair genuinely isn't callable from outside the crate at
+# all, not just differently named). A function without it is simply
+# invisible to inference, same as any other shape this grammar doesn't
+# match -- needs an explicit `exports=` entry instead. Multi-line
+# `#[no_mangle]\npub extern "C" fn ...` (attribute and signature on
+# separate lines, the natural rustfmt style) is matched via `re.DOTALL`
+# across the two lines specifically, not a fully free-form scan.
+_RUST_TYPE_MAP = {
+    "i32": "int",
+    "i64": "int",
+    "u32": "int",
+    "u64": "int",
+    "isize": "int",
+    "usize": "int",
+    "f32": "float",
+    "f64": "float",
+}
+_RUST_TYPE_ALT = "|".join(sorted(_RUST_TYPE_MAP, key=len, reverse=True))
+_RUST_SIG_RE = re.compile(
+    r'^\s*#\[no_mangle\]\s*\n\s*pub\s+extern\s+"C"\s+fn\s+(\w+)\s*'
+    r'\(\s*([^)]*)\s*\)\s*(?:->\s*(' + _RUST_TYPE_ALT + r')\s*)?\{',
+    re.MULTILINE,
+)
+_RUST_PARAM_RE = re.compile(r'^\s*\w+\s*:\s*(' + _RUST_TYPE_ALT + r')\s*$')
+
+
+def _infer_rust_signatures(source: str) -> "dict[str, MlangFuncSig]":
+    funcs: dict[str, MlangFuncSig] = {}
+    for m in _RUST_SIG_RE.finditer(source):
+        name, params_text, ret_rust = m.group(1), m.group(2).strip(), m.group(3)
+        if ret_rust is None:
+            # No `-> TYPE` means the function returns `()` (unit) -- not
+            # representable in asmpython's arg_types/ret_type vocabulary,
+            # same as `void` in the C grammar. Skip; still declarable via
+            # an explicit exports= entry if a unit-returning call is
+            # genuinely needed (asmpython would just see it as returning
+            # nothing meaningful).
+            continue
+        ret_ty = _RUST_TYPE_MAP[ret_rust]
+        if not params_text:
+            arg_types: tuple[str, ...] = ()
+        else:
+            arg_types_list: list[str] = []
+            ok = True
+            for part in params_text.split(","):
+                pm = _RUST_PARAM_RE.match(part)
+                if not pm:
+                    ok = False
+                    break
+                arg_types_list.append(_RUST_TYPE_MAP[pm.group(1)])
+            if not ok:
+                continue
+            arg_types = tuple(arg_types_list)
+        funcs[name] = MlangFuncSig(arg_types=arg_types, ret_type=ret_ty)
+    return funcs
+
+
 _CACHE: "dict[str, MlangResult]" = {}
 
 
@@ -148,7 +223,7 @@ def _run_mlang_code(
 
     inferred: dict[str, MlangFuncSig] = {}
     if infer_signatures:
-        inferred = _infer_signatures(source)
+        inferred = _infer_rust_signatures(source) if frontend == "rust" else _infer_signatures(source)
     funcs = dict(inferred)
     funcs.update(exports)
     if not funcs:
@@ -159,12 +234,20 @@ def _run_mlang_code(
             f"grammar scan found nothing to infer."
         )
 
+    # `extern "C"` is a C++-only linkage specifier -- invalid syntax under
+    # a real C compiler (confirmed: gcc -x c rejects it outright, "expected
+    # identifier or '(' before string constant"). A plain C function
+    # already has C linkage by definition, nothing to wrap. Rust functions
+    # must already carry `#[no_mangle] pub extern "C"` themselves -- unlike
+    # C++, there's no safe single-line rewrite that adds it after the fact
+    # (see _infer_rust_signatures' docstring). So the auto-wrap step is
+    # cpp-only.
     compile_source = source
-    if infer_signatures and inferred:
+    if infer_signatures and inferred and frontend == "cpp":
         compile_source = _wrap_extern_c(source, set(inferred))
 
     with tempfile.TemporaryDirectory(prefix="asmpython_mlang_") as tmpdir:
-        ext = {"cpp": ".cpp", "c": ".c"}.get(frontend, ".txt")
+        ext = {"cpp": ".cpp", "c": ".c", "rust": ".rs", "asm": ".asm"}.get(frontend, ".txt")
         src_path = Path(tmpdir) / f"code{ext}"
         src_path.write_text(compile_source, encoding="utf-8")
         obj_ext = ".obj" if os.name == "nt" else ".o"
@@ -187,6 +270,6 @@ def _run_mlang_code(
             )
         obj_bytes = out_path.read_bytes()
 
-    result = MlangResult(obj_bytes=obj_bytes, obj_ext=obj_ext, funcs=funcs)
+    result = MlangResult(objects=[(obj_bytes, obj_ext)], funcs=funcs)
     _CACHE[key] = result
     return result

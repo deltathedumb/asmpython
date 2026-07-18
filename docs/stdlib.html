@@ -45,6 +45,9 @@
     <tbody>
       <tr><td><code>ml.builtins.gcc.cpp</code></td><td><code>g++</code> on <code>PATH</code></td><td><code>"cpp"</code></td><td><code>True</code></td></tr>
       <tr><td><code>ml.builtins.gcc.c</code></td><td><code>gcc</code> on <code>PATH</code></td><td><code>"c"</code></td><td><code>True</code></td></tr>
+      <tr><td><code>ml.builtins.rust</code></td><td><code>rustc</code> on <code>PATH</code></td><td><code>"rust"</code></td><td><code>True</code></td></tr>
+      <tr><td><code>ml.builtins.nasm.win64</code></td><td><code>nasm</code> on <code>PATH</code>, <code>-f win64</code></td><td><code>"asm"</code></td><td><code>False</code></td></tr>
+      <tr><td><code>ml.builtins.nasm.elf64</code></td><td><code>nasm</code> on <code>PATH</code>, <code>-f elf64</code></td><td><code>"asm"</code></td><td><code>False</code></td></tr>
     </tbody>
   </table></div>
 
@@ -53,9 +56,37 @@
 code = ml.Code(ml.builtins.gcc.cpp, <span class="str">'extern "C" int add(int a, int b) { return a + b; }'</span>)
 <span class="fn">print</span>(code.add(<span class="num">1</span>, <span class="num">2</span>))   <span class="cmt"># 3</span></code></pre>
 
-  <p>Both built-ins opt into signature inference, so a plain top-level <code>TYPE NAME(TYPE, ...) { ... }</code> function needs no explicit <code>exports=</code>. For any other compiler (Rust, a cross-compiler, a non-default C++ standard), build a <code>ml.Config(...)</code> of your own — see <a href="assembly.html#mlang">Assembly &amp; FFI</a> for the full field reference and worked examples.</p>
+  <p><code>gcc</code>/<code>rust</code> opt into signature inference: a plain top-level <code>TYPE NAME(TYPE, ...) { ... }</code> function (C/C++) or <code>#[no_mangle] pub extern "C" fn NAME(...) -&gt; TYPE { ... }</code> function (Rust) needs no explicit <code>exports=</code>. Raw NASM has no function-signature syntax to infer from at all, so both <code>nasm.*</code> configs always require an explicit <code>exports=</code> mapping:</p>
+
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> asmpython.mlang <span class="kw2">as</span> ml
+<span class="kw2">from</span> asmpython.mlang <span class="kw2">import</span> Sig
+
+code = ml.Code(
+    ml.builtins.nasm.win64,
+    <span class="str">'''
+    global subtract
+    section .text
+    subtract:
+        mov eax, ecx
+        sub eax, edx
+        ret
+    '''</span>,
+    exports={<span class="str">"subtract"</span>: Sig([<span class="str">"int"</span>, <span class="str">"int"</span>], <span class="str">"int"</span>)},
+)
+<span class="fn">print</span>(code.subtract(<span class="num">50</span>, <span class="num">8</span>))   <span class="cmt"># 42</span></code></pre>
+
+  <p>There is no single <code>ml.builtins.nasm</code> — NASM's object format is a real target choice (<code>-f win64</code> vs <code>-f elf64</code> are non-interchangeable), and <code>Config</code>/<code>Code</code> resolve fully at compile time with no notion of the build's eventual target OS. Pick the one matching your <code>--target</code>.</p>
+
+  <p>For any other compiler (a cross-compiler, a non-default C++ standard, a language not listed here), build a <code>ml.Config(...)</code> of your own — see <a href="assembly.html#mlang">Assembly &amp; FFI</a> for the full field reference and worked examples.</p>
 
   <div class="warn">Every <code>mlang</code> build currently needs <code>--linker gcc</code> (auto-selected once a <code>Code(...)</code> is detected). See <a href="assembly.html#mlang">the linker-requirement note</a> for why.</div>
+
+  <h3>Not built in: C# and Java</h3>
+  <p>Both were investigated and deliberately left out — a real architecture gap, not an oversight. Neither language's ordinary compiler (<code>csc</code>/<code>javac</code>) produces native machine code at all (both target a managed runtime), so ahead-of-time native compilation is the only route that could work with <code>mlang</code>'s model at all:</p>
+  <ul>
+    <li><strong>Java</strong> (GraalVM <code>native-image</code>): confirmed via its own <code>--help-extra</code> that there is no flag stopping short of a final, fully linked executable or shared library — no intermediate object file exists for <code>mlang</code> to extract at all.</li>
+    <li><strong>C#</strong> (.NET Native AOT, <code>dotnet publish -p:PublishAot=true</code>): does leave a real linkable <code>.obj</code> behind, confirmed by a real test build — but that object depends on roughly 15 of the AOT runtime's own MSVC-format static libraries (GC, PInvoke thunks, exception handling). Linking those against asmpython's actual toolchain (GNU <code>ld</code>, via both <code>--linker gcc</code> and asmpython's own from-scratch <code>--linker builtin</code>) was tested directly and fails with real symbol-resolution errors — MSVC-produced <code>.lib</code> archives and GNU binutils don't reliably interoperate. The only linker that reliably links this object is real MSVC <code>link.exe</code>, which asmpython has no wrapper for today. Adding one (a new <code>--linker msvc</code> backend) is a legitimate, scoped follow-up, not attempted here.</li>
+  </ul>
 </section>
 
 <section id="ext-catalog">

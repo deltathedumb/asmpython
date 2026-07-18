@@ -2349,14 +2349,17 @@ class SemaAnalyzer:
 
     def _mlang_resolve_config(self, e) -> "tuple[str, str, tuple, bool] | None":
         """Statically resolve `e` (an mlang Config expression) to
-        `(exe, frontend, compile_args, infer_signatures)`. Only the two
-        built-in `ml.builtins.gcc.cpp`/`ml.builtins.gcc.c` configs are
-        recognized in this first version -- a user-authored `ml.Config(...)`
-        literal isn't statically evaluated here (that would need a general
+        `(exe, frontend, compile_args, infer_signatures)`. Only the
+        built-in `ml.builtins.*` configs are recognized in this first
+        version -- a user-authored `ml.Config(...)` literal isn't
+        statically evaluated here (that would need a general
         constant-folding evaluator this compiler doesn't have); returns
         None for anything else, and the caller raises a clear SemaError."""
         # e is an Attr chain: ml.builtins.gcc.cpp -> Attr(Attr(Attr(Name(ml),
-        # "builtins"), "gcc"), "cpp").
+        # "builtins"), "gcc"), "cpp"). ml.builtins.rust is one level
+        # shallower (no per-frontend sub-attribute -- there's exactly one
+        # rustc config, unlike gcc's cpp/c split or nasm's win64/elf64
+        # split).
         names: list[str] = []
         cur = e
         while isinstance(cur, A.Attr):
@@ -2366,13 +2369,80 @@ class SemaAnalyzer:
             return None
         names.append(cur.name)
         names.reverse()  # e.g. ["ml", "builtins", "gcc", "cpp"]
-        if len(names) != 4 or names[1:3] != ["builtins", "gcc"]:
+        if len(names) == 3 and names[1] == "builtins":
+            if names[2] == "rust":
+                return (
+                    "rustc", "rust",
+                    (
+                        "--crate-type", "staticlib", "--emit", "obj",
+                        "-C", "panic=abort", "-C", "opt-level=2",
+                        "-o", "{out}", "{src}",
+                    ),
+                    True,
+                )
             return None
-        if names[3] == "cpp":
+        if len(names) != 4 or names[1] != "builtins":
+            return None
+        if names[2] == "gcc" and names[3] == "cpp":
             return ("g++", "cpp", ("-c", "-x", "c++", "{src}", "-o", "{out}"), True)
-        if names[3] == "c":
+        if names[2] == "gcc" and names[3] == "c":
             return ("gcc", "c", ("-c", "-x", "c", "{src}", "-o", "{out}"), True)
+        if names[2] == "nasm" and names[3] == "win64":
+            return ("nasm", "asm", ("-f", "win64", "{src}", "-o", "{out}"), False)
+        if names[2] == "nasm" and names[3] == "elf64":
+            return ("nasm", "asm", ("-f", "elf64", "{src}", "-o", "{out}"), False)
         return None
+
+    def _mlang_resolve_exports(self, e) -> "dict":
+        """Statically resolve `exports={"name": Sig([...], "...")}` (an
+        mlang Code(...) kwarg) into `{name: mlang_support.MlangFuncSig}`.
+        `e` is None when the kwarg wasn't passed at all (returns {}).
+        Only a literal dict-of-Sig(...)-calls is understood -- anything
+        else raises a clear SemaError rather than silently resolving to
+        no exports (the earlier, pre-this-fix behavior: exports= was
+        parsed but never actually forwarded to _run_mlang_code at all,
+        so a NASM Config with no signature-inference support had no way
+        to declare any exported function)."""
+        from . import mlang_support as _mlang
+
+        if e is None:
+            return {}
+        if not isinstance(e, A.DictLit):
+            raise SemaError(
+                "mlang Code(...)'s exports= must be a dict literal of "
+                "Sig(...) calls",
+                getattr(e, "pos", None),
+            )
+        result: dict = {}
+        for k, v in zip(e.keys, e.values):
+            if not isinstance(k, A.StrLit):
+                raise SemaError("mlang exports= keys must be string literals", e.pos)
+            if not (isinstance(v, A.Call) and v.func == "Sig" and len(v.args) == 2):
+                raise SemaError(
+                    f"mlang exports={{{k.value!r}: ...}} value must be a "
+                    f"Sig(arg_types, ret_type) call",
+                    e.pos,
+                )
+            arg_types_node, ret_type_node = v.args
+            if not isinstance(arg_types_node, A.ListLit) or not all(
+                isinstance(a, A.StrLit) for a in arg_types_node.elems
+            ):
+                raise SemaError(
+                    f"mlang Sig(...) for {k.value!r}: arg_types must be a "
+                    f"list of string literals",
+                    e.pos,
+                )
+            if not isinstance(ret_type_node, A.StrLit):
+                raise SemaError(
+                    f"mlang Sig(...) for {k.value!r}: ret_type must be a "
+                    f"string literal",
+                    e.pos,
+                )
+            result[k.value] = _mlang.MlangFuncSig(
+                arg_types=tuple(a.value for a in arg_types_node.elems),
+                ret_type=ret_type_node.value,
+            )
+        return result
 
     def _inject_mlang_if_needed(self) -> None:
         """If the module imports `asmpython.mlang`, find every
@@ -2433,15 +2503,19 @@ class SemaAnalyzer:
                         )
                     exe, frontend, compile_args, infer_signatures = config
                     source = call.args[1].value
+                    exports_node = next(
+                        (kv[1] for kv in call.kwargs if kv[0] == "exports"), None
+                    )
+                    exports = self._mlang_resolve_exports(exports_node)
                     try:
                         result = _mlang._run_mlang_code(
-                            exe, frontend, compile_args, infer_signatures, source, {}
+                            exe, frontend, compile_args, infer_signatures, source, exports
                         )
                     except _mlang.MlangError as exc:
                         raise SemaError(str(exc), call.pos) from exc
                     uid = str(id(s))
                     self.mlang_code_funcs[uid] = result.funcs
-                    self.mlang_objects.append((result.obj_bytes, result.obj_ext))
+                    self.mlang_objects.extend(result.objects)
                     # Stamp the Code(...) call's own inferred_type -- same
                     # mechanism sema.py's super() check uses
                     # (`e.inferred_type = f"super:{parent}"`), so

@@ -144,23 +144,45 @@ code = ml.Code(
     <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
     <tbody>
       <tr><td><code>exe</code></td><td>The compiler executable — found on <code>PATH</code>, or an absolute path</td></tr>
-      <tr><td><code>frontend</code></td><td>Short label for the source language/dialect (e.g. <code>"cpp"</code>, <code>"c"</code>) — descriptive, and the dispatch key <code>infer_signatures</code> uses for its restricted-grammar parser (C/C++-family only today)</td></tr>
+      <tr><td><code>frontend</code></td><td>Short label for the source language/dialect (e.g. <code>"cpp"</code>, <code>"c"</code>, <code>"rust"</code>) — descriptive, and the dispatch key <code>infer_signatures</code> uses to pick its restricted-grammar parser (C/C++-family or Rust today — see below)</td></tr>
       <tr><td><code>compile_args</code></td><td>argv template compiling one source file to one object file, with <code>{src}</code>/<code>{out}</code> substituted for real temp-file paths</td></tr>
-      <tr><td><code>infer_signatures</code></td><td>Whether <code>Code(...)</code> may omit <code>exports=</code> and rely on a source-text scan instead — only meaningful for C-family frontends today</td></tr>
+      <tr><td><code>infer_signatures</code></td><td>Whether <code>Code(...)</code> may omit <code>exports=</code> and rely on a source-text scan instead — only meaningful for <code>"cpp"</code>/<code>"c"</code>/<code>"rust"</code> frontends today</td></tr>
     </tbody>
   </table></div>
 
-  <pre><div class="lang">python</div><code>rust = ml.Config(
-    exe=<span class="str">"rustc"</span>,
-    frontend=<span class="str">"rust"</span>,
-    compile_args=[<span class="str">"--crate-type"</span>, <span class="str">"staticlib"</span>, <span class="str">"-o"</span>, <span class="str">"{out}"</span>, <span class="str">"{src}"</span>],
-)   <span class="cmt"># infer_signatures defaults to False -- rust isn't C-family-shaped,</span>
-    <span class="cmt"># so every Code(...) using this Config needs an explicit exports=</span></code></pre>
+  <p>Example custom <code>Config</code> for a compiler with no built-in (a cross-compiler, a non-default toolchain, a language not listed below):</p>
+  <pre><div class="lang">python</div><code>zig = ml.Config(
+    exe=<span class="str">"zig"</span>,
+    frontend=<span class="str">"zig"</span>,
+    compile_args=[<span class="str">"build-obj"</span>, <span class="str">"-femit-bin={out}"</span>, <span class="str">"{src}"</span>],
+)   <span class="cmt"># infer_signatures defaults to False -- "zig" isn't a recognized</span>
+    <span class="cmt"># inference frontend, so every Code(...) using this Config needs</span>
+    <span class="cmt"># an explicit exports=</span></code></pre>
 
-  <h3>Built-in configs: ml.builtins.gcc</h3>
-  <p><code>ml.builtins.gcc.cpp</code> and <code>ml.builtins.gcc.c</code> are
-     ready-made <code>Config</code>s for a real <code>g++</code>/<code>gcc</code>
-     found on <code>PATH</code>. Both set <code>infer_signatures=True</code>.</p>
+  <h3>Built-in configs</h3>
+  <p><code>ml.builtins.gcc.cpp</code> / <code>ml.builtins.gcc.c</code> are ready-made
+     <code>Config</code>s for a real <code>g++</code>/<code>gcc</code> found on <code>PATH</code>.
+     <code>ml.builtins.rust</code> is the same for <code>rustc</code> (compiling to a
+     <code>staticlib</code> object with <code>-C panic=abort</code> — plain Rust panic-unwinding
+     symbols aren't resolvable from a bare staticlib build, confirmed via a real link failure
+     without it). All three set <code>infer_signatures=True</code>: C/C++ functions are recognized
+     from a plain <code>TYPE NAME(TYPE, ...) { ... }</code> shape, Rust functions from
+     <code>#[no_mangle] pub extern "C" fn NAME(...) -&gt; TYPE { ... }</code> (a separate grammar —
+     Rust's syntax doesn't match the C-family one at all).</p>
+  <p><code>ml.builtins.nasm.win64</code> / <code>ml.builtins.nasm.elf64</code> wrap raw
+     <code>nasm</code>, one <code>Config</code> per object format — there's no single
+     <code>ml.builtins.nasm</code>, since <code>-f win64</code>/<code>-f elf64</code> aren't
+     interchangeable and <code>Config</code> resolves fully at compile time with no notion of the
+     build's eventual target OS. Both set <code>infer_signatures=False</code> (raw NASM has no
+     function-signature syntax to scan for at all) — every <code>Code(...)</code> using either
+     needs an explicit <code>exports=</code>. See <a href="stdlib.html#mlang-configs">Built-in
+     mlang configs</a> for the full table and a worked NASM example.</p>
+  <div class="note">C# and Java are deliberately not built in — both only produce a genuinely
+     linkable object via ahead-of-time native compilation, and neither AOT toolchain fits
+     <code>mlang</code>'s model cleanly today (GraalVM's <code>native-image</code> has no
+     object-only output mode at all; .NET Native AOT's object depends on MSVC-format runtime
+     libraries that don't reliably cross-link with asmpython's GNU-toolchain-based linkers). See
+     <a href="stdlib.html#mlang-configs">Built-in mlang configs</a> for the full writeup.</div>
 
   <h3>Signature inference</h3>
   <p>When a <code>Config</code> opts in via <code>infer_signatures=True</code>
