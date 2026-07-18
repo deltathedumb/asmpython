@@ -2121,7 +2121,7 @@ class SemaAnalyzer:
         # constrain; the body's usage decides what's legal.
         return None
 
-    def _seed_param(self, scope: Scope, name: str, annot, default_expr, inferred=None) -> None:
+    def _seed_param(self, scope: Scope, name: str, annot, default_expr, inferred=None, pos=None) -> None:
         """Add a parameter to `scope`, typing it from its annotation if
         present, otherwise from a literal default, otherwise from
         `inferred` (a (ty, el, val, tup) tuple from
@@ -2151,6 +2151,18 @@ class SemaAnalyzer:
         if inferred is not None:
             self._seed_param_from_inferred(scope, name, inferred)
             return
+        # `no_implicit_any` extension: reaching here means the parameter has
+        # no annotation, no literal default, no inferred type, and no usage
+        # hint (all four already ruled out by the caller before this call) --
+        # a genuinely opaque parameter that would otherwise silently seed
+        # "int" as asmpython's generic unknown-sentinel.
+        if self._ext_active("no_implicit_any") and self.in_function is not None:
+            raise SemaError(
+                f"parameter {name!r} has no annotation, default, or "
+                f"inferrable usage -- its type cannot be determined",
+                pos,
+                ErrorCode.E_IMPLICIT_ANY_PARAM,
+            )
         scope.add(name, "int")
 
     def _seed_param_from_inferred(self, scope: Scope, name: str, inferred: tuple) -> None:
@@ -3625,7 +3637,7 @@ class SemaAnalyzer:
                     ):
                         scope.add(p, usage_hints[p])
                         continue
-                    self._seed_param(scope, p, annot, default, inferred)
+                    self._seed_param(scope, p, annot, default, inferred, pos=f.pos)
             self._try_check_block(f.body, scope)
             self.in_function = None
             self.in_lifted = False
@@ -3697,7 +3709,7 @@ class SemaAnalyzer:
                     ):
                         scope.add(p, usage_hints[p])
                         continue
-                    self._seed_param(scope, p, annot, default, inferred)
+                    self._seed_param(scope, p, annot, default, inferred, pos=m.pos)
                 m_body_chk: list = m.body
                 self._try_check_block(m_body_chk, scope)
                 self.in_function = None
@@ -4623,6 +4635,19 @@ class SemaAnalyzer:
             self.lambda_rets[target] = getattr(value, "lambda_ret", "int")
             self._infer_lambda_param_types(target, value)
         t: str = A.expr_type(value)
+        # `no_implicit_any` extension: an unannotated assignment whose value
+        # is genuinely opaque (the real "any" marker A.expr_type returns for
+        # specific unresolvable-inference cases -- NOT the much more common
+        # "int"-as-unknown-sentinel default, which is load-bearing internal
+        # inference fallback throughout this compiler and would false-
+        # positive constantly if included here). An explicit `target: T =
+        # value` annotation always overrides this, checked below.
+        if self._ext_active("no_implicit_any") and annot is None and t == "any":
+            raise SemaError(
+                f"assignment to {target!r} has no inferrable concrete type",
+                getattr(value, "pos", None),
+                ErrorCode.E_IMPLICIT_ANY_ASSIGN,
+            )
         if (
             t == "int"
             and isinstance(value, A.Call)
