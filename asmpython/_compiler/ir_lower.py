@@ -5299,8 +5299,7 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", v, ["_abi_str_char_at", obj_v, idx_v]))
             return v
         if obj_ty == "dict":
-            if A.expr_type(e) == "float":
-                raise LowerError("unsupported expr Subscript (float dict value)")
+            res_is_float = A.expr_type(e) == "float"
             obj_v = _lower_expr(ctx, e.obj)
             key_v = _lower_dict_key(ctx, e.index)
             _emit_dict_key_check(ctx, obj_v, key_v, id(e))
@@ -5308,6 +5307,16 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("const", zero, [0]))
             v = ctx.tmp(I64)
             ctx.emit(IRInstr("call", v, ["_abi_dict_get_default", obj_v, key_v, zero]))
+            if res_is_float:
+                # Same int-only-cell constraint as dict.get()'s own
+                # bitcast_i2f (and A.Attr's matching case) -- was
+                # previously a hard LowerError here specifically, even
+                # though dict.get() on the identical float-valued dict
+                # already worked; a plain `d[key]` read had just never
+                # been extended to match.
+                fv = ctx.tmp(F64)
+                ctx.emit(IRInstr("bitcast_i2f", fv, [v]))
+                return fv
             return v
         getitem_cls = getattr(e, "_getitem_class", "")
         if getitem_cls or obj_ty.startswith("instance:"):
