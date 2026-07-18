@@ -4485,6 +4485,26 @@ class SemaAnalyzer:
                 pos,
                 ErrorCode.E_READONLY_PARAM_REASSIGNED,
             )
+        # `no_global_mutation` extension: a write to a name that is a real
+        # module-level global, from inside a function that never declared
+        # `global name` for it. Checked against self.global_scope.types --
+        # the one authoritative global table -- rather than the function's
+        # own flat `Scope`, which (being a one-time dict-copy seeded by
+        # _seed_globals_into, not a live reference) can't itself distinguish
+        # "this is the module global's copy" from "an ordinary same-named
+        # function-local" once seeded.
+        if (
+            self._ext_active("no_global_mutation")
+            and self.in_function is not None
+            and name in self.global_scope.types
+            and name not in self._globals_declared_in.get(self.in_function, set())
+        ):
+            raise SemaError(
+                f"cannot reassign global {name!r} without a 'global "
+                f"{name}' declaration",
+                pos,
+                ErrorCode.E_UNDECLARED_GLOBAL_MUTATION,
+            )
 
     def _bind_name_from_value(
         self, target: str, value, scope: Scope, annot: tuple | None = None
@@ -5593,6 +5613,13 @@ class SemaAnalyzer:
             for nm in s.names:
                 if nm not in scope.types and nm not in self.global_scope.types:
                     pass  # allow forward-declared globals (assigned before use)
+            # `no_global_mutation` extension: record which names THIS
+            # function declared `global` for, so _require_assignable can
+            # tell "explicitly declared, rebinding is the whole point of
+            # this statement" apart from "an undeclared write that happens
+            # to share a global's name" -- see self._globals_declared_in.
+            if self.in_function is not None:
+                self._globals_declared_in.setdefault(self.in_function, set()).update(s.names)
             return
         if isinstance(s, A.Nonlocal):
             # `nonlocal x, y`: closures aren't supported; accept and ignore.
