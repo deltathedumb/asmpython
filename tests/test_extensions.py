@@ -2,10 +2,12 @@
 
 These tests exercise `ExtensionContext`'s activation/retraction/dependency/
 conflict machinery directly with small dummy `CompilerExtension` subclasses,
-rather than through compiled `.py` source -- the only real built-in extension
-(`constants`) has no dependents/conflicts of its own to exercise this logic
-against, so dummy extensions give direct, isolated coverage of the reusable
-registry mechanics themselves.
+rather than through compiled `.py` source, giving direct isolated coverage
+of the reusable registry mechanics. `BuiltinExtensionConflictTests` below is
+the one exception: it exercises the real `final`/`sealed` registry entries
+directly, since it's asserting something specific about those two named
+built-ins (they conflict with each other) rather than the generic
+mechanism.
 """
 
 from __future__ import annotations
@@ -242,6 +244,31 @@ class ParserIsolationTests(unittest.TestCase):
         self.assertTrue(
             any(isinstance(s, A.ConstDecl) and s.name == "X" for s in mod_a.body)
         )
+
+
+class BuiltinExtensionConflictTests(unittest.TestCase):
+    """`final` and `sealed` are real _REGISTRY-backed built-in extensions
+    (wave 1) whose `conflicts` sets reference each other -- both restrict
+    subclassing (final: none allowed, sealed: an explicit permit-list), so
+    composing them is either redundant or contradictory. This exercises the
+    real registry entries directly, not FakeA/FakeConflictsWithA dummies,
+    since it's asserting something specific about these two named built-ins
+    rather than the generic conflict-checking mechanism (already covered
+    above)."""
+
+    def test_final_then_sealed_conflicts(self) -> None:
+        ctx = ExtensionContext()
+        ctx.activate("final")
+        with self.assertRaises(ExtensionError) as cm:
+            ctx.activate("sealed")
+        self.assertEqual(cm.exception.code, ErrorCode.P_EXTENSION_CONFLICT)
+
+    def test_sealed_then_final_conflicts(self) -> None:
+        ctx = ExtensionContext()
+        ctx.activate("sealed")
+        with self.assertRaises(ExtensionError) as cm:
+            ctx.activate("final")
+        self.assertEqual(cm.exception.code, ErrorCode.P_EXTENSION_CONFLICT)
 
 
 if __name__ == "__main__":
