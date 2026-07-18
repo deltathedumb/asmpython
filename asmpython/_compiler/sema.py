@@ -4438,7 +4438,15 @@ class SemaAnalyzer:
                         ErrorCode.E_READONLY_UNKNOWN_PARAM,
                     )
             locked.update(readonly_names)
-        if self._ext_active("const_params") and "mutable_params" not in f.decorators:
+        has_mutable_params_deco = "mutable_params" in f.decorators
+        if has_mutable_params_deco and not self._ext_active("const_params"):
+            raise SemaError(
+                f"@mutable_params on {f.name} requires the 'const_params' "
+                f"extension (pass '--ext const_params' on the command line)",
+                f.pos,
+                ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
+            )
+        if self._ext_active("const_params") and not has_mutable_params_deco:
             params = f.params[1:] if skip_first and f.params else f.params
             locked.update(params)
         return locked
