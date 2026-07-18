@@ -245,6 +245,81 @@ ERROR_DESCRIPTIONS: dict[str, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# CPython exception-name mapping
+# ---------------------------------------------------------------------------
+# Where a diagnostic corresponds to a real CPython runtime exception, the
+# formatted message leads with that exception's class name (e.g.
+# "NameError: name 'greet' is not defined") instead of a generic
+# "semantic error: [E001] ..." tag, so users coming from CPython recognise
+# the failure immediately. The E0xx/P0xx/L0xx code is still appended in
+# brackets for `--explain` lookups.
+#
+# Lex/parse errors are all reported as SyntaxError, matching how CPython
+# itself surfaces tokenizer/parser problems. A few codes have no real
+# CPython equivalent (redefinition is legal in CPython -- it just silently
+# rebinds; asm-directive and const-extension diagnostics are asmpython-only
+# concepts) and are intentionally left unmapped, falling back to the
+# original "{phase} error" wording.
+_PYTHON_EXCEPTION_NAME: dict[int, str] = {
+    # Name resolution
+    ErrorCode.E_UNDEFINED_NAME: "NameError",
+    ErrorCode.E_UNDEFINED_FUNC: "NameError",
+    ErrorCode.E_NO_SUCH_MODULE: "ModuleNotFoundError",
+    # Types
+    ErrorCode.E_TYPE_MISMATCH: "TypeError",
+    ErrorCode.E_BINARY_OP_TYPE: "TypeError",
+    ErrorCode.E_UNARY_OP_TYPE: "TypeError",
+    ErrorCode.E_FSTRING_SEGMENT_TYPE: "TypeError",
+    ErrorCode.E_RETURN_TYPE: "TypeError",
+    ErrorCode.E_INDEX_TYPE: "TypeError",
+    ErrorCode.E_INDEX_OBJECT_TYPE: "TypeError",
+    ErrorCode.E_ITER_TYPE: "TypeError",
+    ErrorCode.E_ASSIGN_TYPE: "TypeError",
+    # Calls
+    ErrorCode.E_ARG_COUNT: "TypeError",
+    ErrorCode.E_ARG_TYPE: "TypeError",
+    ErrorCode.E_NOT_CALLABLE: "TypeError",
+    ErrorCode.E_FORMAT_ARG_COUNT: "TypeError",
+    ErrorCode.E_FORMAT_ARG_TYPE: "TypeError",
+    ErrorCode.E_FORMAT_LITERAL: "TypeError",
+    # Control flow (CPython reports these at parse time)
+    ErrorCode.E_BREAK_OUTSIDE_LOOP: "SyntaxError",
+    ErrorCode.E_CONTINUE_OUTSIDE_LOOP: "SyntaxError",
+    ErrorCode.E_RETURN_OUTSIDE_FUNC: "SyntaxError",
+    # Class / attribute
+    ErrorCode.E_NO_ATTR: "AttributeError",
+    ErrorCode.E_NOT_AN_EXCEPTION: "TypeError",
+    ErrorCode.E_INDEX_ASSIGN: "TypeError",
+    ErrorCode.E_SUPER_NO_CLASS: "RuntimeError",
+    ErrorCode.E_STATIC_NO_CLASS: "SyntaxError",
+    # Collections
+    ErrorCode.E_HETEROGENEOUS_LIST: "TypeError",
+    ErrorCode.E_HETEROGENEOUS_TUPLE: "TypeError",
+    ErrorCode.E_UNPACK_COUNT: "ValueError",
+    ErrorCode.E_DICT_KEY_TYPE: "TypeError",
+    ErrorCode.E_SET_KEY_TYPE: "TypeError",
+    # Misc
+    ErrorCode.E_ZIP_ARGS: "TypeError",
+    ErrorCode.E_ENUMERATE_ARG: "TypeError",
+    ErrorCode.E_MATCH_PATTERN: "SyntaxError",
+}
+
+
+def _python_exception_name(code: Optional[int]) -> Optional[str]:
+    """Return the CPython exception class name for a code, if one applies.
+
+    Lex/parse-phase codes (< 200) always map to SyntaxError, mirroring
+    CPython's own tokenizer/parser diagnostics. Semantic codes are looked
+    up individually since they span many different real exception types.
+    """
+    if code is None:
+        return None
+    if code < 200:
+        return "SyntaxError"
+    return _PYTHON_EXCEPTION_NAME.get(code)
+
+
 class CompileError(Exception):
     """Base class for any user-facing compile-time failure.
 
@@ -270,17 +345,19 @@ class CompileError(Exception):
     def format(self, source: str, filename: str = "<input>") -> str:
         out: list[str] = []
         code_tag = f"[{_code_label(self.code)}] " if self.code is not None else ""
+        exc_name = _python_exception_name(self.code)
+        if exc_name is not None:
+            kind = f"{exc_name}: {code_tag}"
+        else:
+            kind = f"{self.phase} error: {code_tag}"
         if self.pos is not None:
-            out.append(
-                f"{filename}:{self.pos.line}:{self.pos.col}: {self.phase} error: "
-                f"{code_tag}{self.message}"
-            )
+            out.append(f"{filename}:{self.pos.line}:{self.pos.col}: {kind}{self.message}")
             line_text = _get_line(source, self.pos.line)
             if line_text is not None:
                 out.append("  " + line_text.rstrip("\n"))
                 out.append("  " + " " * (self.pos.col - 1) + "^")
         else:
-            out.append(f"{filename}: {self.phase} error: {code_tag}{self.message}")
+            out.append(f"{filename}: {kind}{self.message}")
         return "\n".join(out)
 
 
