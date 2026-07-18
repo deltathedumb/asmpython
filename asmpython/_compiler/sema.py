@@ -15,7 +15,7 @@ flag what's clearly wrong).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Optional
 
 from . import ast_nodes as A
@@ -539,6 +539,106 @@ _OVERLOAD_TYPE_TAG = {"int": "i", "float": "f", "str": "s"}
 def _overload_symbol(name: str, sig) -> str:
     tags = "".join(_OVERLOAD_TYPE_TAG.get(t, "a") for t in sig.param_types)
     return f"{name}__ov{sig.arity}{tags}"
+
+
+def _syntactic_reachable_names(mod: A.Module) -> "tuple[set, set]":
+    """Pre-sema call-graph walk: which top-level functions and class methods
+    are reachable from the module's real entry point (`mod.body`)?
+
+    Deliberately cheaper and less precise than `ir_lower.py`'s
+    `_reachable_callables` -- that one runs AFTER sema and can key off
+    sema-populated fields (`A.expr_type()`'s `.inferred_type`,
+    `resolved_overload_symbol`, `dunder_call_owner`, etc.) to resolve exactly
+    which class a method call dispatches to. This walker runs BEFORE sema
+    (it has to: it's used to decide whether sema may safely skip a broken
+    body), so it only has the plain-string AST fields the parser already
+    populated: `A.Call.func`, `A.MethodCall.method`, bare `A.Name` refs. It
+    can't tell which class a `MethodCall.method` call targets, so it
+    conservatively marks EVERY class method matching that bare name reachable
+    across all classes -- an over-approximation that only ever marks too
+    much, never too little, which is the safe direction for this walker's
+    one job (deciding what's safe to skip if it errors).
+    """
+    method_defs: dict = {}
+    methods_by_name: dict = {}
+    for cls in mod.classes:
+        for m in cls.methods:
+            method_defs[(cls.name, m.name)] = m
+            methods_by_name.setdefault(m.name, []).append(cls.name)
+    func_defs = {f.name: f for f in mod.funcs}
+
+    needed_funcs: set = set()
+    needed_methods: set = set()
+    func_queue: list = []
+    method_queue: list = []
+
+    def add_func(name) -> None:
+        if isinstance(name, str) and name in func_defs and name not in needed_funcs:
+            needed_funcs.add(name)
+            func_queue.append(name)
+
+    def add_method_by_name(name) -> None:
+        if not isinstance(name, str):
+            return
+        for owner in methods_by_name.get(name, []):
+            key = (owner, name)
+            if key not in needed_methods:
+                needed_methods.add(key)
+                method_queue.append(key)
+
+    def visit(node) -> None:
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, A.MethodCall):
+            add_method_by_name(node.method)
+        elif isinstance(node, A.Call):
+            add_func(node.func)
+            if node.func in {c.name for c in mod.classes}:
+                add_method_by_name("__init__")
+        elif isinstance(node, A.Name):
+            add_func(node.name)
+            add_method_by_name(node.name)
+        if not is_dataclass(node):
+            return
+        if isinstance(node, (A.MethodCall, A.Attr)) and isinstance(node.obj, A.Name):
+            skip_field = "obj"
+        else:
+            skip_field = None
+        for fld in fields(node):
+            if fld.name == "pos" or fld.name == skip_field:
+                continue
+            value = getattr(node, fld.name)
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, tuple):
+                        for sub in item:
+                            visit(sub)
+                    else:
+                        visit(item)
+            elif isinstance(value, tuple):
+                for sub in value:
+                    visit(sub)
+            else:
+                visit(value)
+
+    for st in mod.body:
+        visit(st)
+
+    while func_queue or method_queue:
+        while func_queue:
+            name = func_queue.pop(0)
+            f = func_defs.get(name)
+            if f is not None:
+                for st in f.body:
+                    visit(st)
+        while method_queue:
+            key = method_queue.pop(0)
+            m = method_defs.get(key)
+            if m is not None:
+                for st in m.body:
+                    visit(st)
+
+    return needed_funcs, needed_methods
 
 
 def _count_defaults(defaults: list) -> int:
@@ -2611,9 +2711,29 @@ class SemaAnalyzer:
             for m in c.methods:
                 _scan(m.body)
 
-    def _try_check_block(self, stmts: list, scope: "Scope") -> None:
+    def _try_check_block(self, stmts: list, scope: "Scope", *, tolerate: bool = False) -> None:
         """Run `_check_block` and, in collect-errors mode, stash any SemaError
-        instead of propagating it so analysis continues in other bodies."""
+        instead of propagating it so analysis continues in other bodies.
+
+        `tolerate=True` (only ever passed for an unreachable, merged-stdlib
+        function/method body -- see the two body-check loops in `analyze()`)
+        goes further: any error is fully DISCARDED, not collected/reported,
+        regardless of whether `--all-errors` is active for the rest of the
+        program. This body will never execute (whole-program compilation
+        merges every stdlib function unconditionally, whether or not the
+        program calls it -- see `program.py`'s `load_program`), so a
+        construct it uses that the native compiler can't yet give meaning to
+        (e.g. `collections.namedtuple`'s dynamic `type()`/`property()` use)
+        must not block compiling programs that never call it.
+        """
+        if tolerate:
+            saved_collect, saved_errs = self.collect_errors, self._collected_errors
+            self.collect_errors, self._collected_errors = True, []
+            try:
+                self._check_block(stmts, scope)
+            finally:
+                self.collect_errors, self._collected_errors = saved_collect, saved_errs
+            return
         if not self.collect_errors:
             self._check_block(stmts, scope)
             return
@@ -3820,6 +3940,18 @@ class SemaAnalyzer:
                 f.param_types = [None] * len(free_vars) + list(f.param_types)
                 f.defaults = [None] * len(free_vars) + list(f.defaults)
 
+        # Which merged functions/methods are actually reachable from the
+        # program's real entry point (mod.body)? Whole-program compilation
+        # (program.py's load_program) merges EVERY top-level func/class from
+        # every transitively-imported stdlib/project module unconditionally,
+        # whether or not anything calls it -- computed here, before the body-
+        # check loops below, so a merged-but-unreachable stdlib function with
+        # a construct the native compiler can't check (e.g.
+        # collections.namedtuple's dynamic type()/property() use) can be
+        # tolerated (see _try_check_block's `tolerate` param) instead of
+        # hard-failing the whole compile over code the program never runs.
+        self._reachable_funcs, self._reachable_methods = _syntactic_reachable_names(self.mod)
+
         # Function bodies: each has its own scope, seeded with globals then
         # params. If a param has a default literal, infer its type from the
         # default (so `def greet(p="hi")` makes p a str in the body).
@@ -3888,7 +4020,8 @@ class SemaAnalyzer:
                         scope.add(p, usage_hints[p])
                         continue
                     self._seed_param(scope, p, annot, default, inferred, pos=f.pos)
-            self._try_check_block(f.body, scope)
+            tolerate = getattr(f, "is_stdlib", False) and f.name not in self._reachable_funcs
+            self._try_check_block(f.body, scope, tolerate=tolerate)
             self.in_function = None
             self.in_lifted = False
             self._locked_params = set()
@@ -3961,7 +4094,11 @@ class SemaAnalyzer:
                         continue
                     self._seed_param(scope, p, annot, default, inferred, pos=m.pos)
                 m_body_chk: list = m.body
-                self._try_check_block(m_body_chk, scope)
+                tolerate = (
+                    getattr(m, "is_stdlib", False)
+                    and (c.name, m.name) not in self._reachable_methods
+                )
+                self._try_check_block(m_body_chk, scope, tolerate=tolerate)
                 self.in_function = None
                 self.current_class = None
                 self.classmethod_cls_param = None

@@ -692,21 +692,53 @@ class Codegen:
                 self.emit(f"extern {sym}")
         self.emit(self.section_text)
         self.emit_entry()
+        # Whole-program compilation (program.py's load_program) merges EVERY
+        # function/method from every imported stdlib module unconditionally,
+        # whether or not the program actually calls it -- sema.py tolerates
+        # (doesn't hard-fail on) a semantic error in one of these if it's
+        # unreachable, so a name that's merged-but-broken can reach this
+        # point at all. The x86-64 backend (ir_lower.py) already prunes these
+        # via `_reachable_callables` before lowering; do the same filtering
+        # here so the legacy backend doesn't try to emit a call into a
+        # skipped, potentially-half-checked body (e.g. a reference to the
+        # undefined symbol `property`, from collections.py's `namedtuple()`)
+        # for code that never runs. Reused as-is: it's a pure function of the
+        # already-fully-typed `self.mod` with no IR-specific state.
+        from .ir_lower import _reachable_callables
+
+        reachable_funcs, reachable_methods = _reachable_callables(self.mod)
+        reachable_func_names = {f.name for f in reachable_funcs}
+        reachable_method_keys = {
+            (cls.name, m.name)
+            for cls in self.mod.classes
+            for m in cls.methods
+            if f"{cls.name}__{m.name}" in {rf.name for rf in reachable_methods}
+        }
         # Index cursor rather than `for f in self.mod.funcs`: a lambda
         # encountered while generating a *method* body below gets appended to
         # `self.mod.funcs` by `_gen_lambda`, but that happens after a plain
         # `for` loop here would already have finished iterating. Track how
         # far we've emitted so the straggler-drain loop after the classes
         # loop below can pick up those late additions (and lambdas nested
-        # inside other lambdas, which append further stragglers still).
+        # inside other lambdas, which append further stragglers still). A
+        # lambda is only ever appended while emitting code that's already
+        # reachable, so the prune below never needs to consider this cursor's
+        # late additions -- they're unconditionally emitted, same as always.
         funcs_emitted = 0
         while funcs_emitted < len(self.mod.funcs):
-            self.emit_function(self.mod.funcs[funcs_emitted])
+            fn = self.mod.funcs[funcs_emitted]
+            if not (getattr(fn, "is_stdlib", False) and fn.name not in reachable_func_names):
+                self.emit_function(fn)
             funcs_emitted += 1
         # Methods compile as regular functions with mangled names so they
         # don't collide with module-level defs.
         for cls in self.mod.classes:
             for m in cls.methods:
+                if (
+                    getattr(m, "is_stdlib", False)
+                    and (cls.name, m.name) not in reachable_method_keys
+                ):
+                    continue
                 mangled = A.FuncDef(
                     name=self._method_symbol(cls.name, m.name),
                     params=list(m.params),

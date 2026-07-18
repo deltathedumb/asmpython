@@ -1395,6 +1395,9 @@ def load_program(
         for c in mod.classes:
             if c.name not in class_names:
                 class_names.add(c.name)
+                if mod_is_stdlib:
+                    for m in c.methods:
+                        m.is_stdlib = True
                 entry.classes.append(c)
                 class_origin[c.name] = mod_path_str
         # Recurse into this module's own project imports.

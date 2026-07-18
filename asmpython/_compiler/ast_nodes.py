@@ -75,14 +75,26 @@ class FuncDef:
     # True for nested functions lifted to module level by the parser. Sema
     # skips undefined-variable errors in their bodies (closure vars).
     is_lifted: bool = False
-    # True for a top-level function merged in from an asmpython stdlib module
-    # (set by program.py's load_program, never by the parser). A stdlib
-    # module's own top-level function names are real Python stdlib API names
-    # meant to be called in a qualified way (`tarfile.open(...)`), not bare
-    # globals — see sema.py's "cannot redefine builtin" check, which would
-    # otherwise reject e.g. tarfile.py's `def open(...)` purely because it
-    # shares a name with the `open` builtin, even though nothing about it is
-    # actually a user mistake.
+    # True for a top-level function OR class method merged in from an
+    # asmpython stdlib module (set by program.py's load_program, never by the
+    # parser). Two independent things key off this:
+    #  1. A stdlib module's own top-level function names are real Python
+    #     stdlib API names meant to be called in a qualified way
+    #     (`tarfile.open(...)`), not bare globals — see sema.py's "cannot
+    #     redefine builtin" check, which would otherwise reject e.g.
+    #     tarfile.py's `def open(...)` purely because it shares a name with
+    #     the `open` builtin, even though nothing about it is actually a
+    #     user mistake.
+    #  2. Whole-program compilation merges EVERY function/method from every
+    #     imported stdlib module unconditionally, whether or not the program
+    #     actually calls it. sema.py's body-check loops tolerate (silently
+    #     discard, rather than hard-fail the whole compile over) a semantic
+    #     error inside a body that is both is_stdlib AND unreachable from the
+    #     program's real entry point (see `_syntactic_reachable_names` /
+    #     `_try_check_block`'s `tolerate` param) — e.g. collections.py's
+    #     `namedtuple()` uses dynamic `type()`/`property()` the native
+    #     compiler can't check, but that must not block a program that only
+    #     does `from collections import deque` and never calls `namedtuple`.
     is_stdlib: bool = False
     # Decorator identities preceding the def (leading dotted names), e.g.
     # ["staticmethod"] / ["classmethod"]. Used to relax the method `self` rule.
