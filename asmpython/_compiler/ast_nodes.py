@@ -83,6 +83,11 @@ class FuncDef:
     # Decorator identities preceding the def (leading dotted names), e.g.
     # ["staticmethod"] / ["classmethod"]. Used to relax the method `self` rule.
     decorators: list = field(default_factory=list)
+    # `readonly_params` extension: parameter names named in a preceding
+    # `@readonly(name, ...)` decorator, locked against reassignment for the
+    # duration of this function's body (see sema.py's per-function
+    # `_locked_params` set).
+    readonly_params: list = field(default_factory=list)
 
 
 @dataclass

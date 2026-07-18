@@ -605,6 +605,15 @@ class SemaAnalyzer:
         # seeding". Once a name is recorded here it is locked forever for
         # the rest of the module.
         self.const_names: dict = {}
+        # `readonly_params`/`const_params` extensions: names locked against
+        # reassignment for the currently-checked function/method body only
+        # -- rebuilt fresh per function (see the per-function/method
+        # body-check loops), unlike const_names' forever-module-wide lock.
+        self._locked_params: set = set()
+        # `no_global_mutation` extension: function name -> set of names it
+        # declared via `global` -- populated by A.Global's handler (see
+        # _check_stmt), consulted by _require_assignable's callers.
+        self._globals_declared_in: dict = {}
         self.loop_depth = 0
         self.in_function: Optional[str] = None
         self.in_lifted: bool = False  # True when checking a lifted nested func
@@ -3548,6 +3557,7 @@ class SemaAnalyzer:
                 continue
             self.in_function = f.name
             self.in_lifted = getattr(f, "is_lifted", False)
+            self._locked_params = self._compute_locked_params(f)
             scope = Scope()
             self._seed_globals_into(scope)
             free_vars: list = getattr(f, "free_vars", [])
@@ -3598,6 +3608,7 @@ class SemaAnalyzer:
             self._try_check_block(f.body, scope)
             self.in_function = None
             self.in_lifted = False
+            self._locked_params = set()
 
         # Method bodies: `self` is typed as the instance of its class.
         for c in self.mod.classes:
@@ -3606,6 +3617,7 @@ class SemaAnalyzer:
                     continue  # raw-NASM method body, nothing to check
                 self.in_function = f"{c.name}__{m.name}"
                 self.current_class = c.name
+                self._locked_params = self._compute_locked_params(m, skip_first=True)
                 scope = Scope()
                 self._seed_globals_into(scope)
                 # Explicit `: list` annotation: getattr(m, "decorators", [])
@@ -3665,6 +3677,7 @@ class SemaAnalyzer:
                 self.in_function = None
                 self.current_class = None
                 self.classmethod_cls_param = None
+                self._locked_params = set()
 
         # Raise all collected errors now that every body has been checked.
         if self._collected_errors:
@@ -4395,6 +4408,41 @@ class SemaAnalyzer:
                 self._collect_returns(st_else, acc)
                 self._collect_returns(st_finally, acc)
 
+    def _compute_locked_params(self, f, skip_first: bool = False) -> set:
+        """Build the per-function-invocation param-lock set for
+        `readonly_params`/`const_params`, consulted by `_require_assignable`.
+
+        `readonly_params`: only the names listed in a preceding
+        `@readonly(name, ...)` decorator. `const_params`: every parameter
+        (implicit lock), unless the function carries `@mutable_params`
+        (a whole-function exemption -- no partial/per-param opt-out).
+        Both extensions write into the same set, so having both active is
+        naturally redundant-but-harmless (const_params' "all params" is
+        already a superset of whatever readonly_params names).
+
+        `skip_first`: for methods, excludes the implicit `self`/`cls`
+        receiver from const_params' blanket lock (it's never a real
+        rebinding target for user code the way an ordinary parameter is)
+        -- `@readonly(name, ...)`'s explicit names are never auto-excluded
+        this way, since naming `self` there is a clear, deliberate choice.
+        """
+        locked: set = set()
+        if self._ext_active("readonly_params"):
+            readonly_names = list(getattr(f, "readonly_params", []) or [])
+            for name in readonly_names:
+                if name not in f.params:
+                    raise SemaError(
+                        f"@readonly names {name!r}, which is not a "
+                        f"parameter of {f.name}()",
+                        f.pos,
+                        ErrorCode.E_READONLY_UNKNOWN_PARAM,
+                    )
+            locked.update(readonly_names)
+        if self._ext_active("const_params") and "mutable_params" not in f.decorators:
+            params = f.params[1:] if skip_first and f.params else f.params
+            locked.update(params)
+        return locked
+
     def _require_assignable(self, name: str, pos) -> None:
         """Raise E_CONST_REASSIGNED if `name` was ever declared `const`.
 
@@ -4414,6 +4462,20 @@ class SemaAnalyzer:
                 f"line {self.const_names[name].line})",
                 pos,
                 ErrorCode.E_CONST_REASSIGNED,
+            )
+        # `readonly_params`/`const_params` extensions: a per-function-
+        # invocation lock set, rebuilt fresh at the start of each function/
+        # method body check (see _locked_params' population sites) --
+        # unlike const_names (locked forever, module-wide), this only
+        # applies for the duration of the ONE function body currently being
+        # checked, since it's the same parameter name potentially reused
+        # (and freely reassignable) in a different function.
+        if name in self._locked_params:
+            raise SemaError(
+                f"cannot reassign parameter {name!r}: locked by "
+                f"'@readonly' or the 'const_params' extension",
+                pos,
+                ErrorCode.E_READONLY_PARAM_REASSIGNED,
             )
 
     def _bind_name_from_value(

@@ -59,6 +59,10 @@ class Parser:
         # by `parse()` right after the decorated def is parsed.
         self._pending_decorator_exprs: list = []
         self._deco_tmp_counter = 0
+        # `@readonly(name, ...)`'s captured param names, populated by
+        # `_eat_decorators` and read by the immediately-following
+        # `_parse_funcdef` call (every caller does exactly this sequence).
+        self._pending_readonly_params: list = []
         # Per-Parser compiler-extension state (const and whatever future
         # extensions register contextual keywords). Fresh per instance --
         # see extensions.py's module docstring for the isolation guarantees
@@ -673,6 +677,8 @@ class Parser:
         # parse-phase one, so a stray `@private` with `--ext access` absent
         # parses fine and is caught later with a precise E087 diagnostic.
         "private", "protected", "public", "immutable", "final",
+        # Wave-2 compiler-extension decorators.
+        "readonly", "mutable_params", "must_use", "overload",
     }
 
     def _eat_decorators(self) -> list[str]:
@@ -692,6 +698,7 @@ class Parser:
         actual call once the decorated def is known.
         """
         names: list[str] = []
+        self._pending_readonly_params: list = []
         while self._check("OP", "@"):
             self._eat()
             # First NAME (optionally dotted) is the decorator's identity.
@@ -716,6 +723,28 @@ class Parser:
                 ):
                     name = f"{name}.{self._peek(2).value}"
                     dotted_suffix = True
+            # `@readonly(param_name, ...)`: unlike every other informational
+            # decorator, its parenthesized args are real data (the parameter
+            # names to lock), not just skipped syntax -- capture them into
+            # self._pending_readonly_params instead of falling through to
+            # the generic "skip the rest of the line" branch below.
+            if (
+                name == "readonly"
+                and not dotted_suffix
+                and self._peek(1).kind == "OP"
+                and self._peek(1).value == "("
+            ):
+                self._eat()  # 'readonly'
+                self._eat()  # '('
+                while not self._check("OP", ")"):
+                    self._pending_readonly_params.append(self._expect("NAME").value)
+                    if self._check("OP", ","):
+                        self._eat()
+                self._eat()  # ')'
+                self._expect("NEWLINE")
+                names.append(name)
+                self._skip_newlines()
+                continue
             is_informational = (
                 dotted_suffix
                 or name in self._INFORMATIONAL_DECORATORS
@@ -1039,6 +1068,7 @@ class Parser:
             asm_body=asm_body,
             asm_symbol=asm_symbol,
             decorators=list(decorators) if decorators else [],
+            readonly_params=list(self._pending_readonly_params),
         )
 
     def _extract_asm_body(self, name: str, body: list, pos) -> "tuple[str, str]":
