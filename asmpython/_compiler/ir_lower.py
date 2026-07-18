@@ -6647,6 +6647,39 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 return out
             # round(int) / round(bool) is the identity.
             return _lower_expr(ctx, e.args[0])
+        if e.func == "round" and len(e.args) == 2:
+            # round(x, ndigits) -> float (unlike the 1-arg form, ndigits
+            # keeps the result a float even for int x -- Python 3's own
+            # documented `round(x, n)` type-preservation rule reduces to
+            # "always float" here since asmpython has no separate
+            # Decimal/int-exact path). Scale by 10**ndigits, reuse the
+            # existing _abi_round_f64 shim (SSE4.1 roundsd, ties-to-even,
+            # same banker's-rounding the 1-arg form already uses), then
+            # unscale -- mirrors codegen.py's own round(x, ndigits) case
+            # exactly (mulsd/roundsd/divsd around a real `pow` call for
+            # 10**n). Was entirely unimplemented on this backend: only
+            # the 1-arg form existed, so `round(x, 6)` fell through to a
+            # direct-symbol-call linking against a nonexistent `round`.
+            x_t = A.expr_type(e.args[0])
+            x_v = _lower_expr(ctx, e.args[0])
+            if x_t != "float":
+                xf = ctx.tmp(F64)
+                ctx.emit(IRInstr("sitofp", xf, [x_v]))
+                x_v = xf
+            nd_v = _lower_expr(ctx, e.args[1])
+            nd_f = ctx.tmp(F64)
+            ctx.emit(IRInstr("sitofp", nd_f, [nd_v]))
+            ten = ctx.tmp(F64)
+            ctx.emit(IRInstr("const", ten, [10.0]))
+            scale = ctx.tmp(F64)
+            ctx.emit(IRInstr("call", scale, ["pow", ten, nd_f]))
+            scaled = ctx.tmp(F64)
+            ctx.emit(IRInstr("fmul", scaled, [x_v, scale]))
+            rounded = ctx.tmp(F64)
+            ctx.emit(IRInstr("call", rounded, ["_abi_round_f64", scaled]))
+            out = ctx.tmp(F64)
+            ctx.emit(IRInstr("fdiv", out, [rounded, scale]))
+            return out
         if e.func in ("hex", "oct", "bin") and len(e.args) == 1:
             n_v = _lower_expr(ctx, e.args[0])
             base = ctx.tmp(I64)

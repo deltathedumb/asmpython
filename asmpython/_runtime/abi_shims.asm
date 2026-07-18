@@ -953,6 +953,10 @@ _abi_fmt_g:      db "%g", 0
 _abi_str_nan:    db "nan", 0
 _abi_str_pinf:   db "inf", 0
 _abi_str_ninf:   db "-inf", 0
+_math_deg_factor: dq 57.29577951308232
+_math_rad_factor: dq 0.017453292519943295
+_math_inf_bits:   dq 0x7FF0000000000000
+_math_abs_mask:   dq 0x7FFFFFFFFFFFFFFF
 
 section .text
 
@@ -1397,5 +1401,297 @@ _abi_float_fmt:
     call sprintf
     mov rax, [rsp+32]
     add rsp, 56
+    ret
+
+; math.isnan(x: float)/gcd(a: int, b: int)/isqrt(n: int) -- ported directly
+; from target_windows.py's legacy-backend inline shims (same symbol names,
+; same algorithms/register conventions), since stdlib/math.py's Func
+; bindings point straight at these C names (`_math_isnan` etc.) and the
+; x86-64 IR backend's `call` op expects them to already exist as real
+; symbols, unlike the legacy backend which synthesizes them into the
+; generated .asm file on demand via self.ffi_called. Never had an x86-64-
+; backend home before -- these three were undefined-symbol BUILD_FAILs.
+
+; _math_isnan(xmm0=x) -> rax 0/1
+_math_isnan:
+    ucomisd xmm0, xmm0
+    setp al
+    movzx rax, al
+    ret
+
+; _math_isinf(xmm0=x) -> rax 0/1
+_math_isinf:
+    movsd xmm1, [rel _math_abs_mask]
+    andpd xmm0, xmm1
+    movsd xmm1, [rel _math_inf_bits]
+    ucomisd xmm0, xmm1
+    sete al
+    setnp cl
+    and al, cl
+    movzx rax, al
+    ret
+
+; _math_isfinite(xmm0=x) -> rax 0/1
+_math_isfinite:
+    ucomisd xmm0, xmm0
+    jp ._mif_no
+    movsd xmm1, [rel _math_abs_mask]
+    andpd xmm0, xmm1
+    movsd xmm1, [rel _math_inf_bits]
+    ucomisd xmm0, xmm1
+    jb ._mif_yes
+._mif_no:
+    xor rax, rax
+    ret
+._mif_yes:
+    mov rax, 1
+    ret
+
+; _math_degrees(xmm0=x) -> xmm0
+_math_degrees:
+    mulsd xmm0, [rel _math_deg_factor]
+    ret
+
+; _math_radians(xmm0=x) -> xmm0
+_math_radians:
+    mulsd xmm0, [rel _math_rad_factor]
+    ret
+
+; _math_gcd(rcx=a, rdx=b) -> rax  (Euclidean, positive result)
+_math_gcd:
+    mov rax, rcx
+    mov rcx, rdx
+    test rax, rax
+    jns ._mg_apos
+    neg rax
+._mg_apos:
+    test rcx, rcx
+    jns ._mg_bpos
+    neg rcx
+._mg_bpos:
+._mg_loop:
+    test rcx, rcx
+    jz ._mg_done
+    xor rdx, rdx
+    div rcx
+    mov rax, rcx
+    mov rcx, rdx
+    jmp ._mg_loop
+._mg_done:
+    ret
+
+; _math_lcm(rcx=a, rdx=b) -> rax
+_math_lcm:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    mov [rbp-8], rcx
+    mov [rbp-16], rdx
+    call _math_gcd
+    test rax, rax
+    jz ._mlcm_zero
+    mov rcx, rax
+    mov rax, [rbp-8]
+    test rax, rax
+    jns ._mlcm_apos
+    neg rax
+._mlcm_apos:
+    xor rdx, rdx
+    div rcx
+    mov rcx, [rbp-16]
+    test rcx, rcx
+    jns ._mlcm_bpos
+    neg rcx
+._mlcm_bpos:
+    imul rax, rcx
+    leave
+    ret
+._mlcm_zero:
+    xor rax, rax
+    leave
+    ret
+
+; _math_factorial(rcx=n) -> rax
+_math_factorial:
+    mov rax, 1
+    cmp rcx, 1
+    jle ._mf_done
+._mf_loop:
+    imul rax, rcx
+    dec rcx
+    cmp rcx, 1
+    jg ._mf_loop
+._mf_done:
+    ret
+
+; _math_comb(rcx=n, rdx=k) -> rax
+_math_comb:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    mov [rbp-8], rcx
+    mov [rbp-16], rdx
+    mov rax, rcx
+    sub rax, rdx
+    cmp rdx, rax
+    jle ._mc_kset
+    mov [rbp-16], rax
+._mc_kset:
+    mov rax, 1
+    mov rcx, 1
+._mc_loop:
+    cmp rcx, [rbp-16]
+    jg ._mc_done
+    mov rdx, [rbp-8]
+    sub rdx, [rbp-16]
+    add rdx, rcx
+    imul rax, rdx
+    xor rdx, rdx
+    div rcx
+    inc rcx
+    jmp ._mc_loop
+._mc_done:
+    leave
+    ret
+
+; _math_perm(rcx=n, rdx=k) -> rax
+_math_perm:
+    push rbp
+    mov rbp, rsp
+    mov rax, 1
+    mov r8, 0
+._mp_loop:
+    cmp r8, rdx
+    jge ._mp_done
+    mov r9, rcx
+    sub r9, r8
+    imul rax, r9
+    inc r8
+    jmp ._mp_loop
+._mp_done:
+    pop rbp
+    ret
+
+; _math_log_base(xmm0=x, xmm1=base) -> xmm0
+extern log
+_math_log_base:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    movsd [rbp-8], xmm1
+    call log
+    movsd [rbp-16], xmm0
+    movsd xmm0, [rbp-8]
+    call log
+    movsd xmm1, xmm0
+    movsd xmm0, [rbp-16]
+    divsd xmm0, xmm1
+    leave
+    ret
+
+; _math_modf_frac(xmm0=x) -> xmm0=fractional
+extern modf
+_math_modf_frac:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    lea rdx, [rbp-8]
+    call modf
+    leave
+    ret
+
+; _math_modf_int(xmm0=x) -> xmm0=integer part
+_math_modf_int:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    lea rdx, [rbp-8]
+    call modf
+    movsd xmm0, [rbp-8]
+    leave
+    ret
+
+; _math_frexp_m(xmm0=x) -> xmm0=mantissa
+extern frexp
+_math_frexp_m:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    lea rdx, [rbp-8]
+    call frexp
+    leave
+    ret
+
+; _math_frexp_e(xmm0=x) -> rax=exponent
+_math_frexp_e:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    lea rdx, [rbp-8]
+    call frexp
+    movsxd rax, dword [rbp-8]
+    leave
+    ret
+
+; _math_ldexp(xmm0=x, rdx=n) -> xmm0
+extern ldexp
+_math_ldexp:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    call ldexp
+    leave
+    ret
+
+; _math_isqrt(rcx=n) -> rax: integer square root (floor(sqrt(n)))
+extern sqrt
+_math_isqrt:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    cvtsi2sd xmm0, rcx
+    call sqrt
+    cvttsd2si rax, xmm0
+    leave
+    ret
+
+; _math_isclose(xmm0=a, xmm1=b, xmm2=rel_tol, xmm3=abs_tol) -> rax 0/1
+; |a-b| <= max(rel_tol * max(|a|,|b|), abs_tol)
+extern fabs
+_math_isclose:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 80
+    movsd [rbp-8],  xmm0        ; a
+    movsd [rbp-16], xmm1        ; b
+    movsd [rbp-24], xmm2        ; rel_tol
+    movsd [rbp-32], xmm3        ; abs_tol
+    movsd xmm0, [rbp-8]
+    subsd xmm0, [rbp-16]
+    call fabs
+    movsd [rbp-40], xmm0        ; diff
+    movsd xmm0, [rbp-8]
+    call fabs
+    movsd [rbp-48], xmm0        ; |a|
+    movsd xmm0, [rbp-16]
+    call fabs                   ; |b|
+    movsd xmm1, [rbp-48]
+    maxsd xmm0, xmm1
+    movsd [rbp-56], xmm0        ; max_ab
+    movsd xmm0, [rbp-24]
+    mulsd xmm0, [rbp-56]        ; rel_tol*max_ab
+    movsd xmm1, [rbp-32]
+    maxsd xmm0, xmm1
+    movsd [rbp-64], xmm0        ; tol
+    movsd xmm0, [rbp-40]
+    movsd xmm1, [rbp-64]
+    ucomisd xmm0, xmm1
+    ja ._mic_no
+    mov rax, 1
+    jmp ._mic_end
+._mic_no:
+    xor rax, rax
+._mic_end:
+    leave
     ret
 
