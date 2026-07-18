@@ -2730,6 +2730,237 @@ tracked effort after roadmap docs are updated:
     intentional dynamic retyping), so (a) may turn out to be sufficient
     on its own for the vast majority of real-world cases without ever
     needing (b) at all.
+- **x86-64 backend: native freestanding/freestanding16 targets (new
+  2026-07-17)**, needed before `--backend x86-64` can become the default
+  for ALL targets (see the "x86-64 as default backend" entry just
+  below — freestanding currently falls back to legacy specifically
+  because of this gap). `target_freestanding.py` (~1100 lines) emits a
+  Multiboot1 flat binary via NASM `-f bin` (no linker at all): a
+  Multiboot1 AOUT-kludge header, a `_start` that runs in 32-bit
+  protected mode (as Multiboot1 requires) and switches to 64-bit long
+  mode before calling the compiled `kernel_main`, and a VGA-text-buffer
+  (`0xB8000`) print runtime instead of any libc. `target_freestanding16.py`
+  (~200 lines) is the 16-bit real-mode equivalent. Both are `Codegen`
+  subclasses (legacy NASM-text pipeline) — porting either to the x86-64
+  IR backend means a genuinely new output path (`_backends/x86_64/`
+  currently only emits COFF/ELF objects consumed by a real linker step;
+  freestanding needs raw flat-binary emission with zero linking), not a
+  config tweak. Scope as its own dedicated multi-day port when picked
+  up: start with the Multiboot1 header + flat-binary emission path,
+  then the protected-mode/long-mode transition, then the VGA print
+  runtime, then freestanding16's 16-bit real-mode variant.
+- **x86-64 as the default backend for windows/linux (new 2026-07-17,
+  user-requested)**: `--backend` currently defaults to `legacy`
+  (`asmpython/_compiler/__main__.py` ~line 423) even though the x86-64
+  IR backend now has strong parity (sweep: 397/438 OK, only 1 confirmed
+  real MISMATCH — `@assembly_func`'s raw-inline-NASM support, which the
+  x86-64 backend has no equivalent of at all — and 0 real crashes after
+  discounting a sweep-tooling false positive). Switch the default to
+  `x86-64` for `--target windows`/`linux`, auto-selecting `legacy` for
+  `--target freestanding`/`freestanding16` (x86-64 doesn't support those
+  targets at all — see the freestanding-port entry above) based on
+  `--target`, with no flag needed either way. `legacy` remains fully
+  available via explicit `--backend legacy` for anyone who needs
+  `@assembly_func` or anything else not yet ported. **DONE 2026-07-18**:
+  `asmpython/_compiler/__main__.py`'s `--backend` default changed from
+  `"legacy"` to `None`, resolved per-invocation in `cmd_build` based on
+  the resolved `targets` list (`x86-64` unless any target is
+  `freestanding`/`freestanding16`, in which case `legacy` for the whole
+  build — a mixed target set can't get two different auto-picked
+  backends in one invocation). Verified: default invocation now uses
+  x86-64 (confirmed via `75_assembly_func.py` reproducing the known
+  x86-64-only gap output `0/0/51` instead of legacy's `42/7/100`),
+  explicit `--backend legacy` still works, `--target freestanding`
+  still auto-selects legacy and produces a flat `-f bin` binary with no
+  flag needed. Side effect: `tests.runner`'s own no-flags invocation
+  (it has no `--backend` handling of its own, so it inherits whatever
+  the CLI defaults to) dropped from 475/483 to 445/483 — the 30 new
+  failures are ALL pre-existing x86-64-backend gaps legacy happened to
+  cover (not new bugs; confirmed each already appeared in this
+  session's earlier x86-64-specific sweep). User's explicit direction:
+  close those gaps rather than pin the test suite back to legacy —
+  tracked as its own effort, see the next entry.
+  **Important correction discovered while investigating the 475-to-445
+  drop**: `tests/runner.py`'s `main()` never parsed `--backend` or
+  `--no-pyinbin-fallback` at all (only `--use-runtime-lib` and
+  `-j`/`--jobs`) — every `python -m tests.runner --backend x86-64
+  --no-pyinbin-fallback` invocation throughout this entire prior session
+  silently dropped both flags and compiled every case with whatever
+  `asmpython._compiler.__main__`'s own CLI default happened to be at
+  the time (`legacy`, until this session's default-switch). Every
+  logged "tests.runner 475/483 holds" regression check for the whole
+  x86-64-backend-parity push was therefore actually re-testing
+  **legacy**, not x86-64 — the individual per-file spot-checks (direct
+  `python -m asmpython._compiler <file> --backend x86-64 ...` calls,
+  confirmed exact-output-match one file at a time) were genuine and
+  accurate, but the aggregate "no regressions" safety net never covered
+  x86-64 for the full 483-case suite until this exact moment. Fixed
+  2026-07-18: `tests/runner.py` now has real `_backend`/
+  `_no_pyinbin_fallback` module globals, set from `main()`'s arg parsing
+  and forwarded into both `run_positive`'s and `run_negative`'s
+  subprocess `cmd` lists. Verified: `--backend legacy` now correctly
+  reports 475/483 again; `--backend x86-64 --no-pyinbin-fallback`
+  reports 445/483 (matching the CLI-default-inherited number, as
+  expected since they're now the same backend). Lesson for future
+  sessions: verify a test harness actually consumes a flag (check its
+  effect measurably differs) before trusting repeated "N/483 holds"
+  claims across many checkpoints, rather than assuming a passed flag
+  took effect.
+- **x86-64 backend: close stdlib/language-feature parity gaps surfaced
+  by making x86-64 the default (new 2026-07-18)**. A background
+  research agent was dispatched to triage all ~37
+  `tests.runner`-no-flags failures into: (1) missing ABI shim symbols
+  (same fixable pattern as this session's already-completed math.*
+  cluster), (2) missing reachability-walker cases for stdlib class
+  methods (same fixable pattern as this session's already-completed
+  super()/iterator-protocol fixes), (3) two genuine `GP result expected
+  for %tN` codegen bugs (`196_hashlib_module.py`/`211_argparse_module.py`)
+  needing real investigation, (4) the collections/namedtuple 3-arg
+  `type()` cluster (7 files, previously assessed as likely-out-of-scope
+  dynamic-class-creation — re-verify whether a narrower fix exists), and
+  (5) a comprehension/closure/generator/tuple-unpack cluster (11 files,
+  each likely its own separate real feature gap, not a shared fix).
+  **Triage results received 2026-07-18** — full per-file root causes in
+  the background agent's own report (search this session's transcript
+  for "Findings Report" if the summary below needs more detail):
+  1. Missing shim symbols: `_threading_*` (9 funcs) and `_random_choice`/
+     `_random_sample`/`_random_getrandbits` — confirmed NOT real DLL
+     exports, complete working NASM source already exists in
+     `target_windows.py` (threading ~line 1789-1926, random ~line
+     1006-1124+), same mechanical port pattern as the already-completed
+     math.* cluster. `148_math_extended.py`'s `erf`/`tgamma`/`lgamma`
+     confirmed still genuinely unreachable via direct DLL shim (mingw-
+     libm-only), unchanged from earlier assessment.
+  2. Missing reachability-walker virtual-dispatch cases: confirmed same
+     root cause for `NullHandler__emit`/`PriorityQueue__put`/
+     `PureWindowsPath__as_posix` — lowering-time dispatch
+     (`_virtual_dispatch_rows`, `ir_lower.py:6354`) already correctly
+     handles subclass overrides, but `_reachable_callables`'s walker
+     (`ir_lower.py:8482`) only marks the STATIC owner reachable, with no
+     downward subclass-override scan. Needs a walker-side counterpart to
+     `_virtual_dispatch_rows` using `classes_sig`/`.parent` (the data
+     `_resolve_method_owner_in_sigs` already reads) instead of live `ctx`
+     state.
+  3. `196_hashlib_module.py`/`225_hashlib_module.py`/
+     `211_argparse_module.py`'s "GP result expected for %tN": TWO
+     stacked regalloc.py/codegen.py bugs. (a) `_pick_evict`
+     (`regalloc.py:251-256`) uses `<=` instead of `<` when comparing a
+     candidate's last-use against `now`, treating a value as dead on the
+     exact instruction that still reads it as an operand — confirmed via
+     direct trace, one-character fix. (b) Bigger: `codegen.py`'s
+     `_dst_gp`/`_dst_xmm` (~line 212, used at ~29 call sites) assert a
+     `RegLoc` unconditionally with no fallback for a legitimately
+     spilled `StackLoc` result under real register pressure — an
+     existing correct pattern for this already lives at
+     `codegen.py:1109-1118` (`global_addr` handling: compute into
+     scratch, then store to the stack slot if `StackLoc`) that needs
+     generalizing into `_dst_gp`/`_dst_xmm` themselves. Both files hit
+     (b) after (a) is fixed.
+  4. Collections/namedtuple cluster: **corrected finding** — this fails
+     identically on `--backend legacy` too (confirmed), so it is NOT an
+     x86-64-only gap and can't be fixed by touching that backend alone.
+     Root confirmed genuinely needs dynamic runtime class creation
+     (`collections.py`'s `namedtuple()` builds field count/names from a
+     runtime string) — no narrower fix exists, matching the original
+     assessment. New finding: only 1 of the 7 files (`296_...`) actually
+     calls `namedtuple()` — the other 6 fail only because `collections`
+     is whole-program source-merged and sema-checked unconditionally
+     regardless of whether the importing file ever calls the
+     dynamic-class-needing function; making stdlib-module sema-checking
+     reachability-gated (lazy, only analyze what's actually called)
+     would unblock those 6 without touching dynamic `type()` at all —
+     a real, different, still-nontrivial sema.py architecture change.
+  5. Comprehension/closure/generator/tuple-unpack cluster: 11 files,
+     confirmed each real and x86-64-only (all build fine on legacy).
+     Grouped by shared fix: (a) `381_enumerate_listcomp.py` needs
+     `_lower_comprehension` to special-case `enumerate()` the way
+     `_lower_dict_comprehension` already does. (b)
+     `382_nested_listcomp.py`/`423_comp_tuple_elem.py` need multi-`for`-
+     clause comprehension support (both comprehension lowering functions
+     explicitly reject `e.extra_for_iters` today) — legacy reference
+     `codegen.py:9908`/`10011`. (c) `413_dict_comp_zip.py` needs
+     zip()-as-comprehension-source support — legacy reference
+     `codegen.py:10371`. (d) `420_min_max_tuple_key.py` is a narrower
+     sema-level bug: `min()`/`max()`'s tuple-element-type info
+     (correctly computed at the call site, `sema.py:8577-8586`) isn't
+     propagated into the assigned variable's own scope type — exact
+     missing branch not yet pinpointed. (e)
+     `430_custom_iterator.py`/`442_generators.py`/
+     `451_generator_yield_in_if.py` all need one shared fix: comprehension
+     iteration over an `instance:X` with `__iter__`/`__next__` (the
+     ordinary `for` loop already supports this; comprehensions don't) —
+     legacy reference `codegen.py:10096`. (f) `439_closures.py`/
+     `447_nonlocal.py` need closures/nested-function free-variable
+     capture — `A.ClosureBind` is a complete AST node with full legacy
+     support (`codegen.py:2545`,`2563`,`14567-14673`) and ZERO references
+     anywhere in `ir_lower.py` — a large, entirely-unported feature, not
+     a small gap. (g) `440_str_unpack.py` needs a str-specific branch in
+     the single-iterable tuple-unpack case (`ir_lower.py:7451`) — narrow,
+     mechanical, mirrors the existing list/tuple branch using
+     `_abi_str_char_at` instead of `_list_elem_addr`. (h)
+     `63_tuple_unpack.py` needs `"tuple"` added to the accepted-iterable
+     tuple at `ir_lower.py:7736` — likely a genuine one-line fix, the
+     rest of that function already treats list/tuple identically.
+  Priority recommendation for whoever picks this up: (1) and (2) first
+  (mechanical, well-understood, same pattern as prior fixed clusters),
+  then (3a) (one-character regalloc fix), then (5g)/(5h) (also
+  near-one-line), leaving (3b) and (5f) as the two genuinely large
+  remaining items, and (4) as out-of-scope-as-assessed unless the
+  lazy-stdlib-sema idea is separately picked up.
+- **x86-64 backend: builtin (from-scratch) linker can't read real
+  gcc/g++ output at all — needs a bigobj-format COFF parser (new
+  2026-07-18, found while removing mlang's hard gcc-linker requirement
+  per user request)**. `asmpython/_backends/x86_64/coff_parse.py`'s
+  parser (explicitly scoped, per its own docstring, to what NASM/
+  `coff.py` emit — "not a general COFF reader") crashes immediately on
+  ANY real g++/gcc-compiled object on this toolchain: confirmed via
+  `objdump`'s own format label (`pe-bigobj-x86-64`) that w64devkit's
+  gcc always emits the "bigobj" PE-COFF variant (a different header/
+  section-count encoding than classic COFF) once a translation unit
+  crosses an internal section/symbol-count threshold — not a rare edge
+  case, the DEFAULT for ordinary compiles on this toolchain, and no
+  `-mno-big-obj`-style flag exists to suppress it (confirmed: tried,
+  gcc doesn't recognize any such option). Crash is a plain
+  `struct.error` in `parse_coff`'s header unpack (`coff_parse.py:74`),
+  not a buffer-size edge case — it's reading a completely different
+  binary layout than what it expects. `--linker gcc` remains fully
+  unaffected (shells straight to gcc's own real linker, never touches
+  this parser) and is `asmpython.mlang`'s default; `--linker builtin`
+  is honored (not rejected) if explicitly requested per the same commit
+  that added this finding, but will fail with this exact error for any
+  real external-compiler object until a bigobj parser variant is added.
+  Scope when picked up: extend `coff_parse.py` to detect and handle the
+  bigobj header format (distinguishable from classic COFF by its magic
+  bytes — classic COFF's machine-type field sits where bigobj's magic/
+  version fields are; the exact bigobj layout is a documented Microsoft
+  format, "ANON object" header) alongside the existing classic-COFF
+  path, not a replacement for it (NASM-produced objects should keep
+  using the fast/simple existing path).
+- **asmpython.mlang: legacy-backend support (new 2026-07-18, deferred)**.
+  mlang (`code = ml.Code(ml.builtins.gcc.cpp, "...")`, see the dedicated
+  entry above this one... actually mlang shipped as a full commit this
+  session, not just an entry — search git log for "asmpython.mlang") only
+  works on `--backend x86-64` today. `--backend legacy` has no
+  equivalent of any of it: the `mlang:<uid>` marker-type dispatch lives
+  entirely in `sema.py`'s `A.MethodCall`/`A.Assign` handling (shared by
+  both backends) and DOES already stamp/resolve correctly regardless of
+  which backend runs next — but the actual LOWERING (`ir_lower.py`'s
+  `mlang:` MethodCall/Assign cases) has no counterpart in `codegen.py`
+  at all, since that's a completely separate, older code generator.
+  Porting mlang to legacy needs: a parallel `mlang:`-marker case in
+  `codegen.py`'s own `A.MethodCall`/`A.Assign` handling (mirroring
+  `ir_lower.py`'s — call straight to the resolved C ABI symbol, never
+  evaluate the `Code(...)` RHS as a real value), plus wiring
+  `module.mlang_objects` into `driver.py`'s legacy `link_cmd` list (the
+  code at driver.py ~line 663 `link_cmd = [gcc, str(obj_path)]` — append
+  each mlang object path the same way icon_obj is appended a few lines
+  above) and forcing gcc linking there too (legacy already always uses
+  gcc for its final link step in the plain-executable path, so this part
+  needs no forcing, unlike x86-64's builtin-vs-gcc choice). Deliberately
+  deferred this session since legacy is now the non-default, explicit-
+  opt-in backend and there's higher-value x86-64 parity work pending
+  (see the entry above) — pick up only once that's judged more urgent
+  than closing this specific gap.
 
 User's explicit instruction: work incrementally, preserve existing
 functionality, commit coherent milestones, and do not claim compatibility or

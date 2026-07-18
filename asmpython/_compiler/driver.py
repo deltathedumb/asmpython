@@ -348,25 +348,25 @@ def _run_backend_x86_64(
 
     # asmpython.mlang: any Code(...) literal sema.py compiled via a real
     # external compiler (mlang_support._run_mlang_code) contributes its
-    # own object file here. That object's real g++/gcc output carries
-    # sections (.pdata/.xdata on Windows, .eh_frame on Linux, etc.) the
-    # builtin from-scratch linker's narrow COFF/ELF parsers don't
-    # recognize and silently drop -- confirmed unsafe for arbitrary
-    # compiler output, unlike this backend's own program/shim/runtime
-    # objects (which are deliberately kept to what those parsers handle).
-    # Force the fully-generic gcc-link-arbitrary-objects path whenever
-    # mlang is in play, regardless of what --linker the invocation asked
-    # for, rather than trying to extend the builtin linker's symbol
-    # tables to cover libstdc++/exception-handling metadata -- a losing
-    # game against arbitrary C++ output.
+    # own object file here. Default to the gcc linker when mlang is in
+    # play (it's the only one currently able to link real compiler
+    # output at all), but don't hard-reject an explicit --linker builtin
+    # -- let it try and fail with its own ordinary error rather than a
+    # special mlang-specific rejection. In practice that error currently
+    # comes very early: real g++/gcc output on this toolchain is a
+    # "bigobj" PE-COFF variant (a different header/section-count
+    # encoding than classic COFF once a translation unit has enough
+    # sections/symbols -- confirmed via `objdump`'s own "pe-bigobj-
+    # x86-64" format label on a real compiled object, and no
+    # -mno-big-obj-style flag exists to suppress it), which
+    # coff_parse.py's narrow parser (explicitly scoped to what NASM/
+    # coff.py emit, per its own docstring) doesn't understand at all --
+    # not a buffer-size edge case, a genuinely different binary layout.
+    # Supporting --linker builtin for real compiler output needs a real
+    # bigobj-format COFF parser addition, not a bugfix; tracked in
+    # RESUME.md rather than attempted here.
     mlang_objects = getattr(module, "mlang_objects", [])
-    if mlang_objects and linker not in (None, "gcc"):
-        raise ValueError(
-            f"--linker {linker!r} can't be used with asmpython.mlang "
-            f"(embedded Code(...) needs the gcc linker to safely handle "
-            f"real compiler output) -- omit --linker or pass --linker gcc"
-        )
-    effective_linker = "gcc" if mlang_objects else (linker or backend.default_linker)
+    effective_linker = linker or ("gcc" if mlang_objects else backend.default_linker)
     gcc = None
     if effective_linker == "gcc":
         gcc = _resolve_tool("gcc", override=gcc_path, env_var="ASMPYTHON_GCC")
@@ -375,7 +375,7 @@ def _run_backend_x86_64(
         "target_os": target,
         "abi": abi,
         "entry_symbol": "main",
-        "linker": "gcc" if mlang_objects else linker,
+        "linker": effective_linker,
         "gcc_path": gcc,
         "extra_args": ["-mconsole"] if target == "windows" else [],
     }

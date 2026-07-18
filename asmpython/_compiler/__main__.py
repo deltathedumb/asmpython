@@ -420,11 +420,15 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
     build_grp.add_argument(
         "--backend",
         metavar="NAME",
-        default="legacy",
+        default=None,
         help="codegen backend: 'legacy' (NASM-text codegen.py, all targets), "
-        "'x86-64' (built-in direct-to-object SSA IR backend, windows only "
-        "for now, experimental), 'ternary' (uASM-related), or any backend "
-        "registered via asmpython.backend.Backend(...). Default: legacy",
+        "'x86-64' (built-in direct-to-object SSA IR backend), 'ternary' "
+        "(uASM-related), or any backend registered via "
+        "asmpython.backend.Backend(...). Default: 'x86-64' for "
+        "--target windows/linux, 'legacy' for --target "
+        "freestanding/freestanding16 (x86-64 doesn't support those targets "
+        "yet) -- chosen automatically per --target unless this flag is "
+        "given explicitly.",
     )
     build_grp.add_argument(
         "--linker",
@@ -708,6 +712,25 @@ def cmd_build(args: argparse.Namespace) -> int:
 
     single = len(targets) == 1
 
+    # --backend default is target-dependent: the x86-64 IR backend has no
+    # freestanding/freestanding16 support yet (see RESUME.md's "x86-64
+    # backend: native freestanding/freestanding16 targets" pending item),
+    # so those targets still need `legacy`; windows/linux default to the
+    # newer x86-64 backend now that it has strong parity (confirmed via
+    # this session's full-corpus sweep). A mixed target set (e.g.
+    # `--target windows,freestanding` in one invocation) can't have two
+    # different auto-picked backends applied to it -- fall back to
+    # `legacy` for the whole build in that rare case rather than picking
+    # one target's default arbitrarily; pass `--backend` explicitly to
+    # override.
+    effective_backend = args.backend
+    if effective_backend is None:
+        _freestanding_targets = {"freestanding", "freestanding16"}
+        if any(t in _freestanding_targets for t in targets):
+            effective_backend = "legacy"
+        else:
+            effective_backend = "x86-64"
+
     effective_output = args.output
     if effective_output is None and cfg is not None and cfg.output:
         assert project_dir is not None
@@ -807,7 +830,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 output_type=output_type,
                 icon_path=icon_path,
                 all_errors=all_errors,
-                backend=args.backend,
+                backend=effective_backend,
                 linker=args.linker,
                 active_extensions=active_extensions,
             )
@@ -828,7 +851,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 output_type=output_type,
                 icon_path=icon_path,
                 all_errors=all_errors,
-                backend=args.backend,
+                backend=effective_backend,
                 linker=args.linker,
                 active_extensions=active_extensions,
             )

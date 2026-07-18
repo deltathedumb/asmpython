@@ -39,6 +39,20 @@ else:
 
 # Mutated by main() so subprocess calls pick it up.
 _use_runtime_lib = False
+# --backend/--no-pyinbin-fallback passthrough: previously silently ignored
+# by this runner (only --use-runtime-lib and -j/--jobs were ever parsed),
+# so `python -m tests.runner --backend x86-64` compiled every case with
+# whatever asmpython._compiler.__main__'s own CLI default happened to be
+# at the time -- confirmed as a real gap 2026-07-18 when the CLI default
+# changed from legacy to x86-64 and this runner's "baseline" number
+# silently changed to match, despite every session-long invocation
+# explicitly passing --backend x86-64 (which had never actually reached
+# the compiler subprocess). Both are None by default: an explicit
+# --backend forwards as `--backend NAME`; --no-pyinbin-fallback forwards
+# as that same bare flag; neither is forced when omitted, so the
+# no-flags case still tracks whatever the CLI's own default is.
+_backend: str | None = None
+_no_pyinbin_fallback = False
 
 
 @dataclass
@@ -125,6 +139,10 @@ def run_positive(case: Path, target: str) -> TestResult:
     cmd = [sys.executable, "-m", "asmpython", str(case), "--target", target, "-o", str(out)]
     if _use_runtime_lib:
         cmd.append("--use-runtime-lib")
+    if _backend is not None:
+        cmd += ["--backend", _backend]
+    if _no_pyinbin_fallback:
+        cmd.append("--no-pyinbin-fallback")
     for ext_name in _parse_ext(src_text):
         cmd += ["--ext", ext_name]
     # On Windows, compile without creationflags (adding CREATE_NO_WINDOW to gcc
@@ -162,6 +180,8 @@ def run_negative(case: Path, target: str) -> TestResult:
            "--emit-asm", "--no-pyinbin-fallback", "-o", str(out)]
     if _use_runtime_lib:
         cmd.append("--use-runtime-lib")
+    if _backend is not None:
+        cmd += ["--backend", _backend]
     for ext_name in _parse_ext(src_text):
         cmd += ["--ext", ext_name]
     cp = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
@@ -178,12 +198,15 @@ def _diff(expected: str, got: str) -> str:
 
 
 def main() -> int:
-    global _use_runtime_lib
+    global _use_runtime_lib, _backend, _no_pyinbin_fallback
     args = sys.argv[1:]
     _use_runtime_lib = "--use-runtime-lib" in args
+    _no_pyinbin_fallback = "--no-pyinbin-fallback" in args
     # -j N or --jobs N overrides parallelism; default = CPU count (capped at 8)
     workers = min(os.cpu_count() or 4, 8)
     for i, a in enumerate(args):
+        if a == "--backend" and i + 1 < len(args):
+            _backend = args[i + 1]
         if a in ("-j", "--jobs") and i + 1 < len(args):
             try:
                 workers = int(args[i + 1])
