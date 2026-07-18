@@ -8017,9 +8017,18 @@ def _lower_raise(ctx: _FuncCtx, s: A.Raise) -> None:
         exc_id = _exc_raise_type_id_ir(s.value)
         exc_id_v = ctx.tmp(I64)
         ctx.emit(IRInstr("const", exc_id_v, [exc_id]))
-        # Extract or synthesize the message string.
-        if isinstance(s.value, A.Call) and s.value.args and A.expr_type(s.value.args[0]) == "str":
-            msg_v = _lower_expr(ctx, s.value.args[0])
+        # Extract or synthesize the message string. `raise UserExcClass(arg)`
+        # for a user-defined exception class: the constructor's first arg IS
+        # the message regardless of its static type (matches codegen.py's
+        # own _cg_is_exception_class handling exactly -- e.g. subprocess.
+        # CalledProcessError(returncode, cmd)'s first arg is an int, not a
+        # str; `str(exc)` on the caught instance still prints "1", not "").
+        # Non-str/int/float first-arg types (list/dict/etc) fall back to
+        # _lower_expr_as_str's own general coercion rather than codegen.py's
+        # dedicated container-placeholder message -- an acceptable smaller
+        # gap on this backend, not yet exercised by any test case.
+        if isinstance(s.value, A.Call) and s.value.args:
+            msg_v = _lower_expr_as_str(ctx, s.value.args[0])
         elif A.expr_type(s.value) == "str":
             msg_v = _lower_expr(ctx, s.value)
         else:

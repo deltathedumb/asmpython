@@ -64,6 +64,10 @@ for _name in (
     "srand", "getenv", "clock", "remove", "_stat64", "_getpid",
     "time", "gmtime", "localtime", "mktime",
     "_mkdir", "_rmdir", "_chdir", "_getcwd", "_access",
+    # subprocess.system() (stdlib/os.py's `system` Func binding) --
+    # confirmed a real msvcrt.dll export the same way as the rest of
+    # this block (ctypes.WinDLL('msvcrt.dll') attribute lookup).
+    "system",
 ):
     _DLL_FOR_SYMBOL[_name] = "msvcrt.dll"
 
