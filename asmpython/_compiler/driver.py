@@ -302,7 +302,12 @@ def _compile_program(
     else:
         tokens = Lexer(src).tokenize()
         module = Parser(tokens, active_extensions).parse()
-    sema_analyze(module, source_dir=source_dir, collect_errors=all_errors)
+    sema_analyze(
+        module,
+        source_dir=source_dir,
+        collect_errors=all_errors,
+        active_extensions=active_extensions,
+    )
     return module
 
 

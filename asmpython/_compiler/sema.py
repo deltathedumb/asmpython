@@ -545,11 +545,23 @@ def _load_module(name: str) -> dict:
 
 
 class SemaAnalyzer:
-    def __init__(self, mod: A.Module, *, source_dir=None, collect_errors: bool = False) -> None:
+    def __init__(
+        self,
+        mod: A.Module,
+        *,
+        source_dir=None,
+        collect_errors: bool = False,
+        active_extensions: "frozenset[str] | None" = None,
+    ) -> None:
         self.mod = mod
         self.source_dir = source_dir
         self.collect_errors = collect_errors
         self._collected_errors: list = []
+        # Compiler-extension activation state, threaded down from the CLI's
+        # `--ext` flags (mirrors `Parser.ext_ctx.is_active`, but sema has no
+        # ExtensionContext of its own -- extensions that need sema-level
+        # enforcement (as opposed to pure new syntax) check this set instead).
+        self.active_extensions: frozenset = active_extensions or frozenset()
         self.funcs: dict[str, FuncSig] = {}
         self.classes: dict[str, ClassSig] = {}
         # Variable name -> return type of the lambda bound to it, so an indirect
@@ -2891,6 +2903,10 @@ class SemaAnalyzer:
                 result.extend(self._rename_stmts([s], all_names, pos))
         return result
 
+    def _ext_active(self, name: str) -> bool:
+        """True if the named compiler extension was passed via --ext."""
+        return name in self.active_extensions
+
     def analyze(self) -> None:
         # Inject stdlib Assembly class if the user imported it, so the
         # constructor and method calls resolve through the normal class path.
@@ -5200,6 +5216,22 @@ class SemaAnalyzer:
                 pass
             return
         if isinstance(s, A.Match):
+            # `exhaustive_switch`: require the last case (in source order) to
+            # be an unconditional catch-all -- a bare/wildcard MatchCapture
+            # with no guard. Checked here, before the reversed-order
+            # desugaring loop below, so "last" unambiguously means "last as
+            # the user wrote it." A guarded trailing case (`case _ if cond:`)
+            # does not count: the guard can still fall through to "no match,"
+            # which is exactly what this extension exists to forbid.
+            if self._ext_active("exhaustive_switch"):
+                last_pattern, last_guard, _ = s.cases[-1] if s.cases else (None, None, None)
+                if not (isinstance(last_pattern, A.MatchCapture) and last_guard is None):
+                    raise SemaError(
+                        "'match' does not cover every case: add a trailing "
+                        "unguarded 'case _:' (exhaustive_switch is active)",
+                        s.pos,
+                        ErrorCode.E_NONEXHAUSTIVE_MATCH,
+                    )
             # Rewrite `match subject: case p [if g]: body ...` in place into a
             # subject-temp assignment + an if/elif/.../else chain, then type-check
             # the resulting if-chain. The subject is evaluated exactly once.
@@ -8922,7 +8954,13 @@ class SemaAnalyzer:
         raise SemaError(f"undefined function {e.func!r}", e.pos, ErrorCode.E_UNDEFINED_FUNC)
 
 
-def analyze(mod: A.Module, *, source_dir=None, collect_errors: bool = False) -> None:
+def analyze(
+    mod: A.Module,
+    *,
+    source_dir=None,
+    collect_errors: bool = False,
+    active_extensions: "frozenset[str] | None" = None,
+) -> None:
     """Run semantic analysis over `mod`.
 
     `source_dir` is the directory of the source file (a Path or None). Used for
@@ -8931,5 +8969,15 @@ def analyze(mod: A.Module, *, source_dir=None, collect_errors: bool = False) -> 
 
     When `collect_errors` is True, sema continues past the first error and
     raises `MultiSemaError` at the end with every diagnostic collected.
+
+    `active_extensions` is the same --ext activation set the parser already
+    received, needed here too since several compiler extensions (unlike
+    `constants`) are enforced at the semantic-analysis level rather than
+    via new syntax alone.
     """
-    SemaAnalyzer(mod, source_dir=source_dir, collect_errors=collect_errors).analyze()
+    SemaAnalyzer(
+        mod,
+        source_dir=source_dir,
+        collect_errors=collect_errors,
+        active_extensions=active_extensions,
+    ).analyze()

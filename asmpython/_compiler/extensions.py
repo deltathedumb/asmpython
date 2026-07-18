@@ -100,10 +100,93 @@ class ConstantsExtension(CompilerExtension):
         return {"const": "handle_const"}
 
 
+# ---------------------------------------------------------------------------
+# Wave-1 extension library
+# ---------------------------------------------------------------------------
+# Six more built-in extensions, each a compile-time-only, opt-in feature with
+# no CPython equivalent. Like `constants`, every one of these is enforced
+# almost entirely in sema.py (via `SemaAnalyzer._ext_active(name)`) rather
+# than through the generic `statement_handlers()` dispatch -- `enum`, `final`,
+# and `sealed` introduce genuinely new statement-prefix syntax with real
+# shape lookahead (parser.py's `_looks_like_*`/`_parse_*` pairs, mirroring
+# `const`'s own pattern) that the generic dispatch can't express, while
+# `access`, `immutable`, and `exhaustive_switch` need no new syntax at all --
+# they're pure additional sema strictness gated on activation. See
+# docs/EXTENSIONS.md for the full per-extension writeup.
+class AccessExtension(CompilerExtension):
+    """`access`: @private / @protected / @public modifiers on class members."""
+
+    name = "access"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = set()
+
+
+class ImmutableExtension(CompilerExtension):
+    """`immutable`: @immutable classes/fields, writable only from __init__."""
+
+    name = "immutable"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = set()
+
+
+class FinalExtension(CompilerExtension):
+    """`final`: `final class` (non-subclassable) and @final methods (non-overridable).
+
+    Conflicts with `sealed`: a class can't sensibly be both unconditionally
+    non-subclassable (final) and subclassable-by-an-explicit-permit-list
+    (sealed) -- a sealed class with an empty permits list is already
+    equivalent to final, so there's no expressive gap from disallowing both
+    at once, and no need to define what it would mean for them to compose.
+    """
+
+    name = "final"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = {"sealed"}
+
+
+class SealedExtension(CompilerExtension):
+    """`sealed`: `sealed class X(permits=A, B)` restricts subclassing to a permit-list.
+
+    Conflicts with `final` -- see `FinalExtension`'s docstring.
+    """
+
+    name = "sealed"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = {"final"}
+
+
+class ExhaustiveSwitchExtension(CompilerExtension):
+    """`exhaustive_switch`: every `match` must end in an unguarded `case _:`."""
+
+    name = "exhaustive_switch"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = set()
+
+
+class EnumExtension(CompilerExtension):
+    """`enum`: `enum Name:` blocks of tagged compile-time int constants."""
+
+    name = "enum"
+    version = "1.0"
+    requires: dict = {}
+    conflicts: set = set()
+
+
 # Class references (not instances) -- looked up by name at activation time so
 # each activation constructs its own fresh instance.
 _REGISTRY: dict = {
     "constants": ConstantsExtension,
+    "access": AccessExtension,
+    "immutable": ImmutableExtension,
+    "final": FinalExtension,
+    "sealed": SealedExtension,
+    "exhaustive_switch": ExhaustiveSwitchExtension,
+    "enum": EnumExtension,
 }
 
 

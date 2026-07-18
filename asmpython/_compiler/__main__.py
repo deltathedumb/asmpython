@@ -507,7 +507,12 @@ def _run_check(
     try:
         tokens = Lexer(src).tokenize()
         module = Parser(tokens, active_extensions).parse()
-        sema_analyze(module, source_dir=source_dir, collect_errors=all_errors)
+        sema_analyze(
+            module,
+            source_dir=source_dir,
+            collect_errors=all_errors,
+            active_extensions=active_extensions,
+        )
     except MultiSemaError as me:
         # me itself is a real MultiSemaError instance under a Python-hosted
         # compiler, but when self-compiled, asmpython's native exception

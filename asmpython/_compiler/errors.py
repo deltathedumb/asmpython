@@ -82,6 +82,13 @@ class ErrorCode:
     P_EXTENSION_MISSING_DEP = 116  # P016: extension activation is missing a dependency
     P_EXTENSION_RETRACT_BLOCKED = 117  # P017: retract() blocked by a dependent active extension
     P_CONST_WITHOUT_EXTENSION  = 118  # P018: const used without --ext constants
+    # P019 intentionally unused: access modifiers are decorator-shaped, so
+    # their "used without extension" diagnostic is a semantic-phase check
+    # (E087), not a parser-phase one -- unlike const/final/sealed/enum,
+    # which are all new statement-prefix shapes with real parse-time lookahead.
+    P_FINAL_WITHOUT_EXTENSION  = 120  # P020: 'final class' used without --ext final
+    P_SEALED_WITHOUT_EXTENSION = 121  # P021: 'sealed class' used without --ext sealed
+    P_ENUM_WITHOUT_EXTENSION   = 122  # P022: 'enum' declaration used without --ext enum
 
     # ---- Semantic (E) ------------------------------------------------------
     # Name resolution
@@ -144,6 +151,20 @@ class ErrorCode:
     E_CONST_REASSIGNED      = 281  # E081: cannot reassign/rebind a const name
     E_CONST_REDEFINED       = 282  # E082: const name collides with a function or class
 
+    # Compiler extensions (wave 1: access, final, sealed, enum, immutable,
+    # exhaustive_switch). See docs/EXTENSIONS.md.
+    E_PRIVATE_ACCESS_VIOLATION   = 283  # E083: private member accessed from outside its class
+    E_PROTECTED_ACCESS_VIOLATION = 284  # E084: protected member accessed from outside its class or subclasses
+    E_FINAL_CLASS_SUBCLASSED     = 285  # E085: cannot subclass a final class
+    E_FINAL_METHOD_OVERRIDDEN    = 286  # E086: cannot override a final method
+    E_DECORATOR_WITHOUT_EXTENSION = 287  # E087: decorator requires a compiler extension that isn't active
+    E_SEALED_SUBCLASS_NOT_PERMITTED = 288  # E088: class is not in its sealed parent's permits list
+    E_NONEXHAUSTIVE_MATCH        = 289  # E089: match/case does not cover every case
+    E_IMMUTABLE_FIELD_REASSIGNED = 290  # E090: cannot assign to an immutable field outside __init__
+    E_ENUM_REDEFINED             = 291  # E091: enum name collides with a function or class
+    E_ENUM_UNKNOWN_MEMBER        = 292  # E092: no such member on this enum type
+    E_ENUM_TYPE_MISMATCH         = 293  # E093: comparing members of two different enum types
+
 
 def _code_label(code: int) -> str:
     """Return the human-readable code label, e.g. 1 -> 'L001', 212 -> 'E012'."""
@@ -191,6 +212,9 @@ ERROR_DESCRIPTIONS: dict[str, str] = {
     _code_label(ErrorCode.P_EXTENSION_MISSING_DEP): "The extension requires another extension that is not active and could not be loaded.",
     _code_label(ErrorCode.P_EXTENSION_RETRACT_BLOCKED): "Cannot retract this extension: another active extension depends on it.",
     _code_label(ErrorCode.P_CONST_WITHOUT_EXTENSION): "'const' declarations require the 'constants' extension.  Add '--ext constants' to the compile command.",
+    _code_label(ErrorCode.P_FINAL_WITHOUT_EXTENSION): "'final class' requires the 'final' extension.  Add '--ext final' to the compile command.",
+    _code_label(ErrorCode.P_SEALED_WITHOUT_EXTENSION): "'sealed class' requires the 'sealed' extension.  Add '--ext sealed' to the compile command.",
+    _code_label(ErrorCode.P_ENUM_WITHOUT_EXTENSION): "'enum' declarations require the 'enum' extension.  Add '--ext enum' to the compile command.",
     # Semantic – name resolution
     _code_label(ErrorCode.E_UNDEFINED_NAME):        "Name is not defined in the current scope.  Check for typos or missing imports.",
     _code_label(ErrorCode.E_UNDEFINED_FUNC):        "Call to an undefined function.  The function may not be imported or may be defined after the call site.",
@@ -242,6 +266,17 @@ ERROR_DESCRIPTIONS: dict[str, str] = {
     # Semantic – compiler extensions
     _code_label(ErrorCode.E_CONST_REASSIGNED):      "Cannot reassign a 'const' name.  Once declared, a const binding can never be rebound, augmented, deleted, or re-targeted.",
     _code_label(ErrorCode.E_CONST_REDEFINED):       "A 'const' name collides with a function or class of the same name.",
+    _code_label(ErrorCode.E_PRIVATE_ACCESS_VIOLATION): "A '@private' member can only be accessed from inside its own class's methods.",
+    _code_label(ErrorCode.E_PROTECTED_ACCESS_VIOLATION): "A '@protected' member can only be accessed from its own class or a subclass.",
+    _code_label(ErrorCode.E_FINAL_CLASS_SUBCLASSED): "Cannot subclass a 'final class'.",
+    _code_label(ErrorCode.E_FINAL_METHOD_OVERRIDDEN): "Cannot override a '@final' method in a subclass.",
+    _code_label(ErrorCode.E_DECORATOR_WITHOUT_EXTENSION): "This decorator requires a compiler extension that was not activated with '--ext'.",
+    _code_label(ErrorCode.E_SEALED_SUBCLASS_NOT_PERMITTED): "This class is not listed in its sealed parent's 'permits' list.",
+    _code_label(ErrorCode.E_NONEXHAUSTIVE_MATCH): "'match' does not cover every case.  Add a trailing unguarded 'case _:' to handle the rest.",
+    _code_label(ErrorCode.E_IMMUTABLE_FIELD_REASSIGNED): "Cannot assign to an '@immutable' field outside its class's __init__.",
+    _code_label(ErrorCode.E_ENUM_REDEFINED): "An 'enum' name collides with a function or class of the same name.",
+    _code_label(ErrorCode.E_ENUM_UNKNOWN_MEMBER): "No such member on this enum type.",
+    _code_label(ErrorCode.E_ENUM_TYPE_MISMATCH): "Comparing members of two different enum types.",
 }
 
 
