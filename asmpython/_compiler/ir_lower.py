@@ -4205,7 +4205,37 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             operands.append(rhs)
             operand_types.append(rhs_ty)
             step = ctx.tmp(I64)
-            if operand_types[i] == "float" or rhs_ty == "float":
+            if op in ("is", "is not"):
+                # `is`/`is not` are always raw-bit identity comparisons,
+                # never a float-semantic compare -- matches codegen.py's
+                # own SETCC comment exactly ("asmpython's uniform 8-byte
+                # runtime representation" means is/is not on ANY type,
+                # including float, is bit equality on the raw slot, not
+                # fcmp). This matters for `Optional[float]` (`r is not
+                # None`): sema collapses Optional[float] to plain "float"
+                # (see parser.py's Optional-annotation handling) with no
+                # separate None-tracking, so `None` here is the same
+                # IntLit(0)-typed "int" sentinel every other Optional
+                # uses -- comparing it against a REAL float value via
+                # fcmp would be wrong even if it "worked" (0 promoted to
+                # 0.0 loses the distinction between "is genuinely 0.0"
+                # and "is None", which raw bit equality preserves). Was
+                # entirely unimplemented for this case: fell through to
+                # the float branch below and raised LowerError since
+                # _FCMPOP has no is/is not entries at all (correctly --
+                # they were never supposed to be looked up there).
+                lv = operands[i]
+                if lv.type is F64:
+                    lv_i = ctx.tmp(I64)
+                    ctx.emit(IRInstr("bitcast_f2i", lv_i, [lv]))
+                    lv = lv_i
+                rv = rhs
+                if rv.type is F64:
+                    rv_i = ctx.tmp(I64)
+                    ctx.emit(IRInstr("bitcast_f2i", rv_i, [rhs]))
+                    rv = rv_i
+                ctx.emit(IRInstr(_CMPOP[op], step, [lv, rv]))
+            elif operand_types[i] == "float" or rhs_ty == "float":
                 if op not in _FCMPOP:
                     raise LowerError(f"unsupported float compare op {op!r}")
                 lv = operands[i]
