@@ -2824,6 +2824,32 @@ def _emit_list_index_bounds_check(ctx: _FuncCtx, list_v: IRValue, idx_v: IRValue
     ctx.switch_to(ok_b)
 
 
+def _emit_str_index_check(ctx: _FuncCtx, idx_v: IRValue, tag: int) -> None:
+    """Raise ValueError("substring not found") if idx_v == -1 -- backs
+    str.index()/str.rindex(), which (unlike find()/rfind()) raise instead
+    of returning -1 on a miss. Same raise_b-before-ok_b block-ordering
+    rule as _emit_list_index_bounds_check's own docstring explains."""
+    neg_one = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", neg_one, [-1]))
+    is_miss = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_miss, [idx_v, neg_one]))
+
+    raise_b = ctx.new_block(f"stridx_raise_{tag}")
+    ok_b = ctx.new_block(f"stridx_ok_{tag}")
+    ctx.emit(IRInstr("br.t", None, [is_miss, raise_b.label, ok_b.label]))
+
+    ctx.switch_to(raise_b)
+    msg_name = ctx.mctx.intern_str("substring not found")
+    msg_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", msg_v, [msg_name]))
+    exc_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", exc_v, [BUILTIN_EXC_IDS["ValueError"]]))
+    ctx.emit(IRInstr("call", None, ["_abi_raise", msg_v, exc_v]))
+    ctx.emit(IRInstr("br", None, [ok_b.label]))
+
+    ctx.switch_to(ok_b)
+
+
 def _emit_dict_key_check(ctx: _FuncCtx, dict_v: IRValue, key_v: IRValue, tag: int) -> None:
     """Raise KeyError(repr(key)) if key_v isn't present in dict_v -- only
     wired into the plain `d[key]` READ subscript site (like
@@ -6042,9 +6068,36 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 "isupper": "_abi_str_isupper", "isspace": "_abi_str_isspace",
             }
             one_arg_int_methods = {
-                "find": "_abi_str_index_of", "count": "_abi_str_count",
+                "count": "_abi_str_count",
                 "startswith": "_abi_str_starts_with", "endswith": "_abi_str_ends_with",
             }
+            # find/index/rfind/rindex: both 1-arg (no start) and 2-arg
+            # (sub, start) forms, plus index()/rindex() raise ValueError
+            # on a miss instead of returning -1 (find()/rfind() don't).
+            # Previously only find()'s 1-arg form was wired (via the
+            # generic one_arg_int_methods table above); rfind/index/
+            # rindex weren't handled at all, and none of the four
+            # supported a start position -- both real gaps, not just a
+            # missing DLL registration. Mirrors codegen.py's own
+            # _runtime_str_index_of/_rindex_of/_index_of_start dispatch
+            # and its index()/rindex() not-found ValueError check.
+            if e.method in ("find", "index", "rfind", "rindex") and len(e.args) in (1, 2):
+                if A.expr_type(e.args[0]) != "str":
+                    raise LowerError(f"unsupported expr MethodCall (str.{e.method} non-str arg)")
+                sub_v = _lower_expr(ctx, e.args[0])
+                v = ctx.tmp(I64)
+                if len(e.args) == 2:
+                    start_v = _lower_expr(ctx, e.args[1])
+                    if e.method in ("find", "index"):
+                        ctx.emit(IRInstr("call", v, ["_abi_str_index_of_start", obj_v, sub_v, start_v]))
+                    else:
+                        raise LowerError(f"unsupported expr MethodCall (str.{e.method} with start)")
+                else:
+                    fn = "_abi_str_index_of" if e.method in ("find", "index") else "_abi_str_rindex_of"
+                    ctx.emit(IRInstr("call", v, [fn, obj_v, sub_v]))
+                if e.method in ("index", "rindex"):
+                    _emit_str_index_check(ctx, v, id(e))
+                return v
             one_arg_str_methods = {
                 "zfill": "_abi_str_zfill", "removeprefix": "_abi_str_removeprefix",
                 "removesuffix": "_abi_str_removesuffix",

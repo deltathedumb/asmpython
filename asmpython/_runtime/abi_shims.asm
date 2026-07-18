@@ -612,6 +612,31 @@ _abi_str_index_of:
     call _runtime_str_index_of
     WIN64_RUNTIME_LEAVE
     ret
+
+; rax = str_rindex_of(haystack=rcx, sub=rdx) -- backs str.rfind/rindex
+; (no-start-arg form). Same runtime helper codegen.py's own STR_METHOD_
+; RUNTIME table points "rfind"/"rindex" at.
+extern _runtime_str_rindex_of
+_abi_str_rindex_of:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_str_rindex_of
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = str_index_of_start(haystack=rcx, sub=rdx, start=r8) -- backs
+; str.find/index(sub, start). Mirrors codegen.py's own calling convention
+; for this runtime helper exactly (rax=haystack, rbx=sub, rcx=start).
+extern _runtime_str_index_of_start
+_abi_str_index_of_start:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    mov rcx, r8
+    call _runtime_str_index_of_start
+    WIN64_RUNTIME_LEAVE
+    ret
 _abi_str_split:
     WIN64_RUNTIME_ENTER
     mov rax, rcx
