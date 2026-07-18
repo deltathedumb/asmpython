@@ -11,7 +11,7 @@ resolution). `legacy` (the original NASM-text codegen pipeline) isn't an
 This registry is for anything else: a third-party backend conforming to
 `asmpython._compiler.ir.IRBackend` (`requested_args`/`default_linker`/
 `compile(module, args)`/`link(objects, args)`), registered via
-`asmpython.Backend(...)` (the public authoring API in `asmpython/
+`asmpython.backend.Backend(...)` (the public authoring API in `asmpython/
 extend.py`) and reached at build time via `--backend NAME`, routed through
 `driver.py`'s `_run_backend_registered` -- a plain compile-then-link-then-
 write, mirroring `_run_backend_ternary`'s simple shape.

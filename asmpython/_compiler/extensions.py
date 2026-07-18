@@ -112,7 +112,7 @@ def register_extension(cls_or_instance):
 
     Accepts either a subclass (the in-tree built-in convention -- a fresh
     instance is constructed per activation) or an already-constructed
-    instance (the `asmpython.Extension(...)` public-API convention -- see
+    instance (the `asmpython.extend.Extension(...)` public-API convention -- see
     `asmpython/extend.py`, which calls this directly). Returns whatever was
     passed in, so it also works as a class decorator for the subclass case.
     """
@@ -155,7 +155,7 @@ class ExtensionContext:
         handlers()` may declare a handler either as a bound-method name
         (a string, resolved against the extension instance here -- the
         in-tree convention, e.g. `ConstantsExtension`) or as a plain
-        callable directly (the `asmpython.Extension(...)` public-API
+        callable directly (the `asmpython.extend.Extension(...)` public-API
         convention, since a dynamically-registered extension has no
         subclass of its own to hang a method off of) -- both resolve to a
         real callable by the time this returns."""
@@ -187,7 +187,7 @@ class ExtensionContext:
 
         # In-tree built-ins register a CLASS (a fresh instance per
         # activation, since a class can carry real per-activation instance
-        # state); a dynamically-built `asmpython.Extension(...)` registers
+        # state); a dynamically-built `asmpython.extend.Extension(...)` registers
         # an already-constructed CompilerExtension INSTANCE directly (it
         # has no subclass of its own to instantiate, and its metadata/
         # handlers are fixed data with nothing meaningful to reset between

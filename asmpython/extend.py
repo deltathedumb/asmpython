@@ -1,11 +1,9 @@
-"""Public API for authoring asmpython plugins: compiler-syntax extensions,
-codegen backends, and linkers.
+"""Public API for authoring asmpython compiler-syntax extensions.
 
 A plugin is an ordinary Python file, run by the *host* CPython interpreter
 (never compiled by asmpython itself) via `--ext path/to/plugin.py`. It
-imports this module and calls `Extension(...)` / `Backend(...)` /
-`Linker(...)`, each of which registers itself as a side effect of
-construction -- there is nothing further to call.
+imports this module and calls `Extension(...)`, which registers itself as
+a side effect of construction -- there is nothing further to call.
 
     # my_plugin.py
     import asmpython
@@ -22,7 +20,7 @@ construction -- there is nothing further to call.
         parser._expect("NEWLINE")
         return A.Assign(target=name, value=value, pos=pos)
 
-    asmpython.Extension(id="let_binding", statement_handlers={"let": handle_let})
+    asmpython.extend.Extension(id="let_binding", statement_handlers={"let": handle_let})
 
 Then:
 
@@ -31,6 +29,9 @@ Then:
 (`--ext` accepts a bare registered id OR a filesystem path to a plugin
 file -- a path is exec'd first, registering whatever it defines, before
 activation by id proceeds as usual.)
+
+Codegen backends and linkers are authored the same way but live in their
+own namespaces -- see `asmpython.backend.Backend` / `asmpython.linker.Linker`.
 
 **Statement-handler contract** (the `statement_handlers` dict passed to
 `Extension`): each value is a callable `(parser, pos) -> ast_nodes.Stmt`.
@@ -65,18 +66,6 @@ def _lazy_extensions_module():
     from ._compiler import extensions as _ext
 
     return _ext
-
-
-def _lazy_backends_module():
-    from . import _backends as _backends_pkg
-
-    return _backends_pkg
-
-
-def _lazy_linkers_module():
-    from . import _linkers as _linkers_pkg
-
-    return _linkers_pkg
 
 
 class Extension:
@@ -137,42 +126,3 @@ class Extension:
 
     def __repr__(self) -> str:
         return f"Extension(id={self.id!r}, version={self.version!r})"
-
-
-class Backend:
-    """Registers a codegen backend, selectable via `--backend name`.
-
-    `impl` must conform to `asmpython._compiler.ir.IRBackend`:
-    `compile(module, args) -> dict[str, bytes]` and
-    `link(objects, args) -> dict[str, bytes]` are required;
-    `requested_args` (list[dict]) and `default_linker` (str) are optional.
-
-    Registration happens immediately, as a side effect of construction.
-    """
-
-    def __init__(self, name: str, impl: object) -> None:
-        self.name = name
-        self.impl = impl
-        _lazy_backends_module().register_backend(name, impl)
-
-    def __repr__(self) -> str:
-        return f"Backend(name={self.name!r})"
-
-
-class Linker:
-    """Registers a linker, selectable via `--linker name`.
-
-    `impl` must expose `link(ctx: dict) -> bytes`; `requested_args`
-    (list[dict]) is optional. `ctx` carries at minimum `objects` (a list of
-    object-file bytes to link) and `target_os`.
-
-    Registration happens immediately, as a side effect of construction.
-    """
-
-    def __init__(self, name: str, impl: object) -> None:
-        self.name = name
-        self.impl = impl
-        _lazy_linkers_module().register_linker(name, impl)
-
-    def __repr__(self) -> str:
-        return f"Linker(name={self.name!r})"

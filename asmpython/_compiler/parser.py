@@ -1421,7 +1421,7 @@ class Parser:
                 ErrorCode.P_CONST_WITHOUT_EXTENSION,
             )
 
-        # Third-party extension statement handlers (asmpython.Extension(...),
+        # Third-party extension statement handlers (asmpython.extend.Extension(...),
         # registered via --ext). Unlike `const`/`match`, a plugin-registered
         # keyword has no built-in shape lookahead the parser can check ahead
         # of time -- the whole point is the plugin decides its own grammar.

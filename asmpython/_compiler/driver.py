@@ -394,7 +394,7 @@ def _run_backend_ternary(module, out_path: Path) -> BuildResult:
 def _run_backend_registered(module, backend_name: str, out_path: Path) -> BuildResult:
     """Compile+link `module` via a third-party `IRBackend` registered under
     `backend_name` (see `asmpython._backends.get_backend`/
-    `asmpython.Backend(...)`, the public authoring API). Mirrors
+    `asmpython.backend.Backend(...)`, the public authoring API). Mirrors
     `_run_backend_ternary`'s simple compile-then-link-then-write shape --
     third-party backends get no bespoke per-backend wiring beyond the
     `IRBackend` contract itself (`requested_args`/`default_linker`/
@@ -462,7 +462,7 @@ def _run_backend(
         return _run_backend_ternary(module, out_path)
     elif backend != "legacy":
         # Not one of the two built-in IR-backend names -- check the
-        # third-party registry (asmpython.Backend(...)) before giving up.
+        # third-party registry (asmpython.backend.Backend(...)) before giving up.
         return _run_backend_registered(module, backend, out_path)
     elif linker is not None and linker != "gcc":
         raise ValueError(f"--backend legacy only supports --linker gcc, got {linker!r}")

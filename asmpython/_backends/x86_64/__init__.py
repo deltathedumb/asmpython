@@ -174,7 +174,7 @@ def run_backend_link(objects: list[bytes], args: dict) -> dict[str, bytes]:
     # third-party registry below (asmpython._linkers.get_linker) is a
     # plain Python dict too, but it's only ever consulted under
     # CPython-hosted compilation -- a third-party linker registered via
-    # `asmpython.Linker(...)` has no self-host story yet either way, so
+    # `asmpython.linker.Linker(...)` has no self-host story yet either way, so
     # this doesn't make anything self-host-unsafe that wasn't already.
     if linker_name == "gcc":
         out_bytes = _gcc_linker.link(ctx)

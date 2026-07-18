@@ -2620,8 +2620,8 @@ tracked effort after roadmap docs are updated:
   a name→module dict specifically because "asmpython has no first-class
   module values" and such a dict "isn't representable under self-hosted
   compilation" — the same constraint would block a clean `asmpython.
-  Backend(...)`/`asmpython.Linker(...)` registry once self-hosting is a
-  real requirement. This is a foundational object-model feature (sema's
+  backend.Backend(...)`/`asmpython.linker.Linker(...)` registry once
+  self-hosting is a real requirement. This is a foundational object-model feature (sema's
   type system, the runtime object model, both codegen backends), not
   scoped to any one registry — sized similarly to a language-level feature
   like the walrus operator, but for a much more central construct.
@@ -2673,6 +2673,63 @@ tracked effort after roadmap docs are updated:
     linker path for prebuilt `.pyd`/`.so` files, and a bundled/auto-
     invoked C compiler for source-only extensions) — not an incremental
     feature bolted onto backend-parity work.
+- **x86-64 backend: module-level global reassigned to a different type
+  silently miscompiles (found 2026-07-17, root-caused via background
+  gdb/IR-dump investigation of `999_comprehensive_codegen.py`'s
+  `'XmmLoc' object has no attribute 'offset'` crash).** `ir_lower.py`'s
+  `_collect_module_globals` (~line 1830) builds ONE flat, name-keyed
+  `global_types: dict[str, IRType]` for the whole module via
+  `dict.setdefault` — first assignment to a given name anywhere in the
+  module (recursing into every `if`/`while`/`for`/`try`/`with` body)
+  permanently fixes that name's storage type; every later reassignment
+  to a *different* type is silently ignored at the type-table level, but
+  the actual `store` at that later site still writes the new (differently-
+  typed) value into the same fixed-type global slot. Every subsequent
+  `load` of that name anywhere in the module then reads it back using
+  the STALE original type, producing a type-mismatched IR value (e.g. an
+  `f64` load whose bits are actually a real pointer) that crashes
+  codegen once it flows into a pointer-only operation like `gep` — not
+  a regalloc bug; regalloc allocates the (wrongly-typed) value
+  correctly, codegen crashes handling it. Confirmed minimal shape: `x =
+  1.0` at module scope, then (perhaps 200 lines later, inside an
+  unrelated `try:` block, but still module-scope) `x = [1, 2, 3]` — the
+  second assignment's `store` is correct, but the immediately-following
+  `x[10]` read loads it back as `f64`.
+  - **Root cause class**: there is no flow-sensitive (or even
+    assignment-order-sensitive) type tracking for module-level globals
+    anywhere in this pipeline — locals avoid the same collision only
+    because each function has its own fresh `slot_ty` table, not because
+    of any real per-use-site analysis.
+  - **Why not fixed immediately**: a real fix needs one of two
+    non-trivial changes, evaluated and explicitly deferred this session
+    rather than rushed: (a) detect the type conflict in
+    `_collect_module_globals` and raise a clear compile-time error
+    (`"global 'x' reassigned from float to list"`) instead of silently
+    miscompiling — matches this compiler's existing conservative-static-
+    typing philosophy elsewhere, roughly a half-day of contained work,
+    but does NOT make `999_comprehensive_codegen.py` (or any other
+    real program with this exact pattern) compile — it just fails
+    loudly and correctly instead of silently corrupting; or (b) give
+    conflicting globals a boxed/tagged-any storage representation,
+    which requires updating every global read AND write site across
+    the whole file (broad blast radius, much larger effort).
+  - **Immediate workaround applied**: `999_comprehensive_codegen.py`'s
+    own colliding module-level `x` (the specific trigger for this
+    session's crash) was renamed to two distinct names instead of fixing
+    the compiler — this is a test-authoring collision, not something
+    most real code will hit, and unblocks that one test without taking
+    on either (a) or (b)'s risk mid-session. **The underlying compiler
+    bug is still real and unfixed** — any other program with the same
+    module-global-retyping pattern will still silently miscompile.
+  - **Recommended next step when picked up**: do (a) first (cheap,
+    honest, contained) — converting a silent miscompile into a clear
+    compile-time error is strictly better even before (b) is scoped, and
+    a real production Python program is very unlikely to reassign a
+    bare module-level name to a genuinely different static type on
+    purpose (this is much more likely a typo/bug in real code than
+    intentional dynamic retyping), so (a) may turn out to be sufficient
+    on its own for the vast majority of real-world cases without ever
+    needing (b) at all.
 
 User's explicit instruction: work incrementally, preserve existing
 functionality, commit coherent milestones, and do not claim compatibility or

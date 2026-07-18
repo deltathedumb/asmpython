@@ -424,14 +424,14 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         help="codegen backend: 'legacy' (NASM-text codegen.py, all targets), "
         "'x86-64' (built-in direct-to-object SSA IR backend, windows only "
         "for now, experimental), 'ternary' (uASM-related), or any backend "
-        "registered via asmpython.Backend(...). Default: legacy",
+        "registered via asmpython.backend.Backend(...). Default: legacy",
     )
     build_grp.add_argument(
         "--linker",
         metavar="NAME",
         default=None,
         help="linker to use: 'gcc', 'builtin' (asmpython's own, no gcc/ld "
-        "involved), or any linker registered via asmpython.Linker(...). "
+        "involved), or any linker registered via asmpython.linker.Linker(...). "
         "Default: whichever the selected --backend prefers (legacy -> gcc, "
         "x86-64 -> builtin)",
     )
@@ -449,7 +449,7 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         help="activate an opt-in compiler-syntax extension for this build: "
         "a built-in id (e.g. 'constants', for 'const NAME = value' "
         "declarations) or a path to a plugin file defining one via "
-        "asmpython.Extension(...) (see asmpython/extend.py). Repeatable. "
+        "asmpython.extend.Extension(...) (see asmpython/extend.py). Repeatable. "
         "Off by default -- a source file's grammar never changes without "
         "this explicit flag.",
     )
@@ -579,7 +579,7 @@ def _resolve_ext_flags(ext_values: "list[str] | None") -> frozenset:
     by whether it names an existing file, matching how `asmpython.
     Extension`'s own docs describe `--ext`. A path is exec'd first (in the
     *host* CPython process, never compiled by asmpython) so its
-    `asmpython.Extension(...)`/`Backend(...)`/`Linker(...)` calls register
+    `asmpython.extend.Extension(...)`/`asmpython.backend.Backend(...)`/`asmpython.linker.Linker(...)` calls register
     before activation is attempted, then its registered extension's `id` is
     what actually gets activated -- so `--ext my_plugin.py` alone is enough
     to both load and activate a plugin-defined extension in one flag.
@@ -599,7 +599,7 @@ def _resolve_ext_flags(ext_values: "list[str] | None") -> frozenset:
 def _load_ext_plugin(path: Path) -> str:
     """Exec a plugin file and return the id of the extension it registered.
 
-    Requires the plugin to register exactly one `asmpython.Extension(...)`
+    Requires the plugin to register exactly one `asmpython.extend.Extension(...)`
     (a `Backend`/`Linker`-only plugin has no extension id to activate --
     use `--backend`/`--linker` to select those instead, no `--ext` needed
     for them at all). Raises a clear error if the plugin registers zero or
@@ -617,7 +617,7 @@ def _load_ext_plugin(path: Path) -> str:
     new_ids = after - before
     if len(new_ids) == 0:
         raise RuntimeError(
-            f"extension plugin {path} did not register any asmpython.Extension(...)"
+            f"extension plugin {path} did not register any asmpython.extend.Extension(...)"
         )
     if len(new_ids) > 1:
         raise RuntimeError(

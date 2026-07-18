@@ -152,11 +152,11 @@ extensions are registered; it's a property of `const`'s specific grammar.
 
 ## User-authored extensions
 
-`asmpython.Extension(...)` (defined in `asmpython/extend.py`, exposed as
-`asmpython.Extension`) is the public, third-party-facing way to register a
-new extension without touching this file's source. A plugin is an
-ordinary Python file, run by the *host* CPython interpreter (never
-compiled by asmpython itself), loaded via `--ext path/to/plugin.py`:
+`asmpython.extend.Extension(...)` (defined in `asmpython/extend.py`) is the
+public, third-party-facing way to register a new extension without touching
+this file's source. A plugin is an ordinary Python file, run by the *host*
+CPython interpreter (never compiled by asmpython itself), loaded via
+`--ext path/to/plugin.py`:
 
 ```python
 # my_plugin.py
@@ -171,7 +171,7 @@ def handle_let(parser, pos):
     parser._expect("NEWLINE")
     return A.Assign(target=name, value=value, pos=pos)
 
-asmpython.Extension(id="let_binding", statement_handlers={"let": handle_let})
+asmpython.extend.Extension(id="let_binding", statement_handlers={"let": handle_let})
 ```
 
 ```sh
@@ -222,17 +222,17 @@ different grammar entirely -- which is not implemented yet.
 The same "public registration API, activated via a CLI flag" pattern
 extends to codegen backends and linkers:
 
-- `asmpython.Backend(name=..., impl=...)` registers a third-party codegen
-  backend, reachable via `--backend NAME`. `impl` must conform to
+- `asmpython.backend.Backend(name=..., impl=...)` registers a third-party
+  codegen backend, reachable via `--backend NAME`. `impl` must conform to
   `asmpython._compiler.ir.IRBackend` (`compile(module, args) -> dict[str,
   bytes]` and `link(objects, args) -> dict[str, bytes]`; `requested_args`/
   `default_linker` optional). Driver.py's `_run_backend_registered`
   handles it with a plain compile-then-link-then-write, the same shape as
   the built-in `ternary` backend -- no bespoke per-backend wiring the way
   `x86-64` gets (ABI shims, runtime object linking, GCC resolution).
-- `asmpython.Linker(name=..., impl=...)` registers a third-party linker,
-  reachable via `--linker NAME`. `impl` must expose `link(ctx: dict) ->
-  bytes` (`requested_args` optional).
+- `asmpython.linker.Linker(name=..., impl=...)` registers a third-party
+  linker, reachable via `--linker NAME`. `impl` must expose `link(ctx: dict)
+  -> bytes` (`requested_args` optional).
 
 Both registries (`asmpython/_backends/__init__.py`, `asmpython/_linkers/
 __init__.py`) are plain Python dicts, consulted only as a fallback after
@@ -348,7 +348,8 @@ The extension system is entirely a frontend concern:
   whole-program merge path). Run via `python -m unittest
   tests.test_program_isolation`.
 - `tests/test_extend.py` -- `unittest`-based coverage for the public
-  `asmpython.Extension`/`Backend`/`Linker` authoring API: metadata-only
+  `asmpython.extend.Extension`/`asmpython.backend.Backend`/
+  `asmpython.linker.Linker` authoring API: metadata-only
   registration and activation, a real statement-handler round-trip
   (registers a trivial `let NAME = value` extension and confirms it
   produces a real `A.Assign` node when active and an ordinary identifier

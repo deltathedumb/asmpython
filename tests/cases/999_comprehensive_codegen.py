@@ -340,8 +340,8 @@ except ZeroDivisionError:
     print("caught zero division")
 
 try:
-    x = [1, 2, 3]
-    print(x[10])
+    idx_list = [1, 2, 3]
+    print(idx_list[10])
 except IndexError:
     print("caught index error")
 

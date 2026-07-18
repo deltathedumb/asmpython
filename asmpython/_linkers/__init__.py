@@ -17,8 +17,8 @@ implementations, named by how driver.py's --linker flag refers to them.
 The two built-in linkers (`gcc`, `builtin`) stay hardcoded if/elif in
 run_backend_link -- a CPython-hosted-only micro-optimization inherited from
 before this registry existed, not required. `_REGISTRY` below is where a
-third-party linker registers (see `asmpython.Linker(...)`, the public
-authoring API in `asmpython/extend.py`), reached via `register_linker()`
+third-party linker registers (see `asmpython.linker.Linker(...)`, the public
+authoring API in `asmpython/linker.py`), reached via `register_linker()`
 and consulted by `run_backend_link` as the fallback after the two builtins.
 This registry is plain-Python-dict-based (CPython-hosted compilation only)
 -- NOT yet safe to self-host, since it holds live module/callable
