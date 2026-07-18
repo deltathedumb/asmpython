@@ -43,7 +43,7 @@
 
   <ol>
     <li><strong>Lex</strong> (<code>lexer.py</code>) — tokenizes source; handles all Python literal types, f-strings, indentation blocks</li>
-    <li><strong>Parse</strong> (<code>parser.py</code>) — recursive-descent parser builds an AST (<code>ast_nodes.py</code>); inlines closures via free-variable lifting; resolves generators into state machines; applies any active <code>--ext</code> compiler extensions (see <a href="api.html#api-extend">asmpython.extend</a>)</li>
+    <li><strong>Parse</strong> (<code>parser.py</code>) — recursive-descent parser builds an AST (<code>ast_nodes.py</code>); inlines closures via free-variable lifting; resolves generators into state machines</li>
     <li><strong>Sema</strong> (<code>sema.py</code>) — type inference and semantic analysis; resolves method overloads, propagates element types, desugars <code>match</code>/<code>case</code>, <code>with</code> statements, properties, and comprehensions</li>
   </ol>
 
@@ -61,7 +61,6 @@
 ├── __main__.py               python -m asmpython entry shim
 ├── backend.py                 asmpython.backend.Backend — public backend registration
 ├── linker.py                  asmpython.linker.Linker — public linker registration
-├── extend.py                  asmpython.extend.Extension — public syntax-extension registration
 ├── mlang.py                   asmpython.mlang — embed/call another language's source
 ├── assembly/                 @assembly_func, Assembly builder, include()
 ├── stdlib/                   ~120 modules: math, os, sys, collections, lumen, …
@@ -83,7 +82,6 @@
     ├── lexer.py               indent-aware tokenizer
     ├── parser.py              recursive-descent parser
     ├── ast_nodes.py           AST dataclasses + expr_type()
-    ├── extensions.py          CompilerExtension / ExtensionContext (--ext machinery)
     ├── sema.py                name resolution, type inference, import binding
     ├── mlang_support.py       shells out to the mlang-configured compiler, infers signatures
     ├── errors.py              L/P/E error-code registry + --explain text + CPython exception-name mapping

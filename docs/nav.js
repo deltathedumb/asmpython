@@ -17,16 +17,15 @@ const NAV_STRUCTURE = [
   ]},
   { page: "api.html", label: "Public API", sections: [
     ["api-overview", "Overview"], ["api-backend", "asmpython.backend"],
-    ["api-linker", "asmpython.linker"], ["api-extend", "asmpython.extend"],
+    ["api-linker", "asmpython.linker"],
   ]},
   { page: "assembly.html", label: "Assembly & FFI", sections: [
     ["inline-asm", "Inline assembly"], ["assembly-class", "Assembly builder class"],
     ["ffi", "Inline FFI"], ["import-binary", "Dynamic loading (import_binary)"],
     ["mlang", "asmpython.mlang"],
   ]},
-  { page: "stdlib.html", label: "Built-ins & Extensions", sections: [
+  { page: "stdlib.html", label: "Built-ins", sections: [
     ["mlang-configs", "Built-in mlang configs"],
-    ["ext-catalog", "Compiler extension catalog"],
   ]},
   { page: "targets.html", label: "Targets", sections: [
     ["target-windows", "Windows (PE64)"], ["target-linux", "Linux (ELF64)"],

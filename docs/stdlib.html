@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>asmpython — Built-ins &amp; Extensions</title>
+<title>asmpython — Built-ins</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -90,83 +90,29 @@ code = ml.Code(
 </section>
 
 <section id="ext-catalog">
-  <h2>Compiler extension catalog <a class="anc" href="#ext-catalog">#</a></h2>
-  <p>Extensions add opt-in syntax or extra compile-time checks that don't exist in plain Python — activated per compile with <code>--ext NAME</code> (one flag per extension, repeatable), never by anything in the source itself. Activation is whole-invocation: every module a build compiles (including everything a whole-program build merges in) sees the same set of active extensions. An unrecognized <code>--ext</code> value, or extension syntax used without its flag, is a precise compile error rather than a silent no-op or a confusing generic parse failure.</p>
+  <h2>Compiler extension catalog (withdrawn) <a class="anc" href="#ext-catalog">#</a></h2>
+  <p>asmpython previously shipped 16 opt-in compiler-syntax extensions
+     (<code>constants</code>, <code>access</code>, <code>immutable</code>,
+     <code>final</code>, <code>sealed</code>, <code>exhaustive_switch</code>,
+     <code>enum</code>, and nine more added in a later wave —
+     <code>readonly_params</code>, <code>const_params</code>,
+     <code>no_global_mutation</code>, <code>no_shadowing</code>,
+     <code>must_use</code>, <code>no_implicit_any</code>,
+     <code>interface</code>, <code>assign_decorators</code>,
+     <code>overload</code>), each adding opt-in syntax or extra
+     compile-time checks that don't exist in plain Python, activated
+     per compile via <code>--ext NAME</code>.</p>
 
-  <pre><div class="lang">bash</div><code>python -m asmpython program.py --ext constants --ext access --ext final</code></pre>
-
-  <p>Two extensions can declare themselves incompatible (<code>final</code> and <code>sealed</code> conflict — see below); activating both in one invocation is a compile error, checked before any source is parsed.</p>
-
-  <h3>constants</h3>
-  <p>Locked, non-reassignable module-level bindings.</p>
-  <pre><div class="lang">python</div><code><span class="kw2">const</span> MAX_RETRIES = <span class="num">5</span>
-<span class="kw2">const</span> LABEL: <span class="ty">str</span> = <span class="str">"build"</span></code></pre>
-  <p><code>const NAME [: annotation] = value</code>, module scope only, initializer mandatory. Once declared, the name can never be rebound, augmented (<code>+=</code>), deleted, or re-targeted by any assignment form — enforced across every rebinding shape (plain assignment, tuple/starred unpacking, <code>for</code> targets, <code>with...as</code>, <code>except...as</code>, import aliasing, <code>del</code>). A const value otherwise behaves exactly like an ordinary variable of the same type — mutating a const-bound <em>list</em>'s contents is fine; only rebinding the name itself is rejected.</p>
-
-  <h3>access</h3>
-  <p><code>@private</code> / <code>@protected</code> modifiers on class methods and fields, checked at every call/read/write site.</p>
-  <pre><div class="lang">python</div><code><span class="kw2">class</span> <span class="ty">Account</span>:
-    <span class="kw">@private</span>
-    <span class="kw2">def</span> <span class="fn">_raw_balance</span>(<span class="kw2">self</span>) -&gt; <span class="ty">int</span>:
-        <span class="kw2">return</span> <span class="kw2">self</span>.balance
-
-    <span class="kw2">def</span> <span class="fn">get_balance</span>(<span class="kw2">self</span>) -&gt; <span class="ty">int</span>:
-        <span class="kw2">return</span> <span class="kw2">self</span>._raw_balance()   <span class="cmt"># fine: called from Account's own method</span></code></pre>
-  <p><code>@private</code> restricts a member to that exact class's own methods — not even a subclass may call it. <code>@protected</code> allows the declaring class and any subclass. No decorator means public (the default). Applies to both methods and class-body fields (a field needs its own decorator line, e.g. <code>@private</code> on its own line above <code>balance: int</code>).</p>
-
-  <h3>immutable</h3>
-  <p><code>@immutable</code> on a class or an individual field, writable only from inside the declaring class's own <code>__init__</code>.</p>
-  <pre><div class="lang">python</div><code><span class="kw">@immutable</span>
-<span class="kw2">class</span> <span class="ty">Point</span>:
-    <span class="kw2">def</span> <span class="fn">__init__</span>(<span class="kw2">self</span>, x: <span class="ty">int</span>, y: <span class="ty">int</span>) -&gt; <span class="ty">None</span>:
-        <span class="kw2">self</span>.x = x    <span class="cmt"># fine: inside __init__</span>
-        <span class="kw2">self</span>.y = y
-
-<span class="cmt"># p = Point(3, 4); p.x = 9   -> compile error</span></code></pre>
-  <p><code>@immutable</code> on the class freezes every field; on an individual class-body field it freezes just that one. Either form allows normal reads everywhere — only writes outside the declaring <code>__init__</code> are rejected.</p>
-
-  <h3>final</h3>
-  <p><code>final class</code> forbids all subclassing; <code>@final</code> on a method forbids overriding it in any subclass.</p>
-  <pre><div class="lang">python</div><code><span class="kw2">final</span> <span class="kw2">class</span> <span class="ty">Point</span>:
-    ...
-
-<span class="kw2">class</span> <span class="ty">Base</span>:
-    <span class="kw">@final</span>
-    <span class="kw2">def</span> <span class="fn">core</span>(<span class="kw2">self</span>) -&gt; <span class="ty">int</span>: ...</code></pre>
-  <p><code>final class</code> is a statement prefix (a new soft keyword, like <code>const</code>), not a decorator — it reads more naturally attached to the class line itself than to <code>@final</code>, since it restricts the class as a whole rather than one member. Method finality is checked against the full ancestor chain, so re-overriding two levels down a hierarchy is still caught. Conflicts with <code>sealed</code> (see below).</p>
-
-  <h3>sealed</h3>
-  <p><code>sealed class Name(permits=A, B):</code> — like <code>final</code>, but with an explicit allow-list instead of forbidding all subclasses.</p>
-  <pre><div class="lang">python</div><code><span class="kw2">sealed</span> <span class="kw2">class</span> <span class="ty">Shape</span>(permits=Circle, Square):
-    ...
-
-<span class="kw2">class</span> <span class="ty">Circle</span>(Shape): ...
-<span class="kw2">class</span> <span class="ty">Square</span>(Shape): ...
-<span class="cmt"># class Triangle(Shape): ...   -> compile error, not in the permits list</span></code></pre>
-  <p>Conflicts with <code>final</code>: a class can't sensibly be both unconditionally non-subclassable and subclassable-by-an-explicit-list — a sealed class with an empty permits list is already equivalent to final, so there's no expressive gap from disallowing both together.</p>
-
-  <h3>exhaustive_switch</h3>
-  <p>Requires every <code>match</code> statement to end in an unguarded <code>case _:</code>, so a value that reaches none of the earlier cases is never silently ignored.</p>
-  <pre><div class="lang">python</div><code><span class="kw2">match</span> shape:
-    <span class="kw2">case</span> Circle(r): ...
-    <span class="kw2">case</span> Square(s): ...
-    <span class="kw2">case</span> _: ...          <span class="cmt"># required when exhaustive_switch is active</span></code></pre>
-  <p>No new syntax — <code>match</code>/<code>case</code> is unchanged. Without this extension, a <code>match</code> that hits no case simply does nothing at runtime (matching CPython's own semantics); with it active, that shape is rejected at compile time instead. A guarded trailing case (<code>case _ if cond:</code>) doesn't satisfy the requirement, since the guard can still fall through to no match.</p>
-
-  <h3>enum</h3>
-  <p><code>enum NAME:</code> blocks of tagged, statically-typed compile-time int constants — not CPython's runtime <code>enum.Enum</code> class.</p>
-  <pre><div class="lang">python</div><code><span class="kw2">enum</span> Color:
-    RED
-    GREEN
-    BLUE
-
-<span class="fn">print</span>(Color.RED)          <span class="cmt"># 0</span>
-<span class="fn">print</span>(Color.GREEN)        <span class="cmt"># 1 (auto-increments)</span>
-
-<span class="kw2">enum</span> Status:
-    OK = <span class="num">10</span>
-    ERROR = <span class="num">20</span>   <span class="cmt"># explicit values are fine too</span></code></pre>
-  <p>A bare member name auto-increments from the previous member's value (starting at 0), matching CPython's own <code>Enum</code>/<code>auto()</code> numbering; <code>NAME = N</code> sets an explicit value. Module scope only. <code>Color.RED</code>-style reads resolve entirely at compile time to a plain int — <code>enum</code> introduces no new runtime type — but comparing members of two <em>different</em> enums (<code>Color.RED == Direction.NORTH</code>) is still a compile error, since asmpython tracks which enum each member came from even though both sides are plain ints underneath.</p>
+  <p>The system has been withdrawn. asmpython's goal is mirroring
+     CPython's language with only tiny, necessary differences — a
+     growing catalog of new keywords, decorators, and semantics Python
+     itself doesn't have cut directly against that. <code>--ext</code>
+     no longer exists as a CLI flag; none of the syntax documented in
+     this section can be activated anymore. The implementation is
+     preserved as-is under <code>archived/extensions/</code> in the
+     source tree, for reference only. See
+     <a href="api.html#api-extend">asmpython.extend</a> for the
+     equivalent note on the plugin-authoring API side.</p>
 </section>
 
 <footer class="docs-footer">

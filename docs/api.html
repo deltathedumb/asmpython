@@ -44,28 +44,25 @@
      <a href="https://docs.python.org/3/">CPython docs</a>). This page is
      about a different surface: the real Python package you <code>pip
      install</code> and <code>import</code> on the <strong>host</strong>
-     interpreter to write build tooling — custom codegen backends, custom
-     linkers, and compiler-syntax extensions. None of this executes inside
-     a compiled asmpython program; it all runs under ordinary CPython, as
-     part of driving a build.</p>
+     interpreter to write build tooling — custom codegen backends and
+     custom linkers. None of this executes inside a compiled asmpython
+     program; it all runs under ordinary CPython, as part of driving a
+     build.</p>
 
   <p>The public surface is namespaced, not flat:</p>
 
   <pre><div class="lang">python</div><code><span class="kw2">import</span> asmpython
 
 asmpython.backend.Backend(name=<span class="str">"my_backend"</span>, impl=my_backend_impl)
-asmpython.linker.Linker(name=<span class="str">"my_linker"</span>, impl=my_linker_impl)
-asmpython.extend.Extension(id=<span class="str">"my_ext"</span>, statement_handlers={...})</code></pre>
+asmpython.linker.Linker(name=<span class="str">"my_linker"</span>, impl=my_linker_impl)</code></pre>
 
-  <div class="note">There is no flat <code>asmpython.Backend</code> / <code>asmpython.linker.Linker</code> / <code>asmpython.Extension</code> shorthand and no backwards-compatibility alias for one — <code>asmpython.backend</code>, <code>asmpython.linker</code>, and <code>asmpython.extend</code> are the only public entry points, each a separate submodule imported lazily so a plain <code>import asmpython</code> doesn't pull in the whole compiler frontend.</div>
+  <div class="note">There is no flat <code>asmpython.Backend</code> / <code>asmpython.linker.Linker</code> shorthand and no backwards-compatibility alias for one — <code>asmpython.backend</code> and <code>asmpython.linker</code> are the only public entry points, each a separate submodule imported lazily so a plain <code>import asmpython</code> doesn't pull in the whole compiler frontend. (A third submodule, <code>asmpython.extend</code>, registered opt-in compiler-syntax extensions — a new statement-level keyword handled by your own parser callback. It has been withdrawn: asmpython's goal is mirroring CPython's language with only tiny, necessary differences, and letting the grammar itself be extended cut against that. The withdrawn implementation is preserved for reference under <code>archived/extensions/</code> in the source tree, not part of the public API anymore.)</div>
 
-  <p>All three follow the same shape: construct the class, and registration
+  <p>Both follow the same shape: construct the class, and registration
      happens immediately as a side effect — there's no separate
      <code>.register()</code> call. Each registered thing becomes selectable
-     from the CLI (<code>--backend NAME</code>, <code>--linker NAME</code>,
-     <code>--ext NAME</code>) on any later <code>asmpython build</code>
-     invocation in that process, or via a plugin file loaded through
-     <code>--ext path/to/plugin.py</code>.</p>
+     from the CLI (<code>--backend NAME</code>, <code>--linker NAME</code>)
+     on any later <code>asmpython build</code> invocation in that process.</p>
 
   <div class="card-grid">
     <div class="card">
@@ -75,10 +72,6 @@ asmpython.extend.Extension(id=<span class="str">"my_ext"</span>, statement_handl
     <div class="card">
       <h4>asmpython.linker</h4>
       <p>Register just a linker, reusable by any backend that wants it. See <a href="#api-linker">below</a>.</p>
-    </div>
-    <div class="card">
-      <h4>asmpython.extend</h4>
-      <p>Register a new statement-level keyword, handled by your own parser callback. See <a href="#api-extend">below</a>.</p>
     </div>
   </div>
 </section>
@@ -186,93 +179,32 @@ asmpython.linker.Linker(name=<span class="str">"my_linker"</span>, impl=MyLinker
      currently requires <code>--linker gcc</code>.</p>
 </section>
 
-<!-- ── extend ────────────────────────────────────────────────── -->
+<!-- ── extend (withdrawn) ───────────────────────────────────────── -->
 <section id="api-extend">
-  <h2>asmpython.extend <a class="anc" href="#api-extend">#</a></h2>
+  <h2>asmpython.extend (withdrawn) <a class="anc" href="#api-extend">#</a></h2>
 
-  <p><code>asmpython.extend.Extension(...)</code> registers a compiler-syntax
-     extension: a new statement-prefix keyword handled by your own parser
-     callback. Unlike <code>backend</code>/<code>linker</code>, an extension
-     plugin is typically loaded straight from a file via <code>--ext</code>,
-     rather than imported as an installed package. This section covers the
-     registration <em>API</em> for writing your own — for the built-in
-     extensions that ship with the compiler (constants, access, immutable,
-     final, sealed, exhaustive_switch, enum), see the
-     <a href="stdlib.html#ext-catalog">extension catalog</a>.</p>
+  <p><code>asmpython.extend.Extension(...)</code> used to register a
+     compiler-syntax extension: a new statement-prefix keyword handled by
+     your own parser callback, activated per build via <code>--ext</code>.
+     It has been withdrawn — asmpython's goal is mirroring CPython's
+     language with only tiny, necessary differences, and letting the
+     grammar itself be extended by any plugin (or by any of the 16
+     built-in extensions this compiler previously shipped: constants,
+     enum, access, immutable, final, sealed, exhaustive_switch,
+     readonly_params, const_params, no_global_mutation, no_shadowing,
+     must_use, no_implicit_any, interface, assign_decorators, overload)
+     cut directly against that. <code>--ext</code>/<code>--apm</code>'s
+     extension-registration surface no longer exists on the CLI, and
+     <code>asmpython.extend</code> is no longer part of the public API —
+     <code>import asmpython.extend</code> now fails.</p>
 
-  <pre><div class="lang">python</div><code><span class="cmt"># my_plugin.py</span>
-<span class="kw2">import</span> asmpython
-
-<span class="kw2">def</span> <span class="fn">handle_let</span>(parser, pos):
-    <span class="str">"""`let NAME = value` -- a trivial single-binding alternative to `=`."""</span>
-    <span class="kw2">from</span> asmpython._compiler <span class="kw2">import</span> ast_nodes <span class="kw2">as</span> A
-
-    name = parser._expect(<span class="str">"NAME"</span>).value
-    parser._expect(<span class="str">"OP"</span>, <span class="str">"="</span>)
-    value = parser._parse_expr()
-    parser._expect(<span class="str">"NEWLINE"</span>)
-    <span class="kw">return</span> A.Assign(target=name, value=value, pos=pos)
-
-asmpython.extend.Extension(id=<span class="str">"let_binding"</span>, statement_handlers={<span class="str">"let"</span>: handle_let})</code></pre>
-
-  <pre><div class="lang">shell</div><code>asmpython build myfile.py --ext my_plugin.py</code></pre>
-
-  <p><code>--ext</code> accepts either a bare registered id (e.g. the
-     built-in <code>constants</code>) or a filesystem path — a path is
-     exec'd first (under the <strong>host</strong> CPython interpreter,
-     never compiled by asmpython itself), registering whatever
-     <code>Extension(...)</code> calls it makes, before activation by id
-     proceeds as usual. A plugin file that registers zero or more than one
-     <code>Extension</code> is a build-time error, since there'd be no
-     unambiguous id for <code>--ext</code> to activate.</p>
-
-  <h3>Constructor</h3>
-  <div class="table-wrap"><table>
-    <thead><tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td><code>id</code></td><td>—</td><td>The name <code>--ext</code> and other extensions' <code>requires</code>/<code>conflicts</code> refer to this extension by</td></tr>
-      <tr><td><code>version</code></td><td><code>"1.0"</code></td><td>Dotted version string, compared as a plain tuple of ints</td></tr>
-      <tr><td><code>requires</code></td><td><code>{}</code></td><td><code>dict[str, str]</code> — other extension id → minimum version that must already be active</td></tr>
-      <tr><td><code>conflicts</code></td><td><code>set()</code></td><td>Other extension ids that can't be active at the same time as this one</td></tr>
-      <tr><td><code>statement_handlers</code></td><td><code>{}</code></td><td><code>dict[str, Callable]</code> — contextual keyword → handler; empty makes a metadata-only extension (useful purely as a dependency/conflict marker)</td></tr>
-    </tbody>
-  </table></div>
-
-  <h3>Statement-handler contract</h3>
-  <p>Each <code>statement_handlers</code> value is a callable
-     <code>(parser, pos) -&gt; ast_nodes.Stmt</code>. <code>parser</code> is
-     the live <code>asmpython._compiler.parser.Parser</code> instance,
-     already positioned just past the claimed keyword — the callback
-     drives it directly via its private <code>_eat</code>/<code>_check</code>/
-     <code>_expect</code>/<code>_parse_expr</code>/etc. methods and
-     constructs a real node from <code>asmpython._compiler.ast_nodes</code>
-     (a private module — there is no separate public AST surface yet, so
-     this is the de facto contract for now).</p>
-
-  <div class="warn">Once an extension is active, its claimed keyword unconditionally becomes a statement prefix for the rest of that compile — unlike built-in soft keywords (<code>const</code>, <code>match</code>), there is no shape lookahead a generic third-party callback could replicate. The keyword can no longer double as a plain identifier for that build. This only ever applies when the invoker explicitly opted in via <code>--ext</code>.</div>
-
-  <h3>Built-in extension: constants</h3>
-  <p>The only extension asmpython ships is <code>constants</code>, activated
-     with <code>--ext constants</code>, which adds a
-     <code>const NAME [: annotation] = value</code> module-scope-only
-     declaration that locks the name against every later rebinding form
-     (plain reassignment, augmented assignment, <code>del</code>, tuple/list
-     destructuring, walrus targets, <code>except ... as</code>, shadowing
-     imports). Mutating an object a const name refers to is unaffected —
-     only rebinding the name itself is rejected:</p>
-
-  <pre><div class="lang">python</div><code>const values = [<span class="num">1</span>, <span class="num">2</span>]
-values.append(<span class="num">3</span>)   <span class="cmt"># allowed -- rebinding `values` itself is not</span>
-values = []         <span class="cmt"># E081: cannot reassign const 'values'</span></code></pre>
-
-  <p>There is no in-source activation directive — an earlier design used
-     <code>extend</code>/<code>retract</code> statements for per-file
-     activation; this was removed in favor of CLI-only activation, so a
-     program's grammar is never a function of anything the program's own
-     source controls. See <code>docs/EXTENSIONS.md</code> in the repository
-     for the full extension-system design notes (contextual-keyword
-     parsing, module isolation, IR/backend neutrality, security posture for
-     third-party extensions).</p>
+  <p>The withdrawn implementation — registry, activation/retraction,
+     conflict/dependency checking, all 16 built-in extensions, and this
+     plugin-authoring API — is preserved as-is under
+     <code>archived/extensions/</code> in the source tree, for reference
+     only. Nothing there is wired up to the compiler anymore; ordinary
+     Python source (no <code>--ext</code> flag needed, since it doesn't
+     exist) is the only thing asmpython compiles.</p>
 </section>
 
 <footer class="docs-footer">
