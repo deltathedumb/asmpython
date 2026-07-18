@@ -48,7 +48,7 @@
     """</span></code></pre>
   <p>The docstring is raw NASM emitted verbatim as the function body. Arguments arrive in the platform's integer-argument registers (Win64: <code>rcx/rdx/r8/r9</code>; SysV/Linux: <code>rdi/rsi/rdx/rcx/r8/r9</code>).</p>
 
-  <div class="warn"><code>@assembly_func</code> is only supported by <code>--backend legacy</code> — the x86-64 IR backend has no raw-NASM escape hatch. A program using <code>@assembly_func</code> needs <code>--backend legacy</code> explicitly (or must target a freestanding platform, which selects it automatically). See <a href="internals.html#backends">Backends: legacy &amp; x86-64</a>.</div>
+  <div class="warn"><code>@assembly_func</code> is only supported by <code>--backend legacy</code> — the x86-64 IR backend has no raw-NASM escape hatch. A program using <code>@assembly_func</code> needs <code>--backend legacy</code> explicitly (or must target a freestanding platform, which selects it automatically); the compiler refuses to build it under <code>--backend x86-64</code> with a clear error rather than silently discarding the NASM body. See <a href="internals.html#backends">Backends: legacy &amp; x86-64</a> and <a href="ABI.md">the ABI spec</a> for the exact calling convention a raw-NASM body must follow.</div>
 
   <h3>Asm blocks inside a normal function</h3>
   <pre><div class="lang">python</div><code><span class="kw2">def</span> <span class="fn">rdtsc</span>() -&gt; <span class="ty">int</span>:

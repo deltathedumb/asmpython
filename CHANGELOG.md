@@ -17,6 +17,18 @@ deliverable.
 
 ### Added
 
+- **`docs/ABI.md`** — the first formal, versioned binary ABI specification:
+  the `@assembly_func` inline-NASM calling convention and the exact
+  byte-level layout of every runtime type (corrects a stale claim in
+  `about.md` that `dict`'s header was 32 bytes/4 fields; it's actually 40
+  bytes/5 fields, the 5th being the insertion-order buffer that gives dict
+  iteration its CPython-3.7+-style ordering). Documents that
+  `@assembly_func` only works under `--backend legacy` — the compiler now
+  refuses to build a program using it under the default `--backend x86-64`
+  instead of silently discarding the NASM body (previously a genuine
+  silent miscompile, found while researching this doc: confirmed via
+  `tests/cases/75_assembly_func.py` producing `0/0/51` instead of the
+  correct `42/7/100` with no error at all).
 - **Pytest repository differential scout** (`asmpython-pytest-scout`) — searches
   for or accepts pytest repositories, clones them, prepares isolated virtual
   environments, and compares native asmpython and pyinbin transcripts against

@@ -467,23 +467,20 @@ asmpython/
 4. **Codegen** is a single-pass tree walk that emits NASM. Locals are pre-collected and given fixed RBP-relative offsets so the frame is finalized before the prologue is written.
 5. **Driver** writes the `.asm`, runs `nasm -f win64|elf64`, then runs `gcc` (which acts as a linker driver and pulls in the C runtime). Intermediate `.obj`/`.o` is removed unless `--keep`.
 
-### Calling conventions
+### Calling conventions and runtime data types
 
-- **Linux (System V AMD64)**: integer args in RDI, RSI, RDX, RCX, R8, R9; float args in XMM0–XMM7; AL = number of XMM args used for variadic calls.
-- **Windows (MS x64)**: integer args in RCX, RDX, R8, R9; float args in the matching XMM register *and* mirrored into the integer register for variadics; 32-byte shadow space below RSP.
-- Both targets require 16-byte stack alignment at the call site.
+See [docs/ABI.md](docs/ABI.md) for the full, verified specification — the
+`@assembly_func` inline-NASM calling convention (System V / MS x64 argument
+registers, return-value convention, symbol naming) and the exact byte-level
+layout of every runtime type (`list`'s 24-byte header, `dict`'s 40-byte
+header — instances share the dict layout exactly). Headers are stable
+across mutations; only the underlying buffer relocates, so variables don't
+need reassignment after growth.
 
-### Runtime data types
-
-| Type | Representation | Size |
-| ---- | -------------- | ---- |
-| `int` | 64-bit signed integer in RAX or a stack slot | 8 bytes |
-| `float` | IEEE-754 double in XMM0 or a stack slot | 8 bytes |
-| `str` | Pointer to nul-terminated UTF-8 bytes in `.rodata` or heap | 8 bytes (ptr) |
-| `list` | Pointer to 24-byte header `[cap, len, buf_ptr]` + heap buffer of int64s | 8 bytes (ptr) |
-| `dict` | Pointer to 32-byte header `[cap, len, tombs, buf_ptr]` + slot buffer of `(key_ptr, value)` pairs | 8 bytes (ptr) |
-
-Headers are stable across mutations; only the underlying buffer relocates. This means variables don't need reassignment after growth.
+`@assembly_func` is currently `--backend legacy`-only; `docs/ABI.md`
+documents the divergence and the compiler now refuses to build a program
+using it under `--backend x86-64` (the default) rather than silently
+discard the NASM body.
 
 ---
 
