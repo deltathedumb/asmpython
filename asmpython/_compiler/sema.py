@@ -421,6 +421,12 @@ class ClassSig:
     final_methods: set = field(default_factory=set)
     is_sealed: bool = False
     sealed_permits: list = field(default_factory=list)
+    # `immutable` extension: whole-class (@immutable on the class) or a set
+    # of specific field names (@immutable on individual class-body fields).
+    # Either form only allows writes from inside the declaring class's own
+    # __init__ (self.in_function == f"{name}__init__").
+    is_immutable: bool = False
+    immutable_fields: set = field(default_factory=set)
 
 
 @dataclass
@@ -886,6 +892,40 @@ class SemaAnalyzer:
                     pos,
                     ErrorCode.E_PROTECTED_ACCESS_VIOLATION,
                 )
+
+    def _check_immutable(self, owner_cls: str, field_name: str, pos) -> None:
+        """Enforce the `immutable` extension: writes to a whole-class-
+        @immutable class or an individually-@immutable field are only
+        allowed from inside the declaring class's own __init__.
+
+        Walks the parent chain like `_check_access` to find which class
+        actually declares the field-or-class-level immutability, so a base
+        class's @immutable still protects fields written through a
+        subclass instance.
+        """
+        if not self._ext_active("immutable"):
+            return
+        cur = owner_cls
+        seen = set()
+        declaring_cls = None
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            cls: ClassSig = self.classes.get(cur)
+            if cls is None:
+                return
+            if cls.is_immutable or field_name in cls.immutable_fields:
+                declaring_cls = cur
+                break
+            cur = cls.parent
+        if declaring_cls is None:
+            return
+        if self.in_function != f"{declaring_cls}____init__":
+            raise SemaError(
+                f"cannot assign to {declaring_cls}.{field_name!r}: it is "
+                f"immutable outside {declaring_cls}.__init__",
+                pos,
+                ErrorCode.E_IMMUTABLE_FIELD_REASSIGNED,
+            )
 
     def _resolve_field_type(self, class_name: str, field_name: str) -> Optional[str]:
         """Walk the parent chain to find the static type of an instance field.
@@ -3170,7 +3210,17 @@ class SemaAnalyzer:
             sig.is_final = getattr(c, "is_final", False)
             sig.is_sealed = getattr(c, "is_sealed", False)
             sig.sealed_permits = list(getattr(c, "sealed_permits", []) or [])
+            sig.is_immutable = "immutable" in c.decorators
+            if sig.is_immutable and not self._ext_active("immutable"):
+                raise SemaError(
+                    f"@immutable on class {c.name} requires the 'immutable' "
+                    f"extension (pass '--ext immutable' on the command line)",
+                    c.pos,
+                    ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
+                )
             for fname, f_decos in getattr(c, "field_decorators", {}).items():
+                if "immutable" in f_decos:
+                    sig.immutable_fields.add(fname)
                 if ("private" in f_decos or "protected" in f_decos) and not self._ext_active("access"):
                     raise SemaError(
                         f"@{'private' if 'private' in f_decos else 'protected'} on "
@@ -5142,6 +5192,7 @@ class SemaAnalyzer:
                 cls_name = obj_t.split(":", 1)[1]
                 if cls_name in self.classes:
                     self._check_access(cls_name, s.name, is_field=True, pos=s.pos)
+                    self._check_immutable(cls_name, s.name, s.pos)
                     resolved = self._resolve_method(cls_name, s.name)
                     if resolved is not None and "property" in resolved[1].decorators:
                         setter_name = self._resolve_setter(cls_name, s.name)
