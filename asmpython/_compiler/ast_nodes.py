@@ -24,6 +24,7 @@ class Module:
     funcs: list["FuncDef"]
     body: list["Stmt"]
     classes: list["ClassDef"] = field(default_factory=list)
+    enums: list["EnumDecl"] = field(default_factory=list)
     # Populated by sema after analyze().
     imported_modules: dict = field(default_factory=dict)
     ffi_funcs: dict = field(default_factory=dict)
@@ -156,6 +157,25 @@ class ConstDecl:
     value: "Expr"
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     annotation: object = None
+
+
+@dataclass
+class EnumDecl:
+    """`enum NAME:` block of tagged compile-time int constants -- only
+    recognised when the `enum` compiler extension is active. Each member is
+    `(member_name, value)`; the parser resolves auto-increment (a member
+    with no explicit `= N` takes the previous member's value + 1, starting
+    at 0, exactly like CPython's own `enum.IntEnum` / `auto()` default
+    numbering) so every member here already carries a concrete int, not a
+    deferred expression. `Color.RED`-style reads fold to a plain IntLit at
+    sema time carrying a synthetic "enum:<NAME>" type marker (for cross-
+    enum type-mismatch checking) -- like ConstDecl, this produces zero new
+    runtime representation, so codegen/ir_lower need no EnumDecl handling
+    at all."""
+
+    name: str
+    members: list  # list[tuple[str, int]]
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 
 @dataclass

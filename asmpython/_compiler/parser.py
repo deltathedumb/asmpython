@@ -401,6 +401,7 @@ class Parser:
     def parse(self) -> A.Module:
         funcs: list[A.FuncDef] = []
         classes: list[A.ClassDef] = []
+        enums: list[A.EnumDecl] = []
         body: list = []
         self._skip_newlines()
         while not self._check("EOF"):
@@ -420,6 +421,8 @@ class Parser:
                 classes.append(self._dispatch_final_class())
             elif self._check("NAME", "sealed") and self._looks_like_sealed_class():
                 classes.append(self._dispatch_sealed_class())
+            elif self._check("NAME", "enum") and self._looks_like_enum_decl():
+                enums.append(self._dispatch_enum_decl())
             else:
                 body.append(self._parse_stmt())
             self._skip_newlines()
@@ -428,7 +431,7 @@ class Parser:
         Parser._propagate_transitive_free_vars(self._nested_funcs)
         funcs.extend(self._nested_funcs)
         classes.extend(self._nested_classes)
-        return A.Module(funcs=funcs, body=body, classes=classes)
+        return A.Module(funcs=funcs, body=body, classes=classes, enums=enums)
 
     @staticmethod
     def _collect_called_names(stmts: list, out: set) -> None:
@@ -1489,6 +1492,16 @@ class Parser:
             self._nested_classes.append(cdef)
             return A.Pass(pos=cdef.pos)
 
+        # `enum` nested inside a function body: unlike final/sealed class,
+        # enum is module-scope-only (mirrors const's own restriction, see
+        # `_parse_enum_decl`'s `_suite_depth != 0` check) -- so this
+        # detection exists purely to route into that precise
+        # P_EXTENSION_SCOPE diagnostic instead of falling through to
+        # ordinary statement parsing, which would choke on the unconsumed
+        # NAME/':' with a confusing generic error.
+        if t.kind == "NAME" and t.value == "enum" and self._looks_like_enum_decl():
+            return self._dispatch_enum_decl()  # raises P_EXTENSION_SCOPE
+
         # Third-party extension statement handlers (asmpython.extend.Extension(...),
         # registered via --ext). Unlike `const`/`match`, a plugin-registered
         # keyword has no built-in shape lookahead the parser can check ahead
@@ -1820,6 +1833,74 @@ class Parser:
             "(pass '--ext sealed' on the command line)",
             self._peek().pos,
             ErrorCode.P_SEALED_WITHOUT_EXTENSION,
+        )
+
+    def _looks_like_enum_decl(self) -> bool:
+        """`enum` is a soft keyword: only `enum NAME:` followed by NEWLINE
+        (then an indented block of member lines) is the enum-declaration
+        shape -- an ordinary `enum = 5` or `enum.method()` keeps working.
+        Mirrors `_looks_like_match_stmt`'s save/rewind idiom (both need to
+        look past the trailing `:` + NEWLINE, not just the leading tokens
+        const's own lookahead stops at)."""
+        save = self.i
+        self._eat()  # 'enum'
+        ok = False
+        if self._check("NAME"):
+            self._eat()
+            ok = self._check("OP", ":")
+        self.i = save
+        return ok
+
+    def _parse_enum_decl(self) -> A.EnumDecl:
+        kw = self._expect("NAME", "enum")
+        if self._suite_depth != 0:
+            raise ParseError(
+                "'enum' may only appear at module scope",
+                kw.pos,
+                ErrorCode.P_EXTENSION_SCOPE,
+            )
+        name_tok = self._expect("NAME")
+        self._expect("OP", ":")
+        self._expect("NEWLINE")
+        self._skip_newlines()
+        self._expect("INDENT")
+        members: list = []
+        next_auto = 0
+        while not self._check("DEDENT"):
+            self._skip_newlines()
+            if self._check("DEDENT"):
+                break
+            m_tok = self._expect("NAME")
+            value = None
+            if self._check("OP", "="):
+                self._eat()
+                sign = 1
+                if self._check("OP", "-"):
+                    self._eat()
+                    sign = -1
+                v_tok = self._expect("INT")
+                value = sign * int(v_tok.value)
+            self._expect("NEWLINE")
+            resolved_value = value if value is not None else next_auto
+            members.append((m_tok.value, resolved_value))
+            next_auto = resolved_value + 1
+            self._skip_newlines()
+        self._expect("DEDENT")
+        if not members:
+            raise ParseError(
+                "'enum' declaration has no members", kw.pos,
+            )
+        return A.EnumDecl(name=name_tok.value, members=members, pos=kw.pos)
+
+    def _dispatch_enum_decl(self) -> A.EnumDecl:
+        """Shared dispatch helper -- see `_dispatch_final_class`."""
+        if self.ext_ctx.is_active("enum"):
+            return self._parse_enum_decl()
+        raise ParseError(
+            "'enum' declarations require the 'enum' extension "
+            "(pass '--ext enum' on the command line)",
+            self._peek().pos,
+            ErrorCode.P_ENUM_WITHOUT_EXTENSION,
         )
 
     def _looks_like_match_stmt(self) -> bool:

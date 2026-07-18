@@ -581,6 +581,13 @@ class SemaAnalyzer:
         self.active_extensions: frozenset = active_extensions or frozenset()
         self.funcs: dict[str, FuncSig] = {}
         self.classes: dict[str, ClassSig] = {}
+        # `enum` extension: enum type name -> {member name -> resolved int
+        # value}. Pure sema-side bookkeeping -- `Color.RED` folds to a plain
+        # IntLit at the read site, so this table exists only to let
+        # `Color.RED == Direction.NORTH`-style cross-enum comparisons be
+        # flagged as a type error even though both sides are plain ints by
+        # the time codegen would see them.
+        self.enum_types: dict[str, dict[str, int]] = {}
         # Variable name -> return type of the lambda bound to it, so an indirect
         # call `f(...)` on a name-bound lambda gets the right result type.
         self.lambda_rets: dict[str, str] = {}
@@ -3200,9 +3207,32 @@ class SemaAnalyzer:
                     )
                     c.methods.insert(0, init_func)
 
+        # `enum` extension: collect enum type tables before class signatures
+        # (Color.RED reads need this in place by the time any body is
+        # checked, and enums don't reference classes or vice versa, so
+        # ordering relative to the class-signature loop is otherwise free).
+        for en in getattr(self.mod, "enums", []):
+            if (
+                en.name in self.enum_types
+                or en.name in self.funcs
+                or en.name in self.classes
+                or en.name in BUILTINS
+            ):
+                raise SemaError(
+                    f"enum name {en.name!r} collides with existing name",
+                    en.pos,
+                    ErrorCode.E_ENUM_REDEFINED,
+                )
+            self.enum_types[en.name] = {m_name: m_val for m_name, m_val in en.members}
+
         # Collect class signatures so methods + constructor calls resolve.
         for c in self.mod.classes:
-            if c.name in self.classes or c.name in self.funcs or c.name in BUILTINS:
+            if (
+                c.name in self.classes
+                or c.name in self.funcs
+                or c.name in self.enum_types
+                or c.name in BUILTINS
+            ):
                 raise SemaError(
                     f"class name {c.name!r} collides with existing name", c.pos
                 )
@@ -6096,6 +6126,35 @@ class SemaAnalyzer:
                     )
             return
         if isinstance(e, A.Compare):
+            # `enum` extension: reject `Color.RED == Direction.NORTH`-style
+            # cross-enum-type comparisons. Must run BEFORE the operands are
+            # individually checked below -- `self._check_expr` on an
+            # `EnumName.MEMBER` Attr folds it to a plain IntLit in place
+            # (see the A.Attr handler), which is exactly what erases the
+            # "this came from an enum" information this check needs. Only
+            # the raw, pre-fold AST shape still has it.
+            if self.enum_types and any(op in ("==", "!=") for op in e.ops):
+                operand_enum_names: list = []
+                for op_expr in e.operands:
+                    en = None
+                    if (
+                        isinstance(op_expr, A.Attr)
+                        and isinstance(op_expr.obj, A.Name)
+                        and op_expr.obj.name in self.enum_types
+                    ):
+                        en = op_expr.obj.name
+                    operand_enum_names.append(en)
+                for i, op in enumerate(e.ops):
+                    if op not in ("==", "!="):
+                        continue
+                    a_en, b_en = operand_enum_names[i], operand_enum_names[i + 1]
+                    if a_en is not None and b_en is not None and a_en != b_en:
+                        raise SemaError(
+                            f"cannot compare {a_en} and {b_en}: they are "
+                            f"different enum types",
+                            e.pos,
+                            ErrorCode.E_ENUM_TYPE_MISMATCH,
+                        )
             for op in e.operands:
                 self._check_expr(op, scope)
             for i, op in enumerate(e.ops):
@@ -6978,6 +7037,28 @@ class SemaAnalyzer:
                 and self.current_class is not None
             ):
                 e.obj.name = self.current_class
+            # `enum` extension: `Color.RED` resolves entirely at sema time --
+            # fold this Attr node into an equivalent IntLit in place (mirrors
+            # the Match -> If in-place rewrite elsewhere in this file), so
+            # codegen/ir_lower need no EnumDecl-specific handling at all;
+            # by the time either backend sees this node it's an ordinary int
+            # constant. Cross-enum-type comparison is checked separately in
+            # the A.Compare handler BEFORE this fold runs, since the fold
+            # itself erases which enum (if any) a member came from.
+            if isinstance(e.obj, A.Name) and e.obj.name in self.enum_types:
+                members = self.enum_types[e.obj.name]
+                if e.name not in members:
+                    raise SemaError(
+                        f"{e.obj.name} has no member {e.name!r}",
+                        e.pos,
+                        ErrorCode.E_ENUM_UNKNOWN_MEMBER,
+                    )
+                value = members[e.name]
+                e.__class__ = A.IntLit  # type: ignore[assignment]
+                e.value = value  # type: ignore[attr-defined]
+                e.is_bool = False  # type: ignore[attr-defined]
+                e.is_none = False  # type: ignore[attr-defined]
+                return
             # Class-level variable read: `ClassName.x` (static constant). Type it
             # from the class var's default expression.
             if isinstance(e.obj, A.Name) and e.obj.name in self.classes:
