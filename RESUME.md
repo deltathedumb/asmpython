@@ -2638,6 +2638,41 @@ tracked effort after roadmap docs are updated:
 - Keep ARM64/macOS/Pi/optimization/custom-backend work, but prioritize
   backend parity, hybrid execution, memory safety, self-host correctness
   first.
+- **Real PyPI package installs (new 2026-07-17), split into two gated
+  phases:**
+  - **Phase 1 (feasible today, not yet started): pure-Python PyPI
+    packages.** `asmpython package install <name>` currently only pulls
+    from asmpython's own curated/vendored registry
+    (`_compiler/packages.py`'s `load_registry`/`install_package`) —
+    extend it (or add a sibling command) to resolve and download plain
+    `.py`-source distributions from the real PyPI index/simple API,
+    unpack them into the existing import-root layout, and let the
+    existing import machinery (native `import`/pyinbin fallback) pick
+    them up exactly like any other project-local module. No object-model
+    prerequisite: this is packaging/fetch plumbing only, same shape as
+    the existing vendored-registry installer, just pointed at a bigger
+    catalog and filtered to pure-Python wheels/sdists (reject anything
+    with a compiled extension module until Phase 2 lands, with a clear
+    error rather than a silent partial install).
+  - **Phase 2 (explicitly gated, do NOT start before its prerequisite
+    lands): full CPython C-extension ABI support** — real `.pyd`/`.so`
+    binary extensions (numpy-style packages, and pure-Python sdists that
+    ship C source needing a build step) loading and working via a real
+    `Python.h`/`PyObject*`/`Py_INCREF`/`Py_DECREF`/type-slot surface,
+    with a custom-compiled-on-demand C linker step invoked automatically
+    when a package needs it. **This requires asmpython to have a real
+    object model with refcounting/ownership first** (see "Real memory
+    management: refcounting, safe ownership..." above, in this same
+    list, still unstarted) — the C ABI is defined entirely in terms of
+    `PyObject` headers and reference counts that don't exist in the
+    current no-GC model. Building the ABI surface against today's model
+    would mean redoing it once real refcounting lands; do not attempt as
+    a shortcut. Sequence: refcounting/object-model work first, then
+    scope Phase 2 as its own dedicated multi-month effort (a working
+    `Python.h` subset, the type-slot dispatch tables, an ABI-compatible
+    linker path for prebuilt `.pyd`/`.so` files, and a bundled/auto-
+    invoked C compiler for source-only extensions) — not an incremental
+    feature bolted onto backend-parity work.
 
 User's explicit instruction: work incrementally, preserve existing
 functionality, commit coherent milestones, and do not claim compatibility or
