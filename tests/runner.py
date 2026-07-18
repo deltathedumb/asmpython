@@ -244,13 +244,25 @@ def main() -> int:
     results = [result_map[n] for n in ordered_names]
 
     fails = [r for r in results if not r.ok]
+    out_lines: list[str] = [f"asmpython test runner (target={target}, workers={workers}){mode}"]
     for r in results:
         mark = "OK  " if r.ok else "FAIL"
-        print(f"  [{mark}] {r.name}")
+        line = f"  [{mark}] {r.name}"
+        print(line)
+        out_lines.append(line)
         if not r.ok:
-            for line in r.detail.splitlines():
-                print(f"        {line}")
-    print(f"\n{len(results) - len(fails)}/{len(results)} passed")
+            for detail_line in r.detail.splitlines():
+                detail_out = f"        {detail_line}"
+                print(detail_out)
+                out_lines.append(detail_out)
+    summary = f"\n{len(results) - len(fails)}/{len(results)} passed"
+    print(summary)
+    out_lines.append(summary)
+    # Written every run (not just on failure) so a caller can read the full
+    # pass/fail breakdown from disk instead of re-running the whole suite
+    # just to see what changed -- avoids repeated multi-minute full-corpus
+    # runs when only the summary or one file's detail is actually needed.
+    (ROOT / "results.txt").write_text("\n".join(out_lines) + "\n", encoding="utf-8")
     return 0 if not fails else 1
 
 

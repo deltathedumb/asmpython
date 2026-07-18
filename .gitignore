@@ -79,6 +79,7 @@ _tmp*.*
 /scratch_*.py
 /full_conformance*.txt
 /runner_out*.txt
+/results.txt
 
 # Local scratch directory for one-off manual testing (temp scripts, probe
 # output, etc.) -- use this instead of littering the repo root.

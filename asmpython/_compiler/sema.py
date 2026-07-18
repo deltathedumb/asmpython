@@ -588,6 +588,11 @@ class SemaAnalyzer:
         # flagged as a type error even though both sides are plain ints by
         # the time codegen would see them.
         self.enum_types: dict[str, dict[str, int]] = {}
+        # `interface` extension: interface name -> {method name -> stub
+        # FuncSig}. Built before class-signature collection so
+        # `class X(interface=Name):` conformance-checking has the interface's
+        # method table ready when it processes each class.
+        self.interface_methods: dict = {}
         # Variable name -> return type of the lambda bound to it, so an indirect
         # call `f(...)` on a name-bound lambda gets the right result type.
         self.lambda_rets: dict[str, str] = {}
@@ -3334,6 +3339,35 @@ class SemaAnalyzer:
                 )
             self.enum_types[en.name] = {m_name: m_val for m_name, m_val in en.members}
 
+        # `interface` extension: collect stub method tables before class
+        # signatures, for the same reason enums are collected first --
+        # `class X(interface=Name):` conformance-checking (below) needs
+        # `self.interface_methods` populated before it runs.
+        for iface in getattr(self.mod, "interfaces", []):
+            if (
+                iface.name in self.interface_methods
+                or iface.name in self.funcs
+                or iface.name in self.classes
+                or iface.name in self.enum_types
+                or iface.name in BUILTINS
+            ):
+                raise SemaError(
+                    f"interface name {iface.name!r} collides with existing name",
+                    iface.pos,
+                    ErrorCode.E_INTERFACE_REDEFINED,
+                )
+            stub_table: dict = {}
+            for stub in iface.methods:
+                r = self._resolve_annot(stub.ret_type)
+                stub_table[stub.name] = FuncSig(
+                    name=stub.name,
+                    arity=len(stub.params),
+                    pos=stub.pos,
+                    ret_type=(r[0], r[1], r[2]) if r is not None else None,
+                    param_names=list(stub.params),
+                )
+            self.interface_methods[iface.name] = stub_table
+
         # Collect class signatures so methods + constructor calls resolve.
         for c in self.mod.classes:
             if (
@@ -3354,6 +3388,14 @@ class SemaAnalyzer:
                 raise SemaError(
                     f"@immutable on class {c.name} requires the 'immutable' "
                     f"extension (pass '--ext immutable' on the command line)",
+                    c.pos,
+                    ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
+                )
+            if getattr(c, "implements_interface", None) is not None and not self._ext_active("interface"):
+                raise SemaError(
+                    f"class {c.name}'s interface={c.implements_interface!r} "
+                    f"requires the 'interface' extension (pass '--ext "
+                    f"interface' on the command line)",
                     c.pos,
                     ErrorCode.E_DECORATOR_WITHOUT_EXTENSION,
                 )
@@ -3519,6 +3561,56 @@ class SemaAnalyzer:
                             ErrorCode.E_FINAL_METHOD_OVERRIDDEN,
                         )
                     cur = ancestor_sig.parent
+
+        # `interface` extension: every class declaring `implements_interface`
+        # must implement every stub method (matching arity/return type),
+        # via _resolve_method's existing parent-chain walk -- so a method
+        # implemented on an ancestor class satisfies the contract too, not
+        # just one declared directly on this exact class.
+        if self._ext_active("interface"):
+            for c in self.mod.classes:
+                iface_name = getattr(c, "implements_interface", None)
+                if iface_name is None:
+                    continue
+                stub_table = self.interface_methods.get(iface_name)
+                if stub_table is None:
+                    raise SemaError(
+                        f"class {c.name} declares interface={iface_name!r}, "
+                        f"but no such interface was declared",
+                        c.pos,
+                        ErrorCode.E_INTERFACE_UNKNOWN,
+                    )
+                for stub_name, stub_sig in stub_table.items():
+                    resolved = self._resolve_method(c.name, stub_name)
+                    if resolved is None:
+                        raise SemaError(
+                            f"class {c.name} does not implement "
+                            f"{iface_name}.{stub_name}() required by its "
+                            f"interface",
+                            c.pos,
+                            ErrorCode.E_INTERFACE_METHOD_MISSING,
+                        )
+                    impl_sig = resolved[1]
+                    if impl_sig.arity != stub_sig.arity:
+                        raise SemaError(
+                            f"{c.name}.{stub_name}() has {impl_sig.arity} "
+                            f"parameter(s), but interface {iface_name} "
+                            f"declares {stub_sig.arity}",
+                            c.pos,
+                            ErrorCode.E_INTERFACE_METHOD_MISMATCH,
+                        )
+                    if (
+                        stub_sig.ret_type is not None
+                        and impl_sig.ret_type is not None
+                        and stub_sig.ret_type[0] != impl_sig.ret_type[0]
+                    ):
+                        raise SemaError(
+                            f"{c.name}.{stub_name}() returns "
+                            f"{impl_sig.ret_type[0]!r}, but interface "
+                            f"{iface_name} declares {stub_sig.ret_type[0]!r}",
+                            c.pos,
+                            ErrorCode.E_INTERFACE_METHOD_MISMATCH,
+                        )
 
         # Top-level body first, so module-level names (imports and top-level
         # assignments) are recorded as globals and become visible inside

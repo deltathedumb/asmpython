@@ -25,6 +25,7 @@ class Module:
     body: list["Stmt"]
     classes: list["ClassDef"] = field(default_factory=list)
     enums: list["EnumDecl"] = field(default_factory=list)
+    interfaces: list["InterfaceDecl"] = field(default_factory=list)
     # Populated by sema after analyze().
     imported_modules: dict = field(default_factory=dict)
     ffi_funcs: dict = field(default_factory=dict)
@@ -132,6 +133,8 @@ class ClassDef:
     # `sealed_permits` holds the leaf names of the permitted subclasses.
     is_sealed: bool = False
     sealed_permits: list = field(default_factory=list)
+    # `interface` extension: set when declared `class X(interface=Name):`.
+    implements_interface: "str | None" = None
 
 
 # ---- Statements -------------------------------------------------------------
@@ -180,6 +183,24 @@ class EnumDecl:
 
     name: str
     members: list  # list[tuple[str, int]]
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
+class InterfaceDecl:
+    """`interface NAME:` block of method-signature stubs -- only recognised
+    when the `interface` compiler extension is active. Each stub is a real
+    `FuncDef` (reusing the exact same node method bodies use), but its body
+    must be exactly `pass` -- a signature-only declaration, never real code.
+    `class X(interface=NAME):` (parsed in _parse_classdef, mirroring the
+    `sealed` extension's `permits=` keyword-arg-in-base-list pattern) must
+    implement every stub with a matching arity/return type or the class
+    fails to compile. Purely a compile-time structural contract -- no
+    runtime representation, no vtable; codegen/ir_lower need no
+    InterfaceDecl handling at all."""
+
+    name: str
+    methods: list  # list[FuncDef], each body == [Pass(...)]
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
 
 

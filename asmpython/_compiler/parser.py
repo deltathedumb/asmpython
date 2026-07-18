@@ -406,6 +406,7 @@ class Parser:
         funcs: list[A.FuncDef] = []
         classes: list[A.ClassDef] = []
         enums: list[A.EnumDecl] = []
+        interfaces: list[A.InterfaceDecl] = []
         body: list = []
         self._skip_newlines()
         while not self._check("EOF"):
@@ -427,6 +428,8 @@ class Parser:
                 classes.append(self._dispatch_sealed_class())
             elif self._check("NAME", "enum") and self._looks_like_enum_decl():
                 enums.append(self._dispatch_enum_decl())
+            elif self._check("NAME", "interface") and self._looks_like_interface_decl():
+                interfaces.append(self._dispatch_interface_decl())
             else:
                 body.append(self._parse_stmt())
             self._skip_newlines()
@@ -435,7 +438,7 @@ class Parser:
         Parser._propagate_transitive_free_vars(self._nested_funcs)
         funcs.extend(self._nested_funcs)
         classes.extend(self._nested_classes)
-        return A.Module(funcs=funcs, body=body, classes=classes, enums=enums)
+        return A.Module(funcs=funcs, body=body, classes=classes, enums=enums, interfaces=interfaces)
 
     @staticmethod
     def _collect_called_names(stmts: list, out: set) -> None:
@@ -809,6 +812,7 @@ class Parser:
         name = self._expect("NAME").value
         parent = None
         sealed_permits: list = []
+        implements_interface: "str | None" = None
         if self._check("OP", "("):
             self._eat()
             if not self._check("OP", ")"):
@@ -833,6 +837,18 @@ class Parser:
                     while self._check("OP", ","):
                         self._eat()
                         sealed_permits.append(self._expect("NAME").value)
+                elif (
+                    self._check("NAME", "interface")
+                    and self._peek(1).kind == "OP"
+                    and self._peek(1).value == "="
+                ):
+                    # `class X(interface=Name):` -- the `interface`
+                    # extension's structural-conformance declaration. Same
+                    # keyword-arg-shape recognition as `permits=`, but
+                    # captures a single NAME (not a comma-list).
+                    self._eat()  # 'interface'
+                    self._eat()  # '='
+                    implements_interface = self._expect("NAME").value
                 else:
                     # First base class, possibly dotted (`module.Base`). Every
                     # consumer (sema's class table, codegen's chain walker) keys
@@ -858,6 +874,15 @@ class Parser:
                         while self._check("OP", ","):
                             self._eat()
                             sealed_permits.append(self._expect("NAME").value)
+                        break
+                    if (
+                        self._check("NAME", "interface")
+                        and self._peek(1).kind == "OP"
+                        and self._peek(1).value == "="
+                    ):
+                        self._eat()  # 'interface'
+                        self._eat()  # '='
+                        implements_interface = self._expect("NAME").value
                         break
                     self._parse_expr()
             self._expect("OP", ")")
@@ -942,6 +967,7 @@ class Parser:
             decorators=class_decorators,
             field_decorators=field_decorators,
             sealed_permits=sealed_permits,
+            implements_interface=implements_interface,
         )
 
     def _parse_class_var(self):
@@ -1532,6 +1558,11 @@ class Parser:
         if t.kind == "NAME" and t.value == "enum" and self._looks_like_enum_decl():
             return self._dispatch_enum_decl()  # raises P_EXTENSION_SCOPE
 
+        # `interface` nested inside a function body: same module-scope-only
+        # restriction and rationale as `enum` above.
+        if t.kind == "NAME" and t.value == "interface" and self._looks_like_interface_decl():
+            return self._dispatch_interface_decl()  # raises P_EXTENSION_SCOPE
+
         # Third-party extension statement handlers (asmpython.extend.Extension(...),
         # registered via --ext). Unlike `const`/`match`, a plugin-registered
         # keyword has no built-in shape lookahead the parser can check ahead
@@ -1931,6 +1962,80 @@ class Parser:
             "(pass '--ext enum' on the command line)",
             self._peek().pos,
             ErrorCode.P_ENUM_WITHOUT_EXTENSION,
+        )
+
+    def _looks_like_interface_decl(self) -> bool:
+        """`interface` is a soft keyword, same shape-check as `enum`:
+        only `interface NAME:` followed by NEWLINE is the declaration
+        shape."""
+        save = self.i
+        self._eat()  # 'interface'
+        ok = False
+        if self._check("NAME"):
+            self._eat()
+            ok = self._check("OP", ":")
+        self.i = save
+        return ok
+
+    def _parse_interface_decl(self) -> A.InterfaceDecl:
+        kw = self._expect("NAME", "interface")
+        if self._suite_depth != 0:
+            raise ParseError(
+                "'interface' may only appear at module scope",
+                kw.pos,
+                ErrorCode.P_EXTENSION_SCOPE,
+            )
+        name_tok = self._expect("NAME")
+        self._expect("OP", ":")
+        self._expect("NEWLINE")
+        self._skip_newlines()
+        self._expect("INDENT")
+        methods: list = []
+        while not self._check("DEDENT"):
+            self._skip_newlines()
+            if self._check("DEDENT"):
+                break
+            if self._check("KEYWORD", "pass"):
+                self._eat()
+                self._expect("NEWLINE")
+                self._skip_newlines()
+                continue
+            if not self._check("KEYWORD", "def"):
+                raise ParseError(
+                    "'interface' bodies may only contain method stubs "
+                    "('def name(...): pass') or 'pass'",
+                    self._peek().pos,
+                )
+            stub = self._parse_funcdef()
+            # A stub is a signature-only declaration: its body must be
+            # exactly `pass`, never real code -- no precedent to reuse here
+            # (this is the first construct in this compiler requiring a
+            # constrained/empty body shape), so this checks the parsed
+            # body directly rather than special-casing the tokenizer.
+            if not (len(stub.body) == 1 and isinstance(stub.body[0], A.Pass)):
+                raise ParseError(
+                    f"interface method {stub.name!r}'s body must be "
+                    f"exactly 'pass' -- interface stubs declare a "
+                    f"signature only, never real code",
+                    kw.pos,
+                    ErrorCode.P_INTERFACE_STUB_BODY,
+                )
+            methods.append(stub)
+            self._skip_newlines()
+        self._expect("DEDENT")
+        if not methods:
+            raise ParseError("'interface' declaration has no methods", kw.pos)
+        return A.InterfaceDecl(name=name_tok.value, methods=methods, pos=kw.pos)
+
+    def _dispatch_interface_decl(self) -> A.InterfaceDecl:
+        """Shared dispatch helper -- see `_dispatch_final_class`."""
+        if self.ext_ctx.is_active("interface"):
+            return self._parse_interface_decl()
+        raise ParseError(
+            "'interface' declarations require the 'interface' extension "
+            "(pass '--ext interface' on the command line)",
+            self._peek().pos,
+            ErrorCode.P_INTERFACE_WITHOUT_EXTENSION,
         )
 
     def _looks_like_match_stmt(self) -> bool:
