@@ -614,6 +614,19 @@ class SemaAnalyzer:
         # declared via `global` -- populated by A.Global's handler (see
         # _check_stmt), consulted by _require_assignable's callers.
         self._globals_declared_in: dict = {}
+        # `no_shadowing` extension: the currently-checked lifted function's
+        # own captured free-variable names, so a NEW body-local binding of
+        # the same name can be flagged (see _check_no_shadowing_free_var).
+        self._current_free_vars: set = set()
+        # `no_shadowing` extension: names already bound at least once
+        # within the CURRENTLY-checked function body -- a real "have we
+        # seen a first bind of this name yet" tracker. `scope.types` can't
+        # serve this purpose: it's pre-seeded with every module global by
+        # _seed_globals_into before any body statement runs, so `target not
+        # in scope.types` is always false for a name that's also a global,
+        # exactly the case case (b) needs to detect. Reset at the start of
+        # each function/method body check.
+        self._locally_bound: set = set()
         self.loop_depth = 0
         self.in_function: Optional[str] = None
         self.in_lifted: bool = False  # True when checking a lifted nested func
@@ -3558,9 +3571,11 @@ class SemaAnalyzer:
             self.in_function = f.name
             self.in_lifted = getattr(f, "is_lifted", False)
             self._locked_params = self._compute_locked_params(f)
+            free_vars: list = getattr(f, "free_vars", [])
+            self._current_free_vars = set(free_vars) if self.in_lifted else set()
+            self._locally_bound = set(f.params)
             scope = Scope()
             self._seed_globals_into(scope)
-            free_vars: list = getattr(f, "free_vars", [])
             n_fvs: int = len(free_vars)
             usage_hints: dict = self._param_usage_hints(f.params, f.body)
             # Explicit `: list` annotation: self._fv_types.get(...)'s result
@@ -3578,6 +3593,12 @@ class SemaAnalyzer:
                     else:
                         scope.add(p, "int")
                 else:
+                    # `no_shadowing` extension, module-level case: a real
+                    # (non-free-var) parameter sharing a name with a
+                    # module-level global. Checked here rather than inside
+                    # _require_assignable since params are seeded directly
+                    # (scope.add), never routed through the rebind guard.
+                    self._check_no_shadowing_global(p, f.pos)
                     # Explicit `: list` reads, not direct f.param_types /
                     # f.defaults attribute access: f is an external/opaque
                     # type to sema (A.FuncDef), so those attributes read
@@ -3609,6 +3630,8 @@ class SemaAnalyzer:
             self.in_function = None
             self.in_lifted = False
             self._locked_params = set()
+            self._current_free_vars = set()
+            self._locally_bound = set()
 
         # Method bodies: `self` is typed as the instance of its class.
         for c in self.mod.classes:
@@ -3618,6 +3641,8 @@ class SemaAnalyzer:
                 self.in_function = f"{c.name}__{m.name}"
                 self.current_class = c.name
                 self._locked_params = self._compute_locked_params(m, skip_first=True)
+                self._current_free_vars = set()
+                self._locally_bound = set(m.params)
                 scope = Scope()
                 self._seed_globals_into(scope)
                 # Explicit `: list` annotation: getattr(m, "decorators", [])
@@ -3649,6 +3674,7 @@ class SemaAnalyzer:
                 m_defaults: list = m.defaults
                 usage_hints: dict = self._param_usage_hints(m_params_chk, m.body)
                 for i, p in enumerate(m_params_chk[start:], start=start):
+                    self._check_no_shadowing_global(p, m.pos)
                     annot = m_param_types[i] if i < len(m_param_types) else None
                     default = m_defaults[i] if i < len(m_defaults) else None
                     if (
@@ -3678,6 +3704,7 @@ class SemaAnalyzer:
                 self.current_class = None
                 self.classmethod_cls_param = None
                 self._locked_params = set()
+                self._locally_bound = set()
 
         # Raise all collected errors now that every body has been checked.
         if self._collected_errors:
@@ -4408,6 +4435,42 @@ class SemaAnalyzer:
                 self._collect_returns(st_else, acc)
                 self._collect_returns(st_finally, acc)
 
+    def _check_no_shadowing_global(self, name: str, pos) -> None:
+        """`no_shadowing` extension, case (a): a function param/first-local
+        sharing a name with a real module-level global
+        (`self.global_scope.types`). See docs/EXTENSIONS.md for why this
+        compiler only implements two narrow shadow checks rather than
+        general lexical shadow detection (Scope is flat, no parent chain)."""
+        if not self._ext_active("no_shadowing"):
+            return
+        if name in self.global_scope.types:
+            raise SemaError(
+                f"parameter/local {name!r} shadows a module-level global "
+                f"of the same name",
+                pos,
+                ErrorCode.E_SHADOWED_GLOBAL,
+            )
+
+    def _check_no_shadowing_free_var(self, name: str, pos) -> None:
+        """`no_shadowing` extension, case (b): inside a lifted (nested)
+        function, a NEW body-local binding (not a parameter -- those are
+        handled by `_check_no_shadowing_global`, since a free-var param can
+        never literally collide with its own free-var list by construction)
+        that shares a name with one of the function's own captured
+        `free_vars` -- i.e. the function locally rebinds a name it also
+        captured from its enclosing scope."""
+        if not self._ext_active("no_shadowing"):
+            return
+        if not self.in_lifted or self.in_function is None:
+            return
+        if name in self._current_free_vars:
+            raise SemaError(
+                f"local {name!r} shadows a variable captured from the "
+                f"enclosing scope",
+                pos,
+                ErrorCode.E_SHADOWED_GLOBAL,
+            )
+
     def _compute_locked_params(self, f, skip_first: bool = False) -> set:
         """Build the per-function-invocation param-lock set for
         `readonly_params`/`const_params`, consulted by `_require_assignable`.
@@ -4513,6 +4576,20 @@ class SemaAnalyzer:
         way a plain `target = value` assignment would. Shared by `A.Assign`
         and `A.NamedExpr` (the walrus operator `target := value`)."""
         self._require_assignable(target, getattr(value, "pos", None))
+        # `no_shadowing` extension: only check on the FIRST bind of `target`
+        # within the CURRENTLY-checked function (a later reassignment of an
+        # already-declared local isn't shadowing). `self._locally_bound`
+        # (not `scope.types`, which is pre-seeded with every module global
+        # before any body statement runs and so can't distinguish "first
+        # real local bind" from "matches a global's name") is the real
+        # first-bind signal. Case (a) (module-global shadow) applies to
+        # every function; case (b) (free-var shadow) is a no-op outside a
+        # lifted function (checked inside the helper itself).
+        if self.in_function is not None and target not in self._locally_bound:
+            pos = getattr(value, "pos", None)
+            self._check_no_shadowing_global(target, pos)
+            self._check_no_shadowing_free_var(target, pos)
+            self._locally_bound.add(target)
         # Remember a name bound directly to a lambda, so a later `name(...)`
         # call recovers the lambda's result type instead of defaulting int.
         if isinstance(value, A.Lambda):
