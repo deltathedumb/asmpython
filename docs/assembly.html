@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>asmpython — Assembly &amp; FFI</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ══ TOP BAR ═══════════════════════════════════════════════════ -->
+<header class="topbar">
+  <button class="burger" id="navToggle" aria-label="Toggle navigation">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+  </button>
+  <a href="index.html#intro" class="brand">
+    <div class="brand-icon"><img src="icon.png" alt="asmpython"></div>
+    <div class="brand-name">asmpython</div>
+  </a>
+  <span class="ver-pill">v3.14-preview</span>
+  <div class="topbar-search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    <input id="navSearch" type="text" placeholder="Filter docs…" autocomplete="off">
+  </div>
+  <div class="topbar-spacer"></div>
+  <a class="gh-link" href="https://github.com/deltathedumb/asmpython" target="_blank" rel="noopener">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    GitHub
+  </a>
+</header>
+
+<div class="shell">
+<!-- ══ SIDEBAR (injected by nav.js) ═══════════════════════════════ -->
+<nav class="side" id="sideNav"></nav>
+
+<!-- ══ MAIN ══════════════════════════════════════════════════════ -->
+<main>
+
+<section id="inline-asm">
+  <h2>Inline assembly <a class="anc" href="#inline-asm">#</a></h2>
+  <pre><div class="lang">python</div><code><span class="kw2">from</span> asmpython.assembly <span class="kw2">import</span> assembly_func
+
+<span class="kw">@assembly_func</span>
+<span class="kw">def</span> <span class="fn">popcnt</span>(x: <span class="ty">int</span>) -&gt; <span class="ty">int</span>:
+    <span class="str">"""
+    popcnt rax, rdi     ; SysV: x in rdi
+    ret
+    """</span></code></pre>
+  <p>The docstring is raw NASM emitted verbatim as the function body. Arguments arrive in the platform's integer-argument registers (Win64: <code>rcx/rdx/r8/r9</code>; SysV/Linux: <code>rdi/rsi/rdx/rcx/r8/r9</code>).</p>
+
+  <div class="warn"><code>@assembly_func</code> is only supported by <code>--backend legacy</code> — the x86-64 IR backend has no raw-NASM escape hatch. A program using <code>@assembly_func</code> needs <code>--backend legacy</code> explicitly (or must target a freestanding platform, which selects it automatically). See <a href="internals.html#backends">Backends: legacy &amp; x86-64</a>.</div>
+
+  <h3>Asm blocks inside a normal function</h3>
+  <pre><div class="lang">python</div><code><span class="kw2">def</span> <span class="fn">rdtsc</span>() -&gt; <span class="ty">int</span>:
+    <span class="asm">asm {
+        rdtsc
+        shl rdx, 32
+        or  rax, rdx
+    }</span></code></pre>
+  <p>Raw NASM inserted verbatim into the function body. The enclosing function's prologue/epilogue is still emitted; the <code>asm</code> block appears between them. Useful for instructions without Python-level wrappers, without giving up the rest of the function to hand-written assembly.</p>
+</section>
+
+<section id="assembly-class">
+  <h2>Assembly builder class <a class="anc" href="#assembly-class">#</a></h2>
+  <p><code>from asmpython.assembly import Assembly</code> gives a chainable builder for generating NASM programmatically — useful for code generators, JITs-within-the-compiled-binary, or any case where the instruction sequence isn't known until runtime.</p>
+  <pre><div class="lang">python</div><code><span class="kw2">from</span> asmpython.assembly <span class="kw2">import</span> Assembly
+
+a = Assembly()
+a.mov(<span class="str">"rax"</span>, <span class="num">0</span>).xor(<span class="str">"rbx"</span>, <span class="str">"rbx"</span>).label(<span class="str">"loop"</span>).inc(<span class="str">"rax"</span>).dec(<span class="str">"rbx"</span>).jnz(<span class="str">"loop"</span>).ret()
+<span class="fn">print</span>(a.emit())</code></pre>
+  <p>150+ instruction methods: full integer ALU, SSE/AVX, atomics, system calls, and the full NASM directive set. Each method appends one formatted line to the builder's internal body and returns <code>self</code> for chaining.</p>
+</section>
+
+<section id="ffi">
+  <h2>Inline FFI <a class="anc" href="#ffi">#</a></h2>
+  <pre><div class="lang">python</div><code><span class="kw2">from</span> asmpython._ffi <span class="kw2">import</span> include, link, extern
+
+include(<span class="str">"windows.h"</span>)
+link(<span class="str">"kernel32"</span>)
+
+<span class="kw">@extern</span>
+<span class="kw">def</span> <span class="fn">GetTickCount</span>() -&gt; <span class="ty">int</span>: ...
+
+<span class="kw">@extern</span>
+<span class="kw">def</span> <span class="fn">MessageBoxA</span>(hwnd: <span class="ty">int</span>, text: <span class="ty">str</span>, cap: <span class="ty">str</span>, utype: <span class="ty">int</span>) -&gt; <span class="ty">int</span>: ...</code></pre>
+  <p><code>@extern</code> declares a foreign function; the compiler emits an <code>extern</code> NASM directive and routes calls through the platform ABI. <code>include()</code> and <code>link()</code> add <code>#include</code> and <code>-l</code> flags to the compile step. This is compile-time/link-time binding — the symbol must be resolvable by the linker. For a library whose name isn't known until runtime, see <a href="#import-binary">import_binary</a>. For embedding real C/C++ source directly (rather than binding to a symbol that already exists in a library), see <a href="#mlang">asmpython.mlang</a>.</p>
+</section>
+
+<section id="import-binary">
+  <h2>Dynamic loading (import_binary) <a class="anc" href="#import-binary">#</a></h2>
+  <p>Loads a shared library at <em>runtime</em> (a real <code>LoadLibraryW</code>/<code>dlopen</code> handle), as opposed to <code>@extern</code>'s compile-time/link-time binding. Functions are declared with <code>@&lt;handle&gt;.imported</code> and resolved via <code>GetProcAddress</code>/<code>dlsym</code> the first time they're called.</p>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> sys
+<span class="kw2">from</span> asmpython <span class="kw2">import</span> import_binary
+
+<span class="kw">if</span> sys.platform == <span class="str">"win32"</span>:
+    libc = import_binary(<span class="str">"msvcrt.dll"</span>)
+<span class="kw">else</span>:
+    libc = import_binary(<span class="str">"libc.so.6"</span>)
+
+<span class="kw">@libc.imported</span>
+<span class="kw">def</span> <span class="fn">toupper</span>(x: <span class="ty">int</span>) -&gt; <span class="ty">int</span>: ...
+
+<span class="fn">print</span>(libc.toupper(<span class="num">97</span>))   <span class="cmt"># 65</span></code></pre>
+  <p>Only scalar (int/float/str-as-pointer) parameters are supported — the foreign function's real signature isn't introspectable, so the stub's own annotations are the contract. Useful when the library to load isn't known until runtime (plugins, optional dependencies, platform-specific DLLs picked by name).</p>
+</section>
+
+<section id="mlang">
+  <h2>asmpython.mlang <a class="anc" href="#mlang">#</a></h2>
+
+  <p>Embeds another language's source directly in your asmpython program and
+     calls into it, compiled by a real external compiler as part of the
+     asmpython <strong>build</strong> — not <code>@extern</code>'s bind-to-an-
+     existing-symbol model, and not <code>import_binary</code>'s runtime
+     <code>dlopen</code> model. <code>mlang</code> compiles source text you
+     write inline.</p>
+
+  <div class="warn">This all happens at asmpython <strong>build time</strong>: the configured compiler (e.g. <code>g++</code>) runs once, as a real step of <code>python -m asmpython</code>, and its output object file is linked into your binary. There is no runtime compiler dependency in the produced executable, and nothing about <code>mlang</code> executes when your compiled program runs — by the time you have a binary, the embedded source is long gone, replaced by native code.</div>
+
+  <h3>Basic usage</h3>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> asmpython.mlang <span class="kw2">as</span> ml
+
+code = ml.Code(
+    ml.builtins.gcc.cpp,
+    <span class="str">'extern "C" int add(int a, int b) { return a + b; }'</span>,
+)
+
+<span class="fn">print</span>(code.add(<span class="num">1</span>, <span class="num">2</span>))   <span class="cmt"># 3</span></code></pre>
+
+  <p>Exported functions become callable directly as attributes on the
+     <code>Code</code> object — <code>code.add(1, 2)</code> above. Under
+     plain CPython (e.g. running the source file directly instead of
+     compiling it), <code>Code</code>/<code>Config</code> are inert data
+     holders: no compiler runs, and calling an exported function raises
+     <code>RuntimeError</code> instead. The real compiler invocation,
+     signature inference, and call marshaling only happen inside the
+     asmpython compiler itself, when it recognizes an
+     <code>asmpython.mlang</code> import and a <code>Code(...)</code>
+     construction in the source being compiled.</p>
+
+  <h3>ml.Config</h3>
+  <p><code>Config(exe, frontend, compile_args, infer_signatures=False)</code>
+     describes one compiler toolchain:</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>exe</code></td><td>The compiler executable — found on <code>PATH</code>, or an absolute path</td></tr>
+      <tr><td><code>frontend</code></td><td>Short label for the source language/dialect (e.g. <code>"cpp"</code>, <code>"c"</code>) — descriptive, and the dispatch key <code>infer_signatures</code> uses for its restricted-grammar parser (C/C++-family only today)</td></tr>
+      <tr><td><code>compile_args</code></td><td>argv template compiling one source file to one object file, with <code>{src}</code>/<code>{out}</code> substituted for real temp-file paths</td></tr>
+      <tr><td><code>infer_signatures</code></td><td>Whether <code>Code(...)</code> may omit <code>exports=</code> and rely on a source-text scan instead — only meaningful for C-family frontends today</td></tr>
+    </tbody>
+  </table></div>
+
+  <pre><div class="lang">python</div><code>rust = ml.Config(
+    exe=<span class="str">"rustc"</span>,
+    frontend=<span class="str">"rust"</span>,
+    compile_args=[<span class="str">"--crate-type"</span>, <span class="str">"staticlib"</span>, <span class="str">"-o"</span>, <span class="str">"{out}"</span>, <span class="str">"{src}"</span>],
+)   <span class="cmt"># infer_signatures defaults to False -- rust isn't C-family-shaped,</span>
+    <span class="cmt"># so every Code(...) using this Config needs an explicit exports=</span></code></pre>
+
+  <h3>Built-in configs: ml.builtins.gcc</h3>
+  <p><code>ml.builtins.gcc.cpp</code> and <code>ml.builtins.gcc.c</code> are
+     ready-made <code>Config</code>s for a real <code>g++</code>/<code>gcc</code>
+     found on <code>PATH</code>. Both set <code>infer_signatures=True</code>.</p>
+
+  <h3>Signature inference</h3>
+  <p>When a <code>Config</code> opts in via <code>infer_signatures=True</code>
+     (true for every built-in <code>ml.builtins.*</code> config),
+     <code>Code(config, source)</code> can omit <code>exports=</code>
+     entirely. Inference parses a deliberately restricted C-family
+     function-signature grammar directly from the source text — no real
+     C++ parser, no name-demangler: each top-level function is matched
+     against <code>[extern "C"] TYPE NAME(TYPE, TYPE, ...) {</code>, and
+     every matched function is wrapped in <code>extern "C"</code> before
+     compilation (if not already) so the compiled object's symbol name
+     exactly equals the parsed name, with no mangling ambiguity to
+     resolve. Recognized types are <code>int</code>/<code>long</code>/
+     <code>long long</code> (asmpython <code>int</code>),
+     <code>float</code>/<code>double</code> (asmpython <code>float</code>),
+     and <code>void</code> as a return type only. This only sees plain
+     top-level function definitions — templates, overloads, classes, and
+     anything the restricted grammar doesn't match are invisible to
+     inference and need an explicit <code>exports=</code> entry instead.</p>
+
+  <h3>Explicit exports and Sig</h3>
+  <p>For a non-inferring <code>Config</code>, or any function the inference
+     grammar can't see, declare each exported function's signature
+     explicitly with <code>Sig(arg_types, ret_type)</code> — the same
+     <code>arg_types</code>/<code>ret_type</code> vocabulary
+     (<code>"int"</code>/<code>"float"</code>/<code>"str"</code>) as
+     <code>asmpython.stdlib</code>'s own <code>Func</code>:</p>
+
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> asmpython.mlang <span class="kw2">as</span> ml
+<span class="kw2">from</span> asmpython.mlang <span class="kw2">import</span> Sig
+
+code = ml.Code(
+    ml.builtins.gcc.c,
+    <span class="str">'''
+    int square(int n) { return n * n; }
+    '''</span>,
+    exports={<span class="str">"square"</span>: Sig([<span class="str">"int"</span>], <span class="str">"int"</span>)},
+)
+
+<span class="fn">print</span>(code.square(<span class="num">7</span>))   <span class="cmt"># 49</span></code></pre>
+
+  <p>Explicit <code>exports</code> entries always win over an inferred
+     signature for the same function name.</p>
+
+  <h3>Linker requirement</h3>
+  <div class="warn">Programs using <code>asmpython.mlang</code> currently require <code>--linker gcc</code> (and the compiler auto-defaults to it when an <code>mlang.Code(...)</code> is detected, unless <code>--linker</code> is passed explicitly). Real g++/gcc output on Windows is a "bigobj" PE-COFF variant that the builtin linker's COFF parser — scoped to what NASM emits — doesn't understand yet. Supporting <code>--linker builtin</code> for real-compiler output needs a real bigobj-format COFF parser, tracked as a known follow-up rather than a quick fix. See <a href="internals.html#backends">Backends: legacy &amp; x86-64</a> for the full backend/linker relationship.</div>
+</section>
+
+<footer class="docs-footer">
+  <span>asmpython — MIT licensed. A Pixelated Dream project.</span>
+  <span>See <code>CHANGELOG.md</code> and <code>docs/ROADMAP.md</code> in the repository for full version history.</span>
+</footer>
+
+</main>
+</div>
+
+<script>window.DOCS_PAGE = "assembly.html";</script>
+<script src="nav.js"></script>
+</body>
+</html>

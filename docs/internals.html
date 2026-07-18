@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>asmpython — Compiler Internals</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ══ TOP BAR ═══════════════════════════════════════════════════ -->
+<header class="topbar">
+  <button class="burger" id="navToggle" aria-label="Toggle navigation">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+  </button>
+  <a href="index.html#intro" class="brand">
+    <div class="brand-icon"><img src="icon.png" alt="asmpython"></div>
+    <div class="brand-name">asmpython</div>
+  </a>
+  <span class="ver-pill">v3.14-preview</span>
+  <div class="topbar-search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    <input id="navSearch" type="text" placeholder="Filter docs…" autocomplete="off">
+  </div>
+  <div class="topbar-spacer"></div>
+  <a class="gh-link" href="https://github.com/deltathedumb/asmpython" target="_blank" rel="noopener">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    GitHub
+  </a>
+</header>
+
+<div class="shell">
+<!-- ══ SIDEBAR (injected by nav.js) ═══════════════════════════════ -->
+<nav class="side" id="sideNav"></nav>
+
+<!-- ══ MAIN ══════════════════════════════════════════════════════ -->
+<main>
+
+<section id="architecture">
+  <h2>Architecture &amp; pipeline <a class="anc" href="#architecture">#</a></h2>
+  <p>asmpython compiles through a shared front end and then one of two
+     back ends. All builds go through the same first three passes:</p>
+
+  <ol>
+    <li><strong>Lex</strong> (<code>lexer.py</code>) — tokenizes source; handles all Python literal types, f-strings, indentation blocks</li>
+    <li><strong>Parse</strong> (<code>parser.py</code>) — recursive-descent parser builds an AST (<code>ast_nodes.py</code>); inlines closures via free-variable lifting; resolves generators into state machines; applies any active <code>--ext</code> compiler extensions (see <a href="api.html#api-extend">asmpython.extend</a>)</li>
+    <li><strong>Sema</strong> (<code>sema.py</code>) — type inference and semantic analysis; resolves method overloads, propagates element types, desugars <code>match</code>/<code>case</code>, <code>with</code> statements, properties, and comprehensions</li>
+  </ol>
+
+  <p>After sema, the typed AST hands off to whichever backend
+     <code>--backend</code> selects (or its target-dependent default — see
+     <a href="#backends">Backends: legacy &amp; x86-64</a>, below):</p>
+  <ul>
+    <li><strong>legacy</strong> — <code>codegen.py</code> walks the AST directly and emits NASM text, handed to <code>nasm</code> and then <code>gcc</code>/<code>ld</code></li>
+    <li><strong>x86-64</strong> — <code>ir_lower.py</code> lowers the AST to a typed SSA IR, which <code>asmpython/_backends/x86_64/</code> compiles straight to a relocatable object file (no assembler invocation at all) and links via the builtin PE/ELF linker or gcc</li>
+  </ul>
+
+  <h3>Repository layout</h3>
+  <pre><div class="lang">text</div><code>asmpython/
+├── __init__.py              package version
+├── __main__.py               python -m asmpython entry shim
+├── backend.py                 asmpython.backend.Backend — public backend registration
+├── linker.py                  asmpython.linker.Linker — public linker registration
+├── extend.py                  asmpython.extend.Extension — public syntax-extension registration
+├── mlang.py                   asmpython.mlang — embed/call another language's source
+├── assembly/                 @assembly_func, Assembly builder, include()
+├── stdlib/                   ~120 modules: math, os, sys, collections, lumen, …
+├── _backends/
+│   ├── ternary/               toy balanced-ternary backend (--backend ternary)
+│   └── x86_64/                 direct-to-object SSA IR backend (--backend x86-64, default)
+│       ├── codegen.py           IR → x86-64 machine code
+│       ├── regalloc.py          linear-scan register allocator
+│       ├── phi_elim.py          phi-node elimination pass (runs before regalloc)
+│       ├── coff.py / coff_parse.py   Windows object emission/parsing
+│       ├── elf.py / elf_parse.py     Linux object emission/parsing
+│       ├── pe_linker.py          builtin PE (.exe) linker
+│       └── elf_linker.py         builtin ELF linker
+├── _linkers/
+│   ├── builtin.py              dispatches to pe_linker.py / elf_linker.py
+│   └── gcc.py                  shells out to a real gcc/ld
+└── _compiler/
+    ├── __main__.py            real CLI entry (argparse, --explain, --check)
+    ├── lexer.py               indent-aware tokenizer
+    ├── parser.py              recursive-descent parser
+    ├── ast_nodes.py           AST dataclasses + expr_type()
+    ├── extensions.py          CompilerExtension / ExtensionContext (--ext machinery)
+    ├── sema.py                name resolution, type inference, import binding
+    ├── mlang_support.py       shells out to the mlang-configured compiler, infers signatures
+    ├── errors.py              L/P/E error-code registry + --explain text + CPython exception-name mapping
+    ├── program.py             whole-program module merge + stdlib resolution
+    ├── codegen.py             legacy backend: target-agnostic AST → NASM text
+    ├── ir.py                  SSA IR data model (Value/Instr/Block/Function)
+    ├── ir_lower.py            AST → SSA IR lowering, feeds --backend x86-64
+    ├── target_windows.py      legacy backend: PE64, MS x64 ABI
+    ├── target_linux.py        legacy backend: ELF64, System V AMD64 ABI
+    ├── target_freestanding.py    legacy backend: Multiboot1, bare-metal runtime
+    ├── target_freestanding16.py  legacy backend: BIOS MBR + 16-bit bootstrap
+    └── driver.py              backend/linker dispatch; invokes nasm/gcc for legacy builds</code></pre>
+
+  <p><strong>Whole-program compilation:</strong> all source files (including stdlib modules) are merged into a single compilation unit before sema. The first definition of any name wins, so stdlib can be overridden by user code.</p>
+
+  <p><strong>Type system:</strong> structural, not nominal. Types flow from annotations and literals. Unannotated parameters are inferred from call sites. Class inheritance is tracked for virtual dispatch and <code>isinstance</code>.</p>
+
+  <p><strong>Runtime:</strong> a set of hand-written helper routines (string ops, allocation, dict/list operations, exception propagation, dynamic dispatch) linked alongside your compiled code on every backend. The legacy backend emits these as NASM (inlined per-binary with <code>--onefile</code>, the default, or linked from a pre-built archive with <code>--use-runtime-lib</code>); the x86-64 backend links a precompiled runtime object directly.</p>
+</section>
+
+<section id="backends">
+  <h2>Backends: legacy &amp; x86-64 <a class="anc" href="#backends">#</a></h2>
+
+  <p>asmpython ships two production codegen backends, selectable with
+     <code>--backend legacy</code> / <code>--backend x86-64</code> (a third,
+     <code>ternary</code>, is a toy balanced-ternary demo backend, and
+     third parties can register more via
+     <a href="api.html#api-backend">asmpython.backend.Backend</a>).</p>
+
+  <div class="two-col">
+    <div class="card">
+      <h4>--backend legacy</h4>
+      <p>The original pipeline: <code>codegen.py</code> walks the typed AST directly and emits NASM assembly text, which is handed to <code>nasm</code> to assemble and then <code>gcc</code>/<code>ld</code> to link. Supports <strong>every</strong> target, including <code>freestanding</code>/<code>freestanding16</code> — the only backend that does, since the x86-64 IR backend has no bare-metal lowering yet. Also the only backend with <code>@assembly_func</code> support (see <a href="assembly.html#inline-asm">Inline assembly</a>), since it has a real raw-NASM escape hatch that a direct-to-object pipeline doesn't.</p>
+    </div>
+    <div class="card">
+      <h4>--backend x86-64</h4>
+      <p>The newer pipeline: <code>ir_lower.py</code> lowers the typed AST to a real SSA intermediate representation (<code>ir.py</code>), which <code>asmpython/_backends/x86_64/</code> runs through phi elimination, linear-scan register allocation, and direct machine-code emission — producing a relocatable object file with no assembler invocation at all. Currently supports <code>windows</code>/<code>linux</code> only. Links via the backend's own builtin PE/ELF linker by default, or <code>gcc</code> if requested/required.</p>
+    </div>
+  </div>
+
+  <h3>Default selection</h3>
+  <p>Which backend runs when <code>--backend</code> is omitted depends on
+     the target:</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Target(s)</th><th>Default backend</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td><code>windows</code> / <code>linux</code> (alone or combined)</td><td><code>x86-64</code></td><td>Has reached strong parity with the legacy pipeline for these targets and produces smaller, faster-to-build output with no <code>nasm</code>/assembler step</td></tr>
+      <tr><td><code>freestanding</code> / <code>freestanding16</code> (alone or combined with anything else)</td><td><code>legacy</code></td><td>The x86-64 backend has no bare-metal lowering yet; a mixed target set (e.g. <code>--target windows,freestanding</code> in one invocation) can't have two different auto-picked backends applied to it, so the whole build falls back to <code>legacy</code> rather than arbitrarily picking one target's default</td></tr>
+    </tbody>
+  </table></div>
+  <p>Pass <code>--backend</code> explicitly to override either default — for
+     example to force <code>--backend legacy</code> on a windows/linux
+     build that needs <code>@assembly_func</code>.</p>
+
+  <h3>Linker selection</h3>
+  <p><code>--linker</code> chooses how the backend's output object(s) become
+     a final binary: <code>builtin</code> (the x86-64 backend's own
+     from-scratch PE/ELF linker — its default, no external toolchain
+     involved) or <code>gcc</code> (shells out to a real <code>gcc</code>/
+     <code>ld</code>). The legacy backend only supports
+     <code>--linker gcc</code>. Third parties can register more via
+     <a href="api.html#api-linker">asmpython.linker.Linker</a>.</p>
+  <div class="note"><a href="assembly.html#mlang">asmpython.mlang</a> currently forces <code>--linker gcc</code> (auto-selected when an <code>mlang.Code(...)</code> is detected, unless overridden) — the builtin linker's COFF parser doesn't yet understand the "bigobj" object format real g++/gcc output produces on Windows.</div>
+</section>
+
+<footer class="docs-footer">
+  <span>asmpython — MIT licensed. A Pixelated Dream project.</span>
+  <span>See <code>CHANGELOG.md</code> and <code>docs/ROADMAP.md</code> in the repository for full version history.</span>
+</footer>
+
+</main>
+</div>
+
+<script>window.DOCS_PAGE = "internals.html";</script>
+<script src="nav.js"></script>
+</body>
+</html>

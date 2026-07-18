@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>asmpython — Targets</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ══ TOP BAR ═══════════════════════════════════════════════════ -->
+<header class="topbar">
+  <button class="burger" id="navToggle" aria-label="Toggle navigation">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+  </button>
+  <a href="index.html#intro" class="brand">
+    <div class="brand-icon"><img src="icon.png" alt="asmpython"></div>
+    <div class="brand-name">asmpython</div>
+  </a>
+  <span class="ver-pill">v3.14-preview</span>
+  <div class="topbar-search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    <input id="navSearch" type="text" placeholder="Filter docs…" autocomplete="off">
+  </div>
+  <div class="topbar-spacer"></div>
+  <a class="gh-link" href="https://github.com/deltathedumb/asmpython" target="_blank" rel="noopener">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    GitHub
+  </a>
+</header>
+
+<div class="shell">
+<!-- ══ SIDEBAR (injected by nav.js) ═══════════════════════════════ -->
+<nav class="side" id="sideNav"></nav>
+
+<!-- ══ MAIN ══════════════════════════════════════════════════════ -->
+<main>
+
+<section id="target-windows">
+  <h2>Windows (PE64) <a class="anc" href="#target-windows">#</a></h2>
+  <p>Default target when running on Windows. Produces a <code>.exe</code> linked against <code>msvcrt.dll</code>. Uses the Microsoft x64 ABI (<code>rcx/rdx/r8/r9</code> with 32-byte shadow space). The entry point is <code>main(int argc, char** argv)</code>.</p>
+  <pre><div class="lang">shell</div><code>python -m asmpython prog.py               <span class="cmt"># auto-detects Windows</span>
+python -m asmpython prog.py --target windows -o prog.exe
+python -m asmpython prog.py --icon app.png  <span class="cmt"># embed PNG icon</span></code></pre>
+  <p>Networking (<code>network</code>/<code>socket</code>) auto-links <code>-lws2_32</code>; <code>lumen</code> auto-links <code>-lSDL2</code> (and <code>-lSDL2_mixer</code>/<code>-lSDL2_ttf</code> as needed) only when actually used.</p>
+  <div class="note">Every hand-rolled runtime helper and function prologue on this target reserves at least 32 bytes of shadow space below <code>rsp</code> before calling any external function, per the Win64 ABI. This target defaults to the <code>x86-64</code> backend (direct-to-object) — see <a href="internals.html#backends">Backends: legacy &amp; x86-64</a>.</div>
+</section>
+
+<section id="target-linux">
+  <h2>Linux (ELF64) <a class="anc" href="#target-linux">#</a></h2>
+  <p>ELF64 binary linked against glibc using the System V AMD64 ABI (<code>rdi/rsi/rdx/rcx/r8/r9</code>). When linked via <code>--linker gcc</code>, uses <code>-no-pie</code> (the code uses absolute relocations, which modern gcc's default PIE mode would otherwise reject).</p>
+  <pre><div class="lang">shell</div><code>python -m asmpython prog.py --target linux -o prog</code></pre>
+</section>
+
+<section id="target-freestanding">
+  <h2>Freestanding (Multiboot1) <a class="anc" href="#target-freestanding">#</a></h2>
+  <p>Bare-metal x86-64 kernel conforming to the Multiboot 1 specification. Boots under QEMU (<code>-kernel</code>), GRUB, and other Multiboot-compliant loaders. No OS; no libc.</p>
+  <ul>
+    <li>VGA text-mode output + COM1 serial mirroring</li>
+    <li>Bump allocator (256 KB heap)</li>
+    <li>64 KB stack</li>
+    <li>32→64-bit long-mode setup with identity-mapped page tables (first 16 MB, 2 MB huge pages)</li>
+    <li>Unhandled exceptions show a flashing red screen and warm-reboot after 5 s</li>
+  </ul>
+  <pre><div class="lang">shell</div><code>python -m asmpython kernel.py --target freestanding -o kernel.bin
+qemu-system-x86_64 -kernel kernel.bin -serial stdio -display none</code></pre>
+  <div class="note">Use <code>--onedir</code> / <code>--use-runtime-lib</code> to keep the binary smaller. The runtime library bundles all helper code into <code>libasmpython_rt.a</code>. Freestanding targets automatically use <code>--backend legacy</code> — the x86-64 IR backend doesn't support bare-metal output yet. See <a href="internals.html#backends">Backends: legacy &amp; x86-64</a>.</div>
+</section>
+
+<section id="target-freestanding16">
+  <h2>16-bit boot sector <a class="anc" href="#target-freestanding16">#</a></h2>
+  <p>Generates a BIOS-bootable raw disk image. Boots in real mode via INT 13h, transitions through 32-bit protected mode, then enters 64-bit long mode before running your code.</p>
+  <pre><div class="lang">shell</div><code>python -m asmpython boot.py --target freestanding16 -o boot.img
+qemu-system-x86_64 -drive format=raw,file=boot.img -display none -serial stdio</code></pre>
+  <div class="note">Like <code>freestanding</code>, this target automatically uses <code>--backend legacy</code>.</div>
+</section>
+
+<footer class="docs-footer">
+  <span>asmpython — MIT licensed. A Pixelated Dream project.</span>
+  <span>See <code>CHANGELOG.md</code> and <code>docs/ROADMAP.md</code> in the repository for full version history.</span>
+</footer>
+
+</main>
+</div>
+
+<script>window.DOCS_PAGE = "targets.html";</script>
+<script src="nav.js"></script>
+</body>
+</html>

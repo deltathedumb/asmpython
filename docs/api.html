@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>asmpython — Public API</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ══ TOP BAR ═══════════════════════════════════════════════════ -->
+<header class="topbar">
+  <button class="burger" id="navToggle" aria-label="Toggle navigation">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+  </button>
+  <a href="index.html#intro" class="brand">
+    <div class="brand-icon"><img src="icon.png" alt="asmpython"></div>
+    <div class="brand-name">asmpython</div>
+  </a>
+  <span class="ver-pill">v3.14-preview</span>
+  <div class="topbar-search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    <input id="navSearch" type="text" placeholder="Filter docs…" autocomplete="off">
+  </div>
+  <div class="topbar-spacer"></div>
+  <a class="gh-link" href="https://github.com/deltathedumb/asmpython" target="_blank" rel="noopener">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    GitHub
+  </a>
+</header>
+
+<div class="shell">
+<!-- ══ SIDEBAR (injected by nav.js) ═══════════════════════════════ -->
+<nav class="side" id="sideNav"></nav>
+
+<!-- ══ MAIN ══════════════════════════════════════════════════════ -->
+<main>
+
+<!-- ── Overview ──────────────────────────────────────────────── -->
+<section id="api-overview">
+  <h2>Public API <a class="anc" href="#api-overview">#</a></h2>
+
+  <p>The compiled <em>language</em> asmpython accepts is plain Python (see
+     <a href="https://docs.python.org/3/">CPython docs</a>). This page is
+     about a different surface: the real Python package you <code>pip
+     install</code> and <code>import</code> on the <strong>host</strong>
+     interpreter to write build tooling — custom codegen backends, custom
+     linkers, and compiler-syntax extensions. None of this executes inside
+     a compiled asmpython program; it all runs under ordinary CPython, as
+     part of driving a build.</p>
+
+  <p>The public surface is namespaced, not flat:</p>
+
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> asmpython
+
+asmpython.backend.Backend(name=<span class="str">"my_backend"</span>, impl=my_backend_impl)
+asmpython.linker.Linker(name=<span class="str">"my_linker"</span>, impl=my_linker_impl)
+asmpython.extend.Extension(id=<span class="str">"my_ext"</span>, statement_handlers={...})</code></pre>
+
+  <div class="note">There is no flat <code>asmpython.Backend</code> / <code>asmpython.linker.Linker</code> / <code>asmpython.Extension</code> shorthand and no backwards-compatibility alias for one — <code>asmpython.backend</code>, <code>asmpython.linker</code>, and <code>asmpython.extend</code> are the only public entry points, each a separate submodule imported lazily so a plain <code>import asmpython</code> doesn't pull in the whole compiler frontend.</div>
+
+  <p>All three follow the same shape: construct the class, and registration
+     happens immediately as a side effect — there's no separate
+     <code>.register()</code> call. Each registered thing becomes selectable
+     from the CLI (<code>--backend NAME</code>, <code>--linker NAME</code>,
+     <code>--ext NAME</code>) on any later <code>asmpython build</code>
+     invocation in that process, or via a plugin file loaded through
+     <code>--ext path/to/plugin.py</code>.</p>
+
+  <div class="card-grid">
+    <div class="card">
+      <h4>asmpython.backend</h4>
+      <p>Register a full codegen backend — something that turns a compiled module into object bytes and links them. See <a href="#api-backend">below</a>.</p>
+    </div>
+    <div class="card">
+      <h4>asmpython.linker</h4>
+      <p>Register just a linker, reusable by any backend that wants it. See <a href="#api-linker">below</a>.</p>
+    </div>
+    <div class="card">
+      <h4>asmpython.extend</h4>
+      <p>Register a new statement-level keyword, handled by your own parser callback. See <a href="#api-extend">below</a>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── backend ───────────────────────────────────────────────── -->
+<section id="api-backend">
+  <h2>asmpython.backend <a class="anc" href="#api-backend">#</a></h2>
+
+  <p><code>asmpython.backend.Backend(name, impl)</code> registers a codegen
+     backend, selectable via <code>--backend name</code>.</p>
+
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> asmpython
+
+backend = asmpython.backend
+backend.Backend(name=<span class="str">"my_backend"</span>, impl=my_backend_impl)</code></pre>
+
+  <p>Then: <code>asmpython build myfile.py --backend my_backend</code>.</p>
+
+  <h3>The impl contract</h3>
+  <p><code>impl</code> must conform to <code>asmpython._compiler.ir.IRBackend</code>:</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Member</th><th>Required</th><th>Signature</th></tr></thead>
+    <tbody>
+      <tr><td><code>compile</code></td><td>yes</td><td><code>(module, args) -&gt; dict[str, bytes]</code></td></tr>
+      <tr><td><code>link</code></td><td>yes</td><td><code>(objects, args) -&gt; dict[str, bytes]</code></td></tr>
+      <tr><td><code>requested_args</code></td><td>no</td><td><code>list[dict]</code> — extra CLI args your backend wants parsed and forwarded</td></tr>
+      <tr><td><code>default_linker</code></td><td>no</td><td><code>str</code> — linker name used when <code>--linker</code> is omitted</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>A registered backend is driven with a plain compile-then-link-then-write
+     sequence (the same shape the built-in <code>ternary</code> backend
+     uses) — it does not get the bespoke per-backend wiring that
+     <code>x86-64</code> has (Win64/SysV ABI shims, runtime object linking,
+     gcc resolution for <code>asmpython.mlang</code>). If your backend needs
+     that kind of target-specific plumbing, you provide it yourself inside
+     <code>compile</code>/<code>link</code>.</p>
+
+  <h3>Minimal example</h3>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> asmpython
+
+<span class="kw2">class</span> <span class="ty">MyBackend</span>:
+    default_linker = <span class="str">"builtin"</span>
+
+    <span class="kw2">def</span> <span class="fn">compile</span>(self, module, args) -&gt; <span class="ty">dict</span>:
+        <span class="cmt"># module: the compiler's typed AST/IR handoff object</span>
+        <span class="cmt"># args:   dict of target_os / abi / any requested_args</span>
+        obj_bytes = my_codegen(module, args)
+        <span class="kw">return</span> {<span class="str">"main"</span>: obj_bytes}
+
+    <span class="kw2">def</span> <span class="fn">link</span>(self, objects, args) -&gt; <span class="ty">dict</span>:
+        exe_bytes = my_link(objects, args)
+        <span class="kw">return</span> {<span class="str">"out"</span>: exe_bytes}
+
+asmpython.backend.Backend(name=<span class="str">"my_backend"</span>, impl=MyBackend())</code></pre>
+
+  <div class="warn">Backend/linker registries are plain in-process Python dicts, consulted after the built-in names (<code>legacy</code>/<code>x86-64</code>/<code>ternary</code>). They're CPython-hosted-compilation only and not yet safe under self-hosting — asmpython's self-hosted subset has no first-class module/object values it could store a live backend object in.</div>
+</section>
+
+<!-- ── linker ────────────────────────────────────────────────── -->
+<section id="api-linker">
+  <h2>asmpython.linker <a class="anc" href="#api-linker">#</a></h2>
+
+  <p><code>asmpython.linker.Linker(name, impl)</code> registers a linker,
+     selectable via <code>--linker name</code> — usable independently of
+     any custom backend, including with the built-in <code>x86-64</code>
+     backend.</p>
+
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> asmpython
+
+linker = asmpython.linker
+linker.Linker(name=<span class="str">"my_linker"</span>, impl=my_linker_impl)</code></pre>
+
+  <p>Then: <code>asmpython build myfile.py --linker my_linker</code>.</p>
+
+  <h3>The impl contract</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Member</th><th>Required</th><th>Signature</th></tr></thead>
+    <tbody>
+      <tr><td><code>link</code></td><td>yes</td><td><code>(ctx: dict) -&gt; bytes</code></td></tr>
+      <tr><td><code>requested_args</code></td><td>no</td><td><code>list[dict]</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <p><code>ctx</code> carries at minimum <code>objects</code> (a list of
+     object-file bytes to link) and <code>target_os</code>.</p>
+
+  <h3>Minimal example</h3>
+  <pre><div class="lang">python</div><code><span class="kw2">import</span> asmpython
+
+<span class="kw2">class</span> <span class="ty">MyLinker</span>:
+    <span class="kw2">def</span> <span class="fn">link</span>(self, ctx: <span class="ty">dict</span>) -&gt; <span class="ty">bytes</span>:
+        objects = ctx[<span class="str">"objects"</span>]
+        target_os = ctx[<span class="str">"target_os"</span>]
+        <span class="kw">return</span> my_link_objects(objects, target_os)
+
+asmpython.linker.Linker(name=<span class="str">"my_linker"</span>, impl=MyLinker())</code></pre>
+
+  <p>The two built-in linkers are <code>builtin</code> (the x86-64 backend's
+     own from-scratch PE/ELF linker, no external toolchain involved) and
+     <code>gcc</code> (shells out to a real <code>gcc</code>/<code>ld</code>).
+     See <a href="internals.html#backends">Backends: legacy &amp;
+     x86-64</a> for how backend and linker selection interact, and
+     <a href="assembly.html#mlang">asmpython.mlang</a> for a case that
+     currently requires <code>--linker gcc</code>.</p>
+</section>
+
+<!-- ── extend ────────────────────────────────────────────────── -->
+<section id="api-extend">
+  <h2>asmpython.extend <a class="anc" href="#api-extend">#</a></h2>
+
+  <p><code>asmpython.extend.Extension(...)</code> registers a compiler-syntax
+     extension: a new statement-prefix keyword handled by your own parser
+     callback. Unlike <code>backend</code>/<code>linker</code>, an extension
+     plugin is typically loaded straight from a file via <code>--ext</code>,
+     rather than imported as an installed package.</p>
+
+  <pre><div class="lang">python</div><code><span class="cmt"># my_plugin.py</span>
+<span class="kw2">import</span> asmpython
+
+<span class="kw2">def</span> <span class="fn">handle_let</span>(parser, pos):
+    <span class="str">"""`let NAME = value` -- a trivial single-binding alternative to `=`."""</span>
+    <span class="kw2">from</span> asmpython._compiler <span class="kw2">import</span> ast_nodes <span class="kw2">as</span> A
+
+    name = parser._expect(<span class="str">"NAME"</span>).value
+    parser._expect(<span class="str">"OP"</span>, <span class="str">"="</span>)
+    value = parser._parse_expr()
+    parser._expect(<span class="str">"NEWLINE"</span>)
+    <span class="kw">return</span> A.Assign(target=name, value=value, pos=pos)
+
+asmpython.extend.Extension(id=<span class="str">"let_binding"</span>, statement_handlers={<span class="str">"let"</span>: handle_let})</code></pre>
+
+  <pre><div class="lang">shell</div><code>asmpython build myfile.py --ext my_plugin.py</code></pre>
+
+  <p><code>--ext</code> accepts either a bare registered id (e.g. the
+     built-in <code>constants</code>) or a filesystem path — a path is
+     exec'd first (under the <strong>host</strong> CPython interpreter,
+     never compiled by asmpython itself), registering whatever
+     <code>Extension(...)</code> calls it makes, before activation by id
+     proceeds as usual. A plugin file that registers zero or more than one
+     <code>Extension</code> is a build-time error, since there'd be no
+     unambiguous id for <code>--ext</code> to activate.</p>
+
+  <h3>Constructor</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>id</code></td><td>—</td><td>The name <code>--ext</code> and other extensions' <code>requires</code>/<code>conflicts</code> refer to this extension by</td></tr>
+      <tr><td><code>version</code></td><td><code>"1.0"</code></td><td>Dotted version string, compared as a plain tuple of ints</td></tr>
+      <tr><td><code>requires</code></td><td><code>{}</code></td><td><code>dict[str, str]</code> — other extension id → minimum version that must already be active</td></tr>
+      <tr><td><code>conflicts</code></td><td><code>set()</code></td><td>Other extension ids that can't be active at the same time as this one</td></tr>
+      <tr><td><code>statement_handlers</code></td><td><code>{}</code></td><td><code>dict[str, Callable]</code> — contextual keyword → handler; empty makes a metadata-only extension (useful purely as a dependency/conflict marker)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Statement-handler contract</h3>
+  <p>Each <code>statement_handlers</code> value is a callable
+     <code>(parser, pos) -&gt; ast_nodes.Stmt</code>. <code>parser</code> is
+     the live <code>asmpython._compiler.parser.Parser</code> instance,
+     already positioned just past the claimed keyword — the callback
+     drives it directly via its private <code>_eat</code>/<code>_check</code>/
+     <code>_expect</code>/<code>_parse_expr</code>/etc. methods and
+     constructs a real node from <code>asmpython._compiler.ast_nodes</code>
+     (a private module — there is no separate public AST surface yet, so
+     this is the de facto contract for now).</p>
+
+  <div class="warn">Once an extension is active, its claimed keyword unconditionally becomes a statement prefix for the rest of that compile — unlike built-in soft keywords (<code>const</code>, <code>match</code>), there is no shape lookahead a generic third-party callback could replicate. The keyword can no longer double as a plain identifier for that build. This only ever applies when the invoker explicitly opted in via <code>--ext</code>.</div>
+
+  <h3>Built-in extension: constants</h3>
+  <p>The only extension asmpython ships is <code>constants</code>, activated
+     with <code>--ext constants</code>, which adds a
+     <code>const NAME [: annotation] = value</code> module-scope-only
+     declaration that locks the name against every later rebinding form
+     (plain reassignment, augmented assignment, <code>del</code>, tuple/list
+     destructuring, walrus targets, <code>except ... as</code>, shadowing
+     imports). Mutating an object a const name refers to is unaffected —
+     only rebinding the name itself is rejected:</p>
+
+  <pre><div class="lang">python</div><code>const values = [<span class="num">1</span>, <span class="num">2</span>]
+values.append(<span class="num">3</span>)   <span class="cmt"># allowed -- rebinding `values` itself is not</span>
+values = []         <span class="cmt"># E081: cannot reassign const 'values'</span></code></pre>
+
+  <p>There is no in-source activation directive — an earlier design used
+     <code>extend</code>/<code>retract</code> statements for per-file
+     activation; this was removed in favor of CLI-only activation, so a
+     program's grammar is never a function of anything the program's own
+     source controls. See <code>docs/EXTENSIONS.md</code> in the repository
+     for the full extension-system design notes (contextual-keyword
+     parsing, module isolation, IR/backend neutrality, security posture for
+     third-party extensions).</p>
+</section>
+
+<footer class="docs-footer">
+  <span>asmpython — MIT licensed. A Pixelated Dream project.</span>
+  <span>See <code>CHANGELOG.md</code> and <code>docs/ROADMAP.md</code> in the repository for full version history.</span>
+</footer>
+
+</main>
+</div>
+
+<script>window.DOCS_PAGE = "api.html";</script>
+<script src="nav.js"></script>
+</body>
+</html>

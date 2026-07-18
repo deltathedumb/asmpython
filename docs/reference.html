@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>asmpython — Reference</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ══ TOP BAR ═══════════════════════════════════════════════════ -->
+<header class="topbar">
+  <button class="burger" id="navToggle" aria-label="Toggle navigation">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+  </button>
+  <a href="index.html#intro" class="brand">
+    <div class="brand-icon"><img src="icon.png" alt="asmpython"></div>
+    <div class="brand-name">asmpython</div>
+  </a>
+  <span class="ver-pill">v3.14-preview</span>
+  <div class="topbar-search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    <input id="navSearch" type="text" placeholder="Filter docs…" autocomplete="off">
+  </div>
+  <div class="topbar-spacer"></div>
+  <a class="gh-link" href="https://github.com/deltathedumb/asmpython" target="_blank" rel="noopener">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    GitHub
+  </a>
+</header>
+
+<div class="shell">
+<!-- ══ SIDEBAR (injected by nav.js) ═══════════════════════════════ -->
+<nav class="side" id="sideNav"></nav>
+
+<!-- ══ MAIN ══════════════════════════════════════════════════════ -->
+<main>
+
+<section id="builtins">
+  <h2>Non-standard builtins <a class="anc" href="#builtins">#</a></h2>
+  <p>Most of asmpython's built-in functions behave exactly like CPython's
+     (<code>len</code>, <code>print</code>, <code>range</code>, <code>sorted</code>,
+     etc.) — see the <a href="https://docs.python.org/3/library/functions.html">CPython
+     builtins docs</a> for those. This table covers only the builtins that
+     are asmpython-specific additions, or where asmpython's behavior
+     differs from or restricts CPython's built-in of the same name.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>Function</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>import_binary(path)</code></td><td>asmpython-only. Loads a shared library at runtime (<code>LoadLibraryW</code>/<code>dlopen</code>) and returns a dynamic-module handle; functions are declared against it with <code>@handle.imported</code>. See <a href="assembly.html#import-binary">Dynamic loading</a>.</td></tr>
+      <tr><td><code>gl_import()</code></td><td>asmpython-only. Like <code>import_binary</code>, but resolves each attached function through <code>SDL_GL_GetProcAddress</code> instead of <code>LoadLibrary</code>/<code>dlsym</code> — the correct lookup path for OpenGL functions beyond GL 1.1. Takes no arguments.</td></tr>
+      <tr><td><code>isinstance(obj, cls)</code></td><td>Real runtime type check that respects single inheritance, but asmpython has no multiple inheritance and no metaclasses — <code>isinstance</code> can only ever check against the single static inheritance chain the compiler already knows about, not arbitrary runtime-registered ABCs.</td></tr>
+      <tr><td><code>hasattr(obj, name)</code> / <code>getattr(obj, name, default)</code> / <code>setattr(obj, name, val)</code></td><td>Attribute access is otherwise CPython-shaped, but asmpython has no dynamic attribute creation — every instance attribute must already have been assigned somewhere in <code>__init__</code>, so these three cannot be used to add a genuinely new attribute name to an instance at runtime.</td></tr>
+      <tr><td><code>type(x)</code></td><td>Returns a <code>&lt;class 'T'&gt;</code>-style string, not a first-class type object — asmpython has no metaclasses, and <code>type()</code>/<code>__class__</code> are read-only.</td></tr>
+      <tr><td><code>hash(x)</code></td><td>Same contract as CPython's <code>hash</code>, but the concrete algorithm is fixed and asmpython-specific: strings hash via FNV-1a (not CPython's randomized SipHash), so hash values are not compatible with CPython's for the same string, and are stable/non-randomized across runs of the same binary.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="error-codes">
+  <h2>Error codes <a class="anc" href="#error-codes">#</a></h2>
+  <p>Every diagnostic carries a stable code: <span class="ec L">L0xx</span> for lex errors, <span class="ec P">P0xx</span> for parse errors, <span class="ec E">E0xx</span> for semantic errors. Run <code>asmpython --explain &lt;CODE&gt;</code> for the full description of any code.</p>
+
+  <h3>Display format</h3>
+  <p>The code tag (e.g. <code>[E001]</code>) is always shown in brackets,
+     and <code>--explain CODE</code> lookups always work, regardless of
+     display format. But the text in front of the code tag now varies by
+     code:</p>
+  <ul>
+    <li><strong>Lex and parse errors (all L0xx/P0xx)</strong> always display as <code>SyntaxError</code>, mirroring CPython's own tokenizer/parser diagnostics.</li>
+    <li><strong>Semantic errors (E0xx) with a real CPython exception equivalent</strong> display using that exception's class name. For example, a name-resolution failure now reads <code>NameError: [E001] name 'x' is not defined</code> instead of the old <code>semantic error: [E001] ...</code> wording.</li>
+    <li><strong>A handful of E0xx codes have no CPython equivalent</strong> and keep the old generic <code>"{phase} error"</code> wording (i.e. <code>semantic error: [E0xx] ...</code>): <code>E003</code>/<code>E004</code> (function/class redefined in the same scope — CPython allows silent redefinition, so there's no matching exception), and the asmpython-only concepts <code>E061</code>–<code>E063</code> (assembly-directive errors) and <code>E081</code>/<code>E082</code> (const-extension errors).</li>
+  </ul>
+
+  <pre><div class="lang">output</div><code>broken.py:3:5: NameError: <span class="err">[E001]</span> name 'greet' is not defined
+  greet("world")
+  ^</code></pre>
+
+  <p>The source of truth for the code → exception-name mapping is
+     <code>_PYTHON_EXCEPTION_NAME</code> and <code>_python_exception_name()</code>
+     in <code>asmpython/_compiler/errors.py</code>.</p>
+
+  <h3>Lex (<span class="ec L">L</span>)</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Code</th><th>Message</th></tr></thead>
+    <tbody>
+      <tr><td><span class="ec L">L001</span></td><td>Inconsistent indentation</td></tr>
+      <tr><td><span class="ec L">L002</span></td><td>Unexpected character</td></tr>
+      <tr><td><span class="ec L">L003</span></td><td>Unterminated string literal</td></tr>
+      <tr><td><span class="ec L">L005</span></td><td>Unterminated f-string</td></tr>
+      <tr><td><span class="ec L">L007</span></td><td>Invalid float literal</td></tr>
+      <tr><td><span class="ec L">L008</span></td><td>Invalid escape sequence</td></tr>
+      <tr><td><span class="ec L">L009</span></td><td>Invalid integer literal</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Parse (<span class="ec P">P</span>)</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Code</th><th>Message</th></tr></thead>
+    <tbody>
+      <tr><td><span class="ec P">P001</span></td><td>Unexpected token</td></tr>
+      <tr><td><span class="ec P">P002</span></td><td>Expected a specific token</td></tr>
+      <tr><td><span class="ec P">P003</span></td><td>Cannot assign to this expression</td></tr>
+      <tr><td><span class="ec P">P005</span></td><td>Invalid match pattern</td></tr>
+      <tr><td><span class="ec P">P007</span></td><td>Invalid default argument</td></tr>
+      <tr><td><span class="ec P">P008</span></td><td>Invalid type annotation</td></tr>
+      <tr><td><span class="ec P">P010</span></td><td><code>const</code> declaration missing an initializer</td></tr>
+      <tr><td><span class="ec P">P011</span></td><td><code>--ext</code> names an unknown extension</td></tr>
+      <tr><td><span class="ec P">P012</span></td><td><code>const</code> used outside module scope</td></tr>
+      <tr><td><span class="ec P">P018</span></td><td><code>const</code> used without <code>--ext constants</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Semantic (<span class="ec E">E</span>)</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Code</th><th>Message</th><th>Displays as</th></tr></thead>
+    <tbody>
+      <tr><td><span class="ec E">E001</span></td><td>Name is not defined</td><td><code>NameError</code></td></tr>
+      <tr><td><span class="ec E">E002</span></td><td>Call to undefined function</td><td><code>NameError</code></td></tr>
+      <tr><td><span class="ec E">E003</span></td><td>Function redefined in same scope</td><td><em>semantic error</em> (no CPython equivalent)</td></tr>
+      <tr><td><span class="ec E">E004</span></td><td>Class redefined in same scope</td><td><em>semantic error</em> (no CPython equivalent)</td></tr>
+      <tr><td><span class="ec E">E005</span></td><td>Import of unknown module</td><td><code>ModuleNotFoundError</code></td></tr>
+      <tr><td><span class="ec E">E011</span></td><td>Incompatible types in expression</td><td><code>TypeError</code></td></tr>
+      <tr><td><span class="ec E">E012</span></td><td>Operator not supported between types</td><td><code>TypeError</code></td></tr>
+      <tr><td><span class="ec E">E015</span></td><td>Return value type mismatch</td><td><code>TypeError</code></td></tr>
+      <tr><td><span class="ec E">E018</span></td><td>Iterating a non-iterable type</td><td><code>TypeError</code></td></tr>
+      <tr><td><span class="ec E">E019</span></td><td>Assignment type mismatch</td><td><code>TypeError</code></td></tr>
+      <tr><td><span class="ec E">E021</span></td><td>Wrong number of arguments</td><td><code>TypeError</code></td></tr>
+      <tr><td><span class="ec E">E024</span></td><td>Calling a non-callable value</td><td><code>TypeError</code></td></tr>
+      <tr><td><span class="ec E">E031</span></td><td><code>break</code> outside a loop</td><td><code>SyntaxError</code></td></tr>
+      <tr><td><span class="ec E">E041</span></td><td>Object has no attribute</td><td><code>AttributeError</code></td></tr>
+      <tr><td><span class="ec E">E044</span></td><td><code>super()</code> outside a class method</td><td><code>RuntimeError</code></td></tr>
+      <tr><td><span class="ec E">E051</span></td><td>List literal has mixed types</td><td><code>TypeError</code></td></tr>
+      <tr><td><span class="ec E">E054</span></td><td>Dict operation requires str key</td><td><code>TypeError</code></td></tr>
+      <tr><td><span class="ec E">E061</span></td><td>Invalid assembly operand</td><td><em>semantic error</em> (asmpython-only concept)</td></tr>
+      <tr><td><span class="ec E">E062</span></td><td>Unrecognised x86-64 register</td><td><em>semantic error</em> (asmpython-only concept)</td></tr>
+      <tr><td><span class="ec E">E063</span></td><td><code>include()</code> argument must be a string</td><td><em>semantic error</em> (asmpython-only concept)</td></tr>
+      <tr><td><span class="ec E">E071</span></td><td><code>zip()</code> arguments must be lists/tuples</td><td><code>TypeError</code></td></tr>
+      <tr><td><span class="ec E">E073</span></td><td>Unsupported match pattern</td><td><em>see errors.py</em></td></tr>
+      <tr><td><span class="ec E">E081</span></td><td>Cannot reassign a <code>const</code> name</td><td><em>semantic error</em> (asmpython-only concept, see <a href="api.html#api-extend">asmpython.extend</a>)</td></tr>
+      <tr><td><span class="ec E">E082</span></td><td><code>const</code> name collides with a function or class</td><td><em>semantic error</em> (asmpython-only concept)</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="limitations">
+  <h2>Limitations <a class="anc" href="#limitations">#</a></h2>
+
+  <ul>
+    <li><strong>No bignum</strong> — integers are 64-bit signed; overflow wraps</li>
+    <li><strong>Homogeneous lists</strong> — <code>list[T]</code> requires all elements to be the same type; <code>list</code> (bare) allows any</li>
+    <li><strong>String keys only</strong> — dict and set elements must be strings (runtime limitation)</li>
+    <li><strong>Single inheritance</strong> — multiple inheritance is not supported</li>
+    <li><strong>No metaclasses</strong> — <code>type()</code> and <code>__class__</code> are read-only</li>
+    <li><strong>No dynamic attribute creation</strong> — all instance attributes must be assigned in <code>__init__</code></li>
+    <li><strong>No mapping patterns</strong> in <code>match</code>/<code>case</code></li>
+    <li><strong>Generator expressions are eager</strong> — <code>(x for x in xs)</code> materializes immediately</li>
+    <li><strong><code>*expr</code> unpacking</strong> at call sites requires a statically-known tuple (literal or named variable)</li>
+    <li><strong>No async/await</strong> — <code>asyncio</code> ships as a subset of primitives, not a real event loop</li>
+    <li><strong>No real TLS/SQLite</strong> — <code>ssl</code> and <code>sqlite3</code> are API-shaped stubs pending a C library binding</li>
+    <li><strong>No runtime introspection</strong> beyond <code>isinstance</code>, <code>hasattr</code>, <code>getattr</code>, <code>type</code></li>
+    <li><strong><code>@assembly_func</code> requires <code>--backend legacy</code></strong> — the x86-64 IR backend has no raw-NASM escape hatch</li>
+    <li><strong>The x86-64 backend supports windows/linux only</strong> — freestanding/freestanding16 and ARM64/macOS/Raspberry Pi targets still need the legacy backend or don't exist yet; see <a href="internals.html#backends">Backends: legacy &amp; x86-64</a></li>
+    <li><strong>The builtin linker can't yet parse gcc's bigobj COFF output</strong> — <code>asmpython.mlang</code> currently requires <code>--linker gcc</code>; see <a href="assembly.html#mlang">asmpython.mlang</a></li>
+  </ul>
+
+  <div class="tip">Most limitations are by design to keep the compiler single-pass and the output zero-overhead. The subset covers a wide range of real programs — see <code>examples/</code> in the repository for demonstrations.</div>
+</section>
+
+<footer class="docs-footer">
+  <span>asmpython — MIT licensed. A Pixelated Dream project.</span>
+  <span>See <code>CHANGELOG.md</code> and <code>docs/ROADMAP.md</code> in the repository for full version history.</span>
+</footer>
+
+</main>
+</div>
+
+<script>window.DOCS_PAGE = "reference.html";</script>
+<script src="nav.js"></script>
+</body>
+</html>
