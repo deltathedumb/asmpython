@@ -637,6 +637,19 @@ _abi_str_index_of_start:
     call _runtime_str_index_of_start
     WIN64_RUNTIME_LEAVE
     ret
+
+; rax = str_expandtabs(self=rcx, tabsize=rdx) -- str.expandtabs([tabsize]);
+; the no-arg Python default (tabsize=8) is applied by the CALLER (see
+; ir_lower.py's expandtabs case), matching codegen.py's own
+; mov rbx, 8 / call pattern for the 0-arg form.
+extern _runtime_str_expandtabs
+_abi_str_expandtabs:
+    WIN64_RUNTIME_ENTER
+    mov rax, rcx
+    mov rbx, rdx
+    call _runtime_str_expandtabs
+    WIN64_RUNTIME_LEAVE
+    ret
 _abi_str_split:
     WIN64_RUNTIME_ENTER
     mov rax, rcx

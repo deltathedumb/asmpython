@@ -6098,6 +6098,19 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 if e.method in ("index", "rindex"):
                     _emit_str_index_check(ctx, v, id(e))
                 return v
+            if e.method == "expandtabs" and len(e.args) in (0, 1):
+                # str.expandtabs([tabsize=8]) -- the Python-level default
+                # is applied here (matching codegen.py's own `mov rbx, 8`
+                # for the 0-arg form); _abi_str_expandtabs always takes
+                # an explicit tabsize.
+                if e.args:
+                    tabsize_v = _lower_expr(ctx, e.args[0])
+                else:
+                    tabsize_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", tabsize_v, [8]))
+                v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", v, ["_abi_str_expandtabs", obj_v, tabsize_v]))
+                return v
             one_arg_str_methods = {
                 "zfill": "_abi_str_zfill", "removeprefix": "_abi_str_removeprefix",
                 "removesuffix": "_abi_str_removesuffix",
