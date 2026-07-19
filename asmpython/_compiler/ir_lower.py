@@ -3676,6 +3676,88 @@ def _lower_set_setop(ctx: _FuncCtx, obj_e: A.Expr, other_e: A.Expr, method: str,
     return new_v
 
 
+def _lower_set_subset(ctx: _FuncCtx, sub_e: A.Expr, sup_e: A.Expr, tag: int) -> IRValue:
+    """1 if every member of `sub_e` is also a member of `sup_e` (subset
+    test underlying `<=`/`<`/`>=`/`>` on two sets), else 0. Ports
+    codegen.py's _runtime_set_subset algorithm (and this file's own
+    sibling _lower_set_setop's identical "walk a's ordered keys, check
+    each against b via _abi_dict_contains" shape) as IR blocks: short-
+    circuits false on the first member of `sub_e` not found in `sup_e`;
+    the empty set is a subset of everything (including itself), so an
+    empty `sub_e` (len 0) falls straight through the loop to "no miss
+    found" -> 1.
+
+    Was entirely unimplemented on this backend -- `<=`/`<`/`>=`/`>`
+    between two sets fell through to the generic int-compare path,
+    silently comparing the two sets' raw HEADER POINTER values instead
+    of any subset logic (confirmed: `{"a"} <= {"a","b","c"}` produced
+    False instead of True, and every other comparison in the same
+    combined print() came out wrong too -- not a crash, a real
+    correctness bug capable of flipping which branch downstream code
+    takes)."""
+    sub_v = _lower_expr(ctx, sub_e)
+    sup_v = _lower_expr(ctx, sup_e)
+    keys_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", sub_v]))
+    idx_ptr = ctx.ensure_slot(f"__setsub_idx_{tag}", I64)
+    zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero, [0]))
+    ctx.emit(IRInstr("store", None, [zero, idx_ptr]))
+    res_ptr = ctx.ensure_slot(f"__setsub_res_{tag}", I64)
+
+    head_b = ctx.new_block("setsubhead")
+    body_b = ctx.new_block("setsubbody")
+    cont_b = ctx.new_block("setsubcont")
+    miss_b = ctx.new_block("setsubmiss")
+    hit_b = ctx.new_block("setsubhit")
+    join_b = ctx.new_block("setsubjoin")
+
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+    ctx.switch_to(head_b)
+    idx_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+    len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_addr, [keys_v, _LIST_LEN_OFF]))
+    len_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", len_v, [len_addr]))
+    cond = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", cond, [idx_v, len_v]))
+    ctx.emit(IRInstr("br.t", None, [cond, body_b.label, hit_b.label]))
+
+    ctx.switch_to(body_b)
+    key_addr = _list_elem_addr(ctx, keys_v, idx_v)
+    key_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", key_v, [key_addr]))
+    has_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", has_v, ["_abi_dict_contains", sup_v, key_v]))
+    ctx.emit(IRInstr("br.t", None, [has_v, cont_b.label, miss_b.label]))
+
+    ctx.switch_to(cont_b)
+    one_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one_v, [1]))
+    next_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", next_v, [idx_v, one_v]))
+    ctx.emit(IRInstr("store", None, [next_v, idx_ptr]))
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+
+    ctx.switch_to(miss_b)
+    zero2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero2, [0]))
+    ctx.emit(IRInstr("store", None, [zero2, res_ptr]))
+    ctx.emit(IRInstr("br", None, [join_b.label]))
+
+    ctx.switch_to(hit_b)
+    one2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one2, [1]))
+    ctx.emit(IRInstr("store", None, [one2, res_ptr]))
+    ctx.emit(IRInstr("br", None, [join_b.label]))
+
+    ctx.switch_to(join_b)
+    out = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", out, [res_ptr]))
+    return out
+
+
 def _lower_isinstance(ctx: _FuncCtx, e: A.Call) -> IRValue:
     targets: list[str] = []
     cls_arg = e.args[1]
@@ -4690,6 +4772,28 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, lhs]))
             ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, rhs]))
             return new_v
+        if lt == "set" and rt == "set" and e.op in ("&", "-"):
+            # `s1 & s2` / `s1 - s2`: unlike `|` above, these were never
+            # given a BinOp case at all -- only reachable via the
+            # equivalent `.intersection()`/`.difference()` METHOD calls
+            # (which already correctly route through _lower_set_setop,
+            # just below in this same file). The operator forms instead
+            # fell all the way through to the generic int-binop path much
+            # further down, which treats both operands' raw HEADER
+            # POINTERS as plain integers -- same corrupts-on-next-read
+            # shape as the `list + list` bug documented just above (`&`
+            # silently computed something that happened to still look
+            # like a valid-ish pointer and produced a wrong answer rather
+            # than crashing; `-` produced a pointer-difference small
+            # enough to be a plausible-looking but bogus address,
+            # confirmed via gdb: SIGSEGV on the very next dereference of
+            # the "result"). codegen.py's own `_gen_binop` already treats
+            # all three set operators identically via one shared
+            # `_gen_set_setop` helper -- mirror that here by reusing this
+            # file's own already-correct method-call path instead of
+            # duplicating its logic.
+            method = {"&": "intersection", "-": "difference"}[e.op]
+            return _lower_set_setop(ctx, e.left, e.right, method, id(e))
         if lt == "float" or rt == "float" or e.op == "/":
             # `/` (true division) is ALWAYS float division in Python, even
             # for two int operands (`6 / 3` is `2.0`, not `2`) -- unlike
@@ -4812,6 +4916,47 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         if len(e.ops) == 1:
             lt0 = A.expr_type(e.operands[0])
             rt0 = A.expr_type(e.operands[1])
+            if lt0 == "set" and rt0 == "set" and e.ops[0] in ("<=", ">=", "<", ">"):
+                # Set subset/superset comparisons (PEP-3119-style: `a <= b`
+                # is `a.issubset(b)`, `a < b` is a proper subset i.e.
+                # subset AND a != b, `>=`/`>` are the mirror via swapped
+                # operands) -- ports codegen.py's own identical swap-
+                # operands approach exactly.
+                op = e.ops[0]
+                swap = op in (">=", ">")
+                sub_e, sup_e = (
+                    (e.operands[1], e.operands[0]) if swap else (e.operands[0], e.operands[1])
+                )
+                result = _lower_set_subset(ctx, sub_e, sup_e, id(e))
+                if op in ("<", ">"):
+                    # Proper subset/superset: subset holds AND the two
+                    # sets aren't equal (same length is sufficient given
+                    # subset already held -- a subset of equal length must
+                    # be the same set, matching codegen.py's own
+                    # reasoning). Re-lower sub_e/sup_e here (a second real
+                    # evaluation, same as codegen.py's own comment
+                    # describes) rather than caching the first lowering's
+                    # IRValues, since a length comparison needs the SAME
+                    # underlying pointers _lower_set_subset already
+                    # consumed inside its own loop -- simplest to just
+                    # recompute rather than thread extra return values
+                    # through that helper's signature.
+                    sub_v2 = _lower_expr(ctx, sub_e)
+                    sup_v2 = _lower_expr(ctx, sup_e)
+                    sub_len_addr = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("gep", sub_len_addr, [sub_v2, _LIST_LEN_OFF]))
+                    sub_len_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("load", sub_len_v, [sub_len_addr]))
+                    sup_len_addr = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("gep", sup_len_addr, [sup_v2, _LIST_LEN_OFF]))
+                    sup_len_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("load", sup_len_v, [sup_len_addr]))
+                    not_equal = ctx.tmp(I64)
+                    ctx.emit(IRInstr("icmp.ne", not_equal, [sub_len_v, sup_len_v]))
+                    proper = ctx.tmp(I64)
+                    ctx.emit(IRInstr("iand", proper, [result, not_equal]))
+                    return proper
+                return result
             if (
                 (lt0 in ("str", "any") and rt0 in ("str", "any") and "str" in (lt0, rt0))
                 or getattr(e, "_map_val_str_cmp", False)
