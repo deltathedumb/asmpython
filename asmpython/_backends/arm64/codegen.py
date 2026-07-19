@@ -80,11 +80,7 @@ class FuncCodegen:
     # Scratch registers, reserved -- must not appear in regalloc.py's pools.
     _SCRATCH   = Reg.X13
     _SCRATCH2  = Reg.X14
-    _SCRATCH3  = Reg.X15   # a third GP scratch: AArch64's 3-operand shape
-                           # needs it in a few spill-heavy paths (_binop_gp's
-                           # StackLoc-destination case) where x86-64 falls
-                           # back to push/pop instead, since AArch64 has no
-                           # single-instruction stack push/pop to lean on.
+    _SCRATCH3  = Reg.X15   # dedicated address/third-operand scratch
     _SCRATCH_FP  = VReg.V14
     _SCRATCH_FP2 = VReg.V15
 
@@ -109,8 +105,7 @@ class FuncCodegen:
         return len(self.buf)
 
     def _emit_word(self, word_bytes: bytes) -> int:
-        """Emit a 4-byte instruction, return its own start offset (for
-        fixups that need to re-encode this exact word later)."""
+        """Emit a 4-byte instruction, return its own start offset."""
         off = self._pos()
         self._emit(word_bytes)
         return off
@@ -121,56 +116,32 @@ class FuncCodegen:
         return self.alloc.locs[val.name]
 
     def _gp(self, val: Any, alt_scratch: bool = False) -> tuple[Reg, bytes]:
-        """Get a GP register holding val. Emits a load from stack if spilled.
-
-        `alt_scratch`: use X14 instead of X13 for the spilled/alloca case
-        -- ported from x86_64/regalloc.py's identical `_gp`: two operands
-        of the same instruction, BOTH stack-spilled, must not share one
-        scratch register or the second load silently clobbers the first
-        before either is read. See that module's docstring for the real
-        production bug this guards against (found there; the same hazard
-        class applies here unchanged, since it's about the allocator's
-        spill strategy, not the ISA).
-        """
+        """Get a GP register holding val. Emits a load from stack if spilled."""
         scratch = self._SCRATCH2 if alt_scratch else self._SCRATCH
         slot = self.alloc.alloca_slots.get(val.name)
         if slot is not None:
-            # alloca'd pointers are recomputed fresh via ADD (X29 + slot)
-            # on every read rather than cached in a register -- mirrors
-            # x86_64's identical `lea` recomputation, see that module's
-            # `_gp` docstring for why.
             return scratch, self._addr_fp(scratch, slot)
         loc = self._loc(val)
         if isinstance(loc, RegLoc):
             return loc.reg, b""
-        return scratch, ldr_imm(scratch, Reg.X29, loc.offset)
+        return scratch, self._load_stack_gp(scratch, loc.offset)
 
     def _fp(self, val: Any, alt_scratch: bool = False) -> tuple[VReg, bytes]:
-        """Get a D-register holding val (f64). Emits load if spilled.
-        See `_gp`'s `alt_scratch` docstring -- identical rationale."""
+        """Get a D-register holding val (f64). Emits load if spilled."""
         loc = self._loc(val)
         if isinstance(loc, VLoc):
             return loc.reg, b""
         scratch = self._SCRATCH_FP2 if alt_scratch else self._SCRATCH_FP
-        return scratch, ldr_imm_d(scratch, Reg.X29, loc.offset)
+        return scratch, self._load_stack_fp(scratch, loc.offset)
 
     def _addr_fp(self, dst: Reg, offset: int) -> bytes:
-        """dst = X29 + offset (materializes an FP-relative address, the
-        AArch64 equivalent of x86-64's `lea dst, [rbp+offset]`). ADD/SUB
-        immediate only encodes a 12-bit unsigned field, so a large-
-        magnitude offset needs the LSL#12 shifted form for its high bits
-        plus the plain form for the low 12 -- mirrors regalloc.py's own
-        16-byte-frame-alignment assumption that most frames are small,
-        but doesn't assume it: this always produces a correct address
-        regardless of magnitude."""
+        """Materialize X29 + offset into dst, for either sign and large frames."""
         if offset >= 0:
             return self._imm_add_or_sub(dst, Reg.X29, offset, negate=False)
         return self._imm_add_or_sub(dst, Reg.X29, -offset, negate=True)
 
     def _imm_add_or_sub(self, dst: Reg, src: Reg, mag: int, *, negate: bool) -> bytes:
-        """dst = src + mag, or dst = src - mag if negate -- handles any
-        non-negative `mag` via at most two instructions (ADD/SUB imm12
-        plus an LSL#12 high part for anything beyond 4095)."""
+        """dst = src +/- mag, handling the imm12 and LSL#12 pieces."""
         lo = mag & 0xFFF
         hi = (mag >> 12) & 0xFFF
         assert mag < (1 << 24), f"offset {mag} exceeds this backend's 24-bit addressing range"
@@ -187,6 +158,35 @@ class FuncCodegen:
             out += mov_reg(dst, cur)
         return out
 
+    def _load_stack_gp(self, dst: Reg, offset: int) -> bytes:
+        """Load an X register from an FP-relative StackLoc.
+
+        The encoder's LDR immediate form is unsigned, while regalloc deliberately
+        uses negative offsets below X29. Materialize the address through reserved
+        X15, then issue an offset-zero load. Positive incoming-argument offsets
+        can use the direct scaled form.
+        """
+        if 0 <= offset <= 32760 and offset % 8 == 0:
+            return ldr_imm(dst, Reg.X29, offset)
+        assert dst != self._SCRATCH3
+        return self._addr_fp(self._SCRATCH3, offset) + ldr_imm(dst, self._SCRATCH3, 0)
+
+    def _store_stack_gp(self, src: Reg, offset: int) -> bytes:
+        if 0 <= offset <= 32760 and offset % 8 == 0:
+            return str_imm(src, Reg.X29, offset)
+        assert src != self._SCRATCH3
+        return self._addr_fp(self._SCRATCH3, offset) + str_imm(src, self._SCRATCH3, 0)
+
+    def _load_stack_fp(self, dst: VReg, offset: int) -> bytes:
+        if 0 <= offset <= 32760 and offset % 8 == 0:
+            return ldr_imm_d(dst, Reg.X29, offset)
+        return self._addr_fp(self._SCRATCH3, offset) + ldr_imm_d(dst, self._SCRATCH3, 0)
+
+    def _store_stack_fp(self, src: VReg, offset: int) -> bytes:
+        if 0 <= offset <= 32760 and offset % 8 == 0:
+            return str_imm_d(src, Reg.X29, offset)
+        return self._addr_fp(self._SCRATCH3, offset) + str_imm_d(src, self._SCRATCH3, 0)
+
     def _dst_gp(self, result: Any) -> Reg:
         loc = self._loc(result)
         assert isinstance(loc, RegLoc), f"GP result expected for {result.name}"
@@ -198,18 +198,12 @@ class FuncCodegen:
         return loc.reg
 
     def _dst_gp_spillable(self, result: Any, alt_scratch: bool = False) -> "tuple[Reg, Callable[[], None]]":
-        """Like `_dst_gp`, but tolerates a StackLoc. Returns (reg_to_
-        compute_into, spill); caller must call spill() once the value is
-        computed. See x86_64/codegen.py's identical helper for the real
-        crash class (high register pressure legitimately spilling a
-        result) this exists to handle correctly rather than assert-crash
-        on."""
         loc = self._loc(result)
         if isinstance(loc, RegLoc):
             return loc.reg, lambda: None
         assert isinstance(loc, StackLoc), f"GP result expected for {result.name}"
         scratch = self._SCRATCH2 if alt_scratch else self._SCRATCH
-        return scratch, lambda: self._emit(str_imm(scratch, Reg.X29, loc.offset))
+        return scratch, lambda: self._emit(self._store_stack_gp(scratch, loc.offset))
 
     def _dst_fp_spillable(self, result: Any) -> "tuple[VReg, Callable[[], None]]":
         loc = self._loc(result)
@@ -217,87 +211,59 @@ class FuncCodegen:
             return loc.reg, lambda: None
         assert isinstance(loc, StackLoc), f"FP result expected for {result.name}"
         scratch = self._SCRATCH_FP
-        return scratch, lambda: self._emit(str_imm_d(scratch, Reg.X29, loc.offset))
+        return scratch, lambda: self._emit(self._store_stack_fp(scratch, loc.offset))
 
     # ── Prologue / epilogue ───────────────────────────────────────────────────
-    # Frame layout (X29 = FP, growing down from the saved [FP,LR] record):
-    #   [FP, #0]  = saved FP        [FP, #8]  = saved LR
-    #   [FP, #-8*1 .. ]             callee-saved GP pairs (STP)
-    #   [FP, #-... ]                callee-saved FP pairs (STP, D-regs)
-    #   [FP, #-stack_bytes .. FP)   locals / spills / allocas (regalloc.py's
-    #                                own StackLoc offsets, all negative)
+    # Conventional AAPCS64 frame:
+    #   [X29, #0]  saved FP, [X29, #8] saved LR
+    #   negative offsets: regalloc locals/spills, then saved GP/FP registers
+    #   positive offsets: caller-provided stack arguments
 
     def _callee_saved_area(self) -> int:
-        """Bytes consumed by callee-saved GP+FP register save pairs,
-        always rounded up to a pair (STP saves two at a time; an odd
-        count still reserves a full pair's worth of slots so both the
-        prologue's STP and the epilogue's matching LDP address the same
-        16-byte-aligned region)."""
         n_gp = len(self.alloc.callee_saved)
         n_fp = len(self.alloc.callee_saved_fp)
         return 8 * (((n_gp + 1) // 2) * 2 + ((n_fp + 1) // 2) * 2)
 
     def _prologue(self) -> None:
-        frame_bytes = 16 + self._callee_saved_area() + self.alloc.stack_bytes
-        # STP X29, X30, [SP, #-frame_bytes]! -- allocate the WHOLE frame in
-        # one instruction and save the frame-record pair at its base,
-        # mirroring x86-64's `push rbp` but folding the SUB RSP in too
-        # (AArch64 has no separate single-register push -- STP with
-        # pre-indexed writeback is the idiomatic equivalent).
-        self._emit(stp(Reg.X29, Reg.X30, Reg.SP, -frame_bytes, writeback="pre"))
-        self._emit(mov_reg(Reg.X29, Reg.SP))
+        # Never use ORR-based mov_reg with SP: register encoding 31 means XZR
+        # in ORR, not SP. ADD-immediate #0 is the architectural SP move.
+        self._emit(stp(Reg.X29, Reg.X30, Reg.SP, -16, writeback="pre"))
+        self._emit(add_imm(Reg.X29, Reg.SP, 0))
 
-        off = 16
-        gp = self.alloc.callee_saved
-        for i in range(0, len(gp) - 1, 2):
-            self._emit(stp(gp[i], gp[i + 1], Reg.X29, off))
-            off += 16
-        if len(gp) % 2:
-            self._emit(str_imm(gp[-1], Reg.X29, off))
-            off += 16
+        frame_body = self.alloc.stack_bytes + self._callee_saved_area()
+        if frame_body:
+            self._emit(self._imm_add_or_sub(Reg.SP, Reg.SP, frame_body, negate=True))
 
-        fp = self.alloc.callee_saved_fp
-        for i in range(0, len(fp) - 1, 2):
-            self._emit(str_imm_d(fp[i], Reg.X29, off))
-            self._emit(str_imm_d(fp[i + 1], Reg.X29, off + 8))
-            off += 16
-        if len(fp) % 2:
-            self._emit(str_imm_d(fp[-1], Reg.X29, off))
+        gp_area = 8 * (((len(self.alloc.callee_saved) + 1) // 2) * 2)
+        off = -self.alloc.stack_bytes - 8
+        for reg in self.alloc.callee_saved:
+            self._emit(self._store_stack_gp(reg, off))
+            off -= 8
+
+        off = -self.alloc.stack_bytes - gp_area - 8
+        for reg in self.alloc.callee_saved_fp:
+            self._emit(self._store_stack_fp(reg, off))
+            off -= 8
 
     def _epilogue(self) -> None:
-        off = 16
-        gp = self.alloc.callee_saved
-        for i in range(0, len(gp) - 1, 2):
-            self._emit(ldp(gp[i], gp[i + 1], Reg.X29, off))
-            off += 16
-        if len(gp) % 2:
-            self._emit(ldr_imm(gp[-1], Reg.X29, off))
-            off += 16
+        gp_area = 8 * (((len(self.alloc.callee_saved) + 1) // 2) * 2)
+        off = -self.alloc.stack_bytes - 8
+        for reg in self.alloc.callee_saved:
+            self._emit(self._load_stack_gp(reg, off))
+            off -= 8
 
-        fp = self.alloc.callee_saved_fp
-        for i in range(0, len(fp) - 1, 2):
-            self._emit(ldr_imm_d(fp[i], Reg.X29, off))
-            self._emit(ldr_imm_d(fp[i + 1], Reg.X29, off + 8))
-            off += 16
-        if len(fp) % 2:
-            self._emit(ldr_imm_d(fp[-1], Reg.X29, off))
+        off = -self.alloc.stack_bytes - gp_area - 8
+        for reg in self.alloc.callee_saved_fp:
+            self._emit(self._load_stack_fp(reg, off))
+            off -= 8
 
-        frame_bytes = 16 + self._callee_saved_area() + self.alloc.stack_bytes
-        self._emit(ldp(Reg.X29, Reg.X30, Reg.SP, frame_bytes, writeback="post"))
+        self._emit(add_imm(Reg.SP, Reg.X29, 0))
+        self._emit(ldp(Reg.X29, Reg.X30, Reg.SP, 16, writeback="post"))
         self._emit(ret())
 
     # ── Pattern helpers ───────────────────────────────────────────────────────
 
     def _binop_gp(self, result: Any, a: Any, b_val: Any, rrr_fn) -> None:
-        """dst = rrr_fn(a, b) -- a genuine 3-operand op (dst, a, b all
-        independent registers), unlike x86-64's 2-operand `_binop_gp`
-        which has to first copy `a` into `dst` and mutate it in place
-        (with all the "is it safe to clobber a_r" bookkeeping that
-        entails). AArch64's ADD/SUB/AND/ORR/EOR/MUL/SDIV/UDIV all take a
-        distinct destination register, so there is no dst-vs-operand
-        aliasing hazard to reason about here at all -- `dst` is written
-        exactly once, after both operands are already loaded into their
-        own registers."""
         a_r, a_ld = self._gp(a)
         b_r, b_ld = self._gp(b_val, alt_scratch=True)
         self._emit(a_ld + b_ld)
@@ -332,12 +298,6 @@ class FuncCodegen:
         spill()
 
     # ── Branch helpers ────────────────────────────────────────────────────────
-    # AArch64 branch offsets are word-counted (units of 4 bytes) and live
-    # inside the SAME instruction word as the opcode -- unlike x86-64's
-    # disp32 (a standalone 4 bytes that can be spliced independent of
-    # anything else), patching means re-encoding the whole word. Each
-    # fixup records a `kind` tag so `_patch_branch` knows which encoder
-    # function to call again with the real, now-known offset.
 
     def _emit_b(self, label: str) -> None:
         off = self._emit_word(b(0))
@@ -369,17 +329,6 @@ class FuncCodegen:
         arg_vals  = instr.operands[1:]
         is_indirect = hasattr(target_op, "name") and hasattr(target_op, "type")
 
-        # Materialize every register-passed argument into its own temp
-        # stack slot first, then load the ABI registers from those slots
-        # -- mirrors x86_64/codegen.py's `_call` exactly (see that
-        # module's own extensive comment): avoids every scratch/alias
-        # hazard at once, since spilled args no longer fight over shared
-        # scratch registers and register-resident args whose current
-        # homes overlap their eventual ABI destination register can't
-        # clobber each other before they're all captured. AAPCS64 has no
-        # SysV/Win64 split to replicate and no variadic-vararg AL-style
-        # register-count convention to special-case -- this is simpler
-        # than the x86-64 original for exactly those reasons.
         gp_reg_args: list[tuple[Reg, Any, int]] = []
         fp_reg_args: list[tuple[VReg, Any, int]] = []
         stack_args:  list[tuple[Any, int]] = []
@@ -461,14 +410,14 @@ class FuncCodegen:
                     if loc.reg != VReg.V0:
                         self._emit(fmov_reg(loc.reg, VReg.V0))
                 else:
-                    self._emit(str_imm_d(VReg.V0, Reg.X29, loc.offset))
+                    self._emit(self._store_stack_fp(VReg.V0, loc.offset))
             else:
                 loc = self._loc(instr.result)
                 if isinstance(loc, RegLoc):
                     if loc.reg != Reg.X0:
                         self._emit(mov_reg(loc.reg, Reg.X0))
                 else:
-                    self._emit(str_imm(Reg.X0, Reg.X29, loc.offset))
+                    self._emit(self._store_stack_gp(Reg.X0, loc.offset))
 
     # ── Per-instruction dispatch ──────────────────────────────────────────────
 
@@ -496,7 +445,6 @@ class FuncCodegen:
         r   = instr.result
         ops = instr.operands
 
-        # ── integer binary ────────────────────────────────────────────────────
         if op in self._IOPS:
             self._binop_gp(r, ops[0], ops[1], self._IOPS[op]); return
 
@@ -505,21 +453,12 @@ class FuncCodegen:
             self._binop_gp(r, ops[0], ops[1], lambda d, a, b_: fn(d, a, b_)); return
 
         if op in ("irem", "urem"):
-            # AArch64 has no direct remainder instruction: rem = a - (a/b)*b,
-            # computed via SDIV/UDIV then MSUB (multiply-subtract, a single
-            # instruction: dst = a - (div*b)). No temp register needed for
-            # the quotient beyond a scratch, since MSUB folds the multiply
-            # and subtract into one op.
             a_r, a_ld = self._gp(ops[0])
             b_r, b_ld = self._gp(ops[1], alt_scratch=True)
             self._emit(a_ld + b_ld)
             div_fn = sdiv if op == "irem" else udiv
             self._emit(div_fn(self._SCRATCH3, a_r, b_r))
             dst, spill = self._dst_gp_spillable(r)
-            # MSUB Xd, Xn, Xm, Xa := Xa - Xn*Xm (no dedicated encoder helper
-            # yet -- encoded directly here since it's the one op unique to
-            # this remainder idiom, not worth adding to encoder.py's general
-            # surface for a single call site).
             word = 0x9B008000 | (int(b_r) << 16) | (int(a_r) << 10) | (int(self._SCRATCH3) << 5) | int(dst)
             self._emit(struct.pack("<I", word))
             spill(); return
@@ -530,8 +469,6 @@ class FuncCodegen:
             self._emit(ld); self._emit(neg_reg(dst, src_r)); spill(); return
 
         if op == "inot":
-            # NOT Xd, Xn := ORN Xd, XZR, Xn -- no dedicated encoder helper
-            # (single call site); encoded directly.
             src_r, ld = self._gp(ops[0])
             dst, spill = self._dst_gp_spillable(r, alt_scratch=(src_r == self._SCRATCH))
             self._emit(ld)
@@ -539,16 +476,12 @@ class FuncCodegen:
             self._emit(struct.pack("<I", word))
             spill(); return
 
-        # ── shifts ────────────────────────────────────────────────────────────
         if op in ("shl", "shr", "sar"):
             val_r, val_ld = self._gp(ops[0])
             count = ops[1]
             self._emit(val_ld)
             dst, spill = self._dst_gp_spillable(r, alt_scratch=(val_r == self._SCRATCH))
-            opc = {"shl": 0b00, "shr": 0b01, "sar": 0b10}[op]
             if isinstance(count, int):
-                # LSL/LSR/ASR (immediate) are UBFM/SBFM aliases; encoded
-                # directly (no dedicated encoder helper -- one call site).
                 n = count & 0x3F
                 if op == "shl":
                     immr = (-n) & 0x3F
@@ -568,11 +501,9 @@ class FuncCodegen:
                 self._emit(struct.pack("<I", word))
             spill(); return
 
-        # ── integer compare ───────────────────────────────────────────────────
         if op in self._ICMP:
             self._cmp_set(r, ops[0], ops[1], self._ICMP[op]); return
 
-        # ── float binary ──────────────────────────────────────────────────────
         if op in self._FOPS:
             self._binop_fp(r, ops[0], ops[1], self._FOPS[op]); return
 
@@ -581,11 +512,9 @@ class FuncCodegen:
             dst, spill = self._dst_fp_spillable(r)
             self._emit(ld); self._emit(fneg(dst, src_x)); spill(); return
 
-        # ── float compare ─────────────────────────────────────────────────────
         if op in self._FCMP:
             self._fcmp_set(r, ops[0], ops[1], self._FCMP[op]); return
 
-        # ── constants ─────────────────────────────────────────────────────────
         if op == "const":
             v = ops[0]
             if r is not None and _is_float(r.type.name):
@@ -598,7 +527,7 @@ class FuncCodegen:
                     self._emit(fmov_from_gp(loc.reg, self._SCRATCH))
                 else:
                     self._emit(fmov_from_gp(self._SCRATCH_FP, self._SCRATCH))
-                    self._emit(str_imm_d(self._SCRATCH_FP, Reg.X29, loc.offset))
+                    self._emit(self._store_stack_fp(self._SCRATCH_FP, loc.offset))
             else:
                 loc = self._loc(r)
                 for w in mov_imm64(self._SCRATCH, int(v)):
@@ -607,10 +536,9 @@ class FuncCodegen:
                     if loc.reg != self._SCRATCH:
                         self._emit(mov_reg(loc.reg, self._SCRATCH))
                 else:
-                    self._emit(str_imm(self._SCRATCH, Reg.X29, loc.offset))
+                    self._emit(self._store_stack_gp(self._SCRATCH, loc.offset))
             return
 
-        # ── memory ────────────────────────────────────────────────────────────
         if op == "load":
             ptr_r, ld = self._gp(ops[0])
             self._emit(ld)
@@ -621,14 +549,14 @@ class FuncCodegen:
                     self._emit(ldr_imm_d(loc.reg, ptr_r, 0))
                 else:
                     self._emit(ldr_imm_d(self._SCRATCH_FP, ptr_r, 0))
-                    self._emit(str_imm_d(self._SCRATCH_FP, Reg.X29, loc.offset))
-            else:  # i64/u64/ptr and any other scalar — full 64-bit
+                    self._emit(self._store_stack_fp(self._SCRATCH_FP, loc.offset))
+            else:
                 loc = self._loc(r)
                 if isinstance(loc, RegLoc):
                     self._emit(ldr_imm(loc.reg, ptr_r, 0))
                 else:
                     self._emit(ldr_imm(self._SCRATCH, ptr_r, 0))
-                    self._emit(str_imm(self._SCRATCH, Reg.X29, loc.offset))
+                    self._emit(self._store_stack_gp(self._SCRATCH, loc.offset))
             return
 
         if op == "store":
@@ -658,22 +586,9 @@ class FuncCodegen:
             spill(); return
 
         if op == "alloca":
-            # No instruction needed: alloca_slots already records this
-            # name's fixed X29-relative address (set by regalloc.py); every
-            # later read recomputes it fresh via `_gp`'s alloca special case.
             return
 
-        # ── type conversions ──────────────────────────────────────────────────
         if op in ("sext", "zext", "trunc"):
-            # This backend's IR only ever carries i64-sized GP values
-            # through these three ops in practice (ir_lower.py's own
-            # scalar type surface is int/str-ptr/instance-ptr/bool, all
-            # 64-bit slots) -- a plain register move covers every case
-            # this backend actually receives. A real 32/16/8-bit-typed
-            # sext/zext (SXTW/UXTW-style) would need the bit-width operand
-            # threaded through here the way x86_64/codegen.py's does; not
-            # implemented since nothing in ir_lower.py's own emission
-            # exercises a narrower width today.
             src_r, ld = self._gp(ops[0])
             dst, spill = self._dst_gp_spillable(r, alt_scratch=(src_r == self._SCRATCH))
             self._emit(ld)
@@ -683,7 +598,8 @@ class FuncCodegen:
 
         if op == "sitofp":
             src_r, ld = self._gp(ops[0])
-            self._emit(ld); self._emit(scvtf(self._dst_fp(r), src_r)); return
+            dst, spill = self._dst_fp_spillable(r)
+            self._emit(ld); self._emit(scvtf(dst, src_r)); spill(); return
 
         if op == "fptosi":
             src_x, ld = self._fp(ops[0])
@@ -692,14 +608,14 @@ class FuncCodegen:
 
         if op == "bitcast_i2f":
             src_r, ld = self._gp(ops[0])
-            self._emit(ld); self._emit(fmov_from_gp(self._dst_fp(r), src_r)); return
+            dst, spill = self._dst_fp_spillable(r)
+            self._emit(ld); self._emit(fmov_from_gp(dst, src_r)); spill(); return
 
         if op == "bitcast_f2i":
             src_x, ld = self._fp(ops[0])
             dst, spill = self._dst_gp_spillable(r)
             self._emit(ld); self._emit(fmov_to_gp(dst, src_x)); spill(); return
 
-        # ── control flow ──────────────────────────────────────────────────────
         if op == "ret":
             if ops:
                 val = ops[0]
@@ -721,8 +637,8 @@ class FuncCodegen:
         if op == "br.t":
             cond_r, ld = self._gp(ops[0])
             self._emit(ld)
-            self._emit_cbz(cond_r, str(ops[2]))  # cond == 0 -> false target
-            self._emit_b(str(ops[1]))            # fallthrough -> true target
+            self._emit_cbz(cond_r, str(ops[2]))
+            self._emit_b(str(ops[1]))
             return
 
         if op == "call":
@@ -753,12 +669,6 @@ class FuncCodegen:
             return
 
         if op in ("global_addr", "str_global"):
-            # ADRP + ADD :lo12: -- the AArch64 two-instruction PC-relative
-            # addressing idiom (see roadmap.md's ARM64 Stage 0 notes: this
-            # is the exact pattern the Stage 0 probe program used by hand).
-            # Each of the two instructions gets its OWN relocation, since
-            # ADRP's 21-bit field and ADD's 12-bit field are independent
-            # ELF relocation types with different addend semantics.
             loc = self._loc(r)
             dst = loc.reg if isinstance(loc, RegLoc) else self._SCRATCH
             adrp_off = self._emit_word(adrp(dst, 0))
@@ -766,7 +676,7 @@ class FuncCodegen:
             add_off = self._emit_word(add_imm(dst, dst, 0))
             self.fixups.append((add_off, str(ops[0]), R_AARCH64_ADD_ABS_LO12_NC, "add_lo12"))
             if isinstance(loc, StackLoc):
-                self._emit(str_imm(dst, Reg.X29, loc.offset))
+                self._emit(self._store_stack_gp(dst, loc.offset))
             return
 
         if op == "debug_loc":
@@ -775,7 +685,7 @@ class FuncCodegen:
             self._debug_locs.append((self._pos(), fname, line))
             return
 
-        self._emit(nop())  # unknown op — keep offsets consistent
+        self._emit(nop())
 
     # ── Main entry ────────────────────────────────────────────────────────────
 
@@ -787,13 +697,9 @@ class FuncCodegen:
             for instr in block.instrs:
                 self._instr(instr)
 
-        # ── Fix up branch targets ─────────────────────────────────────────────
         relocs: list[tuple[int, str, int]] = []
         for patch_off, label, rtype, kind in self.fixups:
             if kind in ("adrp", "add_lo12"):
-                # Data-symbol references are never internal labels -- these
-                # always become real ELF relocations (offset is 0 by
-                # convention; the addend, if any, is elf.py's concern).
                 relocs.append((patch_off, label, rtype))
                 continue
             if label in self.block_off and kind != "bl":
@@ -801,7 +707,7 @@ class FuncCodegen:
                 new_word = self._patch_branch(patch_off, kind, offset_words)
                 self.buf[patch_off:patch_off + 4] = new_word
             else:
-                relocs.append((patch_off, label, rtype))  # external symbol (bl) or unresolved
+                relocs.append((patch_off, label, rtype))
 
         return FuncCode(
             name=self.func.name,
