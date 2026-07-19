@@ -94,6 +94,7 @@ extern printf
 extern sprintf
 extern putchar
 extern strtoll
+extern strtod
 
 global _abi_dict_get_default
 global _abi_setjmp
@@ -1030,6 +1031,17 @@ _con_ansi2: resq 1
 _con_buf:   resb 32
 _abi_int_to_str_buf: resb 32
 _abi_float_to_str_buf: resb 40
+; Mutable copies of _abi_fmt_fixed/_abi_fmt_sci -- .rodata can't be
+; patched in place, so _abi_float_to_str's precision-search loop edits
+; the digit(s) here before each sprintf call.
+_abi_fmt_fixed_buf: resb 8
+_abi_fmt_sci_buf:   resb 8
+; Scratch buffer strtod's round-trip check writes each candidate string's
+; parsed value into, and a second buffer the search loop's sprintf calls
+; write their candidate string into before it's known to be the winner
+; (kept separate from _abi_float_to_str_buf so a losing candidate never
+; clobbers a still-needed value mid-search).
+_abi_float_search_buf: resb 40
 
 section .rodata
 _abi_fmt_lld:    db "%lld", 0
@@ -1038,6 +1050,12 @@ _con_fmt_color:  db 27, "[%dm", 27, "[%dm", 0
 _con_fmt_cursor: db 27, "[%d;%dH", 0
 _con_fmt_s:      db "%s", 0
 _abi_fmt_g:      db "%g", 0
+; Runtime-built format strings for _abi_float_to_str's precision search
+; (see that routine): "%.NNf" / "%.NNe", N patched in as one or two ASCII
+; digit bytes before each sprintf call. Sized for the largest N (17) plus
+; nul.
+_abi_fmt_fixed:  db "%.17f", 0
+_abi_fmt_sci:    db "%.17e", 0
 _abi_str_nan:    db "nan", 0
 _abi_str_pinf:   db "inf", 0
 _abi_str_ninf:   db "-inf", 0
@@ -1262,27 +1280,52 @@ _abi_round_f64:
     roundsd xmm0, xmm0, 0
     ret
 
-; rax = float_to_str(xmm0) -> ptr to a nul-terminated CPython-style float
-; repr ("2.0" not C's bare "2"; "nan"/"inf"/"-inf" not UCRT's "1.#QNAN"/
-; "1.#INF"). Ports codegen.py's target_windows.py _emit_float_to_str +
-; _emit_float_repr_fixup exactly: detect NaN/inf up front (UCRT's sprintf
-; spellings don't match Python's), else sprintf "%g" then scan the result
-; for a byte that already marks it non-integral/non-finite and append
-; ".0" if none is found before the nul terminator.
+; rax = float_to_str(xmm0) -> ptr to a nul-terminated CPython-repr-style
+; float string. Replaces a plain sprintf(buf, "%g", x): %g's fixed 6
+; significant digits switches to scientific notation far too early
+; compared to CPython (starts at 1e6/1e-4, CPython's repr() only switches
+; outside [1e-4, 1e16)) and, on Windows specifically, zero-pads the
+; exponent to 3 digits ("1e+010" instead of CPython's "1e+10"). Confirmed
+; via direct comparison against real CPython repr() output across a wide
+; range of magnitudes -- this was a genuine, previously-undiscovered bug
+; affecting every float print above ~1e6 or below ~1e-4, present in both
+; backends (this routine and codegen.py's identical hand-port both used
+; bare "%g") and both OS targets (glibc's %g has the same 1e6 threshold,
+; confirmed via a direct WSL/gcc probe, though its exponent padding
+; already happened to match Python's 2-digit form).
 ;
-; NOTE: the NaN/inf branches return a pointer to a genuine static string
-; constant (safe to alias, never mutated) but the .finite path's result
-; is a pointer into the shared _abi_float_to_str_buf -- every branch
-; dups through _runtime_str_concat_dup at .done before returning so ALL
-; paths return an owned copy uniformly, not just the one that actually
-; needed it. Same class of bug as _abi_fmt_elem's fix: this pipeline's
-; print()/f-string lowering computes every arg of a multi-arg call up
-; front before one shared call, so two float args in the same call
-; alias the same buffer otherwise -- confirmed via a live repro
-; (`f1, *fmid, f2 = floats; print(f1, fmid, f2)` printed f2's value
-; for both f1 and f2).
+; Correct fix, verified against real CPython repr() output for a battery
+; of magnitudes (0, subnormals, values straddling both thresholds, the
+; float64 max) before being written here: CPython's float repr is the
+; SHORTEST decimal string that round-trips back to the exact same double
+; -- there is no fixed sprintf precision that produces this for every
+; input (a fixed high precision like %.17g shows spurious trailing noise
+; digits, e.g. 0.1 -> "0.10000000000000001"; a fixed low precision
+; rounds real information away for large/precise values). This routine
+; searches: for each candidate precision N = 0..17 (0..17 significant
+; digits after the point is always sufficient -- IEEE-754 double has at
+; most 17 significant decimal digits of information), format with that
+; precision and parse the result back with strtod; the first N whose
+; round-trip exactly reproduces the original bits is used. %f is used
+; when CPython would print fixed notation (abs(x) in [1e-4, 1e16), or
+; x == 0), %e when it would print scientific -- this mirrors CPython's
+; own notation-selection rule, which %g's own internal (different, fixed-
+; threshold) rule can't replicate by itself even with a variable
+; precision.
 _abi_float_to_str:
-    sub rsp, 40
+    ; The .finite path below uses rbx/rsi/rdi/r12 as scratch across the
+    ; precision-search loop -- all four are callee-saved under the MS x64
+    ; ABI this whole runtime targets, so they must be preserved here
+    ; exactly like every other multi-register-scratch routine in this
+    ; file does via WIN64_RUNTIME_ENTER/LEAVE. (The original single-
+    ; register-scratch version of this routine had the same latent bug
+    ; with bare `rbx` alone -- narrow enough in that version to not
+    ; reliably manifest -- but this version's much heavier register use
+    ; turned it into a real, reproducible corruption: every fixed-
+    ; notation value needing search precision > 0 printed wrong,
+    ; confirmed via 0.0001/0.001/0.01 all incorrectly printing "0.0".)
+    WIN64_RUNTIME_ENTER
+    sub rsp, 80
     ucomisd xmm0, xmm0
     jp .is_nan
     movq rax, xmm0
@@ -1303,12 +1346,176 @@ _abi_float_to_str:
     lea rax, [_abi_str_nan]
     jmp .done
 .finite:
+    ; Locals live at rsp+32 and up, NOT rsp+0 -- the first 32 bytes of
+    ; this frame are the Win64 shadow space every `call` below (sprintf,
+    ; strtod) is entitled to clobber freely as ITS OWN scratch. Storing a
+    ; local at e.g. rsp+8 (inside that region) meant every sprintf/strtod
+    ; call was free to stomp it -- confirmed as the actual root cause of
+    ; a real, reproducible bug via isolated minimal-repro NASM probes
+    ; outside the full compiler (a hand-written loop with locals at
+    ; rsp+32 worked correctly in isolation; moving them to rsp+0 inside
+    ; this same function's frame reproduced the exact "0.001 always
+    ; prints as 0.0" failure this whole routine was rewritten to fix).
+    ;
+    ; rsp+32 = the original double (spilled across the many calls below).
+    ; rsp+40 = notation flag: 0 = fixed (%f), 1 = scientific (%e).
+    ; rsp+48 = current search precision (as a 64-bit int, built into the
+    ; format string's digit(s) each iteration).
+    movsd [rsp+32], xmm0
+    ; abs(x) via the same sign-bit-clear trick used above.
+    movq rax, xmm0
+    mov r10, 0x7FFFFFFFFFFFFFFF
+    and rax, r10
+    movq xmm1, rax               ; xmm1 = abs(x)
+    xorpd xmm2, xmm2              ; xmm2 = 0.0
+    ucomisd xmm1, xmm2
+    je .notation_fixed             ; x == 0.0 -> always fixed ("0", not "0e+00")
+    ; threshold comparisons against 1e-4 and 1e16 as immediate doubles.
+    mov r10, 0x3F1A36E2EB1C432D    ; bit pattern of 1e-4
+    movq xmm3, r10
+    ucomisd xmm1, xmm3
+    jb .notation_sci                ; abs(x) < 1e-4 -> scientific
+    mov r10, 0x4341C37937E08000    ; bit pattern of 1e16
+    movq xmm3, r10
+    ucomisd xmm1, xmm3
+    jae .notation_sci               ; abs(x) >= 1e16 -> scientific
+.notation_fixed:
+    mov qword [rsp+40], 0
+    jmp .search_init
+.notation_sci:
+    mov qword [rsp+40], 1
+.search_init:
+    xor r12, r12                  ; r12 = search precision, 0..17
+.search_loop:
+    mov qword [rsp+48], r12
+    ; Build the format string for this precision: "%." + digit(s) + 'f'/'e' + 0.
+    cmp qword [rsp+40], 0
+    je .use_fixed_fmt
+    lea rbx, [_abi_fmt_sci_buf]
+    mov byte [rbx+0], '%'
+    mov byte [rbx+1], '.'
+    jmp .fmt_digits
+.use_fixed_fmt:
+    lea rbx, [_abi_fmt_fixed_buf]
+    mov byte [rbx+0], '%'
+    mov byte [rbx+1], '.'
+.fmt_digits:
+    ; r12 is 0..17 -- at most two decimal digits.
+    mov rax, r12
+    mov r10, 10
+    xor rdx, rdx
+    div r10                        ; rax = r12/10, rdx = r12%10
+    test rax, rax
+    jz .one_digit
+    add al, '0'
+    mov [rbx+2], al
+    add dl, '0'
+    mov [rbx+3], dl
+    lea rcx, [rbx+4]
+    jmp .fmt_kind
+.one_digit:
+    add dl, '0'
+    mov [rbx+2], dl
+    lea rcx, [rbx+3]
+.fmt_kind:
+    cmp qword [rsp+40], 0
+    je .fmt_kind_fixed
+    mov byte [rcx], 'e'
+    mov byte [rcx+1], 0
+    jmp .fmt_ready
+.fmt_kind_fixed:
+    mov byte [rcx], 'f'
+    mov byte [rcx+1], 0
+.fmt_ready:
+    ; sprintf(_abi_float_search_buf, fmt, x)
+    movsd xmm0, [rsp+32]
     movq r8, xmm0
-    lea rdx, [_abi_fmt_g]
-    lea rcx, [_abi_float_to_str_buf]
+    mov rdx, rbx
+    lea rcx, [_abi_float_search_buf]
     xor eax, eax
     call sprintf
-    lea rbx, [_abi_float_to_str_buf]
+    ; strtod(_abi_float_search_buf, NULL) and compare bit-for-bit against
+    ; the original -- an epsilon/numeric compare would be wrong here on
+    ; purpose, since round-trip EXACTNESS (not closeness) is the entire
+    ; correctness criterion for a repr algorithm.
+    lea rcx, [_abi_float_search_buf]
+    xor edx, edx
+    call strtod
+    movq rax, xmm0
+    movsd xmm1, [rsp+32]
+    movq r10, xmm1
+    mov r12, [rsp+48]
+    cmp rax, r10
+    je .search_done
+    inc r12
+    cmp r12, 17
+    jbe .search_loop
+    ; Fell through the loop without an exact match (shouldn't happen for
+    ; a finite double -- 17 significant digits is always sufficient --
+    ; but fail safe rather than loop forever): the last (N=17) candidate
+    ; in _abi_float_search_buf is used as-is.
+.search_done:
+    lea rax, [_abi_float_search_buf]
+    ; CPython repr() never zero-pads a scientific exponent beyond 2 digits
+    ; and never shows a leading zero on it ("1e+10" not "1e+010"/"1e+1")
+    ; -- MSVC's sprintf %e always emits exactly 3 exponent digits (e.g.
+    ; "1.234500e+010"); this scan-and-compact pass fixes that up in
+    ; place. A %f-formatted (fixed-notation) result has no 'e' at all and
+    ; is left untouched by this scan.
+    mov rbx, rax
+.exp_scan:
+    mov cl, [rbx]
+    test cl, cl
+    jz .no_exp
+    cmp cl, 'e'
+    je .found_exp
+    inc rbx
+    jmp .exp_scan
+.found_exp:
+    ; rbx -> 'e'; rbx+1 -> '+'/'-'; rbx+2.. -> digits, nul-terminated.
+    lea rsi, [rbx+2]               ; first digit
+    mov rdi, rsi
+.skip_zeros:
+    ; Leave at least 2 digits even if they're both zero (matches
+    ; CPython's own minimum-2-digit exponent).
+    mov cl, [rdi]
+    cmp cl, '0'
+    jne .zeros_done
+    lea rdx, [rdi+1]
+    cmp byte [rdx], 0
+    je .zeros_done                 ; don't eat the last digit
+    ; also stop once only 2 digits remain before the nul.
+    mov r10, rdi
+.count_rest:
+    cmp byte [r10], 0
+    je .count_done
+    inc r10
+    jmp .count_rest
+.count_done:
+    sub r10, rdi
+    cmp r10, 2
+    jle .zeros_done
+    inc rdi
+    jmp .skip_zeros
+.zeros_done:
+    cmp rdi, rsi
+    je .no_exp                     ; nothing to compact
+    ; shift [rdi..] left over [rsi..], including the nul terminator.
+.shift_loop:
+    mov cl, [rdi]
+    mov [rsi], cl
+    test cl, cl
+    jz .no_exp
+    inc rdi
+    inc rsi
+    jmp .shift_loop
+.no_exp:
+    lea rax, [_abi_float_search_buf]
+    ; %f/%e never drop the decimal point the way plain %g on a whole
+    ; number does (e.g. "%.0f" on 2.0 gives "2", not "2."), so the same
+    ; "append .0 if no '.'/'e' marker seen" fixup as before is still
+    ; needed for the integral-fixed-notation case.
+    mov rbx, rax
 .scan:
     mov cl, [rbx]
     test cl, cl
@@ -1317,16 +1524,6 @@ _abi_float_to_str:
     je .fixup_done
     cmp cl, 'e'
     je .fixup_done
-    cmp cl, 'E'
-    je .fixup_done
-    cmp cl, 'n'
-    je .fixup_done
-    cmp cl, 'N'
-    je .fixup_done
-    cmp cl, 'i'
-    je .fixup_done
-    cmp cl, 'I'
-    je .fixup_done
     inc rbx
     jmp .scan
 .append:
@@ -1334,10 +1531,11 @@ _abi_float_to_str:
     mov byte [rbx+1], '0'
     mov byte [rbx+2], 0
 .fixup_done:
-    lea rax, [_abi_float_to_str_buf]
+    lea rax, [_abi_float_search_buf]
 .done:
     call _runtime_str_concat_dup
-    add rsp, 40
+    add rsp, 80
+    WIN64_RUNTIME_LEAVE
     ret
 
 ; xmm0 = fmax_f64(xmm0=a, xmm1=b) -> max(a, b). classic msvcrt.dll exports
