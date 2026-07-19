@@ -2,107 +2,160 @@ from __future__ import annotations
 
 import unittest
 
-from asmpython._backends.arm64 import codegen, encoder, regalloc
-from asmpython._compiler.ir import I64, IRBlock, IRFunc, IRInstr, IRValue
+from asmpython._backends.arm64.codegen import compile_func
+from asmpython._backends.arm64.encoder import Reg, VReg
+from asmpython._backends.arm64.regalloc import (
+    AllocResult,
+    RegLoc,
+    StackLoc,
+    _FP_POOL,
+    _GP_POOL,
+)
+from asmpython._compiler.ir import I64, PTR, IRBlock, IRFunc, IRInstr, IRValue
 
 
-class Arm64CodegenSmokeTests(unittest.TestCase):
-    def test_codegen_import_and_scratch_register_reservations(self) -> None:
-        self.assertNotIn(encoder.Reg.X13, regalloc._GP_POOL)
-        self.assertNotIn(encoder.Reg.X14, regalloc._GP_POOL)
-        self.assertNotIn(encoder.Reg.X15, regalloc._GP_POOL)
-        self.assertNotIn(encoder.VReg.V14, regalloc._FP_POOL)
-        self.assertNotIn(encoder.VReg.V15, regalloc._FP_POOL)
+class Arm64CodegenTests(unittest.TestCase):
+    def test_codegen_scratch_registers_are_not_allocatable(self) -> None:
+        self.assertTrue({Reg.X13, Reg.X14, Reg.X15}.isdisjoint(_GP_POOL))
+        self.assertTrue({VReg.V14, VReg.V15}.isdisjoint(_FP_POOL))
 
-    def test_simple_add_reaches_machine_code(self) -> None:
-        left = IRValue("left", I64)
-        right = IRValue("right", I64)
+    def test_minimal_integer_add_matches_real_aarch64_assembler(self) -> None:
+        a = IRValue("a", I64)
+        b = IRValue("b", I64)
         result = IRValue("result", I64)
         func = IRFunc(
-            "add_two",
-            [left, right],
+            "add2",
+            [a, b],
             I64,
             [
                 IRBlock(
                     "entry",
                     [
-                        IRInstr("iadd", result, [left, right]),
+                        IRInstr("iadd", result, [a, b]),
                         IRInstr("ret", None, [result]),
                     ],
                 )
             ],
         )
-
-        allocation = regalloc.allocate(func)
-        compiled = codegen.compile_func(func, allocation)
-
-        self.assertEqual(compiled.name, "add_two")
-        self.assertEqual(compiled.relocs, [])
-        self.assertGreaterEqual(len(compiled.code), 20)
-        self.assertEqual(len(compiled.code) % 4, 0)
-        self.assertTrue(compiled.code.endswith(encoder.ret()))
-
-    def test_negative_spill_offsets_use_signed_stack_accesses(self) -> None:
-        left = IRValue("left", I64)
-        right = IRValue("right", I64)
-        result = IRValue("result", I64)
-        func = IRFunc(
-            "spilled_add",
-            [],
-            I64,
-            [
-                IRBlock(
-                    "entry",
-                    [
-                        IRInstr("iadd", result, [left, right]),
-                        IRInstr("ret", None, [result]),
-                    ],
-                )
-            ],
-        )
-        allocation = regalloc.AllocResult(
+        alloc = AllocResult(
             locs={
-                left.name: regalloc.StackLoc(-8),
-                right.name: regalloc.StackLoc(-16),
-                result.name: regalloc.StackLoc(-24),
+                "a": RegLoc(Reg.X0),
+                "b": RegLoc(Reg.X1),
+                "result": RegLoc(Reg.X9),
             },
             alloca_slots={},
-            stack_bytes=32,
+            stack_bytes=0,
             callee_saved=[],
             callee_saved_fp=[],
         )
 
-        compiled = codegen.compile_func(func, allocation)
+        code = compile_func(func, alloc).code
 
-        self.assertIn(encoder.ldur(encoder.Reg.X13, encoder.Reg.X29, -8), compiled.code)
-        self.assertIn(encoder.ldur(encoder.Reg.X14, encoder.Reg.X29, -16), compiled.code)
-        # Both inputs occupy X13/X14, so the spillable result deliberately
-        # reuses the alternate scratch X14 only after ADD has consumed it.
-        self.assertIn(encoder.stur(encoder.Reg.X14, encoder.Reg.X29, -24), compiled.code)
-        self.assertEqual(compiled.relocs, [])
+        # Independently assembled with:
+        #   clang --target=aarch64-linux-gnu -c add2.s
+        expected = bytes.fromhex(
+            "fd7bbfa9"  # stp x29, x30, [sp, #-16]!
+            "fd030091"  # add x29, sp, #0
+            "0900018b"  # add x9, x0, x1
+            "e00309aa"  # mov x0, x9
+            "bf030091"  # add sp, x29, #0
+            "fd7bc1a8"  # ldp x29, x30, [sp], #16
+            "c0035fd6"  # ret
+        )
+        self.assertEqual(code, expected)
 
-    def test_large_frame_expands_push_and_pop(self) -> None:
+    def test_alloca_store_load_matches_real_aarch64_assembler(self) -> None:
+        slot = IRValue("slot", PTR)
+        value = IRValue("value", I64)
+        loaded = IRValue("loaded", I64)
         func = IRFunc(
-            "large_frame",
+            "stack_roundtrip",
             [],
-            None,
-            [IRBlock("entry", [IRInstr("ret", None, [])])],
+            I64,
+            [
+                IRBlock(
+                    "entry",
+                    [
+                        IRInstr("alloca", slot, [8]),
+                        IRInstr("const", value, [42]),
+                        IRInstr("store", None, [value, slot]),
+                        IRInstr("load", loaded, [slot]),
+                        IRInstr("ret", None, [loaded]),
+                    ],
+                )
+            ],
         )
-        allocation = regalloc.AllocResult(
-            locs={},
-            alloca_slots={},
-            stack_bytes=4608,
+        alloc = AllocResult(
+            locs={
+                "value": RegLoc(Reg.X9),
+                "loaded": RegLoc(Reg.X10),
+            },
+            alloca_slots={"slot": -8},
+            stack_bytes=16,
             callee_saved=[],
             callee_saved_fp=[],
         )
 
-        compiled = codegen.compile_func(func, allocation)
+        code = compile_func(func, alloc).code
 
-        # The frame is 4624 bytes including the saved FP/LR record, too large
-        # for STP/LDP's signed scaled imm7 writeback form. Both ends therefore
-        # expand to explicit SP adjustment sequences around offset-zero pairs.
-        self.assertEqual(len(compiled.code), 32)
-        self.assertTrue(compiled.code.endswith(encoder.ret()))
+        expected = bytes.fromhex(
+            "fd7bbfa9"  # stp x29, x30, [sp, #-16]!
+            "fd030091"  # add x29, sp, #0
+            "ff4300d1"  # sub sp, sp, #16
+            "4d0580d2"  # movz x13, #42
+            "e9030daa"  # mov x9, x13
+            "ad2300d1"  # sub x13, x29, #8
+            "a90100f9"  # str x9, [x13]
+            "ad2300d1"  # sub x13, x29, #8
+            "aa0140f9"  # ldr x10, [x13]
+            "e0030aaa"  # mov x0, x10
+            "bf030091"  # add sp, x29, #0
+            "fd7bc1a8"  # ldp x29, x30, [sp], #16
+            "c0035fd6"  # ret
+        )
+        self.assertEqual(code, expected)
+
+    def test_negative_spill_slot_uses_materialized_address(self) -> None:
+        value = IRValue("value", I64)
+        func = IRFunc(
+            "spill7",
+            [],
+            I64,
+            [
+                IRBlock(
+                    "entry",
+                    [
+                        IRInstr("const", value, [7]),
+                        IRInstr("ret", None, [value]),
+                    ],
+                )
+            ],
+        )
+        alloc = AllocResult(
+            locs={"value": StackLoc(-8)},
+            alloca_slots={},
+            stack_bytes=16,
+            callee_saved=[],
+            callee_saved_fp=[],
+        )
+
+        code = compile_func(func, alloc).code
+
+        expected = bytes.fromhex(
+            "fd7bbfa9"  # stp x29, x30, [sp, #-16]!
+            "fd030091"  # add x29, sp, #0
+            "ff4300d1"  # sub sp, sp, #16
+            "ed0080d2"  # movz x13, #7
+            "af2300d1"  # sub x15, x29, #8
+            "ed0100f9"  # str x13, [x15]
+            "af2300d1"  # sub x15, x29, #8
+            "ed0140f9"  # ldr x13, [x15]
+            "e0030daa"  # mov x0, x13
+            "bf030091"  # add sp, x29, #0
+            "fd7bc1a8"  # ldp x29, x30, [sp], #16
+            "c0035fd6"  # ret
+        )
+        self.assertEqual(code, expected)
 
 
 if __name__ == "__main__":
