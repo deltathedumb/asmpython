@@ -1,0 +1,54 @@
+name: Verify ARM64 backend
+
+on:
+  push:
+    branches: [beta]
+    paths:
+      - "asmpython/_backends/arm64/**"
+      - "asmpython/_compiler/ir.py"
+      - "tests/test_arm64_codegen.py"
+      - ".github/workflows/arm64-verify.yml"
+  pull_request:
+    paths:
+      - "asmpython/_backends/arm64/**"
+      - "asmpython/_compiler/ir.py"
+      - "tests/test_arm64_codegen.py"
+      - ".github/workflows/arm64-verify.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install AArch64 binutils
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils-aarch64-linux-gnu
+
+      - name: Check Python modules
+        run: |
+          python -m py_compile \
+            asmpython/_backends/arm64/encoder.py \
+            asmpython/_backends/arm64/regalloc.py \
+            asmpython/_backends/arm64/codegen.py \
+            asmpython/_backends/arm64/_stack_access.py \
+            asmpython/_backends/arm64/_verify_encoder.py \
+            asmpython/_backends/arm64/_verify_stack_access.py \
+            tests/test_arm64_codegen.py
+
+      - name: Verify instruction encoder against GNU assembler
+        run: python -m asmpython._backends.arm64._verify_encoder
+
+      - name: Verify stack access sequences against GNU assembler
+        run: python -m asmpython._backends.arm64._verify_stack_access
+
+      - name: Run ARM64 codegen smoke tests
+        run: python -m unittest tests.test_arm64_codegen -v
