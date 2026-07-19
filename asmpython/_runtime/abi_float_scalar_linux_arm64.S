@@ -22,4 +22,12 @@ copysign:
     ret
 .size copysign, .-copysign
 
+/* double nearbyint(double value) -- current FPCR mode, no inexact exception. */
+.global nearbyint
+.type nearbyint, %function
+nearbyint:
+    frinti d0, d0
+    ret
+.size nearbyint, .-nearbyint
+
 .section .note.GNU-stack,"",%progbits

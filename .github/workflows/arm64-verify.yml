@@ -78,6 +78,8 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_degrees --mode cross
       - name: Verify exact radians through QEMU
         run: python -m asmpython._backends.arm64._verify_float_radians --mode cross
+      - name: Verify exact nearbyint through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_nearbyint --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -133,3 +135,5 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_degrees --mode native
       - name: Verify exact radians natively
         run: python -m asmpython._backends.arm64._verify_float_radians --mode native
+      - name: Verify exact nearbyint natively
+        run: python -m asmpython._backends.arm64._verify_float_nearbyint --mode native
