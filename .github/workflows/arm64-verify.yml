@@ -10,6 +10,7 @@ on:
       - "tests/test_arm64_codegen.py"
       - "tests/test_arm64_elf.py"
       - "tests/test_arm64_module_codegen.py"
+      - "tests/test_arm64_source_codegen.py"
       - ".github/workflows/arm64-verify.yml"
   pull_request:
     paths:
@@ -18,6 +19,7 @@ on:
       - "tests/test_arm64_codegen.py"
       - "tests/test_arm64_elf.py"
       - "tests/test_arm64_module_codegen.py"
+      - "tests/test_arm64_source_codegen.py"
       - ".github/workflows/arm64-verify.yml"
 
 permissions:
@@ -52,7 +54,8 @@ jobs:
             asmpython/_backends/arm64/_verify_source.py \
             tests/test_arm64_codegen.py \
             tests/test_arm64_elf.py \
-            tests/test_arm64_module_codegen.py
+            tests/test_arm64_module_codegen.py \
+            tests/test_arm64_source_codegen.py
 
       - name: Verify instruction encoder against GNU assembler
         run: python -m asmpython._backends.arm64._verify_encoder
@@ -63,6 +66,7 @@ jobs:
             tests.test_arm64_codegen \
             tests.test_arm64_elf \
             tests.test_arm64_module_codegen \
+            tests.test_arm64_source_codegen \
             -v
 
       - name: Link and execute generated IR through QEMU
@@ -98,11 +102,13 @@ jobs:
             asmpython/_backends/arm64/_verify_source.py \
             tests/test_arm64_codegen.py \
             tests/test_arm64_elf.py \
-            tests/test_arm64_module_codegen.py
+            tests/test_arm64_module_codegen.py \
+            tests/test_arm64_source_codegen.py
           python -m unittest \
             tests.test_arm64_codegen \
             tests.test_arm64_elf \
             tests.test_arm64_module_codegen \
+            tests.test_arm64_source_codegen \
             -v
 
       - name: Link and execute generated IR natively
