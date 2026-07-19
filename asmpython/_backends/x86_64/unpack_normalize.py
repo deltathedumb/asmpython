@@ -1,28 +1,42 @@
-"""Normalize literal destructuring before x86-64 IR lowering.
+"""Normalize statically typed destructuring before x86-64 IR lowering.
 
 The generic single-iterable TupleAssign path in ``ir_lower.py`` represents every
 list/tuple cell as I64. That is correct for opaque container storage, but wrong
-for a literal tuple whose AST still carries each concrete element expression and
-for a literal string whose elements are one-character strings.
+for a tuple whose AST carries per-position types and for a literal string whose
+elements are one-character strings.
 
 Keep this adaptation backend-local until the target-neutral IR has a first-class
 unpack operation. The pass runs after semantic analysis and rewrites only shapes
-sema has already accepted:
+that can reuse existing typed parallel-assignment/subscript lowering safely:
 
 * ``a, b = (expr_a, expr_b)`` becomes the ordinary parallel form
   ``a, b = expr_a, expr_b``. Existing lowering evaluates every RHS first and
   stores each real IR type, preserving side-effect and swap semantics.
+* ``a, b = pair`` becomes typed tuple subscripts when ``pair`` is a plain name
+  with sema-stamped per-slot types. Re-reading a name has no side effects.
 * ``a, b = "xy"`` becomes parallel string subscripts. Existing subscript
   lowering calls ``_abi_str_char_at`` and returns PTR values.
 
-Tuple variables, tuple-returning calls, lists, starred targets, mismatched
-literal lengths, and non-name targets remain untouched.
+Tuple-returning calls, lists, starred targets, mismatched literal lengths, and
+non-name targets remain untouched.
 """
 from __future__ import annotations
 
 from dataclasses import fields, is_dataclass
 
 from ..._compiler import ast_nodes as A
+
+
+def _typed_subscripts(source, types: list[str], stmt: A.TupleAssign) -> list:
+    return [
+        A.Subscript(
+            obj=source,
+            index=A.IntLit(index, pos=stmt.pos),
+            pos=stmt.pos,
+            inferred_type=element_type,
+        )
+        for index, element_type in enumerate(types)
+    ]
 
 
 def _literal_unpack_values(stmt: A.TupleAssign) -> list | None:
@@ -38,26 +52,23 @@ def _literal_unpack_values(stmt: A.TupleAssign) -> list | None:
         if len(source.elems) != len(stmt.targets):
             return None
         return list(source.elems)
+    if isinstance(source, A.Name) and source.inferred_type == "tuple":
+        element_types = list(source.tuple_elem_types)
+        if len(element_types) != len(stmt.targets):
+            return None
+        return _typed_subscripts(source, element_types, stmt)
     if isinstance(source, A.StrLit):
         # Python strings are Unicode code-point sequences. Host Python's len()
         # gives exactly the target count the existing UTF-8-aware character shim
         # expects; do not rewrite mismatches into unchecked out-of-range reads.
         if len(source.value) != len(stmt.targets):
             return None
-        return [
-            A.Subscript(
-                obj=source,
-                index=A.IntLit(index, pos=stmt.pos),
-                pos=stmt.pos,
-                inferred_type="str",
-            )
-            for index in range(len(stmt.targets))
-        ]
+        return _typed_subscripts(source, ["str"] * len(stmt.targets), stmt)
     return None
 
 
 def normalize_literal_unpacks(root) -> None:
-    """Rewrite literal unpack assignments recursively, in place."""
+    """Rewrite safe typed unpack assignments recursively, in place."""
     seen: set[int] = set()
 
     def visit(value) -> None:
