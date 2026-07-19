@@ -94,6 +94,17 @@ class Arm64LinuxLinkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid AArch64 entry symbol"):
             linux_link.start_source("main; injected")
 
+    def test_runtime_sources_are_modular_and_stable(self) -> None:
+        paths = linux_link.runtime_source_paths()
+        self.assertEqual(
+            tuple(path.name for path in paths),
+            (
+                "abi_shims_linux_arm64.S",
+                "abi_strings_linux_arm64.S",
+            ),
+        )
+        self.assertEqual(linux_link.runtime_source_path(), paths[0])
+
     def test_current_runtime_exports_satisfy_print_object(self) -> None:
         program = self._object_requiring("_abi_int_to_base", "printf")
         self.assertEqual(
@@ -133,15 +144,33 @@ class Arm64LinuxLinkTests(unittest.TestCase):
         ):
             linux_link.validate_runtime_object(runtime)
 
-    def test_build_runtime_object_validates_assembled_payload(self) -> None:
+    def test_build_runtime_object_merges_and_validates_all_slices(self) -> None:
+        slices = [b"core-object", b"string-object"]
         runtime = self._runtime_object()
         toolchain = linux_link.LinuxArm64Toolchain("as", "ld", False)
-        with patch.object(linux_link, "assemble_file", return_value=runtime) as assemble:
+        with (
+            patch.object(
+                linux_link,
+                "assemble_file",
+                side_effect=slices,
+            ) as assemble,
+            patch.object(
+                linux_link,
+                "link_relocatable",
+                return_value=runtime,
+            ) as merge,
+        ):
             self.assertEqual(
                 linux_link.build_runtime_object(toolchain=toolchain),
                 runtime,
             )
-        assemble.assert_called_once()
+
+        self.assertEqual(assemble.call_count, 2)
+        self.assertEqual(
+            [call.args[0].name for call in assemble.call_args_list],
+            ["abi_shims_linux_arm64.S", "abi_strings_linux_arm64.S"],
+        )
+        merge.assert_called_once_with(slices, toolchain=toolchain)
 
     def test_runtime_free_build_rejects_external_symbols(self) -> None:
         program = self._object_requiring("printf")
@@ -180,6 +209,11 @@ class Arm64LinuxLinkTests(unittest.TestCase):
         toolchain = linux_link.LinuxArm64Toolchain("as", "ld", False)
         with self.assertRaisesRegex(ValueError, "at least one ARM64 object"):
             linux_link.link_objects([], toolchain=toolchain)
+        with self.assertRaisesRegex(
+            ValueError,
+            "at least one ARM64 object.*relocatable",
+        ):
+            linux_link.link_relocatable([], toolchain=toolchain)
 
     def test_subprocess_error_preserves_diagnostic(self) -> None:
         failed = subprocess.CompletedProcess(
