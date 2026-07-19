@@ -1,0 +1,78 @@
+name: Apply hosted subprocess command fix
+
+on:
+  pull_request:
+    branches: [beta]
+    paths:
+      - ".github/workflows/apply-driver-shell-fix.yml"
+      - "asmpython/_compiler/driver.py"
+      - "tests/test_driver_run_shell.py"
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply the exact hosted-runner fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("asmpython/_compiler/driver.py")
+          source = path.read_text(encoding="utf-8")
+          old = "proc = subprocess.run(cmd_str, capture_output=True, text=True)"
+          new = "proc = subprocess.run(cmd_str, capture_output=True, text=True, shell=True)"
+          if old in source:
+              source = source.replace(old, new, 1)
+              path.write_text(source, encoding="utf-8")
+          elif new not in source:
+              raise SystemExit("driver._run call shape changed; refusing an unreviewed patch")
+          PY
+          cat > tests/test_driver_run_shell.py <<'PY'
+          from __future__ import annotations
+
+          import unittest
+          from unittest import mock
+
+          from asmpython._compiler import driver
+
+
+          class DriverRunShellTests(unittest.TestCase):
+              def test_string_command_uses_shell_for_cpython_and_selfhost_parity(self) -> None:
+                  completed = mock.Mock(stdout="", stderr="", returncode=0)
+                  with mock.patch.object(driver.subprocess, "run", return_value=completed) as run:
+                      driver._run(["/tool path/nasm", "-f", "elf64", "input file.asm"])
+                  run.assert_called_once_with(
+                      '"/tool path/nasm" -f elf64 "input file.asm"',
+                      capture_output=True,
+                      text=True,
+                      shell=True,
+                  )
+
+
+          if __name__ == "__main__":
+              unittest.main()
+          PY
+      - name: Run focused regression test
+        run: python -m unittest -v tests.test_driver_run_shell
+      - name: Commit patch to PR branch
+        run: |
+          if git diff --quiet -- asmpython/_compiler/driver.py tests/test_driver_run_shell.py; then
+            echo "Patch already committed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add asmpython/_compiler/driver.py tests/test_driver_run_shell.py
+          git commit -m "Run constructed tool commands through the shell"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
