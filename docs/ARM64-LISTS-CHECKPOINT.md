@@ -49,11 +49,13 @@ Committed probes cover:
 
 Every probe asserts its exact undefined-symbol set before tool discovery and
 rejects accidental `_abi_raise` dependencies. Each also has native AArch64 and
-QEMU workflow jobs with exact stdout expectations.
+QEMU workflow jobs with exact stdout expectations. Opaque post-mutation values
+are checked through executable return codes rather than requiring the still-
+unimplemented generic element formatter.
 
 ## Verification status
 
-Directly observed in the current environment:
+Directly observed locally:
 
 - Clang's AArch64 integrated assembler accepted the combined original list source.
 - Clang's AArch64 integrated assembler accepted the dedicated deletion slice.
@@ -65,20 +67,22 @@ Directly observed in the current environment:
   runtime symbols for the original list surface.
 - Disassembly showed resolved calls through allocation, append, self-extend,
   insert, repeat, reverse, and pop.
-- The insertion harness encodes checks for the final `[0, 1, 2, 3, 4]` cell order
-  after middle, very-negative, and oversized insertions.
-- The repetition harness encodes checks for `[7, 8] * 3` plus zero and negative
-  count results.
 
-Not directly observed in the current environment:
+Directly observed in GitHub Actions:
 
-- execution of the deletion probe under `qemu-aarch64`,
-- native ARM64 execution of the deletion probe,
-- the full repository test suite (the execution container cannot resolve GitHub
-  to clone the repository).
+- the deletion probe passed under both native AArch64 and `qemu-aarch64`,
+- every list-core, extend, insert, pop, repeat, reverse, and deletion workflow
+  passed on both execution paths,
+- full ARM64 structural/codegen verification passed,
+- the comprehensive ARM64 source/runtime workflow passed natively and through
+  QEMU after executing every scalar, string, and list stage,
+- `Func(ret_conv="f2i")` calls are normalized to an F64 call result followed by
+  explicit `fptosi`; `math.ceil`, `math.floor`, and `math.trunc` passed natively
+  and through QEMU with Python integer-return semantics.
 
-Do not describe the committed QEMU/native jobs as passed until a workflow or
-independent ARM64 environment records their results.
+The complete cross-platform repository suite has not been run in the local
+container because it cannot materialize the repository. The ARM64-specific test
+and execution workflows are the authoritative verification for this checkpoint.
 
 ## Deliberate exclusions
 
@@ -93,6 +97,8 @@ independent ARM64 environment records their results.
 - Allocation exhaustion and repetition overflow currently return a null result;
   converting those into catchable `MemoryError`/`OverflowError` remains part of
   the exception-runtime track.
+- `ceil`, `floor`, and `trunc` exceptional infinity/NaN behavior remains gated on
+  the ARM64 exception runtime; finite integer-return behavior is verified.
 - Dict and set runtime coverage remains untouched.
 
 ## Next exact step
