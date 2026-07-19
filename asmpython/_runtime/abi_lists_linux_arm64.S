@@ -237,6 +237,79 @@ _abi_list_insert:
 .size _abi_list_insert, .-_abi_list_insert
 
 /*
+ * x0=source list, x1=signed repeat count -> x0=fresh repeated list.
+ * Zero and negative counts return a fresh empty list. Overflow/allocation
+ * failure returns NULL until catchable MemoryError support exists.
+ */
+.global _abi_list_repeat
+.type _abi_list_repeat, %function
+_abi_list_repeat:
+    stp     x29, x30, [sp, #-96]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+    stp     x25, x26, [sp, #64]
+    stp     x27, x28, [sp, #80]
+
+    mov     x19, x0               /* source */
+    mov     x20, x1               /* signed count */
+    cmp     x20, #0
+    b.le    .Llist_repeat_empty
+    ldr     x21, [x19, #8]        /* source length */
+    cbz     x21, .Llist_repeat_empty
+
+    umulh   x9, x21, x20
+    cbnz    x9, .Llist_repeat_fail
+    mul     x22, x21, x20         /* target length */
+    lsr     x9, x22, #61          /* target bytes = target length * 8 */
+    cbnz    x9, .Llist_repeat_fail
+
+    mov     x0, x22
+    bl      _abi_new_list
+    cbz     x0, .Llist_repeat_fail
+    mov     x23, x0               /* destination header */
+    ldr     x24, [x23, #16]       /* destination buffer */
+    ldr     x25, [x19, #16]       /* source buffer */
+    mov     x26, xzr              /* destination index */
+    mov     x27, xzr              /* repeat index */
+.Llist_repeat_outer:
+    cmp     x27, x20
+    b.hs    .Llist_repeat_filled
+    mov     x28, xzr              /* source index */
+.Llist_repeat_inner:
+    cmp     x28, x21
+    b.hs    .Llist_repeat_next
+    ldr     x9, [x25, x28, lsl #3]
+    str     x9, [x24, x26, lsl #3]
+    add     x28, x28, #1
+    add     x26, x26, #1
+    b       .Llist_repeat_inner
+.Llist_repeat_next:
+    add     x27, x27, #1
+    b       .Llist_repeat_outer
+.Llist_repeat_filled:
+    str     x22, [x23, #8]
+    mov     x0, x23
+    b       .Llist_repeat_done
+
+.Llist_repeat_empty:
+    mov     x0, #1
+    bl      _abi_new_list
+    b       .Llist_repeat_done
+.Llist_repeat_fail:
+    mov     x0, xzr
+.Llist_repeat_done:
+    ldp     x27, x28, [sp, #80]
+    ldp     x25, x26, [sp, #64]
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #96
+    ret
+.size _abi_list_repeat, .-_abi_list_repeat
+
+/*
  * x0=list header -> x0=removed final 8-byte cell.
  *
  * This intentionally matches the existing native runtime's current contract:
