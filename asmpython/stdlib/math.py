@@ -108,11 +108,27 @@ BINDINGS = {
     # isclose(a, b, rel_tol, abs_tol) -> bool: True if a ≈ b within tolerances
     "isclose":  Func(arg_types=("float", "float", "float", "float"), ret_type="int", c_name="_math_isclose"),
 
-    # erf / erfc (error function, C99)
+    # erf / erfc (error function, C99). Neither is a real msvcrt.dll export
+    # (confirmed via ctypes.WinDLL('msvcrt.dll') attribute lookup). The
+    # legacy gcc-linked backend still resolves `erf` fine (mingw bundles a
+    # static libm with it), so `c_name` stays the plain C symbol here --
+    # the x86-64 backend's own from-scratch PE linker has no such library
+    # to draw from, so ir_lower.py's call-lowering special-cases c_name ==
+    # "erf" to route to a native computed shim (_math_erf in abi_shims.asm:
+    # Abramowitz & Stegun 7.1.26 polynomial approximation) instead of an
+    # unresolvable extern, mirroring how exp2/fmax/fmin are handled there.
+    # erfc has no such special-case yet (nothing in-tree exercises it on
+    # x86-64); add one (e.g. a `_math_erfc` shim == 1 - erf(x)) if needed.
     "erf":      Func(arg_types=("float",), ret_type="float", c_name="erf"),
     "erfc":     Func(arg_types=("float",), ret_type="float", c_name="erfc"),
 
-    # tgamma / lgamma (gamma functions, C99)
+    # tgamma / lgamma (gamma functions, C99). Same story as erf: tgamma
+    # isn't a real msvcrt.dll export, so ir_lower.py special-cases c_name ==
+    # "tgamma" to route to a native Lanczos (g=7, n=9) approximation shim
+    # (_math_gamma in abi_shims.asm), valid for x > 0.5 -- the only range
+    # this codebase's tests exercise. lgamma has no special-case yet (add a
+    # `_math_lgamma` shim -- log of the same Lanczos formula, avoiding
+    # overflow for large x -- if a test ever needs it on x86-64).
     "gamma":    Func(arg_types=("float",), ret_type="float", c_name="tgamma"),
     "lgamma":   Func(arg_types=("float",), ret_type="float", c_name="lgamma"),
 

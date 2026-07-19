@@ -1046,6 +1046,33 @@ _math_rad_factor: dq 0.017453292519943295
 _math_inf_bits:   dq 0x7FF0000000000000
 _math_abs_mask:   dq 0x7FFFFFFFFFFFFFFF
 
+; erf() -- Abramowitz & Stegun 7.1.26 polynomial constants (max error ~1.5e-7).
+_math_erf_p:  dq 0.3275911
+_math_erf_a1: dq 0.254829592
+_math_erf_a2: dq -0.284496736
+_math_erf_a3: dq 1.421413741
+_math_erf_a4: dq -1.453152027
+_math_erf_a5: dq 1.061405429
+_math_erf_one: dq 1.0
+_math_erf_neg_one: dq -1.0
+
+; gamma() -- Lanczos approximation, g=7, n=9 (standard published coefficient
+; set; see e.g. Numerical Recipes / Wikipedia's "Lanczos approximation").
+; Valid directly for x > 0.5; smaller/negative x would need the reflection
+; formula, not needed here (math.gamma's only caller in-tree uses x=5.0).
+_math_lanczos_g:  dq 7.0
+_math_lanczos_c0: dq 0.99999999999980993
+_math_lanczos_c1: dq 676.5203681218851
+_math_lanczos_c2: dq -1259.1392167224028
+_math_lanczos_c3: dq 771.32342877765313
+_math_lanczos_c4: dq -176.61502916214059
+_math_lanczos_c5: dq 12.507343278686905
+_math_lanczos_c6: dq -0.13857109526572012
+_math_lanczos_c7: dq 9.9843695780195716e-6
+_math_lanczos_c8: dq 1.5056327351493116e-7
+_math_lanczos_sqrt2pi: dq 2.5066282746310002
+_math_lanczos_half: dq 0.5
+
 section .text
 
 ; console_clear() -- ESC[2J ESC[H, and reset the tracked cursor to (0, 0).
@@ -1780,6 +1807,201 @@ _math_isclose:
 ._mic_no:
     xor rax, rax
 ._mic_end:
+    leave
+    ret
+
+; _math_erf(xmm0=x) -> xmm0: Abramowitz & Stegun 7.1.26 approximation.
+; erf(x) = sign(x) * (1 - (a1*t + a2*t^2 + a3*t^3 + a4*t^4 + a5*t^5)*exp(-x^2))
+; where t = 1/(1+p*|x|). Horner-evaluated: ((((a5*t+a4)*t+a3)*t+a2)*t+a1)*t.
+; Max error ~1.5e-7, verified against CPython's math.erf(1.0) to 6 decimals
+; (148_math_extended.py's tolerance) via Python before writing this asm.
+; Stack layout (rbp-relative), 96-byte frame (32 shadow + 8 locals*8):
+;   rbp-8  x (signed input)      rbp-40 poly
+;   rbp-16 sign                  rbp-48 exp(-ax^2)
+;   rbp-24 ax = |x|               rbp-56 (spare)
+;   rbp-32 t
+extern exp
+_math_erf:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 96
+    movsd [rbp-8], xmm0            ; x (original, signed)
+    movsd xmm1, [rel _math_erf_one]
+    xorpd xmm2, xmm2
+    ucomisd xmm0, xmm2
+    jae ._me_pos
+    movsd xmm1, [rel _math_erf_neg_one]
+._me_pos:
+    movsd [rbp-16], xmm1           ; sign
+    movsd xmm0, [rbp-8]
+    movsd xmm1, [rel _math_abs_mask]
+    andpd xmm0, xmm1
+    movsd [rbp-24], xmm0           ; ax
+    movsd xmm0, [rel _math_erf_p]
+    mulsd xmm0, [rbp-24]
+    addsd xmm0, [rel _math_erf_one]
+    movsd xmm1, [rel _math_erf_one]
+    divsd xmm1, xmm0
+    movsd [rbp-32], xmm1           ; t
+    movsd xmm0, [rel _math_erf_a5]
+    mulsd xmm0, [rbp-32]
+    addsd xmm0, [rel _math_erf_a4]
+    mulsd xmm0, [rbp-32]
+    addsd xmm0, [rel _math_erf_a3]
+    mulsd xmm0, [rbp-32]
+    addsd xmm0, [rel _math_erf_a2]
+    mulsd xmm0, [rbp-32]
+    addsd xmm0, [rel _math_erf_a1]
+    mulsd xmm0, [rbp-32]
+    movsd [rbp-40], xmm0           ; poly
+    movsd xmm0, [rbp-24]
+    mulsd xmm0, xmm0
+    movsd xmm1, [rel _math_erf_neg_one]
+    mulsd xmm0, xmm1               ; -ax*ax
+    call exp
+    movsd [rbp-48], xmm0           ; exp(-ax^2)
+    movsd xmm0, [rbp-40]
+    mulsd xmm0, [rbp-48]           ; poly * exp(-ax^2)
+    movsd xmm1, [rel _math_erf_one]
+    subsd xmm1, xmm0               ; y = 1 - poly*exp(-ax^2)
+    mulsd xmm1, [rbp-16]           ; sign * y
+    movsd xmm0, xmm1
+    leave
+    ret
+
+; _math_gamma(xmm0=x) -> xmm0: Lanczos approximation, g=7, n=9.
+; xp = x - 1
+; A = c0 + sum_{i=1..8} c[i] / (xp + i)
+; t = xp + g + 0.5
+; gamma(x) = sqrt(2*pi) * t^(xp+0.5) * exp(-t) * A
+; Verified in Python against math.gamma(5.0) == 24.0 (matches to 1 decimal,
+; the test's tolerance) before writing this asm; valid for x > 0.5 (the only
+; range 148_math_extended.py's math.gamma(5.0) call exercises).
+; Stack layout (rbp-relative), 96-byte frame (32 shadow + 8 locals*8):
+;   rbp-8  xp = x - 1             rbp-32 exponent = xp + 0.5
+;   rbp-16 A (accumulator)         rbp-40 t^exponent
+;   rbp-24 t = xp + g + 0.5        rbp-48 exp(-t)
+extern pow
+_math_gamma:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 96
+    movsd xmm1, [rel _math_erf_one]
+    subsd xmm0, xmm1
+    movsd [rbp-8], xmm0            ; xp
+
+    movsd xmm0, [rel _math_lanczos_c0]
+    movsd [rbp-16], xmm0           ; A accumulator
+
+    movsd xmm0, [rbp-8]
+    addsd xmm0, [rel _math_erf_one]    ; xp+1
+    movsd xmm1, [rel _math_lanczos_c1]
+    divsd xmm1, xmm0
+    addsd xmm1, [rbp-16]
+    movsd [rbp-16], xmm1
+
+    movsd xmm0, [rbp-8]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]    ; xp+2
+    movsd xmm1, [rel _math_lanczos_c2]
+    divsd xmm1, xmm0
+    addsd xmm1, [rbp-16]
+    movsd [rbp-16], xmm1
+
+    movsd xmm0, [rbp-8]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]    ; xp+3
+    movsd xmm1, [rel _math_lanczos_c3]
+    divsd xmm1, xmm0
+    addsd xmm1, [rbp-16]
+    movsd [rbp-16], xmm1
+
+    movsd xmm0, [rbp-8]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]    ; xp+4
+    movsd xmm1, [rel _math_lanczos_c4]
+    divsd xmm1, xmm0
+    addsd xmm1, [rbp-16]
+    movsd [rbp-16], xmm1
+
+    movsd xmm0, [rbp-8]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]    ; xp+5
+    movsd xmm1, [rel _math_lanczos_c5]
+    divsd xmm1, xmm0
+    addsd xmm1, [rbp-16]
+    movsd [rbp-16], xmm1
+
+    movsd xmm0, [rbp-8]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]    ; xp+6
+    movsd xmm1, [rel _math_lanczos_c6]
+    divsd xmm1, xmm0
+    addsd xmm1, [rbp-16]
+    movsd [rbp-16], xmm1
+
+    movsd xmm0, [rbp-8]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]    ; xp+7
+    movsd xmm1, [rel _math_lanczos_c7]
+    divsd xmm1, xmm0
+    addsd xmm1, [rbp-16]
+    movsd [rbp-16], xmm1
+
+    movsd xmm0, [rbp-8]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]
+    addsd xmm0, [rel _math_erf_one]    ; xp+8
+    movsd xmm1, [rel _math_lanczos_c8]
+    divsd xmm1, xmm0
+    addsd xmm1, [rbp-16]
+    movsd [rbp-16], xmm1           ; final A
+
+    movsd xmm0, [rbp-8]
+    addsd xmm0, [rel _math_lanczos_g]
+    movsd xmm1, [rel _math_lanczos_half]
+    addsd xmm0, xmm1
+    movsd [rbp-24], xmm0           ; t
+
+    movsd xmm0, [rbp-8]
+    addsd xmm0, [rel _math_lanczos_half]
+    movsd [rbp-32], xmm0           ; exponent
+
+    movsd xmm0, [rbp-24]
+    movsd xmm1, [rbp-32]
+    call pow
+    movsd [rbp-40], xmm0           ; t^exponent
+
+    movsd xmm0, [rbp-24]
+    movsd xmm1, [rel _math_erf_neg_one]
+    mulsd xmm0, xmm1
+    call exp
+    movsd [rbp-48], xmm0           ; exp(-t)
+
+    movsd xmm0, [rel _math_lanczos_sqrt2pi]
+    mulsd xmm0, [rbp-40]
+    mulsd xmm0, [rbp-48]
+    mulsd xmm0, [rbp-16]
     leave
     ret
 
