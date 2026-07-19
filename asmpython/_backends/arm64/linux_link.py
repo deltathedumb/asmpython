@@ -1,12 +1,12 @@
 """Experimental Linux AArch64 object assembly and executable linking.
 
 This module is the reusable bridge between the object-only backend and the
-future compiler-driver integration.  It deliberately remains an explicit API:
+future compiler-driver integration. It deliberately remains an explicit API:
 ``asmpython._backends.arm64`` still does not advertise ``__module_backend__``
 because the freestanding runtime covers only a small source subset.
 
-The builder has no host-architecture assumption.  On an AArch64 Linux host it
-uses native ``as``/``ld``; elsewhere it uses GNU cross-binutils.  Tool paths can
+The builder has no host-architecture assumption. On an AArch64 Linux host it
+uses native ``as``/``ld``; elsewhere it uses GNU cross-binutils. Tool paths can
 be overridden for hermetic builds or alternate toolchains.
 """
 from __future__ import annotations
@@ -20,7 +20,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from .elf_inspect import Arm64ElfFormatError, undefined_symbols
 from .module_codegen import compile_ir_module
+
+
+# Keep this synchronized with global exports in abi_shims_linux_arm64.S. This
+# is intentionally a compatibility allowlist, not a promise that the complete
+# x86-64 runtime has been ported.
+RUNTIME_EXPORTS = frozenset({"_abi_int_to_base", "printf", "strlen"})
 
 
 @dataclass(frozen=True)
@@ -57,7 +64,9 @@ def discover_toolchain(
 ) -> LinuxArm64Toolchain:
     """Resolve native or GNU-cross AArch64 assembler/linker executables."""
     if mode not in {"auto", "native", "cross"}:
-        raise ValueError(f"ARM64 toolchain mode must be auto/native/cross, got {mode!r}")
+        raise ValueError(
+            f"ARM64 toolchain mode must be auto/native/cross, got {mode!r}"
+        )
 
     machine = platform.machine().lower()
     host_is_arm64 = machine in {"aarch64", "arm64"}
@@ -153,7 +162,9 @@ def build_runtime_object(*, toolchain: LinuxArm64Toolchain) -> bytes:
 
 
 def start_source(entry_symbol: str = "main") -> str:
-    if not entry_symbol or not all(ch.isalnum() or ch in "_.$" for ch in entry_symbol):
+    if not entry_symbol or not all(
+        char.isalnum() or char in "_.$" for char in entry_symbol
+    ):
         raise ValueError(f"invalid AArch64 entry symbol {entry_symbol!r}")
     return (
         ".text\n"
@@ -178,6 +189,36 @@ def build_start_object(
         toolchain=toolchain,
         filename="start.S",
     )
+
+
+def required_external_symbols(program_object: bytes) -> frozenset[str]:
+    """Return the program object's unresolved symbol requirements."""
+    try:
+        return undefined_symbols(program_object)
+    except Arm64ElfFormatError as exc:
+        raise Arm64LinkError(f"invalid ARM64 program object: {exc}") from exc
+
+
+def validate_runtime_requirements(
+    program_object: bytes,
+    *,
+    include_runtime: bool,
+) -> frozenset[str]:
+    """Reject symbols not supplied by the selected experimental link set."""
+    required = required_external_symbols(program_object)
+    available = RUNTIME_EXPORTS if include_runtime else frozenset()
+    missing = required - available
+    if missing:
+        rendered = ", ".join(sorted(missing))
+        if include_runtime:
+            raise Arm64LinkError(
+                "current freestanding ARM64 runtime does not provide required "
+                f"symbol(s): {rendered}"
+            )
+        raise Arm64LinkError(
+            "runtime-free ARM64 build has unresolved symbol(s): " + rendered
+        )
+    return required
 
 
 def link_objects(
@@ -219,7 +260,14 @@ def build_executable_from_object(
     entry_symbol: str = "main",
     include_runtime: bool = True,
 ) -> bytes:
-    objects = [build_start_object(entry_symbol, toolchain=toolchain), program_object]
+    validate_runtime_requirements(
+        program_object,
+        include_runtime=include_runtime,
+    )
+    objects = [
+        build_start_object(entry_symbol, toolchain=toolchain),
+        program_object,
+    ]
     if include_runtime:
         objects.append(build_runtime_object(toolchain=toolchain))
     return link_objects(objects, toolchain=toolchain)
