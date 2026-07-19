@@ -1,31 +1,109 @@
 """Declared surface and source ordering of the experimental ARM64 runtime.
 
-Keeping this in one small module makes each runtime expansion an auditable
-manifest change instead of requiring edits throughout the linker implementation.
-The assembled merged runtime is still independently checked against this set.
+Each freestanding assembly slice owns an explicit export set.  The derived flat
+constants remain the public compatibility surface used by the linker, while the
+per-slice records let the builder reject source/manifest drift before invoking
+any external tool.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 
+
+@dataclass(frozen=True)
+class RuntimeSlice:
+    filename: str
+    exports: frozenset[str]
+
+
+RUNTIME_SLICES = (
+    RuntimeSlice(
+        "abi_shims_linux_arm64.S",
+        frozenset({"_abi_int_to_base", "printf", "strlen"}),
+    ),
+    RuntimeSlice(
+        "abi_strings_linux_arm64.S",
+        frozenset(
+            {
+                "_abi_str_cmp",
+                "_abi_str_concat",
+                "_abi_str_concat_dup",
+                "_abi_str_eq",
+                "_abi_str_repeat",
+                "labs",
+            }
+        ),
+    ),
+    RuntimeSlice(
+        "abi_string_search_linux_arm64.S",
+        frozenset(
+            {
+                "_abi_str_count",
+                "_abi_str_ends_with",
+                "_abi_str_starts_with",
+            }
+        ),
+    ),
+)
+
+RUNTIME_SOURCE_NAMES = tuple(runtime_slice.filename for runtime_slice in RUNTIME_SLICES)
 RUNTIME_EXPORTS = frozenset(
-    {
-        "_abi_int_to_base",
-        "_abi_str_cmp",
-        "_abi_str_concat",
-        "_abi_str_concat_dup",
-        "_abi_str_count",
-        "_abi_str_ends_with",
-        "_abi_str_eq",
-        "_abi_str_repeat",
-        "_abi_str_starts_with",
-        "labs",
-        "printf",
-        "strlen",
-    }
+    symbol
+    for runtime_slice in RUNTIME_SLICES
+    for symbol in runtime_slice.exports
 )
 
-RUNTIME_SOURCE_NAMES = (
-    "abi_shims_linux_arm64.S",
-    "abi_strings_linux_arm64.S",
-    "abi_string_search_linux_arm64.S",
-)
+
+def declared_global_symbols(source: str) -> frozenset[str]:
+    """Return symbols declared by GNU ``.global``/``.globl`` directives."""
+    declared: set[str] = set()
+    for raw_line in source.splitlines():
+        line = raw_line.strip()
+        if not (line.startswith(".global ") or line.startswith(".globl ")):
+            continue
+        payload = line.split(None, 1)[1]
+        for symbol in payload.replace(",", " ").split():
+            declared.add(symbol)
+    return frozenset(declared)
+
+
+def validate_manifest_shape() -> None:
+    """Reject duplicate filenames or symbols assigned to multiple slices."""
+    filenames: set[str] = set()
+    owners: dict[str, str] = {}
+    for runtime_slice in RUNTIME_SLICES:
+        if runtime_slice.filename in filenames:
+            raise ValueError(
+                f"duplicate ARM64 runtime source {runtime_slice.filename!r}"
+            )
+        filenames.add(runtime_slice.filename)
+        for symbol in runtime_slice.exports:
+            previous = owners.get(symbol)
+            if previous is not None:
+                raise ValueError(
+                    f"ARM64 runtime export {symbol!r} is assigned to both "
+                    f"{previous!r} and {runtime_slice.filename!r}"
+                )
+            owners[symbol] = runtime_slice.filename
+
+
+def validate_slice_source(runtime_slice: RuntimeSlice, source: str) -> None:
+    """Require one assembly slice's public declarations to match its manifest."""
+    declared = declared_global_symbols(source)
+    missing = runtime_slice.exports - declared
+    unexpected = declared - runtime_slice.exports
+    if not missing and not unexpected:
+        return
+
+    details: list[str] = []
+    if missing:
+        details.append("missing " + ", ".join(sorted(missing)))
+    if unexpected:
+        details.append("unexpected " + ", ".join(sorted(unexpected)))
+    raise ValueError(
+        f"ARM64 runtime source {runtime_slice.filename!r} does not match its "
+        f"manifest ({'; '.join(details)})"
+    )
+
+
+validate_manifest_shape()

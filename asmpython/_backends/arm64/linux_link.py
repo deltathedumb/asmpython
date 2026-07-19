@@ -26,7 +26,12 @@ from .elf_inspect import (
     undefined_symbols,
 )
 from .module_codegen import compile_ir_module
-from .runtime_manifest import RUNTIME_EXPORTS, RUNTIME_SOURCE_NAMES
+from .runtime_manifest import (
+    RUNTIME_EXPORTS,
+    RUNTIME_SLICES,
+    RUNTIME_SOURCE_NAMES,
+    validate_slice_source,
+)
 
 # Kept as a private alias for callers/tests written before runtime_manifest.py
 # became the single source of truth.
@@ -168,6 +173,30 @@ def runtime_source_path() -> Path:
     return runtime_source_paths()[0]
 
 
+def validate_runtime_source_files(
+    paths: Iterable[str | Path] | None = None,
+) -> tuple[Path, ...]:
+    """Validate source ordering and exact public declarations pre-assembly."""
+    resolved = tuple(Path(path) for path in (paths or runtime_source_paths()))
+    actual_names = tuple(path.name for path in resolved)
+    if actual_names != RUNTIME_SOURCE_NAMES:
+        raise Arm64LinkError(
+            "ARM64 runtime source order does not match manifest: "
+            f"expected={RUNTIME_SOURCE_NAMES!r}, actual={actual_names!r}"
+        )
+    for runtime_slice, path in zip(RUNTIME_SLICES, resolved):
+        if not path.is_file():
+            raise Arm64LinkError(f"ARM64 runtime source is missing: {path}")
+        try:
+            validate_slice_source(
+                runtime_slice,
+                path.read_text(encoding="utf-8"),
+            )
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise Arm64LinkError(str(exc)) from exc
+    return resolved
+
+
 def validate_runtime_object(runtime_object: bytes) -> frozenset[str]:
     """Verify that the merged runtime matches its compatibility declaration."""
     try:
@@ -231,7 +260,7 @@ def build_runtime_object(*, toolchain: LinuxArm64Toolchain) -> bytes:
     """Assemble, merge, and validate all freestanding ARM64 runtime slices."""
     source_objects = [
         assemble_file(path, toolchain=toolchain)
-        for path in runtime_source_paths()
+        for path in validate_runtime_source_files()
     ]
     runtime_object = link_relocatable(source_objects, toolchain=toolchain)
     validate_runtime_object(runtime_object)
