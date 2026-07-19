@@ -5,7 +5,7 @@ normal front end and IR lowering rather than constructing IR by hand:
 
 ``source -> lexer -> parser -> sema -> ir_lower -> ARM64 object -> ld -> run``
 
-The source defines ``main()`` returning ``40 + 2``. A tiny freestanding
+The default source defines ``main()`` returning ``40 + 2``. A tiny freestanding
 ``_start`` calls that symbol and exits with its result, so success is a real
 native/QEMU process exit status of 42.
 """
@@ -30,8 +30,9 @@ def main() -> int:
 """
 
 
-def _compile_source() -> bytes:
-    tokens = Lexer(_SOURCE).tokenize()
+def _compile_source(source: str = _SOURCE) -> bytes:
+    """Compile one source string through the real front end to ARM64 ET_REL."""
+    tokens = Lexer(source).tokenize()
     module = Parser(tokens, frozenset()).parse()
     sema_analyze(module)
     ir_module = ir_lower.lower_module(module)
