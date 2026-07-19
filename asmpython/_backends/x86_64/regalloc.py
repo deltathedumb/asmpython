@@ -182,9 +182,35 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
     # Extend a use inside a loop to that loop's last block, but only when
     # the value's definition lies outside the loop's own range -- see the
     # docstring for why a loop-internal definition doesn't need this.
+    #
+    # `end >= bi`, not `end > bi`: a value whose textual last use falls in
+    # the loop's OWN LAST block (bi == end) still needs the extension --
+    # that block is the one the back edge jumps FROM, so any use inside it
+    # (even its very last instruction) still precedes the next iteration's
+    # re-entry into the loop. `end > bi` wrongly treated `bi == end` as
+    # "not really in a loop that needs extending", leaving the value's
+    # last-use exactly where the plain textual scan found it instead of
+    # pushing it to the loop's true end -- confirmed via a real repro:
+    # sum(xs)'s list pointer (defined once before the loop, read via two
+    # `gep`s inside the loop body, the second and textually-last of which
+    # sits in the loop's own last block) kept its un-extended last-use,
+    # got evicted mid-loop for a value that only lives from that point
+    # onward, and its physical register held a stale/wrong value machine
+    # code containing a NULL/garbage pointer that segfaulted (confirmed
+    # via gdb: the register holding what should have been the list
+    # pointer instead held a small loop-counter-like integer) -- the
+    # allocator narrowly avoided this everywhere else in the existing
+    # test suite by coincidence (the value happening to still be needed
+    # for OTHER reasons, or the loop's last block happening to not be
+    # where the un-extended value's own last use falls), which is why
+    # this specific, narrow shape had never been caught before. Extending
+    # to (end, len(instrs)) is always >= (bi, _ii) when bi == end (an
+    # instruction index is always < the block's own instruction count),
+    # so this is a pure widening -- never moves a value's recorded
+    # lifetime backward.
     for name, (bi, _ii) in list(last.items()):
         start, end = loop_start[bi], loop_end[bi]
-        if end > bi and def_block.get(name, bi) < start:
+        if end >= bi and def_block.get(name, bi) < start:
             last[name] = (end, len(func.blocks[end].instrs))
 
     # try/except handler blocks are reached via an IMPLICIT control

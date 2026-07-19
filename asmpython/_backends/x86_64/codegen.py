@@ -396,16 +396,28 @@ class FuncCodegen:
         # flags setcc reads, since XOR is itself flag-setting. setcc only
         # writes the low byte, so zero-extend dst *after* via movzx instead;
         # movzx doesn't touch flags, so it's safe to sequence post-setcc.
-        dst       = self._dst_gp(result)
+        #
+        # Spillable dst (see _div's own comment on why): encode_setcc only
+        # ever takes a register operand, never memory, so a spilled result
+        # still needs a real scratch register to setcc/movzx into before
+        # being stored out. alt_scratch=True: `b`'s own `_gp` load already
+        # uses alt_scratch (R10) to avoid colliding with `a`'s load (R11)
+        # when both are spilled -- the destination must pick a THIRD
+        # register distinct from both, but this encoder only reserves two
+        # GP scratches total (R10/R11), so instead sequence the
+        # destination's own spill-load AFTER cmp/setcc have already
+        # consumed a_r/b_r (nothing later needs them), making plain
+        # _SCRATCH (R11) safe to reuse for the destination write.
         a_r, a_ld = self._gp(a)
         b_r, b_ld = self._gp(b, alt_scratch=True)
         self._emit(a_ld + b_ld)
         self._emit(encode_cmp_rr(a_r, b_r))
+        dst, spill = self._dst_gp_spillable(result)
         self._emit(encode_setcc(cc, dst))
         self._emit(encode_movzx(dst, dst, 8))
+        spill()
 
     def _fcmp_set(self, result: Any, a: Any, b: Any, cc: CC, f32: bool) -> None:
-        dst = self._dst_gp(result)
         if f32:
             a_x, a_ld = self._xmm_f32(a)
             b_x, b_ld = self._xmm_f32(b, alt_scratch=True)
@@ -416,8 +428,13 @@ class FuncCodegen:
             b_x, b_ld = self._xmm(b, alt_scratch=True)
             self._emit(a_ld + b_ld)
             self._emit(encode_ucomisd(a_x, b_x))
+        # Spillable dst, same rationale as _cmp_set -- a_x/b_x are XMM
+        # registers, entirely disjoint from the GP scratch _dst_gp_spillable
+        # would use, so no alt_scratch collision risk here either.
+        dst, spill = self._dst_gp_spillable(result)
         self._emit(encode_setcc(cc, dst))
         self._emit(encode_movzx(dst, dst, 8))
+        spill()
 
     # ── Branch helpers ────────────────────────────────────────────────────────
 
@@ -483,19 +500,41 @@ class FuncCodegen:
             self._emit(encode_xor_zero(Reg.RDX))
             self._emit(encode_div_r(b_r))
 
-        dst        = self._dst_gp(instr.result)
+        # Tolerate `instr.result` being spilled to a StackLoc, not just a
+        # RegLoc -- a real, legitimate outcome under high register
+        # pressure (confirmed via a real crash: sum(xs)'s loop, once a
+        # separate liveness-tracking fix correctly kept more values alive
+        # across the loop's back edge, legitimately pushed one more value
+        # here into a stack spill than this function previously ever
+        # tolerated). `alt_scratch=False` (plain _SCRATCH/R11), NOT True:
+        # _SCRATCH2/R10 is already claimed by `a_in_rax`'s own preserved-
+        # value slot below (line ~472) -- reusing it here for the
+        # destination write would clobber `a`'s saved value before the
+        # `a_in_rax` restore reads it back. R11 is safe: `b_r` may have
+        # transiently used it (line ~476), but only ever as the divisor
+        # operand to `idiv`/`div`, which has already consumed it by this
+        # point -- nothing later reads `b_r` again.
+        dst, spill = self._dst_gp_spillable(instr.result)
         result_reg = Reg.RAX if op in ("idiv", "udiv") else Reg.RDX
         if dst != result_reg:
             self._emit(encode_mov_rr(dst, result_reg))
         if a_in_rax and dst != Reg.RAX:
             self._emit(encode_mov_rr(Reg.RAX, self._SCRATCH2))
+        spill()
 
     # ── Shifts ────────────────────────────────────────────────────────────────
 
     def _shift(self, instr: Any) -> None:
+        # Spillable dst (see _div's own comment on why): shl/shr/sar only
+        # ever encode a register operand, never memory, so a spilled
+        # result still needs a real scratch to compute into before being
+        # stored out. alt_scratch=True: `instr.operands[0]`'s own `_gp`
+        # load may already occupy plain `_SCRATCH`/R11 if it too is
+        # spilled -- the destination must use R10 instead to avoid
+        # clobbering it before the mov into dst reads it.
         op = instr.op
         val_r, val_ld = self._gp(instr.operands[0])
-        dst = self._dst_gp(instr.result)
+        dst, spill = self._dst_gp_spillable(instr.result, alt_scratch=True)
         self._emit(val_ld)
         if val_r != dst:
             self._emit(encode_mov_rr(dst, val_r))
@@ -509,6 +548,7 @@ class FuncCodegen:
             if cnt_r != Reg.RCX:
                 self._emit(encode_mov_rr(Reg.RCX, cnt_r))
             self._emit({"shl": encode_shl_cl, "shr": encode_shr_cl, "sar": encode_sar_cl}[op](dst))
+        spill()
 
     # ── Call ──────────────────────────────────────────────────────────────────
 
@@ -843,16 +883,25 @@ class FuncCodegen:
             self._div(instr); return
 
         if op == "ineg":
-            dst = self._dst_gp(r); src_r, ld = self._gp(ops[0])
+            # Spillable dst (see _div's own comment on why this class of
+            # site needs it): a result forced to a stack slot under high
+            # register pressure is legitimate, not a bug. alt_scratch=True
+            # on the destination: `ops[0]`'s own `_gp` load may already
+            # occupy `_SCRATCH`/R11 if it too is spilled -- the same
+            # operand-vs-destination collision `_dst_gp_spillable`'s own
+            # docstring describes, so the destination must use R10 instead.
+            src_r, ld = self._gp(ops[0])
+            dst, spill = self._dst_gp_spillable(r, alt_scratch=True)
             self._emit(ld)
             if src_r != dst: self._emit(encode_mov_rr(dst, src_r))
-            self._emit(encode_neg(dst)); return
+            self._emit(encode_neg(dst)); spill(); return
 
         if op == "inot":
-            dst = self._dst_gp(r); src_r, ld = self._gp(ops[0])
+            src_r, ld = self._gp(ops[0])
+            dst, spill = self._dst_gp_spillable(r, alt_scratch=True)
             self._emit(ld)
             if src_r != dst: self._emit(encode_mov_rr(dst, src_r))
-            self._emit(encode_not(dst)); return
+            self._emit(encode_not(dst)); spill(); return
 
         # ── shifts ────────────────────────────────────────────────────────────
         if op in ("shl", "shr", "sar"):
@@ -1100,21 +1149,24 @@ class FuncCodegen:
             return
 
         if op == "zext":
+            # Spillable dst -- see _div's/sext's own comment on why.
             src_r, ld = self._gp(ops[0])
-            dst = self._dst_gp(r)
+            dst, spill = self._dst_gp_spillable(r, alt_scratch=True)
             self._emit(ld)
             bits = int(ops[0].type.name[1:])
             if bits == 32:
                 self._emit(encode_mov_rr(dst, src_r))
             else:
                 self._emit(encode_movzx(dst, src_r, bits))
+            spill()
             return
 
         if op == "trunc":
             src_r, ld = self._gp(ops[0])
-            dst = self._dst_gp(r)
+            dst, spill = self._dst_gp_spillable(r, alt_scratch=True)
             self._emit(ld)
             if src_r != dst: self._emit(encode_mov_rr(dst, src_r))
+            spill()
             return
 
         if op == "sitofp":
@@ -1127,13 +1179,18 @@ class FuncCodegen:
             return
 
         if op == "fptosi":
-            dst = self._dst_gp(r)
+            # Spillable dst -- see _div's own comment on why. No
+            # alt_scratch collision risk: the operand load is into an XMM
+            # register (src_x), entirely disjoint from the GP scratch
+            # _dst_gp_spillable would use.
+            dst, spill = self._dst_gp_spillable(r)
             if ops[0].type.name == "f32":
                 src_x, ld = self._xmm_f32(ops[0])
                 self._emit(ld); self._emit(encode_cvttss2si(dst, src_x))
             else:
                 src_x, ld = self._xmm(ops[0])
                 self._emit(ld); self._emit(encode_cvttsd2si(dst, src_x))
+            spill()
             return
 
         if op == "fpext":
@@ -1162,10 +1219,12 @@ class FuncCodegen:
         if op == "bitcast_f2i":
             # Reverse of bitcast_i2f -- an f64's raw bits into a GP
             # register, for storing a float into one of those int-only
-            # slots.
+            # slots. Spillable dst -- see _div's own comment on why; no
+            # alt_scratch collision risk, src_x is an XMM register.
             src_x, ld = self._xmm(ops[0])
-            dst = self._dst_gp(r)
+            dst, spill = self._dst_gp_spillable(r)
             self._emit(ld); self._emit(encode_movq_gp_xmm(dst, src_x))
+            spill()
             return
 
         # ── control flow ──────────────────────────────────────────────────────
@@ -1201,7 +1260,10 @@ class FuncCodegen:
             self._call(instr); return
 
         if op == "mov":
-            # Explicit register copy (from phi elimination)
+            # Explicit register copy (from phi elimination). Spillable
+            # dst on the GP side -- see _div's own comment on why;
+            # alt_scratch=True since ops[0]'s own _gp load may already
+            # occupy plain _SCRATCH/R11 if it too is spilled.
             if r is None:
                 return
             if _is_xmm(r.type.name):
@@ -1210,10 +1272,11 @@ class FuncCodegen:
                 self._emit(ld)
                 if src_x != dst: self._emit(encode_movdqa_rr(dst, src_x))
             else:
-                dst = self._dst_gp(r)
                 src_r, ld = self._gp(ops[0])
+                dst, spill = self._dst_gp_spillable(r, alt_scratch=True)
                 self._emit(ld)
                 if src_r != dst: self._emit(encode_mov_rr(dst, src_r))
+                spill()
             return
 
         if op in ("global_addr", "str_global"):
@@ -1229,11 +1292,13 @@ class FuncCodegen:
 
         if op == "tls_addr":
             # MOV dst, QWORD PTR FS:[tpoff32]  — local-exec TLS model (Linux x86-64)
-            dst    = self._dst_gp(r)
+            # Spillable dst -- see _div's own comment on why.
+            dst, spill = self._dst_gp_spillable(r)
             tls_off = self._pos()
             self._emit(encode_mov_tls_rm(dst, 0))
             # disp32 is at byte 5 (0x64 + REX + 0x8B + ModRM + SIB); R_X86_64_TPOFF32
             self.fixups.append((tls_off + 5, str(ops[0]), R_X86_64_TPOFF32))
+            spill()
             return
 
         if op == "stack_probe":
