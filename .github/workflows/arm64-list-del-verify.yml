@@ -35,6 +35,25 @@ jobs:
           sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user
       - name: Run exact lowering and manifest tests
         run: python -m unittest -v tests.test_arm64_list_del
+      - name: Collect legacy focused-test diagnostics
+        id: legacy-focused
+        continue-on-error: true
+        run: |
+          python -m unittest -v \
+            tests.test_arm64_list_core \
+            tests.test_arm64_list_extend \
+            tests.test_arm64_list_insert \
+            tests.test_arm64_list_pop \
+            tests.test_arm64_list_repeat \
+            tests.test_arm64_list_reverse \
+            tests.test_arm64_float_ulp \
+            2>&1 | tee legacy-focused-tests.log
+      - name: Preserve legacy focused-test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-legacy-focused-test-log
+          path: legacy-focused-tests.log
       - name: Execute valid-index list deletion through QEMU
         run: python -m asmpython._backends.arm64._verify_list_del --mode cross
 
