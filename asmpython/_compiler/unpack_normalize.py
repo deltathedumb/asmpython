@@ -13,8 +13,9 @@ existing typed parallel-assignment/subscript lowering safely:
   stores each real IR type, preserving side-effect and swap semantics.
 * ``a, b = pair`` becomes typed tuple subscripts when ``pair`` is a plain name
   with sema-stamped per-slot types. Re-reading a name has no side effects.
-* ``a, b = "xy"`` becomes parallel string subscripts. Existing subscript
-  lowering calls ``_abi_str_char_at`` and returns PTR values.
+* ``a, b = "xy"`` becomes two one-character string literals at compile time.
+  Python's host string iteration is already Unicode code-point based, so this is
+  exact without introducing an unchecked runtime indexing helper.
 
 Tuple-returning calls, lists, starred targets, mismatched literal lengths, and
 non-name targets remain untouched.
@@ -57,12 +58,12 @@ def _unpack_values(stmt: A.TupleAssign) -> list | None:
             return None
         return _typed_subscripts(source, element_types, stmt)
     if isinstance(source, A.StrLit):
-        # Python strings are Unicode code-point sequences. Host Python's len()
-        # gives exactly the target count the existing UTF-8-aware character shim
-        # expects; do not rewrite mismatches into unchecked out-of-range reads.
+        # Python strings are Unicode code-point sequences. Splitting the literal
+        # with host Python is therefore exact for both ASCII and multibyte UTF-8
+        # source text, and avoids exposing exception-sensitive runtime indexing.
         if len(source.value) != len(stmt.targets):
             return None
-        return _typed_subscripts(source, ["str"] * len(stmt.targets), stmt)
+        return [A.StrLit(character, pos=stmt.pos) for character in source.value]
     return None
 
 
