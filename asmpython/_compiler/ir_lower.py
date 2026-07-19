@@ -119,6 +119,7 @@ class _ModuleCtx:
         global_list_el_ty: dict[str, str] | None = None,
         classes: list | None = None,
         mlang_code_funcs: dict | None = None,
+        imported_funcs: dict | None = None,
     ) -> None:
         self.data: list[IRGlobal] = []
         self.class_names = class_names
@@ -137,6 +138,15 @@ class _ModuleCtx:
         # local defaulting to I64, corrupting anything that read it).
         self.ffi_consts = ffi_consts or {}
         self.imported_modules = imported_modules or {}
+        # import_binary()/.imported dynamic-loading (see the "import_binary
+        # dynamic DLL loading" section near the end of this file): handle
+        # variable name -> list of (func_name, FuncDef) for every top-level
+        # `@<handle>.imported` stub decorated for it. Built once in
+        # lower_module from the whole-program mod.funcs, mirroring
+        # codegen.py's Codegen.imported_funcs exactly (same dict shape, same
+        # ".imported" decorator-suffix scan) so both backends resolve the
+        # same set of dynamically-imported functions per handle.
+        self.imported_funcs: dict[str, list[tuple[str, "A.FuncDef"]]] = imported_funcs or {}
         self.classes_sig = classes_sig or {}
         self.global_types = global_types or {}
         self.global_names = frozenset(self.global_types)
@@ -792,9 +802,527 @@ def _lower_list_index(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
     return result
 
 
+def _lower_comprehension_enumerate(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
+    """`[elt for i, x in enumerate(xs)]` -- iterate xs by index, bind the
+    running counter to targets[0] and the element to targets[1]. Ports
+    codegen.py's `_gen_comprehension_enumerate` IR-op-for-instruction, and
+    mirrors this file's own `_lower_dict_comprehension` enumerate branch
+    (kept as two separate copies, same as every other list-vs-dict
+    comprehension shape in this file, rather than sharing one helper)."""
+    inner = e.iter.args[0]  # type: ignore[union-attr]
+    src_t = A.expr_type(inner)
+    if src_t == "any":
+        src_t = "list"
+    if src_t not in ("str", "list", "tuple"):
+        raise LowerError(f"unsupported expr Comprehension (enumerate {src_t})")
+    elem_ty = _iter_element_type(inner)
+    iter_v = _lower_expr(ctx, inner)
+    iter_ptr = ctx.ensure_slot(f"__comp_enum_iter_{id(e)}", ir_type_for(src_t))
+    ctx.emit(IRInstr("store", None, [iter_v, iter_ptr]))
+
+    idx_ptr = ctx.ensure_slot(f"__comp_enum_idx_{id(e)}", I64)
+    zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero, [0]))
+    ctx.emit(IRInstr("store", None, [zero, idx_ptr]))
+
+    if src_t == "str":
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", len_v, ["strlen", iter_v]))
+    else:
+        len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", len_addr, [iter_v, _LIST_LEN_OFF]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_addr]))
+    cap_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", cap_v, [1]))
+    real_cap_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", real_cap_v, [len_v, cap_v]))
+    out_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", out_v, ["_abi_new_list", real_cap_v]))
+    out_ptr = ctx.ensure_slot(f"__comp_enum_out_{id(e)}", PTR)
+    ctx.emit(IRInstr("store", None, [out_v, out_ptr]))
+
+    head_b = ctx.new_block("compenumhead")
+    body_b = ctx.new_block("compenumbody")
+    append_b = ctx.new_block("compenumappend")
+    cont_b = ctx.new_block("compenumcont")
+    end_b = ctx.new_block("compenumend")
+
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+    ctx.switch_to(head_b)
+    idx_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+    cur_iter_v = ctx.tmp(ir_type_for(src_t))
+    ctx.emit(IRInstr("load", cur_iter_v, [iter_ptr]))
+    if src_t == "str":
+        cur_len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", cur_len_v, ["strlen", cur_iter_v]))
+    else:
+        cur_len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", cur_len_addr, [cur_iter_v, _LIST_LEN_OFF]))
+        cur_len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", cur_len_v, [cur_len_addr]))
+    keep_going = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", keep_going, [idx_v, cur_len_v]))
+    ctx.emit(IRInstr("br.t", None, [keep_going, body_b.label, end_b.label]))
+
+    ctx.switch_to(body_b)
+    body_iter_v = ctx.tmp(ir_type_for(src_t))
+    ctx.emit(IRInstr("load", body_iter_v, [iter_ptr]))
+    body_idx_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", body_idx_v, [idx_ptr]))
+    _store_loop_target(ctx, e.targets[0], body_idx_v, "int")
+    if src_t == "str":
+        elem_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", elem_v, ["_abi_str_char_at", body_iter_v, body_idx_v]))
+    else:
+        addr = _list_elem_addr(ctx, body_iter_v, body_idx_v)
+        elem_v = ctx.tmp(ir_type_for(elem_ty))
+        ctx.emit(IRInstr("load", elem_v, [addr]))
+    _store_loop_target(ctx, e.targets[1], elem_v, elem_ty)
+
+    shadow_names = {e.targets[0], e.targets[1]}
+    ctx.comprehension_shadows.append(shadow_names)
+    try:
+        if e.cond is not None:
+            cond_v = _lower_truthy(ctx, e.cond)
+            ctx.emit(IRInstr("br.t", None, [cond_v, append_b.label, cont_b.label]))
+        else:
+            ctx.emit(IRInstr("br", None, [append_b.label]))
+
+        ctx.switch_to(append_b)
+        cur_out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
+        item_v = _lower_expr(ctx, e.elt)
+        ctx.emit(IRInstr("call", None, ["_abi_list_append", cur_out_v, item_v]))
+        ctx.emit(IRInstr("br", None, [cont_b.label]))
+    finally:
+        ctx.comprehension_shadows.pop()
+
+    ctx.switch_to(cont_b)
+    inc_idx_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", inc_idx_v, [idx_ptr]))
+    one = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one, [1]))
+    next_idx_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", next_idx_v, [inc_idx_v, one]))
+    ctx.emit(IRInstr("store", None, [next_idx_v, idx_ptr]))
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+
+    ctx.switch_to(end_b)
+    final_out_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", final_out_v, [out_ptr]))
+    return final_out_v
+
+
+def _lower_comprehension_multi_for(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
+    """`[elt for a in A for b in B ...]` -- multiple `for` clauses, each an
+    independent nested loop (not a zip/lockstep walk); the innermost body
+    appends `elt` once per combination, same as a nested for-loop would.
+    Ports codegen.py's `_gen_comprehension`'s `ef_iters_g` branch (the
+    tail of that method, after the single-clause setup) IR-op-for-
+    instruction. Was entirely unhandled: `e.extra_for_iters` non-empty
+    hit a hard LowerError unconditionally, regardless of shape.
+
+    Block-creation order matters here (see this file's own hard-earned
+    lesson on `ctx.new_block`/regalloc liveness): every level's
+    head/body block must be created BEFORE any inner level's blocks
+    (outer-to-inner, matching real control-flow descent), and every
+    level's cont/end block must be created AFTER the innermost level's
+    append/skip blocks (inner-to-outer, matching the real unwind -- a
+    level's cont/end is only reached once its nested loop has fully
+    finished). Creating cont/end blocks upfront in "declaration order"
+    instead of this real-traversal order is exactly the shape that
+    previously crashed regalloc with a bare KeyError('%tN') elsewhere in
+    this file.
+    """
+    outer_iter_ty = A.expr_type(e.iter)
+    if outer_iter_ty == "any":
+        outer_iter_ty = "list"
+    if outer_iter_ty not in ("str", "list", "tuple"):
+        raise LowerError(f"unsupported expr Comprehension (iter {outer_iter_ty})")
+    if A.expr_type(e.elt) == "float":
+        raise LowerError("unsupported expr Comprehension (float element)")
+
+    all_iters = [e.iter] + list(e.extra_for_iters)
+    all_vars = [e.var] + list(e.extra_for_vars)
+    all_targets = [e.targets] + list(e.extra_for_targets)
+    all_conds = [e.cond] + list(e.extra_for_conds)
+    n_levels = len(all_iters)
+
+    # --- level 0: evaluate iterable, allocate result list (outer clause
+    # only -- inner clauses don't grow the result list themselves) ---
+    iter_ptrs: list = []
+    idx_ptrs: list = []
+    level_tys: list = []
+
+    iter_v0 = _lower_expr(ctx, e.iter)
+    iter_ptr0 = ctx.ensure_slot(f"__mcomp_iter_0_{id(e)}", ir_type_for(outer_iter_ty))
+    ctx.emit(IRInstr("store", None, [iter_v0, iter_ptr0]))
+    iter_ptrs.append(iter_ptr0)
+    level_tys.append(outer_iter_ty)
+
+    if outer_iter_ty == "str":
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", len_v, ["strlen", iter_v0]))
+    else:
+        len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", len_addr, [iter_v0, _LIST_LEN_OFF]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_addr]))
+    cap_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", cap_v, [1]))
+    real_cap_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", real_cap_v, [len_v, cap_v]))
+    out_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", out_v, ["_abi_new_list", real_cap_v]))
+    out_ptr = ctx.ensure_slot(f"__mcomp_out_{id(e)}", PTR)
+    ctx.emit(IRInstr("store", None, [out_v, out_ptr]))
+
+    idx_ptr0 = ctx.ensure_slot(f"__mcomp_idx_0_{id(e)}", I64)
+    zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero, [0]))
+    ctx.emit(IRInstr("store", None, [zero, idx_ptr0]))
+    idx_ptrs.append(idx_ptr0)
+
+    # Remaining clauses' iterables are evaluated lazily (inside the
+    # enclosing loop body, per real Python semantics -- e.g. `for row in
+    # matrix for x in row` re-evaluates `row`'s binding each outer
+    # iteration), so only reserve their type/slot info now.
+    for k in range(1, n_levels):
+        it_ty = A.expr_type(all_iters[k])
+        if it_ty == "any":
+            it_ty = "list"
+        if it_ty not in ("str", "list", "tuple"):
+            raise LowerError(f"unsupported expr Comprehension (iter {it_ty})")
+        level_tys.append(it_ty)
+        iter_ptrs.append(ctx.ensure_slot(f"__mcomp_iter_{k}_{id(e)}", ir_type_for(it_ty)))
+        idx_ptrs.append(ctx.ensure_slot(f"__mcomp_idx_{k}_{id(e)}", I64))
+
+    # --- create blocks in real traversal order: for each level (outer to
+    # inner), an "init" block (re-binds level k's iterable + resets its
+    # index -- skipped for level 0, already done above) followed by its
+    # head/body; then append/skip at the innermost; then cont/end
+    # inner-to-outer on the unwind. A dedicated init_bs[k] (rather than
+    # folding the init into body_bs[k-1] or head_bs[k]) is required
+    # because head_bs[k] is ALSO reached from cont_bs[k] (the loop-back
+    # edge, which must NOT re-init), and body_bs[k-1] is one block shared
+    # by both the cond-pass and cond-fail paths -- an unconditional
+    # "next block" for the pass-only re-init needs its own block. ---
+    head_bs = []
+    body_bs = []
+    init_bs: list = [None]  # level 0 has no init block (handled above)
+    for k in range(n_levels):
+        if k > 0:
+            init_bs.append(ctx.new_block(f"mcompinit{k}"))
+        head_bs.append(ctx.new_block(f"mcomphead{k}"))
+        body_bs.append(ctx.new_block(f"mcompbody{k}"))
+    append_b = ctx.new_block("mcompappend")
+    cont_bs = []
+    end_bs = []
+    for k in range(n_levels - 1, -1, -1):
+        cont_bs_rev_slot = ctx.new_block(f"mcompcont{k}")
+        end_bs_rev_slot = ctx.new_block(f"mcompend{k}")
+        cont_bs.append(cont_bs_rev_slot)
+        end_bs.append(end_bs_rev_slot)
+    cont_bs.reverse()
+    end_bs.reverse()
+    # cont_bs[k]/end_bs[k] now index by level k, same as head_bs/body_bs.
+
+    shadow_names: set = set()
+
+    def emit_level_head(k: int) -> None:
+        idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v, [idx_ptrs[k]]))
+        cur_iter_v = ctx.tmp(ir_type_for(level_tys[k]))
+        ctx.emit(IRInstr("load", cur_iter_v, [iter_ptrs[k]]))
+        if level_tys[k] == "str":
+            cur_len_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("call", cur_len_v, ["strlen", cur_iter_v]))
+        else:
+            cur_len_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", cur_len_addr, [cur_iter_v, _LIST_LEN_OFF]))
+            cur_len_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", cur_len_v, [cur_len_addr]))
+        keep_going = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", keep_going, [idx_v, cur_len_v]))
+        ctx.emit(IRInstr("br.t", None, [keep_going, body_bs[k].label, end_bs[k].label]))
+
+    def emit_level_body(k: int) -> None:
+        body_iter_v = ctx.tmp(ir_type_for(level_tys[k]))
+        ctx.emit(IRInstr("load", body_iter_v, [iter_ptrs[k]]))
+        body_idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", body_idx_v, [idx_ptrs[k]]))
+        if level_tys[k] == "str":
+            elem_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", elem_v, ["_abi_str_char_at", body_iter_v, body_idx_v]))
+            elem_kind = "str"
+        else:
+            elem_addr = _list_elem_addr(ctx, body_iter_v, body_idx_v)
+            src_ty = A.expr_type(all_iters[k])
+            elem_kind = "any" if src_ty == "any" else _iter_element_type(all_iters[k])
+            elem_v = ctx.tmp(ir_type_for(elem_kind))
+            ctx.emit(IRInstr("load", elem_v, [elem_addr]))
+
+        multi_targets = all_targets[k]
+        if multi_targets:
+            elem_types = getattr(all_iters[k], "tuple_elem_types", [])
+            for i, target in enumerate(multi_targets):
+                tidx = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", tidx, [i]))
+                item_addr = _list_elem_addr(ctx, elem_v, tidx)
+                target_ty = elem_types[i] if i < len(elem_types) else "any"
+                item_v = ctx.tmp(ir_type_for(target_ty))
+                ctx.emit(IRInstr("load", item_v, [item_addr]))
+                _store_loop_target(ctx, target, item_v, target_ty)
+                if isinstance(target, str):
+                    shadow_names.add(target)
+        else:
+            var_name = all_vars[k]
+            var_ptr = ctx.ensure_slot(var_name, ir_type_for(elem_kind))
+            ctx.emit(IRInstr("store", None, [elem_v, var_ptr]))
+            shadow_names.add(var_name)
+
+        pass_target = init_bs[k + 1].label if k + 1 < n_levels else append_b.label
+        cond = all_conds[k]
+        if cond is not None:
+            cond_v = _lower_truthy(ctx, cond)
+            ctx.emit(IRInstr("br.t", None, [cond_v, pass_target, cont_bs[k].label]))
+        else:
+            ctx.emit(IRInstr("br", None, [pass_target]))
+
+    def emit_level_init(k: int) -> None:
+        # Level k's "fresh entry" point (once per level-(k-1) element,
+        # e.g. once per `row`): (re-)evaluate level k's iterable and reset
+        # its index to 0. Not hoistable to before the outer loop -- it may
+        # depend on the enclosing level's own loop variable (`row` in
+        # `for x in row`) and must be freshly bound on every outer pass,
+        # not just the first. Reached only from the enclosing level's
+        # cond-PASS path (see pass_target above); the loop-back edge
+        # (cont_bs[k] -> head_bs[k]) bypasses this block entirely, so it
+        # never re-inits mid-loop.
+        it_v = _lower_expr(ctx, all_iters[k])
+        ctx.emit(IRInstr("store", None, [it_v, iter_ptrs[k]]))
+        zero_k = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero_k, [0]))
+        ctx.emit(IRInstr("store", None, [zero_k, idx_ptrs[k]]))
+        ctx.emit(IRInstr("br", None, [head_bs[k].label]))
+
+    def emit_level_cont(k: int) -> None:
+        inc_idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", inc_idx_v, [idx_ptrs[k]]))
+        one = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one, [1]))
+        next_idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", next_idx_v, [inc_idx_v, one]))
+        ctx.emit(IRInstr("store", None, [next_idx_v, idx_ptrs[k]]))
+        ctx.emit(IRInstr("br", None, [head_bs[k].label]))
+
+    ctx.emit(IRInstr("br", None, [head_bs[0].label]))
+    for k in range(n_levels):
+        if k > 0:
+            ctx.switch_to(init_bs[k])
+            emit_level_init(k)
+        ctx.switch_to(head_bs[k])
+        emit_level_head(k)
+
+    ctx.comprehension_shadows.append(shadow_names)
+    try:
+        for k in range(n_levels):
+            ctx.switch_to(body_bs[k])
+            emit_level_body(k)
+
+        ctx.switch_to(append_b)
+        cur_out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
+        item_v = _lower_expr(ctx, e.elt)
+        ctx.emit(IRInstr("call", None, ["_abi_list_append", cur_out_v, item_v]))
+        ctx.emit(IRInstr("br", None, [cont_bs[n_levels - 1].label]))
+    finally:
+        ctx.comprehension_shadows.pop()
+
+    for k in range(n_levels - 1, -1, -1):
+        ctx.switch_to(cont_bs[k])
+        emit_level_cont(k)
+        ctx.switch_to(end_bs[k])
+        if k > 0:
+            ctx.emit(IRInstr("br", None, [cont_bs[k - 1].label]))
+
+    ctx.switch_to(end_bs[0])
+    final_out_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", final_out_v, [out_ptr]))
+    return final_out_v
+
+
+def _lower_comprehension_instance_iter(ctx: _FuncCtx, e: A.Comprehension, cls_name: str) -> IRValue:
+    """`[elt for x in obj]` where obj is a user class with __iter__/
+    __next__ (this also covers a yield-based generator function's
+    returned object -- see `_lower_comprehension`'s dispatch comment for
+    why that's the same shape, not separate machinery). Mirrors
+    codegen.py's `_gen_comprehension_instance_iter` and this file's own
+    `_lower_for_iter_protocol` (A.For's identical iterator-protocol loop)
+    -- same setjmp/StopIteration-catch shape, but appends to a result
+    list each iteration instead of running loop-body statements."""
+    uid = id(e)
+    owner = _resolve_method_owner(ctx, cls_name, "__iter__") or cls_name
+    next_owner = _resolve_method_owner(ctx, cls_name, "__next__") or cls_name
+
+    obj_v = _lower_expr(ctx, e.iter)
+    iter_ptr = ctx.ensure_slot(f"__comp_iter_obj_{uid}", PTR)
+    ctx.emit(IRInstr("store", None, [obj_v, iter_ptr]))
+    iter_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", iter_v, [f"{owner}____iter__", obj_v]))
+    ctx.emit(IRInstr("store", None, [iter_v, iter_ptr]))
+
+    out_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", out_v, ["_abi_new_list", ctx.shared_zero]))
+    out_ptr = ctx.ensure_slot(f"__comp_iter_out_{uid}", PTR)
+    ctx.emit(IRInstr("store", None, [out_v, out_ptr]))
+
+    buf_ptr = ctx.raw_slot(f"__comp_iter_buf_{uid}", _JMP_BUF_SIZE)
+    parent_ptr = ctx.ensure_slot(f"__comp_iter_parent_{uid}", PTR)
+    prev_msg_ptr = ctx.ensure_slot(f"__comp_iter_prev_msg_{uid}", PTR)
+    prev_type_ptr = ctx.ensure_slot(f"__comp_iter_prev_type_{uid}", I64)
+
+    top_b = ctx.new_block(f"comp_iter_top_{uid}")
+    handler_b = ctx.new_block(f"comp_iter_handler_{uid}")
+    body_b = ctx.new_block(f"comp_iter_body_{uid}")
+    append_b = ctx.new_block(f"comp_iter_append_{uid}")
+    cont_b = ctx.new_block(f"comp_iter_cont_{uid}")
+    end_b = ctx.new_block(f"comp_iter_end_{uid}")
+    ctx.emit(IRInstr("br", None, [top_b.label]))
+
+    ctx.switch_to(top_b)
+    cur_msg = _load_global(ctx, "_runtime_exc_msg", PTR)
+    ctx.emit(IRInstr("store", None, [cur_msg, prev_msg_ptr]))
+    cur_type = _load_global(ctx, "_runtime_exc_type", I64)
+    ctx.emit(IRInstr("store", None, [cur_type, prev_type_ptr]))
+    cur_top = _load_global(ctx, "_runtime_handler_top", PTR)
+    ctx.emit(IRInstr("store", None, [cur_top, parent_ptr]))
+    _store_global(ctx, "_runtime_handler_top", buf_ptr)
+
+    setjmp_block_index = ctx.blocks.index(ctx.cur)
+    setjmp_result = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", setjmp_result, ["_abi_setjmp", buf_ptr]))
+    ctx.emit(IRInstr("br.t", None, [setjmp_result, handler_b.label, body_b.label]))
+
+    ctx.switch_to(body_b)
+    # Handler must stay INSTALLED across the __next__ call (that's the
+    # call that can raise StopIteration) -- see _lower_for_iter_protocol's
+    # identical comment for the confirmed-by-repro reason the restore
+    # can't happen before this call.
+    cur_iter = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", cur_iter, [iter_ptr]))
+    next_sig = ctx.mctx.classes_sig.get(next_owner)
+    next_msig = next_sig.methods.get("__next__") if next_sig is not None else None
+    el_kind = "any"
+    if next_msig is not None and getattr(next_msig, "ret_type", None):
+        el_kind = next_msig.ret_type[0]
+    next_v = ctx.tmp(ir_type_for(el_kind))
+    ctx.emit(IRInstr("call", next_v, [f"{next_owner}____next__", cur_iter]))
+    parent_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", parent_v, [parent_ptr]))
+    _store_global(ctx, "_runtime_handler_top", parent_v)
+
+    shadow_names: set = set()
+    if e.targets:
+        elem_types = getattr(e.iter, "tuple_elem_types", [])
+        for i, target in enumerate(e.targets):
+            idx = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", idx, [i]))
+            item_addr = _list_elem_addr(ctx, next_v, idx)
+            target_ty = elem_types[i] if i < len(elem_types) else "any"
+            item_v = ctx.tmp(ir_type_for(target_ty))
+            ctx.emit(IRInstr("load", item_v, [item_addr]))
+            _store_loop_target(ctx, target, item_v, target_ty)
+            if isinstance(target, str):
+                shadow_names.add(target)
+    else:
+        var_ptr = ctx.ensure_slot(e.var, ir_type_for(el_kind))
+        ctx.emit(IRInstr("store", None, [next_v, var_ptr]))
+        shadow_names.add(e.var)
+
+    ctx.comprehension_shadows.append(shadow_names)
+    try:
+        if e.cond is not None:
+            cond_v = _lower_truthy(ctx, e.cond)
+            ctx.emit(IRInstr("br.t", None, [cond_v, append_b.label, cont_b.label]))
+        else:
+            ctx.emit(IRInstr("br", None, [append_b.label]))
+
+        ctx.switch_to(append_b)
+        cur_out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
+        item_v = _lower_expr(ctx, e.elt)
+        ctx.emit(IRInstr("call", None, ["_abi_list_append", cur_out_v, item_v]))
+        ctx.emit(IRInstr("br", None, [cont_b.label]))
+    finally:
+        ctx.comprehension_shadows.pop()
+
+    ctx.switch_to(cont_b)
+    ctx.emit(IRInstr("br", None, [top_b.label]))
+
+    ctx.switch_to(handler_b)
+    parent_v2 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", parent_v2, [parent_ptr]))
+    _store_global(ctx, "_runtime_handler_top", parent_v2)
+    exc_type_v = _load_global(ctx, "_runtime_exc_type", I64)
+    stop_iter_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", stop_iter_v, [BUILTIN_EXC_IDS["StopIteration"]]))
+    is_stop = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_stop, [exc_type_v, stop_iter_v]))
+    reraise_b = ctx.new_block(f"comp_iter_reraise_{uid}")
+    ctx.emit(IRInstr("br.t", None, [is_stop, end_b.label, reraise_b.label]))
+
+    ctx.switch_to(reraise_b)
+    reraise_msg = _load_global(ctx, "_runtime_exc_msg", PTR)
+    ctx.emit(IRInstr("call", None, ["_abi_raise", reraise_msg, exc_type_v]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.try_regions.append((setjmp_block_index, len(ctx.blocks) - 1))
+    ctx.switch_to(end_b)
+    final_out_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", final_out_v, [out_ptr]))
+    return final_out_v
+
+
 def _lower_comprehension(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
+    # `[elt for i, x in enumerate(xs)]` -- mirrors codegen.py's dedicated
+    # `_gen_comprehension_enumerate` (and this file's own identical special
+    # case already present in `_lower_dict_comprehension`, just below).
+    # Was entirely unhandled for LIST comprehensions specifically: without
+    # this, `A.expr_type(e.iter)` for a bare `enumerate(...)` call is
+    # "int" (sema types the raw builtin-call result leniently, there's no
+    # dedicated "enumerate object" type), which isn't one of the
+    # str/list/tuple shapes the generic path below accepts, so it raised
+    # "unsupported expr Comprehension (iter int)" immediately.
+    if (
+        isinstance(e.iter, A.Call)
+        and e.iter.func == "enumerate"
+        and len(e.iter.args) >= 1
+        and e.targets
+        and len(e.targets) == 2
+    ):
+        return _lower_comprehension_enumerate(ctx, e)
     if e.extra_for_iters:
-        raise LowerError("unsupported expr Comprehension (multiple for clauses)")
+        return _lower_comprehension_multi_for(ctx, e)
+    outer_ty = A.expr_type(e.iter)
+    if outer_ty.startswith("instance:"):
+        # `[elt for x in obj]` where obj is a user class with __iter__/
+        # __next__ (or, equivalently, a generator-function's returned
+        # object -- sema.py desugars `def f(): ... yield v ...` into a
+        # `_genobj_f` class with exactly those two methods well before
+        # this file ever sees it, so this is the SAME shape, not a
+        # separate generator-object machinery). Mirrors codegen.py's
+        # `_gen_comprehension_instance_iter` and this file's own
+        # `_lower_for_iter_protocol` (A.For's identical iterator-protocol
+        # loop): setjmp/StopIteration-catch around each __next__() call.
+        # Was entirely unhandled: `A.expr_type(e.iter)` starting with
+        # "instance:" isn't one of the str/list/tuple shapes the generic
+        # path below accepts, so it raised "unsupported expr Comprehension
+        # (iter instance:X)" immediately, for BOTH a real user __iter__/
+        # __next__ class and any yield-based generator function's result.
+        return _lower_comprehension_instance_iter(ctx, e, outer_ty.split(":", 1)[1])
     iter_ty = A.expr_type(e.iter)
     if iter_ty == "any":
         iter_ty = "list"
@@ -959,6 +1487,124 @@ def _lower_dict_comprehension(ctx: _FuncCtx, e: A.DictComprehension) -> IRValue:
     zero = ctx.tmp(I64)
     ctx.emit(IRInstr("const", zero, [0]))
     ctx.emit(IRInstr("store", None, [zero, idx_ptr]))
+
+    if (
+        isinstance(e.iter, A.Call)
+        and e.iter.func == "zip"
+        and len(e.iter.args) >= 2
+        and e.targets
+        and len(e.targets) == len(e.iter.args)
+    ):
+        # `{k: v for k, v in zip(keys, vals)}` -- was entirely unhandled:
+        # the fallback path below accepts `iter_ty == "list"` (which is
+        # exactly what sema.py types a bare `zip(...)` call as, see
+        # sema.py's `e.func == "zip"` handling), so it fell through to
+        # `_lower_expr(ctx, e.iter)` on the raw `zip(...)` Call node --
+        # there's no generic "bare zip() call" lowering (only a dedicated
+        # `list(zip(...))` pattern exists elsewhere in this file), so it
+        # tried to link a real function symbol named `zip` and failed at
+        # link time ("undefined symbol 'zip' has no known DLL"). Ports
+        # `_lower_for_zip`'s N-list lockstep walk (stopping at the
+        # shortest input, real zip() truncation semantics) but performs a
+        # dict insert per iteration instead of a list append/body lower.
+        n = len(e.iter.args)
+        zexprs = list(e.iter.args)
+        znames = list(e.targets)
+        iter_ptrs = [ctx.ensure_slot(f"__dcompzip_it{k}_{id(e)}", PTR) for k in range(n)]
+        for k, ze in enumerate(zexprs):
+            v = _lower_expr(ctx, ze)
+            ctx.emit(IRInstr("store", None, [v, iter_ptrs[k]]))
+
+        stop_ptr = ctx.ensure_slot(f"__dcompzip_stop_{id(e)}", I64)
+        first_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", first_v, [iter_ptrs[0]]))
+        first_len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", first_len_addr, [first_v, _LIST_LEN_OFF]))
+        stop_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", stop_v, [first_len_addr]))
+        ctx.emit(IRInstr("store", None, [stop_v, stop_ptr]))
+        for k in range(1, n):
+            cur_stop = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", cur_stop, [stop_ptr]))
+            it_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", it_v, [iter_ptrs[k]]))
+            len_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", len_addr, [it_v, _LIST_LEN_OFF]))
+            len_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", len_v, [len_addr]))
+            is_shorter = ctx.tmp(I64)
+            ctx.emit(IRInstr("icmp.lt", is_shorter, [len_v, cur_stop]))
+            min_ptr = ctx.ensure_slot(f"__dcompzip_min_{k}_{id(e)}", I64)
+            shorter_b = ctx.new_block(f"dcompzipmin_shorter_{k}")
+            keep_b = ctx.new_block(f"dcompzipmin_keep_{k}")
+            after_b = ctx.new_block(f"dcompzipmin_after_{k}")
+            ctx.emit(IRInstr("br.t", None, [is_shorter, shorter_b.label, keep_b.label]))
+            ctx.switch_to(shorter_b)
+            ctx.emit(IRInstr("store", None, [len_v, min_ptr]))
+            ctx.emit(IRInstr("br", None, [after_b.label]))
+            ctx.switch_to(keep_b)
+            ctx.emit(IRInstr("store", None, [cur_stop, min_ptr]))
+            ctx.emit(IRInstr("br", None, [after_b.label]))
+            ctx.switch_to(after_b)
+            new_stop = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", new_stop, [min_ptr]))
+            ctx.emit(IRInstr("store", None, [new_stop, stop_ptr]))
+
+        head_b = ctx.new_block("dcompziphead")
+        body_b = ctx.new_block("dcompzipbody")
+        insert_b = ctx.new_block("dcompzipinsert")
+        cont_b = ctx.new_block("dcompzipcont")
+        end_b = ctx.new_block("dcompzipend")
+
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+        ctx.switch_to(head_b)
+        i_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", i_v, [idx_ptr]))
+        stop_v2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", stop_v2, [stop_ptr]))
+        cond_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", cond_v, [i_v, stop_v2]))
+        ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
+
+        ctx.switch_to(body_b)
+        i_v2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", i_v2, [idx_ptr]))
+        for k in range(n):
+            it_v2 = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", it_v2, [iter_ptrs[k]]))
+            elem_ty = _iter_element_type(zexprs[k])
+            addr = _list_elem_addr(ctx, it_v2, i_v2)
+            val = ctx.tmp(F64 if elem_ty == "float" else I64)
+            ctx.emit(IRInstr("load", val, [addr]))
+            _store_loop_target(ctx, znames[k], val, elem_ty)
+        if e.cond is not None:
+            keep_v = _lower_truthy(ctx, e.cond)
+            ctx.emit(IRInstr("br.t", None, [keep_v, insert_b.label, cont_b.label]))
+        else:
+            ctx.emit(IRInstr("br", None, [insert_b.label]))
+
+        ctx.switch_to(insert_b)
+        cur_out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
+        key_v = _lower_dict_key(ctx, e.key)
+        val_v = _lower_expr(ctx, e.value)
+        ctx.emit(IRInstr("call", None, ["_abi_dict_set", cur_out_v, key_v, val_v]))
+        ctx.emit(IRInstr("br", None, [cont_b.label]))
+
+        ctx.switch_to(cont_b)
+        inc_i = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", inc_i, [idx_ptr]))
+        one_i = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one_i, [1]))
+        next_i = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", next_i, [inc_i, one_i]))
+        ctx.emit(IRInstr("store", None, [next_i, idx_ptr]))
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+
+        ctx.switch_to(end_b)
+        final_out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", final_out_v, [out_ptr]))
+        return final_out_v
 
     if (
         isinstance(e.iter, A.Call)
@@ -5331,8 +5977,23 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(ir_type_for(A.expr_type(e)))
             ctx.emit(IRInstr("call", v, [f"{cls_name}____getitem__", obj_v, idx_v]))
             return v
-        if obj_ty not in ("list", "tuple"):
+        if obj_ty not in ("list", "tuple", "any"):
             raise LowerError(f"unsupported expr Subscript ({obj_ty})")
+        # obj_ty == "any" (e.g. a lambda parameter -- sema.py seeds every
+        # lambda parameter's type as "any" unconditionally, see
+        # _lower_sort_key_call's docstring) is treated the same as list/
+        # tuple: at runtime it IS a list/tuple-layout pointer, this is only
+        # a static-typing gap. Mirrors codegen.py's `_gen_subscript`, whose
+        # int-index fallthrough (past the dict/str special cases) accepts
+        # ANY obj_t uniformly -- there's no separate "any" rejection there
+        # at all. Was reachable via `min(pairs, key=lambda p: p[1])`: the
+        # call SITE already has a dedicated tuple-index fast path
+        # (`_lower_sort_key_call`) that never lowers the lambda body, but
+        # the synthesized lambda function itself is still marked reachable
+        # and lowered independently (its `return p[1]` hits this exact
+        # generic Subscript path with `p`'s static type "any"), so the
+        # LowerError fired even though the fast path made the call-site
+        # lowering itself correct.
         result_ty = A.expr_type(e)
         obj_v = _lower_expr(ctx, e.obj)
         idx_v = _lower_expr(ctx, e.index)
@@ -5554,6 +6215,26 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     ctx.emit(IRInstr("const", two, [2.0]))
                     v = ctx.tmp(F64)
                     ctx.emit(IRInstr("call", v, ["pow", two, args[0]]))
+                    return v
+                if c_name == "erf" and len(args) == 1:
+                    # erf isn't a real msvcrt.dll export (confirmed via
+                    # ctypes.WinDLL('msvcrt.dll') attribute lookup) -- the
+                    # x86-64 backend's from-scratch PE linker has no static
+                    # libm to pull it from (unlike the legacy gcc-linked
+                    # backend, which mingw supplies it for free), so route
+                    # to a native computed shim in abi_shims.asm instead of
+                    # an unresolvable extern. See _math_erf there for the
+                    # Abramowitz & Stegun 7.1.26 polynomial approximation.
+                    v = ctx.tmp(F64)
+                    ctx.emit(IRInstr("call", v, ["_math_erf", args[0]]))
+                    return v
+                if c_name == "tgamma" and len(args) == 1:
+                    # tgamma has the same problem as erf: not a real
+                    # msvcrt.dll export. Route to a native Lanczos (g=7,
+                    # n=9) approximation shim (_math_gamma in abi_shims.asm)
+                    # instead of an unresolvable extern.
+                    v = ctx.tmp(F64)
+                    ctx.emit(IRInstr("call", v, ["_math_gamma", args[0]]))
                     return v
                 ret_conv = getattr(fn, "ret_conv", None)
                 if ret_conv == "f2i":
@@ -6339,6 +7020,19 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(res_ty)
             ctx.emit(IRInstr("call", v, [f"{owner}__{e.method}", *args]))
             return v
+        if obj_ty == "instance:DynamicModule":
+            # `handle.func(args)` where handle = import_binary(path) and
+            # func is a `@handle.imported` stub -- see the "import_binary
+            # dynamic DLL loading" section near the end of this file for
+            # the matching import_binary(path) assignment lowering. Must
+            # be checked BEFORE the generic "instance:" case just below:
+            # a DynamicModule handle is represented as an ordinary
+            # instance dict (same _abi_new_instance/_abi_dict_* machinery
+            # every user class uses), but `e.method` is never a real
+            # ClassName__method symbol -- it's a function pointer resolved
+            # at runtime and stashed in the handle's own dict, keyed by
+            # name.
+            return _lower_dynamic_call(ctx, e)
         if obj_ty.startswith("instance:"):
             # Walk the inheritance chain for the method's actual defining
             # class -- a static instance:Dog type doesn't mean Dog itself
@@ -7210,6 +7904,13 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         return
 
     if isinstance(s, A.Assign):
+        if (
+            isinstance(s.target, str)
+            and isinstance(s.value, A.Call)
+            and s.value.func == "import_binary"
+        ):
+            _lower_import_binary_assign(ctx, s)
+            return
         if A.expr_type(s.value).startswith("mlang:"):
             # `code = ml.Code(config, source)`: the RHS is a compile-time-
             # only marker (see the `mlang:` MethodCall case above) --
@@ -8716,6 +9417,20 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
             cls_name = node.iter_is_instance
             add_resolved(cls_name, "__iter__")
             add_resolved(cls_name, "__next__")
+        elif isinstance(node, A.Comprehension) and A.expr_type(node.iter).startswith("instance:"):
+            # `[elt for x in obj]` on a user class with __iter__/__next__
+            # (also covers a yield-based generator function's returned
+            # object -- see `_lower_comprehension_instance_iter`'s own
+            # docstring for why that's the same shape) -- same two-part
+            # "lowering fixed, walker not fixed" gap as A.For's identical
+            # `iter_is_instance` case just above. Unlike A.For, sema.py
+            # never stamps a dedicated marker attribute on A.Comprehension
+            # for this shape (only A.For gets `iter_is_instance`), so this
+            # re-derives the class name the same way the lowering itself
+            # does: straight off `A.expr_type(node.iter)`.
+            cls_name = A.expr_type(node.iter).split(":", 1)[1]
+            add_resolved(cls_name, "__iter__")
+            add_resolved(cls_name, "__next__")
         elif isinstance(node, A.AugAssign) and A.expr_type(node.value).startswith("instance:"):
             # `v1 += v2` on a user instance dispatches to
             # `__iadd__`/`__add__` (see `_lower_stmt`'s AugAssign case,
@@ -8924,6 +9639,20 @@ def lower_module(mod: A.Module) -> IRModule:
     global_types: dict[str, IRType] = {}
     global_list_el_ty: dict[str, str] = {}
     _collect_module_globals(mod.body, global_types, global_list_el_ty)
+    # import_binary()/.imported: scan the FULL (not reachability-filtered)
+    # top-level function list for `@<handle>.imported` stubs -- mirrors
+    # codegen.py's identical scan in Codegen.__init__. These stubs are
+    # never called as ordinary functions (only ever as `handle.func(...)`,
+    # a MethodCall dispatched specially below), so they legitimately don't
+    # show up in `top_funcs`/`_reachable_callables`'s reachable set; this
+    # dict is the only place their FuncDef (needed for its param_types,
+    # to marshal each call's arguments) is still reachable from lowering.
+    imported_funcs: dict[str, list[tuple[str, "A.FuncDef"]]] = {}
+    for f in mod.funcs:
+        for deco in f.decorators:
+            if deco.endswith(".imported"):
+                handle_name = deco[: -len(".imported")]
+                imported_funcs.setdefault(handle_name, []).append((f.name, f))
     mctx = _ModuleCtx(
         frozenset(c.name for c in mod.classes),
         frozenset(f.name for f in top_funcs) | frozenset(f.name for f in method_funcs),
@@ -8936,6 +9665,7 @@ def lower_module(mod: A.Module) -> IRModule:
         global_list_el_ty,
         mod.classes,
         getattr(mod, "mlang_code_funcs", {}),
+        imported_funcs,
     )
     # Register each class-var global's type into `global_types` (and
     # therefore `global_names`, computed from it in `_ModuleCtx.__init__`)
@@ -8978,3 +9708,136 @@ def lower_module(mod: A.Module) -> IRModule:
         main_body = A.FuncDef(name="main", params=[], body=class_var_init_stmts + list(mod.body))
         funcs.append(lower_func(main_body, mctx, visibility="global", module_body=True))
     return IRModule(funcs=funcs, data=mctx.data)
+
+
+# ── import_binary() dynamic DLL loading ─────────────────────────────────────
+#
+# `handle = import_binary(path)` loads a DLL/shared object at RUNTIME via
+# LoadLibraryA (this backend currently targets Windows/PE only -- see
+# pe_linker.py's _DLL_FOR_SYMBOL, which already imports LoadLibraryA/
+# GetProcAddress from kernel32.dll for other purposes, so no new linker
+# wiring is needed), then eagerly resolves every function the program
+# declared with `@<handle>.imported` against it via GetProcAddress,
+# mirroring codegen.py's `_gen_import_binary`/`_gen_dynamic_call` exactly
+# (same eager-resolve-at-load-time strategy, same "handle is a real
+# instance dict, resolved pointers stored under each function's own name"
+# representation -- see codegen.py for the full rationale, including why
+# this is eager instead of gl_import()'s lazy resolution: import_binary()
+# has no equivalent to gl_import()'s "needs a GL context first" ordering
+# hazard, so there's no reason to defer).
+#
+# The call itself (`handle.func(args)`) is an INDIRECT call through the
+# resolved pointer -- no new IR mechanism was needed for this: the x86-64
+# backend's "call" IRInstr op already supports an indirect call whenever
+# its first operand is an IRValue (a runtime pointer) instead of a bare
+# string symbol name (see _backends/x86_64/codegen.py's `_call`, `is_indirect
+# = hasattr(target_op, "name") and hasattr(target_op, "type")`) -- this is
+# already exercised by ordinary lambda/closure calls elsewhere in this
+# pipeline, just reused here.
+#
+# Not `_reachable_callables`-aware: a `@handle.imported` stub is never
+# dispatched to as a user-defined function/method (there is no
+# `DynamicModule__toupper` symbol anywhere) -- it's purely a decorator
+# carrying the function's name/signature for this dict-driven runtime
+# resolution, so the walker's job of deciding which USER functions/methods
+# stay reachable doesn't apply. The stub's FuncDef is read directly out of
+# `mctx.imported_funcs` (built in lower_module from the whole, unfiltered
+# `mod.funcs`), and its trivial `pass` body is simply never lowered/
+# compiled -- exactly like codegen.py, which never emits these stubs as
+# real functions either.
+
+_DYNCALL_HANDLE_KEY = "_handle"
+
+
+def _lower_import_binary_assign(ctx: _FuncCtx, s: A.Assign) -> None:
+    """`handle = import_binary(path)`: alloc a fresh instance dict, load the
+    named library into it (keyed "_handle", unused today but keeps the
+    raw HMODULE available for a future close_binary()), then resolve every
+    `@<handle>.imported` function registered for this exact target name
+    (mctx.imported_funcs) via GetProcAddress, storing each resolved
+    pointer keyed by the function's own name -- read back by
+    _lower_dynamic_call at each `handle.func(...)` call site.
+    """
+    e = s.value  # the import_binary(path) Call
+    dict_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", dict_v, ["_abi_new_instance"]))
+
+    path_v = _lower_expr(ctx, e.args[0])
+    lib_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", lib_v, ["LoadLibraryA", path_v]))
+
+    handle_key_name = ctx.mctx.intern_str(_DYNCALL_HANDLE_KEY)
+    handle_key_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", handle_key_v, [handle_key_name]))
+    ctx.emit(IRInstr("call", None, ["_abi_dict_set", dict_v, handle_key_v, lib_v]))
+
+    for func_name, _funcdef in ctx.mctx.imported_funcs.get(s.target, []):
+        name_label = ctx.mctx.intern_str(func_name)
+        name_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", name_v, [name_label]))
+        proc_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", proc_v, ["GetProcAddress", lib_v, name_v]))
+        ctx.emit(IRInstr("call", None, ["_abi_dict_set", dict_v, name_v, proc_v]))
+
+    ptr = _name_ptr(ctx, s.target, PTR)
+    ctx.emit(IRInstr("store", None, [dict_v, ptr]))
+
+
+def _lower_dynamic_call(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
+    """`handle.func(args)` for a `@handle.imported` function: look up the
+    pointer GetProcAddress already resolved into the handle dict (keyed by
+    `func`'s name, see _lower_import_binary_assign) and call through it
+    indirectly. Scalar int/float/str parameters are supported -- an
+    unannotated parameter defaults to "int", matching codegen.py's
+    _gen_dynamic_call (the foreign function's real signature isn't
+    introspectable, so the stub's own annotations are the only contract).
+    """
+    handle_name = e.obj.name if isinstance(e.obj, A.Name) else None
+    funcdef = None
+    if handle_name is not None:
+        for fname, fdef in ctx.mctx.imported_funcs.get(handle_name, []):
+            if fname == e.method:
+                funcdef = fdef
+                break
+    if funcdef is None:
+        raise LowerError(
+            f"unsupported expr MethodCall ({e.method!r} is not a "
+            "@<handle>.imported function on a known import_binary() handle)"
+        )
+
+    args: list[IRValue] = []
+    for i, a in enumerate(e.args):
+        annot = funcdef.param_types[i] if i < len(funcdef.param_types) else None
+        base = annot[0] if annot else "int"
+        av = _lower_expr(ctx, a)
+        if base == "float" and av.type is not F64:
+            fv = ctx.tmp(F64)
+            ctx.emit(IRInstr("sitofp", fv, [av]))
+            av = fv
+        elif base != "float" and av.type is F64:
+            raise LowerError(
+                f"@{handle_name}.imported function {funcdef.name!r}: "
+                "passing a float argument to a non-float parameter is not supported"
+            )
+        elif base not in ("int", "float", "str"):
+            raise LowerError(
+                f"@{handle_name}.imported function {funcdef.name!r}: "
+                f"parameter type {base!r} is not supported "
+                "(only int/float/str)"
+            )
+        args.append(av)
+
+    obj_v = _lower_expr(ctx, e.obj)
+    name_label = ctx.mctx.intern_str(e.method)
+    name_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", name_v, [name_label]))
+    zero_default = ctx.tmp(PTR)
+    ctx.emit(IRInstr("const", zero_default, [0]))
+    ptr_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", ptr_v, ["_abi_dict_get_default", obj_v, name_v, zero_default]))
+
+    ret_base = funcdef.ret_type[0] if funcdef.ret_type else "int"
+    res_ty = F64 if ret_base == "float" else I64
+    v = ctx.tmp(res_ty)
+    ctx.emit(IRInstr("call", v, [ptr_v, *args]))
+    return v
