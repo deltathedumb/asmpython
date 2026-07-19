@@ -7,6 +7,7 @@ on:
     paths:
       - "asmpython/_backends/arm64/**"
       - "asmpython/_runtime/abi_shims_linux_arm64.S"
+      - "asmpython/_runtime/abi_strings_linux_arm64.S"
       - "asmpython/_compiler/ir.py"
       - "tests/test_arm64_cli.py"
       - "tests/test_arm64_codegen.py"
@@ -19,6 +20,7 @@ on:
     paths:
       - "asmpython/_backends/arm64/**"
       - "asmpython/_runtime/abi_shims_linux_arm64.S"
+      - "asmpython/_runtime/abi_strings_linux_arm64.S"
       - "asmpython/_compiler/ir.py"
       - "tests/test_arm64_cli.py"
       - "tests/test_arm64_codegen.py"
@@ -63,6 +65,7 @@ jobs:
             asmpython/_backends/arm64/_verify_elf.py \
             asmpython/_backends/arm64/_verify_source.py \
             asmpython/_backends/arm64/_verify_print.py \
+            asmpython/_backends/arm64/_verify_scalars.py \
             tests/test_arm64_cli.py \
             tests/test_arm64_codegen.py \
             tests/test_arm64_elf.py \
@@ -92,6 +95,9 @@ jobs:
 
       - name: Verify freestanding print runtime through QEMU
         run: python -m asmpython._backends.arm64._verify_print --mode cross
+
+      - name: Verify scalar and string runtime through QEMU
+        run: python -m asmpython._backends.arm64._verify_scalars --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -123,6 +129,7 @@ jobs:
             asmpython/_backends/arm64/_verify_elf.py \
             asmpython/_backends/arm64/_verify_source.py \
             asmpython/_backends/arm64/_verify_print.py \
+            asmpython/_backends/arm64/_verify_scalars.py \
             tests/test_arm64_cli.py \
             tests/test_arm64_codegen.py \
             tests/test_arm64_elf.py \
@@ -146,3 +153,6 @@ jobs:
 
       - name: Verify freestanding print runtime natively
         run: python -m asmpython._backends.arm64._verify_print --mode native
+
+      - name: Verify scalar and string runtime natively
+        run: python -m asmpython._backends.arm64._verify_scalars --mode native
