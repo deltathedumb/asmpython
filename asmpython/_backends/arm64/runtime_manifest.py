@@ -22,6 +22,10 @@ RUNTIME_SLICES = (
         frozenset({"_abi_int_to_base", "printf", "strlen"}),
     ),
     RuntimeSlice(
+        "abi_float_scalar_linux_arm64.S",
+        frozenset({"fabs"}),
+    ),
+    RuntimeSlice(
         "abi_strings_linux_arm64.S",
         frozenset(
             {

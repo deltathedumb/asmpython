@@ -64,6 +64,8 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_string_slice --mode cross
       - name: Verify Unicode zfill through QEMU
         run: python -m asmpython._backends.arm64._verify_string_zfill --mode cross
+      - name: Verify exact float absolute value through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_abs --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -105,3 +107,5 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_string_slice --mode native
       - name: Verify Unicode zfill natively
         run: python -m asmpython._backends.arm64._verify_string_zfill --mode native
+      - name: Verify exact float absolute value natively
+        run: python -m asmpython._backends.arm64._verify_float_abs --mode native
