@@ -14,8 +14,12 @@ from asmpython._compiler.parser import Parser
 from asmpython._compiler.sema import analyze
 
 
+def _parsed_module(source: str) -> A.Module:
+    return Parser(Lexer(source).tokenize()).parse()
+
+
 def _checked_module(source: str) -> A.Module:
-    module = Parser(Lexer(source).tokenize()).parse()
+    module = _parsed_module(source)
     analyze(module)
     return module
 
@@ -100,11 +104,7 @@ class X86LiteralUnpackNormalizeTests(unittest.TestCase):
         self.assertEqual(statement.values, original_values)
 
     def test_tuple_call_and_starred_unpack_are_unchanged(self) -> None:
-        call_module = _checked_module(
-            'def make_pair() -> tuple[str, int]:\n'
-            '    return ("a", 2)\n'
-            'a, b = make_pair()\n'
-        )
+        call_module = _parsed_module('a, b = make_pair()\n')
         call_statement = _tuple_assign(call_module)
         original_call_values = list(call_statement.values)
         normalize_literal_unpacks(call_module)
