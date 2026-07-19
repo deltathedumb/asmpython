@@ -172,31 +172,61 @@ A broad set of language and stdlib improvements shipped alongside the core
 
 A platform-expansion release that broadens asmpython beyond x86-64 Windows/Linux.
 
-#### Pyinbin interpreter — stretch goal
+#### Pyinbin and PortaPy interpreters — required 3.14 track
 
 `pyinbin` is a complete, CPython-independent Python interpreter written in
-the asmpython language subset and compiled to a native executable. It is not
-a stub module or a host-Python wrapper: after bootstrap compilation, executing
-pyinbin must require neither CPython nor a Python installation.
+Python source compatible with the asmpython language subset and compiled to a
+native executable. It is not a stub module, host-Python wrapper, or native-
+language interpreter rewrite: after bootstrap compilation, executing pyinbin
+must require neither CPython nor a Python installation.
+
+`PortaPy` is the separately versioned, embeddable fork of pyinbin's reusable
+interpreter core. It is compiled by asmpython into `portapy.dll`,
+`libportapy.so`, and eventually `libportapy.dylib`, exposing a stable public API
+through opaque handles and fixed-width primitive types.
+
+Both products are **fully Python-built interpreters**:
+
+- lexer, parser, bytecode compiler, VM, object model, exceptions, generators,
+  imports, builtins, and Python-level standard library are implemented in Python
+  source;
+- no C/C++/Rust interpreter core and no CPython embedding API may provide
+  interpreter semantics;
+- handwritten native code is limited to export annotations, calling-convention
+  adapters, loader entry points, and unavoidable OS bootstrap glue;
+- the DLL/shared library contains native code generated from the Python
+  implementation, not a launcher for another interpreter.
+
+pyinbin remains tailored to asmpython's static/native import pipeline, packaged
+source manifests, project metadata, runtime import routing, and fallback
+diagnostics. PortaPy removes those compiler-specific policies and exposes the
+same reusable Python-built VM core to external hosts.
+
+Required capabilities and gates:
 
 - Full source execution: lexer, parser, object model, calls, classes,
   exceptions, generators, imports, and standard-library module loading.
-- Runtime imports: when a compiled program imports a Python source module that
-  cannot be statically merged into the native program, the compiler packages
-  that source and dispatches it to pyinbin at runtime.
-- Static merging remains the preferred path for modules that asmpython can
-  compile directly; pyinbin fallback must be explicit in build metadata until
-  compatibility coverage is complete, never a silent partial interpreter.
-- Interpreter compatibility is measured by a separate pyinbin conformance
-  suite. It must not claim full Python support before that suite covers the
-  supported import and execution surface.
+- Runtime imports: when a compiled program performs a genuinely dynamic import
+  that cannot be statically merged, asmpython packages that source and dispatches
+  it to pyinbin at runtime.
+- Static merging remains the preferred path; normal static imports never become
+  an excuse for broad interpreter fallback.
+- Interpreter compatibility is measured by a shared pyinbin/PortaPy conformance
+  corpus. Semantic fixes in the common core must remain portable between both
+  projects until an intentional divergence is documented.
+- PortaPy's ABI must include version negotiation, runtime create/destroy,
+  source/bytecode execution, opaque values, checked primitive conversion,
+  structured errors, host callbacks, module registration, interruption, and
+  deterministic teardown.
+- PortaPy must be tested from an external C host and at least one additional
+  language binding before ABI v1 is declared stable.
 - 3.14 readiness additionally requires a run of `tests/cpython_conformance.py`
   against the official CPython `Lib/test` suite. The release gate remains
   closed until `--required --mode pyinbin` passes for the complete discovered
   module set, with the CPython baseline recorded alongside it.
 
-The architecture and staged implementation contract live in
-`docs/PYINBIN-DESIGN.md`.
+The shared interpreter architecture lives in `docs/PYINBIN-DESIGN.md`; PortaPy's
+product and ABI requirements live in `docs/PORTAPY-DESIGN.md`.
 
 **Versioning decided: 3.14.** A codebase survey (2026-06-17) confirmed
 `codegen.py` hardcodes x86-64 mnemonics directly in ~3,461 lines of raw
