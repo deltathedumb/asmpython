@@ -107,6 +107,12 @@ building, and diagnostic-preserving failures. It checks program undefined
 symbols before tool invocation and rejects source requiring runtime symbols not
 in the current compatibility set.
 
+`runtime_manifest.py` is the single source of truth for runtime source order and
+symbol ownership. Before assembly, every source file must exist in manifest
+order and its `.global`/`.globl` declarations must exactly match its owned
+symbols. After `ld -r`, the merged ELF is independently checked again for every
+declared export and for zero unresolved symbols.
+
 `python -m asmpython._backends.arm64` provides deliberately separate
 experimental commands:
 
@@ -128,25 +134,27 @@ Runtime sources are assembled separately and combined with `ld -r`:
   - `strlen`
 - `abi_strings_linux_arm64.S`
   - `labs`
-  - `_abi_str_concat`
-  - `_abi_str_concat_dup`
-  - `_abi_str_eq`
-  - `_abi_str_cmp`
+  - `_abi_str_concat` / `_abi_str_concat_dup`
+  - `_abi_str_repeat`
+  - `_abi_str_eq` / `_abi_str_cmp`
+  - `_abi_hash_string` (the existing 64-bit FNV-1a contract)
+  - `_abi_str_removeprefix` / `_abi_str_removesuffix`
 - `abi_string_search_linux_arm64.S`
   - `_abi_str_starts_with`
   - `_abi_str_ends_with`
   - `_abi_str_count`
 
 Each allocation-producing slice uses distinct bump-allocated storage rather
-than a shared static formatting buffer. The merged runtime object is inspected
-after every build: every declared export must exist and the supposedly
-freestanding object must have no unresolved symbols.
+than a shared static formatting buffer. The string-repetition path checks
+multiplication/addition overflow and treats zero/negative counts as empty.
+Prefix/suffix removal handles matching, non-matching, empty, and UTF-8 affixes
+without splitting a valid encoded code point.
 
 Independent Clang AArch64 assembly and `ld.lld -r` verification succeeded for
-all three slices. Cross-slice `strlen` calls resolve in the merged object and
-the expected global exports are present. The search slice handles complete
-UTF-8 prefixes/suffixes and counts empty substrings by Unicode code-point count
-plus one, not raw byte count plus one.
+all slices. Cross-slice `strlen`, prefix, and suffix calls resolve in the merged
+object. Disassembly confirms the FNV-1a constants/loop and the remover AAPCS64
+frames/calls. The search slice counts empty substrings by Unicode code-point
+count plus one, not raw byte count plus one.
 
 Execution probes compile real source and require exact output:
 
@@ -157,10 +165,16 @@ Execution probes compile real source and require exact output:
   concatenation, equality, inequality, and ordering
 - `_verify_string_search.py`: `startswith`, `endswith`, non-overlapping `count`,
   ASCII empty-substring count, and UTF-8 empty-substring count (`"éé"` -> 3)
+- `_verify_string_repeat.py`: both operand orders, UTF-8 repetition, and zero/
+  negative counts
+- `_verify_hash.py`: ASCII and UTF-8 vectors locked to the reference FNV-1a
+  implementation
+- `_verify_string_remove.py`: matching, non-matching, empty, and UTF-8 prefix/
+  suffix removal
 
-`tests/test_arm64_source_codegen.py` locks the scalar and search probes to their
-exact external-symbol sets so lowering drift fails before assembler/link/
-execution stages.
+Focused tests lock every probe to its exact external-symbol set so lowering
+drift fails before assembler/link/execution stages. Runtime-manifest tests also
+reject source ordering and public-symbol ownership drift before tool discovery.
 
 ### Float formatting — DELIBERATELY NOT FAKED
 
@@ -188,7 +202,7 @@ until the ARM64 exception runtime exists.
 - native `ubuntu-24.04-arm` with GNU binutils and `strace`
 
 Both run encoder checks, object/codegen/CLI/link tests, real-source object tests,
-and IR/source/print/scalar/string-search execution probes.
+and IR/source/print/scalar/search/repeat/hash/remove execution probes.
 
 **Current execution boundary:** assembler correctness, object structure,
 relocatable merging, and static linker acceptance are independently confirmed.
@@ -207,8 +221,8 @@ successfully until a workflow or WSL2 run is directly observed.
 
 **Next concrete step:** continue exact non-raising runtime expansion from symbols
 emitted by real lowered source. Keep float shortest-round-trip, exception-
-dependent parsing, containers, and other failure-sensitive surfaces explicitly
-gated until their real semantics and end-to-end probes exist.
+dependent parsing/indexing, containers, and other failure-sensitive surfaces
+explicitly gated until their real semantics and end-to-end probes exist.
 
 ## Known gaps / deferred work
 
