@@ -28,11 +28,26 @@ from .elf_inspect import (
 from .module_codegen import compile_ir_module
 
 
-# Keep this synchronized with global exports in abi_shims_linux_arm64.S. This
-# is intentionally a compatibility allowlist, not a promise that the complete
-# x86-64 runtime has been ported. build_runtime_object() independently checks
-# that the assembled object really exports every listed symbol.
-RUNTIME_EXPORTS = frozenset({"_abi_int_to_base", "printf", "strlen"})
+# Keep this synchronized with global exports across the modular freestanding
+# runtime sources. build_runtime_object() independently checks that the merged
+# relocatable object really exports every listed symbol and has no unresolved
+# cross-slice dependencies.
+RUNTIME_EXPORTS = frozenset(
+    {
+        "_abi_int_to_base",
+        "_abi_str_cmp",
+        "_abi_str_concat",
+        "_abi_str_concat_dup",
+        "_abi_str_eq",
+        "labs",
+        "printf",
+        "strlen",
+    }
+)
+_RUNTIME_SOURCE_NAMES = (
+    "abi_shims_linux_arm64.S",
+    "abi_strings_linux_arm64.S",
+)
 
 
 @dataclass(frozen=True)
@@ -111,7 +126,11 @@ def _run(command: list[str], *, stage: str) -> None:
         stderr=subprocess.PIPE,
     )
     if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip() or "no diagnostic"
+        detail = (
+            completed.stderr.strip()
+            or completed.stdout.strip()
+            or "no diagnostic"
+        )
         raise Arm64LinkError(
             f"ARM64 {stage} failed with exit code {completed.returncode}: {detail}"
         )
@@ -153,21 +172,28 @@ def assemble_file(
         return object_path.read_bytes()
 
 
+def _runtime_directory() -> Path:
+    return Path(__file__).resolve().parents[2] / "_runtime"
+
+
+def runtime_source_paths() -> tuple[Path, ...]:
+    return tuple(_runtime_directory() / name for name in _RUNTIME_SOURCE_NAMES)
+
+
 def runtime_source_path() -> Path:
-    return (
-        Path(__file__).resolve().parents[2]
-        / "_runtime"
-        / "abi_shims_linux_arm64.S"
-    )
+    """Backward-compatible path to the original/core runtime source."""
+    return runtime_source_paths()[0]
 
 
 def validate_runtime_object(runtime_object: bytes) -> frozenset[str]:
-    """Verify that the assembled runtime matches its declared compatibility set."""
+    """Verify that the merged runtime matches its compatibility declaration."""
     try:
         exports = defined_global_symbols(runtime_object)
         unresolved = undefined_symbols(runtime_object)
     except Arm64ElfFormatError as exc:
-        raise Arm64LinkError(f"invalid assembled ARM64 runtime object: {exc}") from exc
+        raise Arm64LinkError(
+            f"invalid assembled ARM64 runtime object: {exc}"
+        ) from exc
 
     missing = RUNTIME_EXPORTS - exports
     if missing:
@@ -183,9 +209,48 @@ def validate_runtime_object(runtime_object: bytes) -> frozenset[str]:
     return exports
 
 
+def _write_object_inputs(root: Path, objects: Iterable[bytes]) -> list[Path]:
+    paths: list[Path] = []
+    for index, payload in enumerate(objects):
+        path = root / f"input-{index}.o"
+        path.write_bytes(payload)
+        paths.append(path)
+    return paths
+
+
+def link_relocatable(
+    objects: Iterable[bytes],
+    *,
+    toolchain: LinuxArm64Toolchain,
+) -> bytes:
+    """Merge runtime slices into one still-relocatable AArch64 ELF object."""
+    object_list = list(objects)
+    if not object_list:
+        raise ValueError("at least one ARM64 object is required for relocatable link")
+    with tempfile.TemporaryDirectory(prefix="asmpython-arm64-ld-r-") as tmp:
+        root = Path(tmp)
+        paths = _write_object_inputs(root, object_list)
+        output_path = root / "output.o"
+        _run(
+            [
+                toolchain.linker,
+                "-r",
+                "-o",
+                str(output_path),
+                *(str(path) for path in paths),
+            ],
+            stage="relocatable runtime link",
+        )
+        return output_path.read_bytes()
+
+
 def build_runtime_object(*, toolchain: LinuxArm64Toolchain) -> bytes:
-    """Assemble and validate the current freestanding ARM64 runtime slice."""
-    runtime_object = assemble_file(runtime_source_path(), toolchain=toolchain)
+    """Assemble, merge, and validate all freestanding ARM64 runtime slices."""
+    source_objects = [
+        assemble_file(path, toolchain=toolchain)
+        for path in runtime_source_paths()
+    ]
+    runtime_object = link_relocatable(source_objects, toolchain=toolchain)
     validate_runtime_object(runtime_object)
     return runtime_object
 
@@ -262,11 +327,7 @@ def link_objects(
         raise ValueError("at least one ARM64 object is required for linking")
     with tempfile.TemporaryDirectory(prefix="asmpython-arm64-ld-") as tmp:
         root = Path(tmp)
-        paths: list[Path] = []
-        for index, payload in enumerate(object_list):
-            path = root / f"input-{index}.o"
-            path.write_bytes(payload)
-            paths.append(path)
+        paths = _write_object_inputs(root, object_list)
         output_path = root / "output"
         _run(
             [
