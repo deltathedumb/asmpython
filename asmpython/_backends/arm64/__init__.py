@@ -4,7 +4,7 @@ asmpython's ARM64 (AArch64) backend -- Stage 1, in progress.
 Implemented so far: instruction encoding, AAPCS64 register allocation, current
 IR instruction selection, ELF64 relocatable-object emission, and explicit
 single-file Linux object/executable builders for the currently supported
-freestanding runtime slice.
+freestanding runtime slices.
 
 The package deliberately does NOT define ``__module_backend__`` yet. The
 functions exported here are experimental APIs for verification and future
@@ -33,8 +33,10 @@ from .linux_link import (
     build_start_object,
     discover_toolchain,
     link_objects,
+    link_relocatable,
     required_external_symbols,
     runtime_source_path,
+    runtime_source_paths,
     start_source,
     validate_runtime_object,
     validate_runtime_requirements,
@@ -73,10 +75,12 @@ __all__ = [
     "defined_global_symbols",
     "discover_toolchain",
     "link_objects",
+    "link_relocatable",
     "lower_source",
     "required_external_symbols",
     "run_backend_codegen",
     "runtime_source_path",
+    "runtime_source_paths",
     "start_source",
     "symbols",
     "undefined_symbols",
