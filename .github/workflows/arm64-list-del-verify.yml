@@ -35,6 +35,23 @@ jobs:
           sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user
       - name: Run exact lowering and manifest tests
         run: python -m unittest -v tests.test_arm64_list_del
+      - name: Collect full ARM64 and ULP diagnostics
+        id: full-diagnostics
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '=== full ARM64 unittest discovery ==='
+            python -m unittest discover -s tests -p 'test_arm64_*.py' -v
+            echo '=== exact ULP execution ==='
+            python -m asmpython._backends.arm64._verify_float_ulp --mode cross
+          } 2>&1 | tee arm64-full-diagnostics.log
+      - name: Preserve full ARM64 diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-full-diagnostics
+          path: arm64-full-diagnostics.log
       - name: Execute valid-index list deletion through QEMU
         run: python -m asmpython._backends.arm64._verify_list_del --mode cross
 
