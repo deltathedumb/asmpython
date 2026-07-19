@@ -49,6 +49,7 @@ jobs:
             asmpython/_backends/arm64/module_codegen.py \
             asmpython/_backends/arm64/_verify_encoder.py \
             asmpython/_backends/arm64/_verify_elf.py \
+            asmpython/_backends/arm64/_verify_source.py \
             tests/test_arm64_codegen.py \
             tests/test_arm64_elf.py \
             tests/test_arm64_module_codegen.py
@@ -64,8 +65,11 @@ jobs:
             tests.test_arm64_module_codegen \
             -v
 
-      - name: Link and execute through QEMU
+      - name: Link and execute generated IR through QEMU
         run: python -m asmpython._backends.arm64._verify_elf --mode cross
+
+      - name: Compile source and execute through QEMU
+        run: python -m asmpython._backends.arm64._verify_source --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -91,6 +95,7 @@ jobs:
             asmpython/_backends/arm64/elf.py \
             asmpython/_backends/arm64/module_codegen.py \
             asmpython/_backends/arm64/_verify_elf.py \
+            asmpython/_backends/arm64/_verify_source.py \
             tests/test_arm64_codegen.py \
             tests/test_arm64_elf.py \
             tests/test_arm64_module_codegen.py
@@ -100,5 +105,8 @@ jobs:
             tests.test_arm64_module_codegen \
             -v
 
-      - name: Link and execute natively
+      - name: Link and execute generated IR natively
         run: python -m asmpython._backends.arm64._verify_elf --mode native
+
+      - name: Compile source and execute natively
+        run: python -m asmpython._backends.arm64._verify_source --mode native
