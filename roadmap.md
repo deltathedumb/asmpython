@@ -210,6 +210,45 @@ backends lower from. Per the criterion below, that makes this 3.14.
 
 #### ARM64 support
 
+**Stage 0 (toolchain bring-up) — done, 2026-07-19.** Verified in WSL2
+(WSL1 cannot run this: QEMU user-mode's `guest_base` address-space
+reservation reliably fails under WSL1's syscall-translation layer):
+`gcc-aarch64-linux-gnu`/`binutils-aarch64-linux-gnu` (cross-assembler,
+cross-linker, cross-gcc) and `qemu-user` (AArch64 user-mode emulation) all
+install and work. A hand-assembled AArch64 ELF executable (raw `write`/
+`exit` syscalls, no libc) assembled and linked with the real cross-tools
+executed correctly under `qemu-aarch64`, confirmed via `strace` showing
+`exit_group(42)`. A codebase survey for this stage additionally confirmed
+the *good* news: `asmpython/_compiler/ir.py`'s SSA IR (the same one the
+x86-64 backend already lowers from, since the 3.14 IR rewrite above already
+landed) is genuinely ISA-neutral — no x86 register names anywhere in it —
+and `asmpython/_backends/x86_64/phi_elim.py` (SSA phi elimination) is
+already IR-level only and reusable by an AArch64 backend completely
+unmodified. `asmpython/_compiler/ir.py`'s `IRBackend` plugin interface
+(`requested_args` / `compile(module, args)` / `link(objects, args)`) is
+also already generic enough for a new backend to implement directly.
+
+**Stage 1 (not started).** What's genuinely new work, confirmed by reading
+the x86-64 backend's own internals as the reference shape: a new
+`asmpython/_backends/arm64/encoder.py` (AArch64 instruction encoding: X0-
+X30 GP registers, V0-V31 SIMD/FP registers, fixed 4-byte instruction width
+unlike x86's variable-length encoding), a new `regalloc.py` port (the
+existing linear-scan/Belady-eviction *algorithm* in
+`_backends/x86_64/regalloc.py` is architecture-generic, but its register
+pools and the AAPCS64 argument-passing convention it must express are
+not — same reasoning applies to the Windows ARM64 calling convention for
+`--target windows-arm64`), a new `codegen.py` (IR op → AArch64
+instruction selection), and real AArch64 relocation support in the object-
+file writer (`EM_AARCH64`, `R_AARCH64_*` relocation types — AArch64 has no
+x86-style RIP-relative `lea`; PC-relative data/symbol addressing is a
+`ADRP`+`ADD`/`ADD :lo12:` page-relative two-instruction sequence, which is
+also why Stage 0's own hand-written probe program above uses it). Beyond
+codegen: the runtime object and ABI shims (`asmpython/_runtime/build.py`,
+currently NASM/x86-64-only throughout) need AArch64 equivalents before a
+real program (not just a hand-written syscall probe) can link and run —
+this is comparable in size to the encoder/regalloc/codegen work itself,
+not a small addendum to it.
+
 - New `--target linux-arm64` and `--target windows-arm64` targets.
 - AArch64 instruction backend — a second ISA alongside the current x86-64 NASM backend.
 - ARM64 ABI (AAPCS64 on Linux, Microsoft ARM64 ABI on Windows).
