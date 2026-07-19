@@ -39,6 +39,10 @@ class CliImportPolicyTests(unittest.TestCase):
             "import importlib\nmodule = importlib.import_module(name)\n",
             "from importlib import import_module\nmodule = import_module(name)\n",
             "import imp\nmodule = imp.load_module(name, file, path, desc)\n",
+            "import importlib as il\nmodule = il.import_module(name)\n",
+            "from importlib import import_module as load\nmodule = load(name)\n",
+            "import importlib\nload = importlib.import_module\nmodule = load(name)\n",
+            "import importlib\nload = importlib.import_module\nagain = load\nmodule = again(name)\n",
         )
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "main.py"
@@ -48,6 +52,15 @@ class CliImportPolicyTests(unittest.TestCase):
                     cli.prepare_argv(["build", str(source)]),
                     ["build", str(source)],
                 )
+
+    def test_dynamic_import_text_in_comments_and_strings_is_static(self) -> None:
+        static_sources = (
+            "# importlib.import_module(name)\nprint(1)\n",
+            "text = 'import_module(name)'\nprint(text)\n",
+            "def import_module(name):\n    return name\nprint(import_module('x'))\n",
+        )
+        for source in static_sources:
+            self.assertFalse(cli.source_uses_dynamic_import(source), source)
 
     def test_dynamic_import_in_reachable_local_module_keeps_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
