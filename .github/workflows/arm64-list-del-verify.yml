@@ -35,24 +35,8 @@ jobs:
           sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user nasm gcc file
       - name: Run exact lowering and manifest tests
         run: python -m unittest -v tests.test_arm64_list_del tests.test_driver_output_permissions
-      - name: Capture string-unpack matrix
+      - name: Capture string-unpack matrix and IR
         run: |
-          cat > /tmp/only_pqr.py <<'PY'
-          p, q, r = "abc"
-          print(p, q, r)
-          PY
-          cat > /tmp/plain_pqr.py <<'PY'
-          p = "a"
-          q = "b"
-          r = "c"
-          print(p, q, r)
-          PY
-          cat > /tmp/two_pqr.py <<'PY'
-          a, b, c = "xyz"
-          print(a, b, c)
-          p, q, r = "abc"
-          print(p, q, r)
-          PY
           cat > /tmp/two_uvw.py <<'PY'
           a, b, c = "xyz"
           print(a, b, c)
@@ -69,7 +53,7 @@ jobs:
           PY
           set +e
           : > string-unpack-matrix.log
-          for name in only_pqr plain_pqr two_pqr two_uvw original; do
+          for name in two_uvw original; do
             {
               echo "=== $name ==="
               python -m asmpython build "/tmp/$name.py" \
@@ -79,22 +63,47 @@ jobs:
               if [ "$build_status" -eq 0 ]; then
                 "/tmp/$name" > "/tmp/$name.stdout" 2> "/tmp/$name.stderr"
                 echo "run_status=$?"
-                echo '-- stdout text --'
                 cat "/tmp/$name.stdout"
-                echo '-- stdout bytes --'
-                od -An -tx1c "/tmp/$name.stdout"
-                echo '-- stderr --'
-                cat "/tmp/$name.stderr"
               fi
             } >> string-unpack-matrix.log 2>&1
           done
+          python - <<'PY' > string-unpack-ir.txt
+          from pathlib import Path
+          from asmpython._backends.x86_64 import __module_backend__
+          from asmpython._compiler import ir_lower
+          from asmpython._compiler.driver import _compile_program
+
+          for filename in ("/tmp/two_uvw.py", "/tmp/original.py"):
+              path = Path(filename)
+              module = _compile_program(
+                  path.read_text(encoding="utf-8"),
+                  source_dir=path.parent,
+                  entry_path=path,
+                  whole_program=False,
+                  all_errors=False,
+                  active_extensions=frozenset(),
+              )
+              lowered = ir_lower.lower_module(module)
+              print(f"=== {path.name} ===")
+              for function in lowered.funcs:
+                  print(f"FUNCTION {function.name}")
+                  for block in function.blocks:
+                      print(f"BLOCK {block.label}")
+                      for instruction in block.instrs:
+                          print(repr(instruction))
+                      print("TERM", repr(block.terminator))
+          PY
           cat string-unpack-matrix.log
+          cat string-unpack-ir.txt
           exit 0
-      - name: Upload string-unpack matrix
+      - name: Upload string-unpack lowering diagnostic
         uses: actions/upload-artifact@v4
         with:
-          name: string-unpack-matrix
-          path: string-unpack-matrix.log
+          name: string-unpack-lowering
+          path: |
+            string-unpack-matrix.log
+            string-unpack-ir.txt
+            asmpython/_compiler/ir_lower.py
       - name: Execute valid-index list deletion through QEMU
         run: python -m asmpython._backends.arm64._verify_list_del --mode cross
 
