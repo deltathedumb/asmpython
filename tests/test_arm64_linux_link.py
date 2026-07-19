@@ -9,6 +9,9 @@ from asmpython._backends.arm64.codegen import FuncCode, R_AARCH64_CALL26
 from asmpython._backends.arm64.elf import build_elf
 
 
+_RET = bytes.fromhex("c0035fd6")
+
+
 class Arm64LinuxLinkTests(unittest.TestCase):
     @staticmethod
     def _object_requiring(*symbols: str) -> bytes:
@@ -17,6 +20,26 @@ class Arm64LinuxLinkTests(unittest.TestCase):
             for index, symbol in enumerate(symbols)
         ]
         return build_elf([FuncCode("main", bytes(4 * len(symbols)), relocs)])
+
+    @staticmethod
+    def _runtime_object(
+        exports: frozenset[str] | set[str] = linux_link.RUNTIME_EXPORTS,
+        *,
+        unresolved: str | None = None,
+    ) -> bytes:
+        functions: list[FuncCode] = []
+        for name in sorted(exports):
+            if unresolved is not None and name == "printf":
+                functions.append(
+                    FuncCode(
+                        name,
+                        bytes(4),
+                        [(0, unresolved, R_AARCH64_CALL26)],
+                    )
+                )
+            else:
+                functions.append(FuncCode(name, _RET))
+        return build_elf(functions)
 
     def test_cross_toolchain_discovery(self) -> None:
         resolved = {
@@ -84,6 +107,41 @@ class Arm64LinuxLinkTests(unittest.TestCase):
             ),
             frozenset({"_abi_int_to_base", "printf"}),
         )
+
+    def test_runtime_object_matches_declared_exports(self) -> None:
+        runtime = self._runtime_object()
+        self.assertEqual(
+            linux_link.validate_runtime_object(runtime),
+            linux_link.RUNTIME_EXPORTS,
+        )
+
+    def test_runtime_object_missing_declared_export_is_rejected(self) -> None:
+        runtime = self._runtime_object(
+            set(linux_link.RUNTIME_EXPORTS) - {"strlen"}
+        )
+        with self.assertRaisesRegex(
+            linux_link.Arm64LinkError,
+            "missing declared export.*strlen",
+        ):
+            linux_link.validate_runtime_object(runtime)
+
+    def test_freestanding_runtime_may_not_require_external_symbols(self) -> None:
+        runtime = self._runtime_object(unresolved="malloc")
+        with self.assertRaisesRegex(
+            linux_link.Arm64LinkError,
+            "unexpectedly requires external symbol.*malloc",
+        ):
+            linux_link.validate_runtime_object(runtime)
+
+    def test_build_runtime_object_validates_assembled_payload(self) -> None:
+        runtime = self._runtime_object()
+        toolchain = linux_link.LinuxArm64Toolchain("as", "ld", False)
+        with patch.object(linux_link, "assemble_file", return_value=runtime) as assemble:
+            self.assertEqual(
+                linux_link.build_runtime_object(toolchain=toolchain),
+                runtime,
+            )
+        assemble.assert_called_once()
 
     def test_runtime_free_build_rejects_external_symbols(self) -> None:
         program = self._object_requiring("printf")
