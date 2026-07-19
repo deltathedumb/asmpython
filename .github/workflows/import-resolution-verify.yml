@@ -15,6 +15,7 @@ on:
       - "tests/test_cli_import_policy.py"
       - "tests/test_site_packages.py"
       - "tests/test_pip_install_integration.py"
+      - "tests/test_selfhost_entrypoint.py"
       - ".github/workflows/import-resolution-verify.yml"
   pull_request:
     paths:
@@ -29,6 +30,7 @@ on:
       - "tests/test_cli_import_policy.py"
       - "tests/test_site_packages.py"
       - "tests/test_pip_install_integration.py"
+      - "tests/test_selfhost_entrypoint.py"
       - ".github/workflows/import-resolution-verify.yml"
   workflow_dispatch:
 
@@ -46,6 +48,7 @@ jobs:
       - name: Compile changed Python files
         run: |
           python -m py_compile \
+            asmpython/__main__.py \
             asmpython/_backends/host_cli.py \
             asmpython/_backends/host_site_packages.py \
             asmpython/_compiler/cli.py \
@@ -54,10 +57,12 @@ jobs:
             asmpython/_compiler/site_packages.py \
             tests/test_cli_import_policy.py \
             tests/test_site_packages.py \
-            tests/test_pip_install_integration.py
+            tests/test_pip_install_integration.py \
+            tests/test_selfhost_entrypoint.py
       - name: Run import policy tests
         run: |
           python -m unittest -v \
             tests.test_cli_import_policy \
             tests.test_site_packages \
-            tests.test_pip_install_integration
+            tests.test_pip_install_integration \
+            tests.test_selfhost_entrypoint
