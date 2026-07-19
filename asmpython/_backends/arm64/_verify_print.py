@@ -14,6 +14,7 @@ from pathlib import Path
 
 from ._verify_elf import _execute, _select_toolchain
 from ._verify_source import _compile_source
+from .linux_link import build_executable_from_object
 
 
 _PRINT_SOURCE = """\
@@ -23,14 +24,6 @@ def main() -> int:
     return 0
 """
 _EXPECTED_STDOUT = "42\n-10|255!\n"
-
-
-def _runtime_source() -> Path:
-    return (
-        Path(__file__).resolve().parents[2]
-        / "_runtime"
-        / "abi_shims_linux_arm64.S"
-    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,29 +39,10 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="asmpython-arm64-print-") as tmp:
         root = Path(tmp)
         program_object = root / "program.o"
-        runtime_object = root / "runtime.o"
-        start_source = root / "start.s"
-        start_object = root / "start.o"
         executable = root / "program"
 
-        program_object.write_bytes(_compile_source(_PRINT_SOURCE))
-        subprocess.run(
-            [toolchain.assembler, "-o", str(runtime_object), str(_runtime_source())],
-            check=True,
-        )
-        start_source.write_text(
-            ".text\n"
-            ".global _start\n"
-            "_start:\n"
-            "    bl main\n"
-            "    mov x8, #93\n"
-            "    svc #0\n",
-            encoding="utf-8",
-        )
-        subprocess.run(
-            [toolchain.assembler, "-o", str(start_object), str(start_source)],
-            check=True,
-        )
+        program_blob = _compile_source(_PRINT_SOURCE)
+        program_object.write_bytes(program_blob)
 
         inspection = subprocess.run(
             [toolchain.readelf, "--wide", "-r", "-s", str(program_object)],
@@ -82,19 +56,15 @@ def main(argv: list[str] | None = None) -> int:
             print(inspection)
             raise SystemExit(f"print probe object is missing symbols: {missing}")
 
-        subprocess.run(
-            [
-                toolchain.linker,
-                "-e",
-                "_start",
-                "-o",
-                str(executable),
-                str(start_object),
-                str(program_object),
-                str(runtime_object),
-            ],
-            check=True,
+        executable.write_bytes(
+            build_executable_from_object(
+                program_blob,
+                toolchain=toolchain.build,
+                entry_symbol="main",
+                include_runtime=True,
+            )
         )
+        executable.chmod(0o755)
 
         completed = _execute(toolchain, executable)
         if completed.returncode != 0 or completed.stdout != _EXPECTED_STDOUT:
@@ -109,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
         print("[ OK ] print(int) source lowered to _abi_int_to_base + printf")
         print("[ OK ] multi-argument conversions retained distinct buffers")
+        print("[ OK ] reusable ARM64 builder linked the runtime and program")
         print(f"[ OK ] {mode_name} stdout matched {_EXPECTED_STDOUT!r}")
         if completed.stderr:
             print(completed.stderr.strip())
