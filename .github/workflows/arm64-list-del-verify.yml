@@ -60,7 +60,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: typed-unpack-diagnostic
-          path: typed-unpack-diagnostic.log
+          path: |
+            typed-unpack-diagnostic.log
+            asmpython/_compiler/driver.py
       - name: Execute valid-index list deletion through QEMU
         run: python -m asmpython._backends.arm64._verify_list_del --mode cross
 
