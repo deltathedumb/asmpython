@@ -12,6 +12,7 @@ from asmpython._backends.arm64.codegen import (
 from asmpython._backends.arm64.elf import EM_AARCH64, ET_REL, build_elf
 from asmpython._backends.arm64.elf_inspect import (
     Arm64ElfFormatError,
+    defined_global_symbols,
     undefined_symbols,
 )
 from asmpython._compiler.ir import I64, IRGlobal
@@ -63,6 +64,10 @@ class Arm64ElfTests(unittest.TestCase):
         self.assertEqual(elf_type, ET_REL)
         self.assertEqual(machine, EM_AARCH64)
         self.assertEqual(undefined_symbols(blob), frozenset())
+        self.assertEqual(
+            defined_global_symbols(blob),
+            frozenset({"caller", "callee", "answer"}),
+        )
 
         sections = self._section_map(blob)
         self.assertEqual(
@@ -121,6 +126,7 @@ class Arm64ElfTests(unittest.TestCase):
         )
         blob = build_elf([caller])
         self.assertEqual(undefined_symbols(blob), frozenset({"printf"}))
+        self.assertEqual(defined_global_symbols(blob), frozenset({"main"}))
 
     def test_malformed_object_is_rejected_by_inspector(self) -> None:
         with self.assertRaisesRegex(Arm64ElfFormatError, "ELF64 header"):
