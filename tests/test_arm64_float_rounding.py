@@ -15,10 +15,6 @@ from asmpython._backends.arm64._verify_float_floor import (
     _EXPECTED_REQUIREMENTS as FLOOR_REQS,
     _FLOOR_SOURCE,
 )
-from asmpython._backends.arm64._verify_float_round import (
-    _EXPECTED_REQUIREMENTS as ROUND_REQS,
-    _ROUND_SOURCE,
-)
 from asmpython._backends.arm64._verify_float_trunc import (
     _EXPECTED_REQUIREMENTS as TRUNC_REQS,
     _TRUNC_SOURCE,
@@ -56,13 +52,6 @@ def _model_trunc(value: float) -> float:
     return _preserve_zero_sign(float(math.trunc(value)), value)
 
 
-def _model_round(value: float) -> float:
-    if not math.isfinite(value):
-        return value
-    magnitude = float(math.floor(abs(value) + 0.5))
-    return math.copysign(magnitude, value)
-
-
 def _load_host_function(name: str):
     try:
         library = ctypes.CDLL(ctypes.util.find_library("m") or None)
@@ -76,13 +65,12 @@ def _load_host_function(name: str):
 
 _HOST = {
     name: _load_host_function(name)
-    for name in ("ceil", "floor", "trunc", "round")
+    for name in ("ceil", "floor", "trunc")
 }
 _MODELS = {
     "ceil": _model_ceil,
     "floor": _model_floor,
     "trunc": _model_trunc,
-    "round": _model_round,
 }
 
 
@@ -92,7 +80,6 @@ class Arm64FloatRoundingTests(unittest.TestCase):
             (_CEIL_SOURCE, CEIL_REQS),
             (_FLOOR_SOURCE, FLOOR_REQS),
             (_TRUNC_SOURCE, TRUNC_REQS),
-            (_ROUND_SOURCE, ROUND_REQS),
         ):
             blob = compile_source_object(source)
             self.assertEqual(undefined_symbols(blob), expected)

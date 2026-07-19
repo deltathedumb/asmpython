@@ -102,8 +102,6 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_floor --mode cross
       - name: Verify exact trunc through QEMU
         run: python -m asmpython._backends.arm64._verify_float_trunc --mode cross
-      - name: Verify exact C round through QEMU
-        run: python -m asmpython._backends.arm64._verify_float_round --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -183,5 +181,3 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_floor --mode native
       - name: Verify exact trunc natively
         run: python -m asmpython._backends.arm64._verify_float_trunc --mode native
-      - name: Verify exact C round natively
-        run: python -m asmpython._backends.arm64._verify_float_round --mode native

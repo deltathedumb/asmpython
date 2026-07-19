@@ -54,6 +54,7 @@ BINDINGS = {
     "hypot": Func(arg_types=("float", "float"), ret_type="float", c_name="hypot"),
     "fmod":  Func(arg_types=("float", "float"), ret_type="float", c_name="fmod"),
     "copysign":  Func(arg_types=("float", "float"), ret_type="float", c_name="copysign"),
+    "nextafter": Func(arg_types=("float", "float"), ret_type="float", c_name="nextafter"),
     "remainder": Func(arg_types=("float", "float"), ret_type="float", c_name="remainder"),
     "fdim":      Func(arg_types=("float", "float"), ret_type="float", c_name="fdim"),
     "fmax":      Func(arg_types=("float", "float"), ret_type="float", c_name="fmax"),

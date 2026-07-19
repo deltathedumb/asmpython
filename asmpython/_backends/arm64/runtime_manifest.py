@@ -32,7 +32,6 @@ RUNTIME_SLICES = (
                 "floor",
                 "nearbyint",
                 "nextafter",
-                "round",
                 "trunc",
             }
         ),

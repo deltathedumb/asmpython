@@ -52,13 +52,6 @@ trunc:
     ret
 .size trunc, .-trunc
 
-.global round
-.type round, %function
-round:
-    frinta d0, d0
-    ret
-.size round, .-round
-
 /* double fdim(double x, double y) -- x-y when x>y, +0 otherwise. */
 .global fdim
 .type fdim, %function
