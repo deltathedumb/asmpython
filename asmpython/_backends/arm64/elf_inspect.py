@@ -1,14 +1,23 @@
-"""Small read-only helpers for AArch64 ELF objects emitted by this backend.
+"""Small read-only helpers for AArch64 ELF relocatable objects.
 
-The executable builder uses this before invoking ``ld`` so unsupported runtime
-requirements are reported as an asmpython compatibility error rather than a
-late generic undefined-reference diagnostic.
+The executable builder uses these before invoking ``ld`` so unsupported runtime
+requirements and runtime-export drift are reported as asmpython compatibility
+errors rather than late generic linker diagnostics.
 """
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass
 
-from .elf import ELFCLASS64, ELFDATA2LSB, EM_AARCH64, ET_REL, SHN_UNDEF, SHT_SYMTAB
+from .elf import (
+    ELFCLASS64,
+    ELFDATA2LSB,
+    EM_AARCH64,
+    ET_REL,
+    SHN_UNDEF,
+    SHT_SYMTAB,
+    STB_GLOBAL,
+)
 
 
 _ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
@@ -20,10 +29,29 @@ class Arm64ElfFormatError(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class ElfSymbol:
+    name: str
+    binding: int
+    kind: int
+    section_index: int
+    value: int
+    size: int
+
+    @property
+    def is_undefined(self) -> bool:
+        return self.section_index == SHN_UNDEF
+
+    @property
+    def is_global(self) -> bool:
+        return self.binding == STB_GLOBAL
+
+
 def _checked_slice(blob: bytes, offset: int, size: int, label: str) -> bytes:
     if offset < 0 or size < 0 or offset + size > len(blob):
         raise Arm64ElfFormatError(
-            f"{label} range {offset}:{offset + size} is outside {len(blob)}-byte object"
+            f"{label} range {offset}:{offset + size} is outside "
+            f"{len(blob)}-byte object"
         )
     return blob[offset : offset + size]
 
@@ -31,7 +59,8 @@ def _checked_slice(blob: bytes, offset: int, size: int, label: str) -> bytes:
 def _cstring(table: bytes, offset: int) -> str:
     if not 0 <= offset < len(table):
         raise Arm64ElfFormatError(
-            f"symbol-name offset {offset} is outside {len(table)}-byte string table"
+            f"symbol-name offset {offset} is outside "
+            f"{len(table)}-byte string table"
         )
     end = table.find(b"\x00", offset)
     if end < 0:
@@ -75,10 +104,10 @@ def section_headers(blob: bytes) -> list[tuple[int, ...]]:
     ]
 
 
-def undefined_symbols(blob: bytes) -> frozenset[str]:
-    """Return all named ``SHN_UNDEF`` symbols in one backend-emitted object."""
+def symbols(blob: bytes) -> tuple[ElfSymbol, ...]:
+    """Return every symbol-table entry from one AArch64 ``ET_REL`` object."""
     sections = section_headers(blob)
-    names: set[str] = set()
+    output: list[ElfSymbol] = []
     found_symtab = False
 
     for section in sections:
@@ -86,7 +115,10 @@ def undefined_symbols(blob: bytes) -> frozenset[str]:
         if kind != SHT_SYMTAB:
             continue
         found_symtab = True
-        offset, size, linked_index, entry_size = section[4], section[5], section[6], section[9]
+        offset = section[4]
+        size = section[5]
+        linked_index = section[6]
+        entry_size = section[9]
         if entry_size != _SYMBOL.size or size % entry_size:
             raise Arm64ElfFormatError(
                 f"invalid symbol table shape: size={size}, entsize={entry_size}"
@@ -102,17 +134,46 @@ def undefined_symbols(blob: bytes) -> frozenset[str]:
             string_section[5],
             "symbol string table",
         )
-        symbols = _checked_slice(blob, offset, size, "symbol table")
+        symbol_data = _checked_slice(blob, offset, size, "symbol table")
         for item_offset in range(0, size, entry_size):
-            name_offset, _info, _other, section_index, _value, _symbol_size = _SYMBOL.unpack_from(
-                symbols, item_offset
+            (
+                name_offset,
+                info,
+                _other,
+                section_index,
+                value,
+                symbol_size,
+            ) = _SYMBOL.unpack_from(symbol_data, item_offset)
+            name = "" if name_offset == 0 else _cstring(strings, name_offset)
+            output.append(
+                ElfSymbol(
+                    name=name,
+                    binding=info >> 4,
+                    kind=info & 0xF,
+                    section_index=section_index,
+                    value=value,
+                    size=symbol_size,
+                )
             )
-            if section_index != SHN_UNDEF or name_offset == 0:
-                continue
-            name = _cstring(strings, name_offset)
-            if name:
-                names.add(name)
 
     if not found_symtab:
         raise Arm64ElfFormatError("AArch64 object has no symbol table")
-    return frozenset(names)
+    return tuple(output)
+
+
+def undefined_symbols(blob: bytes) -> frozenset[str]:
+    """Return all named ``SHN_UNDEF`` symbols."""
+    return frozenset(
+        symbol.name
+        for symbol in symbols(blob)
+        if symbol.name and symbol.is_undefined
+    )
+
+
+def defined_global_symbols(blob: bytes) -> frozenset[str]:
+    """Return all named global symbols defined by the object."""
+    return frozenset(
+        symbol.name
+        for symbol in symbols(blob)
+        if symbol.name and symbol.is_global and not symbol.is_undefined
+    )
