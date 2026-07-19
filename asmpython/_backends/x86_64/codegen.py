@@ -134,7 +134,8 @@ def _is_xmm(type_name: str) -> bool:
 class FuncCodegen:
     _SCRATCH     = Reg.R11        # reserved GP scratch — must not be in regalloc pool
     _SCRATCH2    = Reg.R10        # second GP scratch for addr/value alias cases
-    _SCRATCH_XMM = XmmReg.XMM15  # reserved XMM scratch
+    _SCRATCH_XMM  = XmmReg.XMM15  # reserved XMM scratch
+    _SCRATCH_XMM2 = XmmReg.XMM14  # second XMM scratch, mirrors _SCRATCH2 -- see _xmm's alt_scratch docstring
 
     def __init__(self, func: Any, alloc: AllocResult, abi: str) -> None:
         self.func  = func
@@ -195,19 +196,42 @@ class FuncCodegen:
             return loc.reg, b""
         return scratch, encode_mov_rm(scratch, Mem(Reg.RBP, loc.offset))
 
-    def _xmm(self, val: Any) -> tuple[XmmReg, bytes]:
-        """Get an XMM register holding val (f64 / v128). Emits load if spilled."""
-        loc = self._loc(val)
-        if isinstance(loc, XmmLoc):
-            return loc.reg, b""
-        return self._SCRATCH_XMM, encode_movsd_rm(self._SCRATCH_XMM, Mem(Reg.RBP, loc.offset))
+    def _xmm(self, val: Any, alt_scratch: bool = False) -> tuple[XmmReg, bytes]:
+        """Get an XMM register holding val (f64 / v128). Emits load if spilled.
 
-    def _xmm_f32(self, val: Any) -> tuple[XmmReg, bytes]:
-        """Get an XMM register holding val (f32). Emits load if spilled."""
+        `alt_scratch`: use XMM14 (_SCRATCH_XMM2) instead of XMM15
+        (_SCRATCH_XMM) for the spilled case -- mirrors `_gp`'s own
+        `alt_scratch` exactly, and exists for the identical reason: every
+        two-operand XMM helper (`_binop_xmm`/`_fcmp_set`) calls `_xmm`
+        independently for each operand, and when BOTH operands are
+        simultaneously stack-spilled (no real register), both calls used
+        to return the SAME shared scratch register (XMM15) -- the second
+        call's load then silently clobbered the first's before either was
+        read, corrupting e.g. `a * b` into `b * b`. Confirmed via a real
+        repro: `round(f(), n)` for any call `f` -- the call's own return
+        value gets spilled once it's forced to cross the LATER `pow(10, n)`
+        call, and `pow`'s own float return value is also stack-homed;
+        `_binop_xmm`'s `fmul(x, scale)` then loaded both operands into
+        XMM15 back-to-back, disassembly showing `movsd -0x8(%rbp),%xmm15`
+        immediately followed by `movsd -0x10(%rbp),%xmm15` with only the
+        second value surviving to the actual `mulsd`. Passing
+        `alt_scratch=True` for the SECOND operand of every such helper
+        guarantees the two operands can never collide, exactly like the
+        GP-side fix this one was missing."""
         loc = self._loc(val)
         if isinstance(loc, XmmLoc):
             return loc.reg, b""
-        return self._SCRATCH_XMM, encode_movss_rm(self._SCRATCH_XMM, Mem(Reg.RBP, loc.offset))
+        scratch = self._SCRATCH_XMM2 if alt_scratch else self._SCRATCH_XMM
+        return scratch, encode_movsd_rm(scratch, Mem(Reg.RBP, loc.offset))
+
+    def _xmm_f32(self, val: Any, alt_scratch: bool = False) -> tuple[XmmReg, bytes]:
+        """Get an XMM register holding val (f32). Emits load if spilled.
+        See `_xmm`'s `alt_scratch` docstring -- identical rationale/fix."""
+        loc = self._loc(val)
+        if isinstance(loc, XmmLoc):
+            return loc.reg, b""
+        scratch = self._SCRATCH_XMM2 if alt_scratch else self._SCRATCH_XMM
+        return scratch, encode_movss_rm(scratch, Mem(Reg.RBP, loc.offset))
 
     def _dst_gp(self, result: Any) -> Reg:
         """GP register to compute `result` into. Asserts a RegLoc -- use
@@ -350,7 +374,7 @@ class FuncCodegen:
         mov = encode_movss_rr if f32 else encode_movsd_rr
         dst       = self._dst_xmm(result)
         a_x, a_ld = get(a)
-        b_x, b_ld = get(b)
+        b_x, b_ld = get(b, alt_scratch=True)
         self._emit(a_ld + b_ld)
         if a_x != dst:
             self._emit(mov(dst, a_x))
@@ -360,14 +384,8 @@ class FuncCodegen:
         """Packed XMM binary op (v128 / SIMD)."""
         dst       = self._dst_xmm(result)
         a_x, a_ld = self._xmm(a)
-        b_x, b_ld = self._xmm(b)
+        b_x, b_ld = self._xmm(b, alt_scratch=True)
         self._emit(a_ld + b_ld)
-        # NOTE: unlike _binop_gp/_cmp_set/_div, this doesn't need an
-        # alt-scratch second operand -- _xmm has only one scratch XMM
-        # register (XMM15) and no second one exists yet. If a
-        # both-spilled-simultaneously bug is ever found here (mirroring
-        # the GP-side R11 collision this comment's siblings guard against),
-        # it needs a real second XMM scratch register added first.
         if a_x != dst:
             self._emit(encode_movdqa_rr(dst, a_x))
         self._emit(rr_fn(dst, b_x))
@@ -390,12 +408,12 @@ class FuncCodegen:
         dst = self._dst_gp(result)
         if f32:
             a_x, a_ld = self._xmm_f32(a)
-            b_x, b_ld = self._xmm_f32(b)
+            b_x, b_ld = self._xmm_f32(b, alt_scratch=True)
             self._emit(a_ld + b_ld)
             self._emit(encode_ucomiss(a_x, b_x))
         else:
             a_x, a_ld = self._xmm(a)
-            b_x, b_ld = self._xmm(b)
+            b_x, b_ld = self._xmm(b, alt_scratch=True)
             self._emit(a_ld + b_ld)
             self._emit(encode_ucomisd(a_x, b_x))
         self._emit(encode_setcc(cc, dst))
@@ -901,7 +919,7 @@ class FuncCodegen:
         if op == "simd.shufps":
             dst   = self._dst_xmm(r)
             a_x, a_ld = self._xmm(ops[0])
-            b_x, b_ld = self._xmm(ops[1])
+            b_x, b_ld = self._xmm(ops[1], alt_scratch=True)
             imm8  = int(ops[2]) if len(ops) > 2 else 0
             self._emit(a_ld + b_ld)
             if a_x != dst: self._emit(encode_movaps_rr(dst, a_x))

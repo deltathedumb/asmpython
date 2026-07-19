@@ -63,7 +63,7 @@ _GP_POOL: tuple[Reg, ...] = (
     Reg.RBX, Reg.R12, Reg.R13, Reg.R14, Reg.R15,  # callee-saved
 )
 
-_XMM_POOL: tuple[XmmReg, ...] = tuple(XmmReg(i) for i in range(15))  # XMM15 reserved as scratch
+_XMM_POOL: tuple[XmmReg, ...] = tuple(XmmReg(i) for i in range(14))  # XMM14/XMM15 reserved as scratch (two, mirroring _SCRATCH/_SCRATCH2 on the GP side -- see codegen.py's _xmm's alt_scratch docstring for why a second one is required)
 
 # XMM6-XMM15 are callee-saved under Win64 ABI
 _WIN64_CALLEE_XMM: frozenset[XmmReg] = frozenset(XmmReg(i) for i in range(6, 16))
