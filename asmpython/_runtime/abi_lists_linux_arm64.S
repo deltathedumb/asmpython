@@ -153,6 +153,30 @@ _abi_list_pop:
     ret
 .size _abi_list_pop, .-_abi_list_pop
 
+/* x0=list header -> reverse its active cells in place, return value ignored. */
+.global _abi_list_reverse
+.type _abi_list_reverse, %function
+_abi_list_reverse:
+    ldr     x9, [x0, #8]
+    cmp     x9, #1
+    b.ls    .Llist_reverse_done
+    ldr     x10, [x0, #16]
+    mov     x11, xzr              /* left index */
+    sub     x12, x9, #1           /* right index */
+.Llist_reverse_loop:
+    cmp     x11, x12
+    b.hs    .Llist_reverse_done
+    ldr     x13, [x10, x11, lsl #3]
+    ldr     x14, [x10, x12, lsl #3]
+    str     x14, [x10, x11, lsl #3]
+    str     x13, [x10, x12, lsl #3]
+    add     x11, x11, #1
+    sub     x12, x12, #1
+    b       .Llist_reverse_loop
+.Llist_reverse_done:
+    ret
+.size _abi_list_reverse, .-_abi_list_reverse
+
 .bss
 .balign 16
 .Llist_heap_pos:
