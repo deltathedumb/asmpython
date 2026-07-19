@@ -19,11 +19,11 @@ from math import ceil, copysign, inf, isinf, isnan, nan
 
 
 def main() -> int:
-    if int(ceil(2.1)) != 3:
+    if ceil(2.1) != 3.0:
         return 11
-    if int(ceil(-2.9)) != -2:
+    if ceil(-2.9) != -2.0:
         return 12
-    if int(copysign(1.0, ceil(-0.2))) != -1:
+    if copysign(1.0, ceil(-0.2)) != -1.0:
         return 13
     if not isinf(ceil(inf)):
         return 14
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
         print("[ OK ] ceil finite, signed-zero, infinity, and NaN cases matched")
-        print("[ OK ] exit-code checks avoided bool-formatting dependencies")
+        print("[ OK ] direct double comparisons avoided unrelated cast/format helpers")
         print(f"[ OK ] {mode_name} ceil matched {_EXPECTED_STDOUT!r}")
     return 0
 
