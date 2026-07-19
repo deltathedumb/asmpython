@@ -121,9 +121,10 @@ these, check the whole class of call sites, not just the one you found.
   the legacy top-level `codegen.py` (NASM-text emission, `--backend
   legacy` only), `driver.py` (backend dispatch), `errors.py`
   (`ErrorCode`/CPython-exception-name mapping), `project.py`
-  (`project.json` schema), `pypi.py` (real PyPI package installer),
-  `packages.py` (prebuilt-binary package installer — a separate system
-  from `pypi.py`).
+  (`project.json` schema), `pypi.py` (retired compatibility shim; Python
+  packages now come from the active interpreter's site-packages), and
+  `packages.py` (prebuilt native-binary dependency installer, a separate
+  system from Python packaging).
 - `asmpython/_compiler/ir.py` — the target-neutral SSA IR itself
   (`IRModule`/`IRFunc`/`IRBlock`/`IRInstr`, the `IRBackend` plugin
   interface).
@@ -133,7 +134,8 @@ these, check the whole class of call sites, not just the one you found.
 - `asmpython/_backends/ternary/` — experimental ternary-VM backend.
 - `asmpython/pyinbin/` — the fallback Python bytecode interpreter.
 - `asmpython/_runtime/` — runtime object/ABI shim NASM sources and their
-  Python build glue (`build.py`), currently x86-64-only.
+  Python build glue (`build.py`), currently x86-64-only outside the
+  experimental freestanding ARM64 slices.
 - `archived/extensions/` — the withdrawn compiler-syntax-extension system,
   kept for historical reference only.
 - `tests/cases/` — positive test programs (must compile+run+match
