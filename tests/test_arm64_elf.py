@@ -10,6 +10,10 @@ from asmpython._backends.arm64.codegen import (
     R_AARCH64_CALL26,
 )
 from asmpython._backends.arm64.elf import EM_AARCH64, ET_REL, build_elf
+from asmpython._backends.arm64.elf_inspect import (
+    Arm64ElfFormatError,
+    undefined_symbols,
+)
 from asmpython._compiler.ir import I64, IRGlobal
 
 
@@ -23,7 +27,11 @@ class Arm64ElfTests(unittest.TestCase):
         shstr_index = header[13]
 
         sections = [
-            struct.unpack_from("<IIQQQQIIQQ", blob, section_offset + i * section_entry_size)
+            struct.unpack_from(
+                "<IIQQQQIIQQ",
+                blob,
+                section_offset + i * section_entry_size,
+            )
             for i in range(section_count)
         ]
         shstr = sections[shstr_index]
@@ -54,6 +62,7 @@ class Arm64ElfTests(unittest.TestCase):
         self.assertEqual(ident[:4], b"\x7fELF")
         self.assertEqual(elf_type, ET_REL)
         self.assertEqual(machine, EM_AARCH64)
+        self.assertEqual(undefined_symbols(blob), frozenset())
 
         sections = self._section_map(blob)
         self.assertEqual(
@@ -77,7 +86,11 @@ class Arm64ElfTests(unittest.TestCase):
         relocation_types = []
         symbol_indexes = []
         for offset in range(0, len(relocation_data), 24):
-            _place, info, addend = struct.unpack_from("<QQq", relocation_data, offset)
+            _place, info, addend = struct.unpack_from(
+                "<QQq",
+                relocation_data,
+                offset,
+            )
             relocation_types.append(info & 0xFFFFFFFF)
             symbol_indexes.append(info >> 32)
             self.assertEqual(addend, 0)
@@ -99,6 +112,19 @@ class Arm64ElfTests(unittest.TestCase):
         self.assertEqual(rela[6], 6)  # sh_link -> .symtab
         self.assertEqual(rela[7], 1)  # sh_info -> .text
         self.assertGreater(strtab[5], 1)
+
+    def test_undefined_symbol_inspection(self) -> None:
+        caller = FuncCode(
+            "main",
+            bytes(4),
+            [(0, "printf", R_AARCH64_CALL26)],
+        )
+        blob = build_elf([caller])
+        self.assertEqual(undefined_symbols(blob), frozenset({"printf"}))
+
+    def test_malformed_object_is_rejected_by_inspector(self) -> None:
+        with self.assertRaisesRegex(Arm64ElfFormatError, "ELF64 header"):
+            undefined_symbols(b"not an elf")
 
     def test_unknown_relocation_is_rejected(self) -> None:
         bad = FuncCode("bad", bytes(4), [(0, "symbol", 0xFFFF)])
