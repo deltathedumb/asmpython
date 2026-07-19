@@ -12,6 +12,7 @@
  *   _abi_str_repeat(text, count)
  *   _abi_str_eq(left, right)
  *   _abi_str_cmp(left, right)
+ *   _abi_hash_string(text)
  */
 
 .text
@@ -230,6 +231,33 @@ _abi_str_cmp:
     mov     x0, #1
     ret
 .size _abi_str_cmp, .-_abi_str_cmp
+
+/* uint64 _abi_hash_string(const char *text) -- FNV-1a over UTF-8 bytes. */
+.global _abi_hash_string
+.type _abi_hash_string, %function
+_abi_hash_string:
+    mov     x1, x0
+
+    /* FNV-1a offset basis: 0xcbf29ce484222325. */
+    movz    x9, #0x2325
+    movk    x9, #0x8422, lsl #16
+    movk    x9, #0x9ce4, lsl #32
+    movk    x9, #0xcbf2, lsl #48
+
+    /* FNV prime: 0x00000100000001b3. */
+    movz    x10, #0x01b3
+    movk    x10, #0x0100, lsl #32
+
+.Lhash_loop:
+    ldrb    w11, [x1], #1
+    cbz     w11, .Lhash_done
+    eor     x9, x9, x11
+    mul     x9, x9, x10
+    b       .Lhash_loop
+.Lhash_done:
+    mov     x0, x9
+    ret
+.size _abi_hash_string, .-_abi_hash_string
 
 .section .rodata
 .Lempty_text:

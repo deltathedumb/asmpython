@@ -13,6 +13,7 @@ on:
       - "tests/test_arm64_cli.py"
       - "tests/test_arm64_codegen.py"
       - "tests/test_arm64_elf.py"
+      - "tests/test_arm64_hash.py"
       - "tests/test_arm64_linux_link.py"
       - "tests/test_arm64_module_codegen.py"
       - "tests/test_arm64_runtime_manifest.py"
@@ -29,6 +30,7 @@ on:
       - "tests/test_arm64_cli.py"
       - "tests/test_arm64_codegen.py"
       - "tests/test_arm64_elf.py"
+      - "tests/test_arm64_hash.py"
       - "tests/test_arm64_linux_link.py"
       - "tests/test_arm64_module_codegen.py"
       - "tests/test_arm64_runtime_manifest.py"
@@ -70,6 +72,7 @@ jobs:
             asmpython/_backends/arm64/source_build.py \
             asmpython/_backends/arm64/_verify_encoder.py \
             asmpython/_backends/arm64/_verify_elf.py \
+            asmpython/_backends/arm64/_verify_hash.py \
             asmpython/_backends/arm64/_verify_source.py \
             asmpython/_backends/arm64/_verify_print.py \
             asmpython/_backends/arm64/_verify_scalars.py \
@@ -78,6 +81,7 @@ jobs:
             tests/test_arm64_cli.py \
             tests/test_arm64_codegen.py \
             tests/test_arm64_elf.py \
+            tests/test_arm64_hash.py \
             tests/test_arm64_linux_link.py \
             tests/test_arm64_module_codegen.py \
             tests/test_arm64_runtime_manifest.py \
@@ -93,6 +97,7 @@ jobs:
             tests.test_arm64_cli \
             tests.test_arm64_codegen \
             tests.test_arm64_elf \
+            tests.test_arm64_hash \
             tests.test_arm64_linux_link \
             tests.test_arm64_module_codegen \
             tests.test_arm64_runtime_manifest \
@@ -117,6 +122,9 @@ jobs:
 
       - name: Verify string repetition runtime through QEMU
         run: python -m asmpython._backends.arm64._verify_string_repeat --mode cross
+
+      - name: Verify deterministic string hashing through QEMU
+        run: python -m asmpython._backends.arm64._verify_hash --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -147,6 +155,7 @@ jobs:
             asmpython/_backends/arm64/runtime_manifest.py \
             asmpython/_backends/arm64/source_build.py \
             asmpython/_backends/arm64/_verify_elf.py \
+            asmpython/_backends/arm64/_verify_hash.py \
             asmpython/_backends/arm64/_verify_source.py \
             asmpython/_backends/arm64/_verify_print.py \
             asmpython/_backends/arm64/_verify_scalars.py \
@@ -155,6 +164,7 @@ jobs:
             tests/test_arm64_cli.py \
             tests/test_arm64_codegen.py \
             tests/test_arm64_elf.py \
+            tests/test_arm64_hash.py \
             tests/test_arm64_linux_link.py \
             tests/test_arm64_module_codegen.py \
             tests/test_arm64_runtime_manifest.py \
@@ -164,6 +174,7 @@ jobs:
             tests.test_arm64_cli \
             tests.test_arm64_codegen \
             tests.test_arm64_elf \
+            tests.test_arm64_hash \
             tests.test_arm64_linux_link \
             tests.test_arm64_module_codegen \
             tests.test_arm64_runtime_manifest \
@@ -188,3 +199,6 @@ jobs:
 
       - name: Verify string repetition runtime natively
         run: python -m asmpython._backends.arm64._verify_string_repeat --mode native
+
+      - name: Verify deterministic string hashing natively
+        run: python -m asmpython._backends.arm64._verify_hash --mode native

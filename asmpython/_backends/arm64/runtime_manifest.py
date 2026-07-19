@@ -25,6 +25,7 @@ RUNTIME_SLICES = (
         "abi_strings_linux_arm64.S",
         frozenset(
             {
+                "_abi_hash_string",
                 "_abi_str_cmp",
                 "_abi_str_concat",
                 "_abi_str_concat_dup",
