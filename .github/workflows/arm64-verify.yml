@@ -80,6 +80,10 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_radians --mode cross
       - name: Verify exact nearbyint through QEMU
         run: python -m asmpython._backends.arm64._verify_float_nearbyint --mode cross
+      - name: Verify exact gcd through QEMU
+        run: python -m asmpython._backends.arm64._verify_int_gcd --mode cross
+      - name: Verify exact lcm through QEMU
+        run: python -m asmpython._backends.arm64._verify_int_lcm --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -137,3 +141,7 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_radians --mode native
       - name: Verify exact nearbyint natively
         run: python -m asmpython._backends.arm64._verify_float_nearbyint --mode native
+      - name: Verify exact gcd natively
+        run: python -m asmpython._backends.arm64._verify_int_gcd --mode native
+      - name: Verify exact lcm natively
+        run: python -m asmpython._backends.arm64._verify_int_lcm --mode native

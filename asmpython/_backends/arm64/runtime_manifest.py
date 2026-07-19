@@ -34,6 +34,10 @@ RUNTIME_SLICES = (
         frozenset({"_math_degrees", "_math_radians"}),
     ),
     RuntimeSlice(
+        "abi_int_math_linux_arm64.S",
+        frozenset({"_math_gcd", "_math_lcm"}),
+    ),
+    RuntimeSlice(
         "abi_strings_linux_arm64.S",
         frozenset(
             {
