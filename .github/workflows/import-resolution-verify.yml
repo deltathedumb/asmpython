@@ -4,6 +4,8 @@ on:
   push:
     branches: [beta]
     paths:
+      - "asmpython/_backends/host_cli.py"
+      - "asmpython/_backends/host_site_packages.py"
       - "asmpython/_compiler/cli.py"
       - "asmpython/_compiler/pypi.py"
       - "asmpython/_compiler/project.py"
@@ -16,6 +18,8 @@ on:
       - ".github/workflows/import-resolution-verify.yml"
   pull_request:
     paths:
+      - "asmpython/_backends/host_cli.py"
+      - "asmpython/_backends/host_site_packages.py"
       - "asmpython/_compiler/cli.py"
       - "asmpython/_compiler/pypi.py"
       - "asmpython/_compiler/project.py"
@@ -42,6 +46,8 @@ jobs:
       - name: Compile changed Python files
         run: |
           python -m py_compile \
+            asmpython/_backends/host_cli.py \
+            asmpython/_backends/host_site_packages.py \
             asmpython/_compiler/cli.py \
             asmpython/_compiler/pypi.py \
             asmpython/_compiler/project.py \

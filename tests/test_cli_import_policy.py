@@ -10,6 +10,7 @@ from unittest import mock
 
 from asmpython._compiler import cli
 from asmpython._compiler.project import ProjectConfig, load_project, save_project
+from asmpython._compiler.site_packages import SitePackageImportError
 from asmpython._compiler.pypi import (
     PypiError,
     install_pypi_package,
@@ -110,6 +111,20 @@ class CliImportPolicyTests(unittest.TestCase):
         self.assertEqual(result, 2)
         legacy.assert_not_called()
         self.assertIn("python -m pip install", stderr.getvalue())
+
+    def test_site_package_resolution_error_is_reported_without_fallback(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.object(
+            cli,
+            "prepare_argv",
+            side_effect=SitePackageImportError("unsupported extension"),
+        ):
+            with mock.patch.object(cli._legacy_cli, "main") as legacy:
+                with contextlib.redirect_stderr(stderr):
+                    result = cli.main(["build", "missing.py"])
+        self.assertEqual(result, 1)
+        legacy.assert_not_called()
+        self.assertIn("native import resolution failed", stderr.getvalue())
 
     def test_legacy_pypi_api_is_migration_error_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
