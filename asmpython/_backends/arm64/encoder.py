@@ -406,3 +406,99 @@ def brk(imm16: int = 0) -> bytes:
     """BRK #imm16 -- breakpoint trap."""
     imm = _check_imm(imm16, 16, name="brk immediate")
     return _u32(0xD4200000 | (imm << 5))
+
+
+# ── Scalar floating-point (double precision, D<n>) ────────────────────────────
+# Only the double-precision forms are emitted -- asmpython's runtime float
+# type is always a 64-bit IEEE-754 double (mirrors the x86-64 backend's own
+# XMM usage: no single-precision path exists there either).
+
+def _fp_dp2(base: int, vd: VReg, vn: VReg, vm: VReg) -> bytes:
+    return _u32(base | (int(vm) << 16) | (int(vn) << 5) | int(vd))
+
+
+def fadd(vd: VReg, vn: VReg, vm: VReg) -> bytes:
+    """FADD Dd, Dn, Dm."""
+    return _fp_dp2(0x1E602800, vd, vn, vm)
+
+
+def fsub(vd: VReg, vn: VReg, vm: VReg) -> bytes:
+    """FSUB Dd, Dn, Dm."""
+    return _fp_dp2(0x1E603800, vd, vn, vm)
+
+
+def fmul(vd: VReg, vn: VReg, vm: VReg) -> bytes:
+    """FMUL Dd, Dn, Dm."""
+    return _fp_dp2(0x1E600800, vd, vn, vm)
+
+
+def fdiv(vd: VReg, vn: VReg, vm: VReg) -> bytes:
+    """FDIV Dd, Dn, Dm."""
+    return _fp_dp2(0x1E601800, vd, vn, vm)
+
+
+def fneg(vd: VReg, vn: VReg) -> bytes:
+    """FNEG Dd, Dn."""
+    return _u32(0x1E614000 | (int(vn) << 5) | int(vd))
+
+
+def fabs_(vd: VReg, vn: VReg) -> bytes:
+    """FABS Dd, Dn (trailing underscore: `abs` shadows a builtin)."""
+    return _u32(0x1E60C000 | (int(vn) << 5) | int(vd))
+
+
+def fsqrt(vd: VReg, vn: VReg) -> bytes:
+    """FSQRT Dd, Dn."""
+    return _u32(0x1E61C000 | (int(vn) << 5) | int(vd))
+
+
+def fmov_reg(vd: VReg, vn: VReg) -> bytes:
+    """FMOV Dd, Dn (register-to-register float move)."""
+    return _u32(0x1E604000 | (int(vn) << 5) | int(vd))
+
+
+def fmov_from_gp(vd: VReg, rn: Reg) -> bytes:
+    """FMOV Dd, Xn -- move the raw 64 bits of a GP register into a D-reg
+    (bit-reinterpret, not a numeric conversion -- mirrors x86-64's
+    MOVQ xmm, r64 usage for bitcast-style float/int reinterpretation)."""
+    return _u32(0x9E670000 | (int(rn) << 5) | int(vd))
+
+
+def fmov_to_gp(rd: Reg, vn: VReg) -> bytes:
+    """FMOV Xd, Dn -- move the raw 64 bits of a D-reg into a GP register."""
+    return _u32(0x9E660000 | (int(vn) << 5) | int(rd))
+
+
+def fcmp(vn: VReg, vm: VReg) -> bytes:
+    """FCMP Dn, Dm -- sets NZCV for a subsequent B.cond/CSEL/CSET."""
+    return _u32(0x1E602000 | (int(vm) << 16) | (int(vn) << 5))
+
+
+def scvtf(vd: VReg, rn: Reg) -> bytes:
+    """SCVTF Dd, Xn -- signed 64-bit integer to double conversion."""
+    return _u32(0x9E620000 | (int(rn) << 5) | int(vd))
+
+
+def fcvtzs(rd: Reg, vn: VReg) -> bytes:
+    """FCVTZS Xd, Dn -- double to signed 64-bit integer, round-toward-zero
+    (Python's `int(float)` truncation semantics)."""
+    return _u32(0x9E780000 | (int(vn) << 5) | int(rd))
+
+
+# ── Shifted-immediate ADD/SUB (for stack frames/offsets beyond 12 bits) ──────
+
+def add_imm_lsl12(rd: Reg, rn: Reg, imm12: int) -> bytes:
+    """ADD Xd, Xn, #imm12, LSL #12 -- adds imm12 * 4096. Combined with
+    add_imm's own unshifted form, expresses any 24-bit-aligned-enough
+    immediate as two instructions (mirrors how a stack frame larger than
+    4095 bytes -- rare, but not impossible for a function with many
+    spills -- must be split across two ADD/SUB immediates, since AArch64
+    has no single instruction encoding an arbitrary 24-bit add)."""
+    imm = _check_imm(imm12, 12, name="add lsl12 immediate")
+    return _u32(0x91400000 | (imm << 10) | (int(rn) << 5) | int(rd))
+
+
+def sub_imm_lsl12(rd: Reg, rn: Reg, imm12: int) -> bytes:
+    """SUB Xd, Xn, #imm12, LSL #12."""
+    imm = _check_imm(imm12, 12, name="sub lsl12 immediate")
+    return _u32(0xD1400000 | (imm << 10) | (int(rn) << 5) | int(rd))

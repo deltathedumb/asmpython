@@ -105,6 +105,21 @@ CASES: list[tuple[str, bytes, str]] = [
     ("nop", E.nop(), "nop"),
     ("svc #0", E.svc(0), "svc"),
     ("brk #0", E.brk(0), "brk"),
+    ("fadd d0, d1, d2", E.fadd(E.VReg.V0, E.VReg.V1, E.VReg.V2), "fadd"),
+    ("fsub d3, d4, d5", E.fsub(E.VReg.V3, E.VReg.V4, E.VReg.V5), "fsub"),
+    ("fmul d6, d7, d8", E.fmul(E.VReg.V6, E.VReg.V7, E.VReg.V8), "fmul"),
+    ("fdiv d9, d10, d11", E.fdiv(E.VReg.V9, E.VReg.V10, E.VReg.V11), "fdiv"),
+    ("fneg d12, d13", E.fneg(E.VReg.V12, E.VReg.V13), "fneg"),
+    ("fabs d14, d15", E.fabs_(E.VReg.V14, E.VReg.V15), "fabs"),
+    ("fsqrt d16, d17", E.fsqrt(E.VReg.V16, E.VReg.V17), "fsqrt"),
+    ("fmov d18, d19", E.fmov_reg(E.VReg.V18, E.VReg.V19), "fmov reg"),
+    ("fmov d0, x1", E.fmov_from_gp(E.VReg.V0, E.Reg.X1), "fmov from gp"),
+    ("fmov x2, d3", E.fmov_to_gp(E.Reg.X2, E.VReg.V3), "fmov to gp"),
+    ("fcmp d4, d5", E.fcmp(E.VReg.V4, E.VReg.V5), "fcmp"),
+    ("scvtf d0, x1", E.scvtf(E.VReg.V0, E.Reg.X1), "scvtf"),
+    ("fcvtzs x0, d1", E.fcvtzs(E.Reg.X0, E.VReg.V1), "fcvtzs"),
+    ("add x0, x1, #1, lsl #12", E.add_imm_lsl12(E.Reg.X0, E.Reg.X1, 1), "add lsl12"),
+    ("sub x2, x3, #4095, lsl #12", E.sub_imm_lsl12(E.Reg.X2, E.Reg.X3, 4095), "sub lsl12 max"),
 ]
 
 
