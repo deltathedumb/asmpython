@@ -22,10 +22,14 @@ def main() -> int:
     del xs[3]
     del xs[-2]
     a, b = xs
-    print(len(xs), a, b)
+    if a != 1:
+        return 11
+    if b != 4:
+        return 12
+    print(len(xs))
     return 0
 """
-_EXPECTED_STDOUT = "2 1 4\n"
+_EXPECTED_STDOUT = "2\n"
 _EXPECTED_REQUIREMENTS = frozenset(
     {
         "_abi_int_to_base",
@@ -83,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[ OK ] first-element deletion shifted every later active cell")
         print("[ OK ] middle and final deletion preserved header and capacity")
         print("[ OK ] valid negative deletion normalized relative to active length")
-        print("[ OK ] typed unpack observed the final active cells")
+        print("[ OK ] typed unpack and exit checks observed final cells [1, 4]")
         print(f"[ OK ] {mode_name} stdout matched {_EXPECTED_STDOUT!r}")
         if completed.stderr:
             print(completed.stderr.strip())
