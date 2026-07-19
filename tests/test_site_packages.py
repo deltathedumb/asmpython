@@ -7,10 +7,13 @@ from pathlib import Path
 from unittest import mock
 
 from asmpython._compiler import program
+from asmpython._compiler.lexer import Lexer
+from asmpython._compiler.parser import Parser
 from asmpython._compiler.site_packages import (
     SitePackageImportError,
     _is_ffi_stdlib,
     install_native_import_resolution,
+    install_pyinbin_site_package_resolution,
     resolve_site_package,
     site_package_roots,
 )
@@ -50,6 +53,29 @@ class SitePackageResolutionTests(unittest.TestCase):
                 self.assertIsNone(resolve_site_package("math"))
                 self.assertIsNone(resolve_site_package("pathlib"))
                 self.assertIsNone(resolve_site_package("pathlib.shadow"))
+
+    def test_bundled_stdlib_precedes_same_named_project_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            entry = project / "main.py"
+            source = "import math\nimport pathlib\n"
+            entry.write_text(source, encoding="utf-8")
+            local_math = project / "math.py"
+            local_pathlib = project / "pathlib.py"
+            local_math.write_text("shadow = 1\n", encoding="utf-8")
+            local_pathlib.write_text("shadow = 1\n", encoding="utf-8")
+
+            module = Parser(Lexer(source).tokenize()).parse()
+            imports = {
+                path.resolve()
+                for path in program._project_imports(module, entry, project)
+            }
+            self.assertNotIn(local_math.resolve(), imports)
+            self.assertNotIn(local_pathlib.resolve(), imports)
+            self.assertIn(
+                program._resolve_bundled_stdlib("pathlib").resolve(),
+                imports,
+            )
 
     def test_pth_editable_root_is_followed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -115,6 +141,30 @@ class SitePackageResolutionTests(unittest.TestCase):
             with mock.patch.object(sys, "path", [str(site)]):
                 module = program.load_program(entry_source, entry)
             self.assertIn("answer", {func.name for func in module.funcs})
+
+    def test_pyinbin_bundle_miss_falls_back_to_import_roots(self) -> None:
+        from asmpython.pyinbin.loader import SourceLoader
+
+        install_pyinbin_site_package_resolution()
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            project = base / "project"
+            site = base / "site-packages"
+            project.mkdir()
+            site.mkdir()
+            module_path = site / "dynamic_pkg.py"
+            module_path.write_text("VALUE = 42\n", encoding="utf-8")
+
+            loader = SourceLoader(source_root=project, import_roots=[site])
+            # Simulate a verified bundle that simply does not contain this
+            # dynamic import. The host resolver must then continue to roots.
+            loader.bundle = base / "bundle"
+            loader._bundle_modules = {}
+            source, filename = loader._source_for("dynamic_pkg")
+
+            self.assertEqual(source, "VALUE = 42\n")
+            self.assertEqual(Path(filename), module_path)
+            self.assertFalse(loader._is_package("dynamic_pkg"))
 
 
 if __name__ == "__main__":
