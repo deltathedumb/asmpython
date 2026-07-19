@@ -35,6 +35,7 @@ class LinuxCodegen(Codegen):
             "strdup",
             "atoll",
             "strtoll",
+            "strtod",
             "atof",
             "sprintf",
             "fgets",
@@ -161,14 +162,149 @@ class LinuxCodegen(Codegen):
         self._emit_print_str_ptr_no_newline()
 
     def _emit_float_to_str(self) -> None:
+        self._emit_float_repr_search()
+
+    def _emit_float_repr_search(self) -> None:
+        """In: xmm0 = a double (glibc's sprintf %g already spells NaN/inf
+        as "nan"/"inf"/"-inf", matching Python, so unlike the Windows/UCRT
+        port there's no special-casing needed before the search below).
+        Out: rax = ptr to an OWNED copy of its CPython-repr-style decimal
+        string (dup'd via _runtime_str_concat_dup).
+
+        Replaces a plain sprintf(buf, "%g", x): %g's fixed 6 significant
+        digits switches to scientific notation far too early compared to
+        CPython (starts at 1e6/1e-4; CPython's repr() only switches
+        outside [1e-4, 1e16)) -- confirmed via a direct WSL/gcc probe that
+        glibc's %g has this identical 1e6 threshold (its exponent padding
+        already happens to match Python's minimum-2-digit form, unlike
+        MSVC's, so no exponent-compaction pass is needed here). Genuine,
+        previously-undiscovered bug affecting every float print above
+        ~1e6 or below ~1e-4 -- ported here from the identical fix already
+        verified and shipped in the x86-64 backend's _abi_float_to_str
+        (asmpython/_runtime/abi_shims.asm) and target_windows.py's own
+        port of the same fix; see either for the full derivation.
+
+        CPython's float repr is the SHORTEST decimal string that
+        round-trips back to the exact same double -- no fixed sprintf
+        precision produces this for every input. Searches precision
+        0..17 with %f (fixed notation, when CPython would print fixed:
+        abs(x) in [1e-4, 1e16), or x == 0) or %e (scientific, otherwise),
+        formatting and parsing back with strtod; the first precision
+        whose round-trip reproduces the ORIGINAL BITS exactly (not
+        approximately) is used.
+        """
+        notation_fixed = self.fresh("frs_fixed")
+        notation_sci = self.fresh("frs_sci")
+        search_loop = self.fresh("frs_loop")
+        digits_ready = self.fresh("frs_digits_ready")
+        one_digit = self.fresh("frs_one_digit")
+        use_fixed_fmt = self.fresh("frs_use_fixed")
+        fmt_kind = self.fresh("frs_kind")
+        fmt_kind_fixed = self.fresh("frs_kind_fixed")
+        fmt_ready = self.fresh("frs_fmt_ready")
+        search_done = self.fresh("frs_search_done")
+        rfixup_scan = self.fresh("frs_rfixup_scan")
+        rfixup_append = self.fresh("frs_rfixup_append")
+        rfixup_done = self.fresh("frs_rfixup_done")
+
         self.emitf(
-            "lea rdi, [itoa_str_buf]",
-            "lea rsi, [fmt_flt]",
+            "movsd [_float_repr_x], xmm0",
+            "xor r12, r12",  # search precision, 0..17
+            "movq rax, xmm0",
+            "mov r10, 0x7FFFFFFFFFFFFFFF",
+            "and rax, r10",
+            "movq xmm1, rax",
+            "xorpd xmm2, xmm2",
+            "ucomisd xmm1, xmm2",
+            f"je {notation_fixed}",  # x == 0.0 -> always fixed ("0", not "0e+00")
+            "mov r10, 0x3F1A36E2EB1C432D",  # bit pattern of 1e-4
+            "movq xmm3, r10",
+            "ucomisd xmm1, xmm3",
+            f"jb {notation_sci}",  # abs(x) < 1e-4 -> scientific
+            "mov r10, 0x4341C37937E08000",  # bit pattern of 1e16
+            "movq xmm3, r10",
+            "ucomisd xmm1, xmm3",
+            f"jae {notation_sci}",  # abs(x) >= 1e16 -> scientific
+        )
+        self.label(notation_fixed)
+        self.emitf("mov qword [_float_repr_notation], 0", f"jmp {search_loop}")
+        self.label(notation_sci)
+        self.emitf("mov qword [_float_repr_notation], 1")
+        self.label(search_loop)
+        self.emitf(
+            "mov qword [_float_repr_prec], r12",
+            # Build "%." + digit(s) + 'f'/'e' + 0 into _float_repr_fmt.
+            "cmp qword [_float_repr_notation], 0",
+            f"je {use_fixed_fmt}",
+            "lea rbx, [_float_repr_fmt]",
+            "mov byte [rbx+0], '%'",
+            "mov byte [rbx+1], '.'",
+            f"jmp {digits_ready}",
+        )
+        self.label(use_fixed_fmt)
+        self.emitf("lea rbx, [_float_repr_fmt]", "mov byte [rbx+0], '%'", "mov byte [rbx+1], '.'")
+        self.label(digits_ready)
+        self.emitf(
+            # r12 is 0..17 -- at most two decimal digits.
+            "mov rax, r12",
+            "mov r10, 10",
+            "xor rdx, rdx",
+            "div r10",
+            "test rax, rax",
+            f"jz {one_digit}",
+            "add al, '0'",
+            "mov [rbx+2], al",
+            "add dl, '0'",
+            "mov [rbx+3], dl",
+            "lea rcx, [rbx+4]",
+            f"jmp {fmt_kind}",
+        )
+        self.label(one_digit)
+        self.emitf("add dl, '0'", "mov [rbx+2], dl", "lea rcx, [rbx+3]")
+        self.label(fmt_kind)
+        self.emitf("cmp qword [_float_repr_notation], 0", f"je {fmt_kind_fixed}")
+        self.emitf("mov byte [rcx], 'e'", "mov byte [rcx+1], 0", f"jmp {fmt_ready}")
+        self.label(fmt_kind_fixed)
+        self.emitf("mov byte [rcx], 'f'", "mov byte [rcx+1], 0")
+        self.label(fmt_ready)
+        self.emitf(
+            # sprintf(buf, fmt, x): SysV -- rdi=buf, rsi=fmt, xmm0=x (already
+            # loaded); al = number of vector regs used for the variadic call.
+            "movsd xmm0, [_float_repr_x]",
+            "lea rdi, [_float_repr_search_buf]",
+            "mov rsi, rbx",
             "mov al, 1",
             "call sprintf",
-            "lea rax, [itoa_str_buf]",
+            # strtod(buf, NULL): rdi=buf, rsi=endptr.
+            "lea rdi, [_float_repr_search_buf]",
+            "xor esi, esi",
+            "call strtod",
+            "movq rax, xmm0",
+            "movsd xmm1, [_float_repr_x]",
+            "movq r10, xmm1",
+            "mov r12, [_float_repr_prec]",
+            "cmp rax, r10",
+            f"je {search_done}",
+            "inc r12",
+            "cmp r12, 17",
+            f"jbe {search_loop}",
         )
-        self._emit_float_repr_fixup()
+        self.label(search_done)
+        # glibc's %e already uses a minimum-2-digit, no-leading-zero
+        # exponent (confirmed via direct probe), so -- unlike the Windows
+        # port -- no exponent-compaction pass is needed here.
+        self.emitf("lea rax, [_float_repr_search_buf]", "mov rbx, rax")
+        self.label(rfixup_scan)
+        self.emitf(
+            "mov cl, [rbx]", "test cl, cl", f"jz {rfixup_append}",
+            "cmp cl, '.'", f"je {rfixup_done}",
+            "cmp cl, 'e'", f"je {rfixup_done}",
+            "inc rbx", f"jmp {rfixup_scan}",
+        )
+        self.label(rfixup_append)
+        self.emitf("mov byte [rbx], '.'", "mov byte [rbx+1], '0'", "mov byte [rbx+2], 0")
+        self.label(rfixup_done)
+        self.emitf("lea rax, [_float_repr_search_buf]", "call _runtime_str_concat_dup")
 
     def _emit_float_fmt(self, fmt_label: str) -> None:
         # sprintf(buf, fmt, xmm0). SysV: al = number of vector regs used (1).
@@ -375,12 +511,24 @@ class LinuxCodegen(Codegen):
             self.emit("section .bss")
             self.emit("itoa_str_buf: resb 32")
             self.emit("input_buf:    resb 256")
+            # Scratch for _emit_float_repr_search's shortest-round-trip
+            # precision search (see that method's docstring).
+            self.emit("_float_repr_x:          resq 1")
+            self.emit("_float_repr_notation:    resq 1")
+            self.emit("_float_repr_prec:        resq 1")
+            self.emit("_float_repr_fmt:         resb 8")
+            self.emit("_float_repr_search_buf:  resb 40")
         else:
             # Even when linking the runtime library, the helpers use these
             # via `lea rdi, [rel itoa_str_buf]` — they must exist in the
             # library or be externed. The runtime owns them.
             self.emit("extern itoa_str_buf")
             self.emit("extern input_buf")
+            self.emit("extern _float_repr_x")
+            self.emit("extern _float_repr_notation")
+            self.emit("extern _float_repr_prec")
+            self.emit("extern _float_repr_fmt")
+            self.emit("extern _float_repr_search_buf")
 
         self._emit_cwd_buf_if_needed()
 
@@ -786,17 +934,36 @@ class LinuxCodegen(Codegen):
                 self.emitf("movsd xmm0, [rbp-8]", "leave", "ret")
 
             # _math_frexp_m(xmm0=x) -> xmm0=mantissa  (frexp; [0.5,1))
+            #
+            # Real, pre-existing bug found and fixed while investigating an
+            # unrelated float-formatting change: frexp's real signature is
+            # `double frexp(double x, int *e)` -- x in xmm0 (first FLOAT
+            # arg), e in rdi (first INTEGER arg; SysV tracks the two
+            # register sequences independently, so "e is frexp's 2nd
+            # parameter" does NOT mean "e goes in the 2nd integer
+            # register"). This shim put the pointer in rsi instead --
+            # frexp's own write to `*e` then landed on whatever rsi
+            # happened to hold, silently corrupting arbitrary caller state
+            # that had nothing to do with frexp at all. This went
+            # undetected because a single, isolated call to frexp_mantissa
+            # often has nothing live in rsi to corrupt; confirmed via a
+            # real repro that surfaced it -- adding frexp_mantissa as a
+            # 4th float-formatting call in a row (unrelated to this bug in
+            # itself) put a live, needed value in rsi at exactly the wrong
+            # moment, and frexp's stray write there silently zeroed a
+            # saved return address, causing the whole program to exit
+            # cleanly without ever reaching its later print() calls.
             if "_math_frexp_m" in self.ffi_called:
                 self.label("_math_frexp_m")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
-                self.emitf("lea rsi, [rbp-8]", "mov al, 1", "call frexp")
+                self.emitf("lea rdi, [rbp-8]", "mov al, 1", "call frexp")
                 self.emitf("leave", "ret")
 
             # _math_frexp_e(xmm0=x) -> rax=exponent  (int)
             if "_math_frexp_e" in self.ffi_called:
                 self.label("_math_frexp_e")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 16")
-                self.emitf("lea rsi, [rbp-8]", "mov al, 1", "call frexp")
+                self.emitf("lea rdi, [rbp-8]", "mov al, 1", "call frexp")
                 self.emitf("movsxd rax, dword [rbp-8]", "leave", "ret")
 
             # _math_ldexp(xmm0=x, rdi=n) -> xmm0  (just forwards to libc ldexp)

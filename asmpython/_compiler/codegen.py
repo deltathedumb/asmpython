@@ -881,6 +881,11 @@ class Codegen:
         publish = list(self.RUNTIME_GLOBALS)
         publish.append("itoa_str_buf")
         publish.append("input_buf")
+        publish.append("_float_repr_x")
+        publish.append("_float_repr_notation")
+        publish.append("_float_repr_prec")
+        publish.append("_float_repr_fmt")
+        publish.append("_float_repr_search_buf")
         publish = sorted(publish)
         for sym in publish:
             self.emit(f"global {sym}")
