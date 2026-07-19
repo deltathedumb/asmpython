@@ -152,7 +152,8 @@ class Arm64CliTests(unittest.TestCase):
 
             diagnostic = errors.getvalue()
             self.assertEqual(result, 1)
-            self.assertIn("error:", diagnostic)
+            self.assertIn(str(source), diagnostic)
+            self.assertIn("SyntaxError", diagnostic)
             self.assertNotIn("Traceback", diagnostic)
 
 
