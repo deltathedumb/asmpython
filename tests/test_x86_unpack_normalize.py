@@ -60,6 +60,20 @@ class X86LiteralUnpackNormalizeTests(unittest.TestCase):
             self.assertEqual(value.index.value, index)
             self.assertEqual(value.inferred_type, "str")
 
+    def test_unicode_string_uses_codepoint_arity(self) -> None:
+        module = _checked_module('first, second = "éx"\n')
+        statement = _tuple_assign(module)
+        normalize_literal_unpacks(module)
+        self.assertEqual(len(statement.values), 2)
+        self.assertTrue(all(isinstance(value, A.Subscript) for value in statement.values))
+
+    def test_mismatched_literal_arity_is_not_rewritten(self) -> None:
+        module = _checked_module('first, second = "x"\n')
+        statement = _tuple_assign(module)
+        original_values = list(statement.values)
+        normalize_literal_unpacks(module)
+        self.assertEqual(statement.values, original_values)
+
     def test_nonliteral_and_starred_unpack_are_unchanged(self) -> None:
         tuple_module = _checked_module('pair = (1, 2)\na, b = pair\n')
         tuple_statement = _tuple_assign(tuple_module)
