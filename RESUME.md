@@ -132,6 +132,10 @@ Runtime sources are assembled separately and combined with `ld -r`:
   - `_abi_str_concat_dup`
   - `_abi_str_eq`
   - `_abi_str_cmp`
+- `abi_string_search_linux_arm64.S`
+  - `_abi_str_starts_with`
+  - `_abi_str_ends_with`
+  - `_abi_str_count`
 
 Each allocation-producing slice uses distinct bump-allocated storage rather
 than a shared static formatting buffer. The merged runtime object is inspected
@@ -139,8 +143,10 @@ after every build: every declared export must exist and the supposedly
 freestanding object must have no unresolved symbols.
 
 Independent Clang AArch64 assembly and `ld.lld -r` verification succeeded for
-the string/scalar slice. Its cross-object `strlen` calls resolve in the merged
-object, and the expected global exports are present.
+all three slices. Cross-slice `strlen` calls resolve in the merged object and
+the expected global exports are present. The search slice handles complete
+UTF-8 prefixes/suffixes and counts empty substrings by Unicode code-point count
+plus one, not raw byte count plus one.
 
 Execution probes compile real source and require exact output:
 
@@ -149,9 +155,12 @@ Execution probes compile real source and require exact output:
   conversions in one print call
 - `_verify_scalars.py`: bool/None, `hex`/`oct`/`bin`, `abs(int)`, string
   concatenation, equality, inequality, and ordering
+- `_verify_string_search.py`: `startswith`, `endswith`, non-overlapping `count`,
+  ASCII empty-substring count, and UTF-8 empty-substring count (`"éé"` -> 3)
 
-`tests/test_arm64_source_codegen.py` locks the scalar probe to its exact six
-external symbols so lowering drift fails before assembler/link/execution stages.
+`tests/test_arm64_source_codegen.py` locks the scalar and search probes to their
+exact external-symbol sets so lowering drift fails before assembler/link/
+execution stages.
 
 ### Float formatting — DELIBERATELY NOT FAKED
 
@@ -163,6 +172,14 @@ Therefore `_abi_float_to_str` remains absent from the ARM64 runtime allowlist;
 float-printing source fails early with an explicit unsupported-symbol error
 instead of linking to a knowingly incorrect formatter.
 
+### Integer parsing — DEFERRED UNTIL EXCEPTIONS
+
+`int(text)` and `int(text, base)` lower to `_abi_str_to_int` and
+`_abi_str_to_int_base`. Their valid-input loops are straightforward, but invalid
+input must raise catchable `ValueError`. A success-only parser would silently
+widen compatibility with wrong failure semantics, so both symbols remain gated
+until the ARM64 exception runtime exists.
+
 ### Verification workflow
 
 `.github/workflows/arm64-verify.yml` has two independent jobs:
@@ -171,7 +188,7 @@ instead of linking to a knowingly incorrect formatter.
 - native `ubuntu-24.04-arm` with GNU binutils and `strace`
 
 Both run encoder checks, object/codegen/CLI/link tests, real-source object tests,
-and IR/source/print/scalar execution probes.
+and IR/source/print/scalar/string-search execution probes.
 
 **Current execution boundary:** assembler correctness, object structure,
 relocatable merging, and static linker acceptance are independently confirmed.
@@ -188,11 +205,10 @@ successfully until a workflow or WSL2 run is directly observed.
 - Windows ARM64 and macOS ARM64 object/link formats.
 - Full x86-64 and legacy regression reruns after ARM64 becomes driver-visible.
 
-**Next concrete step:** continue exact runtime expansion from symbols emitted by
-real lowered source. Prefer self-contained semantics such as integer/string
-conversion and parsing; keep difficult surfaces (float shortest-round-trip,
-exceptions, containers) explicitly gated until a real implementation and
-end-to-end probe exist.
+**Next concrete step:** continue exact non-raising runtime expansion from symbols
+emitted by real lowered source. Keep float shortest-round-trip, exception-
+dependent parsing, containers, and other failure-sensitive surfaces explicitly
+gated until their real semantics and end-to-end probes exist.
 
 ## Known gaps / deferred work
 
