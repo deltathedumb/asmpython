@@ -4,10 +4,14 @@ import struct
 import unittest
 
 from asmpython._backends.arm64._verify_scalars import (
-    _EXPECTED_REQUIREMENTS,
+    _EXPECTED_REQUIREMENTS as _SCALAR_REQUIREMENTS,
     _SCALAR_SOURCE,
 )
 from asmpython._backends.arm64._verify_source import _compile_source
+from asmpython._backends.arm64._verify_string_search import (
+    _EXPECTED_REQUIREMENTS as _SEARCH_REQUIREMENTS,
+    _SEARCH_SOURCE,
+)
 from asmpython._backends.arm64.elf_inspect import undefined_symbols
 from asmpython._backends.arm64.source_build import compile_source_object
 
@@ -52,7 +56,11 @@ class Arm64SourceCodegenTests(unittest.TestCase):
 
     def test_scalar_probe_lowers_to_exact_runtime_surface(self) -> None:
         blob = compile_source_object(_SCALAR_SOURCE)
-        self.assertEqual(undefined_symbols(blob), _EXPECTED_REQUIREMENTS)
+        self.assertEqual(undefined_symbols(blob), _SCALAR_REQUIREMENTS)
+
+    def test_string_search_probe_lowers_to_exact_runtime_surface(self) -> None:
+        blob = compile_source_object(_SEARCH_SOURCE)
+        self.assertEqual(undefined_symbols(blob), _SEARCH_REQUIREMENTS)
 
 
 if __name__ == "__main__":
