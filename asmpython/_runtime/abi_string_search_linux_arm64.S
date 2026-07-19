@@ -68,16 +68,8 @@ _abi_str_ends_with:
     cmp     x22, x21
     b.hi    .Lends_false
 
-    sub     x19, x21, x22
-    add     x19, x0, xzr           /* x0 currently suffix length; overwritten below */
-    /* Reconstruct text start from its preserved pointer and byte lengths. */
-    ldr     x9, [sp, #16]          /* saved original x19/text */
-    cbnz    x9, .Lends_have_original
-    adrp    x9, .Lsearch_empty
-    add     x9, x9, :lo12:.Lsearch_empty
-.Lends_have_original:
-    sub     x10, x21, x22
-    add     x9, x9, x10
+    sub     x9, x21, x22
+    add     x9, x19, x9
     mov     x10, x20
 .Lends_compare:
     ldrb    w11, [x10], #1
