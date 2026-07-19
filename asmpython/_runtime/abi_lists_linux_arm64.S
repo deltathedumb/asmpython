@@ -136,6 +136,47 @@ _abi_list_append:
 .size _abi_list_append, .-_abi_list_append
 
 /*
+ * x0=destination list, x1=source list -> x0=destination (or NULL if append
+ * growth fails). Source length and buffer are snapshotted before mutation so
+ * xs.extend(xs) duplicates exactly the original active cells once.
+ */
+.global _abi_list_extend
+.type _abi_list_extend, %function
+_abi_list_extend:
+    stp     x29, x30, [sp, #-80]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    str     x23, [sp, #48]
+
+    mov     x19, x0               /* destination */
+    mov     x20, x1               /* source */
+    ldr     x21, [x20, #8]        /* source length snapshot */
+    ldr     x22, [x20, #16]       /* source buffer snapshot */
+    mov     x23, xzr
+.Llist_extend_loop:
+    cmp     x23, x21
+    b.hs    .Llist_extend_done
+    ldr     x1, [x22, x23, lsl #3]
+    mov     x0, x19
+    bl      _abi_list_append
+    cbz     x0, .Llist_extend_fail
+    add     x23, x23, #1
+    b       .Llist_extend_loop
+.Llist_extend_done:
+    mov     x0, x19
+    b       .Llist_extend_return
+.Llist_extend_fail:
+    mov     x0, xzr
+.Llist_extend_return:
+    ldr     x23, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #80
+    ret
+.size _abi_list_extend, .-_abi_list_extend
+
+/*
  * x0=list header -> x0=removed final 8-byte cell.
  *
  * This intentionally matches the existing native runtime's current contract:
