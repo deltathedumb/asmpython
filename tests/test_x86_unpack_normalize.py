@@ -20,11 +20,19 @@ def _checked_module(source: str) -> A.Module:
     return module
 
 
+def _tuple_assigns(module: A.Module) -> list[A.TupleAssign]:
+    return [
+        statement
+        for statement in module.body
+        if isinstance(statement, A.TupleAssign)
+    ]
+
+
 def _tuple_assign(module: A.Module) -> A.TupleAssign:
-    for statement in module.body:
-        if isinstance(statement, A.TupleAssign):
-            return statement
-    raise AssertionError("source did not produce a TupleAssign")
+    statements = _tuple_assigns(module)
+    if not statements:
+        raise AssertionError("source did not produce a TupleAssign")
+    return statements[0]
 
 
 def _instructions(ir_module):
@@ -45,6 +53,23 @@ class X86LiteralUnpackNormalizeTests(unittest.TestCase):
         self.assertIsInstance(statement.values[0], A.StrLit)
         self.assertIsInstance(statement.values[1], A.IntLit)
         self.assertIsInstance(statement.values[2], A.FloatLit)
+
+    def test_typed_tuple_name_becomes_typed_subscripts(self) -> None:
+        module = _checked_module(
+            'pair = ("a", 1.5)\n'
+            'label, ratio = pair\n'
+        )
+        statement = _tuple_assign(module)
+
+        normalize_literal_unpacks(module)
+
+        self.assertEqual(len(statement.values), 2)
+        self.assertTrue(all(isinstance(value, A.Subscript) for value in statement.values))
+        self.assertEqual(
+            [value.inferred_type for value in statement.values],
+            ["str", "float"],
+        )
+        self.assertTrue(all(value.obj is statement.values[0].obj for value in statement.values))
 
     def test_string_literal_becomes_typed_character_subscripts(self) -> None:
         module = _checked_module('a, b, c = "xyz"\n')
@@ -74,12 +99,16 @@ class X86LiteralUnpackNormalizeTests(unittest.TestCase):
         normalize_literal_unpacks(module)
         self.assertEqual(statement.values, original_values)
 
-    def test_nonliteral_and_starred_unpack_are_unchanged(self) -> None:
-        tuple_module = _checked_module('pair = (1, 2)\na, b = pair\n')
-        tuple_statement = _tuple_assign(tuple_module)
-        original_tuple_values = list(tuple_statement.values)
-        normalize_literal_unpacks(tuple_module)
-        self.assertEqual(tuple_statement.values, original_tuple_values)
+    def test_tuple_call_and_starred_unpack_are_unchanged(self) -> None:
+        call_module = _checked_module(
+            'def make_pair() -> tuple[str, int]:\n'
+            '    return ("a", 2)\n'
+            'a, b = make_pair()\n'
+        )
+        call_statement = _tuple_assign(call_module)
+        original_call_values = list(call_statement.values)
+        normalize_literal_unpacks(call_module)
+        self.assertEqual(call_statement.values, original_call_values)
 
         starred_module = _checked_module('values = [1, 2, 3]\na, *rest = values\n')
         starred_statement = _tuple_assign(starred_module)
@@ -92,6 +121,8 @@ class X86LiteralUnpackNormalizeTests(unittest.TestCase):
         module = _checked_module(
             'a, b, c = "xyz"\n'
             'label, count, ratio = ("ok", 5, 1.5)\n'
+            'pair = ("saved", 2.5)\n'
+            'saved_label, saved_ratio = pair\n'
         )
         lowered = ir_lower.lower_module(module)
         instructions = list(_instructions(lowered))
