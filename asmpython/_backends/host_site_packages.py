@@ -1,14 +1,14 @@
 """Native resolution for packages installed by the host Python's pip.
 
-The native compiler keeps its own bundled stdlib authoritative.  Only when an
-absolute import is neither a project module nor an asmpython stdlib module do we
-look through the active interpreter's site-packages/dist-packages roots.  Pure
+The native compiler keeps its own bundled stdlib authoritative. Only when an
+absolute import is neither an asmpython stdlib module nor project source do we
+look through the active interpreter's site-packages/dist-packages roots. Pure
 Python modules are merged by the existing whole-program loader; compiled CPython
 extension modules are rejected explicitly because neither the native runtime nor
 pyinbin implements the CPython C extension ABI.
 
 This module is installed as a small extension around ``program.py`` rather than
-forking its whole-program merge logic.  It patches all three resolution paths the
+forking its whole-program merge logic. It patches all three resolution paths the
 loader uses: import discovery, relative imports, and value-import materialization.
 """
 from __future__ import annotations
@@ -34,11 +34,18 @@ def _append_unique(paths: list[Path], candidate: Path) -> None:
     paths.append(resolved)
 
 
+def _remove_path(paths: list[Path], candidate: Path | None) -> None:
+    if candidate is None:
+        return
+    resolved = candidate.resolve()
+    paths[:] = [path for path in paths if path.resolve() != resolved]
+
+
 def site_package_roots() -> list[Path]:
     """Return import roots belonging to the active interpreter's pip installs.
 
     Normal and user installs appear on ``sys.path`` as ``site-packages`` or
-    ``dist-packages``.  Legacy ``.egg`` entries are accepted too.  Plain path
+    ``dist-packages``. Legacy ``.egg`` entries are accepted too. Plain path
     entries added by ``.pth`` files are recovered from those files so editable
     installs continue to work without treating the entire CPython stdlib as a
     native-import source.
@@ -94,12 +101,7 @@ def _site_root_for(path: Path) -> Path | None:
 
 
 def _is_ffi_stdlib(module: str) -> bool:
-    """Inline mirror of ``asmpython.stdlib.STDLIB_BINDINGS`` module keys.
-
-    Keeping this as scalar comparisons avoids depending on a module-level dict
-    when the compiler is self-hosted.  A focused test compares it against the
-    live registry so additions cannot silently become shadowable by site-packages.
-    """
+    """Inline mirror of ``asmpython.stdlib.STDLIB_BINDINGS`` module keys."""
     top = module.split(".")[0]
     if top == "math":
         return True
@@ -156,7 +158,12 @@ def _native_extension_at(target: Path) -> Path | None:
         return None
     for entry in entries:
         name = entry.name.lower()
-        if not (name == stem + ".pyd" or name == stem + ".so" or name == stem + ".dylib" or name.startswith(stem + ".")):
+        if not (
+            name == stem + ".pyd"
+            or name == stem + ".so"
+            or name == stem + ".dylib"
+            or name.startswith(stem + ".")
+        ):
             continue
         if name.endswith(".pyd") or name.endswith(".so") or name.endswith(".dylib"):
             return entry
@@ -203,13 +210,13 @@ def resolve_site_package(module: str) -> Path | None:
 
 
 def _resolve_external(module: str, importer: Path, root: Path) -> Path | None:
+    # asmpython's source and FFI stdlib always wins.
+    if _is_asmpython_stdlib(module):
+        return None
     # Project-local code remains authoritative over third-party packages.
     if program._resolve_absolute(module, root) is not None:
         return None
     if program._resolve_user_module(module, importer, root) is not None:
-        return None
-    # asmpython's source and FFI stdlib always wins over site-packages.
-    if _is_asmpython_stdlib(module):
         return None
     return resolve_site_package(module)
 
@@ -226,7 +233,7 @@ def _relative_target(importer: Path, level: int, module: str) -> Path:
 
 
 def install_native_import_resolution() -> None:
-    """Extend ``program.py`` with site-packages resolution, once per process."""
+    """Extend ``program.py`` with ordered import resolution, once per process."""
     if getattr(program, "_site_packages_resolution_installed", False):
         return
 
@@ -255,11 +262,29 @@ def install_native_import_resolution() -> None:
                 return
         out.append(path)
 
+    def prefer_stdlib_module(
+        out: list[Path],
+        module_name: str,
+        importer: Path,
+        root: Path,
+    ) -> Path | None:
+        # Remove project files that the original loader found before consulting
+        # the bundled stdlib, then add the bundled source implementation when one
+        # exists. FFI-only stdlib modules intentionally add no source path.
+        _remove_path(out, program._resolve_absolute(module_name, root))
+        _remove_path(out, program._resolve_user_module(module_name, importer, root))
+        bundled = program._resolve_bundled_stdlib(module_name)
+        add_path(out, bundled)
+        return bundled
+
     def project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]:
         out = original_project_imports(module, importer, root)
         for stmt in program._collect_import_stmts(module):
             if isinstance(stmt, A.Import):
-                add_path(out, _resolve_external(stmt.module, importer, root))
+                if _is_asmpython_stdlib(stmt.module):
+                    prefer_stdlib_module(out, stmt.module, importer, root)
+                else:
+                    add_path(out, _resolve_external(stmt.module, importer, root))
                 continue
             if not isinstance(stmt, A.FromImport):
                 continue
@@ -283,6 +308,17 @@ def install_native_import_resolution() -> None:
 
             if not stmt.module:
                 continue
+            if _is_asmpython_stdlib(stmt.module):
+                unresolved_name = False
+                for original_name in original_names:
+                    dotted = stmt.module + "." + original_name
+                    bundled_submodule = prefer_stdlib_module(out, dotted, importer, root)
+                    if bundled_submodule is None:
+                        unresolved_name = True
+                if unresolved_name or not original_names:
+                    prefer_stdlib_module(out, stmt.module, importer, root)
+                continue
+
             # Imported names may be submodules or values from the package/module.
             for original_name in original_names:
                 add_path(
@@ -295,6 +331,12 @@ def install_native_import_resolution() -> None:
     def resolve_fromimport_path(
         stmt: A.FromImport, importer: Path, root: Path
     ) -> Path | None:
+        # Absolute stdlib imports are authoritative even when a project contains
+        # a same-named file. Returning None for FFI-only modules deliberately
+        # prevents the original resolver from falling through to project source.
+        if stmt.level == 0 and stmt.module and _is_asmpython_stdlib(stmt.module):
+            return program._resolve_bundled_stdlib(stmt.module)
+
         resolved = original_fromimport(stmt, importer, root)
         if resolved is not None:
             return resolved
@@ -320,17 +362,42 @@ def install_native_import_resolution() -> None:
 def install_pyinbin_site_package_resolution() -> None:
     """Give dynamic pyinbin imports the active interpreter's pip roots.
 
-    This does not make static imports interpreter-backed.  The native whole-
-    program loader gets first chance at every normal import; this wrapper is
-    used only after the public CLI has established that the reachable source
-    tree contains a dynamic import operation.
+    Bundle modules remain first. A module absent from the bundle then resolves
+    from explicit roots and site-packages, matching the native resolver's ordered
+    fallback without sending any static import through pyinbin.
     """
     import asmpython.pyinbin as pyinbin
     from asmpython.pyinbin import loader as pyinbin_loader
 
     if getattr(pyinbin, "_site_packages_resolution_installed", False):
         return
+
+    original_source_for = pyinbin_loader.SourceLoader._source_for
+    original_is_package = pyinbin_loader.SourceLoader._is_package
     original_run_source = pyinbin_loader.run_source
+
+    def source_for(loader, name: str) -> tuple[str, str]:
+        try:
+            return original_source_for(loader, name)
+        except pyinbin_loader.PyinbinImportError:
+            if loader.bundle is None:
+                raise
+            bundle = loader.bundle
+            loader.bundle = None
+            try:
+                return original_source_for(loader, name)
+            finally:
+                loader.bundle = bundle
+
+    def is_package(loader, name: str) -> bool:
+        if loader.bundle is None or name in loader._bundle_modules:
+            return original_is_package(loader, name)
+        bundle = loader.bundle
+        loader.bundle = None
+        try:
+            return original_is_package(loader, name)
+        finally:
+            loader.bundle = bundle
 
     def run_source(
         path: Path,
@@ -349,6 +416,8 @@ def install_pyinbin_site_package_resolution() -> None:
             import_roots=roots or None,
         )
 
+    pyinbin_loader.SourceLoader._source_for = source_for
+    pyinbin_loader.SourceLoader._is_package = is_package
     pyinbin_loader.run_source = run_source
     pyinbin.run_source = run_source
     pyinbin._site_packages_resolution_installed = True
