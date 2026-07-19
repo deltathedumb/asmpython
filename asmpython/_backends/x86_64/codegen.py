@@ -709,11 +709,6 @@ class FuncCodegen:
                     else:
                         stack_args.append((av, len(stack_args)))
 
-        if is_sysv_vararg:
-            # SysV AMD64 passes the number of live vector arguments in AL for
-            # variadic calls such as printf/sprintf.
-            self._emit(encode_mov_ri(Reg.RAX, xmm_i))
-
         target_temp_slot: int | None = None
         if is_indirect:
             target_temp_slot = temp_slots
@@ -788,6 +783,14 @@ class FuncCodegen:
                 self._emit(encode_mov_rm32(dst_r, Mem(Reg.RSP, temp_base + 8 * temp_i)))
             else:
                 self._emit(encode_mov_rm(dst_r, Mem(Reg.RSP, temp_base + 8 * temp_i)))
+
+        if is_sysv_vararg:
+            # SysV AMD64 passes the number of live vector arguments in AL for
+            # variadic calls such as printf/sprintf. Do this only after every
+            # argument has been captured and loaded: register allocation may
+            # place an argument (including the format pointer) in RAX, and an
+            # earlier write to EAX would silently replace that value with null.
+            self._emit(encode_mov_ri(Reg.RAX, xmm_i))
 
         if is_indirect:
             self._emit(encode_mov_rm(self._SCRATCH, Mem(Reg.RSP, temp_base + 8 * target_temp_slot)))
