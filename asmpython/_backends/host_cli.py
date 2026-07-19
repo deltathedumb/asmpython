@@ -7,6 +7,7 @@ only when a reachable source file actually performs a dynamic import.
 """
 from __future__ import annotations
 
+import ast as _host_ast
 import sys
 from pathlib import Path
 
@@ -16,6 +17,9 @@ from asmpython._backends.host_site_packages import (
     SitePackageImportError,
     install_pyinbin_site_package_resolution,
 )
+
+
+_DYNAMIC_IMPORT_ATTRS = frozenset({"import_module", "load_module", "reload"})
 
 
 def _is_top_level_command(value: str) -> bool:
@@ -32,35 +36,81 @@ def _is_top_level_command(value: str) -> bool:
     return False
 
 
-def _compact_source(source: str) -> str:
-    out: list[str] = []
-    for ch in source:
-        if ch not in (" ", "\t", "\r", "\n"):
-            out.append(ch)
-    return "".join(out)
+def _is_dynamic_callable(
+    expression: _host_ast.expr,
+    module_aliases: set[str],
+    callable_aliases: set[str],
+) -> bool:
+    if isinstance(expression, _host_ast.Name):
+        return expression.id in callable_aliases
+    if isinstance(expression, _host_ast.Attribute):
+        return (
+            expression.attr in _DYNAMIC_IMPORT_ATTRS
+            and isinstance(expression.value, _host_ast.Name)
+            and expression.value.id in module_aliases
+        )
+    if isinstance(expression, _host_ast.Call):
+        # getattr(importlib, name)(...) / getattr(imp, name)(...) is itself a
+        # dynamic selection of an import operation and therefore interpreter-only.
+        if not isinstance(expression.func, _host_ast.Name):
+            return False
+        if expression.func.id != "getattr" or not expression.args:
+            return False
+        owner = expression.args[0]
+        return isinstance(owner, _host_ast.Name) and owner.id in module_aliases
+    return False
 
 
 def source_uses_dynamic_import(source: str) -> bool:
-    """Conservatively detect import operations requiring an interpreter.
+    """Return whether *source* contains an actual dynamic import operation.
 
-    Normal ``import``/``from`` statements are deliberately absent: those must
-    resolve natively through the bundled stdlib or pip's site-packages.  A false
-    positive only allows a fallback after native compilation rejects the source;
-    it never bypasses the native attempt by itself.
+    The host CPython AST is used so comments and string literals containing text
+    such as ``import_module(...)`` do not accidentally authorize pyinbin fallback.
+    Normal ``import`` and ``from`` statements are never interpreter-backed.
     """
-    compact = _compact_source(source)
-    if "__import__(" in compact:
-        return True
-    if "import_module(" in compact:
-        return True
-    if "load_module(" in compact:
-        return True
-    if "importlib.reload(" in compact:
-        return True
-    if "getattr(importlib," in compact:
-        return True
-    if "getattr(imp," in compact:
-        return True
+    try:
+        tree = _host_ast.parse(source)
+    except SyntaxError:
+        # Native compilation owns syntax diagnostics. A parse failure by itself
+        # is not permission to execute the source through pyinbin.
+        return False
+
+    module_aliases: set[str] = set()
+    callable_aliases: set[str] = {"__import__"}
+
+    for node in _host_ast.walk(tree):
+        if isinstance(node, _host_ast.Import):
+            for imported in node.names:
+                if imported.name in ("importlib", "imp"):
+                    module_aliases.add(imported.asname or imported.name)
+        elif isinstance(node, _host_ast.ImportFrom):
+            if node.module in ("importlib", "imp", "builtins"):
+                for imported in node.names:
+                    if imported.name in _DYNAMIC_IMPORT_ATTRS or imported.name == "__import__":
+                        callable_aliases.add(imported.asname or imported.name)
+
+    # Follow simple aliases such as ``loader = importlib.import_module`` or
+    # ``again = loader``. Iterate to a fixed point so short alias chains work.
+    changed = True
+    while changed:
+        changed = False
+        for node in _host_ast.walk(tree):
+            if not isinstance(node, _host_ast.Assign):
+                continue
+            if not _is_dynamic_callable(node.value, module_aliases, callable_aliases):
+                continue
+            for target in node.targets:
+                if isinstance(target, _host_ast.Name) and target.id not in callable_aliases:
+                    callable_aliases.add(target.id)
+                    changed = True
+
+    for node in _host_ast.walk(tree):
+        if isinstance(node, _host_ast.Call) and _is_dynamic_callable(
+            node.func,
+            module_aliases,
+            callable_aliases,
+        ):
+            return True
     return False
 
 
@@ -111,7 +161,7 @@ def source_tree_uses_dynamic_import(entry: Path) -> bool:
         try:
             module = Parser(Lexer(source).tokenize()).parse()
         except Exception:
-            # Native compilation will report the real parse error.  Parsing
+            # Native compilation will report the real parse error. Parsing
             # failure alone is not permission to execute through pyinbin.
             continue
         for imported in program._project_imports(module, path, root):
@@ -168,8 +218,8 @@ def _call_legacy_with_static_project_policy(argv: list[str]) -> int:
     """Prevent legacy ``pyinbin_imports`` metadata from forcing fallback.
 
     Those roots remain available when a dynamic import actually makes fallback
-    eligible.  For a native-only build they are merely dormant metadata and must
-    not reject compilation before static imports are resolved.
+    eligible. For a native-only build they are dormant metadata and must not
+    reject compilation before static imports are resolved.
     """
     native_only = "--no-pyinbin-fallback" in argv
     original_load_project = _legacy_cli.load_project
