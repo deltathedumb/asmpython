@@ -17,11 +17,7 @@ from pathlib import Path
 
 from ._verify_elf import _execute, _select_toolchain
 from .linux_link import build_executable_from_object
-from .module_codegen import compile_ir_module
-from asmpython._compiler import ir_lower
-from asmpython._compiler.lexer import Lexer
-from asmpython._compiler.parser import Parser
-from asmpython._compiler.sema import analyze as sema_analyze
+from .source_build import compile_source_object
 
 
 _SOURCE = """\
@@ -31,12 +27,8 @@ def main() -> int:
 
 
 def _compile_source(source: str = _SOURCE) -> bytes:
-    """Compile one source string through the real front end to ARM64 ET_REL."""
-    tokens = Lexer(source).tokenize()
-    module = Parser(tokens, frozenset()).parse()
-    sema_analyze(module)
-    ir_module = ir_lower.lower_module(module)
-    return compile_ir_module(ir_module)
+    """Compatibility wrapper used by focused source/runtime tests."""
+    return compile_source_object(source)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,9 +55,15 @@ def main(argv: list[str] | None = None) -> int:
             text=True,
             stdout=subprocess.PIPE,
         ).stdout
-        if "Machine:" not in inspection or "AArch64" not in inspection or " main" not in inspection:
+        if (
+            "Machine:" not in inspection
+            or "AArch64" not in inspection
+            or " main" not in inspection
+        ):
             print(inspection)
-            raise SystemExit("generated source object is missing AArch64/main metadata")
+            raise SystemExit(
+                "generated source object is missing AArch64/main metadata"
+            )
 
         executable.write_bytes(
             build_executable_from_object(
@@ -82,7 +80,8 @@ def main(argv: list[str] | None = None) -> int:
             print(completed.stdout, end="")
             print(completed.stderr, end="")
             raise SystemExit(
-                f"source-compiled AArch64 program returned {completed.returncode}, expected 42"
+                "source-compiled AArch64 program returned "
+                f"{completed.returncode}, expected 42"
             )
 
         mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
