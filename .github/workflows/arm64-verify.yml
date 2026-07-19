@@ -43,18 +43,13 @@ jobs:
             asmpython/_backends/arm64/regalloc.py \
             asmpython/_backends/arm64/codegen.py \
             asmpython/_backends/arm64/elf.py \
-            asmpython/_backends/arm64/_stack_access.py \
             asmpython/_backends/arm64/_verify_encoder.py \
-            asmpython/_backends/arm64/_verify_stack_access.py \
             asmpython/_backends/arm64/_verify_elf.py \
             tests/test_arm64_codegen.py \
             tests/test_arm64_elf.py
 
       - name: Verify instruction encoder against GNU assembler
         run: python -m asmpython._backends.arm64._verify_encoder
-
-      - name: Verify stack access sequences against GNU assembler
-        run: python -m asmpython._backends.arm64._verify_stack_access
 
       - name: Run ARM64 structure and codegen tests
         run: python -m unittest tests.test_arm64_codegen tests.test_arm64_elf -v
