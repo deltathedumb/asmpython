@@ -9,7 +9,7 @@ def test_list_repeat_malloc_sizes_use_sysv_rdi() -> None:
     codegen.label_counter = 0
 
     codegen._emit_list_repeat_helper()
-    assembly = "\n".join(codegen.lines)
+    assembly = "\n".join(line.strip() for line in codegen.lines)
 
     assert "mov rdi, 24\ncall malloc" in assembly
     assert "mov rdi, 32\ncall malloc" in assembly
