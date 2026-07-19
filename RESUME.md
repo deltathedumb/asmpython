@@ -140,21 +140,24 @@ Runtime sources are assembled separately and combined with `ld -r`:
   - `_abi_hash_string` (the existing 64-bit FNV-1a contract)
   - `_abi_str_removeprefix` / `_abi_str_removesuffix`
 - `abi_string_search_linux_arm64.S`
-  - `_abi_str_starts_with`
-  - `_abi_str_ends_with`
-  - `_abi_str_count`
+  - `_abi_str_starts_with` / `_abi_str_ends_with` / `_abi_str_count`
+  - `_abi_str_index_of` / `_abi_str_rindex_of`
+  - `_abi_str_index_of_start`
+- `abi_string_replace_linux_arm64.S`
+  - `_abi_str_replace`, including empty-old insertion at Unicode code-point gaps
+- `abi_string_slice_linux_arm64.S`
+  - `_abi_str_slice`, with Python negative/clamped code-point bounds
 
 Each allocation-producing slice uses distinct bump-allocated storage rather
-than a shared static formatting buffer. The string-repetition path checks
-multiplication/addition overflow and treats zero/negative counts as empty.
-Prefix/suffix removal handles matching, non-matching, empty, and UTF-8 affixes
-without splitting a valid encoded code point.
+than a shared static formatting buffer. Repetition checks multiplication and
+addition overflow and treats zero/negative counts as empty. Prefix/suffix
+removal, find/rfind, replacement, and slicing preserve complete UTF-8 code-point
+boundaries.
 
 Independent Clang AArch64 assembly and `ld.lld -r` verification succeeded for
-all slices. Cross-slice `strlen`, prefix, and suffix calls resolve in the merged
-object. Disassembly confirms the FNV-1a constants/loop and the remover AAPCS64
-frames/calls. The search slice counts empty substrings by Unicode code-point
-count plus one, not raw byte count plus one.
+all slices. Cross-slice calls resolve in the merged object. Disassembly confirms
+the FNV-1a constants/loop, AAPCS64 frames, Unicode-index loops, replacement
+allocation/copy paths, and slice normalization/copy paths.
 
 Execution probes compile real source and require exact output:
 
@@ -165,16 +168,36 @@ Execution probes compile real source and require exact output:
   concatenation, equality, inequality, and ordering
 - `_verify_string_search.py`: `startswith`, `endswith`, non-overlapping `count`,
   ASCII empty-substring count, and UTF-8 empty-substring count (`"éé"` -> 3)
-- `_verify_string_repeat.py`: both operand orders, UTF-8 repetition, and zero/
+- `_verify_string_repeat.py`: both operand orders, UTF-8 repetition, zero/
   negative counts
-- `_verify_hash.py`: ASCII and UTF-8 vectors locked to the reference FNV-1a
-  implementation
-- `_verify_string_remove.py`: matching, non-matching, empty, and UTF-8 prefix/
-  suffix removal
+- `_verify_hash.py`: ASCII and UTF-8 vectors locked to reference FNV-1a
+- `_verify_string_remove.py`: matching/non-matching/empty/UTF-8 affixes
+- `_verify_string_find.py`: overlapping matches, empty needles, negative starts,
+  past-end starts, and Unicode code-point indices
+- `_verify_string_replace.py`: shrinking/growing/no-match/empty-old/UTF-8 cases
+- `_verify_string_slice.py`: negative, clamped, empty, full, and UTF-8 slices
 
 Focused tests lock every probe to its exact external-symbol set so lowering
-drift fails before assembler/link/execution stages. Runtime-manifest tests also
-reject source ordering and public-symbol ownership drift before tool discovery.
+drift fails before assembler/link/execution stages. Randomized Python-reference
+models cover UTF-8 find/rfind, replacement, and slicing. CI automatically
+discovers every `tests/test_arm64_*.py` file.
+
+### Directly observed execution boundary
+
+Independent WSL2 verification on 2026-07-19 directly observed:
+
+- encoder verification: 70/70 instruction encodings matched GNU assembler
+- the then-current focused suite: 39/39 tests passed
+- `_verify_elf`, `_verify_source`, `_verify_print`, `_verify_scalars`, and
+  `_verify_string_search` all completed through real `qemu-aarch64`
+- exact exit/stdout behavior was visible through real Linux syscalls under
+  `strace`, including the UTF-8 empty-substring count
+
+The newer repeat/hash/remove/find/replace/slice probes were added after that
+independent session. Their source objects, assembly, relocatable links, symbol
+surfaces, reference models, and static links are verified, and native/QEMU jobs
+are committed; do not claim those newer probes executed successfully until a
+later workflow or WSL2 observation records them.
 
 ### Float formatting — DELIBERATELY NOT FAKED
 
@@ -201,14 +224,8 @@ until the ARM64 exception runtime exists.
 - x86-64 Ubuntu with GNU cross-binutils and `qemu-aarch64 -strace`
 - native `ubuntu-24.04-arm` with GNU binutils and `strace`
 
-Both run encoder checks, object/codegen/CLI/link tests, real-source object tests,
-and IR/source/print/scalar/search/repeat/hash/remove execution probes.
-
-**Current execution boundary:** assembler correctness, object structure,
-relocatable merging, and static linker acceptance are independently confirmed.
-Push-triggered native/QEMU results are not exposed by the available GitHub
-connector, so do not claim the new generated source/runtime probes executed
-successfully until a workflow or WSL2 run is directly observed.
+Both run auto-discovered focused tests plus all committed real-source execution
+probes. The native job is ready on GitHub's `ubuntu-24.04-arm` runner.
 
 ### Not yet done
 
