@@ -22,8 +22,9 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
+  cross-verify:
+    name: Cross toolchain + QEMU
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -54,5 +55,35 @@ jobs:
       - name: Run ARM64 structure and codegen tests
         run: python -m unittest tests.test_arm64_codegen tests.test_arm64_elf -v
 
-      - name: Link and execute generated AArch64 ELF
-        run: python -m asmpython._backends.arm64._verify_elf
+      - name: Link and execute through QEMU
+        run: python -m asmpython._backends.arm64._verify_elf --mode cross
+
+  native-verify:
+    name: Native ARM64 execution
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install native binutils and strace
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils strace
+
+      - name: Check and run focused tests
+        run: |
+          python -m py_compile \
+            asmpython/_backends/arm64/encoder.py \
+            asmpython/_backends/arm64/regalloc.py \
+            asmpython/_backends/arm64/codegen.py \
+            asmpython/_backends/arm64/elf.py \
+            asmpython/_backends/arm64/_verify_elf.py \
+            tests/test_arm64_codegen.py \
+            tests/test_arm64_elf.py
+          python -m unittest tests.test_arm64_codegen tests.test_arm64_elf -v
+
+      - name: Link and execute natively
+        run: python -m asmpython._backends.arm64._verify_elf --mode native
