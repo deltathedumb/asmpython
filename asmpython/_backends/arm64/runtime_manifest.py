@@ -23,7 +23,14 @@ RUNTIME_SLICES = (
     ),
     RuntimeSlice(
         "abi_lists_linux_arm64.S",
-        frozenset({"_abi_list_append", "_abi_list_pop", "_abi_new_list"}),
+        frozenset(
+            {
+                "_abi_list_append",
+                "_abi_list_pop",
+                "_abi_list_reverse",
+                "_abi_new_list",
+            }
+        ),
     ),
     RuntimeSlice(
         "abi_float_scalar_linux_arm64.S",
