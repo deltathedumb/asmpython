@@ -1,16 +1,12 @@
-"""project.py — asmpython project manifest (`project.json`) schema + IO.
+"""asmpython project manifest (``project.json``) schema and IO.
 
-A project file captures everything `asmpython build` needs beyond the entry
-source file itself: output path/type, target platform(s), bundling mode,
-icon, and native library dependencies (`packages`) plus where they should be
-installed (`library_dirs`). `asmpython build some_project.json` reads this
-instead of compiling the JSON file directly; `asmpython project new`
-scaffolds a fresh one; `asmpython package install/uninstall some_project.json`
-batch-installs/removes everything listed in `packages`.
+A project file captures everything ``asmpython build`` needs beyond the entry
+source file itself: output path/type, target platform(s), bundling mode, icon,
+and native library dependencies (``packages``) plus their install directories.
 
-Any project.json field can be overridden by the matching `build` CLI flag —
-the CLI flag wins when given, the project file value is the default
-otherwise (see `__main__.py`'s `cmd_build`).
+Python/PyPI dependencies are intentionally absent from this schema.  They are
+installed into the active Python environment with pip and discovered from that
+interpreter's site-packages during native import resolution.
 """
 from __future__ import annotations
 
@@ -42,21 +38,21 @@ class ProjectConfig:
     use_runtime_lib: bool = False
     library_dirs: list[str] = field(default_factory=lambda: ["libs"])
     packages: list[str] = field(default_factory=list)
-    # Module roots packaged as Python source for pyinbin runtime imports.
-    # The build currently validates this contract and rejects it clearly until
-    # pyinbin's package/runtime loader is available.
+    # Explicit source roots for interpreter-only dynamic imports.  Static imports
+    # are native-first and resolve from asmpython stdlib, then site-packages.
     pyinbin_imports: list[str] = field(default_factory=list)
-    # Real PyPI packages (`asmpython pypi install`), pure-Python wheels only,
-    # run through pyinbin. Separate from `packages` (prebuilt binary deps,
-    # e.g. SDL2) and `pyinbin_imports` (this project's own source roots).
-    pypi_packages: list[str] = field(default_factory=list)
-    pypi_dir: str = "pypi_libs"
+
+    # Private compatibility attributes for the old CLI implementation.  They
+    # are always empty and are deliberately omitted from project.json output.
+    pypi_packages: list[str] = field(default_factory=list, init=False, repr=False)
+    pypi_dir: str = field(default="", init=False, repr=False)
 
     def validate(self) -> None:
-        for t in self.target:
-            if t not in _VALID_TARGETS:
+        for target in self.target:
+            if target not in _VALID_TARGETS:
                 raise ProjectError(
-                    f"invalid target {t!r}; choose from {', '.join(sorted(_VALID_TARGETS))}"
+                    f"invalid target {target!r}; choose from "
+                    + ", ".join(sorted(_VALID_TARGETS))
                 )
         if self.output_type not in _VALID_OUTPUT_TYPES:
             raise ProjectError(f"invalid type {self.output_type!r}")
@@ -66,65 +62,52 @@ class ProjectConfig:
             raise ProjectError("library_dirs must have at least one entry")
         if not isinstance(self.pyinbin_imports, list):
             raise ProjectError("pyinbin_imports must be a list of module roots")
-        seen_pyinbin: list[str] = []
+        seen: list[str] = []
         for module in self.pyinbin_imports:
             if not isinstance(module, str) or not module:
-                raise ProjectError("pyinbin_imports entries must be non-empty strings")
-            if module in seen_pyinbin:
-                raise ProjectError(f"pyinbin_imports contains duplicate module root {module!r}")
-            seen_pyinbin.append(module)
-        if not isinstance(self.pypi_packages, list):
-            raise ProjectError("pypi_packages must be a list of package names")
-        if not self.pypi_dir:
-            raise ProjectError("pypi_dir must be non-empty")
+                raise ProjectError(
+                    "pyinbin_imports entries must be non-empty strings"
+                )
+            if module in seen:
+                raise ProjectError(
+                    f"pyinbin_imports contains duplicate module root {module!r}"
+                )
+            seen.append(module)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("pypi_packages", None)
+        data.pop("pypi_dir", None)
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> tuple["ProjectConfig", list[str]]:
-        known: set = set()
-        known.add("name")
-        known.add("entry")
-        known.add("output")
-        known.add("target")
-        known.add("output_type")
-        known.add("bundle_mode")
-        known.add("icon")
-        known.add("use_runtime_lib")
-        known.add("library_dirs")
-        known.add("packages")
-        known.add("pyinbin_imports")
-        known.add("pypi_packages")
-        known.add("pypi_dir")
-        unknown: list = sorted([k for k in data if k not in known])
-        name: str = data["name"] if "name" in data else "project"
-        entry: str = data["entry"] if "entry" in data else "main.py"
-        output: str = data["output"] if "output" in data else None
-        target: list = data["target"] if "target" in data else []
-        output_type: str = data["output_type"] if "output_type" in data else "executable"
-        bundle_mode: str = data["bundle_mode"] if "bundle_mode" in data else "onefile"
-        icon: str = data["icon"] if "icon" in data else None
-        use_runtime_lib: int = data["use_runtime_lib"] if "use_runtime_lib" in data else 0
-        library_dirs: list = data["library_dirs"] if "library_dirs" in data else ["libs"]
-        packages: list = data["packages"] if "packages" in data else []
-        pyinbin_imports: list = data["pyinbin_imports"] if "pyinbin_imports" in data else []
-        pypi_packages: list = data["pypi_packages"] if "pypi_packages" in data else []
-        pypi_dir: str = data["pypi_dir"] if "pypi_dir" in data else "pypi_libs"
-        cfg: ProjectConfig = ProjectConfig(
-            name=name,
-            entry=entry,
-            output=output,
-            target=target,
-            output_type=output_type,
-            bundle_mode=bundle_mode,
-            icon=icon,
-            use_runtime_lib=use_runtime_lib,
-            library_dirs=library_dirs,
-            packages=packages,
-            pyinbin_imports=pyinbin_imports,
-            pypi_packages=pypi_packages,
-            pypi_dir=pypi_dir,
+        known = {
+            "name",
+            "entry",
+            "output",
+            "target",
+            "output_type",
+            "bundle_mode",
+            "icon",
+            "use_runtime_lib",
+            "library_dirs",
+            "packages",
+            "pyinbin_imports",
+        }
+        unknown = sorted(key for key in data if key not in known)
+        cfg = cls(
+            name=data.get("name", "project"),
+            entry=data.get("entry", "main.py"),
+            output=data.get("output"),
+            target=data.get("target", []),
+            output_type=data.get("output_type", "executable"),
+            bundle_mode=data.get("bundle_mode", "onefile"),
+            icon=data.get("icon"),
+            use_runtime_lib=data.get("use_runtime_lib", False),
+            library_dirs=data.get("library_dirs", ["libs"]),
+            packages=data.get("packages", []),
+            pyinbin_imports=data.get("pyinbin_imports", []),
         )
         cfg.validate()
         return cfg, unknown
@@ -133,14 +116,15 @@ class ProjectConfig:
 def load_project(path: Path) -> ProjectConfig:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        raise ProjectError(f"{path}: invalid JSON ({e})") from e
+    except json.JSONDecodeError as exc:
+        raise ProjectError(f"{path}: invalid JSON ({exc})") from exc
     if not isinstance(raw, dict):
         raise ProjectError(f"{path}: project file must be a JSON object")
     cfg, unknown = ProjectConfig.from_dict(raw)
     if unknown:
         print(
-            f"asmpython: warning: {path}: unknown project field(s) ignored: {', '.join(unknown)}",
+            f"asmpython: warning: {path}: unknown project field(s) ignored: "
+            + ", ".join(unknown),
             file=sys.stderr,
         )
     return cfg
@@ -151,29 +135,30 @@ def save_project(cfg: ProjectConfig, path: Path) -> None:
 
 
 def find_default_project(start_dir: Path) -> Path | None:
-    """Look for `project.json` directly inside *start_dir* (no upward
-    search — keeps this predictable rather than magic)."""
+    """Look for project.json directly inside *start_dir* (no upward search)."""
     candidate = start_dir / DEFAULT_PROJECT_FILENAME
     return candidate if candidate.is_file() else None
 
 
 def init_project(
-    directory: Path, name: str, *, target: list[str] | None = None
+    directory: Path,
+    name: str,
+    *,
+    target: list[str] | None = None,
 ) -> tuple[Path, ProjectConfig]:
-    """Scaffold a new project under *directory*: project.json + entry.py +
-    an empty library directory. Returns (project_json_path, config)."""
+    """Scaffold project.json, an entry file, and the native library directory."""
     directory.mkdir(parents=True, exist_ok=True)
-    proj_path = directory / DEFAULT_PROJECT_FILENAME
-    if proj_path.exists():
-        raise ProjectError(f"{proj_path} already exists")
+    project_path = directory / DEFAULT_PROJECT_FILENAME
+    if project_path.exists():
+        raise ProjectError(f"{project_path} already exists")
 
     cfg = ProjectConfig(name=name, entry="main.py", target=target or [])
     cfg.validate()
-    save_project(cfg, proj_path)
+    save_project(cfg, project_path)
 
     entry_path = directory / cfg.entry
     if not entry_path.exists():
         entry_path.write_text(f'print("Hello from {name}!")\n', encoding="utf-8")
 
     (directory / cfg.library_dirs[0]).mkdir(parents=True, exist_ok=True)
-    return proj_path, cfg
+    return project_path, cfg

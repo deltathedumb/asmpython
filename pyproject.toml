@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 [project.scripts]
-asmpython = "asmpython._compiler.__main__:main"
+asmpython = "asmpython._compiler.cli:main"
 asmpython-pytest-scout = "asmpython.tools.pytest_scout:main"
 
 [project.urls]
