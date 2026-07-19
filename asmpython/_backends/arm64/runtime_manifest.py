@@ -27,6 +27,7 @@ RUNTIME_SLICES = (
             {
                 "_abi_list_append",
                 "_abi_list_extend",
+                "_abi_list_insert",
                 "_abi_list_pop",
                 "_abi_list_reverse",
                 "_abi_new_list",
