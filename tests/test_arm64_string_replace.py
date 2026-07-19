@@ -14,6 +14,11 @@ from asmpython._backends.arm64.source_build import compile_source_object
 
 def _model_replace(text: str, old: str, new: str) -> str:
     if not old:
+        # Python inserts the replacement at every boundary. An empty string has
+        # one boundary, not two; the generic non-empty formula would duplicate
+        # `new` for that case.
+        if not text:
+            return new
         return new + new.join(text) + new
     output: list[str] = []
     cursor = 0
