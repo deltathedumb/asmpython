@@ -1,10 +1,8 @@
-name: Apply x86 SysV vararg fix
+name: Diagnose feature-branch push
 
 on:
   pull_request:
     paths:
-      - "asmpython/_backends/x86_64/codegen.py"
-      - "tests/test_x86_64_sysv_varargs.py"
       - ".github/workflows/arm64-list-del-verify.yml"
   workflow_dispatch:
 
@@ -12,54 +10,34 @@ permissions:
   contents: write
 
 jobs:
-  apply-fix:
+  diagnose-push:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/python314-arm64-list-del
           fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Move SysV AL write after argument capture
+      - name: Capture authenticated dry-run push
         run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          codegen = Path("asmpython/_backends/x86_64/codegen.py")
-          text = codegen.read_text(encoding="utf-8")
-          early = '''        if is_sysv_vararg:\n            # SysV AMD64 passes the number of live vector arguments in AL for\n            # variadic calls such as printf/sprintf.\n            self._emit(encode_mov_ri(Reg.RAX, xmm_i))\n\n'''
-          if early not in text:
-              raise SystemExit("early SysV vararg AL write was not found")
-          text = text.replace(early, "", 1)
-
-          boundary = '''        for dst_r, temp_i, typ in gp_dup_slots:\n            if typ == "f32":\n                self._emit(encode_mov_rm32(dst_r, Mem(Reg.RSP, temp_base + 8 * temp_i)))\n            else:\n                self._emit(encode_mov_rm(dst_r, Mem(Reg.RSP, temp_base + 8 * temp_i)))\n\n        if is_indirect:\n'''
-          replacement = '''        for dst_r, temp_i, typ in gp_dup_slots:\n            if typ == "f32":\n                self._emit(encode_mov_rm32(dst_r, Mem(Reg.RSP, temp_base + 8 * temp_i)))\n            else:\n                self._emit(encode_mov_rm(dst_r, Mem(Reg.RSP, temp_base + 8 * temp_i)))\n\n        if is_sysv_vararg:\n            # SysV AMD64 passes the number of live vector arguments in AL for\n            # variadic calls such as printf/sprintf. Do this only after every\n            # argument has been captured and loaded: register allocation may\n            # place an argument (including the format pointer) in RAX, and an\n            # earlier write to EAX would silently replace that value with null.\n            self._emit(encode_mov_ri(Reg.RAX, xmm_i))\n\n        if is_indirect:\n'''
-          if boundary not in text:
-              raise SystemExit("SysV call boundary changed")
-          codegen.write_text(text.replace(boundary, replacement, 1), encoding="utf-8")
-
-          Path("tests/test_x86_64_sysv_varargs.py").write_text('''from __future__ import annotations\n\nimport unittest\n\nfrom asmpython._backends.x86_64.codegen import FuncCodegen\nfrom asmpython._backends.x86_64.encoder import (\n    Mem, Reg, encode_call_rel32, encode_mov_mr, encode_mov_ri,\n)\nfrom asmpython._backends.x86_64.regalloc import AllocResult, RegLoc\nfrom asmpython._compiler.ir import I64, PTR, IRBlock, IRFunc, IRInstr, IRValue\n\n\nclass SysvVarargCallTests(unittest.TestCase):\n    def test_rax_argument_is_captured_before_al_vector_count_write(self) -> None:\n        fmt = IRValue("fmt", PTR)\n        first = IRValue("first", PTR)\n        second = IRValue("second", PTR)\n        third = IRValue("third", PTR)\n        func = IRFunc("probe", [], I64, [IRBlock("entry")])\n        alloc = AllocResult(\n            locs={\n                fmt.name: RegLoc(Reg.RAX),\n                first.name: RegLoc(Reg.RBX),\n                second.name: RegLoc(Reg.R12),\n                third.name: RegLoc(Reg.R13),\n            },\n            alloca_slots={}, stack_bytes=0, callee_saved=[], callee_saved_xmm=[],\n        )\n        generator = FuncCodegen(func, alloc, "sysv")\n        generator._call(IRInstr("call", None, ["printf", fmt, first, second, third]))\n        code = bytes(generator.buf)\n\n        capture_at = code.index(encode_mov_mr(Mem(Reg.RSP, 0), Reg.RAX))\n        vector_count_at = code.index(encode_mov_ri(Reg.RAX, 0))\n        call_at = code.index(encode_call_rel32(0))\n        self.assertLess(capture_at, vector_count_at)\n        self.assertLess(vector_count_at, call_at)\n\n\nif __name__ == "__main__":\n    unittest.main()\n''', encoding="utf-8")
-
-          Path(".github/workflows/arm64-list-del-verify.yml").write_text('''name: Verify ARM64 list deletion\n\non:\n  push:\n    branches: [beta]\n    paths:\n      - "asmpython/_runtime/abi_list_del_linux_arm64.S"\n      - "asmpython/_backends/arm64/runtime_manifest.py"\n      - "asmpython/_backends/arm64/_verify_list_del.py"\n      - "tests/test_arm64_list_del.py"\n      - ".github/workflows/arm64-list-del-verify.yml"\n  pull_request:\n    paths:\n      - "asmpython/_runtime/abi_list_del_linux_arm64.S"\n      - "asmpython/_backends/arm64/runtime_manifest.py"\n      - "asmpython/_backends/arm64/_verify_list_del.py"\n      - "tests/test_arm64_list_del.py"\n      - ".github/workflows/arm64-list-del-verify.yml"\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\njobs:\n  cross-verify:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          python-version: "3.12"\n      - name: Install AArch64 binutils and QEMU\n        run: |\n          sudo apt-get update\n          sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user\n      - name: Run exact lowering and manifest tests\n        run: python -m unittest -v tests.test_arm64_list_del\n      - name: Execute valid-index list deletion through QEMU\n        run: python -m asmpython._backends.arm64._verify_list_del --mode cross\n\n  native-verify:\n    runs-on: ubuntu-24.04-arm\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          python-version: "3.12"\n      - name: Install native binutils\n        run: |\n          sudo apt-get update\n          sudo apt-get install --yes binutils\n      - name: Run exact lowering and manifest tests\n        run: python -m unittest -v tests.test_arm64_list_del\n      - name: Execute valid-index list deletion natively\n        run: python -m asmpython._backends.arm64._verify_list_del --mode native\n''', encoding="utf-8")
-          PY
-          python -m py_compile asmpython/_backends/x86_64/codegen.py tests/test_x86_64_sysv_varargs.py
-          python -m unittest -v tests.test_x86_64_sysv_varargs
-      - name: Preserve verified patch
-        uses: actions/upload-artifact@v4
-        with:
-          name: verified-sysv-vararg-fix
-          path: |
-            asmpython/_backends/x86_64/codegen.py
-            tests/test_x86_64_sysv_varargs.py
-            .github/workflows/arm64-list-del-verify.yml
-      - name: Commit and push verified patch
-        run: |
+          set +e
           git config user.name "asmpython-ci"
           git config user.email "actions@users.noreply.github.com"
-          git add -A
-          git commit -m "Preserve RAX arguments for SysV variadic calls"
-          git fetch origin agent/python314-arm64-list-del
-          git rebase origin/agent/python314-arm64-list-del
-          git push --force-with-lease origin HEAD:agent/python314-arm64-list-del
+          git commit --allow-empty -m "diagnose feature branch push"
+          {
+            echo '=== remotes ==='
+            git remote -v
+            echo '=== status ==='
+            git status --short --branch
+            echo '=== dry-run normal push ==='
+            git push --dry-run origin HEAD:agent/python314-arm64-list-del
+            echo "normal_status=$?"
+            echo '=== dry-run force-with-lease push ==='
+            git push --dry-run --force-with-lease origin HEAD:agent/python314-arm64-list-del
+            echo "lease_status=$?"
+          } 2>&1 | tee feature-branch-push.log
+          exit 0
+      - name: Upload push diagnostic
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-branch-push-log
+          path: feature-branch-push.log
