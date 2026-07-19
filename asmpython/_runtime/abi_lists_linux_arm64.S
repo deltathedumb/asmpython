@@ -177,6 +177,66 @@ _abi_list_extend:
 .size _abi_list_extend, .-_abi_list_extend
 
 /*
+ * x0=list header, x1=index, x2=value -> x0=list header (or NULL if append
+ * growth fails). Insertion indices use Python's clamping semantics.
+ */
+.global _abi_list_insert
+.type _abi_list_insert, %function
+_abi_list_insert:
+    stp     x29, x30, [sp, #-96]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+    str     x25, [sp, #64]
+
+    mov     x19, x0               /* header */
+    mov     x20, x1               /* requested index */
+    mov     x21, x2               /* inserted value */
+    ldr     x22, [x19, #8]        /* old length */
+
+    cmp     x20, #0
+    b.ge    .Llist_insert_high_clamp
+    add     x20, x20, x22
+    cmp     x20, #0
+    b.ge    .Llist_insert_high_clamp
+    mov     x20, xzr
+.Llist_insert_high_clamp:
+    cmp     x20, x22
+    b.le    .Llist_insert_index_ready
+    mov     x20, x22
+.Llist_insert_index_ready:
+    mov     x0, x19
+    mov     x1, x21
+    bl      _abi_list_append
+    cbz     x0, .Llist_insert_fail
+
+    ldr     x23, [x19, #16]       /* append may have relocated the buffer */
+    mov     x24, x22              /* destination starts at old length */
+.Llist_insert_shift:
+    cmp     x24, x20
+    b.le    .Llist_insert_store
+    sub     x25, x24, #1
+    ldr     x9, [x23, x25, lsl #3]
+    str     x9, [x23, x24, lsl #3]
+    mov     x24, x25
+    b       .Llist_insert_shift
+.Llist_insert_store:
+    str     x21, [x23, x20, lsl #3]
+    mov     x0, x19
+    b       .Llist_insert_done
+.Llist_insert_fail:
+    mov     x0, xzr
+.Llist_insert_done:
+    ldr     x25, [sp, #64]
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #96
+    ret
+.size _abi_list_insert, .-_abi_list_insert
+
+/*
  * x0=list header -> x0=removed final 8-byte cell.
  *
  * This intentionally matches the existing native runtime's current contract:
