@@ -31,7 +31,15 @@ from .coff import build_coff
 from ..._linkers import builtin as _builtin_linker
 from ..._linkers import gcc as _gcc_linker
 from .phi_elim import eliminate_phi
+from .unpack_normalize import install as _install_literal_unpack_normalizer
 from ..._compiler.ir import ModuleBackend
+
+
+# driver.py imports ir_lower immediately before this package and only calls
+# lower_module after resolving __module_backend__. Install the backend-local,
+# idempotent prepass at that point so sema-approved literal destructuring reaches
+# the existing typed parallel-assignment lowering.
+_install_literal_unpack_normalizer()
 
 
 # ── CLI arguments this backend registers ─────────────────────────────────────

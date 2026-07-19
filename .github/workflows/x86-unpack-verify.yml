@@ -1,0 +1,59 @@
+name: Verify x86 literal unpacking
+
+on:
+  push:
+    branches: [beta]
+    paths:
+      - "asmpython/_backends/x86_64/__init__.py"
+      - "asmpython/_backends/x86_64/unpack_normalize.py"
+      - "tests/test_x86_unpack_normalize.py"
+      - "tests/cases/440_str_unpack.py"
+      - "tests/cases/63_tuple_unpack.py"
+      - ".github/workflows/x86-unpack-verify.yml"
+  pull_request:
+    paths:
+      - "asmpython/_backends/x86_64/__init__.py"
+      - "asmpython/_backends/x86_64/unpack_normalize.py"
+      - "tests/test_x86_unpack_normalize.py"
+      - "tests/cases/440_str_unpack.py"
+      - "tests/cases/63_tuple_unpack.py"
+      - ".github/workflows/x86-unpack-verify.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused-unpack:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes nasm gcc
+      - name: Compile changed Python files
+        run: |
+          python -m py_compile \
+            asmpython/_backends/x86_64/__init__.py \
+            asmpython/_backends/x86_64/unpack_normalize.py \
+            tests/test_x86_unpack_normalize.py
+      - name: Run IR normalization tests
+        run: python -m unittest -v tests.test_x86_unpack_normalize
+      - name: Compile and execute string unpack case
+        run: |
+          python -m asmpython tests/cases/440_str_unpack.py \
+            --backend x86-64 --no-pyinbin-fallback -o /tmp/str_unpack
+          /tmp/str_unpack > /tmp/str_unpack.out
+          printf 'x y z\na b c\nh e l l o\n' > /tmp/str_unpack.expected
+          diff -u /tmp/str_unpack.expected /tmp/str_unpack.out
+      - name: Compile and execute typed tuple unpack case
+        run: |
+          python -m asmpython tests/cases/63_tuple_unpack.py \
+            --backend x86-64 --no-pyinbin-fallback -o /tmp/tuple_unpack
+          /tmp/tuple_unpack > /tmp/tuple_unpack.out
+          printf '1\n2\nlabel: a\nn: 5\n1.5\n2.5\n0\n1\n2\nsum: 3\n' > /tmp/tuple_unpack.expected
+          diff -u /tmp/tuple_unpack.expected /tmp/tuple_unpack.out
