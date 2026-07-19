@@ -7,6 +7,7 @@ from unittest.mock import patch
 from asmpython._backends.arm64 import linux_link
 from asmpython._backends.arm64.codegen import FuncCode, R_AARCH64_CALL26
 from asmpython._backends.arm64.elf import build_elf
+from asmpython._backends.arm64.runtime_manifest import RUNTIME_SOURCE_NAMES
 
 
 _RET = bytes.fromhex("c0035fd6")
@@ -94,16 +95,14 @@ class Arm64LinuxLinkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid AArch64 entry symbol"):
             linux_link.start_source("main; injected")
 
-    def test_runtime_sources_are_modular_and_stable(self) -> None:
+    def test_runtime_sources_follow_the_manifest(self) -> None:
         paths = linux_link.runtime_source_paths()
         self.assertEqual(
             tuple(path.name for path in paths),
-            (
-                "abi_shims_linux_arm64.S",
-                "abi_strings_linux_arm64.S",
-                "abi_string_search_linux_arm64.S",
-            ),
+            RUNTIME_SOURCE_NAMES,
         )
+        self.assertEqual(len(paths), len(set(paths)))
+        self.assertGreaterEqual(len(paths), 3)
         self.assertEqual(linux_link.runtime_source_path(), paths[0])
 
     def test_current_runtime_exports_satisfy_print_object(self) -> None:
@@ -146,7 +145,10 @@ class Arm64LinuxLinkTests(unittest.TestCase):
             linux_link.validate_runtime_object(runtime)
 
     def test_build_runtime_object_merges_and_validates_all_slices(self) -> None:
-        slices = [b"core-object", b"string-object", b"search-object"]
+        slices = [
+            f"runtime-slice-{index}".encode("ascii")
+            for index in range(len(RUNTIME_SOURCE_NAMES))
+        ]
         runtime = self._runtime_object()
         toolchain = linux_link.LinuxArm64Toolchain("as", "ld", False)
         with (
@@ -166,14 +168,10 @@ class Arm64LinuxLinkTests(unittest.TestCase):
                 runtime,
             )
 
-        self.assertEqual(assemble.call_count, 3)
+        self.assertEqual(assemble.call_count, len(RUNTIME_SOURCE_NAMES))
         self.assertEqual(
             [call.args[0].name for call in assemble.call_args_list],
-            [
-                "abi_shims_linux_arm64.S",
-                "abi_strings_linux_arm64.S",
-                "abi_string_search_linux_arm64.S",
-            ],
+            list(RUNTIME_SOURCE_NAMES),
         )
         merge.assert_called_once_with(slices, toolchain=toolchain)
 
@@ -189,12 +187,13 @@ class Arm64LinuxLinkTests(unittest.TestCase):
             )
 
     def test_unsupported_runtime_symbol_fails_before_tool_invocation(self) -> None:
-        program = self._object_requiring("_abi_new_list")
+        unsupported_symbol = "_abi_list_slice"
+        program = self._object_requiring(unsupported_symbol)
         toolchain = linux_link.LinuxArm64Toolchain("as", "ld", False)
         with patch.object(linux_link, "build_start_object") as build_start:
             with self.assertRaisesRegex(
                 linux_link.Arm64LinkError,
-                "current freestanding ARM64 runtime.*_abi_new_list",
+                rf"current freestanding ARM64 runtime.*{unsupported_symbol}",
             ):
                 linux_link.build_executable_from_object(
                     program,
