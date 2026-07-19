@@ -20,13 +20,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .elf_inspect import Arm64ElfFormatError, undefined_symbols
+from .elf_inspect import (
+    Arm64ElfFormatError,
+    defined_global_symbols,
+    undefined_symbols,
+)
 from .module_codegen import compile_ir_module
 
 
 # Keep this synchronized with global exports in abi_shims_linux_arm64.S. This
 # is intentionally a compatibility allowlist, not a promise that the complete
-# x86-64 runtime has been ported.
+# x86-64 runtime has been ported. build_runtime_object() independently checks
+# that the assembled object really exports every listed symbol.
 RUNTIME_EXPORTS = frozenset({"_abi_int_to_base", "printf", "strlen"})
 
 
@@ -156,9 +161,33 @@ def runtime_source_path() -> Path:
     )
 
 
+def validate_runtime_object(runtime_object: bytes) -> frozenset[str]:
+    """Verify that the assembled runtime matches its declared compatibility set."""
+    try:
+        exports = defined_global_symbols(runtime_object)
+        unresolved = undefined_symbols(runtime_object)
+    except Arm64ElfFormatError as exc:
+        raise Arm64LinkError(f"invalid assembled ARM64 runtime object: {exc}") from exc
+
+    missing = RUNTIME_EXPORTS - exports
+    if missing:
+        raise Arm64LinkError(
+            "assembled ARM64 runtime is missing declared export(s): "
+            + ", ".join(sorted(missing))
+        )
+    if unresolved:
+        raise Arm64LinkError(
+            "freestanding ARM64 runtime unexpectedly requires external symbol(s): "
+            + ", ".join(sorted(unresolved))
+        )
+    return exports
+
+
 def build_runtime_object(*, toolchain: LinuxArm64Toolchain) -> bytes:
-    """Assemble the currently implemented freestanding ARM64 runtime slice."""
-    return assemble_file(runtime_source_path(), toolchain=toolchain)
+    """Assemble and validate the current freestanding ARM64 runtime slice."""
+    runtime_object = assemble_file(runtime_source_path(), toolchain=toolchain)
+    validate_runtime_object(runtime_object)
+    return runtime_object
 
 
 def start_source(entry_symbol: str = "main") -> str:
