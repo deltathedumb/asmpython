@@ -43,6 +43,9 @@ RUNTIME_SLICES = (
             {
                 "_abi_str_count",
                 "_abi_str_ends_with",
+                "_abi_str_index_of",
+                "_abi_str_index_of_start",
+                "_abi_str_rindex_of",
                 "_abi_str_starts_with",
             }
         ),
@@ -71,7 +74,6 @@ def declared_global_symbols(source: str) -> frozenset[str]:
 
 
 def validate_manifest_shape() -> None:
-    """Reject duplicate filenames or symbols assigned to multiple slices."""
     filenames: set[str] = set()
     owners: dict[str, str] = {}
     for runtime_slice in RUNTIME_SLICES:
@@ -91,13 +93,11 @@ def validate_manifest_shape() -> None:
 
 
 def validate_slice_source(runtime_slice: RuntimeSlice, source: str) -> None:
-    """Require one assembly slice's public declarations to match its manifest."""
     declared = declared_global_symbols(source)
     missing = runtime_slice.exports - declared
     unexpected = declared - runtime_slice.exports
     if not missing and not unexpected:
         return
-
     details: list[str] = []
     if missing:
         details.append("missing " + ", ".join(sorted(missing)))

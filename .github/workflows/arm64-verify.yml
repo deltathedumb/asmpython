@@ -18,6 +18,7 @@ on:
       - "tests/test_arm64_module_codegen.py"
       - "tests/test_arm64_runtime_manifest.py"
       - "tests/test_arm64_source_codegen.py"
+      - "tests/test_arm64_string_find.py"
       - "tests/test_arm64_string_remove.py"
       - "tests/test_arm64_string_repeat.py"
       - ".github/workflows/arm64-verify.yml"
@@ -36,6 +37,7 @@ on:
       - "tests/test_arm64_module_codegen.py"
       - "tests/test_arm64_runtime_manifest.py"
       - "tests/test_arm64_source_codegen.py"
+      - "tests/test_arm64_string_find.py"
       - "tests/test_arm64_string_remove.py"
       - "tests/test_arm64_string_repeat.py"
       - ".github/workflows/arm64-verify.yml"
@@ -49,16 +51,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install AArch64 binutils and QEMU
         run: |
           sudo apt-get update
           sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user
-
       - name: Check Python modules
         run: |
           python -m py_compile \
@@ -75,9 +74,10 @@ jobs:
             asmpython/_backends/arm64/_verify_encoder.py \
             asmpython/_backends/arm64/_verify_elf.py \
             asmpython/_backends/arm64/_verify_hash.py \
-            asmpython/_backends/arm64/_verify_source.py \
             asmpython/_backends/arm64/_verify_print.py \
             asmpython/_backends/arm64/_verify_scalars.py \
+            asmpython/_backends/arm64/_verify_source.py \
+            asmpython/_backends/arm64/_verify_string_find.py \
             asmpython/_backends/arm64/_verify_string_remove.py \
             asmpython/_backends/arm64/_verify_string_search.py \
             asmpython/_backends/arm64/_verify_string_repeat.py \
@@ -89,12 +89,11 @@ jobs:
             tests/test_arm64_module_codegen.py \
             tests/test_arm64_runtime_manifest.py \
             tests/test_arm64_source_codegen.py \
+            tests/test_arm64_string_find.py \
             tests/test_arm64_string_remove.py \
             tests/test_arm64_string_repeat.py
-
       - name: Verify instruction encoder against GNU assembler
         run: python -m asmpython._backends.arm64._verify_encoder
-
       - name: Run ARM64 structure, CLI, and codegen tests
         run: |
           python -m unittest \
@@ -106,49 +105,41 @@ jobs:
             tests.test_arm64_module_codegen \
             tests.test_arm64_runtime_manifest \
             tests.test_arm64_source_codegen \
+            tests.test_arm64_string_find \
             tests.test_arm64_string_remove \
             tests.test_arm64_string_repeat \
             -v
-
       - name: Link and execute generated IR through QEMU
         run: python -m asmpython._backends.arm64._verify_elf --mode cross
-
       - name: Compile source and execute through QEMU
         run: python -m asmpython._backends.arm64._verify_source --mode cross
-
       - name: Verify freestanding print runtime through QEMU
         run: python -m asmpython._backends.arm64._verify_print --mode cross
-
       - name: Verify scalar and string runtime through QEMU
         run: python -m asmpython._backends.arm64._verify_scalars --mode cross
-
       - name: Verify string search runtime through QEMU
         run: python -m asmpython._backends.arm64._verify_string_search --mode cross
-
       - name: Verify string repetition runtime through QEMU
         run: python -m asmpython._backends.arm64._verify_string_repeat --mode cross
-
       - name: Verify deterministic string hashing through QEMU
         run: python -m asmpython._backends.arm64._verify_hash --mode cross
-
       - name: Verify prefix and suffix removal through QEMU
         run: python -m asmpython._backends.arm64._verify_string_remove --mode cross
+      - name: Verify Unicode find and rfind through QEMU
+        run: python -m asmpython._backends.arm64._verify_string_find --mode cross
 
   native-verify:
     name: Native ARM64 execution
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install native binutils and strace
         run: |
           sudo apt-get update
           sudo apt-get install --yes binutils strace
-
       - name: Check and run focused tests
         run: |
           python -m py_compile \
@@ -164,9 +155,10 @@ jobs:
             asmpython/_backends/arm64/source_build.py \
             asmpython/_backends/arm64/_verify_elf.py \
             asmpython/_backends/arm64/_verify_hash.py \
-            asmpython/_backends/arm64/_verify_source.py \
             asmpython/_backends/arm64/_verify_print.py \
             asmpython/_backends/arm64/_verify_scalars.py \
+            asmpython/_backends/arm64/_verify_source.py \
+            asmpython/_backends/arm64/_verify_string_find.py \
             asmpython/_backends/arm64/_verify_string_remove.py \
             asmpython/_backends/arm64/_verify_string_search.py \
             asmpython/_backends/arm64/_verify_string_repeat.py \
@@ -178,6 +170,7 @@ jobs:
             tests/test_arm64_module_codegen.py \
             tests/test_arm64_runtime_manifest.py \
             tests/test_arm64_source_codegen.py \
+            tests/test_arm64_string_find.py \
             tests/test_arm64_string_remove.py \
             tests/test_arm64_string_repeat.py
           python -m unittest \
@@ -189,30 +182,25 @@ jobs:
             tests.test_arm64_module_codegen \
             tests.test_arm64_runtime_manifest \
             tests.test_arm64_source_codegen \
+            tests.test_arm64_string_find \
             tests.test_arm64_string_remove \
             tests.test_arm64_string_repeat \
             -v
-
       - name: Link and execute generated IR natively
         run: python -m asmpython._backends.arm64._verify_elf --mode native
-
       - name: Compile source and execute natively
         run: python -m asmpython._backends.arm64._verify_source --mode native
-
       - name: Verify freestanding print runtime natively
         run: python -m asmpython._backends.arm64._verify_print --mode native
-
       - name: Verify scalar and string runtime natively
         run: python -m asmpython._backends.arm64._verify_scalars --mode native
-
       - name: Verify string search runtime natively
         run: python -m asmpython._backends.arm64._verify_string_search --mode native
-
       - name: Verify string repetition runtime natively
         run: python -m asmpython._backends.arm64._verify_string_repeat --mode native
-
       - name: Verify deterministic string hashing natively
         run: python -m asmpython._backends.arm64._verify_hash --mode native
-
       - name: Verify prefix and suffix removal natively
         run: python -m asmpython._backends.arm64._verify_string_remove --mode native
+      - name: Verify Unicode find and rfind natively
+        run: python -m asmpython._backends.arm64._verify_string_find --mode native
