@@ -5,13 +5,22 @@ See roadmap.md's "ARM64 support" section for what Stage 0 (toolchain
 bring-up) confirmed and what Stage 1 (this package) still needs before
 `--backend arm64` is real. Done so far: `encoder.py` (instruction
 encoding, verified bit-for-bit against real `aarch64-linux-gnu-as`
-output — see `_verify_encoder.py`) and `regalloc.py` (linear-scan
-register allocation over AAPCS64's register set, ported from the x86-64
-backend's allocator and smoke-tested). Still needed: `codegen.py` (IR op
--> AArch64 instruction selection — the biggest remaining piece), AArch64
-relocation support in an ELF object-file writer (`EM_AARCH64`,
-`R_AARCH64_*`), and AArch64 ports of the runtime object/ABI shims. This
-module is intentionally NOT wired into driver.py's `--backend` dispatch
-yet — there is nothing here yet that can compile a real program.
+output — see `_verify_encoder.py`), `regalloc.py` (linear-scan register
+allocation over AAPCS64's register set), and the first complete
+`codegen.py` instruction-selection pass. The code generator is still under
+verification and is not wired into driver.py yet. Remaining major work:
+AArch64 ELF relocation/object writing, runtime object/ABI shims, and driver
+integration.
+
+`regalloc.py` deliberately represents spills and locals as negative
+X29-relative offsets. Importing this package installs the signed/unscaled
+stack-memory wrappers from `_stack_access.py` before `codegen.py` imports
+its encoder helpers, preventing those offsets from being sent to A64's
+unsigned scaled LDR/STR forms.
 """
 from __future__ import annotations
+
+from ._stack_access import install as _install_stack_access
+
+_install_stack_access()
+del _install_stack_access
