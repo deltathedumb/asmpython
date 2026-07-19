@@ -76,7 +76,9 @@ class Arm64CodegenSmokeTests(unittest.TestCase):
 
         self.assertIn(encoder.ldur(encoder.Reg.X13, encoder.Reg.X29, -8), compiled.code)
         self.assertIn(encoder.ldur(encoder.Reg.X14, encoder.Reg.X29, -16), compiled.code)
-        self.assertIn(encoder.stur(encoder.Reg.X13, encoder.Reg.X29, -24), compiled.code)
+        # Both inputs occupy X13/X14, so the spillable result deliberately
+        # reuses the alternate scratch X14 only after ADD has consumed it.
+        self.assertIn(encoder.stur(encoder.Reg.X14, encoder.Reg.X29, -24), compiled.code)
         self.assertEqual(compiled.relocs, [])
 
     def test_large_frame_expands_push_and_pop(self) -> None:
