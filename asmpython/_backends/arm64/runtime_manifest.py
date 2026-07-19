@@ -36,6 +36,10 @@ RUNTIME_SLICES = (
         ),
     ),
     RuntimeSlice(
+        "abi_list_del_linux_arm64.S",
+        frozenset({"_abi_list_del"}),
+    ),
+    RuntimeSlice(
         "abi_float_scalar_linux_arm64.S",
         frozenset(
             {
