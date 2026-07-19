@@ -19,10 +19,18 @@ def main() -> int:
     xs = [1, 2, 3, 4]
     xs.reverse()
     a, b, c, d = xs
-    print(len(xs), a, b, c, d)
+    if a != 4:
+        return 11
+    if b != 3:
+        return 12
+    if c != 2:
+        return 13
+    if d != 1:
+        return 14
+    print(len(xs))
     return 0
 """
-_EXPECTED_STDOUT = "4 4 3 2 1\n"
+_EXPECTED_STDOUT = "4\n"
 _EXPECTED_REQUIREMENTS = frozenset(
     {
         "_abi_int_to_base",
@@ -80,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[ OK ] reverse swapped active 8-byte cells in place")
         print("[ OK ] list length and header identity were preserved")
         print("[ OK ] even-length center crossing terminated correctly")
+        print("[ OK ] exit checks observed final cells [4, 3, 2, 1]")
         print(f"[ OK ] {mode_name} stdout matched {_EXPECTED_STDOUT!r}")
         if completed.stderr:
             print(completed.stderr.strip())
