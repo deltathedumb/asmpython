@@ -176,7 +176,7 @@ def _run(cmd: list[str], extra_path_dirs: list[str] | None = None) -> None:
     for c in cmd:
         parts.append(_quote_cmd_part(c))
     cmd_str = " ".join(parts)
-    proc = subprocess.run(cmd_str, capture_output=True, text=True)
+    proc = subprocess.run(cmd_str, capture_output=True, text=True, shell=True)
     if proc.stdout:
         sys.stdout.write(proc.stdout)
     if proc.stderr:
