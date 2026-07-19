@@ -9,15 +9,20 @@ python -m asmpython hello.py          # compile for your host platform
 ./hello                               # or hello.exe on Windows
 ```
 
-Current release: **1.1.0**.
+Current release: **3.14.0-preview**.
 See [roadmap.md](roadmap.md) for the full version plan.
 
 ---
 
 ## Installation
 
+There is no PyPI package for asmpython yet. Install from a checkout of this
+repo instead (editable, for development):
+
 ```sh
-pip install asmpython
+git clone "https://github.com/deltathedumb/asmpython.git"
+cd asmpython
+pip install -e .
 ```
 
 This installs the `asmpython` command (and `python -m asmpython`). The
@@ -26,12 +31,6 @@ out to **`nasm`** and **`gcc`** to assemble and link, so make sure both are
 on your `PATH` (see [Toolchain requirements](#toolchain-requirements)). On
 Windows, `asmpython.bat` from this repo can fetch a portable NASM/MinGW for
 you instead.
-
-To install from a checkout of this repo (editable, for development):
-
-```sh
-pip install -e .
-```
 
 ---
 
