@@ -19,13 +19,23 @@ from pathlib import Path
 
 from . import codegen, regalloc
 from .elf import build_elf
-from asmpython._compiler.ir import I64, PTR, IRBlock, IRFunc, IRGlobal, IRInstr, IRValue
+from asmpython._compiler.ir import (
+    I64,
+    PTR,
+    IRBlock,
+    IRFunc,
+    IRGlobal,
+    IRInstr,
+    IRValue,
+)
 
 
 def _require_tool(name: str) -> str:
     path = shutil.which(name)
     if path is None:
-        raise SystemExit(f"missing {name}; install the AArch64 binutils/qemu toolchain")
+        raise SystemExit(
+            f"missing {name}; install the AArch64 binutils/qemu toolchain"
+        )
     return path
 
 
@@ -73,6 +83,22 @@ def _build_probe_object() -> bytes:
     return build_elf(functions, [IRGlobal("answer", I64, 42)])
 
 
+def _verify_readelf(inspection: str) -> None:
+    required_markers = (
+        "AArch64",
+        "R_AARCH64_CALL26",
+        "R_AARCH64_ADR_PREL_PG_HI21",
+        "R_AARCH64_ADD_ABS_LO12_NC",
+        "caller",
+        "load_answer",
+        "answer",
+    )
+    missing = [marker for marker in required_markers if marker not in inspection]
+    if "Machine:" not in inspection or missing:
+        print(inspection)
+        raise SystemExit(f"readelf output missing expected markers: {missing}")
+
+
 def main() -> int:
     assembler = _require_tool("aarch64-linux-gnu-as")
     linker = _require_tool("aarch64-linux-gnu-ld")
@@ -108,19 +134,7 @@ def main() -> int:
             text=True,
             stdout=subprocess.PIPE,
         ).stdout
-        required_markers = (
-            "Machine:                           AArch64",
-            "R_AARCH64_CALL26",
-            "R_AARCH64_ADR_PREL_PG_HI21",
-            "R_AARCH64_ADD_ABS_LO12_NC",
-            "caller",
-            "load_answer",
-            "answer",
-        )
-        missing = [marker for marker in required_markers if marker not in inspection]
-        if missing:
-            print(inspection)
-            raise SystemExit(f"readelf output missing expected markers: {missing}")
+        _verify_readelf(inspection)
 
         subprocess.run(
             [
@@ -135,8 +149,19 @@ def main() -> int:
             check=True,
         )
 
-        completed = subprocess.run([qemu, str(executable)], check=False)
+        # QEMU's own syscall trace is retained for diagnostics. This avoids the
+        # recurring native-code failure mode where buffered program stdout says
+        # nothing useful about how far execution actually progressed.
+        completed = subprocess.run(
+            [qemu, "-strace", str(executable)],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         if completed.returncode != 42:
+            print(completed.stdout, end="")
+            print(completed.stderr, end="")
             raise SystemExit(
                 f"AArch64 probe returned {completed.returncode}, expected 42"
             )
@@ -145,6 +170,8 @@ def main() -> int:
         print("[ OK ] readelf recognized all three AArch64 relocation types")
         print("[ OK ] GNU ld linked the generated object")
         print("[ OK ] qemu-aarch64 process exited with 42")
+        if completed.stderr:
+            print(completed.stderr.strip())
     return 0
 
 
