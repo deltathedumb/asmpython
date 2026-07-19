@@ -3614,7 +3614,8 @@ class SemaAnalyzer:
                 or c.name in BUILTINS
             ):
                 raise SemaError(
-                    f"class name {c.name!r} collides with existing name", c.pos
+                    f"class name {c.name!r} collides with existing name", c.pos,
+                    ErrorCode.E_CLASS_NAME_COLLISION,
                 )
             sig = ClassSig(name=c.name, parent=c.parent, pos=c.pos)
             sig.is_final = getattr(c, "is_final", False)
@@ -3730,6 +3731,7 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"method {c.name}.{m.name!r} must take 'self' as its first parameter",
                             m.pos,
+                            ErrorCode.E_MISSING_SELF_PARAM,
                         )
                 mr = self._resolve_annot(m.ret_type)  # type: ignore
                 # `@x.setter` methods are registered under a mangled name
@@ -3786,7 +3788,8 @@ class SemaAnalyzer:
                 while cur is not None and cur in self.classes:
                     if cur in seen:
                         raise SemaError(
-                            f"inheritance cycle involving {c.name!r}", c.pos
+                            f"inheritance cycle involving {c.name!r}", c.pos,
+                            ErrorCode.E_INHERITANCE_CYCLE,
                         )
                     seen.add(cur)
                     cur = self.classes[cur].parent
@@ -5322,6 +5325,7 @@ class SemaAnalyzer:
                         "starred assignment requires a single list on the "
                         "right-hand side",
                         s.pos,
+                        ErrorCode.E_STARRED_ASSIGN_NOT_LIST,
                     )
                 rhs_t: str = A.expr_type(s.values[0])
                 if rhs_t != "list":
@@ -5329,6 +5333,7 @@ class SemaAnalyzer:
                         f"starred assignment requires a list on the "
                         f"right-hand side, got {rhs_t}",
                         s.pos,
+                        ErrorCode.E_STARRED_ASSIGN_NOT_LIST,
                     )
                 el = self._list_el_type(s.values[0], scope)
                 el_bound = el if el != "int" else "any"
@@ -5349,6 +5354,7 @@ class SemaAnalyzer:
                     "tuple assign with subscript/attribute targets requires "
                     "the parallel form (one value per target)",
                     s.pos,
+                    ErrorCode.E_TUPLE_ASSIGN_MIXED_TARGETS,
                 )
             # Unpack form: `a, b = <single tuple expr>` (a literal, a tuple
             # variable, or a call to a tuple-returning function).
@@ -5358,6 +5364,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"cannot unpack {len(ets)}-tuple into {len(s.targets)} target(s)",
                         s.pos,
+                        ErrorCode.E_UNPACK_COUNT,
                     )
                 # Bind each target from the tuple's per-slot kind. A missing
                 # slot, or an "int" slot (asmpython's unknown sentinel — a slot
@@ -5409,6 +5416,7 @@ class SemaAnalyzer:
                 raise SemaError(
                     f"tuple assign expects {len(s.targets)} values, got {len(s.values)}",
                     s.pos,
+                    ErrorCode.E_UNPACK_COUNT,
                 )
             for t, v in zip(s.targets, s.values):
                 vt: str = A.expr_type(v)
@@ -5442,6 +5450,7 @@ class SemaAnalyzer:
                 raise SemaError(
                     f"augmented assignment to undefined variable {s.target!r}",
                     s.pos,
+                    ErrorCode.E_UNDEFINED_NAME,
                 )
             self._check_expr(s.value, scope)
             # `d |= other` (PEP 584): in-place dict union, merging `other`'s
@@ -5455,7 +5464,8 @@ class SemaAnalyzer:
                 rt: str = A.expr_type(s.value)
                 if rt not in (target_ty, "any"):
                     raise SemaError(
-                        f"unsupported operand type for |=: {target_ty} |= {rt}", s.pos
+                        f"unsupported operand type for |=: {target_ty} |= {rt}", s.pos,
+                        ErrorCode.E_BINARY_OP_TYPE,
                     )
                 return
             # `b += 1` etc. demotes a tracked bool back to a plain int, as in
@@ -5547,13 +5557,15 @@ class SemaAnalyzer:
                 _enum_n_args = len(s.iter.args) + (1 if _enum_start_kwarg else 0)
                 if _enum_n_args not in (1, 2):
                     raise SemaError(
-                        "enumerate() takes 1 or 2 arguments", s.pos
+                        "enumerate() takes 1 or 2 arguments", s.pos,
+                        ErrorCode.E_ARG_COUNT,
                     )
                 if len(s.targets) != 2:
                     raise SemaError(
                         "for ... in enumerate(...) needs two targets "
                         "(`for i, x in enumerate(xs)`)",
                         s.pos,
+                        ErrorCode.E_UNPACK_TARGET_COUNT,
                     )
                 inner = s.iter.args[0]
                 self._check_expr(inner, scope)
@@ -5564,6 +5576,7 @@ class SemaAnalyzer:
                         raise SemaError(
                             "enumerate() start argument must be an int",
                             s.pos,
+                            ErrorCode.E_ARG_TYPE,
                         )
                 scope.add(s.targets[0], "int")
                 enum_el_t = self._iter_element_type(inner, scope)
@@ -5612,6 +5625,7 @@ class SemaAnalyzer:
                             raise SemaError(
                                 f"cannot unpack non-iterable {cls} object",
                                 s.pos,
+                                ErrorCode.E_UNPACK_NOT_ITERABLE,
                             )
                     # If the iterable carries a per-pair slot shape and the
                     # targets are FLAT names (a nested group like
@@ -5696,6 +5710,7 @@ class SemaAnalyzer:
                         raise SemaError(
                             "cannot iterate a heterogeneous tuple; index its elements instead",
                             s.pos,
+                            ErrorCode.E_HETEROGENEOUS_TUPLE,
                         )
                 elif it_t == "dict":
                     # Iterating a dict yields its keys (strings).
@@ -5715,6 +5730,7 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"cannot iterate over {cls_name!r}: unknown class",
                             s.pos,
+                            ErrorCode.E_UNDEFINED_NAME,
                         )
                     cls_methods = cls_sig.methods
                     if "__iter__" not in cls_methods or "__next__" not in cls_methods:
@@ -5722,6 +5738,7 @@ class SemaAnalyzer:
                             f"cannot iterate over {cls_name!r}: "
                             f"class must define __iter__ and __next__",
                             s.pos,
+                            ErrorCode.E_ITER_TYPE,
                         )
                     # Determine element type from __next__'s declared return type.
                     next_sig = cls_methods.get("__next__")
@@ -5744,6 +5761,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         "asmpython 'for' iterates over range(), list, dict, tuple, or str",
                         s.pos,
+                        ErrorCode.E_ITER_TYPE,
                     )
             else:
                 for arg in s.range_args:
@@ -5957,13 +5975,14 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"list[i] = v: list element type is {el_t}, got {value_t}",
                         s.pos,
+                        ErrorCode.E_ASSIGN_TYPE,
                     )
             elif obj_t == "dict":
                 # "int" doubles as asmpython's unknown sentinel (an untracked
                 # element/slot that is a str at runtime), so it's lenient here.
                 _ikt = A.expr_type(s.target.index)
                 if _ikt not in ("str", "any", "int") and not _ikt.startswith("instance:"):
-                    raise SemaError("dict keys must be strings", s.pos)
+                    raise SemaError("dict keys must be strings", s.pos, ErrorCode.E_DICT_KEY_TYPE)
                 dvt = self._dict_value_type(s.target.obj, scope)
                 if (
                     dvt not in ("any", "int")
@@ -5983,6 +6002,7 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"dict[k] = v: dict values are {dvt}, got {value_t}",
                             s.pos,
+                            ErrorCode.E_ASSIGN_TYPE,
                         )
                 elif dvt in ("any", "int") and value_t not in ("any", "int") and isinstance(
                     s.target.obj, A.Name
@@ -6039,6 +6059,7 @@ class SemaAnalyzer:
                 raise SemaError(
                     f"cannot assign attribute on {obj_t}",
                     s.pos,
+                    ErrorCode.E_NO_ATTR,
                 )
             if obj_t.startswith("instance:"):
                 cls_name = obj_t.split(":", 1)[1]
@@ -6054,6 +6075,7 @@ class SemaAnalyzer:
                             raise SemaError(
                                 f"property {s.name!r} of {cls_name!r} object has no setter",
                                 s.pos,
+                                ErrorCode.E_PROPERTY_NO_SETTER,
                             )
                         # `obj.x = value` -> `obj.x__setter(value)`: rewrite
                         # this AttrAssign into an ExprStmt wrapping a
@@ -6141,7 +6163,8 @@ class SemaAnalyzer:
                 and not is_exc_ctor
             ):
                 raise SemaError(
-                    "raise requires a string message or an exception", s.pos
+                    "raise requires a string message or an exception", s.pos,
+                    ErrorCode.E_NOT_AN_EXCEPTION,
                 )
             return
         if isinstance(s, A.With):
@@ -6156,6 +6179,7 @@ class SemaAnalyzer:
                         f"{cls_name!r} object does not support the context "
                         "manager protocol (missing __enter__/__exit__)",
                         s.pos,
+                        ErrorCode.E_NOT_A_CONTEXT_MANAGER,
                     )
                 # `with expr as name: body` -> rewrite *in place* into:
                 #   __cm = expr
@@ -6375,6 +6399,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         "capture patterns are not allowed inside or-patterns",
                         alt.pos,
+                        ErrorCode.E_OR_PATTERN_CAPTURE,
                     )
             tests = [
                 self._lower_pattern(p, subj_name, pattern.pos)[1]
@@ -6549,12 +6574,14 @@ class SemaAnalyzer:
                         f"class '{cls_name}' does not define __match_args__ "
                         "for positional patterns",
                         pattern.pos,
+                        ErrorCode.E_MATCH_ARGS_MISSING,
                     )
                 if len(pattern.positional) > len(match_args):
                     raise SemaError(
                         f"too many positional patterns for '{cls_name}' "
                         f"(__match_args__ has {len(match_args)} entries)",
                         pattern.pos,
+                        ErrorCode.E_MATCH_ARGS_TOO_MANY,
                     )
                 for i, sub in enumerate(pattern.positional):
                     attr_name = match_args[i]
@@ -6635,11 +6662,12 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"list[i] = v: list element type is {el_t}, got {value_t}",
                         pos,
+                        ErrorCode.E_ASSIGN_TYPE,
                     )
             elif obj_t == "dict":
                 ikt: str = A.expr_type(t.index)
                 if ikt not in ("str", "any", "int") and not ikt.startswith("instance:"):
-                    raise SemaError("dict keys must be strings", pos)
+                    raise SemaError("dict keys must be strings", pos, ErrorCode.E_DICT_KEY_TYPE)
                 dvt = self._dict_value_type(t.obj, scope)
                 if (
                     dvt not in ("any", "int")
@@ -6650,6 +6678,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"dict[k] = v: dict values are {dvt}, got {value_t}",
                         pos,
+                        ErrorCode.E_ASSIGN_TYPE,
                     )
             elif obj_t == "any":
                 pass  # opaque target: accept the index assignment leniently
@@ -6666,7 +6695,7 @@ class SemaAnalyzer:
         self._check_expr(t.obj, scope)
         obj_t: str = A.expr_type(t.obj)
         if not obj_t.startswith("instance:") and obj_t not in ("any", "module", "int"):
-            raise SemaError(f"cannot assign attribute on {obj_t}", pos)
+            raise SemaError(f"cannot assign attribute on {obj_t}", pos, ErrorCode.E_NO_ATTR)
         if obj_t.startswith("instance:"):
             cls_name = obj_t.split(":", 1)[1]
             if cls_name in self.classes:
@@ -6675,6 +6704,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"property {t.name!r} of {cls_name!r} object has no setter",
                         pos,
+                        ErrorCode.E_PROPERTY_NO_SETTER,
                     )
                 sig = self.classes[cls_name]
                 if isinstance(t.obj, A.Name) and t.obj.name == "self":
@@ -6799,6 +6829,7 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"{owner}.{sig.name}() must take exactly (self, other)",
                             e.pos,
+                            ErrorCode.E_DUNDER_SIGNATURE,
                         )
                     e.dunder_owner = owner  # type: ignore
                     e.dunder_method = sig.name  # type: ignore
@@ -6832,6 +6863,7 @@ class SemaAnalyzer:
                 raise SemaError(
                     f"unsupported operand type for {e.op}: {lt} {e.op} {rt}",
                     e.pos,
+                    ErrorCode.E_BINARY_OP_TYPE,
                 )
             # A union of class objects (`Stmt = Assign | AugAssign | ...`) is a
             # type-alias expression: `type | type` collapses to `type`.
@@ -6896,6 +6928,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"unsupported operand type for {e.op}: {t}",
                         e.pos,
+                        ErrorCode.E_UNARY_OP_TYPE,
                     )
             # Bitwise / shift can't take floats.
             if e.op in ("&", "|", "^", "<<", ">>"):
@@ -6903,6 +6936,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"bitwise/shift operator {e.op!r} requires int operands",
                         e.pos,
+                        ErrorCode.E_BINARY_OP_TYPE,
                     )
             return
         if isinstance(e, A.Compare):
@@ -6963,6 +6997,7 @@ class SemaAnalyzer:
                             raise SemaError(
                                 f"'{op}': needle is {lt} but list elements are {el_t}",
                                 e.pos,
+                                ErrorCode.E_CONTAINS_TYPE_MISMATCH,
                             )
                         continue
                     if rt == "dict":
@@ -6970,6 +7005,7 @@ class SemaAnalyzer:
                             raise SemaError(
                                 f"'{op}' on dict requires str key, got {lt}",
                                 e.pos,
+                                ErrorCode.E_DICT_KEY_TYPE,
                             )
                         continue
                     if rt == "tuple":
@@ -6988,6 +7024,7 @@ class SemaAnalyzer:
                             raise SemaError(
                                 "'in' on a heterogeneous tuple is unsupported",
                                 e.pos,
+                                ErrorCode.E_HETEROGENEOUS_TUPLE,
                             )
                         # "int" doubles as the unknown sentinel, so it's a lenient
                         # needle (asmpython's shallow inference types many strings
@@ -6997,6 +7034,7 @@ class SemaAnalyzer:
                             raise SemaError(
                                 f"'{op}': needle is {lt} but tuple elements are {only}",
                                 e.pos,
+                                ErrorCode.E_CONTAINS_TYPE_MISMATCH,
                             )
                         continue
                     if rt == "set":
@@ -7020,6 +7058,7 @@ class SemaAnalyzer:
                             raise SemaError(
                                 f"'{op}': {cls_name} does not define __contains__",
                                 e.pos,
+                                ErrorCode.E_NO_CONTAINS_METHOD,
                             )
                         continue
                     raise SemaError(
@@ -7054,6 +7093,7 @@ class SemaAnalyzer:
                             raise SemaError(
                                 f"{owner}.__eq__() must take exactly (self, other)",
                                 e.pos,
+                                ErrorCode.E_DUNDER_SIGNATURE,
                             )
                         e.dunder_owner = owner  # type: ignore
                         e.dunder_method = "__eq__"  # type: ignore
@@ -7093,6 +7133,7 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"string comparison does not support {op!r}",
                             e.pos,
+                            ErrorCode.E_STRING_COMPARISON_OP,
                         )
                     if lt != "str" or rt != "str":
                         # Equality against the unknown "int" sentinel is allowed
@@ -7104,6 +7145,7 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"cannot compare {lt} and {rt} with {op!r}",
                             e.pos,
+                            ErrorCode.E_UNCOMPARABLE_TYPES,
                         )
             return
         if isinstance(e, A.BoolOp):
@@ -7157,6 +7199,7 @@ class SemaAnalyzer:
                 raise SemaError(
                     f"conditional expression arms have mismatched types ({bt} vs {ot})",
                     e.pos,
+                    ErrorCode.E_TYPE_MISMATCH,
                 )
             return
         if isinstance(e, A.NamedExpr):
@@ -7189,6 +7232,7 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"list unpacking requires a list or tuple, got {spread_t}",
                             el.pos,
+                            ErrorCode.E_SPREAD_NOT_ITERABLE,
                         )
                 else:
                     self._check_expr(el, scope)
@@ -7477,7 +7521,8 @@ class SemaAnalyzer:
                 el = "any"
             else:
                 raise SemaError(
-                    f"cannot iterate a {it_t} in a dict comprehension", e.pos
+                    f"cannot iterate a {it_t} in a dict comprehension", e.pos,
+                    ErrorCode.E_ITER_TYPE,
                 )
             child = Scope()
             child.types.update(scope.types)
@@ -7501,6 +7546,7 @@ class SemaAnalyzer:
                     "dict comprehension keys must be strings "
                     "(other types not supported yet)",
                     getattr(e.key, "pos", e.pos),
+                    ErrorCode.E_DICT_KEY_TYPE,
                 )
             self._check_expr(e.value, child)
             vt = A.expr_type(e.value)
@@ -7533,6 +7579,7 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"dict unpacking requires a dict (got {vt})",
                             getattr(v, "pos", e.pos),
+                            ErrorCode.E_DICT_UNPACK_TYPE,
                         )
                     continue
                 self._check_expr(k, scope)
@@ -7540,6 +7587,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         "dict keys must be strings (other types not supported yet)",
                         getattr(k, "pos", e.pos),
+                        ErrorCode.E_DICT_KEY_TYPE,
                     )
             # Dict values must be homogeneous: all int, all str, all float, all
             # instances of one class, or all of one pointer-sized collection
@@ -7657,19 +7705,19 @@ class SemaAnalyzer:
             obj_t = A.expr_type(e.obj)
             if isinstance(e.index, A.Slice):
                 if obj_t not in ("str", "list", "any", "int"):
-                    raise SemaError(f"slicing not supported on {obj_t}", e.pos)
+                    raise SemaError(f"slicing not supported on {obj_t}", e.pos, ErrorCode.E_INDEX_OBJECT_TYPE)
                 if e.index.start is not None:
                     self._check_expr(e.index.start, scope)
                     if A.expr_type(e.index.start) not in ("int", "any"):
-                        raise SemaError("slice start must be an int", e.pos)
+                        raise SemaError("slice start must be an int", e.pos, ErrorCode.E_INDEX_TYPE)
                 if e.index.stop is not None:
                     self._check_expr(e.index.stop, scope)
                     if A.expr_type(e.index.stop) not in ("int", "any"):
-                        raise SemaError("slice stop must be an int", e.pos)
+                        raise SemaError("slice stop must be an int", e.pos, ErrorCode.E_INDEX_TYPE)
                 if e.index.step is not None:
                     self._check_expr(e.index.step, scope)
                     if A.expr_type(e.index.step) not in ("int", "any"):
-                        raise SemaError("slice step must be an int", e.pos)
+                        raise SemaError("slice step must be an int", e.pos, ErrorCode.E_INDEX_TYPE)
                 if obj_t == "any":
                     e.inferred_type = "any"
                     return
@@ -7698,7 +7746,7 @@ class SemaAnalyzer:
                     e.tuple_elem_types = self._list_el_tuple_types(e.obj, scope)
             elif obj_t == "tuple":
                 if A.expr_type(e.index) != "int":
-                    raise SemaError("tuple index must be an int", e.pos)
+                    raise SemaError("tuple index must be an int", e.pos, ErrorCode.E_INDEX_TYPE)
                 ets = self._tuple_elem_types(e.obj, scope)
                 if not ets:
                     # Unknown per-slot kinds (e.g. a tuple read out of an
@@ -7709,7 +7757,8 @@ class SemaAnalyzer:
                     idx = e.index.value
                     if idx < -n or idx >= n:
                         raise SemaError(
-                            f"tuple index {idx} out of range for {n}-tuple", e.pos
+                            f"tuple index {idx} out of range for {n}-tuple", e.pos,
+                            ErrorCode.E_TUPLE_INDEX_RANGE,
                         )
                     # An "int" slot is asmpython's unknown sentinel — a slot
                     # holding an inferred-but-untracked object (e.g. a FuncSig
@@ -7724,11 +7773,12 @@ class SemaAnalyzer:
                     raise SemaError(
                         "tuple index must be a constant for a heterogeneous tuple",
                         e.pos,
+                        ErrorCode.E_TUPLE_INDEX_NOT_CONST,
                     )
             elif obj_t == "dict":
                 # "int" doubles as the unknown sentinel; lenient (see above).
                 if A.expr_type(e.index) not in ("str", "any", "int"):
-                    raise SemaError("dict keys must be strings", e.pos)
+                    raise SemaError("dict keys must be strings", e.pos, ErrorCode.E_DICT_KEY_TYPE)
                 e.inferred_type = self._dict_value_type(e.obj, scope)
                 # A nested container value (dict[str, dict] / dict[str, list]):
                 # carry the outer dict's tracked inner kind onto the read-out
@@ -7741,7 +7791,7 @@ class SemaAnalyzer:
                     e.list_el_type = inner
             elif obj_t == "str":
                 if A.expr_type(e.index) != "int":
-                    raise SemaError("string index must be an int", e.pos)
+                    raise SemaError("string index must be an int", e.pos, ErrorCode.E_INDEX_TYPE)
                 e.inferred_type = "str"
             elif obj_t == "any":
                 # Indexing an opaque value stays opaque.
@@ -7754,7 +7804,8 @@ class SemaAnalyzer:
                     msig = cls_sig.methods.get("__getitem__")
                 if msig is None:
                     raise SemaError(
-                        f"'{cls_name}' object does not support indexing", e.pos
+                        f"'{cls_name}' object does not support indexing", e.pos,
+                        ErrorCode.E_INDEX_OBJECT_TYPE,
                     )
                 # Mark so codegen translates this subscript into a __getitem__ call.
                 e._getitem_class = cls_name  # type: ignore[attr-defined]
@@ -8084,6 +8135,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"module {e.obj.name!r} has no callable {e.method!r}",
                         e.pos,
+                        ErrorCode.E_MODULE_NO_CALLABLE,
                     )
                 fn = bindings[e.method]
                 self._check_ffi_call(
@@ -8134,9 +8186,9 @@ class SemaAnalyzer:
                 # this via `range(*index.indices(len(xs)))`; stamp the static
                 # tuple shape so the existing `*tuple` expander can rewrite it.
                 if len(e.args) != 1:
-                    raise SemaError("slice.indices() takes 1 argument", e.pos)
+                    raise SemaError("slice.indices() takes 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
                 if A.expr_type(e.args[0]) not in ("int", "any"):
-                    raise SemaError("slice.indices() length must be an int", e.pos)
+                    raise SemaError("slice.indices() length must be an int", e.pos, ErrorCode.E_ARG_TYPE)
                 e.inferred_type = "tuple"
                 e.tuple_elem_types = ["int", "int", "int"]
                 return
@@ -8147,6 +8199,7 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"list.append() takes 1 argument, got {len(e.args)}",
                             e.pos,
+                            ErrorCode.E_ARG_COUNT,
                         )
                     arg_t = A.expr_type(e.args[0])
                     # Every asmpython value is a uniform 8-byte slot, so a list
@@ -8166,6 +8219,7 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"list.append() element of type {arg_t} not supported",
                             e.pos,
+                            ErrorCode.E_LIST_ELEMENT_TYPE_UNSUPPORTED,
                         )
                     if arg_t == "any":
                         # Opaque value: compatible with any element kind, and it
@@ -8185,47 +8239,49 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"list.append() expected {el_t}, got {arg_t}",
                             e.pos,
+                            ErrorCode.E_ASSIGN_TYPE,
                         )
                     e.inferred_type = "int"  # returns None ~ 0
                 elif e.method == "pop":
                     if len(e.args) > 1:
-                        raise SemaError("list.pop() takes at most 1 argument", e.pos)
+                        raise SemaError("list.pop() takes at most 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = el_t if el_t != "?" else "int"
                 elif e.method == "extend":
                     # xs.extend(ys): append every element of another list.
                     if len(e.args) != 1:
-                        raise SemaError("list.extend() takes 1 argument", e.pos)
+                        raise SemaError("list.extend() takes 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
                     at = A.expr_type(e.args[0])
                     if at not in ("list", "any"):
                         raise SemaError(
-                            f"list.extend() expects a list, got {at}", e.pos
+                            f"list.extend() expects a list, got {at}", e.pos,
+                            ErrorCode.E_ARG_TYPE,
                         )
                     e.inferred_type = "int"  # returns None ~ 0
                 elif e.method == "index":
                     # xs.index(v) -> position of the first matching element.
                     if len(e.args) != 1:
-                        raise SemaError("list.index() takes 1 argument", e.pos)
+                        raise SemaError("list.index() takes 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "int"
                 elif e.method == "sort":
                     if e.args:
-                        raise SemaError("list.sort() takes no arguments", e.pos)
+                        raise SemaError("list.sort() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     self._check_sort_kwargs(e, scope)
                     e.inferred_type = "int"  # in-place, returns None ~ 0
                 elif e.method == "reverse":
                     if e.args:
-                        raise SemaError("list.reverse() takes no arguments", e.pos)
+                        raise SemaError("list.reverse() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "int"
                 elif e.method == "count":
                     if len(e.args) != 1:
-                        raise SemaError("list.count() takes 1 argument", e.pos)
+                        raise SemaError("list.count() takes 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "int"
                 elif e.method == "clear":
                     if e.args:
-                        raise SemaError("list.clear() takes no arguments", e.pos)
+                        raise SemaError("list.clear() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "int"
                 elif e.method == "copy":
                     if e.args:
-                        raise SemaError("list.copy() takes no arguments", e.pos)
+                        raise SemaError("list.copy() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "list"
                     e.list_el_type = el_t if el_t not in ("?", "") else "int"
                 elif e.method == "decode":
@@ -8234,33 +8290,33 @@ class SemaAnalyzer:
                     # accepted for CPython compatibility and ignored by the
                     # runtime helper (ASCII/UTF-8 byte-for-byte for now).
                     if len(e.args) > 2:
-                        raise SemaError("bytes.decode() takes at most 2 arguments", e.pos)
+                        raise SemaError("bytes.decode() takes at most 2 arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     for a in e.args:
                         if A.expr_type(a) not in ("str", "any"):
-                            raise SemaError("bytes.decode() arguments must be strings", e.pos)
+                            raise SemaError("bytes.decode() arguments must be strings", e.pos, ErrorCode.E_ARG_TYPE)
                     e.inferred_type = "str"
                 elif e.method == "ljust":
                     # list[int].ljust(width[, fill]) mirrors bytes.ljust and
                     # returns a padded byte list. The VM project uses this when
                     # constructing EDID descriptor payloads.
                     if not (1 <= len(e.args) <= 2):
-                        raise SemaError("bytes.ljust() takes width[, fill]", e.pos)
+                        raise SemaError("bytes.ljust() takes width[, fill]", e.pos, ErrorCode.E_ARG_COUNT)
                     if A.expr_type(e.args[0]) not in ("int", "any"):
-                        raise SemaError("bytes.ljust() width must be an int", e.pos)
+                        raise SemaError("bytes.ljust() width must be an int", e.pos, ErrorCode.E_ARG_TYPE)
                     if len(e.args) == 2 and A.expr_type(e.args[1]) not in ("list", "str", "any"):
-                        raise SemaError("bytes.ljust() fill must be bytes or str", e.pos)
+                        raise SemaError("bytes.ljust() fill must be bytes or str", e.pos, ErrorCode.E_ARG_TYPE)
                     e.inferred_type = "list"
                     e.list_el_type = "int"
                 elif e.method == "insert":
                     if len(e.args) != 2:
-                        raise SemaError("list.insert() takes (index, value)", e.pos)
+                        raise SemaError("list.insert() takes (index, value)", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "int"
                 elif e.method == "remove":
                     if len(e.args) != 1:
-                        raise SemaError("list.remove() takes 1 argument", e.pos)
+                        raise SemaError("list.remove() takes 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "int"
                 else:
-                    raise SemaError(f"list has no method {e.method!r}", e.pos)
+                    raise SemaError(f"list has no method {e.method!r}", e.pos, ErrorCode.E_NO_METHOD)
             elif obj_t == "dict":
                 if e.method == "get":
                     # `d.get(k)` or `d.get(k, default)`. With one arg the default
@@ -8268,11 +8324,12 @@ class SemaAnalyzer:
                     # so `cls = self.classes.get(k); cls.parent` resolves.
                     if not (1 <= len(e.args) <= 2):
                         raise SemaError(
-                            "dict.get() takes (key) or (key, default)", e.pos
+                            "dict.get() takes (key) or (key, default)", e.pos,
+                            ErrorCode.E_ARG_COUNT,
                         )
                     kt = A.expr_type(e.args[0])
                     if kt not in ("str", "any", "int") and not kt.startswith("instance:"):
-                        raise SemaError("dict.get() key must be a str", e.pos)
+                        raise SemaError("dict.get() key must be a str", e.pos, ErrorCode.E_ARG_TYPE)
                     e.inferred_type = self._dict_value_type(e.obj, scope)
                     # A dict with no tracked value kind (e.g. `d: dict = {}`,
                     # never populated with a literal at declaration time --
@@ -8311,19 +8368,19 @@ class SemaAnalyzer:
                         e.dict_get_none_default = True
                 elif e.method == "contains":
                     if len(e.args) != 1:
-                        raise SemaError("dict.contains() takes 1 argument", e.pos)
+                        raise SemaError("dict.contains() takes 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
                     kt = A.expr_type(e.args[0])
                     if kt not in ("str", "any", "int") and not kt.startswith("instance:"):
-                        raise SemaError("dict.contains() key must be a str", e.pos)
+                        raise SemaError("dict.contains() key must be a str", e.pos, ErrorCode.E_ARG_TYPE)
                     e.inferred_type = "int"
                 elif e.method == "keys":
                     if e.args:
-                        raise SemaError("dict.keys() takes no arguments", e.pos)
+                        raise SemaError("dict.keys() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "list"
                     e.list_el_type = "str"
                 elif e.method == "values":
                     if e.args:
-                        raise SemaError("dict.values() takes no arguments", e.pos)
+                        raise SemaError("dict.values() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "list"
                     # Element kind = the dict's value kind (so `for v in d.values()`
                     # and `d.values()[i].attr` recover it; opaque dicts -> any).
@@ -8339,7 +8396,7 @@ class SemaAnalyzer:
                     # slots aren't tracked per-entry; `for k, v in d.items()`
                     # binds the targets leniently via the multi-target unpack.
                     if e.args:
-                        raise SemaError("dict.items() takes no arguments", e.pos)
+                        raise SemaError("dict.items() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "list"
                     e.list_el_type = "tuple"
                     # Pair shape for `for k, v in d.items()` target typing.
@@ -8348,17 +8405,18 @@ class SemaAnalyzer:
                     # d.update(other): merge another dict in. Lenient on the
                     # argument kind; returns None (~0).
                     if len(e.args) != 1:
-                        raise SemaError("dict.update() takes 1 argument", e.pos)
+                        raise SemaError("dict.update() takes 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "int"
                 elif e.method == "pop":
                     # d.pop(key[, default]) -> removes key, returns its value
                     # (or the default if absent). Returns the dict's value kind.
                     if not (1 <= len(e.args) <= 2):
                         raise SemaError(
-                            "dict.pop() takes (key) or (key, default)", e.pos
+                            "dict.pop() takes (key) or (key, default)", e.pos,
+                            ErrorCode.E_ARG_COUNT,
                         )
                     if A.expr_type(e.args[0]) not in ("str", "any"):
-                        raise SemaError("dict.pop() key must be a str", e.pos)
+                        raise SemaError("dict.pop() key must be a str", e.pos, ErrorCode.E_ARG_TYPE)
                     e.inferred_type = self._dict_value_type(e.obj, scope)
                     if e.inferred_type == "list":
                         e.list_el_type = self._dict_inner_value_type(e.obj, scope)
@@ -8370,11 +8428,11 @@ class SemaAnalyzer:
                         e.tuple_elem_types = self._dict_value_tuple_types(e.obj, scope)
                 elif e.method == "clear":
                     if e.args:
-                        raise SemaError("dict.clear() takes no arguments", e.pos)
+                        raise SemaError("dict.clear() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "int"
                 elif e.method == "copy":
                     if e.args:
-                        raise SemaError("dict.copy() takes no arguments", e.pos)
+                        raise SemaError("dict.copy() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "dict"
                     e.value_type = self._dict_value_type(e.obj, scope)
                     if e.value_type in ("list", "dict"):
@@ -8384,10 +8442,11 @@ class SemaAnalyzer:
                 elif e.method == "setdefault":
                     if not (1 <= len(e.args) <= 2):
                         raise SemaError(
-                            "dict.setdefault() takes (key[, default])", e.pos
+                            "dict.setdefault() takes (key[, default])", e.pos,
+                            ErrorCode.E_ARG_COUNT,
                         )
                     if A.expr_type(e.args[0]) not in ("str", "any"):
-                        raise SemaError("dict.setdefault() key must be a str", e.pos)
+                        raise SemaError("dict.setdefault() key must be a str", e.pos, ErrorCode.E_ARG_TYPE)
                     e.inferred_type = self._dict_value_type(e.obj, scope)
                     if e.inferred_type == "list":
                         e.list_el_type = self._dict_inner_value_type(e.obj, scope)
@@ -8398,24 +8457,24 @@ class SemaAnalyzer:
                     elif e.inferred_type == "tuple":
                         e.tuple_elem_types = self._dict_value_tuple_types(e.obj, scope)
                 else:
-                    raise SemaError(f"dict has no method {e.method!r}", e.pos)
+                    raise SemaError(f"dict has no method {e.method!r}", e.pos, ErrorCode.E_NO_METHOD)
             elif obj_t == "str":
                 self._check_str_method(e, scope)
                 return
             elif obj_t == "int":
                 if e.method == "to_bytes":
                     if not (1 <= len(e.args) <= 3):
-                        raise SemaError("int.to_bytes() takes length[, byteorder[, signed]]", e.pos)
+                        raise SemaError("int.to_bytes() takes length[, byteorder[, signed]]", e.pos, ErrorCode.E_ARG_COUNT)
                     if A.expr_type(e.args[0]) not in ("int", "any"):
-                        raise SemaError("int.to_bytes() length must be an int", e.pos)
+                        raise SemaError("int.to_bytes() length must be an int", e.pos, ErrorCode.E_ARG_TYPE)
                     if len(e.args) >= 2 and A.expr_type(e.args[1]) not in ("str", "any"):
-                        raise SemaError("int.to_bytes() byteorder must be a str", e.pos)
+                        raise SemaError("int.to_bytes() byteorder must be a str", e.pos, ErrorCode.E_ARG_TYPE)
                     if len(e.args) >= 3 and A.expr_type(e.args[2]) not in ("int", "any"):
-                        raise SemaError("int.to_bytes() signed must be bool/int", e.pos)
+                        raise SemaError("int.to_bytes() signed must be bool/int", e.pos, ErrorCode.E_ARG_TYPE)
                     e.inferred_type = "list"
                     e.list_el_type = "int"
                     return
-                raise SemaError(f"int has no method {e.method!r}", e.pos)
+                raise SemaError(f"int has no method {e.method!r}", e.pos, ErrorCode.E_NO_METHOD)
             elif (
                 obj_t == "type"
                 or (isinstance(e.obj, A.Name) and e.obj.name == "int")
@@ -8424,7 +8483,7 @@ class SemaAnalyzer:
                     cls_name = e.obj.name
                     resolved = self._resolve_method(cls_name, e.method)
                     if resolved is None:
-                        raise SemaError(f"{cls_name} has no method {e.method!r}", e.pos)
+                        raise SemaError(f"{cls_name} has no method {e.method!r}", e.pos, ErrorCode.E_NO_METHOD)
                     sig: FuncSig = resolved[1]
                     deco: list[str] = getattr(sig, "decorators", [])
                     if "classmethod" in deco:
@@ -8436,6 +8495,7 @@ class SemaAnalyzer:
                             f"{cls_name}.{e.method}() needs an instance "
                             "(not a @staticmethod or @classmethod)",
                             e.pos,
+                            ErrorCode.E_METHOD_NEEDS_INSTANCE,
                         )
                     required = expected - sig.n_defaults
                     if not (required <= len(e.args) <= expected):
@@ -8443,6 +8503,7 @@ class SemaAnalyzer:
                             f"{cls_name}.{e.method}() takes {required}..{expected} "
                             f"argument(s), got {len(e.args)}",
                             e.pos,
+                            ErrorCode.E_ARG_COUNT,
                         )
                     if sig.ret_type is not None:
                         rt7: tuple = sig.ret_type  # type: ignore
@@ -8456,16 +8517,16 @@ class SemaAnalyzer:
                     return
                 if e.method == "from_bytes":
                     if not (1 <= len(e.args) <= 3):
-                        raise SemaError("int.from_bytes() takes bytes[, byteorder[, signed]]", e.pos)
+                        raise SemaError("int.from_bytes() takes bytes[, byteorder[, signed]]", e.pos, ErrorCode.E_ARG_COUNT)
                     if A.expr_type(e.args[0]) not in ("list", "any"):
-                        raise SemaError("int.from_bytes() first argument must be bytes/list[int]", e.pos)
+                        raise SemaError("int.from_bytes() first argument must be bytes/list[int]", e.pos, ErrorCode.E_ARG_TYPE)
                     if len(e.args) >= 2 and A.expr_type(e.args[1]) not in ("str", "any"):
-                        raise SemaError("int.from_bytes() byteorder must be a str", e.pos)
+                        raise SemaError("int.from_bytes() byteorder must be a str", e.pos, ErrorCode.E_ARG_TYPE)
                     if len(e.args) >= 3 and A.expr_type(e.args[2]) not in ("int", "any"):
-                        raise SemaError("int.from_bytes() signed must be bool/int", e.pos)
+                        raise SemaError("int.from_bytes() signed must be bool/int", e.pos, ErrorCode.E_ARG_TYPE)
                     e.inferred_type = "int"
                     return
-                raise SemaError(f"{obj_t} has no method {e.method!r}", e.pos)
+                raise SemaError(f"{obj_t} has no method {e.method!r}", e.pos, ErrorCode.E_NO_METHOD)
             elif obj_t.startswith("super:"):
                 # super().method(...) — dispatch against the base class. If the
                 # base is external (e.g. Exception), we can't model it, so the
@@ -8479,7 +8540,7 @@ class SemaAnalyzer:
                     if self._has_external_base(parent):
                         e.inferred_type = "any"
                         return
-                    raise SemaError(f"{parent} has no method {e.method!r}", e.pos)
+                    raise SemaError(f"{parent} has no method {e.method!r}", e.pos, ErrorCode.E_NO_METHOD)
                 sig: FuncSig = resolved[1]
                 expected = sig.arity - 1
                 required = expected - sig.n_defaults
@@ -8488,6 +8549,7 @@ class SemaAnalyzer:
                         f"super().{e.method}() takes {required}..{expected} "
                         f"argument(s), got {len(e.args)}",
                         e.pos,
+                        ErrorCode.E_ARG_COUNT,
                     )
                 if sig.ret_type is not None:
                     rt5: tuple = sig.ret_type  # type: ignore
@@ -8570,6 +8632,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"{class_name} has no method {e.method!r}",
                         e.pos,
+                        ErrorCode.E_NO_METHOD,
                     )
                 sig: FuncSig = resolved[1]
                 # Method arity counts self; user passed args don't include self.
@@ -8687,16 +8750,17 @@ class SemaAnalyzer:
                 elif e.method in ("union", "intersection", "difference"):
                     if len(e.args) != 1:
                         raise SemaError(
-                            f"set.{e.method}() takes 1 argument", e.pos
+                            f"set.{e.method}() takes 1 argument", e.pos,
+                            ErrorCode.E_ARG_COUNT,
                         )
                     e.inferred_type = "set"
                 elif e.method == "copy":
                     if e.args:
-                        raise SemaError("set.copy() takes no arguments", e.pos)
+                        raise SemaError("set.copy() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "set"
                 elif e.method == "pop":
                     if e.args:
-                        raise SemaError("set.pop() takes no arguments", e.pos)
+                        raise SemaError("set.pop() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "str"
                 else:
                     e.inferred_type = "any"
@@ -8709,7 +8773,8 @@ class SemaAnalyzer:
                 resolved = self._resolve_method(cls_name, e.method)
                 if resolved is None:
                     raise SemaError(
-                        f"{cls_name} has no method {e.method!r}", e.pos
+                        f"{cls_name} has no method {e.method!r}", e.pos,
+                        ErrorCode.E_NO_METHOD,
                     )
                 sig: FuncSig = resolved[1]
                 deco: list[str] = getattr(sig, "decorators", [])
@@ -8722,6 +8787,7 @@ class SemaAnalyzer:
                         f"{cls_name}.{e.method}() needs an instance "
                         "(not a @staticmethod or @classmethod)",
                         e.pos,
+                        ErrorCode.E_METHOD_NEEDS_INSTANCE,
                     )
                 required = expected - sig.n_defaults
                 if not (required <= len(e.args) <= expected):
@@ -8729,6 +8795,7 @@ class SemaAnalyzer:
                         f"{cls_name}.{e.method}() takes {required}..{expected} "
                         f"argument(s), got {len(e.args)}",
                         e.pos,
+                        ErrorCode.E_ARG_COUNT,
                     )
                 for a in e.args:
                     self._check_expr(a, scope)
@@ -8742,7 +8809,7 @@ class SemaAnalyzer:
                 else:
                     e.inferred_type = "int"
             else:
-                raise SemaError(f"{obj_t} has no method {e.method!r}", e.pos)
+                raise SemaError(f"{obj_t} has no method {e.method!r}", e.pos, ErrorCode.E_NO_METHOD)
             return
         if isinstance(e, A.Lambda):
             # Lambda: a small anonymous function whose body is a single expr.
@@ -8809,12 +8876,13 @@ class SemaAnalyzer:
         """
         if not isinstance(e.left, A.StrLit):
             raise SemaError(
-                "'%' string formatting requires a literal format string", e.pos
+                "'%' string formatting requires a literal format string", e.pos,
+                ErrorCode.E_FORMAT_LITERAL,
             )
         try:
             pieces, nconv = A.parse_pct_format(e.left.value)
         except ValueError as exc:
-            raise SemaError(f"bad format string: {exc}", e.pos)
+            raise SemaError(f"bad format string: {exc}", e.pos, ErrorCode.E_BAD_FORMAT_STRING)
         args = e.right.elems if isinstance(e.right, A.TupleLit) else [e.right]
         if len(args) != nconv:
             raise SemaError(
@@ -8871,6 +8939,7 @@ class SemaAnalyzer:
                             f"key= function {key_expr.name!r} must take exactly "
                             "one argument (the element being compared)",
                             e.pos,
+                            ErrorCode.E_SORT_KEY_ARITY,
                         )
                     ret_t = sig.ret_type[0] if sig.ret_type is not None else "int"
                 else:
@@ -8879,11 +8948,13 @@ class SemaAnalyzer:
                         f"lambda, or a top-level function ({key_expr.name!r} "
                         "is none of these)",
                         e.pos,
+                        ErrorCode.E_SORT_KEY_TYPE,
                     )
             else:
                 raise SemaError(
                     "key= must be a lambda literal or a name bound to a lambda",
                     e.pos,
+                    ErrorCode.E_SORT_KEY_TYPE,
                 )
             # Lambda params are typed "any", so most non-str results (int,
             # float-as-bits, "any") compare correctly as ints; only an
@@ -8909,22 +8980,22 @@ class SemaAnalyzer:
             # maxsplit int (front-end); codegen currently ignores it and splits
             # on all occurrences (a full maxsplit lowering is a runtime TODO).
             if len(e.args) > 2:
-                raise SemaError("str.split() takes 0 to 2 arguments", e.pos)
+                raise SemaError("str.split() takes 0 to 2 arguments", e.pos, ErrorCode.E_ARG_COUNT)
             if (
                 e.args
                 and A.expr_type(e.args[0]) not in ("str", "any")
                 and not A.is_none_expr(e.args[0])
             ):
-                raise SemaError("str.split() separator must be str", e.pos)
+                raise SemaError("str.split() separator must be str", e.pos, ErrorCode.E_ARG_TYPE)
             if len(e.args) == 2 and A.expr_type(e.args[1]) not in ("int", "any"):
-                raise SemaError("str.split() maxsplit must be an int", e.pos)
+                raise SemaError("str.split() maxsplit must be an int", e.pos, ErrorCode.E_ARG_TYPE)
             e.inferred_type = "list"
             e.list_el_type = "str"
             return
         if e.method == "splitlines":
             # Optional `keepends` bool arg is accepted and ignored.
             if len(e.args) > 1:
-                raise SemaError("str.splitlines() takes 0 or 1 argument", e.pos)
+                raise SemaError("str.splitlines() takes 0 or 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
             e.inferred_type = "list"
             e.list_el_type = "str"
             return
@@ -8934,10 +9005,11 @@ class SemaAnalyzer:
             # lowered today; other counts need a general right-scan runtime.
             if len(e.args) != 2:
                 raise SemaError(
-                    "str.rsplit() currently requires exactly (sep, 1)", e.pos
+                    "str.rsplit() currently requires exactly (sep, 1)", e.pos,
+                    ErrorCode.E_ARG_COUNT,
                 )
             if A.expr_type(e.args[0]) not in ("str", "any"):
-                raise SemaError("str.rsplit() separator must be str", e.pos)
+                raise SemaError("str.rsplit() separator must be str", e.pos, ErrorCode.E_ARG_TYPE)
             if not (isinstance(e.args[1], A.IntLit) and e.args[1].value == 1):
                 raise SemaError(
                     "str.rsplit() maxsplit must be the literal 1 (only the "
@@ -8951,72 +9023,73 @@ class SemaAnalyzer:
             # str.(r)partition(sep) -> (before, sep, after): always a 3-tuple
             # of strings, so the unpack targets type as str (prints / == work).
             if len(e.args) != 1:
-                raise SemaError(f"str.{e.method}() takes 1 argument", e.pos)
+                raise SemaError(f"str.{e.method}() takes 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
             if A.expr_type(e.args[0]) not in ("str", "any"):
-                raise SemaError(f"str.{e.method}() separator must be str", e.pos)
+                raise SemaError(f"str.{e.method}() separator must be str", e.pos, ErrorCode.E_ARG_TYPE)
             e.inferred_type = "tuple"
             e.tuple_elem_types = ["str", "str", "str"]
             return
         if e.method == "join":
             if len(e.args) != 1:
-                raise SemaError("str.join() takes 1 argument", e.pos)
+                raise SemaError("str.join() takes 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
             arg_t = A.expr_type(e.args[0])
             if arg_t not in ("list", "any", "int"):
                 # "int" is the default type for unannotated vars; accept it
                 # leniently so self-hosting code using e.g. `self.lines` passes.
-                raise SemaError("str.join() requires list[str]", e.pos)
+                raise SemaError("str.join() requires list[str]", e.pos, ErrorCode.E_ARG_TYPE)
             if arg_t == "list":
                 arg_el = self._list_el_type(e.args[0], scope)
                 # An opaque element kind ("any") is accepted — we can't prove it's
                 # str, but join only ever runs on str elements in practice.
                 if arg_el not in ("str", "any"):
                     raise SemaError(
-                        f"str.join() requires list[str], got list[{arg_el}]", e.pos
+                        f"str.join() requires list[str], got list[{arg_el}]", e.pos,
+                        ErrorCode.E_ARG_TYPE,
                     )
             e.inferred_type = "str"
             return
         if e.method in ("strip", "lstrip", "rstrip"):
             # Optional `chars` argument (a str). With no arg, strips whitespace.
             if len(e.args) > 1:
-                raise SemaError(f"str.{e.method}() takes 0 or 1 argument", e.pos)
+                raise SemaError(f"str.{e.method}() takes 0 or 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
             if e.args and A.expr_type(e.args[0]) != "str":
-                raise SemaError(f"str.{e.method}() argument must be str", e.pos)
+                raise SemaError(f"str.{e.method}() argument must be str", e.pos, ErrorCode.E_ARG_TYPE)
             e.inferred_type = "str"
             return
         if e.method == "zfill":
             if len(e.args) != 1:
-                raise SemaError("str.zfill() takes 1 argument", e.pos)
+                raise SemaError("str.zfill() takes 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
             if A.expr_type(e.args[0]) not in ("int", "any"):
-                raise SemaError("str.zfill() argument must be an int", e.pos)
+                raise SemaError("str.zfill() argument must be an int", e.pos, ErrorCode.E_ARG_TYPE)
             e.inferred_type = "str"
             return
         if e.method in ("ljust", "rjust", "center"):
             # str.{ljust,rjust,center}(width[, fillchar]); fillchar defaults
             # to a space when omitted.
             if len(e.args) not in (1, 2):
-                raise SemaError(f"str.{e.method}() takes 1 or 2 arguments", e.pos)
+                raise SemaError(f"str.{e.method}() takes 1 or 2 arguments", e.pos, ErrorCode.E_ARG_COUNT)
             if A.expr_type(e.args[0]) not in ("int", "any"):
-                raise SemaError(f"str.{e.method}() width must be an int", e.pos)
+                raise SemaError(f"str.{e.method}() width must be an int", e.pos, ErrorCode.E_ARG_TYPE)
             if len(e.args) == 2 and A.expr_type(e.args[1]) not in ("str", "any"):
-                raise SemaError(f"str.{e.method}() fillchar must be a str", e.pos)
+                raise SemaError(f"str.{e.method}() fillchar must be a str", e.pos, ErrorCode.E_ARG_TYPE)
             e.inferred_type = "str"
             return
         if e.method in ("find", "rfind", "index", "rindex"):
             # str.find(sub[, start[, end]]): asmpython supports 1- or 2-arg form.
             if len(e.args) not in (1, 2):
-                raise SemaError(f"str.{e.method}() takes 1 or 2 arguments", e.pos)
+                raise SemaError(f"str.{e.method}() takes 1 or 2 arguments", e.pos, ErrorCode.E_ARG_COUNT)
             if A.expr_type(e.args[0]) not in ("str", "any"):
-                raise SemaError(f"str.{e.method}() sub must be a str", e.pos)
+                raise SemaError(f"str.{e.method}() sub must be a str", e.pos, ErrorCode.E_ARG_TYPE)
             if len(e.args) == 2 and A.expr_type(e.args[1]) not in ("int", "any"):
-                raise SemaError(f"str.{e.method}() start must be an int", e.pos)
+                raise SemaError(f"str.{e.method}() start must be an int", e.pos, ErrorCode.E_ARG_TYPE)
             e.inferred_type = "int"
             return
         if e.method == "expandtabs":
             # str.expandtabs([tabsize=8])
             if len(e.args) > 1:
-                raise SemaError("str.expandtabs() takes 0 or 1 argument", e.pos)
+                raise SemaError("str.expandtabs() takes 0 or 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
             if e.args and A.expr_type(e.args[0]) not in ("int", "any"):
-                raise SemaError("str.expandtabs() tabsize must be an int", e.pos)
+                raise SemaError("str.expandtabs() tabsize must be an int", e.pos, ErrorCode.E_ARG_TYPE)
             e.inferred_type = "str"
             return
         if e.method == "format" and isinstance(e.obj, A.StrLit):
@@ -9044,12 +9117,14 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"str.format() got an unexpected field name {val!r}",
                             e.pos,
+                            ErrorCode.E_FORMAT_UNKNOWN_FIELD,
                         )
                 elif val >= len(e.args):
                     raise SemaError(
                         f"str.format() field index {val} out of range "
                         f"({len(e.args)} positional argument(s))",
                         e.pos,
+                        ErrorCode.E_FORMAT_INDEX_RANGE,
                     )
             e.inferred_type = "str"
             return
@@ -9071,6 +9146,7 @@ class SemaAnalyzer:
             raise SemaError(
                 f"str.{e.method}() takes {_n_expected} argument(s), got {len(e.args)}",
                 e.pos,
+                ErrorCode.E_ARG_COUNT,
             )
         # All str methods that accept arguments require str-typed values.
         _si = 0
@@ -9081,6 +9157,7 @@ class SemaAnalyzer:
                 raise SemaError(
                     f"str.{e.method}() argument {_si + 1}: expected str, got {got}",
                     e.pos,
+                    ErrorCode.E_ARG_TYPE,
                 )
             _si = _si + 1
         _ret: str = _STR_METHOD_RET.get(e.method, "str")
@@ -9097,6 +9174,7 @@ class SemaAnalyzer:
             raise SemaError(
                 f"{label}() takes {len(_fn_arg_types)} argument(s), got {len(args)}",
                 pos,
+                ErrorCode.E_ARG_COUNT,
             )
         _ffi_i = 0
         for a, want in zip(args, _fn_arg_types):
@@ -9120,6 +9198,7 @@ class SemaAnalyzer:
             raise SemaError(
                 f"{label}() argument {_ffi_i + 1}: expected {want_s}, got {got}",
                 pos,
+                ErrorCode.E_ARG_TYPE,
             )
 
     def _maybe_bind_method_args(self, e: A.MethodCall, obj_t: str) -> None:
@@ -9258,7 +9337,8 @@ class SemaAnalyzer:
                 extra.append(a)
             else:
                 raise SemaError(
-                    f"{label}() takes {nfixed} argument(s), got {len(_e_args)}", pos
+                    f"{label}() takes {nfixed} argument(s), got {len(_e_args)}", pos,
+                    ErrorCode.E_ARG_COUNT,
                 )
         excess_kw: list = []
         for kname, kexpr in _e_kwargs:
@@ -9267,13 +9347,15 @@ class SemaAnalyzer:
                     excess_kw.append((kname, kexpr))
                 else:
                     raise SemaError(
-                        f"{label}() got an unexpected keyword argument {kname!r}", pos
+                        f"{label}() got an unexpected keyword argument {kname!r}", pos,
+                        ErrorCode.E_ARG_COUNT,
                     )
             else:
                 idx = fixed_names.index(kname)
                 if slots[idx] is not None:
                     raise SemaError(
-                        f"{label}() got multiple values for argument {kname!r}", pos
+                        f"{label}() got multiple values for argument {kname!r}", pos,
+                        ErrorCode.E_ARG_COUNT,
                     )
                 slots[idx] = kexpr
         for i in range(nfixed):
@@ -9289,6 +9371,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"{label}() missing required argument {fixed_names[i]!r}",
                         pos,
+                        ErrorCode.E_ARG_COUNT,
                     )
         new_args = list(slots)
         if vararg is not None:
@@ -9346,7 +9429,7 @@ class SemaAnalyzer:
             return
         ds: A.DoubleStarred = e.args[-1]
         if any(isinstance(a, A.DoubleStarred) for a in e.args[:-1]):
-            raise SemaError("call takes at most one **expr argument", ds.pos)
+            raise SemaError("call takes at most one **expr argument", ds.pos, ErrorCode.E_ARG_COUNT)
         e.dstar = ds.value
         e.args = e.args[:-1]
 
@@ -9362,7 +9445,8 @@ class SemaAnalyzer:
         dstar_t = A.expr_type(e.dstar)
         if dstar_t not in ("dict", "any"):
             raise SemaError(
-                "**expr call argument must be a dict", e.dstar.pos
+                "**expr call argument must be a dict", e.dstar.pos,
+                ErrorCode.E_DSTAR_NOT_DICT,
             )
         already_bound = set(param_names[: len(e.args)]) | {kn for kn, _ in e.kwargs}
         for name in param_names:
@@ -9428,7 +9512,8 @@ class SemaAnalyzer:
             # the parser captures range specially and it never becomes a Call.)
             if not (1 <= len(e.args) <= 3):
                 raise SemaError(
-                    f"range() takes 1-3 arguments, got {len(e.args)}", e.pos
+                    f"range() takes 1-3 arguments, got {len(e.args)}", e.pos,
+                    ErrorCode.E_ARG_COUNT,
                 )
             for a in e.args:
                 self._check_expr(a, scope)
@@ -9448,7 +9533,8 @@ class SemaAnalyzer:
             parent = self.classes[self.current_class].parent
             if parent is None:
                 raise SemaError(
-                    f"{self.current_class!r} has no base class for super()", e.pos
+                    f"{self.current_class!r} has no base class for super()", e.pos,
+                    ErrorCode.E_SUPER_NO_CLASS,
                 )
             e.inferred_type = f"super:{parent}"
             return
@@ -9460,7 +9546,8 @@ class SemaAnalyzer:
             # typed values in asmpython's model.
             if len(e.args) != 2:
                 raise SemaError(
-                    f"isinstance() takes 2 arguments, got {len(e.args)}", e.pos
+                    f"isinstance() takes 2 arguments, got {len(e.args)}", e.pos,
+                    ErrorCode.E_ARG_COUNT,
                 )
             self._check_expr(e.args[0], scope)
             e.inferred_type = "int"
@@ -9472,7 +9559,8 @@ class SemaAnalyzer:
             # "any" because the field's static type isn't known.
             if not (2 <= len(e.args) <= 3):
                 raise SemaError(
-                    f"getattr() takes 2-3 arguments, got {len(e.args)}", e.pos
+                    f"getattr() takes 2-3 arguments, got {len(e.args)}", e.pos,
+                    ErrorCode.E_ARG_COUNT,
                 )
             for a in e.args:
                 self._check_expr(a, scope)
@@ -9482,7 +9570,8 @@ class SemaAnalyzer:
             # hasattr(obj, "name") -> int 0/1.
             if len(e.args) != 2:
                 raise SemaError(
-                    f"hasattr() takes 2 arguments, got {len(e.args)}", e.pos
+                    f"hasattr() takes 2 arguments, got {len(e.args)}", e.pos,
+                    ErrorCode.E_ARG_COUNT,
                 )
             for a in e.args:
                 self._check_expr(a, scope)
@@ -9498,7 +9587,8 @@ class SemaAnalyzer:
             # on an instance, the same path every other class uses.
             if len(e.args) != 1:
                 raise SemaError(
-                    f"import_binary() takes 1 argument, got {len(e.args)}", e.pos
+                    f"import_binary() takes 1 argument, got {len(e.args)}", e.pos,
+                    ErrorCode.E_ARG_COUNT,
                 )
             self._check_expr(e.args[0], scope)
             if A.expr_type(e.args[0]) != "str":
@@ -9521,7 +9611,8 @@ class SemaAnalyzer:
             # whichever GL context is current.
             if len(e.args) != 0:
                 raise SemaError(
-                    f"gl_import() takes 0 arguments, got {len(e.args)}", e.pos
+                    f"gl_import() takes 0 arguments, got {len(e.args)}", e.pos,
+                    ErrorCode.E_ARG_COUNT,
                 )
             e.inferred_type = "instance:DynamicModule"
             return
@@ -9539,7 +9630,8 @@ class SemaAnalyzer:
             # called through directly.
             if len(e.args) != 2:
                 raise SemaError(
-                    f"gl_resolve() takes 2 arguments, got {len(e.args)}", e.pos
+                    f"gl_resolve() takes 2 arguments, got {len(e.args)}", e.pos,
+                    ErrorCode.E_ARG_COUNT,
                 )
             self._check_expr(e.args[0], scope)
             self._check_expr(e.args[1], scope)
@@ -9558,10 +9650,12 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"{e.func}() takes {lo} argument(s), got {len(e.args)}",
                         e.pos,
+                        ErrorCode.E_ARG_COUNT,
                     )
                 raise SemaError(
                     f"{e.func}() takes {lo}-{hi} arguments, got {len(e.args)}",
                     e.pos,
+                    ErrorCode.E_ARG_COUNT,
                 )
             for a in e.args:
                 self._check_expr(a, scope)
@@ -9658,13 +9752,14 @@ class SemaAnalyzer:
                 return
             if e.func == "reversed":
                 if len(e.args) != 1:
-                    raise SemaError("reversed() takes exactly 1 argument", e.pos)
+                    raise SemaError("reversed() takes exactly 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
                 src = e.args[0]
                 src_t = A.expr_type(src)
                 if src_t not in ("list", "tuple", "str", "any"):
                     raise SemaError(
                         "reversed() argument must be a list, tuple, or str",
                         e.pos,
+                        ErrorCode.E_ARG_TYPE,
                     )
                 e.inferred_type = "list"
                 if src_t == "str":
@@ -9721,6 +9816,7 @@ class SemaAnalyzer:
                             f"{e.func}(): key= is only supported for the "
                             "single-iterable form",
                             e.pos,
+                            ErrorCode.E_KEY_UNSUPPORTED_FORM,
                         )
                     types = set()
                     for a in e.args:
@@ -9749,7 +9845,8 @@ class SemaAnalyzer:
                 t = A.expr_type(e.args[0])
                 if t not in ("list", "tuple", "str", "any", "int"):
                     raise SemaError(
-                        "tuple() requires a list, tuple, or string", e.pos
+                        "tuple() requires a list, tuple, or string", e.pos,
+                        ErrorCode.E_ARG_TYPE,
                     )
                 return
             if e.func == "list":
@@ -9758,7 +9855,8 @@ class SemaAnalyzer:
                 t = A.expr_type(e.args[0])
                 if t not in ("list", "tuple", "str", "dict", "any"):
                     raise SemaError(
-                        "list() requires a list, tuple, dict, or string", e.pos
+                        "list() requires a list, tuple, dict, or string", e.pos,
+                        ErrorCode.E_ARG_TYPE,
                     )
                 e.list_el_type = self._list_el_type(e.args[0], scope)
                 # Propagate per-slot tuple types so `for a, b in list(zip(...))` works.
@@ -9773,7 +9871,7 @@ class SemaAnalyzer:
                 if e.args:
                     t = A.expr_type(e.args[0])
                     if t not in ("dict", "any", "list", "tuple"):
-                        raise SemaError("dict() requires a dict or list-of-pairs argument", e.pos)
+                        raise SemaError("dict() requires a dict or list-of-pairs argument", e.pos, ErrorCode.E_ARG_TYPE)
                     if t == "dict":
                         e.value_type = self._dict_value_type(e.args[0], scope)
                     else:
@@ -9794,7 +9892,8 @@ class SemaAnalyzer:
                 if t not in ("str", "list", "dict", "tuple", "set", "any", "int") and not t.startswith("instance:"):
                     # "int" is the default for unannotated vars — accept leniently
                     raise SemaError(
-                        "len() requires a string, list, dict, tuple, or set", e.pos
+                        "len() requires a string, list, dict, tuple, or set", e.pos,
+                        ErrorCode.E_ARG_TYPE,
                     )
             elif e.func == "int":
                 t = A.expr_type(e.args[0])
@@ -9804,11 +9903,11 @@ class SemaAnalyzer:
                 if t not in ("str", "float", "int", "any") and not t.startswith(
                     "instance:"
                 ):
-                    raise SemaError("int() requires str / float / int", e.pos)
+                    raise SemaError("int() requires str / float / int", e.pos, ErrorCode.E_ARG_TYPE)
             elif e.func == "float":
                 t = A.expr_type(e.args[0])
                 if t not in ("str", "int", "float", "any"):
-                    raise SemaError("float() requires str / int / float", e.pos)
+                    raise SemaError("float() requires str / int / float", e.pos, ErrorCode.E_ARG_TYPE)
             elif e.func == "str":
                 t = A.expr_type(e.args[0])
                 # int/float/str convert directly; list/tuple/dict/set stringify
@@ -9818,7 +9917,8 @@ class SemaAnalyzer:
                     "int", "float", "str", "any", "list", "tuple", "dict", "set"
                 ) and not t.startswith("instance:"):
                     raise SemaError(
-                        "str() requires a scalar, container, or object", e.pos
+                        "str() requires a scalar, container, or object", e.pos,
+                        ErrorCode.E_ARG_TYPE,
                     )
             return
         if e.func in self.overload_sets:
@@ -9849,10 +9949,12 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"{e.func}() takes {sig.arity} argument(s), got {len(e.args)}",
                             e.pos,
+                            ErrorCode.E_ARG_COUNT,
                         )
                     raise SemaError(
                         f"{e.func}() takes {required}-{sig.arity} arguments, got {len(e.args)}",
                         e.pos,
+                        ErrorCode.E_ARG_COUNT,
                     )
             # Normalize every call to a complete positional argument list
             # (defaults filled, keyword args placed, varargs packed) so codegen
@@ -9933,6 +10035,7 @@ class SemaAnalyzer:
                         f"{e.func}() has no declared parameter list to expand "
                         "**expr against",
                         e.dstar.pos,
+                        ErrorCode.E_DSTAR_NO_PARAM_LIST,
                     )
                 if (
                     (e.args or e.kwargs)
@@ -9943,6 +10046,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"{e.func}() has no __init__ and takes no arguments",
                         e.pos,
+                        ErrorCode.E_ARG_COUNT,
                     )
                 for a in e.args:
                     self._check_expr(a, scope)
@@ -10047,6 +10151,7 @@ class SemaAnalyzer:
                     f"**expr call argument requires a statically known "
                     f"parameter list; {e.func!r} doesn't have one here",
                     e.dstar.pos,
+                    ErrorCode.E_DSTAR_NO_PARAM_LIST,
                 )
             for a in e.args:
                 self._check_expr(a, scope)

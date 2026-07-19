@@ -186,6 +186,59 @@ class ErrorCode:
     E_OVERLOAD_NO_MATCH          = 306  # E106: call matches no @overload signature
     E_OVERLOAD_INCOMPATIBLE      = 307  # E107: two @overload signatures are indistinguishable
 
+    # Name resolution / redefinition (batch 2: coding the remaining 217
+    # previously-uncoded sema.py call sites, see commit that introduced
+    # these -- message wording is unchanged, only code= was added)
+    E_CLASS_NAME_COLLISION       = 308  # E108: class name collides with an existing function/class/enum/builtin
+    E_INHERITANCE_CYCLE          = 309  # E109: class inheritance chain cycles back to itself
+
+    # Function/method shape
+    E_MISSING_SELF_PARAM         = 310  # E110: instance method's first parameter must be 'self'
+    E_DUNDER_SIGNATURE           = 311  # E111: dunder method must take exactly (self, other)
+    E_METHOD_NEEDS_INSTANCE      = 312  # E112: method needs an instance receiver, not a static/classmethod call
+    E_NO_METHOD                  = 313  # E113: object's type has no method of this name
+
+    # Unpacking / assignment
+    E_STARRED_ASSIGN_NOT_LIST    = 314  # E114: starred assignment requires a list on the right-hand side
+    E_TUPLE_ASSIGN_MIXED_TARGETS = 315  # E115: tuple assign mixing subscript/attribute targets needs the parallel form
+    E_UNPACK_TARGET_COUNT        = 316  # E116: unpacking target count doesn't match the values produced
+    E_UNPACK_NOT_ITERABLE        = 317  # E117: cannot unpack a non-iterable object
+
+    # Attribute / property / context manager
+    E_PROPERTY_NO_SETTER         = 318  # E118: cannot assign to a property that has no setter
+    E_NOT_A_CONTEXT_MANAGER      = 319  # E119: object does not support the context manager protocol
+    E_MODULE_NO_CALLABLE         = 320  # E120: module has no callable of this name
+
+    # Match/case patterns
+    E_OR_PATTERN_CAPTURE         = 321  # E121: capture pattern not allowed inside an or-pattern
+    E_MATCH_ARGS_MISSING         = 322  # E122: class used in a positional pattern must define __match_args__
+    E_MATCH_ARGS_TOO_MANY        = 323  # E123: too many positional patterns for __match_args__
+
+    # Containment / comparison
+    E_CONTAINS_TYPE_MISMATCH     = 324  # E124: 'in'/'not in' needle type doesn't match the container's element type
+    E_NO_CONTAINS_METHOD         = 325  # E125: class used with 'in'/'not in' must define __contains__
+    E_STRING_COMPARISON_OP       = 326  # E126: comparison operator not supported between strings
+    E_UNCOMPARABLE_TYPES         = 327  # E127: these two types cannot be compared with this operator
+
+    # Container literals / spreads
+    E_SPREAD_NOT_ITERABLE        = 328  # E128: list unpacking (*expr in a list literal) requires a list or tuple
+    E_DICT_UNPACK_TYPE           = 329  # E129: dict unpacking (**expr in a dict literal) requires a dict
+
+    # Indexing
+    E_TUPLE_INDEX_RANGE          = 330  # E130: constant tuple index out of range for this tuple's length
+    E_TUPLE_INDEX_NOT_CONST      = 331  # E131: indexing a heterogeneous tuple requires a constant index
+
+    # Method/function call errors on builtins
+    E_LIST_ELEMENT_TYPE_UNSUPPORTED = 332  # E132: value's type not supported as a list element
+    E_BAD_FORMAT_STRING          = 333  # E133: '%' format string has an invalid/unsupported conversion specifier
+    E_SORT_KEY_ARITY             = 334  # E134: sort key= function must take exactly one argument
+    E_SORT_KEY_TYPE              = 335  # E135: sort key= must be a lambda literal or a name bound to one
+    E_FORMAT_UNKNOWN_FIELD       = 336  # E136: str.format() field name has no matching keyword argument
+    E_FORMAT_INDEX_RANGE         = 337  # E137: str.format() positional field index is out of range
+    E_DSTAR_NOT_DICT             = 338  # E138: '**expr' call argument must evaluate to a dict
+    E_KEY_UNSUPPORTED_FORM       = 339  # E139: key= is only supported for the single-iterable call form
+    E_DSTAR_NO_PARAM_LIST        = 340  # E140: '**expr' expansion requires a statically known parameter list
+
 
 def _code_label(code: int) -> str:
     """Return the human-readable code label, e.g. 1 -> 'L001', 212 -> 'E012'."""
@@ -315,6 +368,48 @@ ERROR_DESCRIPTIONS: dict[str, str] = {
     _code_label(ErrorCode.E_OVERLOAD_AMBIGUOUS): "This call matches two or more '@overload' signatures equally well.",
     _code_label(ErrorCode.E_OVERLOAD_NO_MATCH): "This call matches no '@overload' signature.",
     _code_label(ErrorCode.E_OVERLOAD_INCOMPATIBLE): "Two '@overload' signatures are indistinguishable from each other.",
+    # Semantic – batch 2 (name resolution / redefinition)
+    _code_label(ErrorCode.E_CLASS_NAME_COLLISION): "A class name collides with an existing function, class, enum, or builtin name.",
+    _code_label(ErrorCode.E_INHERITANCE_CYCLE): "A class's base-class chain cycles back to itself.",
+    # Semantic – function/method shape
+    _code_label(ErrorCode.E_MISSING_SELF_PARAM): "An instance method's first parameter must be named 'self'.",
+    _code_label(ErrorCode.E_DUNDER_SIGNATURE): "A dunder method (e.g. __eq__, __add__) must take exactly (self, other).",
+    _code_label(ErrorCode.E_METHOD_NEEDS_INSTANCE): "This method needs an instance receiver; it cannot be called as a @staticmethod or @classmethod would be.",
+    _code_label(ErrorCode.E_NO_METHOD): "The object's type has no method of this name.",
+    # Semantic – unpacking / assignment
+    _code_label(ErrorCode.E_STARRED_ASSIGN_NOT_LIST): "Starred assignment (e.g. '*x, = ...' or 'a, *b = ...') requires a list on the right-hand side.",
+    _code_label(ErrorCode.E_TUPLE_ASSIGN_MIXED_TARGETS): "Tuple assignment mixing subscript/attribute targets requires the parallel form (one value per target).",
+    _code_label(ErrorCode.E_UNPACK_TARGET_COUNT): "The number of unpacking targets doesn't match the number of values produced.",
+    _code_label(ErrorCode.E_UNPACK_NOT_ITERABLE): "Cannot unpack a non-iterable object.",
+    # Semantic – attribute / property / context manager
+    _code_label(ErrorCode.E_PROPERTY_NO_SETTER): "Cannot assign to a property that has no setter.",
+    _code_label(ErrorCode.E_NOT_A_CONTEXT_MANAGER): "An object used in a 'with' statement does not support the context manager protocol (missing __enter__/__exit__).",
+    _code_label(ErrorCode.E_MODULE_NO_CALLABLE): "A module has no callable of this name.",
+    # Semantic – match/case patterns
+    _code_label(ErrorCode.E_OR_PATTERN_CAPTURE): "A capture pattern cannot appear inside an or-pattern.",
+    _code_label(ErrorCode.E_MATCH_ARGS_MISSING): "A class used with a positional match pattern must define __match_args__.",
+    _code_label(ErrorCode.E_MATCH_ARGS_TOO_MANY): "Too many positional patterns for this class's __match_args__.",
+    # Semantic – containment / comparison
+    _code_label(ErrorCode.E_CONTAINS_TYPE_MISMATCH): "The 'in'/'not in' needle's type doesn't match the container's element type.",
+    _code_label(ErrorCode.E_NO_CONTAINS_METHOD): "A class used with 'in'/'not in' must define __contains__.",
+    _code_label(ErrorCode.E_STRING_COMPARISON_OP): "This comparison operator is not supported between strings.",
+    _code_label(ErrorCode.E_UNCOMPARABLE_TYPES): "These two types cannot be compared with this operator.",
+    # Semantic – container literals / spreads
+    _code_label(ErrorCode.E_SPREAD_NOT_ITERABLE): "List unpacking ('*expr' inside a list literal) requires a list or tuple.",
+    _code_label(ErrorCode.E_DICT_UNPACK_TYPE): "Dict unpacking ('**expr' inside a dict literal) requires a dict.",
+    # Semantic – indexing
+    _code_label(ErrorCode.E_TUPLE_INDEX_RANGE): "A constant tuple index is out of range for this tuple's length.",
+    _code_label(ErrorCode.E_TUPLE_INDEX_NOT_CONST): "Indexing a heterogeneous tuple requires a compile-time constant index.",
+    # Semantic – method/function call errors on builtins
+    _code_label(ErrorCode.E_LIST_ELEMENT_TYPE_UNSUPPORTED): "This value's type is not supported as a list element.",
+    _code_label(ErrorCode.E_BAD_FORMAT_STRING): "A '%' format string contains an invalid or unsupported conversion specifier.",
+    _code_label(ErrorCode.E_SORT_KEY_ARITY): "A sort key= function must take exactly one argument.",
+    _code_label(ErrorCode.E_SORT_KEY_TYPE): "sort()'s key= argument must be a lambda literal or a name bound to one.",
+    _code_label(ErrorCode.E_FORMAT_UNKNOWN_FIELD): "str.format() references a field name that has no matching keyword argument.",
+    _code_label(ErrorCode.E_FORMAT_INDEX_RANGE): "str.format() references a positional field index that is out of range.",
+    _code_label(ErrorCode.E_DSTAR_NOT_DICT): "A '**expr' call argument must evaluate to a dict.",
+    _code_label(ErrorCode.E_KEY_UNSUPPORTED_FORM): "key= is only supported for the single-iterable call form.",
+    _code_label(ErrorCode.E_DSTAR_NO_PARAM_LIST): "'**expr' expansion requires a statically known parameter list, which this callee doesn't have.",
 }
 
 
@@ -376,6 +471,48 @@ _PYTHON_EXCEPTION_NAME: dict[int, str] = {
     ErrorCode.E_ZIP_ARGS: "TypeError",
     ErrorCode.E_ENUMERATE_ARG: "TypeError",
     ErrorCode.E_MATCH_PATTERN: "SyntaxError",
+    # Name resolution / redefinition (batch 2)
+    ErrorCode.E_CLASS_NAME_COLLISION: "TypeError",
+    ErrorCode.E_INHERITANCE_CYCLE: "TypeError",
+    # Function/method shape
+    ErrorCode.E_MISSING_SELF_PARAM: "TypeError",
+    ErrorCode.E_DUNDER_SIGNATURE: "TypeError",
+    ErrorCode.E_METHOD_NEEDS_INSTANCE: "TypeError",
+    ErrorCode.E_NO_METHOD: "AttributeError",
+    # Unpacking / assignment
+    ErrorCode.E_STARRED_ASSIGN_NOT_LIST: "TypeError",
+    ErrorCode.E_TUPLE_ASSIGN_MIXED_TARGETS: "SyntaxError",
+    ErrorCode.E_UNPACK_TARGET_COUNT: "ValueError",
+    ErrorCode.E_UNPACK_NOT_ITERABLE: "TypeError",
+    # Attribute / property / context manager
+    ErrorCode.E_PROPERTY_NO_SETTER: "AttributeError",
+    ErrorCode.E_NOT_A_CONTEXT_MANAGER: "AttributeError",
+    ErrorCode.E_MODULE_NO_CALLABLE: "AttributeError",
+    # Match/case patterns
+    ErrorCode.E_OR_PATTERN_CAPTURE: "SyntaxError",
+    ErrorCode.E_MATCH_ARGS_MISSING: "TypeError",
+    ErrorCode.E_MATCH_ARGS_TOO_MANY: "TypeError",
+    # Containment / comparison
+    ErrorCode.E_CONTAINS_TYPE_MISMATCH: "TypeError",
+    ErrorCode.E_NO_CONTAINS_METHOD: "TypeError",
+    ErrorCode.E_STRING_COMPARISON_OP: "TypeError",
+    ErrorCode.E_UNCOMPARABLE_TYPES: "TypeError",
+    # Container literals / spreads
+    ErrorCode.E_SPREAD_NOT_ITERABLE: "TypeError",
+    ErrorCode.E_DICT_UNPACK_TYPE: "TypeError",
+    # Indexing
+    ErrorCode.E_TUPLE_INDEX_RANGE: "IndexError",
+    ErrorCode.E_TUPLE_INDEX_NOT_CONST: "TypeError",
+    # Method/function call errors on builtins
+    ErrorCode.E_LIST_ELEMENT_TYPE_UNSUPPORTED: "TypeError",
+    ErrorCode.E_BAD_FORMAT_STRING: "ValueError",
+    ErrorCode.E_SORT_KEY_ARITY: "TypeError",
+    ErrorCode.E_SORT_KEY_TYPE: "TypeError",
+    ErrorCode.E_FORMAT_UNKNOWN_FIELD: "KeyError",
+    ErrorCode.E_FORMAT_INDEX_RANGE: "IndexError",
+    ErrorCode.E_DSTAR_NOT_DICT: "TypeError",
+    ErrorCode.E_KEY_UNSUPPORTED_FORM: "TypeError",
+    ErrorCode.E_DSTAR_NO_PARAM_LIST: "TypeError",
 }
 
 
