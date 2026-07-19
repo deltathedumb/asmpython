@@ -5,6 +5,8 @@ on:
     branches: [beta]
     paths:
       - ".github/workflows/diagnose-list-repeat.yml"
+  pull_request:
+    branches: [beta]
   workflow_dispatch:
 
 permissions:
