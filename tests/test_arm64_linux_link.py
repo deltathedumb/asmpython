@@ -101,6 +101,7 @@ class Arm64LinuxLinkTests(unittest.TestCase):
             (
                 "abi_shims_linux_arm64.S",
                 "abi_strings_linux_arm64.S",
+                "abi_string_search_linux_arm64.S",
             ),
         )
         self.assertEqual(linux_link.runtime_source_path(), paths[0])
@@ -145,7 +146,7 @@ class Arm64LinuxLinkTests(unittest.TestCase):
             linux_link.validate_runtime_object(runtime)
 
     def test_build_runtime_object_merges_and_validates_all_slices(self) -> None:
-        slices = [b"core-object", b"string-object"]
+        slices = [b"core-object", b"string-object", b"search-object"]
         runtime = self._runtime_object()
         toolchain = linux_link.LinuxArm64Toolchain("as", "ld", False)
         with (
@@ -165,10 +166,14 @@ class Arm64LinuxLinkTests(unittest.TestCase):
                 runtime,
             )
 
-        self.assertEqual(assemble.call_count, 2)
+        self.assertEqual(assemble.call_count, 3)
         self.assertEqual(
             [call.args[0].name for call in assemble.call_args_list],
-            ["abi_shims_linux_arm64.S", "abi_strings_linux_arm64.S"],
+            [
+                "abi_shims_linux_arm64.S",
+                "abi_strings_linux_arm64.S",
+                "abi_string_search_linux_arm64.S",
+            ],
         )
         merge.assert_called_once_with(slices, toolchain=toolchain)
 
