@@ -53,9 +53,9 @@ Both are **454/461**, with the same seven known failures:
 - `75_assembly_func.py` — legacy-only by design.
 
 Zero regressions is the bar for changes touching sema, IR lowering, or a
-production backend. The ARM64-only files added at the current checkpoint are
-not selected by either baseline command, but those complete suites still need
-to be re-run before ARM64 is wired into normal driver dispatch.
+production backend. The ARM64-only files at the current checkpoint are not
+selected by either baseline command, but both complete suites still need to be
+re-run before ARM64 is wired into normal driver dispatch.
 
 ## Recently shipped (2026-07-19)
 
@@ -83,22 +83,17 @@ with QEMU/strace.
 `asmpython/_backends/arm64/encoder.py` is independently checked bit-for-bit
 against GNU AArch64 assembler output by `_verify_encoder.py`; 70/70 encodings
 match. This caught and fixed a real silent `cset` destination-register bug.
-The covered surface includes integer arithmetic/logical operations, constant
-materialization, GP/FP memory operations, pair load/store, control flow,
-ADRP/ADR, conditional select/set, syscalls, scalar floating point, conversions,
-and shifted-immediate ADD/SUB.
 
 ### Register allocator — DONE
 
 `asmpython/_backends/arm64/regalloc.py` ports the architecture-neutral
 linear-scan, loop-liveness, Belady eviction, and call-crossing logic to AAPCS64.
 X13-X15 and V14-V15 are reserved for codegen scratch use and excluded from the
-allocation pools. The allocator has smoke coverage for ordinary values,
-call-crossing values, and spill pressure.
+allocation pools.
 
 ### Code generator — IMPLEMENTED AND FOCUSED-VERIFIED
 
-`asmpython/_backends/arm64/codegen.py` now covers the current IR instruction
+`asmpython/_backends/arm64/codegen.py` covers the current IR instruction
 surface. Its frame layout follows AAPCS64: a fixed `[FP, LR]` record, X29 as the
 frame pointer, negative offsets for spills/locals, positive offsets for incoming
 stack arguments, and 16-byte SP alignment.
@@ -115,51 +110,104 @@ Important verified details:
   assembled with real Clang AArch64 tooling: integer add, alloca/store/load,
   and a negative spill round-trip.
 
-### ELF relocatable object writer — IMPLEMENTED, LINK-VERIFIED
+### ELF relocatable writer and module compiler — IMPLEMENTED, LINK-VERIFIED
 
 `asmpython/_backends/arm64/elf.py` emits little-endian ELF64 `ET_REL` objects
 with `EM_AARCH64=183`, `.text`, `.data`, `.rodata`, `.tdata`, `.rela.text`,
-`.symtab`, `.strtab`, and `.shstrtab`. It currently supports exactly the three
-relocations emitted by codegen:
+`.symtab`, `.strtab`, and `.shstrtab`. It supports the three relocations emitted
+by codegen:
 
 - `R_AARCH64_CALL26` (283)
 - `R_AARCH64_ADR_PREL_PG_HI21` (275)
 - `R_AARCH64_ADD_ABS_LO12_NC` (277)
 
-`tests/test_arm64_elf.py` validates the ELF header, section links, symbol table,
-relocation records, and rejection of unknown relocation types.
+`module_codegen.py` compiles a complete `IRModule` to `output.o`, validates the
+entire IR operation set before codegen, and rejects unknown operations with
+function/block/instruction context rather than allowing codegen's development
+NOP fallback to become a silent miscompile. Linux/AAPCS64 is the only accepted
+object target. The package deliberately does not define `__module_backend__`
+until normal runtime/link support exists.
 
-Independent local validation built the equivalent generated object, confirmed
-it with `readelf`, and linked it with LLVM `ld.lld` into an AArch64 executable.
-Disassembly confirms `_start -> caller -> load_answer`, correct resolution of
-the `answer` data symbol, and the expected eight-byte value 42. The linker may
-relax ADRP+ADD into ADR+NOP; that is valid and was observed.
+Focused coverage:
 
-`asmpython/_backends/arm64/_verify_elf.py` performs the decisive repository
-probe: IR -> regalloc -> codegen -> ELF -> GNU readelf/ld -> qemu-aarch64. It
-requires all three relocation types and a real QEMU process exit status of 42,
-with `-strace` output retained for diagnostics. `.github/workflows/arm64-verify.yml`
-installs GNU AArch64 binutils/QEMU and runs the encoder verifier, byte-exact
-codegen tests, ELF structure tests, and execution probe.
+- `tests/test_arm64_elf.py` validates headers, sections, symbols, relocation
+  records, and unknown-relocation rejection.
+- `tests/test_arm64_module_codegen.py` validates whole-module object emission,
+  target/ABI rejection, unknown-op refusal, and that ARM64 is not yet advertised
+  as a normal driver backend.
+- Independent local `readelf` + LLVM `ld.lld` validation accepted the generated
+  layout and linked it into an AArch64 executable. Disassembly confirms
+  `_start -> caller -> load_answer`, correct `answer` data resolution, and valid
+  ADRP+ADD linker relaxation.
 
-**Current verification boundary:** object structure and linker acceptance are
-confirmed; the QEMU run is committed and CI-triggered, but its push-run result
-is not exposed by the available GitHub connector. Do not claim the generated
-program executed successfully until that workflow or a WSL2 run is observed.
+### Real source path — IMPLEMENTED, EXECUTION-PROBED IN CI
+
+`_verify_source.py` exercises the actual front end:
+
+`source -> lexer -> parser -> sema -> ir_lower -> ARM64 ET_REL -> ld -> execute`
+
+Its runtime-free source defines `main() -> int` returning `40 + 2`. The
+reachability walker explicitly roots `main`, and the resulting object is checked
+to have no text relocations/undefined runtime dependencies. Fast object tests
+live in `tests/test_arm64_source_codegen.py`.
+
+### First freestanding runtime slice — IMPLEMENTED, ASSEMBLY/LINK-VERIFIED
+
+`asmpython/_runtime/abi_shims_linux_arm64.S` exports the first symbols required
+by real source-level output:
+
+- `_abi_int_to_base(value, base, prefix)`
+- `printf(format, ...)` supporting literal bytes, `%%`, and `%s`
+- `strlen(text)`
+
+It has no libc dependency. Integer conversions receive distinct 128-byte blocks
+from a 1 MiB bump arena; this deliberately avoids the recurring shared-static-
+buffer aliasing bug where multiple formatted arguments overwrite one another
+before a single print call. Sign precedes prefix (`-0xa`), bases 2..36 are
+handled, and magnitude division is unsigned so INT64_MIN is representable.
+`printf` handles x1-x7 variadic pointers plus further stack-passed arguments and
+writes through the Linux AArch64 `write` syscall.
+
+Independent local verification with Clang's real AArch64 assembler produced a
+valid `EM_AARCH64` object. `readelf` recognized its symbols/relocations, and
+LLVM `ld.lld` linked a static AArch64 probe with no unresolved symbols.
+Disassembly confirms the expected allocator, conversion, formatter, and syscall
+sequences.
+
+`_verify_print.py` compiles real source with two print calls, including
+`print(-10, 255, sep="|", end="!\\n")`, links the freestanding runtime, and
+requires exact stdout `42\n-10|255!\n`. The multi-argument call is intentional:
+a shared conversion buffer would fail this test.
+
+### Execution verification
+
+`.github/workflows/arm64-verify.yml` now has two independent jobs:
+
+- x86-64 Ubuntu with GNU cross-binutils + `qemu-aarch64 -strace`
+- native `ubuntu-24.04-arm` with GNU binutils + `strace`
+
+Both run encoder verification, byte-exact codegen tests, ELF/module/source object
+tests, IR execution, real source execution, and the print-runtime stdout probe.
+
+**Current verification boundary:** assembler correctness, ELF/object structure,
+and static linker acceptance are locally confirmed. Native/QEMU execution jobs
+are committed and triggered, but push-run results are not exposed by the
+available GitHub connector. Do not claim these new generated source/runtime
+probes executed successfully until their workflow or a WSL2 run is observed.
 
 ### Not yet done
 
-- AArch64 runtime object/ABI shims. `asmpython/_runtime/build.py` and the current
-  runtime assembly are x86-64/NASM-specific.
-- Driver integration for a real `--backend arm64` target.
+- A reusable ARM64 runtime-object builder integrated with compiler build paths.
+- Driver/backend integration for a normal `--backend arm64` source build.
+- Runtime coverage beyond integer conversion/basic `%s` print/strlen.
 - Richer object metadata such as AArch64 unwind/debug sections.
 - Windows ARM64 and macOS ARM64 object/link formats.
 
-**Next concrete step:** observe a green `_verify_elf.py` QEMU run. Once green,
-begin the smallest freestanding AArch64 runtime slice needed to compile and run
-an integer-only source program through the normal compiler driver. Keep runtime
-ports independently assembler-verified and add shims incrementally rather than
-translating the entire x86-64 runtime in one untestable block.
+**Next concrete step:** make the ARM64 runtime slice buildable through a normal
+Python helper and add an object/link API that can produce a Linux AArch64
+executable without duplicating verifier logic. Keep it experimental and do not
+advertise `__module_backend__` until unresolved runtime-symbol checking and the
+full x86-64/legacy regression baselines are green.
 
 ## Known gaps / deferred work
 
