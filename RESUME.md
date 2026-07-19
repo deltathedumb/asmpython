@@ -22,7 +22,9 @@ rather than blocking synchronously.
 - `asmpython/_backends/ternary/` is the experimental second IR backend.
 - `asmpython/_backends/arm64/` is the active in-progress backend.
 - `--backend legacy` remains the NASM-text path required for `@assembly_func`.
-- `asmpython/pyinbin/` remains the fallback Python bytecode VM.
+- `asmpython/pyinbin/` remains the tailored fallback Python bytecode VM.
+- `portapy/` is the in-tree bootstrap for the separately versioned embeddable
+  PortaPy project.
 - Compiler syntax extensions remain withdrawn under `archived/extensions/`.
 
 ## Native test baseline
@@ -56,6 +58,44 @@ bar for shared compiler or production-backend changes.
 - Pure-Python site packages are merged into whole-program native compilation;
   CPython C-extension modules are rejected explicitly.
 - The retired `asmpython pypi` APIs are migration-error shims only.
+
+## Pyinbin and PortaPy
+
+Both interpreters are required to remain fully Python-built. Their lexer, parser,
+bytecode compiler, VM, object model, imports, exceptions, builtins, and Python-
+level standard library are Python source compiled by asmpython. A C/C++/Rust VM
+or CPython embedding wrapper does not satisfy the 3.14 requirement.
+
+pyinbin remains tailored to asmpython's native/static import pipeline, packaged
+source manifests, runtime fallback diagnostics, and project integration.
+
+PortaPy is the separately versioned embeddable fork of pyinbin's reusable core.
+Its final artifacts are `portapy.dll`, `libportapy.so`, and later
+`libportapy.dylib`; the public C ABI is only a thin host boundary around code
+generated from the Python implementation.
+
+Current PortaPy bootstrap checkpoint:
+
+- `docs/PORTAPY-DESIGN.md` defines product, ABI, ownership, callbacks, build, and
+  conformance requirements.
+- `docs/PYINBIN-DESIGN.md` identifies the reusable Python core versus the
+  asmpython-specific adapter layer.
+- `portapy/reference_api.py` models runtime/value handles, retain/release, source
+  execution, expression evaluation, calls, conversions, and structured errors
+  over the live pyinbin core.
+- `portapy/include/portapy.h` is the provisional opaque-handle C ABI.
+- `portapy/examples/embed.c` is a compile-time external-host example.
+- `tests/test_portapy_reference_api.py` and a focused workflow are committed.
+
+Still pending for PortaPy:
+
+- physically fork/copy the reusable pyinbin sources into a standalone versioned
+  project rather than importing `asmpython.pyinbin`,
+- compile the Python-authored API/export layer as a real shared library,
+- implement host callbacks, imports, interruption, and bytecode loading through
+  the public ABI,
+- run external C and second-language host conformance tests,
+- stabilize ABI v1 only after cross-host verification.
 
 ## ARM64 Stage 1
 
@@ -256,9 +296,11 @@ Still not done:
 - Windows ARM64 and macOS ARM64 object/link formats,
 - full x86-64 and legacy regression reruns after ARM64 becomes visible.
 
-**Next concrete step:** continue exact non-raising runtime expansion from symbols
-emitted by real lowered source. Keep exception-sensitive, arbitrary-precision,
-container, and shortest-round-trip formatting surfaces explicitly gated.
+**Next concrete step:** port the first non-raising ARM64 list slice from symbols
+already emitted by real lowered source (`list` allocation, length, indexed access,
+mutation, and append) without adding list formatting or exception-dependent
+bounds behavior prematurely. Continue PortaPy extraction in parallel only through
+Python-authored core/API work.
 
 ## Broader known gaps
 
@@ -275,7 +317,9 @@ container, and shortest-round-trip formatting surfaces explicitly gated.
 ## Resume notes
 
 - `docs/EXTENSIONS.md` is historical only.
-- `docs/ABI.md` is the formal, versioned binary ABI reference.
+- `docs/ABI.md` is the formal binary ABI reference.
+- `docs/PYINBIN-DESIGN.md` and `docs/PORTAPY-DESIGN.md` are the interpreter
+  architecture/product contracts.
 - This may be a shared `beta` workspace; check fresh blob SHAs before editing.
 - `AGENTS.md`, `AGENT_INSTRUCTIONS.md`, and `SESSION_SUMMARY_2026_07_19.md`
   contain cross-cutting rules and the independent verification handoff.
