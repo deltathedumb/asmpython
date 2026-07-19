@@ -3,11 +3,10 @@
 This is deliberately an integer-only runtime-free checkpoint. It exercises the
 normal front end and IR lowering rather than constructing IR by hand:
 
-``source -> lexer -> parser -> sema -> ir_lower -> ARM64 object -> ld -> run``
+``source -> lexer -> parser -> sema -> ir_lower -> ARM64 object -> builder -> run``
 
-The default source defines ``main()`` returning ``40 + 2``. A tiny freestanding
-``_start`` calls that symbol and exits with its result, so success is a real
-native/QEMU process exit status of 42.
+The default source defines ``main()`` returning ``40 + 2``. The shared Linux
+builder supplies ``_start`` and links a runtime-free executable.
 """
 from __future__ import annotations
 
@@ -17,6 +16,7 @@ import tempfile
 from pathlib import Path
 
 from ._verify_elf import _execute, _select_toolchain
+from .linux_link import build_executable_from_object
 from .module_codegen import compile_ir_module
 from asmpython._compiler import ir_lower
 from asmpython._compiler.lexer import Lexer
@@ -52,24 +52,10 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="asmpython-arm64-source-") as tmp:
         root = Path(tmp)
         program_object = root / "program.o"
-        start_source = root / "start.s"
-        start_object = root / "start.o"
         executable = root / "program"
 
-        program_object.write_bytes(_compile_source())
-        start_source.write_text(
-            ".text\n"
-            ".global _start\n"
-            "_start:\n"
-            "    bl main\n"
-            "    mov x8, #93\n"
-            "    svc #0\n",
-            encoding="utf-8",
-        )
-        subprocess.run(
-            [toolchain.assembler, "-o", str(start_object), str(start_source)],
-            check=True,
-        )
+        program_blob = _compile_source()
+        program_object.write_bytes(program_blob)
 
         inspection = subprocess.run(
             [toolchain.readelf, "--wide", "-h", "-r", "-s", str(program_object)],
@@ -81,18 +67,15 @@ def main(argv: list[str] | None = None) -> int:
             print(inspection)
             raise SystemExit("generated source object is missing AArch64/main metadata")
 
-        subprocess.run(
-            [
-                toolchain.linker,
-                "-e",
-                "_start",
-                "-o",
-                str(executable),
-                str(start_object),
-                str(program_object),
-            ],
-            check=True,
+        executable.write_bytes(
+            build_executable_from_object(
+                program_blob,
+                toolchain=toolchain.build,
+                entry_symbol="main",
+                include_runtime=False,
+            )
         )
+        executable.chmod(0o755)
 
         completed = _execute(toolchain, executable)
         if completed.returncode != 42:
@@ -104,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
 
         mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
         print("[ OK ] source parsed, type-checked, and lowered to IR")
-        print("[ OK ] ARM64 module compiler emitted a linkable ELF object")
+        print("[ OK ] reusable ARM64 builder emitted a linkable executable")
         print(f"[ OK ] {mode_name} source program exited with 42")
         if completed.stderr:
             print(completed.stderr.strip())
