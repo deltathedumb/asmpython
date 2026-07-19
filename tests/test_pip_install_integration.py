@@ -8,10 +8,16 @@ from pathlib import Path
 from unittest import mock
 
 from asmpython._compiler import program
-from asmpython._compiler.site_packages import resolve_site_package
+from asmpython._compiler.site_packages import (
+    install_native_import_resolution,
+    resolve_site_package,
+)
 
 
 class PipInstallIntegrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        install_native_import_resolution()
+
     def test_pip_installed_pure_python_package_is_native_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
