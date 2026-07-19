@@ -30,6 +30,10 @@ RUNTIME_SLICES = (
         frozenset({"_math_isfinite", "_math_isinf", "_math_isnan"}),
     ),
     RuntimeSlice(
+        "abi_float_angles_linux_arm64.S",
+        frozenset({"_math_degrees", "_math_radians"}),
+    ),
+    RuntimeSlice(
         "abi_strings_linux_arm64.S",
         frozenset(
             {

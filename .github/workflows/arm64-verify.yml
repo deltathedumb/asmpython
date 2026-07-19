@@ -74,6 +74,10 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_isinf --mode cross
       - name: Verify exact isfinite through QEMU
         run: python -m asmpython._backends.arm64._verify_float_isfinite --mode cross
+      - name: Verify exact degrees through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_degrees --mode cross
+      - name: Verify exact radians through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_radians --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -125,3 +129,7 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_isinf --mode native
       - name: Verify exact isfinite natively
         run: python -m asmpython._backends.arm64._verify_float_isfinite --mode native
+      - name: Verify exact degrees natively
+        run: python -m asmpython._backends.arm64._verify_float_degrees --mode native
+      - name: Verify exact radians natively
+        run: python -m asmpython._backends.arm64._verify_float_radians --mode native
