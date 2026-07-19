@@ -34,15 +34,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user
       - name: Run exact lowering and manifest tests
-        run: |
-          set -o pipefail
-          python -m unittest -v tests.test_arm64_list_del 2>&1 | tee list-del-tests.log
-      - name: Preserve focused test diagnostic
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: arm64-list-del-cross-test-log
-          path: list-del-tests.log
+        run: python -m unittest -v tests.test_arm64_list_del
       - name: Execute valid-index list deletion through QEMU
         run: python -m asmpython._backends.arm64._verify_list_del --mode cross
 
