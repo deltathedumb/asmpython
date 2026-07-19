@@ -9,6 +9,7 @@
  *   labs(value)
  *   _abi_str_concat(left, right)
  *   _abi_str_concat_dup(text)
+ *   _abi_str_repeat(text, count)
  *   _abi_str_eq(left, right)
  *   _abi_str_cmp(left, right)
  */
@@ -117,6 +118,70 @@ _abi_str_concat_dup:
     add     x1, x1, :lo12:.Lempty_text
     b       _abi_str_concat
 .size _abi_str_concat_dup, .-_abi_str_concat_dup
+
+/* char *_abi_str_repeat(const char *text, int64 count) */
+.global _abi_str_repeat
+.type _abi_str_repeat, %function
+_abi_str_repeat:
+    stp     x29, x30, [sp, #-80]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    mov     x19, x0
+    mov     x20, x1
+    cbnz    x19, .Lrepeat_text_ready
+    adrp    x19, .Lempty_text
+    add     x19, x19, :lo12:.Lempty_text
+.Lrepeat_text_ready:
+    cmp     x20, #0
+    b.le    .Lrepeat_empty
+
+    mov     x0, x19
+    bl      strlen
+    mov     x21, x0
+    cbz     x21, .Lrepeat_empty
+
+    /* Detect 64-bit multiplication/addition overflow before allocation. */
+    umulh   x9, x21, x20
+    cbnz    x9, .Lrepeat_fail
+    mul     x21, x21, x20
+    adds    x0, x21, #1
+    b.cs    .Lrepeat_fail
+    bl      .Lstring_alloc
+    mov     x22, x0
+    cbz     x22, .Lrepeat_done
+
+    mov     x23, x22
+    mov     x24, x20
+.Lrepeat_outer:
+    mov     x9, x19
+.Lrepeat_copy:
+    ldrb    w10, [x9], #1
+    cbz     w10, .Lrepeat_next
+    strb    w10, [x23], #1
+    b       .Lrepeat_copy
+.Lrepeat_next:
+    subs    x24, x24, #1
+    b.ne    .Lrepeat_outer
+    strb    wzr, [x23]
+    b       .Lrepeat_done
+
+.Lrepeat_empty:
+    adrp    x22, .Lempty_text
+    add     x22, x22, :lo12:.Lempty_text
+    b       .Lrepeat_done
+.Lrepeat_fail:
+    mov     x22, xzr
+.Lrepeat_done:
+    mov     x0, x22
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #80
+    ret
+.size _abi_str_repeat, .-_abi_str_repeat
 
 /* int64 _abi_str_eq(const char *left, const char *right) -> 0 or 1 */
 .global _abi_str_eq
