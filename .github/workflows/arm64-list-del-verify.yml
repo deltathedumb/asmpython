@@ -35,7 +35,7 @@ jobs:
           sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user nasm gcc file
       - name: Run exact lowering and manifest tests
         run: python -m unittest -v tests.test_arm64_list_del tests.test_driver_output_permissions
-      - name: Capture string-unpack matrix and IR
+      - name: Capture repeated-print relocation pipeline
         run: |
           cat > /tmp/two_uvw.py <<'PY'
           a, b, c = "xyz"
@@ -43,67 +43,53 @@ jobs:
           u, v, w = "abc"
           print(u, v, w)
           PY
-          cat > /tmp/original.py <<'PY'
-          a, b, c = "xyz"
-          print(a, b, c)
-          p, q, r = "abc"
-          print(p, q, r)
-          h, e, l1, l2, o = "hello"
-          print(h, e, l1, l2, o)
-          PY
-          set +e
-          : > string-unpack-matrix.log
-          for name in two_uvw original; do
-            {
-              echo "=== $name ==="
-              python -m asmpython build "/tmp/$name.py" \
-                --target linux -o "/tmp/$name" --no-pyinbin-fallback
-              build_status=$?
-              echo "build_status=$build_status"
-              if [ "$build_status" -eq 0 ]; then
-                "/tmp/$name" > "/tmp/$name.stdout" 2> "/tmp/$name.stderr"
-                echo "run_status=$?"
-                cat "/tmp/$name.stdout"
-              fi
-            } >> string-unpack-matrix.log 2>&1
-          done
-          python - <<'PY' > string-unpack-ir.txt
+          python -m asmpython build /tmp/two_uvw.py \
+            --target linux -o /tmp/two_uvw --no-pyinbin-fallback
+          /tmp/two_uvw > repeated-print.stdout 2> repeated-print.stderr || true
+          objdump -d -Mintel /tmp/two_uvw > repeated-print.disassembly.txt
+          python - <<'PY' > repeated-print-relocs.txt
           from pathlib import Path
-          from asmpython._backends.x86_64 import __module_backend__
+          from asmpython._backends.x86_64 import run_backend_codegen
+          from asmpython._backends.x86_64.elf_parse import parse_elf
           from asmpython._compiler import ir_lower
           from asmpython._compiler.driver import _compile_program
 
-          for filename in ("/tmp/two_uvw.py", "/tmp/original.py"):
-              path = Path(filename)
-              module = _compile_program(
-                  path.read_text(encoding="utf-8"),
-                  source_dir=path.parent,
-                  entry_path=path,
-                  whole_program=False,
-                  all_errors=False,
-                  active_extensions=frozenset(),
-              )
-              lowered = ir_lower.lower_module(module)
-              print(f"=== {path.name} ===")
-              for function in lowered.funcs:
-                  print(f"FUNCTION {function.name}")
-                  for block in function.blocks:
-                      print(f"BLOCK {block.label}")
-                      for instruction in block.instrs:
-                          print(repr(instruction))
-                      print("TERM", repr(block.terminator))
+          path = Path("/tmp/two_uvw.py")
+          module = _compile_program(
+              path.read_text(encoding="utf-8"),
+              source_dir=path.parent,
+              entry_path=path,
+              whole_program=False,
+              all_errors=False,
+              active_extensions=frozenset(),
+          )
+          lowered = ir_lower.lower_module(module)
+          object_blob = next(iter(run_backend_codegen(
+              lowered,
+              {"target_os": "linux", "abi": "sysv"},
+          ).values()))
+          Path("/tmp/two_uvw.o").write_bytes(object_blob)
+          parsed = parse_elf(object_blob)
+          for section in parsed.sections:
+              if not section.relocs:
+                  continue
+              print(f"SECTION {section.name}")
+              for relocation in section.relocs:
+                  print(relocation)
           PY
-          cat string-unpack-matrix.log
-          cat string-unpack-ir.txt
-          exit 0
-      - name: Upload string-unpack lowering diagnostic
+          cat repeated-print.stdout
+          cat repeated-print-relocs.txt
+      - name: Upload repeated-print relocation diagnostic
         uses: actions/upload-artifact@v4
         with:
-          name: string-unpack-lowering
+          name: repeated-print-relocations
           path: |
-            string-unpack-matrix.log
-            string-unpack-ir.txt
-            asmpython/_compiler/ir_lower.py
+            repeated-print.stdout
+            repeated-print.stderr
+            repeated-print.disassembly.txt
+            repeated-print-relocs.txt
+            /tmp/two_uvw.o
+            /tmp/two_uvw
       - name: Execute valid-index list deletion through QEMU
         run: python -m asmpython._backends.arm64._verify_list_del --mode cross
 
