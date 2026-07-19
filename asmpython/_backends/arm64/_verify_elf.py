@@ -2,19 +2,16 @@
 
 This verifies the complete Stage-1 path currently available:
 
-``IRFunc -> regalloc -> codegen -> ELF ET_REL -> GNU ld -> execution``
+``IRFunc -> regalloc -> codegen -> ELF ET_REL -> reusable linker -> execution``
 
 Execution can happen natively on an AArch64 host or through qemu-aarch64 on an
 x86-64 host. The generated program exercises every relocation kind emitted by
 codegen: ``load_answer`` uses ADRP+ADD to address a global containing 42,
-``caller`` uses BL to call it, and a tiny hand-written ``_start`` exits with the
-returned value. Success is therefore a real process exit status of 42, not
-merely a file-format parse.
+``caller`` uses BL to call it, and the shared Linux builder supplies ``_start``.
 """
 from __future__ import annotations
 
 import argparse
-import platform
 import shutil
 import subprocess
 import tempfile
@@ -23,6 +20,12 @@ from pathlib import Path
 
 from . import codegen, regalloc
 from .elf import build_elf
+from .linux_link import (
+    Arm64ToolchainError,
+    LinuxArm64Toolchain,
+    build_executable_from_object,
+    discover_toolchain,
+)
 from asmpython._compiler.ir import (
     I64,
     PTR,
@@ -36,12 +39,14 @@ from asmpython._compiler.ir import (
 
 @dataclass(frozen=True)
 class Toolchain:
-    assembler: str
-    linker: str
+    build: LinuxArm64Toolchain
     readelf: str
-    native: bool
     qemu: str | None = None
     strace: str | None = None
+
+    @property
+    def native(self) -> bool:
+        return self.build.native
 
 
 def _require_tool(name: str) -> str:
@@ -52,27 +57,20 @@ def _require_tool(name: str) -> str:
 
 
 def _select_toolchain(mode: str) -> Toolchain:
-    machine = platform.machine().lower()
-    native_host = machine in {"aarch64", "arm64"}
-    native = native_host if mode == "auto" else mode == "native"
+    try:
+        build = discover_toolchain(mode)
+    except Arm64ToolchainError as exc:
+        raise SystemExit(str(exc)) from exc
 
-    if native and not native_host:
-        raise SystemExit(
-            f"native verification requested on non-AArch64 host {machine!r}"
-        )
-    if native:
+    if build.native:
         return Toolchain(
-            assembler=_require_tool("as"),
-            linker=_require_tool("ld"),
+            build=build,
             readelf=_require_tool("readelf"),
-            native=True,
             strace=_require_tool("strace"),
         )
     return Toolchain(
-        assembler=_require_tool("aarch64-linux-gnu-as"),
-        linker=_require_tool("aarch64-linux-gnu-ld"),
+        build=build,
         readelf=_require_tool("aarch64-linux-gnu-readelf"),
-        native=False,
         qemu=_require_tool("qemu-aarch64"),
     )
 
@@ -173,25 +171,10 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="asmpython-arm64-elf-") as tmp:
         root = Path(tmp)
         module_object = root / "module.o"
-        start_source = root / "start.s"
-        start_object = root / "start.o"
         executable = root / "probe"
 
-        module_object.write_bytes(_build_probe_object())
-        start_source.write_text(
-            ".text\n"
-            ".global _start\n"
-            "_start:\n"
-            "    bl caller\n"
-            "    mov x8, #93\n"
-            "    svc #0\n",
-            encoding="utf-8",
-        )
-
-        subprocess.run(
-            [toolchain.assembler, "-o", str(start_object), str(start_source)],
-            check=True,
-        )
+        module_blob = _build_probe_object()
+        module_object.write_bytes(module_blob)
 
         inspection = subprocess.run(
             [
@@ -209,18 +192,15 @@ def main(argv: list[str] | None = None) -> int:
         ).stdout
         _verify_readelf(inspection)
 
-        subprocess.run(
-            [
-                toolchain.linker,
-                "-e",
-                "_start",
-                "-o",
-                str(executable),
-                str(start_object),
-                str(module_object),
-            ],
-            check=True,
+        executable.write_bytes(
+            build_executable_from_object(
+                module_blob,
+                toolchain=toolchain.build,
+                entry_symbol="caller",
+                include_runtime=False,
+            )
         )
+        executable.chmod(0o755)
 
         completed = _execute(toolchain, executable)
         if completed.returncode != 42:
@@ -233,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
         mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
         print(f"[ OK ] ELF object: {module_object.stat().st_size} bytes")
         print("[ OK ] readelf recognized all three AArch64 relocation types")
-        print("[ OK ] GNU ld linked the generated object")
+        print("[ OK ] reusable Linux ARM64 builder linked the generated object")
         print(f"[ OK ] {mode_name} process exited with 42")
         if completed.stderr:
             print(completed.stderr.strip())
