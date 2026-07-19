@@ -30,6 +30,35 @@ nearbyint:
     ret
 .size nearbyint, .-nearbyint
 
+/* C rounding functions returning binary64 integral values. */
+.global ceil
+.type ceil, %function
+ceil:
+    frintp d0, d0
+    ret
+.size ceil, .-ceil
+
+.global floor
+.type floor, %function
+floor:
+    frintm d0, d0
+    ret
+.size floor, .-floor
+
+.global trunc
+.type trunc, %function
+trunc:
+    frintz d0, d0
+    ret
+.size trunc, .-trunc
+
+.global round
+.type round, %function
+round:
+    frinta d0, d0
+    ret
+.size round, .-round
+
 /* double fdim(double x, double y) -- x-y when x>y, +0 otherwise. */
 .global fdim
 .type fdim, %function

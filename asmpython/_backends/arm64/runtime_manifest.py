@@ -23,7 +23,19 @@ RUNTIME_SLICES = (
     ),
     RuntimeSlice(
         "abi_float_scalar_linux_arm64.S",
-        frozenset({"copysign", "fabs", "fdim", "nearbyint", "nextafter"}),
+        frozenset(
+            {
+                "ceil",
+                "copysign",
+                "fabs",
+                "fdim",
+                "floor",
+                "nearbyint",
+                "nextafter",
+                "round",
+                "trunc",
+            }
+        ),
     ),
     RuntimeSlice(
         "abi_float_classify_linux_arm64.S",

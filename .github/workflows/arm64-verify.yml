@@ -96,6 +96,14 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_fdim --mode cross
       - name: Verify exact nextafter through QEMU
         run: python -m asmpython._backends.arm64._verify_float_nextafter --mode cross
+      - name: Verify exact ceil through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_ceil --mode cross
+      - name: Verify exact floor through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_floor --mode cross
+      - name: Verify exact trunc through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_trunc --mode cross
+      - name: Verify exact C round through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_round --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -169,3 +177,11 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_fdim --mode native
       - name: Verify exact nextafter natively
         run: python -m asmpython._backends.arm64._verify_float_nextafter --mode native
+      - name: Verify exact ceil natively
+        run: python -m asmpython._backends.arm64._verify_float_ceil --mode native
+      - name: Verify exact floor natively
+        run: python -m asmpython._backends.arm64._verify_float_floor --mode native
+      - name: Verify exact trunc natively
+        run: python -m asmpython._backends.arm64._verify_float_trunc --mode native
+      - name: Verify exact C round natively
+        run: python -m asmpython._backends.arm64._verify_float_round --mode native
