@@ -1,4 +1,4 @@
-/* Minimal freestanding AArch64 list allocation and append runtime. */
+/* Minimal freestanding AArch64 list allocation and core mutation runtime. */
 .text
 .balign 4
 
@@ -134,6 +134,24 @@ _abi_list_append:
     ldp     x29, x30, [sp], #96
     ret
 .size _abi_list_append, .-_abi_list_append
+
+/*
+ * x0=list header -> x0=removed final 8-byte cell.
+ *
+ * This intentionally matches the existing native runtime's current contract:
+ * callers must provide a non-empty list. Empty-pop IndexError support remains
+ * gated on the catchable ARM64 exception runtime rather than being faked here.
+ */
+.global _abi_list_pop
+.type _abi_list_pop, %function
+_abi_list_pop:
+    ldr     x9, [x0, #8]
+    sub     x9, x9, #1
+    str     x9, [x0, #8]
+    ldr     x10, [x0, #16]
+    ldr     x0, [x10, x9, lsl #3]
+    ret
+.size _abi_list_pop, .-_abi_list_pop
 
 .bss
 .balign 16
