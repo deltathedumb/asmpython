@@ -60,4 +60,49 @@ fdim:
     ret
 .size fdim, .-fdim
 
+/* double nextafter(double x, double y) -- one representable step toward y. */
+.global nextafter
+.type nextafter, %function
+nextafter:
+    fmov x9, d0
+    fmov x10, d1
+    lsl x11, x9, #1
+    lsr x11, x11, #1
+    movz x12, #0x7ff0, lsl #48
+    cmp x11, x12
+    b.hi .Lnext_done
+
+    lsl x13, x10, #1
+    lsr x13, x13, #1
+    cmp x13, x12
+    b.hi .Lnext_return_y
+
+    fcmp d0, d1
+    b.eq .Lnext_return_y
+    cbz x11, .Lnext_from_zero
+    tbz x9, #63, .Lnext_x_positive
+    b.lt .Lnext_decrement
+    add x9, x9, #1
+    b .Lnext_finish
+.Lnext_x_positive:
+    b.lt .Lnext_increment
+.Lnext_decrement:
+    sub x9, x9, #1
+    b .Lnext_finish
+.Lnext_increment:
+    add x9, x9, #1
+    b .Lnext_finish
+.Lnext_from_zero:
+    lsr x9, x10, #63
+    lsl x9, x9, #63
+    orr x9, x9, #1
+.Lnext_finish:
+    fmov d0, x9
+.Lnext_done:
+    ret
+.Lnext_return_y:
+    fmov d0, x10
+    ret
+.size nextafter, .-nextafter
+
 .section .note.GNU-stack,"",%progbits
