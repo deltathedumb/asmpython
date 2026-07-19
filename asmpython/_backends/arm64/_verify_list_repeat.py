@@ -21,10 +21,26 @@ def main() -> int:
     a, b, c, d, e, f = ys
     empty_zero = xs * 0
     empty_negative = -2 * xs
-    print(len(ys), a, b, c, d, e, f, len(empty_zero), len(empty_negative))
+    if a != 7:
+        return 11
+    if b != 8:
+        return 12
+    if c != 7:
+        return 13
+    if d != 8:
+        return 14
+    if e != 7:
+        return 15
+    if f != 8:
+        return 16
+    if len(empty_zero) != 0:
+        return 17
+    if len(empty_negative) != 0:
+        return 18
+    print(len(ys))
     return 0
 """
-_EXPECTED_STDOUT = "6 7 8 7 8 7 8 0 0\n"
+_EXPECTED_STDOUT = "6\n"
 _EXPECTED_REQUIREMENTS = frozenset(
     {
         "_abi_int_to_base",
@@ -82,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[ OK ] positive repeat copied cells in source order")
         print("[ OK ] zero repeat returned a fresh empty list")
         print("[ OK ] negative repeat returned a fresh empty list")
+        print("[ OK ] exit checks observed [7, 8, 7, 8, 7, 8] and both empty results")
         print(f"[ OK ] {mode_name} stdout matched {_EXPECTED_STDOUT!r}")
         if completed.stderr:
             print(completed.stderr.strip())
