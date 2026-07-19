@@ -50,6 +50,10 @@ RUNTIME_SLICES = (
             }
         ),
     ),
+    RuntimeSlice(
+        "abi_string_replace_linux_arm64.S",
+        frozenset({"_abi_str_replace"}),
+    ),
 )
 
 RUNTIME_SOURCE_NAMES = tuple(runtime_slice.filename for runtime_slice in RUNTIME_SLICES)
@@ -61,7 +65,6 @@ RUNTIME_EXPORTS = frozenset(
 
 
 def declared_global_symbols(source: str) -> frozenset[str]:
-    """Return symbols declared by GNU ``.global``/``.globl`` directives."""
     declared: set[str] = set()
     for raw_line in source.splitlines():
         line = raw_line.strip()
