@@ -75,29 +75,25 @@ class X86LiteralUnpackNormalizeTests(unittest.TestCase):
         )
         self.assertTrue(all(value.obj is statement.values[0].obj for value in statement.values))
 
-    def test_string_literal_becomes_typed_character_subscripts(self) -> None:
+    def test_string_literal_becomes_character_literals(self) -> None:
         module = _checked_module('a, b, c = "xyz"\n')
         statement = _tuple_assign(module)
 
         normalize_literal_unpacks(module)
 
         self.assertEqual(len(statement.values), 3)
-        first_source = statement.values[0].obj
-        for index, value in enumerate(statement.values):
-            self.assertIsInstance(value, A.Subscript)
-            self.assertIs(value.obj, first_source)
-            self.assertEqual(value.index.value, index)
-            self.assertEqual(value.inferred_type, "str")
+        self.assertTrue(all(isinstance(value, A.StrLit) for value in statement.values))
+        self.assertEqual([value.value for value in statement.values], ["x", "y", "z"])
 
-    def test_unicode_string_uses_codepoint_arity(self) -> None:
+    def test_unicode_string_uses_codepoint_literals(self) -> None:
         module = _checked_module('first, second = "éx"\n')
         statement = _tuple_assign(module)
         normalize_literal_unpacks(module)
         self.assertEqual(len(statement.values), 2)
-        self.assertTrue(all(isinstance(value, A.Subscript) for value in statement.values))
+        self.assertEqual([value.value for value in statement.values], ["é", "x"])
 
     def test_mismatched_literal_arity_is_not_rewritten(self) -> None:
-        module = _checked_module('first, second = "x"\n')
+        module = _parsed_module('first, second = "x"\n')
         statement = _tuple_assign(module)
         original_values = list(statement.values)
         normalize_literal_unpacks(module)
@@ -110,7 +106,7 @@ class X86LiteralUnpackNormalizeTests(unittest.TestCase):
         normalize_literal_unpacks(call_module)
         self.assertEqual(call_statement.values, original_call_values)
 
-        starred_module = _checked_module('values = [1, 2, 3]\na, *rest = values\n')
+        starred_module = _parsed_module('values = [1, 2, 3]\na, *rest = values\n')
         starred_statement = _tuple_assign(starred_module)
         original_starred_values = list(starred_statement.values)
         normalize_literal_unpacks(starred_module)
@@ -134,10 +130,7 @@ class X86LiteralUnpackNormalizeTests(unittest.TestCase):
             and instruction.operands
             and instruction.operands[0] == "_abi_str_char_at"
         ]
-        self.assertEqual(len(char_calls), 3)
-        self.assertTrue(
-            all(call.result is not None and call.result.type is PTR for call in char_calls)
-        )
+        self.assertEqual(char_calls, [])
 
         stored_types = {
             instruction.operands[0].type
