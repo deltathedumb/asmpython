@@ -92,6 +92,8 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_frexp_m --mode cross
       - name: Verify exact frexp exponent through QEMU
         run: python -m asmpython._backends.arm64._verify_float_frexp_e --mode cross
+      - name: Verify exact fdim through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_fdim --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -161,3 +163,5 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_frexp_m --mode native
       - name: Verify exact frexp exponent natively
         run: python -m asmpython._backends.arm64._verify_float_frexp_e --mode native
+      - name: Verify exact fdim natively
+        run: python -m asmpython._backends.arm64._verify_float_fdim --mode native

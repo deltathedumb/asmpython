@@ -30,4 +30,34 @@ nearbyint:
     ret
 .size nearbyint, .-nearbyint
 
+/* double fdim(double x, double y) -- x-y when x>y, +0 otherwise. */
+.global fdim
+.type fdim, %function
+fdim:
+    fmov x9, d0
+    lsl x10, x9, #1
+    lsr x10, x10, #1
+    movz x11, #0x7ff0, lsl #48
+    cmp x10, x11
+    b.hi .Lfdim_done
+
+    fmov x9, d1
+    lsl x10, x9, #1
+    lsr x10, x10, #1
+    cmp x10, x11
+    b.hi .Lfdim_y_nan
+
+    fcmp d0, d1
+    b.gt .Lfdim_sub
+    fmov d0, xzr
+    ret
+.Lfdim_sub:
+    fsub d0, d0, d1
+    ret
+.Lfdim_y_nan:
+    fmov d0, x9
+.Lfdim_done:
+    ret
+.size fdim, .-fdim
+
 .section .note.GNU-stack,"",%progbits
