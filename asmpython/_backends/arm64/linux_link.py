@@ -26,32 +26,11 @@ from .elf_inspect import (
     undefined_symbols,
 )
 from .module_codegen import compile_ir_module
+from .runtime_manifest import RUNTIME_EXPORTS, RUNTIME_SOURCE_NAMES
 
-
-# Keep this synchronized with global exports across the modular freestanding
-# runtime sources. build_runtime_object() independently checks that the merged
-# relocatable object really exports every listed symbol and has no unresolved
-# cross-slice dependencies.
-RUNTIME_EXPORTS = frozenset(
-    {
-        "_abi_int_to_base",
-        "_abi_str_cmp",
-        "_abi_str_concat",
-        "_abi_str_concat_dup",
-        "_abi_str_count",
-        "_abi_str_ends_with",
-        "_abi_str_eq",
-        "_abi_str_starts_with",
-        "labs",
-        "printf",
-        "strlen",
-    }
-)
-_RUNTIME_SOURCE_NAMES = (
-    "abi_shims_linux_arm64.S",
-    "abi_strings_linux_arm64.S",
-    "abi_string_search_linux_arm64.S",
-)
+# Kept as a private alias for callers/tests written before runtime_manifest.py
+# became the single source of truth.
+_RUNTIME_SOURCE_NAMES = RUNTIME_SOURCE_NAMES
 
 
 @dataclass(frozen=True)
@@ -181,7 +160,7 @@ def _runtime_directory() -> Path:
 
 
 def runtime_source_paths() -> tuple[Path, ...]:
-    return tuple(_runtime_directory() / name for name in _RUNTIME_SOURCE_NAMES)
+    return tuple(_runtime_directory() / name for name in RUNTIME_SOURCE_NAMES)
 
 
 def runtime_source_path() -> Path:
