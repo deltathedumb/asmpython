@@ -35,22 +35,6 @@ jobs:
           sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user
       - name: Run exact lowering and manifest tests
         run: python -m unittest -v tests.test_arm64_list_del
-      - name: Collect final scalar diagnostics
-        run: |
-          {
-            echo '=== exact ceil execution ==='
-            python -m asmpython._backends.arm64._verify_float_ceil --mode cross || true
-            echo '=== exact floor execution ==='
-            python -m asmpython._backends.arm64._verify_float_floor --mode cross || true
-            echo '=== exact trunc execution ==='
-            python -m asmpython._backends.arm64._verify_float_trunc --mode cross || true
-          } 2>&1 | tee arm64-scalar-diagnostics.log
-      - name: Preserve final scalar diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: arm64-scalar-diagnostics
-          path: arm64-scalar-diagnostics.log
       - name: Execute valid-index list deletion through QEMU
         run: python -m asmpython._backends.arm64._verify_list_del --mode cross
 
