@@ -19,11 +19,11 @@ from math import copysign, floor, inf, isinf, isnan, nan
 
 
 def main() -> int:
-    if int(floor(2.9)) != 2:
+    if floor(2.9) != 2.0:
         return 11
-    if int(floor(-2.1)) != -3:
+    if floor(-2.1) != -3.0:
         return 12
-    if int(copysign(1.0, floor(0.2))) != 1:
+    if copysign(1.0, floor(0.2)) != 1.0:
         return 13
     if not isinf(floor(inf)):
         return 14
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
         print("[ OK ] floor finite, signed-zero, infinity, and NaN cases matched")
-        print("[ OK ] exit-code checks avoided bool-formatting dependencies")
+        print("[ OK ] direct double comparisons avoided unrelated cast/format helpers")
         print(f"[ OK ] {mode_name} floor matched {_EXPECTED_STDOUT!r}")
     return 0
 
