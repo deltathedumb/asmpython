@@ -2588,16 +2588,21 @@ class SemaAnalyzer:
                 "mlang Code(...)'s exports= must be a dict literal of "
                 "Sig(...) calls",
                 getattr(e, "pos", None),
+                ErrorCode.E_MLANG_INVALID_ARG,
             )
         result: dict = {}
         for k, v in zip(e.keys, e.values):
             if not isinstance(k, A.StrLit):
-                raise SemaError("mlang exports= keys must be string literals", e.pos)
+                raise SemaError(
+                    "mlang exports= keys must be string literals", e.pos,
+                    ErrorCode.E_MLANG_INVALID_ARG,
+                )
             if not (isinstance(v, A.Call) and v.func == "Sig" and len(v.args) == 2):
                 raise SemaError(
                     f"mlang exports={{{k.value!r}: ...}} value must be a "
                     f"Sig(arg_types, ret_type) call",
                     e.pos,
+                    ErrorCode.E_MLANG_INVALID_ARG,
                 )
             arg_types_node, ret_type_node = v.args
             if not isinstance(arg_types_node, A.ListLit) or not all(
@@ -2607,12 +2612,14 @@ class SemaAnalyzer:
                     f"mlang Sig(...) for {k.value!r}: arg_types must be a "
                     f"list of string literals",
                     e.pos,
+                    ErrorCode.E_MLANG_INVALID_ARG,
                 )
             if not isinstance(ret_type_node, A.StrLit):
                 raise SemaError(
                     f"mlang Sig(...) for {k.value!r}: ret_type must be a "
                     f"string literal",
                     e.pos,
+                    ErrorCode.E_MLANG_INVALID_ARG,
                 )
             result[k.value] = _mlang.MlangFuncSig(
                 arg_types=tuple(a.value for a in arg_types_node.elems),
@@ -2670,12 +2677,14 @@ class SemaAnalyzer:
                             "ml.builtins.gcc.c) -- user-authored Config(...) "
                             "literals aren't statically resolvable yet",
                             call.pos,
+                            ErrorCode.E_MLANG_INVALID_ARG,
                         )
                     if not isinstance(call.args[1], A.StrLit):
                         raise SemaError(
                             "mlang Code(...)'s source argument must be a "
                             "string literal",
                             call.pos,
+                            ErrorCode.E_MLANG_INVALID_ARG,
                         )
                     exe, frontend, compile_args, infer_signatures = config
                     source = call.args[1].value
@@ -2688,7 +2697,7 @@ class SemaAnalyzer:
                             exe, frontend, compile_args, infer_signatures, source, exports
                         )
                     except _mlang.MlangError as exc:
-                        raise SemaError(str(exc), call.pos) from exc
+                        raise SemaError(str(exc), call.pos, ErrorCode.E_MLANG_COMPILE_FAILED) from exc
                     uid = str(id(s))
                     self.mlang_code_funcs[uid] = result.funcs
                     self.mlang_objects.extend(result.objects)
@@ -3436,6 +3445,7 @@ class SemaAnalyzer:
                 raise SemaError(
                     f"cannot redefine builtin {f.name!r}",
                     f.pos,
+                    ErrorCode.E_BUILTIN_REDEFINED,
                 )
             r = self._resolve_annot(f.ret_type)  # type: ignore
             _raw_ret_base = f.ret_type[0] if f.ret_type else None
@@ -5428,6 +5438,7 @@ class SemaAnalyzer:
                         f"tuple assign target: float values aren't supported in "
                         "parallel assignment yet (assign separately)",
                         s.pos,
+                        ErrorCode.E_TUPLE_ASSIGN_VALUE_TYPE,
                     )
                 if vt not in (
                     "int",
@@ -5441,6 +5452,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"tuple assign target: unsupported value type {vt}",
                         s.pos,
+                        ErrorCode.E_TUPLE_ASSIGN_VALUE_TYPE,
                     )
                 self._check_tuple_assign_target(t, vt, scope, s.pos)
             return
@@ -6331,7 +6343,8 @@ class SemaAnalyzer:
             return all_pre
 
         raise SemaError(
-            f"internal: unhandled stmt {type(s).__name__}", getattr(s, "pos", None)
+            f"internal: unhandled stmt {type(s).__name__}", getattr(s, "pos", None),
+            ErrorCode.E_INTERNAL_UNHANDLED_NODE,
         )
 
     # ---- match/case helpers -------------------------------------------------
@@ -6632,7 +6645,8 @@ class SemaAnalyzer:
             return as_pre, as_test, as_binds
 
         raise SemaError(
-            f"internal: unhandled pattern {type(pattern).__name__}", pos
+            f"internal: unhandled pattern {type(pattern).__name__}", pos,
+            ErrorCode.E_INTERNAL_UNHANDLED_NODE,
         )
 
     def _check_tuple_assign_target(
@@ -7254,6 +7268,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"list element of type {et} is not supported yet",
                         getattr(el, "pos", e.pos),
+                        ErrorCode.E_LIST_ELEMENT_TYPE_UNSUPPORTED,
                     )
                 if et == "any":
                     # Opaque element: compatible with any kind. It pins the list
@@ -7294,6 +7309,7 @@ class SemaAnalyzer:
                         f"mixed list element types ({seen} and {et}); "
                         "mixed-type lists need a tagged-value runtime, not yet implemented",
                         getattr(el, "pos", e.pos),
+                        ErrorCode.E_HETEROGENEOUS_LIST,
                     )
             # Empty literal stays "?" until the first append pins the type.
             e.el_type = seen if seen is not None else "?"
@@ -7563,6 +7579,7 @@ class SemaAnalyzer:
                 raise SemaError(
                     f"dict comprehension value of type {vt} is not supported yet",
                     getattr(e.value, "pos", e.pos),
+                    ErrorCode.E_DICT_VALUE_TYPE_UNSUPPORTED,
                 )
             e.inferred_type = "dict"
             e.value_type = vt if vt != "any" else "int"
@@ -7622,6 +7639,7 @@ class SemaAnalyzer:
                         raise SemaError(
                             f"dict value of type {vt} is not supported yet",
                             getattr(v, "pos", e.pos),
+                            ErrorCode.E_DICT_VALUE_TYPE_UNSUPPORTED,
                         )
                 if vt == "any":
                     saw_opaque_value = True
@@ -7640,6 +7658,7 @@ class SemaAnalyzer:
                             f"mixed dict value types ({seen_v} and {vt}); "
                             "a float value can't share a dict with non-floats",
                             getattr(v, "pos", e.pos),
+                            ErrorCode.E_DICT_VALUE_TYPE_MIXED,
                         )
                     seen_v = "any"
             e.value_type = seen_v if seen_v is not None else ("any" if saw_opaque_value else "int")
@@ -7680,6 +7699,7 @@ class SemaAnalyzer:
                     raise SemaError(
                         f"tuple element of type {et} is not supported yet",
                         getattr(el, "pos", e.pos),
+                        ErrorCode.E_TUPLE_ELEMENT_TYPE_UNSUPPORTED,
                     )
                 ets.append(et)
             e.elem_types = ets
@@ -7698,6 +7718,7 @@ class SemaAnalyzer:
                         f"set elements of type {et} are not supported yet "
                         "(sets are str/int-keyed in v1)",
                         getattr(el, "pos", e.pos),
+                        ErrorCode.E_SET_KEY_TYPE,
                     )
             return
         if isinstance(e, A.Subscript):
@@ -8064,6 +8085,7 @@ class SemaAnalyzer:
                     "requires a Python interpreter and cannot be compiled to "
                     "native code",
                     e.pos,
+                    ErrorCode.E_INTERPRETER_ONLY_FEATURE,
                 )
             # `ml.Code(config, source)` itself: _inject_mlang_if_needed
             # already ran (before this normal _check_block/_check_stmt
@@ -8101,6 +8123,7 @@ class SemaAnalyzer:
                         f"mlang Code(...) has no exported function {e.method!r} "
                         f"(known: {', '.join(sorted(funcs)) or '<none>'})",
                         e.pos,
+                        ErrorCode.E_MLANG_UNKNOWN_EXPORT,
                     )
                 sig = funcs[e.method]
                 fn = stdlib.Func(arg_types=sig.arg_types, ret_type=sig.ret_type, c_name=e.method)
@@ -8743,6 +8766,7 @@ class SemaAnalyzer:
                             f"set.{e.method}({arg_t}) is not supported yet "
                             "(sets are str/int-keyed in v1)",
                             e.args[0].pos,
+                            ErrorCode.E_SET_KEY_TYPE,
                         )
                     e.inferred_type = "int"
                 elif e.method in ("update", "clear"):
@@ -8854,7 +8878,8 @@ class SemaAnalyzer:
             e.inferred_type = "any"
             return
         raise SemaError(
-            f"internal: unhandled expr {type(e).__name__}", getattr(e, "pos", None)
+            f"internal: unhandled expr {type(e).__name__}", getattr(e, "pos", None),
+            ErrorCode.E_INTERNAL_UNHANDLED_NODE,
         )
 
     # Intentionally NOT stored as a class variable with nested tuples.
@@ -9015,6 +9040,7 @@ class SemaAnalyzer:
                     "str.rsplit() maxsplit must be the literal 1 (only the "
                     "last-separator split is implemented)",
                     e.pos,
+                    ErrorCode.E_RSPLIT_MAXSPLIT,
                 )
             e.inferred_type = "list"
             e.list_el_type = "str"
@@ -9112,6 +9138,7 @@ class SemaAnalyzer:
                             f"fields (e.g. '{{0.attr}}', '{{0[0]}}') is not "
                             "supported",
                             e.pos,
+                            ErrorCode.E_FORMAT_FIELD_UNSUPPORTED,
                         )
                     if val not in kwarg_names:
                         raise SemaError(
@@ -9410,6 +9437,7 @@ class SemaAnalyzer:
                     "*expr argument unpacking requires a tuple with known "
                     "element types",
                     a.pos,
+                    ErrorCode.E_VARARGS_UNPACK,
                 )
             for i in range(len(ets)):
                 sub = A.Subscript(
@@ -9506,6 +9534,7 @@ class SemaAnalyzer:
                 f"{e.func}() is not supported: it requires a Python interpreter "
                 "and cannot be compiled to native code",
                 e.pos,
+                ErrorCode.E_INTERPRETER_ONLY_FEATURE,
             )
         if e.func == "range":
             # range(...) as a value materializes a list[int]. (In a `for` header
@@ -9784,6 +9813,7 @@ class SemaAnalyzer:
                             f"set elements of type {et} are not supported yet "
                             "(sets are str/int-keyed in v1)",
                             e.pos,
+                            ErrorCode.E_SET_KEY_TYPE,
                         )
                 return
             if e.func in (

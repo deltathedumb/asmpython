@@ -239,6 +239,22 @@ class ErrorCode:
     E_KEY_UNSUPPORTED_FORM       = 339  # E139: key= is only supported for the single-iterable call form
     E_DSTAR_NO_PARAM_LIST        = 340  # E140: '**expr' expansion requires a statically known parameter list
 
+    # Batch 3: remaining uncoded call sites (mlang FFI, internal invariants,
+    # collection-element-type coverage, interpreter-only builtins). Message
+    # wording unchanged, only code= was added.
+    E_MLANG_INVALID_ARG          = 341  # E141: mlang Code(...)/Sig(...) argument has an invalid shape
+    E_MLANG_COMPILE_FAILED       = 342  # E142: mlang Code(...) source failed to compile
+    E_BUILTIN_REDEFINED          = 343  # E143: a top-level def/class redefines a builtin name
+    E_TUPLE_ASSIGN_VALUE_TYPE    = 344  # E144: parallel tuple-assign value has an unsupported type
+    E_INTERNAL_UNHANDLED_NODE    = 345  # E145: internal: compiler encountered an AST node kind it doesn't handle
+    E_TUPLE_ELEMENT_TYPE_UNSUPPORTED = 346  # E146: tuple literal element has an unsupported type
+    E_DICT_VALUE_TYPE_UNSUPPORTED = 347  # E147: dict value has an unsupported type
+    E_DICT_VALUE_TYPE_MIXED      = 348  # E148: dict literal mixes incompatible value types
+    E_INTERPRETER_ONLY_FEATURE   = 349  # E149: this call requires a Python interpreter and can't be compiled natively
+    E_MLANG_UNKNOWN_EXPORT       = 350  # E150: mlang Code(...) has no export of this name
+    E_RSPLIT_MAXSPLIT            = 351  # E151: str.rsplit() maxsplit argument must be the literal 1
+    E_FORMAT_FIELD_UNSUPPORTED   = 352  # E152: str.format() field spec uses an unsupported form
+
 
 def _code_label(code: int) -> str:
     """Return the human-readable code label, e.g. 1 -> 'L001', 212 -> 'E012'."""
@@ -410,6 +426,19 @@ ERROR_DESCRIPTIONS: dict[str, str] = {
     _code_label(ErrorCode.E_DSTAR_NOT_DICT): "A '**expr' call argument must evaluate to a dict.",
     _code_label(ErrorCode.E_KEY_UNSUPPORTED_FORM): "key= is only supported for the single-iterable call form.",
     _code_label(ErrorCode.E_DSTAR_NO_PARAM_LIST): "'**expr' expansion requires a statically known parameter list, which this callee doesn't have.",
+    # Semantic – batch 3
+    _code_label(ErrorCode.E_MLANG_INVALID_ARG): "An mlang Code(...)/Sig(...) argument has an invalid shape (wrong literal kind, arity, or structure).",
+    _code_label(ErrorCode.E_MLANG_COMPILE_FAILED): "The source passed to mlang Code(...) failed to compile.",
+    _code_label(ErrorCode.E_BUILTIN_REDEFINED): "A top-level function or class redefines a builtin name.",
+    _code_label(ErrorCode.E_TUPLE_ASSIGN_VALUE_TYPE): "A value in a parallel tuple-assignment has a type that isn't supported for this form.",
+    _code_label(ErrorCode.E_INTERNAL_UNHANDLED_NODE): "Internal: the compiler encountered an AST node kind it does not handle here. This indicates a compiler bug, not a source error.",
+    _code_label(ErrorCode.E_TUPLE_ELEMENT_TYPE_UNSUPPORTED): "A tuple literal element has a type that is not yet supported.",
+    _code_label(ErrorCode.E_DICT_VALUE_TYPE_UNSUPPORTED): "A dict value has a type that is not yet supported.",
+    _code_label(ErrorCode.E_DICT_VALUE_TYPE_MIXED): "A dict literal mixes value types that can't share a dict (e.g. float with a pointer-typed value).",
+    _code_label(ErrorCode.E_INTERPRETER_ONLY_FEATURE): "This call requires a Python interpreter and cannot be compiled to native code.",
+    _code_label(ErrorCode.E_MLANG_UNKNOWN_EXPORT): "mlang Code(...) has no export of this name.",
+    _code_label(ErrorCode.E_RSPLIT_MAXSPLIT): "str.rsplit()'s maxsplit argument must be the literal 1; only the last-separator split is implemented.",
+    _code_label(ErrorCode.E_FORMAT_FIELD_UNSUPPORTED): "str.format() field specifier uses a form that is not supported (e.g. attribute/index access inside the field).",
 }
 
 
@@ -513,6 +542,21 @@ _PYTHON_EXCEPTION_NAME: dict[int, str] = {
     ErrorCode.E_DSTAR_NOT_DICT: "TypeError",
     ErrorCode.E_KEY_UNSUPPORTED_FORM: "TypeError",
     ErrorCode.E_DSTAR_NO_PARAM_LIST: "TypeError",
+    # Batch 3
+    ErrorCode.E_MLANG_INVALID_ARG: "TypeError",
+    ErrorCode.E_MLANG_COMPILE_FAILED: "RuntimeError",
+    ErrorCode.E_BUILTIN_REDEFINED: "TypeError",
+    ErrorCode.E_TUPLE_ASSIGN_VALUE_TYPE: "TypeError",
+    # E_INTERNAL_UNHANDLED_NODE intentionally unmapped: a compiler-internal
+    # invariant violation, not a real CPython exception a user's source
+    # would ever raise.
+    ErrorCode.E_TUPLE_ELEMENT_TYPE_UNSUPPORTED: "TypeError",
+    ErrorCode.E_DICT_VALUE_TYPE_UNSUPPORTED: "TypeError",
+    ErrorCode.E_DICT_VALUE_TYPE_MIXED: "TypeError",
+    ErrorCode.E_INTERPRETER_ONLY_FEATURE: "RuntimeError",
+    ErrorCode.E_MLANG_UNKNOWN_EXPORT: "AttributeError",
+    ErrorCode.E_RSPLIT_MAXSPLIT: "ValueError",
+    ErrorCode.E_FORMAT_FIELD_UNSUPPORTED: "ValueError",
 }
 
 
