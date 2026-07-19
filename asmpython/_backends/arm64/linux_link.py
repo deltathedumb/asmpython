@@ -38,7 +38,10 @@ RUNTIME_EXPORTS = frozenset(
         "_abi_str_cmp",
         "_abi_str_concat",
         "_abi_str_concat_dup",
+        "_abi_str_count",
+        "_abi_str_ends_with",
         "_abi_str_eq",
+        "_abi_str_starts_with",
         "labs",
         "printf",
         "strlen",
@@ -47,6 +50,7 @@ RUNTIME_EXPORTS = frozenset(
 _RUNTIME_SOURCE_NAMES = (
     "abi_shims_linux_arm64.S",
     "abi_strings_linux_arm64.S",
+    "abi_string_search_linux_arm64.S",
 )
 
 
