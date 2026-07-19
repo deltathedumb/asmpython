@@ -23,7 +23,7 @@ RUNTIME_SLICES = (
     ),
     RuntimeSlice(
         "abi_float_scalar_linux_arm64.S",
-        frozenset({"fabs"}),
+        frozenset({"copysign", "fabs"}),
     ),
     RuntimeSlice(
         "abi_strings_linux_arm64.S",

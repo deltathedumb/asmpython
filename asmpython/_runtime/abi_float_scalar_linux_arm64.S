@@ -10,4 +10,16 @@ fabs:
     ret
 .size fabs, .-fabs
 
+/* double copysign(double magnitude, double sign) -- replace only sign bit. */
+.global copysign
+.type copysign, %function
+copysign:
+    fmov x9, d0
+    fmov x10, d1
+    lsr x10, x10, #63
+    bfi x9, x10, #63, #1
+    fmov d0, x9
+    ret
+.size copysign, .-copysign
+
 .section .note.GNU-stack,"",%progbits
