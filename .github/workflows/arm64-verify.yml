@@ -8,6 +8,7 @@ on:
       - "asmpython/_backends/arm64/**"
       - "asmpython/_runtime/abi_shims_linux_arm64.S"
       - "asmpython/_compiler/ir.py"
+      - "tests/test_arm64_cli.py"
       - "tests/test_arm64_codegen.py"
       - "tests/test_arm64_elf.py"
       - "tests/test_arm64_linux_link.py"
@@ -19,6 +20,7 @@ on:
       - "asmpython/_backends/arm64/**"
       - "asmpython/_runtime/abi_shims_linux_arm64.S"
       - "asmpython/_compiler/ir.py"
+      - "tests/test_arm64_cli.py"
       - "tests/test_arm64_codegen.py"
       - "tests/test_arm64_elf.py"
       - "tests/test_arm64_linux_link.py"
@@ -48,6 +50,7 @@ jobs:
       - name: Check Python modules
         run: |
           python -m py_compile \
+            asmpython/_backends/arm64/__main__.py \
             asmpython/_backends/arm64/encoder.py \
             asmpython/_backends/arm64/regalloc.py \
             asmpython/_backends/arm64/codegen.py \
@@ -55,10 +58,12 @@ jobs:
             asmpython/_backends/arm64/elf_inspect.py \
             asmpython/_backends/arm64/linux_link.py \
             asmpython/_backends/arm64/module_codegen.py \
+            asmpython/_backends/arm64/source_build.py \
             asmpython/_backends/arm64/_verify_encoder.py \
             asmpython/_backends/arm64/_verify_elf.py \
             asmpython/_backends/arm64/_verify_source.py \
             asmpython/_backends/arm64/_verify_print.py \
+            tests/test_arm64_cli.py \
             tests/test_arm64_codegen.py \
             tests/test_arm64_elf.py \
             tests/test_arm64_linux_link.py \
@@ -68,9 +73,10 @@ jobs:
       - name: Verify instruction encoder against GNU assembler
         run: python -m asmpython._backends.arm64._verify_encoder
 
-      - name: Run ARM64 structure and codegen tests
+      - name: Run ARM64 structure, CLI, and codegen tests
         run: |
           python -m unittest \
+            tests.test_arm64_cli \
             tests.test_arm64_codegen \
             tests.test_arm64_elf \
             tests.test_arm64_linux_link \
@@ -105,6 +111,7 @@ jobs:
       - name: Check and run focused tests
         run: |
           python -m py_compile \
+            asmpython/_backends/arm64/__main__.py \
             asmpython/_backends/arm64/encoder.py \
             asmpython/_backends/arm64/regalloc.py \
             asmpython/_backends/arm64/codegen.py \
@@ -112,15 +119,18 @@ jobs:
             asmpython/_backends/arm64/elf_inspect.py \
             asmpython/_backends/arm64/linux_link.py \
             asmpython/_backends/arm64/module_codegen.py \
+            asmpython/_backends/arm64/source_build.py \
             asmpython/_backends/arm64/_verify_elf.py \
             asmpython/_backends/arm64/_verify_source.py \
             asmpython/_backends/arm64/_verify_print.py \
+            tests/test_arm64_cli.py \
             tests/test_arm64_codegen.py \
             tests/test_arm64_elf.py \
             tests/test_arm64_linux_link.py \
             tests/test_arm64_module_codegen.py \
             tests/test_arm64_source_codegen.py
           python -m unittest \
+            tests.test_arm64_cli \
             tests.test_arm64_codegen \
             tests.test_arm64_elf \
             tests.test_arm64_linux_link \
