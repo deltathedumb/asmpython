@@ -1,41 +1,53 @@
-# Design Issue: PyPI Package Resolution
+# PyPI Package Resolution
 
-## Current State (as of 2026-07-19)
+## Resolved Design (beta, 2026-07-19)
 
-The `asmpython pypi install/uninstall/list` commands (commit `b3dc5258`) maintain a **separate package installation system** from Python's standard pip:
-- Packages are installed to `.asmpython_pypi_packages.json` manifest
-- Separate from `pip`'s site-packages
-- Only used by pyinbin fallback as import roots
+asmpython now uses Python's package ecosystem directly. There is no independent
+PyPI installation store, package manifest, or `pypi_libs` directory.
 
-## Correct Design (User's Intent)
+Install Python dependencies with the interpreter that runs the compiler:
 
-asmpython should integrate with **Python's own package ecosystem**:
+```text
+python -m pip install <package>
+```
 
-1. **Use `pip install`** — packages go into Python's site-packages (standard location)
-2. **Native compiler resolves from site-packages** — when compiling `import six`, look up six from site-packages first (after checking asmpython stdlib)
-3. **Pyinbin also uses site-packages** — for runtime imports
-4. **Only dynamic imports use pyinbin** — `importlib.import_module()` evaluated at runtime → handled by pyinbin interpreter
+The normal `asmpython` command and `python -m asmpython` then discover those
+packages from that interpreter's `site-packages` / `dist-packages` roots.
 
-## Why This Matters
+## Resolution Policy
 
-- **User expectation**: `pip install six; asmpython build myscript.py` should just work
-- **No separate install step**: Don't require `asmpython pypi install six` alongside pip
-- **Correct fallback semantics**: native compilation for static imports, pyinbin only for dynamic ones
-- **Python ecosystem alignment**: asmpython becomes a Python compiler, not a fork of Python's packaging
+1. asmpython's bundled source and FFI standard library is authoritative.
+2. Non-stdlib project modules resolve as normal project source.
+3. Third-party static imports resolve from the active interpreter's pip roots.
+4. Only an actual dynamic import operation may enable pyinbin fallback.
 
-## Current Gap
+Comments, string literals, `eval`, and `exec` do not authorize fallback. Dynamic
+operations such as `__import__(name)` and `importlib.import_module(name)` do.
 
-`program.py`'s `_resolve_user_module()` only searches the user's project directory. It needs to also search Python's site-packages via `sysconfig.get_path("purelib")` or similar.
+## Native vs. Dynamic Imports
 
-## Recommendation
+Static imports are compiled through the native whole-program loader. A
+pure-Python package installed by pip is parsed and merged like project source,
+including package-relative imports and imported module constants.
 
-The `asmpython pypi install` command should either:
-1. **Be deprecated** — rely on pip entirely, or
-2. **Become a convenience wrapper** — just runs `pip install` and prints the location
+A pip-installed module that uses syntax outside the native compiler's supported
+surface fails with a native-import diagnostic. It is not silently executed by
+pyinbin merely because it came from PyPI.
 
-Either way, the native compiler and pyinbin need to resolve from site-packages as their primary import source (after asmpython's own stdlib override).
+Compiled CPython extension modules (`.pyd`, `.so`, `.dylib`) are rejected
+explicitly because asmpython does not implement the CPython C extension ABI.
 
-## Related Work
+When a reachable source file performs a dynamic import and native compilation
+rejects the program, pyinbin receives the same site-packages roots. Verified
+pyinbin bundle modules remain first; a module absent from the bundle may then
+resolve from explicit roots and pip-installed source.
 
-- sema.py already has `_load_module()` for FFI binding lookup, but this is only for stdlib modules with `STDLIB_BINDINGS`
-- Need parallel logic for user-installed packages: site-packages resolution with fallback to pyinbin for uncompilable cases
+## Removed Private System
+
+The public `asmpython pypi install|uninstall|list` path is retired and reports a
+migration message directing users to `python -m pip`. The old private helper API
+is a non-operational compatibility shim that only raises the same migration
+error; it does not download, extract, track, list, or remove package files.
+
+Legacy `project.json` fields `pypi_packages` and `pypi_dir` are ignored as unknown
+fields and are no longer emitted when a project manifest is saved.
