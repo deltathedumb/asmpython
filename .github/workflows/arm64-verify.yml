@@ -6,40 +6,16 @@ on:
     branches: [beta]
     paths:
       - "asmpython/_backends/arm64/**"
-      - "asmpython/_runtime/abi_shims_linux_arm64.S"
-      - "asmpython/_runtime/abi_strings_linux_arm64.S"
-      - "asmpython/_runtime/abi_string_search_linux_arm64.S"
+      - "asmpython/_runtime/*linux_arm64.S"
       - "asmpython/_compiler/ir.py"
-      - "tests/test_arm64_cli.py"
-      - "tests/test_arm64_codegen.py"
-      - "tests/test_arm64_elf.py"
-      - "tests/test_arm64_hash.py"
-      - "tests/test_arm64_linux_link.py"
-      - "tests/test_arm64_module_codegen.py"
-      - "tests/test_arm64_runtime_manifest.py"
-      - "tests/test_arm64_source_codegen.py"
-      - "tests/test_arm64_string_find.py"
-      - "tests/test_arm64_string_remove.py"
-      - "tests/test_arm64_string_repeat.py"
+      - "tests/test_arm64_*.py"
       - ".github/workflows/arm64-verify.yml"
   pull_request:
     paths:
       - "asmpython/_backends/arm64/**"
-      - "asmpython/_runtime/abi_shims_linux_arm64.S"
-      - "asmpython/_runtime/abi_strings_linux_arm64.S"
-      - "asmpython/_runtime/abi_string_search_linux_arm64.S"
+      - "asmpython/_runtime/*linux_arm64.S"
       - "asmpython/_compiler/ir.py"
-      - "tests/test_arm64_cli.py"
-      - "tests/test_arm64_codegen.py"
-      - "tests/test_arm64_elf.py"
-      - "tests/test_arm64_hash.py"
-      - "tests/test_arm64_linux_link.py"
-      - "tests/test_arm64_module_codegen.py"
-      - "tests/test_arm64_runtime_manifest.py"
-      - "tests/test_arm64_source_codegen.py"
-      - "tests/test_arm64_string_find.py"
-      - "tests/test_arm64_string_remove.py"
-      - "tests/test_arm64_string_repeat.py"
+      - "tests/test_arm64_*.py"
       - ".github/workflows/arm64-verify.yml"
 
 permissions:
@@ -58,57 +34,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user
-      - name: Check Python modules
+      - name: Compile and run focused ARM64 tests
         run: |
-          python -m py_compile \
-            asmpython/_backends/arm64/__main__.py \
-            asmpython/_backends/arm64/encoder.py \
-            asmpython/_backends/arm64/regalloc.py \
-            asmpython/_backends/arm64/codegen.py \
-            asmpython/_backends/arm64/elf.py \
-            asmpython/_backends/arm64/elf_inspect.py \
-            asmpython/_backends/arm64/linux_link.py \
-            asmpython/_backends/arm64/module_codegen.py \
-            asmpython/_backends/arm64/runtime_manifest.py \
-            asmpython/_backends/arm64/source_build.py \
-            asmpython/_backends/arm64/_verify_encoder.py \
-            asmpython/_backends/arm64/_verify_elf.py \
-            asmpython/_backends/arm64/_verify_hash.py \
-            asmpython/_backends/arm64/_verify_print.py \
-            asmpython/_backends/arm64/_verify_scalars.py \
-            asmpython/_backends/arm64/_verify_source.py \
-            asmpython/_backends/arm64/_verify_string_find.py \
-            asmpython/_backends/arm64/_verify_string_remove.py \
-            asmpython/_backends/arm64/_verify_string_search.py \
-            asmpython/_backends/arm64/_verify_string_repeat.py \
-            tests/test_arm64_cli.py \
-            tests/test_arm64_codegen.py \
-            tests/test_arm64_elf.py \
-            tests/test_arm64_hash.py \
-            tests/test_arm64_linux_link.py \
-            tests/test_arm64_module_codegen.py \
-            tests/test_arm64_runtime_manifest.py \
-            tests/test_arm64_source_codegen.py \
-            tests/test_arm64_string_find.py \
-            tests/test_arm64_string_remove.py \
-            tests/test_arm64_string_repeat.py
+          python -m compileall -q asmpython/_backends/arm64
+          python -m unittest discover -s tests -p 'test_arm64_*.py' -v
       - name: Verify instruction encoder against GNU assembler
         run: python -m asmpython._backends.arm64._verify_encoder
-      - name: Run ARM64 structure, CLI, and codegen tests
-        run: |
-          python -m unittest \
-            tests.test_arm64_cli \
-            tests.test_arm64_codegen \
-            tests.test_arm64_elf \
-            tests.test_arm64_hash \
-            tests.test_arm64_linux_link \
-            tests.test_arm64_module_codegen \
-            tests.test_arm64_runtime_manifest \
-            tests.test_arm64_source_codegen \
-            tests.test_arm64_string_find \
-            tests.test_arm64_string_remove \
-            tests.test_arm64_string_repeat \
-            -v
       - name: Link and execute generated IR through QEMU
         run: python -m asmpython._backends.arm64._verify_elf --mode cross
       - name: Compile source and execute through QEMU
@@ -127,6 +58,8 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_string_remove --mode cross
       - name: Verify Unicode find and rfind through QEMU
         run: python -m asmpython._backends.arm64._verify_string_find --mode cross
+      - name: Verify Unicode replacement through QEMU
+        run: python -m asmpython._backends.arm64._verify_string_replace --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -140,52 +73,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes binutils strace
-      - name: Check and run focused tests
+      - name: Compile and run focused ARM64 tests
         run: |
-          python -m py_compile \
-            asmpython/_backends/arm64/__main__.py \
-            asmpython/_backends/arm64/encoder.py \
-            asmpython/_backends/arm64/regalloc.py \
-            asmpython/_backends/arm64/codegen.py \
-            asmpython/_backends/arm64/elf.py \
-            asmpython/_backends/arm64/elf_inspect.py \
-            asmpython/_backends/arm64/linux_link.py \
-            asmpython/_backends/arm64/module_codegen.py \
-            asmpython/_backends/arm64/runtime_manifest.py \
-            asmpython/_backends/arm64/source_build.py \
-            asmpython/_backends/arm64/_verify_elf.py \
-            asmpython/_backends/arm64/_verify_hash.py \
-            asmpython/_backends/arm64/_verify_print.py \
-            asmpython/_backends/arm64/_verify_scalars.py \
-            asmpython/_backends/arm64/_verify_source.py \
-            asmpython/_backends/arm64/_verify_string_find.py \
-            asmpython/_backends/arm64/_verify_string_remove.py \
-            asmpython/_backends/arm64/_verify_string_search.py \
-            asmpython/_backends/arm64/_verify_string_repeat.py \
-            tests/test_arm64_cli.py \
-            tests/test_arm64_codegen.py \
-            tests/test_arm64_elf.py \
-            tests/test_arm64_hash.py \
-            tests/test_arm64_linux_link.py \
-            tests/test_arm64_module_codegen.py \
-            tests/test_arm64_runtime_manifest.py \
-            tests/test_arm64_source_codegen.py \
-            tests/test_arm64_string_find.py \
-            tests/test_arm64_string_remove.py \
-            tests/test_arm64_string_repeat.py
-          python -m unittest \
-            tests.test_arm64_cli \
-            tests.test_arm64_codegen \
-            tests.test_arm64_elf \
-            tests.test_arm64_hash \
-            tests.test_arm64_linux_link \
-            tests.test_arm64_module_codegen \
-            tests.test_arm64_runtime_manifest \
-            tests.test_arm64_source_codegen \
-            tests.test_arm64_string_find \
-            tests.test_arm64_string_remove \
-            tests.test_arm64_string_repeat \
-            -v
+          python -m compileall -q asmpython/_backends/arm64
+          python -m unittest discover -s tests -p 'test_arm64_*.py' -v
       - name: Link and execute generated IR natively
         run: python -m asmpython._backends.arm64._verify_elf --mode native
       - name: Compile source and execute natively
@@ -204,3 +95,5 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_string_remove --mode native
       - name: Verify Unicode find and rfind natively
         run: python -m asmpython._backends.arm64._verify_string_find --mode native
+      - name: Verify Unicode replacement natively
+        run: python -m asmpython._backends.arm64._verify_string_replace --mode native
