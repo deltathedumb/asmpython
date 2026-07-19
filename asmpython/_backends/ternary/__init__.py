@@ -44,6 +44,12 @@ from typing import Any
 from . import encoder as E
 from .codegen import TernaryFuncCodegen
 from ..._compiler.ir import ModuleBackend
+from ..._compiler.unpack_normalize import install_ir_lowering_prepass
+
+
+# driver.py imports ir_lower before resolving this backend. Install the same
+# target-neutral typed-unpack prepass used by x86-64 before lower_module runs.
+install_ir_lowering_prepass()
 
 
 # ── CLI args ──────────────────────────────────────────────────────────────────
@@ -52,7 +58,7 @@ requested_args: list[dict] = [
     {"name": "--load-addr", "type": int, "default": 0,
      "help": "Base RAM address where the binary will be loaded (default 0)."},
     {"name": "--frame-addr", "type": int, "default": 4000,
-     "help": "Base RAM address for static alloca frames (default 4000)."},
+     "help": "Base RAM address for static alloca slots (default 4000)."},
     {"name": "--lib", "action": "store_true", "default": False,
      "help": "Emit RET instead of HALT in entry stub (for programs loaded by kernel)."},
 ]
