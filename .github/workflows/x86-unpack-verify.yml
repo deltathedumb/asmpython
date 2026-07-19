@@ -1,19 +1,23 @@
-name: Verify x86 literal unpacking
+name: Verify typed unpacking
 
 on:
   push:
     branches: [beta]
     paths:
+      - "asmpython/_compiler/unpack_normalize.py"
       - "asmpython/_backends/x86_64/__init__.py"
       - "asmpython/_backends/x86_64/unpack_normalize.py"
+      - "asmpython/_backends/arm64/source_build.py"
       - "tests/test_x86_unpack_normalize.py"
       - "tests/cases/440_str_unpack.py"
       - "tests/cases/63_tuple_unpack.py"
       - ".github/workflows/x86-unpack-verify.yml"
   pull_request:
     paths:
+      - "asmpython/_compiler/unpack_normalize.py"
       - "asmpython/_backends/x86_64/__init__.py"
       - "asmpython/_backends/x86_64/unpack_normalize.py"
+      - "asmpython/_backends/arm64/source_build.py"
       - "tests/test_x86_unpack_normalize.py"
       - "tests/cases/440_str_unpack.py"
       - "tests/cases/63_tuple_unpack.py"
@@ -38,8 +42,10 @@ jobs:
       - name: Compile changed Python files
         run: |
           python -m py_compile \
+            asmpython/_compiler/unpack_normalize.py \
             asmpython/_backends/x86_64/__init__.py \
             asmpython/_backends/x86_64/unpack_normalize.py \
+            asmpython/_backends/arm64/source_build.py \
             tests/test_x86_unpack_normalize.py
       - name: Run IR normalization tests
         run: python -m unittest -v tests.test_x86_unpack_normalize
