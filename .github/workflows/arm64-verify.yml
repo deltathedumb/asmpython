@@ -9,6 +9,7 @@ on:
       - "asmpython/_compiler/ir.py"
       - "tests/test_arm64_codegen.py"
       - "tests/test_arm64_elf.py"
+      - "tests/test_arm64_module_codegen.py"
       - ".github/workflows/arm64-verify.yml"
   pull_request:
     paths:
@@ -16,6 +17,7 @@ on:
       - "asmpython/_compiler/ir.py"
       - "tests/test_arm64_codegen.py"
       - "tests/test_arm64_elf.py"
+      - "tests/test_arm64_module_codegen.py"
       - ".github/workflows/arm64-verify.yml"
 
 permissions:
@@ -44,16 +46,23 @@ jobs:
             asmpython/_backends/arm64/regalloc.py \
             asmpython/_backends/arm64/codegen.py \
             asmpython/_backends/arm64/elf.py \
+            asmpython/_backends/arm64/module_codegen.py \
             asmpython/_backends/arm64/_verify_encoder.py \
             asmpython/_backends/arm64/_verify_elf.py \
             tests/test_arm64_codegen.py \
-            tests/test_arm64_elf.py
+            tests/test_arm64_elf.py \
+            tests/test_arm64_module_codegen.py
 
       - name: Verify instruction encoder against GNU assembler
         run: python -m asmpython._backends.arm64._verify_encoder
 
       - name: Run ARM64 structure and codegen tests
-        run: python -m unittest tests.test_arm64_codegen tests.test_arm64_elf -v
+        run: |
+          python -m unittest \
+            tests.test_arm64_codegen \
+            tests.test_arm64_elf \
+            tests.test_arm64_module_codegen \
+            -v
 
       - name: Link and execute through QEMU
         run: python -m asmpython._backends.arm64._verify_elf --mode cross
@@ -80,10 +89,16 @@ jobs:
             asmpython/_backends/arm64/regalloc.py \
             asmpython/_backends/arm64/codegen.py \
             asmpython/_backends/arm64/elf.py \
+            asmpython/_backends/arm64/module_codegen.py \
             asmpython/_backends/arm64/_verify_elf.py \
             tests/test_arm64_codegen.py \
-            tests/test_arm64_elf.py
-          python -m unittest tests.test_arm64_codegen tests.test_arm64_elf -v
+            tests/test_arm64_elf.py \
+            tests/test_arm64_module_codegen.py
+          python -m unittest \
+            tests.test_arm64_codegen \
+            tests.test_arm64_elf \
+            tests.test_arm64_module_codegen \
+            -v
 
       - name: Link and execute natively
         run: python -m asmpython._backends.arm64._verify_elf --mode native
