@@ -38,6 +38,10 @@ RUNTIME_SLICES = (
         frozenset({"_math_modf_frac", "_math_modf_int"}),
     ),
     RuntimeSlice(
+        "abi_float_frexp_linux_arm64.S",
+        frozenset({"_math_frexp_e", "_math_frexp_m"}),
+    ),
+    RuntimeSlice(
         "abi_int_math_linux_arm64.S",
         frozenset({"_math_gcd", "_math_lcm"}),
     ),
