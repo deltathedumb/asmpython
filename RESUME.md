@@ -27,12 +27,12 @@ rather than blocking synchronously.
 
 ## Native test baseline
 
-Last full baseline recorded 2026-07-19:
+Last complete two-backend baseline recorded 2026-07-19:
 
 - `python -m tests.runner --backend x86-64 --no-pyinbin-fallback -j 8`
 - `python -m tests.runner -j 8`
 
-Both were **454/461**, with the same seven known failures:
+Both were **454/461**, with the same seven failures at that checkpoint:
 
 - `296_collections_namedtuple.py`
 - `439`/`447` closures/nonlocal
@@ -40,9 +40,22 @@ Both were **454/461**, with the same seven known failures:
 - `53_dynamic_import.py`
 - `75_assembly_func.py` (legacy-only by design)
 
-Zero regressions remains the bar for shared compiler or production-backend
-changes. Current ARM64 work is isolated, but the complete suites must be rerun
-before ARM64 becomes driver-visible.
+A target-neutral typed-unpack normalizer has since landed for tuple literals,
+typed tuple names, and string literals, and focused x86/ARM64 tests are committed.
+Do not rewrite the historical baseline as passed until both complete runners have
+actually been rerun and their failure lists compared. Zero regressions remains the
+bar for shared compiler or production-backend changes.
+
+## Import and package policy
+
+- Python packages are installed by the active interpreter's pip, not by a private
+  asmpython package store.
+- Static import resolution is native-first: bundled asmpython stdlib, project
+  source, then the active interpreter's `site-packages`/`dist-packages`.
+- Only genuinely dynamic imports are eligible for pyinbin fallback.
+- Pure-Python site packages are merged into whole-program native compilation;
+  CPython C-extension modules are rejected explicitly.
+- The retired `asmpython pypi` APIs are migration-error shims only.
 
 ## ARM64 Stage 1
 
@@ -69,8 +82,11 @@ confirm calls, globals, ADRP+ADD relaxation, frames, and symbol resolution.
 
 ### Explicit source/object/executable API
 
-`source_build.py` runs single-file source through lexer, parser, sema, IR
-lowering, and ARM64 object generation.
+`source_build.py` runs single-file source through lexer, parser, sema, typed-unpack
+normalization, IR lowering, and ARM64 object generation. Because the backend is
+still gated, ARM64-only source bindings may be installed as a temporary sema
+overlay and must be restored immediately afterward; tests assert no binding leaks
+into the shared x86/legacy registry.
 
 `linux_link.py` provides native/cross tool discovery, assembly, relocatable
 runtime merging, start-object generation, static linking, source/IR executable
@@ -131,6 +147,11 @@ not split complete code points.
   - `ceil`, `floor`, and `trunc`
   - `fdim`
   - `nextafter`
+- `abi_float_ulp_linux_arm64.S`
+  - `_math_ulp`, exact from binary64 exponent bits
+  - preserves NaN payload/sign, maps negative finite values by magnitude,
+    returns +inf for either infinity, minimum positive subnormal for zero and
+    subnormals, and exact spacing for every normal including maximum finite
 - `abi_float_classify_linux_arm64.S`
   - `_math_isnan`, `_math_isinf`, `_math_isfinite`
 - `abi_float_angles_linux_arm64.S`
@@ -143,9 +164,11 @@ not split complete code points.
   - exact mantissa/exponent components
   - CLZ-based subnormal normalization, signed zero, infinity, and NaN handling
 
-`math.nextafter` is now a real source binding. The previous C `round` export and
-`math.round` probe were removed because CPython has no `math.round`; Python's
-rounding API remains the builtin `round` with its own semantics.
+`math.nextafter` is a shared source binding. `math.ulp` is currently exposed only
+inside the gated ARM64 source API through a temporary binding overlay; do not add
+it to the shared registry until x86-64 and legacy have coherent implementations.
+The previous C `round` export/probe was removed because CPython has no
+`math.round`; Python rounding remains the builtin `round`.
 
 These helpers expand useful float computation without enabling float printing.
 Float formatting remains separately gated.
@@ -179,6 +202,8 @@ currently include:
 - angle factors and operation order,
 - ties-to-even nearbyint vectors,
 - exact nextafter one-ULP stepping across 20,000 random pairs,
+- exact `math.ulp` across 20,000 committed random binary64 values plus special
+  cases; an additional local audit compared 200,008 values against CPython,
 - thousands of gcd/lcm comparisons in safe int64 range,
 - 4,000 finite `modf` bit patterns plus nonfinite cases,
 - 10,000 `frexp` bit patterns including subnormals and nonfinite values.
@@ -194,10 +219,16 @@ Independent WSL2 verification on 2026-07-19 directly observed:
 - exact exit/stdout behavior was visible through real Linux syscalls under
   `strace`, including distinct formatting buffers and UTF-8 count behavior.
 
-All later probes have independently verified source lowering surfaces, assembly,
-disassembly, relocatable links, static links, and reference models, with native
-and QEMU jobs committed. Do **not** claim those later probes executed until a
-later workflow or WSL2 observation records them.
+For `_math_ulp`, Clang 17's independent AArch64 integrated assembler accepted the
+source and LLVM disassembly confirmed the intended 25-instruction, 100-byte
+function. The native/QEMU probe is committed but has **not** been observed running
+in this session. Do not claim it executed until a workflow or WSL2 observation
+records it.
+
+All other later probes have independently verified source lowering surfaces,
+assembly, disassembly, relocatable links, static links, and reference models, with
+native and QEMU jobs committed. Do **not** claim those later probes executed until
+a later workflow or WSL2 observation records them.
 
 ## Deliberate gates
 
@@ -232,7 +263,8 @@ container, and shortest-round-trip formatting surfaces explicitly gated.
 ## Broader known gaps
 
 - `296_collections_namedtuple.py`
-- x86-64 closures/nonlocal (`439`/`447`) and str/tuple unpack (`440`/`63`)
+- x86-64 closures/nonlocal (`439`/`447`)
+- full baseline refresh after typed unpack (`440`/`63`) landed
 - real memory management/refcounting
 - stale self-hosting measurement
 - macOS and bare-metal AArch64 targets
@@ -243,7 +275,7 @@ container, and shortest-round-trip formatting surfaces explicitly gated.
 ## Resume notes
 
 - `docs/EXTENSIONS.md` is historical only.
-- `docs/ABI.md` is the formal binary ABI reference.
+- `docs/ABI.md` is the formal, versioned binary ABI reference.
 - This may be a shared `beta` workspace; check fresh blob SHAs before editing.
 - `AGENTS.md`, `AGENT_INSTRUCTIONS.md`, and `SESSION_SUMMARY_2026_07_19.md`
   contain cross-cutting rules and the independent verification handoff.
