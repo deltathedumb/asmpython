@@ -19,11 +19,11 @@ from math import copysign, inf, isinf, isnan, nan, trunc
 
 
 def main() -> int:
-    if int(trunc(2.9)) != 2:
+    if trunc(2.9) != 2.0:
         return 11
-    if int(trunc(-2.9)) != -2:
+    if trunc(-2.9) != -2.0:
         return 12
-    if int(copysign(1.0, trunc(-0.2))) != -1:
+    if copysign(1.0, trunc(-0.2)) != -1.0:
         return 13
     if not isinf(trunc(inf)):
         return 14
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
         print("[ OK ] trunc finite, signed-zero, infinity, and NaN cases matched")
-        print("[ OK ] exit-code checks avoided bool-formatting dependencies")
+        print("[ OK ] direct double comparisons avoided unrelated cast/format helpers")
         print(f"[ OK ] {mode_name} trunc matched {_EXPECTED_STDOUT!r}")
     return 0
 
