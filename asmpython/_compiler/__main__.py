@@ -1,9 +1,10 @@
 """CLI entry point: `python -m asmpython <command> ...` or `asmpython.bat ...`.
 
-Three subcommands:
+Subcommands:
 
   asmpython build <source.py | project.json> [options]
   asmpython package install|uninstall <name | project.json> [options]
+  asmpython pypi install|uninstall|list <name | project.json> [options]
   asmpython project new [name] [options]
 
 For backward compatibility, a bare `asmpython <source.py> [options]` (no
@@ -27,6 +28,12 @@ from .packages import (
     install_package,
     run_project_init_script,
     uninstall_package,
+)
+from .pypi import (
+    PypiError,
+    install_pypi_package,
+    list_pypi_packages,
+    uninstall_pypi_package,
 )
 from .project import (
     ProjectConfig,
@@ -202,7 +209,7 @@ Run `asmpython <command> --help` for that command's full option list.
 def _build_top_parser() -> argparse.ArgumentParser:
     ap = _ColorParser(
         prog="asmpython",
-        usage="asmpython <build|package|project> ... (or just `asmpython <source.py>`)",
+        usage="asmpython <build|package|pypi|project> ... (or just `asmpython <source.py>`)",
         description=_TOP_DESCRIPTION,
         epilog=_TOP_EPILOG,
         formatter_class=_AsmPythonHelp,
@@ -228,6 +235,7 @@ def _build_top_parser() -> argparse.ArgumentParser:
     subparsers = ap.add_subparsers(dest="command")
     _add_build_subparser(subparsers)
     _add_package_subparser(subparsers)
+    _add_pypi_subparser(subparsers)
     _add_pyinbin_subparser(subparsers)
     _add_project_subparser(subparsers)
     return ap
@@ -805,8 +813,13 @@ def cmd_build(args: argparse.Namespace) -> int:
                 )
                 return 1
 
+        pypi_roots: list[Path] = []
+        if cfg is not None and cfg.pypi_packages:
+            assert project_dir is not None
+            pypi_roots.append(project_dir / cfg.pypi_dir)
+
         try:
-            run_source(source_path, bundle=bundle)
+            run_source(source_path, bundle=bundle, import_roots=pypi_roots or None)
         except Exception as fallback_error:
             print(
                 f"asmpython: native compilation failed: {native_error}\n"
@@ -1090,6 +1103,211 @@ def cmd_package(args: argparse.Namespace) -> int:
     return 2
 
 
+# ── `pypi` subcommand ────────────────────────────────────────────────────────
+
+_PYPI_DESCRIPTION = """\
+Install real PyPI packages for pyinbin (run-through-interpreter) imports.
+
+v1 is deliberately narrow: only pure-Python wheels (no compiled extension
+modules), no sdist builds, and no transitive dependency resolution -- every
+package your program imports must be installed explicitly. Installed
+packages are implicit pyinbin import roots for `asmpython build` and
+`asmpython pyinbin run`; this is a separate system from `asmpython package`
+(prebuilt binary deps like SDL2).
+"""
+
+_PYPI_EPILOG = """\
+Examples:
+
+  Install a package into ./pypi_libs/ (or the cwd project's pypi_dir):
+      asmpython pypi install requests
+
+  Pin a specific version:
+      asmpython pypi install six --version 1.16.0
+
+  Install into an explicit directory:
+      asmpython pypi install six --dir vendor_py/
+
+  Install everything a project depends on:
+      asmpython pypi install myproj/project.json
+
+  Remove a package:
+      asmpython pypi uninstall six
+
+  List installed packages:
+      asmpython pypi list
+"""
+
+
+def _add_pypi_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
+    ap = subparsers.add_parser(
+        "pypi",
+        usage="asmpython pypi <install|uninstall|list> <name|project.json> [options]",
+        description=_PYPI_DESCRIPTION,
+        epilog=_PYPI_EPILOG,
+        formatter_class=_AsmPythonHelp,
+        add_help=False,
+    )
+    meta_grp = ap.add_argument_group("information")
+    meta_grp.add_argument("-h", "--help", action="help", help="show this help message and exit")
+
+    pypi_sub = ap.add_subparsers(dest="pypi_action")
+
+    install_p = pypi_sub.add_parser(
+        "install",
+        formatter_class=_AsmPythonHelp,
+        help="install a PyPI package (pure-Python wheel only), or every package listed in a project.json",
+    )
+    install_p.add_argument("target", help="PyPI package name, or path to a project JSON file")
+    install_p.add_argument(
+        "--version",
+        default=None,
+        help="pin to a specific version (default: PyPI's latest release)",
+    )
+    install_p.add_argument(
+        "--dir",
+        type=Path,
+        default=None,
+        help="install destination (default: a project.json in the cwd's "
+        "pypi_dir, else ./pypi_libs/)",
+    )
+
+    uninstall_p = pypi_sub.add_parser(
+        "uninstall",
+        formatter_class=_AsmPythonHelp,
+        help="remove a previously-installed PyPI package, or every package listed in a project.json",
+    )
+    uninstall_p.add_argument("target", help="PyPI package name, or path to a project JSON file")
+    uninstall_p.add_argument(
+        "--dir",
+        type=Path,
+        default=None,
+        help="install directory to remove from (default: a project.json in "
+        "the cwd's pypi_dir, else ./pypi_libs/)",
+    )
+
+    list_p = pypi_sub.add_parser(
+        "list",
+        formatter_class=_AsmPythonHelp,
+        help="list PyPI packages installed into a directory",
+    )
+    list_p.add_argument(
+        "--dir",
+        type=Path,
+        default=None,
+        help="directory to list (default: a project.json in the cwd's "
+        "pypi_dir, else ./pypi_libs/)",
+    )
+
+    return ap
+
+
+def _resolve_default_pypi_dir(explicit: Path | None) -> Path:
+    if explicit is not None:
+        return explicit
+    proj = find_default_project(Path.cwd())
+    if proj is not None:
+        try:
+            cfg = load_project(proj)
+            return proj.parent / cfg.pypi_dir
+        except ProjectError:
+            pass
+    return Path("pypi_libs")
+
+
+def _pypi_install_one(name: str, dest_dir: Path, *, version: str | None) -> bool:
+    try:
+        resolved_version, installed = install_pypi_package(name, dest_dir, version=version)
+    except PypiError as e:
+        print(f"asmpython: pypi install {name!r} failed: {e}", file=sys.stderr)
+        return False
+    print(f"asmpython: installed {name} {resolved_version} -> {dest_dir}/ ({len(installed)} file(s))")
+    return True
+
+
+def _pypi_uninstall_one(name: str, dest_dir: Path) -> bool:
+    try:
+        removed = uninstall_pypi_package(name, dest_dir)
+    except PypiError as e:
+        print(f"asmpython: pypi uninstall {name!r} failed: {e}", file=sys.stderr)
+        return False
+    print(
+        f"asmpython: uninstalled {name} from {dest_dir}/ "
+        f"({len(removed)} file(s) removed)" if removed else
+        f"asmpython: {name} was not installed in {dest_dir}/"
+    )
+    return True
+
+
+def cmd_pypi_install(args: argparse.Namespace) -> int:
+    target_path = Path(args.target)
+    if target_path.suffix.lower() == ".json" and target_path.is_file():
+        try:
+            cfg = load_project(target_path)
+        except ProjectError as e:
+            print(f"asmpython: {args.target}: {e}", file=sys.stderr)
+            return 1
+        if not cfg.pypi_packages:
+            print(f"asmpython: {args.target}: no pypi_packages listed", file=sys.stderr)
+            return 0
+        dest_dir = target_path.resolve().parent / cfg.pypi_dir
+        ok = True
+        for name in cfg.pypi_packages:
+            ok = _pypi_install_one(name, dest_dir, version=None) and ok
+        return 0 if ok else 1
+
+    dest_dir = _resolve_default_pypi_dir(args.dir)
+    return 0 if _pypi_install_one(args.target, dest_dir, version=args.version) else 1
+
+
+def cmd_pypi_uninstall(args: argparse.Namespace) -> int:
+    target_path = Path(args.target)
+    if target_path.suffix.lower() == ".json" and target_path.is_file():
+        try:
+            cfg = load_project(target_path)
+        except ProjectError as e:
+            print(f"asmpython: {args.target}: {e}", file=sys.stderr)
+            return 1
+        if not cfg.pypi_packages:
+            print(f"asmpython: {args.target}: no pypi_packages listed", file=sys.stderr)
+            return 0
+        dest_dir = target_path.resolve().parent / cfg.pypi_dir
+        ok = True
+        for name in cfg.pypi_packages:
+            ok = _pypi_uninstall_one(name, dest_dir) and ok
+        return 0 if ok else 1
+
+    dest_dir = _resolve_default_pypi_dir(args.dir)
+    return 0 if _pypi_uninstall_one(args.target, dest_dir) else 1
+
+
+def cmd_pypi_list(args: argparse.Namespace) -> int:
+    dest_dir = _resolve_default_pypi_dir(args.dir)
+    manifest = list_pypi_packages(dest_dir)
+    if not manifest:
+        print(f"asmpython: no PyPI packages installed in {dest_dir}/")
+        return 0
+    for entry in manifest.values():
+        print(f"{entry['name']} {entry['version']} ({len(entry.get('files', []))} file(s))")
+    return 0
+
+
+def cmd_pypi(args: argparse.Namespace) -> int:
+    action = args.pypi_action
+    if action == "install":
+        return cmd_pypi_install(args)
+    if action == "uninstall":
+        return cmd_pypi_uninstall(args)
+    if action == "list":
+        return cmd_pypi_list(args)
+    print(
+        "asmpython: error: `pypi` requires a subcommand (install/uninstall/list); "
+        "try `asmpython pypi --help`",
+        file=sys.stderr,
+    )
+    return 2
+
+
 # ── `pyinbin` subcommand ───────────────────────────────────────────────────────
 
 _PYINBIN_DESCRIPTION = """\
@@ -1343,7 +1561,7 @@ def cmd_project(args: argparse.Namespace) -> int:
 
 # ── argv preprocessing (backward-compat shorthand) ──────────────────────────────
 
-_SUBCOMMANDS = {"build", "package", "pyinbin", "project"}
+_SUBCOMMANDS = {"build", "package", "pypi", "pyinbin", "project"}
 _TOP_LEVEL_ONLY = {"-h", "--help", "-V", "--version"}
 
 
@@ -1381,6 +1599,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_build(args)
     if command == "package":
         return cmd_package(args)
+    if command == "pypi":
+        return cmd_pypi(args)
     if command == "pyinbin":
         return cmd_pyinbin(args)
     if command == "project":

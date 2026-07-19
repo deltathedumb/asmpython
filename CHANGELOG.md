@@ -17,6 +17,20 @@ deliverable.
 
 ### Added
 
+- **`asmpython pypi install|uninstall|list`** — real PyPI package installation
+  (`asmpython/_compiler/pypi.py`), resolved against PyPI's own public JSON API
+  and sha256-verified against the digest PyPI supplies for every file. v1 is
+  deliberately narrow: pure-Python wheels only (a wheel containing a
+  `.pyd`/`.so`/`.dylib` is refused, naming the specific member), no sdist
+  builds (no arbitrary code execution during install), and no transitive
+  dependency resolution (every package a program imports must be installed
+  explicitly). Installed packages become implicit pyinbin import roots via a
+  new `pypi_packages`/`pypi_dir` pair on `project.json` (default
+  `pypi_libs/`), wired into the existing `pyinbin_fallback()` path in
+  `asmpython build`. Kept as a separate system, with its own manifest
+  (`.asmpython_pypi_packages.json`), from `asmpython package` (prebuilt
+  binary deps like SDL2) — the two install fundamentally different kinds of
+  artifact under a different trust model.
 - **`docs/ABI.md`** — the first formal, versioned binary ABI specification:
   the `@assembly_func` inline-NASM calling convention and the exact
   byte-level layout of every runtime type (corrects a stale claim in

@@ -46,6 +46,11 @@ class ProjectConfig:
     # The build currently validates this contract and rejects it clearly until
     # pyinbin's package/runtime loader is available.
     pyinbin_imports: list[str] = field(default_factory=list)
+    # Real PyPI packages (`asmpython pypi install`), pure-Python wheels only,
+    # run through pyinbin. Separate from `packages` (prebuilt binary deps,
+    # e.g. SDL2) and `pyinbin_imports` (this project's own source roots).
+    pypi_packages: list[str] = field(default_factory=list)
+    pypi_dir: str = "pypi_libs"
 
     def validate(self) -> None:
         for t in self.target:
@@ -68,6 +73,10 @@ class ProjectConfig:
             if module in seen_pyinbin:
                 raise ProjectError(f"pyinbin_imports contains duplicate module root {module!r}")
             seen_pyinbin.append(module)
+        if not isinstance(self.pypi_packages, list):
+            raise ProjectError("pypi_packages must be a list of package names")
+        if not self.pypi_dir:
+            raise ProjectError("pypi_dir must be non-empty")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -86,6 +95,8 @@ class ProjectConfig:
         known.add("library_dirs")
         known.add("packages")
         known.add("pyinbin_imports")
+        known.add("pypi_packages")
+        known.add("pypi_dir")
         unknown: list = sorted([k for k in data if k not in known])
         name: str = data["name"] if "name" in data else "project"
         entry: str = data["entry"] if "entry" in data else "main.py"
@@ -98,6 +109,8 @@ class ProjectConfig:
         library_dirs: list = data["library_dirs"] if "library_dirs" in data else ["libs"]
         packages: list = data["packages"] if "packages" in data else []
         pyinbin_imports: list = data["pyinbin_imports"] if "pyinbin_imports" in data else []
+        pypi_packages: list = data["pypi_packages"] if "pypi_packages" in data else []
+        pypi_dir: str = data["pypi_dir"] if "pypi_dir" in data else "pypi_libs"
         cfg: ProjectConfig = ProjectConfig(
             name=name,
             entry=entry,
@@ -110,6 +123,8 @@ class ProjectConfig:
             library_dirs=library_dirs,
             packages=packages,
             pyinbin_imports=pyinbin_imports,
+            pypi_packages=pypi_packages,
+            pypi_dir=pypi_dir,
         )
         cfg.validate()
         return cfg, unknown
