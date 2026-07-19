@@ -1,10 +1,6 @@
-name: Locate list-repeat ABI emitter
+name: Verify Linux list-repeat ABI
 
 on:
-  push:
-    branches: [beta]
-    paths:
-      - ".github/workflows/diagnose-list-repeat.yml"
   pull_request:
     branches: [beta]
   workflow_dispatch:
@@ -13,20 +9,29 @@ permissions:
   contents: read
 
 jobs:
-  locate:
+  verify:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Locate source and tests
+      - name: Install NASM
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes nasm
+      - name: Run focused codegen regression
+        run: python -m pytest -q tests/test_linux_list_repeat_codegen.py
+      - name: Compile and execute a large repeated list
         shell: bash
         run: |
-          {
-            echo '=== runtime-list-repeat names ==='
-            grep -R -n -E '_runtime_list_repeat|list_repeat|emit_list_repeat' asmpython tests || true
-            echo '=== suspicious hard-coded allocation registers ==='
-            grep -R -n -E 'mov rcx, (24|32)|call malloc' asmpython/_compiler || true
-          } | tee list-repeat-locations.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: list-repeat-locations
-          path: list-repeat-locations.txt
+          cat > /tmp/list_repeat_probe.py <<'PY'
+          def main() -> int:
+              values = [0] * 4097
+              values[0] = 11
+              values[4096] = 31
+              print(len(values), values[0] + values[4096])
+              return 0
+          PY
+          python -m asmpython build /tmp/list_repeat_probe.py \
+            --target linux --backend legacy --no-pyinbin-fallback \
+            -o /tmp/list_repeat_probe.elf
+          /tmp/list_repeat_probe.elf | tee /tmp/list-repeat-output.txt
+          grep -qx '4097 42' /tmp/list-repeat-output.txt
