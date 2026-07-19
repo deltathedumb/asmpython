@@ -35,35 +35,66 @@ jobs:
           sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user nasm gcc file
       - name: Run exact lowering and manifest tests
         run: python -m unittest -v tests.test_arm64_list_del tests.test_driver_output_permissions
-      - name: Capture string-unpack execution
+      - name: Capture string-unpack matrix
         run: |
+          cat > /tmp/only_pqr.py <<'PY'
+          p, q, r = "abc"
+          print(p, q, r)
+          PY
+          cat > /tmp/plain_pqr.py <<'PY'
+          p = "a"
+          q = "b"
+          r = "c"
+          print(p, q, r)
+          PY
+          cat > /tmp/two_pqr.py <<'PY'
+          a, b, c = "xyz"
+          print(a, b, c)
+          p, q, r = "abc"
+          print(p, q, r)
+          PY
+          cat > /tmp/two_uvw.py <<'PY'
+          a, b, c = "xyz"
+          print(a, b, c)
+          u, v, w = "abc"
+          print(u, v, w)
+          PY
+          cat > /tmp/original.py <<'PY'
+          a, b, c = "xyz"
+          print(a, b, c)
+          p, q, r = "abc"
+          print(p, q, r)
+          h, e, l1, l2, o = "hello"
+          print(h, e, l1, l2, o)
+          PY
           set +e
-          {
-            python -m asmpython build tests/cases/440_str_unpack.py \
-              --target linux -o /tmp/str-unpack --no-pyinbin-fallback
-            build_status=$?
-            echo "build_status=$build_status"
-            ls -l /tmp/str-unpack 2>/dev/null || true
-            file /tmp/str-unpack 2>/dev/null || true
-            if [ "$build_status" -eq 0 ]; then
-              /tmp/str-unpack > /tmp/str-unpack.stdout 2> /tmp/str-unpack.stderr
-              run_status=$?
-              echo "run_status=$run_status"
-              echo '=== stdout ==='
-              cat /tmp/str-unpack.stdout
-              echo '=== stderr ==='
-              cat /tmp/str-unpack.stderr
-            fi
-          } 2>&1 | tee string-unpack-diagnostic.log
+          : > string-unpack-matrix.log
+          for name in only_pqr plain_pqr two_pqr two_uvw original; do
+            {
+              echo "=== $name ==="
+              python -m asmpython build "/tmp/$name.py" \
+                --target linux -o "/tmp/$name" --no-pyinbin-fallback
+              build_status=$?
+              echo "build_status=$build_status"
+              if [ "$build_status" -eq 0 ]; then
+                "/tmp/$name" > "/tmp/$name.stdout" 2> "/tmp/$name.stderr"
+                echo "run_status=$?"
+                echo '-- stdout text --'
+                cat "/tmp/$name.stdout"
+                echo '-- stdout bytes --'
+                od -An -tx1c "/tmp/$name.stdout"
+                echo '-- stderr --'
+                cat "/tmp/$name.stderr"
+              fi
+            } >> string-unpack-matrix.log 2>&1
+          done
+          cat string-unpack-matrix.log
           exit 0
-      - name: Upload string-unpack diagnostic
+      - name: Upload string-unpack matrix
         uses: actions/upload-artifact@v4
         with:
-          name: string-unpack-diagnostic
-          path: |
-            string-unpack-diagnostic.log
-            /tmp/str-unpack.stdout
-            /tmp/str-unpack.stderr
+          name: string-unpack-matrix
+          path: string-unpack-matrix.log
       - name: Execute valid-index list deletion through QEMU
         run: python -m asmpython._backends.arm64._verify_list_del --mode cross
 
