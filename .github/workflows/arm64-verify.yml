@@ -68,6 +68,12 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_abs --mode cross
       - name: Verify exact float copysign through QEMU
         run: python -m asmpython._backends.arm64._verify_float_copysign --mode cross
+      - name: Verify exact isnan through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_isnan --mode cross
+      - name: Verify exact isinf through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_isinf --mode cross
+      - name: Verify exact isfinite through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_isfinite --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -113,3 +119,9 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_float_abs --mode native
       - name: Verify exact float copysign natively
         run: python -m asmpython._backends.arm64._verify_float_copysign --mode native
+      - name: Verify exact isnan natively
+        run: python -m asmpython._backends.arm64._verify_float_isnan --mode native
+      - name: Verify exact isinf natively
+        run: python -m asmpython._backends.arm64._verify_float_isinf --mode native
+      - name: Verify exact isfinite natively
+        run: python -m asmpython._backends.arm64._verify_float_isfinite --mode native

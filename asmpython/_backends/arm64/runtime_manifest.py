@@ -26,6 +26,10 @@ RUNTIME_SLICES = (
         frozenset({"copysign", "fabs"}),
     ),
     RuntimeSlice(
+        "abi_float_classify_linux_arm64.S",
+        frozenset({"_math_isfinite", "_math_isinf", "_math_isnan"}),
+    ),
+    RuntimeSlice(
         "abi_strings_linux_arm64.S",
         frozenset(
             {
