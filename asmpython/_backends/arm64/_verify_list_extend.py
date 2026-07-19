@@ -19,10 +19,18 @@ def main() -> int:
     xs = [1, 2]
     xs.extend(xs)
     a, b, c, d = xs
-    print(len(xs), a, b, c, d)
+    if a != 1:
+        return 11
+    if b != 2:
+        return 12
+    if c != 1:
+        return 13
+    if d != 2:
+        return 14
+    print(len(xs))
     return 0
 """
-_EXPECTED_STDOUT = "4 1 2 1 2\n"
+_EXPECTED_STDOUT = "4\n"
 _EXPECTED_REQUIREMENTS = frozenset(
     {
         "_abi_int_to_base",
@@ -79,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
         print("[ OK ] extend reused the canonical append growth path")
         print("[ OK ] source length and buffer were snapshotted before mutation")
-        print("[ OK ] xs.extend(xs) duplicated only the original active cells")
+        print("[ OK ] exit checks observed xs.extend(xs) -> [1, 2, 1, 2]")
         print(f"[ OK ] {mode_name} stdout matched {_EXPECTED_STDOUT!r}")
         if completed.stderr:
             print(completed.stderr.strip())
