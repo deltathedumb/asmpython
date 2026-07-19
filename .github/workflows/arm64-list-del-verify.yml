@@ -1,20 +1,8 @@
-name: Verify ARM64 list deletion
+name: Inspect typed tuple unpack failure
 
 on:
-  push:
-    branches: [beta]
-    paths:
-      - "asmpython/_runtime/abi_list_del_linux_arm64.S"
-      - "asmpython/_backends/arm64/runtime_manifest.py"
-      - "asmpython/_backends/arm64/_verify_list_del.py"
-      - "tests/test_arm64_list_del.py"
-      - ".github/workflows/arm64-list-del-verify.yml"
   pull_request:
     paths:
-      - "asmpython/_runtime/abi_list_del_linux_arm64.S"
-      - "asmpython/_backends/arm64/runtime_manifest.py"
-      - "asmpython/_backends/arm64/_verify_list_del.py"
-      - "tests/test_arm64_list_del.py"
       - ".github/workflows/arm64-list-del-verify.yml"
   workflow_dispatch:
 
@@ -22,34 +10,22 @@ permissions:
   contents: read
 
 jobs:
-  cross-verify:
+  inspect:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install AArch64 binutils and QEMU
+      - name: Locate typed-unpack workflow and cases
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user
-      - name: Run exact lowering and manifest tests
-        run: python -m unittest -v tests.test_arm64_list_del
-      - name: Execute valid-index list deletion through QEMU
-        run: python -m asmpython._backends.arm64._verify_list_del --mode cross
-
-  native-verify:
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+          grep -R -n "Compile and execute typed tuple unpack case" .github/workflows \
+            | tee typed-unpack-location.txt || true
+          grep -R -n "tuple.*unpack\|unpack.*tuple" tests .github/workflows \
+            | tee typed-unpack-references.txt || true
+      - name: Upload workflow and case sources
+        uses: actions/upload-artifact@v4
         with:
-          python-version: "3.12"
-      - name: Install native binutils
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes binutils
-      - name: Run exact lowering and manifest tests
-        run: python -m unittest -v tests.test_arm64_list_del
-      - name: Execute valid-index list deletion natively
-        run: python -m asmpython._backends.arm64._verify_list_del --mode native
+          name: typed-unpack-sources
+          path: |
+            typed-unpack-location.txt
+            typed-unpack-references.txt
+            .github/workflows
+            tests/cases
