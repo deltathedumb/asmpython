@@ -22,6 +22,26 @@ RUNTIME_SLICES = (
         frozenset({"_abi_int_to_base", "printf", "strlen"}),
     ),
     RuntimeSlice(
+        "abi_float_scalar_linux_arm64.S",
+        frozenset({"copysign", "fabs", "nearbyint"}),
+    ),
+    RuntimeSlice(
+        "abi_float_classify_linux_arm64.S",
+        frozenset({"_math_isfinite", "_math_isinf", "_math_isnan"}),
+    ),
+    RuntimeSlice(
+        "abi_float_angles_linux_arm64.S",
+        frozenset({"_math_degrees", "_math_radians"}),
+    ),
+    RuntimeSlice(
+        "abi_float_modf_linux_arm64.S",
+        frozenset({"_math_modf_frac", "_math_modf_int"}),
+    ),
+    RuntimeSlice(
+        "abi_int_math_linux_arm64.S",
+        frozenset({"_math_gcd", "_math_lcm"}),
+    ),
+    RuntimeSlice(
         "abi_strings_linux_arm64.S",
         frozenset(
             {
@@ -53,6 +73,14 @@ RUNTIME_SLICES = (
     RuntimeSlice(
         "abi_string_replace_linux_arm64.S",
         frozenset({"_abi_str_replace"}),
+    ),
+    RuntimeSlice(
+        "abi_string_slice_linux_arm64.S",
+        frozenset({"_abi_str_slice"}),
+    ),
+    RuntimeSlice(
+        "abi_string_padding_linux_arm64.S",
+        frozenset({"_abi_str_zfill"}),
     ),
 )
 

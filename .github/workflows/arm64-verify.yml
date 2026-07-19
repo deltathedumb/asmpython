@@ -60,6 +60,34 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_string_find --mode cross
       - name: Verify Unicode replacement through QEMU
         run: python -m asmpython._backends.arm64._verify_string_replace --mode cross
+      - name: Verify Unicode string slicing through QEMU
+        run: python -m asmpython._backends.arm64._verify_string_slice --mode cross
+      - name: Verify Unicode zfill through QEMU
+        run: python -m asmpython._backends.arm64._verify_string_zfill --mode cross
+      - name: Verify exact float absolute value through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_abs --mode cross
+      - name: Verify exact float copysign through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_copysign --mode cross
+      - name: Verify exact isnan through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_isnan --mode cross
+      - name: Verify exact isinf through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_isinf --mode cross
+      - name: Verify exact isfinite through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_isfinite --mode cross
+      - name: Verify exact degrees through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_degrees --mode cross
+      - name: Verify exact radians through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_radians --mode cross
+      - name: Verify exact nearbyint through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_nearbyint --mode cross
+      - name: Verify exact gcd through QEMU
+        run: python -m asmpython._backends.arm64._verify_int_gcd --mode cross
+      - name: Verify exact lcm through QEMU
+        run: python -m asmpython._backends.arm64._verify_int_lcm --mode cross
+      - name: Verify exact modf fractional part through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_modf_frac --mode cross
+      - name: Verify exact modf integral part through QEMU
+        run: python -m asmpython._backends.arm64._verify_float_modf_int --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -97,3 +125,31 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_string_find --mode native
       - name: Verify Unicode replacement natively
         run: python -m asmpython._backends.arm64._verify_string_replace --mode native
+      - name: Verify Unicode string slicing natively
+        run: python -m asmpython._backends.arm64._verify_string_slice --mode native
+      - name: Verify Unicode zfill natively
+        run: python -m asmpython._backends.arm64._verify_string_zfill --mode native
+      - name: Verify exact float absolute value natively
+        run: python -m asmpython._backends.arm64._verify_float_abs --mode native
+      - name: Verify exact float copysign natively
+        run: python -m asmpython._backends.arm64._verify_float_copysign --mode native
+      - name: Verify exact isnan natively
+        run: python -m asmpython._backends.arm64._verify_float_isnan --mode native
+      - name: Verify exact isinf natively
+        run: python -m asmpython._backends.arm64._verify_float_isinf --mode native
+      - name: Verify exact isfinite natively
+        run: python -m asmpython._backends.arm64._verify_float_isfinite --mode native
+      - name: Verify exact degrees natively
+        run: python -m asmpython._backends.arm64._verify_float_degrees --mode native
+      - name: Verify exact radians natively
+        run: python -m asmpython._backends.arm64._verify_float_radians --mode native
+      - name: Verify exact nearbyint natively
+        run: python -m asmpython._backends.arm64._verify_float_nearbyint --mode native
+      - name: Verify exact gcd natively
+        run: python -m asmpython._backends.arm64._verify_int_gcd --mode native
+      - name: Verify exact lcm natively
+        run: python -m asmpython._backends.arm64._verify_int_lcm --mode native
+      - name: Verify exact modf fractional part natively
+        run: python -m asmpython._backends.arm64._verify_float_modf_frac --mode native
+      - name: Verify exact modf integral part natively
+        run: python -m asmpython._backends.arm64._verify_float_modf_int --mode native
