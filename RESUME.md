@@ -1,41 +1,38 @@
 # 3.14 Resume
 
-Short, current-state-only. Full history lives in `git log`; this file points to
-where the 3.14.0 push stands now rather than serving as a chronological journal.
+Current-state checkpoint only. Full history lives in `git log`.
 
 ## Directive
 
-Versioned **3.14.0** (matching CPython's version number), not 2.0.0. ARM64
-requires a target-neutral compiler architecture rather than a parallel target
-subclass, so this is a real architecture release even where the Python surface
-is unchanged. See `roadmap.md` for the complete release definition.
+Versioned **3.14.0** (matching CPython), not 2.0.0. ARM64 requires a
+target-neutral compiler architecture rather than a parallel target subclass, so
+this is a real architecture release even where the Python surface is unchanged.
+See `roadmap.md` for the complete release definition.
 
 Standing instruction: work continuously through the punch list without pausing
-for routine check-ins. Checkpoint through commits and this file. Use no more
-than 1-2 subagents at once. Long suites must run through a background execution
-mechanism rather than synchronously.
+for routine check-ins. Checkpoint through commits and this file. Use no more than
+1-2 subagents at once. Long suites must use a background execution mechanism
+rather than blocking synchronously.
 
-## Architecture (current)
+## Architecture
 
-- `asmpython/_compiler/ir_lower.py` lowers checked AST into the target-neutral
-  SSA IR in `asmpython/_compiler/ir.py`.
+- `asmpython/_compiler/ir_lower.py` lowers checked AST into target-neutral SSA IR
+  in `asmpython/_compiler/ir.py`.
 - `asmpython/_backends/x86_64/` remains the default/reference native backend.
 - `asmpython/_backends/ternary/` is the experimental second IR backend.
-- `asmpython/_backends/arm64/` is the active in-progress backend; exact status
-  is below.
+- `asmpython/_backends/arm64/` is the active in-progress backend.
 - `--backend legacy` remains the NASM-text path required for `@assembly_func`.
-- `asmpython/pyinbin/` is the fallback Python bytecode VM.
-- The compiler-syntax-extension system is withdrawn and archived under
-  `archived/extensions/`; do not resurrect it without an explicit request.
+- `asmpython/pyinbin/` remains the fallback Python bytecode VM.
+- Compiler syntax extensions remain withdrawn under `archived/extensions/`.
 
-## Test baseline
+## Native test baseline
 
-Last known full native baseline, recorded 2026-07-19:
+Last full baseline recorded 2026-07-19:
 
 - `python -m tests.runner --backend x86-64 --no-pyinbin-fallback -j 8`
 - `python -m tests.runner -j 8`
 
-Both are **454/461**, with the same seven known failures:
+Both were **454/461**, with the same seven known failures:
 
 - `296_collections_namedtuple.py`
 - `439`/`447` closures/nonlocal
@@ -43,90 +40,64 @@ Both are **454/461**, with the same seven known failures:
 - `53_dynamic_import.py`
 - `75_assembly_func.py` (legacy-only by design)
 
-Zero regressions is the bar for sema, IR-lowering, or production-backend
-changes. Current work is isolated to the experimental ARM64 package/runtime,
-but both complete suites must still be re-run before ARM64 is registered as a
-normal backend.
+Zero regressions remains the bar for shared compiler or production-backend
+changes. Current ARM64 work is isolated, but the complete suites must be rerun
+before ARM64 becomes driver-visible.
 
-## ARM64 backend — Stage 1 in progress
+## ARM64 Stage 1
 
-### Stage 0 toolchain bring-up — DONE
+### Toolchain, encoder, allocator, codegen, ELF — DONE / FOCUSED-VERIFIED
 
-WSL2 with GNU AArch64 binutils and QEMU assembled, linked, traced, and executed
-a freestanding probe through the real `exit(42)` path. Outer Windows/WSL shell
-exit-code propagation is unreliable; trust QEMU/strace.
+- WSL2 GNU AArch64 binutils and QEMU assembled, linked, traced, and executed the
+  real syscall path.
+- `encoder.py` is checked bit-for-bit against GNU assembler: **70/70** encodings
+  match. This caught and fixed a silent `cset` destination-register bug.
+- `regalloc.py` implements AAPCS64 linear scan, loop liveness, Belady eviction,
+  and call-crossing allocation. X13-X15 and V14-V15 are reserved scratches.
+- `codegen.py` uses a correct AAPCS64 frame: fixed FP/LR record, X29 frame
+  pointer, negative spill/local offsets, positive incoming stack arguments, and
+  16-byte SP alignment.
+- `elf.py` emits little-endian ELF64 `ET_REL`, `EM_AARCH64=183`, text/data/
+  rodata/tdata, RELA, symbols, and string tables.
+- Supported relocations: `R_AARCH64_CALL26`, `R_AARCH64_ADR_PREL_PG_HI21`, and
+  `R_AARCH64_ADD_ABS_LO12_NC`.
+- `module_codegen.py` validates every IR operation before codegen.
+- `elf_inspect.py` validates objects and exposes defined/undefined symbols.
 
-### Encoder — DONE
+Independent assembler, disassembler, `readelf`, and relocatable-link checks
+confirm calls, globals, ADRP+ADD relaxation, frames, and symbol resolution.
 
-`encoder.py` is independently checked bit-for-bit against GNU assembler output;
-70/70 encodings match. This verification caught and fixed a real silent `cset`
-destination-register bug.
+### Explicit source/object/executable API
 
-### Register allocator — DONE
-
-`regalloc.py` ports linear scan, loop liveness, Belady eviction, and call-crossing
-allocation to AAPCS64. X13-X15 and V14-V15 are reserved for codegen scratch use.
-
-### Code generator — IMPLEMENTED, FOCUSED-VERIFIED
-
-`codegen.py` covers the current IR instruction surface with an AAPCS64 frame:
-fixed `[FP, LR]` record, X29 frame pointer, negative spill/local offsets,
-positive incoming-stack-argument offsets, and 16-byte SP alignment.
-
-Verified details include correct SP materialization, X15-based negative stack
-addressing, independent X13/X14 spill scratches, and byte-exact integer-add,
-alloca/store/load, and spill cases assembled independently with real Clang
-AArch64 tooling.
-
-### ELF/object compiler — IMPLEMENTED, LINK-VERIFIED
-
-`elf.py` emits little-endian ELF64 `ET_REL`, `EM_AARCH64=183`, with text/data/
-rodata/tdata, RELA, symbols, and string tables. Supported relocations are:
-
-- `R_AARCH64_CALL26` (283)
-- `R_AARCH64_ADR_PREL_PG_HI21` (275)
-- `R_AARCH64_ADD_ABS_LO12_NC` (277)
-
-`module_codegen.py` compiles whole `IRModule` values and validates every IR op
-before codegen so an unknown operation cannot silently become the development
-NOP fallback. `elf_inspect.py` validates ARM64 objects and exposes defined and
-undefined symbol inspection.
-
-Independent `readelf` and LLVM `ld.lld` validation accepts generated objects;
-disassembly confirms direct calls, global addressing, data resolution, and
-valid ADRP+ADD relaxation.
-
-### Source/object/executable APIs — EXPERIMENTAL, EXPLICIT
-
-`source_build.py` runs real single-file source through lexer, parser, sema, IR
+`source_build.py` runs single-file source through lexer, parser, sema, IR
 lowering, and ARM64 object generation.
 
 `linux_link.py` provides native/cross tool discovery, assembly, relocatable
-runtime merging, start-object generation, static linking, IR/source executable
-building, and diagnostic-preserving failures. It checks program undefined
-symbols before tool invocation and rejects source requiring runtime symbols not
-in the current compatibility set.
+runtime merging, start-object generation, static linking, source/IR executable
+building, and diagnostic-preserving failures. Program undefined symbols are
+checked before external tool invocation.
 
 `runtime_manifest.py` is the single source of truth for runtime source order and
-symbol ownership. Before assembly, every source file must exist in manifest
-order and its `.global`/`.globl` declarations must exactly match its owned
-symbols. After `ld -r`, the merged ELF is independently checked again for every
-declared export and for zero unresolved symbols.
+per-file symbol ownership. Before assembly, every file must exist in manifest
+order and its `.global`/`.globl` declarations must exactly match its exports.
+After `ld -r`, the merged ELF is independently checked for all declared exports
+and zero unresolved symbols.
 
-`python -m asmpython._backends.arm64` provides deliberately separate
-experimental commands:
+Experimental CLI commands:
 
-- `object SOURCE [-o FILE]`
-- `requirements SOURCE [--runtime/--no-runtime]`
-- `build SOURCE [-o FILE] [--mode auto|native|cross]`
+- `python -m asmpython._backends.arm64 object SOURCE [-o FILE]`
+- `python -m asmpython._backends.arm64 requirements SOURCE [--runtime|--no-runtime]`
+- `python -m asmpython._backends.arm64 build SOURCE [-o FILE] [--mode auto|native|cross]`
 
-The package deliberately does **not** define `__module_backend__`; normal
-`--backend arm64` registration remains blocked on broader runtime coverage and
-full regression gates.
+The package deliberately does **not** define `__module_backend__`. There is no
+normal `--backend arm64` dispatch yet. Keep this gate until the platform claim
+is deliberately expanded and full regression gates are rerun.
 
-### Freestanding Linux runtime — MODULAR, ASSEMBLY/LINK-VERIFIED
+## Freestanding Linux runtime
 
-Runtime sources are assembled separately and combined with `ld -r`:
+Every slice is separately assembled and manifest-audited before `ld -r`.
+
+### Core and strings
 
 - `abi_shims_linux_arm64.S`
   - `_abi_int_to_base`
@@ -134,114 +105,123 @@ Runtime sources are assembled separately and combined with `ld -r`:
   - `strlen`
 - `abi_strings_linux_arm64.S`
   - `labs`
-  - `_abi_str_concat` / `_abi_str_concat_dup`
-  - `_abi_str_repeat`
-  - `_abi_str_eq` / `_abi_str_cmp`
-  - `_abi_hash_string` (the existing 64-bit FNV-1a contract)
-  - `_abi_str_removeprefix` / `_abi_str_removesuffix`
+  - concat/dup/repeat/equality/comparison
+  - deterministic 64-bit FNV-1a hashing
+  - `removeprefix` / `removesuffix`
 - `abi_string_search_linux_arm64.S`
-  - `_abi_str_starts_with` / `_abi_str_ends_with` / `_abi_str_count`
-  - `_abi_str_index_of` / `_abi_str_rindex_of`
-  - `_abi_str_index_of_start`
+  - startswith/endswith/non-overlapping count
+  - find/rfind and start-index find using Unicode code-point indices
 - `abi_string_replace_linux_arm64.S`
-  - `_abi_str_replace`, including empty-old insertion at Unicode code-point gaps
+  - replacement including empty-old insertion at Unicode code-point gaps
 - `abi_string_slice_linux_arm64.S`
-  - `_abi_str_slice`, with Python negative/clamped code-point bounds
+  - plain slices with Python negative/clamped code-point bounds
+- `abi_string_padding_linux_arm64.S`
+  - `zfill` with sign placement and Unicode character width
 
-Each allocation-producing slice uses distinct bump-allocated storage rather
-than a shared static formatting buffer. Repetition checks multiplication and
-addition overflow and treats zero/negative counts as empty. Prefix/suffix
-removal, find/rfind, replacement, and slicing preserve complete UTF-8 code-point
-boundaries.
+Allocation-producing slices use distinct bump storage, not a shared formatting
+buffer. Repetition checks multiplication/addition overflow. UTF-8 operations do
+not split complete code points.
 
-Independent Clang AArch64 assembly and `ld.lld -r` verification succeeded for
-all slices. Cross-slice calls resolve in the merged object. Disassembly confirms
-the FNV-1a constants/loop, AAPCS64 frames, Unicode-index loops, replacement
-allocation/copy paths, and slice normalization/copy paths.
+### Exact scalar float helpers
 
-Execution probes compile real source and require exact output:
+- `abi_float_scalar_linux_arm64.S`
+  - `fabs`
+  - `copysign`
+  - `nearbyint` using the current FPCR rounding mode
+- `abi_float_classify_linux_arm64.S`
+  - `_math_isnan`, `_math_isinf`, `_math_isfinite`
+- `abi_float_angles_linux_arm64.S`
+  - `_math_degrees` and `_math_radians` using the established x86 binary64
+    constants and the same single-multiply operation
+- `abi_float_modf_linux_arm64.S`
+  - exact fractional and integral components using exponent masking
+  - signed-zero, infinity, NaN, and payload handling
+- `abi_float_frexp_linux_arm64.S`
+  - exact mantissa/exponent components
+  - CLZ-based subnormal normalization, signed zero, infinity, and NaN handling
 
-- `_verify_source.py`: runtime-free `main() -> 42`
-- `_verify_print.py`: `42\n-10|255!\n`, including multiple distinct integer
-  conversions in one print call
-- `_verify_scalars.py`: bool/None, `hex`/`oct`/`bin`, `abs(int)`, string
-  concatenation, equality, inequality, and ordering
-- `_verify_string_search.py`: `startswith`, `endswith`, non-overlapping `count`,
-  ASCII empty-substring count, and UTF-8 empty-substring count (`"éé"` -> 3)
-- `_verify_string_repeat.py`: both operand orders, UTF-8 repetition, zero/
-  negative counts
-- `_verify_hash.py`: ASCII and UTF-8 vectors locked to reference FNV-1a
-- `_verify_string_remove.py`: matching/non-matching/empty/UTF-8 affixes
-- `_verify_string_find.py`: overlapping matches, empty needles, negative starts,
-  past-end starts, and Unicode code-point indices
-- `_verify_string_replace.py`: shrinking/growing/no-match/empty-old/UTF-8 cases
-- `_verify_string_slice.py`: negative, clamped, empty, full, and UTF-8 slices
+These helpers expand useful float computation without enabling float printing.
+Float formatting remains separately gated.
 
-Focused tests lock every probe to its exact external-symbol set so lowering
-drift fails before assembler/link/execution stages. Randomized Python-reference
-models cover UTF-8 find/rfind, replacement, and slicing. CI automatically
-discovers every `tests/test_arm64_*.py` file.
+### Exact int64 helpers
+
+- `abi_int_math_linux_arm64.S`
+  - `_math_gcd`: non-negative Euclidean reduction
+  - `_math_lcm`: zero-aware, divide-before-multiply int64 contract
+
+This mirrors the existing fixed-width native runtime contract; it does not claim
+CPython arbitrary-precision behavior outside signed-int64 range.
+
+## Verification probes
+
+Each new runtime symbol has a real-source probe with:
+
+1. exact lowered undefined-symbol requirements,
+2. pre-link runtime compatibility validation,
+3. static freestanding executable construction,
+4. exact expected stdout/exit behavior,
+5. native and QEMU workflow entries.
+
+Focused tests auto-discover `tests/test_arm64_*.py`. Independent reference models
+currently include:
+
+- UTF-8 find/rfind, replacement, slicing, and zfill,
+- FNV-1a vectors,
+- exact sign/payload float bit operations,
+- IEEE-754 classification,
+- angle factors and operation order,
+- ties-to-even nearbyint vectors,
+- thousands of gcd/lcm comparisons in safe int64 range,
+- 4,000 finite `modf` bit patterns plus nonfinite cases,
+- 10,000 `frexp` bit patterns including subnormals and nonfinite values.
 
 ### Directly observed execution boundary
 
 Independent WSL2 verification on 2026-07-19 directly observed:
 
-- encoder verification: 70/70 instruction encodings matched GNU assembler
-- the then-current focused suite: 39/39 tests passed
+- encoder verification: 70/70 encodings matched GNU assembler,
+- the then-current focused suite: 39/39 tests passed,
 - `_verify_elf`, `_verify_source`, `_verify_print`, `_verify_scalars`, and
-  `_verify_string_search` all completed through real `qemu-aarch64`
+  `_verify_string_search` completed through real `qemu-aarch64`,
 - exact exit/stdout behavior was visible through real Linux syscalls under
-  `strace`, including the UTF-8 empty-substring count
+  `strace`, including distinct formatting buffers and UTF-8 count behavior.
 
-The newer repeat/hash/remove/find/replace/slice probes were added after that
-independent session. Their source objects, assembly, relocatable links, symbol
-surfaces, reference models, and static links are verified, and native/QEMU jobs
-are committed; do not claim those newer probes executed successfully until a
+All later probes have independently verified source lowering surfaces, assembly,
+disassembly, relocatable links, static links, and reference models, with native
+and QEMU jobs committed. Do **not** claim those later probes executed until a
 later workflow or WSL2 observation records them.
 
-### Float formatting — DELIBERATELY NOT FAKED
+## Deliberate gates
 
-Float printing lowers to `_abi_float_to_str(F64) -> pointer`. The x86 runtime's
-CPython-compatible implementation searches decimal precision and parses each
-candidate back until it finds the shortest exact round-trip representation.
-A fixed `%.17g`-style substitute would visibly misformat values such as `0.1`.
-Therefore `_abi_float_to_str` remains absent from the ARM64 runtime allowlist;
-float-printing source fails early with an explicit unsupported-symbol error
-instead of linking to a knowingly incorrect formatter.
+### Float formatting — NOT FAKED
 
-### Integer parsing — DEFERRED UNTIL EXCEPTIONS
+`_abi_float_to_str` must produce CPython's shortest exact round-trip decimal.
+A fixed `%.17g` substitute is visibly wrong for common values, so the symbol
+remains outside the ARM64 allowlist and float-printing source fails early.
 
-`int(text)` and `int(text, base)` lower to `_abi_str_to_int` and
-`_abi_str_to_int_base`. Their valid-input loops are straightforward, but invalid
-input must raise catchable `ValueError`. A success-only parser would silently
-widen compatibility with wrong failure semantics, so both symbols remain gated
-until the ARM64 exception runtime exists.
+### Exceptions and failure-sensitive APIs
 
-### Verification workflow
+`int(text)`, `int(text, base)`, string `index`/`rindex`, invalid fill-character
+handling, and other APIs whose failures must raise catchable exceptions remain
+gated until the ARM64 exception runtime exists. Success-only substitutes are not
+acceptable.
 
-`.github/workflows/arm64-verify.yml` has two independent jobs:
+### Containers and platform integration
 
-- x86-64 Ubuntu with GNU cross-binutils and `qemu-aarch64 -strace`
-- native `ubuntu-24.04-arm` with GNU binutils and `strace`
+Still not done:
 
-Both run auto-discovered focused tests plus all committed real-source execution
-probes. The native job is ready on GitHub's `ubuntu-24.04-arm` runner.
-
-### Not yet done
-
-- Normal driver/backend registration and project/module loading.
-- Runtime coverage for float formatting, containers, exceptions, input, and most
-  stdlib-facing ABI shims.
-- ARM64 unwind/debug metadata.
-- Windows ARM64 and macOS ARM64 object/link formats.
-- Full x86-64 and legacy regression reruns after ARM64 becomes driver-visible.
+- list/dict/set runtime coverage,
+- input and most stdlib-facing ABI shims,
+- normal driver/backend registration and project/module loading,
+- unwind/debug metadata,
+- Windows ARM64 and macOS ARM64 object/link formats,
+- full x86-64 and legacy regression reruns after ARM64 becomes visible.
 
 **Next concrete step:** continue exact non-raising runtime expansion from symbols
-emitted by real lowered source. Keep float shortest-round-trip, exception-
-dependent parsing/indexing, containers, and other failure-sensitive surfaces
-explicitly gated until their real semantics and end-to-end probes exist.
+emitted by real lowered source. Keep exception-sensitive, arbitrary-precision,
+container, and shortest-round-trip formatting surfaces explicitly gated.
 
-## Known gaps / deferred work
+## Broader known gaps
 
 - `296_collections_namedtuple.py`
 - x86-64 closures/nonlocal (`439`/`447`) and str/tuple unpack (`440`/`63`)
@@ -256,6 +236,6 @@ explicitly gated until their real semantics and end-to-end probes exist.
 
 - `docs/EXTENSIONS.md` is historical only.
 - `docs/ABI.md` is the formal binary ABI reference.
-- This may be a shared `beta` workspace; check coordination files and fresh
-  blob SHAs before editing.
-- `AGENTS.md` contains the cross-cutting rules and recurring bug classes.
+- This may be a shared `beta` workspace; check fresh blob SHAs before editing.
+- `AGENTS.md`, `AGENT_INSTRUCTIONS.md`, and `SESSION_SUMMARY_2026_07_19.md`
+  contain cross-cutting rules and the independent verification handoff.
