@@ -2,19 +2,23 @@
 
 This verifies the complete Stage-1 path currently available:
 
-``IRFunc -> regalloc -> codegen -> ELF ET_REL -> GNU ld -> qemu-aarch64``
+``IRFunc -> regalloc -> codegen -> ELF ET_REL -> GNU ld -> execution``
 
-The generated program exercises every relocation kind emitted by codegen:
-``load_answer`` uses ADRP+ADD to address a global containing 42, ``caller``
-uses BL to call it, and a tiny hand-written ``_start`` exits with the returned
-value. Success is therefore a real process exit status of 42, not merely a
-file-format parse.
+Execution can happen natively on an AArch64 host or through qemu-aarch64 on an
+x86-64 host. The generated program exercises every relocation kind emitted by
+codegen: ``load_answer`` uses ADRP+ADD to address a global containing 42,
+``caller`` uses BL to call it, and a tiny hand-written ``_start`` exits with the
+returned value. Success is therefore a real process exit status of 42, not
+merely a file-format parse.
 """
 from __future__ import annotations
 
+import argparse
+import platform
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import codegen, regalloc
@@ -30,13 +34,47 @@ from asmpython._compiler.ir import (
 )
 
 
+@dataclass(frozen=True)
+class Toolchain:
+    assembler: str
+    linker: str
+    readelf: str
+    native: bool
+    qemu: str | None = None
+    strace: str | None = None
+
+
 def _require_tool(name: str) -> str:
     path = shutil.which(name)
     if path is None:
-        raise SystemExit(
-            f"missing {name}; install the AArch64 binutils/qemu toolchain"
-        )
+        raise SystemExit(f"missing required verification tool: {name}")
     return path
+
+
+def _select_toolchain(mode: str) -> Toolchain:
+    machine = platform.machine().lower()
+    native_host = machine in {"aarch64", "arm64"}
+    native = native_host if mode == "auto" else mode == "native"
+
+    if native and not native_host:
+        raise SystemExit(
+            f"native verification requested on non-AArch64 host {machine!r}"
+        )
+    if native:
+        return Toolchain(
+            assembler=_require_tool("as"),
+            linker=_require_tool("ld"),
+            readelf=_require_tool("readelf"),
+            native=True,
+            strace=_require_tool("strace"),
+        )
+    return Toolchain(
+        assembler=_require_tool("aarch64-linux-gnu-as"),
+        linker=_require_tool("aarch64-linux-gnu-ld"),
+        readelf=_require_tool("aarch64-linux-gnu-readelf"),
+        native=False,
+        qemu=_require_tool("qemu-aarch64"),
+    )
 
 
 def _compile_function(func: IRFunc) -> codegen.FuncCode:
@@ -99,11 +137,38 @@ def _verify_readelf(inspection: str) -> None:
         raise SystemExit(f"readelf output missing expected markers: {missing}")
 
 
-def main() -> int:
-    assembler = _require_tool("aarch64-linux-gnu-as")
-    linker = _require_tool("aarch64-linux-gnu-ld")
-    readelf = _require_tool("aarch64-linux-gnu-readelf")
-    qemu = _require_tool("qemu-aarch64")
+def _execute(toolchain: Toolchain, executable: Path) -> subprocess.CompletedProcess[str]:
+    if toolchain.native:
+        assert toolchain.strace is not None
+        command = [
+            toolchain.strace,
+            "-f",
+            "-e",
+            "trace=exit,exit_group",
+            str(executable),
+        ]
+    else:
+        assert toolchain.qemu is not None
+        command = [toolchain.qemu, "-strace", str(executable)]
+    return subprocess.run(
+        command,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--mode",
+        choices=("auto", "native", "cross"),
+        default="auto",
+        help="execute natively or through qemu-aarch64 (default: auto)",
+    )
+    args = parser.parse_args(argv)
+    toolchain = _select_toolchain(args.mode)
 
     with tempfile.TemporaryDirectory(prefix="asmpython-arm64-elf-") as tmp:
         root = Path(tmp)
@@ -124,12 +189,20 @@ def main() -> int:
         )
 
         subprocess.run(
-            [assembler, "-o", str(start_object), str(start_source)],
+            [toolchain.assembler, "-o", str(start_object), str(start_source)],
             check=True,
         )
 
         inspection = subprocess.run(
-            [readelf, "--wide", "-h", "-S", "-r", "-s", str(module_object)],
+            [
+                toolchain.readelf,
+                "--wide",
+                "-h",
+                "-S",
+                "-r",
+                "-s",
+                str(module_object),
+            ],
             check=True,
             text=True,
             stdout=subprocess.PIPE,
@@ -138,7 +211,7 @@ def main() -> int:
 
         subprocess.run(
             [
-                linker,
+                toolchain.linker,
                 "-e",
                 "_start",
                 "-o",
@@ -149,16 +222,7 @@ def main() -> int:
             check=True,
         )
 
-        # QEMU's own syscall trace is retained for diagnostics. This avoids the
-        # recurring native-code failure mode where buffered program stdout says
-        # nothing useful about how far execution actually progressed.
-        completed = subprocess.run(
-            [qemu, "-strace", str(executable)],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        completed = _execute(toolchain, executable)
         if completed.returncode != 42:
             print(completed.stdout, end="")
             print(completed.stderr, end="")
@@ -166,10 +230,11 @@ def main() -> int:
                 f"AArch64 probe returned {completed.returncode}, expected 42"
             )
 
+        mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
         print(f"[ OK ] ELF object: {module_object.stat().st_size} bytes")
         print("[ OK ] readelf recognized all three AArch64 relocation types")
         print("[ OK ] GNU ld linked the generated object")
-        print("[ OK ] qemu-aarch64 process exited with 42")
+        print(f"[ OK ] {mode_name} process exited with 42")
         if completed.stderr:
             print(completed.stderr.strip())
     return 0
