@@ -1,0 +1,57 @@
+name: Verify import resolution
+
+on:
+  push:
+    branches: [beta]
+    paths:
+      - "asmpython/_compiler/cli.py"
+      - "asmpython/_compiler/pypi.py"
+      - "asmpython/_compiler/project.py"
+      - "asmpython/_compiler/site_packages.py"
+      - "asmpython/__main__.py"
+      - "pyproject.toml"
+      - "tests/test_cli_import_policy.py"
+      - "tests/test_site_packages.py"
+      - "tests/test_pip_install_integration.py"
+      - ".github/workflows/import-resolution-verify.yml"
+  pull_request:
+    paths:
+      - "asmpython/_compiler/cli.py"
+      - "asmpython/_compiler/pypi.py"
+      - "asmpython/_compiler/project.py"
+      - "asmpython/_compiler/site_packages.py"
+      - "asmpython/__main__.py"
+      - "pyproject.toml"
+      - "tests/test_cli_import_policy.py"
+      - "tests/test_site_packages.py"
+      - "tests/test_pip_install_integration.py"
+      - ".github/workflows/import-resolution-verify.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused-import-policy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile changed Python files
+        run: |
+          python -m py_compile \
+            asmpython/_compiler/cli.py \
+            asmpython/_compiler/pypi.py \
+            asmpython/_compiler/project.py \
+            asmpython/_compiler/site_packages.py \
+            tests/test_cli_import_policy.py \
+            tests/test_site_packages.py \
+            tests/test_pip_install_integration.py
+      - name: Run import policy tests
+        run: |
+          python -m unittest -v \
+            tests.test_cli_import_policy \
+            tests.test_site_packages \
+            tests.test_pip_install_integration
