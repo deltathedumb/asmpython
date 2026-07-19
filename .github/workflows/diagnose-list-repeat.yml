@@ -13,17 +13,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install NASM
+      - name: Install test and native toolchains
         run: |
           sudo apt-get update
           sudo apt-get install --yes nasm
+          python -m pip install pytest
       - name: Run focused codegen regression
         id: focused
         continue-on-error: true
         shell: bash
         run: |
           mkdir -p diagnostics
-          set -o pipefail
+          set -euo pipefail
           python -m pytest -q tests/test_linux_list_repeat_codegen.py \
             2>&1 | tee diagnostics/pytest.log
       - name: Compile and execute a large repeated list
@@ -40,19 +41,27 @@ jobs:
               print(len(values), values[0] + values[4096])
               return 0
           PY
-          set -o pipefail
-          {
-            python -m asmpython build /tmp/list_repeat_probe.py \
-              --target linux --backend legacy --no-pyinbin-fallback \
-              -o /tmp/list_repeat_probe.elf
-            /tmp/list_repeat_probe.elf | tee diagnostics/output.txt
-            grep -qx '4097 42' diagnostics/output.txt
-          } 2>&1 | tee diagnostics/execution.log
+          set -euo pipefail
+          python -m asmpython build /tmp/list_repeat_probe.py \
+            --target linux --backend legacy --no-pyinbin-fallback \
+            -o /tmp/list_repeat_probe.elf \
+            2>&1 | tee diagnostics/build.log
+
+          set +e
+          timeout 10s stdbuf -o0 -e0 /tmp/list_repeat_probe.elf \
+            > diagnostics/output.txt 2> diagnostics/stderr.txt
+          program_status=$?
+          set -e
+          cat diagnostics/output.txt
+          cat diagnostics/stderr.txt >&2
+          printf '%s\n' "$program_status" > diagnostics/exit-status.txt
+          test "$program_status" -eq 0
+          grep -qx '4097 42' diagnostics/output.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: list-repeat-verification
           path: diagnostics
       - name: Propagate verification failure
-        if: steps.focused.outcome == 'failure' || steps.execute.outcome == 'failure'
+        if: ${{ steps.focused.outcome == 'failure' || steps.execute.outcome == 'failure' }}
         run: exit 1
