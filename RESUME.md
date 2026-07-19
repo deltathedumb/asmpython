@@ -128,6 +128,9 @@ not split complete code points.
   - `fabs`
   - `copysign`
   - `nearbyint` using the current FPCR rounding mode
+  - `ceil`, `floor`, and `trunc`
+  - `fdim`
+  - `nextafter`
 - `abi_float_classify_linux_arm64.S`
   - `_math_isnan`, `_math_isinf`, `_math_isfinite`
 - `abi_float_angles_linux_arm64.S`
@@ -139,6 +142,10 @@ not split complete code points.
 - `abi_float_frexp_linux_arm64.S`
   - exact mantissa/exponent components
   - CLZ-based subnormal normalization, signed zero, infinity, and NaN handling
+
+`math.nextafter` is now a real source binding. The previous C `round` export and
+`math.round` probe were removed because CPython has no `math.round`; Python's
+rounding API remains the builtin `round` with its own semantics.
 
 These helpers expand useful float computation without enabling float printing.
 Float formatting remains separately gated.
@@ -171,6 +178,7 @@ currently include:
 - IEEE-754 classification,
 - angle factors and operation order,
 - ties-to-even nearbyint vectors,
+- exact nextafter one-ULP stepping across 20,000 random pairs,
 - thousands of gcd/lcm comparisons in safe int64 range,
 - 4,000 finite `modf` bit patterns plus nonfinite cases,
 - 10,000 `frexp` bit patterns including subnormals and nonfinite values.
