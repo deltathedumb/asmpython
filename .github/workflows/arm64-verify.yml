@@ -6,6 +6,7 @@ on:
     branches: [beta]
     paths:
       - "asmpython/_backends/arm64/**"
+      - "asmpython/_runtime/abi_shims_linux_arm64.S"
       - "asmpython/_compiler/ir.py"
       - "tests/test_arm64_codegen.py"
       - "tests/test_arm64_elf.py"
@@ -15,6 +16,7 @@ on:
   pull_request:
     paths:
       - "asmpython/_backends/arm64/**"
+      - "asmpython/_runtime/abi_shims_linux_arm64.S"
       - "asmpython/_compiler/ir.py"
       - "tests/test_arm64_codegen.py"
       - "tests/test_arm64_elf.py"
@@ -52,6 +54,7 @@ jobs:
             asmpython/_backends/arm64/_verify_encoder.py \
             asmpython/_backends/arm64/_verify_elf.py \
             asmpython/_backends/arm64/_verify_source.py \
+            asmpython/_backends/arm64/_verify_print.py \
             tests/test_arm64_codegen.py \
             tests/test_arm64_elf.py \
             tests/test_arm64_module_codegen.py \
@@ -74,6 +77,9 @@ jobs:
 
       - name: Compile source and execute through QEMU
         run: python -m asmpython._backends.arm64._verify_source --mode cross
+
+      - name: Verify freestanding print runtime through QEMU
+        run: python -m asmpython._backends.arm64._verify_print --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -100,6 +106,7 @@ jobs:
             asmpython/_backends/arm64/module_codegen.py \
             asmpython/_backends/arm64/_verify_elf.py \
             asmpython/_backends/arm64/_verify_source.py \
+            asmpython/_backends/arm64/_verify_print.py \
             tests/test_arm64_codegen.py \
             tests/test_arm64_elf.py \
             tests/test_arm64_module_codegen.py \
@@ -116,3 +123,6 @@ jobs:
 
       - name: Compile source and execute natively
         run: python -m asmpython._backends.arm64._verify_source --mode native
+
+      - name: Verify freestanding print runtime natively
+        run: python -m asmpython._backends.arm64._verify_print --mode native
