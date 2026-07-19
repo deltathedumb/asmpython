@@ -54,6 +54,10 @@ RUNTIME_SLICES = (
         "abi_string_replace_linux_arm64.S",
         frozenset({"_abi_str_replace"}),
     ),
+    RuntimeSlice(
+        "abi_string_slice_linux_arm64.S",
+        frozenset({"_abi_str_slice"}),
+    ),
 )
 
 RUNTIME_SOURCE_NAMES = tuple(runtime_slice.filename for runtime_slice in RUNTIME_SLICES)

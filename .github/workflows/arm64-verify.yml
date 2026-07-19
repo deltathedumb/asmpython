@@ -60,6 +60,8 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_string_find --mode cross
       - name: Verify Unicode replacement through QEMU
         run: python -m asmpython._backends.arm64._verify_string_replace --mode cross
+      - name: Verify Unicode string slicing through QEMU
+        run: python -m asmpython._backends.arm64._verify_string_slice --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -97,3 +99,5 @@ jobs:
         run: python -m asmpython._backends.arm64._verify_string_find --mode native
       - name: Verify Unicode replacement natively
         run: python -m asmpython._backends.arm64._verify_string_replace --mode native
+      - name: Verify Unicode string slicing natively
+        run: python -m asmpython._backends.arm64._verify_string_slice --mode native
