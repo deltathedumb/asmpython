@@ -29,12 +29,41 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install AArch64 binutils and QEMU
+      - name: Install AArch64 and native build tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user
+          sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user nasm gcc file
       - name: Run exact lowering and manifest tests
-        run: python -m unittest -v tests.test_arm64_list_del
+        run: python -m unittest -v tests.test_arm64_list_del tests.test_driver_output_permissions
+      - name: Capture string-unpack execution
+        run: |
+          set +e
+          {
+            python -m asmpython build tests/cases/440_str_unpack.py \
+              --target linux -o /tmp/str-unpack --no-pyinbin-fallback
+            build_status=$?
+            echo "build_status=$build_status"
+            ls -l /tmp/str-unpack 2>/dev/null || true
+            file /tmp/str-unpack 2>/dev/null || true
+            if [ "$build_status" -eq 0 ]; then
+              /tmp/str-unpack > /tmp/str-unpack.stdout 2> /tmp/str-unpack.stderr
+              run_status=$?
+              echo "run_status=$run_status"
+              echo '=== stdout ==='
+              cat /tmp/str-unpack.stdout
+              echo '=== stderr ==='
+              cat /tmp/str-unpack.stderr
+            fi
+          } 2>&1 | tee string-unpack-diagnostic.log
+          exit 0
+      - name: Upload string-unpack diagnostic
+        uses: actions/upload-artifact@v4
+        with:
+          name: string-unpack-diagnostic
+          path: |
+            string-unpack-diagnostic.log
+            /tmp/str-unpack.stdout
+            /tmp/str-unpack.stderr
       - name: Execute valid-index list deletion through QEMU
         run: python -m asmpython._backends.arm64._verify_list_del --mode cross
 
