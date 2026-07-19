@@ -1,22 +1,22 @@
 """Normalize literal destructuring before x86-64 IR lowering.
 
 The generic single-iterable TupleAssign path in ``ir_lower.py`` represents every
-list/tuple cell as I64.  That is correct for opaque container storage, but wrong
+list/tuple cell as I64. That is correct for opaque container storage, but wrong
 for a literal tuple whose AST still carries each concrete element expression and
 for a literal string whose elements are one-character strings.
 
 Keep this adaptation backend-local until the target-neutral IR has a first-class
-unpack operation.  The pass runs after semantic analysis and rewrites only shapes
+unpack operation. The pass runs after semantic analysis and rewrites only shapes
 sema has already accepted:
 
 * ``a, b = (expr_a, expr_b)`` becomes the ordinary parallel form
-  ``a, b = expr_a, expr_b``.  Existing lowering evaluates every RHS first and
+  ``a, b = expr_a, expr_b``. Existing lowering evaluates every RHS first and
   stores each real IR type, preserving side-effect and swap semantics.
-* ``a, b = "xy"`` becomes parallel string subscripts.  Existing subscript
+* ``a, b = "xy"`` becomes parallel string subscripts. Existing subscript
   lowering calls ``_abi_str_char_at`` and returns PTR values.
 
-Tuple variables, tuple-returning calls, lists, starred targets, and non-name
-targets remain untouched.
+Tuple variables, tuple-returning calls, lists, starred targets, mismatched
+literal lengths, and non-name targets remain untouched.
 """
 from __future__ import annotations
 
@@ -35,8 +35,15 @@ def _literal_unpack_values(stmt: A.TupleAssign) -> list | None:
 
     source = stmt.values[0]
     if isinstance(source, A.TupleLit):
+        if len(source.elems) != len(stmt.targets):
+            return None
         return list(source.elems)
     if isinstance(source, A.StrLit):
+        # Python strings are Unicode code-point sequences. Host Python's len()
+        # gives exactly the target count the existing UTF-8-aware character shim
+        # expects; do not rewrite mismatches into unchecked out-of-range reads.
+        if len(source.value) != len(stmt.targets):
+            return None
         return [
             A.Subscript(
                 obj=source,
