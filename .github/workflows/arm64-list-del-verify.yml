@@ -29,12 +29,38 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install AArch64 binutils and QEMU
+      - name: Install AArch64 and native build tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user
+          sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user nasm gcc file
       - name: Run exact lowering and manifest tests
         run: python -m unittest -v tests.test_arm64_list_del
+      - name: Capture typed-unpack compiler diagnostics
+        run: |
+          set +e
+          {
+            echo '=== install tests ==='
+            python -m unittest -v tests.test_unpack_normalize_install
+            echo "install_status=$?"
+            echo '=== compile string unpack ==='
+            python -m asmpython build tests/cases/440_str_unpack.py \
+              --target linux -o /tmp/str-unpack --no-pyinbin-fallback
+            build_status=$?
+            echo "build_status=$build_status"
+            if [ "$build_status" -eq 0 ]; then
+              echo '=== execute string unpack ==='
+              /tmp/str-unpack
+              echo "execute_status=$?"
+              echo '=== file metadata ==='
+              file /tmp/str-unpack
+            fi
+          } 2>&1 | tee typed-unpack-diagnostic.log
+          exit 0
+      - name: Upload typed-unpack diagnostic
+        uses: actions/upload-artifact@v4
+        with:
+          name: typed-unpack-diagnostic
+          path: typed-unpack-diagnostic.log
       - name: Execute valid-index list deletion through QEMU
         run: python -m asmpython._backends.arm64._verify_list_del --mode cross
 
