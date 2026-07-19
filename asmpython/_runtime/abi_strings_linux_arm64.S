@@ -2,7 +2,7 @@
  * Exact scalar/string additions for the freestanding AArch64 runtime.
  *
  * This file is assembled separately from abi_shims_linux_arm64.S and combined
- * with it through `ld -r`.  Keeping the slice separate makes each runtime
+ * with it through `ld -r`. Keeping the slice separate makes each runtime
  * expansion independently inspectable and assembler-verifiable.
  *
  * Exports:
@@ -13,6 +13,8 @@
  *   _abi_str_eq(left, right)
  *   _abi_str_cmp(left, right)
  *   _abi_hash_string(text)
+ *   _abi_str_removeprefix(text, prefix)
+ *   _abi_str_removesuffix(text, suffix)
  */
 
 .text
@@ -258,6 +260,100 @@ _abi_hash_string:
     mov     x0, x9
     ret
 .size _abi_hash_string, .-_abi_hash_string
+
+/* char *_abi_str_removeprefix(const char *text, const char *prefix) */
+.global _abi_str_removeprefix
+.type _abi_str_removeprefix, %function
+_abi_str_removeprefix:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+
+    mov     x19, x0
+    mov     x20, x1
+    cbnz    x19, .Lrmp_text_ready
+    adrp    x19, .Lempty_text
+    add     x19, x19, :lo12:.Lempty_text
+.Lrmp_text_ready:
+    cbnz    x20, .Lrmp_prefix_ready
+    adrp    x20, .Lempty_text
+    add     x20, x20, :lo12:.Lempty_text
+.Lrmp_prefix_ready:
+
+    mov     x0, x19
+    mov     x1, x20
+    bl      _abi_str_starts_with
+    cbz     x0, .Lrmp_no_match
+    mov     x0, x20
+    bl      strlen
+    add     x0, x19, x0
+    bl      _abi_str_concat_dup
+    b       .Lrmp_done
+.Lrmp_no_match:
+    mov     x0, x19
+.Lrmp_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+.size _abi_str_removeprefix, .-_abi_str_removeprefix
+
+/* char *_abi_str_removesuffix(const char *text, const char *suffix) */
+.global _abi_str_removesuffix
+.type _abi_str_removesuffix, %function
+_abi_str_removesuffix:
+    stp     x29, x30, [sp, #-80]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    mov     x19, x0
+    mov     x20, x1
+    cbnz    x19, .Lrms_text_ready
+    adrp    x19, .Lempty_text
+    add     x19, x19, :lo12:.Lempty_text
+.Lrms_text_ready:
+    cbnz    x20, .Lrms_suffix_ready
+    adrp    x20, .Lempty_text
+    add     x20, x20, :lo12:.Lempty_text
+.Lrms_suffix_ready:
+
+    mov     x0, x19
+    mov     x1, x20
+    bl      _abi_str_ends_with
+    cbz     x0, .Lrms_no_match
+    mov     x0, x19
+    bl      strlen
+    mov     x21, x0
+    mov     x0, x20
+    bl      strlen
+    sub     x22, x21, x0
+    add     x0, x22, #1
+    bl      .Lstring_alloc
+    mov     x23, x0
+    cbz     x23, .Lrms_done
+    mov     x24, x23
+    mov     x9, x19
+    mov     x10, x22
+.Lrms_copy:
+    cbz     x10, .Lrms_terminate
+    ldrb    w11, [x9], #1
+    strb    w11, [x24], #1
+    sub     x10, x10, #1
+    b       .Lrms_copy
+.Lrms_terminate:
+    strb    wzr, [x24]
+    b       .Lrms_done
+.Lrms_no_match:
+    mov     x23, x19
+.Lrms_done:
+    mov     x0, x23
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #80
+    ret
+.size _abi_str_removesuffix, .-_abi_str_removesuffix
 
 .section .rodata
 .Lempty_text:

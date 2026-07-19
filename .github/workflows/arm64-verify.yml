@@ -18,6 +18,7 @@ on:
       - "tests/test_arm64_module_codegen.py"
       - "tests/test_arm64_runtime_manifest.py"
       - "tests/test_arm64_source_codegen.py"
+      - "tests/test_arm64_string_remove.py"
       - "tests/test_arm64_string_repeat.py"
       - ".github/workflows/arm64-verify.yml"
   pull_request:
@@ -35,6 +36,7 @@ on:
       - "tests/test_arm64_module_codegen.py"
       - "tests/test_arm64_runtime_manifest.py"
       - "tests/test_arm64_source_codegen.py"
+      - "tests/test_arm64_string_remove.py"
       - "tests/test_arm64_string_repeat.py"
       - ".github/workflows/arm64-verify.yml"
 
@@ -76,6 +78,7 @@ jobs:
             asmpython/_backends/arm64/_verify_source.py \
             asmpython/_backends/arm64/_verify_print.py \
             asmpython/_backends/arm64/_verify_scalars.py \
+            asmpython/_backends/arm64/_verify_string_remove.py \
             asmpython/_backends/arm64/_verify_string_search.py \
             asmpython/_backends/arm64/_verify_string_repeat.py \
             tests/test_arm64_cli.py \
@@ -86,6 +89,7 @@ jobs:
             tests/test_arm64_module_codegen.py \
             tests/test_arm64_runtime_manifest.py \
             tests/test_arm64_source_codegen.py \
+            tests/test_arm64_string_remove.py \
             tests/test_arm64_string_repeat.py
 
       - name: Verify instruction encoder against GNU assembler
@@ -102,6 +106,7 @@ jobs:
             tests.test_arm64_module_codegen \
             tests.test_arm64_runtime_manifest \
             tests.test_arm64_source_codegen \
+            tests.test_arm64_string_remove \
             tests.test_arm64_string_repeat \
             -v
 
@@ -125,6 +130,9 @@ jobs:
 
       - name: Verify deterministic string hashing through QEMU
         run: python -m asmpython._backends.arm64._verify_hash --mode cross
+
+      - name: Verify prefix and suffix removal through QEMU
+        run: python -m asmpython._backends.arm64._verify_string_remove --mode cross
 
   native-verify:
     name: Native ARM64 execution
@@ -159,6 +167,7 @@ jobs:
             asmpython/_backends/arm64/_verify_source.py \
             asmpython/_backends/arm64/_verify_print.py \
             asmpython/_backends/arm64/_verify_scalars.py \
+            asmpython/_backends/arm64/_verify_string_remove.py \
             asmpython/_backends/arm64/_verify_string_search.py \
             asmpython/_backends/arm64/_verify_string_repeat.py \
             tests/test_arm64_cli.py \
@@ -169,6 +178,7 @@ jobs:
             tests/test_arm64_module_codegen.py \
             tests/test_arm64_runtime_manifest.py \
             tests/test_arm64_source_codegen.py \
+            tests/test_arm64_string_remove.py \
             tests/test_arm64_string_repeat.py
           python -m unittest \
             tests.test_arm64_cli \
@@ -179,6 +189,7 @@ jobs:
             tests.test_arm64_module_codegen \
             tests.test_arm64_runtime_manifest \
             tests.test_arm64_source_codegen \
+            tests.test_arm64_string_remove \
             tests.test_arm64_string_repeat \
             -v
 
@@ -202,3 +213,6 @@ jobs:
 
       - name: Verify deterministic string hashing natively
         run: python -m asmpython._backends.arm64._verify_hash --mode native
+
+      - name: Verify prefix and suffix removal natively
+        run: python -m asmpython._backends.arm64._verify_string_remove --mode native

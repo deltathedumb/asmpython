@@ -1,6 +1,6 @@
 """Declared surface and source ordering of the experimental ARM64 runtime.
 
-Each freestanding assembly slice owns an explicit export set.  The derived flat
+Each freestanding assembly slice owns an explicit export set. The derived flat
 constants remain the public compatibility surface used by the linker, while the
 per-slice records let the builder reject source/manifest drift before invoking
 any external tool.
@@ -30,6 +30,8 @@ RUNTIME_SLICES = (
                 "_abi_str_concat",
                 "_abi_str_concat_dup",
                 "_abi_str_eq",
+                "_abi_str_removeprefix",
+                "_abi_str_removesuffix",
                 "_abi_str_repeat",
                 "labs",
             }
