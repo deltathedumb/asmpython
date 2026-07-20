@@ -22,7 +22,7 @@ jobs:
           python-version: "3.12"
       - name: Install native toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm
-      - name: Apply semantic support
+      - name: Apply class-value semantic support
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -30,23 +30,66 @@ jobs:
           path = Path("asmpython/_compiler/sema.py")
           text = path.read_text(encoding="utf-8")
 
-          for suffix in ("f.pos", "m.pos"):
-              old = f'''                    if (\n                          annot is None\n                          and default is None\n                          and inferred is None\n                          and p in usage_hints\n                      ):\n                          scope.add(p, usage_hints[p])\n                          continue\n                      self._seed_param(scope, p, annot, default, inferred, pos={suffix})\n'''
-              new = f'''                    if annot is None and default is None and inferred is None:\n                          scope.add(p, usage_hints[p] if p in usage_hints else "any")\n                          continue\n                      self._seed_param(scope, p, annot, default, inferred, pos={suffix})\n'''
-              if old in text:
-                  text = text.replace(old, new, 1)
-
-          old_str = '''                if t not in (\n                      "int", "float", "str", "any", "list", "tuple", "dict", "set"\n                  ) and not t.startswith("instance:"):\n'''
-          new_str = '''                if t not in (\n                      "int", "float", "str", "any", "list", "tuple", "dict", "set", "type"\n                  ) and not t.startswith("instance:"):\n'''
+          old_str = '''                if t not in (
+                      "int", "float", "str", "any", "list", "tuple", "dict", "set"
+                  ) and not t.startswith("instance:"):
+'''
+          new_str = '''                if t not in (
+                      "int", "float", "str", "any", "list", "tuple", "dict", "set", "type"
+                  ) and not t.startswith("instance:"):
+'''
           if old_str in text:
               text = text.replace(old_str, new_str, 1)
 
           if 'e.dynamic_type_candidates = candidates' not in text:
-              anchor = '''                    else:\n                          e.inferred_type = "int"\n                      return\n                  if e.method == "from_bytes":\n'''
-              replacement = '''                    else:\n                          e.inferred_type = "int"\n                      return\n                  if obj_t == "type":\n                      candidates: list = []\n                      candidate_ret = None\n                      candidate_el = None\n                      for dynamic_cls_name in self.classes:\n                          dynamic_resolved = self._resolve_method(dynamic_cls_name, e.method)\n                          if dynamic_resolved is None:\n                              continue\n                          dynamic_owner: str = dynamic_resolved[0]\n                          dynamic_sig: FuncSig = dynamic_resolved[1]\n                          dynamic_decorators: list[str] = getattr(dynamic_sig, "decorators", [])\n                          if "classmethod" not in dynamic_decorators and "staticmethod" not in dynamic_decorators:\n                              continue\n                          dynamic_expected = dynamic_sig.arity - (1 if "classmethod" in dynamic_decorators else 0)\n                          dynamic_required = dynamic_expected - dynamic_sig.n_defaults\n                          if not (dynamic_required <= len(e.args) <= dynamic_expected):\n                              continue\n                          candidates.append((dynamic_cls_name, dynamic_owner, "classmethod" in dynamic_decorators))\n                          if dynamic_sig.ret_type is not None:\n                              dynamic_ret: tuple = dynamic_sig.ret_type  # type: ignore\n                              this_ret = dynamic_ret[0]\n                              this_el = dynamic_ret[1]\n                          else:\n                              this_ret = "int"\n                              this_el = None\n                          if candidate_ret is None:\n                              candidate_ret = this_ret\n                              candidate_el = this_el\n                          elif candidate_ret != this_ret:\n                              candidate_ret = "any"\n                              candidate_el = None\n                      if not candidates:\n                          raise SemaError(f"type has no method {e.method!r}", e.pos, ErrorCode.E_NO_METHOD)\n                      e.dynamic_type_candidates = candidates  # type: ignore[attr-defined]\n                      e.inferred_type = candidate_ret if candidate_ret is not None else "any"\n                      if e.inferred_type == "list" and candidate_el is not None:\n                          e.list_el_type = candidate_el\n                      return\n                  if e.method == "from_bytes":\n'''
-              if anchor not in text:
-                  raise SystemExit("dynamic type method semantic anchor not found")
-              text = text.replace(anchor, replacement, 1)
+              type_branch = text.find('''            elif (
+                  obj_t == "type"
+''')
+              if type_branch < 0:
+                  raise SystemExit("type receiver semantic branch not found")
+              insert_at = text.find('                if e.method == "from_bytes":', type_branch)
+              if insert_at < 0:
+                  raise SystemExit("type receiver insertion point not found")
+              dynamic_block = '''                if obj_t == "type":
+                      candidates: list = []
+                      candidate_ret = None
+                      candidate_el = None
+                      for dynamic_cls_name in self.classes:
+                          dynamic_resolved = self._resolve_method(dynamic_cls_name, e.method)
+                          if dynamic_resolved is None:
+                              continue
+                          dynamic_owner: str = dynamic_resolved[0]
+                          dynamic_sig: FuncSig = dynamic_resolved[1]
+                          dynamic_decorators: list[str] = getattr(dynamic_sig, "decorators", [])
+                          if "classmethod" not in dynamic_decorators and "staticmethod" not in dynamic_decorators:
+                              continue
+                          dynamic_expected = dynamic_sig.arity - (1 if "classmethod" in dynamic_decorators else 0)
+                          dynamic_required = dynamic_expected - dynamic_sig.n_defaults
+                          if not (dynamic_required <= len(e.args) <= dynamic_expected):
+                              continue
+                          candidates.append((dynamic_cls_name, dynamic_owner, "classmethod" in dynamic_decorators))
+                          if dynamic_sig.ret_type is not None:
+                              dynamic_ret: tuple = dynamic_sig.ret_type  # type: ignore
+                              this_ret = dynamic_ret[0]
+                              this_el = dynamic_ret[1]
+                          else:
+                              this_ret = "int"
+                              this_el = None
+                          if candidate_ret is None:
+                              candidate_ret = this_ret
+                              candidate_el = this_el
+                          elif candidate_ret != this_ret:
+                              candidate_ret = "any"
+                              candidate_el = None
+                      if not candidates:
+                          raise SemaError(f"type has no method {e.method!r}", e.pos, ErrorCode.E_NO_METHOD)
+                      e.dynamic_type_candidates = candidates  # type: ignore[attr-defined]
+                      e.inferred_type = candidate_ret if candidate_ret is not None else "any"
+                      if e.inferred_type == "list" and candidate_el is not None:
+                          e.list_el_type = candidate_el
+                      return
+'''
+              text = text[:insert_at] + dynamic_block + text[insert_at:]
 
           path.write_text(text, encoding="utf-8")
           PY
@@ -65,6 +108,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          touch provider-runtime-probe.txt
           git add asmpython/_compiler/sema.py provider-runtime-probe.txt
           if ! git diff --cached --quiet; then
             git commit -m "Add semantic support for provider class values"
