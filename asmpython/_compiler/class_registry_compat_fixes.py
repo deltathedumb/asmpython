@@ -1,10 +1,9 @@
 """Static lowering for class decorators backed by a class registry.
 
 Python registry decorators commonly store class objects in dictionaries and later
-call a class selected at runtime.  asmpython represents class names as compact type
-values but does not yet expose a fully dynamic Python metatype runtime.  This pass
-captures simple literal class decorators and replaces the conventional registry
-surface (register/resolve/create/type_name) with direct native dispatch.
+call a class selected at runtime. asmpython does not yet expose a fully dynamic
+Python metatype runtime, so this pass captures literal class decorators and
+materializes direct native register/resolve/create/type-name dispatch.
 """
 
 from __future__ import annotations
@@ -25,7 +24,11 @@ def _scan_literal_decorator_calls(parser: Parser) -> list:
     calls: list = []
     index = parser.i
     tokens = parser.toks
-    while index < len(tokens) and tokens[index].kind == "OP" and tokens[index].value == "@":
+    while (
+        index < len(tokens)
+        and tokens[index].kind == "OP"
+        and tokens[index].value == "@"
+    ):
         index += 1
         if index >= len(tokens) or tokens[index].kind != "NAME":
             break
@@ -41,12 +44,17 @@ def _scan_literal_decorator_calls(parser: Parser) -> list:
             index += 2
 
         literal = None
-        if index < len(tokens) and tokens[index].kind == "OP" and tokens[index].value == "(":
+        depth = 0
+        if (
+            index < len(tokens)
+            and tokens[index].kind == "OP"
+            and tokens[index].value == "("
+        ):
+            depth = 1
             index += 1
             if index < len(tokens) and tokens[index].kind == "STRING":
                 literal = tokens[index].value
 
-        depth = 0
         while index < len(tokens):
             token = tokens[index]
             if token.kind == "NEWLINE" and depth == 0:
@@ -55,7 +63,7 @@ def _scan_literal_decorator_calls(parser: Parser) -> list:
             if token.kind == "OP" and token.value in ("(", "[", "{"):
                 depth += 1
             elif token.kind == "OP" and token.value in (")", "]", "}"):
-                depth -= 1
+                depth = max(0, depth - 1)
             index += 1
         if literal is not None:
             calls.append((".".join(parts), literal))
@@ -90,59 +98,71 @@ def _find_method_call(stmts, method_name: str):
 
 def _factory_specs(mod: A.Module, names: set) -> dict:
     """Recognize identity decorator factories that call ``registry.register``."""
-    funcs = {func.name: func for func in mod.funcs}
+    funcs_by_name: dict = {}
+    for func in mod.funcs:
+        funcs_by_name.setdefault(func.name, []).append(func)
+
     specs: dict = {}
     for decorated_name in names:
         name = decorated_name.rsplit(".", 1)[-1]
-        outer = funcs.get(name)
-        if outer is None or not outer.params:
+        outer_candidates = funcs_by_name.get(name, [])
+        if not outer_candidates:
             continue
-        key_param = outer.params[0]
+        for outer in outer_candidates:
+            if not outer.params:
+                continue
+            key_param = outer.params[0]
+            registry_param = None
+            registry_global = None
+            for index, param in enumerate(outer.params):
+                default = outer.defaults[index] if index < len(outer.defaults) else None
+                if isinstance(default, A.Name):
+                    registry_param = param
+                    registry_global = default.name
+                    break
+            if registry_param is None or registry_global is None:
+                continue
 
-        registry_param = None
-        registry_global = None
-        for index, param in enumerate(outer.params):
-            default = outer.defaults[index] if index < len(outer.defaults) else None
-            if isinstance(default, A.Name):
-                registry_param = param
-                registry_global = default.name
-                break
-        if registry_param is None or registry_global is None:
-            continue
+            nested_name = None
+            returned_name = None
+            for stmt in outer.body:
+                if isinstance(stmt, A.ClosureBind):
+                    nested_name = stmt.func_name
+                elif isinstance(stmt, A.Return) and isinstance(stmt.value, A.Name):
+                    returned_name = stmt.value.name
+            if nested_name is None or returned_name != nested_name:
+                continue
 
-        nested_name = None
-        returned_name = None
-        for stmt in outer.body:
-            if isinstance(stmt, A.ClosureBind):
-                nested_name = stmt.func_name
-            elif isinstance(stmt, A.Return) and isinstance(stmt.value, A.Name):
-                returned_name = stmt.value.name
-        if nested_name is None or returned_name != nested_name:
-            continue
-        nested = funcs.get(nested_name)
-        if nested is None or not nested.params:
-            continue
-        class_param = nested.params[-1]
-        register_call = _find_method_call(nested.body, "register")
-        if (
-            register_call is None
-            or not isinstance(register_call.obj, A.Name)
-            or register_call.obj.name != registry_param
-            or len(register_call.args) < 2
-            or not isinstance(register_call.args[0], A.Name)
-            or register_call.args[0].name != key_param
-            or not isinstance(register_call.args[1], A.Name)
-            or register_call.args[1].name != class_param
-        ):
-            continue
-        specs[name] = (
-            registry_global,
-            outer,
-            nested,
-            key_param,
-            registry_param,
-            class_param,
-        )
+            matched = None
+            for nested in funcs_by_name.get(nested_name, []):
+                if not nested.params:
+                    continue
+                class_param = nested.params[-1]
+                register_call = _find_method_call(nested.body, "register")
+                if (
+                    register_call is not None
+                    and isinstance(register_call.obj, A.Name)
+                    and register_call.obj.name == registry_param
+                    and len(register_call.args) >= 2
+                    and isinstance(register_call.args[0], A.Name)
+                    and register_call.args[0].name == key_param
+                    and isinstance(register_call.args[1], A.Name)
+                    and register_call.args[1].name == class_param
+                ):
+                    matched = (nested, class_param)
+                    break
+            if matched is None:
+                continue
+            nested, class_param = matched
+            specs[name] = (
+                registry_global,
+                outer,
+                nested,
+                key_param,
+                registry_param,
+                class_param,
+            )
+            break
     return specs
 
 
@@ -162,14 +182,24 @@ def _compare_name(param: str, value: str, pos):
     )
 
 
-def _if_return_chain(entries: list, test_builder, value_builder, fallback: list) -> list:
+def _if_return_chain(
+    entries: list,
+    test_builder,
+    value_builder,
+    fallback: list,
+    pos,
+) -> list:
     body = list(fallback)
     for type_name, class_name in reversed(entries):
-        pos = value_builder(type_name, class_name, None).pos
         body = [
             A.If(
                 test=test_builder(type_name, class_name, pos),
-                then=[A.Return(value=value_builder(type_name, class_name, pos), pos=pos)],
+                then=[
+                    A.Return(
+                        value=value_builder(type_name, class_name, pos),
+                        pos=pos,
+                    )
+                ],
                 orelse=body,
                 pos=pos,
             )
@@ -181,7 +211,14 @@ def _collect_returns(stmts: list, out: list) -> None:
     for stmt in stmts:
         if isinstance(stmt, A.Return):
             out.append(stmt)
-        for attr in ("then", "orelse", "body", "handler", "else_body", "finally_body"):
+        for attr in (
+            "then",
+            "orelse",
+            "body",
+            "handler",
+            "else_body",
+            "finally_body",
+        ):
             nested = getattr(stmt, attr, None)
             if isinstance(nested, list):
                 _collect_returns(nested, out)
@@ -219,6 +256,7 @@ def _registration_attribute(register_method) -> "str | None":
 
 def _rewrite_registry_class(registry_class, entries: list, class_table: dict) -> None:
     methods = {method.name: method for method in registry_class.methods}
+
     register = methods.get("register")
     if register is not None and register.params:
         class_param = register.params[-1]
@@ -249,19 +287,17 @@ def _rewrite_registry_class(registry_class, entries: list, class_table: dict) ->
     resolve = methods.get("resolve")
     if resolve is not None and len(resolve.params) >= 2:
         key_param = resolve.params[1]
-        fallback = [
-            A.Return(
-                value=A.IntLit(value=0, pos=resolve.pos, is_none=True),
-                pos=resolve.pos,
-            )
-        ]
         resolve.body = _if_return_chain(
             entries,
             lambda type_name, _class_name, pos: _compare_name(key_param, type_name, pos),
-            lambda _type_name, class_name, pos: A.Name(
-                name=class_name, pos=pos or resolve.pos
-            ),
-            fallback,
+            lambda _type_name, class_name, pos: A.Name(name=class_name, pos=pos),
+            [
+                A.Return(
+                    value=A.IntLit(value=0, pos=resolve.pos, is_none=True),
+                    pos=resolve.pos,
+                )
+            ],
+            resolve.pos,
         )
         resolve.ret_type = ("any", None)
 
@@ -274,13 +310,9 @@ def _rewrite_registry_class(registry_class, entries: list, class_table: dict) ->
         fallback_value = A.IntLit(value=0, pos=create.pos, is_none=True)
         for return_stmt in returns:
             value = return_stmt.value
-            if value is None:
-                fallback_value = A.IntLit(value=0, pos=create.pos, is_none=True)
-                break
             if isinstance(value, A.Call) and value.func in class_table:
                 fallback_value = value
                 break
-        fallback = [A.Return(value=fallback_value, pos=create.pos)]
         create.body = _if_return_chain(
             entries,
             lambda type_name, _class_name, pos: _compare_name(key_param, type_name, pos),
@@ -288,12 +320,13 @@ def _rewrite_registry_class(registry_class, entries: list, class_table: dict) ->
                 func=class_name,
                 args=[],
                 kwargs=[
-                    (param, A.Name(name=param, pos=pos or create.pos))
+                    (param, A.Name(name=param, pos=pos))
                     for param in constructor_params
                 ],
-                pos=pos or create.pos,
+                pos=pos,
             ),
-            fallback,
+            [A.Return(value=fallback_value, pos=create.pos)],
+            create.pos,
         )
         create.ret_type = ("any", None)
 
@@ -334,6 +367,7 @@ def _rewrite_registry_class(registry_class, entries: list, class_table: dict) ->
                     pos=type_name_method.pos,
                 )
             ],
+            type_name_method.pos,
         )
         type_name_method.ret_type = ("str", None)
 
@@ -341,7 +375,12 @@ def _rewrite_registry_class(registry_class, entries: list, class_table: dict) ->
     if describe is not None:
         describe.body = [
             A.Return(
-                value=A.DictLit(keys=[], values=[], pos=describe.pos, value_type="any"),
+                value=A.DictLit(
+                    keys=[],
+                    values=[],
+                    pos=describe.pos,
+                    value_type="any",
+                ),
                 pos=describe.pos,
             )
         ]
@@ -376,15 +415,14 @@ def _lower_static_class_registries(mod: A.Module) -> None:
         grouped.setdefault((registry_global, registry_class_name), []).append(
             (literal, class_name)
         )
-
     if not grouped:
         return
+
     class_table = {cls.name: cls for cls in mod.classes}
     for (_registry_global, registry_class_name), entries in grouped.items():
         registry_class = class_table.get(registry_class_name)
-        if registry_class is None:
-            continue
-        _rewrite_registry_class(registry_class, entries, class_table)
+        if registry_class is not None:
+            _rewrite_registry_class(registry_class, entries, class_table)
 
     for factory_name, spec in factories.items():
         if not any(name == factory_name for name, _literal, _class in decorated):
