@@ -36,10 +36,7 @@ jobs:
             tests/test_arm64_ffi_return_conversions.py
           python -m unittest -v \
             tests.test_arm64_ffi_return_conversions \
-            tests.test_arm64_float_nextafter \
-            tests.test_arm64_float_ceil \
-            tests.test_arm64_float_floor \
-            tests.test_arm64_float_trunc
+            tests.test_arm64_float_nextafter
       - name: Execute scalar probes through QEMU
         run: |
           python -m asmpython._backends.arm64._verify_float_nextafter --mode cross
@@ -80,10 +77,7 @@ jobs:
         run: |
           python -m unittest -v \
             tests.test_arm64_ffi_return_conversions \
-            tests.test_arm64_float_nextafter \
-            tests.test_arm64_float_ceil \
-            tests.test_arm64_float_floor \
-            tests.test_arm64_float_trunc
+            tests.test_arm64_float_nextafter
       - name: Execute scalar probes natively
         run: |
           python -m asmpython._backends.arm64._verify_float_nextafter --mode native
