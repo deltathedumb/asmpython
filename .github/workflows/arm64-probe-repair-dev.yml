@@ -1,0 +1,134 @@
+name: Repair ARM64 verification probes
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cross-verify:
+    if: github.head_ref == 'beta/3.14.0'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: beta/3.14.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install AArch64 binutils and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user
+      - name: Apply probe repairs
+        run: python .github/dev/apply_arm64_probe_repairs.py
+      - name: Run focused lowering tests
+        run: |
+          python -m py_compile \
+            asmpython/_backends/arm64/_verify_list_core.py \
+            asmpython/_backends/arm64/_verify_list_extend.py \
+            asmpython/_backends/arm64/_verify_list_insert.py \
+            asmpython/_backends/arm64/_verify_list_pop.py \
+            asmpython/_backends/arm64/_verify_list_repeat.py \
+            asmpython/_backends/arm64/_verify_list_reverse.py \
+            asmpython/_backends/arm64/_verify_float_ulp.py
+          python -m unittest -v \
+            tests.test_arm64_list_core \
+            tests.test_arm64_list_extend \
+            tests.test_arm64_list_insert \
+            tests.test_arm64_list_pop \
+            tests.test_arm64_list_repeat \
+            tests.test_arm64_list_reverse \
+            tests.test_arm64_float_ulp
+      - name: Execute repaired probes through QEMU
+        run: |
+          python -m asmpython._backends.arm64._verify_list_core --mode cross
+          python -m asmpython._backends.arm64._verify_list_extend --mode cross
+          python -m asmpython._backends.arm64._verify_list_insert --mode cross
+          python -m asmpython._backends.arm64._verify_list_pop --mode cross
+          python -m asmpython._backends.arm64._verify_list_repeat --mode cross
+          python -m asmpython._backends.arm64._verify_list_reverse --mode cross
+          python -m asmpython._backends.arm64._verify_float_ulp --mode cross
+      - name: Package verified source files
+        run: |
+          tar -czf arm64-probe-repairs.tar.gz \
+            asmpython/_backends/arm64/_verify_list_core.py \
+            asmpython/_backends/arm64/_verify_list_extend.py \
+            asmpython/_backends/arm64/_verify_list_insert.py \
+            asmpython/_backends/arm64/_verify_list_pop.py \
+            asmpython/_backends/arm64/_verify_list_repeat.py \
+            asmpython/_backends/arm64/_verify_list_reverse.py \
+            asmpython/_backends/arm64/_verify_float_ulp.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arm64-probe-repairs
+          path: arm64-probe-repairs.tar.gz
+
+  native-verify:
+    if: github.head_ref == 'beta/3.14.0'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: beta/3.14.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install native binutils
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils
+      - name: Apply probe repairs
+        run: python .github/dev/apply_arm64_probe_repairs.py
+      - name: Run focused lowering tests
+        run: |
+          python -m unittest -v \
+            tests.test_arm64_list_core \
+            tests.test_arm64_list_extend \
+            tests.test_arm64_list_insert \
+            tests.test_arm64_list_pop \
+            tests.test_arm64_list_repeat \
+            tests.test_arm64_list_reverse \
+            tests.test_arm64_float_ulp
+      - name: Execute repaired probes natively
+        run: |
+          python -m asmpython._backends.arm64._verify_list_core --mode native
+          python -m asmpython._backends.arm64._verify_list_extend --mode native
+          python -m asmpython._backends.arm64._verify_list_insert --mode native
+          python -m asmpython._backends.arm64._verify_list_pop --mode native
+          python -m asmpython._backends.arm64._verify_list_repeat --mode native
+          python -m asmpython._backends.arm64._verify_list_reverse --mode native
+          python -m asmpython._backends.arm64._verify_float_ulp --mode native
+
+  commit-repairs:
+    if: github.head_ref == 'beta/3.14.0'
+    needs: [cross-verify, native-verify]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: beta/3.14.0
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: arm64-probe-repairs
+          path: /tmp/arm64-probe-repairs
+      - name: Restore verified files
+        run: tar -xzf /tmp/arm64-probe-repairs/arm64-probe-repairs.tar.gz
+      - name: Commit verified probe repairs
+        run: |
+          git config user.name "asmpython-ci"
+          git config user.email "actions@users.noreply.github.com"
+          git add \
+            asmpython/_backends/arm64/_verify_list_core.py \
+            asmpython/_backends/arm64/_verify_list_extend.py \
+            asmpython/_backends/arm64/_verify_list_insert.py \
+            asmpython/_backends/arm64/_verify_list_pop.py \
+            asmpython/_backends/arm64/_verify_list_repeat.py \
+            asmpython/_backends/arm64/_verify_list_reverse.py \
+            asmpython/_backends/arm64/_verify_float_ulp.py
+          git commit -m "Repair ARM64 list and ULP probes"
+          git push origin HEAD:beta/3.14.0
