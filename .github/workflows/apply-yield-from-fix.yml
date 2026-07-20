@@ -40,16 +40,15 @@ jobs:
                   1,
               )
 
-          old = '''            if t.value == "yield":
-                  pos = self._eat().pos
-                  if self._check("NEWLINE"):
-                      val: A.Expr = A.IntLit(value=0, pos=pos)  # bare yield
-                  else:
-                      val = self._parse_expr()
-                  self._expect("NEWLINE")
-                  return A.YieldStmt(value=val, pos=pos)
-          '''
-          new = '''            if t.value == "yield":
+          start_marker = '            if t.value == "yield":\n'
+          end_marker = '\n\n        # `match` is a soft keyword'
+          start = text.find(start_marker)
+          if start < 0:
+              raise SystemExit("yield parser start landmark not found")
+          end = text.find(end_marker, start)
+          if end < 0:
+              raise SystemExit("yield parser end landmark not found")
+          new_branch = '''            if t.value == "yield":
                   pos = self._eat().pos
                   if self._check("KEYWORD", "from"):
                       self._eat()
@@ -76,9 +75,8 @@ jobs:
                   self._expect("NEWLINE")
                   return A.YieldStmt(value=val, pos=pos)
           '''
-          if old not in text:
-              raise SystemExit("yield parser branch not found")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          text = text[:start] + new_branch + text[end:]
+          path.write_text(text, encoding="utf-8")
           PY
       - name: Compile and run focused regression
         run: |
