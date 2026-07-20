@@ -308,6 +308,26 @@ def _compile_program(
     return module
 
 
+def _write_backend_output(
+    out_path: Path,
+    out_bytes: bytes,
+    *,
+    executable: bool,
+) -> Path:
+    """Write backend output and preserve the executable contract on POSIX.
+
+    ``Path.write_bytes`` creates a regular data file, normally mode 0o644.
+    Built-in linkers return bytes instead of writing the final path, so Linux
+    executables must have their execute bits restored explicitly.
+    """
+    resolved = out_path.resolve()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_bytes(out_bytes)
+    if executable and os.name != "nt":
+        resolved.chmod(resolved.stat().st_mode | 0o111)
+    return resolved
+
+
 def _run_backend_x86_64(
     module,
     target: str,
@@ -404,9 +424,11 @@ def _run_backend_x86_64(
     linked = backend.link(objects, link_args)
     out_bytes = next(iter(linked.values()))
 
-    out_path = out_path.resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(out_bytes)
+    out_path = _write_backend_output(
+        out_path,
+        out_bytes,
+        executable=target == "linux",
+    )
 
     print(f"wrote {out_path}")
     return BuildResult(asm_path=out_path, obj_path=out_path, exe_path=out_path)

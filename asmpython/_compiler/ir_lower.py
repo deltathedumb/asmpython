@@ -8606,7 +8606,7 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             ctx.switch_to(end_b)
             return
         iter_t = A.expr_type(s.iter)
-        if iter_t not in ("list", "dict", "str", "any"):
+        if iter_t not in ("list", "tuple", "dict", "str", "any"):
             raise LowerError(f"unsupported stmt For (iterating {iter_t!r})")
         if iter_t == "dict":
             el_ty = "str"
@@ -8614,6 +8614,9 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             el_ty = "str"
         elif iter_t == "any":
             el_ty = "any"
+        elif iter_t == "tuple":
+            tuple_types = A.tuple_element_types(s.iter)
+            el_ty = tuple_types[0] if tuple_types else "int"
         elif isinstance(s.iter, A.ListLit):
             el_ty = s.iter.el_type
         elif isinstance(s.iter, A.Name):
@@ -8623,7 +8626,7 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             )
         else:
             el_ty = getattr(s.iter, "list_el_type", "int") or "int"
-        if el_ty == "float":
+        if el_ty == "float" and iter_t != "tuple":
             raise LowerError("unsupported stmt For (float list elements)")
         var_ty = PTR if s.targets else ir_type_for(el_ty)
 

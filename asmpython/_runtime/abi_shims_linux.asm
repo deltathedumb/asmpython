@@ -21,6 +21,7 @@ extern _runtime_dict_contains
 extern _runtime_dict_keys
 extern _runtime_dict_update
 extern _runtime_str_concat
+extern _runtime_str_concat_dup
 extern _runtime_str_eq
 extern _runtime_str_cmp
 extern _runtime_int_to_base
@@ -77,6 +78,7 @@ extern _runtime_sort_pairs_str
 extern _runtime_sort_pairs_int
 extern _runtime_chr
 extern strtoll
+extern strtod
 extern malloc
 extern printf
 extern sprintf
@@ -146,6 +148,7 @@ global _abi_sort_pairs_int
 global _abi_chr
 global _abi_str_to_int
 global _abi_str_to_int_base
+global _abi_float_to_str
 
 ; asmlib.hardware's _hw_* symbols, hosted-target bodies -- see
 ; abi_shims.asm's matching comment block; identical behavior, SysV args.
@@ -685,6 +688,193 @@ _abi_range_list:
     pop rbx
     ret
 
+
+; rax = float_to_str(xmm0) -> a fresh nul-terminated Python-style float
+; representation. Search the minimum fixed/scientific precision whose text
+; round-trips through strtod to the exact original IEEE-754 bits. This is the
+; SysV port of the Windows runtime's shortest-roundtrip formatter.
+_abi_float_to_str:
+    ; SysV entry rsp % 16 == 8. Two pushes keep it at 8; subtracting 40
+    ; aligns rsp to 16 before every libc/runtime call below.
+    push rbx
+    push r12
+    sub rsp, 40
+
+    ucomisd xmm0, xmm0
+    jp .float_is_nan
+    movq rax, xmm0
+    mov r10, 0x7FFFFFFFFFFFFFFF
+    and rax, r10
+    mov r10, 0x7FF0000000000000
+    cmp rax, r10
+    jne .float_finite
+    movq rax, xmm0
+    test rax, rax
+    jns .float_pos_inf
+    lea rax, [_abi_str_ninf]
+    jmp .float_done
+.float_pos_inf:
+    lea rax, [_abi_str_pinf]
+    jmp .float_done
+.float_is_nan:
+    lea rax, [_abi_str_nan]
+    jmp .float_done
+
+.float_finite:
+    movsd [rsp], xmm0
+    movq rax, xmm0
+    mov r10, 0x7FFFFFFFFFFFFFFF
+    and rax, r10
+    movq xmm1, rax
+    xorpd xmm2, xmm2
+    ucomisd xmm1, xmm2
+    je .float_notation_fixed
+    mov r10, 0x3F1A36E2EB1C432D
+    movq xmm3, r10
+    ucomisd xmm1, xmm3
+    jb .float_notation_sci
+    mov r10, 0x4341C37937E08000
+    movq xmm3, r10
+    ucomisd xmm1, xmm3
+    jae .float_notation_sci
+.float_notation_fixed:
+    mov qword [rsp+8], 0
+    jmp .float_search_init
+.float_notation_sci:
+    mov qword [rsp+8], 1
+
+.float_search_init:
+    xor r12d, r12d
+.float_search_loop:
+    mov [rsp+16], r12
+    cmp qword [rsp+8], 0
+    je .float_use_fixed_fmt
+    lea rbx, [_abi_fmt_sci_buf]
+    mov byte [rbx], '%'
+    mov byte [rbx+1], '.'
+    jmp .float_fmt_digits
+.float_use_fixed_fmt:
+    lea rbx, [_abi_fmt_fixed_buf]
+    mov byte [rbx], '%'
+    mov byte [rbx+1], '.'
+.float_fmt_digits:
+    mov rax, r12
+    mov r10, 10
+    xor edx, edx
+    div r10
+    test rax, rax
+    jz .float_one_digit
+    add al, '0'
+    mov [rbx+2], al
+    add dl, '0'
+    mov [rbx+3], dl
+    lea rcx, [rbx+4]
+    jmp .float_fmt_kind
+.float_one_digit:
+    add dl, '0'
+    mov [rbx+2], dl
+    lea rcx, [rbx+3]
+.float_fmt_kind:
+    cmp qword [rsp+8], 0
+    je .float_fmt_fixed
+    mov byte [rcx], 'e'
+    mov byte [rcx+1], 0
+    jmp .float_fmt_ready
+.float_fmt_fixed:
+    mov byte [rcx], 'f'
+    mov byte [rcx+1], 0
+.float_fmt_ready:
+    movsd xmm0, [rsp]
+    lea rdi, [_abi_float_search_buf]
+    mov rsi, rbx
+    mov eax, 1
+    call sprintf
+
+    lea rdi, [_abi_float_search_buf]
+    xor esi, esi
+    call strtod
+    movq rax, xmm0
+    movsd xmm1, [rsp]
+    movq r10, xmm1
+    mov r12, [rsp+16]
+    cmp rax, r10
+    je .float_search_done
+    inc r12
+    cmp r12, 17
+    jbe .float_search_loop
+
+.float_search_done:
+    lea rax, [_abi_float_search_buf]
+    mov rbx, rax
+.float_exp_scan:
+    mov cl, [rbx]
+    test cl, cl
+    jz .float_no_exp
+    cmp cl, 'e'
+    je .float_found_exp
+    inc rbx
+    jmp .float_exp_scan
+.float_found_exp:
+    lea rsi, [rbx+2]
+    mov rdi, rsi
+.float_skip_zeros:
+    mov cl, [rdi]
+    cmp cl, '0'
+    jne .float_zeros_done
+    lea rdx, [rdi+1]
+    cmp byte [rdx], 0
+    je .float_zeros_done
+    mov r10, rdi
+.float_count_rest:
+    cmp byte [r10], 0
+    je .float_count_done
+    inc r10
+    jmp .float_count_rest
+.float_count_done:
+    sub r10, rdi
+    cmp r10, 2
+    jle .float_zeros_done
+    inc rdi
+    jmp .float_skip_zeros
+.float_zeros_done:
+    cmp rdi, rsi
+    je .float_no_exp
+.float_shift_exp:
+    mov cl, [rdi]
+    mov [rsi], cl
+    test cl, cl
+    jz .float_no_exp
+    inc rdi
+    inc rsi
+    jmp .float_shift_exp
+
+.float_no_exp:
+    lea rax, [_abi_float_search_buf]
+    mov rbx, rax
+.float_scan_marker:
+    mov cl, [rbx]
+    test cl, cl
+    jz .float_append_point_zero
+    cmp cl, '.'
+    je .float_fixup_done
+    cmp cl, 'e'
+    je .float_fixup_done
+    inc rbx
+    jmp .float_scan_marker
+.float_append_point_zero:
+    mov byte [rbx], '.'
+    mov byte [rbx+1], '0'
+    mov byte [rbx+2], 0
+.float_fixup_done:
+    lea rax, [_abi_float_search_buf]
+
+.float_done:
+    call _runtime_str_concat_dup
+    add rsp, 40
+    pop r12
+    pop rbx
+    ret
+
 ; ---- asmlib.hardware: ring-0-only ops, stubbed (unavailable to ring-3
 ; hosted code) -- see abi_shims.asm's matching block.
 _hw_in_byte:
@@ -756,12 +946,18 @@ _con_ch:    resq 1
 _con_ansi1: resq 1
 _con_ansi2: resq 1
 _con_buf:   resb 32
+_abi_fmt_fixed_buf: resb 8
+_abi_fmt_sci_buf:   resb 8
+_abi_float_search_buf: resb 40
 
 section .rodata
 _con_fmt_clear:  db 27, "[2J", 27, "[H", 0
 _con_fmt_color:  db 27, "[%dm", 27, "[%dm", 0
 _con_fmt_cursor: db 27, "[%d;%dH", 0
 _con_fmt_s:      db "%s", 0
+_abi_str_nan:    db "nan", 0
+_abi_str_pinf:   db "inf", 0
+_abi_str_ninf:   db "-inf", 0
 
 section .text
 
