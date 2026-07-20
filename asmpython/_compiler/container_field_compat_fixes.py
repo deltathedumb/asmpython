@@ -65,6 +65,27 @@ def _recursive_object_element(owner, field_name: str, classes: dict) -> "str | N
     return None
 
 
+def _cross_object_self_element(owner, field_name: str) -> "str | None":
+    """Recognize ``other.field.append(self)`` on same-hierarchy relationships."""
+    for method in owner.methods:
+        parameters = set(method.params[1:])
+        for node in _walk_statements(method.body):
+            if not (
+                isinstance(node, A.MethodCall)
+                and node.method == "append"
+                and len(node.args) == 1
+                and isinstance(node.args[0], A.Name)
+                and node.args[0].name == "self"
+                and isinstance(node.obj, A.Attr)
+                and node.obj.name == field_name
+                and isinstance(node.obj.obj, A.Name)
+                and node.obj.obj.name in parameters
+            ):
+                continue
+            return owner.name
+    return None
+
+
 def _collection_fields(mod: A.Module) -> dict[tuple[str, str], tuple[str, str]]:
     result: dict[tuple[str, str], tuple[str, str]] = {}
     classes = {owner.name: owner for owner in mod.classes}
@@ -84,6 +105,8 @@ def _collection_fields(mod: A.Module) -> dict[tuple[str, str], tuple[str, str]]:
                     continue
                 if base == "list" and element == "any":
                     refined = _recursive_object_element(owner, statement.name, classes)
+                    if refined is None:
+                        refined = _cross_object_self_element(owner, statement.name)
                     if refined is not None:
                         element = refined
                         statement.annot = ("list", element)
