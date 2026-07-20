@@ -13,5 +13,6 @@ from . import program_compat_fixes as _program_compat_fixes
 from . import analysis_compat_fixes as _analysis_compat_fixes
 from . import object_flow_compat_fixes as _object_flow_compat_fixes
 from . import dynamic_parameter_compat_fixes as _dynamic_parameter_compat_fixes
+from . import type_parameter_compat_fixes as _type_parameter_compat_fixes
 
 __all__ = ["__version__"]
