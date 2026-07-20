@@ -16,6 +16,7 @@ from .sema import SemaAnalyzer
 _ORIGINAL_PARSE_STMT = Parser._parse_stmt
 _ORIGINAL_PARSE_TRAILERS = Parser._parse_trailers
 _ORIGINAL_CHECK_EXPR = SemaAnalyzer._check_expr
+_ORIGINAL_ANALYZE = SemaAnalyzer.analyze
 
 
 def _parse_stmt_with_yield_from(self: Parser):
@@ -96,6 +97,138 @@ def _check_expr_with_type_constructor(self: SemaAnalyzer, expr, scope) -> None:
     _ORIGINAL_CHECK_EXPR(self, expr, scope)
 
 
+def _lower_static_data_descriptors(mod: A.Module) -> None:
+    """Lower statically declared descriptors to shared objects + properties.
+
+    A declaration such as ``value = Descriptor(...)`` is recognized when the
+    descriptor class is part of the compiled program and defines ``__get__`` or
+    ``__set__``. One module-global descriptor instance is created, ``__set_name__``
+    is invoked once when present, and instance reads/writes are routed through the
+    compiler's existing ``@property`` getter/setter machinery.
+
+    Native class objects do not exist yet, so the owner argument is represented by
+    the class's qualified name string. Descriptors that ignore the owner (the usual
+    data-descriptor pattern) behave exactly as expected; no per-instance descriptor
+    copies are made.
+    """
+    if getattr(mod, "_static_descriptors_lowered", False):
+        return
+    mod._static_descriptors_lowered = True
+
+    class_table = {cls.name: cls for cls in mod.classes}
+    descriptor_methods = {
+        cls.name: {method.name for method in cls.methods}
+        for cls in mod.classes
+        if any(method.name in ("__get__", "__set__") for method in cls.methods)
+    }
+    if not descriptor_methods:
+        return
+
+    module_init: list = []
+    for owner in mod.classes:
+        existing_methods = {method.name for method in owner.methods}
+        rewritten_vars: list = []
+        for field_name, annotation, initializer in owner.class_vars:
+            descriptor_name = None
+            if isinstance(initializer, A.Call) and initializer.func in descriptor_methods:
+                descriptor_name = initializer.func
+            if descriptor_name is None:
+                rewritten_vars.append((field_name, annotation, initializer))
+                continue
+
+            methods = descriptor_methods[descriptor_name]
+            global_name = f"__asmpy_descriptor_{owner.name}_{field_name}"
+            module_init.append(
+                A.Assign(target=global_name, value=initializer, pos=owner.pos)
+            )
+            if "__set_name__" in methods:
+                module_init.append(
+                    A.ExprStmt(
+                        expr=A.MethodCall(
+                            obj=A.Name(name=global_name, pos=owner.pos),
+                            method="__set_name__",
+                            args=[
+                                A.StrLit(value=owner.name, pos=owner.pos),
+                                A.StrLit(value=field_name, pos=owner.pos),
+                            ],
+                            pos=owner.pos,
+                        ),
+                        pos=owner.pos,
+                    )
+                )
+
+            if "__get__" in methods and field_name not in existing_methods:
+                owner.methods.append(
+                    A.FuncDef(
+                        name=field_name,
+                        params=["self"],
+                        body=[
+                            A.Return(
+                                value=A.MethodCall(
+                                    obj=A.Name(name=global_name, pos=owner.pos),
+                                    method="__get__",
+                                    args=[
+                                        A.Name(name="self", pos=owner.pos),
+                                        A.StrLit(value=owner.name, pos=owner.pos),
+                                    ],
+                                    pos=owner.pos,
+                                ),
+                                pos=owner.pos,
+                            )
+                        ],
+                        pos=owner.pos,
+                        defaults=[None],
+                        param_types=[None],
+                        decorators=["property"],
+                    )
+                )
+                existing_methods.add(field_name)
+
+            if "__set__" in methods:
+                owner.methods.append(
+                    A.FuncDef(
+                        name=field_name,
+                        params=["self", "value"],
+                        body=[
+                            A.ExprStmt(
+                                expr=A.MethodCall(
+                                    obj=A.Name(name=global_name, pos=owner.pos),
+                                    method="__set__",
+                                    args=[
+                                        A.Name(name="self", pos=owner.pos),
+                                        A.Name(name="value", pos=owner.pos),
+                                    ],
+                                    pos=owner.pos,
+                                ),
+                                pos=owner.pos,
+                            )
+                        ],
+                        pos=owner.pos,
+                        defaults=[None, None],
+                        param_types=[None, None],
+                        decorators=[f"{field_name}.setter"],
+                    )
+                )
+
+            # Preserve class-level identity through the shared module binding.
+            rewritten_vars.append(
+                (
+                    field_name,
+                    annotation,
+                    A.Name(name=global_name, pos=owner.pos),
+                )
+            )
+        owner.class_vars = rewritten_vars
+
+    if module_init:
+        mod.body = module_init + list(mod.body)
+
+
+def _analyze_with_static_descriptors(self: SemaAnalyzer) -> None:
+    _lower_static_data_descriptors(self.mod)
+    _ORIGINAL_ANALYZE(self)
+
+
 if not getattr(Parser, "_asmpython_yield_from_patch", False):
     Parser._parse_stmt = _parse_stmt_with_yield_from
     Parser._asmpython_yield_from_patch = True
@@ -107,3 +240,7 @@ if not getattr(Parser, "_asmpython_expression_call_patch", False):
 if not getattr(SemaAnalyzer, "_asmpython_type_constructor_patch", False):
     SemaAnalyzer._check_expr = _check_expr_with_type_constructor
     SemaAnalyzer._asmpython_type_constructor_patch = True
+
+if not getattr(SemaAnalyzer, "_asmpython_static_descriptor_patch", False):
+    SemaAnalyzer.analyze = _analyze_with_static_descriptors
+    SemaAnalyzer._asmpython_static_descriptor_patch = True
