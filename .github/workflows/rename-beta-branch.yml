@@ -5,6 +5,8 @@ on:
     branches: [beta]
     paths:
       - ".github/workflows/rename-beta-branch.yml"
+  pull_request:
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 permissions:
@@ -12,6 +14,7 @@ permissions:
 
 jobs:
   rename:
+    if: github.head_ref == 'beta' || github.ref_name == 'beta'
     runs-on: ubuntu-24.04
     steps:
       - name: Rename beta to beta/3.14.0
