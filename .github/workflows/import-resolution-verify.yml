@@ -106,12 +106,15 @@ jobs:
       - name: Show native diagnostic
         if: always()
         run: cat native-import-binary-diagnostic.txt
-      - name: Upload native diagnostic
+      - name: Upload native diagnostic and relevant sources
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: native-import-binary-diagnostic
-          path: native-import-binary-diagnostic.txt
+          path: |
+            native-import-binary-diagnostic.txt
+            asmpython/_compiler
+            asmpython/_backends/x86_64
           if-no-files-found: error
           retention-days: 1
       - name: Fail if native parity failed
