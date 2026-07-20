@@ -130,3 +130,5 @@ jobs:
           git add asmpython/_compiler/ast_nodes.py asmpython/_compiler/parser.py
           git commit -m "Parse class metaclass keyword arguments"
           git push origin HEAD:fix/somnia-metaclass-keyword
+
+# Base-branch verifier trigger.
