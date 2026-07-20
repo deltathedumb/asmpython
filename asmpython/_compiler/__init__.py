@@ -10,5 +10,6 @@ from . import language_compat_fixes as _language_compat_fixes
 from . import metaclass_compat_fixes as _metaclass_compat_fixes
 from . import class_registry_compat_fixes as _class_registry_compat_fixes
 from . import program_compat_fixes as _program_compat_fixes
+from . import analysis_compat_fixes as _analysis_compat_fixes
 
 __all__ = ["__version__"]
