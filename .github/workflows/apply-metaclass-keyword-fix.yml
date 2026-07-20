@@ -1,59 +1,65 @@
-name: Apply metaclass keyword parsing
+name: Verify metaclass keyword parsing
 
 on:
-  push:
+  pull_request:
     branches: [beta/3.14.0]
     paths:
-      - ".github/workflows/apply-metaclass-keyword-fix.yml"
+      - "asmpython/_compiler/ast_nodes.py"
+      - "asmpython/_compiler/parser.py"
+      - "tests/cases/464_metaclass_keyword.py"
+      - ".github/workflows/verify-somnia-metaclass-fix.yml"
 
 permissions:
   contents: write
 
 jobs:
-  patch-and-verify:
+  patch-test-commit:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: beta/3.14.0
+          ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install native toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm
-      - name: Add metaclass keyword AST and parser support
+      - name: Apply metaclass keyword support when absent
         run: |
           python - <<'PY'
           from pathlib import Path
 
           ast_path = Path("asmpython/_compiler/ast_nodes.py")
           ast = ast_path.read_text(encoding="utf-8")
-          needle = '    implements_interface: "str | None" = None\n'
-          replacement = (
-              needle
-              + '    # Explicit Python class-header metaclass.\n'
-              + '    metaclass: "str | None" = None\n'
-          )
-          if needle not in ast:
-              raise SystemExit("ClassDef implements_interface field not found")
-          ast_path.write_text(ast.replace(needle, replacement, 1), encoding="utf-8")
+          if '    metaclass: "str | None" = None\n' not in ast:
+              needle = '    implements_interface: "str | None" = None\n'
+              if needle not in ast:
+                  raise SystemExit("ClassDef field anchor not found")
+              ast = ast.replace(
+                  needle,
+                  needle + '    # Explicit Python class-header metaclass.\n'
+                  '    metaclass: "str | None" = None\n',
+                  1,
+              )
+              ast_path.write_text(ast, encoding="utf-8")
 
           parser_path = Path("asmpython/_compiler/parser.py")
           parser = parser_path.read_text(encoding="utf-8")
-          variable_needle = '        implements_interface: "str | None" = None\n'
-          if variable_needle not in parser:
-              raise SystemExit("class parser variable anchor not found")
-          parser = parser.replace(
-              variable_needle,
-              variable_needle + '        metaclass_name: "str | None" = None\n',
-              1,
-          )
+          if '        metaclass_name: "str | None" = None\n' not in parser:
+              needle = '        implements_interface: "str | None" = None\n'
+              if needle not in parser:
+                  raise SystemExit("class parser variable anchor not found")
+              parser = parser.replace(
+                  needle,
+                  needle + '        metaclass_name: "str | None" = None\n',
+                  1,
+              )
 
-          first_else = '''                else:
+              first_else = '''                else:
                       # First base class, possibly dotted (`module.Base`). Every
           '''
-          first_meta = '''                elif (
+              first_meta = '''                elif (
                       self._check("NAME", "metaclass")
                       and self._peek(1).kind == "OP"
                       and self._peek(1).value == "="
@@ -67,15 +73,15 @@ jobs:
                   else:
                       # First base class, possibly dotted (`module.Base`). Every
           '''
-          if first_else not in parser:
-              raise SystemExit("first class-base else anchor not found")
-          parser = parser.replace(first_else, first_meta, 1)
+              if first_else not in parser:
+                  raise SystemExit("first class-base else anchor not found")
+              parser = parser.replace(first_else, first_meta, 1)
 
-          comma_tail = '''                        implements_interface = self._expect("NAME").value
+              comma_tail = '''                        implements_interface = self._expect("NAME").value
                           break
                       self._parse_expr()
           '''
-          comma_meta = '''                        implements_interface = self._expect("NAME").value
+              comma_meta = '''                        implements_interface = self._expect("NAME").value
                           break
                       if (
                           self._check("NAME", "metaclass")
@@ -91,34 +97,36 @@ jobs:
                           continue
                       self._parse_expr()
           '''
-          if comma_tail not in parser:
-              raise SystemExit("extra class-base anchor not found")
-          parser = parser.replace(comma_tail, comma_meta, 1)
+              if comma_tail not in parser:
+                  raise SystemExit("extra class-base anchor not found")
+              parser = parser.replace(comma_tail, comma_meta, 1)
 
-          return_needle = '            implements_interface=implements_interface,\n        )\n'
-          if return_needle not in parser:
-              raise SystemExit("ClassDef return anchor not found")
-          parser = parser.replace(
-              return_needle,
-              '            implements_interface=implements_interface,\n'
-              '            metaclass=metaclass_name,\n'
-              '        )\n',
-              1,
-          )
-          parser_path.write_text(parser, encoding="utf-8")
+              return_needle = '            implements_interface=implements_interface,\n        )\n'
+              if return_needle not in parser:
+                  raise SystemExit("ClassDef return anchor not found")
+              parser = parser.replace(
+                  return_needle,
+                  '            implements_interface=implements_interface,\n'
+                  '            metaclass=metaclass_name,\n'
+                  '        )\n',
+                  1,
+              )
+              parser_path.write_text(parser, encoding="utf-8")
           PY
-      - name: Compile and run metaclass keyword regression
+      - name: Compile and run focused regression
         run: |
           python -m asmpython tests/cases/464_metaclass_keyword.py \
             --target linux -o /tmp/asmpython-metaclass-keyword
           output=$(/tmp/asmpython-metaclass-keyword)
           printf '%s\n' "$output"
           test "$output" = "42"
-      - name: Commit verified compiler fix
+      - name: Commit materialized source changes
         run: |
+          if git diff --quiet -- asmpython/_compiler/ast_nodes.py asmpython/_compiler/parser.py; then
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/workflows/apply-metaclass-keyword-fix.yml
           git add asmpython/_compiler/ast_nodes.py asmpython/_compiler/parser.py
           git commit -m "Parse class metaclass keyword arguments"
-          git push origin HEAD:beta/3.14.0
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
