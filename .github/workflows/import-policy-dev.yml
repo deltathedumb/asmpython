@@ -1,0 +1,47 @@
+name: Diagnose import policy
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'beta/3.14.0'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: beta/3.14.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Locate import policy suite
+        run: |
+          grep -R -n -E 'focused-import-policy|Run import policy tests' .github/workflows \
+            | tee import-policy-location.log || true
+          find tests -maxdepth 2 -type f -iname '*import*.py' -print \
+            | sort | tee import-policy-tests.log
+      - name: Run import-related tests with full diagnostics
+        run: |
+          set +e
+          python -m unittest discover -s tests -p 'test_*import*.py' -v \
+            > import-policy-run.log 2>&1
+          status=$?
+          echo "status=$status" | tee import-policy-status.log
+          cat import-policy-run.log
+          exit 0
+      - name: Upload import policy diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: import-policy-diagnostic
+          path: |
+            import-policy-location.log
+            import-policy-tests.log
+            import-policy-run.log
+            import-policy-status.log
+            .github/workflows
+            tests
