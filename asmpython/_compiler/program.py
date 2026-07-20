@@ -646,24 +646,29 @@ def _resolve_relative(importer: Path, level: int, module: str, root: Path) -> Pa
 
 
 def _resolve_absolute(module: str, root: Path) -> Path | None:
-    """Resolve an absolute dotted import (`asmpython._compiler.errors`) to a
-    project file under `root`'s parent, or None if it's not a project module."""
+    """Resolve an absolute dotted import inside a project's source root.
+
+    `root` may be either a package directory itself (`.../asmpython`) or a
+    workspace/repository directory containing multiple top-level packages
+    (`.../somnia`, `.../tests`, and so on). Only files contained by `root`
+    are accepted, so normal stdlib and third-party imports remain external.
+    """
     parts = module.split(".")
-    # The project root dir is named after the top package (e.g. `asmpython`),
-    # so an import `asmpython.x.y` maps to <root>/x/y.py with root.name == parts[0].
     if not parts:
         return None
-    if parts[0] != root.name:
-        return None
-    target = root
+
+    if root.name == parts[0]:
+        target = root
+    else:
+        target = root / parts[0]
     for part in parts[1:]:
         target = target / part
+
     py = Path(str(target) + ".py")
-    if py.is_file():
+    if py.is_file() and _within(py, root):
         return py
-    # A package import (`asmpython._compiler`) -> its __init__.py.
     init = target / "__init__.py"
-    if init.is_file():
+    if init.is_file() and _within(init, root):
         return init
     return None
 
@@ -1256,15 +1261,40 @@ def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]
 
 
 def _project_root(entry: Path) -> Path:
-    """The top-level package directory: walk up while a parent has __init__.py
-    so the whole `asmpython/` tree counts as one project."""
-    root = entry.parent
-    while (root.parent / "__init__.py").is_file() or (root / "__init__.py").is_file():
-        if (root.parent / "__init__.py").is_file():
-            root = root.parent
+    """Find the source root that owns an entry file.
+
+    First discover the entry's top-level package as before. Then walk toward
+    the filesystem root looking for an ordinary project/workspace marker.
+    This lets an entry nested under one package import sibling top-level
+    packages from the same repository, matching CPython's project-root
+    behavior, while preserving the old package-root fallback for loose or
+    installed source trees without a marker.
+    """
+    package_root = entry.parent
+    while (
+        (package_root.parent / "__init__.py").is_file()
+        or (package_root / "__init__.py").is_file()
+    ):
+        if (package_root.parent / "__init__.py").is_file():
+            package_root = package_root.parent
         else:
             break
-    return root
+
+    current = package_root
+    while True:
+        if (
+            (current / "pyproject.toml").is_file()
+            or (current / "setup.cfg").is_file()
+            or (current / "setup.py").is_file()
+            or (current / "project.json").is_file()
+            or (current / ".git").is_dir()
+        ):
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return package_root
 
 
 def _toplevel_value_assigns(module: A.Module) -> dict[str, A.Stmt]:
