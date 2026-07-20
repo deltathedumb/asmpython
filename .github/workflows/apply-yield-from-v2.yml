@@ -1,10 +1,8 @@
-name: Apply and verify yield-from support
+name: Verify yield-from support
 
 on:
-  push:
+  pull_request:
     branches: [beta/3.14.0]
-    paths:
-      - ".github/workflows/apply-yield-from-v2.yml"
 
 permissions:
   contents: write
@@ -15,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: beta/3.14.0
+          ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -97,11 +95,13 @@ jobs:
               Parser(Lexer(path.read_text(encoding="utf-8")).tokenize()).parse()
               print("PASS", rel)
           PY
-      - name: Commit verified compiler fix
+      - name: Commit verified compiler fix to PR branch
         run: |
+          if git diff --quiet -- asmpython/_compiler/parser.py; then
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/workflows/apply-yield-from-v2.yml
           git add asmpython/_compiler/parser.py
           git commit -m "Lower yield-from delegation"
-          git push origin HEAD:beta/3.14.0
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
