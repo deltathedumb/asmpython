@@ -97,6 +97,39 @@ def _check_expr_with_type_constructor(self: SemaAnalyzer, expr, scope) -> None:
     _ORIGINAL_CHECK_EXPR(self, expr, scope)
 
 
+def _descriptor_value_annotation(initializer) -> "tuple | None":
+    """Infer a descriptor's exposed value type from its static constructor."""
+    if not isinstance(initializer, A.Call):
+        return None
+
+    for name, value in initializer.kwargs:
+        if name == "value_type" and isinstance(value, A.Name):
+            return (value.name, None)
+
+    if not initializer.args:
+        return None
+    default = initializer.args[0]
+    if isinstance(default, A.StrLit):
+        return ("str", None)
+    if isinstance(default, A.FloatLit):
+        return ("float", None)
+    if isinstance(default, A.IntLit):
+        return ("bool" if default.is_bool else "int", None)
+    if isinstance(default, A.ListLit):
+        return ("list", getattr(default, "el_type", None))
+    if isinstance(default, A.DictLit):
+        return ("dict", None)
+    if isinstance(default, A.TupleLit):
+        return ("tuple", None)
+    if isinstance(default, A.SetLit):
+        return ("set", None)
+    if isinstance(default, A.Call):
+        return (default.func, None)
+    if isinstance(default, A.MethodCall) and isinstance(default.obj, A.Name):
+        return (default.obj.name, None)
+    return None
+
+
 def _lower_static_data_descriptors(mod: A.Module) -> None:
     """Lower statically declared descriptors to shared objects + properties.
 
@@ -115,7 +148,6 @@ def _lower_static_data_descriptors(mod: A.Module) -> None:
         return
     mod._static_descriptors_lowered = True
 
-    class_table = {cls.name: cls for cls in mod.classes}
     descriptor_methods = {
         cls.name: {method.name for method in cls.methods}
         for cls in mod.classes
@@ -137,6 +169,7 @@ def _lower_static_data_descriptors(mod: A.Module) -> None:
                 continue
 
             methods = descriptor_methods[descriptor_name]
+            exposed_type = _descriptor_value_annotation(initializer)
             global_name = f"__asmpy_descriptor_{owner.name}_{field_name}"
             module_init.append(
                 A.Assign(target=global_name, value=initializer, pos=owner.pos)
@@ -179,6 +212,7 @@ def _lower_static_data_descriptors(mod: A.Module) -> None:
                         pos=owner.pos,
                         defaults=[None],
                         param_types=[None],
+                        ret_type=exposed_type,
                         decorators=["property"],
                     )
                 )
@@ -205,7 +239,7 @@ def _lower_static_data_descriptors(mod: A.Module) -> None:
                         ],
                         pos=owner.pos,
                         defaults=[None, None],
-                        param_types=[None, None],
+                        param_types=[None, exposed_type],
                         decorators=[f"{field_name}.setter"],
                     )
                 )
