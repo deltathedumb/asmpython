@@ -15,5 +15,7 @@ from . import object_flow_compat_fixes as _object_flow_compat_fixes
 from . import dynamic_parameter_compat_fixes as _dynamic_parameter_compat_fixes
 from . import type_parameter_compat_fixes as _type_parameter_compat_fixes
 from . import field_flow_compat_fixes as _field_flow_compat_fixes
+from . import container_field_compat_fixes as _container_field_compat_fixes
+from . import live_definition_compat_fixes as _live_definition_compat_fixes
 
 __all__ = ["__version__"]
