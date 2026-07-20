@@ -1,0 +1,124 @@
+name: Verify Somnia expression-result calls
+
+on:
+  pull_request:
+    branches: [beta/3.14.0]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/somnia-call-expression-result
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install native toolchain
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm
+      - name: Parse call trailers and resolve type(instance) constructors
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          parser_path = Path("asmpython/_compiler/parser.py")
+          parser = parser_path.read_text(encoding="utf-8")
+          call_trailer_marker = 'atom = A.MethodCall(obj=atom, method="__call__"'
+          if call_trailer_marker not in parser:
+              marker = '''                else:
+                      # obj.name — attribute access (e.g. math.pi)
+                      atom = A.Attr(obj=atom, name=name, pos=dot.pos)  # type: ignore
+              else:
+                  return atom
+          '''
+              replacement = '''                else:
+                      # obj.name — attribute access (e.g. math.pi)
+                      atom = A.Attr(obj=atom, name=name, pos=dot.pos)  # type: ignore
+              elif self._check("OP", "("):
+                  # Calling the result of any primary expression: f()(x),
+                  # type(obj)(...), factory.property(...), etc. Reuse the
+                  # existing __call__ method machinery rather than adding a
+                  # second indirect-call representation.
+                  lpar = self._eat()
+                  args, kwargs = self._parse_call_args()
+                  self._expect("OP", ")")
+                  atom = A.MethodCall(
+                      obj=atom,
+                      method="__call__",
+                      args=args,
+                      kwargs=kwargs,
+                      pos=lpar.pos,
+                  )
+              else:
+                  return atom
+          '''
+              if marker not in parser:
+                  raise SystemExit("parser trailer landmark not found")
+              parser = parser.replace(marker, replacement, 1)
+              parser_path.write_text(parser, encoding="utf-8")
+
+          sema_path = Path("asmpython/_compiler/sema.py")
+          sema = sema_path.read_text(encoding="utf-8")
+          special_marker = 'source_class_name = source_t.split(":", 1)[1]'
+          if special_marker not in sema:
+              anchor = '''            self._check_expr(e.obj, scope)
+              obj_t = A.expr_type(e.obj)
+              # Bind keyword/vararg arguments for user-class (and super) method
+          '''
+              insertion = '''            self._check_expr(e.obj, scope)
+              obj_t = A.expr_type(e.obj)
+              # `type(instance)(...)`: CPython returns the concrete class object
+              # and immediately invokes it as a constructor. asmpython normally
+              # renders standalone type(x) as a display string, but in this
+              # syntactically unambiguous call-result position the source
+              # instance's static class lets us rewrite directly to Class(...).
+              if (
+                  e.method == "__call__"
+                  and isinstance(e.obj, A.Call)
+                  and e.obj.func == "type"
+                  and len(e.obj.args) == 1
+              ):
+                  source_t = A.expr_type(e.obj.args[0])
+                  if source_t.startswith("instance:"):
+                      source_class_name = source_t.split(":", 1)[1]
+                      e.__class__ = A.Call  # type: ignore[assignment]
+                      e.func = source_class_name  # type: ignore[attr-defined]
+                      e.dstar = None  # type: ignore[attr-defined]
+                      e.resolved_overload_symbol = None  # type: ignore[attr-defined]
+                      self._check_call(e, scope)  # type: ignore[arg-type]
+                      return
+                  if source_t != "any":
+                      raise SemaError(
+                          "the result of type() is only constructible for a "
+                          "statically known user-class instance",
+                          e.pos,
+                          ErrorCode.E_NOT_CALLABLE,
+                      )
+              # Bind keyword/vararg arguments for user-class (and super) method
+          '''
+              if anchor not in sema:
+                  raise SystemExit("MethodCall semantic landmark not found")
+              sema = sema.replace(anchor, insertion, 1)
+              sema_path.write_text(sema, encoding="utf-8")
+          PY
+      - name: Compile and run focused regression
+        run: |
+          python -m asmpython tests/cases/466_call_expression_result.py \
+            --target linux -o /tmp/asmpython-call-expression
+          output=$(/tmp/asmpython-call-expression)
+          printf '%s\n' "$output"
+          test "$output" = $'42\n43'
+      - name: Commit materialized source changes
+        run: |
+          if git diff --quiet -- asmpython/_compiler/parser.py asmpython/_compiler/sema.py; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add asmpython/_compiler/parser.py asmpython/_compiler/sema.py
+          git commit -m "Support calls on expression results"
+          git push origin HEAD:fix/somnia-call-expression-result
