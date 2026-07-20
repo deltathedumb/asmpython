@@ -116,17 +116,29 @@ def _collection_fields(mod: A.Module) -> dict[tuple[str, str], tuple[str, str]]:
 
 def _lookup_field(self: SemaAnalyzer, receiver_type: str, field_name: str):
     table = getattr(self, "_compat_collection_fields", {})
-    if not receiver_type.startswith("instance:"):
+    if receiver_type.startswith("instance:"):
+        classes = {owner.name: owner for owner in self.mod.classes}
+        current = receiver_type.split(":", 1)[1]
+        seen: set[str] = set()
+        while current in classes and current not in seen:
+            seen.add(current)
+            value = table.get((current, field_name))
+            if value is not None:
+                return value
+            current = classes[current].parent
         return None
-    classes = {owner.name: owner for owner in self.mod.classes}
-    current = receiver_type.split(":", 1)[1]
-    seen: set[str] = set()
-    while current in classes and current not in seen:
-        seen.add(current)
-        value = table.get((current, field_name))
-        if value is not None:
-            return value
-        current = classes[current].parent
+
+    if receiver_type == "any":
+        # Dynamic Python receivers still carry useful structural information.
+        # When every class declaring this field agrees on its collection shape,
+        # that shape is safe to propagate without guessing the receiver class.
+        candidates = {
+            value
+            for (owner_name, candidate_name), value in table.items()
+            if candidate_name == field_name
+        }
+        if len(candidates) == 1:
+            return next(iter(candidates))
     return None
 
 
