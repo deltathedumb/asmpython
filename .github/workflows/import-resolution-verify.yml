@@ -51,8 +51,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install focused native toolchain
-        run: sudo apt-get update && sudo apt-get install -y nasm
       - name: Compile changed Python files
         run: |
           python -m py_compile \
@@ -78,7 +76,17 @@ jobs:
             tests.test_site_packages \
             tests.test_pip_install_integration \
             tests.test_selfhost_entrypoint
-      - name: Run native import_binary parity case
+
+  native-import-binary:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install NASM
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm
+      - name: Compile and execute native import_binary case
         run: |
           python - <<'PY'
           from pathlib import Path
