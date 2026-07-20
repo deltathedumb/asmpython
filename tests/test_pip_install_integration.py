@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -21,31 +22,43 @@ class PipInstallIntegrationTests(unittest.TestCase):
     def test_pip_installed_pure_python_package_is_native_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            package = root / "package"
             target = root / "site-packages"
             project = root / "project"
-            package.mkdir()
             target.mkdir()
             project.mkdir()
 
-            (package / "pyproject.toml").write_text(
-                """\
-[build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+            wheel = root / "asmpython_pip_probe-1.0.0-py3-none-any.whl"
+            dist_info = "asmpython_pip_probe-1.0.0.dist-info"
+            module_path = "asmpython_pip_probe/__init__.py"
+            metadata_path = f"{dist_info}/METADATA"
+            wheel_metadata_path = f"{dist_info}/WHEEL"
+            record_path = f"{dist_info}/RECORD"
+            with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    module_path,
+                    "def answer() -> int:\n    return 42\n",
+                )
+                archive.writestr(
+                    metadata_path,
+                    "Metadata-Version: 2.1\n"
+                    "Name: asmpython-pip-probe\n"
+                    "Version: 1.0.0\n",
+                )
+                archive.writestr(
+                    wheel_metadata_path,
+                    "Wheel-Version: 1.0\n"
+                    "Generator: asmpython-test\n"
+                    "Root-Is-Purelib: true\n"
+                    "Tag: py3-none-any\n",
+                )
+                archive.writestr(
+                    record_path,
+                    f"{module_path},,\n"
+                    f"{metadata_path},,\n"
+                    f"{wheel_metadata_path},,\n"
+                    f"{record_path},,\n",
+                )
 
-[project]
-name = "asmpython-pip-probe"
-version = "1.0.0"
-""",
-                encoding="utf-8",
-            )
-            module = package / "asmpython_pip_probe"
-            module.mkdir()
-            (module / "__init__.py").write_text(
-                "def answer() -> int:\n    return 42\n",
-                encoding="utf-8",
-            )
             subprocess.run(
                 [
                     sys.executable,
@@ -53,10 +66,9 @@ version = "1.0.0"
                     "pip",
                     "install",
                     "--no-deps",
-                    "--no-build-isolation",
                     "--target",
                     str(target),
-                    str(package),
+                    str(wheel),
                 ],
                 check=True,
                 stdout=subprocess.PIPE,

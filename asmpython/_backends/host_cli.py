@@ -237,15 +237,20 @@ def _call_legacy_with_static_project_policy(argv: list[str]) -> int:
         _legacy_cli.load_project = original_load_project
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    prepare: object = None,
+) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw and raw[0] == "pypi":
         return _reject_private_pypi_command()
     if raw == ["-h"] or raw == ["--help"]:
         _print_top_help()
         return 0
+    prepare_call = prepare_argv if prepare is None else prepare
     try:
-        prepared = prepare_argv(raw)
+        prepared = prepare_call(raw)
     except SitePackageImportError as error:
         print(f"asmpython: native import resolution failed: {error}", file=sys.stderr)
         return 1
