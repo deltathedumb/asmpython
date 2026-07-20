@@ -3,6 +3,7 @@
 # 0
 # SomniaProvider
 # 1
+# Covers class-valued providers and unannotated dynamic parameters.
 
 
 class Provider:
