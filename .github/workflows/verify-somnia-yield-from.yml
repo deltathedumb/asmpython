@@ -1,0 +1,11 @@
+name: Somnia yield-from trigger
+
+on:
+  pull_request:
+    branches: [beta/3.14.0]
+
+jobs:
+  trigger:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "Base-branch verifier owns implementation and native testing."
