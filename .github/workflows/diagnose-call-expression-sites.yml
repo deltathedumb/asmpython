@@ -1,0 +1,40 @@
+name: Map expression-call compiler handling sites
+
+on:
+  push:
+    branches: [beta/3.14.0]
+    paths:
+      - ".github/workflows/diagnose-call-expression-sites.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  map-sites:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: beta/3.14.0
+          fetch-depth: 0
+      - name: Record call-handling sites
+        run: |
+          {
+            echo '=== A.Call references ==='
+            grep -R -n 'A\.Call' asmpython/_compiler || true
+            echo
+            echo '=== Call emission helpers ==='
+            grep -R -n -E 'def .*call|indirect.*call|closure.*call' asmpython/_compiler || true
+            echo
+            echo '=== type built-in handling ==='
+            grep -R -n -E 'func == "type"|func in .*type|inferred_type.*type' asmpython/_compiler || true
+          } > call-expression-sites.txt
+          cat call-expression-sites.txt
+      - name: Commit map
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/diagnose-call-expression-sites.yml
+          git add call-expression-sites.txt
+          git commit -m "Map expression-call compiler sites"
+          git push origin HEAD:beta/3.14.0
