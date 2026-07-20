@@ -33,12 +33,12 @@ jobs:
           ast_path = Path("asmpython/_compiler/ast_nodes.py")
           ast = ast_path.read_text(encoding="utf-8")
           if '    metaclass: "str | None" = None\n' not in ast:
-              needle = '    implements_interface: "str | None" = None\n'
-              if needle not in ast:
+              field = '    implements_interface: "str | None" = None\n'
+              if field not in ast:
                   raise SystemExit("ClassDef field anchor not found")
               ast = ast.replace(
-                  needle,
-                  needle + '    # Explicit Python class-header metaclass.\n'
+                  field,
+                  field + '    # Explicit Python class-header metaclass.\n'
                   '    metaclass: "str | None" = None\n',
                   1,
               )
@@ -47,65 +47,70 @@ jobs:
           parser_path = Path("asmpython/_compiler/parser.py")
           parser = parser_path.read_text(encoding="utf-8")
           if '        metaclass_name: "str | None" = None\n' not in parser:
-              needle = '        implements_interface: "str | None" = None\n'
-              if needle not in parser:
+              variable = '        implements_interface: "str | None" = None\n'
+              if variable not in parser:
                   raise SystemExit("class parser variable anchor not found")
               parser = parser.replace(
-                  needle,
-                  needle + '        metaclass_name: "str | None" = None\n',
+                  variable,
+                  variable + '        metaclass_name: "str | None" = None\n',
                   1,
               )
 
-              first_else = '''                else:
-                      # First base class, possibly dotted (`module.Base`). Every
-          '''
-              first_meta = '''                elif (
-                      self._check("NAME", "metaclass")
-                      and self._peek(1).kind == "OP"
-                      and self._peek(1).value == "="
-                  ):
-                      self._eat()
-                      self._eat()
-                      metaclass_name = self._expect("NAME").value
-                      while self._check("OP", "."):
-                          self._eat()
-                          metaclass_name = self._expect("NAME").value
-                  else:
-                      # First base class, possibly dotted (`module.Base`). Every
-          '''
-              if first_else not in parser:
-                  raise SystemExit("first class-base else anchor not found")
-              parser = parser.replace(first_else, first_meta, 1)
-
-              comma_tail = '''                        implements_interface = self._expect("NAME").value
-                          break
-                      self._parse_expr()
-          '''
-              comma_meta = '''                        implements_interface = self._expect("NAME").value
-                          break
-                      if (
-                          self._check("NAME", "metaclass")
-                          and self._peek(1).kind == "OP"
-                          and self._peek(1).value == "="
-                      ):
-                          self._eat()
-                          self._eat()
-                          metaclass_name = self._expect("NAME").value
-                          while self._check("OP", "."):
-                              self._eat()
-                              metaclass_name = self._expect("NAME").value
-                          continue
-                      self._parse_expr()
-          '''
-              if comma_tail not in parser:
-                  raise SystemExit("extra class-base anchor not found")
-              parser = parser.replace(comma_tail, comma_meta, 1)
-
-              return_needle = '            implements_interface=implements_interface,\n        )\n'
-              if return_needle not in parser:
-                  raise SystemExit("ClassDef return anchor not found")
+              first_marker = (
+                  '                else:\n'
+                  '                    # First base class, possibly dotted (`module.Base`). Every\n'
+              )
+              if first_marker not in parser:
+                  raise SystemExit("first class-base landmark not found")
               parser = parser.replace(
-                  return_needle,
+                  first_marker,
+                  '                elif (\n'
+                  '                    self._check("NAME", "metaclass")\n'
+                  '                    and self._peek(1).kind == "OP"\n'
+                  '                    and self._peek(1).value == "="\n'
+                  '                ):\n'
+                  '                    self._eat()\n'
+                  '                    self._eat()\n'
+                  '                    metaclass_name = self._expect("NAME").value\n'
+                  '                    while self._check("OP", "."):\n'
+                  '                        self._eat()\n'
+                  '                        metaclass_name = self._expect("NAME").value\n'
+                  + first_marker,
+                  1,
+              )
+
+              extra_marker = (
+                  '                    self._parse_expr()\n'
+                  '            self._expect("OP", ")")\n'
+              )
+              if extra_marker not in parser:
+                  raise SystemExit("extra class-base landmark not found")
+              parser = parser.replace(
+                  extra_marker,
+                  '                    if (\n'
+                  '                        self._check("NAME", "metaclass")\n'
+                  '                        and self._peek(1).kind == "OP"\n'
+                  '                        and self._peek(1).value == "="\n'
+                  '                    ):\n'
+                  '                        self._eat()\n'
+                  '                        self._eat()\n'
+                  '                        metaclass_name = self._expect("NAME").value\n'
+                  '                        while self._check("OP", "."):\n'
+                  '                            self._eat()\n'
+                  '                            metaclass_name = self._expect("NAME").value\n'
+                  '                        continue\n'
+                  + extra_marker,
+                  1,
+              )
+
+              return_marker = (
+                  '            implements_interface=implements_interface,\n'
+                  '        )\n'
+              )
+              if return_marker not in parser:
+                  raise SystemExit("ClassDef return landmark not found")
+              parser = parser.replace(
+                  return_marker,
                   '            implements_interface=implements_interface,\n'
                   '            metaclass=metaclass_name,\n'
                   '        )\n',
