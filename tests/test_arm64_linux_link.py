@@ -187,7 +187,7 @@ class Arm64LinuxLinkTests(unittest.TestCase):
             )
 
     def test_unsupported_runtime_symbol_fails_before_tool_invocation(self) -> None:
-        unsupported_symbol = "_abi_list_slice"
+        unsupported_symbol = "_abi_list_slice_step"
         program = self._object_requiring(unsupported_symbol)
         toolchain = linux_link.LinuxArm64Toolchain("as", "ld", False)
         with patch.object(linux_link, "build_start_object") as build_start:
