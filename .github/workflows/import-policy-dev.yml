@@ -6,42 +6,49 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  implement:
     if: github.head_ref == 'beta/3.14.0'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           ref: beta/3.14.0
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Locate import policy suite
+      - name: Apply public facade fix
+        run: python .github/dev/apply_import_policy_facade.py
+      - name: Compile changed sources
         run: |
-          grep -R -n -E 'focused-import-policy|Run import policy tests' .github/workflows \
-            | tee import-policy-location.log || true
-          find tests -maxdepth 2 -type f -iname '*import*.py' -print \
-            | sort | tee import-policy-tests.log
-      - name: Run import-related tests with full diagnostics
+          python -m py_compile \
+            asmpython/__main__.py \
+            asmpython/_backends/host_cli.py \
+            asmpython/_backends/host_site_packages.py \
+            asmpython/_compiler/cli.py \
+            asmpython/_compiler/pypi.py \
+            asmpython/_compiler/project.py \
+            asmpython/_compiler/site_packages.py \
+            tests/test_cli_import_policy.py \
+            tests/test_site_packages.py \
+            tests/test_pip_install_integration.py \
+            tests/test_selfhost_entrypoint.py
+      - name: Run complete import policy suite
         run: |
-          set +e
-          python -m unittest discover -s tests -p 'test_*import*.py' -v \
-            > import-policy-run.log 2>&1
-          status=$?
-          echo "status=$status" | tee import-policy-status.log
-          cat import-policy-run.log
-          exit 0
-      - name: Upload import policy diagnostics
-        uses: actions/upload-artifact@v4
-        with:
-          name: import-policy-diagnostic
-          path: |
-            import-policy-location.log
-            import-policy-tests.log
-            import-policy-run.log
-            import-policy-status.log
-            .github/workflows
-            tests
+          python -m unittest -v \
+            tests.test_cli_import_policy \
+            tests.test_site_packages \
+            tests.test_pip_install_integration \
+            tests.test_selfhost_entrypoint
+      - name: Commit verified facade fix
+        run: |
+          git config user.name "asmpython-ci"
+          git config user.email "actions@users.noreply.github.com"
+          git add \
+            asmpython/_backends/host_cli.py \
+            asmpython/_compiler/cli.py
+          git commit -m "Keep public CLI import policy injectable"
+          git push origin HEAD:beta/3.14.0
