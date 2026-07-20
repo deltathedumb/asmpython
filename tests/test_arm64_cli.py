@@ -78,12 +78,16 @@ class Arm64CliTests(unittest.TestCase):
             self.assertIn("unsupported by selected runtime", report)
 
     def test_unsupported_runtime_fails_before_tool_discovery(self) -> None:
+        # Keep this symbol deliberately outside RUNTIME_EXPORTS. _abi_new_list
+        # used to serve this role, but became supported with the first ARM64
+        # list-runtime slice.
+        unsupported_symbol = "_abi_list_slice"
         unsupported = build_elf(
             [
                 FuncCode(
                     "main",
                     bytes(4),
-                    [(0, "_abi_new_list", R_AARCH64_CALL26)],
+                    [(0, unsupported_symbol, R_AARCH64_CALL26)],
                 )
             ]
         )
@@ -99,7 +103,7 @@ class Arm64CliTests(unittest.TestCase):
                 result = cli.main(["build", str(source)])
 
             self.assertEqual(result, 1)
-            self.assertIn("_abi_new_list", errors.getvalue())
+            self.assertIn(unsupported_symbol, errors.getvalue())
             discover.assert_not_called()
 
     def test_build_command_uses_reusable_builder_and_marks_executable(self) -> None:
