@@ -1,10 +1,6 @@
 name: Rename beta branch
 
 on:
-  push:
-    branches: [beta]
-    paths:
-      - ".github/workflows/rename-beta-branch.yml"
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
@@ -14,13 +10,30 @@ permissions:
 
 jobs:
   rename:
-    if: github.head_ref == 'beta' || github.ref_name == 'beta'
+    if: github.head_ref == 'beta'
     runs-on: ubuntu-24.04
     steps:
-      - name: Rename beta to beta/3.14.0
+      - name: Safely migrate beta ref to beta/3.14.0
         env:
           GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BETA_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          gh api --method POST \
-            "repos/${{ github.repository }}/branches/beta/rename" \
-            -f new_name='beta/3.14.0'
+          set -euo pipefail
+          backup_ref='refs/heads/__beta_314_rename_backup'
+          target_ref='refs/heads/beta/3.14.0'
+
+          gh api --method POST "repos/$REPOSITORY/git/refs" \
+            -f ref="$backup_ref" -f sha="$BETA_SHA"
+
+          gh api --method DELETE "repos/$REPOSITORY/git/refs/heads/beta"
+
+          if ! gh api --method POST "repos/$REPOSITORY/git/refs" \
+            -f ref="$target_ref" -f sha="$BETA_SHA"; then
+            gh api --method POST "repos/$REPOSITORY/git/refs" \
+              -f ref='refs/heads/beta' -f sha="$BETA_SHA" || true
+            exit 1
+          fi
+
+          gh api --method DELETE \
+            "repos/$REPOSITORY/git/refs/heads/__beta_314_rename_backup"
