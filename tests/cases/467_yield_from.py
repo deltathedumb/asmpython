@@ -1,6 +1,7 @@
 # expect:
 # 1
 # 2
+# Delegated generator iteration regression.
 
 
 def inner():
