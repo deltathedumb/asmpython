@@ -623,14 +623,13 @@ def _func_free_names(f) -> set[str]:
 
 
 def _resolve_relative(importer: Path, level: int, module: str, root: Path) -> Path | None:
-    """Resolve a relative import (`from ..pkg.mod import x`) to a file path.
+    """Resolve a relative import to a module file or package initializer.
 
     `level` is the dot count: 1 = same package dir, 2 = parent, etc. `module`
-    is the dotted remainder (may be ""). Returns the `.py` file or None if it
-    doesn't resolve to a project file (or escapes the project root).
+    is the dotted remainder (may be ""). Both `module.py` and
+    `module/__init__.py` are valid Python import targets.
     """
     base = importer.parent
-    # Each extra dot beyond the first walks up one directory.
     for _ in range(level - 1):
         base = base.parent
     target = base
@@ -641,7 +640,12 @@ def _resolve_relative(importer: Path, level: int, module: str, root: Path) -> Pa
     py = candidate if candidate.suffix == ".py" else Path(str(candidate) + ".py")
     if py.is_file() and (_within(py, root) or _is_within_stdlib(py)):
         return py
-    # `from . import submod` — module is "", the imported *name* is the module.
+    init = target / "__init__.py"
+    if init.is_file() and (_within(init, root) or _is_within_stdlib(init)):
+        return init
+    # `from . import submod` — module is "", the imported *name* is resolved
+    # separately by `_project_imports` because each imported name may be a
+    # distinct sibling module.
     return None
 
 
