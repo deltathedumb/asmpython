@@ -28,7 +28,9 @@ class _FakeLibrary:
 class ImportBinaryCtypesTests(unittest.TestCase):
     def test_imported_decorator_configures_ctypes_and_converts_strings(self) -> None:
         fake = _FakeLibrary()
-        with mock.patch("asmpython._ctypes.CDLL", return_value=fake) as cdll:
+        with mock.patch(
+            "asmpython._host_import_binary._ctypes.CDLL", return_value=fake
+        ) as cdll:
             library = import_binary("example-library")
 
             @library.imported
@@ -44,7 +46,9 @@ class ImportBinaryCtypesTests(unittest.TestCase):
 
     def test_missing_annotations_are_rejected_before_native_call(self) -> None:
         fake = _FakeLibrary()
-        with mock.patch("asmpython._ctypes.CDLL", return_value=fake):
+        with mock.patch(
+            "asmpython._host_import_binary._ctypes.CDLL", return_value=fake
+        ):
             library = import_binary("example-library")
 
             with self.assertRaisesRegex(TypeError, "must annotate parameter 'value'"):
