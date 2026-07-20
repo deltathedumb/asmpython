@@ -43,10 +43,10 @@ def _annotation_name(annotation: _Any) -> str | None:
 def _ctype_for_annotation(annotation: _Any, *, function: str, parameter: str) -> _Any:
     """Translate the public import annotations to their ctypes ABI types."""
     if annotation is _EMPTY:
-        raise TypeError(
-            f"imported function {function!r} must annotate {parameter}; "
-            "use int, float, bool, str, bytes, None, or a ctypes type"
-        )
+        # Native asmpython treats an unannotated dynamic-import parameter or
+        # result as its ordinary hosted ``int`` ABI.  Mirror that instead of
+        # making CPython reference execution artificially stricter.
+        return _ctypes.c_int64
 
     name = _annotation_name(annotation)
     if name == "int":
