@@ -3,9 +3,8 @@
 Static descriptor lowering creates shared descriptor objects plus synthesized
 property getter/setter methods. Keeping a same-named class-variable field in the
 native class signature makes ordinary instance access resolve to the descriptor
-object itself, violating Python's data-descriptor precedence. Remove only the
-synthetic class-variable shadow; the shared module binding remains available to
-synthesized accessors and ``__set_name__`` initialization.
+object itself, violating Python's data-descriptor precedence. Lower and clean
+those descriptors before ``SemaAnalyzer`` constructs its class signature table.
 """
 
 from __future__ import annotations
@@ -15,6 +14,7 @@ from .language_compat_fixes import _lower_static_data_descriptors
 from .sema import SemaAnalyzer
 
 
+_ORIGINAL_INIT = SemaAnalyzer.__init__
 _ORIGINAL_ANALYZE = SemaAnalyzer.analyze
 
 
@@ -44,10 +44,19 @@ def _remove_lowered_descriptor_shadows(mod: A.Module) -> None:
         owner.class_vars = retained
 
 
+def _init_with_descriptor_precedence(self: SemaAnalyzer, mod: A.Module, *args, **kwargs) -> None:
+    _remove_lowered_descriptor_shadows(mod)
+    _ORIGINAL_INIT(self, mod, *args, **kwargs)
+
+
 def _analyze_with_descriptor_precedence(self: SemaAnalyzer) -> None:
     _remove_lowered_descriptor_shadows(self.mod)
     _ORIGINAL_ANALYZE(self)
 
+
+if not getattr(SemaAnalyzer, "_asmpython_descriptor_precedence_init_patch", False):
+    SemaAnalyzer.__init__ = _init_with_descriptor_precedence
+    SemaAnalyzer._asmpython_descriptor_precedence_init_patch = True
 
 if not getattr(SemaAnalyzer, "_asmpython_descriptor_precedence_patch", False):
     SemaAnalyzer.analyze = _analyze_with_descriptor_precedence
