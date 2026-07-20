@@ -144,32 +144,47 @@ def build_runtime(target: str, *, force: bool = False) -> Path:
 _ABI_SHIM_TARGETS = {
     # target -> (source filename, nasm output format, object filename)
     "windows": ("abi_shims.asm", "win64", "abi_shims.obj"),
-    "linux": ("abi_shims_linux.asm", "elf64", "abi_shims_linux.o"),
+    "linux": ("abi_shims_linux_bundle.asm", "elf64", "abi_shims_linux.o"),
 }
 
 
 def build_abi_shims(target: str, *, force: bool = False) -> Path:
-    """Assemble the ABI shim layer (abi_shims.asm / abi_shims_linux.asm) for
-    the built-in x86-64 backend's SSA IR pipeline (see driver.py's
-    _run_backend_x86_64 and ir_lower.py's module docstring). Cached the
-    same way as the runtime archive: rebuilt only when the source .asm is
-    newer than the cached object.
+    """Assemble the ABI shim layer for the built-in x86-64 SSA pipeline.
+
+    Linux uses ``abi_shims_linux_bundle.asm`` so target-neutral dynamic-loader
+    names can be translated to ``dlopen``/``dlsym`` alongside the ordinary
+    runtime ABI shims. Cached objects are rebuilt when either the bundle or
+    its included base shim source changes.
     """
     if target not in _ABI_SHIM_TARGETS:
         have = ", ".join(sorted(_ABI_SHIM_TARGETS))
         raise ValueError(f"unknown target {target!r} for build_abi_shims (have: {have})")
     src_name, nasm_fmt, obj_name = _ABI_SHIM_TARGETS[target]
     src_path = Path(__file__).resolve().parent / src_name
+    source_paths = [src_path]
+    if target == "linux":
+        source_paths.append(src_path.parent / "abi_shims_linux.asm")
     out_dir = _build_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     obj_path = out_dir / obj_name
 
     if obj_path.exists() and not force:
-        if obj_path.stat().st_mtime >= src_path.stat().st_mtime:
+        newest_source = max(path.stat().st_mtime for path in source_paths)
+        if obj_path.stat().st_mtime >= newest_source:
             return obj_path
 
     nasm = _which("nasm")
-    _run([nasm, "-f", nasm_fmt, "-w-label-redef-late", str(src_path), "-o", str(obj_path)])
+    include_dir = f"-I{src_path.parent}/"
+    _run([
+        nasm,
+        include_dir,
+        "-f",
+        nasm_fmt,
+        "-w-label-redef-late",
+        str(src_path),
+        "-o",
+        str(obj_path),
+    ])
     print(f"wrote {obj_path}")
     return obj_path
 
@@ -186,12 +201,12 @@ def build_threading_shims(target: str, *, force: bool = False) -> Path:
     """Assemble the threading ABI shim layer -- kept as a SEPARATE object
     from build_abi_shims's (always-linked) output specifically because
     _threading_trampoline references _threading_bootstrap, a real user-
-    program-level function that only exists in programs that import
-    threading. Declaring that extern in the always-linked shim object
-    broke every program's link step (an unresolved relocation regardless
-    of whether the referencing code path runs) -- see threading_shims.asm's
-    own header comment. driver.py only appends this object to the link
-    set when the compiled program actually needs it."""
+    program-level function that only exists in a program that actually imports
+    threading. Declaring that extern in the always-linked object broke every
+    program's link step (an unresolved relocation regardless of whether the
+    referencing code path runs) -- see threading_shims.asm's own header
+    comment. driver.py only appends this object to the link set when the
+    compiled program actually needs it."""
     if target not in _THREADING_SHIM_TARGETS:
         have = ", ".join(sorted(_THREADING_SHIM_TARGETS))
         raise ValueError(f"unknown target {target!r} for build_threading_shims (have: {have})")
