@@ -1,0 +1,121 @@
+name: Verify ARM64 FFI integer returns
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cross-verify:
+    if: github.head_ref == 'beta/3.14.0'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: beta/3.14.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install AArch64 binutils and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils-aarch64-linux-gnu qemu-user
+      - name: Apply FFI return fixes
+        run: python .github/dev/apply_arm64_f2i_fix.py
+      - name: Run focused lowering tests
+        run: |
+          python -m py_compile \
+            asmpython/_backends/arm64/source_build.py \
+            asmpython/_backends/arm64/_verify_float_nextafter.py \
+            asmpython/_backends/arm64/_verify_float_ceil.py \
+            asmpython/_backends/arm64/_verify_float_floor.py \
+            asmpython/_backends/arm64/_verify_float_trunc.py \
+            tests/test_arm64_ffi_return_conversions.py
+          python -m unittest -v \
+            tests.test_arm64_ffi_return_conversions \
+            tests.test_arm64_float_nextafter \
+            tests.test_arm64_float_ceil \
+            tests.test_arm64_float_floor \
+            tests.test_arm64_float_trunc
+      - name: Execute scalar probes through QEMU
+        run: |
+          python -m asmpython._backends.arm64._verify_float_nextafter --mode cross
+          python -m asmpython._backends.arm64._verify_float_ceil --mode cross
+          python -m asmpython._backends.arm64._verify_float_floor --mode cross
+          python -m asmpython._backends.arm64._verify_float_trunc --mode cross
+      - name: Package verified source files
+        run: |
+          tar -czf arm64-f2i-fix.tar.gz \
+            asmpython/_backends/arm64/source_build.py \
+            asmpython/_backends/arm64/_verify_float_nextafter.py \
+            asmpython/_backends/arm64/_verify_float_ceil.py \
+            asmpython/_backends/arm64/_verify_float_floor.py \
+            asmpython/_backends/arm64/_verify_float_trunc.py \
+            tests/test_arm64_ffi_return_conversions.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arm64-f2i-fix
+          path: arm64-f2i-fix.tar.gz
+
+  native-verify:
+    if: github.head_ref == 'beta/3.14.0'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: beta/3.14.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install native binutils
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils
+      - name: Apply FFI return fixes
+        run: python .github/dev/apply_arm64_f2i_fix.py
+      - name: Run focused lowering tests
+        run: |
+          python -m unittest -v \
+            tests.test_arm64_ffi_return_conversions \
+            tests.test_arm64_float_nextafter \
+            tests.test_arm64_float_ceil \
+            tests.test_arm64_float_floor \
+            tests.test_arm64_float_trunc
+      - name: Execute scalar probes natively
+        run: |
+          python -m asmpython._backends.arm64._verify_float_nextafter --mode native
+          python -m asmpython._backends.arm64._verify_float_ceil --mode native
+          python -m asmpython._backends.arm64._verify_float_floor --mode native
+          python -m asmpython._backends.arm64._verify_float_trunc --mode native
+
+  commit-fix:
+    if: github.head_ref == 'beta/3.14.0'
+    needs: [cross-verify, native-verify]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: beta/3.14.0
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: arm64-f2i-fix
+          path: /tmp/arm64-f2i-fix
+      - name: Restore verified files
+        run: tar -xzf /tmp/arm64-f2i-fix/arm64-f2i-fix.tar.gz
+      - name: Commit verified scalar fixes
+        run: |
+          git config user.name "asmpython-ci"
+          git config user.email "actions@users.noreply.github.com"
+          git add \
+            asmpython/_backends/arm64/source_build.py \
+            asmpython/_backends/arm64/_verify_float_nextafter.py \
+            asmpython/_backends/arm64/_verify_float_ceil.py \
+            asmpython/_backends/arm64/_verify_float_floor.py \
+            asmpython/_backends/arm64/_verify_float_trunc.py \
+            tests/test_arm64_ffi_return_conversions.py
+          git commit -m "Normalize ARM64 FFI integer returns"
+          git push origin HEAD:beta/3.14.0
