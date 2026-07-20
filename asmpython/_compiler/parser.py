@@ -827,6 +827,7 @@ class Parser:
         parent = None
         sealed_permits: list = []
         implements_interface: "str | None" = None
+        metaclass_name: "str | None" = None
         if self._check("OP", "("):
             self._eat()
             if not self._check("OP", ")"):
@@ -863,6 +864,17 @@ class Parser:
                     self._eat()  # 'interface'
                     self._eat()  # '='
                     implements_interface = self._expect("NAME").value
+                elif (
+                    self._check("NAME", "metaclass")
+                    and self._peek(1).kind == "OP"
+                    and self._peek(1).value == "="
+                ):
+                    self._eat()
+                    self._eat()
+                    metaclass_name = self._expect("NAME").value
+                    while self._check("OP", "."):
+                        self._eat()
+                        metaclass_name = self._expect("NAME").value
                 else:
                     # First base class, possibly dotted (`module.Base`). Every
                     # consumer (sema's class table, codegen's chain walker) keys
@@ -898,6 +910,18 @@ class Parser:
                         self._eat()  # '='
                         implements_interface = self._expect("NAME").value
                         break
+                    if (
+                        self._check("NAME", "metaclass")
+                        and self._peek(1).kind == "OP"
+                        and self._peek(1).value == "="
+                    ):
+                        self._eat()
+                        self._eat()
+                        metaclass_name = self._expect("NAME").value
+                        while self._check("OP", "."):
+                            self._eat()
+                            metaclass_name = self._expect("NAME").value
+                        continue
                     self._parse_expr()
             self._expect("OP", ")")
         self._expect("OP", ":")
@@ -968,6 +992,7 @@ class Parser:
             field_decorators=field_decorators,
             sealed_permits=sealed_permits,
             implements_interface=implements_interface,
+            metaclass=metaclass_name,
         )
 
     def _parse_class_var(self):
