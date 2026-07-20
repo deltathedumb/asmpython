@@ -1,0 +1,36 @@
+name: Diagnose ARM64 test discovery
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'beta/3.14.0'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: beta/3.14.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run full ARM64 unit discovery
+        run: |
+          set +e
+          python -m unittest discover -s tests -p 'test_arm64_*.py' -v \
+            > arm64-test-discovery.log 2>&1
+          status=$?
+          echo "status=$status" | tee arm64-test-discovery.status
+          cat arm64-test-discovery.log
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arm64-test-discovery
+          path: |
+            arm64-test-discovery.log
+            arm64-test-discovery.status
