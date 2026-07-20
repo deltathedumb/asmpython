@@ -21,25 +21,51 @@ jobs:
           python-version: "3.12"
       - name: Apply public facade fix
         run: python .github/dev/apply_import_policy_facade.py
-      - name: Run complete import policy suite with diagnostics
+      - name: Capture pip environment and suppressed failure
         run: |
           set +e
-          python -m unittest -v \
-            tests.test_cli_import_policy \
-            tests.test_site_packages \
-            tests.test_pip_install_integration \
-            tests.test_selfhost_entrypoint \
-            > import-policy-after-fix.log 2>&1
-          status=$?
-          echo "status=$status" | tee import-policy-after-fix.status
-          cat import-policy-after-fix.log
+          {
+            python -m pip --version
+            python - <<'PY'
+          import importlib.metadata
+          for name in ("pip", "setuptools", "wheel"):
+              try:
+                  print(name, importlib.metadata.version(name))
+              except importlib.metadata.PackageNotFoundError:
+                  print(name, "NOT INSTALLED")
+          PY
+            python - <<'PY'
+          import subprocess
+          import unittest
+
+          original = subprocess.run
+
+          def verbose_run(*args, **kwargs):
+              try:
+                  return original(*args, **kwargs)
+              except subprocess.CalledProcessError as error:
+                  print("COMMAND:", error.cmd)
+                  print("RETURN CODE:", error.returncode)
+                  print("STDOUT:")
+                  print(error.stdout)
+                  print("STDERR:")
+                  print(error.stderr)
+                  raise
+
+          subprocess.run = verbose_run
+          suite = unittest.defaultTestLoader.loadTestsFromName(
+              "tests.test_pip_install_integration"
+          )
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          raise SystemExit(not result.wasSuccessful())
+          PY
+            echo "status=$?"
+          } 2>&1 | tee pip-integration-diagnostic.log
           exit 0
-      - name: Upload post-fix diagnostics
+      - name: Upload pip integration diagnostic
         uses: actions/upload-artifact@v4
         with:
-          name: import-policy-after-fix
+          name: pip-integration-diagnostic
           path: |
-            import-policy-after-fix.log
-            import-policy-after-fix.status
-            asmpython/_backends/host_cli.py
-            asmpython/_compiler/cli.py
+            pip-integration-diagnostic.log
+            tests/test_pip_install_integration.py
