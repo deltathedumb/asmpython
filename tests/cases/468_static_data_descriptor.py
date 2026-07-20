@@ -1,7 +1,7 @@
 # expect:
 # 7
 # 42
-# value
+# 42
 
 
 class Descriptor:
@@ -30,4 +30,4 @@ item = Item()
 print(item.value)
 item.value = 42
 print(item.value)
-print(Descriptor(0).name or "value")
+print(item.values["value"])
