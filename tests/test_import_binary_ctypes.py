@@ -44,18 +44,22 @@ class ImportBinaryCtypesTests(unittest.TestCase):
         self.assertEqual(echo(value="hello"), "hello")
         self.assertEqual(fake.echo.calls, [(b"hello", 1)])
 
-    def test_missing_annotations_are_rejected_before_native_call(self) -> None:
+    def test_missing_annotations_default_to_native_int_abi(self) -> None:
         fake = _FakeLibrary()
+        fake.echo.result = 42
         with mock.patch(
             "asmpython._host_import_binary._ctypes.CDLL", return_value=fake
         ):
             library = import_binary("example-library")
 
-            with self.assertRaisesRegex(TypeError, "must annotate parameter 'value'"):
+            @library.imported
+            def echo(value):
+                pass
 
-                @library.imported
-                def echo(value) -> int:
-                    pass
+        self.assertEqual(fake.echo.argtypes, [ctypes.c_int64])
+        self.assertIs(fake.echo.restype, ctypes.c_int64)
+        self.assertEqual(echo(7), 42)
+        self.assertEqual(fake.echo.calls, [(7,)])
 
     def test_real_c_runtime_smoke(self) -> None:
         if sys.platform == "win32":
