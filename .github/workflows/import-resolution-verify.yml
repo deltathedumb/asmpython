@@ -90,8 +90,10 @@ jobs:
       - name: Install NASM
         run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm
       - name: Compile and execute native import_binary case
+        id: native_case
+        continue-on-error: true
         run: |
-          python - <<'PY'
+          python - <<'PY' > native-import-binary-diagnostic.txt 2>&1
           from pathlib import Path
           from tests.runner import run_positive
 
@@ -101,3 +103,17 @@ jobs:
               print(result.detail)
           raise SystemExit(0 if result.ok else 1)
           PY
+      - name: Show native diagnostic
+        if: always()
+        run: cat native-import-binary-diagnostic.txt
+      - name: Upload native diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-import-binary-diagnostic
+          path: native-import-binary-diagnostic.txt
+          if-no-files-found: error
+          retention-days: 1
+      - name: Fail if native parity failed
+        if: steps.native_case.outcome != 'success'
+        run: exit 1
