@@ -1,6 +1,8 @@
 name: Verify Somnia yield-from fix
 
 on:
+  push:
+    branches: [fix/somnia-yield-from]
   pull_request:
     branches: [beta/3.14.0]
 
