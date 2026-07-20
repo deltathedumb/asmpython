@@ -20,20 +20,43 @@ jobs:
           BETA_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          backup_ref='refs/heads/__beta_314_rename_backup'
-          target_ref='refs/heads/beta/3.14.0'
+          backup_name='__beta_314_rename_backup'
+          target_name='beta/3.14.0'
 
-          gh api --method POST "repos/$REPOSITORY/git/refs" \
-            -f ref="$backup_ref" -f sha="$BETA_SHA"
+          retry() {
+            local attempt
+            for attempt in 1 2 3 4 5 6; do
+              if "$@"; then
+                return 0
+              fi
+              sleep $((attempt * 2))
+            done
+            return 1
+          }
 
-          gh api --method DELETE "repos/$REPOSITORY/git/refs/heads/beta"
-
-          if ! gh api --method POST "repos/$REPOSITORY/git/refs" \
-            -f ref="$target_ref" -f sha="$BETA_SHA"; then
-            gh api --method POST "repos/$REPOSITORY/git/refs" \
-              -f ref='refs/heads/beta' -f sha="$BETA_SHA" || true
-            exit 1
+          if ! gh api "repos/$REPOSITORY/git/ref/heads/$backup_name" --silent; then
+            retry gh api --method POST "repos/$REPOSITORY/git/refs" \
+              -f ref="refs/heads/$backup_name" -f sha="$BETA_SHA"
           fi
 
-          gh api --method DELETE \
-            "repos/$REPOSITORY/git/refs/heads/__beta_314_rename_backup"
+          if gh api "repos/$REPOSITORY/git/ref/heads/beta" --silent; then
+            retry gh api --method DELETE \
+              "repos/$REPOSITORY/git/refs/heads/beta"
+          fi
+
+          if ! gh api "repos/$REPOSITORY/git/ref/heads/$target_name" --silent; then
+            if ! retry gh api --method POST "repos/$REPOSITORY/git/refs" \
+              -f ref="refs/heads/$target_name" -f sha="$BETA_SHA"; then
+              if ! gh api "repos/$REPOSITORY/git/ref/heads/beta" --silent; then
+                retry gh api --method POST "repos/$REPOSITORY/git/refs" \
+                  -f ref='refs/heads/beta' -f sha="$BETA_SHA" || true
+              fi
+              exit 1
+            fi
+          fi
+
+          actual_sha="$(gh api "repos/$REPOSITORY/git/ref/heads/$target_name" --jq '.object.sha')"
+          test "$actual_sha" = "$BETA_SHA"
+
+          retry gh api --method DELETE \
+            "repos/$REPOSITORY/git/refs/heads/$backup_name"
