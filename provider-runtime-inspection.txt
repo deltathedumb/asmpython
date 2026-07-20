@@ -1,4 +1,9 @@
 === resolve param types ===
+3360-                if len(group) < 2:
+3361-                    continue
+3362-                if not all("overload" in getattr(g, "decorators", []) for g in group):
+3363-                    continue
+3364-                sigs: list = []
 3365-                for g in group:
 3366-                    r = self._resolve_annot(g.ret_type)
 3367-                    sigs.append(FuncSig(
@@ -132,7 +137,27 @@
 3495-            lit = self._literal_arg_type(stmt.value)
 3496-            if lit is None:
 3497-                continue
+3498-            ty, el, val, tup = lit
+3499-            self._tuple_scan_globals.add(
+3500-                stmt.target, ty, el_type=el, value_type=val, tuple_types=tup
+3501-            )
+3502-
+3503-        # Infer which functions return a tuple, and the shape of that tuple,
+3504-        # so call sites can unpack `q, r = f()`. Done before body analysis so
+3505-        # forward references and recursion still see the inferred shape.
+3506-        for f in self.mod.funcs:
+3507-            f_body_str: list = f.body
+3508-            sig = self.funcs.get(f.name)
+3509-            ets = list(sig.ret_tuple) if sig is not None and sig.ret_tuple else self._scan_tuple_return(f_body_str)
+3510-            if ets is not None:
+3511-                self.func_ret_tuple[f.name] = ets
+3512-
 --
+3688-                    if len(mgroup) < 2:
+3689-                        continue
+3690-                    if not all("overload" in getattr(g, "decorators", []) for g in mgroup):
+3691-                        continue
+3692-                    msigs: list = []
 3693-                    for g in mgroup:
 3694-                        mr0 = self._resolve_annot(g.ret_type)
 3695-                        msigs.append(FuncSig(
@@ -179,7 +204,27 @@
 3736-                    sig.access[m.name] = "protected"
 3737-                if "final" in deco:
 3738-                    sig.final_methods.add(m.name)
+3739-                if not (is_static or is_classm):
+3740-                    if not m.params or m.params[0] != "self":
+3741-                        raise SemaError(
+3742-                            f"method {c.name}.{m.name!r} must take 'self' as its first parameter",
+3743-                            m.pos,
+3744-                            ErrorCode.E_MISSING_SELF_PARAM,
+3745-                        )
+3746-                mr = self._resolve_annot(m.ret_type)  # type: ignore
+3747-                # `@x.setter` methods are registered under a mangled name
+3748-                # ("x__setter") so they don't collide in `methods`/codegen
+3749-                # symbols with the `@property` getter of the same name "x".
+3750-                # `ClassSig.setters` maps the property name to this mangled
+3751-                # name so `obj.x = v` can be rewritten to dispatch to it.
+3752-                setter_prop = None
+3753-                for d in getattr(m, "decorators", []):
 --
+4840-                s_body: list = s.body
+4841-                self._collect_returns(s_body, acc)
+4842-            elif isinstance(s, A.Try):
+4843-                st_body: list = s.body
+4844-                st_handler: list = s.handler
 4845-                self._collect_returns(st_body, acc)
 4846-                self._collect_returns(st_handler, acc)
 4847-                st_extra: list = s.extra_handlers
@@ -226,6 +271,21 @@
 4888-        for a call site's `args`. Filters by arity match first (accounting
 4889-        for defaults, same as ordinary single-signature arity checking),
 4890-        then scores the arity-matching candidates by how many parameters
+4891-        have an EXACT static-type match against the call site's argument
+4892-        types (an unannotated "any" parameter matches anything but scores
+4893-        lower than a real match) -- the highest-scoring candidate wins;
+4894-        a tie or zero arity-matching candidates is an error. Deliberately
+4895-        simpler than full overload resolution (no covariance/promotion
+4896-        rules) -- a documented v1 simplification, not every C++/Java
+4897-        overload-resolution edge case.
+4898-
+4899-        `implicit_self`: True for a method-form overload call, where
+4900-        `sig.arity`/`sig.param_types` include the `self` receiver
+4901-        (index 0) but the call-site `args` never do -- every comparison
+4902-        below is offset by 1 to account for that.
+4903-        """
+4904-        offset = 1 if implicit_self else 0
+4905-        n = len(args)
 351-    # `for row in rows: row[i]` recovers the leaf type.
 352-    ret_inner_el_type: object = None
 353-    # Parameter names and their default expressions (parallel to params,
@@ -272,6 +332,11 @@
 394-
 395-    name: str
 396-    parent: Optional[str]
+397-    methods: dict[str, FuncSig] = field(default_factory=dict)
+398-    pos: A.SourcePos = None  # type: ignore
+399-    # Field name -> static type ("int"/"str"/"float"/"list"/"dict"/"tuple"/
+400-    # "instance:<Class>"), inferred from `self.x = <value>` assignments and
+401-    # `self.x: T` annotations. Drives the type of `obj.x` reads. Unknown fields
 --
 525-
 526-
@@ -319,6 +384,11 @@
 568-    func_defs = {f.name: f for f in mod.funcs}
 569-
 570-    needed_funcs: set = set()
+571-    needed_methods: set = set()
+572-    func_queue: list = []
+573-    method_queue: list = []
+574-
+575-    def add_func(name) -> None:
 --
 790-        # (mlang_objects), consumed by driver.py's link step. Populated by
 791-        # _inject_mlang_if_needed, consulted by A.MethodCall's `mlang:`
@@ -398,6 +468,11 @@
 865-    def _has_external_base(self, class_name: str) -> bool:
 866-        """True if `class_name` or any ancestor inherits from a base that isn't
 867-        a user-defined class (a builtin like Exception, or a name imported from
+868-        another module). Such a base may supply methods/fields asmpython can't
+869-        see, so member access against it is checked leniently."""
+870-        cur = class_name
+871-        seen: set = set()
+872-        while cur is not None and cur not in seen:
 --
 1305-                    if el in ("list", "dict") and elval is not None:
 1306-                        sig.field_inner_value_types[cname] = elval
@@ -470,6 +545,11 @@
 1373-                    el = r[1]
 1374-                    val = r[2]
 1375-                    tup = r[3]
+1376-                    elval = r[4]
+1377-                else:
+1378-                    raw = self._static_value_info(s.value, pinfo)
+1379-                    ty, el, val, tup = raw[0], raw[1], raw[2], raw[3]
+1380-                    elval = None
 --
 1699-                    # same-named method with conflicting argument types, the
 1700-                    # mismatch just falls back to `int` as before -- no new
@@ -486,6 +566,46 @@
 1711-        """Infer types for `fn`'s parameters at index >= `start` (0 for plain
 1712-        functions, 1 for methods to skip `self`) from `sites` (the `A.Call`/
 1713-        `A.MethodCall` nodes invoking it), storing results in
+1714:        `self.inferred_param_types`. See `_infer_unannotated_params`."""
+1715:        fn_param_types: list = fn.param_types
+1716-        fn_defaults: list = fn.defaults
+1717-        for i, p in enumerate(fn.params):
+1718-            if i < start:
+1719-                continue
+1720:            annot = fn_param_types[i] if i < len(fn_param_types) else None
+1721-            if self._resolve_annot(annot) is not None:  # type: ignore
+1722-                continue
+1723-            if i < len(fn_defaults) and fn_defaults[i] is not None:
+1724-                continue
+1725-            candidates: list = []
+1726-            found_any = False
+1727-            arg_idx = i - start
+1728-            for site in sites:
+1729-                args: list = site.args
+1730-                if arg_idx < len(args):
+1731-                    arg = args[arg_idx]
+1732-                else:
+1733-                    # Explicit loop, not next((v for n,v in ... if n==p), None):
+1734-                    # asmpython's own codegen has no generator-expression/next()
+1735-                    # support (this is the compiler's own source, self-compiled),
+1736-                    # so that construct silently fell through to an unrelated
+1737-                    # fallback and corrupted state instead of erroring.
+1738-                    site_kwargs: list = site.kwargs
+1739-                    arg = None
+1740-                    for kw_name, kw_val in site_kwargs:
+1741-                        if kw_name == p:
+1742-                            arg = kw_val
+1743-                            break
+1744-                    if arg is None:
+1745-                        continue
+1746-                lit = self._literal_arg_type(arg)
+1747-                if lit is None:
+1748-                    continue
+1749-                found_any = True
+1750-                if lit not in candidates:
+1751-                    candidates.append(lit)
+1752-            if found_any and len(candidates) == 1:
+1753:                self.inferred_param_types[f"{qualname}:{i}"] = candidates[0]
 === type method semantic branch ===
 8477-                            e.tuple_elem_types = self._dict_value_tuple_types(e.obj, scope)
 8478-                    elif e.inferred_type == "dict":
@@ -603,7 +723,22 @@
 8590-                class_name = obj_t.split(":", 1)[1]
 8591-                ov_key = (class_name, e.method)
 8592-                if ov_key in self.method_overload_sets:
-=== str builtin lowering ===
+8593-                    for a in e.args:
+8594-                        self._check_expr(a, scope)
+8595-                    ov_sig = self._resolve_overload(
+8596-                        f"{class_name}.{e.method}",
+8597-                        self.method_overload_sets[ov_key],
+8598-                        e.args,
+8599-                        e.pos,
+8600-                        implicit_self=True,
+8601-                    )
+8602-                    e.resolved_overload_symbol = _overload_symbol(e.method, ov_sig)
+=== str builtin backend lowering ===
+asmpython/_compiler/sema.py-9916-                e.tuple_elem_types = ["int", "int"]
+asmpython/_compiler/sema.py-9917-                return
+asmpython/_compiler/sema.py-9918-            # Argument-type sanity for builtins that care. An opaque ("any")
+asmpython/_compiler/sema.py-9919-            # argument is accepted everywhere — we can't know its real type.
+asmpython/_compiler/sema.py-9920-            if e.func == "len":
 asmpython/_compiler/sema.py-9921-                t = A.expr_type(e.args[0])
 asmpython/_compiler/sema.py-9922-                if t not in ("str", "list", "dict", "tuple", "set", "any", "int") and not t.startswith("instance:"):
 asmpython/_compiler/sema.py-9923-                    # "int" is the default for unannotated vars — accept leniently
@@ -670,7 +805,22 @@ asmpython/_compiler/sema.py-9983-                        )
 asmpython/_compiler/sema.py-9984-                    raise SemaError(
 asmpython/_compiler/sema.py-9985-                        f"{e.func}() takes {required}-{sig.arity} arguments, got {len(e.args)}",
 asmpython/_compiler/sema.py-9986-                        e.pos,
+asmpython/_compiler/sema.py-9987-                        ErrorCode.E_ARG_COUNT,
+asmpython/_compiler/sema.py-9988-                    )
+asmpython/_compiler/sema.py-9989-            # Normalize every call to a complete positional argument list
+asmpython/_compiler/sema.py-9990-            # (defaults filled, keyword args placed, varargs packed) so codegen
+asmpython/_compiler/sema.py-9991-            # always sees a fixed-shape call.
+asmpython/_compiler/sema.py-9992-            self._bind_args(
+asmpython/_compiler/sema.py-9993-                e, sig.param_names, sig.param_defaults, sig.vararg, e.pos, e.func,
+asmpython/_compiler/sema.py-9994-                kwarg=sig.kwarg,
+asmpython/_compiler/sema.py-9995-            )
+asmpython/_compiler/sema.py-9996-            for a in e.args:
 --
+asmpython/_compiler/ir_lower.py-7462-            # declares a float parameter (e.g. `sqrt(49)` -- a bare int
+asmpython/_compiler/ir_lower.py-7463-            # literal into a `("float",)`-typed binding): without this,
+asmpython/_compiler/ir_lower.py-7464-            # the raw integer bits get passed through unconverted and
+asmpython/_compiler/ir_lower.py-7465-            # reinterpreted as a double bit pattern on the callee side,
+asmpython/_compiler/ir_lower.py-7466-            # producing garbage (confirmed: `sqrt(49)` silently returned
 asmpython/_compiler/ir_lower.py-7467-            # `0` instead of `7`). No reverse case needed -- a real
 asmpython/_compiler/ir_lower.py-7468-            # Python float literal/expression passed to an int-typed
 asmpython/_compiler/ir_lower.py-7469-            # parameter isn't valid input this compiler needs to handle
@@ -737,7 +887,22 @@ asmpython/_compiler/ir_lower.py-7529-            if isinstance(arg, A.StrLit):
 asmpython/_compiler/ir_lower.py-7530-                s = arg.value.strip().lower()
 asmpython/_compiler/ir_lower.py-7531-                if s == "nan":
 asmpython/_compiler/ir_lower.py-7532-                    out = ctx.tmp(F64)
+asmpython/_compiler/ir_lower.py-7533-                    ctx.emit(IRInstr("const", out, [float("nan")]))
+asmpython/_compiler/ir_lower.py-7534-                    return out
+asmpython/_compiler/ir_lower.py-7535-                if s in ("inf", "+inf", "infinity", "+infinity"):
+asmpython/_compiler/ir_lower.py-7536-                    out = ctx.tmp(F64)
+asmpython/_compiler/ir_lower.py-7537-                    ctx.emit(IRInstr("const", out, [float("inf")]))
+asmpython/_compiler/ir_lower.py-7538-                    return out
+asmpython/_compiler/ir_lower.py-7539-                if s in ("-inf", "-infinity"):
+asmpython/_compiler/ir_lower.py-7540-                    out = ctx.tmp(F64)
+asmpython/_compiler/ir_lower.py-7541-                    ctx.emit(IRInstr("const", out, [float("-inf")]))
+asmpython/_compiler/ir_lower.py-7542-                    return out
 --
+asmpython/_compiler/codegen.py-13673-                f"mov rbx, [rbp{b_slot:+d}]",
+asmpython/_compiler/codegen.py-13674-                "call _runtime_range_list",
+asmpython/_compiler/codegen.py-13675-            )
+asmpython/_compiler/codegen.py-13676-            return
+asmpython/_compiler/codegen.py-13677-        if e.func == "len":
 asmpython/_compiler/codegen.py-13678-            arg = e.args[0]
 asmpython/_compiler/codegen.py-13679-            self.gen_expr(arg, info)  # rax = ptr
 asmpython/_compiler/codegen.py-13680-            t: str = A.expr_type(arg)
@@ -804,7 +969,17 @@ asmpython/_compiler/codegen.py-13740-                self.emitf(f"mov [rbp{base_
 asmpython/_compiler/codegen.py-13741-                self.gen_expr(e.args[0], info)  # rax = string ptr
 asmpython/_compiler/codegen.py-13742-                self.emitf(f"mov rbx, [rbp{base_slot:+d}]")
 asmpython/_compiler/codegen.py-13743-                self._emit_str_to_int_base()  # rax = parsed int
-=== class ids ===
+asmpython/_compiler/codegen.py-13744-                return
+asmpython/_compiler/codegen.py-13745-            self.gen_expr(e.args[0], info)
+asmpython/_compiler/codegen.py-13746-            if arg_t == "str":
+asmpython/_compiler/codegen.py-13747-                self._emit_str_to_int()
+asmpython/_compiler/codegen.py-13748-            elif arg_t == "float":
+asmpython/_compiler/codegen.py-13749-                # Truncate toward zero (Python's int(float) semantics).
+asmpython/_compiler/codegen.py-13750-                self.emitf("cvttsd2si rax, xmm0")
+asmpython/_compiler/codegen.py-13751-            elif arg_t.startswith("instance:"):
+asmpython/_compiler/codegen.py-13752-                resolved = self._resolve_int_dunder(arg_t.split(":", 1)[1])
+asmpython/_compiler/codegen.py-13753-                if resolved is not None:
+=== class ids and type values ===
 asmpython/_compiler/sema.py-212-    "AttributeError",
 asmpython/_compiler/sema.py-213-    "KeyError",
 asmpython/_compiler/sema.py-214-    "IndexError",
@@ -866,6 +1041,78 @@ asmpython/_compiler/sema.py-269-    "*": ("__mul__", "__rmul__"),
 asmpython/_compiler/sema.py-270-    "/": ("__truediv__", "__rtruediv__"),
 asmpython/_compiler/sema.py-271-    "//": ("__floordiv__", "__rfloordiv__"),
 asmpython/_compiler/sema.py-272-    "%": ("__mod__", "__rmod__"),
+asmpython/_compiler/sema.py-273-    "**": ("__pow__", "__rpow__"),
+asmpython/_compiler/sema.py-274-    "&": ("__and__", "__rand__"),
+asmpython/_compiler/sema.py-275-    "|": ("__or__", "__ror__"),
+asmpython/_compiler/sema.py-276-    "^": ("__xor__", "__rxor__"),
+asmpython/_compiler/sema.py-277-    "<<": ("__lshift__", "__rlshift__"),
+--
+asmpython/_compiler/ir_lower.py-22-"""
+asmpython/_compiler/ir_lower.py-23-
+asmpython/_compiler/ir_lower.py-24-from __future__ import annotations
+asmpython/_compiler/ir_lower.py-25-
+asmpython/_compiler/ir_lower.py-26-from dataclasses import fields, is_dataclass
+asmpython/_compiler/ir_lower.py-27-
+asmpython/_compiler/ir_lower.py-28-from . import ast_nodes as A
+asmpython/_compiler/ir_lower.py-29-from .ir import (
+asmpython/_compiler/ir_lower.py-30-    IRBlock,
+asmpython/_compiler/ir_lower.py-31-    IRFunc,
+asmpython/_compiler/ir_lower.py-32-    IRGlobal,
+asmpython/_compiler/ir_lower.py-33-    IRInstr,
+asmpython/_compiler/ir_lower.py-34-    IRModule,
+asmpython/_compiler/ir_lower.py-35-    IRType,
+asmpython/_compiler/ir_lower.py-36-    IRValue,
+asmpython/_compiler/ir_lower.py-37-    F64,
+asmpython/_compiler/ir_lower.py-38-    I64,
+asmpython/_compiler/ir_lower.py-39-    PTR,
+asmpython/_compiler/ir_lower.py-40-    ir_type_for,
+asmpython/_compiler/ir_lower.py-41-)
+asmpython/_compiler/ir_lower.py:42:from .codegen import BUILTIN_EXC_IDS, BUILTIN_EXC_PARENTS, BUILTIN_TYPE_IDS, EXC_ANY
+asmpython/_compiler/ir_lower.py-43-
+asmpython/_compiler/ir_lower.py-44-
+asmpython/_compiler/ir_lower.py-45-class LowerError(Exception):
+asmpython/_compiler/ir_lower.py-46-    pass
+asmpython/_compiler/ir_lower.py-47-
+asmpython/_compiler/ir_lower.py-48-
+asmpython/_compiler/ir_lower.py-49-U8 = IRType("u8")
+asmpython/_compiler/ir_lower.py-50-
+asmpython/_compiler/ir_lower.py-51-# jmp_buf layout (mirrors _runtime_setjmp in codegen.py): rbx/rbp/r12-r15/
+asmpython/_compiler/ir_lower.py-52-# rsp/retaddr in the first 8 slots (0-56), rsi/rdi in slots 8-9 (64, 72) --
+asmpython/_compiler/ir_lower.py-53-# 10 regs * 8 bytes = 80 bytes. rsi/rdi were added after the first 8 slots
+asmpython/_compiler/ir_lower.py-54-# were already established elsewhere; kept at the end rather than
+asmpython/_compiler/ir_lower.py-55-# renumbering to avoid touching every other offset in this file.
+asmpython/_compiler/ir_lower.py-56-_JMP_BUF_SIZE = 80
+asmpython/_compiler/ir_lower.py-57-
+asmpython/_compiler/ir_lower.py-58-# Build parent-id map once at module level from BUILTIN_EXC_PARENTS.
+asmpython/_compiler/ir_lower.py-59-_EXC_PARENT_OF: dict[int, int] = {
+asmpython/_compiler/ir_lower.py-60-    BUILTIN_EXC_IDS[k]: (BUILTIN_EXC_IDS[v] if v else -1)
+asmpython/_compiler/ir_lower.py-61-    for k, v in BUILTIN_EXC_PARENTS.items()
+asmpython/_compiler/ir_lower.py-62-    if k in BUILTIN_EXC_IDS
+asmpython/_compiler/ir_lower.py-63-}
+asmpython/_compiler/ir_lower.py-64-
+asmpython/_compiler/ir_lower.py-65-
+asmpython/_compiler/ir_lower.py-66-def _exc_raise_type_id_ir(value) -> int:
+asmpython/_compiler/ir_lower.py-67-    """Type id for `raise value` -- mirrors codegen._exc_raise_type_id."""
+asmpython/_compiler/ir_lower.py-68-    name = None
+asmpython/_compiler/ir_lower.py-69-    if isinstance(value, A.Call):
+asmpython/_compiler/ir_lower.py-70-        name = value.func
+asmpython/_compiler/ir_lower.py-71-    elif isinstance(value, A.Name):
+asmpython/_compiler/ir_lower.py-72-        name = value.name
+asmpython/_compiler/ir_lower.py-73-    if name is not None and name in BUILTIN_EXC_IDS:
+asmpython/_compiler/ir_lower.py-74-        return BUILTIN_EXC_IDS[name]
+asmpython/_compiler/ir_lower.py-75-    return EXC_ANY
+asmpython/_compiler/ir_lower.py-76-
+asmpython/_compiler/ir_lower.py-77-
+asmpython/_compiler/ir_lower.py-78-def _exc_matching_ids_ir(types: list) -> list:
+asmpython/_compiler/ir_lower.py-79-    """Full set of type ids an `except (T1, T2, ...):` catches,
+asmpython/_compiler/ir_lower.py-80-    including subtypes and EXC_ANY -- mirrors codegen._exc_matching_ids."""
+asmpython/_compiler/ir_lower.py-81-    ancestor_ids = [BUILTIN_EXC_IDS[t] for t in types if t in BUILTIN_EXC_IDS]
+asmpython/_compiler/ir_lower.py-82-    matches: list = [EXC_ANY]
+asmpython/_compiler/ir_lower.py-83-    for a in ancestor_ids:
+asmpython/_compiler/ir_lower.py-84-        if a not in matches:
+asmpython/_compiler/ir_lower.py-85-            matches.append(a)
+asmpython/_compiler/ir_lower.py-86-    for tid in BUILTIN_EXC_IDS.values():
+asmpython/_compiler/ir_lower.py-87-        for a in ancestor_ids:
 --
 asmpython/_compiler/ir_lower.py-134-        # to a compile-time-known scalar value (stdlib.Const), NOT a real
 asmpython/_compiler/ir_lower.py-135-        # runtime global. `_lower_expr`'s A.Name case checks this BEFORE
@@ -928,6 +1175,11 @@ asmpython/_compiler/ir_lower.py-191-        return name
 asmpython/_compiler/ir_lower.py-192-
 asmpython/_compiler/ir_lower.py-193-
 asmpython/_compiler/ir_lower.py-194-class _FuncCtx:
+asmpython/_compiler/ir_lower.py-195-    def __init__(
+asmpython/_compiler/ir_lower.py-196-        self,
+asmpython/_compiler/ir_lower.py-197-        mctx: _ModuleCtx,
+asmpython/_compiler/ir_lower.py-198-        *,
+asmpython/_compiler/ir_lower.py-199-        local_names: set[str] | None = None,
 --
 asmpython/_compiler/ir_lower.py-2212-    return "staticmethod" in getattr(msig, "decorators", [])
 asmpython/_compiler/ir_lower.py-2213-
@@ -1001,6 +1253,11 @@ asmpython/_compiler/ir_lower.py-2280-    return _value_repr_kind(t)
 asmpython/_compiler/ir_lower.py-2281-
 asmpython/_compiler/ir_lower.py-2282-
 asmpython/_compiler/ir_lower.py-2283-def _list_repr_kind(e: A.Expr) -> int:
+asmpython/_compiler/ir_lower.py-2284-    el = getattr(e, "list_el_type", "int") or "int"
+asmpython/_compiler/ir_lower.py-2285-    inner = getattr(e, "list_el_value_type", "int") or "int"
+asmpython/_compiler/ir_lower.py-2286-    if isinstance(e, A.ListLit):
+asmpython/_compiler/ir_lower.py-2287-        el = e.el_type or "int"
+asmpython/_compiler/ir_lower.py-2288-        inner = getattr(e, "el_value_type", "int") or "int"
 --
 asmpython/_compiler/ir_lower.py-3786-    arg0_t = A.expr_type(arg0)
 asmpython/_compiler/ir_lower.py-3787-    has_prim_target = False
@@ -1063,6 +1320,11 @@ asmpython/_compiler/ir_lower.py-3843-        ctx.emit(IRInstr("ior", next_v, [ma
 asmpython/_compiler/ir_lower.py-3844-        match_v = next_v
 asmpython/_compiler/ir_lower.py-3845-    ctx.emit(IRInstr("store", None, [match_v, out_ptr]))
 asmpython/_compiler/ir_lower.py-3846-    ctx.emit(IRInstr("br", None, [end_b.label]))
+asmpython/_compiler/ir_lower.py-3847-
+asmpython/_compiler/ir_lower.py-3848-    ctx.switch_to(end_b)
+asmpython/_compiler/ir_lower.py-3849-    out = ctx.tmp(I64)
+asmpython/_compiler/ir_lower.py-3850-    ctx.emit(IRInstr("load", out, [out_ptr]))
+asmpython/_compiler/ir_lower.py-3851-    return out
 --
 asmpython/_compiler/ir_lower.py-4460-    _emit_instance_field_set(ctx, obj_v, "_alive", zero_v)
 asmpython/_compiler/ir_lower.py-4461-    return obj_v
@@ -1088,9 +1350,9 @@ asmpython/_compiler/ir_lower.py:4480:        if e.name in ctx.mctx.class_ids:
 asmpython/_compiler/ir_lower.py-4481-            v = ctx.tmp(I64)
 asmpython/_compiler/ir_lower.py:4482:            ctx.emit(IRInstr("const", v, [ctx.mctx.class_ids[e.name]]))
 asmpython/_compiler/ir_lower.py-4483-            return v
-asmpython/_compiler/ir_lower.py-4484-        if e.name in BUILTIN_TYPE_IDS:
+asmpython/_compiler/ir_lower.py:4484:        if e.name in BUILTIN_TYPE_IDS:
 asmpython/_compiler/ir_lower.py-4485-            v = ctx.tmp(I64)
-asmpython/_compiler/ir_lower.py-4486-            ctx.emit(IRInstr("const", v, [BUILTIN_TYPE_IDS[e.name]]))
+asmpython/_compiler/ir_lower.py:4486:            ctx.emit(IRInstr("const", v, [BUILTIN_TYPE_IDS[e.name]]))
 asmpython/_compiler/ir_lower.py-4487-            return v
 asmpython/_compiler/ir_lower.py-4488-        if e.name in ctx.mctx.ffi_consts and e.name not in ctx.slot_ty:
 asmpython/_compiler/ir_lower.py-4489-            # `from math import pi` -- a bare name bound to a stdlib.Const,
@@ -1127,6 +1389,15 @@ asmpython/_compiler/ir_lower.py-4519-                return v
 asmpython/_compiler/ir_lower.py-4520-            if b.ty == "int" and isinstance(value, (int, bool)):
 asmpython/_compiler/ir_lower.py-4521-                v = ctx.tmp(I64)
 asmpython/_compiler/ir_lower.py-4522-                ctx.emit(IRInstr("const", v, [int(value)]))
+asmpython/_compiler/ir_lower.py-4523-                return v
+asmpython/_compiler/ir_lower.py-4524-            if b.ty == "float" and isinstance(value, (int, float)):
+asmpython/_compiler/ir_lower.py-4525-                v = ctx.tmp(F64)
+asmpython/_compiler/ir_lower.py-4526-                ctx.emit(IRInstr("const", v, [float(value)]))
+asmpython/_compiler/ir_lower.py-4527-                return v
+asmpython/_compiler/ir_lower.py-4528-            # Anything else (list-typed constants, etc.) falls through to
+asmpython/_compiler/ir_lower.py-4529-            # the generic path unchanged -- a separate, smaller,
+asmpython/_compiler/ir_lower.py-4530-            # not-yet-scoped gap, same as the module.CONST case's own
+asmpython/_compiler/ir_lower.py-4531-            # matching fallthrough note.
 --
 asmpython/_compiler/ir_lower.py-7403-        ctx.emit(IRInstr("const", zero, [0]))
 asmpython/_compiler/ir_lower.py-7404-        v = ctx.tmp(I64)
@@ -1189,6 +1460,11 @@ asmpython/_compiler/ir_lower.py-7460-            av = _lower_expr(ctx, a)
 asmpython/_compiler/ir_lower.py-7461-            # Coerce an int-typed argument to float when the binding
 asmpython/_compiler/ir_lower.py-7462-            # declares a float parameter (e.g. `sqrt(49)` -- a bare int
 asmpython/_compiler/ir_lower.py-7463-            # literal into a `("float",)`-typed binding): without this,
+asmpython/_compiler/ir_lower.py-7464-            # the raw integer bits get passed through unconverted and
+asmpython/_compiler/ir_lower.py-7465-            # reinterpreted as a double bit pattern on the callee side,
+asmpython/_compiler/ir_lower.py-7466-            # producing garbage (confirmed: `sqrt(49)` silently returned
+asmpython/_compiler/ir_lower.py-7467-            # `0` instead of `7`). No reverse case needed -- a real
+asmpython/_compiler/ir_lower.py-7468-            # Python float literal/expression passed to an int-typed
 --
 asmpython/_compiler/ir_lower.py-9352-    def add_resolved(class_name: str, method: str) -> None:
 asmpython/_compiler/ir_lower.py-9353-        add(_resolve_method_owner_in_sigs(classes_sig, class_name, method), method)
@@ -1251,6 +1527,11 @@ asmpython/_compiler/ir_lower.py-9409-                # already handles the None-
 asmpython/_compiler/ir_lower.py-9410-                # case as a no-op.
 asmpython/_compiler/ir_lower.py-9411-                add_resolved(obj_ty.split(":", 1)[1], node.method)
 asmpython/_compiler/ir_lower.py-9412-            elif obj_ty == "type" and isinstance(node.obj, A.Name):
+asmpython/_compiler/ir_lower.py-9413-                add_resolved(node.obj.name, node.method)
+asmpython/_compiler/ir_lower.py-9414-            # `node.obj` (the receiver) is visited (or deliberately
+asmpython/_compiler/ir_lower.py-9415-            # skipped, for a bare Name) once, uniformly for both
+asmpython/_compiler/ir_lower.py-9416-            # MethodCall and Attr, in the generic dataclass-field
+asmpython/_compiler/ir_lower.py-9417-            # recursion below -- see its own comment for why.
 --
 asmpython/_compiler/codegen.py-68-    "ZeroDivisionError": 6,
 asmpython/_compiler/codegen.py-69-    "OverflowError": 7,
@@ -1276,7 +1557,7 @@ asmpython/_compiler/codegen.py:88:# mimicking argparse's `type=str`) -- same RTT
 asmpython/_compiler/codegen.py-89-# BUILTIN_EXC_IDS: asmpython has no first-class type objects, so this is just
 asmpython/_compiler/codegen.py-90-# a stable, unique-per-name placeholder the program never actually inspects.
 asmpython/_compiler/codegen.py:91:# Negative so it can never collide with class_ids (which starts at 0).
-asmpython/_compiler/codegen.py-92-BUILTIN_TYPE_IDS: dict[str, int] = {
+asmpython/_compiler/codegen.py:92:BUILTIN_TYPE_IDS: dict[str, int] = {
 asmpython/_compiler/codegen.py-93-    "int": -1,
 asmpython/_compiler/codegen.py-94-    "float": -2,
 asmpython/_compiler/codegen.py-95-    "str": -3,
@@ -1305,704 +1586,297 @@ asmpython/_compiler/codegen.py-117-    frame_size: int = 0  # bytes to subtract 
 asmpython/_compiler/codegen.py-118-    # Default value expressions, one per param (None for required).
 asmpython/_compiler/codegen.py-119-    defaults: list = field(default_factory=list)
 asmpython/_compiler/codegen.py-120-    # Running RBP offset (negative) used while collecting locals, and whether
-=== MethodCall codegen ===
-asmpython/_compiler/program.py-331-    if name == "asyncio":
-asmpython/_compiler/program.py-332-        return 1
-asmpython/_compiler/program.py-333-    if name == "importlib":
-asmpython/_compiler/program.py-334-        return 1
-asmpython/_compiler/program.py-335-    return 0
-asmpython/_compiler/program.py-336-
-asmpython/_compiler/program.py-337-
-asmpython/_compiler/program.py-338-def _flatten_targets(targets: list, out: set[str]) -> None:
-asmpython/_compiler/program.py-339-    """Collect every name bound by a (possibly nested) unpack target list,
-asmpython/_compiler/program.py-340-    e.g. `["a", ["b", "c"]]` -> {"a", "b", "c"}. Mirrors sema's
-asmpython/_compiler/program.py-341-    `_flat_target_names` for the subset program.py needs."""
-asmpython/_compiler/program.py-342-    for t in targets:
-asmpython/_compiler/program.py-343-        if isinstance(t, str):
-asmpython/_compiler/program.py-344-            out.add(t)
-asmpython/_compiler/program.py-345-        elif isinstance(t, list):
-asmpython/_compiler/program.py-346-            _flatten_targets(t, out)
-asmpython/_compiler/program.py-347-
-asmpython/_compiler/program.py-348-
-asmpython/_compiler/program.py-349-def _free_names(node: object, out: set[str]) -> None:
-asmpython/_compiler/program.py-350-    """Collect the bare names an expression references: `Name` lookups and
-asmpython/_compiler/program.py:351:    `Call`/`MethodCall` callee names. Used to decide whether a value-import's
-asmpython/_compiler/program.py-352-    initializer can be safely materialized (every name it needs must already
-asmpython/_compiler/program.py-353-    be available). Attribute names and string literals are not free
-asmpython/_compiler/program.py-354-    variables, so they're skipped. Explicit per-node-type walk over every
-asmpython/_compiler/program.py-355-    expression shape (no statement shapes: every call site passes a single
-asmpython/_compiler/program.py-356-    expression, e.g. an import initializer or an `if`/assert test).
-asmpython/_compiler/program.py-357-    """
-asmpython/_compiler/program.py-358-    if node is None:
-asmpython/_compiler/program.py-359-        return
-asmpython/_compiler/program.py-360-    if isinstance(node, A.Name):
-asmpython/_compiler/program.py-361-        out.add(node.name)
-asmpython/_compiler/program.py-362-        return
-asmpython/_compiler/program.py-363-    if isinstance(node, A.Call):
-asmpython/_compiler/program.py-364-        out.add(node.func)
-asmpython/_compiler/program.py-365-        for a in node.args:
-asmpython/_compiler/program.py-366-            _free_names(a, out)
-asmpython/_compiler/program.py-367-        for _kw, val in node.kwargs:
-asmpython/_compiler/program.py-368-            _free_names(val, out)
-asmpython/_compiler/program.py-369-        return
-asmpython/_compiler/program.py:370:    if isinstance(node, A.MethodCall):
-asmpython/_compiler/program.py-371-        # `obj.method(...)`: the receiver and args are sub-expressions; the
-asmpython/_compiler/program.py-372-        # method name itself is an attribute, not a free variable.
-asmpython/_compiler/program.py-373-        _free_names(node.obj, out)
-asmpython/_compiler/program.py-374-        for a in node.args:
-asmpython/_compiler/program.py-375-            _free_names(a, out)
-asmpython/_compiler/program.py-376-        for _kw, val in node.kwargs:
-asmpython/_compiler/program.py-377-            _free_names(val, out)
-asmpython/_compiler/program.py-378-        return
-asmpython/_compiler/program.py-379-    if isinstance(node, A.Attr):
-asmpython/_compiler/program.py-380-        # `obj.name`: only the object is a free reference.
-asmpython/_compiler/program.py-381-        _free_names(node.obj, out)
-asmpython/_compiler/program.py-382-        return
-asmpython/_compiler/program.py-383-    if isinstance(node, A.Comprehension):
-asmpython/_compiler/program.py-384-        # `[elt for a, b in iter if cond]`: `var`/`targets` are loop-bound
-asmpython/_compiler/program.py-385-        # names, not free references — collect names from the rest of the
-asmpython/_compiler/program.py-386-        # node (elt/key/value/iter/cond/extra_for_*) and drop the bound
-asmpython/_compiler/program.py-387-        # ones, so e.g. `{fwd for fwd, _rfl in DUNDER_BINOP.values()}`
-asmpython/_compiler/program.py-388-        # reports only `DUNDER_BINOP` as free, not `fwd`/`_rfl`.
-asmpython/_compiler/program.py-389-        _nc: A.Comprehension = node
-asmpython/_compiler/program.py-390-        bound: set[str] = set()
-asmpython/_compiler/program.py-391-        if _nc.var:
-asmpython/_compiler/program.py-392-            bound.add(_nc.var)
-asmpython/_compiler/program.py-393-        _flatten_targets(_nc.targets, bound)
-asmpython/_compiler/program.py-394-        for t in _nc.extra_for_vars:
-asmpython/_compiler/program.py-395-            if t:
-asmpython/_compiler/program.py-396-                bound.add(t)
-asmpython/_compiler/program.py-397-        for t in _nc.extra_for_targets:
-asmpython/_compiler/program.py-398-            _flatten_targets(t, bound)
-asmpython/_compiler/program.py-399-        inner: set[str] = set()
-asmpython/_compiler/program.py-400-        _free_names(_nc.elt, inner)
-asmpython/_compiler/program.py-401-        _free_names(_nc.iter, inner)
-asmpython/_compiler/program.py-402-        if _nc.cond is not None:
-asmpython/_compiler/program.py-403-            _free_names(_nc.cond, inner)
-asmpython/_compiler/program.py-404-        for ei in _nc.extra_for_iters:
-asmpython/_compiler/program.py-405-            _free_names(ei, inner)
-asmpython/_compiler/program.py-406-        for ec in _nc.extra_for_conds:
-asmpython/_compiler/program.py-407-            if ec is not None:
-asmpython/_compiler/program.py-408-                _free_names(ec, inner)
-asmpython/_compiler/program.py-409-        out |= inner - bound
-asmpython/_compiler/program.py-410-        return
-asmpython/_compiler/program.py-411-    if isinstance(node, A.DictComprehension):
-asmpython/_compiler/program.py-412-        # Unlike A.Comprehension, DictComprehension has no extra_for_*
-asmpython/_compiler/program.py-413-        # fields — it only supports a single `for` clause.
-asmpython/_compiler/program.py-414-        _ndc: A.DictComprehension = node
-asmpython/_compiler/program.py-415-        bound2: set[str] = set()
-asmpython/_compiler/program.py-416-        if _ndc.var:
-asmpython/_compiler/program.py-417-            bound2.add(_ndc.var)
-asmpython/_compiler/program.py-418-        _flatten_targets(_ndc.targets, bound2)
-asmpython/_compiler/program.py-419-        inner2: set[str] = set()
-asmpython/_compiler/program.py-420-        _free_names(_ndc.key, inner2)
-asmpython/_compiler/program.py-421-        _free_names(_ndc.value, inner2)
-asmpython/_compiler/program.py-422-        _free_names(_ndc.iter, inner2)
-asmpython/_compiler/program.py-423-        if _ndc.cond is not None:
-asmpython/_compiler/program.py-424-            _free_names(_ndc.cond, inner2)
-asmpython/_compiler/program.py-425-        out |= inner2 - bound2
-asmpython/_compiler/program.py-426-        return
-asmpython/_compiler/program.py-427-    if isinstance(node, A.BinOp):
-asmpython/_compiler/program.py-428-        _free_names(node.left, out)
-asmpython/_compiler/program.py-429-        _free_names(node.right, out)
-asmpython/_compiler/program.py-430-        return
+asmpython/_compiler/codegen.py-121-    # this is the synthetic module-entry frame. Carried on the FuncInfo so the
+asmpython/_compiler/codegen.py-122-    # local-collection helpers can be plain instance methods (no closures /
+asmpython/_compiler/codegen.py-123-    # nonlocal) — a self-host requirement.
+asmpython/_compiler/codegen.py-124-    offset: int = 0
+asmpython/_compiler/codegen.py-125-    is_main: bool = False
+asmpython/_compiler/codegen.py-126-    # Names declared `global` in this function: skip frame-slot allocation and
+asmpython/_compiler/codegen.py-127-    # access them via the module-global .bss slot instead.
+asmpython/_compiler/codegen.py-128-    global_names: set = field(default_factory=set)
+asmpython/_compiler/codegen.py-129-    # Nonlocal vars: maps var name -> box-ptr slot name (__nl_box_<name>).
+asmpython/_compiler/codegen.py-130-    # Reads/writes to these names go through one pointer indirection.
+asmpython/_compiler/codegen.py-131-    nonlocal_boxes: dict = field(default_factory=dict)
+asmpython/_compiler/codegen.py-132-    # True when the function's declared return annotation is `-> float`.
+asmpython/_compiler/codegen.py-133-    # Lets `return <expr>` promote a non-float result (e.g. an `any`/`int`
+asmpython/_compiler/codegen.py-134-    # element read out of an unannotated `list`) to xmm0, since callers of a
+asmpython/_compiler/codegen.py-135-    # float-returning function read the result from xmm0.
+asmpython/_compiler/codegen.py-136-    ret_is_float: bool = False
+asmpython/_compiler/codegen.py-137-
 --
-asmpython/_compiler/program.py-1031-        elif isinstance(s, A.YieldStmt):
-asmpython/_compiler/program.py-1032-            _rename_call_targets_expr(s.value, renames)
-asmpython/_compiler/program.py-1033-        elif isinstance(s, A.Match):
-asmpython/_compiler/program.py-1034-            _rename_call_targets_expr(s.subject, renames)
-asmpython/_compiler/program.py-1035-            for _pattern, guard, body in s.cases:
-asmpython/_compiler/program.py-1036-                if guard is not None:
-asmpython/_compiler/program.py-1037-                    _rename_call_targets_expr(guard, renames)
-asmpython/_compiler/program.py-1038-                _rename_call_targets(body, renames)
-asmpython/_compiler/program.py-1039-        elif isinstance(s, A.ClosureBind) and s.func_name in renames:
-asmpython/_compiler/program.py-1040-            s.func_name = renames[s.func_name]
-asmpython/_compiler/program.py-1041-
-asmpython/_compiler/program.py-1042-
-asmpython/_compiler/program.py-1043-def _rename_call_targets_expr(e, renames: dict[str, str]) -> None:
-asmpython/_compiler/program.py-1044-    if isinstance(e, A.Call):
-asmpython/_compiler/program.py-1045-        if e.func in renames:
-asmpython/_compiler/program.py-1046-            e.func = renames[e.func]
-asmpython/_compiler/program.py-1047-        for a in e.args:
-asmpython/_compiler/program.py-1048-            _rename_call_targets_expr(a, renames)
-asmpython/_compiler/program.py-1049-        for _kn, kv in e.kwargs:
-asmpython/_compiler/program.py-1050-            _rename_call_targets_expr(kv, renames)
-asmpython/_compiler/program.py:1051:    elif isinstance(e, A.MethodCall):
-asmpython/_compiler/program.py-1052-        _rename_call_targets_expr(e.obj, renames)
-asmpython/_compiler/program.py-1053-        for a in e.args:
-asmpython/_compiler/program.py-1054-            _rename_call_targets_expr(a, renames)
-asmpython/_compiler/program.py-1055-        for _kn, kv in e.kwargs:
-asmpython/_compiler/program.py-1056-            _rename_call_targets_expr(kv, renames)
-asmpython/_compiler/program.py-1057-    elif isinstance(e, A.BinOp):
-asmpython/_compiler/program.py-1058-        _rename_call_targets_expr(e.left, renames)
-asmpython/_compiler/program.py-1059-        _rename_call_targets_expr(e.right, renames)
-asmpython/_compiler/program.py-1060-    elif isinstance(e, A.UnaryOp):
-asmpython/_compiler/program.py-1061-        _rename_call_targets_expr(e.operand, renames)
-asmpython/_compiler/program.py-1062-    elif isinstance(e, A.Compare):
-asmpython/_compiler/program.py-1063-        for o in e.operands:
-asmpython/_compiler/program.py-1064-            _rename_call_targets_expr(o, renames)
-asmpython/_compiler/program.py-1065-    elif isinstance(e, A.BoolOp):
-asmpython/_compiler/program.py-1066-        _rename_call_targets_expr(e.left, renames)
-asmpython/_compiler/program.py-1067-        _rename_call_targets_expr(e.right, renames)
-asmpython/_compiler/program.py-1068-    elif isinstance(e, A.IfExp):
-asmpython/_compiler/program.py-1069-        _rename_call_targets_expr(e.test, renames)
-asmpython/_compiler/program.py-1070-        _rename_call_targets_expr(e.body, renames)
-asmpython/_compiler/program.py-1071-        _rename_call_targets_expr(e.orelse, renames)
-asmpython/_compiler/program.py-1072-    elif isinstance(e, A.NamedExpr):
-asmpython/_compiler/program.py-1073-        _rename_call_targets_expr(e.value, renames)
-asmpython/_compiler/program.py-1074-    elif isinstance(e, A.ListLit):
-asmpython/_compiler/program.py-1075-        for el in e.elems:
-asmpython/_compiler/program.py-1076-            _rename_call_targets_expr(el, renames)
-asmpython/_compiler/program.py-1077-    elif isinstance(e, A.Subscript):
-asmpython/_compiler/program.py-1078-        _rename_call_targets_expr(e.obj, renames)
-asmpython/_compiler/program.py-1079-        if isinstance(e.index, A.Slice):
-asmpython/_compiler/program.py-1080-            if e.index.start is not None:
-asmpython/_compiler/program.py-1081-                _rename_call_targets_expr(e.index.start, renames)
-asmpython/_compiler/program.py-1082-            if e.index.stop is not None:
-asmpython/_compiler/program.py-1083-                _rename_call_targets_expr(e.index.stop, renames)
-asmpython/_compiler/program.py-1084-            if e.index.step is not None:
-asmpython/_compiler/program.py-1085-                _rename_call_targets_expr(e.index.step, renames)
-asmpython/_compiler/program.py-1086-        else:
-asmpython/_compiler/program.py-1087-            _rename_call_targets_expr(e.index, renames)
-asmpython/_compiler/program.py-1088-    elif isinstance(e, A.Attr):
-asmpython/_compiler/program.py-1089-        _rename_call_targets_expr(e.obj, renames)
-asmpython/_compiler/program.py-1090-    elif isinstance(e, A.FString):
-asmpython/_compiler/program.py-1091-        for seg in e.segments:
-asmpython/_compiler/program.py-1092-            _rename_call_targets_expr(seg, renames)
-asmpython/_compiler/program.py-1093-    elif isinstance(e, A.DictLit):
-asmpython/_compiler/program.py-1094-        for k in e.keys:
-asmpython/_compiler/program.py-1095-            if k is not None:
-asmpython/_compiler/program.py-1096-                _rename_call_targets_expr(k, renames)
-asmpython/_compiler/program.py-1097-        for v in e.values:
-asmpython/_compiler/program.py-1098-            _rename_call_targets_expr(v, renames)
-asmpython/_compiler/program.py-1099-    elif isinstance(e, A.TupleLit):
-asmpython/_compiler/program.py-1100-        for el in e.elems:
-asmpython/_compiler/program.py-1101-            _rename_call_targets_expr(el, renames)
-asmpython/_compiler/program.py-1102-    elif isinstance(e, A.SetLit):
-asmpython/_compiler/program.py-1103-        for el in e.elems:
-asmpython/_compiler/program.py-1104-            _rename_call_targets_expr(el, renames)
-asmpython/_compiler/program.py-1105-    elif isinstance(e, A.Starred):
-asmpython/_compiler/program.py-1106-        _rename_call_targets_expr(e.value, renames)
-asmpython/_compiler/program.py-1107-    elif isinstance(e, A.Comprehension):
-asmpython/_compiler/program.py-1108-        _rename_call_targets_expr(e.elt, renames)
-asmpython/_compiler/program.py-1109-        _rename_call_targets_expr(e.iter, renames)
-asmpython/_compiler/program.py-1110-        if e.cond is not None:
-asmpython/_compiler/program.py-1111-            _rename_call_targets_expr(e.cond, renames)
+asmpython/_compiler/codegen.py-288-                and isinstance(s.target, str)
+asmpython/_compiler/codegen.py-289-                and s.target not in bound_in_frame
+asmpython/_compiler/codegen.py-290-            ):
+asmpython/_compiler/codegen.py-291-                self.global_vars[s.target] = A.expr_type(s.value)
+asmpython/_compiler/codegen.py-292-            elif (
+asmpython/_compiler/codegen.py-293-                isinstance(s, A.ConstDecl)
+asmpython/_compiler/codegen.py-294-                and s.name not in bound_in_frame
+asmpython/_compiler/codegen.py-295-            ):
+asmpython/_compiler/codegen.py-296-                # const NAME = value is module-scope-only (enforced by the
+asmpython/_compiler/codegen.py-297-                # parser), so it's always a global slot, never a frame local
+asmpython/_compiler/codegen.py-298-                # -- same collection as a plain top-level A.Assign.
+asmpython/_compiler/codegen.py-299-                self.global_vars[s.name] = A.expr_type(s.value)
+asmpython/_compiler/codegen.py-300-            elif isinstance(s, A.If):
+asmpython/_compiler/codegen.py-301-                self._collect_if_globals(s, bound_in_frame, self.global_vars)
+asmpython/_compiler/codegen.py-302-        # RTTI: each user class gets a small integer id. Instances are tagged
+asmpython/_compiler/codegen.py-303-        # with their id (a hidden `__class__` dict entry) at construction, and
+asmpython/_compiler/codegen.py-304-        # isinstance walks the `__class_parents` table to honour inheritance.
+asmpython/_compiler/codegen.py-305-        # Built with an explicit loop rather than a dict comprehension over
+asmpython/_compiler/codegen.py-306-        # enumerate(...) so this stays self-compilable (asmpython comprehensions
+asmpython/_compiler/codegen.py-307-        # don't take enumerate() iterables or tuple targets).
+asmpython/_compiler/codegen.py:308:        self.class_ids: dict[str, int] = {}
+asmpython/_compiler/codegen.py-309-        cid = 0
+asmpython/_compiler/codegen.py-310-        for cls in mod.classes:
+asmpython/_compiler/codegen.py:311:            self.class_ids[cls.name] = cid
+asmpython/_compiler/codegen.py-312-            cid += 1
+asmpython/_compiler/codegen.py-313-        # Lazily-built .rodata table mapping each class id above to a
+asmpython/_compiler/codegen.py-314-        # "<class '__main__.Name'>" string, for type(instance) (see
+asmpython/_compiler/codegen.py-315-        # _type_name_table_label). None until first requested.
+asmpython/_compiler/codegen.py-316-        self.type_name_table: list[str] | None = None
+asmpython/_compiler/codegen.py-317-        # Class-level variables that act as static constants: `class C: x = 5`.
+asmpython/_compiler/codegen.py-318-        # Each maps "<Class>.<name>" -> (label, default_expr). Emitted as bss
+asmpython/_compiler/codegen.py-319-        # globals, initialized at startup, and read/written via ClassName.attr
+asmpython/_compiler/codegen.py-320-        # and cls.attr. Only plain class bodies (not @dataclass, whose class
+asmpython/_compiler/codegen.py-321-        # vars are per-instance fields) contribute, and only literal/simple
+asmpython/_compiler/codegen.py-322-        # defaults that the startup initializer can evaluate.
+asmpython/_compiler/codegen.py-323-        self.class_var_labels: dict[str, str] = {}
+asmpython/_compiler/codegen.py-324-        self.class_var_defaults: list = []  # (label, default_expr) in emit order
+asmpython/_compiler/codegen.py-325-        for cls in mod.classes:
+asmpython/_compiler/codegen.py-326-            if getattr(cls, "is_dataclass", False):
+asmpython/_compiler/codegen.py-327-                continue
+asmpython/_compiler/codegen.py-328-            for cv in getattr(cls, "class_vars", []) or []:
+asmpython/_compiler/codegen.py-329-                cvname, _annot, cvdefault = cv
+asmpython/_compiler/codegen.py-330-                if cvdefault is None:
+asmpython/_compiler/codegen.py-331-                    continue
+asmpython/_compiler/codegen.py-332-                label = f"__cv_{cls.name}__{cvname}"
+asmpython/_compiler/codegen.py-333-                self.class_var_labels[f"{cls.name}.{cvname}"] = label
+asmpython/_compiler/codegen.py-334-                self.class_var_defaults.append((label, cvdefault))
+asmpython/_compiler/codegen.py-335-        # import_binary()/.imported dynamic-loading: map each handle variable
+asmpython/_compiler/codegen.py-336-        # name to the list of (func_name, FuncDef) decorated `@handle.imported`
+asmpython/_compiler/codegen.py-337-        # for it. A handle's import_binary(path) call site resolves every
+asmpython/_compiler/codegen.py-338-        # function in its list via GetProcAddress/dlsym immediately, storing
+asmpython/_compiler/codegen.py-339-        # each pointer keyed by name on the handle instance — see
+asmpython/_compiler/codegen.py-340-        # _gen_constructor-adjacent dynamic-import codegen.
+asmpython/_compiler/codegen.py-341-        #
+asmpython/_compiler/codegen.py-342-        # Also scans class methods (mod.classes[*].methods), not just
+asmpython/_compiler/codegen.py-343-        # top-level mod.funcs: a class can wrap a set of GL bindings behind
+asmpython/_compiler/codegen.py-344-        # its own API (e.g. pugtk's GLRenderer3D) instead of forcing every
+asmpython/_compiler/codegen.py-345-        # caller to hand-declare the same ~20 top-level @glfns.imported
+asmpython/_compiler/codegen.py-346-        # stubs. `handle` (the `@<handle>.imported` decorator's receiver)
+asmpython/_compiler/codegen.py-347-        # still has to be a name resolvable where the decorator itself is
+asmpython/_compiler/codegen.py-348-        # evaluated -- a module-level `glfns = gl_import()`, since Python
+asmpython/_compiler/codegen.py-349-        # evaluates a class's decorators once, at class-definition time,
+asmpython/_compiler/codegen.py-350-        # not per-instance. Methods compile with `self` as their first
+asmpython/_compiler/codegen.py-351-        # parameter; _gen_dynamic_call's plain_params helper below strips
+asmpython/_compiler/codegen.py-352-        # it before marshalling so `self` is never sent to the GL call.
+asmpython/_compiler/codegen.py-353-        self.imported_funcs: dict[str, list[tuple[str, A.FuncDef]]] = {}
+asmpython/_compiler/codegen.py-354-        for f in mod.funcs:
+asmpython/_compiler/codegen.py-355-            for deco in f.decorators:
+asmpython/_compiler/codegen.py-356-                if deco.endswith(".imported"):
 --
-asmpython/_compiler/parser.py-199-        # clause(s) — Python scopes these to the comprehension itself, not
-asmpython/_compiler/parser.py-200-        # the surrounding function, so a `Name` read while this is non-empty
-asmpython/_compiler/parser.py-201-        # must not be recorded as a free-var reference. A list-as-stack
-asmpython/_compiler/parser.py-202-        # (rather than reassigning a set) so nested comprehensions compose
-asmpython/_compiler/parser.py-203-        # without needing `nonlocal`.
-asmpython/_compiler/parser.py-204-        comp_suppressed: list = []
-asmpython/_compiler/parser.py-205-        def _collect_refs_expr(node) -> None:
-asmpython/_compiler/parser.py-206-            if isinstance(node, A.Name):
-asmpython/_compiler/parser.py-207-                if node.name not in comp_suppressed:
-asmpython/_compiler/parser.py-208-                    referenced.add(node.name)
-asmpython/_compiler/parser.py-209-            elif isinstance(node, A.BinOp):
-asmpython/_compiler/parser.py-210-                _collect_refs_expr(node.left)
-asmpython/_compiler/parser.py-211-                _collect_refs_expr(node.right)
-asmpython/_compiler/parser.py-212-            elif isinstance(node, A.UnaryOp):
-asmpython/_compiler/parser.py-213-                _collect_refs_expr(node.operand)
-asmpython/_compiler/parser.py-214-            elif isinstance(node, A.Call):
-asmpython/_compiler/parser.py-215-                for a in node.args:
-asmpython/_compiler/parser.py-216-                    _collect_refs_expr(a)
-asmpython/_compiler/parser.py-217-                for _kw_name, kw_val in (node.kwargs or []):
-asmpython/_compiler/parser.py-218-                    _collect_refs_expr(kw_val)
-asmpython/_compiler/parser.py:219:            elif isinstance(node, A.MethodCall):
-asmpython/_compiler/parser.py-220-                _collect_refs_expr(node.obj)
-asmpython/_compiler/parser.py-221-                for a in node.args:
-asmpython/_compiler/parser.py-222-                    _collect_refs_expr(a)
-asmpython/_compiler/parser.py-223-                for _kw_name, kw_val in (node.kwargs or []):
-asmpython/_compiler/parser.py-224-                    _collect_refs_expr(kw_val)
-asmpython/_compiler/parser.py-225-            elif isinstance(node, A.Attr):
-asmpython/_compiler/parser.py-226-                _collect_refs_expr(node.obj)
-asmpython/_compiler/parser.py-227-            elif isinstance(node, A.Subscript):
-asmpython/_compiler/parser.py-228-                _collect_refs_expr(node.obj)
-asmpython/_compiler/parser.py-229-                _collect_refs_expr(node.index)
-asmpython/_compiler/parser.py-230-            elif isinstance(node, A.Slice):
-asmpython/_compiler/parser.py-231-                if node.start is not None:
-asmpython/_compiler/parser.py-232-                    _collect_refs_expr(node.start)
-asmpython/_compiler/parser.py-233-                if node.stop is not None:
-asmpython/_compiler/parser.py-234-                    _collect_refs_expr(node.stop)
-asmpython/_compiler/parser.py-235-                if node.step is not None:
-asmpython/_compiler/parser.py-236-                    _collect_refs_expr(node.step)
-asmpython/_compiler/parser.py-237-            elif isinstance(node, A.IfExp):
-asmpython/_compiler/parser.py-238-                _collect_refs_expr(node.test)
-asmpython/_compiler/parser.py-239-                _collect_refs_expr(node.body)
-asmpython/_compiler/parser.py-240-                _collect_refs_expr(node.orelse)
-asmpython/_compiler/parser.py-241-            elif isinstance(node, A.NamedExpr):
-asmpython/_compiler/parser.py-242-                _collect_refs_expr(node.value)
-asmpython/_compiler/parser.py-243-            elif isinstance(node, A.BoolOp):
-asmpython/_compiler/parser.py-244-                _collect_refs_expr(node.left)
-asmpython/_compiler/parser.py-245-                _collect_refs_expr(node.right)
-asmpython/_compiler/parser.py-246-            elif isinstance(node, A.Compare):
-asmpython/_compiler/parser.py-247-                for op in node.operands:
-asmpython/_compiler/parser.py-248-                    _collect_refs_expr(op)
-asmpython/_compiler/parser.py-249-            elif isinstance(node, A.ListLit):
-asmpython/_compiler/parser.py-250-                for e in node.elems:
-asmpython/_compiler/parser.py-251-                    _collect_refs_expr(e)
-asmpython/_compiler/parser.py-252-            elif isinstance(node, A.TupleLit):
-asmpython/_compiler/parser.py-253-                for e in node.elems:
-asmpython/_compiler/parser.py-254-                    _collect_refs_expr(e)
-asmpython/_compiler/parser.py-255-            elif isinstance(node, A.SetLit):
-asmpython/_compiler/parser.py-256-                for e in node.elems:
-asmpython/_compiler/parser.py-257-                    _collect_refs_expr(e)
-asmpython/_compiler/parser.py-258-            elif isinstance(node, A.DictLit):
-asmpython/_compiler/parser.py-259-                for k in node.keys:
-asmpython/_compiler/parser.py-260-                    if k is not None:
-asmpython/_compiler/parser.py-261-                        _collect_refs_expr(k)
-asmpython/_compiler/parser.py-262-                for v in node.values:
-asmpython/_compiler/parser.py-263-                    _collect_refs_expr(v)
-asmpython/_compiler/parser.py-264-            elif isinstance(node, A.FString):
-asmpython/_compiler/parser.py-265-                for seg in node.segments:
-asmpython/_compiler/parser.py-266-                    _collect_refs_expr(seg)
-asmpython/_compiler/parser.py-267-            elif isinstance(node, A.Starred):
-asmpython/_compiler/parser.py-268-                _collect_refs_expr(node.value)
-asmpython/_compiler/parser.py-269-            elif isinstance(node, A.Lambda):
-asmpython/_compiler/parser.py-270-                if node.body is not None:
-asmpython/_compiler/parser.py-271-                    _collect_refs_expr(node.body)
-asmpython/_compiler/parser.py-272-            elif isinstance(node, A.Comprehension):
-asmpython/_compiler/parser.py-273-                # `iter` (the outermost `for x in <iter>`) runs in the
-asmpython/_compiler/parser.py-274-                # *enclosing* scope in real Python, so walk it before any
-asmpython/_compiler/parser.py-275-                # suppression is pushed.
-asmpython/_compiler/parser.py-276-                _collect_refs_expr(node.iter)
-asmpython/_compiler/parser.py-277-                _comp_vars: list = []
-asmpython/_compiler/parser.py-278-                if node.var:
-asmpython/_compiler/parser.py-279-                    _comp_vars.append(node.var)
+asmpython/_compiler/codegen.py-635-
+asmpython/_compiler/codegen.py-636-    def intern_string(self, s: str) -> tuple[str, int]:
+asmpython/_compiler/codegen.py-637-        """Add a string to .data, return (label, byte_length).
+asmpython/_compiler/codegen.py-638-
+asmpython/_compiler/codegen.py-639-        Emits the string as a comma-separated list of byte values for NASM.
+asmpython/_compiler/codegen.py-640-        We walk the characters and take `ord(ch)` rather than `s.encode()` so
+asmpython/_compiler/codegen.py-641-        this stays self-compilable (asmpython has no bytes type). For the ASCII
+asmpython/_compiler/codegen.py-642-        source the compiler emits this is exact; `ord` on a 1-char asmpython str
+asmpython/_compiler/codegen.py-643-        already yields its byte value.
+asmpython/_compiler/codegen.py-644-        """
+asmpython/_compiler/codegen.py-645-        label = f"str_{len(self.strings)}"
+asmpython/_compiler/codegen.py-646-        parts: list = []
+asmpython/_compiler/codegen.py-647-        for ch in s:
+asmpython/_compiler/codegen.py-648-            parts.append(str(ord(ch)))
+asmpython/_compiler/codegen.py-649-        body = ",".join(parts) if parts else "0"
+asmpython/_compiler/codegen.py-650-        self.strings.append((label, body))
+asmpython/_compiler/codegen.py-651-        return label, len(parts)
+asmpython/_compiler/codegen.py-652-
+asmpython/_compiler/codegen.py-653-    def _type_name_table_label(self) -> str:
+asmpython/_compiler/codegen.py-654-        """Lazily build a .rodata table mapping each user class's RTTI id
+asmpython/_compiler/codegen.py:655:        (see self.class_ids) to a "<class '__main__.Name'>" string, so
+asmpython/_compiler/codegen.py-656-        type(instance) can index into it by runtime class id."""
+asmpython/_compiler/codegen.py-657-        if self.type_name_table is None:
+asmpython/_compiler/codegen.py-658-            table = []
+asmpython/_compiler/codegen.py-659-            _tnt_i = 0
+asmpython/_compiler/codegen.py:660:            while _tnt_i < len(self.class_ids):
+asmpython/_compiler/codegen.py-661-                table.append("")
+asmpython/_compiler/codegen.py-662-                _tnt_i += 1
+asmpython/_compiler/codegen.py:663:            for name, cid in self.class_ids.items():
+asmpython/_compiler/codegen.py-664-                label, _ = self.intern_string(f"<class '__main__.{name}'>")
+asmpython/_compiler/codegen.py-665-                table[cid] = label
+asmpython/_compiler/codegen.py-666-            self.type_name_table = table
+asmpython/_compiler/codegen.py-667-        return "__type_name_table"
+asmpython/_compiler/codegen.py-668-
+asmpython/_compiler/codegen.py-669-    # ---- driver -------------------------------------------------------------
+asmpython/_compiler/codegen.py-670-
+asmpython/_compiler/codegen.py-671-    def generate(self) -> str:
+asmpython/_compiler/codegen.py-672-        self.emit(f"; asmpython generated for target = {self.target_name}")
+asmpython/_compiler/codegen.py-673-        self.emit("BITS 64")
+asmpython/_compiler/codegen.py-674-        self.emit("default rel")
+asmpython/_compiler/codegen.py-675-        before = len(self.lines)
+asmpython/_compiler/codegen.py-676-        self.emit_externs()
+asmpython/_compiler/codegen.py-677-        # Avoid duplicate `extern foo` declarations: the target subclass
+asmpython/_compiler/codegen.py-678-        # already emits some. Collect their symbol names (the last token of each
+asmpython/_compiler/codegen.py-679-        # `extern ...` line). Built as a list with an explicit loop rather than
+asmpython/_compiler/codegen.py-680-        # a set comprehension so this stays self-compilable (asmpython has no
+asmpython/_compiler/codegen.py-681-        # set runtime); `already` is only used for membership below.
+asmpython/_compiler/codegen.py-682-        already: list = []
+asmpython/_compiler/codegen.py-683-        for line in self.lines[before:]:
+asmpython/_compiler/codegen.py-684-            stripped = line.strip()
+asmpython/_compiler/codegen.py-685-            if stripped.startswith("extern"):
+asmpython/_compiler/codegen.py-686-                already.append(stripped.split()[-1])
+asmpython/_compiler/codegen.py-687-        # Symbols defined inline by emit_asmlib_runtime must not also be
+asmpython/_compiler/codegen.py-688-        # declared `extern` — that would conflict with their label definition.
+asmpython/_compiler/codegen.py-689-        inline = self._asmlib_inline_syms()
+asmpython/_compiler/codegen.py-690-        for sym in sorted(self.ffi_externs):
+asmpython/_compiler/codegen.py-691-            if sym not in already and sym not in inline:
+asmpython/_compiler/codegen.py-692-                self.emit(f"extern {sym}")
+asmpython/_compiler/codegen.py-693-        self.emit(self.section_text)
+asmpython/_compiler/codegen.py-694-        self.emit_entry()
+asmpython/_compiler/codegen.py-695-        # Whole-program compilation (program.py's load_program) merges EVERY
+asmpython/_compiler/codegen.py-696-        # function/method from every imported stdlib module unconditionally,
+asmpython/_compiler/codegen.py-697-        # whether or not the program actually calls it -- sema.py tolerates
+asmpython/_compiler/codegen.py-698-        # (doesn't hard-fail on) a semantic error in one of these if it's
+asmpython/_compiler/codegen.py-699-        # unreachable, so a name that's merged-but-broken can reach this
+asmpython/_compiler/codegen.py-700-        # point at all. The x86-64 backend (ir_lower.py) already prunes these
+asmpython/_compiler/codegen.py-701-        # via `_reachable_callables` before lowering; do the same filtering
+asmpython/_compiler/codegen.py-702-        # here so the legacy backend doesn't try to emit a call into a
+asmpython/_compiler/codegen.py-703-        # skipped, potentially-half-checked body (e.g. a reference to the
+asmpython/_compiler/codegen.py-704-        # undefined symbol `property`, from collections.py's `namedtuple()`)
+asmpython/_compiler/codegen.py-705-        # for code that never runs. Reused as-is: it's a pure function of the
+asmpython/_compiler/codegen.py-706-        # already-fully-typed `self.mod` with no IR-specific state.
+asmpython/_compiler/codegen.py-707-        from .ir_lower import _reachable_callables
+asmpython/_compiler/codegen.py-708-
 --
-asmpython/_compiler/parser.py-512-                    Parser._collect_called_names_expr(s.value, out)
-asmpython/_compiler/parser.py-513-            elif isinstance(s, A.Del):
-asmpython/_compiler/parser.py-514-                Parser._collect_called_names_expr(s.target, out)
-asmpython/_compiler/parser.py-515-            elif isinstance(s, A.YieldStmt):
-asmpython/_compiler/parser.py-516-                Parser._collect_called_names_expr(s.value, out)
-asmpython/_compiler/parser.py-517-            elif isinstance(s, A.Match):
-asmpython/_compiler/parser.py-518-                Parser._collect_called_names_expr(s.subject, out)
-asmpython/_compiler/parser.py-519-                for _pattern, guard, body in s.cases:
-asmpython/_compiler/parser.py-520-                    if guard is not None:
-asmpython/_compiler/parser.py-521-                        Parser._collect_called_names_expr(guard, out)
-asmpython/_compiler/parser.py-522-                    Parser._collect_called_names(body, out)
-asmpython/_compiler/parser.py-523-
-asmpython/_compiler/parser.py-524-    @staticmethod
-asmpython/_compiler/parser.py-525-    def _collect_called_names_expr(e, out: set) -> None:
-asmpython/_compiler/parser.py-526-        if isinstance(e, A.Call):
-asmpython/_compiler/parser.py-527-            out.add(e.func)
-asmpython/_compiler/parser.py-528-            for a in e.args:
-asmpython/_compiler/parser.py-529-                Parser._collect_called_names_expr(a, out)
-asmpython/_compiler/parser.py-530-            for _kn, kv in e.kwargs:
-asmpython/_compiler/parser.py-531-                Parser._collect_called_names_expr(kv, out)
-asmpython/_compiler/parser.py:532:        elif isinstance(e, A.MethodCall):
-asmpython/_compiler/parser.py-533-            Parser._collect_called_names_expr(e.obj, out)
-asmpython/_compiler/parser.py-534-            for a in e.args:
-asmpython/_compiler/parser.py-535-                Parser._collect_called_names_expr(a, out)
-asmpython/_compiler/parser.py-536-            for _kn, kv in e.kwargs:
-asmpython/_compiler/parser.py-537-                Parser._collect_called_names_expr(kv, out)
-asmpython/_compiler/parser.py-538-        elif isinstance(e, A.BinOp):
-asmpython/_compiler/parser.py-539-            Parser._collect_called_names_expr(e.left, out)
-asmpython/_compiler/parser.py-540-            Parser._collect_called_names_expr(e.right, out)
-asmpython/_compiler/parser.py-541-        elif isinstance(e, A.UnaryOp):
-asmpython/_compiler/parser.py-542-            Parser._collect_called_names_expr(e.operand, out)
-asmpython/_compiler/parser.py-543-        elif isinstance(e, A.Compare):
-asmpython/_compiler/parser.py-544-            for o in e.operands:
-asmpython/_compiler/parser.py-545-                Parser._collect_called_names_expr(o, out)
-asmpython/_compiler/parser.py-546-        elif isinstance(e, A.BoolOp):
-asmpython/_compiler/parser.py-547-            Parser._collect_called_names_expr(e.left, out)
-asmpython/_compiler/parser.py-548-            Parser._collect_called_names_expr(e.right, out)
-asmpython/_compiler/parser.py-549-        elif isinstance(e, A.IfExp):
-asmpython/_compiler/parser.py-550-            Parser._collect_called_names_expr(e.test, out)
-asmpython/_compiler/parser.py-551-            Parser._collect_called_names_expr(e.body, out)
-asmpython/_compiler/parser.py-552-            Parser._collect_called_names_expr(e.orelse, out)
-asmpython/_compiler/parser.py-553-        elif isinstance(e, A.NamedExpr):
-asmpython/_compiler/parser.py-554-            Parser._collect_called_names_expr(e.value, out)
-asmpython/_compiler/parser.py-555-        elif isinstance(e, A.ListLit):
-asmpython/_compiler/parser.py-556-            for el in e.elems:
-asmpython/_compiler/parser.py-557-                Parser._collect_called_names_expr(el, out)
-asmpython/_compiler/parser.py-558-        elif isinstance(e, A.Subscript):
-asmpython/_compiler/parser.py-559-            Parser._collect_called_names_expr(e.obj, out)
-asmpython/_compiler/parser.py-560-            if isinstance(e.index, A.Slice):
-asmpython/_compiler/parser.py-561-                if e.index.start is not None:
-asmpython/_compiler/parser.py-562-                    Parser._collect_called_names_expr(e.index.start, out)
-asmpython/_compiler/parser.py-563-                if e.index.stop is not None:
-asmpython/_compiler/parser.py-564-                    Parser._collect_called_names_expr(e.index.stop, out)
-asmpython/_compiler/parser.py-565-                if e.index.step is not None:
-asmpython/_compiler/parser.py-566-                    Parser._collect_called_names_expr(e.index.step, out)
-asmpython/_compiler/parser.py-567-            else:
-asmpython/_compiler/parser.py-568-                Parser._collect_called_names_expr(e.index, out)
-asmpython/_compiler/parser.py-569-        elif isinstance(e, A.Attr):
-asmpython/_compiler/parser.py-570-            Parser._collect_called_names_expr(e.obj, out)
-asmpython/_compiler/parser.py-571-        elif isinstance(e, A.FString):
-asmpython/_compiler/parser.py-572-            for seg in e.segments:
-asmpython/_compiler/parser.py-573-                Parser._collect_called_names_expr(seg, out)
-asmpython/_compiler/parser.py-574-        elif isinstance(e, A.DictLit):
-asmpython/_compiler/parser.py-575-            for k in e.keys:
-asmpython/_compiler/parser.py-576-                if k is not None:
-asmpython/_compiler/parser.py-577-                    Parser._collect_called_names_expr(k, out)
-asmpython/_compiler/parser.py-578-            for v in e.values:
-asmpython/_compiler/parser.py-579-                Parser._collect_called_names_expr(v, out)
-asmpython/_compiler/parser.py-580-        elif isinstance(e, A.TupleLit):
-asmpython/_compiler/parser.py-581-            for el in e.elems:
-asmpython/_compiler/parser.py-582-                Parser._collect_called_names_expr(el, out)
-asmpython/_compiler/parser.py-583-        elif isinstance(e, A.SetLit):
-asmpython/_compiler/parser.py-584-            for el in e.elems:
-asmpython/_compiler/parser.py-585-                Parser._collect_called_names_expr(el, out)
-asmpython/_compiler/parser.py-586-        elif isinstance(e, A.Starred):
-asmpython/_compiler/parser.py-587-            Parser._collect_called_names_expr(e.value, out)
-asmpython/_compiler/parser.py-588-        elif isinstance(e, A.Comprehension):
-asmpython/_compiler/parser.py-589-            Parser._collect_called_names_expr(e.elt, out)
-asmpython/_compiler/parser.py-590-            Parser._collect_called_names_expr(e.iter, out)
-asmpython/_compiler/parser.py-591-            if e.cond is not None:
-asmpython/_compiler/parser.py-592-                Parser._collect_called_names_expr(e.cond, out)
+asmpython/_compiler/codegen.py-2214-                    self._cl_define(info, f"__dm_new_{id(expr)}")
+asmpython/_compiler/codegen.py-2215-                if obj_t == "set" and expr.method in (
+asmpython/_compiler/codegen.py-2216-                    "union",
+asmpython/_compiler/codegen.py-2217-                    "intersection",
+asmpython/_compiler/codegen.py-2218-                    "difference",
+asmpython/_compiler/codegen.py-2219-                ):
+asmpython/_compiler/codegen.py-2220-                    self._cl_define(info, f"__sm_other_{id(expr)}")
+asmpython/_compiler/codegen.py-2221-                    self._cl_define(info, f"__sm_new_{id(expr)}")
+asmpython/_compiler/codegen.py-2222-                    self._cl_define(info, f"__sm_keys_{id(expr)}")
+asmpython/_compiler/codegen.py-2223-                    self._cl_define(info, f"__sm_idx_{id(expr)}")
+asmpython/_compiler/codegen.py-2224-                    self._cl_define(info, f"__sm_key_{id(expr)}")
+asmpython/_compiler/codegen.py-2225-                if obj_t.startswith("instance:"):
+asmpython/_compiler/codegen.py-2226-                    self._cl_define(info, f"__callself_{id(expr)}")
+asmpython/_compiler/codegen.py-2227-                # Module-qualified call to a merged project function
+asmpython/_compiler/codegen.py-2228-                # (`A.expr_type(x)`) lowers to a plain call, so it needs the
+asmpython/_compiler/codegen.py-2229-                # same per-arg slots as an instance/super call.
+asmpython/_compiler/codegen.py-2230-                is_module_fn = obj_t == "module" and expr.method in self.funcs
+asmpython/_compiler/codegen.py-2231-                # `ClassName.staticmethod(args)` / `.classmethod(args)`: a plain
+asmpython/_compiler/codegen.py-2232-                # call to the method symbol, so it needs per-arg slots too.
+asmpython/_compiler/codegen.py-2233-                is_class_static = (
+asmpython/_compiler/codegen.py:2234:                    isinstance(expr.obj, A.Name) and expr.obj.name in self.class_ids
+asmpython/_compiler/codegen.py-2235-                )
+asmpython/_compiler/codegen.py-2236-                if (
+asmpython/_compiler/codegen.py-2237-                    obj_t.startswith("instance:")
+asmpython/_compiler/codegen.py-2238-                    or obj_t.startswith("super:")
+asmpython/_compiler/codegen.py-2239-                    or is_module_fn
+asmpython/_compiler/codegen.py-2240-                    or is_class_static
+asmpython/_compiler/codegen.py-2241-                ):
+asmpython/_compiler/codegen.py-2242-                    for k in range(len(expr.args)):
+asmpython/_compiler/codegen.py-2243-                        self._cl_define(info, f"__callarg_{id(expr)}_{k}")
+asmpython/_compiler/codegen.py-2244-                self._cl_walk_expr(info, expr.obj)
+asmpython/_compiler/codegen.py-2245-            for a in expr.args:
+asmpython/_compiler/codegen.py-2246-                self._cl_walk_expr(info, a)
+asmpython/_compiler/codegen.py-2247-            for _kn, kv in getattr(expr, "kwargs", []) or []:
+asmpython/_compiler/codegen.py-2248-                self._cl_walk_expr(info, kv)
+asmpython/_compiler/codegen.py-2249-        elif isinstance(expr, A.Subscript):
+asmpython/_compiler/codegen.py-2250-            if isinstance(expr.index, A.Slice):
+asmpython/_compiler/codegen.py-2251-                # slice needs scratch slots for obj/start (always) plus
+asmpython/_compiler/codegen.py-2252-                # stop/step when the step-aware path is used.
+asmpython/_compiler/codegen.py-2253-                self._cl_define(info, f"__strsl_obj_{id(expr)}")
+asmpython/_compiler/codegen.py-2254-                self._cl_define(info, f"__strsl_start_{id(expr)}")
+asmpython/_compiler/codegen.py-2255-                if expr.index.step is not None:
+asmpython/_compiler/codegen.py-2256-                    self._cl_define(info, f"__strsl_stop_{id(expr)}")
+asmpython/_compiler/codegen.py-2257-                    self._cl_define(info, f"__strsl_step_{id(expr)}")
+asmpython/_compiler/codegen.py-2258-                # List slicing dispatches through a different helper; the
+asmpython/_compiler/codegen.py-2259-                # codegen path uses its own pair of slots.
+asmpython/_compiler/codegen.py-2260-                if A.expr_type(expr.obj) == "list":
+asmpython/_compiler/codegen.py-2261-                    self._cl_define(info, f"__lstsl_obj_{id(expr)}")
+asmpython/_compiler/codegen.py-2262-                    self._cl_define(info, f"__lstsl_start_{id(expr)}")
+asmpython/_compiler/codegen.py-2263-                    if expr.index.step is not None:
+asmpython/_compiler/codegen.py-2264-                        self._cl_define(info, f"__lstsl_step_{id(expr)}")
+asmpython/_compiler/codegen.py-2265-                self._cl_walk_expr(info, expr.obj)
+asmpython/_compiler/codegen.py-2266-                if expr.index.start is not None:
+asmpython/_compiler/codegen.py-2267-                    self._cl_walk_expr(info, expr.index.start)
+asmpython/_compiler/codegen.py-2268-                if expr.index.stop is not None:
+asmpython/_compiler/codegen.py-2269-                    self._cl_walk_expr(info, expr.index.stop)
+asmpython/_compiler/codegen.py-2270-                if expr.index.step is not None:
+asmpython/_compiler/codegen.py-2271-                    self._cl_walk_expr(info, expr.index.step)
+asmpython/_compiler/codegen.py-2272-            elif A.expr_type(expr.obj) == "str":
+asmpython/_compiler/codegen.py-2273-                self._cl_define(info, f"__stridx_{id(expr)}")
+asmpython/_compiler/codegen.py-2274-                self._cl_walk_expr(info, expr.obj)
+asmpython/_compiler/codegen.py-2275-                self._cl_walk_expr(info, expr.index)
+asmpython/_compiler/codegen.py-2276-            elif getattr(expr, "_getitem_class", None) is not None:
+asmpython/_compiler/codegen.py-2277-                # Instance __getitem__: synthesized method call needs receiver
+asmpython/_compiler/codegen.py-2278-                # slot and one arg slot (the index). We park them under
+asmpython/_compiler/codegen.py-2279-                # __gi_self_<id> / __gi_arg_<id> so they don't collide with
 --
-asmpython/_compiler/parser.py-3090-                    if not self._check("OP", ":") and not self._check("OP", "]"):
-asmpython/_compiler/parser.py-3091-                        stop = self._parse_expr()
-asmpython/_compiler/parser.py-3092-                    if self._check("OP", ":"):
-asmpython/_compiler/parser.py-3093-                        self._eat()
-asmpython/_compiler/parser.py-3094-                        if not self._check("OP", "]"):
-asmpython/_compiler/parser.py-3095-                            step = self._parse_expr()
-asmpython/_compiler/parser.py-3096-                    self._expect("OP", "]")
-asmpython/_compiler/parser.py-3097-                    idx = A.Slice(start=start, stop=stop, step=step, pos=lbr.pos)
-asmpython/_compiler/parser.py-3098-                else:
-asmpython/_compiler/parser.py-3099-                    self._expect("OP", "]")
-asmpython/_compiler/parser.py-3100-                    idx = start
-asmpython/_compiler/parser.py-3101-                atom = A.Subscript(obj=atom, index=idx, pos=lbr.pos)  # type: ignore
-asmpython/_compiler/parser.py-3102-            elif self._check("OP", "."):
-asmpython/_compiler/parser.py-3103-                dot = self._eat()
-asmpython/_compiler/parser.py-3104-                name = self._expect("NAME").value
-asmpython/_compiler/parser.py-3105-                if self._check("OP", "("):
-asmpython/_compiler/parser.py-3106-                    # obj.name(...) — method call
-asmpython/_compiler/parser.py-3107-                    self._eat()
-asmpython/_compiler/parser.py-3108-                    args, kwargs = self._parse_call_args()  # type: ignore
-asmpython/_compiler/parser.py-3109-                    self._expect("OP", ")")
-asmpython/_compiler/parser.py:3110:                    atom = A.MethodCall(
-asmpython/_compiler/parser.py-3111-                        obj=atom,
-asmpython/_compiler/parser.py-3112-                        method=name,  # type: ignore
-asmpython/_compiler/parser.py-3113-                        args=args,
-asmpython/_compiler/parser.py-3114-                        kwargs=kwargs,
-asmpython/_compiler/parser.py-3115-                        pos=dot.pos,  # type: ignore
-asmpython/_compiler/parser.py-3116-                    )
-asmpython/_compiler/parser.py-3117-                else:
-asmpython/_compiler/parser.py-3118-                    # obj.name — attribute access (e.g. math.pi)
-asmpython/_compiler/parser.py-3119-                    atom = A.Attr(obj=atom, name=name, pos=dot.pos)  # type: ignore
-asmpython/_compiler/parser.py-3120-            else:
-asmpython/_compiler/parser.py-3121-                return atom
-asmpython/_compiler/parser.py-3122-
-asmpython/_compiler/parser.py-3123-    def _parse_paren_or_tuple(self):
-asmpython/_compiler/parser.py-3124-        """After a '(': parse either a parenthesised expression or a tuple.
-asmpython/_compiler/parser.py-3125-
-asmpython/_compiler/parser.py-3126-        A comma is what makes it a tuple:
-asmpython/_compiler/parser.py-3127-            ()        -> empty tuple
-asmpython/_compiler/parser.py-3128-            (a)       -> just `a` (grouping, not a tuple)
-asmpython/_compiler/parser.py-3129-            (a,)      -> 1-tuple
-asmpython/_compiler/parser.py-3130-            (a, b, c) -> 3-tuple   (trailing comma allowed)
-asmpython/_compiler/parser.py-3131-        """
-asmpython/_compiler/parser.py-3132-        lpar = self._expect("OP", "(")
-asmpython/_compiler/parser.py-3133-        if self._check("OP", ")"):
-asmpython/_compiler/parser.py-3134-            self._eat()
-asmpython/_compiler/parser.py-3135-            return A.TupleLit(elems=[], pos=lpar.pos)
-asmpython/_compiler/parser.py-3136-        tuple_has_star = False
-asmpython/_compiler/parser.py-3137-        if self._check("OP", "*"):
-asmpython/_compiler/parser.py-3138-            star_pos = self._eat().pos
-asmpython/_compiler/parser.py-3139-            first = A.Starred(value=self._parse_expr(), pos=star_pos)
-asmpython/_compiler/parser.py-3140-            tuple_has_star = True
-asmpython/_compiler/parser.py-3141-        else:
-asmpython/_compiler/parser.py-3142-            first = self._parse_expr()
-asmpython/_compiler/parser.py-3143-        if self._check("KEYWORD", "for"):
-asmpython/_compiler/parser.py-3144-            if isinstance(first, A.Starred):
-asmpython/_compiler/parser.py-3145-                raise ParseError(
-asmpython/_compiler/parser.py-3146-                    "generator expression element cannot be starred",
-asmpython/_compiler/parser.py-3147-                    first.pos,
-asmpython/_compiler/parser.py-3148-                )
-asmpython/_compiler/parser.py-3149-            comp = self._parse_comprehension_tail(first, lpar.pos)
-asmpython/_compiler/parser.py-3150-            self._expect("OP", ")")
-asmpython/_compiler/parser.py-3151-            return comp
-asmpython/_compiler/parser.py-3152-        if not self._check("OP", ","):
-asmpython/_compiler/parser.py-3153-            self._expect("OP", ")")
-asmpython/_compiler/parser.py-3154-            return first
-asmpython/_compiler/parser.py-3155-        elems = [first]
-asmpython/_compiler/parser.py-3156-        while self._check("OP", ","):
-asmpython/_compiler/parser.py-3157-            self._eat()
-asmpython/_compiler/parser.py-3158-            if self._check("OP", ")"):
-asmpython/_compiler/parser.py-3159-                break  # trailing comma
-asmpython/_compiler/parser.py-3160-            if self._check("OP", "*"):
-asmpython/_compiler/parser.py-3161-                star_pos2 = self._eat().pos
-asmpython/_compiler/parser.py-3162-                elems.append(A.Starred(value=self._parse_expr(), pos=star_pos2))
-asmpython/_compiler/parser.py-3163-                tuple_has_star = True
-asmpython/_compiler/parser.py-3164-            else:
-asmpython/_compiler/parser.py-3165-                elems.append(self._parse_expr())
-asmpython/_compiler/parser.py-3166-        self._expect("OP", ")")
-asmpython/_compiler/parser.py-3167-        if tuple_has_star:
-asmpython/_compiler/parser.py-3168-            return A.ListLit(elems=elems, pos=lpar.pos)
-asmpython/_compiler/parser.py-3169-        return A.TupleLit(elems=elems, pos=lpar.pos)
-asmpython/_compiler/parser.py-3170-
---
---
---
---
-asmpython/_compiler/type_parameter_compat_fixes.py-120-    return result
-asmpython/_compiler/type_parameter_compat_fixes.py-121-
-asmpython/_compiler/type_parameter_compat_fixes.py-122-
-asmpython/_compiler/type_parameter_compat_fixes.py-123-def _assignment_related_variables(func, parameter: str) -> set:
-asmpython/_compiler/type_parameter_compat_fixes.py-124-    related = set()
-asmpython/_compiler/type_parameter_compat_fixes.py-125-    changed = True
-asmpython/_compiler/type_parameter_compat_fixes.py-126-    while changed:
-asmpython/_compiler/type_parameter_compat_fixes.py-127-        changed = False
-asmpython/_compiler/type_parameter_compat_fixes.py-128-        for node in _walk_stmts(func.body):
-asmpython/_compiler/type_parameter_compat_fixes.py-129-            if not isinstance(node, A.Assign):
-asmpython/_compiler/type_parameter_compat_fixes.py-130-                continue
-asmpython/_compiler/type_parameter_compat_fixes.py-131-            value = node.value
-asmpython/_compiler/type_parameter_compat_fixes.py-132-            uses_parameter = _expression_uses_type_parameter(value, parameter)
-asmpython/_compiler/type_parameter_compat_fixes.py-133-            uses_related = any(
-asmpython/_compiler/type_parameter_compat_fixes.py-134-                isinstance(expr, A.Name) and expr.name in related
-asmpython/_compiler/type_parameter_compat_fixes.py-135-                for expr in _walk_expr(value)
-asmpython/_compiler/type_parameter_compat_fixes.py-136-            )
-asmpython/_compiler/type_parameter_compat_fixes.py-137-            passes_parameter = any(
-asmpython/_compiler/type_parameter_compat_fixes.py-138-                isinstance(expr, A.Name) and expr.name == parameter
-asmpython/_compiler/type_parameter_compat_fixes.py-139-                for expr in _walk_expr(value)
-asmpython/_compiler/type_parameter_compat_fixes.py:140:            ) and isinstance(value, (A.Call, A.MethodCall))
-asmpython/_compiler/type_parameter_compat_fixes.py-141-            if (
-asmpython/_compiler/type_parameter_compat_fixes.py-142-                uses_parameter or uses_related or passes_parameter
-asmpython/_compiler/type_parameter_compat_fixes.py-143-            ) and node.target not in related:
-asmpython/_compiler/type_parameter_compat_fixes.py-144-                related.add(node.target)
-asmpython/_compiler/type_parameter_compat_fixes.py-145-                changed = True
-asmpython/_compiler/type_parameter_compat_fixes.py-146-    return related
-asmpython/_compiler/type_parameter_compat_fixes.py-147-
-asmpython/_compiler/type_parameter_compat_fixes.py-148-
-asmpython/_compiler/type_parameter_compat_fixes.py-149-def _guarded_type_variable(test, parameter: str) -> "str | None":
-asmpython/_compiler/type_parameter_compat_fixes.py-150-    for expr in _walk_expr(test):
-asmpython/_compiler/type_parameter_compat_fixes.py-151-        if (
-asmpython/_compiler/type_parameter_compat_fixes.py-152-            isinstance(expr, A.Call)
-asmpython/_compiler/type_parameter_compat_fixes.py-153-            and expr.func == "isinstance"
-asmpython/_compiler/type_parameter_compat_fixes.py-154-            and len(expr.args) == 2
-asmpython/_compiler/type_parameter_compat_fixes.py-155-            and isinstance(expr.args[0], A.Name)
-asmpython/_compiler/type_parameter_compat_fixes.py-156-            and isinstance(expr.args[1], A.Name)
-asmpython/_compiler/type_parameter_compat_fixes.py-157-            and expr.args[1].name == parameter
-asmpython/_compiler/type_parameter_compat_fixes.py-158-        ):
-asmpython/_compiler/type_parameter_compat_fixes.py-159-            return expr.args[0].name
-asmpython/_compiler/type_parameter_compat_fixes.py-160-    return None
-asmpython/_compiler/type_parameter_compat_fixes.py-161-
-asmpython/_compiler/type_parameter_compat_fixes.py-162-
-asmpython/_compiler/type_parameter_compat_fixes.py-163-def _returns_specialized_type(func, parameter: str) -> bool:
-asmpython/_compiler/type_parameter_compat_fixes.py-164-    related = _assignment_related_variables(func, parameter)
-asmpython/_compiler/type_parameter_compat_fixes.py-165-    saw_value = False
-asmpython/_compiler/type_parameter_compat_fixes.py-166-    valid = True
-asmpython/_compiler/type_parameter_compat_fixes.py-167-
-asmpython/_compiler/type_parameter_compat_fixes.py-168-    def visit(stmts: list, guarded: set) -> None:
-asmpython/_compiler/type_parameter_compat_fixes.py-169-        nonlocal saw_value, valid
-asmpython/_compiler/type_parameter_compat_fixes.py-170-        for stmt in stmts:
-asmpython/_compiler/type_parameter_compat_fixes.py-171-            if isinstance(stmt, A.Return):
-asmpython/_compiler/type_parameter_compat_fixes.py-172-                value = stmt.value
-asmpython/_compiler/type_parameter_compat_fixes.py-173-                if value is None or (
-asmpython/_compiler/type_parameter_compat_fixes.py-174-                    isinstance(value, A.IntLit) and getattr(value, "is_none", False)
-asmpython/_compiler/type_parameter_compat_fixes.py-175-                ):
-asmpython/_compiler/type_parameter_compat_fixes.py-176-                    continue
-asmpython/_compiler/type_parameter_compat_fixes.py-177-                saw_value = True
-asmpython/_compiler/type_parameter_compat_fixes.py-178-                if isinstance(value, A.Call) and value.func == parameter:
-asmpython/_compiler/type_parameter_compat_fixes.py-179-                    continue
-asmpython/_compiler/type_parameter_compat_fixes.py-180-                if isinstance(value, A.Name) and (
-asmpython/_compiler/type_parameter_compat_fixes.py-181-                    value.name in related or value.name in guarded
-asmpython/_compiler/type_parameter_compat_fixes.py-182-                ):
-asmpython/_compiler/type_parameter_compat_fixes.py-183-                    continue
-asmpython/_compiler/type_parameter_compat_fixes.py-184-                valid = False
-asmpython/_compiler/type_parameter_compat_fixes.py-185-                continue
-asmpython/_compiler/type_parameter_compat_fixes.py-186-            if isinstance(stmt, A.If):
-asmpython/_compiler/type_parameter_compat_fixes.py-187-                narrowed = _guarded_type_variable(stmt.test, parameter)
-asmpython/_compiler/type_parameter_compat_fixes.py-188-                then_guarded = set(guarded)
-asmpython/_compiler/type_parameter_compat_fixes.py-189-                if narrowed is not None:
-asmpython/_compiler/type_parameter_compat_fixes.py-190-                    then_guarded.add(narrowed)
-asmpython/_compiler/type_parameter_compat_fixes.py-191-                visit(stmt.then, then_guarded)
-asmpython/_compiler/type_parameter_compat_fixes.py-192-                visit(stmt.orelse, guarded)
-asmpython/_compiler/type_parameter_compat_fixes.py-193-                continue
-asmpython/_compiler/type_parameter_compat_fixes.py-194-            for attr in ("body", "handler", "else_body", "finally_body"):
-asmpython/_compiler/type_parameter_compat_fixes.py-195-                nested = getattr(stmt, attr, None)
-asmpython/_compiler/type_parameter_compat_fixes.py-196-                if isinstance(nested, list):
-asmpython/_compiler/type_parameter_compat_fixes.py-197-                    visit(nested, guarded)
-asmpython/_compiler/type_parameter_compat_fixes.py-198-
-asmpython/_compiler/type_parameter_compat_fixes.py-199-    visit(func.body, set())
-asmpython/_compiler/type_parameter_compat_fixes.py-200-    return saw_value and valid
-asmpython/_compiler/type_parameter_compat_fixes.py-201-
-asmpython/_compiler/type_parameter_compat_fixes.py-202-
-asmpython/_compiler/type_parameter_compat_fixes.py-203-def _all_statement_lists(mod: A.Module) -> list:
-asmpython/_compiler/type_parameter_compat_fixes.py-204-    result = [mod.body]
-asmpython/_compiler/type_parameter_compat_fixes.py-205-    for func in mod.funcs:
-asmpython/_compiler/type_parameter_compat_fixes.py-206-        result.append(func.body)
-asmpython/_compiler/type_parameter_compat_fixes.py-207-    for cls in mod.classes:
-asmpython/_compiler/type_parameter_compat_fixes.py-208-        for method in cls.methods:
-asmpython/_compiler/type_parameter_compat_fixes.py-209-            result.append(method.body)
-asmpython/_compiler/type_parameter_compat_fixes.py-210-    return result
-asmpython/_compiler/type_parameter_compat_fixes.py-211-
-asmpython/_compiler/type_parameter_compat_fixes.py-212-
-asmpython/_compiler/type_parameter_compat_fixes.py-213-def _all_call_nodes(mod: A.Module) -> list:
-asmpython/_compiler/type_parameter_compat_fixes.py-214-    calls: list = []
-asmpython/_compiler/type_parameter_compat_fixes.py-215-    for stmts in _all_statement_lists(mod):
-asmpython/_compiler/type_parameter_compat_fixes.py-216-        for node in _walk_stmts(stmts):
-asmpython/_compiler/type_parameter_compat_fixes.py:217:            if isinstance(node, (A.Call, A.MethodCall)):
-asmpython/_compiler/type_parameter_compat_fixes.py-218-                calls.append(node)
-asmpython/_compiler/type_parameter_compat_fixes.py-219-    return calls
-asmpython/_compiler/type_parameter_compat_fixes.py-220-
-asmpython/_compiler/type_parameter_compat_fixes.py-221-
-asmpython/_compiler/type_parameter_compat_fixes.py-222-def _call_sites_with_owners(mod: A.Module):
-asmpython/_compiler/type_parameter_compat_fixes.py-223-    """Yield ``(owning FuncDef id or None, call)`` for the complete module."""
-asmpython/_compiler/type_parameter_compat_fixes.py-224-    for node in _walk_stmts(mod.body):
-asmpython/_compiler/type_parameter_compat_fixes.py:225:        if isinstance(node, (A.Call, A.MethodCall)):
-asmpython/_compiler/type_parameter_compat_fixes.py-226-            yield (None, node)
-asmpython/_compiler/type_parameter_compat_fixes.py-227-    for func in mod.funcs:
-asmpython/_compiler/type_parameter_compat_fixes.py-228-        owner_id = id(func)
-asmpython/_compiler/type_parameter_compat_fixes.py-229-        for node in _walk_stmts(func.body):
-asmpython/_compiler/type_parameter_compat_fixes.py:230:            if isinstance(node, (A.Call, A.MethodCall)):
-asmpython/_compiler/type_parameter_compat_fixes.py-231-                yield (owner_id, node)
-asmpython/_compiler/type_parameter_compat_fixes.py-232-    for cls in mod.classes:
-asmpython/_compiler/type_parameter_compat_fixes.py-233-        for method in cls.methods:
-asmpython/_compiler/type_parameter_compat_fixes.py-234-            owner_id = id(method)
-asmpython/_compiler/type_parameter_compat_fixes.py-235-            for node in _walk_stmts(method.body):
-asmpython/_compiler/type_parameter_compat_fixes.py:236:                if isinstance(node, (A.Call, A.MethodCall)):
-asmpython/_compiler/type_parameter_compat_fixes.py-237-                    yield (owner_id, node)
-asmpython/_compiler/type_parameter_compat_fixes.py-238-
-asmpython/_compiler/type_parameter_compat_fixes.py-239-
-asmpython/_compiler/type_parameter_compat_fixes.py-240-def _argument_binding(call, func, parameter_index: int, is_method: bool):
-asmpython/_compiler/type_parameter_compat_fixes.py-241-    parameter = func.params[parameter_index]
-asmpython/_compiler/type_parameter_compat_fixes.py-242-    offset = 0
-asmpython/_compiler/type_parameter_compat_fixes.py-243-    if is_method and "staticmethod" not in getattr(func, "decorators", []):
-asmpython/_compiler/type_parameter_compat_fixes.py-244-        offset = 1
-asmpython/_compiler/type_parameter_compat_fixes.py-245-    positional_index = parameter_index - offset
-asmpython/_compiler/type_parameter_compat_fixes.py-246-    if 0 <= positional_index < len(call.args):
-asmpython/_compiler/type_parameter_compat_fixes.py-247-        return call.args[positional_index], ("positional", positional_index)
-asmpython/_compiler/type_parameter_compat_fixes.py-248-    for index, (name, value) in enumerate(call.kwargs):
-asmpython/_compiler/type_parameter_compat_fixes.py-249-        if name == parameter:
-asmpython/_compiler/type_parameter_compat_fixes.py-250-            return value, ("keyword", index)
-asmpython/_compiler/type_parameter_compat_fixes.py-251-    return None, None
-asmpython/_compiler/type_parameter_compat_fixes.py-252-
-asmpython/_compiler/type_parameter_compat_fixes.py-253-
-asmpython/_compiler/type_parameter_compat_fixes.py-254-def _remove_bound_argument(call, binding) -> None:
-asmpython/_compiler/type_parameter_compat_fixes.py-255-    kind, index = binding
-asmpython/_compiler/type_parameter_compat_fixes.py-256-    if kind == "positional":
-asmpython/_compiler/type_parameter_compat_fixes.py-257-        del call.args[index]
-asmpython/_compiler/type_parameter_compat_fixes.py-258-    else:
-asmpython/_compiler/type_parameter_compat_fixes.py-259-        del call.kwargs[index]
-asmpython/_compiler/type_parameter_compat_fixes.py-260-
-asmpython/_compiler/type_parameter_compat_fixes.py-261-
-asmpython/_compiler/type_parameter_compat_fixes.py-262-def _sanitize(name: str) -> str:
-asmpython/_compiler/type_parameter_compat_fixes.py-263-    out = []
-asmpython/_compiler/type_parameter_compat_fixes.py-264-    for char in name:
-asmpython/_compiler/type_parameter_compat_fixes.py-265-        out.append(char if char.isalnum() or char == "_" else "_")
-asmpython/_compiler/type_parameter_compat_fixes.py-266-    return "".join(out)
-asmpython/_compiler/type_parameter_compat_fixes.py-267-
-asmpython/_compiler/type_parameter_compat_fixes.py-268-
-asmpython/_compiler/type_parameter_compat_fixes.py-269-def _specialized_clone(func, parameter_index: int, class_name: str, clone_name: str):
-asmpython/_compiler/type_parameter_compat_fixes.py-270-    cloned = _clone(func)
-asmpython/_compiler/type_parameter_compat_fixes.py-271-    parameter = cloned.params[parameter_index]
-asmpython/_compiler/type_parameter_compat_fixes.py-272-    cloned.name = clone_name
-asmpython/_compiler/type_parameter_compat_fixes.py-273-    del cloned.params[parameter_index]
-asmpython/_compiler/type_parameter_compat_fixes.py-274-    if parameter_index < len(cloned.defaults):
-asmpython/_compiler/type_parameter_compat_fixes.py-275-        del cloned.defaults[parameter_index]
-asmpython/_compiler/type_parameter_compat_fixes.py-276-    if parameter_index < len(cloned.param_types):
-asmpython/_compiler/type_parameter_compat_fixes.py-277-        del cloned.param_types[parameter_index]
-asmpython/_compiler/type_parameter_compat_fixes.py-278-    cloned.readonly_params = [
-asmpython/_compiler/type_parameter_compat_fixes.py-279-        name for name in cloned.readonly_params if name != parameter
-asmpython/_compiler/type_parameter_compat_fixes.py-280-    ]
-asmpython/_compiler/type_parameter_compat_fixes.py-281-    if hasattr(func, "free_vars"):
-asmpython/_compiler/type_parameter_compat_fixes.py-282-        cloned.free_vars = [
-asmpython/_compiler/type_parameter_compat_fixes.py-283-            name for name in getattr(func, "free_vars", []) if name != parameter
-asmpython/_compiler/type_parameter_compat_fixes.py-284-        ]
-asmpython/_compiler/type_parameter_compat_fixes.py-285-    if hasattr(func, "nonlocal_vars"):
-asmpython/_compiler/type_parameter_compat_fixes.py-286-        cloned.nonlocal_vars = [
-asmpython/_compiler/type_parameter_compat_fixes.py-287-            name for name in getattr(func, "nonlocal_vars", []) if name != parameter
-asmpython/_compiler/type_parameter_compat_fixes.py-288-        ]
-asmpython/_compiler/type_parameter_compat_fixes.py-289-    _replace_parameter(cloned.body, parameter, class_name)
-asmpython/_compiler/type_parameter_compat_fixes.py-290-    if _returns_specialized_type(func, parameter):
-asmpython/_compiler/type_parameter_compat_fixes.py-291-        cloned.ret_type = (class_name, None)
-asmpython/_compiler/type_parameter_compat_fixes.py-292-    return cloned
-asmpython/_compiler/type_parameter_compat_fixes.py-293-
-asmpython/_compiler/type_parameter_compat_fixes.py-294-
-asmpython/_compiler/type_parameter_compat_fixes.py-295-def _call_matches(call, is_method: bool, name: str) -> bool:
-asmpython/_compiler/type_parameter_compat_fixes.py-296-    if is_method:
-asmpython/_compiler/type_parameter_compat_fixes.py:297:        return isinstance(call, A.MethodCall) and call.method == name
-asmpython/_compiler/type_parameter_compat_fixes.py-298-    return isinstance(call, A.Call) and call.func == name
-asmpython/_compiler/type_parameter_compat_fixes.py-299-
-asmpython/_compiler/type_parameter_compat_fixes.py-300-
-asmpython/_compiler/type_parameter_compat_fixes.py-301-def _safe_originals_to_neutralize(mod: A.Module, originals: dict) -> set:
-asmpython/_compiler/type_parameter_compat_fixes.py-302-    """Compute the greatest set whose only incoming calls come from that set.
-asmpython/_compiler/type_parameter_compat_fixes.py-303-
-asmpython/_compiler/type_parameter_compat_fixes.py-304-    Calls between generic originals disappear together. Calls from module code,
-asmpython/_compiler/type_parameter_compat_fixes.py-305-    generated clones, or a generic original that must remain live keep their
-asmpython/_compiler/type_parameter_compat_fixes.py-306-    target live as well. Iterating removals computes the greatest safe set.
-asmpython/_compiler/type_parameter_compat_fixes.py-307-    """
-asmpython/_compiler/type_parameter_compat_fixes.py-308-    candidates = set(originals)
-asmpython/_compiler/type_parameter_compat_fixes.py-309-    changed = True
-asmpython/_compiler/type_parameter_compat_fixes.py-310-    while changed:
-asmpython/_compiler/type_parameter_compat_fixes.py-311-        changed = False
-asmpython/_compiler/type_parameter_compat_fixes.py-312-        for original_id in list(candidates):
-asmpython/_compiler/type_parameter_compat_fixes.py-313-            _func, is_method, _owner_name, name = originals[original_id]
-asmpython/_compiler/type_parameter_compat_fixes.py-314-            externally_referenced = False
-asmpython/_compiler/type_parameter_compat_fixes.py-315-            for caller_id, call in _call_sites_with_owners(mod):
-asmpython/_compiler/type_parameter_compat_fixes.py-316-                if not _call_matches(call, is_method, name):
-asmpython/_compiler/type_parameter_compat_fixes.py-317-                    continue
-asmpython/_compiler/type_parameter_compat_fixes.py-318-                if caller_id in candidates:
-asmpython/_compiler/type_parameter_compat_fixes.py-319-                    continue
-asmpython/_compiler/type_parameter_compat_fixes.py-320-                externally_referenced = True
-asmpython/_compiler/type_parameter_compat_fixes.py-321-                break
-asmpython/_compiler/type_parameter_compat_fixes.py-322-            if externally_referenced:
-asmpython/_compiler/type_parameter_compat_fixes.py-323-                candidates.remove(original_id)
-asmpython/_compiler/type_parameter_compat_fixes.py-324-                changed = True
-asmpython/_compiler/type_parameter_compat_fixes.py-325-    return candidates
-asmpython/_compiler/type_parameter_compat_fixes.py-326-
-asmpython/_compiler/type_parameter_compat_fixes.py-327-
-asmpython/_compiler/type_parameter_compat_fixes.py-328-def _lower_type_parameter_specializations(mod: A.Module) -> None:
-asmpython/_compiler/type_parameter_compat_fixes.py-329-    if getattr(mod, "_type_parameter_specializations_lowered", False):
-asmpython/_compiler/type_parameter_compat_fixes.py-330-        return
-asmpython/_compiler/type_parameter_compat_fixes.py-331-    mod._type_parameter_specializations_lowered = True
-asmpython/_compiler/type_parameter_compat_fixes.py-332-
-asmpython/_compiler/type_parameter_compat_fixes.py-333-    class_names = {cls.name for cls in mod.classes}
-asmpython/_compiler/type_parameter_compat_fixes.py-334-    function_defs: dict = {}
-asmpython/_compiler/type_parameter_compat_fixes.py-335-    for func in mod.funcs:
-asmpython/_compiler/type_parameter_compat_fixes.py-336-        function_defs.setdefault(func.name, []).append(func)
-asmpython/_compiler/type_parameter_compat_fixes.py-337-    method_defs: dict = {}
-asmpython/_compiler/type_parameter_compat_fixes.py-338-    method_owners: dict = {}
-asmpython/_compiler/type_parameter_compat_fixes.py-339-    for cls in mod.classes:
-asmpython/_compiler/type_parameter_compat_fixes.py-340-        for method in cls.methods:
-asmpython/_compiler/type_parameter_compat_fixes.py-341-            method_defs.setdefault(method.name, []).append(method)
-asmpython/_compiler/type_parameter_compat_fixes.py-342-            method_owners.setdefault(method.name, []).append(cls)
-asmpython/_compiler/type_parameter_compat_fixes.py-343-
-asmpython/_compiler/type_parameter_compat_fixes.py-344-    function_targets = {
-asmpython/_compiler/type_parameter_compat_fixes.py-345-        name: defs[0]
-asmpython/_compiler/type_parameter_compat_fixes.py-346-        for name, defs in function_defs.items()
-asmpython/_compiler/type_parameter_compat_fixes.py-347-        if len(defs) == 1 and _type_parameter_indices(defs[0], False)
-asmpython/_compiler/type_parameter_compat_fixes.py-348-    }
-asmpython/_compiler/type_parameter_compat_fixes.py-349-    method_targets = {
-asmpython/_compiler/type_parameter_compat_fixes.py-350-        name: defs[0]
-asmpython/_compiler/type_parameter_compat_fixes.py-351-        for name, defs in method_defs.items()
-asmpython/_compiler/type_parameter_compat_fixes.py-352-        if len(defs) == 1 and _type_parameter_indices(defs[0], True)
-asmpython/_compiler/type_parameter_compat_fixes.py-353-    }
-asmpython/_compiler/type_parameter_compat_fixes.py-354-    if not function_targets and not method_targets:
-asmpython/_compiler/type_parameter_compat_fixes.py-355-        return
-asmpython/_compiler/type_parameter_compat_fixes.py-356-
-asmpython/_compiler/type_parameter_compat_fixes.py-357-    specializations: dict = {}
-asmpython/_compiler/type_parameter_compat_fixes.py-358-    changed = True
-asmpython/_compiler/type_parameter_compat_fixes.py-359-    while changed:
-asmpython/_compiler/type_parameter_compat_fixes.py-360-        changed = False
-asmpython/_compiler/type_parameter_compat_fixes.py-361-        for call in list(_all_call_nodes(mod)):
-asmpython/_compiler/type_parameter_compat_fixes.py:362:            is_method = isinstance(call, A.MethodCall)
-asmpython/_compiler/type_parameter_compat_fixes.py-363-            name = call.method if is_method else call.func
-asmpython/_compiler/type_parameter_compat_fixes.py-364-            func = method_targets.get(name) if is_method else function_targets.get(name)
-asmpython/_compiler/type_parameter_compat_fixes.py-365-            if func is None:
-asmpython/_compiler/type_parameter_compat_fixes.py-366-                continue
-asmpython/_compiler/type_parameter_compat_fixes.py-367-            indices = _type_parameter_indices(func, is_method)
-asmpython/_compiler/type_parameter_compat_fixes.py-368-            if not indices:
-asmpython/_compiler/type_parameter_compat_fixes.py-369-                continue
-asmpython/_compiler/type_parameter_compat_fixes.py-370-            parameter_index = indices[0]
-asmpython/_compiler/type_parameter_compat_fixes.py-371-            argument, binding = _argument_binding(
-asmpython/_compiler/type_parameter_compat_fixes.py-372-                call,
-asmpython/_compiler/type_parameter_compat_fixes.py-373-                func,
-asmpython/_compiler/type_parameter_compat_fixes.py-374-                parameter_index,
-asmpython/_compiler/type_parameter_compat_fixes.py-375-                is_method,
-asmpython/_compiler/type_parameter_compat_fixes.py-376-            )
-asmpython/_compiler/type_parameter_compat_fixes.py-377-            if (
-asmpython/_compiler/type_parameter_compat_fixes.py-378-                binding is None
-asmpython/_compiler/type_parameter_compat_fixes.py-379-                or not isinstance(argument, A.Name)
-asmpython/_compiler/type_parameter_compat_fixes.py-380-                or argument.name not in class_names
-asmpython/_compiler/type_parameter_compat_fixes.py-381-            ):
-asmpython/_compiler/type_parameter_compat_fixes.py-382-                continue
-asmpython/_compiler/type_parameter_compat_fixes.py-383-
-asmpython/_compiler/type_parameter_compat_fixes.py-384-            class_name = argument.name
-asmpython/_compiler/type_parameter_compat_fixes.py-385-            owner_name = ""
-asmpython/_compiler/type_parameter_compat_fixes.py-386-            owner = None
-asmpython/_compiler/type_parameter_compat_fixes.py-387-            if is_method:
+asmpython/_compiler/codegen.py-4010-                self._gen_const_load(self.ffi_consts[expr.name])
+asmpython/_compiler/codegen.py-4011-                return
+asmpython/_compiler/codegen.py-4012-            # Module dunders the runtime provides as string constants. A
+asmpython/_compiler/codegen.py-4013-            # compiled program is its own entry point, so __name__ is
+asmpython/_compiler/codegen.py-4014-            # "__main__"; __file__ is the entry source file's resolved path
+asmpython/_compiler/codegen.py-4015-            # (threaded in from the driver), or "" if compiling from a
+asmpython/_compiler/codegen.py-4016-            # string with no real file.
+asmpython/_compiler/codegen.py-4017-            if expr.name == "__name__":
+asmpython/_compiler/codegen.py-4018-                label, _ = self.intern_string("__main__")
+asmpython/_compiler/codegen.py-4019-                self.emitf(f"lea rax, [{label}]")
+asmpython/_compiler/codegen.py-4020-                return
+asmpython/_compiler/codegen.py-4021-            if expr.name == "__file__":
+asmpython/_compiler/codegen.py-4022-                label, _ = self.intern_string(self.entry_path or "")
+asmpython/_compiler/codegen.py-4023-                self.emitf(f"lea rax, [{label}]")
+asmpython/_compiler/codegen.py-4024-                return
+asmpython/_compiler/codegen.py-4025-            # A bare class name used as a value (`Stmt = Assign | AugAssign`,
+asmpython/_compiler/codegen.py-4026-            # `isinstance(x, Token)`, storing a class object). asmpython has no
+asmpython/_compiler/codegen.py-4027-            # first-class type objects; we load the class's RTTI id so the value
+asmpython/_compiler/codegen.py-4028-            # is stable and unique per class. (These appear in type-alias
+asmpython/_compiler/codegen.py-4029-            # expressions the compiled program never actually inspects.)
+asmpython/_compiler/codegen.py:4030:            if expr.name in self.class_ids:
+asmpython/_compiler/codegen.py:4031:                self.emitf(f"mov rax, {self.class_ids[expr.name]}")
+asmpython/_compiler/codegen.py-4032-                return
+asmpython/_compiler/codegen.py:4033:            if expr.name in BUILTIN_TYPE_IDS:
+asmpython/_compiler/codegen.py-4034-                # A bare builtin type name as a value (`{"type": str}`,
+asmpython/_compiler/codegen.py-4035-                # mimicking argparse's `type=str`) -- same RTTI-id trick,
+asmpython/_compiler/codegen.py:4036:                # see BUILTIN_TYPE_IDS.
+asmpython/_compiler/codegen.py:4037:                self.emitf(f"mov rax, {BUILTIN_TYPE_IDS[expr.name]}")
+asmpython/_compiler/codegen.py-4038-                return
+asmpython/_compiler/codegen.py-4039-            if expr.name in BUILTIN_EXCEPTIONS:
+asmpython/_compiler/codegen.py-4040-                # A bare builtin-exception name as a value (`raise X` without
+asmpython/_compiler/codegen.py-4041-                # parens, storing the class): exceptions are message strings,
+asmpython/_compiler/codegen.py-4042-                # so the class-as-value is its interned name.
+asmpython/_compiler/codegen.py-4043-                lbl, _ = self.intern_string(expr.name)
+asmpython/_compiler/codegen.py-4044-                self.emitf(f"lea rax, [{lbl}]")
+asmpython/_compiler/codegen.py-4045-                return
+asmpython/_compiler/codegen.py-4046-            if expr.name not in info.locals_ and expr.name not in self.global_vars:
+asmpython/_compiler/codegen.py-4047-                # A bare reference to a top-level function (not a call): used
+asmpython/_compiler/codegen.py-4048-                # as a callback value, e.g. `atexit.register(my_handler, ...)`
+asmpython/_compiler/codegen.py-4049-                # or `signal.signal(SIGINT, handler)`. Evaluate to the
+asmpython/_compiler/codegen.py-4050-                # function's address so it can be stored in an int slot and
+asmpython/_compiler/codegen.py-4051-                # called indirectly later.
+asmpython/_compiler/codegen.py-4052-                if any(f.name == expr.name for f in self.mod.funcs):
+asmpython/_compiler/codegen.py-4053-                    self.emitf(f"lea rax, [rel {self._user_symbol(expr.name)}]")
+asmpython/_compiler/codegen.py-4054-                    return
+asmpython/_compiler/codegen.py-4055-                # A module name (from `import X`) isn't a real heap variable —
+asmpython/_compiler/codegen.py-4056-                # represent it as null (0). Attribute access on it falls through
+asmpython/_compiler/codegen.py-4057-                # to the lenient module/any path in _gen_attr.
+asmpython/_compiler/codegen.py-4058-                if (
+asmpython/_compiler/codegen.py-4059-                    expr.inferred_type in ("module", "any")
+asmpython/_compiler/codegen.py-4060-                    or expr.name in self.mod.imported_modules
+asmpython/_compiler/codegen.py-4061-                ):
+asmpython/_compiler/codegen.py-4062-                    self.emitf("xor rax, rax")
+asmpython/_compiler/codegen.py-4063-                    return
+asmpython/_compiler/codegen.py-4064-                raise NameError(f"undefined variable {expr.name}")
+asmpython/_compiler/codegen.py-4065-            mem = self._var_mem(expr.name, info)
+asmpython/_compiler/codegen.py-4066-            ty = self._var_type(expr.name, info)
+asmpython/_compiler/codegen.py-4067-            if expr.name in info.nonlocal_boxes:
+asmpython/_compiler/codegen.py-4068-                # Nonlocal: param slot holds a box ptr; deref to get the value.
+asmpython/_compiler/codegen.py-4069-                self.emitf(f"mov rax, {mem}", "mov rax, [rax]")
+asmpython/_compiler/codegen.py-4070-            elif ty == "float":
+asmpython/_compiler/codegen.py-4071-                self.emitf(f"movsd xmm0, {mem}")
+asmpython/_compiler/codegen.py-4072-            else:
+asmpython/_compiler/codegen.py-4073-                self.emitf(f"mov rax, {mem}")
