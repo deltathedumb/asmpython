@@ -1,5 +1,6 @@
 # expect:
 # 42
+# 43
 
 
 class Item:
@@ -7,9 +8,17 @@ class Item:
         self.value: int = value
 
 
-def choose_type():
-    return Item
+class Factory:
+    def __call__(self, value: int) -> Item:
+        return Item(value)
 
 
-item = choose_type()(42)
+def make_factory() -> Factory:
+    return Factory()
+
+
+item = make_factory()(42)
 print(item.value)
+source = Item(1)
+clone = type(source)(43)
+print(clone.value)
