@@ -1,6 +1,7 @@
 # expect:
 # 42
 # 43
+# Clean Somnia-triggered expression-result call verification branch.
 
 
 class Item:
