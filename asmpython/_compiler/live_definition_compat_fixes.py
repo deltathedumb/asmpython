@@ -4,8 +4,8 @@ Importing a package executes its top-level code but does not execute every
 function and method body re-exported by that package. The native compiler merges
 all source modules, so it must preserve that distinction. This pass identifies
 classes constructed by the entry graph, their ancestors and methods, plus direct
-function dependencies. Bodies outside that graph use the compiler's existing
-unreachable-body tolerance and cannot block an otherwise valid build.
+function dependencies. Bodies outside that graph are replaced by inert native
+stubs before semantic analysis and code generation.
 """
 
 from __future__ import annotations
@@ -99,7 +99,7 @@ def _live_definitions(mod: A.Module) -> tuple[set[str], set[str]]:
 
             # Once an instance exists, any of its methods may be selected through
             # Python's dynamic dispatch. Check all methods on that live class,
-            # while still excluding entire classes never instantiated/referenced.
+            # while excluding entire classes never instantiated/referenced.
             for method in owner.methods:
                 found_functions, found_classes = _scan_body(
                     method.body,
@@ -118,32 +118,35 @@ def _live_definitions(mod: A.Module) -> tuple[set[str], set[str]]:
     return live_functions, live_classes
 
 
+def _neutral_body(definition) -> None:
+    if getattr(definition, "_dead_body_neutralized", False):
+        return
+    definition._dead_body_neutralized = True
+    definition.body = [
+        A.Return(
+            value=A.IntLit(value=0, pos=definition.pos),
+            pos=definition.pos,
+        )
+    ]
+    definition.ret_type = ("int", None)
+    definition.ret_tuple = None
+    definition.ret_list_tuple_types = []
+
+
 def _analyze_live_project_definitions(self: SemaAnalyzer) -> None:
     live_functions, live_classes = _live_definitions(self.mod)
-    changed: list[tuple[object, bool]] = []
 
     for function in self.mod.funcs:
-        if function.name in live_functions:
-            continue
-        original = bool(getattr(function, "is_stdlib", False))
-        if not original:
-            function.is_stdlib = True
-            changed.append((function, original))
+        if function.name not in live_functions:
+            _neutral_body(function)
 
     for owner in self.mod.classes:
         if owner.name in live_classes:
             continue
         for method in owner.methods:
-            original = bool(getattr(method, "is_stdlib", False))
-            if not original:
-                method.is_stdlib = True
-                changed.append((method, original))
+            _neutral_body(method)
 
-    try:
-        _ORIGINAL_ANALYZE(self)
-    finally:
-        for definition, original in changed:
-            definition.is_stdlib = original
+    _ORIGINAL_ANALYZE(self)
 
 
 if not getattr(SemaAnalyzer, "_asmpython_live_definition_patch", False):
