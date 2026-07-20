@@ -1,6 +1,7 @@
 # expect:
 # 1
 # 2
+# Clean Somnia-triggered yield-from verification branch.
 
 
 def inner():
