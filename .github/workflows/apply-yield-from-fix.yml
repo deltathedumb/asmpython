@@ -1,21 +1,23 @@
-name: Apply yield-from lowering
+name: Verify yield-from lowering
 
 on:
-  push:
+  pull_request:
     branches: [beta/3.14.0]
     paths:
-      - ".github/workflows/apply-yield-from-fix.yml"
+      - "asmpython/_compiler/parser.py"
+      - "tests/cases/467_yield_from.py"
+      - ".github/workflows/verify-somnia-yield-from.yml"
 
 permissions:
   contents: write
 
 jobs:
-  patch-and-verify:
+  patch-test-commit:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: beta/3.14.0
+          ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -30,8 +32,8 @@ jobs:
           path = Path("asmpython/_compiler/parser.py")
           text = path.read_text(encoding="utf-8")
 
-          counter_anchor = '        self._deco_tmp_counter = 0\n'
           if '        self._yield_from_counter = 0\n' not in text:
+              counter_anchor = '        self._deco_tmp_counter = 0\n'
               if counter_anchor not in text:
                   raise SystemExit("parser counter anchor not found")
               text = text.replace(
@@ -40,15 +42,16 @@ jobs:
                   1,
               )
 
-          start_marker = '            if t.value == "yield":\n'
-          end_marker = '\n\n        # `match` is a soft keyword'
-          start = text.find(start_marker)
-          if start < 0:
-              raise SystemExit("yield parser start landmark not found")
-          end = text.find(end_marker, start)
-          if end < 0:
-              raise SystemExit("yield parser end landmark not found")
-          new_branch = '''            if t.value == "yield":
+          if 'item_name = "__yield_from_" + str(self._yield_from_counter)' not in text:
+              start_marker = '            if t.value == "yield":\n'
+              end_marker = '\n\n        # `match` is a soft keyword'
+              start = text.find(start_marker)
+              if start < 0:
+                  raise SystemExit("yield parser start landmark not found")
+              end = text.find(end_marker, start)
+              if end < 0:
+                  raise SystemExit("yield parser end landmark not found")
+              new_branch = '''            if t.value == "yield":
                   pos = self._eat().pos
                   if self._check("KEYWORD", "from"):
                       self._eat()
@@ -69,13 +72,14 @@ jobs:
                           pos=pos,
                       )
                   if self._check("NEWLINE"):
-                      val: A.Expr = A.IntLit(value=0, pos=pos)  # bare yield
+                      val: A.Expr = A.IntLit(value=0, pos=pos)
                   else:
                       val = self._parse_expr()
                   self._expect("NEWLINE")
                   return A.YieldStmt(value=val, pos=pos)
-          '''
-          text = text[:start] + new_branch + text[end:]
+'''
+              text = text[:start] + new_branch + text[end:]
+
           path.write_text(text, encoding="utf-8")
           PY
       - name: Compile and run focused regression
@@ -85,11 +89,13 @@ jobs:
           output=$(/tmp/asmpython-yield-from)
           printf '%s\n' "$output"
           test "$output" = $'1\n2'
-      - name: Commit verified compiler fix
+      - name: Commit materialized source changes
         run: |
+          if git diff --quiet -- asmpython/_compiler/parser.py; then
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/workflows/apply-yield-from-fix.yml
           git add asmpython/_compiler/parser.py
           git commit -m "Lower yield-from delegation"
-          git push origin HEAD:beta/3.14.0
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
