@@ -3,9 +3,9 @@
 Importing a package executes its top-level code but does not execute every
 function and method body re-exported by that package. The native compiler merges
 all source modules, so it must preserve that distinction. This pass identifies
-classes constructed by the entry graph, their ancestors and methods, plus direct
-function dependencies. Bodies outside that graph are replaced by inert native
-stubs before semantic analysis and code generation.
+classes constructed by the entry graph, direct function dependencies, and the
+method names actually dispatched by reachable code. Bodies outside that graph
+are replaced by inert native stubs before semantic analysis and code generation.
 """
 
 from __future__ import annotations
@@ -22,9 +22,10 @@ def _scan_body(
     body: list,
     function_names: set,
     class_names: set,
-) -> tuple[set[str], set[str]]:
+) -> tuple[set[str], set[str], set[str]]:
     functions: set[str] = set()
     classes: set[str] = set()
+    methods: set[str] = set()
 
     for node in _walk_statements(body):
         expressions = []
@@ -46,34 +47,52 @@ def _scan_body(
                     if isinstance(argument, A.Name) and argument.name in class_names:
                         classes.add(argument.name)
             elif isinstance(expression, A.MethodCall):
+                methods.add(expression.method)
                 for argument in expression.args:
                     if isinstance(argument, A.Name) and argument.name in class_names:
                         classes.add(argument.name)
                 for _keyword, argument in expression.kwargs:
                     if isinstance(argument, A.Name) and argument.name in class_names:
                         classes.add(argument.name)
-    return functions, classes
+    return functions, classes, methods
 
 
-def _live_definitions(mod: A.Module) -> tuple[set[str], set[str]]:
+def _method_is_implicit_runtime_surface(method) -> bool:
+    name = method.name
+    decorators = list(getattr(method, "decorators", []) or [])
+    return (
+        name == "__init__"
+        or (name.startswith("__") and name.endswith("__"))
+        or "property" in decorators
+        or any(decorator.endswith(".setter") for decorator in decorators)
+    )
+
+
+def _live_definitions(mod: A.Module) -> tuple[set[str], set[str], set[str]]:
     functions = {definition.name: definition for definition in mod.funcs}
     classes = {definition.name: definition for definition in mod.classes}
     function_names = set(functions)
     class_names = set(classes)
 
-    live_functions, live_classes = _scan_body(mod.body, function_names, class_names)
+    live_functions, live_classes, live_methods = _scan_body(
+        mod.body,
+        function_names,
+        class_names,
+    )
     queued_functions = list(live_functions)
-    queued_classes = list(live_classes)
     processed_functions: set[str] = set()
-    processed_classes: set[str] = set()
+    processed_method_keys: set[tuple[str, str]] = set()
 
-    while queued_functions or queued_classes:
+    changed = True
+    while changed:
+        changed = False
+
         while queued_functions:
             name = queued_functions.pop()
             if name in processed_functions or name not in functions:
                 continue
             processed_functions.add(name)
-            found_functions, found_classes = _scan_body(
+            found_functions, found_classes, found_methods = _scan_body(
                 functions[name].body,
                 function_names,
                 class_names,
@@ -82,26 +101,42 @@ def _live_definitions(mod: A.Module) -> tuple[set[str], set[str]]:
                 if found not in live_functions:
                     live_functions.add(found)
                     queued_functions.append(found)
+                    changed = True
             for found in found_classes:
                 if found not in live_classes:
                     live_classes.add(found)
-                    queued_classes.append(found)
+                    changed = True
+            for found in found_methods:
+                if found not in live_methods:
+                    live_methods.add(found)
+                    changed = True
 
-        while queued_classes:
-            name = queued_classes.pop()
-            if name in processed_classes or name not in classes:
+        # A constructed class brings its ancestor initializers/descriptor surface
+        # into play, but ordinary methods are retained only when their name is
+        # dispatched by reachable code.
+        for name in list(live_classes):
+            owner = classes.get(name)
+            if owner is None:
                 continue
-            processed_classes.add(name)
-            owner = classes[name]
             if owner.parent in classes and owner.parent not in live_classes:
                 live_classes.add(owner.parent)
-                queued_classes.append(owner.parent)
+                changed = True
 
-            # Once an instance exists, any of its methods may be selected through
-            # Python's dynamic dispatch. Check all methods on that live class,
-            # while excluding entire classes never instantiated/referenced.
+        for name in list(live_classes):
+            owner = classes.get(name)
+            if owner is None:
+                continue
             for method in owner.methods:
-                found_functions, found_classes = _scan_body(
+                if not (
+                    method.name in live_methods
+                    or _method_is_implicit_runtime_surface(method)
+                ):
+                    continue
+                key = (owner.name, method.name)
+                if key in processed_method_keys:
+                    continue
+                processed_method_keys.add(key)
+                found_functions, found_classes, found_methods = _scan_body(
                     method.body,
                     function_names,
                     class_names,
@@ -110,12 +145,17 @@ def _live_definitions(mod: A.Module) -> tuple[set[str], set[str]]:
                     if found not in live_functions:
                         live_functions.add(found)
                         queued_functions.append(found)
+                        changed = True
                 for found in found_classes:
                     if found not in live_classes:
                         live_classes.add(found)
-                        queued_classes.append(found)
+                        changed = True
+                for found in found_methods:
+                    if found not in live_methods:
+                        live_methods.add(found)
+                        changed = True
 
-    return live_functions, live_classes
+    return live_functions, live_classes, live_methods
 
 
 def _neutral_body(definition) -> None:
@@ -134,17 +174,19 @@ def _neutral_body(definition) -> None:
 
 
 def _analyze_live_project_definitions(self: SemaAnalyzer) -> None:
-    live_functions, live_classes = _live_definitions(self.mod)
+    live_functions, live_classes, live_methods = _live_definitions(self.mod)
 
     for function in self.mod.funcs:
         if function.name not in live_functions:
             _neutral_body(function)
 
     for owner in self.mod.classes:
-        if owner.name in live_classes:
-            continue
         for method in owner.methods:
-            _neutral_body(method)
+            if owner.name not in live_classes or not (
+                method.name in live_methods
+                or _method_is_implicit_runtime_surface(method)
+            ):
+                _neutral_body(method)
 
     _ORIGINAL_ANALYZE(self)
 
