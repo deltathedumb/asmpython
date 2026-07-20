@@ -1,7 +1,7 @@
 # expect:
 # 1
 # 2
-# Delegated generator iteration regression.
+# Delegated generator iteration regression; preserves yielded order.
 
 
 def inner():
