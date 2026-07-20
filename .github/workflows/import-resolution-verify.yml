@@ -5,6 +5,7 @@ on:
     branches: ["beta/3.14.0"]
     paths:
       - "asmpython/__init__.py"
+      - "asmpython/_host_import_binary.py"
       - "asmpython/_backends/host_cli.py"
       - "asmpython/_backends/host_site_packages.py"
       - "asmpython/_compiler/cli.py"
@@ -23,6 +24,7 @@ on:
   pull_request:
     paths:
       - "asmpython/__init__.py"
+      - "asmpython/_host_import_binary.py"
       - "asmpython/_backends/host_cli.py"
       - "asmpython/_backends/host_site_packages.py"
       - "asmpython/_compiler/cli.py"
@@ -55,6 +57,7 @@ jobs:
         run: |
           python -m py_compile \
             asmpython/__init__.py \
+            asmpython/_host_import_binary.py \
             asmpython/__main__.py \
             asmpython/_backends/host_cli.py \
             asmpython/_backends/host_site_packages.py \
