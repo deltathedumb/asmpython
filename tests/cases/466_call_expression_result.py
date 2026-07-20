@@ -1,6 +1,7 @@
 # expect:
 # 42
 # 43
+# Covers a callable returned by a function and type(instance)(...).
 
 
 class Item:
