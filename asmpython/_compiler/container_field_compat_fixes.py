@@ -6,6 +6,7 @@ from . import ast_nodes as A
 from .dynamic_parameter_compat_fixes import _mark_dynamic_parameters
 from .field_flow_compat_fixes import _annotate_object_fields
 from .language_compat_fixes import _normalize_method_receivers
+from .object_flow_compat_fixes import _walk_statements
 from .sema import SemaAnalyzer
 
 
@@ -23,8 +24,50 @@ def _annotation_parts(annotation) -> tuple[str, "str | None"]:
     return "", None
 
 
+def _hierarchy_method_names(owner, classes: dict) -> set[str]:
+    result: set[str] = set()
+    current = owner
+    seen: set[str] = set()
+    while current is not None and current.name not in seen:
+        seen.add(current.name)
+        for method in current.methods:
+            result.add(method.name)
+        current = classes.get(current.parent)
+    return result
+
+
+def _recursive_object_element(owner, field_name: str, classes: dict) -> "str | None":
+    methods = _hierarchy_method_names(owner, classes)
+    for method in owner.methods:
+        appended_parameters: set[str] = set()
+        for node in _walk_statements(method.body):
+            if (
+                isinstance(node, A.MethodCall)
+                and node.method == "append"
+                and node.args
+                and isinstance(node.obj, A.Attr)
+                and isinstance(node.obj.obj, A.Name)
+                and node.obj.obj.name == "self"
+                and node.obj.name == field_name
+                and isinstance(node.args[0], A.Name)
+            ):
+                appended_parameters.add(node.args[0].name)
+        if not appended_parameters:
+            continue
+        for node in _walk_statements(method.body):
+            if (
+                isinstance(node, A.MethodCall)
+                and isinstance(node.obj, A.Name)
+                and node.obj.name in appended_parameters
+                and node.method in methods
+            ):
+                return owner.name
+    return None
+
+
 def _collection_fields(mod: A.Module) -> dict[tuple[str, str], tuple[str, str]]:
     result: dict[tuple[str, str], tuple[str, str]] = {}
+    classes = {owner.name: owner for owner in mod.classes}
     for owner in mod.classes:
         for method in owner.methods:
             if method.name != "__init__":
@@ -37,8 +80,14 @@ def _collection_fields(mod: A.Module) -> dict[tuple[str, str], tuple[str, str]]:
                 ):
                     continue
                 base, element = _annotation_parts(statement.annot)
-                if base in ("list", "dict") and element is not None:
-                    result[(owner.name, statement.name)] = (base, element)
+                if base not in ("list", "dict") or element is None:
+                    continue
+                if base == "list" and element == "any":
+                    refined = _recursive_object_element(owner, statement.name, classes)
+                    if refined is not None:
+                        element = refined
+                        statement.annot = ("list", element)
+                result[(owner.name, statement.name)] = (base, element)
     return result
 
 
@@ -82,6 +131,8 @@ def _check_expr_with_collection_fields(self: SemaAnalyzer, expression, scope) ->
         element = getattr(source, "list_el_type", None)
         if isinstance(element, str):
             expression.list_el_type = element
+            if expression.func == "tuple":
+                expression.tuple_elem_types = []
 
 
 def _analyze_with_collection_fields(self: SemaAnalyzer) -> None:
