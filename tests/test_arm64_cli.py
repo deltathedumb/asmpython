@@ -78,10 +78,9 @@ class Arm64CliTests(unittest.TestCase):
             self.assertIn("unsupported by selected runtime", report)
 
     def test_unsupported_runtime_fails_before_tool_discovery(self) -> None:
-        # Keep this symbol deliberately outside RUNTIME_EXPORTS. _abi_new_list
-        # used to serve this role, but became supported with the first ARM64
-        # list-runtime slice.
-        unsupported_symbol = "_abi_list_slice"
+        # Plain list slicing is now part of the runtime. Explicit-step slicing
+        # remains the next deliberately unsupported list symbol.
+        unsupported_symbol = "_abi_list_slice_step"
         unsupported = build_elf(
             [
                 FuncCode(
