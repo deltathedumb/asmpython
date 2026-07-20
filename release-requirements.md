@@ -23,7 +23,7 @@ A requirement is complete only when all of the following exist:
 7. memory-ownership coverage,
 8. no known silent miscompilation or silent semantic deviation.
 
-A feature implemented on only one production target is not complete unless the feature is explicitly target-specific by nature.
+A feature implemented on only one production target is not complete unless it is explicitly target-specific by nature.
 
 A passing happy-path test alone does not make a feature complete.
 
@@ -209,7 +209,7 @@ The CLI MUST:
 
 - compiler installation,
 - active asmpython version,
-- host Python used to run the compiler during bootstrap/development,
+- host Python used during bootstrap or development,
 - target toolchains,
 - assemblers,
 - linkers,
@@ -217,13 +217,9 @@ The CLI MUST:
 - code-signing tools,
 - emulator availability,
 - required environment variables,
-- writable cache/build directories.
+- writable cache and build directories.
 
-For supported cross-compilation targets, asmpython MUST either:
-
-- provide the needed toolchain itself,
-- download and pin a verified toolchain,
-- or provide a precise one-command installation path.
+For supported cross-compilation targets, asmpython MUST either provide the needed toolchain, download and pin a verified toolchain, or provide a precise one-command installation path.
 
 A missing tool MUST produce a direct actionable diagnostic rather than an indirect linker or subprocess error.
 
@@ -245,9 +241,9 @@ The implementation MUST preserve Python behavior for, at minimum:
 - IEEE-754 floating-point behavior where Python specifies it,
 - distinct `bool`, `None`, and integer semantics,
 - Unicode strings by code point rather than byte approximation,
-- bytes, bytearray, memoryview, and buffer behavior,
+- bytes, bytearray, memoryview, and the buffer protocol,
 - lists, tuples, dicts, sets, frozensets, ranges, and slices,
-- iteration and iterator invalidation behavior,
+- iteration and iterator behavior,
 - generators and generator finalization,
 - coroutines, `async`, `await`, and asynchronous iteration,
 - comprehensions,
@@ -314,8 +310,8 @@ Each production backend MUST include:
 - calling-convention implementation,
 - object generation,
 - relocation generation,
-- debug/source metadata,
-- exception/unwind integration,
+- debug and source metadata,
+- exception and unwind integration,
 - runtime integration,
 - executable and library linking.
 
@@ -346,10 +342,7 @@ A backend MUST NOT:
 
 The legacy backend MAY remain for compatibility and inline assembly, but it MUST NOT weaken the production release gate.
 
-Any feature exposed through the legacy backend MUST either:
-
-- be fully supported and tested within its declared scope,
-- or be explicitly marked legacy-only and excluded from default-backend compatibility claims.
+Any feature exposed through the legacy backend MUST either be fully supported and tested within its declared scope or be explicitly marked legacy-only and excluded from default-backend compatibility claims.
 
 ---
 
@@ -398,7 +391,7 @@ A platform is supported only when all required categories work:
 - diagnostics,
 - debug metadata,
 - reproducibility,
-- automated tests on real or independently validated hardware/emulation.
+- automated tests on real or independently validated hardware or emulation.
 
 Object generation alone is not platform support.
 
@@ -481,14 +474,7 @@ Static imports MUST remain native-first. PyinBin MUST NOT become an excuse to in
 
 The compiler MUST automatically determine which code can execute natively and which code requires PyinBin.
 
-Partitioning MAY occur at:
-
-- module boundaries,
-- function boundaries,
-- class boundaries,
-- call sites,
-- dynamic import sites,
-- dynamic compilation sites.
+Partitioning MAY occur at module, function, class, call-site, dynamic-import, or dynamic-compilation boundaries.
 
 The chosen boundary MUST preserve Python semantics.
 
@@ -572,35 +558,35 @@ PortaPy's ABI MUST include:
 
 - ABI version query,
 - implementation version query,
-- runtime create/destroy,
+- runtime create and destroy,
 - versioned configuration structures,
 - source execution,
 - bytecode execution,
 - expression evaluation,
 - function calls,
 - opaque value handles,
-- retain/release,
+- retain and release,
 - checked primitive conversion,
 - structured exception and traceback retrieval,
-- host output/input callbacks,
+- host output and input callbacks,
 - host clock callbacks,
 - host filesystem callbacks,
 - host import callbacks,
 - host module registration,
-- interruption/cancellation,
+- interruption and cancellation,
 - deterministic teardown,
 - documented threading and re-entry rules.
 
-### 11.4 Host bindings
+### 11.4 Independent host conformance
 
 PortaPy MUST be tested from:
 
 - an external C host,
-- Java through JNI or an equivalent production-quality Java binding.
+- at least one additional host language through a production-quality binding.
 
-The Java binding is a required first-class integration because PortaPy is intended to support JVM applications and projects such as Minecraft mods.
+The additional binding exists to validate that the ABI is genuinely language-neutral. It MUST be selected independently of any downstream application.
 
-At least one example MUST demonstrate:
+At least one host example MUST demonstrate:
 
 - registering host functions,
 - executing Python source,
@@ -619,7 +605,22 @@ A PortaPy runtime with no host callbacks MUST have no ambient access to:
 - host memory,
 - clock sources other than explicitly supplied deterministic services.
 
-This requirement makes PortaPy suitable for sandboxed scripting and modding.
+This requirement makes PortaPy suitable for isolated embedded scripting.
+
+### 11.6 Downstream products are independent
+
+No downstream game, mod, plugin, application, or product is part of the asmpython 3.14.0 release contract.
+
+In particular, any Minecraft mod or other project that later consumes PortaPy is entirely independent of asmpython and PortaPy development. It is not:
+
+- a release deliverable,
+- a required demo,
+- a required host binding,
+- a conformance target,
+- a reason to select a particular binding language,
+- part of either repository's scope.
+
+PortaPy MUST remain a general-purpose embeddable product rather than being designed around one downstream integration.
 
 ---
 
@@ -676,7 +677,7 @@ The systems library MUST provide Pythonic freestanding interfaces for:
 - interrupts,
 - timers,
 - memory regions,
-- volatile reads/writes,
+- volatile reads and writes,
 - architecture-specific instructions,
 - panic and halt behavior.
 
@@ -690,7 +691,7 @@ Unsupported capabilities MUST raise precise platform-appropriate errors rather t
 
 ---
 
-## 13. Standard library compatibility
+## 13. Standard-library compatibility
 
 ### 13.1 Scope
 
@@ -720,7 +721,7 @@ Behavior MUST match Python semantics even when implementation differs from CPyth
 
 ### 13.4 Required areas
 
-The release MUST include production support for the standard-library areas needed by real applications, including:
+The release MUST include production support for standard-library areas needed by real applications, including:
 
 - filesystem and path handling,
 - subprocess and process control,
@@ -779,7 +780,7 @@ The build system MUST understand:
 - optional dependencies,
 - environment markers.
 
-### 14.4 Native extension policy
+### 14.4 Native-extension policy
 
 3.14.0 MUST have a deliberate native-extension compatibility strategy.
 
@@ -809,8 +810,6 @@ It MUST publish machine-readable reports and exact diffs.
 
 ## 15. Compatibility inspector
 
-### 15.1 Required command
-
 The CLI MUST provide:
 
 ```text
@@ -819,8 +818,6 @@ asmpython inspect SOURCE_OR_PROJECT
 
 with human-readable and JSON output.
 
-### 15.2 Required report categories
-
 The inspector MUST report separately:
 
 - native-ready code,
@@ -828,12 +825,10 @@ The inspector MUST report separately:
 - shared native/PyinBin objects,
 - external native libraries,
 - pure-Python dependencies,
-- native extension dependencies,
+- native-extension dependencies,
 - unsupported behavior,
 - target-specific blockers,
 - untested or uncertain behavior.
-
-### 15.3 Required explanations
 
 For every dynamic boundary or blocker, the inspector MUST report:
 
@@ -843,19 +838,7 @@ For every dynamic boundary or blocker, the inspector MUST report:
 - affected target,
 - likely resolution where one exists.
 
-### 15.4 Percentages
-
-The inspector MUST NOT collapse all compatibility into one misleading number.
-
-It MUST report at least:
-
-- native coverage,
-- PyinBin coverage,
-- combined coverage,
-- unsupported coverage,
-- unverified coverage.
-
-### 15.5 Performance and memory analysis
+The inspector MUST NOT collapse all compatibility into one misleading number. It MUST report native, PyinBin, combined, unsupported, and unverified coverage separately.
 
 The inspector MUST also identify:
 
@@ -916,7 +899,7 @@ An internal compiler failure MUST:
 
 ### 16.4 Native debug metadata
 
-Production targets MUST support source-level debug information consumable by the platform's normal tools:
+Production targets MUST support source-level debug information consumable by normal platform tools:
 
 - GDB on Linux,
 - LLDB on macOS,
@@ -928,23 +911,9 @@ Optimized builds MUST preserve enough mapping for meaningful tracebacks.
 
 ## 17. Good memory management
 
-### 17.1 General requirement
+3.14.0 MUST have real memory management suitable for long-running applications. Leaking all allocations is not acceptable.
 
-3.14.0 MUST have real memory management suitable for long-running applications.
-
-Leaking all allocations is not acceptable.
-
-The exact implementation MAY use:
-
-- reference counting,
-- tracing garbage collection,
-- cycle detection,
-- region allocation,
-- or a documented hybrid.
-
-The algorithm is an implementation choice. Correct lifetime behavior is a release requirement.
-
-### 17.2 Managed values
+The exact implementation MAY use reference counting, tracing garbage collection, cycle detection, region allocation, or a documented hybrid.
 
 Memory management MUST cover:
 
@@ -969,9 +938,7 @@ Memory management MUST cover:
 - PortaPy handles,
 - FFI-owned and host-owned memory.
 
-### 17.3 Cycles and finalization
-
-The implementation MUST handle:
+The implementation MUST correctly handle:
 
 - object cycles,
 - cycles crossing native/PyinBin boundaries,
@@ -982,39 +949,13 @@ The implementation MUST handle:
 - interpreter shutdown,
 - PortaPy runtime destruction.
 
-Finalization ordering and resurrection behavior MUST be compatible with Python where observable.
+Internal and public APIs MUST distinguish owned, borrowed, transferred, pinned, host-owned, and runtime-owned references or buffers.
 
-### 17.4 Ownership contracts
-
-Internal and public APIs MUST distinguish:
-
-- owned references,
-- borrowed references,
-- transferred references,
-- pinned references,
-- host-owned buffers,
-- runtime-owned buffers.
-
-PortaPy's retain/release API MUST map cleanly onto the underlying lifetime system.
-
-### 17.5 Verification
-
-The release gate MUST include:
-
-- leak testing,
-- use-after-free testing,
-- double-free testing,
-- cycle stress tests,
-- repeated runtime create/execute/destroy tests,
-- long-running allocation/deallocation tests,
-- mixed native/PyinBin lifetime tests,
-- FFI ownership tests.
+The release gate MUST include leak, use-after-free, double-free, cycle, long-running allocation, runtime recreation, hybrid lifetime, and FFI ownership testing.
 
 ---
 
 ## 18. Predictable performance
-
-### 18.1 Honest performance model
 
 asmpython MUST NOT claim that every program is faster than CPython.
 
@@ -1028,8 +969,6 @@ It MUST provide predictable, measurable performance characteristics for:
 - memory use,
 - binary size,
 - library size.
-
-### 18.2 Required optimization pipeline
 
 Production native backends MUST include a real optimization pipeline with, at minimum:
 
@@ -1048,69 +987,19 @@ Production native backends MUST include a real optimization pipeline with, at mi
 - bounds-check elimination where proven safe,
 - escape analysis where practical.
 
-### 18.3 Optimization correctness
-
 Every optimization MUST preserve Python semantics, including exceptions and observable side effects.
 
-Optimization MUST NOT remove:
-
-- potentially raising operations,
-- descriptor calls,
-- import side effects,
-- finalization-visible behavior,
-- mutation-visible behavior,
-- traceback-relevant frames unless explicitly allowed by the selected optimization/debug profile.
-
-### 18.4 Performance regression tracking
-
-A versioned benchmark suite MUST track:
-
-- startup latency,
-- compile time,
-- native numeric loops,
-- object-heavy workloads,
-- imports,
-- function calls,
-- exceptions,
-- strings,
-- containers,
-- PyinBin workloads,
-- hybrid boundary cost,
-- real applications.
+A versioned benchmark suite MUST track startup latency, compile time, native numeric loops, object-heavy workloads, imports, calls, exceptions, strings, containers, PyinBin workloads, hybrid boundary cost, binary size, and real applications.
 
 Material regressions MUST block release unless explicitly documented and accepted for a correctness reason.
 
-### 18.5 Profiles
-
-The CLI MUST expose clear profiles such as:
-
-- debug,
-- release,
-- size-optimized.
-
-Profile behavior MUST be documented and reproducible.
-
-Profile-guided optimization MAY be included, but MUST remain optional and deterministic when a fixed profile is supplied.
+The CLI MUST expose clear debug, release, and size-optimized profiles. Profile behavior MUST be documented and reproducible.
 
 ---
 
 ## 19. Reproducible and inspectable builds
 
-### 19.1 Byte reproducibility
-
-Given identical:
-
-- source,
-- dependency lock,
-- compiler version,
-- target,
-- build configuration,
-- pinned toolchain,
-- supplied profile data,
-
-asmpython MUST produce byte-identical release artifacts.
-
-### 19.2 Sources of nondeterminism
+Given identical source, dependency lock, compiler version, target, build configuration, pinned toolchain, and supplied profile data, asmpython MUST produce byte-identical release artifacts.
 
 The build MUST normalize or control:
 
@@ -1127,8 +1016,6 @@ The build MUST normalize or control:
 - toolchain version selection,
 - environment-dependent feature detection.
 
-### 19.3 Build manifest
-
 Every build MUST be able to emit a machine-readable manifest containing:
 
 - compiler version and commit,
@@ -1144,25 +1031,13 @@ Every build MUST be able to emit a machine-readable manifest containing:
 - external libraries,
 - output hashes.
 
-### 19.4 Verification command
-
 The CLI MUST provide a reproducibility verification mode that performs isolated rebuilds and compares every output.
 
-### 19.5 Supply-chain metadata
-
-Release builds MUST be able to emit:
-
-- SBOM metadata,
-- checksums,
-- provenance metadata,
-- dependency licenses,
-- signature-ready artifact manifests.
+Release builds MUST be able to emit SBOM metadata, checksums, provenance metadata, dependency licenses, and signature-ready artifact manifests.
 
 ---
 
 ## 20. Deterministic self-hosting
-
-### 20.1 Compiler self-hosting
 
 The asmpython compiler MUST compile itself through the production compiler pipeline.
 
@@ -1172,8 +1047,6 @@ The self-hosted compiler MUST:
 - compile normal asmpython projects,
 - produce behavior equivalent to the bootstrap compiler,
 - support every production target needed to build the release.
-
-### 20.2 Fixed-point requirement
 
 A deterministic staged build MUST be demonstrated:
 
@@ -1186,8 +1059,6 @@ stage 3: stage 2 compiles asmpython
 
 Stage 2 and Stage 3 release artifacts MUST be byte-identical under the reproducible-build contract.
 
-### 20.3 No hidden bootstrap dependency
-
 Published self-hosted artifacts MUST not require CPython after build.
 
 Bootstrap instructions MUST be documented separately from normal end-user installation.
@@ -1195,8 +1066,6 @@ Bootstrap instructions MUST be documented separately from normal end-user instal
 ---
 
 ## 21. Public APIs, ABI, FFI, and library output
-
-### 21.1 Stable APIs
 
 3.14.0 MUST define and version:
 
@@ -1212,8 +1081,6 @@ Bootstrap instructions MUST be documented separately from normal end-user instal
 
 Breaking changes MUST be intentional, documented, and versioned.
 
-### 21.2 Real library output
-
 `--type library` MUST produce a genuinely callable library, not merely a shared container holding a whole-program `main` entry.
 
 The compiler MUST provide an ordinary Pythonic way, such as an importable decorator, to mark exported functions.
@@ -1228,9 +1095,7 @@ Exported functions MUST support:
 - target calling conventions,
 - generated headers or equivalent metadata.
 
-### 21.3 FFI
-
-The FFI MUST support the practical platform C ABI surface required by systems programming and package interoperability, including:
+The FFI MUST support:
 
 - integers of explicit widths,
 - floating-point values,
@@ -1248,22 +1113,11 @@ The FFI MUST support the practical platform C ABI surface required by systems pr
 
 FFI failures MUST become precise Python exceptions.
 
-### 21.4 ABI tests
-
-Every public ABI MUST have:
-
-- external-host tests,
-- symbol/export inspection,
-- invalid-input tests,
-- version-negotiation tests,
-- layout tests,
-- cross-language tests.
+Every public ABI MUST have external-host, symbol/export, invalid-input, version-negotiation, layout, and cross-language tests.
 
 ---
 
 ## 22. Security and isolation
-
-### 22.1 No hidden execution
 
 Produced applications MUST NOT silently execute source through:
 
@@ -1272,8 +1126,6 @@ Produced applications MUST NOT silently execute source through:
 - a system Python,
 - an undeclared subprocess,
 - a downloaded interpreter.
-
-### 22.2 PyinBin and PortaPy sandboxing
 
 PyinBin and PortaPy MUST support capability-based isolation.
 
@@ -1290,19 +1142,11 @@ Hosts MUST be able to control:
 - instruction or time limits,
 - cancellation.
 
-### 22.3 Resource limits
-
 Untrusted embedded code MUST be interruptible.
-
-Resource exhaustion MUST fail with controlled errors rather than corrupting the host process where technically possible.
-
-### 22.4 Compiler robustness
 
 The compiler front end, package reader, bytecode loader, object writers, and linkers MUST be fuzz-tested.
 
 Malformed source, bytecode, object files, packages, and manifests MUST not cause memory corruption.
-
-### 22.5 Dependency integrity
 
 Downloaded toolchains and dependencies MUST be verified by cryptographic hash or signature.
 
@@ -1312,13 +1156,7 @@ The release process MUST publish checksums and provenance for official artifacts
 
 ## 23. Measurable compatibility
 
-### 23.1 Internal suite
-
-Every required internal test MUST pass on every production backend and target.
-
-There is no acceptable release baseline containing known unexplained failures.
-
-### 23.2 CPython conformance
+Every required internal test MUST pass on every production backend and target. There is no acceptable release baseline containing known unexplained failures.
 
 The release MUST run the official CPython 3.14 test corpus against:
 
@@ -1327,15 +1165,11 @@ The release MUST run the official CPython 3.14 test corpus against:
 - PyinBin,
 - combined hybrid execution.
 
-Every discovered test/module MUST be recorded.
+Every discovered test and module MUST be recorded.
 
 Failures MAY be excluded only when they test CPython implementation internals rather than Python behavior, and every exclusion MUST include a documented reason.
 
-### 23.3 Differential semantics
-
-The conformance system MUST compare more than stdout.
-
-Where applicable it MUST compare:
+The conformance system MUST compare, where applicable:
 
 - exit status,
 - stdout,
@@ -1348,41 +1182,15 @@ Where applicable it MUST compare:
 - filesystem effects,
 - serialized results.
 
-### 23.4 Real-package corpus
+The compatibility scourer MUST run a versioned real-package corpus covering command-line tools, web libraries, serialization, parsing, networking, testing frameworks, async code, object-heavy applications, and packages with optional native extensions.
 
-The compatibility scourer MUST run a versioned real-package corpus covering:
-
-- command-line tools,
-- web libraries,
-- serialization,
-- parsing,
-- networking,
-- testing frameworks,
-- async code,
-- object-heavy applications,
-- packages with optional native extensions.
-
-The exact corpus and package versions MUST be published so results are reproducible.
-
-### 23.5 Public compatibility report
-
-3.14.0 MUST ship with a generated compatibility report showing:
-
-- native pass rate,
-- PyinBin pass rate,
-- combined pass rate,
-- standard-library status,
-- package-corpus status,
-- target status,
-- known implementation-defined differences.
+3.14.0 MUST ship with a generated compatibility report showing native pass rate, PyinBin pass rate, combined pass rate, standard-library status, package-corpus status, target status, and known implementation-defined differences.
 
 Compatibility claims MUST link to evidence.
 
 ---
 
 ## 24. Testing and verification discipline
-
-### 24.1 Required test types
 
 The project MUST maintain:
 
@@ -1405,50 +1213,21 @@ The project MUST maintain:
 - package tests,
 - reproducibility tests,
 - self-host tests,
-- security/fuzz tests.
-
-### 24.2 Independent low-level verification
+- security and fuzz tests.
 
 Hand-encoded instructions, object formats, relocations, unwind data, and ABI shims MUST be checked against independent platform tools or specifications.
 
-Examples include:
-
-- assembler bit comparison,
-- disassembler inspection,
-- `readelf`,
-- `objdump`,
-- `otool`,
-- PE/COFF inspection,
-- linker cross-checks,
-- debugger or syscall tracing,
-- real or QEMU execution.
+Examples include assembler bit comparison, disassembler inspection, `readelf`, `objdump`, `otool`, PE/COFF inspection, linker cross-checks, debugger or syscall tracing, and real or QEMU execution.
 
 Reasoning about low-level code without independent verification is insufficient.
 
-### 24.3 Sanitizers and analysis
-
-Where implementation components can be checked by platform sanitizers or equivalent tools, CI MUST include them.
-
 Static analysis, type checking, and linting MUST run on compiler and runtime sources.
 
-### 24.4 Long-running tests
-
-The release gate MUST include long-running tests for:
-
-- memory stability,
-- repeated imports,
-- repeated dynamic compilation,
-- exception-heavy workloads,
-- thread creation/destruction,
-- event loops,
-- PortaPy runtime recreation,
-- hybrid native/PyinBin calls.
+The release gate MUST include long-running tests for memory stability, repeated imports, repeated dynamic compilation, exception-heavy workloads, thread creation and destruction, event loops, PortaPy runtime recreation, and hybrid native/PyinBin calls.
 
 ---
 
 ## 25. Build speed, incremental builds, and cache correctness
-
-A simple CLI does not justify rebuilding an entire large project unnecessarily.
 
 3.14.0 MUST provide a content-addressed build cache for reusable stages where correctness permits.
 
@@ -1458,7 +1237,7 @@ The cache MUST:
 - include compiler version,
 - include target and profile,
 - include dependency hashes,
-- include relevant environment/toolchain identity,
+- include relevant environment and toolchain identity,
 - be safe under concurrent builds,
 - detect corruption,
 - be clearable through the CLI,
@@ -1493,22 +1272,18 @@ PortaPy MUST document whether separate runtime instances may execute concurrentl
 
 ---
 
-## 27. Installation, release artifacts, and updates
+## 27. Installation and official artifacts
 
-### 27.1 Installation
-
-The normal compiler installation SHOULD be available through ordinary Python packaging during bootstrap/development, including PyPI release distribution through the dedicated release branch policy.
+The normal compiler installation SHOULD be available through ordinary Python packaging during bootstrap and development, including PyPI release distribution through the dedicated release-branch policy.
 
 Installation MUST not require manual copying of repository internals.
-
-### 27.2 Official artifacts
 
 Official 3.14.0 releases MUST publish:
 
 - compiler packages,
 - self-hosted compiler executables where supported,
 - runtime libraries,
-- PyinBin executable/runtime artifacts,
+- PyinBin executable and runtime artifacts,
 - PortaPy artifacts from its separate project,
 - public headers,
 - documentation,
@@ -1518,9 +1293,7 @@ Official 3.14.0 releases MUST publish:
 - compatibility reports,
 - benchmark reports.
 
-### 27.3 Version consistency
-
-All artifacts MUST report consistent implementation versions and ABI versions.
+All artifacts MUST report consistent implementation and ABI versions.
 
 The release process MUST reject mismatched tags, branches, package metadata, and embedded versions.
 
@@ -1528,15 +1301,11 @@ The release process MUST reject mismatched tags, branches, package metadata, and
 
 ## 28. Documentation and governance
 
-### 28.1 Source of truth
-
 This file defines 3.14.0 release readiness.
 
 `RESUME.md` records current implementation state.
 
 Historical roadmaps MUST NOT override this file.
-
-### 28.2 Required documentation
 
 The release MUST document:
 
@@ -1547,8 +1316,8 @@ The release MUST document:
 - compiler architecture,
 - static/dynamic splitting,
 - PyinBin,
-- PortaPy relationship,
-- systems library,
+- the PortaPy relationship,
+- the systems library,
 - standard-library status,
 - package compatibility,
 - memory model,
@@ -1560,17 +1329,11 @@ The release MUST document:
 - known implementation-defined differences,
 - migration from prior asmpython releases.
 
-### 28.3 Generated status
-
 Feature and compatibility tables SHOULD be generated from tests and manifests rather than manually copied between documents.
 
 Stale status claims MUST be treated as documentation bugs.
 
-### 28.4 Demos
-
-Demos are valuable but are not 3.14.0 release blockers.
-
-They may be produced over time independently of the release gate.
+Demos are valuable but are not 3.14.0 release blockers. They may be produced over time independently of the release gate.
 
 ---
 
@@ -1584,21 +1347,23 @@ A 3.14.0 release candidate MUST include all of the following:
 4. complete one-command hybrid builds,
 5. PyinBin embedded as the dynamic execution runtime,
 6. separately released PortaPy native libraries,
-7. C and Java/JNI PortaPy integrations,
-8. coherent Pythonic systems library,
+7. an external C PortaPy host and at least one independent additional-language binding used only for ABI conformance,
+8. a coherent Pythonic systems library,
 9. broad measured Python 3.14 standard-library compatibility,
-10. normal pip/site-packages package integration,
-11. compatibility inspector,
+10. normal pip and site-packages integration,
+11. a compatibility inspector,
 12. Python-quality native, PyinBin, and mixed tracebacks,
 13. real memory management,
 14. reproducible builds,
 15. deterministic self-hosting,
 16. real callable library output and stable FFI,
-17. public compatibility report,
-18. public benchmark report,
+17. a public compatibility report,
+18. a public benchmark report,
 19. complete platform CI evidence,
 20. no known silent miscompilations,
 21. no advertised half-finished features.
+
+No downstream mod, game, plugin, or application is a 3.14.0 deliverable.
 
 ---
 
@@ -1609,7 +1374,7 @@ asmpython 3.14.0 MUST NOT be tagged final until all statements below are true:
 - [ ] Ordinary Python 3.14 source requires no asmpython dialect.
 - [ ] No Python grammar or semantics were changed.
 - [ ] All compiler-specific functionality is exposed Pythonically through libraries, decorators, configuration, or CLI options.
-- [ ] `asmpython build` performs complete native/hybrid packaging in one command.
+- [ ] `asmpython build` performs complete native and hybrid packaging in one command.
 - [ ] CLI behavior and exit codes are stable and tested.
 - [ ] x86-64 and ARM64 production backends pass all required suites.
 - [ ] Windows x86-64 and ARM64 are verified.
@@ -1618,8 +1383,9 @@ asmpython 3.14.0 MUST NOT be tagged final until all statements below are true:
 - [ ] Required freestanding targets boot and execute verified programs.
 - [ ] PyinBin is complete, Python-built, embedded, and independent of CPython.
 - [ ] Native/PyinBin object, call, exception, traceback, and lifetime boundaries are correct.
-- [ ] PortaPy is separately versioned and produces verified DLL/SO/dylib artifacts.
-- [ ] PortaPy C and Java/JNI hosts pass conformance tests.
+- [ ] PortaPy is separately versioned and produces verified DLL, SO, and dylib artifacts.
+- [ ] PortaPy's C host and at least one independently selected additional-language host pass conformance tests.
+- [ ] No downstream game, mod, plugin, or application is treated as an asmpython or PortaPy release requirement.
 - [ ] The systems-level API is coherent, Pythonic, and documented.
 - [ ] All public Python 3.14 standard-library modules are categorized and measured.
 - [ ] Package and wheel handling is production-ready.
@@ -1659,7 +1425,8 @@ The following are never acceptable shortcuts for completing 3.14.0:
 - reporting one combined compatibility percentage that hides native failures,
 - declaring a feature complete without failure-path behavior,
 - declaring a backend complete without independent execution evidence,
-- keeping known silent miscompilations for a later patch.
+- keeping known silent miscompilations for a later patch,
+- making a downstream mod, game, plugin, or application part of the compiler or interpreter release gate.
 
 ---
 
