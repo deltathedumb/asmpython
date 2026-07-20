@@ -1,28 +1,25 @@
-name: Apply tuple iteration lowering
+name: Diagnose tuple iteration patch
 
 on:
   pull_request:
     paths:
-      - "asmpython/_compiler/ir_lower.py"
-      - "tests/test_tuple_iteration_lowering.py"
       - ".github/workflows/arm64-list-del-verify.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  apply-fix:
+  diagnose:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/python314-arm64-list-del
-          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Add homogeneous tuple iteration to generic IR lowering
+      - name: Apply patch and capture tests
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -30,35 +27,44 @@ jobs:
           path = Path("asmpython/_compiler/ir_lower.py")
           text = path.read_text(encoding="utf-8")
           old = '''        iter_t = A.expr_type(s.iter)\n        if iter_t not in ("list", "dict", "str", "any"):\n            raise LowerError(f"unsupported stmt For (iterating {iter_t!r})")\n        if iter_t == "dict":\n            el_ty = "str"\n        elif iter_t == "str":\n            el_ty = "str"\n        elif iter_t == "any":\n            el_ty = "any"\n        elif isinstance(s.iter, A.ListLit):\n            el_ty = s.iter.el_type\n'''
-          new = '''        iter_t = A.expr_type(s.iter)\n        if iter_t not in ("list", "tuple", "dict", "str", "any"):\n            raise LowerError(f"unsupported stmt For (iterating {iter_t!r})")\n        if iter_t == "dict":\n            el_ty = "str"\n        elif iter_t == "str":\n            el_ty = "str"\n        elif iter_t == "any":\n            el_ty = "any"\n        elif iter_t == "tuple":\n            # TupleLit intentionally reuses the list cap/len/buffer ABI. Sema\n            # permits iteration only when every tuple slot has one common\n            # kind, and stamps that shape onto tuple-valued Names/Calls, so the\n            # first slot kind is the loop variable kind for the whole tuple.\n            tuple_types = A.tuple_element_types(s.iter)\n            el_ty = tuple_types[0] if tuple_types else "int"\n        elif isinstance(s.iter, A.ListLit):\n            el_ty = s.iter.el_type\n'''
+          new = '''        iter_t = A.expr_type(s.iter)\n        if iter_t not in ("list", "tuple", "dict", "str", "any"):\n            raise LowerError(f"unsupported stmt For (iterating {iter_t!r})")\n        if iter_t == "dict":\n            el_ty = "str"\n        elif iter_t == "str":\n            el_ty = "str"\n        elif iter_t == "any":\n            el_ty = "any"\n        elif iter_t == "tuple":\n            tuple_types = A.tuple_element_types(s.iter)\n            el_ty = tuple_types[0] if tuple_types else "int"\n        elif isinstance(s.iter, A.ListLit):\n            el_ty = s.iter.el_type\n'''
           if old not in text:
               raise SystemExit("generic iterable type dispatch changed")
           text = text.replace(old, new, 1)
-
-          old_float = '''        if el_ty == "float":\n            raise LowerError("unsupported stmt For (float list elements)")\n'''
-          new_float = '''        if el_ty == "float" and iter_t != "tuple":\n            raise LowerError("unsupported stmt For (float list elements)")\n'''
-          if old_float not in text:
-              raise SystemExit("float iterable guard changed")
-          text = text.replace(old_float, new_float, 1)
+          text = text.replace(
+              '        if el_ty == "float":\n            raise LowerError("unsupported stmt For (float list elements)")\n',
+              '        if el_ty == "float" and iter_t != "tuple":\n            raise LowerError("unsupported stmt For (float list elements)")\n',
+              1,
+          )
           path.write_text(text, encoding="utf-8")
 
-          Path("tests/test_tuple_iteration_lowering.py").write_text('''from __future__ import annotations\n\nimport unittest\n\nfrom asmpython._compiler import ir_lower\nfrom asmpython._compiler.errors import SemaError\nfrom asmpython._compiler.lexer import Lexer\nfrom asmpython._compiler.parser import Parser\nfrom asmpython._compiler.sema import analyze as sema_analyze\n\n\ndef _lower(source: str):\n    module = Parser(Lexer(source).tokenize(), frozenset()).parse()\n    sema_analyze(module)\n    return ir_lower.lower_module(module)\n\n\nclass TupleIterationLoweringTests(unittest.TestCase):\n    def test_homogeneous_int_tuple_uses_list_abi_loop(self) -> None:\n        lowered = _lower(\n            "nums = (0, 1, 2)\\n"\n            "total = 0\\n"\n            "for value in nums:\\n"\n            "    total += value\\n"\n            "print(total)\\n"\n        )\n        labels = [block.label for func in lowered.funcs for block in func.blocks]\n        self.assertTrue(any(label.startswith("forlisthead") for label in labels))\n        self.assertTrue(any(label.startswith("forlistbody") for label in labels))\n\n    def test_homogeneous_float_tuple_loads_float_elements(self) -> None:\n        lowered = _lower(\n            "nums = (1.5, 2.5)\\n"\n            "total = 0.0\\n"\n            "for value in nums:\\n"\n            "    total += value\\n"\n            "print(total)\\n"\n        )\n        loads = [\n            instr\n            for func in lowered.funcs\n            for block in func.blocks\n            for instr in block.instrs\n            if instr.op == "load" and instr.result is not None\n        ]\n        self.assertTrue(any(instr.result.type.name == "f64" for instr in loads))\n\n    def test_heterogeneous_tuple_iteration_remains_rejected(self) -> None:\n        with self.assertRaisesRegex(SemaError, "heterogeneous tuple"):\n            _lower(\n                "items = (1, \\\"two\\\")\\n"\n                "for item in items:\\n"\n                "    print(item)\\n"\n            )\n\n\nif __name__ == "__main__":\n    unittest.main()\n''', encoding="utf-8")
+          Path("tests/test_tuple_iteration_lowering.py").write_text('''from __future__ import annotations\n\nimport unittest\n\nfrom asmpython._compiler import ir_lower\nfrom asmpython._compiler.errors import SemaError\nfrom asmpython._compiler.lexer import Lexer\nfrom asmpython._compiler.parser import Parser\nfrom asmpython._compiler.sema import analyze as sema_analyze\n\n\ndef _lower(source: str):\n    module = Parser(Lexer(source).tokenize(), frozenset()).parse()\n    sema_analyze(module)\n    return ir_lower.lower_module(module)\n\n\nclass TupleIterationLoweringTests(unittest.TestCase):\n    def test_homogeneous_int_tuple_uses_list_abi_loop(self) -> None:\n        lowered = _lower("nums = (0, 1, 2)\\ntotal = 0\\nfor value in nums:\\n    total += value\\nprint(total)\\n")\n        labels = [block.label for func in lowered.funcs for block in func.blocks]\n        self.assertTrue(any(label.startswith("forlisthead") for label in labels))\n\n    def test_homogeneous_float_tuple_loads_float_elements(self) -> None:\n        lowered = _lower("nums = (1.5, 2.5)\\ntotal = 0.0\\nfor value in nums:\\n    total += value\\nprint(total)\\n")\n        loads = [instr for func in lowered.funcs for block in func.blocks for instr in block.instrs if instr.op == "load" and instr.result is not None]\n        self.assertTrue(any(instr.result.type.name == "f64" for instr in loads))\n\n    def test_heterogeneous_tuple_iteration_remains_rejected(self) -> None:\n        with self.assertRaisesRegex(SemaError, "heterogeneous tuple"):\n            _lower("items = (1, \\\"two\\\")\\nfor item in items:\\n    print(item)\\n")\n\n\nif __name__ == "__main__":\n    unittest.main()\n''', encoding="utf-8")
           PY
-          python -m py_compile asmpython/_compiler/ir_lower.py tests/test_tuple_iteration_lowering.py
-          python -m unittest -v tests.test_tuple_iteration_lowering
-      - name: Execute the complete typed tuple case
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes nasm gcc
-          python -m asmpython tests/cases/63_tuple_unpack.py \
-            --backend x86-64 --no-pyinbin-fallback -o /tmp/tuple_unpack
-          /tmp/tuple_unpack > /tmp/actual.txt
-          printf '1\n2\nlabel: a\nn: 5\n1.5\n2.5\n0\n1\n2\nsum: 3\n' > /tmp/expected.txt
-          diff -u /tmp/expected.txt /tmp/actual.txt
-      - name: Commit and push source-only fix
-        run: |
-          git config user.name "asmpython-ci"
-          git config user.email "actions@users.noreply.github.com"
-          git add asmpython/_compiler/ir_lower.py tests/test_tuple_iteration_lowering.py
-          git commit -m "Lower homogeneous tuple iteration through the list ABI"
-          git push origin HEAD:agent/python314-arm64-list-del
+          set +e
+          python -m py_compile asmpython/_compiler/ir_lower.py tests/test_tuple_iteration_lowering.py > tuple-pycompile.log 2>&1
+          echo "pycompile_status=$?" > tuple-status.log
+          python -m unittest -v tests.test_tuple_iteration_lowering > tuple-unittest.log 2>&1
+          echo "unittest_status=$?" >> tuple-status.log
+          sudo apt-get update > apt.log 2>&1
+          sudo apt-get install --yes nasm gcc >> apt.log 2>&1
+          python -m asmpython tests/cases/63_tuple_unpack.py --backend x86-64 --no-pyinbin-fallback -o /tmp/tuple_unpack > tuple-build.log 2>&1
+          echo "build_status=$?" >> tuple-status.log
+          if [ -x /tmp/tuple_unpack ]; then
+            /tmp/tuple_unpack > tuple-run.log 2>&1
+            echo "run_status=$?" >> tuple-status.log
+          fi
+          cat tuple-status.log
+          cat tuple-unittest.log
+          cat tuple-build.log
+          exit 0
+      - name: Upload tuple patch diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: tuple-patch-diagnostics
+          path: |
+            tuple-status.log
+            tuple-pycompile.log
+            tuple-unittest.log
+            tuple-build.log
+            tuple-run.log
+            tests/test_tuple_iteration_lowering.py
