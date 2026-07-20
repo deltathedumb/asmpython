@@ -1,0 +1,161 @@
+name: Apply metaclass keyword parsing
+
+on:
+  push:
+    branches: [beta/3.14.0]
+    paths:
+      - ".github/workflows/apply-metaclass-keyword-fix.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: beta/3.14.0
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install native toolchain
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm
+      - name: Add metaclass keyword AST and parser support
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          ast_path = Path("asmpython/_compiler/ast_nodes.py")
+          ast = ast_path.read_text(encoding="utf-8")
+          ast_old = '''    # `interface` extension: set when declared `class X(interface=Name):`.
+              implements_interface: "str | None" = None
+          '''
+          ast_new = '''    # `interface` extension: set when declared `class X(interface=Name):`.
+              implements_interface: "str | None" = None
+              # Explicit Python class-header metaclass, e.g. `class X(metaclass=Meta):`.
+              # The parser preserves this even when later compilation phases do not need
+              # to inspect the metaclass for a particular class.
+              metaclass: "str | None" = None
+          '''
+          if ast_old not in ast:
+              raise SystemExit("ClassDef tail not found")
+          ast_path.write_text(ast.replace(ast_old, ast_new, 1), encoding="utf-8")
+
+          parser_path = Path("asmpython/_compiler/parser.py")
+          parser = parser_path.read_text(encoding="utf-8")
+          parser = parser.replace(
+              '        implements_interface: "str | None" = None\n',
+              '        implements_interface: "str | None" = None\n        metaclass_name: "str | None" = None\n',
+              1,
+          )
+          first_anchor = '''                elif (
+                      self._check("NAME", "interface")
+                      and self._peek(1).kind == "OP"
+                      and self._peek(1).value == "="
+                  ):
+                      # `class X(interface=Name):` -- the `interface`
+                      # extension's structural-conformance declaration. Same
+                      # keyword-arg-shape recognition as `permits=`, but
+                      # captures a single NAME (not a comma-list).
+                      self._eat()  # 'interface'
+                      self._eat()  # '='
+                      implements_interface = self._expect("NAME").value
+                  else:
+          '''
+          first_replacement = '''                elif (
+                      self._check("NAME", "interface")
+                      and self._peek(1).kind == "OP"
+                      and self._peek(1).value == "="
+                  ):
+                      # `class X(interface=Name):` -- the `interface`
+                      # extension's structural-conformance declaration. Same
+                      # keyword-arg-shape recognition as `permits=`, but
+                      # captures a single NAME (not a comma-list).
+                      self._eat()  # 'interface'
+                      self._eat()  # '='
+                      implements_interface = self._expect("NAME").value
+                  elif (
+                      self._check("NAME", "metaclass")
+                      and self._peek(1).kind == "OP"
+                      and self._peek(1).value == "="
+                  ):
+                      self._eat()  # 'metaclass'
+                      self._eat()  # '='
+                      metaclass_name = self._expect("NAME").value
+                      while self._check("OP", "."):
+                          self._eat()
+                          metaclass_name = self._expect("NAME").value
+                  else:
+          '''
+          if first_anchor not in parser:
+              raise SystemExit("first class keyword branch not found")
+          parser = parser.replace(first_anchor, first_replacement, 1)
+
+          comma_anchor = '''                    if (
+                          self._check("NAME", "interface")
+                          and self._peek(1).kind == "OP"
+                          and self._peek(1).value == "="
+                      ):
+                          self._eat()  # 'interface'
+                          self._eat()  # '='
+                          implements_interface = self._expect("NAME").value
+                          break
+                      self._parse_expr()
+          '''
+          comma_replacement = '''                    if (
+                          self._check("NAME", "interface")
+                          and self._peek(1).kind == "OP"
+                          and self._peek(1).value == "="
+                      ):
+                          self._eat()  # 'interface'
+                          self._eat()  # '='
+                          implements_interface = self._expect("NAME").value
+                          break
+                      if (
+                          self._check("NAME", "metaclass")
+                          and self._peek(1).kind == "OP"
+                          and self._peek(1).value == "="
+                      ):
+                          self._eat()  # 'metaclass'
+                          self._eat()  # '='
+                          metaclass_name = self._expect("NAME").value
+                          while self._check("OP", "."):
+                              self._eat()
+                              metaclass_name = self._expect("NAME").value
+                          continue
+                      self._parse_expr()
+          '''
+          if comma_anchor not in parser:
+              raise SystemExit("extra class keyword branch not found")
+          parser = parser.replace(comma_anchor, comma_replacement, 1)
+
+          return_anchor = '''            sealed_permits=sealed_permits,
+                  implements_interface=implements_interface,
+              )
+          '''
+          return_replacement = '''            sealed_permits=sealed_permits,
+                  implements_interface=implements_interface,
+                  metaclass=metaclass_name,
+              )
+          '''
+          if return_anchor not in parser:
+              raise SystemExit("ClassDef return tail not found")
+          parser_path.write_text(parser.replace(return_anchor, return_replacement, 1), encoding="utf-8")
+          PY
+      - name: Compile and run metaclass keyword regression
+        run: |
+          python -m asmpython tests/cases/464_metaclass_keyword.py \
+            --target linux -o /tmp/asmpython-metaclass-keyword
+          output=$(/tmp/asmpython-metaclass-keyword)
+          printf '%s\n' "$output"
+          test "$output" = "42"
+      - name: Commit verified compiler fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-metaclass-keyword-fix.yml
+          git add asmpython/_compiler/ast_nodes.py asmpython/_compiler/parser.py
+          git commit -m "Parse class metaclass keyword arguments"
+          git push origin HEAD:beta/3.14.0
