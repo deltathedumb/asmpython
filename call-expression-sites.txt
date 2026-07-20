@@ -1,0 +1,296 @@
+=== A.Call references ===
+asmpython/_compiler/program.py:363:    if isinstance(node, A.Call):
+asmpython/_compiler/program.py:958:    """Recursively rewrite every `A.Call.func` and `A.ClosureBind.func_name`
+asmpython/_compiler/program.py:1044:    if isinstance(e, A.Call):
+asmpython/_compiler/parser.py:214:            elif isinstance(node, A.Call):
+asmpython/_compiler/parser.py:459:        """Collect every `A.Call.func` name reachable inside a statement
+asmpython/_compiler/parser.py:526:        if isinstance(e, A.Call):
+asmpython/_compiler/parser.py:818:            call = A.Call(func=tmp_name, args=[A.Name(name=func_name, pos=pos)], pos=pos)
+asmpython/_compiler/parser.py:2081:            # call-by-name representation (A.Call.func is a bare str, the
+asmpython/_compiler/parser.py:2103:            call = A.Call(
+asmpython/_compiler/parser.py:2125:            call = A.Call(
+asmpython/_compiler/parser.py:3069:                atom = A.Call(func=t.value, args=args, kwargs=kwargs, pos=t.pos)  # type: ignore
+asmpython/_compiler/parser.py:3369:            return A.Call(func="set", args=[comp], kwargs=[], pos=start)  # type: ignore
+asmpython/_compiler/ast_nodes.py:954:    # `overload` extension: mirrors A.Call.resolved_overload_symbol -- the
+asmpython/_compiler/sema.py:529:# call-emission, which read A.Call.resolved_overload_symbol back rather
+asmpython/_compiler/sema.py:555:    populated: `A.Call.func`, `A.MethodCall.method`, bare `A.Name` refs. It
+asmpython/_compiler/sema.py:594:        elif isinstance(node, A.Call):
+asmpython/_compiler/sema.py:1469:        if isinstance(value, A.Call) and value.func in ("bytes", "bytearray"):
+asmpython/_compiler/sema.py:1471:        if isinstance(value, A.Call) and value.func in self.classes:
+asmpython/_compiler/sema.py:1496:        if isinstance(value, A.Call) or isinstance(value, A.MethodCall) or isinstance(value, A.Attr):
+asmpython/_compiler/sema.py:1507:        """Recursively collect every `A.Call`/`A.MethodCall` reachable from a
+asmpython/_compiler/sema.py:1580:        if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:1687:            sites = [c for c in calls if isinstance(c, A.Call) and c.func == f.name]
+asmpython/_compiler/sema.py:1694:                        c2 for c2 in calls if isinstance(c2, A.Call) and c2.func == c.name
+asmpython/_compiler/sema.py:1712:        functions, 1 for methods to skip `self`) from `sites` (the `A.Call`/
+asmpython/_compiler/sema.py:1781:        sites = [c for c in calls if isinstance(c, A.Call) and c.func == target]
+asmpython/_compiler/sema.py:1842:            elif isinstance(e, A.Call):
+asmpython/_compiler/sema.py:2357:                        isinstance(dv, A.Call)
+asmpython/_compiler/sema.py:2373:                isinstance(value, A.Call)
+asmpython/_compiler/sema.py:2600:            if not (isinstance(v, A.Call) and v.func == "Sig" and len(v.args) == 2):
+asmpython/_compiler/sema.py:2650:                # A.Call(func="Code", ...) instead of A.MethodCall. Not yet
+asmpython/_compiler/sema.py:2816:            if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:2817:                return A.Call(
+asmpython/_compiler/sema.py:3029:                value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
+asmpython/_compiler/sema.py:3045:                iter_expr = A.Call(func="range", args=list(_for_loop.range_args), pos=pos)
+asmpython/_compiler/sema.py:3054:                value=A.Call(func="list", args=[renamed_iter], pos=pos),
+asmpython/_compiler/sema.py:3091:            _cmp_ops.append(A.Call(func="len", args=[
+asmpython/_compiler/sema.py:3103:                value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
+asmpython/_compiler/sema.py:3132:                value=A.Call(
+asmpython/_compiler/sema.py:3175:        if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:3176:            return A.Call(func=e.func, args=[self._rename_expr(a, local_names) for a in e.args], pos=e.pos,
+asmpython/_compiler/sema.py:3528:                        if isinstance(fvalue, A.Call):
+asmpython/_compiler/sema.py:3529:                            _fv_call: A.Call = fvalue
+asmpython/_compiler/sema.py:3533:                        if isinstance(fvalue, A.Call) and _func_nm == "field":
+asmpython/_compiler/sema.py:3534:                            _fv_call2: A.Call = fvalue
+asmpython/_compiler/sema.py:4156:                if isinstance(s, A.Assign) and isinstance(s.value, A.Call):
+asmpython/_compiler/sema.py:4217:        `te` is the second argument: a class reference (`A.Call`, `Token`), a
+asmpython/_compiler/sema.py:4241:            isinstance(expr, A.Call)
+asmpython/_compiler/sema.py:4358:        if it is None or not isinstance(it, A.Call):
+asmpython/_compiler/sema.py:4372:            and isinstance(it.args[0], A.Call)
+asmpython/_compiler/sema.py:4418:        if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:4441:        if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:4464:        if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:4485:        A.MethodCall and A.Call are trusted:
+asmpython/_compiler/sema.py:4522:        if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:4535:        if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:4549:        if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:4575:        if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:4593:        if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:4651:        if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:4652:            _e_call: A.Call = e
+asmpython/_compiler/sema.py:4763:        if isinstance(el, A.Call) and el.func in ("list", "sorted"):
+asmpython/_compiler/sema.py:4765:        if isinstance(el, A.Call) and el.func == "tuple":
+asmpython/_compiler/sema.py:4767:        if isinstance(el, A.Call) and el.func in ("dict",):
+asmpython/_compiler/sema.py:4769:        if isinstance(el, A.Call) and el.func in ("set",):
+asmpython/_compiler/sema.py:4950:        if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:5144:            and isinstance(value, A.Call)
+asmpython/_compiler/sema.py:5385:                    s.values[0], (A.TupleLit, A.Call, A.MethodCall)
+asmpython/_compiler/sema.py:5562:                and isinstance(s.iter, A.Call)
+asmpython/_compiler/sema.py:6168:            is_exc_ctor = isinstance(s.value, A.Call) and (
+asmpython/_compiler/sema.py:6431:            len_call = A.Call(
+asmpython/_compiler/sema.py:6456:                                left=A.Call(
+asmpython/_compiler/sema.py:6564:            isinstance_call = A.Call(func="isinstance", args=_isinst_args, pos=pattern.pos)
+asmpython/_compiler/sema.py:7229:        if isinstance(e, A.Call):
+asmpython/_compiler/sema.py:7330:                isinstance(e.iter, A.Call)
+asmpython/_compiler/sema.py:7474:                isinstance(e.iter, A.Call)
+asmpython/_compiler/sema.py:8174:            # plain call to the merged symbol. Rewrite the node into an A.Call
+asmpython/_compiler/sema.py:8184:                e.__class__ = A.Call  # type: ignore[assignment]
+asmpython/_compiler/sema.py:8202:                e.__class__ = A.Call  # type: ignore[assignment]
+asmpython/_compiler/sema.py:8616:                    # recursing (mirrors the existing `e.__class__ = A.Call`
+asmpython/_compiler/sema.py:9345:            _ec: A.Call = e
+asmpython/_compiler/sema.py:9418:            _ec2: A.Call = e
+asmpython/_compiler/sema.py:9450:    def _extract_dstar(self, e: A.Call) -> None:
+asmpython/_compiler/sema.py:9464:    def _expand_dstar_kwarg(self, e: A.Call, param_names: list, scope: Scope) -> None:
+asmpython/_compiler/sema.py:9490:    def _check_call(self, e: A.Call, scope: Scope) -> None:
+asmpython/_compiler/sema.py:9514:        # `A.Call` parameter, an external/opaque type to sema, so e.func
+asmpython/_compiler/ir_lower.py:69:    if isinstance(value, A.Call):
+asmpython/_compiler/ir_lower.py:1300:        isinstance(e.iter, A.Call)
+asmpython/_compiler/ir_lower.py:1492:        isinstance(e.iter, A.Call)
+asmpython/_compiler/ir_lower.py:1610:        isinstance(e.iter, A.Call)
+asmpython/_compiler/ir_lower.py:2368:    elif isinstance(e, A.Call):
+asmpython/_compiler/ir_lower.py:3761:def _lower_isinstance(ctx: _FuncCtx, e: A.Call) -> IRValue:
+asmpython/_compiler/ir_lower.py:3903:        and isinstance(key_body, A.Call)
+asmpython/_compiler/ir_lower.py:4040:def _lower_minmax(ctx: _FuncCtx, e: A.Call) -> IRValue:
+asmpython/_compiler/ir_lower.py:4168:def _lower_sorted(ctx: _FuncCtx, e: A.Call) -> IRValue:
+asmpython/_compiler/ir_lower.py:4425:def _lower_thread_ctor(ctx: _FuncCtx, e: A.Call) -> IRValue:
+asmpython/_compiler/ir_lower.py:5070:    if isinstance(e, A.Call) and e.func == "len" and len(e.args) == 1 and A.expr_type(e.args[0]) == "str":
+asmpython/_compiler/ir_lower.py:5076:    if isinstance(e, A.Call) and e.func == "len" and len(e.args) == 1 and A.expr_type(e.args[0]) in ("list", "tuple"):
+asmpython/_compiler/ir_lower.py:5085:        isinstance(e, A.Call)
+asmpython/_compiler/ir_lower.py:5105:    if isinstance(e, A.Call) and e.func == "len" and len(e.args) == 1 and A.expr_type(e.args[0]) in ("dict", "set", "any", "int"):
+asmpython/_compiler/ir_lower.py:5113:    if isinstance(e, A.Call) and e.func == "ord" and len(e.args) == 1:
+asmpython/_compiler/ir_lower.py:5123:    if isinstance(e, A.Call) and e.func == "callable" and len(e.args) == 1:
+asmpython/_compiler/ir_lower.py:5154:    if isinstance(e, A.Call) and e.func == "print":
+asmpython/_compiler/ir_lower.py:5196:    if isinstance(e, A.Call) and e.func == "getattr" and len(e.args) in (2, 3):
+asmpython/_compiler/ir_lower.py:5229:    if isinstance(e, A.Call) and e.func == "hasattr" and len(e.args) == 2:
+asmpython/_compiler/ir_lower.py:5265:    if isinstance(e, A.Call) and e.func == "setattr" and len(e.args) == 3:
+asmpython/_compiler/ir_lower.py:5272:    if isinstance(e, A.Call) and e.func == "isinstance" and len(e.args) == 2:
+asmpython/_compiler/ir_lower.py:5276:        isinstance(e, A.Call)
+asmpython/_compiler/ir_lower.py:5279:        and isinstance(e.args[0], A.Call)
+asmpython/_compiler/ir_lower.py:5417:        isinstance(e, A.Call)
+asmpython/_compiler/ir_lower.py:5420:        and isinstance(e.args[0], A.Call)
+asmpython/_compiler/ir_lower.py:5536:        isinstance(e, A.Call)
+asmpython/_compiler/ir_lower.py:5560:    if isinstance(e, A.Call) and e.func == "dict" and len(e.args) in (0, 1):
+asmpython/_compiler/ir_lower.py:5646:    if isinstance(e, A.Call) and e.func in ("set", "frozenset") and len(e.args) in (0, 1):
+asmpython/_compiler/ir_lower.py:5741:    if isinstance(e, A.Call) and e.func == "sum" and len(e.args) in (1, 2):
+asmpython/_compiler/ir_lower.py:5797:    if isinstance(e, A.Call) and e.func in ("any", "all") and len(e.args) == 1:
+asmpython/_compiler/ir_lower.py:5869:    if isinstance(e, A.Call) and e.func == "range" and len(e.args) in (1, 2, 3):
+asmpython/_compiler/ir_lower.py:5872:        # (via `s.range_args`) and never reaches this generic A.Call
+asmpython/_compiler/ir_lower.py:5898:    if isinstance(e, A.Call) and e.func in ("bytes", "bytearray"):
+asmpython/_compiler/ir_lower.py:7283:            and isinstance(e.obj, A.Call)
+asmpython/_compiler/ir_lower.py:7418:    if isinstance(e, A.Call) and e.func in ctx.mctx.class_names:
+asmpython/_compiler/ir_lower.py:7439:    if isinstance(e, A.Call) and e.func in ctx.mctx.ffi_funcs:
+asmpython/_compiler/ir_lower.py:7486:    if isinstance(e, A.Call):
+asmpython/_compiler/ir_lower.py:7890:    if it is None or not isinstance(it, A.Call):
+asmpython/_compiler/ir_lower.py:7900:        and isinstance(it.args[0], A.Call)
+asmpython/_compiler/ir_lower.py:8054:            and isinstance(s.value, A.Call)
+asmpython/_compiler/ir_lower.py:8493:            and isinstance(s.iter, A.Call)
+asmpython/_compiler/ir_lower.py:8954:        if isinstance(s.value, A.Call) and s.value.args:
+asmpython/_compiler/ir_lower.py:9421:                # max()'s A.Call case just below; MethodCall needs its own
+asmpython/_compiler/ir_lower.py:9422:                # check since list.sort() isn't an A.Call at all.
+asmpython/_compiler/ir_lower.py:9426:        elif isinstance(node, A.Call):
+asmpython/_compiler/ir_lower.py:9750:    if isinstance(st, A.ExprStmt) and isinstance(st.expr, A.Call):
+asmpython/_compiler/ir_lower.py:9754:        and isinstance(st.value, A.Call)
+asmpython/_compiler/ir_lower.py:9757:        and isinstance(st.value.args[0], A.Call)
+asmpython/_compiler/codegen.py:252:            if not (isinstance(s, A.Assign) and isinstance(s.value, A.Call)):
+asmpython/_compiler/codegen.py:459:        """Rewrite all A.Call.func fields that are import aliases to the
+asmpython/_compiler/codegen.py:469:            if isinstance(e, A.Call):
+asmpython/_compiler/codegen.py:1400:        Covers both `w = make_adder(3)` (A.Call) and `w = reg.register("x")`
+asmpython/_compiler/codegen.py:1405:        if isinstance(value, A.Call) and isinstance(value.func, str):
+asmpython/_compiler/codegen.py:1492:                isinstance(expr.iter, A.Call)
+asmpython/_compiler/codegen.py:1580:                isinstance(expr.iter, A.Call)
+asmpython/_compiler/codegen.py:1586:                isinstance(expr.iter, A.Call)
+asmpython/_compiler/codegen.py:1796:        elif isinstance(expr, A.Call):
+asmpython/_compiler/codegen.py:1910:                    isinstance(a0, A.Call)
+asmpython/_compiler/codegen.py:1920:                        isinstance(a0, A.Call)
+asmpython/_compiler/codegen.py:1946:                if isinstance(a0, A.Call) and a0.func == "zip":
+asmpython/_compiler/codegen.py:2033:                                    isinstance(fdefault, A.Call)
+asmpython/_compiler/codegen.py:2336:                    and isinstance(s.value, A.Call)
+asmpython/_compiler/codegen.py:2345:                    and isinstance(s.value, A.Call)
+asmpython/_compiler/codegen.py:2413:                and isinstance(s.iter, A.Call)
+asmpython/_compiler/codegen.py:2690:                and isinstance(stmt.value, A.Call)
+asmpython/_compiler/codegen.py:2697:                and isinstance(stmt.value, A.Call)
+asmpython/_compiler/codegen.py:3192:            if isinstance(stmt.value, A.Call) and stmt.value.func == "SystemExit":
+asmpython/_compiler/codegen.py:3205:                isinstance(stmt.value, A.Call)
+asmpython/_compiler/codegen.py:3324:        if it is None or not isinstance(it, A.Call):
+asmpython/_compiler/codegen.py:3338:            and isinstance(it.args[0], A.Call)
+asmpython/_compiler/codegen.py:3372:            and isinstance(stmt.iter, A.Call)
+asmpython/_compiler/codegen.py:4164:        if isinstance(expr, A.Call):
+asmpython/_compiler/codegen.py:4679:            # `A.Call` used as a value: whole-program merging flattened the
+asmpython/_compiler/codegen.py:9955:            isinstance(e.iter, A.Call)
+asmpython/_compiler/codegen.py:10504:            isinstance(e.iter, A.Call)
+asmpython/_compiler/codegen.py:10514:            isinstance(e.iter, A.Call)
+asmpython/_compiler/codegen.py:10724:    def _gen_list_call(self, e: A.Call, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:10735:        if isinstance(arg0, A.Call) and arg0.func == "filter" and len(arg0.args) == 2:
+asmpython/_compiler/codegen.py:10740:            isinstance(arg0, A.Call)
+asmpython/_compiler/codegen.py:10748:        if isinstance(arg0, A.Call) and arg0.func == "zip":
+asmpython/_compiler/codegen.py:10767:        self, outer: A.Call, filter_call: A.Call, info: FuncInfo
+asmpython/_compiler/codegen.py:10835:    def _gen_list_map(self, outer: A.Call, map_call: A.Call, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:10889:    def _gen_list_zip(self, outer: A.Call, zip_call: A.Call, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:11081:    def _gen_set_call(self, e: A.Call, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:13631:    def _gen_call(self, e: A.Call, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:14295:                elif isinstance(arg, A.Call):
+asmpython/_compiler/codegen.py:14296:                    _ac: A.Call = arg
+asmpython/_compiler/codegen.py:15018:        if isinstance(value, A.Call):
+asmpython/_compiler/codegen.py:15044:    def _gen_isinstance(self, e: A.Call, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:15236:    def _gen_constructor(self, e: A.Call, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:15303:                    if isinstance(fdef0, A.Call) and fdef0.func == "field":
+asmpython/_compiler/codegen.py:15350:            # Direct field access: e is this function's own A.Call parameter,
+asmpython/_compiler/codegen.py:15375:                if isinstance(val_expr, A.Call) and val_expr.func == "field":
+asmpython/_compiler/codegen.py:15930:    def _gen_print(self, e: A.Call, info: FuncInfo) -> None:
+
+=== Call emission helpers ===
+asmpython/_compiler/program.py:957:def _rename_call_targets(stmts: list, renames: dict[str, str]) -> None:
+asmpython/_compiler/program.py:1043:def _rename_call_targets_expr(e, renames: dict[str, str]) -> None:
+asmpython/_compiler/parser.py:458:    def _collect_called_names(stmts: list, out: set) -> None:
+asmpython/_compiler/parser.py:525:    def _collect_called_names_expr(e, out: set) -> None:
+asmpython/_compiler/parser.py:3171:    def _parse_call_args(self):
+asmpython/_compiler/target_linux.py:91:    def emit_call(self, target: str) -> None:
+asmpython/_compiler/target_linux.py:333:    def _emit_call_libc_double_double(self, fn: str) -> None:
+asmpython/_compiler/target_linux.py:382:    def _emit_call_setjmp(self, buf_off: int) -> None:
+asmpython/_compiler/target_linux.py:386:    def _emit_call_longjmp_with_buf_in_rax(self) -> None:
+asmpython/_compiler/sema.py:1506:    def _collect_calls_stmts(self, stmts: list, out: list) -> None:
+asmpython/_compiler/sema.py:1579:    def _collect_calls_expr(self, e, out: list) -> None:
+asmpython/_compiler/sema.py:1708:    def _infer_call_target_params(
+asmpython/_compiler/sema.py:1951:        e.g. `def f(x): return x` called as `f("hi")` makes `f("hi")` a str
+asmpython/_compiler/sema.py:4129:        # upgrade their FuncSig ret_type to "closure" so call sites get the
+asmpython/_compiler/sema.py:4154:        def _retype_closure_calls(stmts: list) -> None:
+asmpython/_compiler/sema.py:4160:                    _retype_closure_calls(s.body)
+asmpython/_compiler/sema.py:4162:                    _retype_closure_calls(s.then)
+asmpython/_compiler/sema.py:4163:                    _retype_closure_calls(s.orelse)
+asmpython/_compiler/sema.py:4165:                    _retype_closure_calls(s.body)
+asmpython/_compiler/sema.py:4166:        _retype_closure_calls(self.mod.body)
+asmpython/_compiler/sema.py:8937:        resolves to a function-pointer value loaded via the same indirect-call
+asmpython/_compiler/sema.py:9193:    def _check_ffi_call(
+asmpython/_compiler/sema.py:9490:    def _check_call(self, e: A.Call, scope: Scope) -> None:
+asmpython/_compiler/sema.py:10136:        # and other indirect callables type-check before cross-module
+asmpython/_compiler/target_freestanding.py:52:    def _caller_shadow_space(self) -> int:
+asmpython/_compiler/target_freestanding.py:55:    def emit_call(self, target: str) -> None:
+asmpython/_compiler/target_freestanding.py:136:    def _emit_call_libc_double_double(self, fn: str) -> None:
+asmpython/_compiler/target_freestanding.py:182:    def _emit_call_setjmp(self, buf_off: int) -> None:
+asmpython/_compiler/target_freestanding.py:185:    def _emit_call_longjmp_with_buf_in_rax(self) -> None:
+asmpython/_compiler/ir_lower.py:3854:def _lower_sort_key_call(ctx: _FuncCtx, sort_key: A.Lambda, el_kind: str, item_v: IRValue) -> IRValue | None:
+asmpython/_compiler/ir_lower.py:4327:def _literal_call_args_list(expr: A.Expr) -> list[A.Expr]:
+asmpython/_compiler/ir_lower.py:4337:def _literal_call_kwargs(expr: A.Expr) -> list[tuple[str, A.Expr]]:
+asmpython/_compiler/ir_lower.py:9323:def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef]]:
+asmpython/_compiler/ir_lower.py:9740:def _is_bare_main_call(st) -> bool:
+asmpython/_compiler/ir_lower.py:9879:# backend's "call" IRInstr op already supports an indirect call whenever
+asmpython/_compiler/ir_lower.py:9883:# already exercised by ordinary lambda/closure calls elsewhere in this
+asmpython/_compiler/ir_lower.py:9934:def _lower_dynamic_call(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
+asmpython/_compiler/codegen.py:1422:    def _is_closure_factory_call(self, value) -> bool:
+asmpython/_compiler/codegen.py:1429:        gets tagged "closure" -- the call site then takes the plain
+asmpython/_compiler/codegen.py:1451:            # closure's [MAGIC, fn_ptr, captured_vars...] list -- calling
+asmpython/_compiler/codegen.py:2329:                if self._is_closure_factory_call(s.value):
+asmpython/_compiler/codegen.py:10724:    def _gen_list_call(self, e: A.Call, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:10835:    def _gen_list_map(self, outer: A.Call, map_call: A.Call, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:10889:    def _gen_list_zip(self, outer: A.Call, zip_call: A.Call, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:11081:    def _gen_set_call(self, e: A.Call, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:11599:    def _gen_method_call(self, e: A.MethodCall, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:11651:        # is `@handle.imported`-decorated: indirect call through the function
+asmpython/_compiler/codegen.py:11656:        # the same shape as a closure call (see the lambda/sorted-key call
+asmpython/_compiler/codegen.py:12644:        # this closure needs shared, advancing state across calls, and
+asmpython/_compiler/codegen.py:13514:    def _eval_call_operands(
+asmpython/_compiler/codegen.py:13540:    def _load_call_operands(
+asmpython/_compiler/codegen.py:13626:    def _caller_shadow_space(self) -> int:
+asmpython/_compiler/codegen.py:13631:    def _gen_call(self, e: A.Call, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:14599:                # Detect closure call: variable type is "closure".
+asmpython/_compiler/codegen.py:14773:        indirect-call convention."""
+asmpython/_compiler/codegen.py:15540:    def _gen_ffi_call(self, fn: stdlib.Func, args: list, info: FuncInfo) -> None:
+asmpython/_compiler/codegen.py:15634:    def _gen_dynamic_call(
+asmpython/_compiler/codegen.py:15734:        # Always reserve shadow space before the indirect `call rax` below,
+asmpython/_compiler/codegen.py:15921:    def emit_call(self, target: str) -> None:
+asmpython/_compiler/codegen.py:16545:    def _emit_call_libc_double_double(self, fn: str) -> None:
+asmpython/_compiler/codegen.py:16551:    def _emit_call_setjmp(self, buf_off: int) -> None:
+asmpython/_compiler/target_windows.py:138:    def _caller_shadow_space(self) -> int:
+asmpython/_compiler/target_windows.py:145:    def emit_call(self, target: str) -> None:
+asmpython/_compiler/target_windows.py:450:    def _emit_call_libc_double_double(self, fn: str) -> None:
+asmpython/_compiler/target_windows.py:506:    def _emit_call_setjmp(self, buf_off: int) -> None:
+asmpython/_compiler/target_windows.py:510:    def _emit_call_longjmp_with_buf_in_rax(self) -> None:
+
+=== type built-in handling ===
+asmpython/_compiler/parser.py:3278:                # the Call node's inferred_type is read as "any"-typed
+asmpython/_compiler/ast_nodes.py:684:    # Filled in by sema when inferred_type == "list" and list_el_type is
+asmpython/_compiler/ast_nodes.py:691:    # Filled in by sema when inferred_type == "dict" and value_type is itself
+asmpython/_compiler/ast_nodes.py:747:    `inferred_type` / `list_el_type` are filled in by sema.
+asmpython/_compiler/ast_nodes.py:764:    that value. `inferred_type` / `list_el_type` mirror `value`'s type and
+asmpython/_compiler/ast_nodes.py:1148:            return e.inferred_type  # type: ignore
+asmpython/_compiler/ast_nodes.py:1154:        if getattr(e, "inferred_type", None) in ("type", "any", "set", "dict", "list", "str"):
+asmpython/_compiler/ast_nodes.py:1155:            return e.inferred_type  # type: ignore
+asmpython/_compiler/sema.py:6752:                e.inferred_type = "type"
+asmpython/_compiler/sema.py:6766:            e.inferred_type = scope.types[e.name]
+asmpython/_compiler/sema.py:6795:                        e.inferred_type = ty  # type: ignore
+asmpython/_compiler/sema.py:6799:                        e.inferred_type = "any"  # type: ignore
+asmpython/_compiler/sema.py:6813:                    e.inferred_type = "str"  # type: ignore
+asmpython/_compiler/sema.py:6820:                    e.inferred_type = "float"  # type: ignore
+asmpython/_compiler/sema.py:6822:                e.inferred_type = "any"  # type: ignore
+asmpython/_compiler/sema.py:6859:                        e.inferred_type = "any"  # type: ignore
+asmpython/_compiler/sema.py:6863:                e.inferred_type = "any"  # type: ignore
+asmpython/_compiler/sema.py:6885:                e.inferred_type = "type"  # type: ignore
+asmpython/_compiler/sema.py:6889:                e.inferred_type = "set"  # type: ignore
+asmpython/_compiler/sema.py:6892:                e.inferred_type = "set"  # type: ignore
+asmpython/_compiler/sema.py:6898:                e.inferred_type = "dict"  # type: ignore
+asmpython/_compiler/sema.py:6902:                e.inferred_type = "list"  # type: ignore
+asmpython/_compiler/sema.py:6935:                e.inferred_type = "list"  # type: ignore
+asmpython/_compiler/sema.py:7225:            e.inferred_type = A.expr_type(e.value)
+asmpython/_compiler/sema.py:7756:                e.inferred_type = self._list_el_type(e.obj, scope)
+asmpython/_compiler/sema.py:7803:                e.inferred_type = self._dict_value_type(e.obj, scope)
+asmpython/_compiler/sema.py:7947:                    e.inferred_type = b.ret_type
+asmpython/_compiler/sema.py:8039:                e.inferred_type = self.global_scope.types.get(e.name, "any")
+asmpython/_compiler/sema.py:8131:                e.inferred_type = sig.ret_type
+asmpython/_compiler/sema.py:8356:                    e.inferred_type = self._dict_value_type(e.obj, scope)
+asmpython/_compiler/sema.py:8443:                    e.inferred_type = self._dict_value_type(e.obj, scope)
+asmpython/_compiler/sema.py:8473:                    e.inferred_type = self._dict_value_type(e.obj, scope)
+asmpython/_compiler/sema.py:8603:                    e.inferred_type = ov_sig.ret_type[0] if ov_sig.ret_type is not None else "int"
+asmpython/_compiler/sema.py:8929:        e.inferred_type = "str"  # type: ignore
+asmpython/_compiler/sema.py:9753:                            e.inferred_type = ty  # type: ignore
+asmpython/_compiler/sema.py:9757:                            e.inferred_type = "any"  # type: ignore
+asmpython/_compiler/sema.py:9759:                        e.inferred_type = "int"  # type: ignore
+asmpython/_compiler/sema.py:9761:                    e.inferred_type = "float" if arg_t == "float" else "int"  # type: ignore
+asmpython/_compiler/sema.py:9763:            if e.func == "type":
+asmpython/_compiler/sema.py:9840:                    e.inferred_type = self._list_el_type(e.args[0], scope)
+asmpython/_compiler/sema.py:10143:        if e.func in scope.types:
+asmpython/_compiler/unpack_normalize.py:36:            inferred_type=element_type,
+asmpython/_compiler/ir_lower.py:7284:            and e.obj.func == "type"
+asmpython/_compiler/ir_lower.py:7568:        if e.func == "type" and len(e.args) == 1:
+asmpython/_compiler/ir_lower.py:7859:            and (e.func in ctx.slot_ty or e.func in ctx.mctx.global_types)
+asmpython/_compiler/codegen.py:14391:        if e.func == "type":
