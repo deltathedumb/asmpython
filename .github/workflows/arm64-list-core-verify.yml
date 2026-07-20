@@ -2,7 +2,7 @@ name: Verify ARM64 list core
 
 on:
   push:
-    branches: [beta]
+    branches: ["beta/3.14.0"]
     paths:
       - "asmpython/_runtime/abi_lists_linux_arm64.S"
       - "asmpython/_backends/arm64/runtime_manifest.py"

@@ -2,7 +2,7 @@ name: ARM64 backend verification
 
 on:
   push:
-    branches: [beta]
+    branches: ["beta/3.14.0"]
     paths:
       - "asmpython/_backends/arm64/**"
       - "asmpython/_compiler/ir.py"

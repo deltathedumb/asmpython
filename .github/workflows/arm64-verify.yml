@@ -3,7 +3,7 @@ name: Verify ARM64 backend
 on:
   workflow_dispatch:
   push:
-    branches: [beta]
+    branches: ["beta/3.14.0"]
     paths:
       - "asmpython/_backends/arm64/**"
       - "asmpython/_runtime/*linux_arm64.S"

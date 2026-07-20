@@ -2,7 +2,7 @@ name: Verify typed unpacking
 
 on:
   push:
-    branches: [beta]
+    branches: ["beta/3.14.0"]
     paths:
       - "asmpython/_compiler/unpack_normalize.py"
       - "asmpython/_backends/x86_64/__init__.py"

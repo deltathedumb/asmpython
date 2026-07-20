@@ -2,7 +2,7 @@ name: Verify import resolution
 
 on:
   push:
-    branches: [beta]
+    branches: ["beta/3.14.0"]
     paths:
       - "asmpython/_backends/host_cli.py"
       - "asmpython/_backends/host_site_packages.py"

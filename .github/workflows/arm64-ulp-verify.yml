@@ -2,7 +2,7 @@ name: Verify ARM64 math.ulp
 
 on:
   push:
-    branches: [beta]
+    branches: ["beta/3.14.0"]
     paths:
       - "asmpython/_backends/arm64/source_build.py"
       - "asmpython/_backends/arm64/runtime_manifest.py"
