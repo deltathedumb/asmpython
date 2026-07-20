@@ -19,10 +19,16 @@ def main() -> int:
     xs = [10, 20, 30]
     tail = xs.pop()
     a, b = xs
-    print(tail, len(xs), a, b)
+    if tail != 30:
+        return 11
+    if a != 10:
+        return 12
+    if b != 20:
+        return 13
+    print(len(xs))
     return 0
 """
-_EXPECTED_STDOUT = "30 2 10 20\n"
+_EXPECTED_STDOUT = "2\n"
 _EXPECTED_REQUIREMENTS = frozenset(
     {
         "_abi_int_to_base",
@@ -79,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
         print("[ OK ] non-empty pop returned the final 8-byte cell")
         print("[ OK ] pop decremented list length without moving the header")
-        print("[ OK ] typed unpack observed the remaining cells")
+        print("[ OK ] exit checks observed tail 30 and remaining cells [10, 20]")
         print(f"[ OK ] {mode_name} stdout matched {_EXPECTED_STDOUT!r}")
         if completed.stderr:
             print(completed.stderr.strip())

@@ -21,10 +21,20 @@ def main() -> int:
     xs.insert(-99, 0)
     xs.insert(99, 4)
     a, b, c, d, e = xs
-    print(len(xs), a, b, c, d, e)
+    if a != 0:
+        return 11
+    if b != 1:
+        return 12
+    if c != 2:
+        return 13
+    if d != 3:
+        return 14
+    if e != 4:
+        return 15
+    print(len(xs))
     return 0
 """
-_EXPECTED_STDOUT = "5 0 1 2 3 4\n"
+_EXPECTED_STDOUT = "5\n"
 _EXPECTED_REQUIREMENTS = frozenset(
     {
         "_abi_int_to_base",
@@ -82,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[ OK ] middle insertion shifted active cells right")
         print("[ OK ] very-negative insertion clamped to the front")
         print("[ OK ] oversized insertion clamped to the end")
+        print("[ OK ] exit checks observed final cells [0, 1, 2, 3, 4]")
         print(f"[ OK ] {mode_name} stdout matched {_EXPECTED_STDOUT!r}")
         if completed.stderr:
             print(completed.stderr.strip())

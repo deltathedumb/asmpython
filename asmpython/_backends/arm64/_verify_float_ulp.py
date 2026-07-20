@@ -19,13 +19,26 @@ from math import inf, isinf, isnan, nan, ulp
 
 
 def main() -> int:
-    print(ulp(0.0) > 0.0, ulp(0.0) == ulp(1e-320))
-    print(ulp(1.0) == 2.220446049250313e-16, ulp(2.0) == 4.440892098500626e-16)
-    print(ulp(-2.0) == ulp(2.0), isinf(ulp(inf)))
-    print(isnan(ulp(nan)), ulp(-0.0) == ulp(0.0))
+    if ulp(0.0) <= 0.0:
+        return 11
+    if ulp(0.0) != ulp(1e-320):
+        return 12
+    if ulp(1.0) != 2.220446049250313e-16:
+        return 13
+    if ulp(2.0) != 4.440892098500626e-16:
+        return 14
+    if ulp(-2.0) != ulp(2.0):
+        return 15
+    if not isinf(ulp(inf)):
+        return 16
+    if not isnan(ulp(nan)):
+        return 17
+    if ulp(-0.0) != ulp(0.0):
+        return 18
+    print(1)
     return 0
 """
-_EXPECTED_STDOUT = "1 1\n1 1\n1 1\n1 1\n"
+_EXPECTED_STDOUT = "1\n"
 _EXPECTED_REQUIREMENTS = frozenset(
     {
         "_abi_int_to_base",
@@ -81,7 +94,8 @@ def main(argv: list[str] | None = None) -> int:
 
         mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
         print("[ OK ] zero and every subnormal used the minimum positive spacing")
-        print("[ OK ] normal, negative, maximum, infinity, and NaN cases matched")
+        print("[ OK ] normal, negative, infinity, and NaN cases matched")
+        print("[ OK ] exit-code checks avoided bool-formatting dependencies")
         print(f"[ OK ] {mode_name} stdout matched {_EXPECTED_STDOUT!r}")
         if completed.stderr:
             print(completed.stderr.strip())

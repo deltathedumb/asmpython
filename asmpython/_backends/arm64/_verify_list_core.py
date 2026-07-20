@@ -20,10 +20,16 @@ def main() -> int:
     xs.append(30)
     xs[1] = 22
     a, b, c = xs
-    print(len(xs), a, b, c)
+    if a != 10:
+        return 11
+    if b != 22:
+        return 12
+    if c != 30:
+        return 13
+    print(len(xs))
     return 0
 """
-_EXPECTED_STDOUT = "3 10 22 30\n"
+_EXPECTED_STDOUT = "3\n"
 _EXPECTED_REQUIREMENTS = frozenset(
     {"_abi_int_to_base", "_abi_list_append", "_abi_new_list", "printf"}
 )
@@ -74,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
         print("[ OK ] list literal allocated a cap/len/buffer header")
         print("[ OK ] append grew capacity 2 -> 4 and preserved existing cells")
-        print("[ OK ] indexed assignment and typed unpack observed the same cells")
+        print("[ OK ] indexed assignment and exit checks observed cells [10, 22, 30]")
         print(f"[ OK ] {mode_name} stdout matched {_EXPECTED_STDOUT!r}")
         if completed.stderr:
             print(completed.stderr.strip())
