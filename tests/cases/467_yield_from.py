@@ -2,6 +2,7 @@
 # 1
 # 2
 # Delegated generator iteration regression; preserves yielded order exactly.
+# Verification trigger after base workflow installation.
 
 
 def inner():
