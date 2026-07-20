@@ -6,69 +6,64 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  implement:
     if: github.head_ref == 'beta/3.14.0'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           ref: beta/3.14.0
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install native build tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes nasm gcc binutils file gdb
+          sudo apt-get install --yes nasm gcc binutils
       - name: Apply implementation
         run: |
           python .github/dev/apply_tuple_iteration.py
           python .github/dev/apply_linux_executable_output.py
-      - name: Verify source and runtime
+          python .github/dev/apply_sysv_vararg_order.py
+      - name: Verify unit and runtime surfaces
         run: |
+          python -m py_compile \
+            asmpython/_compiler/ir_lower.py \
+            asmpython/_compiler/driver.py \
+            asmpython/_backends/x86_64/codegen.py \
+            tests/test_tuple_iteration_lowering.py \
+            tests/test_driver_output_permissions.py \
+            tests/test_x86_64_sysv_varargs.py
           python -m unittest -v \
             tests.test_tuple_iteration_lowering \
-            tests.test_driver_output_permissions
+            tests.test_driver_output_permissions \
+            tests.test_x86_64_sysv_varargs
           nasm -f elf64 -w-label-redef-late \
             asmpython/_runtime/abi_shims_linux.asm -o /tmp/abi_shims_linux.o
-      - name: Capture executable behavior
+          nm -g /tmp/abi_shims_linux.o | grep ' _abi_float_to_str$'
+      - name: Execute full tuple regression
         run: |
-          set +e
-          {
-            python -m asmpython tests/cases/63_tuple_unpack.py \
-              --backend x86-64 --no-pyinbin-fallback -o /tmp/tuple_unpack
-            echo "build_status=$?"
-            ls -l /tmp/tuple_unpack
-            file /tmp/tuple_unpack
-            /tmp/tuple_unpack > tuple.out 2> tuple.err
-            run_status=$?
-            echo "run_status=$run_status"
-            echo '=== stdout ==='
-            cat tuple.out
-            echo '=== stdout bytes ==='
-            od -An -tx1c tuple.out
-            echo '=== stderr ==='
-            cat tuple.err
-            printf '1\n2\nlabel: a\nn: 5\n1.5\n2.5\n0\n1\n2\nsum: 3\n' > tuple.expected
-            echo '=== diff ==='
-            diff -u tuple.expected tuple.out
-            echo "diff_status=$?"
-            if [ "$run_status" -ne 0 ]; then
-              echo '=== gdb ==='
-              gdb -batch -ex run -ex bt --args /tmp/tuple_unpack
-            fi
-          } 2>&1 | tee tuple-runtime.log
-          exit 0
-      - name: Upload runtime diagnostic
-        uses: actions/upload-artifact@v4
-        with:
-          name: tuple-post-permission-diagnostic
-          path: |
-            tuple-runtime.log
-            tuple.out
-            tuple.err
-            tuple.expected
-            asmpython/_runtime/abi_shims_linux.asm
+          python -m asmpython tests/cases/63_tuple_unpack.py \
+            --backend x86-64 --no-pyinbin-fallback -o /tmp/tuple_unpack
+          test -x /tmp/tuple_unpack
+          /tmp/tuple_unpack > /tmp/tuple.out
+          printf '1\n2\nlabel: a\nn: 5\n1.5\n2.5\n0\n1\n2\nsum: 3\n' > /tmp/tuple.expected
+          diff -u /tmp/tuple.expected /tmp/tuple.out
+      - name: Commit verified implementation
+        run: |
+          git config user.name "asmpython-ci"
+          git config user.email "actions@users.noreply.github.com"
+          git add \
+            asmpython/_compiler/ir_lower.py \
+            asmpython/_compiler/driver.py \
+            asmpython/_backends/x86_64/codegen.py \
+            asmpython/_runtime/abi_shims_linux.asm \
+            tests/test_tuple_iteration_lowering.py \
+            tests/test_driver_output_permissions.py \
+            tests/test_x86_64_sysv_varargs.py
+          git commit -m "Add homogeneous tuple iteration on Linux"
+          git push origin HEAD:beta/3.14.0
