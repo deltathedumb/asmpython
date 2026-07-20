@@ -8,7 +8,6 @@ from .sema import SemaAnalyzer
 
 
 def main() -> int:
-    needle = "must take 'self' as its first parameter"
     found = 0
     for name, value in SemaAnalyzer.__dict__.items():
         if not callable(value):
@@ -17,7 +16,13 @@ def main() -> int:
             source = inspect.getsource(value)
         except (OSError, TypeError):
             continue
-        if needle in source:
+        normalized = source.lower()
+        if (
+            "first parameter" in normalized
+            or "params[0]" in normalized
+            or "params[0] != \"self\"" in source
+            or "params[0] != 'self'" in source
+        ):
             found += 1
             print("METHOD", name)
             print(source)
