@@ -1,0 +1,150 @@
+PASS examples/__init__.py
+PASS examples/foundation.py
+PASS somnia/__init__.py
+PASS somnia/editor/__init__.py
+PASS somnia/editor/commands.py
+PASS somnia/editor/services.py
+PASS somnia/editor/session.py
+PASS somnia/errors.py
+PASS somnia/formats/__init__.py
+PASS somnia/formats/model_codec.py
+PASS somnia/math/__init__.py
+PASS somnia/math/values.py
+PASS somnia/model/__init__.py
+FAIL somnia/model/core.py: ParseError: expected OP ')', got OP '='
+    Traceback (most recent call last):
+      File "<stdin>", line 14, in <module>
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 438, in parse
+        classes.append(self._parse_classdef(decorators=decorators))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 902, in _parse_classdef
+        self._expect("OP", ")")
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 97, in _expect
+        raise ParseError(f"expected {want}, got {t.kind} {t.value!r}", t.pos, ErrorCode.P_EXPECTED_TOKEN)
+    asmpython._compiler.errors.ParseError: expected OP ')', got OP '='
+FAIL somnia/model/document.py: ParseError: unexpected token KEYWORD 'from'
+    Traceback (most recent call last):
+      File "<stdin>", line 14, in <module>
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 438, in parse
+        classes.append(self._parse_classdef(decorators=decorators))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 921, in _parse_classdef
+        methods.append(self._parse_funcdef(decorators=decorators))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 1079, in _parse_funcdef
+        body = self._parse_block()
+               ^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 1436, in _parse_block
+        stmts.append(self._parse_stmt())
+                     ^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 1455, in _parse_stmt
+        return self._parse_for()
+               ^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2771, in _parse_for
+        body = self._parse_block()
+               ^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 1436, in _parse_block
+        stmts.append(self._parse_stmt())
+                     ^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 1515, in _parse_stmt
+        val = self._parse_expr()
+              ^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2803, in _parse_expr
+        return self._parse_ternary()
+               ^^^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2834, in _parse_ternary
+        body = self._parse_or()
+               ^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2844, in _parse_or
+        left = self._parse_and()
+               ^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2852, in _parse_and
+        left = self._parse_not()
+               ^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2863, in _parse_not
+        return self._parse_cmp()
+               ^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2902, in _parse_cmp
+        left = self._parse_bit_or()
+               ^^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2931, in _parse_bit_or
+        left = self._parse_bit_xor()
+               ^^^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2939, in _parse_bit_xor
+        left = self._parse_bit_and()
+               ^^^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2947, in _parse_bit_and
+        left = self._parse_shift()
+               ^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2955, in _parse_shift
+        left = self._parse_add()
+               ^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2963, in _parse_add
+        left = self._parse_mul()
+               ^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2971, in _parse_mul
+        left = self._parse_unary()
+               ^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2991, in _parse_unary
+        return self._parse_power()
+               ^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2994, in _parse_power
+        base = self._parse_primary()
+               ^^^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 3048, in _parse_primary
+        raise ParseError(f"unexpected token {t.kind} {t.value!r}", t.pos, ErrorCode.P_UNEXPECTED_TOKEN)
+    asmpython._compiler.errors.ParseError: unexpected token KEYWORD 'from'
+PASS somnia/model/native.py
+PASS somnia/model/scene.py
+PASS somnia/model/scripting.py
+PASS somnia/project.py
+PASS somnia/rendering/__init__.py
+PASS somnia/rendering/base.py
+PASS somnia/rendering/null.py
+FAIL somnia/runtime.py: ParseError: expected NEWLINE, got OP '('
+    Traceback (most recent call last):
+      File "<stdin>", line 14, in <module>
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 438, in parse
+        classes.append(self._parse_classdef(decorators=decorators))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 921, in _parse_classdef
+        methods.append(self._parse_funcdef(decorators=decorators))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 1079, in _parse_funcdef
+        body = self._parse_block()
+               ^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 1436, in _parse_block
+        stmts.append(self._parse_stmt())
+                     ^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 1474, in _parse_stmt
+        fdef = self._parse_funcdef(decorators=decorators)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 1079, in _parse_funcdef
+        body = self._parse_block()
+               ^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 1436, in _parse_block
+        stmts.append(self._parse_stmt())
+                     ^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 1573, in _parse_stmt
+        return self._parse_assign()
+               ^^^^^^^^^^^^^^^^^^^^
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 2513, in _parse_assign
+        self._expect("NEWLINE")
+      File "/home/runner/work/asmpython/asmpython/asmpython/_compiler/parser.py", line 97, in _expect
+        raise ParseError(f"expected {want}, got {t.kind} {t.value!r}", t.pos, ErrorCode.P_EXPECTED_TOKEN)
+    asmpython._compiler.errors.ParseError: expected NEWLINE, got OP '('
+PASS somnia/scripting/__init__.py
+PASS somnia/scripting/host.py
+PASS somnia/typing.py
+PASS somnia/version.py
+PASS tests/__init__.py
+PASS tests/parity/__init__.py
+PASS tests/parity/model_snapshot.py
+PASS tests/test_formats.py
+PASS tests/test_object_model.py
+PASS tests/test_runtime.py
+PASS tools/__init__.py
+PASS tools/build_wiki.py
+PASS tools/dualrun.py
+
+Failures: 3
