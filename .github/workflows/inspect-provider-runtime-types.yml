@@ -1,0 +1,39 @@
+name: Inspect provider runtime type hooks
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.event.issue.pull_request && github.event.issue.number == 37 && github.event.comment.body == '/inspect-provider-runtime-types'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/somnia-provider-runtime-types
+          fetch-depth: 0
+      - name: Locate semantic and backend hooks
+        run: |
+          set -euo pipefail
+          {
+            echo '=== resolve param types ==='
+            grep -n -A35 -B10 'resolve_param' asmpython/_compiler/sema.py || true
+            grep -n -A30 -B15 'param_types' asmpython/_compiler/sema.py | head -n 260 || true
+            echo '=== type method semantic branch ==='
+            grep -n -A90 -B25 'obj_t == "type"' asmpython/_compiler/sema.py || true
+            echo '=== str builtin lowering ==='
+            grep -R -n -A45 -B20 'e.func == "str"' asmpython/_compiler | head -n 500 || true
+            echo '=== class ids ==='
+            grep -R -n -A40 -B20 'class_ids' asmpython/_compiler | head -n 500 || true
+            echo '=== MethodCall codegen ==='
+            grep -R -n -A60 -B20 'MethodCall' asmpython/_compiler | grep -v ast_nodes | head -n 700 || true
+          } | tee provider-runtime-inspection.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: provider-runtime-inspection
+          path: provider-runtime-inspection.txt
+          retention-days: 7
