@@ -1,6 +1,8 @@
 name: Verify Somnia expression-result calls
 
 on:
+  push:
+    branches: [fix/somnia-call-expression-result]
   pull_request:
     branches: [beta/3.14.0]
 
@@ -39,10 +41,6 @@ jobs:
                       # obj.name — attribute access (e.g. math.pi)
                       atom = A.Attr(obj=atom, name=name, pos=dot.pos)  # type: ignore
               elif self._check("OP", "("):
-                  # Calling the result of any primary expression: f()(x),
-                  # type(obj)(...), factory.property(...), etc. Reuse the
-                  # existing __call__ method machinery rather than adding a
-                  # second indirect-call representation.
                   lpar = self._eat()
                   args, kwargs = self._parse_call_args()
                   self._expect("OP", ")")
@@ -63,19 +61,13 @@ jobs:
 
           sema_path = Path("asmpython/_compiler/sema.py")
           sema = sema_path.read_text(encoding="utf-8")
-          special_marker = 'source_class_name = source_t.split(":", 1)[1]'
-          if special_marker not in sema:
+          if 'source_class_name = source_t.split(":", 1)[1]' not in sema:
               anchor = '''            self._check_expr(e.obj, scope)
               obj_t = A.expr_type(e.obj)
               # Bind keyword/vararg arguments for user-class (and super) method
           '''
               insertion = '''            self._check_expr(e.obj, scope)
               obj_t = A.expr_type(e.obj)
-              # `type(instance)(...)`: CPython returns the concrete class object
-              # and immediately invokes it as a constructor. asmpython normally
-              # renders standalone type(x) as a display string, but in this
-              # syntactically unambiguous call-result position the source
-              # instance's static class lets us rewrite directly to Class(...).
               if (
                   e.method == "__call__"
                   and isinstance(e.obj, A.Call)
