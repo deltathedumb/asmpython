@@ -1,0 +1,55 @@
+name: Re-audit Somnia parser compatibility
+
+on:
+  push:
+    branches: [beta/3.14.0]
+    paths:
+      - ".github/workflows/diagnose-somnia-parser-2.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: beta/3.14.0
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check out Somnia
+        run: git clone --depth 1 https://github.com/deltathedumb/somnia.git ../somnia
+      - name: Parse every Somnia module
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from asmpython._compiler.lexer import Lexer
+          from asmpython._compiler.parser import Parser
+
+          root = Path("../somnia")
+          lines = []
+          failures = 0
+          for path in sorted(root.rglob("*.py")):
+              rel = path.relative_to(root)
+              try:
+                  Parser(Lexer(path.read_text(encoding="utf-8")).tokenize()).parse()
+                  lines.append(f"PASS {rel}")
+              except Exception as exc:
+                  failures += 1
+                  lines.append(f"FAIL {rel}: {type(exc).__name__}: {exc}")
+          lines.append("")
+          lines.append(f"Failures: {failures}")
+          Path("somnia-parse-report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          print("\n".join(lines))
+          PY
+      - name: Commit refreshed parser report
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/diagnose-somnia-parser-2.yml
+          git add somnia-parse-report.txt
+          git commit -m "Refresh Somnia parser compatibility report"
+          git push origin HEAD:beta/3.14.0
