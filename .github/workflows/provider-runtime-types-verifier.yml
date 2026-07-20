@@ -1,0 +1,47 @@
+name: Verify provider runtime type support
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [beta/3.14.0]
+
+permissions:
+  contents: write
+
+jobs:
+  inspect-and-patch:
+    if: github.event.pull_request.number == 37
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/somnia-provider-runtime-types
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install native toolchain
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm
+      - name: Record compiler hook inspection
+        run: |
+          set -euo pipefail
+          {
+            echo '=== resolve param types ==='
+            grep -n -A50 -B15 'resolve_param' asmpython/_compiler/sema.py || true
+            grep -n -A35 -B15 'param_types' asmpython/_compiler/sema.py | head -n 320 || true
+            echo '=== type method semantic branch ==='
+            grep -n -A100 -B25 'obj_t == "type"' asmpython/_compiler/sema.py || true
+            echo '=== str builtin backend lowering ==='
+            grep -R -n -A55 -B25 'func == "str"' asmpython/_compiler | head -n 700 || true
+            echo '=== class ids and type values ==='
+            grep -R -n -A45 -B20 'class_ids\|BUILTIN_TYPE_IDS' asmpython/_compiler | head -n 900 || true
+          } > provider-runtime-inspection.txt
+      - name: Commit inspection to PR branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add provider-runtime-inspection.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "Record provider runtime compiler hooks"
+            git push origin HEAD:fix/somnia-provider-runtime-types
+          fi
