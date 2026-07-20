@@ -4,7 +4,7 @@
 # SomniaProvider
 # 1
 # Covers class-valued providers and unannotated dynamic parameters.
-# Semantic/backend probe generation 1.
+# Semantic/backend probe generation 2.
 
 
 class Provider:
