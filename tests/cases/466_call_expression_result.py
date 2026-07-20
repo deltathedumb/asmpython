@@ -1,7 +1,7 @@
 # expect:
 # 42
 # 43
-# Covers a callable returned by a function and type(instance)(...).
+# Covers a callable returned by a function and type(instance)(...) cloning.
 
 
 class Item:
