@@ -27,9 +27,17 @@ def link(ctx: dict) -> bytes:
         return link_pe(objects, entry_symbol=entry_symbol)
 
     if target_os == "linux":
-        from asmpython._backends.x86_64.elf_linker import link_elf
+        # import_binary's target-neutral IR calls Linux ABI aliases named
+        # LoadLibraryA/GetProcAddress.  abi_shims_linux_bundle.asm implements
+        # those aliases through dlopen/dlsym, so make the real loader symbols
+        # available to the ELF dynamic linker.  libdl.so.2 remains the stable
+        # compatibility SONAME on glibc systems, including versions where the
+        # implementation itself was folded into libc.
+        from asmpython._backends.x86_64 import elf_linker
 
-        return link_elf(objects, entry_symbol=entry_symbol)
+        elf_linker._SO_FOR_SYMBOL.setdefault("dlopen", "libdl.so.2")
+        elf_linker._SO_FOR_SYMBOL.setdefault("dlsym", "libdl.so.2")
+        return elf_linker.link_elf(objects, entry_symbol=entry_symbol)
 
     raise NotImplementedError(
         f"--linker builtin doesn't support target_os={target_os!r} yet "
