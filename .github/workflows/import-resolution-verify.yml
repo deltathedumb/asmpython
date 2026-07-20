@@ -13,6 +13,7 @@ on:
       - "asmpython/_compiler/site_packages.py"
       - "asmpython/__main__.py"
       - "pyproject.toml"
+      - "tests/cases/299_import_binary.py"
       - "tests/test_cli_import_policy.py"
       - "tests/test_import_binary_ctypes.py"
       - "tests/test_site_packages.py"
@@ -30,6 +31,7 @@ on:
       - "asmpython/_compiler/site_packages.py"
       - "asmpython/__main__.py"
       - "pyproject.toml"
+      - "tests/cases/299_import_binary.py"
       - "tests/test_cli_import_policy.py"
       - "tests/test_import_binary_ctypes.py"
       - "tests/test_site_packages.py"
@@ -49,6 +51,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install focused native toolchain
+        run: sudo apt-get update && sudo apt-get install -y nasm
       - name: Compile changed Python files
         run: |
           python -m py_compile \
@@ -60,6 +64,7 @@ jobs:
             asmpython/_compiler/pypi.py \
             asmpython/_compiler/project.py \
             asmpython/_compiler/site_packages.py \
+            tests/cases/299_import_binary.py \
             tests/test_cli_import_policy.py \
             tests/test_import_binary_ctypes.py \
             tests/test_site_packages.py \
@@ -73,3 +78,15 @@ jobs:
             tests.test_site_packages \
             tests.test_pip_install_integration \
             tests.test_selfhost_entrypoint
+      - name: Run native import_binary parity case
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from tests.runner import run_positive
+
+          result = run_positive(Path("tests/cases/299_import_binary.py"), "linux")
+          print(f"{result.name}: {'OK' if result.ok else 'FAIL'}")
+          if result.detail:
+              print(result.detail)
+          raise SystemExit(0 if result.ok else 1)
+          PY
