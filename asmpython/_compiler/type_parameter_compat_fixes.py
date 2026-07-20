@@ -7,9 +7,9 @@ constructor position::
         found = self.find(service_type)
         return found or service_type()
 
-The whole-program compiler can see calls such as ``ensure(World)``.  This pass
+The whole-program compiler can see calls such as ``ensure(World)``. This pass
 clones the method for each concrete class argument, removes the type parameter,
-replaces its uses with the class literal, and rewrites the call site.  Recursive
+replaces its uses with the class literal, and rewrites the call site. Recursive
 calls into other type-parameter methods are specialized to a fixed point.
 """
 
@@ -26,6 +26,7 @@ _ORIGINAL_ANALYZE = SemaAnalyzer.analyze
 
 
 def _clone(value):
+    """Clone parser AST dataclasses without passing non-init fields to __init__."""
     if isinstance(value, list):
         return [_clone(item) for item in value]
     if isinstance(value, tuple):
@@ -36,7 +37,18 @@ def _clone(value):
         return {_clone(item) for item in value}
     if is_dataclass(value) and not isinstance(value, type):
         cls = type(value)
-        return cls(**{field.name: _clone(getattr(value, field.name)) for field in fields(value)})
+        init_values: dict = {}
+        deferred: list = []
+        for data_field in fields(value):
+            cloned_value = _clone(getattr(value, data_field.name))
+            if data_field.init:
+                init_values[data_field.name] = cloned_value
+            else:
+                deferred.append((data_field.name, cloned_value))
+        cloned = cls(**init_values)
+        for name, cloned_value in deferred:
+            setattr(cloned, name, cloned_value)
+        return cloned
     return value
 
 
@@ -61,8 +73,8 @@ def _replace_parameter(value, parameter: str, class_name: str) -> None:
             _replace_parameter(item, parameter, class_name)
         return
     if is_dataclass(value) and not isinstance(value, type):
-        for field in fields(value):
-            _replace_parameter(getattr(value, field.name), parameter, class_name)
+        for data_field in fields(value):
+            _replace_parameter(getattr(value, data_field.name), parameter, class_name)
 
 
 def _expression_uses_type_parameter(expr, parameter: str) -> bool:
@@ -82,7 +94,11 @@ def _expression_uses_type_parameter(expr, parameter: str) -> bool:
 
 def _type_parameter_indices(func, is_method: bool) -> list:
     result: list = []
-    start = 1 if is_method and "staticmethod" not in getattr(func, "decorators", []) else 0
+    start = (
+        1
+        if is_method and "staticmethod" not in getattr(func, "decorators", [])
+        else 0
+    )
     for index in range(start, len(func.params)):
         parameter = func.params[index]
         found = False
@@ -122,7 +138,9 @@ def _assignment_related_variables(func, parameter: str) -> set:
                 isinstance(expr, A.Name) and expr.name == parameter
                 for expr in _walk_expr(value)
             ) and isinstance(value, (A.Call, A.MethodCall))
-            if (uses_parameter or uses_related or passes_parameter) and node.target not in related:
+            if (
+                uses_parameter or uses_related or passes_parameter
+            ) and node.target not in related:
                 related.add(node.target)
                 changed = True
     return related
@@ -201,6 +219,24 @@ def _all_call_nodes(mod: A.Module) -> list:
     return calls
 
 
+def _call_sites_with_owners(mod: A.Module):
+    """Yield ``(owning FuncDef id or None, call)`` for the complete module."""
+    for node in _walk_stmts(mod.body):
+        if isinstance(node, (A.Call, A.MethodCall)):
+            yield (None, node)
+    for func in mod.funcs:
+        owner_id = id(func)
+        for node in _walk_stmts(func.body):
+            if isinstance(node, (A.Call, A.MethodCall)):
+                yield (owner_id, node)
+    for cls in mod.classes:
+        for method in cls.methods:
+            owner_id = id(method)
+            for node in _walk_stmts(method.body):
+                if isinstance(node, (A.Call, A.MethodCall)):
+                    yield (owner_id, node)
+
+
 def _argument_binding(call, func, parameter_index: int, is_method: bool):
     parameter = func.params[parameter_index]
     offset = 0
@@ -239,21 +275,54 @@ def _specialized_clone(func, parameter_index: int, class_name: str, clone_name: 
         del cloned.defaults[parameter_index]
     if parameter_index < len(cloned.param_types):
         del cloned.param_types[parameter_index]
-    cloned.readonly_params = [name for name in cloned.readonly_params if name != parameter]
-    cloned.free_vars = [name for name in cloned.free_vars if name != parameter]
+    cloned.readonly_params = [
+        name for name in cloned.readonly_params if name != parameter
+    ]
+    if hasattr(func, "free_vars"):
+        cloned.free_vars = [
+            name for name in getattr(func, "free_vars", []) if name != parameter
+        ]
+    if hasattr(func, "nonlocal_vars"):
+        cloned.nonlocal_vars = [
+            name for name in getattr(func, "nonlocal_vars", []) if name != parameter
+        ]
     _replace_parameter(cloned.body, parameter, class_name)
     if _returns_specialized_type(func, parameter):
         cloned.ret_type = (class_name, None)
     return cloned
 
 
-def _remaining_named_calls(mod: A.Module, name: str, is_method: bool) -> bool:
-    for call in _all_call_nodes(mod):
-        if is_method and isinstance(call, A.MethodCall) and call.method == name:
-            return True
-        if not is_method and isinstance(call, A.Call) and call.func == name:
-            return True
-    return False
+def _call_matches(call, is_method: bool, name: str) -> bool:
+    if is_method:
+        return isinstance(call, A.MethodCall) and call.method == name
+    return isinstance(call, A.Call) and call.func == name
+
+
+def _safe_originals_to_neutralize(mod: A.Module, originals: dict) -> set:
+    """Compute the greatest set whose only incoming calls come from that set.
+
+    Calls between generic originals disappear together. Calls from module code,
+    generated clones, or a generic original that must remain live keep their
+    target live as well. Iterating removals computes the greatest safe set.
+    """
+    candidates = set(originals)
+    changed = True
+    while changed:
+        changed = False
+        for original_id in list(candidates):
+            _func, is_method, _owner_name, name = originals[original_id]
+            externally_referenced = False
+            for caller_id, call in _call_sites_with_owners(mod):
+                if not _call_matches(call, is_method, name):
+                    continue
+                if caller_id in candidates:
+                    continue
+                externally_referenced = True
+                break
+            if externally_referenced:
+                candidates.remove(original_id)
+                changed = True
+    return candidates
 
 
 def _lower_type_parameter_specializations(mod: A.Module) -> None:
@@ -299,7 +368,12 @@ def _lower_type_parameter_specializations(mod: A.Module) -> None:
             if not indices:
                 continue
             parameter_index = indices[0]
-            argument, binding = _argument_binding(call, func, parameter_index, is_method)
+            argument, binding = _argument_binding(
+                call,
+                func,
+                parameter_index,
+                is_method,
+            )
             if (
                 binding is None
                 or not isinstance(argument, A.Name)
@@ -309,12 +383,20 @@ def _lower_type_parameter_specializations(mod: A.Module) -> None:
 
             class_name = argument.name
             owner_name = ""
+            owner = None
             if is_method:
                 owners = method_owners.get(name, [])
                 if len(owners) != 1:
                     continue
-                owner_name = owners[0].name
-            key = (is_method, owner_name, name, func.params[parameter_index], class_name)
+                owner = owners[0]
+                owner_name = owner.name
+            key = (
+                is_method,
+                owner_name,
+                name,
+                func.params[parameter_index],
+                class_name,
+            )
             clone = specializations.get(key)
             if clone is None:
                 clone_name = (
@@ -332,9 +414,14 @@ def _lower_type_parameter_specializations(mod: A.Module) -> None:
                 )
                 specializations[key] = clone
                 if is_method:
-                    method_owners[name][0].methods.append(clone)
+                    owner.methods.append(clone)
+                    if _type_parameter_indices(clone, True):
+                        method_targets[clone.name] = clone
+                        method_owners[clone.name] = [owner]
                 else:
                     mod.funcs.append(clone)
+                    if _type_parameter_indices(clone, False):
+                        function_targets[clone.name] = clone
             _remove_bound_argument(call, binding)
             if is_method:
                 call.method = clone.name
@@ -345,15 +432,15 @@ def _lower_type_parameter_specializations(mod: A.Module) -> None:
     if not specializations:
         return
 
-    specialized_originals = set()
+    originals: dict = {}
     for is_method, owner_name, name, _parameter, _class_name in specializations:
-        specialized_originals.add((is_method, owner_name, name))
-    for is_method, owner_name, name in specialized_originals:
-        if _remaining_named_calls(mod, name, is_method):
-            continue
         func = method_targets.get(name) if is_method else function_targets.get(name)
-        if func is None:
-            continue
+        if func is not None:
+            originals[id(func)] = (func, is_method, owner_name, name)
+
+    safe_ids = _safe_originals_to_neutralize(mod, originals)
+    for original_id in safe_ids:
+        func = originals[original_id][0]
         func.body = [
             A.Return(
                 value=A.IntLit(value=0, pos=func.pos, is_none=True),
