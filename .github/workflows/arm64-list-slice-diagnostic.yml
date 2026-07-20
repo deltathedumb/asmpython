@@ -1,0 +1,57 @@
+name: Diagnose ARM64 list slicing
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.head_ref == 'beta/3.14.0'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: beta/3.14.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Locate slice lowering and runtime
+        run: |
+          {
+            echo '=== IR lowering references ==='
+            grep -n -C 25 '_abi_list_slice' asmpython/_compiler/ir_lower.py || true
+            echo '=== legacy runtime references ==='
+            grep -n -C 20 '_runtime_list_slice' asmpython/_compiler/codegen.py || true
+            echo '=== x86 ABI wrappers ==='
+            grep -n -C 15 '_abi_list_slice' asmpython/_runtime/abi_shims.asm || true
+          } > list-slice-sources.log
+      - name: Compile representative slices
+        run: |
+          python - <<'PY' > list-slice-lowering.log
+          from asmpython._backends.arm64.elf_inspect import undefined_symbols
+          from asmpython._backends.arm64.source_build import compile_source_object
+
+          cases = {
+              "forward": """def main() -> int:\n    xs = [0, 1, 2, 3, 4]\n    ys = xs[1:4]\n    print(len(ys))\n    return 0\n""",
+              "missing_start": """def main() -> int:\n    xs = [0, 1, 2, 3, 4]\n    ys = xs[:3]\n    print(len(ys))\n    return 0\n""",
+              "missing_stop": """def main() -> int:\n    xs = [0, 1, 2, 3, 4]\n    ys = xs[2:]\n    print(len(ys))\n    return 0\n""",
+              "negative": """def main() -> int:\n    xs = [0, 1, 2, 3, 4]\n    ys = xs[-4:-1]\n    print(len(ys))\n    return 0\n""",
+              "step": """def main() -> int:\n    xs = [0, 1, 2, 3, 4]\n    ys = xs[::2]\n    print(len(ys))\n    return 0\n""",
+          }
+          for name, source in cases.items():
+              try:
+                  blob = compile_source_object(source)
+                  print(name, sorted(undefined_symbols(blob)))
+              except Exception as error:
+                  print(name, type(error).__name__, str(error))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arm64-list-slice-diagnostic
+          path: |
+            list-slice-sources.log
+            list-slice-lowering.log
