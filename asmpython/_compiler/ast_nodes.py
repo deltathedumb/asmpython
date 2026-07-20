@@ -150,6 +150,8 @@ class ClassDef:
     sealed_permits: list = field(default_factory=list)
     # `interface` extension: set when declared `class X(interface=Name):`.
     implements_interface: "str | None" = None
+    # Explicit Python class-header metaclass.
+    metaclass: "str | None" = None
 
 
 # ---- Statements -------------------------------------------------------------

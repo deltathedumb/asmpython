@@ -1,5 +1,6 @@
 # expect:
 # 42
+# Valid Python class-header keyword regression.
 
 
 class Item(metaclass=type):
