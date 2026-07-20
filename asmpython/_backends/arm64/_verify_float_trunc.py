@@ -1,4 +1,4 @@
-"""Verify exact ARM64 C-trunc behavior."""
+"""Verify ARM64 math.trunc integer-return behavior."""
 from __future__ import annotations
 
 import argparse
@@ -9,19 +9,21 @@ from ._verify_elf import _execute, _select_toolchain
 from .linux_link import build_executable_from_object, required_external_symbols, validate_runtime_requirements
 from .source_build import compile_source_object
 
-
 _TRUNC_SOURCE = """\
-from math import copysign, inf, isinf, isnan, nan, trunc
-
+from math import trunc
 
 def main() -> int:
-    print(int(trunc(2.9)), int(trunc(-2.9)))
-    print(int(copysign(1.0, trunc(-0.2))), isinf(trunc(inf)), isnan(trunc(nan)))
+    if trunc(2.9) != 2:
+        return 11
+    if trunc(-2.9) != -2:
+        return 12
+    if trunc(-0.2) != 0:
+        return 13
+    print(1)
     return 0
 """
-_EXPECTED_STDOUT = "2 -2\n-1 1 1\n"
-_EXPECTED_REQUIREMENTS = frozenset({"_abi_int_to_base", "_math_isinf", "_math_isnan", "copysign", "printf", "trunc"})
-
+_EXPECTED_STDOUT = "1\n"
+_EXPECTED_REQUIREMENTS = frozenset({"_abi_int_to_base", "printf", "trunc"})
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -40,9 +42,11 @@ def main(argv: list[str] | None = None) -> int:
         completed = _execute(toolchain, executable)
         if completed.returncode != 0 or completed.stdout != _EXPECTED_STDOUT:
             raise SystemExit(f"ARM64 trunc probe failed: returncode={completed.returncode}, stdout={completed.stdout!r}")
-        print(f"[ OK ] {'native AArch64' if toolchain.native else 'qemu-aarch64'} trunc matched {_EXPECTED_STDOUT!r}")
+        mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
+        print("[ OK ] trunc returned Python integers for positive and negative inputs")
+        print("[ OK ] finite near-zero input converted to integer zero")
+        print(f"[ OK ] {mode_name} trunc matched {_EXPECTED_STDOUT!r}")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

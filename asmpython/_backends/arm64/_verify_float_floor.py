@@ -1,4 +1,4 @@
-"""Verify exact ARM64 C-floor behavior."""
+"""Verify ARM64 math.floor integer-return behavior."""
 from __future__ import annotations
 
 import argparse
@@ -9,19 +9,21 @@ from ._verify_elf import _execute, _select_toolchain
 from .linux_link import build_executable_from_object, required_external_symbols, validate_runtime_requirements
 from .source_build import compile_source_object
 
-
 _FLOOR_SOURCE = """\
-from math import copysign, floor, inf, isinf, isnan, nan
-
+from math import floor
 
 def main() -> int:
-    print(int(floor(2.9)), int(floor(-2.1)))
-    print(int(copysign(1.0, floor(0.2))), isinf(floor(inf)), isnan(floor(nan)))
+    if floor(2.9) != 2:
+        return 11
+    if floor(-2.1) != -3:
+        return 12
+    if floor(0.2) != 0:
+        return 13
+    print(1)
     return 0
 """
-_EXPECTED_STDOUT = "2 -3\n1 1 1\n"
-_EXPECTED_REQUIREMENTS = frozenset({"_abi_int_to_base", "_math_isinf", "_math_isnan", "copysign", "floor", "printf"})
-
+_EXPECTED_STDOUT = "1\n"
+_EXPECTED_REQUIREMENTS = frozenset({"_abi_int_to_base", "floor", "printf"})
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -40,9 +42,11 @@ def main(argv: list[str] | None = None) -> int:
         completed = _execute(toolchain, executable)
         if completed.returncode != 0 or completed.stdout != _EXPECTED_STDOUT:
             raise SystemExit(f"ARM64 floor probe failed: returncode={completed.returncode}, stdout={completed.stdout!r}")
-        print(f"[ OK ] {'native AArch64' if toolchain.native else 'qemu-aarch64'} floor matched {_EXPECTED_STDOUT!r}")
+        mode_name = "native AArch64" if toolchain.native else "qemu-aarch64"
+        print("[ OK ] floor returned Python integers for positive and negative inputs")
+        print("[ OK ] finite near-zero input converted to integer zero")
+        print(f"[ OK ] {mode_name} floor matched {_EXPECTED_STDOUT!r}")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

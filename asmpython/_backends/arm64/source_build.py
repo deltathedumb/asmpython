@@ -16,6 +16,7 @@ from typing import Any
 from .linux_link import LinuxArm64Toolchain, build_executable_from_object
 from .module_codegen import compile_ir_module
 from asmpython._compiler import ir_lower
+from asmpython._compiler.ir import F64, IRInstr, IRValue
 from asmpython._compiler.lexer import Lexer
 from asmpython._compiler.parser import Parser
 from asmpython._compiler.sema import analyze as sema_analyze
@@ -28,6 +29,74 @@ _ARM64_MATH_ULP = Func(
     ret_type="float",
     c_name="_math_ulp",
 )
+
+
+def _f2i_return_symbols() -> frozenset[str]:
+    """Return FFI symbols whose C ABI result is double but Python result is int."""
+    symbols: set[str] = set()
+    for bindings in STDLIB_BINDINGS.values():
+        for binding in bindings.values():
+            if getattr(binding, "ret_conv", None) != "f2i":
+                continue
+            c_name = getattr(binding, "c_name", None)
+            c_name_windows = getattr(binding, "c_name_windows", None)
+            if c_name:
+                symbols.add(c_name)
+            if c_name_windows:
+                symbols.add(c_name_windows)
+    return frozenset(symbols)
+
+
+_F2I_RETURN_SYMBOLS = _f2i_return_symbols()
+
+
+def _normalize_ffi_return_conversions(module: Any) -> None:
+    """Materialize ``Func(ret_conv='f2i')`` as an explicit IR conversion.
+
+    Shared IR lowering types those calls by their Python-visible ``ret_type``
+    (I64), while the C ABI callee returns a double in D0. AArch64 therefore
+    captures the call into an F64 temporary and converts it with ``fptosi``.
+    """
+    for func in getattr(module, "funcs", ()):
+        used_names = {
+            instr.result.name
+            for block in getattr(func, "blocks", ())
+            for instr in getattr(block, "instrs", ())
+            if instr.result is not None
+        }
+        serial = 0
+        for block in getattr(func, "blocks", ()):
+            rewritten: list[IRInstr] = []
+            for instr in getattr(block, "instrs", ()):
+                target = (
+                    instr.operands[0]
+                    if instr.op == "call" and instr.operands
+                    else None
+                )
+                if (
+                    instr.op == "call"
+                    and instr.result is not None
+                    and instr.result.type.name == "i64"
+                    and isinstance(target, str)
+                    and target in _F2I_RETURN_SYMBOLS
+                ):
+                    original_result = instr.result
+                    while True:
+                        serial += 1
+                        raw_name = f"{original_result.name}__ffi_f2i_{serial}"
+                        if raw_name not in used_names:
+                            break
+                    used_names.add(raw_name)
+                    raw_result = IRValue(raw_name, F64)
+                    rewritten.append(
+                        IRInstr("call", raw_result, list(instr.operands))
+                    )
+                    rewritten.append(
+                        IRInstr("fptosi", original_result, [raw_result])
+                    )
+                else:
+                    rewritten.append(instr)
+            block.instrs = rewritten
 
 
 def _analyze_with_arm64_bindings(module: Any) -> None:
@@ -48,7 +117,9 @@ def lower_source(source: str) -> Any:
     module = Parser(tokens, frozenset()).parse()
     _analyze_with_arm64_bindings(module)
     normalize_typed_unpacks(module)
-    return ir_lower.lower_module(module)
+    lowered = ir_lower.lower_module(module)
+    _normalize_ffi_return_conversions(lowered)
+    return lowered
 
 
 def compile_source_object(source: str) -> bytes:

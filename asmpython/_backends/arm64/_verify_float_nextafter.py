@@ -19,13 +19,26 @@ from math import copysign, inf, isinf, isnan, nan, nextafter
 
 
 def main() -> int:
-    print(nextafter(1.0, 2.0) > 1.0, nextafter(1.0, 0.0) < 1.0)
-    print(nextafter(0.0, 1.0) > 0.0, nextafter(0.0, -1.0) < 0.0)
-    print(isinf(nextafter(inf, inf)), isinf(nextafter(inf, 0.0)))
-    print(int(copysign(1.0, nextafter(0.0, -0.0))), isnan(nextafter(nan, 1.0)))
+    if nextafter(1.0, 2.0) <= 1.0:
+        return 11
+    if nextafter(1.0, 0.0) >= 1.0:
+        return 12
+    if nextafter(0.0, 1.0) <= 0.0:
+        return 13
+    if nextafter(0.0, -1.0) >= 0.0:
+        return 14
+    if not isinf(nextafter(inf, inf)):
+        return 15
+    if isinf(nextafter(inf, 0.0)):
+        return 16
+    if int(copysign(1.0, nextafter(0.0, -0.0))) != -1:
+        return 17
+    if not isnan(nextafter(nan, 1.0)):
+        return 18
+    print(1)
     return 0
 """
-_EXPECTED_STDOUT = "1 1\n1 1\n1 0\n-1 1\n"
+_EXPECTED_STDOUT = "1\n"
 _EXPECTED_REQUIREMENTS = frozenset(
     {
         "_abi_int_to_base",
@@ -84,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[ OK ] finite values moved exactly one representable bit step")
         print("[ OK ] zero, infinity, equality, and signed-zero targets matched")
         print("[ OK ] NaN operands remained NaN")
+        print("[ OK ] exit-code checks avoided bool-formatting dependencies")
         print(f"[ OK ] {mode_name} stdout matched {_EXPECTED_STDOUT!r}")
         if completed.stderr:
             print(completed.stderr.strip())
