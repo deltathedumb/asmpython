@@ -29,11 +29,49 @@ jobs:
           printf '%s\n' "$output"
           test "$output" = $'True\nFalse\nTrue\nTrue\nTrue\nTrue'
       - name: Test property and generator string flow
+        id: property_flow
+        continue-on-error: true
         run: |
-          python -m asmpython tests/cases/469_property_generator_string.py --target linux -o /tmp/asmpython-property-flow
-          output=$(/tmp/asmpython-property-flow)
-          printf '%s\n' "$output"
-          test "$output" = $'2\nsomnia.Root'
+          set +e
+          {
+            python -m asmpython tests/cases/469_property_generator_string.py --target linux -o /tmp/asmpython-property-flow
+            compile_status=$?
+            echo "compile_status=$compile_status"
+            if [ "$compile_status" -eq 0 ] && [ -x /tmp/asmpython-property-flow ]; then
+              output=$(/tmp/asmpython-property-flow)
+              native_status=$?
+              printf '%s\n' "$output"
+              echo "native_status=$native_status"
+              if [ "$output" = $'2\nsomnia.Root' ]; then
+                output_status=0
+              else
+                output_status=2
+              fi
+            else
+              native_status=99
+              output_status=99
+            fi
+            exit_status=$compile_status
+            if [ "$exit_status" -eq 0 ]; then
+              exit_status=$native_status
+            fi
+            if [ "$exit_status" -eq 0 ]; then
+              exit_status=$output_status
+            fi
+            echo "exit_status=$exit_status"
+          } > property-flow.txt 2>&1
+          cat property-flow.txt
+          exit "$(sed -n 's/^exit_status=//p' property-flow.txt | tail -n 1)"
+      - name: Upload property-flow diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: property-generator-string-flow
+          path: property-flow.txt
+          retention-days: 7
+      - name: Require property-flow regression
+        if: steps.property_flow.outcome != 'success'
+        run: exit 1
       - name: Test unchanged Somnia parity
         id: somnia
         continue-on-error: true
