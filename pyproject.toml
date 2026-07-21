@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 [project.scripts]
-asmpython = "asmpython._compiler.__main__:main"
+asmpython = "asmpython._compiler.cli:main"
 
 [project.urls]
 Repository = "https://github.com/deltathedumb/asmpython"
