@@ -6,9 +6,13 @@ from pathlib import Path
 
 import asmpython
 from asmpython._version import (
-    ASMPYTHON_BUILD,
+    ASMPYTHON_VERSION,
+    FULL_VERSION,
+    FULL_VERSION_INFO,
     PACKAGING_VERSION,
     PYTHON_LANGUAGE_VERSION,
+    PYTHON_VERSION_INFO,
+    RELEASE_VERSION,
     VERSION_INFO,
 )
 
@@ -17,17 +21,28 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_public_version_shape() -> None:
-    assert re.fullmatch(r"\d+\.\d+-[1-9]\d*", asmpython.__version__)
-    assert asmpython.__version__ == (
-        f"{PYTHON_LANGUAGE_VERSION}-{ASMPYTHON_BUILD}"
+    assert re.fullmatch(
+        r"\d+\.\d+-\d+\.\d+\.\d+", FULL_VERSION
     )
-    assert VERSION_INFO == (3, 14, ASMPYTHON_BUILD)
+    assert FULL_VERSION == f"{PYTHON_LANGUAGE_VERSION}-{ASMPYTHON_VERSION}"
+    assert RELEASE_VERSION == FULL_VERSION
+    assert PYTHON_VERSION_INFO == (3, 14)
+    assert VERSION_INFO == (2, 0, 0)
+    assert FULL_VERSION_INFO == (3, 14, 2, 0, 0)
+
+
+def test_runtime_version_surfaces() -> None:
+    assert asmpython.__version__ == "2.0.0"
+    assert asmpython.ASMPYTHON_VERSION == "2.0.0"
+    assert asmpython.PYTHON_LANGUAGE_VERSION == "3.14"
+    assert asmpython.FULL_VERSION == "3.14-2.0.0"
+    assert asmpython.RELEASE_VERSION == "3.14-2.0.0"
 
 
 def test_all_version_sources_agree() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     version_file = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
-    assert PACKAGING_VERSION == asmpython.__version__
-    assert project["project"]["version"] == asmpython.__version__
-    assert version_file == asmpython.__version__
+    assert PACKAGING_VERSION == ASMPYTHON_VERSION
+    assert project["project"]["version"] == ASMPYTHON_VERSION
+    assert version_file == FULL_VERSION
