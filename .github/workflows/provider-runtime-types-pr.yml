@@ -103,6 +103,18 @@ jobs:
           output=$(/tmp/asmpython-property-only)
           printf '%s\n' "$output"
           test "$output" = 'somnia.Root'
+      - name: Test simple object generator
+        run: |
+          python -m asmpython tests/cases/475_simple_generator_self.py --target linux -o /tmp/asmpython-simple-generator
+          output=$(/tmp/asmpython-simple-generator)
+          printf '%s\n' "$output"
+          test "$output" = '1'
+      - name: Test generator child iteration
+        run: |
+          python -m asmpython tests/cases/476_generator_child_iteration.py --target linux -o /tmp/asmpython-child-generator
+          output=$(/tmp/asmpython-child-generator)
+          printf '%s\n' "$output"
+          test "$output" = '2'
       - name: Test recursive generator
         run: |
           python -m asmpython tests/cases/471_recursive_generator_only.py --target linux -o /tmp/asmpython-generator-only
