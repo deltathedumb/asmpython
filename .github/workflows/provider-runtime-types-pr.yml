@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   provider-class-values:
-    if: github.event.pull_request.number == 37
+    if: github.event.pull_request.head.ref == 'fix/somnia-provider-runtime-types-v2'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
