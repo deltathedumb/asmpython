@@ -1,16 +1,16 @@
-name: Verify provider runtime type support
+name: Provider runtime type trigger
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    branches: [beta/3.14.0]
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
-  patch-and-probe:
-    if: github.event.pull_request.number == 37
+  patch-probe:
+    if: github.event.pull_request.head.ref == 'ci/provider-runtime-trigger'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +22,7 @@ jobs:
           python-version: "3.12"
       - name: Install native toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm
-      - name: Apply semantic support
+      - name: Apply provider runtime semantics
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -30,7 +30,7 @@ jobs:
           path = Path("asmpython/_compiler/sema.py")
           text = path.read_text(encoding="utf-8")
 
-          old_hint = '''                    if (
+          old_function_param = '''                    if (
                           annot is None
                           and default is None
                           and inferred is None
@@ -40,18 +40,15 @@ jobs:
                           continue
                       self._seed_param(scope, p, annot, default, inferred, pos=f.pos)
 '''
-          new_hint = '''                    if annot is None and default is None and inferred is None:
-                          # Python parameters without annotations are dynamic, not
-                          # integers. Preserve a concrete usage hint when one is
-                          # available; otherwise keep the value opaque.
+          new_function_param = '''                    if annot is None and default is None and inferred is None:
                           scope.add(p, usage_hints[p] if p in usage_hints else "any")
                           continue
                       self._seed_param(scope, p, annot, default, inferred, pos=f.pos)
 '''
-          if old_hint in text:
-              text = text.replace(old_hint, new_hint, 1)
+          if old_function_param in text:
+              text = text.replace(old_function_param, new_function_param, 1)
 
-          old_method_hint = '''                    if (
+          old_method_param = '''                    if (
                           annot is None
                           and default is None
                           and inferred is None
@@ -61,13 +58,13 @@ jobs:
                           continue
                       self._seed_param(scope, p, annot, default, inferred, pos=m.pos)
 '''
-          new_method_hint = '''                    if annot is None and default is None and inferred is None:
+          new_method_param = '''                    if annot is None and default is None and inferred is None:
                           scope.add(p, usage_hints[p] if p in usage_hints else "any")
                           continue
                       self._seed_param(scope, p, annot, default, inferred, pos=m.pos)
 '''
-          if old_method_hint in text:
-              text = text.replace(old_method_hint, new_method_hint, 1)
+          if old_method_param in text:
+              text = text.replace(old_method_param, new_method_param, 1)
 
           old_str = '''                if t not in (
                       "int", "float", "str", "any", "list", "tuple", "dict", "set"
@@ -80,21 +77,16 @@ jobs:
           if old_str in text:
               text = text.replace(old_str, new_str, 1)
 
-          dynamic_marker = 'e.dynamic_type_candidates = candidates'
-          if dynamic_marker not in text:
-              anchor = '''                    else:
-                          e.inferred_type = "int"
-                      return
-                  if e.method == "from_bytes":
-'''
-              replacement = '''                    else:
-                          e.inferred_type = "int"
-                      return
-                  if obj_t == "type":
-                      # A class value held in a variable/list/tuple. Collect every
-                      # user class for which this name resolves to a public
-                      # classmethod/staticmethod. Lowering dispatches on the
-                      # existing stable class RTTI id.
+          if 'e.dynamic_type_candidates = candidates' not in text:
+              type_start = text.find('''            elif (
+                  obj_t == "type"
+''')
+              if type_start < 0:
+                  raise SystemExit("type receiver branch not found")
+              insert_at = text.find('                if e.method == "from_bytes":', type_start)
+              if insert_at < 0:
+                  raise SystemExit("type receiver insertion point not found")
+              block = '''                if obj_t == "type":
                       candidates: list = []
                       candidate_ret = None
                       candidate_el = None
@@ -132,16 +124,12 @@ jobs:
                       if e.inferred_type == "list" and candidate_el is not None:
                           e.list_el_type = candidate_el
                       return
-                  if e.method == "from_bytes":
 '''
-              if anchor not in text:
-                  raise SystemExit("dynamic type method semantic anchor not found")
-              text = text.replace(anchor, replacement, 1)
+              text = text[:insert_at] + block + text[insert_at:]
 
           path.write_text(text, encoding="utf-8")
           PY
       - name: Probe native regression
-        id: probe
         continue-on-error: true
         run: |
           set -o pipefail
@@ -151,13 +139,15 @@ jobs:
             /tmp/provider-type-runtime >> provider-runtime-probe.txt 2>&1
           fi
           cat provider-runtime-probe.txt
-      - name: Record patched sources and probe
+      - name: Commit patch and diagnostic to beta fix branch
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          touch provider-runtime-probe.txt
           git add asmpython/_compiler/sema.py provider-runtime-probe.txt
-          if ! git diff --cached --quiet; then
-            git commit -m "Add semantic support for provider class values"
-            git push origin HEAD:fix/somnia-provider-runtime-types
+          if git diff --cached --quiet; then
+            exit 0
           fi
+          git commit -m "Add provider class value semantics"
+          git push origin HEAD:fix/somnia-provider-runtime-types
