@@ -56,5 +56,32 @@ def __getattr__(name: str):
 def __dir__() -> list[str]:
     return sorted([*globals(), "import_binary"])
 
+def compile_function(
+    *,
+    dyn: bool = True,
+    gc: bool = True,
+    exc: bool = True,
+    refl: bool = True,
+    free: bool = False,
+):
+    def decorator(func):
+        func.__asmpython_config__ = {
+            "dyn": dyn,
+            "gc": gc,
+            "exc": exc,
+            "refl": refl,
+            "free": free,
+        }
+        return func
+
+    return decorator
+
+
+class _ASMPythonModule(ModuleType):
+    def __call__(self, **options):
+        return compile_function(**options)
+
+# make it so you can do import asmpython; @asmpython(); def func(): ...
+sys.modules[__name__].__class__ = _ASMPythonModule
 
 __all__ = ["backend", "linker", "mlang", "import_binary", "__version__"]
