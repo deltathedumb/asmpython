@@ -28,12 +28,69 @@ jobs:
           output=$(/tmp/asmpython-provider-types)
           printf '%s\n' "$output"
           test "$output" = $'True\nFalse\nTrue\nTrue\nTrue\nTrue'
-      - name: Test dict method string return
+      - name: Diagnose dict method string return
+        id: dict_method
+        continue-on-error: true
         run: |
-          python -m asmpython tests/cases/473_dict_method_string.py --target linux -o /tmp/asmpython-dict-method
-          output=$(/tmp/asmpython-dict-method)
-          printf '%s\n' "$output"
-          test "$output" = 'somnia.Root'
+          set +e
+          {
+            python - <<'PY'
+          from pathlib import Path
+          from asmpython._compiler.driver import _compile_program
+
+          path = Path("tests/cases/473_dict_method_string.py")
+          module = _compile_program(
+              path.read_text(encoding="utf-8"),
+              source_dir=path.parent,
+              entry_path=path,
+              whole_program=False,
+              all_errors=False,
+          )
+          for owner in module.classes:
+              if owner.name == "Registry":
+                  for method in owner.methods:
+                      if method.name == "type_name":
+                          print("ret_type", method.ret_type)
+                          print("body", repr(method.body))
+          PY
+            python -m asmpython tests/cases/473_dict_method_string.py --target linux -o /tmp/asmpython-dict-method
+            compile_status=$?
+            echo "compile_status=$compile_status"
+            if [ "$compile_status" -eq 0 ] && [ -x /tmp/asmpython-dict-method ]; then
+              output=$(/tmp/asmpython-dict-method)
+              native_status=$?
+              printf '%s\n' "$output"
+              echo "native_status=$native_status"
+              if [ "$output" = 'somnia.Root' ]; then
+                output_status=0
+              else
+                output_status=2
+              fi
+            else
+              native_status=99
+              output_status=99
+            fi
+            exit_status=$compile_status
+            if [ "$exit_status" -eq 0 ]; then
+              exit_status=$native_status
+            fi
+            if [ "$exit_status" -eq 0 ]; then
+              exit_status=$output_status
+            fi
+            echo "exit_status=$exit_status"
+          } > dict-method.txt 2>&1
+          cat dict-method.txt
+          exit "$(sed -n 's/^exit_status=//p' dict-method.txt | tail -n 1)"
+      - name: Upload dict-method diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dict-method-string-return
+          path: dict-method.txt
+          retention-days: 7
+      - name: Require dict-method regression
+        if: steps.dict_method.outcome != 'success'
+        run: exit 1
       - name: Test literal string property
         run: |
           python -m asmpython tests/cases/474_literal_property_string.py --target linux -o /tmp/asmpython-literal-property
