@@ -28,6 +28,18 @@ jobs:
           output=$(/tmp/asmpython-provider-types)
           printf '%s\n' "$output"
           test "$output" = $'True\nFalse\nTrue\nTrue\nTrue\nTrue'
+      - name: Test dict method string return
+        run: |
+          python -m asmpython tests/cases/473_dict_method_string.py --target linux -o /tmp/asmpython-dict-method
+          output=$(/tmp/asmpython-dict-method)
+          printf '%s\n' "$output"
+          test "$output" = 'somnia.Root'
+      - name: Test literal string property
+        run: |
+          python -m asmpython tests/cases/474_literal_property_string.py --target linux -o /tmp/asmpython-literal-property
+          output=$(/tmp/asmpython-literal-property)
+          printf '%s\n' "$output"
+          test "$output" = 'somnia.Root'
       - name: Test direct string property
         run: |
           python -m asmpython tests/cases/470_property_string_only.py --target linux -o /tmp/asmpython-property-only
