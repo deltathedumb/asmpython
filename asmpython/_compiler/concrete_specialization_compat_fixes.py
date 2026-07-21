@@ -3,7 +3,8 @@
 Finite class lowering may materialize an inherited classmethod on a concrete
 subclass so native codegen has a ``Subclass__method`` symbol. Python still
 requires ``cls`` inside that body to be the concrete subclass. This pass turns
-those copied methods into static, subclass-specialized bodies.
+those copied methods into static, subclass-specialized bodies and folds reads of
+concrete class variables to their nearest class-body initializer.
 
 It also annotates an otherwise-unannotated top-level parameter when every call
 site supplies the same statically-known value kind. This keeps ordinary dynamic
@@ -62,6 +63,63 @@ def _nearest_parent_method(owner, method_name: str, class_table: dict):
     return None
 
 
+def _class_variable_initializer(class_name: str, field_name: str, class_table: dict):
+    current_name = class_name
+    seen = set()
+    while current_name and current_name not in seen:
+        seen.add(current_name)
+        owner = class_table.get(current_name)
+        if owner is None:
+            return None
+        for name, _annotation, initializer in owner.class_vars:
+            if name == field_name and initializer is not None:
+                return class_values._clone(initializer)
+        current_name = owner.parent
+    return None
+
+
+def _fold_concrete_class_attributes(value, class_name: str, class_table: dict):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [
+            _fold_concrete_class_attributes(item, class_name, class_table)
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _fold_concrete_class_attributes(item, class_name, class_table)
+            for item in value
+        )
+    if isinstance(value, dict):
+        return {
+            _fold_concrete_class_attributes(key, class_name, class_table):
+            _fold_concrete_class_attributes(item, class_name, class_table)
+            for key, item in value.items()
+        }
+    if isinstance(value, A.Attr):
+        value.obj = _fold_concrete_class_attributes(
+            value.obj, class_name, class_table
+        )
+        if isinstance(value.obj, A.Name) and value.obj.name == class_name:
+            initializer = _class_variable_initializer(
+                class_name, value.name, class_table
+            )
+            if initializer is not None:
+                return initializer
+        return value
+    if is_dataclass(value) and not isinstance(value, type):
+        for data_field in fields(value):
+            setattr(
+                value,
+                data_field.name,
+                _fold_concrete_class_attributes(
+                    getattr(value, data_field.name), class_name, class_table
+                ),
+            )
+    return value
+
+
 def _specialize_materialized_classmethods(mod: A.Module, class_tuples: dict) -> None:
     class_table = {owner.name: owner for owner in mod.classes}
     concrete_names = {
@@ -87,6 +145,9 @@ def _specialize_materialized_classmethods(mod: A.Module, class_tuples: dict) -> 
                 continue
             receiver = method.params[0]
             _replace_identifier(method.body, receiver, class_name)
+            method.body = _fold_concrete_class_attributes(
+                method.body, class_name, class_table
+            )
             del method.params[0]
             if method.defaults:
                 del method.defaults[0]
