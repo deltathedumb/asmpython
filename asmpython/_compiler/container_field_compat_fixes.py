@@ -125,6 +125,109 @@ def _cross_object_self_element(owner, field_name: str) -> "str | None":
     return None
 
 
+def _common_class(left: str, right: str, classes: dict) -> str:
+    if left == right:
+        return left
+    left_chain: list[str] = []
+    current = left
+    seen: set[str] = set()
+    while current in classes and current not in seen:
+        seen.add(current)
+        left_chain.append(current)
+        current = classes[current].parent
+    right_chain: set[str] = set()
+    current = right
+    seen = set()
+    while current in classes and current not in seen:
+        seen.add(current)
+        right_chain.add(current)
+        current = classes[current].parent
+    for candidate in left_chain:
+        if candidate in right_chain:
+            return candidate
+    return "any"
+
+
+def _module_instance_types(mod: A.Module, classes: dict) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for statement in mod.body:
+        if (
+            isinstance(statement, A.Assign)
+            and isinstance(statement.target, str)
+            and isinstance(statement.value, A.Call)
+            and statement.value.func in classes
+        ):
+            result[statement.target] = statement.value.func
+    return result
+
+
+def _set_initializer_element(
+    classes: dict,
+    owner_name: str,
+    field_name: str,
+    element: str,
+) -> None:
+    owner = classes.get(owner_name)
+    if owner is None:
+        return
+    for method in owner.methods:
+        if method.name != "__init__":
+            continue
+        for statement in method.body:
+            if (
+                isinstance(statement, A.AttrAssign)
+                and isinstance(statement.obj, A.Name)
+                and statement.obj.name == "self"
+                and statement.name == field_name
+            ):
+                base, _old_element = _annotation_parts(statement.annot)
+                if base == "list":
+                    statement.annot = ("list", element)
+                return
+
+
+def _refine_module_collection_mutations(
+    mod: A.Module,
+    result: dict[tuple[str, str], tuple[str, str]],
+    classes: dict,
+) -> None:
+    """Infer field element types from whole-program ``obj.field.append(value)``."""
+    instances = _module_instance_types(mod, classes)
+    if not instances:
+        return
+    for node in _walk_statements(mod.body):
+        if not (
+            isinstance(node, A.MethodCall)
+            and node.method == "append"
+            and len(node.args) == 1
+            and isinstance(node.obj, A.Attr)
+            and isinstance(node.obj.obj, A.Name)
+        ):
+            continue
+        receiver_class = instances.get(node.obj.obj.name)
+        if receiver_class is None:
+            continue
+        argument = node.args[0]
+        element_class = None
+        if isinstance(argument, A.Call) and argument.func in classes:
+            element_class = argument.func
+        elif isinstance(argument, A.Name):
+            element_class = instances.get(argument.name)
+        if element_class is None:
+            continue
+        key = (receiver_class, node.obj.name)
+        metadata = result.get(key)
+        if metadata is None or metadata[0] != "list":
+            continue
+        previous = metadata[1]
+        if previous in ("any", "int", ""):
+            refined = element_class
+        else:
+            refined = _common_class(previous, element_class, classes)
+        result[key] = ("list", refined)
+        _set_initializer_element(classes, receiver_class, node.obj.name, refined)
+
+
 def _collection_fields(mod: A.Module) -> dict[tuple[str, str], tuple[str, str]]:
     result: dict[tuple[str, str], tuple[str, str]] = {}
     classes = {owner.name: owner for owner in mod.classes}
@@ -156,6 +259,7 @@ def _collection_fields(mod: A.Module) -> dict[tuple[str, str], tuple[str, str]]:
                         element = refined
                         statement.annot = ("list", element)
                 result[(owner.name, statement.name)] = (base, element)
+    _refine_module_collection_mutations(mod, result, classes)
     return result
 
 
@@ -206,12 +310,9 @@ def _lookup_field(self: SemaAnalyzer, receiver_type: str, field_name: str):
         return None
 
     if receiver_type == "any":
-        # Dynamic Python receivers still carry useful structural information.
-        # When every class declaring this field agrees on its collection shape,
-        # that shape is safe to propagate without guessing the receiver class.
         candidates = {
             value
-            for (owner_name, candidate_name), value in table.items()
+            for (_owner_name, candidate_name), value in table.items()
             if candidate_name == field_name
         }
         if len(candidates) == 1:
