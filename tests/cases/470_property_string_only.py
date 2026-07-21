@@ -1,5 +1,6 @@
 # expect:
 # somnia.Root
+# Method/property isolation generation 1.
 
 
 class Registry:
