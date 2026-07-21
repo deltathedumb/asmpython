@@ -39,9 +39,17 @@ against that. The withdrawn implementation is preserved for reference under
 
 from __future__ import annotations
 
-from . import backend, linker, mlang
+import sys
+from types import ModuleType
 
-__version__ = "3.14-preview"
+from . import backend, linker, mlang
+from ._version import (
+    ASMPYTHON_BUILD,
+    PACKAGING_VERSION,
+    PYTHON_LANGUAGE_VERSION,
+    VERSION_INFO,
+    __version__,
+)
 
 
 def __getattr__(name: str):
@@ -55,6 +63,7 @@ def __getattr__(name: str):
 
 def __dir__() -> list[str]:
     return sorted([*globals(), "import_binary"])
+
 
 def compile_function(
     *,
@@ -72,7 +81,7 @@ def compile_function(
             "exc": config.get("exc", True),
             "refl": config.get("refl", True),
             "free": config.get("free", True),
-            "enforced": config.get("enforced", [])
+            "enforced": config.get("enforced", []),
         }
         return func
 
@@ -83,7 +92,18 @@ class _ASMPythonModule(ModuleType):
     def __call__(self, **options):
         return compile_function(**options)
 
+
 # make it so you can do import asmpython; @asmpython(); def func(): ...
 sys.modules[__name__].__class__ = _ASMPythonModule
 
-__all__ = ["backend", "linker", "mlang", "import_binary", "__version__"]
+__all__ = [
+    "ASMPYTHON_BUILD",
+    "PACKAGING_VERSION",
+    "PYTHON_LANGUAGE_VERSION",
+    "VERSION_INFO",
+    "backend",
+    "import_binary",
+    "linker",
+    "mlang",
+    "__version__",
+]
