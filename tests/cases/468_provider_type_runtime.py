@@ -3,9 +3,11 @@
 # 0
 # 1
 # 1
+# 1
+# 1
 # Finite class tuples must lower without a dynamic metatype runtime.
 # Dynamic values must preserve string behavior.
-# AST inspection generation 1.
+# Tuple-membership isolation generation 1.
 
 class Provider:
     runtime_realms = ("server", "client")
@@ -23,6 +25,12 @@ class ClientProvider(Provider):
     runtime_realms = ("client",)
 
 
+class StaticProbe:
+    @staticmethod
+    def contains_server(realm: str) -> bool:
+        return realm in ("server",)
+
+
 def starts_with_somnia(value) -> bool:
     return value.startswith("somnia.")
 
@@ -32,3 +40,5 @@ print(provider_types[0].supports_realm("server"))
 print(provider_types[1].supports_realm("server"))
 print(starts_with_somnia("somnia.Scene"))
 print("Provider" in str(Provider))
+print("server" in ("server",))
+print(StaticProbe.contains_server("server"))
