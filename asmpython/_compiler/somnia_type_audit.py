@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from . import ast_nodes as A
 from .program import load_program
 from .sema import SemaAnalyzer
 
@@ -45,6 +46,26 @@ def main(argv=None) -> int:
 
     entry = args.entry.resolve()
     module = load_program(entry.read_text(encoding="utf-8"), entry)
+
+    original_iter_element_type = SemaAnalyzer._iter_element_type
+
+    def audited_iter_element_type(self, expression, *extra, **keywords):
+        result = original_iter_element_type(self, expression, *extra, **keywords)
+        if isinstance(expression, A.MethodCall) and expression.method == "walk":
+            print(
+                "ITER_WALK",
+                "RECEIVER",
+                A.expr_type(expression.obj),
+                "CALL",
+                A.expr_type(expression),
+                "CALL_EL",
+                getattr(expression, "list_el_type", None),
+                "RESULT",
+                result,
+            )
+        return result
+
+    SemaAnalyzer._iter_element_type = audited_iter_element_type
     analyzer = SemaAnalyzer(module, source_dir=entry.parent, collect_errors=True)
     try:
         analyzer.analyze()
