@@ -25,5 +25,6 @@ from . import class_value_compat_fixes as _class_value_compat_fixes
 from . import class_string_compat_fixes as _class_string_compat_fixes
 from . import global_return_flow_compat_fixes as _global_return_flow_compat_fixes
 from . import iterable_element_compat_fixes as _iterable_element_compat_fixes
+from . import chained_receiver_compat_fixes as _chained_receiver_compat_fixes
 
 __all__ = ["__version__"]
