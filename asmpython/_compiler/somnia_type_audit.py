@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import inspect
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 
 from . import ast_nodes as A
@@ -39,6 +41,37 @@ INTERESTING_METHODS = {
 }
 
 
+def _walk_ast(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return
+    yield value
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            yield from _walk_ast(item)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _walk_ast(key)
+            yield from _walk_ast(item)
+        return
+    if is_dataclass(value) and not isinstance(value, type):
+        for descriptor in fields(value):
+            yield from _walk_ast(getattr(value, descriptor.name))
+
+
+def _print_comprehension_source() -> None:
+    print("ITER_ELEMENT_SOURCE")
+    print(inspect.getsource(SemaAnalyzer._iter_element_type))
+    source_lines = inspect.getsource(SemaAnalyzer._check_expr).splitlines()
+    for index, line in enumerate(source_lines):
+        if "Comprehension" not in line:
+            continue
+        start = max(0, index - 4)
+        end = min(len(source_lines), index + 22)
+        print("CHECK_EXPR_COMPREHENSION_SOURCE")
+        print("\n".join(source_lines[start:end]))
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("entry", type=Path)
@@ -46,6 +79,7 @@ def main(argv=None) -> int:
 
     entry = args.entry.resolve()
     module = load_program(entry.read_text(encoding="utf-8"), entry)
+    _print_comprehension_source()
 
     original_iter_element_type = SemaAnalyzer._iter_element_type
 
@@ -72,6 +106,22 @@ def main(argv=None) -> int:
         print("ANALYZE PASS")
     except Exception as error:
         print("ANALYZE ERROR", type(error).__name__ + ":", str(error))
+
+    for node in _walk_ast(module):
+        if isinstance(node, (A.Comprehension, A.DictComprehension)):
+            iterator = node.iter
+            print(
+                "COMPREHENSION",
+                type(iterator).__name__,
+                "METHOD",
+                getattr(iterator, "method", None),
+                "TYPE",
+                A.expr_type(iterator),
+                "EL",
+                getattr(iterator, "list_el_type", None),
+                "VARS",
+                vars(node),
+            )
 
     for owner in module.classes:
         if owner.name not in INTERESTING:
