@@ -21,8 +21,13 @@ RELEASE_VERSION = FULL_VERSION
 PACKAGING_VERSION = ASMPYTHON_VERSION
 
 # ``__version__`` follows the installed ASMPython package version. Use
-# ``FULL_VERSION`` when displaying or recording the complete release identity.
+# ``full_version`` when displaying or recording the complete release identity.
 __version__ = ASMPYTHON_VERSION
+
+# Friendly runtime aliases for tools and user code.
+asmpython_version = ASMPYTHON_VERSION
+python_version = PYTHON_LANGUAGE_VERSION
+full_version = FULL_VERSION
 
 PYTHON_VERSION_INFO = (3, 14)
 VERSION_INFO = (2, 0, 0)
@@ -37,5 +42,8 @@ __all__ = [
     "PYTHON_VERSION_INFO",
     "RELEASE_VERSION",
     "VERSION_INFO",
+    "asmpython_version",
+    "full_version",
+    "python_version",
     "__version__",
 ]
