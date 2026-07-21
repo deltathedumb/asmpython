@@ -65,12 +65,14 @@ def compile_function(
     free: bool = False,
 ):
     def decorator(func):
-        func.__asmpython_config__ = {
-            "dyn": dyn,
-            "gc": gc,
-            "exc": exc,
-            "refl": refl,
-            "free": free,
+        config = func.__asmpython_config__
+        config = {
+            "dyn": config.get("dyn", True),
+            "gc": config.get("gc", True),
+            "exc": config.get("exc", True),
+            "refl": config.get("refl", True),
+            "free": config.get("free", True),
+            "enforced": config.get("enforced", [])
         }
         return func
 
