@@ -1,17 +1,4 @@
-"""Preserve iterable element types through simple helper and generator patterns.
-
-Two ordinary Python forms carry a statically finite element shape which the
-native compiler can resolve before semantic analysis:
-
-* a zero-argument helper returning a module-level literal tuple, and
-* a generator method yielding its receiver or another statically typed value.
-
-Normalize the helper call back to its tuple constant so finite-class lowering
-can unroll it, and annotate generator returns as list-like iterables with their
-yield element type. The runtime already lowers generators through its existing
-collection-backed generator machinery; this pass supplies the missing type
-metadata only.
-"""
+"""Preserve iterable element types through helpers, generators, and calls."""
 
 from __future__ import annotations
 
@@ -22,6 +9,7 @@ from .sema import SemaAnalyzer
 
 
 _ORIGINAL_INIT = SemaAnalyzer.__init__
+_ORIGINAL_CHECK_EXPR = SemaAnalyzer._check_expr
 
 
 def _walk(value):
@@ -71,7 +59,6 @@ def _rewrite_tuple_helper_iterators(mod: A.Module) -> None:
     helpers = _tuple_helpers(mod)
     if not helpers:
         return
-
     for node in _walk(mod):
         if isinstance(node, A.For):
             expression = node.iter
@@ -86,13 +73,10 @@ def _rewrite_tuple_helper_iterators(mod: A.Module) -> None:
             and not expression.kwargs
             and expression.dstar is None
         ):
-            replacement = A.Name(name=helpers[expression.func], pos=expression.pos)
-            node.iter = replacement
+            node.iter = A.Name(name=helpers[expression.func], pos=expression.pos)
 
 
 def _yield_value_type(value, receiver: str, owner_name: str) -> "str | None":
-    # AST annotation descriptors store user class names without the semantic
-    # ``instance:`` prefix. Sema adds that prefix while resolving annotations.
     if isinstance(value, A.Name) and value.name == receiver:
         return owner_name
     if isinstance(value, A.StrLit):
@@ -121,8 +105,7 @@ def _missing_iterable_element(ret_type) -> bool:
         return True
     if not isinstance(ret_type, tuple) or not ret_type:
         return False
-    base = ret_type[0]
-    if base not in ("list", "generator", "iterator", "iterable", "any"):
+    if ret_type[0] not in ("list", "generator", "iterator", "iterable", "any"):
         return False
     return len(ret_type) < 2 or ret_type[1] is None
 
@@ -131,41 +114,66 @@ def _mark_generator_returns(mod: A.Module) -> None:
     if getattr(mod, "_generator_returns_marked", False):
         return
     mod._generator_returns_marked = True
-
     for owner in mod.classes:
         for method in owner.methods:
             if not method.params or not _missing_iterable_element(method.ret_type):
                 continue
             receiver = method.params[0]
-            yielded: list[str] = []
+            yielded = []
             for node in _walk(method.body):
-                if not isinstance(node, A.YieldStmt):
-                    continue
-                inferred = _yield_value_type(node.value, receiver, owner.name)
-                if inferred is not None:
-                    yielded.append(inferred)
-            if not yielded:
-                continue
-            concrete = set(yielded)
-            element_type = yielded[0] if len(concrete) == 1 else "any"
-            method.ret_type = ("list", element_type)
-
+                if isinstance(node, A.YieldStmt):
+                    inferred = _yield_value_type(node.value, receiver, owner.name)
+                    if inferred is not None:
+                        yielded.append(inferred)
+            if yielded:
+                method.ret_type = (
+                    "list",
+                    yielded[0] if len(set(yielded)) == 1 else "any",
+                )
     for function in mod.funcs:
         if not _missing_iterable_element(function.ret_type):
             continue
-        yielded: list[str] = []
+        yielded = []
         for node in _walk(function.body):
-            if not isinstance(node, A.YieldStmt):
-                continue
-            inferred = _yield_value_type(node.value, "", "")
-            if inferred is not None:
-                yielded.append(inferred)
+            if isinstance(node, A.YieldStmt):
+                inferred = _yield_value_type(node.value, "", "")
+                if inferred is not None:
+                    yielded.append(inferred)
         if yielded:
-            concrete = set(yielded)
             function.ret_type = (
                 "list",
-                yielded[0] if len(concrete) == 1 else "any",
+                yielded[0] if len(set(yielded)) == 1 else "any",
             )
+
+
+def _method_element_type(analyzer: SemaAnalyzer, expression: A.MethodCall):
+    receiver_type = A.expr_type(expression.obj)
+    if receiver_type.startswith("instance:"):
+        class_name = receiver_type.split(":", 1)[1]
+    elif receiver_type in analyzer.classes:
+        class_name = receiver_type
+    else:
+        return None
+    resolved = analyzer._resolve_method(class_name, expression.method)
+    if resolved is None:
+        return None
+    return_type = getattr(resolved[1], "ret_type", None)
+    if isinstance(return_type, tuple) and len(return_type) > 1:
+        return return_type[1]
+    return None
+
+
+def _check_expr_with_iterable_elements(self: SemaAnalyzer, expression, scope) -> None:
+    _ORIGINAL_CHECK_EXPR(self, expression, scope)
+    if not isinstance(expression, A.MethodCall):
+        return
+    if A.expr_type(expression) not in ("list", "tuple", "set"):
+        return
+    if getattr(expression, "list_el_type", None) not in (None, "any"):
+        return
+    element_type = _method_element_type(self, expression)
+    if element_type not in (None, "any"):
+        expression.list_el_type = element_type
 
 
 def _init_with_iterable_elements(self: SemaAnalyzer, mod: A.Module, *args, **kwargs) -> None:
@@ -176,4 +184,5 @@ def _init_with_iterable_elements(self: SemaAnalyzer, mod: A.Module, *args, **kwa
 
 if not getattr(SemaAnalyzer, "_asmpython_iterable_element_patch", False):
     SemaAnalyzer.__init__ = _init_with_iterable_elements
+    SemaAnalyzer._check_expr = _check_expr_with_iterable_elements
     SemaAnalyzer._asmpython_iterable_element_patch = True
