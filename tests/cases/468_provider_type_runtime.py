@@ -3,7 +3,7 @@
 # 0
 # 1
 # Finite class tuples must lower without a dynamic metatype runtime.
-# Verification generation 6.
+# Verification generation 7.
 
 class Provider:
     runtime_realms = ("server", "client")
