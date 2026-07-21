@@ -44,9 +44,13 @@ from types import ModuleType
 
 from . import backend, linker, mlang
 from ._version import (
-    ASMPYTHON_BUILD,
+    ASMPYTHON_VERSION,
+    FULL_VERSION,
+    FULL_VERSION_INFO,
     PACKAGING_VERSION,
     PYTHON_LANGUAGE_VERSION,
+    PYTHON_VERSION_INFO,
+    RELEASE_VERSION,
     VERSION_INFO,
     __version__,
 )
@@ -97,9 +101,13 @@ class _ASMPythonModule(ModuleType):
 sys.modules[__name__].__class__ = _ASMPythonModule
 
 __all__ = [
-    "ASMPYTHON_BUILD",
+    "ASMPYTHON_VERSION",
+    "FULL_VERSION",
+    "FULL_VERSION_INFO",
     "PACKAGING_VERSION",
     "PYTHON_LANGUAGE_VERSION",
+    "PYTHON_VERSION_INFO",
+    "RELEASE_VERSION",
     "VERSION_INFO",
     "backend",
     "import_binary",
