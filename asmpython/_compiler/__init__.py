@@ -16,6 +16,7 @@ from . import dynamic_parameter_compat_fixes as _dynamic_parameter_compat_fixes
 from . import type_parameter_compat_fixes as _type_parameter_compat_fixes
 from . import field_flow_compat_fixes as _field_flow_compat_fixes
 from . import container_field_compat_fixes as _container_field_compat_fixes
+from . import global_singleton_flow_compat_fixes as _global_singleton_flow_compat_fixes
 from . import live_definition_compat_fixes as _live_definition_compat_fixes
 from . import empty_collection_compat_fixes as _empty_collection_compat_fixes
 from . import ordered_flow_compat_fixes as _ordered_flow_compat_fixes
@@ -25,6 +26,5 @@ from . import class_value_compat_fixes as _class_value_compat_fixes
 from . import dynamic_value_compat_fixes as _dynamic_value_compat_fixes
 from . import concrete_specialization_compat_fixes as _concrete_specialization_compat_fixes
 from . import static_method_call_compat_fixes as _static_method_call_compat_fixes
-from . import global_singleton_flow_compat_fixes as _global_singleton_flow_compat_fixes
 
 __all__ = ["__version__"]
