@@ -62,6 +62,12 @@ def _walk_ast(value):
 def _print_comprehension_source() -> None:
     print("ITER_ELEMENT_SOURCE")
     print(inspect.getsource(SemaAnalyzer._iter_element_type))
+    print(
+        "CHECK_EXPR_ACTIVE",
+        SemaAnalyzer._check_expr.__module__,
+        SemaAnalyzer._check_expr.__name__,
+    )
+    print(inspect.getsource(SemaAnalyzer._check_expr))
     source_lines = inspect.getsource(SemaAnalyzer._check_expr).splitlines()
     for index, line in enumerate(source_lines):
         if "Comprehension" not in line:
@@ -70,6 +76,15 @@ def _print_comprehension_source() -> None:
         end = min(len(source_lines), index + 22)
         print("CHECK_EXPR_COMPREHENSION_SOURCE")
         print("\n".join(source_lines[start:end]))
+
+
+def _expr_state(expression) -> tuple[str, str, object, object]:
+    return (
+        type(expression).__name__,
+        A.expr_type(expression),
+        getattr(expression, "inferred_type", None),
+        getattr(expression, "list_el_type", None),
+    )
 
 
 def main(argv=None) -> int:
@@ -82,6 +97,7 @@ def main(argv=None) -> int:
     _print_comprehension_source()
 
     original_iter_element_type = SemaAnalyzer._iter_element_type
+    original_check_expr = SemaAnalyzer._check_expr
 
     def audited_iter_element_type(self, expression, *extra, **keywords):
         result = original_iter_element_type(self, expression, *extra, **keywords)
@@ -99,7 +115,46 @@ def main(argv=None) -> int:
             )
         return result
 
+    def audited_check_expr(self, expression, scope):
+        if not (
+            isinstance(expression, A.MethodCall)
+            and expression.method == "startswith"
+        ):
+            return original_check_expr(self, expression, scope)
+        print(
+            "STARTSWITH_BEFORE",
+            "OUTER",
+            _expr_state(expression),
+            "RECEIVER",
+            _expr_state(expression.obj),
+            "ACTIVE",
+            original_check_expr.__module__,
+            original_check_expr.__name__,
+        )
+        try:
+            result = original_check_expr(self, expression, scope)
+        except Exception as error:
+            print(
+                "STARTSWITH_ERROR",
+                type(error).__name__ + ":",
+                str(error),
+                "OUTER",
+                _expr_state(expression),
+                "RECEIVER",
+                _expr_state(expression.obj),
+            )
+            raise
+        print(
+            "STARTSWITH_AFTER",
+            "OUTER",
+            _expr_state(expression),
+            "RECEIVER",
+            _expr_state(expression.obj),
+        )
+        return result
+
     SemaAnalyzer._iter_element_type = audited_iter_element_type
+    SemaAnalyzer._check_expr = audited_check_expr
     analyzer = SemaAnalyzer(module, source_dir=entry.parent, collect_errors=True)
     try:
         analyzer.analyze()
