@@ -27,5 +27,6 @@ from . import global_return_flow_compat_fixes as _global_return_flow_compat_fixe
 from . import iterable_element_compat_fixes as _iterable_element_compat_fixes
 from . import chained_receiver_compat_fixes as _chained_receiver_compat_fixes
 from . import boolop_value_compat_fixes as _boolop_value_compat_fixes
+from . import dynamic_index_assignment_compat_fixes as _dynamic_index_assignment_compat_fixes
 
 __all__ = ["__version__"]
