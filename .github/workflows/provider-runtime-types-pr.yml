@@ -57,9 +57,22 @@ jobs:
         if: steps.focused.outcome != 'success'
         run: exit 1
       - name: Test unchanged Somnia parity
+        id: somnia
+        continue-on-error: true
         run: |
           git clone --depth 1 https://github.com/deltathedumb/somnia.git ../somnia
           (
             cd ../somnia
             PYTHONPATH="$GITHUB_WORKSPACE" python tools/dualrun.py tests/parity/model_snapshot.py
-          )
+          ) > somnia-parity.txt 2>&1
+          cat somnia-parity.txt
+      - name: Upload Somnia parity diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: somnia-provider-parity
+          path: somnia-parity.txt
+          retention-days: 7
+      - name: Require Somnia parity
+        if: steps.somnia.outcome != 'success'
+        run: exit 1
