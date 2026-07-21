@@ -24,6 +24,45 @@ def _annotation_parts(annotation) -> tuple[str, "str | None"]:
     return "", None
 
 
+def _literal_kind(expression) -> "str | None":
+    if isinstance(expression, A.StrLit) or isinstance(expression, A.FString):
+        return "str"
+    if isinstance(expression, A.FloatLit):
+        return "float"
+    if isinstance(expression, A.IntLit):
+        if getattr(expression, "is_none", False):
+            return None
+        return "bool" if getattr(expression, "is_bool", False) else "int"
+    if isinstance(expression, A.ListLit):
+        return "list"
+    if isinstance(expression, A.DictLit):
+        return "dict"
+    if isinstance(expression, A.TupleLit):
+        return "tuple"
+    if isinstance(expression, A.SetLit):
+        return "set"
+    return None
+
+
+def _literal_collection_element(expression, base: str) -> "str | None":
+    values = None
+    if base == "dict" and isinstance(expression, A.DictLit):
+        values = list(expression.values)
+    elif base == "list" and isinstance(expression, A.ListLit):
+        values = list(expression.elems)
+    if not values:
+        return None
+    kinds = [_literal_kind(value) for value in values]
+    if any(kind is None for kind in kinds):
+        return None
+    unique = set(kinds)
+    if len(unique) == 1:
+        return kinds[0]
+    if unique.issubset({"bool", "int", "float"}):
+        return "float" if "float" in unique else "int"
+    return "any"
+
+
 def _hierarchy_method_names(owner, classes: dict) -> set[str]:
     result: set[str] = set()
     current = owner
@@ -101,7 +140,13 @@ def _collection_fields(mod: A.Module) -> dict[tuple[str, str], tuple[str, str]]:
                 ):
                     continue
                 base, element = _annotation_parts(statement.annot)
-                if base not in ("list", "dict") or element is None:
+                if base not in ("list", "dict"):
+                    continue
+                literal_element = _literal_collection_element(statement.value, base)
+                if literal_element is not None and element in (None, "any", "int"):
+                    element = literal_element
+                    statement.annot = (base, element)
+                if element is None:
                     continue
                 if base == "list" and element == "any":
                     refined = _recursive_object_element(owner, statement.name, classes)
@@ -112,6 +157,38 @@ def _collection_fields(mod: A.Module) -> dict[tuple[str, str], tuple[str, str]]:
                         statement.annot = ("list", element)
                 result[(owner.name, statement.name)] = (base, element)
     return result
+
+
+def _refine_collection_method_returns(mod: A.Module, table: dict) -> None:
+    """Propagate concrete ``dict.get``/field return kinds into method signatures."""
+    for owner in mod.classes:
+        for method in owner.methods:
+            observed: list[str] = []
+            for statement in _walk_statements(method.body):
+                if not isinstance(statement, A.Return):
+                    continue
+                value = statement.value
+                if (
+                    isinstance(value, A.MethodCall)
+                    and value.method == "get"
+                    and isinstance(value.obj, A.Attr)
+                    and isinstance(value.obj.obj, A.Name)
+                    and value.obj.obj.name == "self"
+                ):
+                    metadata = table.get((owner.name, value.obj.name))
+                    if metadata is not None and metadata[0] == "dict":
+                        observed.append(metadata[1])
+                elif (
+                    isinstance(value, A.Attr)
+                    and isinstance(value.obj, A.Name)
+                    and value.obj.name == "self"
+                ):
+                    metadata = table.get((owner.name, value.name))
+                    if metadata is not None:
+                        observed.append(metadata[0])
+            concrete = {kind for kind in observed if kind not in ("any", "int", "")}
+            if len(concrete) == 1:
+                method.ret_type = (next(iter(concrete)), None)
 
 
 def _lookup_field(self: SemaAnalyzer, receiver_type: str, field_name: str):
@@ -175,6 +252,7 @@ def _analyze_with_collection_fields(self: SemaAnalyzer) -> None:
     _mark_dynamic_parameters(self.mod)
     _annotate_object_fields(self.mod)
     self._compat_collection_fields = _collection_fields(self.mod)
+    _refine_collection_method_returns(self.mod, self._compat_collection_fields)
     _ORIGINAL_ANALYZE(self)
 
 
