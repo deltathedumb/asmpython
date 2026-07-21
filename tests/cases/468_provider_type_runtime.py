@@ -5,6 +5,7 @@
 # 1
 # Finite class tuples must lower without a dynamic metatype runtime.
 # Dynamic values must preserve string behavior.
+# Exact-output verification generation 1.
 
 class Provider:
     runtime_realms = ("server", "client")
