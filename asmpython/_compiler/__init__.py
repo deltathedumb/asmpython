@@ -23,5 +23,6 @@ from . import descriptor_precedence_compat_fixes as _descriptor_precedence_compa
 from . import return_annotation_precedence_compat_fixes as _return_annotation_precedence_compat_fixes
 from . import class_value_compat_fixes as _class_value_compat_fixes
 from . import class_string_compat_fixes as _class_string_compat_fixes
+from . import global_return_flow_compat_fixes as _global_return_flow_compat_fixes
 
 __all__ = ["__version__"]
