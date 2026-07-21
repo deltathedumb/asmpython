@@ -34,6 +34,7 @@ INTERESTING_METHODS = {
     "to_list",
     "to_dict",
     "type_name",
+    "walk",
 }
 
 
@@ -57,6 +58,9 @@ def main(argv=None) -> int:
         signature = analyzer.classes.get(owner.name)
         print("CLASS", owner.name)
         print("  CLASS_VARS", [name for name, _annotation, _value in owner.class_vars])
+        for method in owner.methods:
+            if method.name in INTERESTING_METHODS:
+                print("  AST_METHOD", method.name, "RET", method.ret_type)
         if signature is None:
             print("  SIGNATURE <missing>")
             continue
@@ -70,6 +74,8 @@ def main(argv=None) -> int:
                 method_name,
                 "RET",
                 method_signature.ret_type,
+                "RET_EL",
+                getattr(method_signature, "ret_el_type", None),
                 "DECORATORS",
                 list(getattr(method_signature, "decorators", []) or []),
             )
