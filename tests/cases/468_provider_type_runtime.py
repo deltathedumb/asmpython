@@ -7,7 +7,7 @@
 # 1
 # Finite class tuples must lower without a dynamic metatype runtime.
 # Dynamic values must preserve string behavior.
-# Tuple-membership isolation generation 1.
+# Tuple-membership isolation generation 2.
 
 class Provider:
     runtime_realms = ("server", "client")
