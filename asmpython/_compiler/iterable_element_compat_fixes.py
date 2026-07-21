@@ -10,6 +10,7 @@ from .sema import SemaAnalyzer
 
 _ORIGINAL_INIT = SemaAnalyzer.__init__
 _ORIGINAL_CHECK_EXPR = SemaAnalyzer._check_expr
+_ORIGINAL_ITER_ELEMENT_TYPE = SemaAnalyzer._iter_element_type
 
 
 def _walk(value):
@@ -176,6 +177,14 @@ def _check_expr_with_iterable_elements(self: SemaAnalyzer, expression, scope) ->
         expression.list_el_type = element_type
 
 
+def _iter_element_type_with_methods(self: SemaAnalyzer, expression, *args, **kwargs):
+    if isinstance(expression, A.MethodCall):
+        element_type = _method_element_type(self, expression)
+        if element_type not in (None, "any"):
+            return element_type
+    return _ORIGINAL_ITER_ELEMENT_TYPE(self, expression, *args, **kwargs)
+
+
 def _init_with_iterable_elements(self: SemaAnalyzer, mod: A.Module, *args, **kwargs) -> None:
     _rewrite_tuple_helper_iterators(mod)
     _mark_generator_returns(mod)
@@ -185,4 +194,5 @@ def _init_with_iterable_elements(self: SemaAnalyzer, mod: A.Module, *args, **kwa
 if not getattr(SemaAnalyzer, "_asmpython_iterable_element_patch", False):
     SemaAnalyzer.__init__ = _init_with_iterable_elements
     SemaAnalyzer._check_expr = _check_expr_with_iterable_elements
+    SemaAnalyzer._iter_element_type = _iter_element_type_with_methods
     SemaAnalyzer._asmpython_iterable_element_patch = True
