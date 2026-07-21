@@ -10,9 +10,13 @@
 
 extern dlopen
 extern dlsym
+extern _runtime_setjmp
+extern _runtime_raise
 
 global LoadLibraryA
 global GetProcAddress
+global _abi_setjmp
+global _abi_raise
 
 section .text
 
@@ -26,3 +30,16 @@ LoadLibraryA:
 ; SysV arguments already match dlsym exactly: rdi=handle, rsi=name.
 GetProcAddress:
     jmp dlsym
+
+; int _abi_setjmp(void *jmp_buf)
+; SysV entry: rdi=buffer.  The runtime's internal convention takes it in rax.
+_abi_setjmp:
+    mov rax, rdi
+    jmp _runtime_setjmp
+
+; noreturn _abi_raise(char *message, int type_id)
+; SysV entry: rdi=message, rsi=type id.  The runtime expects rax/rbx.
+_abi_raise:
+    mov rax, rdi
+    mov rbx, rsi
+    jmp _runtime_raise
