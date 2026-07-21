@@ -1,6 +1,6 @@
 # expect:
 # 2
-# Generator isolation generation 2.
+# Generator isolation generation 3.
 
 
 class Node:
