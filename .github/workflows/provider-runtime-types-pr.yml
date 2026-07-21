@@ -1,4 +1,4 @@
-name: Provider runtime type PR verifier
+name: Verify provider class values
 
 on:
   pull_request:
@@ -6,10 +6,10 @@ on:
     branches: [beta/3.14.0]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch-and-probe:
+  provider-class-values:
     if: github.event.pull_request.number == 37
     runs-on: ubuntu-24.04
     steps:
@@ -22,95 +22,16 @@ jobs:
           python-version: "3.12"
       - name: Install native toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm
-      - name: Apply class-value semantic support
+      - name: Test focused regression
         run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path("asmpython/_compiler/sema.py")
-          text = path.read_text(encoding="utf-8")
-
-          old_str = '''                if t not in (
-                      "int", "float", "str", "any", "list", "tuple", "dict", "set"
-                  ) and not t.startswith("instance:"):
-'''
-          new_str = '''                if t not in (
-                      "int", "float", "str", "any", "list", "tuple", "dict", "set", "type"
-                  ) and not t.startswith("instance:"):
-'''
-          if old_str in text:
-              text = text.replace(old_str, new_str, 1)
-
-          if 'e.dynamic_type_candidates = candidates' not in text:
-              type_branch = text.find('''            elif (
-                  obj_t == "type"
-''')
-              if type_branch < 0:
-                  raise SystemExit("type receiver semantic branch not found")
-              insert_at = text.find('                if e.method == "from_bytes":', type_branch)
-              if insert_at < 0:
-                  raise SystemExit("type receiver insertion point not found")
-              dynamic_block = '''                if obj_t == "type":
-                      candidates: list = []
-                      candidate_ret = None
-                      candidate_el = None
-                      for dynamic_cls_name in self.classes:
-                          dynamic_resolved = self._resolve_method(dynamic_cls_name, e.method)
-                          if dynamic_resolved is None:
-                              continue
-                          dynamic_owner: str = dynamic_resolved[0]
-                          dynamic_sig: FuncSig = dynamic_resolved[1]
-                          dynamic_decorators: list[str] = getattr(dynamic_sig, "decorators", [])
-                          if "classmethod" not in dynamic_decorators and "staticmethod" not in dynamic_decorators:
-                              continue
-                          dynamic_expected = dynamic_sig.arity - (1 if "classmethod" in dynamic_decorators else 0)
-                          dynamic_required = dynamic_expected - dynamic_sig.n_defaults
-                          if not (dynamic_required <= len(e.args) <= dynamic_expected):
-                              continue
-                          candidates.append((dynamic_cls_name, dynamic_owner, "classmethod" in dynamic_decorators))
-                          if dynamic_sig.ret_type is not None:
-                              dynamic_ret: tuple = dynamic_sig.ret_type  # type: ignore
-                              this_ret = dynamic_ret[0]
-                              this_el = dynamic_ret[1]
-                          else:
-                              this_ret = "int"
-                              this_el = None
-                          if candidate_ret is None:
-                              candidate_ret = this_ret
-                              candidate_el = this_el
-                          elif candidate_ret != this_ret:
-                              candidate_ret = "any"
-                              candidate_el = None
-                      if not candidates:
-                          raise SemaError(f"type has no method {e.method!r}", e.pos, ErrorCode.E_NO_METHOD)
-                      e.dynamic_type_candidates = candidates  # type: ignore[attr-defined]
-                      e.inferred_type = candidate_ret if candidate_ret is not None else "any"
-                      if e.inferred_type == "list" and candidate_el is not None:
-                          e.list_el_type = candidate_el
-                      return
-'''
-              text = text[:insert_at] + dynamic_block + text[insert_at:]
-
-          path.write_text(text, encoding="utf-8")
-          PY
-      - name: Probe native regression
-        continue-on-error: true
+          python -m asmpython tests/cases/468_provider_type_runtime.py --target linux -o /tmp/asmpython-provider-types
+          output=$(/tmp/asmpython-provider-types)
+          printf '%s\n' "$output"
+          test "$output" = $'1\n0\n1'
+      - name: Test unchanged Somnia parity
         run: |
-          set -o pipefail
-          python -m asmpython tests/cases/468_provider_type_runtime.py --target linux -o /tmp/provider-type-runtime \
-            > provider-runtime-probe.txt 2>&1
-          if [ -x /tmp/provider-type-runtime ]; then
-            /tmp/provider-type-runtime >> provider-runtime-probe.txt 2>&1
-          fi
-          cat provider-runtime-probe.txt
-      - name: Commit semantic patch and probe
-        if: always()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          touch provider-runtime-probe.txt
-          git add asmpython/_compiler/sema.py provider-runtime-probe.txt
-          if ! git diff --cached --quiet; then
-            git commit -m "Add semantic support for provider class values"
-            git push origin HEAD:${{ github.event.pull_request.head.ref }}
-          fi
+          git clone --depth 1 https://github.com/deltathedumb/somnia.git ../somnia
+          (
+            cd ../somnia
+            PYTHONPATH="$GITHUB_WORKSPACE" python tools/dualrun.py tests/parity/model_snapshot.py
+          )
