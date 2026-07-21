@@ -22,86 +22,18 @@ jobs:
           python-version: "3.12"
       - name: Install native toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm
-      - name: Inspect lowered provider AST
+      - name: Test provider class values
         run: |
-          python - <<'PY' > lowered-provider-ast.txt
-          from pathlib import Path
-          from asmpython._compiler.lexer import Lexer
-          from asmpython._compiler.parser import Parser
-          from asmpython._compiler import class_value_compat_fixes as class_values
-          from asmpython._compiler import concrete_specialization_compat_fixes as concrete
-
-          source = Path("tests/cases/468_provider_type_runtime.py").read_text(encoding="utf-8")
-          module = Parser(Lexer(source).tokenize()).parse()
-          class_values._lower_finite_class_values(module)
-          class_tuples = class_values._static_class_tuples(module)
-          concrete._specialize_materialized_classmethods(module, class_tuples)
-          print("class_tuples", class_tuples)
-          for owner in module.classes:
-              if owner.name not in ("Provider", "ServerProvider", "ClientProvider"):
-                  continue
-              print("CLASS", owner.name, "VARS", owner.class_vars)
-              for method in owner.methods:
-                  if method.name == "supports_realm":
-                      print(
-                          "METHOD",
-                          owner.name,
-                          method.decorators,
-                          method.params,
-                          repr(method.body),
-                      )
-          PY
-          cat lowered-provider-ast.txt
-      - name: Upload lowered AST
-        uses: actions/upload-artifact@v4
-        with:
-          name: lowered-provider-ast
-          path: lowered-provider-ast.txt
-          retention-days: 7
-      - name: Test focused regression
-        id: focused
-        continue-on-error: true
+          python -m asmpython tests/cases/468_provider_type_runtime.py --target linux -o /tmp/asmpython-provider-types
+          output=$(/tmp/asmpython-provider-types)
+          printf '%s\n' "$output"
+          test "$output" = $'True\nFalse\nTrue\nTrue\nTrue\nTrue'
+      - name: Test property and generator string flow
         run: |
-          set +e
-          {
-            python -m asmpython tests/cases/468_provider_type_runtime.py --target linux -o /tmp/asmpython-provider-types
-            compile_status=$?
-            echo "compile_status=$compile_status"
-            native_status=99
-            output_status=99
-            if [ "$compile_status" -eq 0 ] && [ -x /tmp/asmpython-provider-types ]; then
-              native_output=$(/tmp/asmpython-provider-types)
-              native_status=$?
-              printf '%s\n' "$native_output"
-              echo "native_status=$native_status"
-              if [ "$native_output" = $'True\nFalse\nTrue\nTrue\nTrue\nTrue' ]; then
-                output_status=0
-              else
-                output_status=2
-              fi
-              echo "output_status=$output_status"
-            fi
-            exit_status=$compile_status
-            if [ "$exit_status" -eq 0 ]; then
-              exit_status=$native_status
-            fi
-            if [ "$exit_status" -eq 0 ]; then
-              exit_status=$output_status
-            fi
-            echo "exit_status=$exit_status"
-          } > provider-runtime-probe.txt 2>&1
-          cat provider-runtime-probe.txt
-          exit "$(sed -n 's/^exit_status=//p' provider-runtime-probe.txt | tail -n 1)"
-      - name: Upload focused diagnostic
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: provider-runtime-probe
-          path: provider-runtime-probe.txt
-          retention-days: 7
-      - name: Require focused regression
-        if: steps.focused.outcome != 'success'
-        run: exit 1
+          python -m asmpython tests/cases/469_property_generator_string.py --target linux -o /tmp/asmpython-property-flow
+          output=$(/tmp/asmpython-property-flow)
+          printf '%s\n' "$output"
+          test "$output" = $'2\nsomnia.Root'
       - name: Test unchanged Somnia parity
         id: somnia
         continue-on-error: true
