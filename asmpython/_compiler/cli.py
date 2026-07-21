@@ -15,13 +15,8 @@ from .driver import (
     detect_default_target,
 )
 from .errors import CompileError, MultiSemaError, explain as _explain_code
-from .fastcomp import (
-    default_cache_dir,
-    fast_compile_module,
-    invalidate_cache,
-    load_cached_frontend,
-    store_cached_frontend,
-)
+from .fastcomp import default_cache_dir, fast_compile_module, invalidate_cache
+from .fastfrontend import load_cached_frontend, store_cached_frontend
 from .irfreeze import freeze_source, load_ir
 
 
@@ -217,7 +212,11 @@ def main(argv: list[str] | None = None) -> int:
             module = None
 
         targets: list[str] = args.target or [detect_default_target()]
-        base_stem = Path("build") / source_path.with_suffix("").name
+        if source_path.name.endswith(".apir.json"):
+            source_stem = source_path.name[: -len(".apir.json")]
+        else:
+            source_stem = source_path.stem
+        base_stem = Path("build") / source_stem
         single = len(targets) == 1
         if args.output is None:
             base_stem.parent.mkdir(parents=True, exist_ok=True)
