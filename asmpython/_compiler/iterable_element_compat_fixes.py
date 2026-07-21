@@ -91,8 +91,10 @@ def _rewrite_tuple_helper_iterators(mod: A.Module) -> None:
 
 
 def _yield_value_type(value, receiver: str, owner_name: str) -> "str | None":
+    # AST annotation descriptors store user class names without the semantic
+    # ``instance:`` prefix. Sema adds that prefix while resolving annotations.
     if isinstance(value, A.Name) and value.name == receiver:
-        return "instance:" + owner_name
+        return owner_name
     if isinstance(value, A.StrLit):
         return "str"
     if isinstance(value, A.FloatLit):
@@ -110,8 +112,19 @@ def _yield_value_type(value, receiver: str, owner_name: str) -> "str | None":
     if isinstance(value, A.SetLit):
         return "set"
     if isinstance(value, A.Call) and value.func[:1].isupper():
-        return "instance:" + value.func
+        return value.func
     return None
+
+
+def _missing_iterable_element(ret_type) -> bool:
+    if ret_type is None:
+        return True
+    if not isinstance(ret_type, tuple) or not ret_type:
+        return False
+    base = ret_type[0]
+    if base not in ("list", "generator", "iterator", "iterable", "any"):
+        return False
+    return len(ret_type) < 2 or ret_type[1] is None
 
 
 def _mark_generator_returns(mod: A.Module) -> None:
@@ -121,7 +134,7 @@ def _mark_generator_returns(mod: A.Module) -> None:
 
     for owner in mod.classes:
         for method in owner.methods:
-            if method.ret_type is not None or not method.params:
+            if not method.params or not _missing_iterable_element(method.ret_type):
                 continue
             receiver = method.params[0]
             yielded: list[str] = []
@@ -138,7 +151,7 @@ def _mark_generator_returns(mod: A.Module) -> None:
             method.ret_type = ("list", element_type)
 
     for function in mod.funcs:
-        if function.ret_type is not None:
+        if not _missing_iterable_element(function.ret_type):
             continue
         yielded: list[str] = []
         for node in _walk(function.body):
