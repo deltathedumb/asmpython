@@ -1,5 +1,6 @@
 # expect:
 # somnia.Root
+# Dict-method diagnostic generation 1.
 
 
 class Value:
