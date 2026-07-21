@@ -7,6 +7,7 @@
 ; avoids baking a target choice into the shared IR.
 
 %include "abi_shims_linux.asm"
+%include "abi_exception_shims_linux.asm"
 
 extern dlopen
 extern dlsym
