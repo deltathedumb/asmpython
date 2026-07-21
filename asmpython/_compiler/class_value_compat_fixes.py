@@ -3,8 +3,8 @@
 Native whole-program compilation can statically resolve class objects stored
 in literal tuples. This pass folds literal tuple indexing and unrolls safe
 loops over those tuples, replacing the loop variable with each concrete
-class. It preserves ordinary Python source while avoiding a general dynamic
-metatype runtime for cases whose complete class set is already known.
+class. It also materializes inherited class/static methods on those concrete
+classes so backend symbol emission preserves Python's subclass ``cls`` value.
 """
 
 from __future__ import annotations
@@ -67,6 +67,44 @@ def _static_class_tuples(mod: A.Module) -> dict:
         if valid and names:
             result[statement.target] = tuple(names)
     return result
+
+
+def _materialize_inherited_class_methods(mod: A.Module, class_tuples: dict) -> None:
+    """Emit subclass symbols for inherited class/static methods.
+
+    Backends key method bodies by ``ClassName__method``. A classmethod invoked
+    through a concrete subclass must still receive that subclass as ``cls``.
+    Copying the nearest inherited class/static method onto each finite concrete
+    class preserves that behavior and gives codegen the symbol it already
+    expects, without introducing a dynamic metatype runtime.
+    """
+    class_table = {definition.name: definition for definition in mod.classes}
+    concrete_names = {
+        class_name
+        for entries in class_tuples.values()
+        for class_name in entries
+    }
+    for class_name in concrete_names:
+        owner = class_table.get(class_name)
+        if owner is None:
+            continue
+        existing = {method.name for method in owner.methods}
+        parent_name = owner.parent
+        seen = set()
+        while parent_name and parent_name not in seen:
+            seen.add(parent_name)
+            parent = class_table.get(parent_name)
+            if parent is None:
+                break
+            for method in parent.methods:
+                decorators = set(getattr(method, "decorators", []))
+                if method.name in existing:
+                    continue
+                if not decorators.intersection({"classmethod", "staticmethod"}):
+                    continue
+                owner.methods.append(_clone(method))
+                existing.add(method.name)
+            parent_name = parent.parent
 
 
 def _contains_loop_control(value) -> bool:
@@ -198,6 +236,7 @@ def _lower_finite_class_values(mod: A.Module) -> None:
     class_tuples = _static_class_tuples(mod)
     if not class_tuples:
         return
+    _materialize_inherited_class_methods(mod, class_tuples)
     mod.body = _rewrite(mod.body, class_tuples, {})
     for function in mod.funcs:
         function.body = _rewrite(function.body, class_tuples, {})
