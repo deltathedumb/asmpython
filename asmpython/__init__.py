@@ -52,6 +52,9 @@ from ._version import (
     PYTHON_VERSION_INFO,
     RELEASE_VERSION,
     VERSION_INFO,
+    asmpython_version,
+    full_version,
+    python_version,
     __version__,
 )
 
@@ -109,6 +112,9 @@ __all__ = [
     "PYTHON_VERSION_INFO",
     "RELEASE_VERSION",
     "VERSION_INFO",
+    "asmpython_version",
+    "full_version",
+    "python_version",
     "backend",
     "import_binary",
     "linker",
