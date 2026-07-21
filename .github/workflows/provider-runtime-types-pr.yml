@@ -28,6 +28,24 @@ jobs:
           output=$(/tmp/asmpython-provider-types)
           printf '%s\n' "$output"
           test "$output" = $'True\nFalse\nTrue\nTrue\nTrue\nTrue'
+      - name: Test direct string property
+        run: |
+          python -m asmpython tests/cases/470_property_string_only.py --target linux -o /tmp/asmpython-property-only
+          output=$(/tmp/asmpython-property-only)
+          printf '%s\n' "$output"
+          test "$output" = 'somnia.Root'
+      - name: Test recursive generator
+        run: |
+          python -m asmpython tests/cases/471_recursive_generator_only.py --target linux -o /tmp/asmpython-generator-only
+          output=$(/tmp/asmpython-generator-only)
+          printf '%s\n' "$output"
+          test "$output" = '2'
+      - name: Test property comprehension
+        run: |
+          python -m asmpython tests/cases/472_property_comprehension_only.py --target linux -o /tmp/asmpython-comprehension-only
+          output=$(/tmp/asmpython-comprehension-only)
+          printf '%s\n' "$output"
+          test "$output" = $'2\nsomnia.Root'
       - name: Test property and generator string flow
         id: property_flow
         continue-on-error: true
