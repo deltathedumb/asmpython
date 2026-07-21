@@ -1,13 +1,13 @@
 # expect:
-# 1
-# 0
-# 1
-# 1
-# 1
-# 1
+# True
+# False
+# True
+# True
+# True
+# True
 # Finite class tuples must lower without a dynamic metatype runtime.
 # Dynamic values must preserve string behavior.
-# Tuple-membership isolation generation 2.
+# Python-boolean verification generation 1.
 
 class Provider:
     runtime_realms = ("server", "client")
