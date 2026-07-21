@@ -18,6 +18,7 @@ import importlib
 import json
 import marshal
 import struct
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -279,6 +280,8 @@ def compile_ir(
         "format": "asmpython-ir",
         "format_version": FORMAT_VERSION,
         "compiler_version": __version__,
+        "python_cache_tag": sys.implementation.cache_tag,
+        "marshal_version": marshal.version,
         "stage": stage,
         "source_path": str(source_path),
         "source_sha256": _source_hash(source),
@@ -339,6 +342,13 @@ def load_ir(path: Path) -> FrozenIR:
         if len(payload) != payload_len or hashlib.sha256(payload).digest() != digest:
             raise ValueError(f"corrupt ASMPython IR payload: {path}")
         metadata = json.loads(metadata_raw.decode("utf-8"))
+        cache_tag = metadata.get("python_cache_tag")
+        if cache_tag and cache_tag != sys.implementation.cache_tag:
+            raise ValueError(
+                f"binary frozen IR was written for {cache_tag}, not "
+                f"{sys.implementation.cache_tag}; use --ir-output json for "
+                "cross-Python interchange"
+            )
         data = marshal.loads(payload)
         return FrozenIR(module=_from_data(data), metadata=metadata)
 
