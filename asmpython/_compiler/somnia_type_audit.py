@@ -98,6 +98,7 @@ def main(argv=None) -> int:
 
     original_iter_element_type = SemaAnalyzer._iter_element_type
     original_check_expr = SemaAnalyzer._check_expr
+    original_bind_name = SemaAnalyzer._bind_name_from_value
 
     def audited_iter_element_type(self, expression, *extra, **keywords):
         result = original_iter_element_type(self, expression, *extra, **keywords)
@@ -115,6 +116,33 @@ def main(argv=None) -> int:
             )
         return result
 
+    def audited_bind_name(self, name, value, scope, *extra, **keywords):
+        interesting = name == "current" or isinstance(value, A.BoolOp)
+        if interesting:
+            print(
+                "BIND_BEFORE",
+                name,
+                "VALUE",
+                _expr_state(value),
+                "LEFT",
+                _expr_state(value.left) if isinstance(value, A.BoolOp) else None,
+                "RIGHT",
+                _expr_state(value.right) if isinstance(value, A.BoolOp) else None,
+                "SCOPE",
+                scope.types.get(name),
+            )
+        result = original_bind_name(self, name, value, scope, *extra, **keywords)
+        if interesting:
+            print(
+                "BIND_AFTER",
+                name,
+                "VALUE",
+                _expr_state(value),
+                "SCOPE",
+                scope.types.get(name),
+            )
+        return result
+
     def audited_check_expr(self, expression, scope):
         if not (
             isinstance(expression, A.MethodCall)
@@ -127,6 +155,10 @@ def main(argv=None) -> int:
             _expr_state(expression),
             "RECEIVER",
             _expr_state(expression.obj),
+            "NAME",
+            getattr(expression.obj, "name", None),
+            "SCOPE",
+            scope.types.get(getattr(expression.obj, "name", "")),
             "ACTIVE",
             original_check_expr.__module__,
             original_check_expr.__name__,
@@ -142,6 +174,10 @@ def main(argv=None) -> int:
                 _expr_state(expression),
                 "RECEIVER",
                 _expr_state(expression.obj),
+                "NAME",
+                getattr(expression.obj, "name", None),
+                "SCOPE",
+                scope.types.get(getattr(expression.obj, "name", "")),
             )
             raise
         print(
@@ -154,6 +190,7 @@ def main(argv=None) -> int:
         return result
 
     SemaAnalyzer._iter_element_type = audited_iter_element_type
+    SemaAnalyzer._bind_name_from_value = audited_bind_name
     SemaAnalyzer._check_expr = audited_check_expr
     analyzer = SemaAnalyzer(module, source_dir=entry.parent, collect_errors=True)
     try:
@@ -163,6 +200,19 @@ def main(argv=None) -> int:
         print("ANALYZE ERROR", type(error).__name__ + ":", str(error))
 
     for node in _walk_ast(module):
+        if isinstance(node, A.BoolOp):
+            print(
+                "BOOLOP",
+                node.op,
+                "VALUE",
+                _expr_state(node),
+                "LEFT",
+                _expr_state(node.left),
+                "RIGHT",
+                _expr_state(node.right),
+                "POS",
+                node.pos,
+            )
         if isinstance(node, (A.Comprehension, A.DictComprehension)):
             iterator = node.iter
             print(
