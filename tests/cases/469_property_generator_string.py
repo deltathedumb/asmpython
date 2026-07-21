@@ -1,6 +1,7 @@
 # expect:
 # 2
 # somnia.Root
+# Property-flow verification generation 1.
 
 
 class Registry:
