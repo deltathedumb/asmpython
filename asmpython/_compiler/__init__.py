@@ -21,5 +21,6 @@ from . import empty_collection_compat_fixes as _empty_collection_compat_fixes
 from . import ordered_flow_compat_fixes as _ordered_flow_compat_fixes
 from . import descriptor_precedence_compat_fixes as _descriptor_precedence_compat_fixes
 from . import return_annotation_precedence_compat_fixes as _return_annotation_precedence_compat_fixes
+from . import class_value_compat_fixes as _class_value_compat_fixes
 
 __all__ = ["__version__"]
