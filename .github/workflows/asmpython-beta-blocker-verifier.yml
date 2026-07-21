@@ -1,4 +1,4 @@
-name: Verify beta compiler blocker fixes
+name: Verify provider class values
 
 on:
   pull_request_target:
@@ -6,11 +6,11 @@ on:
     branches: [beta/3.14.0]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch-test-commit:
-    if: github.event.pull_request.head.repo.full_name == github.repository && (github.event.pull_request.head.ref == 'fix/yield-from-final' || github.event.pull_request.head.ref == 'fix/call-expression-result-final')
+  provider-class-values:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/somnia-provider-runtime-types'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -22,163 +22,16 @@ jobs:
           python-version: "3.12"
       - name: Install native toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm
-      - name: Apply yield-from support
-        if: github.event.pull_request.head.ref == 'fix/yield-from-final'
+      - name: Test focused regression
         run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path("asmpython/_compiler/parser.py")
-          text = path.read_text(encoding="utf-8")
-          counter = '        self._yield_from_counter = 0\n'
-          if counter not in text:
-              anchor = '        self._deco_tmp_counter = 0\n'
-              if anchor not in text:
-                  raise SystemExit("parser counter anchor not found")
-              text = text.replace(anchor, anchor + counter, 1)
-          signature = 'item_name = "__yield_from_" + str(self._yield_from_counter)'
-          if signature not in text:
-              start_marker = '            if t.value == "yield":\n'
-              end_marker = '\n\n        # `match` is a soft keyword'
-              start = text.find(start_marker)
-              end = text.find(end_marker, start)
-              if start < 0 or end < 0:
-                  raise SystemExit("yield parser branch landmarks not found")
-              branch = '''            if t.value == "yield":
-                  pos = self._eat().pos
-                  if self._check("KEYWORD", "from"):
-                      self._eat()
-                      iterable = self._parse_expr()
-                      self._expect("NEWLINE")
-                      self._yield_from_counter += 1
-                      item_name = "__yield_from_" + str(self._yield_from_counter)
-                      return A.For(
-                          var=item_name,
-                          range_args=[],
-                          iter=iterable,
-                          body=[A.YieldStmt(value=A.Name(name=item_name, pos=pos), pos=pos)],
-                          pos=pos,
-                      )
-                  if self._check("NEWLINE"):
-                      val: A.Expr = A.IntLit(value=0, pos=pos)
-                  else:
-                      val = self._parse_expr()
-                  self._expect("NEWLINE")
-                  return A.YieldStmt(value=val, pos=pos)
-'''
-              text = text[:start] + branch + text[end:]
-          path.write_text(text, encoding="utf-8")
-          PY
-      - name: Test yield-from support
-        if: github.event.pull_request.head.ref == 'fix/yield-from-final'
-        run: |
-          python -m asmpython tests/cases/467_yield_from.py --target linux -o /tmp/asmpython-yield-from
-          output=$(/tmp/asmpython-yield-from)
+          python -m asmpython tests/cases/468_provider_type_runtime.py --target linux -o /tmp/asmpython-provider-types
+          output=$(/tmp/asmpython-provider-types)
           printf '%s\n' "$output"
-          test "$output" = $'1\n2'
+          test "$output" = $'1\n0\n1'
+      - name: Test unchanged Somnia parity
+        run: |
           git clone --depth 1 https://github.com/deltathedumb/somnia.git ../somnia
-          python - <<'PY'
-          from pathlib import Path
-          from asmpython._compiler.lexer import Lexer
-          from asmpython._compiler.parser import Parser
-          for rel in ("somnia/model/core.py", "somnia/model/document.py"):
-              p = Path("../somnia") / rel
-              Parser(Lexer(p.read_text(encoding="utf-8")).tokenize()).parse()
-              print("PASS", rel)
-          PY
-      - name: Apply expression-result-call support
-        if: github.event.pull_request.head.ref == 'fix/call-expression-result-final'
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          parser_path = Path("asmpython/_compiler/parser.py")
-          parser = parser_path.read_text(encoding="utf-8")
-          if 'method="__call__"' not in parser:
-              marker = '''                else:
-                      # obj.name — attribute access (e.g. math.pi)
-                      atom = A.Attr(obj=atom, name=name, pos=dot.pos)  # type: ignore
-              else:
-                  return atom
-'''
-              replacement = '''                else:
-                      # obj.name — attribute access (e.g. math.pi)
-                      atom = A.Attr(obj=atom, name=name, pos=dot.pos)  # type: ignore
-              elif self._check("OP", "("):
-                  lpar = self._eat()
-                  args, kwargs = self._parse_call_args()
-                  self._expect("OP", ")")
-                  atom = A.MethodCall(obj=atom, method="__call__", args=args, kwargs=kwargs, pos=lpar.pos)
-              else:
-                  return atom
-'''
-              if marker not in parser:
-                  raise SystemExit("parser trailer landmark not found")
-              parser_path.write_text(parser.replace(marker, replacement, 1), encoding="utf-8")
-
-          sema_path = Path("asmpython/_compiler/sema.py")
-          sema = sema_path.read_text(encoding="utf-8")
-          if 'source_class_name = source_t.split(":", 1)[1]' not in sema:
-              marker = '''            self._check_expr(e.obj, scope)
-              obj_t = A.expr_type(e.obj)
-              # Bind keyword/vararg arguments for user-class (and super) method
-'''
-              replacement = '''            self._check_expr(e.obj, scope)
-              obj_t = A.expr_type(e.obj)
-              if (
-                  e.method == "__call__"
-                  and isinstance(e.obj, A.Call)
-                  and e.obj.func == "type"
-                  and len(e.obj.args) == 1
-              ):
-                  source_t = A.expr_type(e.obj.args[0])
-                  if source_t.startswith("instance:"):
-                      source_class_name = source_t.split(":", 1)[1]
-                      e.__class__ = A.Call  # type: ignore[assignment]
-                      e.func = source_class_name  # type: ignore[attr-defined]
-                      e.dstar = None  # type: ignore[attr-defined]
-                      e.resolved_overload_symbol = None  # type: ignore[attr-defined]
-                      self._check_call(e, scope)  # type: ignore[arg-type]
-                      return
-                  if source_t != "any":
-                      raise SemaError(
-                          "the result of type() is only constructible for a statically known user-class instance",
-                          e.pos,
-                          ErrorCode.E_NOT_CALLABLE,
-                      )
-              # Bind keyword/vararg arguments for user-class (and super) method
-'''
-              if marker not in sema:
-                  raise SystemExit("MethodCall semantic landmark not found")
-              sema_path.write_text(sema.replace(marker, replacement, 1), encoding="utf-8")
-          PY
-      - name: Test expression-result calls
-        if: github.event.pull_request.head.ref == 'fix/call-expression-result-final'
-        run: |
-          python -m asmpython tests/cases/466_call_expression_result.py --target linux -o /tmp/asmpython-call-expression
-          output=$(/tmp/asmpython-call-expression)
-          printf '%s\n' "$output"
-          test "$output" = $'42\n43'
-          git clone --depth 1 https://github.com/deltathedumb/somnia.git ../somnia
-          python - <<'PY'
-          from pathlib import Path
-          from asmpython._compiler.lexer import Lexer
-          from asmpython._compiler.parser import Parser
-          p = Path("../somnia/somnia/runtime.py")
-          Parser(Lexer(p.read_text(encoding="utf-8")).tokenize()).parse()
-          print("PASS somnia/runtime.py")
-          PY
-      - name: Commit verified source changes
-        run: |
-          if git diff --quiet -- asmpython/_compiler/parser.py asmpython/_compiler/sema.py; then
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add asmpython/_compiler/parser.py asmpython/_compiler/sema.py
-          if [ "${{ github.event.pull_request.head.ref }}" = "fix/yield-from-final" ]; then
-            git commit -m "Lower yield-from delegation"
-          else
-            git commit -m "Support calls on expression results"
-          fi
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          (
+            cd ../somnia
+            PYTHONPATH="$GITHUB_WORKSPACE" python tools/dualrun.py tests/parity/model_snapshot.py
+          )
