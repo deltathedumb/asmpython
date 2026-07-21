@@ -24,5 +24,6 @@ from . import return_annotation_precedence_compat_fixes as _return_annotation_pr
 from . import class_value_compat_fixes as _class_value_compat_fixes
 from . import dynamic_value_compat_fixes as _dynamic_value_compat_fixes
 from . import concrete_specialization_compat_fixes as _concrete_specialization_compat_fixes
+from . import static_method_call_compat_fixes as _static_method_call_compat_fixes
 
 __all__ = ["__version__"]
