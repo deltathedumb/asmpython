@@ -8,7 +8,8 @@ such as ``platform or sys.platform`` were later rejected as integer values.
 Use the same compatibility rule already applied to conditional expressions:
 ``int`` doubles as the unknown/None sentinel, so a concrete opposite operand
 wins. Two different concrete kinds remain opaque because either may be returned
-at runtime.
+at runtime. The shared AST type reader must also honor that semantic stamp;
+otherwise assignments immediately recompute the old fallback from the operands.
 """
 
 from __future__ import annotations
@@ -18,6 +19,15 @@ from .sema import SemaAnalyzer
 
 
 _ORIGINAL_CHECK_EXPR = SemaAnalyzer._check_expr
+_ORIGINAL_EXPR_TYPE = A.expr_type
+
+
+def _expr_type_with_boolop_values(expression) -> str:
+    if isinstance(expression, A.BoolOp):
+        inferred = getattr(expression, "inferred_type", None)
+        if inferred not in (None, "int"):
+            return inferred
+    return _ORIGINAL_EXPR_TYPE(expression)
 
 
 def _copy_collection_shape(expression, source) -> None:
@@ -69,5 +79,6 @@ def _check_expr_with_boolop_values(self: SemaAnalyzer, expression, scope) -> Non
 
 
 if not getattr(SemaAnalyzer, "_asmpython_boolop_value_patch", False):
+    A.expr_type = _expr_type_with_boolop_values
     SemaAnalyzer._check_expr = _check_expr_with_boolop_values
     SemaAnalyzer._asmpython_boolop_value_patch = True
