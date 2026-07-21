@@ -29,5 +29,6 @@ from . import chained_receiver_compat_fixes as _chained_receiver_compat_fixes
 from . import boolop_value_compat_fixes as _boolop_value_compat_fixes
 from . import dynamic_index_assignment_compat_fixes as _dynamic_index_assignment_compat_fixes
 from . import issubclass_compat_fixes as _issubclass_compat_fixes
+from . import inherited_classmethod_compat_fixes as _inherited_classmethod_compat_fixes
 
 __all__ = ["__version__"]
