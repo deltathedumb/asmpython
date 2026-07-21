@@ -6,9 +6,11 @@ attribute dictionary path: the receiver is a class value, not an instance
 pointer. Direct ``ClassName.value`` reads already lower to dedicated class-var
 globals; this pass extends the same representation to dynamic class values.
 
-For each concrete runtime class ID, resolve the nearest class in its inheritance
-chain that defines the requested class variable, then load that owner's global.
-This preserves subclass overrides while still inheriting base values.
+Reachability filtering clones class methods before IR lowering. Preserve their
+decorators and mark the exact first parameter of each active classmethod on its
+function context, so only that receiver uses class-ID attribute dispatch. For
+each concrete runtime class ID, resolve the nearest class in its inheritance
+chain that defines the requested variable, preserving overrides and inheritance.
 """
 
 from __future__ import annotations
@@ -18,6 +20,49 @@ from . import ir_lower as IR
 
 
 _ORIGINAL_LOWER_EXPR = IR._lower_expr
+_ORIGINAL_REACHABLE_CALLABLES = IR._reachable_callables
+_ORIGINAL_LOWER_FUNC = IR.lower_func
+_ORIGINAL_CTX_INIT = IR._FuncCtx.__init__
+_ACTIVE_CLASSMETHOD_RECEIVER: str | None = None
+
+
+def _reachable_callables_with_method_metadata(mod):
+    top_functions, method_functions = _ORIGINAL_REACHABLE_CALLABLES(mod)
+    originals = {
+        f"{owner.name}__{method.name}": method
+        for owner in mod.classes
+        for method in owner.methods
+    }
+    for lowered in method_functions:
+        source = originals.get(lowered.name)
+        if source is None:
+            continue
+        lowered.decorators = list(source.decorators)
+        if "classmethod" in source.decorators and lowered.params:
+            parameter_types = list(lowered.param_types)
+            while len(parameter_types) < len(lowered.params):
+                parameter_types.append(None)
+            parameter_types[0] = ("type", None, None, [], None)
+            lowered.param_types = parameter_types
+    return top_functions, method_functions
+
+
+def _ctx_init_with_classmethod_receiver(self, *args, **kwargs) -> None:
+    _ORIGINAL_CTX_INIT(self, *args, **kwargs)
+    self.classmethod_receiver = _ACTIVE_CLASSMETHOD_RECEIVER
+
+
+def _lower_func_with_classmethod_receiver(function, module_context, **kwargs):
+    global _ACTIVE_CLASSMETHOD_RECEIVER
+    previous = _ACTIVE_CLASSMETHOD_RECEIVER
+    if "classmethod" in getattr(function, "decorators", []) and function.params:
+        _ACTIVE_CLASSMETHOD_RECEIVER = function.params[0]
+    else:
+        _ACTIVE_CLASSMETHOD_RECEIVER = None
+    try:
+        return _ORIGINAL_LOWER_FUNC(function, module_context, **kwargs)
+    finally:
+        _ACTIVE_CLASSMETHOD_RECEIVER = previous
 
 
 def _parent_name(ctx, class_name: str) -> str | None:
@@ -116,11 +161,12 @@ def _lower_dynamic_class_var(ctx, expression: A.Attr):
 
 
 def _lower_expr_with_dynamic_classvars(ctx, expression):
+    receiver_name = getattr(ctx, "classmethod_receiver", None)
     if (
-        isinstance(expression, A.Attr)
+        receiver_name is not None
+        and isinstance(expression, A.Attr)
         and isinstance(expression.obj, A.Name)
-        and A.expr_type(expression.obj) == "type"
-        and expression.obj.name not in ctx.mctx.class_names
+        and expression.obj.name == receiver_name
     ):
         result = _lower_dynamic_class_var(ctx, expression)
         if result is not None:
@@ -129,5 +175,8 @@ def _lower_expr_with_dynamic_classvars(ctx, expression):
 
 
 if not getattr(IR, "_asmpython_dynamic_classvar_patch", False):
+    IR._reachable_callables = _reachable_callables_with_method_metadata
+    IR._FuncCtx.__init__ = _ctx_init_with_classmethod_receiver
+    IR.lower_func = _lower_func_with_classmethod_receiver
     IR._lower_expr = _lower_expr_with_dynamic_classvars
     IR._asmpython_dynamic_classvar_patch = True
