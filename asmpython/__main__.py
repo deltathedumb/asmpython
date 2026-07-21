@@ -1,4 +1,4 @@
-from ._compiler.__main__ import main
+from ._compiler.cli import main
 
 
 if __name__ == "__main__":
