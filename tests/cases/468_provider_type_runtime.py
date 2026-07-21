@@ -2,8 +2,9 @@
 # 1
 # 0
 # 1
+# 1
 # Finite class tuples must lower without a dynamic metatype runtime.
-# Diagnostic generation 3.
+# Dynamic values must preserve string behavior.
 
 class Provider:
     runtime_realms = ("server", "client")
@@ -29,3 +30,4 @@ provider_types = (ServerProvider, ClientProvider)
 print(provider_types[0].supports_realm("server"))
 print(provider_types[1].supports_realm("server"))
 print(starts_with_somnia("somnia.Scene"))
+print("Provider" in str(Provider))
