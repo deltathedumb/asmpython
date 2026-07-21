@@ -22,6 +22,42 @@ jobs:
           python-version: "3.12"
       - name: Install native toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm
+      - name: Inspect lowered provider AST
+        run: |
+          python - <<'PY' > lowered-provider-ast.txt
+          from pathlib import Path
+          from asmpython._compiler.lexer import Lexer
+          from asmpython._compiler.parser import Parser
+          from asmpython._compiler import class_value_compat_fixes as class_values
+          from asmpython._compiler import concrete_specialization_compat_fixes as concrete
+
+          source = Path("tests/cases/468_provider_type_runtime.py").read_text(encoding="utf-8")
+          module = Parser(Lexer(source).tokenize()).parse()
+          class_values._lower_finite_class_values(module)
+          class_tuples = class_values._static_class_tuples(module)
+          concrete._specialize_materialized_classmethods(module, class_tuples)
+          print("class_tuples", class_tuples)
+          for owner in module.classes:
+              if owner.name not in ("Provider", "ServerProvider", "ClientProvider"):
+                  continue
+              print("CLASS", owner.name, "VARS", owner.class_vars)
+              for method in owner.methods:
+                  if method.name == "supports_realm":
+                      print(
+                          "METHOD",
+                          owner.name,
+                          method.decorators,
+                          method.params,
+                          repr(method.body),
+                      )
+          PY
+          cat lowered-provider-ast.txt
+      - name: Upload lowered AST
+        uses: actions/upload-artifact@v4
+        with:
+          name: lowered-provider-ast
+          path: lowered-provider-ast.txt
+          retention-days: 7
       - name: Test focused regression
         id: focused
         continue-on-error: true
