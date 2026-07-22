@@ -6,8 +6,13 @@ on:
       - agent/management-runtime-features
   pull_request:
     paths:
+      - "asmpython/backend.py"
+      - "asmpython/linker.py"
+      - "asmpython/_backends/**"
+      - "asmpython/_compiler/build_options.py"
       - "asmpython/_compiler/cache_manager.py"
       - "asmpython/_compiler/cli.py"
+      - "asmpython/_compiler/ir.py"
       - "asmpython/_compiler/ir_command.py"
       - "asmpython/_compiler/irfreeze.py"
       - "asmpython/_compiler/management_commands.py"
@@ -20,6 +25,7 @@ on:
       - "tests/test_management_commands.py"
       - "tests/test_memory_runtime.py"
       - "tests/test_mixed_traceback.py"
+      - "tests/test_speedy_lossy.py"
       - "tests/test_test_command.py"
       - ".github/workflows/management-runtime.yml"
 
@@ -51,8 +57,12 @@ jobs:
       - name: Compile changed Python files
         run: |
           python -m py_compile \
+            asmpython/backend.py \
+            asmpython/linker.py \
+            asmpython/_compiler/build_options.py \
             asmpython/_compiler/cache_manager.py \
             asmpython/_compiler/cli.py \
+            asmpython/_compiler/ir.py \
             asmpython/_compiler/ir_command.py \
             asmpython/_compiler/irfreeze.py \
             asmpython/_compiler/management_commands.py \
@@ -70,6 +80,7 @@ jobs:
             tests/test_management_commands.py \
             tests/test_memory_runtime.py \
             tests/test_mixed_traceback.py \
+            tests/test_speedy_lossy.py \
             tests/test_test_command.py
 
       - name: Smoke-test CLI management commands
