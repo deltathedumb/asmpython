@@ -13,34 +13,28 @@ asmpython. Under ordinary CPython it is resolved lazily to a :mod:`ctypes`
 wrapper, so the same DLL/SO declarations can be reference-tested without
 shadowing the compiler intrinsic during static import resolution.
 
-Plugin authoring (codegen backends, linkers, and embedded other-language
-source via `mlang`) is organized as one namespace submodule per concern --
-each exposes its own registration class(es), accessed off the top-level
-package:
+Plugin authoring is organized as one namespace submodule per concern, while
+installable extension packages use the top-level ``Extension`` descriptor:
 
     import asmpython
+    from asmpython import Extension
 
+    extension = Extension(id="my_extension")
     asmpython.backend.Backend(name="my_backend", impl=...)
     asmpython.linker.Linker(name="my_linker", impl=...)
-    asmpython.mlang.Config(...)  # embed/compile another language's source
+    asmpython.mlang.Config(...)
 
 Runtime ownership and mixed-traceback APIs live under ``asmpython.runtime``.
 Each submodule is importable on its own or reached as an attribute after
 ``import asmpython``, matching ordinary Python package semantics.
-
-(Compiler-syntax extensions -- `asmpython.extend.Extension(...)` -- were
-withdrawn: asmpython's goal is mirroring CPython's language with only tiny,
-necessary differences, and letting the grammar itself be extended cut
-against that. The withdrawn implementation is preserved for reference under
-`archived/extensions/`.)
 """
-
 from __future__ import annotations
 
 import sys
 from types import ModuleType
 
 from . import backend, linker, mlang, runtime
+from .extension import Extension
 from ._version import (
     ASMPYTHON_VERSION,
     FULL_VERSION,
@@ -101,8 +95,10 @@ class _ASMPythonModule(ModuleType):
 # make it so you can do import asmpython; @asmpython(); def func(): ...
 sys.modules[__name__].__class__ = _ASMPythonModule
 
+
 __all__ = [
     "ASMPYTHON_VERSION",
+    "Extension",
     "FULL_VERSION",
     "FULL_VERSION_INFO",
     "PACKAGING_VERSION",
