@@ -20,6 +20,7 @@ on:
       - "tests/test_backend_scaffolds.py"
       - "tests/test_build_system_features.py"
       - "tests/test_extensions_sanitizers_reports.py"
+      - "tests/test_fastcomp_bridge.py"
       - "tests/test_management_commands.py"
       - "tests/test_memory_runtime.py"
       - "tests/test_mixed_traceback.py"
@@ -79,6 +80,8 @@ jobs:
             asmpython/_compiler/embedded_data.py \
             asmpython/_compiler/extension_command.py \
             asmpython/_compiler/extension_packages.py \
+            asmpython/_compiler/fastcomp.py \
+            asmpython/_compiler/fastcomp_bridge.py \
             asmpython/_compiler/fast_state.py \
             asmpython/_compiler/fast_state_ext.py \
             asmpython/_compiler/ir.py \
@@ -105,6 +108,7 @@ jobs:
             tests/test_backend_scaffolds.py \
             tests/test_build_system_features.py \
             tests/test_extensions_sanitizers_reports.py \
+            tests/test_fastcomp_bridge.py \
             tests/test_management_commands.py \
             tests/test_memory_runtime.py \
             tests/test_mixed_traceback.py \
