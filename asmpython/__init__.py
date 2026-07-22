@@ -24,11 +24,9 @@ package:
     asmpython.linker.Linker(name="my_linker", impl=...)
     asmpython.mlang.Config(...)  # embed/compile another language's source
 
-Each submodule (`asmpython.backend`, `asmpython.linker`, `asmpython.mlang`)
-is importable on its own (`import asmpython.backend`) or reached as an
-attribute after `import asmpython`, matching ordinary Python package
-semantics -- there is no flat top-level `asmpython.Backend`/
-`asmpython.Linker` shorthand.
+Runtime ownership and mixed-traceback APIs live under ``asmpython.runtime``.
+Each submodule is importable on its own or reached as an attribute after
+``import asmpython``, matching ordinary Python package semantics.
 
 (Compiler-syntax extensions -- `asmpython.extend.Extension(...)` -- were
 withdrawn: asmpython's goal is mirroring CPython's language with only tiny,
@@ -42,7 +40,7 @@ from __future__ import annotations
 import sys
 from types import ModuleType
 
-from . import backend, linker, mlang
+from . import backend, linker, mlang, runtime
 from ._version import (
     ASMPYTHON_VERSION,
     FULL_VERSION,
@@ -81,13 +79,13 @@ def compile_function(
     free: bool = False,
 ):
     def decorator(func):
-        config = func.__asmpython_config__
-        config = {
-            "dyn": config.get("dyn", True),
-            "gc": config.get("gc", True),
-            "exc": config.get("exc", True),
-            "refl": config.get("refl", True),
-            "free": config.get("free", True),
+        config = getattr(func, "__asmpython_config__", {})
+        func.__asmpython_config__ = {
+            "dyn": config.get("dyn", dyn),
+            "gc": config.get("gc", gc),
+            "exc": config.get("exc", exc),
+            "refl": config.get("refl", refl),
+            "free": config.get("free", free),
             "enforced": config.get("enforced", []),
         }
         return func
@@ -119,5 +117,6 @@ __all__ = [
     "import_binary",
     "linker",
     "mlang",
+    "runtime",
     "__version__",
 ]
