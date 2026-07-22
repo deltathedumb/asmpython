@@ -20,6 +20,7 @@ from asmpython.extension import Extension
 
 FORMAT = "asmpython.apext"
 FORMAT_VERSION = 1
+EXTENSION_API_VERSION = 1
 MANIFEST = "apext.json"
 SCOPES = ("system", "user", "local")
 _EXCLUDED_DIRS = {
@@ -86,6 +87,11 @@ def read_manifest(path: Path, *, verify: bool = True) -> dict[str, Any]:
                 f"{path} uses unsupported extension format/version: "
                 f"{manifest.get('format')!r}/{manifest.get('format_version')!r}"
             )
+        if manifest.get("api_version") != EXTENSION_API_VERSION:
+            raise ExtensionPackageError(
+                f"{path} requires extension API {manifest.get('api_version')!r}; "
+                f"this ASMPython supports API {EXTENSION_API_VERSION}"
+            )
         extension_id = manifest.get("id")
         entry = manifest.get("entry")
         object_name = manifest.get("object")
@@ -96,17 +102,25 @@ def read_manifest(path: Path, *, verify: bool = True) -> dict[str, Any]:
         if not isinstance(object_name, str) or not object_name.isidentifier():
             raise ExtensionPackageError(f"{path}: manifest field 'object' must be an identifier")
         entry = _safe_archive_name(entry)
-        names = {_safe_archive_name(name) for name in archive.namelist() if not name.endswith("/")}
+        names = {
+            _safe_archive_name(name)
+            for name in archive.namelist()
+            if not name.endswith("/")
+        }
         if entry not in names:
             raise ExtensionPackageError(f"{path}: entry {entry!r} is missing from the archive")
         files = manifest.get("files", {})
         if verify:
             if not isinstance(files, dict):
                 raise ExtensionPackageError(f"{path}: manifest 'files' must be an object")
+            expected_members = set(files) | {MANIFEST}
+            unexpected = sorted(names - expected_members)
+            if unexpected:
+                raise ExtensionPackageError(
+                    f"{path}: archive contains unhashed file(s): {', '.join(unexpected)}"
+                )
             for name, expected in files.items():
                 safe_name = _safe_archive_name(str(name))
-                if safe_name == MANIFEST:
-                    continue
                 if safe_name not in names:
                     raise ExtensionPackageError(f"{path}: hashed file {safe_name!r} is missing")
                 actual = _sha256(archive.read(safe_name))
@@ -124,18 +138,28 @@ def _load_descriptor(module_ref: str, root: Path) -> tuple[Extension, Path, str]
     if not module_name or not object_name.isidentifier():
         raise ExtensionPackageError("package target must use module:object syntax")
     module_path = root.joinpath(*module_name.split("."))
+    is_package = False
     if module_path.with_suffix(".py").is_file():
         source_path = module_path.with_suffix(".py")
     elif (module_path / "__init__.py").is_file():
         source_path = module_path / "__init__.py"
+        is_package = True
     else:
         raise ExtensionPackageError(f"cannot resolve module {module_name!r} beneath {root}")
-    unique_name = f"_asmpython_apext_package_{hashlib.sha256(str(source_path).encode()).hexdigest()[:12]}"
-    spec = importlib.util.spec_from_file_location(unique_name, source_path)
+    unique_name = (
+        f"_asmpython_apext_package_"
+        f"{hashlib.sha256(str(source_path).encode()).hexdigest()[:12]}"
+    )
+    spec = importlib.util.spec_from_file_location(
+        unique_name,
+        source_path,
+        submodule_search_locations=[str(source_path.parent)] if is_package else None,
+    )
     if spec is None or spec.loader is None:
         raise ExtensionPackageError(f"cannot import extension entry {source_path}")
     module = importlib.util.module_from_spec(spec)
     old_path = list(sys.path)
+    sys.modules[unique_name] = module
     try:
         sys.path.insert(0, str(root))
         spec.loader.exec_module(module)
@@ -143,10 +167,16 @@ def _load_descriptor(module_ref: str, root: Path) -> tuple[Extension, Path, str]
         raise ExtensionPackageError(f"failed to import {module_ref}: {exc}") from exc
     finally:
         sys.path[:] = old_path
+        sys.modules.pop(unique_name, None)
     descriptor = getattr(module, object_name, None)
     if not isinstance(descriptor, Extension):
         raise ExtensionPackageError(
             f"{module_ref} did not resolve to an asmpython.Extension object"
+        )
+    if descriptor.api_version != EXTENSION_API_VERSION:
+        raise ExtensionPackageError(
+            f"{module_ref} uses extension API {descriptor.api_version}; "
+            f"expected {EXTENSION_API_VERSION}"
         )
     return descriptor, source_path, object_name
 
@@ -263,10 +293,7 @@ def list_installed(directory: Path | None = None) -> list[InstalledExtension]:
         if not root.is_dir():
             continue
         for path in sorted(root.glob("*.apext")):
-            try:
-                manifest = read_manifest(path, verify=False)
-            except ExtensionPackageError:
-                continue
+            manifest = read_manifest(path, verify=True)
             installed.append(InstalledExtension(
                 id=manifest["id"],
                 version=str(manifest.get("version", "0.0.0")),
@@ -291,7 +318,7 @@ def get_extension(
     with tempfile.TemporaryDirectory(prefix="asmpython_apext_get_") as temp:
         target = Path(temp) / "download.apext"
         try:
-            with urllib.request.urlopen(url) as response, target.open("wb") as output:
+            with urllib.request.urlopen(url, timeout=30) as response, target.open("wb") as output:
                 shutil.copyfileobj(response, output)
         except Exception as exc:
             raise ExtensionPackageError(f"failed to download {url}: {exc}") from exc
@@ -307,12 +334,13 @@ def _load_archive(path: Path) -> Extension:
     manifest = read_manifest(path, verify=True)
     entry = manifest["entry"]
     object_name = manifest["object"]
+    module_name = str(manifest.get("module", ""))
     with zipfile.ZipFile(path) as archive:
         source = archive.read(entry).decode("utf-8")
     namespace: dict[str, Any] = {
-        "__name__": f"asmpython_apext_{manifest['id'].replace('-', '_').replace('.', '_')}",
+        "__name__": module_name or f"asmpython_apext_{manifest['id'].replace('-', '_').replace('.', '_')}",
         "__file__": f"{path}!/{entry}",
-        "__package__": "",
+        "__package__": module_name.rpartition(".")[0],
     }
     old_path = list(sys.path)
     try:
@@ -331,7 +359,7 @@ def _load_archive(path: Path) -> Extension:
         raise ExtensionPackageError(
             f"{path}: descriptor id {descriptor.id!r} does not match manifest id {manifest['id']!r}"
         )
-    if descriptor.api_version != manifest.get("api_version", descriptor.api_version):
+    if descriptor.api_version != manifest["api_version"]:
         raise ExtensionPackageError(f"{path}: descriptor and manifest API versions disagree")
     descriptor.activate()
     return descriptor
@@ -352,7 +380,8 @@ def load_installed_extensions(directory: Path | None = None) -> list[InstalledEx
 
 
 __all__ = [
-    "ExtensionPackageError", "InstalledExtension", "SCOPES", "get_extension",
-    "install_extension", "list_installed", "load_installed_extensions",
-    "package_extension", "read_manifest", "scope_path", "uninstall_extension",
+    "EXTENSION_API_VERSION", "ExtensionPackageError", "InstalledExtension",
+    "SCOPES", "get_extension", "install_extension", "list_installed",
+    "load_installed_extensions", "package_extension", "read_manifest",
+    "scope_path", "uninstall_extension",
 ]
