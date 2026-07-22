@@ -6,12 +6,18 @@ on:
       - agent/management-runtime-features
   pull_request:
     paths:
+      - "asmpython/__init__.py"
       - "asmpython/backend.py"
+      - "asmpython/extension.py"
       - "asmpython/linker.py"
       - "asmpython/_backends/**"
+      - "asmpython/_linkers/**"
       - "asmpython/_compiler/build_options.py"
+      - "asmpython/_compiler/build_report.py"
       - "asmpython/_compiler/cache_manager.py"
       - "asmpython/_compiler/cli.py"
+      - "asmpython/_compiler/extension_command.py"
+      - "asmpython/_compiler/extension_packages.py"
       - "asmpython/_compiler/ir.py"
       - "asmpython/_compiler/ir_command.py"
       - "asmpython/_compiler/irfreeze.py"
@@ -23,6 +29,7 @@ on:
       - "asmpython/_runtime/mixed_traceback.py"
       - "asmpython/pyinbin/**"
       - "asmpython/runtime.py"
+      - "tests/test_extensions_sanitizers_reports.py"
       - "tests/test_management_commands.py"
       - "tests/test_memory_runtime.py"
       - "tests/test_mixed_traceback.py"
@@ -58,11 +65,18 @@ jobs:
       - name: Compile changed Python files
         run: |
           python -m py_compile \
+            asmpython/__init__.py \
             asmpython/backend.py \
+            asmpython/extension.py \
             asmpython/linker.py \
+            asmpython/_linkers/builtin.py \
+            asmpython/_linkers/gcc.py \
             asmpython/_compiler/build_options.py \
+            asmpython/_compiler/build_report.py \
             asmpython/_compiler/cache_manager.py \
             asmpython/_compiler/cli.py \
+            asmpython/_compiler/extension_command.py \
+            asmpython/_compiler/extension_packages.py \
             asmpython/_compiler/ir.py \
             asmpython/_compiler/ir_command.py \
             asmpython/_compiler/irfreeze.py \
@@ -79,6 +93,7 @@ jobs:
         run: |
           python -m pytest -q \
             tests/test_backend_scaffolds.py \
+            tests/test_extensions_sanitizers_reports.py \
             tests/test_management_commands.py \
             tests/test_memory_runtime.py \
             tests/test_mixed_traceback.py \
@@ -91,3 +106,4 @@ jobs:
           python -m asmpython backends jvm --json
           python -m asmpython cache --json
           python -m asmpython profile list --json
+          python -m asmpython extension list --json
