@@ -1,9 +1,4 @@
-"""Scoped ASMPython build profiles.
-
-Profiles are ordinary JSON documents and can live at system, user, or directory
-scope. Resolution overlays those scopes in that order, so a project can refine
-(or replace) a machine/user default without modifying it.
-"""
+"""Scoped ASMPython build profiles."""
 from __future__ import annotations
 
 import json
@@ -15,14 +10,13 @@ from typing import Any
 
 PROFILE_SCHEMA = 1
 SCOPES = ("system", "user", "directory")
-
-# Keys map only to build flags implemented on this branch. New compiler options
-# should be added here when their public CLI flag lands, never pre-advertised.
 SUPPORTED_KEYS = frozenset({
     "target", "output", "output_type", "type", "backend", "linker",
     "bundle_mode", "use_runtime_lib", "no_pyinbin_fallback", "keep",
     "keep_assembly", "emit_asm", "icon", "nasm", "gcc", "apm",
     "speedy_lossy", "bleach", "sanitize", "sanitizers", "report",
+    "fastcomp", "debug", "debug_format", "embed", "locked", "lockfile",
+    "graphonly", "graph_format", "graph_output",
 })
 
 
@@ -58,8 +52,7 @@ def _user_profile_path() -> Path:
 
 
 def _directory_profile_path(directory: Path | None = None) -> Path:
-    root = Path.cwd() if directory is None else Path(directory)
-    return root.resolve() / ".asmpython" / "profiles.json"
+    return (directory or Path.cwd()).resolve() / ".asmpython" / "profiles.json"
 
 
 def profile_path(scope: str, directory: Path | None = None) -> Path:
@@ -85,8 +78,7 @@ def _load_document(path: Path) -> dict[str, Any]:
         raise ProfileError(f"cannot read profile store {path}: {exc}") from exc
     if not isinstance(document, dict) or document.get("schema") != PROFILE_SCHEMA:
         raise ProfileError(f"unsupported profile document in {path}")
-    profiles = document.get("profiles")
-    if not isinstance(profiles, dict):
+    if not isinstance(document.get("profiles"), dict):
         raise ProfileError(f"profile store {path} has no object-valued 'profiles' field")
     return document
 
@@ -94,25 +86,17 @@ def _load_document(path: Path) -> dict[str, Any]:
 def _write_document(path: Path, document: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(
-        json.dumps(document, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     try:
         temporary.replace(path)
     except OSError as exc:
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
+        temporary.unlink(missing_ok=True)
         raise ProfileError(f"cannot write profile store {path}: {exc}") from exc
 
 
 def _validate_name(name: str) -> None:
-    if not name or name in {".", ".."}:
-        raise ProfileError("profile name must not be empty")
-    if any(ch in name for ch in "/\\\0"):
-        raise ProfileError("profile names cannot contain path separators")
+    if not name or name in {".", ".."} or any(ch in name for ch in "/\\\0"):
+        raise ProfileError("invalid profile name")
 
 
 def _validate_values(values: dict[str, Any]) -> dict[str, Any]:
@@ -122,22 +106,16 @@ def _validate_values(values: dict[str, Any]) -> dict[str, Any]:
     return dict(values)
 
 
-def list_profiles(
-    *, scope: str | None = None, directory: Path | None = None
-) -> dict[str, list[ProfileLocation]]:
-    scopes = (scope,) if scope is not None else SCOPES
+def list_profiles(*, scope: str | None = None, directory: Path | None = None) -> dict[str, list[ProfileLocation]]:
     found: dict[str, list[ProfileLocation]] = {}
-    for item_scope in scopes:
+    for item_scope in ((scope,) if scope is not None else SCOPES):
         path = profile_path(item_scope, directory)
-        document = _load_document(path)
-        for name in document["profiles"]:
+        for name in _load_document(path)["profiles"]:
             found.setdefault(name, []).append(ProfileLocation(item_scope, path))
     return found
 
 
-def get_profile(
-    name: str, *, scope: str, directory: Path | None = None
-) -> dict[str, Any] | None:
+def get_profile(name: str, *, scope: str, directory: Path | None = None) -> dict[str, Any] | None:
     _validate_name(name)
     path = profile_path(scope, directory)
     value = _load_document(path)["profiles"].get(name)
@@ -200,12 +178,9 @@ def delete_profile(name: str, *, scope: str, directory: Path | None = None) -> P
 
 
 def resolve_profile(name: str, *, directory: Path | None = None) -> dict[str, Any]:
-    """Resolve one profile with system < user < directory precedence."""
-
     def resolve(current: str, stack: tuple[str, ...]) -> dict[str, Any]:
         if current in stack:
-            chain = " -> ".join((*stack, current))
-            raise ProfileError(f"profile inheritance cycle: {chain}")
+            raise ProfileError("profile inheritance cycle: " + " -> ".join((*stack, current)))
         merged: dict[str, Any] = {}
         seen = False
         for scope in SCOPES:
@@ -222,7 +197,6 @@ def resolve_profile(name: str, *, directory: Path | None = None) -> dict[str, An
         if not seen:
             raise ProfileError(f"unknown profile {current!r}")
         return merged
-
     return resolve(name, ())
 
 
@@ -238,9 +212,17 @@ def parse_assignment(text: str) -> tuple[str, Any]:
     return key, value
 
 
-def profile_to_argv(profile: dict[str, Any]) -> list[str]:
-    """Translate a resolved profile into public build arguments."""
+def _string_list(value: Any, *, key: str) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ProfileError(f"{key} must be a string or list of strings")
+    return value
 
+
+def profile_to_argv(profile: dict[str, Any]) -> list[str]:
     result: list[str] = []
 
     def add_value(flag: str, value: Any) -> None:
@@ -249,7 +231,9 @@ def profile_to_argv(profile: dict[str, Any]) -> list[str]:
 
     target = profile.get("target")
     if isinstance(target, list):
-        target = ",".join(str(item) for item in target)
+        if len(target) != 3:
+            raise ProfileError("target arrays must contain platform, system, and ABI")
+        target = "-".join(str(item) for item in target)
     add_value("--target", target)
     add_value("-o", profile.get("output"))
     add_value("--type", profile.get("output_type", profile.get("type")))
@@ -259,6 +243,10 @@ def profile_to_argv(profile: dict[str, Any]) -> list[str]:
     add_value("--nasm", profile.get("nasm"))
     add_value("--gcc", profile.get("gcc"))
     add_value("--report", profile.get("report"))
+    add_value("--debug-format", profile.get("debug_format"))
+    add_value("--lockfile", profile.get("lockfile"))
+    add_value("--graph-format", profile.get("graph_format"))
+    add_value("--graph-output", profile.get("graph_output"))
 
     bundle = profile.get("bundle_mode")
     if bundle == "onefile":
@@ -276,24 +264,19 @@ def profile_to_argv(profile: dict[str, Any]) -> list[str]:
         "emit_asm": "--emit-asm",
         "speedy_lossy": "--speedy-lossy",
         "bleach": "--bleach",
+        "fastcomp": "--fastcomp",
+        "debug": "--debug",
+        "locked": "--locked",
+        "graphonly": "--graphonly",
     }
     for key, flag in boolean_flags.items():
         if profile.get(key) is True:
             result.append(flag)
 
-    sanitizer_values = profile.get("sanitizers", profile.get("sanitize", []))
-    if isinstance(sanitizer_values, str):
-        sanitizer_values = [sanitizer_values]
-    if not isinstance(sanitizer_values, list):
-        raise ProfileError("sanitizers must be a string or list of strings")
-    for item in sanitizer_values:
+    for item in _string_list(profile.get("sanitizers", profile.get("sanitize")), key="sanitizers"):
         add_value("--sanitize", item)
-
-    apm = profile.get("apm", [])
-    if isinstance(apm, str):
-        apm = [apm]
-    if not isinstance(apm, list):
-        raise ProfileError("apm must be a string or list of strings")
-    for item in apm:
+    for item in _string_list(profile.get("embed"), key="embed"):
+        add_value("--embed", item)
+    for item in _string_list(profile.get("apm"), key="apm"):
         add_value("--apm", item)
     return result
