@@ -10,7 +10,7 @@ from .build_options import (
     extract_shared_build_options,
     shared_build_options,
 )
-from .build_report import report_session
+from .build_report import event, report_session
 from .management_commands import (
     MANAGEMENT_COMMANDS,
     REMOVED_COMMANDS,
@@ -28,6 +28,10 @@ _legacy_cli = _host_cli._legacy_cli
 prepare_argv = _host_cli.prepare_argv
 source_tree_uses_dynamic_import = _host_cli.source_tree_uses_dynamic_import
 source_uses_dynamic_import = _host_cli.source_uses_dynamic_import
+
+_NON_BUILD_COMMANDS = MANAGEMENT_COMMANDS | {
+    "extension", "package", "pypi", "pyinbin", "project",
+}
 
 
 def _print_help() -> None:
@@ -70,6 +74,35 @@ def _print_help() -> None:
     print("  asmpython test tests --engine all")
 
 
+def _is_build_invocation(raw: list[str]) -> bool:
+    if not raw:
+        return False
+    first = raw[0]
+    return first == "build" or first not in _NON_BUILD_COMMANDS
+
+
+def _merge_options(
+    profile_options: SharedBuildOptions,
+    explicit_options: SharedBuildOptions,
+) -> SharedBuildOptions:
+    sanitizers = tuple(sorted(set(profile_options.sanitizers) | set(explicit_options.sanitizers)))
+    selected = set(sanitizers)
+    if "thread" in selected and selected.intersection({"address", "leak", "memory"}):
+        raise ValueError(
+            "the thread sanitizer cannot be combined with address, leak, or memory sanitizers"
+        )
+    if "memory" in selected and selected.intersection({"address", "leak"}):
+        raise ValueError(
+            "the memory sanitizer cannot be combined with address or leak sanitizers"
+        )
+    return SharedBuildOptions(
+        speedy_lossy=profile_options.speedy_lossy or explicit_options.speedy_lossy,
+        bleach=profile_options.bleach or explicit_options.bleach,
+        sanitizers=sanitizers,
+        report_path=explicit_options.report_path or profile_options.report_path,
+    )
+
+
 def _load_extensions(report) -> bool:
     from .extension_packages import ExtensionPackageError, load_installed_extensions
 
@@ -90,7 +123,29 @@ def _load_extensions(report) -> bool:
     return True
 
 
-def _main_with_options(raw: list[str], *, options: SharedBuildOptions, report) -> int:
+def _extensions_needed(raw: list[str], *, is_build: bool) -> bool:
+    if is_build:
+        return True
+    return bool(raw and raw[0] in {"backends", "ir", "test"})
+
+
+def _option_value(argv: list[str], flag: str) -> str | None:
+    value: str | None = None
+    for index, token in enumerate(argv):
+        if token == flag and index + 1 < len(argv):
+            value = argv[index + 1]
+        elif token.startswith(flag + "="):
+            value = token.split("=", 1)[1]
+    return value
+
+
+def _main_with_options(
+    raw: list[str],
+    *,
+    options: SharedBuildOptions,
+    report,
+    is_build: bool,
+) -> int:
     if raw in (["-h"], ["--help"]):
         _print_help()
         return 0
@@ -101,10 +156,6 @@ def _main_with_options(raw: list[str], *, options: SharedBuildOptions, report) -
             file=sys.stderr,
         )
         return 2
-
-    if raw and raw[0] == "extension":
-        from .extension_command import command_main
-        return command_main(raw[1:])
 
     if options.speedy_lossy:
         print(
@@ -124,35 +175,33 @@ def _main_with_options(raw: list[str], *, options: SharedBuildOptions, report) -
             file=sys.stderr,
         )
 
-    # Installed extensions are loaded before management discovery and ordinary
-    # builds so extension-provided backends/linkers are visible everywhere.
-    if not _load_extensions(report):
+    if _extensions_needed(raw, is_build=is_build) and not _load_extensions(report):
         return 1
 
     handled = dispatch(raw)
     if handled is not None:
         return handled
 
-    try:
-        prepared = apply_build_profiles(raw)
-    except ProfileError as exc:
-        print(f"asmpython: profile: {exc}", file=sys.stderr)
-        return 2
+    if is_build:
+        warn_selected_nonproduction(raw)
+        event(
+            "build.configuration",
+            backend=_option_value(raw, "--backend"),
+            linker=_option_value(raw, "--linker"),
+            target=_option_value(raw, "--target"),
+            speedy_lossy=options.speedy_lossy,
+            bleach=options.bleach,
+            sanitizers=options.sanitizers,
+        )
 
-    # Profiles may choose a backend/linker even when the raw command did not.
-    warn_selected_nonproduction(prepared)
-
-    # ``build --ir-only`` stops before target selection/linking and therefore
-    # bypasses the historical build parser, which deliberately knows nothing
-    # about the frozen-IR feature.
-    if "--ir-only" in prepared:
+    if "--ir-only" in raw:
         from .ir_command import freeze_build_main
-        return freeze_build_main(prepared)
+        return freeze_build_main(raw)
 
     previous_traceback_mode = os.environ.get("ASMPYTHON_CLI_MIXED_TRACEBACK")
     os.environ["ASMPYTHON_CLI_MIXED_TRACEBACK"] = "1"
     try:
-        return _host_cli.main(prepared, prepare=prepare_argv)
+        return _host_cli.main(raw, prepare=prepare_argv)
     except BaseException as exc:
         try:
             from asmpython._runtime.mixed_traceback import MixedTracebackError
@@ -173,9 +222,23 @@ def main(argv: list[str] | None = None) -> int:
     """Run management commands or delegate ordinary builds to the host policy."""
 
     original = list(sys.argv[1:] if argv is None else argv)
+
+    # Extension management has its own parser and does not consume build flags.
+    if original and original[0] == "extension":
+        from .extension_command import command_main
+        return command_main(original[1:])
+
     try:
-        raw, options = extract_shared_build_options(original)
-    except ValueError as exc:
+        raw, explicit_options = extract_shared_build_options(original)
+        is_build = _is_build_invocation(raw)
+        if is_build:
+            prepared = apply_build_profiles(raw)
+            prepared, profile_options = extract_shared_build_options(prepared)
+            options = _merge_options(profile_options, explicit_options)
+        else:
+            prepared = raw
+            options = explicit_options
+    except (ProfileError, ValueError) as exc:
         print(f"asmpython: {exc}", file=sys.stderr)
         return 2
 
@@ -187,7 +250,12 @@ def main(argv: list[str] | None = None) -> int:
     with shared_build_options(options):
         with report_session(options.report_path, original, option_record) as report:
             try:
-                result = _main_with_options(raw, options=options, report=report)
+                result = _main_with_options(
+                    prepared,
+                    options=options,
+                    report=report,
+                    is_build=is_build,
+                )
             except BaseException as exc:
                 if report is not None:
                     report.write(
