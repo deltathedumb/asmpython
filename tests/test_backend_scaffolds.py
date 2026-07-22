@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import re
 
 import pytest
@@ -9,35 +10,37 @@ from asmpython._backends._scaffold import ScaffoldBackend
 from asmpython._backends.scaffolds import SCAFFOLD_BACKENDS, SCAFFOLD_BACKEND_SPECS
 
 
-EXPECTED_BACKENDS = {
-    "x86",
-    "arm",
-    "thumb",
-    "riscv",
-    "mips",
-    "powerpc",
-    "avr",
-    "8051",
-    "pic",
-    "xtensa",
-    "6502",
-    "z80",
-    "jvm",
-    "python-bytecode",
-    "webassembly",
-    "beam",
-    "spirv",
-    "ebpf",
-    "cuda",
-    "amdgpu",
-    "glsl",
-    "hlsl",
-    "wgsl",
-    "metal",
-    "verilog",
-    "systemverilog",
-    "vhdl",
+BACKEND_MODULES = {
+    "x86": "x86",
+    "arm": "arm",
+    "thumb": "thumb",
+    "riscv": "riscv",
+    "mips": "mips",
+    "powerpc": "powerpc",
+    "avr": "avr",
+    "8051": "mcs51",
+    "pic": "pic",
+    "xtensa": "xtensa",
+    "6502": "mos6502",
+    "z80": "z80",
+    "jvm": "jvm",
+    "python-bytecode": "python_bytecode",
+    "webassembly": "webassembly",
+    "beam": "beam",
+    "spirv": "spirv",
+    "ebpf": "ebpf",
+    "cuda": "cuda",
+    "amdgpu": "amdgpu",
+    "glsl": "glsl",
+    "hlsl": "hlsl",
+    "wgsl": "wgsl",
+    "metal": "metal",
+    "verilog": "verilog",
+    "systemverilog": "systemverilog",
+    "vhdl": "vhdl",
 }
+
+EXPECTED_BACKENDS = set(BACKEND_MODULES)
 
 
 def test_every_planned_backend_is_registered_once() -> None:
@@ -71,6 +74,14 @@ def test_scaffold_operations_fail_loudly(name: str) -> None:
         backend.emit_source(object())  # type: ignore[arg-type]
     with pytest.raises(NotImplementedError, match=expected):
         backend.package({})
+
+
+@pytest.mark.parametrize("name,module_name", sorted(BACKEND_MODULES.items()))
+def test_backend_package_exposes_registered_scaffold(name: str, module_name: str) -> None:
+    module = importlib.import_module(f"asmpython._backends.{module_name}")
+    registered = get_backend(name)
+    assert module.__module_backend__ is registered
+    assert module.backend is registered
 
 
 def test_convenience_aliases_resolve_to_canonical_scaffolds() -> None:
