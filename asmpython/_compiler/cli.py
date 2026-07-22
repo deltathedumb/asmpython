@@ -5,7 +5,12 @@ import os
 import sys
 
 from asmpython._backends import host_cli as _host_cli
-from .build_options import extract_speedy_lossy, speedy_lossy_mode
+from .build_options import (
+    SharedBuildOptions,
+    extract_shared_build_options,
+    shared_build_options,
+)
+from .build_report import report_session
 from .management_commands import (
     MANAGEMENT_COMMANDS,
     REMOVED_COMMANDS,
@@ -35,6 +40,7 @@ def _print_help() -> None:
     print("  build       compile source or a project")
     print("  test        compare CPython, native, PyinBin, and hybrid execution")
     print("  backends    list backends or show one backend's metadata")
+    print("  extension   package, install, download, list, or remove .apext extensions")
     print("  ir          inspect or compile frozen IR")
     print("  cache       inspect, verify, prune, or clear compiler caches")
     print("  profile     create, modify, show, or delete scoped build profiles")
@@ -43,11 +49,19 @@ def _print_help() -> None:
     print("  project     scaffold projects")
     print()
     print("Shared build options:")
-    print("  --speedy-lossy  compile faster while permitting lower-performance output")
+    print("  --speedy-lossy       compile faster while permitting lower-performance output")
+    print("  --bleach             enable the strong default sanitizer set")
+    print("  --sanitize NAME      enable a specific sanitizer; repeatable")
+    print("  --report PATH        write a machine-readable JSON build report")
     print()
     print("Examples:")
     print("  asmpython build app.py --profile release")
-    print("  asmpython build app.py --speedy-lossy")
+    print("  asmpython build app.py --speedy-lossy --report build-report.json")
+    print("  asmpython build app.py --bleach")
+    print("  asmpython build app.py --sanitize address --sanitize undefined")
+    print("  asmpython extension package main:extension")
+    print("  asmpython extension install my_extension.apext --user")
+    print("  asmpython extension get https://example.com/my_extension.apext")
     print("  asmpython backends list")
     print("  asmpython backends jvm")
     print("  asmpython ir build/app.apir --target linux --speedy-lossy")
@@ -56,7 +70,27 @@ def _print_help() -> None:
     print("  asmpython test tests --engine all")
 
 
-def _main_with_options(raw: list[str], *, speedy_lossy: bool) -> int:
+def _load_extensions(report) -> bool:
+    from .extension_packages import ExtensionPackageError, load_installed_extensions
+
+    try:
+        loaded = load_installed_extensions()
+    except ExtensionPackageError as exc:
+        print(f"asmpython: extension: {exc}", file=sys.stderr)
+        return False
+    if report is not None:
+        for item in loaded:
+            report.add_extension(
+                id=item.id,
+                version=item.version,
+                scope=item.scope,
+                path=item.path,
+                production_suitable=item.production_suitable,
+            )
+    return True
+
+
+def _main_with_options(raw: list[str], *, options: SharedBuildOptions, report) -> int:
     if raw in (["-h"], ["--help"]):
         _print_help()
         return 0
@@ -68,12 +102,32 @@ def _main_with_options(raw: list[str], *, speedy_lossy: bool) -> int:
         )
         return 2
 
-    if speedy_lossy:
+    if raw and raw[0] == "extension":
+        from .extension_command import command_main
+        return command_main(raw[1:])
+
+    if options.speedy_lossy:
         print(
             "asmpython: speedy-lossy mode enabled; backends and linkers may "
             "trade generated-program speed and code quality for faster builds",
             file=sys.stderr,
         )
+    if options.bleach:
+        print(
+            "asmpython: bleach mode enabled; strong runtime/compiler checks may "
+            "substantially increase compile time, program size, and runtime cost",
+            file=sys.stderr,
+        )
+    elif options.sanitizers:
+        print(
+            "asmpython: sanitizers enabled: " + ", ".join(options.sanitizers),
+            file=sys.stderr,
+        )
+
+    # Installed extensions are loaded before management discovery and ordinary
+    # builds so extension-provided backends/linkers are visible everywhere.
+    if not _load_extensions(report):
+        return 1
 
     handled = dispatch(raw)
     if handled is not None:
@@ -118,18 +172,32 @@ def _main_with_options(raw: list[str], *, speedy_lossy: bool) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Run management commands or delegate ordinary builds to the host policy."""
 
-    raw = list(sys.argv[1:] if argv is None else argv)
+    original = list(sys.argv[1:] if argv is None else argv)
     try:
-        raw, speedy_lossy = extract_speedy_lossy(raw)
+        raw, options = extract_shared_build_options(original)
     except ValueError as exc:
         print(f"asmpython: {exc}", file=sys.stderr)
         return 2
 
-    # The context wraps both management-command dispatch (notably ``ir``) and
-    # the ordinary source build path. ModuleBackend and public plugin adapters
-    # inject the value into every backend compile/link and linker link call.
-    with speedy_lossy_mode(speedy_lossy):
-        return _main_with_options(raw, speedy_lossy=speedy_lossy)
+    option_record = {
+        "speedy_lossy": options.speedy_lossy,
+        "bleach": options.bleach,
+        "sanitizers": list(options.sanitizers),
+    }
+    with shared_build_options(options):
+        with report_session(options.report_path, original, option_record) as report:
+            try:
+                result = _main_with_options(raw, options=options, report=report)
+            except BaseException as exc:
+                if report is not None:
+                    report.write(
+                        exit_code=1,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                raise
+            if report is not None:
+                report.write(exit_code=result)
+            return result
 
 
 __all__ = [
