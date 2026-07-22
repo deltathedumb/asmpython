@@ -39,6 +39,8 @@ class SharedBuildOptions:
     bleach: bool = False
     sanitizers: tuple[str, ...] = ()
     report_path: Path | None = None
+    locked: bool = False
+    lockfile_path: Path = Path("asmpython.lock")
 
 
 def speedy_lossy_enabled() -> bool:
@@ -76,7 +78,6 @@ def _restore_environment(previous: dict[str, str | None]) -> None:
 @contextlib.contextmanager
 def speedy_lossy_mode(enabled: bool) -> Iterator[None]:
     """Compatibility context manager for callers that set only this option."""
-
     value = bool(enabled)
     token = _speedy_lossy.set(value)
     previous = _set_environment(
@@ -110,7 +111,6 @@ def shared_build_options(options: SharedBuildOptions) -> Iterator[None]:
 
 def inject_build_options(args: dict[str, Any] | None) -> dict[str, Any]:
     """Copy plugin arguments and inject all authoritative shared options."""
-
     resolved = dict(args or {})
     resolved["speedy_lossy"] = speedy_lossy_enabled()
     resolved["bleach"] = bleach_enabled()
@@ -120,7 +120,6 @@ def inject_build_options(args: dict[str, Any] | None) -> dict[str, Any]:
 
 def extract_speedy_lossy(argv: list[str]) -> tuple[list[str], bool]:
     """Remove repeated ``--speedy-lossy`` flags from an argv vector."""
-
     remaining: list[str] = []
     enabled = False
     for token in argv:
@@ -156,12 +155,13 @@ def _validate_sanitizers(selected: set[str]) -> None:
 
 def extract_shared_build_options(argv: list[str]) -> tuple[list[str], SharedBuildOptions]:
     """Remove shared build flags and return their normalized values."""
-
     remaining: list[str] = []
     speedy_lossy = False
     bleach = False
     selected: set[str] = set()
     report_path: Path | None = None
+    locked = False
+    lockfile_path = Path("asmpython.lock")
     index = 0
     while index < len(argv):
         token = argv[index]
@@ -201,6 +201,25 @@ def extract_shared_build_options(argv: list[str]) -> tuple[list[str], SharedBuil
             report_path = Path(value)
             index += 1
             continue
+        if token == "--locked":
+            locked = True
+            index += 1
+            continue
+        if token.startswith("--locked="):
+            raise ValueError("--locked is a flag and does not accept a value")
+        if token == "--lockfile":
+            if index + 1 >= len(argv):
+                raise ValueError("--lockfile requires a path")
+            lockfile_path = Path(argv[index + 1])
+            index += 2
+            continue
+        if token.startswith("--lockfile="):
+            value = token.split("=", 1)[1]
+            if not value:
+                raise ValueError("--lockfile requires a path")
+            lockfile_path = Path(value)
+            index += 1
+            continue
         remaining.append(token)
         index += 1
     _validate_sanitizers(selected)
@@ -209,6 +228,8 @@ def extract_shared_build_options(argv: list[str]) -> tuple[list[str], SharedBuil
         bleach=bleach,
         sanitizers=tuple(sorted(selected)),
         report_path=report_path,
+        locked=locked,
+        lockfile_path=lockfile_path,
     )
 
 
