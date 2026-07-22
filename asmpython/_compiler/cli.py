@@ -46,7 +46,7 @@ def _print_help() -> None:
     print("  asmpython backends jvm")
     print("  asmpython ir build/app.apir --target linux")
     print("  asmpython cache clear")
-    print("  asmpython profile create release --scope user --set optimization=3")
+    print('  asmpython profile create release --scope user --set backend="x86-64"')
     print("  asmpython test tests --engine all")
 
 
