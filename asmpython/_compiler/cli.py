@@ -1,6 +1,8 @@
 """Stable, patchable public facade over the host-only CLI runtime."""
 from __future__ import annotations
 
+import os
+
 # Install shared policy extensions before plans, lockfiles, or the runtime import
 # their original modules.
 from . import negotiation_ext as _negotiation_ext  # noqa: F401
@@ -17,6 +19,11 @@ source_uses_dynamic_import = _runtime.source_uses_dynamic_import
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Each invocation resolves these values from its own config/profile/CLI.
+    # Clearing them prevents embedded callers from inheriting a previous build.
+    os.environ.pop("ASMPYTHON_TARGET_TRIPLE", None)
+    os.environ.pop("ASMPYTHON_FAST_STATE", None)
+
     # Preserve the existing testing/embedding contract: callers can monkeypatch
     # ``asmpython._compiler.cli.prepare_argv`` and the active invocation observes
     # that replacement.
