@@ -17,6 +17,7 @@ from asmpython._compiler.extension_packages import (
     read_manifest,
     uninstall_extension,
 )
+from asmpython._compiler.profiles import profile_to_argv
 
 
 def test_apext_package_install_discover_and_load(tmp_path: Path) -> None:
@@ -77,6 +78,22 @@ def test_bleach_and_sanitizers_are_normalized_and_injected() -> None:
     assert injected["speedy_lossy"] is False
     assert injected["bleach"] is True
     assert injected["sanitizers"] == options.sanitizers
+
+
+def test_profiles_emit_shared_options_for_second_stage_resolution() -> None:
+    argv = profile_to_argv({
+        "target": "linux",
+        "speedy_lossy": True,
+        "bleach": True,
+        "sanitizers": ["bounds"],
+        "report": "reports/profile.json",
+    })
+    remaining, options = extract_shared_build_options(["build", "app.py", *argv])
+    assert remaining == ["build", "app.py", "--target", "linux"]
+    assert options.speedy_lossy is True
+    assert options.bleach is True
+    assert options.sanitizers == ("address", "bounds", "leak", "undefined")
+    assert options.report_path == Path("reports/profile.json")
 
 
 def test_thread_sanitizer_conflicts_are_rejected() -> None:
