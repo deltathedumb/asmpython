@@ -80,6 +80,7 @@ jobs:
             asmpython/_compiler/extension_command.py \
             asmpython/_compiler/extension_packages.py \
             asmpython/_compiler/fast_state.py \
+            asmpython/_compiler/fast_state_ext.py \
             asmpython/_compiler/ir.py \
             asmpython/_compiler/ir_command.py \
             asmpython/_compiler/irfreeze.py \
@@ -88,6 +89,7 @@ jobs:
             asmpython/_compiler/package_signing.py \
             asmpython/_compiler/profiles.py \
             asmpython/_compiler/target_triple.py \
+            asmpython/_compiler/target_triple_ext.py \
             asmpython/_compiler/test_runner.py \
             asmpython/_compiler/toolchain_policy.py \
             asmpython/_runtime/memory.py \
@@ -96,7 +98,9 @@ jobs:
             asmpython/runtime.py
 
       - name: Run focused tests
+        shell: bash
         run: |
+          set +e
           python -m pytest -q \
             tests/test_backend_scaffolds.py \
             tests/test_build_system_features.py \
@@ -105,7 +109,17 @@ jobs:
             tests/test_memory_runtime.py \
             tests/test_mixed_traceback.py \
             tests/test_speedy_lossy.py \
-            tests/test_test_command.py
+            tests/test_test_command.py 2>&1 | tee focused-tests.log
+          status=${PIPESTATUS[0]}
+          exit "$status"
+
+      - name: Upload focused-test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: focused-tests-python-${{ matrix.python-version }}
+          path: focused-tests.log
+          if-no-files-found: warn
 
       - name: Smoke-test CLI management commands
         run: |
