@@ -1,25 +1,14 @@
-"""SSA IR types consumed by asmpython's built-in x86-64 backend
-(asmpython/_backends/x86_64), the codegen.py-free path reached via
-driver.py's --backend x86-64. The backend's `run_backend_codegen(ir,
-args)` only ever touches `.funcs`/`.data` and every nested field by name
-(duck-typed, no import cycle back to this module from the backend).
+"""SSA IR types consumed by ASMPython compiler backends.
 
-asmpython's own type system (see ast_nodes.expr_type: "int", "float",
-"str", "list", "dict", "instance:Name", ...) collapses onto two IRTypes
-at the register-allocation level, mirroring what the legacy NASM-text
-codegen.py already does by hand: float values live in XMM registers
-(F64); everything else -- ints, bools, and every heap pointer (str/list/
-dict/instance/closure) -- is a 64-bit GP value (I64). There is no
-"struct" IRType because asmpython has none at the machine level: every
-object is a runtime dict, accessed through `_runtime_dict_*` calls, not
-through typed field offsets.
+ASMPython's own type strings collapse onto three machine-facing IR types at the
+register-allocation level. Every backend receives shared build options through
+its argument dictionaries, including speedy-lossy and sanitizer policy.
 """
-
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass, field
 import enum
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -41,9 +30,6 @@ I64 = IRType("i64")
 F64 = IRType("f64")
 PTR = IRType("ptr")
 
-# asmpython's own type strings -> the IRType a value of that type is
-# stored in. Anything not listed here (instance:*, list, dict, str,
-# closures, ...) is a heap pointer and defaults to PTR.
 _ASM_TYPE_TO_IR = {
     "int": I64,
     "bool": I64,
@@ -65,7 +51,7 @@ class IRValue:
 class IRInstr:
     op: str
     result: IRValue | None
-    operands: list  # IRValue | int | float | str
+    operands: list
 
 
 @dataclass
@@ -81,24 +67,10 @@ class IRFunc:
     ret_type: IRType | None
     blocks: list[IRBlock] = field(default_factory=list)
     visibility: Visibility = Visibility.UNDEFINED
-    # (setjmp_block_index, end_block_index) per try/except statement this
-    # function lowers -- see ir_lower.py's _lower_try. The exception
-    # handler blocks a setjmp call can transfer to via longjmp are NOT
-    # connected to it by any ordinary br/br.t edge (the transfer only
-    # happens through the runtime jmp_buf mechanism), and _lower_try
-    # allocates them AFTER the try's own post-loop-body continuation
-    # block in block-list order -- so a value defined before the try and
-    # read inside the handler can look, to a plain block-list-order
-    # liveness scan, already dead by the time the handler's use is
-    # recorded. The x86-64 backend's regalloc.py consumes this to treat
-    # each region as one liveness span, the same way it already does for
-    # loop back-edges.
-    #
-    # Also consumed by regalloc.py's _last_uses to exclude every backward-
-    # by-block-index branch _lower_try's control-flow-dispatch machinery
-    # produces (a normal-completion `br` back to the try's own `end_b`, a
-    # per-handler type-match `br.t` whose matched-target sits at a lower
-    # index) from loop-back-edge detection -- none of them are real loops.
+    # (setjmp_block_index, end_block_index) per try/except region. Exception
+    # transfers are not ordinary CFG edges, so register allocation consumes this
+    # metadata to keep values live across handlers without misclassifying the
+    # synthetic backward edges as loops.
     try_regions: list[tuple[int, int]] = field(default_factory=list)
 
 
@@ -117,64 +89,51 @@ class IRModule:
 
 
 class IRBackend(abc.ABC):
-    """Interface every asmpython compiler backend implements.
+    """Interface every ASMPython compiler backend implements.
 
-    In-process Python backends (the built-in x86-64 backend in
-    asmpython/_backends/x86_64, anything else written directly against
-    this IR) implement it directly. A future DLL-based custom backend
-    wouldn't implement it itself -- it'd be wrapped by an adapter that
-    loads the DLL and marshals `compile()` calls across that boundary via
-    a serialized form of this IR (a DLL can't receive live IRModule/
-    IRValue objects directly), so the driver only ever talks to an
-    IRBackend either way and never needs to know which kind it has.
+    Every compile/link argument dictionary receives:
 
-    Every compile/link argument dictionary receives the shared
-    ``speedy_lossy`` boolean. When true, implementations may deliberately
-    trade generated-program quality for lower compiler/linker latency, but
-    must preserve program semantics.
+    ``speedy_lossy``
+        Permit cheaper code generation that may produce slower/larger programs.
+    ``bleach``
+        Request the strong default sanitizer/checking policy.
+    ``sanitizers``
+        A normalized tuple of requested sanitizer names.
+
+    These modes may affect performance and diagnostics, never language semantics.
     """
 
     @property
     @abc.abstractmethod
     def requested_args(self) -> list[dict]:
-        """CLI arguments this backend wants the driver to register and
-        pass through (e.g. --target-os, --abi)."""
+        """CLI arguments this backend wants the driver to register."""
 
     @property
     def default_linker(self) -> str:
-        """Name of the linker (asmpython/_linkers/<name>.py) this backend
-        links with when driver.py's --linker flag isn't given explicitly.
-        Backends "define" their linker this way -- e.g. the x86-64
-        backend defaults to "builtin" (its whole point is skipping
-        external tools); a backend with no opinion just inherits this
-        default of "gcc"."""
         return "gcc"
 
     @property
     def production_suitable(self) -> bool:
-        """Whether this backend may be used for production-build claims."""
-
         return True
 
     @abc.abstractmethod
     def compile(self, module: IRModule, args: dict) -> dict[str, bytes]:
-        """Compile an IRModule to one or more output files, returned as
-        {filename: bytes} (e.g. {"output.obj": b"..."})."""
+        """Compile an IRModule to one or more named output files."""
 
     @abc.abstractmethod
     def link(self, objects: list[bytes], args: dict) -> dict[str, bytes]:
-        """Link one or more object files (as bytes) into one or more output files, returned as
-        {filename: bytes} (e.g. {"output.exe": b"..."})."""
+        """Link object bytes into one or more named output files."""
 
 
 class ModuleBackend(IRBackend):
-    """Adapts a plugin module exposing module-level `requested_args` and
-    `run_backend_codegen(ir, args)` (see asmpython/_backends/x86_64's
-    __init__.py for the reference implementation of this convention) to
-    the IRBackend interface, so that backend is usable here unmodified."""
+    """Adapt a module-level backend implementation to :class:`IRBackend`."""
 
     def __init__(self, module: object) -> None:
         self._module = module
+
+    @property
+    def name(self) -> str:
+        return str(getattr(self._module, "__name__", type(self._module).__name__))
 
     @property
     def requested_args(self) -> list[dict]:
@@ -190,14 +149,34 @@ class ModuleBackend(IRBackend):
 
     def compile(self, module: IRModule, args: dict) -> dict[str, bytes]:
         from .build_options import inject_build_options
+        from .build_report import event, stage
 
-        return self._module.run_backend_codegen(  # type: ignore[attr-defined]
-            module, inject_build_options(args)
+        resolved = inject_build_options(args)
+        with stage("backend.compile", backend=self.name):
+            outputs = self._module.run_backend_codegen(  # type: ignore[attr-defined]
+                module, resolved
+            )
+        event(
+            "backend.outputs",
+            backend=self.name,
+            phase="compile",
+            outputs={name: len(data) for name, data in outputs.items()},
         )
+        return outputs
 
     def link(self, objects: list[bytes], args: dict) -> dict[str, bytes]:
         from .build_options import inject_build_options
+        from .build_report import event, stage
 
-        return self._module.run_backend_link(  # type: ignore[attr-defined]
-            objects, inject_build_options(args)
+        resolved = inject_build_options(args)
+        with stage("backend.link", backend=self.name, input_objects=len(objects)):
+            outputs = self._module.run_backend_link(  # type: ignore[attr-defined]
+                objects, resolved
+            )
+        event(
+            "backend.outputs",
+            backend=self.name,
+            phase="link",
+            outputs={name: len(data) for name, data in outputs.items()},
         )
+        return outputs
