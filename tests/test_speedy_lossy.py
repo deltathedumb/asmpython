@@ -6,6 +6,11 @@ import asmpython
 from asmpython._backends import get_backend
 from asmpython._compiler.build_options import extract_speedy_lossy, speedy_lossy_mode
 from asmpython._compiler.ir import ModuleBackend
+from asmpython._compiler.toolchain_policy import (
+    backend_production_suitable,
+    linker_production_suitable,
+    warn_selected_nonproduction,
+)
 from asmpython._linkers import get_linker
 
 
@@ -97,3 +102,23 @@ def test_public_backend_and_linker_adapters_inject_flag() -> None:
     assert linker_registration.impl.__class__ is LinkerImpl
     assert registered_backend.production_suitable is False
     assert registered_linker.production_suitable is False
+
+
+def test_nonproduction_components_are_queryable_and_warn(
+    capsys,
+) -> None:
+    assert backend_production_suitable("ternary") is False
+    assert backend_production_suitable("x86-64") is True
+    assert linker_production_suitable("builtin") is True
+    assert backend_production_suitable("speedy-test-backend") is False
+    assert linker_production_suitable("speedy-test-linker") is False
+
+    warn_selected_nonproduction([
+        "build", "app.py",
+        "--backend", "speedy-test-backend",
+        "--linker=speedy-test-linker",
+    ])
+    warning = capsys.readouterr().err
+    assert "backend 'speedy-test-backend'" in warning
+    assert "linker 'speedy-test-linker'" in warning
+    assert warning.count("unsuitable for production builds") == 2
