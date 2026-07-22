@@ -22,6 +22,7 @@ SUPPORTED_KEYS = frozenset({
     "target", "output", "output_type", "type", "backend", "linker",
     "bundle_mode", "use_runtime_lib", "no_pyinbin_fallback", "keep",
     "keep_assembly", "emit_asm", "icon", "nasm", "gcc", "apm",
+    "speedy_lossy", "bleach", "sanitize", "sanitizers", "report",
 })
 
 
@@ -199,11 +200,7 @@ def delete_profile(name: str, *, scope: str, directory: Path | None = None) -> P
 
 
 def resolve_profile(name: str, *, directory: Path | None = None) -> dict[str, Any]:
-    """Resolve one profile with system < user < directory precedence.
-
-    ``extends`` may name another profile. Cycles are rejected, and the child
-    always overrides its parent after both have been resolved across scopes.
-    """
+    """Resolve one profile with system < user < directory precedence."""
 
     def resolve(current: str, stack: tuple[str, ...]) -> dict[str, Any]:
         if current in stack:
@@ -261,6 +258,7 @@ def profile_to_argv(profile: dict[str, Any]) -> list[str]:
     add_value("--icon", profile.get("icon"))
     add_value("--nasm", profile.get("nasm"))
     add_value("--gcc", profile.get("gcc"))
+    add_value("--report", profile.get("report"))
 
     bundle = profile.get("bundle_mode")
     if bundle == "onefile":
@@ -276,10 +274,20 @@ def profile_to_argv(profile: dict[str, Any]) -> list[str]:
         "keep": "--keep",
         "keep_assembly": "--keep-assembly",
         "emit_asm": "--emit-asm",
+        "speedy_lossy": "--speedy-lossy",
+        "bleach": "--bleach",
     }
     for key, flag in boolean_flags.items():
         if profile.get(key) is True:
             result.append(flag)
+
+    sanitizer_values = profile.get("sanitizers", profile.get("sanitize", []))
+    if isinstance(sanitizer_values, str):
+        sanitizer_values = [sanitizer_values]
+    if not isinstance(sanitizer_values, list):
+        raise ProfileError("sanitizers must be a string or list of strings")
+    for item in sanitizer_values:
+        add_value("--sanitize", item)
 
     apm = profile.get("apm", [])
     if isinstance(apm, str):
