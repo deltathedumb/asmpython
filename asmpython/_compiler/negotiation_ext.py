@@ -1,6 +1,7 @@
 """Extended build negotiation for debugger-aware and delegated linkers."""
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 
 from .build_options import (
@@ -104,9 +105,22 @@ def negotiate_build(argv: list[str]) -> NegotiationResult:
 
 
 # Keep every existing importer—builds, graph plans, lockfiles, and extensions—on
-# one source of truth without forcing a public module rename.
+# one source of truth without forcing public module renames.
 from . import capability_negotiation as _base
+from . import build_options as _build_options
+
 _base.negotiate_build = negotiate_build
+_original_inject = _build_options.inject_build_options
+
+
+def _inject_extended_build_options(args):
+    resolved = _original_inject(args)
+    resolved["target_triple"] = os.environ.get("ASMPYTHON_TARGET_TRIPLE")
+    resolved["fastcomp_state_path"] = os.environ.get("ASMPYTHON_FAST_STATE")
+    return resolved
+
+
+_build_options.inject_build_options = _inject_extended_build_options
 
 
 __all__ = ["negotiate_build"]
