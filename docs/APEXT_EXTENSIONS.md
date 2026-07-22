@@ -40,9 +40,10 @@ asmpython extension install my_extension.apext --user
 asmpython extension install my_extension.apext --local
 ```
 
-If no scope is passed, installation defaults to `--user`. Build-time discovery
-loads system extensions first, then user extensions, then local extensions. A
-higher-precedence package with the same id replaces the lower-precedence one.
+If no scope is passed, installation defaults to `--user`. Discovery examines
+system, then user, then local extensions. A higher-precedence local package with
+the same id replaces a user package, and a user package replaces a system one;
+only the selected package is executed.
 
 ```bash
 asmpython extension list
