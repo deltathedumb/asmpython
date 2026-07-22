@@ -7,6 +7,7 @@ import os
 # their original modules.
 from . import negotiation_ext as _negotiation_ext  # noqa: F401
 from . import build_lock_ext as _build_lock_ext  # noqa: F401
+from . import fast_state_ext as _fast_state_ext  # noqa: F401
 from . import cli_runtime as _runtime
 
 
