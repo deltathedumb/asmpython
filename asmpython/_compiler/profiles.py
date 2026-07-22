@@ -1,7 +1,7 @@
 """Scoped ASMPython build profiles.
 
 Profiles are ordinary JSON documents and can live at system, user, or directory
-scope.  Resolution overlays those scopes in that order, so a project can refine
+scope. Resolution overlays those scopes in that order, so a project can refine
 (or replace) a machine/user default without modifying it.
 """
 from __future__ import annotations
@@ -16,12 +16,12 @@ from typing import Any
 PROFILE_SCHEMA = 1
 SCOPES = ("system", "user", "directory")
 
-# Keys intentionally map to the public build CLI rather than compiler internals.
+# Keys map only to build flags implemented on this branch. New compiler options
+# should be added here when their public CLI flag lands, never pre-advertised.
 SUPPORTED_KEYS = frozenset({
     "target", "output", "output_type", "type", "backend", "linker",
     "bundle_mode", "use_runtime_lib", "no_pyinbin_fallback", "keep",
     "keep_assembly", "emit_asm", "icon", "nasm", "gcc", "apm",
-    "optimization", "debug", "strip", "fastcomp",
 })
 
 
@@ -276,9 +276,6 @@ def profile_to_argv(profile: dict[str, Any]) -> list[str]:
         "keep": "--keep",
         "keep_assembly": "--keep-assembly",
         "emit_asm": "--emit-asm",
-        "fastcomp": "--fastcomp",
-        "debug": "--debug",
-        "strip": "--strip",
     }
     for key, flag in boolean_flags.items():
         if profile.get(key) is True:
