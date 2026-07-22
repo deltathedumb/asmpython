@@ -5,6 +5,7 @@ import os
 import sys
 
 from asmpython._backends import host_cli as _host_cli
+from .build_options import extract_speedy_lossy, speedy_lossy_mode
 from .management_commands import (
     MANAGEMENT_COMMANDS,
     REMOVED_COMMANDS,
@@ -40,20 +41,21 @@ def _print_help() -> None:
     print("  pyinbin     package or run interpreted source")
     print("  project     scaffold projects")
     print()
+    print("Shared build options:")
+    print("  --speedy-lossy  compile faster while permitting lower-performance output")
+    print()
     print("Examples:")
     print("  asmpython build app.py --profile release")
+    print("  asmpython build app.py --speedy-lossy")
     print("  asmpython backends list")
     print("  asmpython backends jvm")
-    print("  asmpython ir build/app.apir --target linux")
+    print("  asmpython ir build/app.apir --target linux --speedy-lossy")
     print("  asmpython cache clear")
     print('  asmpython profile create release --scope user --set backend="x86-64"')
     print("  asmpython test tests --engine all")
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run management commands or delegate ordinary builds to the host policy."""
-
-    raw = list(sys.argv[1:] if argv is None else argv)
+def _main_with_options(raw: list[str], *, speedy_lossy: bool) -> int:
     if raw in (["-h"], ["--help"]):
         _print_help()
         return 0
@@ -64,6 +66,13 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    if speedy_lossy:
+        print(
+            "asmpython: speedy-lossy mode enabled; backends and linkers may "
+            "trade generated-program performance for faster builds",
+            file=sys.stderr,
+        )
 
     handled = dispatch(raw)
     if handled is not None:
@@ -100,6 +109,23 @@ def main(argv: list[str] | None = None) -> int:
             os.environ.pop("ASMPYTHON_CLI_MIXED_TRACEBACK", None)
         else:
             os.environ["ASMPYTHON_CLI_MIXED_TRACEBACK"] = previous_traceback_mode
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run management commands or delegate ordinary builds to the host policy."""
+
+    raw = list(sys.argv[1:] if argv is None else argv)
+    try:
+        raw, speedy_lossy = extract_speedy_lossy(raw)
+    except ValueError as exc:
+        print(f"asmpython: {exc}", file=sys.stderr)
+        return 2
+
+    # The context wraps both management-command dispatch (notably ``ir``) and
+    # the ordinary source build path. ModuleBackend and public plugin adapters
+    # inject the value into every backend compile/link and linker link call.
+    with speedy_lossy_mode(speedy_lossy):
+        return _main_with_options(raw, speedy_lossy=speedy_lossy)
 
 
 __all__ = [
