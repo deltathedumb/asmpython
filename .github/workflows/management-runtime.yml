@@ -18,6 +18,7 @@ on:
       - "asmpython/_compiler/management_commands.py"
       - "asmpython/_compiler/profiles.py"
       - "asmpython/_compiler/test_runner.py"
+      - "asmpython/_compiler/toolchain_policy.py"
       - "asmpython/_runtime/memory.py"
       - "asmpython/_runtime/mixed_traceback.py"
       - "asmpython/pyinbin/**"
@@ -68,6 +69,7 @@ jobs:
             asmpython/_compiler/management_commands.py \
             asmpython/_compiler/profiles.py \
             asmpython/_compiler/test_runner.py \
+            asmpython/_compiler/toolchain_policy.py \
             asmpython/_runtime/memory.py \
             asmpython/_runtime/mixed_traceback.py \
             asmpython/pyinbin/__init__.py \
