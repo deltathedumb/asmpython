@@ -29,11 +29,29 @@ def _sanitizer_flags(ctx: dict) -> list[str]:
     return [f"-fsanitize={','.join(dict.fromkeys(mapped))}", "-fno-omit-frame-pointer"]
 
 
+def _debug_flags(ctx: dict) -> list[str]:
+    if not ctx.get("debug"):
+        return []
+    debug_format = str(ctx.get("debug_format", "auto")).lower()
+    target_os = str(ctx.get("target_os", "")).lower()
+    if debug_format == "auto":
+        debug_format = "codeview" if target_os == "windows" else "dwarf"
+    if debug_format in {"pdb", "codeview"}:
+        # MinGW/LLVM-compatible GCC drivers understand -gcodeview. A backend
+        # may additionally emit a PDB path in its artifact map.
+        return ["-gcodeview", "-fno-omit-frame-pointer"]
+    if debug_format == "dwarf":
+        return ["-gdwarf-5", "-fno-omit-frame-pointer"]
+    if debug_format == "sourcemap":
+        raise NotImplementedError("GCC native linking cannot emit WebAssembly source maps")
+    raise ValueError(f"unsupported GCC debug format {debug_format!r}")
+
+
 def link(ctx: dict) -> bytes:
     gcc = ctx.get("gcc_path") or "gcc"
     objects: list[bytes] = ctx["objects"]
     extra_args: list[str] = list(ctx.get("extra_args", []))
-    sanitizer_args = _sanitizer_flags(ctx)
+    policy_args = [*_sanitizer_flags(ctx), *_debug_flags(ctx)]
 
     with tempfile.TemporaryDirectory(prefix="asmpython_gcc_link_") as tmp:
         tmp_dir = Path(tmp)
@@ -48,7 +66,7 @@ def link(ctx: dict) -> bytes:
         cmd = [
             str(gcc),
             *[str(path) for path in obj_paths],
-            *sanitizer_args,
+            *policy_args,
             "-o",
             str(out_path),
             *extra_args,
