@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .build_options import active_embed_paths, fastcomp_enabled
 from .capability_negotiation import negotiate_build
 from .embedded_data import collect_files
 from .fast_state import prepare_state, state_summary
@@ -23,12 +24,7 @@ class PlanNode:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "kind": self.kind,
-            "label": self.label,
-            "metadata": self.metadata,
-        }
+        return {"id": self.id, "kind": self.kind, "label": self.label, "metadata": self.metadata}
 
 
 @dataclass(frozen=True)
@@ -38,11 +34,7 @@ class PlanEdge:
     relation: str
 
     def as_dict(self) -> dict[str, str]:
-        return {
-            "source": self.source,
-            "target": self.target,
-            "relation": self.relation,
-        }
+        return {"source": self.source, "target": self.target, "relation": self.relation}
 
 
 @dataclass
@@ -67,29 +59,13 @@ class BuildPlan:
         }
 
 
-def _option_values(argv: list[str], flag: str) -> list[str]:
-    result: list[str] = []
-    index = 0
-    while index < len(argv):
-        token = argv[index]
-        if token == flag and index + 1 < len(argv):
-            result.append(argv[index + 1])
-            index += 2
-            continue
-        if token.startswith(flag + "="):
-            result.append(token.split("=", 1)[1])
-        index += 1
-    return result
-
-
 def _source_from_argv(argv: list[str]) -> Path:
     tokens = list(argv)
     if tokens and tokens[0] == "build":
         tokens = tokens[1:]
     value_flags = {
         "--backend", "--linker", "--target", "--type", "--output", "-o",
-        "--profile", "--sanitize", "--report", "--debug-format", "--embed",
-        "--lockfile", "--config", "--graph-format", "--graph-output",
+        "--profile", "--graph-format", "--graph-output", "--icon", "--nasm", "--gcc",
     }
     skip = False
     for token in tokens:
@@ -112,12 +88,11 @@ def create_build_plan(argv: list[str]) -> BuildPlan:
     negotiation = negotiate_build(argv)
     backend = negotiation.backend.name
     target = negotiation.target
-    fastcomp_enabled = "--fastcomp" in argv
     fast = None
     state = None
     if source.suffix == ".py":
         state = prepare_state(source, backend=backend, target=target)
-        if fastcomp_enabled:
+        if fastcomp_enabled():
             fast = state_summary(state)
 
     nodes: list[PlanNode] = [
@@ -130,21 +105,12 @@ def create_build_plan(argv: list[str]) -> BuildPlan:
         PlanNode("backend", "backend", backend, negotiation.backend.as_dict()),
     ]
     if negotiation.linker is not None:
-        nodes.append(
-            PlanNode(
-                "linker",
-                "linker",
-                negotiation.linker.name,
-                negotiation.linker.as_dict(),
-            )
-        )
-    nodes.extend(
-        [
-            PlanNode("bundle", "stage", "bundle runtime and resources"),
-            PlanNode("verify", "stage", "artifact verification"),
-            PlanNode("output", "artifact", "final output"),
-        ]
-    )
+        nodes.append(PlanNode("linker", "linker", negotiation.linker.name, negotiation.linker.as_dict()))
+    nodes.extend([
+        PlanNode("bundle", "stage", "bundle runtime and resources"),
+        PlanNode("verify", "stage", "artifact verification"),
+        PlanNode("output", "artifact", "final output"),
+    ])
 
     edges = [
         PlanEdge("source", "discover", "input"),
@@ -158,24 +124,17 @@ def create_build_plan(argv: list[str]) -> BuildPlan:
     if negotiation.linker is not None:
         edges.append(PlanEdge("backend", "linker", "objects"))
         previous = "linker"
-    edges.extend(
-        [
-            PlanEdge(previous, "bundle", "binary"),
-            PlanEdge("bundle", "verify", "candidate artifact"),
-            PlanEdge("verify", "output", "atomic publish"),
-        ]
-    )
+    edges.extend([
+        PlanEdge(previous, "bundle", "binary"),
+        PlanEdge("bundle", "verify", "candidate artifact"),
+        PlanEdge("verify", "output", "atomic publish"),
+    ])
 
     if state is not None:
-        for index, (path, dependencies) in enumerate(sorted(state.graph.items())):
+        for index, path in enumerate(sorted(state.graph)):
             node_id = f"module:{index}"
             nodes.append(
-                PlanNode(
-                    node_id,
-                    "module",
-                    Path(path).name,
-                    {"path": path, "sha256": state.dependencies.get(path)},
-                )
+                PlanNode(node_id, "module", Path(path).name, {"path": path, "sha256": state.dependencies.get(path)})
             )
             edges.append(PlanEdge("discover", node_id, "found"))
         path_to_id = {
@@ -193,7 +152,7 @@ def create_build_plan(argv: list[str]) -> BuildPlan:
                     edges.append(PlanEdge(source_id, target_id, "imports"))
 
     embedded_records: list[dict[str, Any]] = []
-    embed_paths = [Path(value) for value in _option_values(argv, "--embed")]
+    embed_paths = list(active_embed_paths())
     if embed_paths:
         files = collect_files(embed_paths)
         for index, (name, content) in enumerate(files.items()):
@@ -234,9 +193,7 @@ def render_dot(plan: BuildPlan) -> str:
         lines.append(f'  "{node.id}" [label="{label}\\n({node.kind})"];')
     for edge in plan.edges:
         relation = edge.relation.replace('"', '\\"')
-        lines.append(
-            f'  "{edge.source}" -> "{edge.target}" [label="{relation}"];'
-        )
+        lines.append(f'  "{edge.source}" -> "{edge.target}" [label="{relation}"];')
     lines.append("}")
     return "\n".join(lines)
 
@@ -294,10 +251,5 @@ def graphonly_main(argv: list[str]) -> int:
 
 
 __all__ = [
-    "BuildPlan",
-    "BuildPlanError",
-    "create_build_plan",
-    "graphonly_main",
-    "render_dot",
-    "render_text",
+    "BuildPlan", "BuildPlanError", "create_build_plan", "graphonly_main", "render_dot", "render_text",
 ]
