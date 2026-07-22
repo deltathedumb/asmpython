@@ -30,6 +30,7 @@ class ScaffoldBackend(IRBackend):
 
     is_scaffold = True
     implemented = False
+    production_suitable = False
 
     def __init__(self, spec: BackendScaffoldSpec) -> None:
         self.spec = spec
