@@ -13,6 +13,7 @@ from .management_commands import (
     dispatch,
 )
 from .profiles import ProfileError
+from .toolchain_policy import warn_selected_nonproduction
 
 
 _call_legacy_with_static_project_policy = (
@@ -70,9 +71,11 @@ def _main_with_options(raw: list[str], *, speedy_lossy: bool) -> int:
     if speedy_lossy:
         print(
             "asmpython: speedy-lossy mode enabled; backends and linkers may "
-            "trade generated-program performance for faster builds",
+            "trade generated-program speed and code quality for faster builds",
             file=sys.stderr,
         )
+
+    warn_selected_nonproduction(raw)
 
     handled = dispatch(raw)
     if handled is not None:
@@ -83,6 +86,9 @@ def _main_with_options(raw: list[str], *, speedy_lossy: bool) -> int:
     except ProfileError as exc:
         print(f"asmpython: profile: {exc}", file=sys.stderr)
         return 2
+
+    # Profiles may choose a backend/linker even when the raw command did not.
+    warn_selected_nonproduction(prepared)
 
     # ``build --ir-only`` stops before target selection/linking and therefore
     # bypasses the historical build parser, which deliberately knows nothing
