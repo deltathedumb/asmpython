@@ -11,7 +11,6 @@ Then: `asmpython build myfile.py --linker my_linker`.
 from __future__ import annotations
 
 
-
 def _lazy_linkers_module():
     # Imported lazily (not at module load time) so `import asmpython` alone
     # doesn't pull in the whole compiler frontend.
@@ -64,9 +63,10 @@ class Linker:
         if production_suitable is None:
             production_suitable = bool(getattr(impl, "production_suitable", True))
         self.name = name
-        self.impl = _ConfiguredLinker(impl, production_suitable)
+        self.impl = impl
         self.production_suitable = bool(production_suitable)
-        _lazy_linkers_module().register_linker(name, self.impl)
+        self._registered_impl = _ConfiguredLinker(impl, self.production_suitable)
+        _lazy_linkers_module().register_linker(name, self._registered_impl)
 
     def __repr__(self) -> str:
         return (
