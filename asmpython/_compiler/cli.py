@@ -6,6 +6,7 @@ import sys
 
 # Install shared policy extensions before plans, lockfiles, or the runtime import
 # their original modules.
+from . import target_triple_ext as _target_triple_ext  # noqa: F401
 from . import negotiation_ext as _negotiation_ext  # noqa: F401
 from . import build_lock_ext as _build_lock_ext  # noqa: F401
 from . import fast_state_ext as _fast_state_ext  # noqa: F401
