@@ -26,13 +26,18 @@ def _linker_names() -> list[str]:
 
 def _aliases(name: str) -> list[str]:
     from asmpython import _backends
-    return sorted(alias for alias, canonical in _backends.registered_aliases().items() if canonical == name)
+    return sorted(
+        alias
+        for alias, canonical in _backends.registered_aliases().items()
+        if canonical == name
+    )
 
 
 def _record(kind: str, name: str) -> dict[str, Any]:
     component = resolve_backend(name) if kind == "backend" else resolve_linker(name)
     if component is None:
         return {"kind": kind, "name": name, "available": False}
+    spec = getattr(component, "spec", None)
     capabilities = component_contract(component)
     statuses = [dependency_status(item) for item in capabilities.dependencies]
     scaffold = bool(getattr(component, "is_scaffold", False))
@@ -47,17 +52,25 @@ def _record(kind: str, name: str) -> dict[str, Any]:
     return {
         "kind": kind,
         "name": name,
-        "display_name": getattr(getattr(component, "spec", None), "display_name", name),
+        "display_name": getattr(spec, "display_name", name),
         "available": True,
         "implemented": bool(getattr(component, "implemented", not scaffold)),
         "production_suitable": production,
         "status": status,
+        "category": getattr(spec, "category", getattr(component, "category", kind)),
         "aliases": _aliases(name) if kind == "backend" else [],
         "default_linker": getattr(component, "default_linker", None) if kind == "backend" else None,
         "module": type(component).__module__,
+        # Preserve the original discovery schema while adding the stronger
+        # capability contract. Existing tooling can migrate field-by-field.
+        "planned_parameters": list(getattr(component, "planned_parameters", ())),
+        "requested_args": list(getattr(component, "requested_args", ())),
+        "notes": getattr(spec, "notes", getattr(component, "notes", "")),
         "capabilities": capabilities.as_dict(),
         "dependencies": [item.as_dict() for item in statuses],
-        "dependencies_ready": all(item.available or item.dependency.optional for item in statuses),
+        "dependencies_ready": all(
+            item.available or item.dependency.optional for item in statuses
+        ),
     }
 
 
@@ -96,7 +109,8 @@ def command_main(kind: str, argv: list[str]) -> int:
         (
             item
             for item in items
-            if args.component == item["name"] or args.component in item.get("aliases", [])
+            if args.component == item["name"]
+            or args.component in item.get("aliases", [])
         ),
         None,
     )
@@ -110,6 +124,7 @@ def command_main(kind: str, argv: list[str]) -> int:
     print(f"status: {selected['status']}")
     print(f"implemented: {'yes' if selected['implemented'] else 'no'}")
     print(f"production suitable: {'yes' if selected['production_suitable'] else 'no'}")
+    print(f"category: {selected['category']}")
     if kind == "backend":
         print(f"aliases: {', '.join(selected['aliases']) or '-'}")
         print(f"default linker: {selected['default_linker'] or '-'}")
@@ -119,6 +134,14 @@ def command_main(kind: str, argv: list[str]) -> int:
     print(f"sanitizers: {', '.join(capabilities.get('sanitizers', [])) or '-'}")
     print(f"debug formats: {', '.join(capabilities.get('debug_formats', [])) or '-'}")
     print(f"features: {', '.join(capabilities.get('features', [])) or '-'}")
+    if selected["planned_parameters"]:
+        print("planned parameters:")
+        for item in selected["planned_parameters"]:
+            print(f"  {item}")
+    if selected["requested_args"]:
+        print("registered arguments:")
+        for item in selected["requested_args"]:
+            print(f"  {item}")
     dependencies = selected["dependencies"]
     if dependencies:
         print("dependencies:")
@@ -129,6 +152,8 @@ def command_main(kind: str, argv: list[str]) -> int:
             print(f"  {item['kind']}:{item['name']}{version} — {state}{optional}")
             if item.get("location"):
                 print(f"    {item['location']}")
+    if selected["notes"]:
+        print(f"notes: {selected['notes']}")
     return 0 if selected["dependencies_ready"] else 1
 
 
