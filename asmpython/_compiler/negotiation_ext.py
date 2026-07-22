@@ -103,4 +103,10 @@ def negotiate_build(argv: list[str]) -> NegotiationResult:
     )
 
 
+# Keep every existing importer—builds, graph plans, lockfiles, and extensions—on
+# one source of truth without forcing a public module rename.
+from . import capability_negotiation as _base
+_base.negotiate_build = negotiate_build
+
+
 __all__ = ["negotiate_build"]
