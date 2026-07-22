@@ -7,22 +7,19 @@
 
 Then: `asmpython build myfile.py --backend my_backend`.
 """
-
 from __future__ import annotations
 
 
 def _lazy_backends_module():
-    # Imported lazily (not at module load time) so `import asmpython` alone
-    # doesn't pull in the whole compiler frontend.
     from . import _backends as _backends_pkg
-
     return _backends_pkg
 
 
 class _ConfiguredBackend:
     """Inject shared build options without changing third-party implementations."""
 
-    def __init__(self, impl: object, production_suitable: bool) -> None:
+    def __init__(self, name: str, impl: object, production_suitable: bool) -> None:
+        self.name = name
         self._impl = impl
         self.production_suitable = bool(production_suitable)
 
@@ -39,13 +36,33 @@ class _ConfiguredBackend:
 
     def compile(self, module: object, args: dict) -> dict[str, bytes]:
         from ._compiler.build_options import inject_build_options
+        from ._compiler.build_report import event, stage
 
-        return self._impl.compile(module, inject_build_options(args))
+        resolved = inject_build_options(args)
+        with stage("backend.compile", backend=self.name):
+            outputs = self._impl.compile(module, resolved)
+        event(
+            "backend.outputs",
+            backend=self.name,
+            phase="compile",
+            outputs={name: len(data) for name, data in outputs.items()},
+        )
+        return outputs
 
     def link(self, objects: list[bytes], args: dict) -> dict[str, bytes]:
         from ._compiler.build_options import inject_build_options
+        from ._compiler.build_report import event, stage
 
-        return self._impl.link(objects, inject_build_options(args))
+        resolved = inject_build_options(args)
+        with stage("backend.link", backend=self.name, input_objects=len(objects)):
+            outputs = self._impl.link(objects, resolved)
+        event(
+            "backend.outputs",
+            backend=self.name,
+            phase="link",
+            outputs={name: len(data) for name, data in outputs.items()},
+        )
+        return outputs
 
 
 class Backend:
@@ -56,11 +73,9 @@ class Backend:
     `link(objects, args) -> dict[str, bytes]` are required;
     `requested_args` (list[dict]) and `default_linker` (str) are optional.
 
-    Every compile/link call receives ``args["speedy_lossy"]``. Set
-    ``production_suitable=False`` for preview, research, or intentionally
-    incomplete implementations that must not be used for production claims.
-
-    Registration happens immediately, as a side effect of construction.
+    Every compile/link call receives ``speedy_lossy``, ``bleach``, and the
+    normalized ``sanitizers`` tuple. Set ``production_suitable=False`` for
+    preview, research, or intentionally incomplete implementations.
     """
 
     def __init__(
@@ -75,7 +90,9 @@ class Backend:
         self.name = name
         self.impl = impl
         self.production_suitable = bool(production_suitable)
-        self._registered_impl = _ConfiguredBackend(impl, self.production_suitable)
+        self._registered_impl = _ConfiguredBackend(
+            name, impl, self.production_suitable
+        )
         _lazy_backends_module().register_backend(name, self._registered_impl)
 
     def __repr__(self) -> str:
