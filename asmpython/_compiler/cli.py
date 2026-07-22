@@ -1,6 +1,9 @@
 """Stable, patchable public facade over the host-only CLI runtime."""
 from __future__ import annotations
 
+# Installs debugger-aware/delegated negotiation into the shared negotiation
+# module before build plans, lockfiles, or the runtime import it.
+from . import negotiation_ext as _negotiation_ext  # noqa: F401
 from . import cli_runtime as _runtime
 
 
