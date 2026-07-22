@@ -1,0 +1,80 @@
+name: Management and runtime features
+
+on:
+  push:
+    branches:
+      - agent/management-runtime-features
+  pull_request:
+    paths:
+      - "asmpython/_compiler/cache_manager.py"
+      - "asmpython/_compiler/cli.py"
+      - "asmpython/_compiler/ir_command.py"
+      - "asmpython/_compiler/irfreeze.py"
+      - "asmpython/_compiler/management_commands.py"
+      - "asmpython/_compiler/profiles.py"
+      - "asmpython/_compiler/test_runner.py"
+      - "asmpython/_runtime/memory.py"
+      - "asmpython/_runtime/mixed_traceback.py"
+      - "asmpython/pyinbin/**"
+      - "asmpython/runtime.py"
+      - "tests/test_management_commands.py"
+      - "tests/test_memory_runtime.py"
+      - "tests/test_mixed_traceback.py"
+      - "tests/test_test_command.py"
+      - ".github/workflows/management-runtime.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  focused-tests:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest
+
+      - name: Compile changed Python files
+        run: |
+          python -m py_compile \
+            asmpython/_compiler/cache_manager.py \
+            asmpython/_compiler/cli.py \
+            asmpython/_compiler/ir_command.py \
+            asmpython/_compiler/irfreeze.py \
+            asmpython/_compiler/management_commands.py \
+            asmpython/_compiler/profiles.py \
+            asmpython/_compiler/test_runner.py \
+            asmpython/_runtime/memory.py \
+            asmpython/_runtime/mixed_traceback.py \
+            asmpython/pyinbin/__init__.py \
+            asmpython/runtime.py
+
+      - name: Run focused tests
+        run: |
+          python -m pytest -q \
+            tests/test_backend_scaffolds.py \
+            tests/test_management_commands.py \
+            tests/test_memory_runtime.py \
+            tests/test_mixed_traceback.py \
+            tests/test_test_command.py
+
+      - name: Smoke-test CLI management commands
+        run: |
+          python -m asmpython backends list
+          python -m asmpython backends jvm --json
+          python -m asmpython cache --json
+          python -m asmpython profile list --json
