@@ -49,9 +49,8 @@ class Extension:
             )
         if not isinstance(self.api_version, int) or self.api_version < 1:
             raise ValueError("extension api_version must be a positive integer")
-        previous = _REGISTRY.get(self.id)
-        if previous is not None and previous is not self:
-            raise ValueError(f"extension id {self.id!r} is already registered")
+        # Scope precedence is resolved before execution. Re-importing the chosen
+        # package in a long-lived process replaces its prior descriptor cleanly.
         _REGISTRY[self.id] = self
 
     def activate(self, asmpython_module: Any | None = None) -> None:
