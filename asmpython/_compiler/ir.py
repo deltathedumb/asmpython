@@ -127,6 +127,11 @@ class IRBackend(abc.ABC):
     a serialized form of this IR (a DLL can't receive live IRModule/
     IRValue objects directly), so the driver only ever talks to an
     IRBackend either way and never needs to know which kind it has.
+
+    Every compile/link argument dictionary receives the shared
+    ``speedy_lossy`` boolean. When true, implementations may deliberately
+    trade generated-program quality for lower compiler/linker latency, but
+    must preserve program semantics.
     """
 
     @property
@@ -144,6 +149,12 @@ class IRBackend(abc.ABC):
         external tools); a backend with no opinion just inherits this
         default of "gcc"."""
         return "gcc"
+
+    @property
+    def production_suitable(self) -> bool:
+        """Whether this backend may be used for production-build claims."""
+
+        return True
 
     @abc.abstractmethod
     def compile(self, module: IRModule, args: dict) -> dict[str, bytes]:
@@ -173,8 +184,20 @@ class ModuleBackend(IRBackend):
     def default_linker(self) -> str:
         return getattr(self._module, "default_linker", "gcc")
 
+    @property
+    def production_suitable(self) -> bool:
+        return bool(getattr(self._module, "production_suitable", True))
+
     def compile(self, module: IRModule, args: dict) -> dict[str, bytes]:
-        return self._module.run_backend_codegen(module, args)  # type: ignore[attr-defined]
+        from .build_options import inject_build_options
+
+        return self._module.run_backend_codegen(  # type: ignore[attr-defined]
+            module, inject_build_options(args)
+        )
 
     def link(self, objects: list[bytes], args: dict) -> dict[str, bytes]:
-        return self._module.run_backend_link(objects, args)  # type: ignore[attr-defined]
+        from .build_options import inject_build_options
+
+        return self._module.run_backend_link(  # type: ignore[attr-defined]
+            objects, inject_build_options(args)
+        )
