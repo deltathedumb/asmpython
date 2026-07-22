@@ -3,12 +3,14 @@
 The public CLI strips shared flags before delegating to the historical parser,
 then installs them in this context. Backend/linker adapters inject a concrete
 copy into every argument dictionary, including ``False`` when the mode is off,
-so plugins never need to infer whether the option was omitted.
+so plugins never need to infer whether the option was omitted. Subprocess-based
+or legacy toolchains also receive ``ASMPYTHON_SPEEDY_LOSSY=0|1``.
 """
 from __future__ import annotations
 
 import contextlib
 import contextvars
+import os
 from collections.abc import Iterator
 from typing import Any
 
@@ -26,12 +28,19 @@ def speedy_lossy_enabled() -> bool:
 
 @contextlib.contextmanager
 def speedy_lossy_mode(enabled: bool) -> Iterator[None]:
-    """Install the build mode for backend/linker calls in this context."""
+    """Install the build mode for in-process and subprocess toolchains."""
 
-    token = _speedy_lossy.set(bool(enabled))
+    value = bool(enabled)
+    token = _speedy_lossy.set(value)
+    previous = os.environ.get("ASMPYTHON_SPEEDY_LOSSY")
+    os.environ["ASMPYTHON_SPEEDY_LOSSY"] = "1" if value else "0"
     try:
         yield
     finally:
+        if previous is None:
+            os.environ.pop("ASMPYTHON_SPEEDY_LOSSY", None)
+        else:
+            os.environ["ASMPYTHON_SPEEDY_LOSSY"] = previous
         _speedy_lossy.reset(token)
 
 
