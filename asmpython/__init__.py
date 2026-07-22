@@ -1,44 +1,14 @@
-"""asmpython: native Python -> x86-64 -> executable transpiler.
+"""ASMPython public package surface.
 
-The public surface is small and deliberately mirrors what a user writes:
-
-    from asmpython.assembly import asm_func
-
-`@asm_func` marks a function whose body is raw NASM (the compiler emits it
-verbatim). The compiler internals live under the private `_compiler`, `_runtime`,
-and `_stdlib` subpackages.
-
-`import_binary()` is a compiler intrinsic when source is compiled by asmpython.
-Under ordinary CPython it is resolved lazily to a :mod:`ctypes` wrapper, so the
-same DLL/SO declarations can be reference-tested without shadowing the compiler
-intrinsic during static import resolution.
-
-Plugin authoring is organized as one namespace submodule per concern, while
-installable extension packages use the top-level ``Extension`` descriptor:
-
-    import asmpython
-    from asmpython import CapabilitySet, Dependency, Extension
-
-    extension = Extension(id="my_extension")
-    asmpython.backend.Backend(
-        name="my_backend",
-        impl=...,
-        capabilities=CapabilitySet(targets=("linux-x64",)),
-        dependencies=(Dependency.executable("gcc"),),
-    )
-    asmpython.linker.Linker(name="my_linker", impl=...)
-    asmpython.mlang.Config(...)
-
-Runtime ownership and mixed-traceback APIs live under ``asmpython.runtime``.
-Each submodule is importable on its own or reached as an attribute after
-``import asmpython``, matching ordinary Python package semantics.
+Ordinary Python remains the language contract. Compiler features are exposed
+through optional Python APIs, command-line options, and installable extensions.
 """
 from __future__ import annotations
 
 import sys
 from types import ModuleType
 
-from . import backend, linker, mlang, runtime
+from . import backend, embedded, linker, mlang, runtime
 from .capabilities import CapabilitySet, Dependency
 from .extension import Extension
 from ._version import (
@@ -115,6 +85,7 @@ __all__ = [
     "full_version",
     "python_version",
     "backend",
+    "embedded",
     "import_binary",
     "linker",
     "mlang",
