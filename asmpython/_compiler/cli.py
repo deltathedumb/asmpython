@@ -75,8 +75,6 @@ def _main_with_options(raw: list[str], *, speedy_lossy: bool) -> int:
             file=sys.stderr,
         )
 
-    warn_selected_nonproduction(raw)
-
     handled = dispatch(raw)
     if handled is not None:
         return handled
