@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 # Install shared policy extensions before plans, lockfiles, or the runtime import
 # their original modules.
@@ -17,6 +18,35 @@ _legacy_cli = _runtime._legacy_cli
 prepare_argv = _runtime.prepare_argv
 source_tree_uses_dynamic_import = _runtime.source_tree_uses_dynamic_import
 source_uses_dynamic_import = _runtime.source_uses_dynamic_import
+
+
+def _project_target_triple(argv: list[str]) -> list[str]:
+    """Give the old parser a staging target while preserving the full triple."""
+    result = list(argv)
+    for index, token in enumerate(result[:-1]):
+        if token != "--target":
+            continue
+        value = result[index + 1]
+        parts = value.split("-")
+        if len(parts) != 3:
+            continue
+        platform, system, _abi = parts
+        os.environ["ASMPYTHON_TARGET_TRIPLE"] = value
+        if system in {"windows", "linux"}:
+            staging = system
+        elif system in {"bios", "uefi16"}:
+            staging = "freestanding16"
+        elif system in {"none", "baremetal", "embedded"} or platform == "embedded":
+            staging = "freestanding"
+        else:
+            # Registered backends receive target_triple and own final emission;
+            # the old frontend only needs a valid staging OS for path defaults.
+            staging = "windows" if sys.platform == "win32" else "linux"
+        result[index + 1] = staging
+    return result
+
+
+_runtime._legacy_target_argv = _project_target_triple
 
 
 def main(argv: list[str] | None = None) -> int:
