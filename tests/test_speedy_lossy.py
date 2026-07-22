@@ -104,21 +104,41 @@ def test_public_backend_and_linker_adapters_inject_flag() -> None:
     assert registered_linker.production_suitable is False
 
 
-def test_nonproduction_components_are_queryable_and_warn(
-    capsys,
-) -> None:
+def test_nonproduction_components_are_queryable_and_warn(capsys) -> None:
+    class BackendImpl:
+        requested_args: list[dict] = []
+
+        def compile(self, module: object, args: dict) -> dict[str, bytes]:
+            return {"output.o": b""}
+
+        def link(self, objects: list[bytes], args: dict) -> dict[str, bytes]:
+            return {"output": b""}
+
+    class LinkerImpl:
+        requested_args: list[dict] = []
+
+        def link(self, ctx: dict) -> bytes:
+            return b""
+
+    asmpython.backend.Backend(
+        "warning-test-backend", BackendImpl(), production_suitable=False
+    )
+    asmpython.linker.Linker(
+        "warning-test-linker", LinkerImpl(), production_suitable=False
+    )
+
     assert backend_production_suitable("ternary") is False
     assert backend_production_suitable("x86-64") is True
     assert linker_production_suitable("builtin") is True
-    assert backend_production_suitable("speedy-test-backend") is False
-    assert linker_production_suitable("speedy-test-linker") is False
+    assert backend_production_suitable("warning-test-backend") is False
+    assert linker_production_suitable("warning-test-linker") is False
 
     warn_selected_nonproduction([
         "build", "app.py",
-        "--backend", "speedy-test-backend",
-        "--linker=speedy-test-linker",
+        "--backend", "warning-test-backend",
+        "--linker=warning-test-linker",
     ])
     warning = capsys.readouterr().err
-    assert "backend 'speedy-test-backend'" in warning
-    assert "linker 'speedy-test-linker'" in warning
+    assert "backend 'warning-test-backend'" in warning
+    assert "linker 'warning-test-linker'" in warning
     assert warning.count("unsuitable for production builds") == 2
