@@ -103,8 +103,52 @@ def _is_float(type_name: str) -> bool:
     return type_name in ("f32", "f64", "v128")
 
 
+def _is_wide_int(type_name: str) -> bool:
+    """True for the one IR value type that doesn't fit in a single 32-bit
+    GP register: i64. asmpython's shared IR (_compiler/ir.py) only ever
+    produces three non-float value types -- I64, PTR -- and every plain
+    Python `int`/`bool` maps to I64 (there is no narrower i32 VALUE type
+    anywhere in the shared compiler; the i32/u32 strings seen elsewhere in
+    this backend's own codegen are load/store WIDTH annotations for
+    memory access, not value types flowing through this allocator). PTR is
+    a real 32-bit-native address on this target and needs no special
+    handling here.
+
+    Every i64 value is ALWAYS given a permanent 8-byte EBP-relative stack
+    slot (never a register, and never the smaller 4-byte slot every other
+    value gets) -- this backend's first working strategy for values wider
+    than a GP register, matching the already-built and Unicorn-verified
+    __udivdi64/__divdi64/etc. division helpers' own calling convention
+    (stacked (lo, hi) dword pairs, low dword at the lower address).
+    codegen.py loads/stores both 32-bit halves through transient GP
+    registers for each arithmetic op rather than ever holding a whole i64
+    value in a register pair permanently. A full register-pair allocation
+    strategy (letting an i64 value live in two real registers when there's
+    room, with pair-atomic eviction) is real, planned follow-up work once
+    there's a working end-to-end backend to optimize from -- not built
+    yet, per an explicit "correctness first, then speed" sequencing
+    decision, so this always-stack strategy is the only one this file
+    currently implements.
+    """
+    return type_name == "i64"
+
+
 def _slot_size(type_name: str) -> int:
-    return 16 if type_name == "v128" else 4
+    if type_name == "v128":
+        return 16
+    if type_name in ("i64", "f64"):
+        # f64 is a REAL 8-byte double (XMM-resident when register-
+        # allocated, but its STACK footprint -- spill slot, call-result
+        # slot, or incoming-parameter width -- is still a genuine 8 bytes,
+        # same as x86-64's own _slot_size treats it). i64 is this backend's
+        # always-8-byte-stack-slot convention (see _is_wide_int). A prior
+        # version of this function fell through both to the plain 4-byte
+        # default, silently mis-sizing every f64 spill/parameter slot by
+        # half its real width -- caught via a direct repro (two params,
+        # f64 then i64, produced offsets 4 bytes apart instead of the
+        # correct 8) before it ever reached codegen.py.
+        return 8
+    return 4
 
 
 def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
@@ -625,6 +669,14 @@ def allocate(func: Any, abi: str = "cdecl") -> AllocResult:
                 elif instr.op == "call" and result.name in crosses_call:
                     stack_top += _slot_size(result.type.name)
                     locs[result.name] = StackLoc(-stack_top)
+                elif _is_wide_int(result.type.name):
+                    # Always stack-resident -- see _is_wide_int's own
+                    # docstring. Must be checked before the ordinary GP
+                    # branch below: an i64 result never goes through
+                    # _alloc_gp (which only ever hands out ONE 32-bit
+                    # register, half of what an i64 value needs).
+                    stack_top += _slot_size(result.type.name)
+                    locs[result.name] = StackLoc(-stack_top)
                 elif _is_float(result.type.name):
                     _alloc_xmm(result.name)
                 else:
@@ -672,9 +724,24 @@ def allocate(func: Any, abi: str = "cdecl") -> AllocResult:
     # prologue before locals are reserved) -- the real cdecl incoming-
     # stack-argument base; nothing like x86-64's Win64-shadow-space/SysV-
     # red-zone-adjacent 48-or-16 constant applies here.
+    #
+    # A running byte offset, NOT `4 * i` -- an earlier draft assumed every
+    # parameter is exactly 4 bytes wide, which is wrong for f64 (a real
+    # 8-byte double) and i64 (this backend's own always-8-byte-stack-slot
+    # convention, see _is_wide_int): with a flat `4 * i` index, a single
+    # preceding 8-byte parameter shifts every LATER parameter's computed
+    # offset 4 bytes short of where the real caller actually pushed it.
+    # Caught via a direct repro before it ever reached codegen.py: two
+    # params (f64, i64) produced offsets 4 bytes apart (8, 12) instead of
+    # the correct 8 bytes apart (8, 16). Each parameter's own width is
+    # exactly `_slot_size(param.type.name)` -- the same helper the rest of
+    # this file already uses for spill/call-result slot sizing.
+    param_by_name = {p.name: p for p in func.params}
     incoming_stack_base = 8 + 4 * len(used_callee_gp)
-    for i, name in enumerate(stack_params):
-        locs[name] = StackLoc(incoming_stack_base + 4 * i)
+    running_offset = incoming_stack_base
+    for name in stack_params:
+        locs[name] = StackLoc(running_offset)
+        running_offset += _slot_size(param_by_name[name].type.name)
 
     return AllocResult(
         locs             = locs,
