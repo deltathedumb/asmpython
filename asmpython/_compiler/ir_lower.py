@@ -396,19 +396,28 @@ def _list_elem_addr(ctx: _FuncCtx, list_v: IRValue, idx_v: IRValue) -> IRValue:
     return elem_addr
 
 
-def _inparam_elem_addr(ctx: _FuncCtx, ptr_v: IRValue, idx_v: IRValue) -> IRValue:
-    """Address of ptr_v[idx_v] for an exported function's inparam[T]
-    parameter -- a raw caller-owned C array, unlike _list_elem_addr's
-    asmpython-native list: no header/length field to skip (ptr_v IS the
-    element buffer's own base address already, not a list handle), no
-    Python negative-index wraparound (there is no length to wrap against
-    -- the caller's own item_count parameter is the only bound, exactly
-    as it is in the equivalent hand-written C glue this replaces), and no
-    bounds check (same "caller's responsibility" contract as the C ABI
-    it's replacing).
+_INPARAM_OUTPARAM_ELEM_SIZE = {"int": 8, "float": 8, "int8": 1}
+
+
+def _inparam_elem_addr(ctx: _FuncCtx, ptr_v: IRValue, idx_v: IRValue, elem_size: int = 8) -> IRValue:
+    """Address of ptr_v[idx_v] for an exported function's inparam[T]/
+    outparam[T] parameter -- a raw caller-owned C array, unlike
+    _list_elem_addr's asmpython-native list: no header/length field to
+    skip (ptr_v IS the element buffer's own base address already, not a
+    list handle), no Python negative-index wraparound (there is no length
+    to wrap against -- the caller's own item_count parameter is the only
+    bound, exactly as it is in the equivalent hand-written C glue this
+    replaces), and no bounds check (same "caller's responsibility"
+    contract as the C ABI it's replacing). `elem_size` is 8 for int/float
+    pointees, 1 for int8 (a byte-granularity buffer, e.g. `uint8_t *` --
+    see _INPARAM_OUTPARAM_ELEM_SIZE / PortaPy's portapy_dict_key_copy_utf8).
     """
+    if elem_size == 1:
+        elem_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", elem_addr, [ptr_v, idx_v]))
+        return elem_addr
     eight = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", eight, [8]))
+    ctx.emit(IRInstr("const", eight, [elem_size]))
     byte_off = ctx.tmp(I64)
     ctx.emit(IRInstr("imul", byte_off, [idx_v, eight]))
     elem_addr = ctx.tmp(PTR)
@@ -6148,11 +6157,23 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             # (an exported function's inparam[T] parameter lowers PTR-
             # typed, same as outparam's; see ir_type_for's default), so no
             # list-header/buffer-pointer indirection is needed, only the
-            # index*8 byte-offset arithmetic (_inparam_elem_addr).
+            # index*elem_size byte-offset arithmetic (_inparam_elem_addr).
+            el_kind = ctx.slot_el_ty.get(e.obj.name, "int") if isinstance(e.obj, A.Name) else "int"
             result_ty = A.expr_type(e)
             ptr_v = _lower_expr(ctx, e.obj)
             idx_v = _lower_expr(ctx, e.index)
-            addr = _inparam_elem_addr(ctx, ptr_v, idx_v)
+            elem_size = _INPARAM_OUTPARAM_ELEM_SIZE.get(el_kind, 8)
+            addr = _inparam_elem_addr(ctx, ptr_v, idx_v, elem_size=elem_size)
+            if el_kind == "int8":
+                v = ctx.tmp(U8)
+                ctx.emit(IRInstr("load", v, [addr]))
+                # Widen the raw byte read to an ordinary I64 value -- every
+                # other consumer of an "int"-typed IRValue expects I64, and
+                # this int8-pointee value is only ever used as a plain
+                # Python-level int (0-255), never re-stored at 1-byte width.
+                widened = ctx.tmp(I64)
+                ctx.emit(IRInstr("zext", widened, [v]))
+                return widened
             v = ctx.tmp(F64 if result_ty == "float" else I64)
             ctx.emit(IRInstr("load", v, [addr]))
             return v
@@ -8269,25 +8290,34 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             ctx.emit(IRInstr("call", None, [f"{cls_name}____setitem__", obj_v, idx_v, val]))
             return
         if obj_ty == "outparam":
-            # `out[0] = value`: sema already required index == literal 0 and
-            # type-checked `value` against the declared pointee kind (there
-            # is exactly one slot, not a real array). `target.obj`'s own
-            # IRValue already IS the raw pointer -- an exported function's
-            # outparam[T] parameter is lowered PTR-typed (ir_type_for's
-            # default for any annotation base it doesn't recognize as a
-            # by-value scalar) and passed through unmodified, unlike an
-            # ordinary local which gets an extra stack slot -- so no
-            # address computation is needed, just a direct store. `val`'s
-            # own IRValue.type from _lower_expr already picks the right
-            # store width ("store"'s codegen branches on it: f64 -> movsd,
-            # i64 -> mov) -- an int literal/expression already comes out
-            # I64-typed and a float one F64-typed, matching outparam[int]
-            # vs outparam[float]'s real ABI pointee width with no bitcast
-            # needed (unlike list/dict cells, which are always raw i64
-            # storage regardless of element kind).
+            # `out[i] = value`: sema already type-checked `value` against
+            # the declared pointee kind. `target.obj`'s own IRValue already
+            # IS the raw pointer -- an exported function's outparam[T]
+            # parameter is lowered PTR-typed (ir_type_for's default for any
+            # annotation base it doesn't recognize as a by-value scalar)
+            # and passed through unmodified, unlike an ordinary local which
+            # gets an extra stack slot. `val`'s own IRValue.type from
+            # _lower_expr already picks the right store width for the
+            # common int/float single-pointee case ("store"'s codegen
+            # branches on it: f64 -> movsd, i64 -> mov) -- an int literal/
+            # expression already comes out I64-typed and a float one
+            # F64-typed, matching outparam[int]/outparam[float]'s real ABI
+            # pointee width with no bitcast needed (unlike list/dict
+            # cells, which are always raw i64 storage regardless of
+            # element kind). outparam[int8] (a byte-granularity buffer,
+            # e.g. `uint8_t *buffer`) needs real index*1 address arithmetic
+            # and an 8-bit-wide store instead.
+            el_kind = ctx.slot_el_ty.get(target.obj.name, "int") if isinstance(target.obj, A.Name) else "int"
             ptr_v = _lower_expr(ctx, target.obj)
+            idx_v = _lower_expr(ctx, target.index)
             val = _lower_expr(ctx, s.value)
-            ctx.emit(IRInstr("store", None, [val, ptr_v]))
+            if el_kind == "int8":
+                addr = _inparam_elem_addr(ctx, ptr_v, idx_v, elem_size=1)
+                truncated = ctx.tmp(U8)
+                ctx.emit(IRInstr("trunc", truncated, [val]))
+                ctx.emit(IRInstr("store", None, [truncated, addr]))
+            else:
+                ctx.emit(IRInstr("store", None, [val, ptr_v]))
             return
         if obj_ty != "list":
             raise LowerError(f"unsupported stmt IndexAssign ({obj_ty})")
@@ -9342,6 +9372,15 @@ def lower_func(
         params.append(pv)
         ptr = ctx.ensure_slot(pname, ty)
         ctx.emit(IRInstr("store", None, [pv, ptr]))
+        if isinstance(annot, tuple) and annot[0] in ("outparam", "inparam"):
+            # Pointee kind ("int"/"float"/"int8") for this parameter's
+            # element-size/store-width in Subscript reads/IndexAssign
+            # writes -- see _inparam_elem_addr's elem_size and the
+            # int8 zext/trunc handling at each call site. Reuses
+            # slot_el_ty (otherwise only used for list-typed locals) since
+            # the shape ("this name has a tracked element kind") is the
+            # same idea.
+            ctx.slot_el_ty[pname] = annot[1] or "int"
 
     for st in f.body:
         _lower_stmt(ctx, st)

@@ -62,13 +62,20 @@ class OutparamSemaTests(unittest.TestCase):
         with self.assertRaises(SemaError):
             sema_analyze(module, source_dir=None, collect_errors=False, active_extensions=frozenset())
 
-    def test_outparam_write_requires_literal_zero_index(self) -> None:
+    def test_outparam_write_index_must_be_an_int(self) -> None:
+        # outparam[T] originally only accepted a literal-0 index (a single
+        # scalar out-parameter). Later generalized to accept any int index
+        # (a loop counter) too, matching inparam[T]'s read side, so that a
+        # byte-buffer outparam[int8] (e.g. `uint8_t *buffer`, written
+        # byte-by-byte -- see PortaPy's portapy_dict_key_copy_utf8) can be
+        # written for real. Only a genuinely non-int index is still
+        # rejected.
         module = _parse(
             "from asmpython import Public, access\n"
             "\n"
             "@access(Public)\n"
             "def get_size(out_size: outparam[int]) -> int:\n"
-            "    out_size[1] = 42\n"
+            "    out_size['bad'] = 42\n"
             "    return 0\n"
         )
         for function in module.funcs:
@@ -76,6 +83,20 @@ class OutparamSemaTests(unittest.TestCase):
                 function.is_public_export = True
         with self.assertRaises(SemaError):
             sema_analyze(module, source_dir=None, collect_errors=False, active_extensions=frozenset())
+
+    def test_outparam_write_with_a_variable_index_is_accepted(self) -> None:
+        module = _parse(
+            "from asmpython import Public, access\n"
+            "\n"
+            "@access(Public)\n"
+            "def fill(out_size: outparam[int], i: int) -> int:\n"
+            "    out_size[i] = 42\n"
+            "    return 0\n"
+        )
+        for function in module.funcs:
+            if function.name == "fill":
+                function.is_public_export = True
+        sema_analyze(module, source_dir=None, collect_errors=False, active_extensions=frozenset())
 
     def test_outparam_write_type_mismatch_is_rejected(self) -> None:
         module = _parse(

@@ -6085,18 +6085,17 @@ class SemaAnalyzer:
                         ErrorCode.E_ASSIGN_TYPE,
                     )
             elif obj_t == "outparam":
-                # `out[0] = value`: the only real write-through syntax for an
-                # exported function's raw-pointer-out parameter. The index
-                # itself is meaningless (a single pointee, not a real array)
-                # but is required syntax so this reads as ordinary Python --
-                # only literal 0 is accepted, matching "there is exactly one
-                # slot to write."
-                if not (isinstance(s.target.index, A.IntLit) and s.target.index.value == 0):
+                # `out[i] = value`: write-through for an exported function's
+                # raw-pointer-out parameter. `i` is usually the literal 0
+                # (a single scalar out-parameter, e.g. `size_t *out_size`
+                # -- the common case), but a real index expression (a loop
+                # counter) is equally valid for the array-out-parameter
+                # shape (e.g. `uint8_t *buffer` filled byte-by-byte) --
+                # same index flexibility as inparam[T]'s read side, just
+                # the write direction.
+                if A.expr_type(s.target.index) not in ("int", "any"):
                     raise SemaError(
-                        "outparam[T] can only be written via `name[0] = value` "
-                        "(there is exactly one pointee, not a real array)",
-                        s.pos,
-                        ErrorCode.E_ASSIGN_TYPE,
+                        "outparam[T] index must be an int", s.pos, ErrorCode.E_INDEX_TYPE
                     )
                 el_t = self._outparam_el_type(s.target.obj, scope)
                 # Unlike list/dict elements, outparam[T]'s "int" is a real,
@@ -6104,7 +6103,12 @@ class SemaAnalyzer:
                 # usual int-as-unknown-sentinel -- so it's NOT treated as a
                 # wildcard here; only "any" (a genuinely unconstrained
                 # value, e.g. an unannotated parameter) stays lenient.
-                if value_t != "any" and el_t != "any" and value_t != el_t:
+                # outparam[int8]'s pointee is a raw C ABI byte width, not a
+                # real asmpython value type -- an ordinary int expression
+                # (0-255) is what a caller actually writes there, same as
+                # inparam[int8]'s read side normalizes to plain "int".
+                expected_t = "int" if el_t == "int8" else el_t
+                if value_t != "any" and expected_t != "any" and value_t != expected_t:
                     raise SemaError(
                         f"outparam[{el_t}] = v: got {value_t}",
                         s.pos,
@@ -7929,7 +7933,13 @@ class SemaAnalyzer:
                     raise SemaError(
                         "inparam[T] index must be an int", e.pos, ErrorCode.E_INDEX_TYPE
                     )
-                e.inferred_type = self._inparam_el_type(e.obj, scope)
+                el_t = self._inparam_el_type(e.obj, scope)
+                # inparam[int8]'s pointee is a raw C ABI byte width, not a
+                # real asmpython value type -- items[i] still reads out as
+                # an ordinary int (0-255), same as C's `uint8_t` widening
+                # to `int` on ordinary use. Only "int"/"float" are real
+                # inferred_type values elsewhere in sema/codegen.
+                e.inferred_type = "int" if el_t == "int8" else el_t
             elif obj_t == "dict":
                 # "int" doubles as the unknown sentinel; lenient (see above).
                 if A.expr_type(e.index) not in ("str", "any", "int"):

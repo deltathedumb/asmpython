@@ -1482,6 +1482,13 @@ class Parser:
             return ("bool", None)
         if name == "int":
             return ("int", None)
+        if name == "int8":
+            # Only meaningful as outparam[int8]/inparam[int8]'s pointee kind
+            # (a byte-granularity C ABI buffer, e.g. `uint8_t *buffer` --
+            # see PortaPy's portapy_dict_key_copy_utf8) -- deliberately a
+            # distinct name from `bytes`/`bytearray` (which normalize to
+            # `list[int]`, an ordinary asmpython list, not a raw pointer).
+            return ("int8", None)
         if name in ("str",):
             return ("str", None)
         if name == "float":
