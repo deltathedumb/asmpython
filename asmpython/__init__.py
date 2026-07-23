@@ -1,16 +1,19 @@
 """ASMPython public package surface.
 
 Ordinary Python remains the language contract. Compiler features are exposed
-through optional Python APIs, command-line options, and installable extensions.
+through optional Python APIs, command-line options, installable extensions, and
+compiler-visible metadata decorators.
 """
 from __future__ import annotations
 
 import sys
 from types import ModuleType
 
-from . import backend, embedded, linker, mlang, runtime
+from . import backend, embedded, extras, linker, mlang, runtime
 from .capabilities import CapabilitySet, Dependency
 from .extension import Extension
+from .extras import *
+from .extras import __all__ as _extras_all
 from ._version import (
     ASMPYTHON_VERSION,
     FULL_VERSION,
@@ -47,17 +50,24 @@ def compile_function(
     refl: bool = True,
     free: bool = False,
 ):
+    """Attach per-function compiler options for CPython tooling and ASMPython."""
+
     def decorator(func):
-        config = getattr(func, "__asmpython_config__", {})
-        func.__asmpython_config__ = {
-            "dyn": config.get("dyn", dyn),
-            "gc": config.get("gc", gc),
-            "exc": config.get("exc", exc),
-            "refl": config.get("refl", refl),
-            "free": config.get("free", free),
-            "enforced": config.get("enforced", []),
-        }
+        previous = getattr(func, "__asmpython_config__", {})
+        config = dict(previous) if isinstance(previous, dict) else {}
+        config.update(
+            {
+                "dyn": dyn,
+                "gc": gc,
+                "exc": exc,
+                "refl": refl,
+                "free": free,
+                "enforced": list(config.get("enforced", [])),
+            }
+        )
+        func.__asmpython_config__ = config
         return func
+
     return decorator
 
 
@@ -66,6 +76,7 @@ class _ASMPythonModule(ModuleType):
         return compile_function(**options)
 
 
+# Supports: import asmpython; @asmpython(...); def func(): ...
 sys.modules[__name__].__class__ = _ASMPythonModule
 
 
@@ -86,9 +97,12 @@ __all__ = [
     "python_version",
     "backend",
     "embedded",
+    "extras",
     "import_binary",
     "linker",
     "mlang",
     "runtime",
+    "compile_function",
     "__version__",
+    *_extras_all,
 ]
