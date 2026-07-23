@@ -259,6 +259,10 @@ notnone = Qualifier("notnone")
 # there too. Only meaningful on an exported (@access(Public)/@abi(...))
 # function's own parameter -- see docs/TOP_LEVEL_EXTRAS.md.
 outparam = Qualifier("outparam")
+# `inparam[int]`/`inparam[float]`: outparam's read-side counterpart -- a
+# raw, read-only, caller-owned ARRAY the compiler recognizes the same
+# structural way (see outparam's comment above for the full rationale).
+inparam = Qualifier("inparam")
 
 
 def _metadata(target: object) -> dict[str, object]:
@@ -415,7 +419,8 @@ __all__ = [
     "Instance", "NoAccess", "access", "ABIObject", "AutoABI", "C", "System",
     "ASMPython", "abi", "QualifiedType", "Qualifier", "const", "readonly",
     "limited", "immutable", "shimmutable", "volatile", "atomic", "threadlocal",
-    "owned", "borrowed", "pinned", "unmanaged", "noescape", "notnone", "outparam", "final",
+    "owned", "borrowed", "pinned", "unmanaged", "noescape", "notnone", "outparam",
+    "inparam", "final",
     "override", "sealed", "frozen", "stability", "since", "muse", "discard",
     "pure", "nomutate", "noexception", "raises", "precond", "postcond",
     "invariant", "enforced", "nativeonly", "dynamiconly", "inline", "noinline",

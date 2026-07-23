@@ -396,6 +396,26 @@ def _list_elem_addr(ctx: _FuncCtx, list_v: IRValue, idx_v: IRValue) -> IRValue:
     return elem_addr
 
 
+def _inparam_elem_addr(ctx: _FuncCtx, ptr_v: IRValue, idx_v: IRValue) -> IRValue:
+    """Address of ptr_v[idx_v] for an exported function's inparam[T]
+    parameter -- a raw caller-owned C array, unlike _list_elem_addr's
+    asmpython-native list: no header/length field to skip (ptr_v IS the
+    element buffer's own base address already, not a list handle), no
+    Python negative-index wraparound (there is no length to wrap against
+    -- the caller's own item_count parameter is the only bound, exactly
+    as it is in the equivalent hand-written C glue this replaces), and no
+    bounds check (same "caller's responsibility" contract as the C ABI
+    it's replacing).
+    """
+    eight = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", eight, [8]))
+    byte_off = ctx.tmp(I64)
+    ctx.emit(IRInstr("imul", byte_off, [idx_v, eight]))
+    elem_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", elem_addr, [ptr_v, byte_off]))
+    return elem_addr
+
+
 def _lower_list_pop_front(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
     result_ty = F64 if A.expr_type(e) == "float" else I64
     obj_v = _lower_expr(ctx, e.obj)
@@ -6121,6 +6141,20 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             idx_v = _lower_expr(ctx, e.index)
             v = ctx.tmp(ir_type_for(A.expr_type(e)))
             ctx.emit(IRInstr("call", v, [f"{cls_name}____getitem__", obj_v, idx_v]))
+            return v
+        if obj_ty == "inparam":
+            # `items[i]`: outparam's read-side counterpart -- e.obj's own
+            # IRValue already IS the raw caller-owned array base pointer
+            # (an exported function's inparam[T] parameter lowers PTR-
+            # typed, same as outparam's; see ir_type_for's default), so no
+            # list-header/buffer-pointer indirection is needed, only the
+            # index*8 byte-offset arithmetic (_inparam_elem_addr).
+            result_ty = A.expr_type(e)
+            ptr_v = _lower_expr(ctx, e.obj)
+            idx_v = _lower_expr(ctx, e.index)
+            addr = _inparam_elem_addr(ctx, ptr_v, idx_v)
+            v = ctx.tmp(F64 if result_ty == "float" else I64)
+            ctx.emit(IRInstr("load", v, [addr]))
             return v
         if obj_ty not in ("list", "tuple", "any"):
             raise LowerError(f"unsupported expr Subscript ({obj_ty})")

@@ -1547,6 +1547,14 @@ class Parser:
             # and ir_lower.py's IRType selection for this parameter.
             el = inner[0][0] if inner else "int"
             return ("outparam", el)
+        if name == "inparam":
+            # `inparam[int]`/`inparam[float]`: a raw, read-only, caller-
+            # owned ARRAY pointer -- outparam's read-side counterpart, same
+            # export-only enforcement (see sema.py). Element kind decides
+            # the load width and the per-element pointer arithmetic
+            # (ir_lower.py's Subscript-read lowering).
+            el = inner[0][0] if inner else "int"
+            return ("inparam", el)
         # Anything else (CamelCase class, dotted module.Class) is a class-ish
         # name; sema decides whether it's a known class -> instance:<name>.
         return (name, None)

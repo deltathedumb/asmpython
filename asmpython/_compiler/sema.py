@@ -479,6 +479,10 @@ class Scope:
     # parameter -- see ast_nodes/parser's `outparam[T]` annotation), the
     # pointee kind ("int"/"float") the store-through assignment must match.
     outparam_el_types: dict[str, str] = field(default_factory=dict)
+    # For names typed "inparam" (an exported function's raw caller-owned
+    # ARRAY parameter -- see `inparam[T]`), the element kind read out by
+    # `items[i]`.
+    inparam_el_types: dict[str, str] = field(default_factory=dict)
     # For names typed "int" that were last assigned a bool-valued expression
     # (see A.is_bool_expr) — lets print()/str()/f-strings render "True"/"False".
     bool_flags: dict[str, bool] = field(default_factory=dict)
@@ -525,6 +529,8 @@ class Scope:
             self.tuple_elem_types[name] = tuple_types
         if ty == "outparam" and el_type is not None:
             self.outparam_el_types[name] = el_type
+        if ty == "inparam" and el_type is not None:
+            self.inparam_el_types[name] = el_type
 
     def __contains__(self, name: str) -> bool:
         return name in self.types
@@ -2271,6 +2277,14 @@ class SemaAnalyzer:
             # carried through el_type so `out.value = expr`/`out[0] = expr`
             # can validate/coerce against it.
             return ("outparam", el or "int", None, None, None)
+        if base == "inparam":
+            # `inparam[int]`/`inparam[float]`: a raw, read-only, caller-
+            # owned ARRAY pointer -- the read-side counterpart of
+            # `outparam[T]` above, same export-only enforcement and
+            # pointee-kind tracking, but indexed by a real (not just
+            # literal-0) expression -- see the Subscript-read handling and
+            # ir_lower.py's pointer-arithmetic lowering.
+            return ("inparam", el or "int", None, None, None)
         if base == "any":
             # An explicit opaque annotation (`object`, `Any`, or a genuine
             # multi-type union the parser collapsed to "any"): constrain the
@@ -2368,6 +2382,7 @@ class SemaAnalyzer:
         scope.dict_value_tuple_types.update(g.dict_value_tuple_types)
         scope.tuple_elem_types.update(g.tuple_elem_types)
         scope.outparam_el_types.update(g.outparam_el_types)
+        scope.inparam_el_types.update(g.inparam_el_types)
 
     def _prescan_fv_types(self) -> None:
         """Pre-scan every function/method body for ClosureBind nodes.
@@ -4079,11 +4094,11 @@ class SemaAnalyzer:
                         continue
                     if (
                         annot is not None
-                        and annot[0] == "outparam"
+                        and annot[0] in ("outparam", "inparam")
                         and not getattr(f, "is_public_export", False)
                     ):
                         raise SemaError(
-                            f"outparam[T] parameter {p!r} on {f.name!r} is only "
+                            f"{annot[0]}[T] parameter {p!r} on {f.name!r} is only "
                             "meaningful on an exported (@access(Public)/@abi(...)) "
                             "function -- an ordinary asmpython-to-asmpython call "
                             "has no caller-supplied pointer for it to write through",
@@ -4507,6 +4522,16 @@ class SemaAnalyzer:
         if isinstance(e, A.Subscript):
             return list(getattr(e, "tuple_elem_types", []))
         return []
+
+    def _inparam_el_type(self, e, scope: Scope) -> str:
+        """Element kind of an inparam[T]-valued expression. 'int' if unknown.
+
+        Same "always a bare parameter reference" shape as
+        _outparam_el_type -- see its docstring.
+        """
+        if isinstance(e, A.Name):
+            return scope.inparam_el_types.get(e.name, "int")
+        return "int"
 
     def _outparam_el_type(self, e, scope: Scope) -> str:
         """Pointee kind of an outparam[T]-valued expression. 'int' if unknown.
@@ -7892,6 +7917,19 @@ class SemaAnalyzer:
                         e.pos,
                         ErrorCode.E_TUPLE_INDEX_NOT_CONST,
                     )
+            elif obj_t == "inparam":
+                # `items[i]`: read the i'th T-sized element from a caller-
+                # owned array pointer (an exported function's inparam[T]
+                # parameter -- see outparam's IndexAssign counterpart for
+                # the write-through direction). Unlike outparam's single
+                # pointee, a real index expression (a loop counter, not
+                # just literal 0) is legitimate here -- see ir_lower.py's
+                # lowering for the pointer-arithmetic this implies.
+                if A.expr_type(e.index) not in ("int", "any"):
+                    raise SemaError(
+                        "inparam[T] index must be an int", e.pos, ErrorCode.E_INDEX_TYPE
+                    )
+                e.inferred_type = self._inparam_el_type(e.obj, scope)
             elif obj_t == "dict":
                 # "int" doubles as the unknown sentinel; lenient (see above).
                 if A.expr_type(e.index) not in ("str", "any", "int"):
