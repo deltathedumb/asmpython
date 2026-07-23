@@ -122,7 +122,205 @@ class Parser:
         while self._check("NEWLINE"):
             self._eat()
 
-    # ---- top level ---------------------------------------------------------
+    # ---- generic AST walk ---------------------------------------------------
+    # `_find_free_vars` and `_propagate_transitive_free_vars` below each need
+    # to "visit every expression/statement reachable from a function body,
+    # doing X at each one" for two different X's (collecting Name references
+    # for free-variable analysis; collecting Call.func names for transitive
+    # free-var propagation between mutually-calling lifted siblings) --
+    # previously two structurally-identical pairs of hand-written dispatch
+    # chains (~35-38 of this compiler's ~64 AST node types each), differing
+    # only in what each did at a visited node, not in which nodes it visited.
+    # `_walk_expr`/`_walk_stmt` are the single shared recursive descent
+    # behind both: every expression/statement node this compiler's AST can
+    # produce that has a child expression or sub-statement list, in the same
+    # traversal order the original hand-written pairs used (load-bearing for
+    # `_find_free_vars`'s comprehension-scoping stack, which pushes/pops
+    # bound names around a specific sub-visit and depends on visiting `iter`
+    # before `elt`/`cond`, matching real Python's own scoping rule that a
+    # comprehension's outermost `for x in <iter>` runs in the *enclosing*
+    # scope). `on_expr` is called on every expression node visited (before
+    # recursing into its children, unless it returns truthy -- see
+    # `_walk_expr`'s own docstring); callers needing scoping/suppression
+    # logic (only `_find_free_vars` does) implement it inside their own
+    # callback instead of `_walk_expr` knowing anything about scoping rules
+    # itself -- keeping "what the tree looks like" (here, shared) separate
+    # from "what a caller does at each node" (caller-specific).
+    def _walk_expr(self, node, on_expr) -> None:
+        """Visit `node` and every expression reachable from it, calling
+        `on_expr(node)` for each -- true expression nodes ONLY (Name,
+        BinOp, Call, ListLit, ...), never a statement. `_walk_stmt` below
+        is what routes a statement's own expression-shaped fields (an
+        Assign's `.value`, a TupleAssign's `.targets`/`.values`, ...) into
+        this function one field at a time; a statement itself is never
+        passed in here, so `on_expr` never fires on one by accident (the
+        original hand-written pair of expression-walking functions never
+        called their own equivalent of `on_expr` for a bare statement node
+        either -- only real expression shapes).
+
+        If `on_expr(node)` returns a truthy value, `_walk_expr` stops --
+        it does NOT also recurse into `node`'s own children afterward. This
+        is for callers whose per-node logic isn't a plain "visit every
+        child the same way" walk (only `_find_free_vars`'s comprehension-
+        scoping needs this: it must push bound names, walk `elt`/`cond` FOR
+        ITSELF in a specific order, then pop -- if `_walk_expr` also walked
+        those same children afterward via its own generic Comprehension
+        case, `elt`'s references would be visited a second time, outside
+        the scoping push/pop, wrongly counting a comprehension's own loop
+        variable as a free-variable reference). Every other caller's
+        callback returns a falsy value (or nothing) and gets the default
+        full recursion, same as if this parameter didn't exist.
+        """
+        if node is None:
+            return
+        if on_expr(node):
+            return
+        if isinstance(node, A.BinOp):
+            self._walk_expr(node.left, on_expr)
+            self._walk_expr(node.right, on_expr)
+        elif isinstance(node, A.UnaryOp):
+            self._walk_expr(node.operand, on_expr)
+        elif isinstance(node, A.Call):
+            for a in node.args:
+                self._walk_expr(a, on_expr)
+            for _kw_name, kw_val in (node.kwargs or []):
+                self._walk_expr(kw_val, on_expr)
+        elif isinstance(node, A.MethodCall):
+            self._walk_expr(node.obj, on_expr)
+            for a in node.args:
+                self._walk_expr(a, on_expr)
+            for _kw_name, kw_val in (node.kwargs or []):
+                self._walk_expr(kw_val, on_expr)
+        elif isinstance(node, A.Attr):
+            self._walk_expr(node.obj, on_expr)
+        elif isinstance(node, A.Subscript):
+            self._walk_expr(node.obj, on_expr)
+            self._walk_expr(node.index, on_expr)
+        elif isinstance(node, A.Slice):
+            self._walk_expr(node.start, on_expr)
+            self._walk_expr(node.stop, on_expr)
+            self._walk_expr(node.step, on_expr)
+        elif isinstance(node, A.IfExp):
+            self._walk_expr(node.test, on_expr)
+            self._walk_expr(node.body, on_expr)
+            self._walk_expr(node.orelse, on_expr)
+        elif isinstance(node, A.NamedExpr):
+            self._walk_expr(node.value, on_expr)
+        elif isinstance(node, A.BoolOp):
+            self._walk_expr(node.left, on_expr)
+            self._walk_expr(node.right, on_expr)
+        elif isinstance(node, A.Compare):
+            for op in node.operands:
+                self._walk_expr(op, on_expr)
+        elif isinstance(node, (A.ListLit, A.TupleLit, A.SetLit)):
+            for e in node.elems:
+                self._walk_expr(e, on_expr)
+        elif isinstance(node, A.DictLit):
+            for k in node.keys:
+                self._walk_expr(k, on_expr)
+            for v in node.values:
+                self._walk_expr(v, on_expr)
+        elif isinstance(node, A.FString):
+            for seg in node.segments:
+                self._walk_expr(seg, on_expr)
+        elif isinstance(node, A.Starred):
+            self._walk_expr(node.value, on_expr)
+        elif isinstance(node, A.Lambda):
+            self._walk_expr(node.body, on_expr)
+        elif isinstance(node, A.Comprehension):
+            # `iter` (the outermost `for x in <iter>`) runs in the
+            # *enclosing* scope in real Python -- visited first, same order
+            # the original hand-written walk used, so a caller's own
+            # comprehension-scoping callback (only `_find_free_vars` has
+            # one) can rely on this ordering.
+            self._walk_expr(node.iter, on_expr)
+            self._walk_expr(node.elt, on_expr)
+            self._walk_expr(node.cond, on_expr)
+            for it in node.extra_for_iters:
+                self._walk_expr(it, on_expr)
+            for c in node.extra_for_conds:
+                self._walk_expr(c, on_expr)
+        elif isinstance(node, A.DictComprehension):
+            self._walk_expr(node.iter, on_expr)
+            self._walk_expr(node.key, on_expr)
+            self._walk_expr(node.value, on_expr)
+            self._walk_expr(node.cond, on_expr)
+
+    def _walk_stmt(self, stmts: list, on_expr) -> None:
+        """Visit every expression reachable from a statement LIST (an `If`'s
+        `then`/`orelse`, a function body, ...): recurse into nested
+        statement lists (loop/branch/try/match bodies), and for every other
+        statement type, hand each of its own expression-shaped fields to
+        `_walk_expr` one at a time (an `Assign`'s `.value`, a `TupleAssign`'s
+        per-target Subscript/Attr expressions and `.values`, ...) -- the
+        statement-level half of the shared walk `_walk_expr`'s own docstring
+        describes. `on_expr` is the same per-expression-node callback
+        `_walk_expr` takes; passed straight through so a caller implements
+        its logic once, regardless of whether the node it fires on came
+        from a statement-level or expression-level field.
+        """
+        for s in stmts:
+            if isinstance(s, A.If):
+                self._walk_expr(s.test, on_expr)
+                self._walk_stmt(s.then, on_expr)
+                self._walk_stmt(s.orelse or [], on_expr)
+            elif isinstance(s, A.While):
+                self._walk_expr(s.test, on_expr)
+                self._walk_stmt(s.body, on_expr)
+                self._walk_stmt(s.orelse or [], on_expr)
+            elif isinstance(s, A.For):
+                for ra in s.range_args:
+                    self._walk_expr(ra, on_expr)
+                self._walk_expr(s.iter, on_expr)
+                self._walk_stmt(s.body, on_expr)
+                self._walk_stmt(s.orelse or [], on_expr)
+            elif isinstance(s, A.With):
+                self._walk_expr(s.expr, on_expr)
+                self._walk_stmt(s.body, on_expr)
+            elif isinstance(s, A.Try):
+                self._walk_stmt(s.body, on_expr)
+                self._walk_stmt(s.handler, on_expr)
+                for _types, _bind, hbody in (getattr(s, "extra_handlers", None) or []):
+                    self._walk_stmt(hbody, on_expr)
+                self._walk_stmt(getattr(s, "else_body", None) or [], on_expr)
+                self._walk_stmt(getattr(s, "finally_body", None) or [], on_expr)
+            elif isinstance(s, A.Match):
+                self._walk_expr(s.subject, on_expr)
+                for _pattern, guard, body in s.cases:
+                    self._walk_expr(guard, on_expr)
+                    self._walk_stmt(body, on_expr)
+            elif isinstance(s, A.Assign):
+                self._walk_expr(s.value, on_expr)
+            elif isinstance(s, A.AugAssign):
+                self._walk_expr(s.value, on_expr)
+            elif isinstance(s, A.MultiAssign):
+                self._walk_expr(s.value, on_expr)
+            elif isinstance(s, A.TupleAssign):
+                for t in s.targets:
+                    self._walk_expr(t, on_expr)
+                for v in s.values:
+                    self._walk_expr(v, on_expr)
+            elif isinstance(s, A.AttrAssign):
+                self._walk_expr(s.obj, on_expr)
+                self._walk_expr(s.value, on_expr)
+            elif isinstance(s, A.IndexAssign):
+                self._walk_expr(s.target, on_expr)
+                self._walk_expr(s.value, on_expr)
+            elif isinstance(s, A.Del):
+                self._walk_expr(s.target, on_expr)
+            elif isinstance(s, A.Return):
+                self._walk_expr(s.value, on_expr)
+            elif isinstance(s, A.Raise):
+                self._walk_expr(s.value, on_expr)
+            elif isinstance(s, A.YieldStmt):
+                self._walk_expr(s.value, on_expr)
+            elif isinstance(s, A.ExprStmt):
+                self._walk_expr(s.expr, on_expr)
+            # Every other statement type (Pass, Break, Continue, Global,
+            # Nonlocal, Import, FromImport, ...) has neither a nested
+            # statement list nor an expression field relevant here -- no
+            # on_expr calls, same as they contributed nothing to either
+            # original hand-written walk.
 
     def _find_free_vars(self, fdef: A.FuncDef) -> tuple:
         """Return (free_vars, nonlocal_vars) for fdef.
@@ -156,7 +354,18 @@ class Parser:
                 if isinstance(s, A.Nonlocal):
                     nonlocal_names.update(s.names)
         _collect_nonlocal(fdef.body)
-        # Collect names that are assigned (bound) inside the body (skip nonlocal).
+        # Collect names that are assigned (bound) inside the body (skip
+        # nonlocal). NOT built on the shared _walk_stmt walker: this needs
+        # STATEMENT-shape recursion tuned to "which statement types create
+        # an ordinary local-variable binding" (Assign/AugAssign/For/If/
+        # MultiAssign/TupleAssign/While/Try), a different, narrower
+        # question than "every expression reachable from here" -- and
+        # deliberately does NOT recurse into A.Match (match-pattern
+        # captures are bound through sema's own separate pattern-
+        # compilation pass, not this local_names set; verified this
+        # doesn't create the opposite bug -- a pattern-captured name
+        # wrongly excluded from a later free-var reference -- via a real
+        # nested-function repro before leaving this as-is).
         def _collect_assigned(stmts: list) -> None:
             for s in stmts:
                 if isinstance(s, A.Assign):
@@ -203,87 +412,39 @@ class Parser:
                     if getattr(s, "bind_name", None) and s.bind_name not in nonlocal_names:
                         local_names.add(s.bind_name)
         _collect_assigned(fdef.body)
-        # Collect all Name references in the body.
+        # Collect all Name references in the body -- built on the shared
+        # _walk_stmt/_walk_expr walker (see their own docstrings), unlike
+        # _collect_assigned above: this question really is "every
+        # expression reachable from here," including inside a `match`
+        # statement's subject/guards/case bodies (previously NOT walked at
+        # all -- a real, live bug this fix corrects: a nested function
+        # referencing an outer variable only through a `match` subject
+        # never saw it as a free variable, so closure-lifting never passed
+        # it in, and the compiled function silently read garbage for it.
+        # Confirmed via a real repro compiled and run: `match outer:
+        # case 1: return 100 / case _: return 200` inside a nested function
+        # printed 200 for outer=1 instead of CPython's 100, before this
+        # fix).
         referenced: set = set()
         # Names currently bound by an enclosing comprehension's own `for`
         # clause(s) — Python scopes these to the comprehension itself, not
         # the surrounding function, so a `Name` read while this is non-empty
         # must not be recorded as a free-var reference. A list-as-stack
         # (rather than reassigning a set) so nested comprehensions compose
-        # without needing `nonlocal`.
+        # without needing `nonlocal`. Comprehension/DictComprehension
+        # return True from on_expr to suppress _walk_expr's own generic
+        # recursion into their children (see _walk_expr's docstring) --
+        # this callback recurses into them itself, in the specific order
+        # (iter, then push scope, then elt/cond/extras, then pop) real
+        # Python's own comprehension scoping needs.
         comp_suppressed: list = []
-        def _collect_refs_expr(node) -> None:
+        def on_expr(node) -> bool:
             if isinstance(node, A.Name):
                 if node.name not in comp_suppressed:
                     referenced.add(node.name)
-            elif isinstance(node, A.BinOp):
-                _collect_refs_expr(node.left)
-                _collect_refs_expr(node.right)
-            elif isinstance(node, A.UnaryOp):
-                _collect_refs_expr(node.operand)
-            elif isinstance(node, A.Call):
-                for a in node.args:
-                    _collect_refs_expr(a)
-                for _kw_name, kw_val in (node.kwargs or []):
-                    _collect_refs_expr(kw_val)
-            elif isinstance(node, A.MethodCall):
-                _collect_refs_expr(node.obj)
-                for a in node.args:
-                    _collect_refs_expr(a)
-                for _kw_name, kw_val in (node.kwargs or []):
-                    _collect_refs_expr(kw_val)
-            elif isinstance(node, A.Attr):
-                _collect_refs_expr(node.obj)
-            elif isinstance(node, A.Subscript):
-                _collect_refs_expr(node.obj)
-                _collect_refs_expr(node.index)
-            elif isinstance(node, A.Slice):
-                if node.start is not None:
-                    _collect_refs_expr(node.start)
-                if node.stop is not None:
-                    _collect_refs_expr(node.stop)
-                if node.step is not None:
-                    _collect_refs_expr(node.step)
-            elif isinstance(node, A.IfExp):
-                _collect_refs_expr(node.test)
-                _collect_refs_expr(node.body)
-                _collect_refs_expr(node.orelse)
-            elif isinstance(node, A.NamedExpr):
-                _collect_refs_expr(node.value)
-            elif isinstance(node, A.BoolOp):
-                _collect_refs_expr(node.left)
-                _collect_refs_expr(node.right)
-            elif isinstance(node, A.Compare):
-                for op in node.operands:
-                    _collect_refs_expr(op)
-            elif isinstance(node, A.ListLit):
-                for e in node.elems:
-                    _collect_refs_expr(e)
-            elif isinstance(node, A.TupleLit):
-                for e in node.elems:
-                    _collect_refs_expr(e)
-            elif isinstance(node, A.SetLit):
-                for e in node.elems:
-                    _collect_refs_expr(e)
-            elif isinstance(node, A.DictLit):
-                for k in node.keys:
-                    if k is not None:
-                        _collect_refs_expr(k)
-                for v in node.values:
-                    _collect_refs_expr(v)
-            elif isinstance(node, A.FString):
-                for seg in node.segments:
-                    _collect_refs_expr(seg)
-            elif isinstance(node, A.Starred):
-                _collect_refs_expr(node.value)
-            elif isinstance(node, A.Lambda):
-                if node.body is not None:
-                    _collect_refs_expr(node.body)
-            elif isinstance(node, A.Comprehension):
-                # `iter` (the outermost `for x in <iter>`) runs in the
-                # *enclosing* scope in real Python, so walk it before any
-                # suppression is pushed.
-                _collect_refs_expr(node.iter)
+                return False
+            if isinstance(node, A.Comprehension):
+                self._walk_expr(node.iter, on_expr)
                 _comp_vars: list = []
                 if node.var:
                     _comp_vars.append(node.var)
@@ -299,18 +460,17 @@ class Parser:
                             _comp_vars.append(_t)
                 for _cv in _comp_vars:
                     comp_suppressed.append(_cv)
-                _collect_refs_expr(node.elt)
-                if node.cond is not None:
-                    _collect_refs_expr(node.cond)
+                self._walk_expr(node.elt, on_expr)
+                self._walk_expr(node.cond, on_expr)
                 for it in node.extra_for_iters:
-                    _collect_refs_expr(it)
+                    self._walk_expr(it, on_expr)
                 for c in node.extra_for_conds:
-                    if c is not None:
-                        _collect_refs_expr(c)
+                    self._walk_expr(c, on_expr)
                 for _cv in _comp_vars:
                     comp_suppressed.remove(_cv)
-            elif isinstance(node, A.DictComprehension):
-                _collect_refs_expr(node.iter)
+                return True
+            if isinstance(node, A.DictComprehension):
+                self._walk_expr(node.iter, on_expr)
                 _comp_vars = []
                 if node.var:
                     _comp_vars.append(node.var)
@@ -319,81 +479,14 @@ class Parser:
                         _comp_vars.append(_t)
                 for _cv in _comp_vars:
                     comp_suppressed.append(_cv)
-                _collect_refs_expr(node.key)
-                _collect_refs_expr(node.value)
-                if node.cond is not None:
-                    _collect_refs_expr(node.cond)
+                self._walk_expr(node.key, on_expr)
+                self._walk_expr(node.value, on_expr)
+                self._walk_expr(node.cond, on_expr)
                 for _cv in _comp_vars:
                     comp_suppressed.remove(_cv)
-            elif isinstance(node, A.Assign):
-                _collect_refs_expr(node.value)
-            elif isinstance(node, A.AugAssign):
-                _collect_refs_expr(node.value)
-            elif isinstance(node, A.MultiAssign):
-                _collect_refs_expr(node.value)
-            elif isinstance(node, A.TupleAssign):
-                for t in node.targets:
-                    _collect_refs_expr(t)
-                for v in node.values:
-                    _collect_refs_expr(v)
-            elif isinstance(node, A.AttrAssign):
-                _collect_refs_expr(node.obj)
-                _collect_refs_expr(node.value)
-            elif isinstance(node, A.IndexAssign):
-                _collect_refs_expr(node.target)
-                _collect_refs_expr(node.value)
-            elif isinstance(node, A.Del):
-                _collect_refs_expr(node.target)
-            elif isinstance(node, A.Return):
-                if node.value is not None:
-                    _collect_refs_expr(node.value)
-            elif isinstance(node, A.Raise):
-                if node.value is not None:
-                    _collect_refs_expr(node.value)
-            elif isinstance(node, A.YieldStmt):
-                if node.value is not None:
-                    _collect_refs_expr(node.value)
-            elif isinstance(node, A.If):
-                _collect_refs_expr(node.test)
-                for _s in node.then:
-                    _collect_refs_expr(_s)
-                for _s in (node.orelse or []):
-                    _collect_refs_expr(_s)
-            elif isinstance(node, A.While):
-                _collect_refs_expr(node.test)
-                for _s in node.body:
-                    _collect_refs_expr(_s)
-                for _s in (node.orelse or []):
-                    _collect_refs_expr(_s)
-            elif isinstance(node, A.For):
-                for ra in node.range_args:
-                    _collect_refs_expr(ra)
-                if node.iter is not None:
-                    _collect_refs_expr(node.iter)
-                for _s in node.body:
-                    _collect_refs_expr(_s)
-                for _s in (node.orelse or []):
-                    _collect_refs_expr(_s)
-            elif isinstance(node, A.Try):
-                for _s in node.body:
-                    _collect_refs_expr(_s)
-                for _s in node.handler:
-                    _collect_refs_expr(_s)
-                for _types, _bind, eh_body in (node.extra_handlers or []):
-                    for _s in eh_body:
-                        _collect_refs_expr(_s)
-                for _s in (node.else_body or []):
-                    _collect_refs_expr(_s)
-                for _s in (node.finally_body or []):
-                    _collect_refs_expr(_s)
-            elif isinstance(node, A.With):
-                _collect_refs_expr(node.expr)
-                for _s in node.body:
-                    _collect_refs_expr(_s)
-            elif isinstance(node, A.ExprStmt):
-                _collect_refs_expr(node.expr)
-        for _stmt in fdef.body:
-            _collect_refs_expr(_stmt)
+                return True
+            return False
+        self._walk_stmt(fdef.body, on_expr)
         # Free vars = referenced names that are not locally bound.
         BUILTINS = {
             "print", "len", "range", "str", "int", "float", "bool", "list",
@@ -467,153 +560,29 @@ class Parser:
     @staticmethod
     def _collect_called_names(stmts: list, out: set) -> None:
         """Collect every `A.Call.func` name reachable inside a statement
-        list, via an explicit walk over every statement/expression shape."""
-        for s in stmts:
-            if isinstance(s, A.Assign):
-                Parser._collect_called_names_expr(s.value, out)
-            elif isinstance(s, A.AugAssign):
-                Parser._collect_called_names_expr(s.value, out)
-            elif isinstance(s, A.TupleAssign):
-                for t in s.targets:
-                    if isinstance(t, A.Subscript) or isinstance(t, A.Attr):
-                        Parser._collect_called_names_expr(t, out)
-                for v in s.values:
-                    Parser._collect_called_names_expr(v, out)
-            elif isinstance(s, A.MultiAssign):
-                Parser._collect_called_names_expr(s.value, out)
-            elif isinstance(s, A.Return):
-                if s.value is not None:
-                    Parser._collect_called_names_expr(s.value, out)
-            elif isinstance(s, A.If):
-                Parser._collect_called_names_expr(s.test, out)
-                Parser._collect_called_names(s.then, out)
-                Parser._collect_called_names(s.orelse, out)
-            elif isinstance(s, A.While):
-                Parser._collect_called_names_expr(s.test, out)
-                Parser._collect_called_names(s.body, out)
-                Parser._collect_called_names(s.orelse, out)
-            elif isinstance(s, A.For):
-                for a in s.range_args:
-                    Parser._collect_called_names_expr(a, out)
-                if s.iter is not None:
-                    Parser._collect_called_names_expr(s.iter, out)
-                Parser._collect_called_names(s.body, out)
-                Parser._collect_called_names(s.orelse, out)
-            elif isinstance(s, A.ExprStmt):
-                Parser._collect_called_names_expr(s.expr, out)
-            elif isinstance(s, A.AttrAssign):
-                Parser._collect_called_names_expr(s.obj, out)
-                Parser._collect_called_names_expr(s.value, out)
-            elif isinstance(s, A.IndexAssign):
-                Parser._collect_called_names_expr(s.target, out)
-                Parser._collect_called_names_expr(s.value, out)
-            elif isinstance(s, A.With):
-                Parser._collect_called_names_expr(s.expr, out)
-                Parser._collect_called_names(s.body, out)
-            elif isinstance(s, A.Try):
-                Parser._collect_called_names(s.body, out)
-                Parser._collect_called_names(s.handler, out)
-                for _types, _bind, hbody in s.extra_handlers:
-                    Parser._collect_called_names(hbody, out)
-                Parser._collect_called_names(s.else_body, out)
-                Parser._collect_called_names(s.finally_body, out)
-            elif isinstance(s, A.Raise):
-                if s.value is not None:
-                    Parser._collect_called_names_expr(s.value, out)
-            elif isinstance(s, A.Del):
-                Parser._collect_called_names_expr(s.target, out)
-            elif isinstance(s, A.YieldStmt):
-                Parser._collect_called_names_expr(s.value, out)
-            elif isinstance(s, A.Match):
-                Parser._collect_called_names_expr(s.subject, out)
-                for _pattern, guard, body in s.cases:
-                    if guard is not None:
-                        Parser._collect_called_names_expr(guard, out)
-                    Parser._collect_called_names(body, out)
+        list -- built on the shared `_walk_stmt`/`_walk_expr` walker (see
+        their own docstrings) rather than a second hand-written dispatch
+        chain structurally identical to `_find_free_vars`'s own expression
+        walk, just for a different purpose (here: propagating free
+        variables between mutually-calling lifted sibling functions, see
+        `_propagate_transitive_free_vars`). No comprehension-scoping
+        concern here (unlike `_find_free_vars`'s `on_expr`) -- a `Call`
+        found anywhere, including inside a comprehension, is a real call
+        this function's own body makes, regardless of which names are
+        comprehension-scoped.
 
-    @staticmethod
-    def _collect_called_names_expr(e, out: set) -> None:
-        if isinstance(e, A.Call):
-            out.add(e.func)
-            for a in e.args:
-                Parser._collect_called_names_expr(a, out)
-            for _kn, kv in e.kwargs:
-                Parser._collect_called_names_expr(kv, out)
-        elif isinstance(e, A.MethodCall):
-            Parser._collect_called_names_expr(e.obj, out)
-            for a in e.args:
-                Parser._collect_called_names_expr(a, out)
-            for _kn, kv in e.kwargs:
-                Parser._collect_called_names_expr(kv, out)
-        elif isinstance(e, A.BinOp):
-            Parser._collect_called_names_expr(e.left, out)
-            Parser._collect_called_names_expr(e.right, out)
-        elif isinstance(e, A.UnaryOp):
-            Parser._collect_called_names_expr(e.operand, out)
-        elif isinstance(e, A.Compare):
-            for o in e.operands:
-                Parser._collect_called_names_expr(o, out)
-        elif isinstance(e, A.BoolOp):
-            Parser._collect_called_names_expr(e.left, out)
-            Parser._collect_called_names_expr(e.right, out)
-        elif isinstance(e, A.IfExp):
-            Parser._collect_called_names_expr(e.test, out)
-            Parser._collect_called_names_expr(e.body, out)
-            Parser._collect_called_names_expr(e.orelse, out)
-        elif isinstance(e, A.NamedExpr):
-            Parser._collect_called_names_expr(e.value, out)
-        elif isinstance(e, A.ListLit):
-            for el in e.elems:
-                Parser._collect_called_names_expr(el, out)
-        elif isinstance(e, A.Subscript):
-            Parser._collect_called_names_expr(e.obj, out)
-            if isinstance(e.index, A.Slice):
-                if e.index.start is not None:
-                    Parser._collect_called_names_expr(e.index.start, out)
-                if e.index.stop is not None:
-                    Parser._collect_called_names_expr(e.index.stop, out)
-                if e.index.step is not None:
-                    Parser._collect_called_names_expr(e.index.step, out)
-            else:
-                Parser._collect_called_names_expr(e.index, out)
-        elif isinstance(e, A.Attr):
-            Parser._collect_called_names_expr(e.obj, out)
-        elif isinstance(e, A.FString):
-            for seg in e.segments:
-                Parser._collect_called_names_expr(seg, out)
-        elif isinstance(e, A.DictLit):
-            for k in e.keys:
-                if k is not None:
-                    Parser._collect_called_names_expr(k, out)
-            for v in e.values:
-                Parser._collect_called_names_expr(v, out)
-        elif isinstance(e, A.TupleLit):
-            for el in e.elems:
-                Parser._collect_called_names_expr(el, out)
-        elif isinstance(e, A.SetLit):
-            for el in e.elems:
-                Parser._collect_called_names_expr(el, out)
-        elif isinstance(e, A.Starred):
-            Parser._collect_called_names_expr(e.value, out)
-        elif isinstance(e, A.Comprehension):
-            Parser._collect_called_names_expr(e.elt, out)
-            Parser._collect_called_names_expr(e.iter, out)
-            if e.cond is not None:
-                Parser._collect_called_names_expr(e.cond, out)
-            for ei in e.extra_for_iters:
-                Parser._collect_called_names_expr(ei, out)
-            for ec in e.extra_for_conds:
-                if ec is not None:
-                    Parser._collect_called_names_expr(ec, out)
-        elif isinstance(e, A.DictComprehension):
-            Parser._collect_called_names_expr(e.key, out)
-            Parser._collect_called_names_expr(e.value, out)
-            Parser._collect_called_names_expr(e.iter, out)
-            if e.cond is not None:
-                Parser._collect_called_names_expr(e.cond, out)
-        elif isinstance(e, A.Lambda):
-            if e.body is not None:
-                Parser._collect_called_names_expr(e.body, out)
+        A throwaway `Parser([])` instance is used only because `_walk_stmt`/
+        `_walk_expr` are ordinary (non-static) methods -- neither reads any
+        instance state, so an empty token list is fine; this method itself
+        stays `@staticmethod` since every real caller already has no `Parser`
+        instance of its own handy (see `_propagate_transitive_free_vars`,
+        also `@staticmethod`).
+        """
+        def on_expr(node) -> bool:
+            if isinstance(node, A.Call):
+                out.add(node.func)
+            return False
+        Parser([])._walk_stmt(stmts, on_expr)
 
     @staticmethod
     def _propagate_transitive_free_vars(nested_funcs: list) -> None:
