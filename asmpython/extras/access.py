@@ -1,17 +1,3 @@
-"""Access declarations; prefer importing these from :mod:`asmpython`."""
-from ._api import (
-    AccessObject,
-    Public,
-    Module,
-    Package,
-    Subclass,
-    Class,
-    Instance,
-    NoAccess,
-    access,
-)
-
-__all__ = [
-    "AccessObject", "Public", "Module", "Package", "Subclass", "Class",
-    "Instance", "NoAccess", "access",
-]
+"""Deprecated alias of :mod:`asmpython.annotations.access`."""
+from ..annotations.access import *  # noqa: F401,F403
+from ..annotations.access import __all__

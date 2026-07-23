@@ -10,9 +10,10 @@ def add(left: int, right: int) -> int:
     return left + right
 ```
 
-`asmpython.extras` remains available as a compatibility namespace, including
-`asmpython.extras.access`, `asmpython.extras.abi`,
-`asmpython.extras.threading`, and `asmpython.extras.interrupts`.
+The same decorators live in `asmpython.annotations` (`asmpython.annotations.access`,
+`asmpython.annotations.abi`, `asmpython.annotations.threading`,
+`asmpython.annotations.interrupts`). `asmpython.extras` is a deprecated alias
+of `asmpython.annotations`, kept importable for compatibility.
 
 ## Native library exports
 

@@ -1,7 +1,3 @@
-"""ABI declarations; prefer importing these from :mod:`asmpython`."""
-from ._api import ABIObject, AutoABI, C, System, ASMPython, abi, packed, aligned, transparent, opaque
-
-__all__ = [
-    "ABIObject", "AutoABI", "C", "System", "ASMPython", "abi",
-    "packed", "aligned", "transparent", "opaque",
-]
+"""Deprecated alias of :mod:`asmpython.annotations.abi`."""
+from ..annotations.abi import *  # noqa: F401,F403
+from ..annotations.abi import __all__

@@ -9,11 +9,11 @@ from __future__ import annotations
 import sys
 from types import ModuleType
 
-from . import backend, embedded, extras, linker, mlang, runtime
+from . import annotations, backend, embedded, extras, linker, mlang, runtime
 from .capabilities import CapabilitySet, Dependency
 from .extension import Extension
-from .extras import *
-from .extras import __all__ as _extras_all
+from .annotations import *
+from .annotations import __all__ as _annotations_all
 from ._version import (
     ASMPYTHON_VERSION,
     FULL_VERSION,
@@ -95,6 +95,7 @@ __all__ = [
     "asmpython_version",
     "full_version",
     "python_version",
+    "annotations",
     "backend",
     "embedded",
     "extras",
@@ -104,5 +105,5 @@ __all__ = [
     "runtime",
     "compile_function",
     "__version__",
-    *_extras_all,
+    *_annotations_all,
 ]

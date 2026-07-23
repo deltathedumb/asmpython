@@ -1,4 +1,3 @@
-"""Threading declarations; prefer importing these from :mod:`asmpython`."""
-from ._api import atomic, threadlocal, sync, threadsafe, mainonly
-
-__all__ = ["atomic", "threadlocal", "sync", "threadsafe", "mainonly"]
+"""Deprecated alias of :mod:`asmpython.annotations.threading`."""
+from ..annotations.threading import *  # noqa: F401,F403
+from ..annotations.threading import __all__

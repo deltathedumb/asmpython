@@ -22,6 +22,7 @@ from asmpython import (
 def test_common_extras_are_exported_from_package_root() -> None:
     assert asmpython.Public is Public
     assert asmpython.AccessObject is AccessObject
+    assert asmpython.annotations.Public is Public
     assert asmpython.extras.Public is Public
     assert "Public" in asmpython.__all__
     assert "access" in asmpython.__all__
@@ -73,6 +74,18 @@ def test_qualifiers_work_in_runtime_annotations() -> None:
 
 
 def test_compatibility_namespaces_remain_importable() -> None:
+    from asmpython.annotations.abi import C as AnnotationsC
+    from asmpython.annotations.access import Public as AnnotationsPublic
+    from asmpython.annotations.interrupts import interhandler
+    from asmpython.annotations.threading import atomic
+
+    assert AnnotationsC is C
+    assert AnnotationsPublic is Public
+    assert callable(interhandler)
+    assert repr(atomic[int]) == "atomic[int]"
+
+
+def test_deprecated_extras_alias_remains_importable() -> None:
     from asmpython.extras.abi import C as CompatC
     from asmpython.extras.access import Public as CompatPublic
     from asmpython.extras.interrupts import interhandler

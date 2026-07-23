@@ -1,6 +1,9 @@
-"""Compatibility namespace for the API now exported directly by :mod:`asmpython`.
+"""Deprecated alias of :mod:`asmpython.annotations`.
 
-Prefer ``from asmpython import Public, access`` in new source.
+``asmpython.extras`` was renamed to ``asmpython.annotations``. This package
+re-exports the same objects (not copies) for compatibility; prefer
+``from asmpython import Public, access`` or ``asmpython.annotations`` directly
+in new source.
 """
-from ._api import *
-from ._api import __all__
+from ..annotations import *
+from ..annotations import __all__
