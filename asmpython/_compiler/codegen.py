@@ -2574,16 +2574,52 @@ class Codegen:
                     self._cl_define(info, s.name, A.expr_type(s.expr))
                 self._cl_walk(info, s.body)
             elif isinstance(s, A.Del):
-                tgt = s.target
-                if isinstance(tgt, A.Subscript):
-                    self._cl_define(info, f"__del_key_{id(s)}")
-                    self._cl_walk_expr(info, tgt.obj)
-                    self._cl_walk_expr(info, tgt.index)
+                # `del a, b, c` -> the parser wraps multiple targets in a
+                # TupleLit (see parser.py's _parse_del); each element is
+                # walked the same way a single target would be.
+                del_targets = s.target.elems if isinstance(s.target, A.TupleLit) else [s.target]
+                for tgt in del_targets:
+                    if isinstance(tgt, A.Subscript):
+                        self._cl_define(info, f"__del_key_{id(tgt)}")
+                        self._cl_walk_expr(info, tgt.obj)
+                        self._cl_walk_expr(info, tgt.index)
             elif isinstance(s, A.ClosureBind):
                 # The closure object is stored under the function name.
                 self._cl_define(info, s.func_name, "closure")
 
     # ---- statement codegen --------------------------------------------------
+
+    def _gen_del_target(self, tgt, info: FuncInfo) -> None:
+        """Generate one `del` TARGET (a single Name or Subscript -- never a
+        TupleLit; the caller unwraps a multi-target `del a, b, c`'s TupleLit
+        into one call per element before reaching here). `del x` zeroes the
+        slot so the variable can't be accidentally read; `del d[k]` calls
+        list-del/dict-pop, discarding the result either way. Uses id(tgt)
+        (not id of the enclosing Del statement) to key into
+        info.locals_["__del_key_..."] -- with multiple targets now sharing
+        one Del statement, keying by the statement's own id would collide
+        between them; the scanning pass that allocates this synthetic slot
+        (_cl_walk's own A.Del case) uses the same id(tgt) key."""
+        if isinstance(tgt, A.Name) and tgt.name in info.locals_:
+            slot = info.locals_[tgt.name]
+            self.emitf(f"mov qword [rbp{slot:+d}], 0")
+        elif isinstance(tgt, A.Subscript):
+            # del xs[i] -> _runtime_list_del(xs, i); del d[key] ->
+            # _runtime_dict_pop(d, key), discarding the result either way.
+            key_slot = info.locals_.get(f"__del_key_{id(tgt)}")
+            fn = (
+                "_runtime_list_del"
+                if A.expr_type(tgt.obj) == "list"
+                else "_runtime_dict_pop"
+            )
+            if key_slot is not None:
+                self.gen_expr(tgt.index, info)
+                self.emitf(f"mov [rbp{key_slot:+d}], rax")
+                self.gen_expr(tgt.obj, info)
+                self.emitf(f"mov rbx, [rbp{key_slot:+d}]", f"call {fn}")
+            else:
+                # Fallback: evaluate for side effects only.
+                self.gen_expr(tgt.obj, info)
 
     def gen_stmt(self, stmt, info: FuncInfo) -> None:
         if isinstance(stmt, A.ConstDecl):
@@ -3261,29 +3297,12 @@ class Codegen:
         if isinstance(stmt, A.Nonlocal):
             return  # closures not supported; accept as no-op
         if isinstance(stmt, A.Del):
-            # `del x` — zero the slot so the variable can't be accidentally read.
-            # `del d[k]` — call dict pop (discard result).
-            tgt = stmt.target
-            if isinstance(tgt, A.Name) and tgt.name in info.locals_:
-                slot = info.locals_[tgt.name]
-                self.emitf(f"mov qword [rbp{slot:+d}], 0")
-            elif isinstance(tgt, A.Subscript):
-                # del xs[i] -> _runtime_list_del(xs, i); del d[key] ->
-                # _runtime_dict_pop(d, key), discarding the result either way.
-                key_slot = info.locals_.get(f"__del_key_{id(stmt)}")
-                fn = (
-                    "_runtime_list_del"
-                    if A.expr_type(tgt.obj) == "list"
-                    else "_runtime_dict_pop"
-                )
-                if key_slot is not None:
-                    self.gen_expr(tgt.index, info)
-                    self.emitf(f"mov [rbp{key_slot:+d}], rax")
-                    self.gen_expr(tgt.obj, info)
-                    self.emitf(f"mov rbx, [rbp{key_slot:+d}]", f"call {fn}")
-                else:
-                    # Fallback: evaluate for side effects only.
-                    self.gen_expr(tgt.obj, info)
+            # `del a, b, c` -> the parser wraps multiple targets in a
+            # TupleLit (see parser.py's _parse_del); each element is a
+            # fully independent deletion, generated one at a time.
+            del_targets = stmt.target.elems if isinstance(stmt.target, A.TupleLit) else [stmt.target]
+            for tgt in del_targets:
+                self._gen_del_target(tgt, info)
             return
         raise NotImplementedError(f"stmt {stmt}")
 

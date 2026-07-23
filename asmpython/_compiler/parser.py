@@ -59,6 +59,14 @@ class Parser:
         # by `parse()` right after the decorated def is parsed.
         self._pending_decorator_exprs: list = []
         self._deco_tmp_counter = 0
+        # Synthetic-temp counter for desugaring a chained assignment led by
+        # an attribute/subscript target (`self.a = self.b = value`) -- see
+        # `_desugar_chained_assign`. A separate counter from
+        # `_deco_tmp_counter` above (different desugaring, own naming
+        # convention: `__chain_tmp_N`) even though both exist to guarantee
+        # a shared RHS is evaluated exactly once across several generated
+        # statements.
+        self._chain_tmp_counter = 0
         # `@readonly(name, ...)`'s captured param names, populated by
         # `_eat_decorators` and read by the immediately-following
         # `_parse_funcdef` call (every caller does exactly this sequence).
@@ -1049,6 +1057,8 @@ class Parser:
         methods: list[A.FuncDef] = []
         class_vars: list = []
         field_decorators: dict = {}
+        conditional_body_blocks: list = []
+        side_effect_stmts: list = []
         while not self._check("DEDENT"):
             self._skip_newlines()
             if self._check("DEDENT"):
@@ -1056,6 +1066,13 @@ class Parser:
             if self._check("KEYWORD", "pass"):
                 self._eat()
                 self._expect("NEWLINE")
+                continue
+            if self._check("KEYWORD", "if"):
+                self._parse_class_body_if(
+                    methods, class_vars, field_decorators,
+                    conditional_body_blocks, side_effect_stmts,
+                )
+                self._skip_newlines()
                 continue
             # Decorators on methods: mostly dropped; @assembly_func is honored.
             decorators = self._eat_decorators()
@@ -1065,21 +1082,48 @@ class Parser:
                 # Class-body string literal (docstring) — drop the line.
                 self._eat()
                 self._expect("NEWLINE")
-            elif self._check("NAME"):
-                # Class-body variable: `name [: type] [= value]`. Captured so
-                # sema can type `self.NAME` reads (e.g. a set/dict constant used
-                # for membership). @dataclass-style annotation-only fields are
+            elif self._check("NAME") and self._peek(1).kind == "OP" and self._peek(1).value in (
+                "=", ":",
+            ):
+                # Class-body variable: `name [: type] [= value]` -- only
+                # these two lookahead shapes are genuinely a class-var
+                # DECLARATION (a single name immediately followed by `:` or
+                # `=`); anything else starting with a bare NAME (a call,
+                # `x.y`, `x[i]`, a tuple-assign `a, b = ...`, ...) is a real
+                # statement, handled by the general fallback below instead
+                # of being misparsed as a field name. Captured so sema can
+                # type `self.NAME` reads (e.g. a set/dict constant used for
+                # membership). @dataclass-style annotation-only fields are
                 # captured too (value None).
                 cv = self._parse_class_var()
                 class_vars.append(cv)
                 if decorators:
                     field_decorators[cv[0]] = decorators
             else:
-                raise ParseError(
-                    "class bodies may only contain 'def' methods, field "
-                    "declarations, docstrings, or 'pass'",
-                    self._peek().pos,
-                )
+                # A general class-body statement -- real Python allows ANY
+                # statement in a class body (it's executed code, same as a
+                # function body): a side-effecting call made purely for
+                # what it registers elsewhere (e.g. Pillow's own `list(map(
+                # _register_basic, [...]))`, populating external format-
+                # registry dicts this compiler's static class model has no
+                # equivalent slot for), or a bare tuple-assignment (`a, b =
+                # 1, 2`, never actually reachable before this fix --
+                # _parse_class_var only ever handled a single name). Reuses
+                # the SAME general statement dispatcher every other scope
+                # already uses (_parse_stmt), rather than a second, narrower
+                # copy of assignment-shape detection -- safe here because
+                # `def` (the one construct _parse_stmt treats differently
+                # inside a class body, lifting it as a closure-capturing
+                # nested function rather than an ordinary method) is
+                # already dispatched separately above, so _parse_stmt is
+                # never reached for it from this fallback. Recorded on
+                # ClassDef.side_effect_stmts for visibility rather than
+                # folded into class_vars/methods -- see that field's own
+                # docstring for why: asmpython's class system has no "run
+                # this code during class construction" phase at all,
+                # matching the same architectural gap conditional_body_
+                # blocks already documents for `if`.
+                side_effect_stmts.append(self._parse_stmt())
             self._skip_newlines()
         self._expect("DEDENT")
         # A method default referencing a bare name that's actually one of
@@ -1115,7 +1159,101 @@ class Parser:
             access_policy=class_access_policy,
             abi_name=class_abi_name or "AutoABI",
             is_public_export=class_access_policy == "Public" or class_abi_name is not None,
+            conditional_body_blocks=conditional_body_blocks,
+            side_effect_stmts=side_effect_stmts,
         )
+
+    def _parse_class_body_if(
+        self,
+        methods: list,
+        class_vars: list,
+        field_decorators: dict,
+        conditional_body_blocks: list,
+        side_effect_stmts: list,
+    ) -> None:
+        """`if <cond>: <methods/field declarations/expression statements>`
+        inside a class body -- a real, common idiom for version/capability-
+        gated member definition (e.g. Pillow's own `if hasattr(Fraction,
+        "__int__"): __int__ = _delegate("__int__")`). See ClassDef.
+        conditional_body_blocks' docstring for why this unconditionally
+        folds the guarded block's contents into the caller's own lists
+        (same as if the `if` wasn't there) rather than modeling real
+        runtime branching: asmpython has no conditional-class-body-
+        execution semantics at all, and the conditions this idiom actually
+        guards on (hasattr against real, unmodeled external types) have no
+        compile-time value to branch on in the first place.
+
+        `elif`/`else` are deliberately NOT supported: unlike a bare `if`
+        (safe to always-include, since real Python's version/capability
+        checks are usually gating an ADDITIVE feature), an `elif`/`else`
+        chain implies genuinely DIFFERENT, mutually exclusive definitions
+        for what may be the same name -- always-including every branch
+        would silently let a later branch's definition win by simple list
+        order rather than reflecting any real, meaningful choice. Rejected
+        explicitly with a precise diagnostic rather than silently picking
+        one branch or the other.
+        """
+        kw = self._expect("KEYWORD", "if")
+        cond = self._parse_expr()
+        self._expect("OP", ":")
+        self._expect("NEWLINE")
+        self._skip_newlines()
+        self._expect("INDENT")
+        guarded_names: list[str] = []
+        while not self._check("DEDENT"):
+            self._skip_newlines()
+            if self._check("DEDENT"):
+                break
+            if self._check("KEYWORD", "pass"):
+                self._eat()
+                self._expect("NEWLINE")
+                continue
+            if self._check("KEYWORD", "if"):
+                # Nested `if` inside a guarded block -- same unconditional-
+                # inclusion rule applies recursively.
+                self._parse_class_body_if(
+                    methods, class_vars, field_decorators,
+                    conditional_body_blocks, side_effect_stmts,
+                )
+                self._skip_newlines()
+                continue
+            decorators = self._eat_decorators()
+            if self._check("KEYWORD", "def"):
+                fdef = self._parse_funcdef(decorators=decorators)
+                methods.append(fdef)
+                guarded_names.append(fdef.name)
+            elif self._check("STRING"):
+                self._eat()
+                self._expect("NEWLINE")
+            elif self._check("NAME") and self._peek(1).kind == "OP" and self._peek(1).value in (
+                "=", ":",
+            ):
+                cv = self._parse_class_var()
+                class_vars.append(cv)
+                guarded_names.append(cv[0])
+                if decorators:
+                    field_decorators[cv[0]] = decorators
+            else:
+                # Same general statement fallback as the outer class-body
+                # loop -- see its own comment for why _parse_stmt is safe
+                # to reuse here.
+                side_effect_stmts.append(self._parse_stmt())
+            self._skip_newlines()
+        self._expect("DEDENT")
+        conditional_body_blocks.append((cond, guarded_names))
+        if self._check("KEYWORD", "elif") or self._check("KEYWORD", "else"):
+            raise ParseError(
+                "'elif'/'else' after a class-body 'if' is not supported -- "
+                "asmpython has no conditional-class-body-execution model, "
+                "so an 'if' block's methods/fields are always included "
+                "(matching version/capability-gated member definitions "
+                "like Pillow's own hasattr(...) idiom), but a genuine "
+                "elif/else branch would imply mutually exclusive "
+                "definitions this compiler cannot meaningfully choose "
+                "between",
+                self._peek().pos,
+                ErrorCode.P_UNEXPECTED_TOKEN,
+            )
 
     def _parse_class_var(self):
         """Parse a class-body variable line: `name [: type] [= value]`.
@@ -1609,7 +1747,16 @@ class Parser:
         # a real repro: PIL.Image.py's `Protocol` stub methods are written
         # exactly as `def getdata(self) -> tuple[...]: ...` on one line.
         if not self._check("NEWLINE"):
-            return [self._parse_stmt()]
+            result = self._parse_stmt()
+            # _parse_stmt() normally returns exactly one Stmt, but a chained
+            # assignment led by an attribute/subscript target (`self.a =
+            # self.b = value`) desugars to MULTIPLE statements and returns a
+            # real list instead -- see `_desugar_chained_assign`'s own
+            # comment for why. Flatten rather than nest so a single-line
+            # inline body (`if x: self.a = self.b = 1`) still yields a flat
+            # statement list, same shape as the ordinary indented-block
+            # path below produces.
+            return result if isinstance(result, list) else [result]
         self._expect("NEWLINE")
         self._skip_newlines()
         self._expect("INDENT")
@@ -1628,7 +1775,13 @@ class Parser:
                     stmts.extend(self._parse_assign_decorator_stmt())
                     self._skip_newlines()
                     continue
-                stmts.append(self._parse_stmt())
+                result = self._parse_stmt()
+                # Same list-vs-single-node tolerance as the inline-body
+                # case just above -- see its comment for why.
+                if isinstance(result, list):
+                    stmts.extend(result)
+                else:
+                    stmts.append(result)
                 self._skip_newlines()
             self._expect("DEDENT")
             return stmts
@@ -1905,6 +2058,45 @@ class Parser:
             return A.IndexAssign(target=expr, value=combined, pos=pos)
         if isinstance(expr, A.Attr) and self._check("OP", "="):
             self._eat()
+            # Chained assignment led by an attribute target (`self.a =
+            # self.b = value`) -- _parse_assign's own multi-target chain
+            # only ever collects bare NAME tokens, since this statement
+            # never even reaches it (a leading `self.x` is parsed as a
+            # general expression here, not the NAME-led fast path
+            # _parse_assign is only invoked from). Desugars using the SAME
+            # "assign the real value to the LAST target, then have every
+            # earlier target read the value back from it" trick
+            # _parse_assign already uses for pure-name chains (safe here
+            # too: reading an attribute immediately after storing to it
+            # returns exactly what was stored, no descriptor/property
+            # machinery modeled in between) -- returns a real list of
+            # statements (one assignment per target) instead of inventing
+            # a new "block of heterogeneous assignment types" AST node;
+            # `_parse_block`'s own loop is the one caller updated to
+            # extend rather than append when this returns a list (see its
+            # own comment). Confirmed via a real repro: Pillow's own
+            # TiffImagePlugin.py's `self.__first = self.__next =
+            # self.tag_v2.next`.
+            more_targets = [expr]
+            while True:
+                # Lookahead alone can't distinguish "another chained target
+                # follows" from "the RHS value expression follows" (both
+                # start with an arbitrary expression) -- so this speculatively
+                # parses the next expression and only commits to treating it
+                # as another target if a further `=` immediately follows;
+                # otherwise rewind and let the normal RHS parse below run.
+                save = self.i
+                nxt = self._parse_expr()
+                if self._is_assign_target(nxt) and self._check("OP", "="):
+                    self._eat()
+                    more_targets.append(nxt)
+                    continue
+                self.i = save
+                break
+            if len(more_targets) > 1:
+                value = self._parse_tuple_rhs()
+                self._expect("NEWLINE")
+                return self._desugar_chained_assign(more_targets, value, pos)
             # Same bare-tuple-RHS allowance as the Subscript case just above.
             value = self._parse_tuple_rhs()
             self._expect("NEWLINE")
@@ -2699,6 +2891,27 @@ class Parser:
     def _parse_del(self) -> "A.Del":
         kw = self._expect("KEYWORD", "del")
         target = self._parse_expr()
+        # Multi-target del (`del a, b, c`) -- each target is a fully
+        # independent deletion (no shared semantics between them, unlike
+        # e.g. a tuple-assignment's shared RHS), so `del a, b, c` and
+        # `del a; del b; del c` behave identically. Wraps the targets in
+        # an A.TupleLit (an existing, general "list of expressions" AST
+        # shape already used elsewhere) rather than widening A.Del's own
+        # `target: Expr` field to a list -- every one of A.Del's 7 call
+        # sites across ir_lower/codegen/sema/program checks
+        # `isinstance(target, A.TupleLit)` and iterates `.elems` when
+        # present, needing no change to A.Del's shape or its single-target
+        # callers. Confirmed via a real repro: Pillow's own
+        # TiffImagePlugin.py's `del _load_dispatch, _write_dispatch, idx,
+        # name` module-level cleanup line.
+        if self._check("OP", ","):
+            elems = [target]
+            while self._check("OP", ","):
+                self._eat()
+                if self._check("NEWLINE"):
+                    break  # trailing comma
+                elems.append(self._parse_expr())
+            target = A.TupleLit(elems=elems, pos=kw.pos)
         self._expect("NEWLINE")
         return A.Del(target=target, pos=kw.pos)
 
@@ -2814,6 +3027,52 @@ class Parser:
         # Wrap in a block via MultiAssign (use Pass as sentinel with a body list).
         # Use the first target's position.
         return A.MultiAssign(targets=[t.value for t in targets], value=value, pos=name_tok.pos)  # type: ignore
+
+    def _desugar_chained_assign(self, targets: list, value, pos) -> list:
+        """`targets[0] = targets[1] = ... = value`, where at least one
+        target is an Attr/Subscript (a pure-NAME chain never reaches this --
+        see `_parse_assign`'s own version of this trick). Returns a list of
+        statements: the LAST target gets the real value; every earlier
+        target (in source order) is assigned a fresh READ of the last
+        target's own location. Mirrors `_parse_assign`'s identical
+        last-target-then-read-back approach exactly, generalized to
+        Name/Attr/Subscript targets via `_is_assign_target`'s same shape
+        rules instead of bare NAME tokens only.
+        """
+        last = targets[-1]
+        read_last = self._read_expr_for_target(last)
+        stmts: list = [self._build_assign_for_target(last, value, pos)]
+        for tgt in targets[:-1]:
+            stmts.append(self._build_assign_for_target(tgt, read_last, tgt.pos))
+        return stmts
+
+    def _build_assign_for_target(self, target, value, pos):
+        """Build the right assignment-statement AST node for `target`'s
+        shape (Name -> Assign, Attr -> AttrAssign, Subscript -> IndexAssign)
+        with `value` as its RHS -- the construction half of
+        `_desugar_chained_assign`'s per-target loop."""
+        if isinstance(target, A.Name):
+            return A.Assign(target=target.name, value=value, pos=pos)
+        if isinstance(target, A.Attr):
+            return A.AttrAssign(obj=target.obj, name=target.name, value=value, pos=pos)
+        if isinstance(target, A.Subscript):
+            return A.IndexAssign(target=target, value=value, pos=pos)
+        raise ParseError("cannot assign to this expression", pos, ErrorCode.P_INVALID_ASSIGN_TARGET)
+
+    def _read_expr_for_target(self, target):
+        """The expression that READS `target`'s own storage location right
+        after it was just assigned to -- e.g. for `self.a = self.b = v`,
+        this builds the `self.b` read-back expression assigned to `self.a`.
+        A fresh node (never the same object `target` itself), since AST
+        nodes elsewhere in this compiler are assumed not to be shared
+        across multiple positions in the tree."""
+        if isinstance(target, A.Name):
+            return A.Name(name=target.name, pos=target.pos)
+        if isinstance(target, A.Attr):
+            return A.Attr(obj=target.obj, name=target.name, pos=target.pos)
+        if isinstance(target, A.Subscript):
+            return A.Subscript(obj=target.obj, index=target.index, pos=target.pos)
+        raise ParseError("cannot assign to this expression", target.pos, ErrorCode.P_INVALID_ASSIGN_TARGET)
 
     def _parse_annotated_assign(self):
         """`name: type [= value]` at statement position.

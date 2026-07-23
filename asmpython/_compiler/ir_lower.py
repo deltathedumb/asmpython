@@ -8132,6 +8132,33 @@ def _lower_for_zip(ctx: _FuncCtx, s: A.For, zspec) -> None:
     ctx.switch_to(end_b)
 
 
+def _lower_del_target(ctx: _FuncCtx, tgt: "A.Expr") -> None:
+    """Lower one `del` TARGET (a single Name or Subscript -- never a
+    TupleLit; the caller unwraps a multi-target `del a, b, c`'s TupleLit
+    into one call per element before reaching here). `del x` zeroes the
+    slot so a later (illegal, sema should have already rejected it) read
+    can't observe a stale value. `del xs[i]` / `del d[key]` calls
+    _abi_list_del/_abi_dict_pop, discarding whatever they return --
+    matches codegen.py's _gen_stmt Del."""
+    if isinstance(tgt, A.Name):
+        ty = ctx.mctx.global_types.get(tgt.name, ctx.slot_ty.get(tgt.name, I64))
+        ptr = _name_ptr(ctx, tgt.name, ty)
+        zero = ctx.tmp(ty)
+        ctx.emit(IRInstr("const", zero, [0]))
+        ctx.emit(IRInstr("store", None, [zero, ptr]))
+        return
+    if isinstance(tgt, A.Subscript):
+        obj_v = _lower_expr(ctx, tgt.obj)
+        if A.expr_type(tgt.obj) == "list":
+            idx_v = _lower_expr(ctx, tgt.index)
+            ctx.emit(IRInstr("call", None, ["_abi_list_del", obj_v, idx_v]))
+        else:
+            key_v = _lower_dict_key(ctx, tgt.index)
+            ctx.emit(IRInstr("call", None, ["_abi_dict_pop", obj_v, key_v]))
+        return
+    raise LowerError(f"unsupported stmt Del ({type(tgt).__name__})")
+
+
 def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
     if isinstance(s, A.ConstDecl):
         # Normalize at entry rather than duplicating Assign's lowering in a
@@ -8982,24 +9009,15 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         # already rejected it) read can't observe a stale value. `del
         # xs[i]` / `del d[key]` -> _abi_list_del/_abi_dict_pop, discarding
         # whatever they return -- matches codegen.py's _gen_stmt Del.
-        tgt = s.target
-        if isinstance(tgt, A.Name):
-            ty = ctx.mctx.global_types.get(tgt.name, ctx.slot_ty.get(tgt.name, I64))
-            ptr = _name_ptr(ctx, tgt.name, ty)
-            zero = ctx.tmp(ty)
-            ctx.emit(IRInstr("const", zero, [0]))
-            ctx.emit(IRInstr("store", None, [zero, ptr]))
-            return
-        if isinstance(tgt, A.Subscript):
-            obj_v = _lower_expr(ctx, tgt.obj)
-            if A.expr_type(tgt.obj) == "list":
-                idx_v = _lower_expr(ctx, tgt.index)
-                ctx.emit(IRInstr("call", None, ["_abi_list_del", obj_v, idx_v]))
-            else:
-                key_v = _lower_dict_key(ctx, tgt.index)
-                ctx.emit(IRInstr("call", None, ["_abi_dict_pop", obj_v, key_v]))
-            return
-        raise LowerError(f"unsupported stmt Del ({type(tgt).__name__})")
+        # `del a, b, c` -> the parser wraps multiple targets in a
+        # TupleLit (see _parse_del's own comment for why); each element
+        # is a fully independent deletion, lowered one at a time.
+        if isinstance(s.target, A.TupleLit):
+            for elem in s.target.elems:
+                _lower_del_target(ctx, elem)
+        else:
+            _lower_del_target(ctx, s.target)
+        return
 
     if isinstance(s, A.Try):
         _lower_try(ctx, s)

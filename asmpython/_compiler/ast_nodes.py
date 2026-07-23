@@ -189,6 +189,52 @@ class ClassDef:
     access_policy: "str | None" = None
     abi_name: str = "AutoABI"
     is_public_export: bool = False
+    # Conditional class-body blocks (`if <cond>: <assignments/methods>`),
+    # e.g. typeshed/Pillow's own `if hasattr(Fraction, "__int__"): __int__ =
+    # _delegate("__int__")` version/capability-gating idiom. Recorded as
+    # (cond_expr, guarded_names) pairs -- guarded_names lists which entries
+    # in `methods`/`class_vars` came from this specific `if` block, purely
+    # for introspection/future use.
+    #
+    # asmpython's class model has no runtime-branching class-body execution
+    # at all: `class_vars`/`methods` are flat, unconditional lists consumed
+    # by 17+ call sites across sema/codegen/ir_lower that all assume every
+    # entry always exists. Building true conditional-member semantics would
+    # mean evaluating `cond_expr` at COMPILED-PROGRAM runtime and choosing
+    # between different member sets per class instance -- a fundamentally
+    # different feature (real branching class definitions) that no
+    # consumer has any way to represent today, and one this compiler
+    # couldn't usefully support anyway for conditions like
+    # `hasattr(Fraction, "__int__")`: `Fraction` here is real, unmodeled
+    # external stdlib, and sema already treats hasattr() as a genuine
+    # runtime probe with no compile-time-constant-folding path (see
+    # sema.py's `if e.func == "hasattr":` handling), so there is no
+    # meaningful compile-time value to branch on in the first place.
+    #
+    # So each guarded block's assignments/methods are unconditionally
+    # folded into the ordinary `class_vars`/`methods` lists (the condition
+    # is parsed and RECORDED here for visibility, never evaluated or acted
+    # on) -- every existing class_vars/methods consumer needs zero changes,
+    # and this becomes a real, visible, extensible part of the class-body
+    # grammar instead of a silent parser shortcut that discarded the `if`
+    # entirely. Confirmed via a real repro: Pillow's own
+    # PIL/TiffImagePlugin.py uses exactly this idiom for its `_IFDRational`
+    # class's Python-3.11+ `__int__` delegate.
+    conditional_body_blocks: list = field(default_factory=list)
+    # General class-body expression statements: real Python class bodies
+    # can contain ANY statement (a class body is executed code, same as a
+    # function body), most commonly a side-effecting call made purely for
+    # what it registers elsewhere -- e.g. Pillow's own `list(map(
+    # _register_basic, [...]))` inside its TiffImageFile class body, which
+    # populates external module-level format-registry dicts. This compiler's
+    # class system has no "run this code during class construction" phase
+    # at all (methods/class_vars are static, unconditional lists -- see
+    # conditional_body_blocks' own docstring for the same underlying
+    # architectural point), so each such statement is parsed for real (so
+    # it doesn't corrupt the surrounding class-body parse) and recorded
+    # here for visibility rather than silently discarded -- never compiled
+    # or executed by any current consumer.
+    side_effect_stmts: list = field(default_factory=list)
 
 
 # ---- Statements -------------------------------------------------------------

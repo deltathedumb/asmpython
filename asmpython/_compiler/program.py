@@ -1074,6 +1074,14 @@ def _rename_call_targets_expr(e, renames: dict[str, str]) -> None:
     elif isinstance(e, A.ListLit):
         for el in e.elems:
             _rename_call_targets_expr(el, renames)
+    elif isinstance(e, A.TupleLit):
+        # Same as ListLit just above -- this branch was missing entirely
+        # before (a real, pre-existing gap unrelated to any one caller):
+        # any call inside a tuple literal anywhere in this walk's reach
+        # (not just `del a, b, c`'s TupleLit-wrapped multi-target) never
+        # had its renamed Call.func target updated.
+        for el in e.elems:
+            _rename_call_targets_expr(el, renames)
     elif isinstance(e, A.Subscript):
         _rename_call_targets_expr(e.obj, renames)
         if isinstance(e.index, A.Slice):

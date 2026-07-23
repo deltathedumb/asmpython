@@ -6402,8 +6402,16 @@ class SemaAnalyzer:
             # the name itself and is rejected; `del const_list[i]` mutates
             # the referenced container, which the constants extension always
             # permits (see ConstDecl's docstring on binding-vs-mutation).
-            if isinstance(s.target, A.Name):
-                self._require_assignable(s.target.name, s.pos)
+            # `del a, b, c` -> the parser wraps multiple targets in a
+            # TupleLit (see parser.py's _parse_del); each element gets the
+            # same const-rebind check individually -- checking the whole
+            # TupleLit against A.Name would never match (a TupleLit is
+            # never itself an A.Name), silently skipping the check for
+            # every multi-target del regardless of what it deletes.
+            del_targets = s.target.elems if isinstance(s.target, A.TupleLit) else [s.target]
+            for tgt in del_targets:
+                if isinstance(tgt, A.Name):
+                    self._require_assignable(tgt.name, s.pos)
             try:
                 self._check_expr(s.target, scope)
             except Exception:
