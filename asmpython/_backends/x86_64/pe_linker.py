@@ -125,7 +125,23 @@ class LinkError(Exception):
     pass
 
 
-def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
+def link_pe(
+    objects: list[bytes],
+    entry_symbol: str = "main",
+    *,
+    is_library: bool = False,
+    exports: "list[str] | tuple[str, ...]" = (),
+) -> bytes:
+    """Link into a PE32+ executable, or (`is_library=True`) a DLL.
+
+    A library build skips the `main`/`ExitProcess` process-entry model
+    entirely: `entry_symbol` is only used to seed relocation resolution for
+    an ordinary executable and is IGNORED when `is_library` is True (a DLL
+    has no required process entry point at all -- see `_dll_entry_stub`).
+    `exports` (each name must be a real merged global symbol, checked
+    below) becomes the PE export directory (`.edata`), letting an external
+    host `GetProcAddress` each one by name.
+    """
     parsed: list[CoffObject] = [parse_coff(o) for o in objects]
 
     # ── 1. Merge .text/.data/.rdata sections, track each object's section
@@ -223,8 +239,11 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
                 )
             global_syms[sym.name] = (bucket, base + sym.value)
 
-    if entry_symbol not in global_syms:
+    if not is_library and entry_symbol not in global_syms:
         raise LinkError(f"entry symbol {entry_symbol!r} not defined in any input object")
+    for export_name in exports:
+        if export_name not in global_syms:
+            raise LinkError(f"export symbol {export_name!r} not defined in any input object")
 
     # ── 3. Collect every relocation target not resolvable as a global
     # symbol -- those are real DLL imports. __acrt_iob_func is special-
@@ -270,8 +289,11 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
                 if r.symbol in global_syms or r.symbol in seen_imports:
                     continue
                 _want_import(_SYMBOL_ALIASES.get(r.symbol, r.symbol))
-    # ExitProcess powers the entry stub even if nothing else calls it.
-    _want_import("ExitProcess")
+    # ExitProcess powers the executable entry stub even if nothing else
+    # calls it. A DLL has no such stub -- its DllMain returns instead of
+    # exiting the process -- so this import is only forced for an exe link.
+    if not is_library:
+        _want_import("ExitProcess")
     imports.sort(key=lambda n: (_DLL_FOR_SYMBOL[n], n))
 
     # ── 4. Lay out .text: merged code, then one 6-byte thunk per import
@@ -286,9 +308,19 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
     acrt_iob_stub_len = 4 + 3 + 5 + 4 + 3 + 4 + 1
     entry_stub_off = acrt_iob_stub_off + (acrt_iob_stub_len if needs_acrt_iob_stub else 0)
     has_module_init = "__asmpy_module_init" in global_syms
-    # sub rsp,40 ; [call rel32(module_init)] ; call rel32(main) ; mov ecx,eax ;
-    # call rel32(ExitProcess thunk) ; ud2
-    entry_stub_len = 4 + (5 if has_module_init else 0) + 5 + 2 + 5 + 2
+    if is_library:
+        # DllMain(rcx=hinst, edx=reason, r8=reserved) -> eax (BOOL). Only
+        # DLL_PROCESS_ATTACH (reason == 1) runs module init -- DLL_PROCESS_
+        # DETACH/THREAD_ATTACH/THREAD_DETACH (0/2/3) have nothing to do
+        # since this backend has no per-thread or teardown state. No
+        # ExitProcess: a DLL returns to its loader, it never terminates the
+        # host process itself.
+        # cmp edx,1 ; jne +N ; [call rel32(module_init)] ; mov eax,1 ; ret
+        entry_stub_len = 3 + 2 + (5 if has_module_init else 0) + 5 + 1
+    else:
+        # sub rsp,40 ; [call rel32(module_init)] ; call rel32(main) ; mov ecx,eax ;
+        # call rel32(ExitProcess thunk) ; ud2
+        entry_stub_len = 4 + (5 if has_module_init else 0) + 5 + 2 + 5 + 2
     text_total_len = entry_stub_off + entry_stub_len
 
     # ── 5. Decide PE section RVAs (one page each, in this fixed order). ──
@@ -453,31 +485,51 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
         text[acrt_iob_stub_off:acrt_iob_stub_off + acrt_iob_stub_len] = bytes(iob)
 
     init_addr = resolve("__asmpy_module_init") if has_module_init else 0
-    main_addr = resolve(entry_symbol)
-    exitprocess_addr = resolve("ExitProcess")
-    stub = bytearray()
-    stub += bytes([0x48, 0x83, 0xEC, 0x28])             # sub rsp, 40
-    if has_module_init:
-        call_init_disp_pos = len(stub) + 1
-        stub += bytes([0xE8, 0, 0, 0, 0])                # call rel32 module init
-    call1_disp_pos = len(stub) + 1
-    stub += bytes([0xE8, 0, 0, 0, 0])                    # call rel32 main
-    stub += bytes([0x89, 0xC1])                          # mov ecx, eax
-    call2_disp_pos = len(stub) + 1
-    stub += bytes([0xE8, 0, 0, 0, 0])                    # call rel32 ExitProcess thunk
-    stub += bytes([0x0F, 0x0B])                          # ud2 (unreachable)
-    assert len(stub) == entry_stub_len
     stub_base_addr = IMAGE_BASE + rva_text + entry_stub_off
-    if has_module_init:
+    if is_library:
+        # DllMain(hinst, reason, reserved) -> BOOL. Only
+        # DLL_PROCESS_ATTACH (reason == 1, in edx per Win64 ABI) runs
+        # module init; every other reason just returns TRUE.
+        stub = bytearray()
+        stub += bytes([0x83, 0xFA, 0x01])                # cmp edx, 1
+        skip_disp_pos = len(stub) + 1
+        skip_len = (5 if has_module_init else 0)
+        stub += bytes([0x75, skip_len & 0xFF])            # jne +skip_len
+        if has_module_init:
+            call_init_disp_pos = len(stub) + 1
+            stub += bytes([0xE8, 0, 0, 0, 0])              # call rel32 module init
+        stub += bytes([0xB8, 1, 0, 0, 0])                  # mov eax, 1
+        stub += bytes([0xC3])                              # ret
+        assert len(stub) == entry_stub_len
+        if has_module_init:
+            struct.pack_into(
+                "<i", stub, call_init_disp_pos,
+                init_addr - (stub_base_addr + call_init_disp_pos + 4),
+            )
+    else:
+        main_addr = resolve(entry_symbol)
+        stub = bytearray()
+        stub += bytes([0x48, 0x83, 0xEC, 0x28])             # sub rsp, 40
+        if has_module_init:
+            call_init_disp_pos = len(stub) + 1
+            stub += bytes([0xE8, 0, 0, 0, 0])                # call rel32 module init
+        call1_disp_pos = len(stub) + 1
+        stub += bytes([0xE8, 0, 0, 0, 0])                    # call rel32 main
+        stub += bytes([0x89, 0xC1])                          # mov ecx, eax
+        call2_disp_pos = len(stub) + 1
+        stub += bytes([0xE8, 0, 0, 0, 0])                    # call rel32 ExitProcess thunk
+        stub += bytes([0x0F, 0x0B])                          # ud2 (unreachable)
+        assert len(stub) == entry_stub_len
+        if has_module_init:
+            struct.pack_into(
+                "<i", stub, call_init_disp_pos,
+                init_addr - (stub_base_addr + call_init_disp_pos + 4),
+            )
+        struct.pack_into("<i", stub, call1_disp_pos, main_addr - (stub_base_addr + call1_disp_pos + 4))
         struct.pack_into(
-            "<i", stub, call_init_disp_pos,
-            init_addr - (stub_base_addr + call_init_disp_pos + 4),
+            "<i", stub, call2_disp_pos,
+            (IMAGE_BASE + rva_text + thunk_off["ExitProcess"]) - (stub_base_addr + call2_disp_pos + 4),
         )
-    struct.pack_into("<i", stub, call1_disp_pos, main_addr - (stub_base_addr + call1_disp_pos + 4))
-    struct.pack_into(
-        "<i", stub, call2_disp_pos,
-        (IMAGE_BASE + rva_text + thunk_off["ExitProcess"]) - (stub_base_addr + call2_disp_pos + 4),
-    )
     text[entry_stub_off:entry_stub_off + entry_stub_len] = bytes(stub)
 
     for oi, obj in enumerate(parsed):
@@ -501,9 +553,20 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
     # ── 9. Assemble the PE file. ──
     rdata_data_blob = bytes(bucket_bytes["rdata"]) + bytes(bucket_bytes["data"])
 
-    entry_rva = rva_text  # process entry = start of merged .text region... see below
-    # The OS entry point must be the stub, not function index 0 of .text.
+    # The OS entry point (executable) / DllMain (library) must be the
+    # stub, not function index 0 of .text. A library with no module init
+    # doesn't strictly need a DllMain at all, but always emitting the
+    # trivial "return TRUE" one is simpler than a third no-stub layout.
     entry_rva = rva_text + entry_stub_off
+
+    rva_edata = rva_bss + _align(bss_size, SECTION_ALIGN) if bss_size else rva_idata + _align(idata_len, SECTION_ALIGN)
+    edata_bytes = b""
+    export_directory_rva_size = (0, 0)
+    if is_library and exports:
+        sorted_exports = sorted(exports)
+        export_addrs = [resolve(name) - IMAGE_BASE for name in sorted_exports]
+        edata_bytes = _build_pe_export_directory(rva_edata, sorted_exports, export_addrs)
+        export_directory_rva_size = (rva_edata, len(edata_bytes))
 
     sections = [
         # (name, rva, raw_data, characteristics)
@@ -515,16 +578,89 @@ def link_pe(objects: list[bytes], entry_symbol: str = "main") -> bytes:
          0x00000040 | 0x40000000),                                    # INITIALIZED_DATA | READ
         (".bss", rva_bss, b"",
          0x00000080 | 0x40000000 | 0x80000000) if bss_size else None,  # UNINIT | READ | WRITE
+        (".edata", rva_edata, edata_bytes,
+         0x00000040 | 0x40000000) if edata_bytes else None,           # INITIALIZED_DATA | READ
     ]
     sections = [s for s in sections if s is not None]
 
-    return _build_pe_image(sections, entry_rva, bss_size if bss_size else 0)
+    return _build_pe_image(
+        sections,
+        entry_rva,
+        bss_size if bss_size else 0,
+        is_dll=is_library,
+        export_directory=export_directory_rva_size,
+    )
+
+
+def _build_pe_export_directory(
+    base_rva: int, sorted_names: list[str], addrs: list[int]
+) -> bytes:
+    """Build a `.edata` section: IMAGE_EXPORT_DIRECTORY + EAT + name
+    pointer table + ordinal table + name strings, per the standard PE
+    export format. `sorted_names` must already be sorted (the Windows
+    loader binary-searches the name pointer table by name), `addrs`
+    holds each name's matching RVA (already relative to the image base).
+    Ordinals are assigned densely (0..n-1) in `sorted_names` order --
+    there is no separate "ordinal base" gap since every export here has
+    a name (no ordinal-only exports).
+    """
+    n = len(sorted_names)
+    DIR_SIZE = 40
+    eat_off = DIR_SIZE
+    eat_len = 4 * n
+    names_off = eat_off + eat_len
+    names_len = 4 * n
+    ordinals_off = names_off + names_len
+    ordinals_len = 2 * n
+    strings_off = ordinals_off + ordinals_len
+
+    dll_name = b"portapy.dll\x00"
+    dll_name_off = strings_off
+    name_str_off: list[int] = []
+    off = dll_name_off + len(dll_name)
+    for name in sorted_names:
+        name_str_off.append(off)
+        off += len(name) + 1
+    total_len = off
+    encoded_names = [name.encode("ascii") + b"\x00" for name in sorted_names]
+
+    buf = bytearray(total_len)
+    buf[dll_name_off:dll_name_off + len(dll_name)] = dll_name
+    for i, encoded in enumerate(encoded_names):
+        at = name_str_off[i]
+        buf[at:at + len(encoded)] = encoded
+
+    for i, addr in enumerate(addrs):
+        struct.pack_into("<I", buf, eat_off + i * 4, addr)
+    for i in range(n):
+        struct.pack_into("<I", buf, names_off + i * 4, base_rva + name_str_off[i])
+    for i in range(n):
+        struct.pack_into("<H", buf, ordinals_off + i * 2, i)
+
+    struct.pack_into(
+        "<IIHHIIIIIII",
+        buf, 0,
+        0,                          # Characteristics
+        0,                          # TimeDateStamp
+        0, 0,                       # MajorVersion, MinorVersion
+        base_rva + dll_name_off,    # Name
+        1,                          # Base (ordinal base)
+        n,                          # NumberOfFunctions
+        n,                          # NumberOfNames
+        base_rva + eat_off,         # AddressOfFunctions
+        base_rva + names_off,       # AddressOfNames
+        base_rva + ordinals_off,    # AddressOfNameOrdinals
+    )
+    return bytes(buf)
 
 
 def _build_pe_image(
     sections: list[tuple[str, int, bytes, int]],
     entry_rva: int,
     bss_size: int,
+    *,
+    is_dll: bool = False,
+    export_directory: "tuple[int, int]" = (0, 0),
 ) -> bytes:
     num_sects = len(sections)
 
@@ -554,6 +690,9 @@ def _build_pe_image(
 
     idata_entry = next(((rva, len(d)) for n, rva, d, *_ in layout if n == ".idata"), (0, 0))
 
+    characteristics = 0x0002 | 0x0020 | 0x0200  # EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE | DEBUG_STRIPPED
+    if is_dll:
+        characteristics |= 0x2000  # IMAGE_FILE_DLL
     coff_hdr = struct.pack(
         "<HHIIIHH",
         0x8664,            # IMAGE_FILE_MACHINE_AMD64
@@ -561,7 +700,7 @@ def _build_pe_image(
         0,
         0, 0,              # symbol table (none in the final exe)
         opt_hdr_size,
-        0x0002 | 0x0020 | 0x0200,  # EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE | DEBUG_STRIPPED
+        characteristics,
     )
 
     opt_hdr = bytearray()
@@ -584,7 +723,9 @@ def _build_pe_image(
     opt_hdr += struct.pack("<I", 0)                         # LoaderFlags
     opt_hdr += struct.pack("<I", 16)                        # NumberOfRvaAndSizes
     for i in range(16):
-        if i == 1:  # IMPORT directory
+        if i == 0:  # EXPORT directory
+            opt_hdr += struct.pack("<II", export_directory[0], export_directory[1])
+        elif i == 1:  # IMPORT directory
             opt_hdr += struct.pack("<II", idata_entry[0], idata_entry[1])
         else:
             opt_hdr += struct.pack("<II", 0, 0)
