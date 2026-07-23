@@ -148,6 +148,15 @@ def encode_and_rr(dst: Reg, src: Reg) -> bytes:  return _alu_rr(0x23, dst, src)
 def encode_or_rr (dst: Reg, src: Reg) -> bytes:  return _alu_rr(0x0B, dst, src)
 def encode_xor_rr(dst: Reg, src: Reg) -> bytes:  return _alu_rr(0x33, dst, src)
 def encode_cmp_rr(a:   Reg, b:   Reg) -> bytes:  return _alu_rr(0x3B, a,   b  )
+# ADC/SBB (add/subtract-with-carry) -- needed for register-pair 64-bit
+# add/sub: the low dwords add/subtract normally, then the high dwords use
+# these to fold in the low half's own carry/borrow (CF). Opcode/ModRM
+# direction verified against real NASM output before use (`adc ecx, eax`
+# -> `13 c8`, same reg<-r/m convention _alu_rr's own ADD/SUB/etc. already
+# use, not the r/m<-reg direction NASM happens to pick by default for a
+# bare `adc eax, ecx` mnemonic).
+def encode_adc_rr(dst: Reg, src: Reg) -> bytes:  return _alu_rr(0x13, dst, src)
+def encode_sbb_rr(dst: Reg, src: Reg) -> bytes:  return _alu_rr(0x1B, dst, src)
 def encode_test_rr(a:  Reg, b:   Reg) -> bytes:
     # TEST r/m, r  (opcode 0x85; operand order flipped vs standard ALU)
     return bytes([0x85, _modrm(0b11, int(b), int(a))])
@@ -163,6 +172,19 @@ def encode_idiv_r(src: Reg) -> bytes:
 
 def encode_div_r(src: Reg) -> bytes:
     return bytes([0xF7, _modrm(0b11, 6, int(src))])
+
+
+def encode_mul_r(src: Reg) -> bytes:
+    """MUL r/m32 -- unsigned EDX:EAX = EAX * src. The building block for
+    64x64 multiplication: (a_hi:a_lo) * (b_hi:b_lo)'s low 64 bits =
+    a_lo*b_lo (this instruction's full EDX:EAX result) plus
+    (a_lo*b_hi + a_hi*b_lo) shifted left 32 (each of THOSE cross products
+    only needs the LOW 32 bits kept, computed with plain `imul reg, reg`,
+    since the shift-left-32 already pushes anything above bit 31 out of
+    the final 64-bit result entirely). Verified against real NASM output
+    (`mul ecx` -> `f7 e1`, /4 within the F7 opcode group -- same group
+    idiv=/7, div=/6, neg=/3, not=/2 already use)."""
+    return bytes([0xF7, _modrm(0b11, 4, int(src))])
 
 
 def encode_neg(dst: Reg) -> bytes:
@@ -226,6 +248,36 @@ def encode_shr_cl(dst: Reg) -> bytes:
 
 def encode_sar_cl(dst: Reg) -> bytes:
     return bytes([0xD3, _modrm(0b11, 7, int(dst))])
+
+
+# SHLD/SHRD (double-precision shift) -- the real primitive for shifting a
+# 64-bit register-pair value by a constant/variable amount less than 32:
+# `shld dst, src, n` sets dst = (dst << n) | (src >> (32-n)), i.e. shifts
+# `n` bits of `src`'s TOP into `dst`'s bottom while dst shifts left --
+# exactly the operation needed to shift a 64-bit value's high dword left
+# while pulling in bits vacated from the low dword shifting left
+# alongside it (and the reverse, SHRD, for right shifts). The existing
+# __udivdi64/__umoddi64 runtime helpers already use SHLD internally for
+# their own 64-bit shift-and-subtract division loop (see abi_shims_
+# x86_32.asm) -- this is the same primitive, exposed here for codegen.py's
+# own inline shl/shr/sar handling of i64 values. Verified against real
+# NASM output before use: `shld eax, ecx, 5` -> `0f a4 c8 05`, `shld eax,
+# ecx, cl` -> `0f a5 c8`, `shrd eax, ecx, 5` -> `0f ac c8 05`, `shrd eax,
+# ecx, cl` -> `0f ad c8`.
+def encode_shld_ri(dst: Reg, src: Reg, n: int) -> bytes:
+    return bytes([0x0F, 0xA4, _modrm(0b11, int(src), int(dst)), n & 0xFF])
+
+
+def encode_shld_cl(dst: Reg, src: Reg) -> bytes:
+    return bytes([0x0F, 0xA5, _modrm(0b11, int(src), int(dst))])
+
+
+def encode_shrd_ri(dst: Reg, src: Reg, n: int) -> bytes:
+    return bytes([0x0F, 0xAC, _modrm(0b11, int(src), int(dst)), n & 0xFF])
+
+
+def encode_shrd_cl(dst: Reg, src: Reg) -> bytes:
+    return bytes([0x0F, 0xAD, _modrm(0b11, int(src), int(dst))])
 
 
 # ── Sign / zero extension ─────────────────────────────────────────────────────

@@ -124,6 +124,14 @@ class X86EncoderNasmCrossCheckTests(unittest.TestCase):
         self._check(enc.encode_idiv_r(Reg.ECX), "idiv ecx")
         self._check(enc.encode_div_r(Reg.ECX), "div ecx")
 
+    def test_mul(self):
+        self._check(enc.encode_mul_r(Reg.ECX), "mul ecx")
+
+    def test_adc_sbb(self):
+        # 64-bit register-pair add/sub building blocks.
+        self._check(enc.encode_adc_rr(Reg.EAX, Reg.ECX), "adc eax, ecx")
+        self._check(enc.encode_sbb_rr(Reg.EAX, Reg.ECX), "sbb eax, ecx")
+
     def test_neg_not(self):
         self._check(enc.encode_neg(Reg.EAX), "neg eax")
         self._check(enc.encode_not(Reg.EAX), "not eax")
@@ -151,6 +159,14 @@ class X86EncoderNasmCrossCheckTests(unittest.TestCase):
         self._check(enc.encode_shl_cl(Reg.EAX), "shl eax, cl")
         self._check(enc.encode_shr_cl(Reg.EAX), "shr eax, cl")
         self._check(enc.encode_sar_cl(Reg.EAX), "sar eax, cl")
+
+    def test_shld_shrd(self):
+        # Double-precision shift -- the real primitive for 64-bit
+        # register-pair shl/shr/sar by a constant/variable amount < 32.
+        self._check(enc.encode_shld_ri(Reg.EAX, Reg.ECX, 5), "shld eax, ecx, 5")
+        self._check(enc.encode_shld_cl(Reg.EAX, Reg.ECX), "shld eax, ecx, cl")
+        self._check(enc.encode_shrd_ri(Reg.EAX, Reg.ECX, 5), "shrd eax, ecx, 5")
+        self._check(enc.encode_shrd_cl(Reg.EAX, Reg.ECX), "shrd eax, ecx, cl")
 
     # ---- Sign / zero extension ---------------------------------------------
 
