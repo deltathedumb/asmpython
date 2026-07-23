@@ -920,6 +920,7 @@ class Parser:
         start = self._expect("KEYWORD", "class").pos
         name = self._expect("NAME").value
         parent = None
+        parent_qualifier = None
         sealed_permits: list = []
         implements_interface: "str | None" = None
         metaclass_name: "str | None" = None
@@ -973,11 +974,16 @@ class Parser:
                 else:
                     # First base class, possibly dotted (`module.Base`). Every
                     # consumer (sema's class table, codegen's chain walker) keys
-                    # by bare class name, so only the leaf survives.
-                    parent = self._expect("NAME").value
+                    # by bare class name, so `parent` keeps the leaf. Preserve
+                    # the qualifier separately so whole-program merging can
+                    # resolve same-named classes from different modules.
+                    parent_parts = [self._expect("NAME").value]
                     while self._check("OP", "."):
                         self._eat()
-                        parent = self._expect("NAME").value
+                        parent_parts.append(self._expect("NAME").value)
+                    parent = parent_parts[-1]
+                    if len(parent_parts) > 1:
+                        parent_qualifier = ".".join(parent_parts[:-1])
                 # Extra bases / keyword bases (multiple inheritance, metaclass=,
                 # or a `permits=` clause after a real base class) aren't
                 # modelled beyond the sealed-permits capture above -- single
@@ -1020,6 +1026,39 @@ class Parser:
                     self._parse_expr()
             self._expect("OP", ")")
         self._expect("OP", ":")
+        # Single-line class body (`class C: pass` / `class C: ...`) -- same
+        # inline-body allowance _parse_block() has for def/if/while/etc.
+        # (see its own comment). Only `pass`/`...` make sense on this line
+        # (a class body can't usefully hold a single inline method/field
+        # declaration the way a function body can hold a single inline
+        # statement), so this stays a narrow, explicit check rather than
+        # delegating to the general statement dispatcher.
+        if not self._check("NEWLINE"):
+            if self._check("KEYWORD", "pass") or self._check("OP", "..."):
+                self._eat()
+                self._expect("NEWLINE")
+                return A.ClassDef(  # type: ignore
+                    name=name,  # type: ignore
+                    parent=parent,  # type: ignore
+                    methods=[],
+                    pos=start,  # type: ignore
+                    parent_qualifier=parent_qualifier,
+                    class_vars=[],
+                    is_dataclass=is_dc,
+                    decorators=class_decorators,
+                    field_decorators={},
+                    sealed_permits=sealed_permits,
+                    implements_interface=implements_interface,
+                    metaclass=metaclass_name,
+                    access_policy=class_access_policy,
+                    abi_name=class_abi_name or "AutoABI",
+                    is_public_export=class_access_policy == "Public" or class_abi_name is not None,
+                )
+            raise ParseError(
+                "class bodies may only contain 'def' methods, field "
+                "declarations, docstrings, or 'pass'",
+                self._peek().pos,
+            )
         self._expect("NEWLINE")
         self._skip_newlines()
         self._expect("INDENT")
@@ -1081,6 +1120,7 @@ class Parser:
             parent=parent,  # type: ignore
             methods=methods,
             pos=start,  # type: ignore
+            parent_qualifier=parent_qualifier,
             class_vars=class_vars,
             is_dataclass=is_dc,
             decorators=class_decorators,
@@ -1304,6 +1344,9 @@ class Parser:
                 is_bool=t.value != "None",
                 is_none=t.value == "None",
             )
+        if t.kind == "OP" and t.value == "...":
+            self._eat()
+            return A.IntLit(value=0, pos=t.pos, is_ellipsis=True)
         if t.kind == "OP" and t.value == "[":
             return self._parse_default_list(t)
         if t.kind == "OP" and t.value == "{":
@@ -1567,6 +1610,19 @@ class Parser:
         return (name, None)
 
     def _parse_block(self) -> list:
+        # Single-line compound-statement body (`def f(): ...`, `if x: y = 1`,
+        # `class C: pass`) -- real Python allows exactly one simple statement
+        # right after the colon on the same line, with no INDENT/DEDENT at
+        # all, instead of the usual indented block. Every _parse_block
+        # caller already consumed the colon, so a non-NEWLINE token here
+        # means this is the inline form: parse exactly one statement via the
+        # normal dispatcher (which already expects to consume the statement's
+        # own trailing NEWLINE, same as when it's the first line of an
+        # indented block) and return it as a one-element body. Confirmed via
+        # a real repro: PIL.Image.py's `Protocol` stub methods are written
+        # exactly as `def getdata(self) -> tuple[...]: ...` on one line.
+        if not self._check("NEWLINE"):
+            return [self._parse_stmt()]
         self._expect("NEWLINE")
         self._skip_newlines()
         self._expect("INDENT")
@@ -1744,6 +1800,25 @@ class Parser:
         # "lhs.name = rhs" -> AttrAssign.
         pos = t.pos
         expr = self._parse_expr()
+        # Parenthesized tuple-unpacking assignment: `(a, b, c) = e1, e2, e3`.
+        # A leading `(` never reaches the bare-NAME lookahead above (that
+        # only fires when the statement starts with a NAME token), so
+        # `(a, b, c)` was always parsed here as a plain TupleLit expression
+        # first -- unwrap its elements into targets when they're all valid
+        # assignment targets and `=` follows, exactly like the bare-NAME
+        # tuple-unpack case just above handles `a, b, c = ...` (real Python
+        # treats `(a, b) = x` and `a, b = x` as equivalent). Confirmed via a
+        # real repro: PIL.Image.py's `(a, b, c, d, e, f) = matrix`.
+        if isinstance(expr, A.TupleLit) and expr.elems and self._check("OP", "=") and all(
+            isinstance(el, (A.Name, A.Subscript, A.Attr)) for el in expr.elems
+        ):
+            self._eat()  # '='
+            values = [self._parse_expr()]
+            while self._check("OP", ","):
+                self._eat()
+                values.append(self._parse_expr())
+            self._expect("NEWLINE")
+            return A.TupleAssign(targets=expr.elems, values=values, pos=pos)
         # Tuple assignment with at least one subscript/attribute target, e.g.
         # `xs[0], xs[1] = xs[1], xs[0]` or `a, self.x = self.x, a`. Pure
         # NAME-only sequences are handled above by `_parse_tuple_assign`.
@@ -1764,7 +1839,12 @@ class Parser:
             return A.TupleAssign(targets=targets, values=values, pos=pos)
         if isinstance(expr, A.Subscript) and self._check("OP", "="):
             self._eat()
-            value = self._parse_expr()
+            # Bare (unparenthesised) tuple RHS: `d[k] = a, b`, same as plain
+            # assignment's `x = a, b` -- _parse_expr() alone only ever
+            # consumed the first element and left a stray comma for the
+            # NEWLINE check to choke on. Confirmed via a real repro:
+            # PIL.Image.py's `OPEN[id] = factory, accept`.
+            value = self._parse_tuple_rhs()
             self._expect("NEWLINE")
             return A.IndexAssign(target=expr, value=value, pos=pos)
         if isinstance(expr, A.Subscript) and self._peek().kind == "OP" and self._peek().value in AUG_OPS:
@@ -1775,7 +1855,8 @@ class Parser:
             return A.IndexAssign(target=expr, value=combined, pos=pos)
         if isinstance(expr, A.Attr) and self._check("OP", "="):
             self._eat()
-            value = self._parse_expr()
+            # Same bare-tuple-RHS allowance as the Subscript case just above.
+            value = self._parse_tuple_rhs()
             self._expect("NEWLINE")
             return A.AttrAssign(obj=expr.obj, name=expr.name, value=value, pos=pos)
         if isinstance(expr, A.Attr) and self._check("OP", ":"):
@@ -3181,6 +3262,9 @@ class Parser:
         elif t.kind == "KEYWORD" and t.value == "None":
             self._eat()
             atom = A.IntLit(value=0, pos=t.pos, is_none=True)
+        elif t.kind == "OP" and t.value == "...":
+            self._eat()
+            atom = A.IntLit(value=0, pos=t.pos, is_ellipsis=True)
         elif t.kind == "OP" and t.value == "(":
             atom = self._parse_paren_or_tuple()
         elif t.kind == "OP" and t.value == "[":
@@ -3222,6 +3306,24 @@ class Parser:
                             step = self._parse_expr()
                     self._expect("OP", "]")
                     idx = A.Slice(start=start, stop=stop, step=step, pos=lbr.pos)
+                elif self._check("OP", ","):
+                    # Comma-separated subscript (`x[a, b]`) desugars to a
+                    # single tuple index (`x[(a, b)]`), same as real Python's
+                    # own grammar -- most common in generic-type expressions
+                    # used as real runtime values (`tuple[int, ...]`,
+                    # `Callable[[int], str]` passed to `typing.cast(...)`,
+                    # etc.), which this parser otherwise has no annotation
+                    # context to special-case. A trailing comma before `]`
+                    # (`x[a,]`) is valid Python too and still yields a
+                    # 1-tuple index, matching `(a,)`'s own trailing-comma rule.
+                    elems = [start]
+                    while self._check("OP", ","):
+                        self._eat()
+                        if self._check("OP", "]"):
+                            break
+                        elems.append(self._parse_expr())
+                    self._expect("OP", "]")
+                    idx = A.TupleLit(elems=elems, pos=lbr.pos)  # type: ignore
                 else:
                     self._expect("OP", "]")
                     idx = start

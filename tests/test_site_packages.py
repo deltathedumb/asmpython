@@ -87,7 +87,19 @@ class SitePackageResolutionTests(unittest.TestCase):
             (site / "editable.pth").write_text(str(editable) + "\n", encoding="utf-8")
             (editable / "editable_mod.py").write_text("VALUE = 9\n", encoding="utf-8")
             with mock.patch.object(sys, "path", [str(site)]):
-                self.assertIn(editable.resolve(), site_package_roots())
+                # site_package_roots() intentionally preserves each root's
+                # original form (matching what real sys.path/.pth entries
+                # look like) rather than returning its .resolve()d form --
+                # .resolve() on Windows can rewrite a long path segment to
+                # its legacy 8.3 short-name alias, and that alias must not
+                # leak into paths this module hands back to callers who
+                # never asked for one (see host_site_packages.py's
+                # _append_unique). Assert against the same unresolved form
+                # the second assertion below already (correctly) expects,
+                # rather than a resolved form that only coincidentally
+                # matches when the temp directory's own path has no
+                # short-name-eligible segment.
+                self.assertIn(editable, site_package_roots())
                 self.assertEqual(
                     resolve_site_package("editable_mod"),
                     editable / "editable_mod.py",

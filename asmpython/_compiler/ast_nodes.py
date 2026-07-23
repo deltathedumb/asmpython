@@ -38,6 +38,9 @@ class Module:
     # `overload` extension: True if this module has any @overload-dispatched
     # call sites. Only supported on --backend x86-64 today -- see driver.py.
     uses_overload: bool = False
+    # Library builders set this so top-level initializers are emitted as a
+    # callable module-init symbol instead of being folded into process main.
+    force_module_init: bool = False
 
 
 @dataclass
@@ -139,6 +142,11 @@ class ClassDef:
     parent: Optional[str]
     methods: list[FuncDef]
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    # Module qualifier from a dotted base expression.  ``parent`` remains the
+    # leaf class name consumed by sema/codegen; the whole-program loader uses
+    # this qualifier to distinguish e.g. ``class Layer(previous.Layer)`` from
+    # an actual self-cycle when several modules define ``Layer``.
+    parent_qualifier: "str | None" = None
     # Class-body variable declarations: parallel list of (name, annot, value)
     # where annot is a parser annotation descriptor or None and value is the
     # initializer Expr or None. Used by sema to type class attributes (e.g. a
@@ -685,6 +693,13 @@ class IntLit:
     # f-strings render "None" instead of "0"; `None` is still "int" (0)
     # everywhere else (comparisons, truthiness, etc.).
     is_none: bool = False
+    # True for the literal `...` (Ellipsis; parses to IntLit(0), the same
+    # underlying representation `None` uses). Lets print()/str()/f-strings
+    # render "Ellipsis" instead of "0"/"None" -- `...` is a distinct runtime
+    # singleton from `None` in real Python (`... is not None`, `repr(...) ==
+    # "Ellipsis"`), so it needs its own marker flag rather than reusing
+    # is_none, even though both share IntLit(0) as their storage.
+    is_ellipsis: bool = False
 
 
 @dataclass

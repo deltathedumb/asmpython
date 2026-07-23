@@ -24,6 +24,7 @@ BACKEND_MODULES = {
     "6502": "mos6502",
     "z80": "z80",
     "jvm": "jvm",
+    "android": "android",
     "python-bytecode": "python_bytecode",
     "webassembly": "webassembly",
     "beam": "beam",

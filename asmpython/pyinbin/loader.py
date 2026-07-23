@@ -88,7 +88,15 @@ class SourceLoader:
         if source_root is None and not import_roots and bundle is None:
             raise ValueError("a source root or pyinbin bundle is required")
         roots = ([source_root] if source_root is not None else []) + (import_roots or [])
-        self.source_roots = list(dict.fromkeys(root.resolve() for root in roots))
+        # Keep each root's ORIGINAL form, not its .resolve()d one: .resolve()
+        # on Windows can rewrite a long path segment to its legacy 8.3
+        # short-name alias (e.g. a user directory containing a space), and
+        # that alias would then leak into every source path this loader
+        # reports back to callers, who never asked for or expected one.
+        # Only the *comparison* in _source_for's nesting-detection logic
+        # below needs the resolved (symlink/".."-collapsed) form; the roots
+        # list itself stays in whatever form the caller supplied.
+        self.source_roots = list(dict.fromkeys(roots))
         self.bundle = bundle.resolve() if bundle is not None else None
         self._modules: dict[str, SimpleNamespace] = _ModuleRegistry()
         self._bundle_modules: dict[str, PackedModule] = {}
@@ -123,7 +131,13 @@ class SourceLoader:
                     if child == parent:
                         continue
                     try:
-                        child.relative_to(parent)
+                        # .resolve() only for the containment CHECK (needs
+                        # symlink/".."-collapsed paths to be correct) -- the
+                        # unresolved `parent`/`child` values themselves are
+                        # what get reordered into `roots` below, so a root's
+                        # original (possibly short-name-free) form still
+                        # survives into the path this function returns.
+                        child.resolve().relative_to(parent.resolve())
                     except ValueError:
                         continue
                     roots = [parent, *[root for root in roots if root != parent]]
@@ -131,10 +145,15 @@ class SourceLoader:
         sys_module = self._modules.get("sys")
         for entry in getattr(sys_module, "path", ()) if sys_module is not None else ():
             try:
-                candidate = Path(str(entry)).resolve()
+                # Keep the original (unresolved) form -- see this method's
+                # nesting-detection comment above for why .resolve()'s
+                # Windows short-name rewriting must not leak into paths
+                # this loader hands back to callers.
+                candidate = Path(str(entry))
+                resolved = candidate.resolve()
             except (TypeError, OSError):
                 continue
-            if candidate not in roots:
+            if resolved not in (root.resolve() for root in roots):
                 roots.append(candidate)
         for root in roots:
             base = root.joinpath(*parts)

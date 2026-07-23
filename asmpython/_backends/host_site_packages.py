@@ -27,11 +27,19 @@ class SitePackageImportError(RuntimeError):
 
 
 def _append_unique(paths: list[Path], candidate: Path) -> None:
+    # Compare via .resolve() (follows symlinks, collapses ".."/".") but store
+    # the ORIGINAL candidate -- .resolve() on Windows can silently rewrite a
+    # long path segment to its legacy 8.3 short-name alias (e.g. a user
+    # directory containing a space), and that alias then leaked into every
+    # path this module returns to callers, which never asked for or expected
+    # a short-name path. Confirmed via a real failure: resolve_site_package()
+    # returned .../HARVEY~1/... for a caller-constructed path under
+    # .../Harvey Jass/....
     resolved = candidate.resolve()
     for existing in paths:
-        if existing == resolved:
+        if existing.resolve() == resolved:
             return
-    paths.append(resolved)
+    paths.append(candidate)
 
 
 def _remove_path(paths: list[Path], candidate: Path | None) -> None:

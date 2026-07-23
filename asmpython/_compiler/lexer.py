@@ -248,21 +248,46 @@ class Lexer:
                 self._advance()
                 continue
 
-            # f-string prefix: f"..." or f'...'
-            if ch == "f" and self._peek(1) in ('"', "'"):
+            # String-literal prefixes: f/r/b singly, and the combined raw
+            # forms rb/br/rf/fr -- all case-insensitive in real Python
+            # (R"...", Rb"...", BR"...", etc. are just as valid as their
+            # lowercase spellings). Checked as a genuine 2-character lookup
+            # BEFORE any single-character prefix check, since a single-char
+            # check alone would consume just the first letter of "rb" and
+            # leave a bare "b" sitting in front of the string quote, which
+            # nothing downstream expects (confirmed via a real repro: PIL's
+            # own `rb'tiff:Orientation...'` lexed as NAME('rb') + a
+            # not-actually-raw STRING token, silently losing the raw-string
+            # backslash-literal rule and producing "expected NEWLINE, got
+            # STRING" once the parser choked on the stray NAME).
+            two = (self._peek(0) + self._peek(1)).lower()
+            if two in ("rb", "br") and self._peek(2) in ('"', "'"):
+                self._advance()  # consume both prefix letters; only the
+                self._advance()  # quote is left for _read_raw_string
+                tok = self._read_raw_string()
+                self.tokens.append(Token("BYTES", tok.value, tok.pos.line, tok.pos.col))
+                continue
+            if two in ("rf", "fr") and self._peek(2) in ('"', "'"):
+                self._advance()  # consume both prefix letters; only the
+                self._advance()  # quote is left for _read_fstring
+                self.tokens.append(self._read_fstring(raw=True))
+                continue
+
+            lower_ch = ch.lower()
+            if lower_ch == "f" and self._peek(1) in ('"', "'"):
+                self._advance()  # consume 'f'/'F'; only the quote is left
                 self.tokens.append(self._read_fstring())
                 continue
 
             # r"..." raw strings: backslashes are literal (no escape processing).
-            # We reuse _read_string but strip backslash-escape processing.
-            if ch == "r" and self._peek(1) in ('"', "'"):
-                self._advance()  # consume 'r'
+            if lower_ch == "r" and self._peek(1) in ('"', "'"):
+                self._advance()  # consume 'r'/'R'
                 self.tokens.append(self._read_raw_string())
                 continue
 
             # b"..." / b'...' byte literals: emit as BYTES token (list[int]).
-            if ch == "b" and self._peek(1) in ('"', "'"):
-                self._advance()  # consume 'b'
+            if lower_ch == "b" and self._peek(1) in ('"', "'"):
+                self._advance()  # consume 'b'/'B'
                 tok = self._read_string()
                 self.tokens.append(Token("BYTES", tok.value, tok.pos.line, tok.pos.col))
                 continue
@@ -362,16 +387,23 @@ class Lexer:
                 raise LexError(f"invalid float literal {text!r}", SourcePos(line, col), ErrorCode.L_INVALID_FLOAT)
         return Token("INT", int(text), line, col)
 
-    def _read_fstring(self) -> Token:
+    def _read_fstring(self, raw: bool = False) -> Token:
         """Read an f-string. Returns an FSTRING token whose value is a list
         of segments: ('str', text) or ('expr', raw_source_string).
 
         The parser will re-lex the expression segments later. This keeps the
         lexer's state-machine flat (we don't need to track 'inside-fstring-
         expression' depth across the main lex loop).
+
+        Prefix letter(s) already consumed by the caller (matching
+        _read_raw_string's convention) -- the only remaining character is
+        the opening quote. `raw=True` is for the combined rf"..."/fr"..."
+        form: literal-text segments keep backslashes verbatim (only an
+        escaped closing quote is special, same exception _read_raw_string
+        itself makes), while `{expr}` segments are unaffected either way
+        (they're just source text the parser re-lexes on its own later).
         """
         line, col = self.line, self.col
-        self._advance()  # 'f'
         quote = self._advance()
         segments: list[tuple[str, str]] = []
         text: list[str] = []
@@ -384,6 +416,15 @@ class Lexer:
             if c == quote:
                 self._advance()
                 break
+            if c == "\\" and raw:
+                # Only escaped-quote is special in a raw f-string (prevents
+                # closing) -- everything else stays a literal backslash.
+                self._advance()
+                if self._peek() == quote:
+                    text.append(self._advance())
+                else:
+                    text.append("\\")
+                continue
             if c == "\\":
                 self._advance()
                 esc = self._advance()
@@ -453,9 +494,25 @@ class Lexer:
         return Token("FSTRING", segments, line, col)
 
     def _read_raw_string(self) -> Token:
-        """Read r"..." or r'...': backslashes are literal, no escape processing."""
+        """Read r"..." or r'...': backslashes are literal, no escape processing.
+
+        Also handles the triple-quoted form (r\"\"\"...\"\"\" / r'''...'''),
+        exactly like _read_string does for a plain string -- real-world raw
+        docstrings/strings spanning multiple lines are common (e.g. `requests`'
+        own r\"\"\"Sends a GET request.\n...\"\"\"), and this reader used to have
+        no triple-quote detection at all, so it always fell through to the
+        single-line body loop below and raised "newline in string literal" on
+        the first embedded newline. Confirmed via a real repro: asmpython's
+        own CLI import-policy check walks a real pip-installed package's
+        source tree and crashed trying to parse `requests/api.py`'s very
+        first raw docstring.
+        """
         line, col = self.line, self.col
         quote = self._advance()
+        if self._peek() == quote and self._peek(1) == quote:
+            self._advance()
+            self._advance()
+            return self._read_triple_string(quote, line, col, raw=True)
         chars: list[str] = []
         while True:
             c = self._peek()
@@ -512,9 +569,19 @@ class Lexer:
                 chars.append(self._advance())
         return Token("STRING", "".join(chars), line, col)
 
-    def _read_triple_string(self, quote: str, line: int, col: int) -> Token:
+    def _read_triple_string(
+        self, quote: str, line: int, col: int, raw: bool = False
+    ) -> Token:
         """Reader for the body of a triple-quoted literal. Opening triple
-        quote already consumed by the caller."""
+        quote already consumed by the caller.
+
+        `raw`: called from _read_raw_string for r\"\"\"...\"\"\"/r'''...'''
+        (backslashes are literal, matching _read_raw_string's own single-line
+        rule) -- the only special case is a backslash immediately before the
+        closing quote character, which must not be allowed to prevent the
+        triple-quote terminator from matching (same escaped-quote exception
+        _read_raw_string's single-line path already has).
+        """
         chars: list[str] = []
         while True:
             c = self._peek()
@@ -528,6 +595,11 @@ class Lexer:
                 self._advance()
                 break
             if c == "\\":
+                if raw:
+                    chars.append(self._advance())
+                    if self._peek() == quote:
+                        chars.append(self._advance())
+                    continue
                 self._advance()
                 esc = self._advance()
                 chars.append(
@@ -549,7 +621,7 @@ class Lexer:
     def _read_operator(self) -> Token:
         line, col = self.line, self.col
         three = self.src[self.pos : self.pos + 3]
-        if three in ("//=", "**="):
+        if three in ("//=", "**=", "..."):
             self._advance()
             self._advance()
             self._advance()

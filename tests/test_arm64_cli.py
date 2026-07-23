@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import stat
 import struct
+import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -105,6 +106,13 @@ class Arm64CliTests(unittest.TestCase):
             self.assertIn(unsupported_symbol, errors.getvalue())
             discover.assert_not_called()
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "Windows/NTFS has no POSIX execute bit -- driver.py's "
+        "resolved.chmod(... | 0o111) runs without error but Path.stat() "
+        "can never reflect S_IXUSR there, so this assertion is meaningless "
+        "on this platform rather than a real regression.",
+    )
     def test_build_command_uses_reusable_builder_and_marks_executable(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
