@@ -1339,111 +1339,104 @@ class Parser:
         self._eat()
         return self._parse_default_literal()
 
+    def _is_safe_default_value(self, e) -> bool:
+        """True if `e` is safe to splice, verbatim, into every call site that
+        omits this parameter (see `_parse_default_literal`'s docstring for
+        why that's the actual constraint a default value's shape must
+        satisfy -- this is the recursive shape-check side of it, mirroring
+        `_is_assign_target`'s role for assignment targets).
+
+        Accepts exactly the shapes `_parse_default_literal` accepted before
+        it started parsing through the general expression grammar: numeric/
+        string/bool/None/Ellipsis literals, a (possibly negated) numeric
+        literal, a dotted Name/Attr chain (a compile-time-constant reference,
+        e.g. `Trit.MID`), and a list/tuple built purely from safe elements
+        (recursively) -- plus the empty dict, the one dict shape the
+        original grammar ever allowed (asmpython dict literals need str
+        keys typed from real elements, which an empty dict has none of to
+        type from, so a non-empty dict was never actually reachable there
+        either). Everything else the general expression grammar can
+        produce -- calls, subscripts, attribute access beyond a bare dotted
+        reference, f-strings, comprehensions, sets, non-empty dicts,
+        binary/boolean/comparison ops, lambdas -- is rejected, since none of
+        them are safe to silently re-evaluate at every omitted-argument call
+        site the way a real one-time def-level default should be.
+        """
+        if isinstance(e, (A.IntLit, A.FloatLit, A.StrLit)):
+            return True
+        if isinstance(e, A.UnaryOp) and e.op == "-":
+            return isinstance(e.operand, (A.IntLit, A.FloatLit))
+        if isinstance(e, A.Name):
+            return True
+        if isinstance(e, A.Attr):
+            return self._is_safe_default_value(e.obj)
+        if isinstance(e, (A.ListLit, A.TupleLit)):
+            return all(self._is_safe_default_value(el) for el in e.elems)
+        if isinstance(e, A.DictLit):
+            return not e.keys and not e.values
+        return False
+
+    def _fold_default_negation(self, e):
+        """`_is_safe_default_value` accepts `UnaryOp(op="-", operand=IntLit|
+        FloatLit)`, but every existing consumer of a default value's AST
+        (sema's direct-splice call-site binding, anything pattern-matching
+        on `isinstance(default, A.IntLit)`) expects the sign already folded
+        into the literal itself -- the same pre-folded shape
+        `_parse_default_literal` always produced, before it started parsing
+        through the general expression grammar (which builds a real
+        `UnaryOp` node for `-x`, unlike a literal's own lexer-level sign).
+        Folds it back to that shape so this stays byte-for-byte compatible
+        with every downstream reader, instead of teaching each of them to
+        also unwrap a UnaryOp wrapper around a default they never had to
+        handle before."""
+        if isinstance(e, A.UnaryOp) and e.op == "-":
+            operand = e.operand
+            if isinstance(operand, A.IntLit):
+                return A.IntLit(value=-operand.value, pos=e.pos)
+            if isinstance(operand, A.FloatLit):
+                return A.FloatLit(value=-operand.value, pos=e.pos)
+        return e
+
     def _parse_default_literal(self):
-        """Parse one default-argument literal: int/float/str/bool/None, or a
-        `[...]`/`{...}` literal of such values (e.g. `choices: list[str] = []`).
-        Negation prefix permitted on numbers so `def f(x=-1)` works."""
-        eq = self._peek()
-        t = self._peek()
-        # Only literal defaults are allowed (MVP). Negation prefix permitted
-        # so `def f(x=-1)` works.
-        neg = False
-        if t.kind == "OP" and t.value == "-":
-            self._eat()
-            neg = True
-            t = self._peek()
-        if t.kind == "INT":
-            self._eat()
-            return A.IntLit(value=-t.value if neg else t.value, pos=t.pos)  # type: ignore
-        if t.kind == "FLOAT":
-            self._eat()
-            return A.FloatLit(value=-t.value if neg else t.value, pos=t.pos)  # type: ignore
-        if neg:
-            raise ParseError("unary '-' only allowed before numeric default", eq.pos, ErrorCode.P_INVALID_DEFAULT)
-        if t.kind == "STRING":
-            self._eat()
-            return A.StrLit(value=t.value, pos=t.pos)  # type: ignore
-        if t.kind == "KEYWORD" and t.value in ("True", "False", "None"):
-            self._eat()
-            v = 1 if t.value == "True" else 0
-            return A.IntLit(
-                value=v,
-                pos=t.pos,
-                is_bool=t.value != "None",
-                is_none=t.value == "None",
+        """Parse one default-argument value: anything `_is_safe_default_value`
+        accepts (see its docstring for the exact set and why it's
+        restricted) -- int/float/str/bool/None/Ellipsis, a (possibly
+        negated) number, a dotted Name/Attr reference, or a list/tuple of
+        such, recursively. The empty dict is the one dict shape accepted;
+        asmpython's dict literals need str keys typed from real elements,
+        which an empty dict never has any of to type from.
+
+        Parses through the same general atom/trailer grammar every other
+        expression uses (so e.g. `[1, [2, 3]]` or `(a.b.c, 1)` compose for
+        free, the same way nested nested nested tuples/lists already do in
+        any ordinary expression) rather than a separate, narrower copy of
+        int/float/str/list/tuple/dict/dotted-name parsing -- then rejects
+        (via `_is_safe_default_value`) whatever shape the general grammar
+        can produce that this restriction doesn't allow (calls, subscripts,
+        f-strings, comprehensions, sets, non-empty dicts, binary ops, ...).
+
+        Only a leading `-` is special-cased here, not the full `_parse_unary`
+        (which would also silently accept and discard a leading `+`, or wrap
+        `~x` in a UnaryOp for `_is_safe_default_value` to reject after the
+        fact) -- the original grammar's negation handling only ever
+        recognized `-`, so a bare `def f(x=+1)` always raised
+        P_INVALID_DEFAULT before; matching that exactly means never letting
+        the parse succeed for `+`/`~` in the first place, not rejecting them
+        one level later once they've already been silently consumed.
+        """
+        if self._check_any_op("-"):
+            minus_pos = self._eat().pos
+            expr = A.UnaryOp(op="-", operand=self._parse_primary(), pos=minus_pos)
+        else:
+            expr = self._parse_primary()
+        if not self._is_safe_default_value(expr):
+            raise ParseError(
+                "default argument must be a literal "
+                "(int/float/str/True/False/None/list/dict), got "
+                f"{expr.__class__.__name__}",
+                expr.pos,
             )
-        if t.kind == "OP" and t.value == "...":
-            self._eat()
-            return A.IntLit(value=0, pos=t.pos, is_ellipsis=True)
-        if t.kind == "OP" and t.value == "[":
-            return self._parse_default_list(t)
-        if t.kind == "OP" and t.value == "{":
-            return self._parse_default_dict(t)
-        if t.kind == "OP" and t.value == "(":
-            return self._parse_default_tuple(t)
-        if t.kind == "NAME":
-            # A dotted name reference, e.g. `def f(x=Trit.MID)` referencing a
-            # plain-int class constant. Not a literal in syntax, but its
-            # value is fixed at compile time -- evaluated like any other
-            # expression wherever it's spliced into a call missing the arg.
-            self._eat()
-            node: A.Expr = A.Name(name=t.value, pos=t.pos)
-            while self._check("OP", "."):
-                self._eat()
-                attr = self._expect("NAME")
-                node = A.Attr(obj=node, name=attr.value, pos=attr.pos)
-            return node
-        raise ParseError(
-            f"default argument must be a literal (int/float/str/True/False/None/list/dict), got {t.kind} {t.value!r}",
-            t.pos,
-        )
-
-    def _parse_default_list(self, open_tok: Token) -> "A.ListLit":
-        """`[a, b, ...]` as a default argument value. Element type follows
-        the first element (homogeneous, like other asmpython list literals);
-        empty (`[]`) defaults to "int" (the caller's annotation, if any,
-        decides the param's actual element type)."""
-        self._eat()  # '['
-        elems: list = []
-        while not self._check("OP", "]"):
-            elems.append(self._parse_default_literal())
-            if self._check("OP", ","):
-                self._eat()
-            else:
-                break
-        self._expect("OP", "]")
-        el_type = "int"
-        if elems:
-            if isinstance(elems[0], A.StrLit):
-                el_type = "str"
-            elif isinstance(elems[0], A.FloatLit):
-                el_type = "float"
-        return A.ListLit(elems=elems, pos=open_tok.pos, el_type=el_type)
-
-    def _parse_default_tuple(self, open_tok: Token) -> "A.TupleLit":
-        """`(a, b, ...)` as a default argument value, e.g.
-        `color: tuple[int, int, int] = (0, 0, 0)`. Per-slot element types are
-        stamped by sema (like any other tuple literal) wherever this default
-        actually gets spliced into a call; a bare `(a)` with no comma is not a
-        tuple (matches TupleLit's normal parsing rule)."""
-        self._eat()  # '('
-        elems: list = []
-        while not self._check("OP", ")"):
-            elems.append(self._parse_default_literal())
-            if self._check("OP", ","):
-                self._eat()
-            else:
-                break
-        self._expect("OP", ")")
-        return A.TupleLit(elems=elems, pos=open_tok.pos)
-
-    def _parse_default_dict(self, open_tok: Token) -> "A.DictLit":
-        """`{}` as a default argument value. Only the empty dict literal is
-        supported (asmpython dict literals require str keys; an empty dict
-        needs no key/value type info)."""
-        self._eat()  # '{'
-        self._expect("OP", "}")
-        return A.DictLit(keys=[], values=[], pos=open_tok.pos)
+        return self._fold_default_negation(expr)
 
     def _parse_type_annotation(self) -> tuple:
         """Parse a type annotation, returning a normalized descriptor.
