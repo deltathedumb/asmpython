@@ -18,16 +18,24 @@ def link(ctx: dict) -> bytes:
     target_os = ctx.get("target_os", "windows")
     objects: list[bytes] = ctx["objects"]
     entry_symbol = ctx.get("entry_symbol", "main")
+    is_library = ctx.get("output_type") == "library"
+    exports = ctx.get("exports") or []
 
     if target_os == "windows":
         from asmpython._backends.x86_64.pe_linker import link_pe
-        return link_pe(objects, entry_symbol=entry_symbol)
+        return link_pe(
+            objects, entry_symbol=entry_symbol, is_library=is_library, exports=exports
+        )
 
     if target_os == "linux":
-        from asmpython._backends.x86_64 import elf_linker
-        elf_linker._SO_FOR_SYMBOL.setdefault("dlopen", "libdl.so.2")
-        elf_linker._SO_FOR_SYMBOL.setdefault("dlsym", "libdl.so.2")
-        return elf_linker.link_elf(objects, entry_symbol=entry_symbol)
+        from asmpython._backends.x86_64.elf_linker import link_elf
+        return link_elf(
+            objects,
+            entry_symbol=entry_symbol,
+            is_library=is_library,
+            exports=exports,
+            soname=ctx.get("soname") or "libportapy.so",
+        )
 
     raise NotImplementedError(
         f"--linker builtin doesn't support target_os={target_os!r} yet "

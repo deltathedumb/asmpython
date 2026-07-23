@@ -335,6 +335,8 @@ def _run_backend_x86_64(
     *,
     gcc_path: Path | None = None,
     linker: str | None = None,
+    output_type: str = "executable",
+    soname: str | None = None,
 ) -> BuildResult:
     """asmpython's built-in x86-64 backend: AST -> ir_lower.py -> the
     vendored backend (asmpython/_backends/x86_64), which compiles to an
@@ -417,6 +419,9 @@ def _run_backend_x86_64(
         "linker": effective_linker,
         "gcc_path": gcc,
         "extra_args": ["-mconsole"] if target == "windows" else [],
+        "output_type": output_type,
+        "exports": ir_mod.exports,
+        "soname": soname,
     }
     objects = [program_obj, shim_obj, runtime_obj]
     objects += extra_objs
@@ -424,10 +429,12 @@ def _run_backend_x86_64(
     linked = backend.link(objects, link_args)
     out_bytes = next(iter(linked.values()))
 
+    # A library is never "the executable bit" the way a Linux exe is --
+    # only mark it executable when it actually is one.
     out_path = _write_backend_output(
         out_path,
         out_bytes,
-        executable=target == "linux",
+        executable=target == "linux" and output_type != "library",
     )
 
     print(f"wrote {out_path}")
@@ -555,14 +562,20 @@ def _run_backend(
     if backend == "x86-64":
         if emit_asm_only or keep_assembly:
             raise ValueError("--backend x86-64 has no assembly stage; drop --emit-asm/--keep-assembly")
-        if bundle_mode != "onefile" or output_type != "executable" or icon_path is not None:
+        if output_type not in ("executable", "library"):
             raise ValueError(
-                "--backend x86-64 only supports plain onefile executables for now "
-                "(no --onedir, --output-type library, or --icon)"
+                f"--backend x86-64 doesn't support --output-type {output_type!r} "
+                "(executable/library only)"
+            )
+        if bundle_mode != "onefile" or icon_path is not None:
+            raise ValueError(
+                "--backend x86-64 only supports plain onefile builds for now "
+                "(no --onedir or --icon)"
             )
         return _run_backend_x86_64(
             module, target, out_path,
             gcc_path=gcc_path, linker=linker,
+            output_type=output_type,
         )
     elif backend == "ternary":
         return _run_backend_ternary(module, out_path)
