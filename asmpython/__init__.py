@@ -39,6 +39,9 @@ against that. The withdrawn implementation is preserved for reference under
 
 from __future__ import annotations
 
+import sys
+from types import ModuleType
+
 from . import backend, linker, mlang
 
 __version__ = "3.14-preview"
