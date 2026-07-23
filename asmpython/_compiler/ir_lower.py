@@ -8234,6 +8234,27 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             val = _lower_expr(ctx, s.value)
             ctx.emit(IRInstr("call", None, [f"{cls_name}____setitem__", obj_v, idx_v, val]))
             return
+        if obj_ty == "outparam":
+            # `out[0] = value`: sema already required index == literal 0 and
+            # type-checked `value` against the declared pointee kind (there
+            # is exactly one slot, not a real array). `target.obj`'s own
+            # IRValue already IS the raw pointer -- an exported function's
+            # outparam[T] parameter is lowered PTR-typed (ir_type_for's
+            # default for any annotation base it doesn't recognize as a
+            # by-value scalar) and passed through unmodified, unlike an
+            # ordinary local which gets an extra stack slot -- so no
+            # address computation is needed, just a direct store. `val`'s
+            # own IRValue.type from _lower_expr already picks the right
+            # store width ("store"'s codegen branches on it: f64 -> movsd,
+            # i64 -> mov) -- an int literal/expression already comes out
+            # I64-typed and a float one F64-typed, matching outparam[int]
+            # vs outparam[float]'s real ABI pointee width with no bitcast
+            # needed (unlike list/dict cells, which are always raw i64
+            # storage regardless of element kind).
+            ptr_v = _lower_expr(ctx, target.obj)
+            val = _lower_expr(ctx, s.value)
+            ctx.emit(IRInstr("store", None, [val, ptr_v]))
+            return
         if obj_ty != "list":
             raise LowerError(f"unsupported stmt IndexAssign ({obj_ty})")
         obj_v = _lower_expr(ctx, target.obj)

@@ -475,6 +475,10 @@ class Scope:
     dict_value_tuple_types: dict[str, list[str]] = field(default_factory=dict)
     # For names typed "tuple", the per-slot element kinds.
     tuple_elem_types: dict[str, list[str]] = field(default_factory=dict)
+    # For names typed "outparam" (an exported function's raw-pointer-out
+    # parameter -- see ast_nodes/parser's `outparam[T]` annotation), the
+    # pointee kind ("int"/"float") the store-through assignment must match.
+    outparam_el_types: dict[str, str] = field(default_factory=dict)
     # For names typed "int" that were last assigned a bool-valued expression
     # (see A.is_bool_expr) — lets print()/str()/f-strings render "True"/"False".
     bool_flags: dict[str, bool] = field(default_factory=dict)
@@ -519,6 +523,8 @@ class Scope:
             self.dict_value_tuple_types[name] = value_tuple_types
         if ty == "tuple" and tuple_types is not None:
             self.tuple_elem_types[name] = tuple_types
+        if ty == "outparam" and el_type is not None:
+            self.outparam_el_types[name] = el_type
 
     def __contains__(self, name: str) -> bool:
         return name in self.types
@@ -623,6 +629,35 @@ def _syntactic_reachable_names(mod: A.Module) -> "tuple[set, set]":
 
     for st in mod.body:
         visit(st)
+    # `main` and every native-library export (`@access(Public)`/`@abi(...)`)
+    # are never called from anything in mod.body -- `main` runs implicitly
+    # as the process entry point (absent an explicit `if __name__ ==
+    # "__main__": main()` guard), and an export is only ever called from
+    # OUTSIDE the compiled program. Without this, this walker's caller
+    # (_analyze_with_unreachable_project_tolerance) marks them "unreachable
+    # project code" and sets is_stdlib=True on them purely to borrow sema's
+    # stdlib-tolerance path -- which SILENTLY DISCARDS every real error in
+    # their bodies (see _try_check_block's tolerate=True branch), not just
+    # relaxes checking. Confirmed via a real regression: an outparam[T]
+    # write-through violation in an exported function's body was accepted
+    # instead of raising, because reaching this exact silent-discard path.
+    # ir_lower.py's OWN _reachable_callables (a similar, separate walker
+    # that runs after sema) needed the identical fix for the identical
+    # reason -- this is the third such reachability walker in this
+    # compiler needing "main"/exports seeded as roots.
+    if "main" in func_defs:
+        add_func("main")
+    for f in mod.funcs:
+        if getattr(f, "is_public_export", False):
+            add_func(f.name)
+    for cls in mod.classes:
+        class_public = getattr(cls, "is_public_export", False)
+        for m in cls.methods:
+            if class_public or getattr(m, "is_public_export", False):
+                key = (cls.name, m.name)
+                if key not in needed_methods:
+                    needed_methods.add(key)
+                    method_queue.append(key)
 
     while func_queue or method_queue:
         while func_queue:
@@ -2227,6 +2262,15 @@ class SemaAnalyzer:
             # set methods (`add`/`discard`/`remove`/`update`) resolve, rather
             # than falling through to the int default.
             return ("set", None, None, None, None)
+        if base == "outparam":
+            # `outparam[int]`/`outparam[float]`: a raw pointer the CALLER
+            # owns, only meaningful as a parameter on an exported
+            # (`@access(Public)`/`@abi(...)`) function -- see
+            # _check_funcdef_export_shape's enforcement and IndexAssign's
+            # outparam-store handling below. `el` (the pointee kind) is
+            # carried through el_type so `out.value = expr`/`out[0] = expr`
+            # can validate/coerce against it.
+            return ("outparam", el or "int", None, None, None)
         if base == "any":
             # An explicit opaque annotation (`object`, `Any`, or a genuine
             # multi-type union the parser collapsed to "any"): constrain the
@@ -2323,6 +2367,7 @@ class SemaAnalyzer:
         scope.dict_inner_value_types.update(g.dict_inner_value_types)
         scope.dict_value_tuple_types.update(g.dict_value_tuple_types)
         scope.tuple_elem_types.update(g.tuple_elem_types)
+        scope.outparam_el_types.update(g.outparam_el_types)
 
     def _prescan_fv_types(self) -> None:
         """Pre-scan every function/method body for ClosureBind nodes.
@@ -4032,6 +4077,19 @@ class SemaAnalyzer:
                     ):
                         scope.add(p, usage_hints[p])
                         continue
+                    if (
+                        annot is not None
+                        and annot[0] == "outparam"
+                        and not getattr(f, "is_public_export", False)
+                    ):
+                        raise SemaError(
+                            f"outparam[T] parameter {p!r} on {f.name!r} is only "
+                            "meaningful on an exported (@access(Public)/@abi(...)) "
+                            "function -- an ordinary asmpython-to-asmpython call "
+                            "has no caller-supplied pointer for it to write through",
+                            f.pos,
+                            ErrorCode.E_ASSIGN_TYPE,
+                        )
                     self._seed_param(scope, p, annot, default, inferred, pos=f.pos)
             tolerate = getattr(f, "is_stdlib", False) and f.name not in self._reachable_funcs
             self._try_check_block(f.body, scope, tolerate=tolerate)
@@ -4449,6 +4507,18 @@ class SemaAnalyzer:
         if isinstance(e, A.Subscript):
             return list(getattr(e, "tuple_elem_types", []))
         return []
+
+    def _outparam_el_type(self, e, scope: Scope) -> str:
+        """Pointee kind of an outparam[T]-valued expression. 'int' if unknown.
+
+        Unlike list/dict, an outparam value can only ever be a bare
+        parameter reference (there's no literal/comprehension/call syntax
+        that produces one) -- it's exclusively an exported function's own
+        declared parameter.
+        """
+        if isinstance(e, A.Name):
+            return scope.outparam_el_types.get(e.name, "int")
+        return "int"
 
     def _list_el_type(self, e, scope: Scope) -> str:
         """Element type of a list-valued expression. 'int' if unknown."""
@@ -5986,6 +6056,32 @@ class SemaAnalyzer:
                 ):
                     raise SemaError(
                         f"list[i] = v: list element type is {el_t}, got {value_t}",
+                        s.pos,
+                        ErrorCode.E_ASSIGN_TYPE,
+                    )
+            elif obj_t == "outparam":
+                # `out[0] = value`: the only real write-through syntax for an
+                # exported function's raw-pointer-out parameter. The index
+                # itself is meaningless (a single pointee, not a real array)
+                # but is required syntax so this reads as ordinary Python --
+                # only literal 0 is accepted, matching "there is exactly one
+                # slot to write."
+                if not (isinstance(s.target.index, A.IntLit) and s.target.index.value == 0):
+                    raise SemaError(
+                        "outparam[T] can only be written via `name[0] = value` "
+                        "(there is exactly one pointee, not a real array)",
+                        s.pos,
+                        ErrorCode.E_ASSIGN_TYPE,
+                    )
+                el_t = self._outparam_el_type(s.target.obj, scope)
+                # Unlike list/dict elements, outparam[T]'s "int" is a real,
+                # explicit, user-declared pointee kind -- not asmpython's
+                # usual int-as-unknown-sentinel -- so it's NOT treated as a
+                # wildcard here; only "any" (a genuinely unconstrained
+                # value, e.g. an unannotated parameter) stays lenient.
+                if value_t != "any" and el_t != "any" and value_t != el_t:
+                    raise SemaError(
+                        f"outparam[{el_t}] = v: got {value_t}",
                         s.pos,
                         ErrorCode.E_ASSIGN_TYPE,
                     )

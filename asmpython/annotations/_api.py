@@ -249,6 +249,16 @@ pinned = Qualifier("pinned")
 unmanaged = Qualifier("unmanaged")
 noescape = Qualifier("noescape")
 notnone = Qualifier("notnone")
+# `outparam[int]`/`outparam[float]`: the compiler recognizes this as a bare
+# type-annotation identifier during parsing (see _compiler/parser.py's
+# _normalize_annot), the same way it recognizes `list`/`dict`/`tuple`
+# without those being imported from anywhere either -- this Qualifier
+# object exists only so the SAME source also type-checks/imports cleanly
+# under plain CPython (editor tooling, hosted non-compiled execution),
+# matching `list[int]`/`dict[str, int]` being real subscriptable builtins
+# there too. Only meaningful on an exported (@access(Public)/@abi(...))
+# function's own parameter -- see docs/TOP_LEVEL_EXTRAS.md.
+outparam = Qualifier("outparam")
 
 
 def _metadata(target: object) -> dict[str, object]:
@@ -405,7 +415,7 @@ __all__ = [
     "Instance", "NoAccess", "access", "ABIObject", "AutoABI", "C", "System",
     "ASMPython", "abi", "QualifiedType", "Qualifier", "const", "readonly",
     "limited", "immutable", "shimmutable", "volatile", "atomic", "threadlocal",
-    "owned", "borrowed", "pinned", "unmanaged", "noescape", "notnone", "final",
+    "owned", "borrowed", "pinned", "unmanaged", "noescape", "notnone", "outparam", "final",
     "override", "sealed", "frozen", "stability", "since", "muse", "discard",
     "pure", "nomutate", "noexception", "raises", "precond", "postcond",
     "invariant", "enforced", "nativeonly", "dynamiconly", "inline", "noinline",

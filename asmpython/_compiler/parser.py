@@ -1538,6 +1538,15 @@ class Parser:
             return ("tuple", inner)
         if name in ("set", "Set", "frozenset"):
             return ("set", None)
+        if name == "outparam":
+            # `outparam[int]`/`outparam[float]`: a parameter that's a raw
+            # pointer the CALLER owns (only meaningful on an exported
+            # `@access(Public)`/`@abi(...)` function's own parameter list --
+            # sema.py rejects it everywhere else). The pointee kind (`el`)
+            # decides the store width -- see sema's outparam-store handling
+            # and ir_lower.py's IRType selection for this parameter.
+            el = inner[0][0] if inner else "int"
+            return ("outparam", el)
         # Anything else (CamelCase class, dotted module.Class) is a class-ish
         # name; sema decides whether it's a known class -> instance:<name>.
         return (name, None)
