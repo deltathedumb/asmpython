@@ -860,6 +860,20 @@ class SemaAnalyzer:
                 ret_type=(ret_ty, None, None),
                 param_names=list(fdef.params),
                 param_defaults=[None] * len(fdef.params),
+                # Mirrors every ordinary def-based FuncSig's own
+                # `vararg=f.vararg` (see the main function-registration
+                # pass) -- fdef.vararg's name is already included in
+                # fdef.params (same convention _parse_funcdef's own vararg
+                # parsing uses), so `arity` above already counts it; this
+                # just lets call-site binding know which trailing param
+                # absorbs surplus positional args, instead of treating it
+                # as an ordinary required parameter. Needed so a lambda's
+                # synthesized FuncDef (the only caller that currently ever
+                # sets fdef.vararg) gets real vararg-packing behavior
+                # identical to a normal `def f(*args): ...` -- there was
+                # previously no way for a synthesized function to have a
+                # vararg at all.
+                vararg=fdef.vararg,
             )
         if not any(f.name == fdef.name for f in self.mod.funcs):
             self.mod.funcs.append(fdef)
@@ -8981,6 +8995,13 @@ class SemaAnalyzer:
                 inner_scope.add(nm, ty)
             for p in e.params:
                 inner_scope.add(p, "any")
+            if e.vararg:
+                # Vararg absorbs surplus positional args into a list at the
+                # call site (identical binding as a real `def f(*args)`, see
+                # _ensure_synthetic_func's vararg passthrough below) -- typed
+                # "any" like every other lambda parameter, since a lambda's
+                # inner scope has no annotation to type it more precisely.
+                inner_scope.add(e.vararg, "any")
             ret_t = "int"
             if e.body is not None:
                 try:
@@ -8988,13 +9009,24 @@ class SemaAnalyzer:
                     ret_t = A.expr_type(e.body)
                 except Exception:
                     pass
+            # A real `def`'s own vararg name is included in its `params`
+            # list (see _parse_funcdef) -- match that convention exactly so
+            # arity/param_names line up the same way for every other
+            # FuncSig consumer (call-site binding, codegen's argcount
+            # correction, etc.), rather than inventing a lambda-specific
+            # shape those consumers would need a special case for.
+            synth_params = list(e.params) + ([e.vararg] if e.vararg else [])
+            synth_param_types = [None] * len(e.params) + (
+                [("list", None)] if e.vararg else []
+            )
             self._ensure_synthetic_func(
                 A.FuncDef(
                     name=lname,
-                    params=list(e.params),
+                    params=synth_params,
                     body=[A.Return(value=e.body, pos=e.pos)],
                     pos=e.pos,
-                    param_types=[None] * len(e.params),
+                    param_types=synth_param_types,
+                    vararg=e.vararg,
                 ),
                 ret_t,
             )

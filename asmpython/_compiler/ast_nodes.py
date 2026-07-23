@@ -883,13 +883,19 @@ class Comprehension:
 class Lambda:
     """`lambda params: expr` — an anonymous function expression.
 
-    `params` is a list of parameter names (no defaults, no *args).
+    `params` is a list of parameter names (no defaults). `vararg`, when
+    set, is a `*name` catch-all parameter (e.g. `lambda *_: expr`) --
+    mirrors `FuncDef.vararg` exactly, since sema synthesizes every lambda
+    into a real, ordinary `FuncDef` (see sema's Lambda handling) and passes
+    this straight through, reusing that FuncDef's existing vararg-packing
+    machinery rather than needing any lambda-specific calling convention.
     `body` is the single expression returned. `func_name` is filled in by
     codegen with the generated label (e.g. `_lambda_42`) and used when the
     lambda value is later called indirectly.
     """
 
     params: list[str] = field(default_factory=list)
+    vararg: "str | None" = None
     body: "Optional[Expr]" = None
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
     func_name: str = ""  # set by codegen

@@ -3113,22 +3113,42 @@ class Parser:
     def _parse_lambda(self) -> "A.Lambda":
         pos = self._expect("KEYWORD", "lambda").pos
         params: list[str] = []
-        if not self._check("OP", ":"):
+        vararg: "str | None" = None
+
+        def _param_item() -> bool:
+            """One lambda parameter item. Returns False for a bare `*name`
+            (vararg -- captured into the enclosing `vararg`, not `params`;
+            real Python allows at most one, always last), True otherwise
+            (an ordinary name, appended to `params`, so the caller's own
+            comma-loop keeps going as before)."""
+            nonlocal vararg
+            if self._check("OP", "*"):
+                # `lambda *_: expr` / `lambda *args: expr` -- a catch-all
+                # for surplus positional args, same shape as `_parse_funcdef`'s
+                # own `*name` vararg param (see its comment). Unlike a def's
+                # vararg, this has no type annotation position -- a lambda
+                # parameter is never annotated at all, matching real Python's
+                # own lambda grammar (annotations are illegal in a lambda's
+                # parameter list, def-only).
+                self._eat()
+                vararg = self._expect("NAME").value
+                return False
             params.append(self._expect("NAME").value)
             if self._check("OP", "="):
                 self._eat()
                 self._parse_expr()
-            while self._check("OP", ","):
+            return True
+
+        if not self._check("OP", ":"):
+            more = _param_item()
+            while more and self._check("OP", ","):
                 self._eat()
                 if self._check("OP", ":"):
                     break
-                params.append(self._expect("NAME").value)
-                if self._check("OP", "="):
-                    self._eat()
-                    self._parse_expr()
+                more = _param_item()
         self._expect("OP", ":")
         body = self._parse_ternary()
-        return A.Lambda(params=params, body=body, pos=pos)
+        return A.Lambda(params=params, vararg=vararg, body=body, pos=pos)
 
     def _parse_ternary(self) -> "A.Expr":
         """Conditional expression: `body if test else orelse`.
