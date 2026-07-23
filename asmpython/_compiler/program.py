@@ -1440,9 +1440,83 @@ def load_program(
             if str(sub.resolve()) not in seen:
                 queue.append(sub)
 
+    _merge_function_import_aliases(
+        entry,
+        parsed,
+        discovery_order,
+        root,
+        func_names,
+        func_origin,
+        active_extensions,
+    )
     _merge_import_bindings(entry, parsed, discovery_order)
     _materialize_value_imports(entry, parsed, discovery_order, root, class_origin, func_origin)
     return entry
+
+
+def _merge_function_import_aliases(
+    entry: A.Module,
+    parsed: dict[str, A.Module],
+    discovery_order: list[str],
+    root: Path,
+    func_names: set[str],
+    func_origin: dict[str, str],
+    active_extensions: "frozenset[str] | None",
+) -> None:
+    """Materialize ``from module import func as alias`` as a real symbol.
+
+    Whole-program merging normally keeps one flat function for each original
+    source name.  That is insufficient when an entry module defines the same
+    name and deliberately preserves the imported function under an alias:
+    flattening the alias back to the original name makes the wrapper recurse
+    into itself.  Parse a fresh copy of the imported function, rename that copy
+    (including direct recursive calls), and merge it under the local alias.
+    """
+    fresh_modules: dict[str, A.Module] = {}
+    for importer_path in discovery_order:
+        importer = parsed.get(importer_path)
+        if importer is None:
+            continue
+        for stmt in _collect_import_stmts(importer):
+            if not isinstance(stmt, A.FromImport):
+                continue
+            target_path = _resolve_fromimport_path(
+                stmt,
+                Path(importer_path),
+                root,
+            )
+            if target_path is None:
+                continue
+            target_key = str(target_path.resolve())
+            if target_key not in parsed:
+                continue
+            original_names: list = stmt.orig_names if stmt.orig_names else stmt.names
+            for local, original in zip(stmt.names, original_names):
+                if local == original or local in func_names:
+                    continue
+                target_module = fresh_modules.get(target_key)
+                if target_module is None:
+                    try:
+                        target_source = target_path.read_text(encoding="utf-8")
+                        target_module = Parser(
+                            Lexer(target_source).tokenize(),
+                            active_extensions,
+                        ).parse()
+                    except Exception:
+                        continue
+                    fresh_modules[target_key] = target_module
+                imported = None
+                for candidate in target_module.funcs:
+                    if candidate.name == original and not candidate.is_lifted:
+                        imported = candidate
+                        break
+                if imported is None:
+                    continue
+                imported.name = local
+                _rename_call_targets(imported.body, {original: local})
+                entry.funcs.append(imported)
+                func_names.add(local)
+                func_origin[local] = target_key
 
 
 def _simple_const_if_targets(stmt: A.If, available: set[str]) -> set[str] | None:

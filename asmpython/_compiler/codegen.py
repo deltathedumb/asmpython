@@ -467,7 +467,7 @@ class Codegen:
             if e is None:
                 return
             if isinstance(e, A.Call):
-                if e.func in aliases:
+                if e.func in aliases and e.func not in self.funcs:
                     orig = aliases[e.func]
                     if orig in self.funcs or orig in self.ffi_funcs:
                         e.func = orig
