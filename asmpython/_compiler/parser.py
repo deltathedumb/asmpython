@@ -63,6 +63,16 @@ class Parser:
         # `_eat_decorators` and read by the immediately-following
         # `_parse_funcdef` call (every caller does exactly this sequence).
         self._pending_readonly_params: list = []
+        # `@access(PolicyName)`'s captured bare-name argument (e.g. "Public"),
+        # populated by `_eat_decorators` and read by the immediately-
+        # following `_parse_funcdef` call, same sequencing as
+        # `_pending_readonly_params` above. None when no `@access(...)`
+        # decorator preceded the def.
+        self._pending_access_policy: "str | None" = None
+        # `@abi(ABIName)`'s captured bare-name argument (e.g. "C"), same
+        # sequencing/lifetime as `_pending_access_policy` above. None when no
+        # explicit `@abi(...)` decorator preceded the def.
+        self._pending_abi_name: "str | None" = None
         # Per-Parser compiler-extension state (const and whatever future
         # extensions register contextual keywords). Fresh per instance --
         # see extensions.py's module docstring for the isolation guarantees
@@ -716,6 +726,8 @@ class Parser:
         """
         names: list[str] = []
         self._pending_readonly_params: list = []
+        self._pending_access_policy: "str | None" = None
+        self._pending_abi_name: "str | None" = None
         while self._check("OP", "@"):
             self._eat()
             # First NAME (optionally dotted) is the decorator's identity.
@@ -757,6 +769,82 @@ class Parser:
                     self._pending_readonly_params.append(self._expect("NAME").value)
                     if self._check("OP", ","):
                         self._eat()
+                self._eat()  # ')'
+                self._expect("NEWLINE")
+                names.append(name)
+                self._skip_newlines()
+                continue
+            # `@access(PolicyName)` / `@abi(ABIName)`, or through a dotted
+            # receiver (`@asmpython.access(asmpython.Public)`,
+            # `@asmpython.abi(asmpython.C)`): capture the bare argument name
+            # (e.g. "Public" / "C") into self._pending_access_policy /
+            # self._pending_abi_name instead of letting it fall through to
+            # the generic "skip the rest of the line" branch below, which
+            # would otherwise discard it same as `readonly`'s args would
+            # without its own special-case above. `access`/`abi` reached via
+            # any binding (`from asmpython import access`, `from
+            # asmpython.annotations import access`, a dotted receiver ending
+            # in `.access`/`.abi`) are all treated the same way -- only the
+            # trailing decorator segment and the trailing argument segment
+            # matter. The compiler never evaluates
+            # asmpython.annotations.AccessObject/ABIObject -- it only
+            # recognizes the well-known preset identifiers sema.py/ir_lower.py
+            # check against.
+            deco_call_kind = None  # "access" | "abi" | None
+            deco_call_start = None  # 0 = bare name, 1 = one dotted segment to skip
+            if (
+                name in ("access", "abi")
+                and not dotted_suffix
+                and self._peek(1).kind == "OP"
+                and self._peek(1).value == "("
+            ):
+                deco_call_kind = name
+                deco_call_start = 0
+            elif (
+                name is not None
+                and not dotted_suffix
+                and self._peek(1).kind == "OP"
+                and self._peek(1).value == "."
+                and self._peek(2).kind == "NAME"
+                and self._peek(2).value in ("access", "abi")
+                and self._peek(3).kind == "OP"
+                and self._peek(3).value == "("
+            ):
+                deco_call_kind = self._peek(2).value
+                deco_call_start = 1  # one extra ".access"/".abi" segment to skip
+            if deco_call_kind is not None:
+                self._eat()  # decorator receiver name
+                if deco_call_start == 1:
+                    self._eat()  # '.'
+                    self._eat()  # 'access' / 'abi'
+                name = deco_call_kind
+                self._eat()  # '('
+                argument = None
+                if self._check("NAME"):
+                    argument = self._peek().value
+                    self._eat()
+                    if self._check("OP", "."):
+                        # Dotted argument (e.g. `asmpython.Public`): only the
+                        # trailing segment is the actual preset name.
+                        self._eat()  # '.'
+                        argument = self._expect("NAME").value
+                if deco_call_kind == "access":
+                    self._pending_access_policy = argument
+                else:
+                    self._pending_abi_name = argument
+                # Skip anything else inside the parens (extra kwargs like
+                # `broaden=True`) without modeling them -- unrecognized here,
+                # same as every other decorator's discarded call arguments.
+                depth = 0
+                while not (self._check("OP", ")") and depth == 0):
+                    t = self._peek()
+                    if t.kind == "EOF":
+                        break
+                    if t.kind == "OP" and t.value in ("(", "[", "{"):
+                        depth += 1
+                    elif t.kind == "OP" and t.value in (")", "]", "}"):
+                        depth -= 1
+                    self._eat()
                 self._eat()  # ')'
                 self._expect("NEWLINE")
                 names.append(name)
@@ -822,6 +910,13 @@ class Parser:
     def _parse_classdef(self, decorators: "list[str] | None" = None) -> A.ClassDef:
         class_decorators = list(decorators) if decorators else []
         is_dc = "dataclass" in class_decorators
+        # Snapshot the CLASS's own `@access(...)`/`@abi(...)` state before
+        # parsing the class body -- each method inside resets
+        # self._pending_access_policy/_pending_abi_name via its own
+        # `_eat_decorators()` call, so reading them after the body loop below
+        # would reflect the last method's decorators instead of the class's.
+        class_access_policy = self._pending_access_policy
+        class_abi_name = self._pending_abi_name
         start = self._expect("KEYWORD", "class").pos
         name = self._expect("NAME").value
         parent = None
@@ -993,6 +1088,9 @@ class Parser:
             sealed_permits=sealed_permits,
             implements_interface=implements_interface,
             metaclass=metaclass_name,
+            access_policy=class_access_policy,
+            abi_name=class_abi_name or "AutoABI",
+            is_public_export=class_access_policy == "Public" or class_abi_name is not None,
         )
 
     def _parse_class_var(self):
@@ -1106,6 +1204,8 @@ class Parser:
         asm_symbol = None
         if decorators and self._ASM_DECORATOR in decorators:
             asm_body, asm_symbol = self._extract_asm_body(name, body, start)  # type: ignore[arg-type]
+        access_policy = self._pending_access_policy
+        abi_name = self._pending_abi_name
         return A.FuncDef(
             name=name,  # type: ignore
             params=params,
@@ -1120,6 +1220,9 @@ class Parser:
             asm_symbol=asm_symbol,
             decorators=list(decorators) if decorators else [],
             readonly_params=list(self._pending_readonly_params),
+            access_policy=access_policy,
+            abi_name=abi_name or "AutoABI",
+            is_public_export=access_policy == "Public" or abi_name is not None,
         )
 
     def _extract_asm_body(self, name: str, body: list, pos) -> "tuple[str, str]":

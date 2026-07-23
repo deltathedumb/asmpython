@@ -4,7 +4,7 @@ import asmpython._compiler  # activates compatibility patches
 from asmpython._compiler import ast_nodes as A
 from asmpython._compiler.lexer import Lexer
 from asmpython._compiler.parser import Parser
-from asmpython._compiler.public_abi_compat_fixes import _inject_public_exports
+from asmpython._compiler.public_abi_exports import _inject_public_exports
 
 
 def _parse(source: str) -> A.Module:
@@ -40,6 +40,27 @@ def helper(value: int) -> int:
     assert function.access_policy == "Class"
     assert function.abi_name == "AutoABI"
     assert function.is_public_export is False
+
+
+def test_dotted_receiver_form_resolves_trailing_argument_segment() -> None:
+    module = _parse(
+        '''import asmpython
+
+@asmpython.access(asmpython.Public)
+def add(left: int, right: int) -> int:
+    return left + right
+
+@asmpython.abi(asmpython.C)
+def callback(value: int) -> int:
+    return value
+'''
+    )
+    add_fn = next(function for function in module.funcs if function.name == "add")
+    assert add_fn.access_policy == "Public"
+    assert add_fn.is_public_export is True
+    callback_fn = next(function for function in module.funcs if function.name == "callback")
+    assert callback_fn.abi_name == "C"
+    assert callback_fn.is_public_export is True
 
 
 def test_explicit_abi_exports_without_public_access() -> None:

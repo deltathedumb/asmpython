@@ -104,6 +104,27 @@ class FuncDef:
     # duration of this function's body (see sema.py's per-function
     # `_locked_params` set).
     readonly_params: list = field(default_factory=list)
+    # Bare-name argument of a preceding `@access(...)` decorator (e.g.
+    # "Public" for `@access(Public)`), or None if the function has no
+    # `@access(...)` decorator. Only the identifier is captured -- the
+    # compiler doesn't evaluate asmpython.annotations.AccessObject, it just
+    # recognizes the well-known preset names sema.py checks against. Drives
+    # native-library export selection under `strict` mode (see sema.py's
+    # module-level `strict`/`__all__` scan and ir_lower.py's IRFunc.visibility).
+    access_policy: "str | None" = None
+    # Bare-name argument of a preceding `@abi(...)` decorator (e.g. "C" for
+    # `@abi(C)`), or "AutoABI" if the function has no explicit `@abi(...)`.
+    # An explicit `@abi(...)` marks the function exported the same as
+    # `@access(Public)` does, independent of access_policy (see
+    # is_public_export below) -- matches asmpython.annotations.abi's own
+    # "explicit @abi(...) also marks the object for export" contract.
+    abi_name: str = "AutoABI"
+    # True when this function should be published as a native-library export
+    # symbol: either `@access(Public)` (access_policy == "Public") or any
+    # explicit `@abi(...)` decorator. Computed once by the parser instead of
+    # re-deriving access_policy/abi_name at every consumer (codegen's NASM
+    # `global` injection, ir_lower's IRFunc.visibility).
+    is_public_export: bool = False
 
 
 @dataclass
@@ -152,6 +173,14 @@ class ClassDef:
     implements_interface: "str | None" = None
     # Explicit Python class-header metaclass.
     metaclass: "str | None" = None
+    # Same three fields as FuncDef's (see their docstrings there): a
+    # class-level `@access(Public)`/`@abi(...)` publishes the class's own
+    # class-ID object and every method (public or not); a non-public class
+    # still publishes any individually `@access(Public)`/`@abi(...)`-marked
+    # method.
+    access_policy: "str | None" = None
+    abi_name: str = "AutoABI"
+    is_public_export: bool = False
 
 
 # ---- Statements -------------------------------------------------------------
