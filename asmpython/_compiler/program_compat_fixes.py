@@ -35,21 +35,28 @@ def _resolve_absolute_workspace_safe(module: str, root: Path) -> Path | None:
         return None
 
     root_is_package = (root / "__init__.py").is_file()
+    candidates: list[Path] = []
     if root.name == parts[0] and root_is_package:
-        target = root
+        candidates.append(root)
     else:
-        target = root / parts[0]
+        candidates.append(root / parts[0])
+        # Standard ``src/`` project layout: the workspace marker lives at
+        # ``root`` while importable top-level packages live below
+        # ``root/src``.
+        candidates.append(root / "src" / parts[0])
 
-    for part in parts[1:]:
-        target = target / part
+    for candidate in candidates:
+        target = candidate
+        for part in parts[1:]:
+            target = target / part
 
-    py = Path(str(target) + ".py")
-    if py.is_file() and program._within(py, root):
-        return py
+        py = Path(str(target) + ".py")
+        if py.is_file() and program._within(py, root):
+            return py
 
-    init = target / "__init__.py"
-    if init.is_file() and program._within(init, root):
-        return init
+        init = target / "__init__.py"
+        if init.is_file() and program._within(init, root):
+            return init
     return None
 
 

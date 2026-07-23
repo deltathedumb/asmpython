@@ -33,6 +33,12 @@ def _scan_body(
             expression = getattr(node, name, None)
             if expression is not None and not isinstance(expression, str):
                 expressions.extend(_walk_expression(expression))
+        for name in ("values",):
+            values = getattr(node, name, None)
+            if isinstance(values, list):
+                for expression in values:
+                    if expression is not None:
+                        expressions.extend(_walk_expression(expression))
 
         for expression in expressions:
             if isinstance(expression, A.Call):

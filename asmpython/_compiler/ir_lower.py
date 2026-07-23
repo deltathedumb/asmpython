@@ -47,6 +47,7 @@ class LowerError(Exception):
 
 
 U8 = IRType("u8")
+I32 = IRType("i32")
 
 # jmp_buf layout (mirrors _runtime_setjmp in codegen.py): rbx/rbp/r12-r15/
 # rsp/retaddr in the first 8 slots (0-56), rsi/rdi in slots 8-9 (64, 72) --
@@ -147,12 +148,22 @@ class _ModuleCtx:
         # ".imported" decorator-suffix scan) so both backends resolve the
         # same set of dynamically-imported functions per handle.
         self.imported_funcs: dict[str, list[tuple[str, "A.FuncDef"]]] = imported_funcs or {}
+        # Filled by lower_module once the complete FuncDef list is available.
+        # Lifted nested functions need their captured values prepended at every
+        # direct call site, including self-recursive calls.
+        self.lifted_free_vars: dict[str, list[str]] = {}
+        self.lifted_nonlocal_vars: dict[str, set[str]] = {}
         self.classes_sig = classes_sig or {}
         self.global_types = global_types or {}
         self.global_names = frozenset(self.global_types)
         self.global_list_el_ty = global_list_el_ty or {}
         self.class_ids: dict[str, int] = {
             name: i for i, name in enumerate(sorted(class_names))
+        }
+        # Mutable runtime namespaces for attributes assigned through class
+        # objects. Declared class-body defaults retain dedicated globals.
+        self.class_object_labels: dict[str, str] = {
+            name: f"__classobj_{name}" for name in class_names
         }
         # `class C: x = 5` (plain class, not @dataclass -- a dataclass's
         # class vars are per-instance fields, handled entirely differently)
@@ -212,6 +223,10 @@ class _FuncCtx:
         # `for x in <list var>:` loop variable correctly for the common
         # case of a directly-assigned list literal. Defaults to "int".
         self.slot_el_ty: dict[str, str] = {}
+        self.closure_names: set[str] = set()
+        self.closure_free_counts: dict[str, int] = {}
+        self.nonlocal_names: set[str] = set()
+        self.boxed_names: set[str] = set()
         self.local_names = local_names or set()
         self.declared_globals = declared_globals or set()
         self.module_body = module_body
@@ -396,7 +411,12 @@ def _list_elem_addr(ctx: _FuncCtx, list_v: IRValue, idx_v: IRValue) -> IRValue:
     return elem_addr
 
 
-_INPARAM_OUTPARAM_ELEM_SIZE = {"int": 8, "float": 8, "int8": 1}
+_INPARAM_OUTPARAM_ELEM_SIZE = {
+    "int": 8,
+    "float": 8,
+    "int8": 1,
+    "int32": 4,
+}
 
 
 def _inparam_elem_addr(ctx: _FuncCtx, ptr_v: IRValue, idx_v: IRValue, elem_size: int = 8) -> IRValue:
@@ -539,7 +559,10 @@ def _lower_membership(ctx: _FuncCtx, needle_e: A.Expr, hay_e: A.Expr, negate: bo
         ctx.emit(IRInstr(op, result, [idx_v, neg1]))
         return result
     if hay_ty not in ("list", "tuple"):
-        raise LowerError(f"unsupported compare membership ({hay_ty})")
+        raise LowerError(
+            f"unsupported compare membership ({hay_ty}) at "
+            f"{getattr(hay_e, 'pos', None)}: {hay_e!r}"
+        )
     needle_v = _lower_expr(ctx, needle_e)
     hay_v = _lower_expr(ctx, hay_e)
     needle_ptr = ctx.ensure_slot(f"__mem_needle_{id(needle_e)}_{id(hay_e)}", needle_v.type)
@@ -587,7 +610,7 @@ def _lower_membership(ctx: _FuncCtx, needle_e: A.Expr, hay_e: A.Expr, negate: bo
     ctx.emit(IRInstr("load", cur_needle, [needle_ptr]))
     needle_ty = A.expr_type(needle_e)
     hay_elem_ty = _iter_element_type(hay_e)
-    hay_tuple_elem_tys = getattr(hay_e, "tuple_elem_types", [])
+    hay_tuple_elem_tys = A.tuple_element_types(hay_e)
     eq_v = ctx.tmp(I64)
     if (
         needle_ty in ("str", "any")
@@ -2178,6 +2201,54 @@ def _lower_truthy(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     """Lower `e` then convert its value to truthy I64 -- see
     `_value_truthy`. Use this (not `_value_truthy` directly) whenever `e`
     hasn't been lowered yet, so it's only evaluated once."""
+    if isinstance(e, A.BoolOp):
+        # In a condition we only need the boolean result, not Python's
+        # operand-returning `and`/`or` value. Lower each side through its own
+        # real truthiness rule so mixed shapes such as
+        # `text and text.isalnum()` never store an integer 0/1 into a pointer
+        # slot and later pass address 1 to strlen().
+        result_ptr = ctx.ensure_slot(f"__truthy_boolop_{id(e)}", I64)
+        left = _lower_truthy(ctx, e.left)
+        rhs_b = ctx.new_block("truthyboolrhs")
+        shortcut_b = ctx.new_block("truthyboolshortcut")
+        end_b = ctx.new_block("truthyboolend")
+        if e.op == "and":
+            ctx.emit(
+                IRInstr(
+                    "br.t",
+                    None,
+                    [left, rhs_b.label, shortcut_b.label],
+                )
+            )
+            shortcut_value = 0
+        elif e.op == "or":
+            ctx.emit(
+                IRInstr(
+                    "br.t",
+                    None,
+                    [left, shortcut_b.label, rhs_b.label],
+                )
+            )
+            shortcut_value = 1
+        else:
+            raise LowerError(f"unsupported boolop {e.op!r}")
+
+        ctx.switch_to(shortcut_b)
+        constant = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", constant, [shortcut_value]))
+        ctx.emit(IRInstr("store", None, [constant, result_ptr]))
+        ctx.emit(IRInstr("br", None, [end_b.label]))
+
+        ctx.switch_to(rhs_b)
+        right = _lower_truthy(ctx, e.right)
+        ctx.emit(IRInstr("store", None, [right, result_ptr]))
+        ctx.emit(IRInstr("br", None, [end_b.label]))
+
+        ctx.switch_to(end_b)
+        result = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", result, [result_ptr]))
+        return result
+
     t = A.expr_type(e)
     if t == "str" or t in ("list", "tuple", "dict", "set"):
         # Heap containers are falsy based on their contents, not their
@@ -2395,6 +2466,27 @@ def _collect_declared_globals(stmts: list, out: set[str]) -> None:
             _collect_declared_globals(s.finally_body, out)
 
 
+def _collect_declared_nonlocals(stmts: list, out: set[str]) -> None:
+    for s in stmts:
+        if isinstance(s, A.Nonlocal):
+            out.update(s.names)
+        elif isinstance(s, A.If):
+            _collect_declared_nonlocals(s.then, out)
+            _collect_declared_nonlocals(s.orelse, out)
+        elif isinstance(s, (A.While, A.For)):
+            _collect_declared_nonlocals(s.body, out)
+            _collect_declared_nonlocals(s.orelse, out)
+        elif isinstance(s, A.With):
+            _collect_declared_nonlocals(s.body, out)
+        elif isinstance(s, A.Try):
+            _collect_declared_nonlocals(s.body, out)
+            _collect_declared_nonlocals(s.handler, out)
+            for _types, _bind, hbody in s.extra_handlers:
+                _collect_declared_nonlocals(hbody, out)
+            _collect_declared_nonlocals(s.else_body, out)
+            _collect_declared_nonlocals(s.finally_body, out)
+
+
 def _walk_named_exprs(e) -> list:
     """Recursively find every `A.NamedExpr` (walrus `target := value`)
     reachable from expression `e`, including inside comprehensions/IfExp/
@@ -2493,6 +2585,8 @@ def _collect_bound_names(stmts: list, out: set[str]) -> None:
             for target in s.targets:
                 if isinstance(target, A.Name):
                     out.add(target.name)
+        elif isinstance(s, A.ClosureBind):
+            out.add(s.func_name)
         elif isinstance(s, A.For):
             out.add(s.var)
             for target in s.targets:
@@ -2664,6 +2758,18 @@ def _name_ptr(ctx: _FuncCtx, name: str, ty: IRType) -> IRValue:
         ctx.emit(IRInstr("global_addr", ptr, [name]))
         return ptr
     return ctx.ensure_slot(name, ty)
+
+
+def _name_value_ptr(ctx: _FuncCtx, name: str, ty: IRType) -> IRValue:
+    """Storage containing a name's value, dereferencing closure boxes."""
+    ptr = _name_ptr(ctx, name, ty)
+    if name not in ctx.nonlocal_names and name not in ctx.boxed_names:
+        return ptr
+    if name in ctx.boxed_names:
+        ptr = ctx.ensure_slot(f"__nl_box_{name}", PTR)
+    box = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", box, [ptr]))
+    return box
 
 
 def _iter_element_type(e: A.Expr) -> str:
@@ -3977,7 +4083,65 @@ def _lower_sort_key_call(ctx: _FuncCtx, sort_key: A.Lambda, el_kind: str, item_v
     return None
 
 
-def _lower_sort_inplace(ctx: _FuncCtx, e, out_v: IRValue, el_kind: str) -> IRValue:
+def _lower_sort_tuple_int_first(
+    ctx: _FuncCtx, e, out_v: IRValue
+) -> IRValue:
+    """Sort tuple-layout elements by their first integer slot."""
+    len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_addr, [out_v, _LIST_LEN_OFF]))
+    length = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", length, [len_addr]))
+    keys = _new_list_from_len(ctx, length)
+    idx_ptr = ctx.ensure_slot(f"__sorttuple_idx_{id(e)}", I64)
+    zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero, [0]))
+    ctx.emit(IRInstr("store", None, [zero, idx_ptr]))
+
+    head_b = ctx.new_block("sorttuplehead")
+    body_b = ctx.new_block("sorttuplebody")
+    cont_b = ctx.new_block("sorttuplecont")
+    end_b = ctx.new_block("sorttupleend")
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+
+    ctx.switch_to(head_b)
+    index = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", index, [idx_ptr]))
+    keep_going = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", keep_going, [index, length]))
+    ctx.emit(IRInstr("br.t", None, [keep_going, body_b.label, end_b.label]))
+
+    ctx.switch_to(body_b)
+    tuple_addr = _list_elem_addr(ctx, out_v, index)
+    tuple_value = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", tuple_value, [tuple_addr]))
+    first_addr = _list_elem_addr(ctx, tuple_value, zero)
+    first = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", first, [first_addr]))
+    ctx.emit(IRInstr("call", None, ["_abi_list_append", keys, first]))
+    ctx.emit(IRInstr("br", None, [cont_b.label]))
+
+    ctx.switch_to(cont_b)
+    current = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", current, [idx_ptr]))
+    one = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one, [1]))
+    following = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", following, [current, one]))
+    ctx.emit(IRInstr("store", None, [following, idx_ptr]))
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+
+    ctx.switch_to(end_b)
+    ctx.emit(IRInstr("call", None, ["_abi_sort_pairs_int", out_v, keys]))
+    return out_v
+
+
+def _lower_sort_inplace(
+    ctx: _FuncCtx,
+    e,
+    out_v: IRValue,
+    el_kind: str,
+    tuple_key_kind: str = "str",
+) -> IRValue:
     """Sort `out_v` (a real list value, already the caller's to mutate --
     `_lower_sorted` passes a fresh clone, `list.sort()` passes the
     original list directly) according to `e`'s sort_key/sort_reverse
@@ -4058,6 +4222,8 @@ def _lower_sort_inplace(ctx: _FuncCtx, e, out_v: IRValue, el_kind: str) -> IRVal
     else:
         if el_kind == "str":
             ctx.emit(IRInstr("call", None, ["_abi_sort_str", out_v]))
+        elif el_kind == "tuple" and tuple_key_kind == "int":
+            out_v = _lower_sort_tuple_int_first(ctx, e, out_v)
         elif el_kind == "tuple":
             ctx.emit(IRInstr("call", None, ["_abi_sort_items", out_v]))
         else:
@@ -4246,7 +4412,14 @@ def _lower_sorted(ctx: _FuncCtx, e: A.Call) -> IRValue:
             el_kind = arg.el_type or "int"
         else:
             el_kind = getattr(arg, "list_el_type", "int") or "int"
-    return _lower_sort_inplace(ctx, e, out_v, el_kind)
+    tuple_key_kind = (
+        "str"
+        if isinstance(arg, A.MethodCall) and arg.method == "items"
+        else getattr(arg, "list_el_value_type", "int") or "int"
+    )
+    return _lower_sort_inplace(
+        ctx, e, out_v, el_kind, tuple_key_kind=tuple_key_kind
+    )
 
 
 def _lower_fstring(ctx: _FuncCtx, e: A.FString) -> IRValue:
@@ -4599,7 +4772,7 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ty = ctx.mctx.global_types.get(e.name, ctx.slot_ty.get(e.name, I64))
         else:
             ty = ctx.slot_ty.get(e.name, ctx.mctx.global_types.get(e.name, I64))
-        ptr = _name_ptr(ctx, e.name, ty)
+        ptr = _name_value_ptr(ctx, e.name, ty)
         v = ctx.tmp(ty)
         ctx.emit(IRInstr("load", v, [ptr]))
         return v
@@ -5346,6 +5519,30 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
 
     if isinstance(e, A.Call) and e.func == "isinstance" and len(e.args) == 2:
         return _lower_isinstance(ctx, e)
+
+    if isinstance(e, A.Call) and e.func == "id" and len(e.args) == 1:
+        # Runtime objects are already represented by their stable pointer.
+        # Scalar values use their immediate machine-word representation,
+        # matching the compiler's documented lightweight id() model.
+        return _lower_expr(ctx, e.args[0])
+
+    if (
+        isinstance(e, A.Call)
+        and e.func == "zip"
+        and len(e.args) >= 2
+    ):
+        # The compiled runtime models zip() eagerly as a list of tuple-layout
+        # records (the same value produced by list(zip(...))). Reuse the
+        # complete lockstep lowering below so a bare zip value can be passed
+        # onward without leaving an unresolved native `zip` symbol.
+        eager = A.Call(
+            func="list",
+            args=[e],
+            pos=e.pos,
+            inferred_type="list",
+            list_el_type="tuple",
+        )
+        return _lower_expr(ctx, eager)
 
     if (
         isinstance(e, A.Call)
@@ -6220,6 +6417,12 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 widened = ctx.tmp(I64)
                 ctx.emit(IRInstr("zext", widened, [v]))
                 return widened
+            if el_kind == "int32":
+                v = ctx.tmp(I32)
+                ctx.emit(IRInstr("load", v, [addr]))
+                widened = ctx.tmp(I64)
+                ctx.emit(IRInstr("sext", widened, [v]))
+                return widened
             v = ctx.tmp(F64 if result_ty == "float" else I64)
             ctx.emit(IRInstr("load", v, [addr]))
             return v
@@ -6700,7 +6903,16 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     if isinstance(e.obj, A.Name)
                     else "int"
                 ) or "int"
-                _lower_sort_inplace(ctx, e, obj_v, el_kind)
+                tuple_key_kind = (
+                    getattr(e.obj, "list_el_value_type", "int") or "int"
+                )
+                _lower_sort_inplace(
+                    ctx,
+                    e,
+                    obj_v,
+                    el_kind,
+                    tuple_key_kind=tuple_key_kind,
+                )
                 return ctx.shared_zero  # list.sort() returns None
             raise LowerError(f"unsupported expr MethodCall (list.{e.method})")
         if obj_ty == "dict":
@@ -6997,6 +7209,97 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             if e.method == "clear" and not e.args:
                 obj_v = _lower_expr(ctx, e.obj)
                 ctx.emit(IRInstr("call", None, ["_abi_dict_clear", obj_v]))
+                return ctx.shared_zero
+            if e.method == "update" and len(e.args) == 1:
+                obj_v0 = _lower_expr(ctx, e.obj)
+                other_v0 = _lower_expr(ctx, e.args[0])
+                other_ty = A.expr_type(e.args[0])
+                if other_ty in ("list", "tuple"):
+                    # Sets are dict-backed, but list/tuple headers are not
+                    # dict-shaped. Passing one to _abi_dict_update makes the
+                    # runtime read the list's unallocated +0x20 field as a
+                    # dict order buffer. Iterate sequence inputs instead.
+                    obj_ptr = ctx.ensure_slot(f"__setupd_obj_{id(e)}", PTR)
+                    ctx.emit(IRInstr("store", None, [obj_v0, obj_ptr]))
+                    other_ptr = ctx.ensure_slot(f"__setupd_src_{id(e)}", PTR)
+                    ctx.emit(IRInstr("store", None, [other_v0, other_ptr]))
+                    len_addr = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("gep", len_addr, [other_v0, _LIST_LEN_OFF]))
+                    len_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("load", len_v, [len_addr]))
+                    idx_ptr = ctx.ensure_slot(f"__setupd_idx_{id(e)}", I64)
+                    zero_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", zero_v, [0]))
+                    ctx.emit(IRInstr("store", None, [zero_v, idx_ptr]))
+                    el_ty = _iter_element_type(e.args[0])
+
+                    head_b = ctx.new_block("setupdhead")
+                    body_b = ctx.new_block("setupdbody")
+                    end_b = ctx.new_block("setupdend")
+                    ctx.emit(IRInstr("br", None, [head_b.label]))
+
+                    ctx.switch_to(head_b)
+                    idx_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+                    cond_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, len_v]))
+                    ctx.emit(
+                        IRInstr(
+                            "br.t",
+                            None,
+                            [cond_v, body_b.label, end_b.label],
+                        )
+                    )
+
+                    ctx.switch_to(body_b)
+                    idx_v2 = ctx.tmp(I64)
+                    ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
+                    other_v = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("load", other_v, [other_ptr]))
+                    addr = _list_elem_addr(ctx, other_v, idx_v2)
+                    elem_v = ctx.tmp(ir_type_for(el_ty))
+                    ctx.emit(IRInstr("load", elem_v, [addr]))
+                    if el_ty == "int":
+                        base10 = ctx.tmp(I64)
+                        ctx.emit(IRInstr("const", base10, [10]))
+                        empty_name = ctx.mctx.intern_str("")
+                        empty_v = ctx.tmp(PTR)
+                        ctx.emit(IRInstr("global_addr", empty_v, [empty_name]))
+                        key_v = ctx.tmp(PTR)
+                        ctx.emit(
+                            IRInstr(
+                                "call",
+                                key_v,
+                                ["_abi_int_to_base", elem_v, base10, empty_v],
+                            )
+                        )
+                    else:
+                        key_v = elem_v
+                    obj_v = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("load", obj_v, [obj_ptr]))
+                    one_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", one_v, [1]))
+                    ctx.emit(
+                        IRInstr(
+                            "call",
+                            None,
+                            ["_abi_dict_set", obj_v, key_v, one_v],
+                        )
+                    )
+                    next_idx = ctx.tmp(I64)
+                    ctx.emit(IRInstr("iadd", next_idx, [idx_v2, one_v]))
+                    ctx.emit(IRInstr("store", None, [next_idx, idx_ptr]))
+                    ctx.emit(IRInstr("br", None, [head_b.label]))
+
+                    ctx.switch_to(end_b)
+                else:
+                    ctx.emit(
+                        IRInstr(
+                            "call",
+                            None,
+                            ["_abi_dict_update", obj_v0, other_v0],
+                        )
+                    )
                 return ctx.shared_zero
             if e.method in ("union", "intersection", "difference") and len(e.args) == 1:
                 return _lower_set_setop(ctx, e.obj, e.args[0], e.method, id(e))
@@ -7521,6 +7824,34 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             return _lower_thread_ctor(ctx, e)
         v = ctx.tmp(PTR)
         ctx.emit(IRInstr("call", v, ["_abi_new_instance"]))
+        # Copy inherited class-body defaults and dynamic class namespace
+        # assignments base-to-derived, so normal `self.NAME` reads see the
+        # effective class attribute and subclass overrides win.
+        class_chain = list(reversed(_resolve_class_chain(ctx, e.func)))
+        for owner in class_chain:
+            for (declaring_class, attribute), label in ctx.mctx.class_var_labels.items():
+                if declaring_class != owner:
+                    continue
+                value_ptr = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", value_ptr, [label]))
+                value_ty = ctx.mctx.global_types.get(label, I64)
+                value = ctx.tmp(value_ty)
+                ctx.emit(IRInstr("load", value, [value_ptr]))
+                key_name = ctx.mctx.intern_str(attribute)
+                key = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", key, [key_name]))
+                stored = value
+                if value.type is F64:
+                    stored = ctx.tmp(I64)
+                    ctx.emit(IRInstr("bitcast_f2i", stored, [value]))
+                ctx.emit(IRInstr("call", None, ["_abi_dict_set", v, key, stored]))
+            class_label = ctx.mctx.class_object_labels.get(owner)
+            if class_label is not None:
+                class_ptr = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", class_ptr, [class_label]))
+                class_object = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", class_object, [class_ptr]))
+                ctx.emit(IRInstr("call", None, ["_abi_dict_update", v, class_object]))
         cid = ctx.mctx.class_ids.get(e.func)
         if cid is not None:
             key_name = ctx.mctx.intern_str("__class__")
@@ -7939,7 +8270,69 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(ir_type_for(A.expr_type(e)))
             ctx.emit(IRInstr("call", v, [f"{call_owner}____call__", *args]))
             return v
-        args = [_lower_expr(ctx, a) for a in e.args]
+        if e.func in ctx.closure_names:
+            closure = _lower_expr(ctx, A.Name(name=e.func, pos=e.pos))
+            buffer_address = ctx.tmp(PTR)
+            ctx.emit(
+                IRInstr("gep", buffer_address, [closure, _LIST_BUF_OFF])
+            )
+            buffer = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", buffer, [buffer_address]))
+            function_address = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", function_address, [buffer, 8]))
+            function = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", function, [function_address]))
+            captured: list[IRValue] = []
+            for index in range(ctx.closure_free_counts.get(e.func, 0)):
+                address = ctx.tmp(PTR)
+                ctx.emit(
+                    IRInstr("gep", address, [buffer, (index + 2) * 8])
+                )
+                value = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", value, [address]))
+                captured.append(value)
+            args = [_lower_expr(ctx, argument) for argument in e.args]
+            result = ctx.tmp(ir_type_for(A.expr_type(e)))
+            ctx.emit(
+                IRInstr("call", result, [function, *captured, *args])
+            )
+            return result
+        captured_args: list[IRValue] = []
+        lifted_free_vars = ctx.mctx.lifted_free_vars.get(e.func, [])
+        lifted_nonlocals = ctx.mctx.lifted_nonlocal_vars.get(e.func, set())
+        for free_name in lifted_free_vars:
+            if free_name in lifted_nonlocals:
+                if free_name in ctx.nonlocal_names:
+                    # This function received the same shared box as one of
+                    # its own hidden closure parameters.
+                    slot = _name_ptr(ctx, free_name, PTR)
+                    captured = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("load", captured, [slot]))
+                elif free_name in ctx.boxed_names:
+                    box_slot = ctx.ensure_slot(f"__nl_box_{free_name}", PTR)
+                    captured = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("load", captured, [box_slot]))
+                else:
+                    # A direct call after binding should normally have boxed
+                    # this already. Keep the path correct for a compiler-
+                    # synthesized direct call by creating that box lazily.
+                    current = _lower_expr(
+                        ctx, A.Name(name=free_name, pos=e.pos)
+                    )
+                    size = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", size, [8]))
+                    captured = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("call", captured, ["malloc", size]))
+                    ctx.emit(IRInstr("store", None, [current, captured]))
+                    box_slot = ctx.ensure_slot(f"__nl_box_{free_name}", PTR)
+                    ctx.emit(IRInstr("store", None, [captured, box_slot]))
+                    ctx.boxed_names.add(free_name)
+            else:
+                captured = _lower_expr(
+                    ctx, A.Name(name=free_name, pos=e.pos)
+                )
+            captured_args.append(captured)
+        args = captured_args + [_lower_expr(ctx, a) for a in e.args]
         v = ctx.tmp(ir_type_for(A.expr_type(e)))
         # A call through a plain variable (not a real function/class name)
         # -- e.g. `double = lambda x: x*2; double(21)`, or a lambda/func
@@ -8173,6 +8566,56 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
     if isinstance(s, A.Pass):
         return
 
+    if isinstance(s, A.ClosureBind):
+        cap = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", cap, [max(2 + len(s.free_vars), 4)]))
+        closure = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", closure, ["_abi_new_list", cap]))
+
+        magic = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", magic, [0xC105E]))
+        ctx.emit(IRInstr("call", None, ["_abi_list_append", closure, magic]))
+        function = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", function, [s.func_name]))
+        ctx.emit(IRInstr("call", None, ["_abi_list_append", closure, function]))
+
+        nonlocals = set(s.nonlocal_vars)
+        for free_name in s.free_vars:
+            if free_name in nonlocals:
+                box_slot = ctx.ensure_slot(f"__nl_box_{free_name}", PTR)
+                if free_name not in ctx.boxed_names:
+                    current = _lower_expr(
+                        ctx, A.Name(name=free_name, pos=s.pos)
+                    )
+                    size = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", size, [8]))
+                    box = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("call", box, ["malloc", size]))
+                    ctx.emit(IRInstr("store", None, [current, box]))
+                    ctx.emit(IRInstr("store", None, [box, box_slot]))
+                    ctx.boxed_names.add(free_name)
+                else:
+                    box = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("load", box, [box_slot]))
+                captured = box
+            else:
+                captured = _lower_expr(
+                    ctx, A.Name(name=free_name, pos=s.pos)
+                )
+            ctx.emit(
+                IRInstr(
+                    "call",
+                    None,
+                    ["_abi_list_append", closure, captured],
+                )
+            )
+
+        destination = _name_ptr(ctx, s.func_name, PTR)
+        ctx.emit(IRInstr("store", None, [closure, destination]))
+        ctx.closure_names.add(s.func_name)
+        ctx.closure_free_counts[s.func_name] = len(s.free_vars)
+        return
+
     if isinstance(s, A.Global) or isinstance(s, A.Nonlocal):
         return
 
@@ -8201,7 +8644,9 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             ctx.emit(IRInstr("store", None, [zero, ptr]))
             return
         val = _lower_expr(ctx, s.value)
-        ptr = _name_ptr(ctx, s.target, ctx.mctx.global_types.get(s.target, val.type))
+        ptr = _name_value_ptr(
+            ctx, s.target, ctx.mctx.global_types.get(s.target, val.type)
+        )
         ctx.emit(IRInstr("store", None, [val, ptr]))
         if not _is_global_name(ctx, s.target) and A.expr_type(s.value) == "list":
             ctx.slot_el_ty[s.target] = getattr(s.value, "list_el_type", "int")
@@ -8213,7 +8658,7 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         # comes from its existing slot, defaulting to int for a first write
         # -- ensure_slot below mirrors A.Assign's own untyped-slot default).
         cur_ty = ctx.mctx.global_types.get(s.target, ctx.slot_ty.get(s.target, I64))
-        ptr = _name_ptr(ctx, s.target, cur_ty)
+        ptr = _name_value_ptr(ctx, s.target, cur_ty)
         cur = ctx.tmp(cur_ty)
         ctx.emit(IRInstr("load", cur, [ptr]))
         rhs_ty = A.expr_type(s.value)
@@ -8384,13 +8829,18 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             ptr_v = _lower_expr(ctx, target.obj)
             idx_v = _lower_expr(ctx, target.index)
             val = _lower_expr(ctx, s.value)
+            elem_size = _INPARAM_OUTPARAM_ELEM_SIZE.get(el_kind, 8)
+            addr = _inparam_elem_addr(ctx, ptr_v, idx_v, elem_size=elem_size)
             if el_kind == "int8":
-                addr = _inparam_elem_addr(ctx, ptr_v, idx_v, elem_size=1)
                 truncated = ctx.tmp(U8)
                 ctx.emit(IRInstr("trunc", truncated, [val]))
                 ctx.emit(IRInstr("store", None, [truncated, addr]))
+            elif el_kind == "int32":
+                truncated = ctx.tmp(I32)
+                ctx.emit(IRInstr("trunc", truncated, [val]))
+                ctx.emit(IRInstr("store", None, [truncated, addr]))
             else:
-                ctx.emit(IRInstr("store", None, [val, ptr_v]))
+                ctx.emit(IRInstr("store", None, [val, addr]))
             return
         if obj_ty != "list":
             raise LowerError(f"unsupported stmt IndexAssign ({obj_ty})")
@@ -8479,7 +8929,16 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         if not all(isinstance(t, A.Name) for t in s.targets):
             raise LowerError("unsupported stmt TupleAssign (non-Name target)")
         names = [t.name for t in s.targets]
-        if len(s.values) == 1 and A.expr_type(s.values[0]) in ("list", "tuple"):
+        if len(s.values) == 1 and A.expr_type(s.values[0]) in (
+            "list",
+            "tuple",
+            "any",
+            # Unannotated values retain the historical "int" sentinel even
+            # when their runtime value is an iterable. Sema has already
+            # accepted this unpack, so lower it through the ordinary
+            # list/tuple cell layout just like "any".
+            "int",
+        ):
             # Single-iterable unpack (a, b = some_tuple_or_list_expr).
             src_v = _lower_expr(ctx, s.values[0])
             for i, name in enumerate(names):
@@ -8492,7 +8951,10 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
                 ptr = _name_ptr(ctx, name, ctx.mctx.global_types.get(name, elem_ty))
                 ctx.emit(IRInstr("store", None, [val, ptr]))
             return
-        raise LowerError("unsupported stmt TupleAssign (shape)")
+        raise LowerError(
+            f"unsupported stmt TupleAssign (shape) at {s.pos}: "
+            f"targets={s.targets!r}, values={s.values!r}"
+        )
 
     if isinstance(s, A.AttrAssign):
         if isinstance(s.obj, A.Name) and (s.obj.name, s.name) in ctx.mctx.class_var_labels:
@@ -8507,6 +8969,24 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             ptr = ctx.tmp(PTR)
             ctx.emit(IRInstr("global_addr", ptr, [label]))
             ctx.emit(IRInstr("store", None, [val, ptr]))
+            return
+        if isinstance(s.obj, A.Name) and s.obj.name in ctx.mctx.class_names:
+            # A write through a class object to an attribute not declared
+            # directly in that class creates a mutable subclass attribute.
+            label = ctx.mctx.class_object_labels[s.obj.name]
+            class_ptr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", class_ptr, [label]))
+            class_object = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", class_object, [class_ptr]))
+            key_name = ctx.mctx.intern_str(s.name)
+            key = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", key, [key_name]))
+            val = _lower_expr(ctx, s.value)
+            if A.expr_type(s.value) == "float":
+                bits = ctx.tmp(I64)
+                ctx.emit(IRInstr("bitcast_f2i", bits, [val]))
+                val = bits
+            ctx.emit(IRInstr("call", None, ["_abi_dict_set", class_object, key, val]))
             return
         # obj.name = value -> _abi_dict_set(obj, name, value); see the
         # A.Attr read path's comment for why this goes through a shim.
@@ -8764,13 +9244,13 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             ctx.switch_to(end_b)
             return
         iter_t = A.expr_type(s.iter)
-        if iter_t not in ("list", "tuple", "dict", "str", "any"):
+        if iter_t not in ("list", "tuple", "dict", "set", "str", "any", "int"):
             raise LowerError(f"unsupported stmt For (iterating {iter_t!r})")
-        if iter_t == "dict":
+        if iter_t in ("dict", "set"):
             el_ty = "str"
         elif iter_t == "str":
             el_ty = "str"
-        elif iter_t == "any":
+        elif iter_t in ("any", "int"):
             el_ty = "any"
         elif iter_t == "tuple":
             tuple_types = A.tuple_element_types(s.iter)
@@ -8788,7 +9268,7 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             raise LowerError("unsupported stmt For (float list elements)")
         var_ty = PTR if s.targets else ir_type_for(el_ty)
 
-        if iter_t == "dict":
+        if iter_t in ("dict", "set"):
             dict_v = _lower_expr(ctx, s.iter)
             list_v = ctx.tmp(PTR)
             ctx.emit(IRInstr("call", list_v, ["_abi_dict_keys", dict_v]))
@@ -9394,6 +9874,8 @@ def lower_func(
 ) -> IRFunc:
     declared_globals: set[str] = set()
     _collect_declared_globals(f.body, declared_globals)
+    declared_nonlocals: set[str] = set()
+    _collect_declared_nonlocals(f.body, declared_nonlocals)
     local_names: set[str] = set()
     if not module_body:
         # Seed with the function's own PARAMETERS before scanning the body
@@ -9421,17 +9903,33 @@ def lower_func(
         declared_globals=declared_globals,
         module_body=module_body,
     )
+    ctx.nonlocal_names = declared_nonlocals
     if isinstance(f.ret_type, tuple) and f.ret_type:
         ctx.ret_ty = f.ret_type[0]
     entry = ctx.new_block("entry")
     ctx.switch_to(entry)
     ctx.shared_zero = ctx.tmp(I64)
     ctx.emit(IRInstr("const", ctx.shared_zero, [0]))
+    if module_body:
+        for label in ctx.mctx.class_object_labels.values():
+            class_object = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", class_object, ["_abi_new_instance"]))
+            destination = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", destination, [label]))
+            ctx.emit(IRInstr("store", None, [class_object, destination]))
 
     params: list[IRValue] = []
     for i, pname in enumerate(f.params):
         annot = f.param_types[i] if i < len(f.param_types) else None
-        ty = ir_type_for(annot[0]) if isinstance(annot, tuple) else I64
+        # A captured nonlocal is passed as a pointer to its shared box. Reads
+        # and writes go through _name_value_ptr; the parameter slot itself
+        # must therefore retain the box pointer rather than pretending it is
+        # the annotated scalar value.
+        ty = (
+            PTR
+            if pname in declared_nonlocals
+            else ir_type_for(annot[0]) if isinstance(annot, tuple) else I64
+        )
         pv = IRValue(f"%arg_{pname}", ty)
         params.append(pv)
         ptr = ctx.ensure_slot(pname, ty)
@@ -9992,6 +10490,16 @@ def lower_module(mod: A.Module) -> IRModule:
         getattr(mod, "mlang_code_funcs", {}),
         imported_funcs,
     )
+    mctx.lifted_free_vars = {
+        f.name: list(f.free_vars)
+        for f in mod.funcs
+        if getattr(f, "is_lifted", False) and f.free_vars
+    }
+    mctx.lifted_nonlocal_vars = {
+        f.name: set(f.nonlocal_vars)
+        for f in mod.funcs
+        if getattr(f, "is_lifted", False) and f.nonlocal_vars
+    }
     # Register each class-var global's type into `global_types` (and
     # therefore `global_names`, computed from it in `_ModuleCtx.__init__`)
     # too -- not just `mctx.data` -- so `_is_global_name`/`_name_ptr`
@@ -10000,6 +10508,8 @@ def lower_module(mod: A.Module) -> IRModule:
     # rather than falling back to a same-named local slot.
     for label, default_expr in mctx.class_var_defaults:
         global_types[label] = ir_type_for(A.expr_type(default_expr))
+    for label in mctx.class_object_labels.values():
+        global_types[label] = PTR
     mctx.global_names = frozenset(global_types)
     for name in sorted(global_types):
         mctx.data.append(IRGlobal(name=name, type=global_types[name], value=None))
@@ -10020,7 +10530,7 @@ def lower_module(mod: A.Module) -> IRModule:
         for label, default_expr in mctx.class_var_defaults
     ]
     has_explicit_main = any(f.name == "main" for f in mod.funcs)
-    if has_explicit_main:
+    if has_explicit_main or mod.force_module_init:
         init_body = class_var_init_stmts + _module_init_stmts(mod)
         if init_body:
             init_body_fn = A.FuncDef(

@@ -196,6 +196,22 @@ BUILTINS: dict[str, tuple[int, int]] = {
     "bytearray": (0, 2), # bytearray() / bytearray(n) / bytearray(str) -> list[int]
 }
 
+# Builtins that are accepted as values as well as in direct call position.
+# Some are lowered by dedicated syntax paths rather than the BUILTINS table.
+BUILTIN_VALUE_NAMES: frozenset[str] = frozenset(BUILTINS) | frozenset({
+    "range",
+    "object",
+    "slice",
+    "property",
+    "classmethod",
+    "staticmethod",
+    "enumerate",
+    "isinstance",
+    "hasattr",
+    "getattr",
+    "ascii",
+})
+
 
 # Builtin exception classes. asmpython's exception runtime is string-message
 # based, but the *front end* must accept idiomatic `raise ValueError(msg)` and
@@ -206,6 +222,7 @@ BUILTIN_EXCEPTIONS: frozenset[str] = frozenset({
     "Exception",
     "SystemExit",
     "KeyboardInterrupt",
+    "GeneratorExit",
     "RuntimeError",
     "NotImplementedError",
     "ValueError",
@@ -216,14 +233,43 @@ BUILTIN_EXCEPTIONS: frozenset[str] = frozenset({
     "IndexError",
     "LookupError",
     "StopIteration",
+    "StopAsyncIteration",
     "ArithmeticError",
     "ZeroDivisionError",
     "OverflowError",
+    "FloatingPointError",
     "AssertionError",
     "ImportError",
+    "ModuleNotFoundError",
     "OSError",
     "IOError",
     "FileNotFoundError",
+    "BlockingIOError",
+    "ChildProcessError",
+    "ConnectionError",
+    "BrokenPipeError",
+    "ConnectionAbortedError",
+    "ConnectionRefusedError",
+    "ConnectionResetError",
+    "InterruptedError",
+    "IsADirectoryError",
+    "NotADirectoryError",
+    "PermissionError",
+    "ProcessLookupError",
+    "TimeoutError",
+    "BufferError",
+    "EOFError",
+    "MemoryError",
+    "ReferenceError",
+    "SystemError",
+    "UnboundLocalError",
+    "UnicodeError",
+    "UnicodeDecodeError",
+    "UnicodeEncodeError",
+    "UnicodeTranslateError",
+    "SyntaxError",
+    "IndentationError",
+    "TabError",
 })
 
 # Builtin scalar/container type names usable as a bare *value* (not just a
@@ -941,11 +987,17 @@ class SemaAnalyzer:
         default expression, or None if the class has no such class var. Only
         plain classes contribute static class vars (a @dataclass's class vars
         are per-instance fields)."""
-        for c in self.mod.classes:
-            if c.name != class_name:
-                continue
+        classes = {c.name: c for c in self.mod.classes}
+        current = class_name
+        seen: set[str] = set()
+        while current is not None and current not in seen:
+            seen.add(current)
+            c = classes.get(current)
+            if c is None:
+                break
             if getattr(c, "is_dataclass", False):
-                return None
+                current = c.parent
+                continue
             for cv in getattr(c, "class_vars", []) or []:
                 cvname, _annot, cvdefault = cv
                 if cvname == var and cvdefault is not None:
@@ -953,6 +1005,7 @@ class SemaAnalyzer:
                     if lit is not None:
                         return lit[0]
                     return self._static_value_info(cvdefault, {})[0]
+            current = c.parent
         return None
 
     def _resolve_method(
@@ -1521,6 +1574,8 @@ class SemaAnalyzer:
             return ("list", None, None, None)
         if isinstance(value, A.DictLit):
             return ("dict", None, None, None)
+        if isinstance(value, A.SetLit):
+            return ("set", None, None, None)
         if isinstance(value, A.TupleLit):
             return ("tuple", None, None, None)
         if isinstance(value, A.Call) and value.func in ("bytes", "bytearray"):
@@ -6110,7 +6165,7 @@ class SemaAnalyzer:
                 # real asmpython value type -- an ordinary int expression
                 # (0-255) is what a caller actually writes there, same as
                 # inparam[int8]'s read side normalizes to plain "int".
-                expected_t = "int" if el_t == "int8" else el_t
+                expected_t = "int" if el_t in ("int8", "int32") else el_t
                 if value_t != "any" and expected_t != "any" and value_t != expected_t:
                     raise SemaError(
                         f"outparam[{el_t}] = v: got {value_t}",
@@ -6887,6 +6942,13 @@ class SemaAnalyzer:
             ):
                 e.inferred_type = "type"
                 return
+            # Builtin callables are also valid first-class values, for
+            # example when an interpreter seeds a globals dictionary with
+            # ``{"print": print, "len": len}``. Calls still use the normal
+            # builtin lowering when the name appears in call position.
+            if e.name in BUILTIN_VALUE_NAMES:
+                e.inferred_type = "any"
+                return
             # A module-level function used as a value (passed, stored in a var).
             # Scope binding takes priority: if the user named a variable the same
             # as a merged stdlib function (e.g. `log = logging.getLogger(...)`
@@ -7437,6 +7499,10 @@ class SemaAnalyzer:
                         and (
                             (seen == "int" and is_container(et))
                             or (et == "int" and is_container(seen))
+                            or (
+                                seen.startswith("instance:")
+                                and et.startswith("instance:")
+                            )
                         )
                     ):
                         seen = "any"
@@ -7950,7 +8016,9 @@ class SemaAnalyzer:
                 # an ordinary int (0-255), same as C's `uint8_t` widening
                 # to `int` on ordinary use. Only "int"/"float" are real
                 # inferred_type values elsewhere in sema/codegen.
-                e.inferred_type = "int" if el_t == "int8" else el_t
+                e.inferred_type = (
+                    "int" if el_t in ("int8", "int32") else el_t
+                )
             elif obj_t == "dict":
                 # "int" doubles as the unknown sentinel; lenient (see above).
                 if A.expr_type(e.index) not in ("str", "any", "int"):
@@ -8409,7 +8477,28 @@ class SemaAnalyzer:
                             scope.list_el_types[e.obj.name] = arg_t
                             e.obj.list_el_type = arg_t
                         el_t = arg_t
-                    elif el_t not in ("any", "int") and arg_t != el_t:
+                    elif (
+                        el_t not in ("any", "int")
+                        and arg_t != el_t
+                        and arg_t != f"instance:{el_t}"
+                        and el_t
+                        != (
+                            arg_t.split(":", 1)[1]
+                            if arg_t.startswith("instance:")
+                            else ""
+                        )
+                        and not (
+                            el_t.startswith("instance:")
+                            and arg_t.startswith("instance:")
+                            and (
+                                el_t.split(":", 1)[1] not in self.classes
+                                or self._class_descends_from(
+                                    arg_t.split(":", 1)[1],
+                                    el_t.split(":", 1)[1],
+                                )
+                            )
+                        )
+                    ):
                         # `int` doubles as the unknown element sentinel (e.g. a
                         # list produced by `list(<opaque>)` whose real element
                         # kind we never tracked), so don't reject a mismatch

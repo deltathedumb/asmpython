@@ -1176,6 +1176,260 @@ def _dedupe_lifted_funcs(module: A.Module, taken_names: set[str]) -> None:
                 _rename_call_targets(m.body, renames)
 
 
+def _resolved_import_path(stmt, importer: Path, root: Path) -> Path | None:
+    """Resolve an ordinary import statement to a merged source module."""
+    if isinstance(stmt, A.Import):
+        result = _resolve_absolute(stmt.module, root)
+        if result is None:
+            result = _resolve_user_module(stmt.module, importer, root)
+        if result is None:
+            result = _resolve_bundled_stdlib(stmt.module)
+        return result
+    if isinstance(stmt, A.FromImport) and stmt.module:
+        return _resolve_fromimport_path(stmt, importer, root)
+    return None
+
+
+def _relative_submodule_path(
+    importer: Path, level: int, name: str, root: Path
+) -> Path | None:
+    """Resolve the module half of ``from . import module as alias``."""
+    base = importer.parent
+    for _ in range(level - 1):
+        base = base.parent
+    target = base / name
+    py = Path(str(target) + ".py")
+    if py.is_file() and (_within(py, root) or _is_within_stdlib(py)):
+        return py.resolve()
+    init = target / "__init__.py"
+    if init.is_file() and (_within(init, root) or _is_within_stdlib(init)):
+        return init.resolve()
+    return None
+
+
+def _class_import_bindings(
+    module: A.Module,
+    module_path: Path,
+    root: Path,
+    class_names_by_module: dict[str, dict[str, str]],
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """Return direct-class and module-alias bindings visible in ``module``.
+
+    Values are already translated to the collision-safe internal names chosen
+    for the target module.
+    """
+    direct: dict[str, str] = {}
+    qualified: dict[str, dict[str, str]] = {}
+    for stmt in module.body:
+        if isinstance(stmt, A.Import):
+            target = _resolved_import_path(stmt, module_path, root)
+            if target is None:
+                continue
+            target_names = class_names_by_module.get(str(target.resolve()))
+            if target_names is None:
+                continue
+            alias = stmt.alias
+            if alias is None:
+                alias = stmt.module.split(".")[0]
+            qualified[alias] = target_names
+            continue
+        if not isinstance(stmt, A.FromImport):
+            continue
+        local_names: list = stmt.names
+        original_names: list = stmt.orig_names if stmt.orig_names else stmt.names
+        if stmt.level > 0 and not stmt.module:
+            for local, original in zip(local_names, original_names):
+                target = _relative_submodule_path(
+                    module_path, stmt.level, original, root
+                )
+                if target is not None:
+                    target_names = class_names_by_module.get(str(target))
+                    if target_names is not None:
+                        qualified[local] = target_names
+                continue
+        target = _resolved_import_path(stmt, module_path, root)
+        if target is None:
+            continue
+        target_names = class_names_by_module.get(str(target.resolve()))
+        if target_names is None:
+            continue
+        for local, original in zip(local_names, original_names):
+            internal = target_names.get(original)
+            if internal is not None:
+                direct[local] = internal
+    return direct, qualified
+
+
+def _rewrite_class_references(
+    value,
+    bare_names: dict[str, str],
+    qualified_names: dict[str, dict[str, str]],
+) -> None:
+    """Rewrite class-valued AST references after whole-program name isolation."""
+    if isinstance(value, A.Call):
+        replacement = bare_names.get(value.func)
+        if replacement is not None:
+            value.func = replacement
+    elif isinstance(value, A.Name):
+        replacement = bare_names.get(value.name)
+        if replacement is not None:
+            value.name = replacement
+    elif (
+        isinstance(value, A.MethodCall)
+        or isinstance(value, A.Attr)
+        or isinstance(value, A.AttrAssign)
+    ):
+        obj = value.obj
+        if isinstance(obj, A.Name):
+            module_classes = qualified_names.get(obj.name)
+            if module_classes is not None:
+                if isinstance(value, A.MethodCall):
+                    replacement = module_classes.get(value.method)
+                    if replacement is not None:
+                        value.method = replacement
+                elif isinstance(value, A.Attr):
+                    replacement = module_classes.get(value.name)
+                    if replacement is not None:
+                        value.name = replacement
+                else:
+                    replacement = module_classes.get(value.name)
+                    if replacement is not None:
+                        value.name = replacement
+
+    if dataclasses.is_dataclass(value):
+        for data_field in dataclasses.fields(value):
+            nested = getattr(value, data_field.name)
+            _rewrite_class_references(nested, bare_names, qualified_names)
+    elif isinstance(value, list) or isinstance(value, tuple):
+        for nested in value:
+            _rewrite_class_references(nested, bare_names, qualified_names)
+    elif isinstance(value, dict):
+        for nested in value.values():
+            _rewrite_class_references(nested, bare_names, qualified_names)
+
+
+def _merge_classes_with_module_identity(
+    entry: A.Module,
+    entry_path: Path,
+    parsed: dict[str, A.Module],
+    discovery_order: list[str],
+    root: Path,
+    class_origin: dict[str, str],
+) -> None:
+    """Merge classes without conflating equal leaf names from other modules.
+
+    The native compiler has one flat symbol table, while Python gives every
+    module its own global namespace.  Retain the first discovered spelling for
+    source compatibility and give later cross-module collisions deterministic
+    internal names.  Dotted bases and class-valued references are then rebound
+    to those internal names before sema sees the flattened program.
+    """
+    occurrences: dict[str, list[str]] = {}
+    for module_path in discovery_order:
+        module = parsed.get(module_path)
+        if module is None:
+            continue
+        local_seen: set[str] = set()
+        for cls in module.classes:
+            if cls.name in local_seen:
+                continue
+            local_seen.add(cls.name)
+            paths = occurrences.get(cls.name)
+            if paths is None:
+                paths = []
+                occurrences[cls.name] = paths
+            paths.append(module_path)
+
+    class_names_by_module: dict[str, dict[str, str]] = {}
+    all_source_names: set[str] = set(occurrences)
+    used_internal_names: set[str] = set()
+    for module_index, module_path in enumerate(discovery_order):
+        module = parsed.get(module_path)
+        if module is None:
+            continue
+        local_map: dict[str, str] = {}
+        for cls in module.classes:
+            original = cls.name
+            if original in local_map:
+                continue
+            internal = original
+            paths = occurrences.get(original)
+            if paths is not None and len(paths) > 1 and paths[0] != module_path:
+                internal = (
+                    original
+                    + "__asmpython_module_"
+                    + str(module_index)
+                )
+                suffix = 1
+                while (
+                    internal in all_source_names
+                    or internal in used_internal_names
+                ):
+                    internal = (
+                        original
+                        + "__asmpython_module_"
+                        + str(module_index)
+                        + "_"
+                        + str(suffix)
+                    )
+                    suffix += 1
+            local_map[original] = internal
+            used_internal_names.add(internal)
+        class_names_by_module[module_path] = local_map
+
+    # Resolve every parent while class names still carry their source spelling.
+    for module_path in discovery_order:
+        module = parsed.get(module_path)
+        if module is None:
+            continue
+        module_path_obj = Path(module_path)
+        local_map = class_names_by_module[module_path]
+        direct, qualified = _class_import_bindings(
+            module, module_path_obj, root, class_names_by_module
+        )
+        for cls in module.classes:
+            if cls.parent is None:
+                continue
+            qualifier = getattr(cls, "parent_qualifier", None)
+            replacement = None
+            if qualifier is not None:
+                target_names = qualified.get(qualifier)
+                if target_names is not None:
+                    replacement = target_names.get(cls.parent)
+            else:
+                replacement = direct.get(cls.parent)
+                if replacement is None:
+                    replacement = local_map.get(cls.parent)
+            if replacement is not None:
+                cls.parent = replacement
+
+        bare = dict(direct)
+        for source_name, internal_name in local_map.items():
+            bare[source_name] = internal_name
+        _rewrite_class_references(module, bare, qualified)
+        for cls in module.classes:
+            cls.name = local_map.get(cls.name, cls.name)
+
+    # Rebuild the flat class list. Unique names preserve the historical
+    # first-definition-wins behavior; cross-module collisions are all retained.
+    merged_classes: list = []
+    class_origin.clear()
+    merged_names: set[str] = set()
+    entry_key = str(entry_path.resolve())
+    for module_path in discovery_order:
+        module = parsed.get(module_path)
+        if module is None:
+            continue
+        for cls in module.classes:
+            if cls.name in merged_names:
+                continue
+            merged_names.add(cls.name)
+            merged_classes.append(cls)
+            if module_path != entry_key:
+                class_origin[cls.name] = module_path
+    entry.classes = merged_classes
+
+
 def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]:
     """Every project `.py` file the module imports (relative or absolute),
     scanning top-level *and* nested (function-local) import statements."""
@@ -1384,9 +1638,6 @@ def load_program(
     func_names = set()
     for f in entry.funcs:
         func_names.add(f.name)
-    class_names = set()
-    for c in entry.classes:
-        class_names.add(c.name)
 
     # Per-module parsed AST + the top-level value assigns it exports, recorded
     # in discovery order so the materialization pass can resolve cross-module
@@ -1434,20 +1685,40 @@ def load_program(
                     f.is_stdlib = True
                 entry.funcs.append(f)
                 func_origin[f.name] = mod_path_str
+            elif getattr(f, "is_public_export", False):
+                # A native-library export must not be hidden by an earlier
+                # private helper with the same bare name from another merged
+                # module.  The public definition is the externally visible
+                # contract and therefore wins this otherwise-first-definition
+                # collision.
+                for index, existing in enumerate(entry.funcs):
+                    if (
+                        existing.name == f.name
+                        and not getattr(existing, "is_public_export", False)
+                    ):
+                        if mod_is_stdlib:
+                            f.is_stdlib = True
+                        entry.funcs[index] = f
+                        func_origin[f.name] = mod_path_str
+                        break
         for c in mod.classes:
-            if c.name not in class_names:
-                class_names.add(c.name)
-                if mod_is_stdlib:
-                    for m in c.methods:
-                        m.is_stdlib = True
-                entry.classes.append(c)
-                class_origin[c.name] = mod_path_str
+            if mod_is_stdlib:
+                for m in c.methods:
+                    m.is_stdlib = True
         # Recurse into this module's own project imports.
         for p in _project_imports(mod, mod_path, root):
             sub: Path = p
             if str(sub.resolve()) not in seen:
                 queue.append(sub)
 
+    _merge_classes_with_module_identity(
+        entry,
+        entry_path,
+        parsed,
+        discovery_order,
+        root,
+        class_origin,
+    )
     _merge_function_import_aliases(
         entry,
         parsed,

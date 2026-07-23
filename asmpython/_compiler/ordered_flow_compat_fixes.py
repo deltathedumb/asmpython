@@ -256,7 +256,12 @@ def _infer_specific_returns(mod: A.Module) -> None:
                 )
             )
             current = _annotation_name(function.ret_type)
-            if inferred is not None and inferred not in (_UNKNOWN, "any") and current != inferred:
+            if (
+                current not in ("tuple", "list", "dict", "set")
+                and inferred is not None
+                and inferred not in (_UNKNOWN, "any")
+                and current != inferred
+            ):
                 function.ret_type = (inferred, None)
                 changed = True
 
@@ -276,7 +281,12 @@ def _infer_specific_returns(mod: A.Module) -> None:
                     )
                 )
                 current = _annotation_name(method.ret_type)
-                if inferred is not None and inferred not in (_UNKNOWN, "any") and current != inferred:
+                if (
+                    current not in ("tuple", "list", "dict", "set")
+                    and inferred is not None
+                    and inferred not in (_UNKNOWN, "any")
+                    and current != inferred
+                ):
                     method.ret_type = (inferred, None)
                     changed = True
 
