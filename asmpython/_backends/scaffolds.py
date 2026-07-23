@@ -61,6 +61,10 @@ SCAFFOLD_BACKEND_SPECS: tuple[BackendScaffoldSpec, ...] = (
         planned_parameters=("--java-version", "--class-version", "--nopack", "--main-class", "--manifest", "--preview"),
     ),
     BackendScaffoldSpec(
+        "android", "Android", "virtual-machine", aliases=("Android", "dex", "apk"),
+        planned_parameters=("--min-sdk", "--target-sdk", "--package", "--main-class", "--manifest", "--nopack"),
+    ),
+    BackendScaffoldSpec(
         "python-bytecode", "Python Bytecode", "virtual-machine",
         aliases=("Python Bytecode", "python_bytecode", "pyc"),
         planned_parameters=("--version", "--optimize", "--invalidation", "--legacy-layout"),
