@@ -4,10 +4,12 @@ on:
   push:
     branches:
       - agent/management-runtime-features
+      - beta/3.14.0
   pull_request:
     paths:
       - "asmpython/__init__.py"
       - "asmpython/embedded.py"
+      - "asmpython/extras/**"
       - "asmpython/backend.py"
       - "asmpython/extension.py"
       - "asmpython/linker.py"
@@ -24,8 +26,10 @@ on:
       - "tests/test_management_commands.py"
       - "tests/test_memory_runtime.py"
       - "tests/test_mixed_traceback.py"
+      - "tests/test_public_abi_exports.py"
       - "tests/test_speedy_lossy.py"
       - "tests/test_test_command.py"
+      - "tests/test_top_level_extras.py"
       - ".github/workflows/management-runtime.yml"
 
 permissions:
@@ -58,6 +62,12 @@ jobs:
           python -m py_compile \
             asmpython/__init__.py \
             asmpython/embedded.py \
+            asmpython/extras/__init__.py \
+            asmpython/extras/_api.py \
+            asmpython/extras/abi.py \
+            asmpython/extras/access.py \
+            asmpython/extras/interrupts.py \
+            asmpython/extras/threading.py \
             asmpython/backend.py \
             asmpython/extension.py \
             asmpython/linker.py \
@@ -91,6 +101,7 @@ jobs:
             asmpython/_compiler/negotiation_ext.py \
             asmpython/_compiler/package_signing.py \
             asmpython/_compiler/profiles.py \
+            asmpython/_compiler/public_abi_compat_fixes.py \
             asmpython/_compiler/target_triple.py \
             asmpython/_compiler/target_triple_ext.py \
             asmpython/_compiler/test_runner.py \
@@ -112,8 +123,10 @@ jobs:
             tests/test_management_commands.py \
             tests/test_memory_runtime.py \
             tests/test_mixed_traceback.py \
+            tests/test_public_abi_exports.py \
             tests/test_speedy_lossy.py \
-            tests/test_test_command.py 2>&1 | tee focused-tests.log
+            tests/test_test_command.py \
+            tests/test_top_level_extras.py 2>&1 | tee focused-tests.log
           status=${PIPESTATUS[0]}
           exit "$status"
 
