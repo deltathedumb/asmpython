@@ -49,6 +49,7 @@ _build/
 # (see ir_lower.py's module docstring) -- this is source, not build output.
 !asmpython/_runtime/abi_shims.asm
 !asmpython/_runtime/abi_shims_linux.asm
+!asmpython/_runtime/abi_shims_x86_32.asm
 !asmpython/_runtime/threading_shims.asm
 
 # ── Downloaded dependencies (NASM / GCC / embeddable Python) ─────────────────
