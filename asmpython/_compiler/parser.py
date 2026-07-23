@@ -1236,6 +1236,19 @@ class Parser:
                 param_types.append(("dict", None))
                 defaults.append(None)
                 continue
+            if self._check("OP", "/"):
+                # Positional-only marker (PEP 570): `def f(a, b, /, c):` --
+                # everything before it may only be passed positionally by a
+                # real caller. Like the bare-`*` keyword-only marker just
+                # below, asmpython treats every parameter positionally
+                # regardless (callers may still pass any of them by
+                # keyword; sema binds keyword args onto positions), so this
+                # carries no actual parameter and is simply consumed and
+                # discarded, exactly the same way. Found via a real repro:
+                # PIL's own bundled typeshed stub, PIL/_typing.py's
+                # `def read(self, length: int = ..., /) -> _T_co: ...`.
+                self._eat()
+                continue
             if self._check("OP", "*"):
                 self._eat()
                 if self._check("NAME"):
