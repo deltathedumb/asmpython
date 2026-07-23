@@ -972,11 +972,25 @@ class Parser:
                         self._eat()
                         metaclass_name = self._expect("NAME").value
                 else:
-                    # First base class, possibly dotted (`module.Base`). Every
-                    # consumer (sema's class table, codegen's chain walker) keys
-                    # by bare class name, so `parent` keeps the leaf. Preserve
-                    # the qualifier separately so whole-program merging can
-                    # resolve same-named classes from different modules.
+                    # First base class, possibly dotted (`module.Base`) and
+                    # possibly a subscripted generic (`Protocol[_T_co]`,
+                    # `Generic[T]`) -- real Python allows a base class
+                    # expression to be any of these, e.g. typeshed's own
+                    # `class SupportsRead(Protocol[_T_co]):`. Every consumer
+                    # (sema's class table, codegen's chain walker) keys by
+                    # bare class name only, so `parent` keeps the leaf and a
+                    # subscript's contents are parsed (for balanced-bracket
+                    # correctness) and discarded, same as the "extra bases
+                    # aren't modelled" skip a few lines below already does
+                    # for anything else in this parameter list. Preserve the
+                    # dotted qualifier separately so whole-program merging
+                    # can resolve same-named classes from different modules.
+                    # Confirmed via a real repro: PIL's own bundled typeshed
+                    # stub `PIL/_typing.py`'s `class SupportsRead(Protocol
+                    # [_T_co]):` failed with "expected OP ')', got OP '['"
+                    # before this fix -- the subscript was never consumed at
+                    # all, so parsing fell straight through to this
+                    # parenthesized-base-list's own closing `)` check.
                     parent_parts = [self._expect("NAME").value]
                     while self._check("OP", "."):
                         self._eat()
@@ -984,6 +998,16 @@ class Parser:
                     parent = parent_parts[-1]
                     if len(parent_parts) > 1:
                         parent_qualifier = ".".join(parent_parts[:-1])
+                    if self._check("OP", "["):
+                        self._eat()
+                        if not self._check("OP", "]"):
+                            self._parse_expr()
+                            while self._check("OP", ","):
+                                self._eat()
+                                if self._check("OP", "]"):
+                                    break
+                                self._parse_expr()
+                        self._expect("OP", "]")
                 # Extra bases / keyword bases (multiple inheritance, metaclass=,
                 # or a `permits=` clause after a real base class) aren't
                 # modelled beyond the sealed-permits capture above -- single
