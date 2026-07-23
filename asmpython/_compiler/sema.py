@@ -4092,19 +4092,6 @@ class SemaAnalyzer:
                     ):
                         scope.add(p, usage_hints[p])
                         continue
-                    if (
-                        annot is not None
-                        and annot[0] in ("outparam", "inparam")
-                        and not getattr(f, "is_public_export", False)
-                    ):
-                        raise SemaError(
-                            f"{annot[0]}[T] parameter {p!r} on {f.name!r} is only "
-                            "meaningful on an exported (@access(Public)/@abi(...)) "
-                            "function -- an ordinary asmpython-to-asmpython call "
-                            "has no caller-supplied pointer for it to write through",
-                            f.pos,
-                            ErrorCode.E_ASSIGN_TYPE,
-                        )
                     self._seed_param(scope, p, annot, default, inferred, pos=f.pos)
             tolerate = getattr(f, "is_stdlib", False) and f.name not in self._reachable_funcs
             self._try_check_block(f.body, scope, tolerate=tolerate)

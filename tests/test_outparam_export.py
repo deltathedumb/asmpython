@@ -50,7 +50,17 @@ class OutparamSemaTests(unittest.TestCase):
                 function.is_public_export = True
         sema_analyze(module, source_dir=None, collect_errors=False, active_extensions=frozenset())
 
-    def test_outparam_on_non_exported_function_is_rejected(self) -> None:
+    def test_outparam_on_non_exported_helper_function_is_accepted(self) -> None:
+        # outparam[T]/inparam[T] originally only allowed on an EXPORTED
+        # function's own parameters, on the theory that only an external
+        # caller ever supplies a real pointer. That blocked a legitimate,
+        # common pattern instead: a non-exported internal helper that an
+        # exported function calls, passing its own outparam/inparam
+        # pointer straight through (e.g. PortaPy's dict_glue.c port needed
+        # a shared `_decode_ascii_key(key: inparam[int8], ...)` helper
+        # called from multiple exported functions). Relaxed to allow it
+        # anywhere -- the real safety property (correct pointer
+        # provenance) isn't verifiable by this shallow a check either way.
         module = _parse(
             "def get_size(runtime: int, value: int, out_size: outparam[int]) -> int:\n"
             "    out_size[0] = 42\n"
@@ -59,8 +69,7 @@ class OutparamSemaTests(unittest.TestCase):
             "def main() -> int:\n"
             "    return get_size(1, 2, 3)\n"
         )
-        with self.assertRaises(SemaError):
-            sema_analyze(module, source_dir=None, collect_errors=False, active_extensions=frozenset())
+        sema_analyze(module, source_dir=None, collect_errors=False, active_extensions=frozenset())
 
     def test_outparam_write_index_must_be_an_int(self) -> None:
         # outparam[T] originally only accepted a literal-0 index (a single

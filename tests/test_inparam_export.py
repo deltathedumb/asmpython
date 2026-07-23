@@ -41,7 +41,12 @@ class InparamSemaTests(unittest.TestCase):
                 function.is_public_export = True
         sema_analyze(module, source_dir=None, collect_errors=False, active_extensions=frozenset())
 
-    def test_inparam_on_non_exported_function_is_rejected(self) -> None:
+    def test_inparam_on_non_exported_helper_function_is_accepted(self) -> None:
+        # See outparam's matching test for the full rationale: a
+        # non-exported internal helper called from an exported function,
+        # passing its inparam/outparam pointer straight through, is a
+        # legitimate and common pattern (PortaPy's dict_glue.c port needed
+        # exactly this for its shared ASCII-key-decoding helper).
         module = _parse(
             "def first(items: inparam[int], count: int) -> int:\n"
             "    return items[0]\n"
@@ -49,8 +54,7 @@ class InparamSemaTests(unittest.TestCase):
             "def main() -> int:\n"
             "    return 0\n"
         )
-        with self.assertRaises(SemaError):
-            sema_analyze(module, source_dir=None, collect_errors=False, active_extensions=frozenset())
+        sema_analyze(module, source_dir=None, collect_errors=False, active_extensions=frozenset())
 
     def test_inparam_read_allows_a_variable_index(self) -> None:
         # Unlike outparam (exactly one pointee, literal 0 only), inparam is
