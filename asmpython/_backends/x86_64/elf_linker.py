@@ -229,7 +229,24 @@ def link_elf(
     thunk_off = {name: text_body_len + i * 6 for i, name in enumerate(func_imports)}
     entry_stub_off = text_body_len + 6 * len(func_imports)
     has_module_init = "__asmpy_module_init" in global_syms
+    library_init_symbol = None
     if is_library:
+        # ir_lower.py's lower_module only synthesizes __asmpy_module_init
+        # when the source has an explicit `def main():` -- a "script
+        # style" program (no explicit main, e.g. a pure C-ABI module with
+        # only @access(Public) exports) instead folds ALL module-level
+        # init code into a function literally named "main" (ir_lower.py's
+        # "preserve the existing script model" branch). Fall back to
+        # calling that as the init function -- without this, a library
+        # with no explicit main() silently never ran its own module-level
+        # global initialization at all (confirmed: a real segfault
+        # appending to an uninitialized global list on the first exported
+        # call, porting PortaPy's list_glue.c).
+        if has_module_init:
+            library_init_symbol = "__asmpy_module_init"
+        elif "main" in global_syms:
+            library_init_symbol = "main"
+        has_module_init = library_init_symbol is not None
         # A shared object has no required entry point at all -- module
         # init (if any) runs via DT_INIT_ARRAY instead (see .dynamic
         # below), which the dynamic linker calls automatically at load
@@ -237,10 +254,10 @@ def link_elf(
         # returns. `entry_stub` here is just a trivial one-instruction
         # trampoline (`jmp rel32 module_init`) satisfying init array's
         # own "function pointer with no arguments" calling convention --
-        # __asmpy_module_init itself already matches that signature, so
-        # this could point straight at it, but keeping a stub means
-        # text_total_len's math doesn't need a THIRD shape (with/without
-        # module init AND with/without a stub at all).
+        # the resolved init function itself already matches that
+        # signature, so this could point straight at it, but keeping a
+        # stub means text_total_len's math doesn't need a THIRD shape
+        # (with/without module init AND with/without a stub at all).
         entry_stub_len = 5 if has_module_init else 0  # jmp rel32 module_init
     else:
         # and rsp,-16 ; [call rel32 module_init] ; call rel32 main ; mov edi,eax ;
@@ -412,7 +429,10 @@ def link_elf(
         disp = got_slot_vaddr - (vaddr_text + pos + 6)
         text[pos:pos + 6] = bytes([0xFF, 0x25]) + struct.pack("<i", disp)
 
-    init_addr = resolve("__asmpy_module_init") if has_module_init else 0
+    if is_library:
+        init_addr = resolve(library_init_symbol) if has_module_init else 0
+    else:
+        init_addr = resolve("__asmpy_module_init") if has_module_init else 0
     stub_addr = vaddr_text + entry_stub_off
     if is_library:
         if has_module_init:

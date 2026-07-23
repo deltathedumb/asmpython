@@ -308,7 +308,28 @@ def link_pe(
     acrt_iob_stub_len = 4 + 3 + 5 + 4 + 3 + 4 + 1
     entry_stub_off = acrt_iob_stub_off + (acrt_iob_stub_len if needs_acrt_iob_stub else 0)
     has_module_init = "__asmpy_module_init" in global_syms
+    library_init_symbol = None
     if is_library:
+        # ir_lower.py's lower_module only synthesizes __asmpy_module_init
+        # when the source has an explicit `def main():` -- a "script style"
+        # program (no explicit main -- the common case for a library-only
+        # source with no process entry point at all, e.g. a pure C-ABI
+        # module) instead gets ALL of its module-level init code (global
+        # list/dict construction, etc) folded into a function literally
+        # named "main" (ir_lower.py's own "preserve the existing script
+        # model" branch). An executable's entry stub always calls that
+        # "main" as its real entry point either way, so this was never
+        # visible there -- but a library has no such call at all, so
+        # without this fallback every module-level global was silently
+        # NEVER INITIALIZED (confirmed: a real segfault appending to an
+        # uninitialized global list on the very first exported call,
+        # porting PortaPy's list_glue.c -- its generated source has no
+        # explicit main(), only exported @access(Public) functions).
+        if has_module_init:
+            library_init_symbol = "__asmpy_module_init"
+        elif "main" in global_syms:
+            library_init_symbol = "main"
+        has_module_init = library_init_symbol is not None
         # DllMain(rcx=hinst, edx=reason, r8=reserved) -> eax (BOOL). Only
         # DLL_PROCESS_ATTACH (reason == 1) runs module init -- DLL_PROCESS_
         # DETACH/THREAD_ATTACH/THREAD_DETACH (0/2/3) have nothing to do
@@ -484,7 +505,10 @@ def link_pe(
         )
         text[acrt_iob_stub_off:acrt_iob_stub_off + acrt_iob_stub_len] = bytes(iob)
 
-    init_addr = resolve("__asmpy_module_init") if has_module_init else 0
+    if is_library:
+        init_addr = resolve(library_init_symbol) if has_module_init else 0
+    else:
+        init_addr = resolve("__asmpy_module_init") if has_module_init else 0
     stub_base_addr = IMAGE_BASE + rva_text + entry_stub_off
     if is_library:
         # DllMain(hinst, reason, reserved) -> BOOL. Only
