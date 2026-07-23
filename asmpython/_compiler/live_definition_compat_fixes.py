@@ -79,6 +79,31 @@ def _live_definitions(mod: A.Module) -> tuple[set[str], set[str], set[str]]:
         function_names,
         class_names,
     )
+    # Two more root sets `mod.body`'s own statements can't capture:
+    #  - `main`, the process entry point when one is declared. Nothing in
+    #    mod.body calls it in the common (no explicit `if __name__ ==
+    #    "__main__": main()` guard) case -- ir_lower.py's own
+    #    `_reachable_callables` special-cases it the same way, for the
+    #    same reason. Without this, a program whose only top-level
+    #    statement is `def main(): ...` had ITS OWN ENTRY POINT stubbed
+    #    to `return 0` by this pass, before ir_lower/codegen ever ran --
+    #    confirmed via a real regression: `def main() -> int: return 5`
+    #    compiled and ran, but always exited 0.
+    #  - native-library exports (`@access(Public)` / `@abi(...)`), called
+    #    only from OUTSIDE the compiled program (a host resolving the
+    #    symbol at runtime), never from anything in mod.body.
+    if "main" in function_names:
+        live_functions.add("main")
+    for name, definition in functions.items():
+        if getattr(definition, "is_public_export", False):
+            live_functions.add(name)
+    for class_name, owner in classes.items():
+        class_public = getattr(owner, "is_public_export", False)
+        if class_public:
+            live_classes.add(class_name)
+        for method in owner.methods:
+            if class_public or getattr(method, "is_public_export", False):
+                live_methods.add(method.name)
     queued_functions = list(live_functions)
     processed_functions: set[str] = set()
     processed_method_keys: set[tuple[str, str]] = set()
