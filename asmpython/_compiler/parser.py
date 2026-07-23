@@ -967,10 +967,7 @@ class Parser:
                 ):
                     self._eat()
                     self._eat()
-                    metaclass_name = self._expect("NAME").value
-                    while self._check("OP", "."):
-                        self._eat()
-                        metaclass_name = self._expect("NAME").value
+                    metaclass_name = ".".join(self._parse_dotted_name_parts())
                 else:
                     # First base class, possibly dotted (`module.Base`) and
                     # possibly a subscripted generic (`Protocol[_T_co]`,
@@ -991,10 +988,7 @@ class Parser:
                     # before this fix -- the subscript was never consumed at
                     # all, so parsing fell straight through to this
                     # parenthesized-base-list's own closing `)` check.
-                    parent_parts = [self._expect("NAME").value]
-                    while self._check("OP", "."):
-                        self._eat()
-                        parent_parts.append(self._expect("NAME").value)
+                    parent_parts = self._parse_dotted_name_parts()
                     parent = parent_parts[-1]
                     if len(parent_parts) > 1:
                         parent_qualifier = ".".join(parent_parts[:-1])
@@ -1042,10 +1036,7 @@ class Parser:
                     ):
                         self._eat()
                         self._eat()
-                        metaclass_name = self._expect("NAME").value
-                        while self._check("OP", "."):
-                            self._eat()
-                            metaclass_name = self._expect("NAME").value
+                        metaclass_name = ".".join(self._parse_dotted_name_parts())
                         continue
                     self._parse_expr()
             self._expect("OP", ")")
@@ -1501,10 +1492,7 @@ class Parser:
             # Unexpected shape (e.g. the `[int]` inside `Callable[[int], str]`).
             # Skip a balanced atom so we don't misparse the enclosing list.
             return self._skip_annot_atom()
-        name = self._eat().value
-        while self._check("OP", "."):
-            self._eat()
-            name = f"{name}.{self._expect('NAME').value}"
+        name = ".".join(self._parse_dotted_name_parts())
         inner: list = []
         if self._check("OP", "["):
             self._eat()
@@ -1686,6 +1674,31 @@ class Parser:
             self._suite_depth -= 1
 
     # ---- statements --------------------------------------------------------
+
+    def _parse_dotted_name_parts(self) -> list[str]:
+        """Consume `NAME (. NAME)*` and return its parts as a flat list, e.g.
+        `os.path.join` -> `["os", "path", "join"]`. The single shared
+        primitive behind every dotted-name walk in this parser -- module
+        paths (`import a.b.c`), class bases (`class X(module.Base):`),
+        metaclass targets, except-clause types, default-value attribute
+        chains, and quoted forward-reference/subscript annotation names all
+        parse the exact same "one or more dot-separated identifiers" shape,
+        previously via ~9 separate hand-written `while self._check("OP",
+        "."): ...` loops scattered across this file that only differed in
+        what shape they immediately built from the parts (a joined string, a
+        list of A.Attr nodes, a bare leaf-name). Callers derive whichever of
+        those shapes they need from the returned parts list (e.g.
+        `".".join(parts)` for a flat string, or fold with A.Attr for an
+        attribute-chain expression) instead of each re-implementing the walk
+        itself -- so a future fix to how dotted names are consumed (e.g.
+        stricter validation, a different soft-keyword interaction) only
+        needs to change here, not at every call site again.
+        """
+        parts = [self._expect("NAME").value]
+        while self._check("OP", "."):
+            self._eat()
+            parts.append(self._expect("NAME").value)
+        return parts
 
     def _is_assign_target(self, expr) -> bool:
         """True if `expr` is a valid assignment-target SHAPE: a bare name, a
@@ -2729,11 +2742,8 @@ class Parser:
 
     def _parse_import(self) -> A.Import:
         kw = self._expect("KEYWORD", "import")
-        name = self._expect("NAME").value
         # Dotted module path: `import os.path`. Joined into one flat string.
-        while self._check("OP", "."):
-            self._eat()
-            name = f"{name}.{self._expect('NAME').value}"
+        name = ".".join(self._parse_dotted_name_parts())
         # Optional `as` alias: keep the full dotted path in `module` (needed
         # to resolve the real file -- a prior version of this collapsed
         # `module` to just the alias, e.g. `import lumen.audio as audio`
@@ -2760,12 +2770,9 @@ class Parser:
             level += 1
         module = ""
         if self._check("NAME"):
-            module = self._expect("NAME").value  # type: ignore[assignment]
-            # Dotted module path: `from a.b.c import x`. Eat the rest as one
+            # Dotted module path: `from a.b.c import x`. Joined into one
             # flat string so sema sees `a.b.c`.
-            while self._check("OP", "."):
-                self._eat()
-                module = f"{module}.{self._expect('NAME').value}"
+            module = ".".join(self._parse_dotted_name_parts())
         elif level == 0:
             # `from import ...` with no module name is invalid.
             raise ParseError("expected module name after 'from'", self._peek().pos, ErrorCode.P_MISSING_MODULE)
