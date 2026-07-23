@@ -169,6 +169,8 @@ BUILTINS: dict[str, tuple[int, int]] = {
     "all": (1, 1),
     "ord": (1, 1),
     "chr": (1, 1),
+    "bitcast_f2i": (1, 1),  # bitcast_f2i(x: float) -> int: raw IEEE-754 bit pattern, not a numeric conversion
+    "bitcast_i2f": (1, 1),  # bitcast_i2f(x: int) -> float: reverse of bitcast_f2i (bit pattern, not a numeric conversion)
     "repr": (1, 1),
     "type": (1, 1),  # type(x) -> opaque type object (`.__name__` reads lenient)
     "id": (1, 1),  # id(x) -> the object's pointer value (unique per object)
@@ -9845,6 +9847,8 @@ class SemaAnalyzer:
                 "all": "int",
                 "ord": "int",
                 "chr": "str",
+                "bitcast_f2i": "int",
+                "bitcast_i2f": "float",
                 "repr": "str",
                 "type": "any",
                 "id": "int",
@@ -9959,6 +9963,8 @@ class SemaAnalyzer:
                 "chr",
                 "repr",
                 "id",
+                "bitcast_f2i",
+                "bitcast_i2f",
             ):
                 return
             if e.func in ("min", "max"):

@@ -5139,6 +5139,22 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("load", v, [len_addr]))
         return v
 
+    if isinstance(e, A.Call) and e.func == "bitcast_f2i" and len(e.args) == 1:
+        if A.expr_type(e.args[0]) != "float":
+            raise LowerError("unsupported expr Call (bitcast_f2i non-float)")
+        f_v = _lower_expr(ctx, e.args[0])
+        v = ctx.tmp(I64)
+        ctx.emit(IRInstr("bitcast_f2i", v, [f_v]))
+        return v
+
+    if isinstance(e, A.Call) and e.func == "bitcast_i2f" and len(e.args) == 1:
+        if A.expr_type(e.args[0]) != "int":
+            raise LowerError("unsupported expr Call (bitcast_i2f non-int)")
+        i_v = _lower_expr(ctx, e.args[0])
+        v = ctx.tmp(F64)
+        ctx.emit(IRInstr("bitcast_i2f", v, [i_v]))
+        return v
+
     if isinstance(e, A.Call) and e.func == "ord" and len(e.args) == 1:
         if A.expr_type(e.args[0]) != "str":
             raise LowerError("unsupported expr Call (ord non-str)")

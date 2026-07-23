@@ -6,6 +6,8 @@ compiler-visible metadata decorators.
 """
 from __future__ import annotations
 
+import builtins
+import struct
 import sys
 from types import ModuleType
 
@@ -78,6 +80,38 @@ class _ASMPythonModule(ModuleType):
 
 # Supports: import asmpython; @asmpython(...); def func(): ...
 sys.modules[__name__].__class__ = _ASMPythonModule
+
+
+def _bitcast_f2i(value: float) -> int:
+    """Raw IEEE-754 bit pattern of a float, reinterpreted as a signed int64.
+
+    Not a numeric conversion (unlike int(x)) -- the compiled path lowers this
+    to a bit-identical register move (MOVQ xmm->gp / FMOV on ARM64) via the
+    existing bitcast_f2i IR instruction; this is the matching CPython-side
+    definition so the same source runs unchanged when imported directly
+    (as PortaPy's own generated-module tests do).
+    """
+    (bits,) = struct.unpack("<q", struct.pack("<d", value))
+    return bits
+
+
+def _bitcast_i2f(value: int) -> float:
+    """Reverse of bitcast_f2i: reinterpret a signed int64's bits as a float."""
+    (result,) = struct.unpack("<d", struct.pack("<q", value))
+    return result
+
+
+# bitcast_f2i/bitcast_i2f are asmpython builtins (see _compiler/sema.py's
+# BUILTINS table and _compiler/ir_lower.py's Call lowering), not real CPython
+# builtins -- unlike every other name the compiler recognizes there (ord,
+# chr, len, ...). Installing them onto the real `builtins` module the moment
+# asmpython is imported keeps the "asmpython source is a strict Python
+# subset, runnable unmodified under plain CPython" invariant intact for
+# generated modules that get imported directly (not just compiled).
+if not hasattr(builtins, "bitcast_f2i"):
+    builtins.bitcast_f2i = _bitcast_f2i
+if not hasattr(builtins, "bitcast_i2f"):
+    builtins.bitcast_i2f = _bitcast_i2f
 
 
 __all__ = [
