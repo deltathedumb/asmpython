@@ -2179,6 +2179,36 @@ def _lower_truthy(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     `_value_truthy`. Use this (not `_value_truthy` directly) whenever `e`
     hasn't been lowered yet, so it's only evaluated once."""
     t = A.expr_type(e)
+    if t == "str" or t in ("list", "tuple", "dict", "set"):
+        # Heap containers are falsy based on their contents, not their
+        # allocation pointer.  Empty strings are still non-NULL interned
+        # pointers, while list/tuple/dict/set objects keep their length at
+        # +8.  Keep the NULL check for Optional values before dereferencing.
+        value = _lower_expr(ctx, e)
+        result_ptr = ctx.ensure_slot(f"__truthy_payload_{id(e)}", I64)
+        zero = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero, [0]))
+        ctx.emit(IRInstr("store", None, [zero, result_ptr]))
+        nonnull_b = ctx.new_block("truthynonnull")
+        end_b = ctx.new_block("truthyend")
+        ctx.emit(IRInstr("br.t", None, [value, nonnull_b.label, end_b.label]))
+
+        ctx.switch_to(nonnull_b)
+        if t == "str":
+            payload = ctx.tmp(I64)
+            ctx.emit(IRInstr("call", payload, ["strlen", value]))
+        else:
+            payload_ptr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", payload_ptr, [value, _LIST_LEN_OFF]))
+            payload = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", payload, [payload_ptr]))
+        ctx.emit(IRInstr("store", None, [payload, result_ptr]))
+        ctx.emit(IRInstr("br", None, [end_b.label]))
+
+        ctx.switch_to(end_b)
+        result = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", result, [result_ptr]))
+        return result
     if t.startswith("instance:"):
         # `if obj:` / `while obj:` on a user instance -- Python truthiness
         # calls `__bool__` (or, if absent, `__len__`) rather than testing
