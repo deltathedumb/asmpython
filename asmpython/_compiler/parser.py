@@ -1650,6 +1650,38 @@ class Parser:
 
     # ---- statements --------------------------------------------------------
 
+    def _is_assign_target(self, expr) -> bool:
+        """True if `expr` is a valid assignment-target SHAPE: a bare name, a
+        subscript, an attribute access, or a (possibly nested) tuple/list of
+        such -- real Python's own assignment-target grammar, which allows
+        arbitrary nesting (`(a, [b, c.d]) = x` is legal CPython). Recursing
+        into TupleLit/ListLit here means every assignment-parsing call site
+        below gets nested-unpack support for free, instead of each needing
+        its own repeat of this shape check (previously duplicated ~6 times,
+        each only checking Name/Subscript/Attr and never recursing into a
+        nested tuple/list target -- e.g. `(a, (b, c)) = x` worked at the top
+        level but `((a, b), c) = x` did not, an arbitrary inconsistency of
+        no benefit to anyone, just a byproduct of how many places happened
+        to repeat the check).
+
+        A single valid identifier (`A.Name`) is always assignable regardless
+        of the surrounding shape (`(a, *[b, c]) = x` mixes it with a nested
+        list-target). Note this deliberately does NOT accept `A.Starred`
+        itself -- callers that allow a starred sub-target (tuple/list
+        unpacking) check for it explicitly beside this predicate, since a
+        bare `*x = v` at the top level is invalid Python (`_parse_tuple_
+        assign` raises P_INVALID_ASSIGN_TARGET for exactly that shape) and a
+        starred target is only ever valid *inside* a tuple/list target, not
+        as a target in its own right.
+        """
+        if isinstance(expr, (A.Name, A.Subscript, A.Attr)):
+            return True
+        if isinstance(expr, (A.TupleLit, A.ListLit)):
+            return bool(expr.elems) and all(
+                self._is_assign_target(el) for el in expr.elems
+            )
+        return False
+
     def _parse_stmt(self):
         t = self._peek()
         if t.kind == "KEYWORD":
@@ -1800,17 +1832,23 @@ class Parser:
         # "lhs.name = rhs" -> AttrAssign.
         pos = t.pos
         expr = self._parse_expr()
-        # Parenthesized tuple-unpacking assignment: `(a, b, c) = e1, e2, e3`.
-        # A leading `(` never reaches the bare-NAME lookahead above (that
-        # only fires when the statement starts with a NAME token), so
-        # `(a, b, c)` was always parsed here as a plain TupleLit expression
-        # first -- unwrap its elements into targets when they're all valid
-        # assignment targets and `=` follows, exactly like the bare-NAME
-        # tuple-unpack case just above handles `a, b, c = ...` (real Python
-        # treats `(a, b) = x` and `a, b = x` as equivalent). Confirmed via a
-        # real repro: PIL.Image.py's `(a, b, c, d, e, f) = matrix`.
-        if isinstance(expr, A.TupleLit) and expr.elems and self._check("OP", "=") and all(
-            isinstance(el, (A.Name, A.Subscript, A.Attr)) for el in expr.elems
+        # Parenthesized tuple-unpacking assignment: `(a, b, c) = e1, e2, e3`,
+        # and its list-target sibling `[a, b, c] = e1, e2, e3` (real Python
+        # allows both interchangeably). A leading `(` or `[` never reaches
+        # the bare-NAME lookahead above (that only fires when the statement
+        # starts with a NAME token), so both were always parsed here as a
+        # plain TupleLit/ListLit expression first -- unwrap its elements
+        # into targets when they're all valid assignment targets and `=`
+        # follows, exactly like the bare-NAME tuple-unpack case just above
+        # handles `a, b, c = ...` (real Python treats `(a, b) = x` and
+        # `a, b = x` as equivalent). Confirmed via a real repro: PIL.Image.
+        # py's `(a, b, c, d, e, f) = matrix`. Uses the general
+        # `_is_assign_target` predicate (see its docstring) instead of an
+        # inline Name/Subscript/Attr check, so a nested unpack target like
+        # `(a, (b, c)) = x` -- or, now, `[a, [b, c]] = x` -- is accepted
+        # here too, for free.
+        if isinstance(expr, (A.TupleLit, A.ListLit)) and expr.elems and self._check("OP", "=") and all(
+            self._is_assign_target(el) for el in expr.elems
         ):
             self._eat()  # '='
             values = [self._parse_expr()]
@@ -1822,12 +1860,12 @@ class Parser:
         # Tuple assignment with at least one subscript/attribute target, e.g.
         # `xs[0], xs[1] = xs[1], xs[0]` or `a, self.x = self.x, a`. Pure
         # NAME-only sequences are handled above by `_parse_tuple_assign`.
-        if (isinstance(expr, A.Name) or isinstance(expr, A.Subscript) or isinstance(expr, A.Attr)) and self._check("OP", ","):
+        if self._is_assign_target(expr) and self._check("OP", ","):
             targets = [expr]
             while self._check("OP", ","):
                 self._eat()
                 tgt = self._parse_expr()
-                if not (isinstance(tgt, A.Name) or isinstance(tgt, A.Subscript) or isinstance(tgt, A.Attr)):
+                if not self._is_assign_target(tgt):
                     raise ParseError("cannot assign to this expression", tgt.pos, ErrorCode.P_INVALID_ASSIGN_TARGET)
                 targets.append(tgt)
             self._expect("OP", "=")
