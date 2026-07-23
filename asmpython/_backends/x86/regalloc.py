@@ -497,7 +497,7 @@ def _compute_crosses_var_shift(func: Any) -> set[str]:
 
 # ── Main allocator ────────────────────────────────────────────────────────────
 
-def allocate(func: Any, abi: str = "cdecl") -> AllocResult:
+def allocate(func: Any, abi: str = "cdecl", needs_pic: bool = False) -> AllocResult:
     """
     Allocate registers for *func* (an IRFunc duck-type).
 
@@ -512,8 +512,28 @@ def allocate(func: Any, abi: str = "cdecl") -> AllocResult:
          module docstring) can be added here without changing every
          CALLER of this function; not implemented yet, since nothing in
          this backend generates fastcall calls today.
+
+    needs_pic: True when codegen.py has determined (by scanning the
+         function's own instructions BEFORE calling this) that it
+         references at least one global/string/external-call symbol and
+         must therefore run as real 32-bit position-independent code --
+         the classic call/pop-then-GOTPC-relocation trick, which needs
+         EBX reserved for the WHOLE function as a GOT-base pointer (see
+         codegen.py's own _prologue). This is a real, hard exclusion, not
+         a preference: unlike an ordinary allocation choice, letting the
+         allocator assign EBX to an arbitrary value here would silently
+         corrupt the GOT-base pointer the very first time that value is
+         written, with every SUBSEQUENT global/string access in the
+         function then computing a garbage address. EBX also drops out
+         of the callee-saved set the allocator can ever use for a call-
+         crossing value (this backend's own 3-register callee-saved pool
+         shrinks to 2, ESI/EDI, whenever PIC is active) -- it's not being
+         saved/restored as an ordinary register at all here, it holds a
+         function-scoped invariant the prologue sets up once.
     """
     callee_gp = set(CALLEE_SAVED) - {Reg.EBP}  # EBP is always the frame pointer, never allocated to an arbitrary value
+    if needs_pic:
+        callee_gp -= {Reg.EBX}
     callee_xmm = _CALLEE_SAVED_XMM
 
     locs:             dict[str, Location] = {}
@@ -522,7 +542,7 @@ def allocate(func: Any, abi: str = "cdecl") -> AllocResult:
     used_callee_xmm:  set[XmmReg]         = set()
     stack_top = 0  # bytes consumed below EBP so far
 
-    free_gp:  list[Reg]    = list(_GP_POOL)
+    free_gp:  list[Reg]    = [r for r in _GP_POOL if not (needs_pic and r == Reg.EBX)]
     free_xmm: list[XmmReg] = list(_XMM_POOL)
 
     in_gp:  dict[str, Reg]    = {}  # values currently in a GP reg
@@ -716,7 +736,21 @@ def allocate(func: Any, abi: str = "cdecl") -> AllocResult:
     # in 0..3, the required stack_top%16 is 8, 4, 0, 12 respectively --
     # exactly `(8 - 4 * n) % 16`, which is what's used below (`% 4` on the
     # callee-saved count, not `% 2`, is the real cycle length here).
-    target_residue = (8 - 4 * (len(used_callee_gp) % 4)) % 16
+    #
+    # needs_pic contributes one MORE push that `used_callee_gp` never
+    # counts: codegen.py's own PIC prologue does `push ebx` (saving the
+    # caller's EBX before clobbering it for the GOT-base computation)
+    # UNCONDITIONALLY when PIC is active, entirely separately from
+    # whether EBX ever appears in used_callee_gp (it structurally never
+    # does -- see this function's own needs_pic docstring, EBX is excluded
+    # from the allocatable pool whenever needs_pic is True). Caught before
+    # it ever reached codegen.py: an earlier draft only counted
+    # used_callee_gp here, silently under-counting the real push total by
+    # one whenever PIC was active, breaking alignment for every PIC
+    # function needing 0 or 2 ordinary callee-saved registers (the two
+    # residues this miscount would have been wrong for).
+    n_prologue_pushes = len(used_callee_gp) + (1 if needs_pic else 0)
+    target_residue = (8 - 4 * (n_prologue_pushes % 4)) % 16
     if stack_top % 16 != target_residue:
         stack_top += (target_residue - stack_top) % 16
 
@@ -736,8 +770,14 @@ def allocate(func: Any, abi: str = "cdecl") -> AllocResult:
     # the correct 8 bytes apart (8, 16). Each parameter's own width is
     # exactly `_slot_size(param.type.name)` -- the same helper the rest of
     # this file already uses for spill/call-result slot sizing.
+    # n_prologue_pushes (not len(used_callee_gp) alone) -- same PIC-mode
+    # EBX-push correction as target_residue's own computation just above;
+    # every real push in the prologue (ordinary callee-saved registers,
+    # PLUS the unconditional PIC-mode EBX save) shifts the incoming-
+    # parameter base by another 4 bytes, not just the ones this allocator
+    # happened to also assign to a value.
     param_by_name = {p.name: p for p in func.params}
-    incoming_stack_base = 8 + 4 * len(used_callee_gp)
+    incoming_stack_base = 8 + 4 * n_prologue_pushes
     running_offset = incoming_stack_base
     for name in stack_params:
         locs[name] = StackLoc(running_offset)
