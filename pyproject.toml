@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asmpython"
-version = "3.14.0-preview"
+version = "2.0.0"
 description = "Compile Python to native x86-64 executables via NASM"
 readme = "README.md"
 license = { text = "MIT" }
