@@ -9662,6 +9662,22 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
         add_func("main")
     if any(f.name == "_threading_bootstrap" for f in mod.funcs):
         add_func("_threading_bootstrap")
+    # Native-library exports (`@access(Public)` / `@abi(...)`) are called
+    # only from OUTSIDE the compiled program (a host language dlopen/
+    # GetProcAddress-ing the symbol) -- nothing in `mod.body`/`main` ever
+    # calls them, so ordinary reachability from the process entry point
+    # would never mark them needed and lowering would silently drop them
+    # before pe_linker.py/elf_linker.py even get a chance to export them.
+    # Treat every exported function/method as its own root, exactly like
+    # `main` above.
+    for f in mod.funcs:
+        if f.is_public_export:
+            add_func(f.name)
+    for cls in mod.classes:
+        class_public = cls.is_public_export
+        for m in cls.methods:
+            if class_public or m.is_public_export:
+                add(cls.name, m.name)
 
     while method_queue or func_queue:
         while method_queue:
@@ -9714,6 +9730,9 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                     kwarg=m.kwarg,
                     asm_body=m.asm_body,
                     asm_symbol=f"{cls.name}__{m.name}" if m.asm_body is not None else None,
+                    access_policy=m.access_policy,
+                    abi_name=m.abi_name,
+                    is_public_export=cls.is_public_export or m.is_public_export,
                 )
             )
     return out_funcs, out_methods
@@ -9826,6 +9845,8 @@ def lower_module(mod: A.Module) -> IRModule:
     mctx.global_names = frozenset(global_types)
     for name in sorted(global_types):
         mctx.data.append(IRGlobal(name=name, type=global_types[name], value=None))
+    exports = [f.name for f in top_funcs if f.is_public_export]
+    exports.extend(f.name for f in method_funcs if f.is_public_export)
     funcs = [lower_func(f, mctx) for f in top_funcs]
     funcs.extend(lower_func(f, mctx) for f in method_funcs)
     # Class-level variable globals (`__cv_<Class>__<var>`) are initialized
@@ -9855,7 +9876,7 @@ def lower_module(mod: A.Module) -> IRModule:
         # module body itself becomes the process entry function.
         main_body = A.FuncDef(name="main", params=[], body=class_var_init_stmts + list(mod.body))
         funcs.append(lower_func(main_body, mctx, visibility="global", module_body=True))
-    return IRModule(funcs=funcs, data=mctx.data)
+    return IRModule(funcs=funcs, data=mctx.data, exports=exports)
 
 
 # ── import_binary() dynamic DLL loading ─────────────────────────────────────

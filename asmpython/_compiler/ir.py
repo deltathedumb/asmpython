@@ -86,6 +86,14 @@ class IRGlobal:
 class IRModule:
     funcs: list[IRFunc] = field(default_factory=list)
     data: list[IRGlobal] = field(default_factory=list)
+    # Names of `funcs` entries to publish as native-library exports (from
+    # `@access(Public)` / `@abi(...)` -- see ast_nodes.FuncDef/ClassDef's
+    # is_public_export and ir_lower.py's lower_module). Empty for an
+    # ordinary standalone-executable compile. A library backend/linker
+    # (pe_linker.py's PE export directory, elf_linker.py's ELF dynamic
+    # symbol table) uses this instead of re-deriving publicness from the
+    # AST, which it no longer has access to at link time.
+    exports: list[str] = field(default_factory=list)
 
 
 class IRBackend(abc.ABC):
