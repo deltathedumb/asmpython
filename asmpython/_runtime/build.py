@@ -26,11 +26,22 @@ from pathlib import Path
 from .._compiler import ast_nodes as A
 from .._compiler.target_linux import LinuxCodegen
 from .._compiler.target_windows import WindowsCodegen
+from .._compiler.target_x86_32_linux import X86_32LinuxCodegen
 
 
 _TARGETS = {
     "linux": (LinuxCodegen, "elf64", "libasmpython_rt_linux.a"),
     "windows": (WindowsCodegen, "win64", "libasmpython_rt_win.a"),
+    # x86-32 (i386) Linux -- the legacy runtime port is PARTIAL (see
+    # target_x86_32_linux.py's own module docstring and its
+    # _UNPORTED_RUNTIME_HELPERS list): exception handling and the dict/
+    # hash/sort core are done and verified; the string runtime, general
+    # list runtime, several dict/list helpers, console/print, and the
+    # GUI/audio/net/threading asmlib layer are not yet ported. A program
+    # that only uses what IS ported builds and runs correctly; one that
+    # calls an unported primitive gets a real, clear NASM/linker
+    # undefined-symbol error at build time, not a silent wrong answer.
+    "x86_32_linux": (X86_32LinuxCodegen, "elf32", "libasmpython_rt_x86_32_linux.a"),
 }
 
 # Shared-library outputs, keyed by the same target name. The build_shared

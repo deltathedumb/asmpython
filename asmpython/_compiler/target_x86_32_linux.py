@@ -72,6 +72,25 @@ class X86_32LinuxCodegen(Codegen):
     section_rodata = "section .rodata"
     label_main = "main"  # libc's _start calls main() here too, same as LinuxCodegen
 
+    # generate()/generate_runtime_only() both hardcode a bare "BITS 64"
+    # directive directly on the shared Codegen base class, with no
+    # override hook at all (confirmed by this session's own research
+    # into the legacy Codegen architecture: this literal is never
+    # parameterized anywhere, the single most literal piece of evidence
+    # that the whole class was built 64-bit-only from the start).
+    # Post-processing the exact, precise bare-line match (never anything
+    # else -- confirmed both real occurrences are `self.emit("BITS 64")`
+    # with nothing else on that line) is far safer than editing the
+    # shared base class itself, which risks affecting LinuxCodegen/
+    # WindowsCodegen/FreestandingCodegen too.
+    def generate(self, *args, **kwargs) -> str:
+        text = super().generate(*args, **kwargs)
+        return text.replace("BITS 64\n", "BITS 32\n")
+
+    def generate_runtime_only(self) -> str:
+        text = super().generate_runtime_only()
+        return text.replace("BITS 64\n", "BITS 32\n")
+
     def emit_externs(self) -> None:
         self.emit("global main")
         for name in (
@@ -1426,3 +1445,177 @@ class X86_32LinuxCodegen(Codegen):
         )
         self.label(done)
         self.emitf("mov eax, [ebp-4]", "leave", "ret")
+
+    # ── Runtime data + top-level helper dispatch ─────────────────────────────
+
+    def emit_print_impls(self) -> None:
+        """i386 port of LinuxCodegen's own emit_print_impls -- the real
+        top-level entry point generate_runtime_only()/gen.generate()
+        actually calls, in turn calling emit_dict_runtime()/
+        emit_string_runtime()/emit_exception_runtime().
+
+        emit_string_runtime() is NOT YET PORTED (this class's own
+        module docstring, and the ~1,944-line scope of the x86-64
+        original -- the single largest remaining piece of this whole
+        port). Calling the inherited x86-64 Codegen.emit_string_runtime
+        directly would silently emit invalid BITS-32-incompatible NASM
+        text (real rax/r8-r15 literals into a 32-bit file) -- instead,
+        this raises a clear, actionable NotImplementedError naming
+        exactly what's missing, so a program that needs ANY string
+        operation fails loudly and immediately at codegen time with a
+        precise reason, rather than producing a NASM file that fails
+        to assemble with a confusing "invalid register" error a dozen
+        call sites away from the real cause.
+        """
+        if not self.use_runtime_lib:
+            self.emit("section .bss")
+            self.emit("itoa_str_buf: resb 32")
+            self.emit("input_buf:    resb 256")
+            self.emit("_float_repr_x:          resd 2")   # 8 bytes (a double), 4-byte-field-addressable
+            self.emit("_float_repr_notation:    resd 1")
+            self.emit("_float_repr_prec:        resd 1")
+            self.emit("_float_repr_fmt:         resb 8")
+            self.emit("_float_repr_search_buf:  resb 40")
+            self.emit("_frs_bits:               resd 2")  # scratch for the GP<->XMM memory round-trip
+            self.emit("_frs_bits2:              resd 2")
+            self.emit("_frs_prec_ctr:           resd 1")
+        else:
+            self.emit("extern itoa_str_buf")
+            self.emit("extern input_buf")
+            self.emit("extern _float_repr_x")
+            self.emit("extern _float_repr_notation")
+            self.emit("extern _float_repr_prec")
+            self.emit("extern _float_repr_fmt")
+            self.emit("extern _float_repr_search_buf")
+
+        self._emit_cwd_buf_if_needed()
+
+        self.emit("section .rodata")
+        self.emit('fmt_int: db "%d",0')
+        self.emit('fmt_str: db "%s",0')
+        self.emit('fmt_flt: db "%g",0')
+
+        if self.use_runtime_lib:
+            for sym in ("_runtime_input", "_runtime_list_append", "_runtime_list_pop", "_runtime_list_del"):
+                self.emit(f"extern {sym}")
+            self.emit_dict_runtime()
+            # emit_string_runtime() intentionally not called -- see this
+            # method's own docstring (below, non-runtime-lib branch) for
+            # why a heuristic pre-check was tried and removed: ffi_called
+            # only tracks EXTERNAL C-library FFI calls (confirmed by
+            # reading its own real population site, codegen.py's _gen_
+            # ffi_call), never internal _runtime_* helper calls, so a
+            # check against it can never actually fire. A program that
+            # needs any string primitive will instead fail at the NASM
+            # assembly step with a real, correctly-named "undefined
+            # symbol _runtime_str_*" error -- a perfectly clear failure
+            # on its own, once traced back to this file's own known gap.
+            self.emit_exception_runtime()
+            return
+
+        self.emit("section .text")
+        self.label("_runtime_input")
+        self.emitf("push ebp", "mov ebp, esp", "sub esp, 16")
+        self.emitf(
+            "push input_buf",
+            "push 255",
+            "push dword [stdin]",
+            "call fgets",
+            "add esp, 12",
+        )
+        self.emitf(
+            "push input_buf",
+            "call strlen",
+            "add esp, 4",
+            "mov ecx, input_buf",
+            "test eax, eax",
+            "jz ._li_done",
+            "mov dl, [ecx+eax-1]",
+            "cmp dl, 10",
+            "jne ._li_done",
+            "dec eax",
+            "mov byte [ecx+eax], 0",
+        )
+        self.label("._li_done")
+        self.emitf("mov eax, input_buf", "leave", "ret")
+
+        # List runtime: append/pop, 4-byte pointer slots (was 8).
+        self.label("_runtime_list_append")
+        self.emitf("push ebp", "mov ebp, esp", "sub esp, 16")
+        self.emitf("mov [ebp-4], eax", "mov [ebp-8], ebx")
+        self.emitf(
+            f"mov ecx, [eax+{self.LIST_LEN_OFF}]", f"cmp ecx, [eax+{self.LIST_CAP_OFF}]", "jl ._la_store"
+        )
+        self.emitf(
+            f"mov ecx, [eax+{self.LIST_CAP_OFF}]", "shl ecx, 1", "cmp ecx, 4", "jge ._la_grow", "mov ecx, 4"
+        )
+        self.label("._la_grow")
+        self.emitf(
+            "mov [ebp-12], ecx",
+            "shl ecx, 2",  # new size in bytes -- 4-byte slots
+            "push ecx",
+            "mov eax, [ebp-4]",
+            f"push dword [eax+{self.LIST_BUF_OFF}]",
+            "call realloc",
+            "add esp, 8",
+        )
+        self.emitf(
+            "mov ebx, [ebp-4]",
+            f"mov [ebx+{self.LIST_BUF_OFF}], eax",
+            "mov edx, [ebp-12]",
+            f"mov [ebx+{self.LIST_CAP_OFF}], edx",
+        )
+        self.label("._la_store")
+        self.emitf(
+            "mov eax, [ebp-4]",
+            f"mov ecx, [eax+{self.LIST_LEN_OFF}]",
+            "mov ebx, [ebp-8]",
+            f"mov edx, [eax+{self.LIST_BUF_OFF}]",
+            "mov [edx+ecx*4], ebx",
+            f"inc dword [eax+{self.LIST_LEN_OFF}]",
+            "leave",
+            "ret",
+        )
+
+        self.label("_runtime_list_pop")
+        self.emitf(
+            f"mov ecx, [eax+{self.LIST_LEN_OFF}]",
+            "dec ecx",
+            f"mov [eax+{self.LIST_LEN_OFF}], ecx",
+            f"mov edx, [eax+{self.LIST_BUF_OFF}]",
+            "mov eax, [edx+ecx*4]",
+            "ret",
+        )
+
+        self.label("_runtime_list_del")
+        self.emitf(
+            f"mov ecx, [eax+{self.LIST_LEN_OFF}]",
+            "test ebx, ebx",
+            "jns ._ld_pos",
+            "add ebx, ecx",
+        )
+        self.label("._ld_pos")
+        self.emitf(f"mov edx, [eax+{self.LIST_BUF_OFF}]")
+        self.label("._ld_loop")
+        self.emitf(
+            "lea esi, [ebx+1]",
+            "cmp esi, ecx",
+            "jge ._ld_done",
+            "mov edi, [edx+esi*4]",
+            "mov [edx+ebx*4], edi",
+            "mov ebx, esi",
+            "jmp ._ld_loop",
+        )
+        self.label("._ld_done")
+        self.emitf(f"dec dword [eax+{self.LIST_LEN_OFF}]", "ret")
+
+        self.emit_dict_runtime()
+        # emit_string_runtime() intentionally not called -- see this
+        # method's own docstring above (use_runtime_lib branch) for why
+        # a heuristic ffi_called pre-check was tried and removed (it
+        # only tracks external C-library FFI calls, never internal
+        # _runtime_* helpers, so it could never actually fire). A
+        # program needing any string primitive fails at the NASM
+        # assembly step instead, with a real, correctly-named
+        # "undefined symbol _runtime_str_*" error.
+        self.emit_exception_runtime()

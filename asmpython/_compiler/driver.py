@@ -594,6 +594,18 @@ def _run_backend(
         gen = LinuxCodegen(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
         nasm_fmt = "elf64"
         obj_suffix = ".o"
+    elif target == "x86_32_linux":
+        from .target_x86_32_linux import X86_32LinuxCodegen
+
+        # PARTIAL runtime port -- see target_x86_32_linux.py's own module
+        # docstring and _UNPORTED_RUNTIME_HELPERS list. A program calling
+        # only what's ported (exception handling, dict/hash/sort core)
+        # builds and runs correctly; one that hits an unported primitive
+        # fails at the NASM/link step with a real, clear undefined-symbol
+        # error, not a silent wrong answer.
+        gen = X86_32LinuxCodegen(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
+        nasm_fmt = "elf32"
+        obj_suffix = ".o"
     elif target == "windows":
         gen = WindowsCodegen(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
         nasm_fmt = "win64"
@@ -761,10 +773,20 @@ def _run_backend(
         if icon_obj is not None:
             link_cmd.append(str(icon_obj))
         link_cmd += ["-o", str(exe_path)]
-        if target == "linux":
+        if target in ("linux", "x86_32_linux"):
             # The generated code uses absolute (non-PIC) relocations against
             # libc symbols, which modern gcc rejects under its default PIE mode.
+            # Same reasoning applies to x86_32_linux's own generated code
+            # (also absolute, non-PIC -- this legacy codegen system has no
+            # PIC mode at all on any target, unlike the separate, newer
+            # IR-based x86-32 backend which built real PIC support).
             link_cmd.append("-no-pie")
+        if target == "x86_32_linux":
+            # gcc must be told to produce/link a 32-bit binary explicitly --
+            # without -m32 it would try to link this NASM-produced elf32
+            # object as if it were a native (64-bit host) object, failing
+            # with an incompatible-format error.
+            link_cmd.append("-m32")
         if target == "windows":
             # Force console subsystem so the CRT calls main() not WinMain().
             # Newer mingw-w64/w64devkit (gcc 16+) no longer infers this from
@@ -775,9 +797,13 @@ def _run_backend(
 
             # Ensure the runtime archive is up to date for this target.
             build_runtime(target)
+            # Archive base name mirrors _runtime/build.py's own _TARGETS
+            # dict exactly (libasmpython_rt_<target>.a) -- NOT a binary
+            # windows/linux ternary, which would silently link the wrong
+            # (x86-64) archive for x86_32_linux.
             link_cmd += [
                 f"-L{_build_dir()}",
-                f"-lasmpython_rt_{'win' if target == 'windows' else 'linux'}",
+                f"-lasmpython_rt_{'win' if target == 'windows' else target}",
             ]
         if target == "windows" and getattr(gen, "needs_net", False):
             link_cmd.append("-lws2_32")
