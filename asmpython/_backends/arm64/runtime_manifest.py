@@ -123,6 +123,19 @@ RUNTIME_SLICES = (
         "abi_string_padding_linux_arm64.S",
         frozenset({"_abi_str_zfill"}),
     ),
+    RuntimeSlice(
+        "abi_dict_linux_arm64.S",
+        frozenset(
+            {
+                "_abi_new_instance",
+                "_abi_dict_set",
+                "_abi_dict_contains",
+                "_abi_dict_get_default",
+                "_abi_dict_keys",
+                "_abi_dict_update",
+            }
+        ),
+    ),
 )
 
 RUNTIME_SOURCE_NAMES = tuple(runtime_slice.filename for runtime_slice in RUNTIME_SLICES)
