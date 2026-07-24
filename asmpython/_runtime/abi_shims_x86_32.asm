@@ -30,6 +30,19 @@
 
 BITS 32
 
+; An explicit `section .text` is required here, not just implied by
+; being the first code -- NASM's `elf32` output format defaults an
+; unlabeled leading section to a real, defined .text (so this file
+; worked fine there without one), but its `win32` output format does
+; NOT: every symbol below showed up as UNDEFINED (COFF section index 0)
+; in a real `nasm -f win32`-assembled object, confirmed directly via
+; objdump, with a minimal single-label repro isolating the section
+; directive as the exact variable that flips it from undefined to
+; correctly-defined. This was invisible until the PE32/COFF32 linker
+; work actually tried to assemble this file with -f win32 for the
+; first time -- the existing -f elf32 usage never exercised this path.
+section .text
+
 global __udivdi64
 global __divdi64
 global __umoddi64
