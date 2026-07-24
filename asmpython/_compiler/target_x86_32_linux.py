@@ -1085,15 +1085,24 @@ class X86_32LinuxCodegen(Codegen):
         self._emit_dict_items_helper()
         self._emit_sort_helpers()
         self._emit_sort_items_helper()
+        self._emit_sort_pairs_helpers()
+        self._emit_list_extend_helper()
+        self._emit_list_repeat_helper()
+        self._emit_list_slice_helper()
+        self._emit_list_slice_step_helper()
+        self._emit_list_slice_assign_helper()
+        self._emit_list_reverse_helper()
+        self._emit_list_insert_helper()
+        self._emit_dict_clear_helper()
+        self._emit_dict_pop_helper()
         # NOT YET PORTED (explicit, tracked gap -- see this class's own
-        # module docstring and _UNPORTED_RUNTIME_HELPERS below): sort_
-        # pairs, list extend/repeat/slice/slice_step/slice_assign/
-        # reverse/insert, dict clear/pop. Each of these needs the exact
-        # same "4-byte list-buffer slots, r8-r11 -> stack scratch"
-        # treatment already applied above -- straightforward continuation
-        # of the same established pattern, not a new design problem, just
-        # not yet done. Emitting real `extern`-style forward declarations
-        # for their symbols here so any program that DOESN'T call these
+        # module docstring and _UNPORTED_RUNTIME_HELPERS below): the
+        # string runtime, general-purpose allocators (_runtime_new_list/
+        # _runtime_new_instance equivalents), number formatting (int_to_
+        # base/chr/str_to_int/int_to_binary/group_digits), and float-
+        # repr/round/divmod helpers beyond what emit_print_impls already
+        # covers. Emitting real `extern`-style forward declarations for
+        # their symbols here so any program that DOESN'T call these
         # specific operations still links and runs correctly; a program
         # that DOES call one of them will get a real, clear assembler-time
         # undefined-symbol error rather than a silent wrong answer.
@@ -1103,13 +1112,675 @@ class X86_32LinuxCodegen(Codegen):
         self.emit("section .rodata")
         self.emit('_runtime_dict_key_error_msg: db "KeyError: key not in dict",10,0')
 
-    _UNPORTED_RUNTIME_HELPERS = (
-        "_runtime_sort_pairs_str", "_runtime_sort_pairs_int",
-        "_runtime_list_extend", "_runtime_list_repeat",
-        "_runtime_list_slice", "_runtime_list_slice_step",
-        "_runtime_list_slice_assign", "_runtime_list_reverse",
-        "_runtime_list_insert", "_runtime_dict_clear", "_runtime_dict_pop",
-    )
+    _UNPORTED_RUNTIME_HELPERS: tuple[str, ...] = ()
+
+    def _emit_sort_pairs_helpers(self) -> None:
+        """i386 port of the x86-64 original (codegen.py's own
+        _emit_sort_pairs_helpers): in-place insertion sort of an "elems"
+        list, ordered by a parallel "keys" list of equal length.
+
+        In:  eax = elems list header, ebx = keys list header.
+        Out: eax = elems header (sorted; keys is left sorted too).
+
+        4-byte list-buffer slots (this target's own element stride, not
+        the x86-64 original's 8) throughout; cdecl _emit_libc_* calls
+        replace the direct `call _runtime_str_cmp` (still a bare call --
+        _runtime_str_cmp isn't a libc function, it's this target's own
+        runtime primitive, so it keeps eax/ebx args unchanged once ported).
+        """
+        for variant in ("str", "int"):
+            name = f"_runtime_sort_pairs_{variant}"
+            outer = self.fresh(f"sp_{variant}_outer")
+            inner = self.fresh(f"sp_{variant}_inner")
+            place = self.fresh(f"sp_{variant}_place")
+            done = self.fresh(f"sp_{variant}_done")
+            self.label(name)
+            self.emitf("push ebp", "mov ebp, esp", "sub esp, 32")
+            self.emitf(
+                "mov [ebp-4], eax",  # elems header
+                "mov [ebp-8], ebx",  # keys header
+                f"mov ecx, [eax+{self.LIST_LEN_OFF}]",
+                "mov [ebp-24], ecx",  # n
+                "mov dword [ebp-12], 1",  # i
+            )
+            self.label(outer)
+            self.emitf(
+                "mov ecx, [ebp-12]",
+                "cmp ecx, [ebp-24]",
+                f"jge {done}",
+                # key_elem = elems_buf[i]; key_key = keys_buf[i]; j = i - 1
+                "mov eax, [ebp-4]",
+                f"mov edx, [eax+{self.LIST_BUF_OFF}]",
+                "mov eax, [edx+ecx*4]",
+                "mov [ebp-20], eax",  # key_elem
+                "mov eax, [ebp-8]",
+                f"mov edx, [eax+{self.LIST_BUF_OFF}]",
+                "mov eax, [edx+ecx*4]",
+                "mov [ebp-16], eax",  # key_key
+                "dec ecx",
+                "mov [ebp-28], ecx",  # j
+            )
+            self.label(inner)
+            self.emitf("mov ecx, [ebp-28]", "test ecx, ecx", f"js {place}")
+            if variant == "str":
+                self.emitf(
+                    "mov eax, [ebp-8]",
+                    f"mov edx, [eax+{self.LIST_BUF_OFF}]",
+                    "mov eax, [edx+ecx*4]",  # keys_buf[j]
+                    "mov ebx, [ebp-16]",  # key_key
+                    "call _runtime_str_cmp",
+                    "cmp eax, 0",
+                    f"jle {place}",
+                )
+            else:
+                self.emitf(
+                    "mov eax, [ebp-8]",
+                    f"mov edx, [eax+{self.LIST_BUF_OFF}]",
+                    "mov eax, [edx+ecx*4]",  # keys_buf[j]
+                    "cmp eax, [ebp-16]",
+                    f"jle {place}",
+                )
+            # shift: elems_buf[j+1] = elems_buf[j]; keys_buf[j+1] = keys_buf[j]; j--
+            self.emitf(
+                "mov ecx, [ebp-28]",
+                "mov eax, [ebp-4]",
+                f"mov edx, [eax+{self.LIST_BUF_OFF}]",
+                "mov eax, [edx+ecx*4]",
+                "mov [edx+ecx*4+4], eax",
+                "mov eax, [ebp-8]",
+                f"mov edx, [eax+{self.LIST_BUF_OFF}]",
+                "mov eax, [edx+ecx*4]",
+                "mov [edx+ecx*4+4], eax",
+                "dec dword [ebp-28]",
+                f"jmp {inner}",
+            )
+            self.label(place)
+            self.emitf(
+                "mov ecx, [ebp-28]",
+                "mov eax, [ebp-4]",
+                f"mov edx, [eax+{self.LIST_BUF_OFF}]",
+                "mov ebx, [ebp-20]",
+                "mov [edx+ecx*4+4], ebx",  # elems_buf[j+1] = key_elem
+                "mov eax, [ebp-8]",
+                f"mov edx, [eax+{self.LIST_BUF_OFF}]",
+                "mov ebx, [ebp-16]",
+                "mov [edx+ecx*4+4], ebx",  # keys_buf[j+1] = key_key
+                "inc dword [ebp-12]",
+                f"jmp {outer}",
+            )
+            self.label(done)
+            self.emitf("mov eax, [ebp-4]", "leave", "ret")
+
+    def _emit_list_extend_helper(self) -> None:
+        """`_runtime_list_extend`: dst.extend(src). In: eax=dst, ebx=src.
+        Out: eax=dst. i386 port of the x86-64 original -- 4-byte slots."""
+        self.label("_runtime_list_extend")
+        self.emitf("push ebp", "mov ebp, esp", "sub esp, 32")
+        self.emitf(
+            "mov [ebp-4], eax",  # dst
+            "mov [ebp-8], ebx",  # src
+            f"mov ecx, [ebx+{self.LIST_LEN_OFF}]",
+            "mov [ebp-12], ecx",  # n
+            "mov dword [ebp-16], 0",  # i
+        )
+        loop = self.fresh("lext")
+        done = self.fresh("lext_done")
+        self.label(loop)
+        self.emitf(
+            "mov ecx, [ebp-16]",
+            "cmp ecx, [ebp-12]",
+            f"jge {done}",
+            "mov ebx, [ebp-8]",
+            f"mov ebx, [ebx+{self.LIST_BUF_OFF}]",
+            "mov ebx, [ebx+ecx*4]",  # src element
+            "mov eax, [ebp-4]",  # dst header
+            "call _runtime_list_append",
+            "mov [ebp-4], eax",  # update dst (may have reallocated)
+            "inc dword [ebp-16]",
+            f"jmp {loop}",
+        )
+        self.label(done)
+        self.emitf("mov eax, [ebp-4]", "leave", "ret")
+
+    def _emit_list_repeat_helper(self) -> None:
+        """`_runtime_list_repeat`: [x,y]*n. In: eax=src, ebx=count.
+        Out: eax=new list header. i386 port -- LIST_HEADER stays 24
+        bytes (structural layout compatibility, see module docstring),
+        initial buffer is cap(4)*4 bytes (this target's element stride)."""
+        self.label("_runtime_list_repeat")
+        self.emitf("push ebp", "mov ebp, esp", "sub esp, 32")
+        self.emitf(
+            "mov [ebp-4], eax",  # src header
+            "mov [ebp-8], ebx",  # count
+        )
+        self._emit_malloc(24)
+        self.emitf(
+            f"mov dword [eax+{self.LIST_CAP_OFF}], 4",
+            f"mov dword [eax+{self.LIST_LEN_OFF}], 0",
+            "mov [ebp-12], eax",  # result
+        )
+        self._emit_malloc(16)  # 4 * 4 = 16 bytes initial buffer
+        self.emitf(
+            "mov ebx, [ebp-12]",
+            f"mov [ebx+{self.LIST_BUF_OFF}], eax",
+        )
+        self.emitf("mov dword [ebp-16], 0")  # i = 0
+        _lrep_top = self.fresh("lrep_top")
+        _lrep_done = self.fresh("lrep_done")
+        self.label(_lrep_top)
+        self.emitf(
+            "mov eax, [ebp-16]",
+            "cmp eax, [ebp-8]",
+            f"jge {_lrep_done}",
+            "mov eax, [ebp-12]",  # dst
+            "mov ebx, [ebp-4]",  # src
+            "call _runtime_list_extend",
+            "mov [ebp-12], eax",  # update result (may have reallocated)
+            "inc dword [ebp-16]",
+            f"jmp {_lrep_top}",
+        )
+        self.label(_lrep_done)
+        self.emitf("mov eax, [ebp-12]", "leave", "ret")
+
+    def _emit_list_slice_helper(self) -> None:
+        """`_runtime_list_slice`: xs[start:stop] (no step). In: eax=src,
+        ebx=start(sentinel INT32_MIN=omit), ecx=stop(sentinel
+        INT32_MAX=omit). Out: eax=new list header. i386 port: sentinels
+        narrowed to 32-bit (this target's own int range, see module
+        docstring) from the x86-64 original's INT64_MIN/MAX; 4-byte
+        element stride throughout."""
+        INT32_MIN = "0x80000000"
+        INT32_MAX = "0x7fffffff"
+
+        self.label("_runtime_list_slice")
+        self.emitf("push ebp", "mov ebp, esp", "sub esp, 48")
+        self.emitf(
+            "mov [ebp-4], eax",  # src header
+            "mov [ebp-8], ebx",  # start raw
+            "mov [ebp-12], ecx",  # stop raw
+        )
+        self.emitf(f"mov eax, [eax+{self.LIST_LEN_OFF}]", "mov [ebp-16], eax")
+        have_start = self.fresh("ls_start_have")
+        s_pos = self.fresh("ls_s_pos")
+        s_ge0 = self.fresh("ls_s_ge0")
+        s_lel = self.fresh("ls_s_lel")
+        self.emitf("mov eax, [ebp-8]", f"cmp eax, {INT32_MIN}", f"jne {have_start}", "xor eax, eax")
+        self.label(have_start)
+        self.emitf("test eax, eax", f"jns {s_pos}", "add eax, [ebp-16]")
+        self.label(s_pos)
+        self.emitf("test eax, eax", f"jns {s_ge0}", "xor eax, eax")
+        self.label(s_ge0)
+        self.emitf("cmp eax, [ebp-16]", f"jle {s_lel}", "mov eax, [ebp-16]")
+        self.label(s_lel)
+        self.emitf("mov [ebp-20], eax")  # effective start
+        have_stop = self.fresh("ls_stop_have")
+        t_pos = self.fresh("ls_t_pos")
+        t_ge0 = self.fresh("ls_t_ge0")
+        t_lel = self.fresh("ls_t_lel")
+        self.emitf("mov eax, [ebp-12]", f"cmp eax, {INT32_MAX}", f"jne {have_stop}", "mov eax, [ebp-16]")
+        self.label(have_stop)
+        self.emitf("test eax, eax", f"jns {t_pos}", "add eax, [ebp-16]")
+        self.label(t_pos)
+        self.emitf("test eax, eax", f"jns {t_ge0}", "xor eax, eax")
+        self.label(t_ge0)
+        self.emitf("cmp eax, [ebp-16]", f"jle {t_lel}", "mov eax, [ebp-16]")
+        self.label(t_lel)
+        self.emitf("mov [ebp-24], eax")  # effective stop
+        nle = self.fresh("ls_n_le")
+        self.emitf("mov eax, [ebp-24]", "sub eax, [ebp-20]", f"jg {nle}", "xor eax, eax")
+        self.label(nle)
+        self.emitf("mov [ebp-28], eax")  # n
+        cap_ok = self.fresh("ls_cap_ok")
+        self.emitf("cmp eax, 4", f"jge {cap_ok}", "mov eax, 4")
+        self.label(cap_ok)
+        self.emitf("mov [ebp-32], eax")  # cap
+        self._emit_malloc(24)
+        self.emitf("mov [ebp-36], eax")
+        self.emitf(
+            "mov edx, [ebp-36]",
+            "mov eax, [ebp-32]",
+            f"mov [edx+{self.LIST_CAP_OFF}], eax",
+            "mov eax, [ebp-28]",
+            f"mov [edx+{self.LIST_LEN_OFF}], eax",
+        )
+        self.emitf("mov eax, [ebp-32]", "shl eax, 2")  # cap * 4 bytes
+        self.emitf("push eax", "call malloc", "add esp, 4")
+        self.emitf(
+            "mov edx, [ebp-36]",
+            f"mov [edx+{self.LIST_BUF_OFF}], eax",
+        )
+        skip_copy = self.fresh("ls_skip_copy")
+        self.emitf("mov ecx, [ebp-28]", "test ecx, ecx", f"jz {skip_copy}")
+        self.emitf(
+            "shl ecx, 2",  # n * 4
+            "mov ebx, [ebp-4]",
+            f"mov ebx, [ebx+{self.LIST_BUF_OFF}]",
+            "mov edx, [ebp-20]",
+            "shl edx, 2",
+            "add ebx, edx",  # src start ptr
+            "mov edx, [ebp-36]",
+            f"mov eax, [edx+{self.LIST_BUF_OFF}]",  # dst buf ptr
+        )
+        self._emit_libc_memcpy()
+        self.label(skip_copy)
+        self.emitf("mov eax, [ebp-36]", "leave", "ret")
+
+    def _emit_list_slice_step_helper(self) -> None:
+        """`_runtime_list_slice_step`: xs[start:stop:step]. In: eax=src,
+        ebx=start(sentinel INT32_MIN=omit), ecx=stop(sentinel
+        INT32_MAX=omit), edx=step (non-zero). Out: eax=new list header.
+        i386 port -- every extra scratch slot the x86-64 original held in
+        r8/r9/... lives in [ebp-N] here instead (this target has no
+        r8-r15 at all); 4-byte element stride throughout."""
+        INT32_MIN = "0x80000000"
+        INT32_MAX = "0x7fffffff"
+        self.label("_runtime_list_slice_step")
+        self.emitf("push ebp", "mov ebp, esp", "sub esp, 64")
+        self.emitf(
+            "mov [ebp-4], eax",
+            "mov [ebp-8], ebx",
+            "mov [ebp-12], ecx",
+            "mov [ebp-16], edx",
+        )
+        self.emitf(f"mov eax, [eax+{self.LIST_LEN_OFF}]", "mov [ebp-20], eax")  # slen
+
+        # -- Normalize start -----------------------------------------------
+        has_start = self.fresh("lss_has_start")
+        s_pos = self.fresh("lss_s_pos")
+        s_nn = self.fresh("lss_s_nn")
+        s_lt = self.fresh("lss_s_lt")
+        self.emitf("mov eax, [ebp-8]", f"cmp eax, {INT32_MIN}", f"jne {has_start}")
+        # default: step<0 -> len-1, else -> 0
+        self.emitf(
+            "mov ecx, [ebp-16]",
+            "test ecx, ecx",
+            f"jns {has_start}",
+            "mov eax, [ebp-20]",
+            "dec eax",
+            f"jmp {s_nn}",
+        )
+        self.label(has_start)
+        self.emitf("test eax, eax", f"jns {s_pos}", "add eax, [ebp-20]")
+        self.label(s_pos)
+        self.emitf("test eax, eax", f"jns {s_nn}", "xor eax, eax")
+        self.label(s_nn)
+        self.emitf("mov ecx, [ebp-16]", "test ecx, ecx", f"jns {s_lt}")
+        self.emitf("cmp eax, [ebp-20]", f"jl {s_lt}", "mov eax, [ebp-20]", "dec eax")
+        self.label(s_lt)
+        self.emitf("mov [ebp-24], eax")  # eff_start
+
+        # -- Normalize stop -------------------------------------------------
+        has_stop = self.fresh("lss_has_stop")
+        t_pos = self.fresh("lss_t_pos")
+        t_nn = self.fresh("lss_t_nn")
+        t_lt = self.fresh("lss_t_lt")
+        t_neg1ok = self.fresh("lss_t_neg1ok")
+        self.emitf("mov eax, [ebp-12]", f"cmp eax, {INT32_MAX}", f"jne {has_stop}")
+        # default: step<0 -> -1 (exclusive before 0), else -> len
+        self.emitf(
+            "mov ecx, [ebp-16]",
+            "test ecx, ecx",
+            f"jns {has_stop}",
+            "mov eax, -1",
+            f"jmp {t_neg1ok}",
+        )
+        self.label(has_stop)
+        self.emitf("mov ecx, [ebp-16]", "test ecx, ecx", f"jns {t_pos}")
+        self.emitf("cmp eax, -1", f"je {t_neg1ok}")
+        self.label(t_pos)
+        self.emitf("test eax, eax", f"jns {t_nn}", "add eax, [ebp-20]")
+        self.label(t_nn)
+        self.emitf("test eax, eax", f"jns {t_lt}", "xor eax, eax")
+        self.label(t_lt)
+        self.emitf("cmp eax, [ebp-20]", f"jle {t_neg1ok}", "mov eax, [ebp-20]")
+        self.label(t_neg1ok)
+        self.emitf("mov [ebp-28], eax")  # eff_stop
+
+        # -- Count n (pass 1) -----------------------------------------------
+        cnt_loop = self.fresh("lss_cnt_loop")
+        cnt_done = self.fresh("lss_cnt_done")
+        cnt_pos = self.fresh("lss_cnt_pos")
+        cnt_neg = self.fresh("lss_cnt_neg")
+        cnt_body = self.fresh("lss_cnt_body")
+        self.emitf("mov eax, [ebp-24]", "mov [ebp-44], eax")  # i = start
+        self.emitf("xor eax, eax", "mov [ebp-32], eax")  # n = 0
+        self.label(cnt_loop)
+        self.emitf("mov ecx, [ebp-16]", "test ecx, ecx", f"js {cnt_neg}")
+        self.label(cnt_pos)
+        self.emitf("mov eax, [ebp-44]", "cmp eax, [ebp-28]", f"jge {cnt_done}")
+        self.emitf(f"jmp {cnt_body}")
+        self.label(cnt_neg)
+        self.emitf("mov eax, [ebp-44]", "cmp eax, [ebp-28]", f"jle {cnt_done}")
+        self.label(cnt_body)
+        self.emitf(
+            "inc dword [ebp-32]",
+            "mov eax, [ebp-44]",
+            "add eax, [ebp-16]",
+            "mov [ebp-44], eax",
+            f"jmp {cnt_loop}",
+        )
+        self.label(cnt_done)
+        # n = [ebp-32]
+
+        # -- Allocate header + buffer (pass 2) --------------------------------
+        cap_ok = self.fresh("lss_cap_ok")
+        self.emitf("mov eax, [ebp-32]", "cmp eax, 4", f"jge {cap_ok}", "mov eax, 4")
+        self.label(cap_ok)
+        self.emitf("mov [ebp-36], eax")  # cap
+        self._emit_malloc(24)
+        self.emitf("mov [ebp-40], eax")  # hdr
+        self.emitf(
+            "mov edx, [ebp-40]",
+            "mov eax, [ebp-36]",
+            f"mov [edx+{self.LIST_CAP_OFF}], eax",
+            "mov eax, [ebp-32]",
+            f"mov [edx+{self.LIST_LEN_OFF}], eax",
+        )
+        self.emitf("mov eax, [ebp-36]", "shl eax, 2")  # cap * 4
+        self.emitf("push eax", "call malloc", "add esp, 4")
+        self.emitf("mov edx, [ebp-40]", f"mov [edx+{self.LIST_BUF_OFF}], eax")
+
+        # -- Fill loop (pass 2) -----------------------------------------------
+        fill_loop = self.fresh("lss_fill_loop")
+        fill_done = self.fresh("lss_fill_done")
+        fill_neg = self.fresh("lss_fill_neg")
+        fill_body = self.fresh("lss_fill_body")
+        self.emitf("mov eax, [ebp-24]", "mov [ebp-44], eax")  # i = eff_start
+        self.emitf("xor eax, eax", "mov [ebp-48], eax")  # out_idx = 0
+        self.label(fill_loop)
+        self.emitf("mov ecx, [ebp-16]", "test ecx, ecx", f"js {fill_neg}")
+        self.emitf("mov eax, [ebp-44]", "cmp eax, [ebp-28]", f"jge {fill_done}")
+        self.emitf(f"jmp {fill_body}")
+        self.label(fill_neg)
+        self.emitf("mov eax, [ebp-44]", "cmp eax, [ebp-28]", f"jle {fill_done}")
+        self.label(fill_body)
+        self.emitf(
+            "mov ebx, [ebp-4]",
+            f"mov ebx, [ebx+{self.LIST_BUF_OFF}]",
+            "mov ecx, [ebp-44]",
+            "mov eax, [ebx+ecx*4]",
+            "mov ebx, [ebp-40]",
+            f"mov ebx, [ebx+{self.LIST_BUF_OFF}]",
+            "mov ecx, [ebp-48]",
+            "mov [ebx+ecx*4], eax",
+        )
+        self.emitf("inc dword [ebp-48]")
+        self.emitf("mov eax, [ebp-44]", "add eax, [ebp-16]", "mov [ebp-44], eax")
+        self.emitf(f"jmp {fill_loop}")
+        self.label(fill_done)
+        self.emitf("mov eax, [ebp-40]", "leave", "ret")
+
+    def _emit_list_slice_assign_helper(self) -> None:
+        """`_runtime_list_slice_assign`: dst[start:stop] = src (in-place,
+        no resize). In: eax=dst, ebx=src, ecx=start(sentinel
+        INT32_MIN=0), edx=stop(sentinel INT32_MAX=len(dst)). Out: nothing.
+        i386 port -- 4-byte element stride, 32-bit sentinels."""
+        INT32_MIN = "0x80000000"
+        INT32_MAX = "0x7fffffff"
+        self.label("_runtime_list_slice_assign")
+        self.emitf("push ebp", "mov ebp, esp", "sub esp, 48")
+        self.emitf(
+            "mov [ebp-4], eax",  # dst
+            "mov [ebp-8], ebx",  # src
+        )
+        self.emitf(f"mov eax, [eax+{self.LIST_LEN_OFF}]", "mov [ebp-16], eax")  # dstlen
+        self.emitf("mov eax, [ebp-8]", f"mov eax, [eax+{self.LIST_LEN_OFF}]")  # srclen
+        ns_have = self.fresh("lsa_s_have")
+        ns_pos = self.fresh("lsa_s_pos")
+        ns_ge0 = self.fresh("lsa_s_ge0")
+        ns_lel = self.fresh("lsa_s_lel")
+        self.emitf(f"cmp ecx, {INT32_MIN}", f"jne {ns_have}", "xor ecx, ecx")
+        self.label(ns_have)
+        self.emitf("test ecx, ecx", f"jns {ns_pos}", "add ecx, [ebp-16]")
+        self.label(ns_pos)
+        self.emitf("test ecx, ecx", f"jns {ns_ge0}", "xor ecx, ecx")
+        self.label(ns_ge0)
+        self.emitf("cmp ecx, [ebp-16]", f"jle {ns_lel}", "mov ecx, [ebp-16]")
+        self.label(ns_lel)
+        self.emitf("mov [ebp-12], ecx")  # eff_start
+        nt_have = self.fresh("lsa_t_have")
+        nt_pos = self.fresh("lsa_t_pos")
+        nt_ge0 = self.fresh("lsa_t_ge0")
+        nt_lel = self.fresh("lsa_t_lel")
+        self.emitf(f"cmp edx, {INT32_MAX}", f"jne {nt_have}", "mov edx, [ebp-16]")
+        self.label(nt_have)
+        self.emitf("test edx, edx", f"jns {nt_pos}", "add edx, [ebp-16]")
+        self.label(nt_pos)
+        self.emitf("test edx, edx", f"jns {nt_ge0}", "xor edx, edx")
+        self.label(nt_ge0)
+        self.emitf("cmp edx, [ebp-16]", f"jle {nt_lel}", "mov edx, [ebp-16]")
+        self.label(nt_lel)
+        self.emitf("sub edx, [ebp-12]")  # stop - start
+        lo_lbl = self.fresh("lsa_lo")
+        nonneg = self.fresh("lsa_nn")
+        self.emitf("test edx, edx", f"jns {nonneg}", "xor edx, edx")
+        self.label(nonneg)
+        self.emitf("cmp edx, eax", f"jle {lo_lbl}", "mov edx, eax")  # eax=srclen
+        self.label(lo_lbl)
+        self.emitf("mov [ebp-20], edx")  # count
+        self.emitf("xor eax, eax", "mov [ebp-24], eax")  # i = 0
+        lp = self.fresh("lsa_loop")
+        le = self.fresh("lsa_done")
+        self.label(lp)
+        self.emitf("mov eax, [ebp-24]", "cmp eax, [ebp-20]", f"jge {le}")
+        self.emitf(
+            "mov ecx, eax",
+            "mov ebx, [ebp-8]",
+            f"mov ebx, [ebx+{self.LIST_BUF_OFF}]",
+            "mov ebx, [ebx+ecx*4]",  # src.buf[i]
+        )
+        self.emitf(
+            "mov edx, [ebp-12]",  # start
+            "add edx, ecx",  # start + i
+            "mov ecx, [ebp-4]",
+            f"mov ecx, [ecx+{self.LIST_BUF_OFF}]",
+            "mov [ecx+edx*4], ebx",
+        )
+        self.emitf("inc dword [ebp-24]", f"jmp {lp}")
+        self.label(le)
+        self.emitf("leave", "ret")
+
+    def _emit_list_reverse_helper(self) -> None:
+        """`_runtime_list_reverse`: in-place reverse. In: eax=header.
+        Out: eax=same header. i386 port -- the two swap-scratch slots
+        the x86-64 original held in r8/r9 live in edx/esi here (both
+        genuinely free at this point: edx isn't otherwise live, and esi
+        is caller's-responsibility-only under cdecl but this whole
+        function is a leaf w.r.t. the caller's expectations around it --
+        actually saved/restored below since esi IS callee-saved under
+        cdecl, unlike the x86-64 original's r8/r9 which are caller-saved
+        there too, so this is a real, deliberate difference: esi must be
+        pushed/popped here or a live caller value in esi is corrupted)."""
+        done = self.fresh("lrev_done")
+        loop = self.fresh("lrev_loop")
+        self.label("_runtime_list_reverse")
+        self.emitf("push ebp", "mov ebp, esp", "push esi", "sub esp, 16")
+        self.emitf(
+            "mov [ebp-4], eax",
+            f"mov ecx, [eax+{self.LIST_LEN_OFF}]",
+            "test ecx, ecx",
+            f"jz {done}",
+            f"mov edx, [eax+{self.LIST_BUF_OFF}]",
+            "xor ebx, ebx",  # lo = 0
+            "dec ecx",  # hi = len-1
+        )
+        self.label(loop)
+        self.emitf(
+            "cmp ebx, ecx",
+            f"jge {done}",
+            "mov eax, [edx+ebx*4]",
+            "mov esi, [edx+ecx*4]",
+            "mov [edx+ebx*4], esi",
+            "mov [edx+ecx*4], eax",
+            "inc ebx",
+            "dec ecx",
+            f"jmp {loop}",
+        )
+        self.label(done)
+        self.emitf("mov eax, [ebp-4]", "add esp, 16", "pop esi", "leave", "ret")
+
+    def _emit_list_insert_helper(self) -> None:
+        """`_runtime_list_insert`: insert value at index i. In: eax=header,
+        ebx=index(clipped to [0,len]), ecx=value. Out: eax=same header.
+        i386 port -- appends dummy 0 first (grows capacity if needed via
+        the already-ported _runtime_list_append), then shifts right, then
+        writes. 4-byte element stride."""
+        shift_loop = self.fresh("lins_shift")
+        shift_done = self.fresh("lins_done")
+        nonneg = self.fresh("lins_nonneg")
+        clip_ok = self.fresh("lins_clip_ok")
+        self.label("_runtime_list_insert")
+        self.emitf("push ebp", "mov ebp, esp", "sub esp, 16")
+        self.emitf(
+            "mov [ebp-4], eax",  # header
+            "mov [ebp-8], ebx",  # index
+            "mov [ebp-12], ecx",  # value
+            "xor ebx, ebx",
+            "call _runtime_list_append",
+        )
+        self.emitf(
+            "mov eax, [ebp-4]",
+            f"mov ecx, [eax+{self.LIST_LEN_OFF}]",
+            "dec ecx",  # old_len = new_len - 1
+            "mov ebx, [ebp-8]",
+            "test ebx, ebx",
+            f"jns {nonneg}",
+            "xor ebx, ebx",
+        )
+        self.label(nonneg)
+        self.emitf("cmp ebx, ecx", f"jle {clip_ok}", "mov ebx, ecx")
+        self.label(clip_ok)
+        self.emitf(
+            "mov [ebp-8], ebx",  # save clipped index
+            f"mov edx, [eax+{self.LIST_BUF_OFF}]",
+            "dec ecx",  # i = old_len - 1
+        )
+        self.label(shift_loop)
+        self.emitf(
+            "cmp ecx, [ebp-8]",
+            f"jl {shift_done}",
+            "mov eax, [edx+ecx*4]",
+            "mov [edx+ecx*4+4], eax",
+            "dec ecx",
+            f"jmp {shift_loop}",
+        )
+        self.label(shift_done)
+        self.emitf(
+            "mov ecx, [ebp-8]",
+            "mov eax, [ebp-12]",
+            "mov [edx+ecx*4], eax",
+            "mov eax, [ebp-4]",
+            "leave",
+            "ret",
+        )
+
+    def _emit_dict_clear_helper(self) -> None:
+        """`_runtime_dict_clear`: remove all entries. In: eax=header.
+        Out: eax=same header. The slot ARRAY keeps its 16-byte stride
+        (DICT_SLOT_SIZE, unchanged -- see module docstring's own note on
+        why DICT_* layout constants stay structurally 8-byte-aligned),
+        but each individual slot's key/value FIELDS are 4-byte pointer-
+        width on this target (key@+0, value@+4 -- confirmed against
+        _runtime_dict_set/_runtime_dict_get's own already-verified
+        `[eax+4]` value-field convention above), so only two dwords per
+        slot need zeroing, not three -- a slot is 16 bytes of stride but
+        only 8 of those bytes are ever read/written as key/value."""
+        loop = self.fresh("dcl_loop")
+        done = self.fresh("dcl_done")
+        self.label("_runtime_dict_clear")
+        self.emitf("push ebp", "mov ebp, esp", "sub esp, 16")
+        self.emitf(
+            "mov [ebp-4], eax",
+            f"mov dword [eax+{self.DICT_LEN_OFF}], 0",
+            f"mov dword [eax+{self.DICT_TOMB_OFF}], 0",
+            f"mov ecx, [eax+{self.DICT_CAP_OFF}]",
+            f"mov edx, [eax+{self.DICT_BUF_OFF}]",
+            "xor ebx, ebx",  # slot index
+        )
+        self.label(loop)
+        self.emitf(
+            "cmp ebx, ecx",
+            f"jge {done}",
+            "mov eax, ebx",
+            "shl eax, 4",  # DICT_SLOT_SIZE = 16 bytes (array stride, unchanged)
+            "mov dword [edx+eax], 0",  # key field (slot+0)
+            "mov dword [edx+eax+4], 0",  # value field (slot+4)
+            "inc ebx",
+            f"jmp {loop}",
+        )
+        self.label(done)
+        self.emitf("mov eax, [ebp-4]", "leave", "ret")
+
+    def _emit_dict_pop_helper(self) -> None:
+        """`_runtime_dict_pop`: remove and return the value for a key.
+        In: eax=header, ebx=key ptr. Out: eax=value (or raises KeyError).
+        i386 port -- marks tombstone, decrements len, increments
+        tombstones, compacts the removed key out of the insertion-order
+        array. 4-byte order-array element stride (this target's own
+        pointer width) replaces the x86-64 original's *8."""
+        found = self.fresh("dpop_found")
+        self.label("_runtime_dict_pop")
+        self.emitf("push ebp", "mov ebp, esp", "sub esp, 32")
+        self.emitf(
+            "mov [ebp-4], eax",
+            "mov [ebp-8], ebx",
+            "call _runtime_dict_lookup_slot",
+            "test eax, eax",
+            f"jnz {found}",
+        )
+        msg, _ = self.intern_string("KeyError: key not in dict")
+        self.emitf(
+            f"mov eax, {msg}",
+            f"mov ebx, {self._exc_type_id('KeyError')}",
+            "call _runtime_raise",
+        )
+        self.label(found)
+        self.emitf(
+            "mov ecx, [eax+4]",  # saved value
+            "mov [ebp-12], ecx",
+            "mov ecx, [eax]",  # key ptr being removed
+            "mov [ebp-16], ecx",
+            "mov dword [eax], 1",  # key = tombstone
+            "mov dword [eax+4], 0",
+            "mov edx, [ebp-4]",
+            f"mov ecx, [edx+{self.DICT_LEN_OFF}]",
+            "mov [ebp-24], ecx",  # old_len
+            f"dec dword [edx+{self.DICT_LEN_OFF}]",
+            f"inc dword [edx+{self.DICT_TOMB_OFF}]",
+            f"mov ecx, [edx+{self.DICT_ORDER_OFF}]",
+            "mov [ebp-20], ecx",  # order_buf
+            "mov dword [ebp-28], 0",  # i = 0
+        )
+        find_loop = self.fresh("dpop_find")
+        shift_loop = self.fresh("dpop_shift")
+        shift_done = self.fresh("dpop_shift_done")
+        self.label(find_loop)
+        self.emitf(
+            "mov eax, [ebp-28]",
+            "cmp eax, [ebp-24]",
+            f"jge {shift_done}",  # not found (shouldn't happen) -> done
+            "mov ecx, [ebp-20]",
+            "mov edx, [ebp-16]",
+            "cmp [ecx+eax*4], edx",
+            f"je {shift_loop}",
+            "inc dword [ebp-28]",
+            f"jmp {find_loop}",
+        )
+        self.label(shift_loop)
+        self.emitf(
+            "mov eax, [ebp-28]",
+            "lea eax, [eax+1]",
+            "cmp eax, [ebp-24]",
+            f"jge {shift_done}",
+            "mov ecx, [ebp-20]",
+            "mov edx, [ecx+eax*4]",  # order_buf[i+1]
+            "mov eax, [ebp-28]",
+            "mov [ecx+eax*4], edx",  # order_buf[i] = order_buf[i+1]
+            "inc dword [ebp-28]",
+            f"jmp {shift_loop}",
+        )
+        self.label(shift_done)
+        self.emitf("mov eax, [ebp-12]", "leave", "ret")
 
     def _emit_dict_keys_or_values_helper(self, name: str, *, value_field: bool) -> None:
         """i386 port -- see LinuxCodegen's own docstring for the full
