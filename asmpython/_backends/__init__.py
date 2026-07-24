@@ -75,6 +75,18 @@ from .scaffolds import register_scaffold_backends as _register_scaffold_backends
 _register_scaffold_backends(register_backend)
 del _register_scaffold_backends
 
+# Real implementations that have replaced their scaffold: imported eagerly,
+# right after scaffold registration, so their own module-level
+# register_backend(...) call runs before any --backend lookup reaches the
+# registry. x86_64 doesn't need this (driver.py imports and special-cases
+# it directly, bypassing the registry entirely) -- x86 has no such special
+# case, so without this import "x86" would silently keep resolving to its
+# NotImplementedError-raising scaffold forever, even though the real
+# codegen/elf/coff/linker modules underneath are complete and verified.
+from . import x86 as _x86  # noqa: F401  (imported for its registration side effect)
+
+del _x86
+
 
 __all__ = [
     "get_backend",

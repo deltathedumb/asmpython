@@ -61,6 +61,14 @@ R_386_PC32 = 2
 R_386_PLT32 = 4
 R_386_COPY = 5
 R_386_GLOB_DAT = 6
+R_386_GOTPC = 10
+
+# The synthetic GOT-base symbol codegen.py's PIC prologue relocates against
+# (see its own docstring): every real linker defines this automatically as
+# the runtime address of the GOT itself, never resolving it as an external
+# .so import. This linker's own GOT lives at vaddr_rest + got_off_in_rest
+# (the same address func_imports' thunk slots are indexed from below).
+_GOT_BASE_SYMBOL = "_GLOBAL_OFFSET_TABLE_"
 
 PT_LOAD = 1
 PT_DYNAMIC = 2
@@ -184,6 +192,11 @@ def link_elf(
                 if r.section_idx is not None:
                     continue
                 name = r.symbol
+                if name == _GOT_BASE_SYMBOL:
+                    # Never an external import -- resolve() and the patch
+                    # loop below both special-case this name directly
+                    # against the GOT's own runtime address.
+                    continue
                 if name in global_syms or name in seen:
                     continue
                 if name in _DATA_SYMBOLS:
@@ -274,6 +287,12 @@ def link_elf(
         raise LinkError(f"unknown bucket {bucket!r}")
 
     def resolve(name: str) -> int:
+        if name == _GOT_BASE_SYMBOL:
+            # Assigned later in this function (step 6, once the .rest
+            # layout is known) -- safe: every real call to resolve()
+            # against this name happens in the relocation-patching loop
+            # (step 7), well after got_off_in_rest exists.
+            return vaddr_rest + got_off_in_rest
         if name in global_syms:
             bucket, off = global_syms[name]
             return _bucket_vaddr(bucket, off)
@@ -450,7 +469,7 @@ def link_elf(
                 continue
             base = sect_base[(oi, sect.name)]
             for r in sect.relocs:
-                if r.rtype not in (R_386_PC32, R_386_PLT32):
+                if r.rtype not in (R_386_PC32, R_386_PLT32, R_386_GOTPC):
                     raise LinkError(f"unsupported relocation type {r.rtype} for {r.symbol!r}")
                 patch_off = base + r.offset
                 patch_addr = vaddr_text + patch_off
@@ -462,7 +481,15 @@ def link_elf(
                 # r.addend was already read back from the ORIGINAL
                 # pre-relocation bytes at parse time (elf_parse.py's own
                 # REL-implicit-addend handling) -- codegen.py's own -4
-                # convention for PC32/PLT32 call-rel32 sites.
+                # convention for PC32/PLT32 call-rel32 sites, or its own
+                # field-to-instruction-start byte offset (here, 2) for
+                # GOTPC. Both share the identical `S + A - P` shape (the
+                # i386 psABI's own relocation formula for both types --
+                # GOTPC substitutes the GOT's own address for the
+                # ordinary "symbol address" S), so one formula covers
+                # both; only the meaning of `target_addr` differs, and
+                # that's already handled by resolve()'s own GOT-base
+                # special case.
                 rel = target_addr + r.addend - patch_addr
                 struct.pack_into("<i", text, patch_off, rel)
 
