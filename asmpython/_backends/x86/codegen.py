@@ -985,7 +985,25 @@ class FuncCodegen:
         else:
             target = str(target_op)
             call_off = self._pos()
-            self._emit(encode_call_rel32(0))
+            # Placeholder is -4, NOT 0: this is a genuine EXTERNAL
+            # relocation (unlike every other call/jmp-rel32 site in this
+            # file, which are internal branches resolved directly by
+            # compile()'s own block_off patching and never become a
+            # real ELF relocation entry at all). ELF32's i386 target
+            # uses SHT_REL (implicit addend baked into the field itself,
+            # confirmed directly against real GNU `as` output: `call
+            # external_func` disassembles with `readelf -r` showing
+            # R_386_PC32 against a field whose own pre-relocation bytes
+            # are `fc ff ff ff` = -4, not 0), unlike x86-64's SHT_RELA
+            # (explicit addend field, separate from the code bytes) --
+            # but the ADDEND VALUE itself is identical either way: -4,
+            # matching this codebase's own x86-64 elf.py (`addend = -4
+            # if rtype in (R_X86_64_PLT32, R_X86_64_PC32) else 0`) and
+            # real toolchain convention, since R_386_PC32/PLT32 resolve
+            # as `S + A - P` with P = this FIELD's own address (not
+            # accounting for the call instruction's remaining bytes),
+            # so A must supply that -4 byte-count itself.
+            self._emit(encode_call_rel32(-4))
             if self.needs_pic:
                 self.fixups.append((call_off + 1, target, R_386_PLT32))
             else:
