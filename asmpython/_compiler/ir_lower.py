@@ -2431,6 +2431,27 @@ def _virtual_dispatch_rows(ctx: _FuncCtx, class_name: str, method: str) -> list[
     return rows
 
 
+def _classes_resolving_method(ctx: _FuncCtx, method: str) -> list[tuple[int, str]]:
+    """[(class_id, owner)] for EVERY user class (regardless of hierarchy)
+    whose chain resolves `method` -- the whole-program candidate set for a
+    method call on an opaque/`any` receiver whose static type names no class.
+
+    Unlike `_virtual_dispatch_rows`, which is rooted at a known base class,
+    this spans all classes: a `list[object]` element (or any `object`-typed
+    value) may at runtime be an instance of any class that happens to define
+    `method`, so the runtime dispatch must consider them all. Each row's
+    class_id is the same `__class__` tag `_lower_read_any_tag` reads back, so
+    an equality chain over these rows recovers the exact concrete method to
+    call -- real virtual dispatch, not the old graceful no-op stub.
+    """
+    rows: list[tuple[int, str]] = []
+    for cname, cid in ctx.mctx.class_ids.items():
+        owner = _resolve_method_owner(ctx, cname, method)
+        if owner is not None:
+            rows.append((cid, owner))
+    return rows
+
+
 def _subclass_ids(ctx: _FuncCtx, target: str) -> list[int]:
     ids: list[int] = []
     for name, cid in ctx.mctx.class_ids.items():
@@ -8237,9 +8258,85 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(ir_type_for(A.expr_type(e)))
             ctx.emit(IRInstr("call", v, [sym, *args]))
             return v
-        # Unknown method on an opaque/any-typed receiver: evaluate receiver
-        # and args for side effects and return 0.  Mirrors codegen.py's
-        # graceful stub so selfhost builds survive unmodeled FFI methods.
+        # Method call on an opaque/`any`-typed receiver whose static type
+        # names no class (e.g. a value read out of a `list[object]`, an
+        # `object` parameter, or an `any` return). If some user class defines
+        # a method of this name, the receiver may AT RUNTIME be an instance of
+        # one of those classes -- do real virtual dispatch on its runtime
+        # `__class__` id instead of the old graceful no-op that returned 0.
+        #
+        # This is the general form of the `instance:`/`super:` dispatch above:
+        # there the base class is statically known, here it is not, so the
+        # candidate set spans every class resolving the method
+        # (`_classes_resolving_method`). The receiver's runtime tag is read the
+        # same way `type()`/`isinstance()` read it (`_lower_read_any_tag`),
+        # which returns the class id an instance dict carries under
+        # "__class__". An equality chain over the candidate class ids selects
+        # the concrete `{owner}__{method}` to call; anything that matches no
+        # candidate (a genuine opaque FFI value) falls through to the graceful
+        # stub, preserving the old survive-unmodeled-methods behaviour.
+        disp_rows = _classes_resolving_method(ctx, e.method)
+        if disp_rows:
+            recv_v = _lower_expr(ctx, e.obj)
+            # Box/scalar-forward each argument the same way a statically-bound
+            # method call does. All candidate owners share the method name; use
+            # the first owner's recorded parameter annotations to decide arg
+            # boxing (self is param 0, so call arg i maps to param i+1).
+            first_owner = disp_rows[0][1]
+            _mann = _callee_param_annots(ctx, f"{first_owner}__{e.method}")
+            args = [recv_v] + [
+                _lower_call_arg(ctx, a, _mann[i + 1] if i + 1 < len(_mann) else None)
+                for i, a in enumerate(e.args)
+            ]
+            res_ty = ir_type_for(A.expr_type(e))
+
+            class_id = _lower_read_any_tag(ctx, recv_v)
+            res_ptr = ctx.ensure_slot(f"__anydisp_res_{id(e)}", res_ty)
+
+            # Distinct owners, in row order, so each concrete class id routes to
+            # its own resolved method. Multiple class ids can share one owner
+            # (an inherited, non-overridden method); the per-id equality checks
+            # below still route each correctly.
+            check_blocks = [ctx.new_block(f"anydispcheck{i}") for i in range(len(disp_rows))]
+            hit_blocks = [ctx.new_block(f"anydisphit{i}") for i in range(len(disp_rows))]
+            stub_b = ctx.new_block("anydispstub")
+            end_b = ctx.new_block("anydispend")
+
+            ctx.emit(IRInstr("br", None, [check_blocks[0].label]))
+
+            for i, (cid, ow) in enumerate(disp_rows):
+                ctx.switch_to(check_blocks[i])
+                cid_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", cid_v, [cid]))
+                is_match = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.eq", is_match, [class_id, cid_v]))
+                next_label = check_blocks[i + 1].label if i + 1 < len(check_blocks) else stub_b.label
+                ctx.emit(IRInstr("br.t", None, [is_match, hit_blocks[i].label, next_label]))
+
+                ctx.switch_to(hit_blocks[i])
+                mv = ctx.tmp(res_ty)
+                ctx.emit(IRInstr("call", mv, [f"{ow}__{e.method}", *args]))
+                ctx.emit(IRInstr("store", None, [mv, res_ptr]))
+                ctx.emit(IRInstr("br", None, [end_b.label]))
+
+            # Receiver matched no candidate class id: a genuine opaque value
+            # (unmodeled FFI object, or a runtime type this method name doesn't
+            # belong to). Preserve the old graceful behaviour -- yield 0.
+            ctx.switch_to(stub_b)
+            stub_v = ctx.tmp(res_ty)
+            ctx.emit(IRInstr("const", stub_v, [0]))
+            ctx.emit(IRInstr("store", None, [stub_v, res_ptr]))
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+
+            ctx.switch_to(end_b)
+            out = ctx.tmp(res_ty)
+            ctx.emit(IRInstr("load", out, [res_ptr]))
+            return out
+
+        # No user class defines this method: a genuinely opaque/FFI method.
+        # Evaluate receiver and args for side effects and return 0.  Mirrors
+        # codegen.py's graceful stub so selfhost builds survive unmodeled FFI
+        # methods.
         _lower_expr(ctx, e.obj)
         for _arg in e.args:
             _lower_expr(ctx, _arg)
@@ -11498,6 +11595,19 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
             dispatch_method = resolved_ov_m if resolved_ov_m is not None else node.method
             if obj_ty.startswith("instance:"):
                 add_resolved_virtual(obj_ty.split(":", 1)[1], dispatch_method)
+            elif obj_ty == "any":
+                # Method call on an opaque/`any`-typed receiver whose static
+                # type names no class -- ir_lower.py's own MethodCall lowering
+                # now emits a runtime __class__-id dispatch chain over EVERY
+                # user class resolving this method (`_classes_resolving_method`)
+                # instead of the old graceful-no-op stub. Mark each such
+                # candidate owner reachable, mirroring that whole-program scan,
+                # or the emitted `{owner}__{method}` calls would be undefined
+                # symbols at link time. Same "lowering fixed, walker not fixed"
+                # shape as every other dispatch gap this session; reimplemented
+                # against module-level `classes_sig` (no live `class_ids` yet).
+                for cname in classes_sig:
+                    add_resolved(cname, dispatch_method)
             elif obj_ty.startswith("super:"):
                 # super().method(...): dispatches statically to the base
                 # class's OWN method (never a subclass override -- see
