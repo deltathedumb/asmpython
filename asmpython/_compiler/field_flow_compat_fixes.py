@@ -651,7 +651,17 @@ def _annotate_object_fields(mod: A.Module) -> None:
                 inferred = _common_type(values, parents) or inferred
 
             if inferred not in (_UNKNOWN, _NONE, None):
-                node.annot = (inferred, None)
+                # Don't clobber an EXISTING user annotation with the coarse
+                # `(inferred, None)` shape: `self.counts: dict[str, int] = {}`
+                # already carries the precise value kind (`int`), and
+                # overwriting it with `("dict", None)` drops that -- making
+                # every `self.counts[k]` read/store degrade to an "any" value
+                # kind (a str value formats as a raw pointer, an int value gets
+                # spuriously boxed, etc.). Only fill in a MISSING annotation
+                # (an unannotated `self.x = <expr>`), where this inference is
+                # the only type information available.
+                if getattr(node, "annot", None) is None:
+                    node.annot = (inferred, None)
                 field_types[(owner.name, node.name)] = inferred
 
         list_elements: dict[str, list[str]] = {name: [] for name in empty_lists}
