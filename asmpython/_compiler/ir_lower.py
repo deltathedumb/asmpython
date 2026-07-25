@@ -5331,9 +5331,24 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         return v
 
     if isinstance(e, A.IfExp):
-        res_ty = ir_type_for(A.expr_type(e))
+        exp_ty = A.expr_type(e)
+        res_ty = ir_type_for(exp_ty)
         tmp_name = f"__ifexp_{id(e)}"
         ptr = ctx.ensure_slot(tmp_name, res_ty)
+        # An "any"-typed conditional expression (`<boxed> if c else None`,
+        # `d.get(k) if k in d else x`, ...) is one more "any" slot: each arm
+        # is stored through the write choke point so a boxed value stays
+        # boxed and a concrete scalar is boxed, and the merged read
+        # (auto-unboxed by `_lower_expr` at the consumer) recovers the kind.
+        # Without this, `_lower_expr` on the arm auto-unboxed a boxed value
+        # to its raw payload, and a later `type(<ifexp>)` saw an untagged
+        # raw value (confirmed: `frame.stack.pop() if frame.stack else None`
+        # -- portapy's VM RETURN -- lost the boxed int's kind).
+        _arm = (
+            (lambda a: _lower_value_into_any_slot(ctx, a))
+            if exp_ty == "any"
+            else (lambda a: _lower_expr(ctx, a))
+        )
 
         then_b = ctx.new_block("ifexpthen")
         else_b = ctx.new_block("ifexpelse")
@@ -5342,12 +5357,12 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("br.t", None, [cond, then_b.label, else_b.label]))
 
         ctx.switch_to(then_b)
-        body_v = _lower_expr(ctx, e.body)
+        body_v = _arm(e.body)
         ctx.emit(IRInstr("store", None, [body_v, ptr]))
         ctx.emit(IRInstr("br", None, [merge_b.label]))
 
         ctx.switch_to(else_b)
-        orelse_v = _lower_expr(ctx, e.orelse)
+        orelse_v = _arm(e.orelse)
         ctx.emit(IRInstr("store", None, [orelse_v, ptr]))
         ctx.emit(IRInstr("br", None, [merge_b.label]))
 
