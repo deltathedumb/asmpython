@@ -2325,6 +2325,18 @@ class SemaAnalyzer:
                 types.append(entry)
         if len(types) == 1:
             return types[0]
+        # Genuinely heterogeneous returns (e.g. one branch returns an int,
+        # another a str): the function's static return type is "any". A
+        # caller that only knows "any" cannot treat the value as any one
+        # concrete kind -- ir_lower's return store choke point boxes the
+        # concrete-this-branch value so the caller can recover the real
+        # runtime kind, and the caller unboxes on read. Returning "any" here
+        # (rather than None, which left `ret_type` at whatever a single-
+        # branch-biased guess had set) is what makes that boxing fire and
+        # keeps the caller from mistreating a boxed int cell as a raw str
+        # pointer.
+        if len(types) >= 2:
+            return ("any", None, None)
         return None
 
     def _static_value_type(self, value, ptypes: dict) -> str:

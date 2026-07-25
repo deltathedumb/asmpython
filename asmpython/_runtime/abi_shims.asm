@@ -118,6 +118,7 @@ global _abi_str_slice
 global _abi_new_instance
 global _abi_new_box
 global _abi_new_list
+global __chkstk
 global _abi_list_append
 global _abi_list_pop
 global _abi_list_slice
@@ -447,6 +448,38 @@ _abi_new_box:
     mov qword [rax+16], rdx     ; payload
     add rsp, 48
     WIN64_RUNTIME_LEAVE
+    ret
+
+; Win64 stack-probe routine the x86-64 backend emits for any function whose
+; frame exceeds one page (4096 B): `mov rax, frame_bytes; call __chkstk; sub
+; rsp, frame_bytes` (see _backends/x86_64/codegen.py). A large `sub rsp`
+; can skip past the stack's guard page without touching it, so the OS never
+; grows the committed stack and the first deep access faults; __chkstk walks
+; DOWN the to-be-allocated range one page at a time, touching each so the
+; guard page moves with it. Contract here: RAX = byte count to probe; must
+; NOT modify RSP (the caller's own `sub rsp` does that) and must preserve
+; every register including RAX. gcc's linker left this symbol undefined
+; because w64devkit's libs don't export the MSVC-style __chkstk this backend
+; targets -- provide it directly.
+__chkstk:
+    push rax
+    push rcx
+    mov rcx, rax                ; rcx = bytes remaining to probe
+    ; The return address occupies [rsp+16] now (after the two pushes); probe
+    ; relative to the caller's rsp, which is rsp+24 (2 pushes + return addr).
+    lea rax, [rsp+24]           ; rax = caller's RSP (top of the new frame)
+.probe_loop:
+    cmp rcx, 4096
+    jbe .last_page
+    sub rax, 4096
+    mov byte [rax], 0           ; touch the guard page
+    sub rcx, 4096
+    jmp .probe_loop
+.last_page:
+    sub rax, rcx
+    mov byte [rax], 0           ; touch the final (partial) page
+    pop rcx
+    pop rax
     ret
 
 ; rax = new list with initial capacity cap=rcx (elements; clamped to >=1
