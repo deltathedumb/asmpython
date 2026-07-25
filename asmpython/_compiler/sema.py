@@ -1046,6 +1046,38 @@ class SemaAnalyzer:
             current = c.parent
         return None
 
+    def _class_var_overridden_in_subclass(self, class_name: str, var: str) -> bool:
+        """True if any *descendant* of `class_name` redeclares class var `var`.
+
+        A `cls.<var>` read inside an inherited @classmethod must resolve to the
+        RUNTIME class's override, not the statically-compiled owner's value --
+        so when a subclass shadows `var`, the `cls.<var> -> Owner.<var>` static
+        rewrite must be suppressed, leaving `cls.<var>` intact for the runtime
+        class-id dispatch (dynamic_classvar_compat_fixes) to resolve per class.
+        Without this guard, `Server`/`Client` overriding `realms` all read
+        `Base.realms` through the single shared `Base__method` symbol."""
+        classes = {c.name: c for c in self.mod.classes}
+        for c in self.mod.classes:
+            if c.name == class_name:
+                continue
+            # Is c a descendant of class_name?
+            cur = c.parent
+            seen: set[str] = set()
+            descends = False
+            while cur is not None and cur not in seen:
+                seen.add(cur)
+                if cur == class_name:
+                    descends = True
+                    break
+                parent_cls = classes.get(cur)
+                cur = parent_cls.parent if parent_cls is not None else None
+            if not descends:
+                continue
+            for cv in getattr(c, "class_vars", []) or []:
+                if cv[0] == var:
+                    return True
+        return False
+
     def _resolve_method(
         self, class_name: str, method: str
     ) -> Optional[tuple[str, FuncSig]]:
@@ -5112,6 +5144,22 @@ class SemaAnalyzer:
             return "set"
         if isinstance(el, A.Name) and el.name in local_annots:
             return local_annots[el.name]
+        # A bare class-name reference in a tuple return (`return (Server,
+        # Shared, Client)`) is a first-class "type" object -- the same kind
+        # _check_expr stamps for a class name used as a value. This scan runs
+        # before the body is type-checked, so the Name's own inferred_type is
+        # still the "int" placeholder; recognizing the class name here keeps
+        # the slot from collapsing to "int" and lets callers that iterate the
+        # returned tuple dispatch classmethods on each element. `self.classes`
+        # isn't populated until after this pre-scan (its per-class sigs are
+        # built later), so match the raw class definitions in `self.mod.classes`
+        # -- those are available now.
+        if isinstance(el, A.Name) and (
+            any(c.name == el.name for c in self.mod.classes)
+            or el.name in BUILTIN_EXCEPTIONS
+            or el.name in BUILTIN_TYPE_NAMES
+        ):
+            return "type"
         return A.expr_type(el)
 
     def _collect_tuple_returns(self, stmts: list, acc: list, local_annots: dict) -> None:
@@ -5511,7 +5559,17 @@ class SemaAnalyzer:
             aval = ann[2]
             atup: list = ann[3]
             aelval = ann[4]
-            if t in ("int", "any") or t == aty:
+            # An explicit `object`/`Any` annotation (aty == "any") is
+            # ALWAYS authoritative, even when the initializer has a concrete
+            # type: `kk: object = "answer"` is deliberately heterogeneous, so
+            # `kk` must stay "any" (not narrow to "str"). Otherwise a later
+            # `show(kk)` into an `object` parameter re-boxes the already-boxed
+            # value -- a double box whose payload is the inner box pointer, so
+            # unboxing once yields garbage. Without the `aty == "any"` term the
+            # condition below (`t in ("int","any") or t == aty`) is False for a
+            # str/list/... initializer and the explicit `object` annotation is
+            # silently dropped.
+            if t in ("int", "any") or t == aty or aty == "any":
                 if aty == "list":
                     # A bare `list` annotation (no `list[T]` parameter)
                     # resolves its element type to the "any" sentinel
@@ -8384,12 +8442,21 @@ class SemaAnalyzer:
             ):
                 e.inferred_type = "int"
                 return
-            # cls.field inside a @classmethod body → rewrite to ClassName.field
+            # cls.field inside a @classmethod body → rewrite to ClassName.field,
+            # UNLESS a subclass overrides that class var: then `cls.field` must
+            # stay dynamic so an inherited classmethod dispatched on a subclass
+            # reads the subclass's value (resolved at runtime by class id in
+            # dynamic_classvar_compat_fixes), not the compiling owner's. The
+            # static rewrite would otherwise bake in the base class's value for
+            # every runtime subclass sharing the one compiled method symbol.
             if (
                 isinstance(e.obj, A.Name)
                 and self.classmethod_cls_param is not None
                 and e.obj.name == self.classmethod_cls_param
                 and self.current_class is not None
+                and not self._class_var_overridden_in_subclass(
+                    self.current_class, e.name
+                )
             ):
                 e.obj.name = self.current_class
             # `enum` extension: `Color.RED` resolves entirely at sema time --
@@ -9170,6 +9237,39 @@ class SemaAnalyzer:
                         raise SemaError("int.from_bytes() signed must be bool/int", e.pos, ErrorCode.E_ARG_TYPE)
                     e.inferred_type = "int"
                     return
+                # A `@classmethod`/`@staticmethod` call on a `type` value whose
+                # concrete class isn't a literal name (`obj_t == "type"` but
+                # e.obj is a variable) -- e.g. iterating a tuple of classes:
+                # `for root in (Server, Shared, Client): root.supports_runtime(r)`.
+                # The class is unknown statically, so dispatch is deferred to
+                # runtime (ir_lower emits an equality chain over every candidate
+                # class id); here we only need to accept the call and infer its
+                # return type. Every user class that resolves this method as a
+                # class/static method is a candidate. If they agree on a return
+                # type, use it; otherwise fall back to "any".
+                if obj_t == "type":
+                    candidates: list[FuncSig] = []
+                    for _cname in self.classes:
+                        _res = self._resolve_method(_cname, e.method)
+                        if _res is None:
+                            continue
+                        _csig: FuncSig = _res[1]
+                        _cdeco: list[str] = getattr(_csig, "decorators", [])
+                        if "classmethod" in _cdeco or "staticmethod" in _cdeco:
+                            candidates.append(_csig)
+                    if candidates:
+                        ret_kinds: list[str] = []
+                        for _csig in candidates:
+                            if _csig.ret_type is not None:
+                                _rt: tuple = _csig.ret_type  # type: ignore
+                                ret_kinds.append(_rt[0])
+                            else:
+                                ret_kinds.append("int")
+                        if _all_same(ret_kinds):
+                            e.inferred_type = ret_kinds[0]
+                        else:
+                            e.inferred_type = "any"
+                        return
                 raise SemaError(f"{obj_t} has no method {e.method!r}", e.pos, ErrorCode.E_NO_METHOD)
             elif obj_t.startswith("super:"):
                 # super().method(...) — dispatch against the base class. If the
