@@ -4834,8 +4834,34 @@ class SemaAnalyzer:
             return getattr(e, "value_type", "any")
         return "any"
 
+    def _normalize_instance_type(self, t: str) -> str:
+        """A bare known-class name used as a value/element type denotes an
+        INSTANCE of that class, so spell it canonically as `instance:<class>`.
+
+        Container value/element kinds derived from an annotation like
+        `dict[int, "Proxy"]` or `list[Node]` can surface the class name bare
+        (the annotation carries just the name), whereas everywhere else in
+        sema an instance type is `instance:<class>`. Left unnormalized, a bare
+        name fails the `instance:`-prefix checks that gate list/dict element
+        storage and type comparisons, even though it is a perfectly valid
+        instance kind. Normalizing here (a single choke point every
+        container-value-type lookup passes through) keeps that one spelling
+        consistent without special-casing each consumer. Scalars, containers,
+        `any`, and already-`instance:`-prefixed strings pass through."""
+        if (
+            t
+            and not t.startswith("instance:")
+            and ":" not in t
+            and t in self.classes
+        ):
+            return f"instance:{t}"
+        return t
+
     def _dict_value_type(self, e, scope: Scope) -> str:
         """Value type of a dict-valued expression. 'int' if unknown."""
+        return self._normalize_instance_type(self._dict_value_type_inner(e, scope))
+
+    def _dict_value_type_inner(self, e, scope: Scope) -> str:
         if isinstance(e, A.DictLit):
             return getattr(e, "value_type", "int")
         if isinstance(e, A.DictComprehension):
@@ -8723,6 +8749,22 @@ class SemaAnalyzer:
                     and e.obj.name in self._explicit_object_lists
                 ):
                     e.box_element = True  # type: ignore[attr-defined]
+                elif (
+                    e.method == "append"
+                    and isinstance(e.obj, A.Attr)
+                    and el_t == "any"
+                ):
+                    # An instance FIELD typed `list[object]` (e.g.
+                    # `self.items: list[object]`): its element kind resolves to
+                    # the explicit "any" (a bare `list` field resolves to the
+                    # "int" unknown-sentinel instead, never "any"), so an "any"
+                    # element type here uniquely marks a genuinely heterogeneous
+                    # object-list field. Box a scalar appended into it, exactly
+                    # as the local-variable `list[object]` case above does, so a
+                    # later `type(x)`/`isinstance(x, ...)` on the read-out element
+                    # can still answer. This is the field analogue of
+                    # `_explicit_object_lists`.
+                    e.box_element = True  # type: ignore[attr-defined]
                 if e.method == "append":
                     if len(e.args) != 1:
                         raise SemaError(
@@ -8760,6 +8802,17 @@ class SemaAnalyzer:
                             scope.list_el_types[e.obj.name] = arg_t
                             e.obj.list_el_type = arg_t
                         el_t = arg_t
+                    elif {el_t, arg_t} == {"bool", "int"}:
+                        # `bool` is a subclass of `int` in Python, so a list may
+                        # freely hold both (e.g. `[True, 0, False, 3]`). Neither
+                        # is a genuine clash: widen the pinned element type to the
+                        # common `int` so a later `int` append is also accepted
+                        # (and an `int`-pinned list already accepts a `bool`,
+                        # since `int` doubles as the accept-anything sentinel).
+                        if el_t == "bool" and isinstance(e.obj, A.Name):
+                            scope.list_el_types[e.obj.name] = "int"
+                            e.obj.list_el_type = "int"
+                            el_t = "int"
                     elif (
                         el_t not in ("any", "int")
                         and arg_t != el_t
