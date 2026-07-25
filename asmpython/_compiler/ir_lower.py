@@ -7268,10 +7268,15 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         if obj_ty == "list":
             if e.method == "append" and len(e.args) == 1:
                 obj_v = _lower_expr(ctx, e.obj)
-                if getattr(e, "box_element", False) and A.expr_type(e.args[0]) in _BOXABLE_STATIC_TYPES:
-                    # `xs.append(scalar)` on an EXPLICIT `list[object]` (sema
-                    # stamped box_element): box so `type(xs[i])` / `isinstance(
-                    # xs[i], int)` on the read-out element can answer.
+                if getattr(e, "box_element", False):
+                    # `xs.append(value)` on an EXPLICIT `list[object]` (sema
+                    # stamped box_element): route through the store choke
+                    # point so a concrete scalar is boxed AND an already-"any"
+                    # value (a boxed cell forwarded from a `v: object` param)
+                    # stays boxed -- so `type(xs[i])`/`isinstance(xs[i], int)`
+                    # on the read-out element can answer. Previously gated on
+                    # a concrete-scalar value, so a forwarded boxed value took
+                    # the else branch and was unboxed on the way in.
                     val = _lower_value_into_any_slot(ctx, e.args[0])
                 else:
                     val = _lower_expr(ctx, e.args[0])
@@ -10133,11 +10138,17 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             obj_v = _lower_expr(ctx, target.obj)
             key_v = _lower_dict_key(ctx, target.index)
             slot_vt = getattr(target.obj, "value_type", "int")
-            if slot_vt == "any" and A.expr_type(s.value) in _BOXABLE_STATIC_TYPES:
-                # `d[k] = scalar` into a genuinely heterogeneous
-                # `dict[str, object]`: box so `type(d[k])` / `isinstance(d[k],
-                # int)` on the read-out value can answer. A homogeneous
-                # `dict[str, int]` has slot_vt "int" (not "any") and skips this.
+            if slot_vt == "any":
+                # `d[k] = value` into a genuinely heterogeneous
+                # `dict[str, object]`: route through the store choke point so
+                # a concrete scalar is boxed AND an already-"any" value (a
+                # boxed cell forwarded from elsewhere, e.g. a `v: object`
+                # parameter) stays boxed. A homogeneous `dict[str, int]` has
+                # slot_vt "int" (not "any") and skips this. Previously this
+                # only fired for a concrete-scalar value, so forwarding an
+                # already-boxed `any` value took the else branch and
+                # `_lower_expr` UNBOXED it on the way in -- storing a raw
+                # payload a later `type(d[k])` then couldn't classify.
                 val = _lower_value_into_any_slot(ctx, s.value)
             else:
                 val = _lower_expr(ctx, s.value)
