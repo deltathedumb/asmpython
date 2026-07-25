@@ -171,6 +171,9 @@ BUILTINS: dict[str, tuple[int, int]] = {
     "staticmethod": (1, 1),
     "classmethod": (1, 1),
     "property": (0, 1),
+    # slice(stop) / slice(start, stop) / slice(start, stop, step) -- a
+    # runtime slice object usable as a dynamic subscript index.
+    "slice": (1, 3),
     "reversed": (1, 1),
     "any": (1, 1),
     "all": (1, 1),
@@ -10198,6 +10201,9 @@ class SemaAnalyzer:
                 "staticmethod": "any",
                 "classmethod": "any",
                 "property": "any",
+                # slice object -> an opaque tagged cell usable as a dynamic
+                # subscript index (see ir_lower's _lower_slice_ctor).
+                "slice": "any",
             }[e.func]
             if e.func == "abs":
                 # abs preserves the operand's numeric type (float -> float so

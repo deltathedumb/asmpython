@@ -121,6 +121,13 @@ BUILTIN_TYPE_IDS: dict[str, int] = {
     "staticmethod": -10,
     "classmethod": -11,
     "property": -12,
+    # `slice(start, stop, step)` -- a runtime slice object (the dynamic form
+    # of `x[a:b:c]`, e.g. a bytecode VM's BUILD_SLICE opcode). Same tagged-
+    # cell mechanism: "__class__" holds this id, and "start"/"stop"/"step"
+    # hold the bounds. A dynamic `obj[slice_obj]` subscript detects the tag
+    # and dispatches to the runtime slice helper (see ir_lower's
+    # _lower_slice_ctor / the any-subscript slice branch).
+    "slice": -13,
 }
 NONE_TYPE_ID = -9
 # Sentinel returned by the runtime tag read when a pointer carries no

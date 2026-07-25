@@ -6907,6 +6907,16 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         result_ty = A.expr_type(e)
         obj_v = _lower_expr(ctx, e.obj)
         idx_v = _lower_expr(ctx, e.index)
+        if A.expr_type(e.index) == "any":
+            # `obj[index]` where the index is opaque: at runtime it may be an
+            # int (element access) OR a slice object (`slice(a, b, c)` -- e.g.
+            # a bytecode VM's BUILD_SLICE feeding GET_ITEM). Branch on the
+            # index's runtime tag: a slice-tagged cell dispatches to the
+            # list/str slice helper reading its start/stop/step; anything else
+            # is an ordinary integer element load. Only meaningful when the
+            # container is a real list/tuple/str at runtime (this "any"-object
+            # path already assumes that, see the note above).
+            return _lower_dynamic_slice_or_index(ctx, obj_v, idx_v, result_ty, id(e))
         _emit_list_index_bounds_check(ctx, obj_v, idx_v, id(e))
         addr = _list_elem_addr(ctx, obj_v, idx_v)
         v = ctx.tmp(F64 if result_ty == "float" else I64)
@@ -8460,6 +8470,8 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             return _lower_sorted(ctx, e)
         if e.func in _DESCRIPTOR_WRAPPERS and len(e.args) <= 1:
             return _lower_descriptor_wrapper(ctx, e)
+        if e.func == "slice" and 1 <= len(e.args) <= 3:
+            return _lower_slice_ctor(ctx, e)
         if e.func == "type" and len(e.args) == 1:
             arg = e.args[0]
             arg_t = A.expr_type(arg)
@@ -8917,6 +8929,74 @@ _DESCRIPTOR_WRAPPERS: dict[str, str] = {
 }
 
 
+def _lower_dynamic_slice_or_index(
+    ctx: "_FuncCtx", obj_v: IRValue, idx_v: IRValue, result_ty: str, uid: int
+) -> IRValue:
+    """`obj[index]` where `index` is opaque: dispatch on the index's runtime
+    tag between a slice (`slice(a, b, c)` cell) and an ordinary int element
+    load. On the slice branch, read start/stop/step out of the cell and call
+    the list-slice helper (the container is a list/tuple at runtime on this
+    path -- str slicing goes through the static `s[a:b]` syntax lowering, not
+    this dynamic-index path). Falls back to the plain int element load
+    otherwise, preserving today's behavior for a genuine integer index.
+    """
+    maybe_ptr_b = ctx.new_block(f"dynslice_maybeptr_{uid}")
+    slice_b = ctx.new_block(f"dynslice_slice_{uid}")
+    index_b = ctx.new_block(f"dynslice_index_{uid}")
+    end_b = ctx.new_block(f"dynslice_end_{uid}")
+    res_ptr = ctx.ensure_slot(f"__dynslice_res_{uid}", PTR if result_ty not in ("float",) else F64)
+
+    # An opaque index is EITHER a raw integer (an ordinary element index) OR
+    # a heap-pointer slice cell. Reading a "__class__" tag dereferences the
+    # value as a dict header, which would fault on a small raw int. Guard with
+    # a low-address check first: only values above the reserved low-address
+    # range can be a real heap pointer, so anything at/below it is definitely
+    # an integer index and skips the tag read entirely.
+    PTR_THRESHOLD = 0x10000
+    thresh_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", thresh_v, [PTR_THRESHOLD]))
+    looks_ptr = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.gt", looks_ptr, [idx_v, thresh_v]))
+    ctx.emit(IRInstr("br.t", None, [looks_ptr, maybe_ptr_b.label, index_b.label]))
+
+    ctx.switch_to(maybe_ptr_b)
+    tag_v = _lower_read_any_tag(ctx, idx_v)
+    slice_tag = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", slice_tag, [BUILTIN_TYPE_IDS["slice"]]))
+    is_slice = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_slice, [tag_v, slice_tag]))
+    ctx.emit(IRInstr("br.t", None, [is_slice, slice_b.label, index_b.label]))
+
+    ctx.switch_to(slice_b)
+    miss = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", miss, [0]))
+    start_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", start_v, ["_abi_dict_get_default", idx_v, _slice_field_key(ctx, "start"), miss]))
+    stop_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", stop_v, ["_abi_dict_get_default", idx_v, _slice_field_key(ctx, "stop"), miss]))
+    step_v = ctx.tmp(I64)
+    one = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one, [1]))
+    ctx.emit(IRInstr("call", step_v, ["_abi_dict_get_default", idx_v, _slice_field_key(ctx, "step"), one]))
+    sliced = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", sliced, ["_abi_list_slice_step", obj_v, start_v, stop_v, step_v]))
+    ctx.emit(IRInstr("store", None, [sliced, res_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(index_b)
+    _emit_list_index_bounds_check(ctx, obj_v, idx_v, uid)
+    addr = _list_elem_addr(ctx, obj_v, idx_v)
+    elem = ctx.tmp(F64 if result_ty == "float" else I64)
+    ctx.emit(IRInstr("load", elem, [addr]))
+    ctx.emit(IRInstr("store", None, [elem, res_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(end_b)
+    out = ctx.tmp(F64 if result_ty == "float" else (PTR if result_ty not in ("int",) else I64))
+    ctx.emit(IRInstr("load", out, [res_ptr]))
+    return out
+
+
 def _lower_descriptor_wrapper(ctx: "_FuncCtx", e: A.Call) -> IRValue:
     """`staticmethod(f)` / `classmethod(f)` / `property(fget)`.
 
@@ -8953,6 +9033,51 @@ def _lower_descriptor_wrapper(ctx: "_FuncCtx", e: A.Call) -> IRValue:
             ctx.emit(IRInstr("global_addr", extra_key, [extra_sym]))
             null_v = _none_const(ctx)
             ctx.emit(IRInstr("call", None, ["_abi_dict_set", cell, extra_key, null_v]))
+    return cell
+
+
+def _slice_field_key(ctx: "_FuncCtx", name: str) -> IRValue:
+    sym = ctx.mctx.intern_str(name)
+    key_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", key_v, [sym]))
+    return key_v
+
+
+def _lower_slice_ctor(ctx: "_FuncCtx", e: A.Call) -> IRValue:
+    """`slice(stop)` / `slice(start, stop)` / `slice(start, stop, step)`.
+
+    Builds a tagged cell (`"__class__"` = the slice tag) carrying integer
+    "start"/"stop"/"step" bounds, so a Python VM's BUILD_SLICE opcode -- and
+    the `obj[slice_obj]` dynamic subscript that consumes it -- work when
+    compiled. A missing bound stores the empty-slice sentinel (SENTINEL_MIN
+    for start, SENTINEL_MAX for stop, 1 for step) the runtime list/str slice
+    helpers already interpret, matching how a literal `xs[a:b]` lowers.
+    Mirrors CPython's `slice(stop)` == `slice(None, stop, None)` one-arg form.
+    """
+    SENTINEL_MIN = -9223372036854775808
+    SENTINEL_MAX = 9223372036854775807
+    if len(e.args) == 1:
+        start_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", start_v, [SENTINEL_MIN]))
+        stop_v = _lower_expr(ctx, e.args[0])
+        step_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", step_v, [1]))
+    else:
+        start_v = _lower_expr(ctx, e.args[0])
+        stop_v = _lower_expr(ctx, e.args[1])
+        if len(e.args) >= 3:
+            step_v = _lower_expr(ctx, e.args[2])
+        else:
+            step_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", step_v, [1]))
+    cell = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", cell, ["_abi_new_instance"]))
+    tag_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", tag_v, [BUILTIN_TYPE_IDS["slice"]]))
+    ctx.emit(IRInstr("call", None, ["_abi_dict_set", cell, _class_tag_key(ctx), tag_v]))
+    ctx.emit(IRInstr("call", None, ["_abi_dict_set", cell, _slice_field_key(ctx, "start"), start_v]))
+    ctx.emit(IRInstr("call", None, ["_abi_dict_set", cell, _slice_field_key(ctx, "stop"), stop_v]))
+    ctx.emit(IRInstr("call", None, ["_abi_dict_set", cell, _slice_field_key(ctx, "step"), step_v]))
     return cell
 
 
