@@ -848,6 +848,13 @@ class SemaAnalyzer:
         # Variable name -> return type of the lambda bound to it, so an indirect
         # call `f(...)` on a name-bound lambda gets the right result type.
         self.lambda_rets: dict[str, str] = {}
+        # Local names EXPLICITLY declared `dict[str, object]` (a genuinely
+        # heterogeneous dict). Their value kind must stay "any" -- unlike a
+        # bare `dict`/`{}`, a later single-kind write must NOT narrow it to
+        # that one kind (the user said the values vary). Keeping it "any" makes
+        # ir_lower box each scalar written in and unbox each read out, so
+        # `type(d[k])`/`isinstance(d[k], T)` answer correctly per key.
+        self._explicit_object_dicts: set[str] = set()
         # Module-level names (imports + top-level assignments). Populated by
         # analyze() before function/method bodies are checked.
         self.global_scope: Scope = Scope()
@@ -5488,6 +5495,18 @@ class SemaAnalyzer:
                 if aty == "dict":
                     # Same "any" truthiness trap as the list branch above.
                     value_type = aval if (aval and aval != "any") else self._dict_value_type_if_known(value, scope)
+                    # An EXPLICIT `dict[str, object]` (aval == "any") is a
+                    # genuinely heterogeneous dict: keep its value kind "any"
+                    # and never let a later single-kind write narrow it (see
+                    # `_explicit_object_dicts`), so its scalar values are boxed
+                    # in / unboxed out and `type(d[k])` stays answerable. A
+                    # bare `dict`/`{}` (annot None, never reaches this branch)
+                    # keeps its "first write teaches the kind" narrowing.
+                    if aval == "any":
+                        value_type = "any"
+                        self._explicit_object_dicts.add(target)
+                    else:
+                        self._explicit_object_dicts.discard(target)
                     scope.add(
                         target,
                         "dict",
@@ -6345,8 +6364,11 @@ class SemaAnalyzer:
                             s.pos,
                             ErrorCode.E_ASSIGN_TYPE,
                         )
-                elif dvt in ("any", "int") and value_t not in ("any", "int") and isinstance(
-                    s.target.obj, A.Name
+                elif (
+                    dvt in ("any", "int")
+                    and value_t not in ("any", "int")
+                    and isinstance(s.target.obj, A.Name)
+                    and s.target.obj.name not in self._explicit_object_dicts
                 ):
                     # First concrete write to a dict whose value kind was never
                     # pinned (declared as a bare `dict`, or assigned `{}` --
@@ -6357,7 +6379,9 @@ class SemaAnalyzer:
                     # reading the unknown-sentinel default forever, so e.g. a
                     # str-valued dict's reads get treated as raw ints (a
                     # pointer printed as a garbage number, not dereferenced
-                    # as a string).
+                    # as a string). Skipped for an EXPLICIT `dict[str, object]`
+                    # (in `_explicit_object_dicts`): it must stay "any" so its
+                    # boxed values round-trip through type()/isinstance().
                     scope.dict_value_types[s.target.obj.name] = value_t
             elif obj_t == "any":
                 pass  # opaque target: accept the index assignment leniently
