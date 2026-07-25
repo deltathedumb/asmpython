@@ -109,6 +109,18 @@ BUILTIN_TYPE_IDS: dict[str, int] = {
     "dict": -6,
     "tuple": -7,
     "set": -8,
+    # The three builtin descriptor wrappers. `staticmethod(f)` /
+    # `classmethod(f)` / `property(fget)` construct a tagged cell (same
+    # instance-shaped "__class__"-keyed mechanism as a boxed scalar or a
+    # user instance) carrying the wrapped function; isinstance() reads this
+    # tag, and `.__func__` / `.fget` read the payload back. asmpython has no
+    # real descriptor protocol of its own -- these exist so a Python VM
+    # authored in the subset (portapy) can use them as the plain markers
+    # they are (`isinstance(v, staticmethod)`, `v.__func__`), with all
+    # actual get/dispatch semantics living in that VM's own code.
+    "staticmethod": -10,
+    "classmethod": -11,
+    "property": -12,
 }
 NONE_TYPE_ID = -9
 # Sentinel returned by the runtime tag read when a pointer carries no

@@ -4382,6 +4382,14 @@ def _lower_isinstance(ctx: _FuncCtx, e: A.Call) -> IRValue:
 
     accept: list[int] = []
     for t in targets:
+        # A descriptor-wrapper target (`isinstance(v, staticmethod)` /
+        # classmethod / property): its tag lives in BUILTIN_TYPE_IDS, stored
+        # in the wrapper cell's "__class__" key by _lower_descriptor_wrapper,
+        # read the same way a user class id is a few lines below. Add that
+        # tag directly (it isn't a user class, so _subclass_ids finds
+        # nothing for it).
+        if t in _DESCRIPTOR_WRAPPERS and BUILTIN_TYPE_IDS[t] not in accept:
+            accept.append(BUILTIN_TYPE_IDS[t])
         for cid in _subclass_ids(ctx, t):
             if cid not in accept:
                 accept.append(cid)
@@ -8429,6 +8437,8 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             return _lower_minmax(ctx, e)
         if e.func == "sorted" and len(e.args) == 1:
             return _lower_sorted(ctx, e)
+        if e.func in _DESCRIPTOR_WRAPPERS and len(e.args) <= 1:
+            return _lower_descriptor_wrapper(ctx, e)
         if e.func == "type" and len(e.args) == 1:
             arg = e.args[0]
             arg_t = A.expr_type(arg)
@@ -8877,6 +8887,52 @@ def _boxed_value_key(ctx: "_FuncCtx") -> IRValue:
     key_v = ctx.tmp(PTR)
     ctx.emit(IRInstr("global_addr", key_v, [sym]))
     return key_v
+
+
+_DESCRIPTOR_WRAPPERS: dict[str, str] = {
+    "staticmethod": "__func__",
+    "classmethod": "__func__",
+    "property": "fget",
+}
+
+
+def _lower_descriptor_wrapper(ctx: "_FuncCtx", e: A.Call) -> IRValue:
+    """`staticmethod(f)` / `classmethod(f)` / `property(fget)`.
+
+    asmpython has no descriptor protocol, but a Python VM written in the
+    subset (portapy) uses these builtins as plain markers: it checks
+    `isinstance(v, staticmethod)` and reads `v.__func__` / `v.fget`, then
+    implements all the actual attribute-get behavior itself. So build a
+    tagged cell -- the same instance-shaped `_abi_new_instance` dict a boxed
+    scalar / user instance uses -- whose `"__class__"` holds the wrapper's
+    BUILTIN_TYPE_IDS tag (so isinstance/type read it) and whose payload key
+    (`"__func__"`, plus `"fget"` for property) holds the wrapped callable.
+    A zero-arg `property()` (a bare `@property`-less placeholder) stores a
+    null payload, matching CPython's `property().fget is None`.
+    """
+    tag = BUILTIN_TYPE_IDS[e.func]
+    payload_key = _DESCRIPTOR_WRAPPERS[e.func]
+    func_v = _lower_expr(ctx, e.args[0]) if e.args else _none_const(ctx)
+    cell = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", cell, ["_abi_new_instance"]))
+    tag_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", tag_v, [tag]))
+    ctx.emit(IRInstr("call", None, ["_abi_dict_set", cell, _class_tag_key(ctx), tag_v]))
+    key_sym = ctx.mctx.intern_str(payload_key)
+    key_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", key_v, [key_sym]))
+    ctx.emit(IRInstr("call", None, ["_abi_dict_set", cell, key_v, func_v]))
+    # property also exposes `.fset`/`.fdel` in CPython; store nulls so a VM
+    # reading them gets None rather than a missing-key fault. staticmethod/
+    # classmethod only need `.__func__`.
+    if e.func == "property":
+        for extra in ("fset", "fdel"):
+            extra_sym = ctx.mctx.intern_str(extra)
+            extra_key = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", extra_key, [extra_sym]))
+            null_v = _none_const(ctx)
+            ctx.emit(IRInstr("call", None, ["_abi_dict_set", cell, extra_key, null_v]))
+    return cell
 
 
 def _lower_box_any(ctx: "_FuncCtx", value_v: IRValue, static_ty: str, e: A.Expr | None) -> IRValue:

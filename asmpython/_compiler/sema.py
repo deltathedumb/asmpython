@@ -164,6 +164,13 @@ BUILTINS: dict[str, tuple[int, int]] = {
     "round": (1, 2),  # round(x[, ndigits]) -> int (ndigits ignored for now)
     "pow": (2, 3),    # pow(base, exp[, mod]) -> int
     "sorted": (1, 1),  # sorted(iterable) (key/reverse via kwargs)
+    # The three builtin descriptor wrappers. Each wraps one callable
+    # (property's is optional -- a bare `property()` placeholder). ir_lower
+    # builds a tagged cell isinstance()/`.__func__`/`.fget` can inspect; the
+    # result is opaque ("any") to the rest of the type system.
+    "staticmethod": (1, 1),
+    "classmethod": (1, 1),
+    "property": (0, 1),
     "reversed": (1, 1),
     "any": (1, 1),
     "all": (1, 1),
@@ -10187,6 +10194,12 @@ class SemaAnalyzer:
                 "issubclass": "int",
                 "bytes": "list",
                 "bytearray": "list",
+                # Descriptor wrappers -> an opaque tagged cell (see ir_lower's
+                # _lower_descriptor_wrapper); "any" keeps isinstance()/
+                # `.__func__`/`.fget` reads on the result lenient.
+                "staticmethod": "any",
+                "classmethod": "any",
+                "property": "any",
             }[e.func]
             if e.func == "abs":
                 # abs preserves the operand's numeric type (float -> float so
