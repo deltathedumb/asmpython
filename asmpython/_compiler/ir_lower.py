@@ -58,6 +58,36 @@ from .codegen import (
 BOX_MAGIC = 0xB0BE11EDB0BE11ED - (1 << 64)
 
 
+# Python builtins that this backend does not model as first-class VALUES --
+# builtin functions and exception/base classes that have no runtime object
+# here. Referenced as a value (`namespace.setdefault("print", print)`,
+# `... = Exception`), a bare name like these resolves to no user func, class,
+# builtin-type id, or ffi const, and was never given a real global slot, so
+# the generic name-read path loads an UNINITIALIZED slot -- a garbage pointer
+# that faults when a later `any`-read tries to box-tag it. Such a reference is
+# yielded as None instead (the value-position analogue of the graceful call
+# stub), harmless unless actually invoked. Builtin *type* names (int/str/list/
+# dict/tuple/set/bool/float/bytes/object/type) are NOT here -- those already
+# resolve to a real BUILTIN_TYPE_IDS id in the name-read path. `callable`-style
+# ones that a program genuinely calls are handled by their own call lowering;
+# this set only affects the bare-value read that would otherwise read garbage.
+_UNMODELED_BUILTIN_VALUES = frozenset({
+    "print", "len", "range", "abs", "min", "max", "sum", "sorted", "enumerate",
+    "zip", "map", "filter", "isinstance", "issubclass", "hasattr", "getattr",
+    "setattr", "delattr", "callable", "iter", "next", "reversed", "round",
+    "pow", "divmod", "all", "any", "repr", "ascii", "format", "chr", "ord",
+    "hash", "id", "slice", "property", "classmethod", "staticmethod",
+    "bytearray", "vars", "dir", "input", "open", "globals", "locals",
+    "Exception", "BaseException", "NameError", "TypeError", "ValueError",
+    "RuntimeError", "AttributeError", "KeyError", "IndexError", "StopIteration",
+    "StopAsyncIteration", "ZeroDivisionError", "OverflowError", "ArithmeticError",
+    "LookupError", "UnboundLocalError", "NotImplementedError", "OSError",
+    "IOError", "ImportError", "ModuleNotFoundError", "AssertionError",
+    "GeneratorExit", "KeyboardInterrupt", "SystemExit", "FileNotFoundError",
+    "PermissionError", "NotImplemented", "Ellipsis",
+})
+
+
 class LowerError(Exception):
     pass
 
@@ -5559,6 +5589,27 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             # the generic path unchanged -- a separate, smaller,
             # not-yet-scoped gap, same as the module.CONST case's own
             # matching fallthrough note.
+        # An unmodeled builtin referenced as a VALUE (`namespace.setdefault(
+        # "print", print)`, `... = Exception`): `print`/`Exception`/`len`/...
+        # are not user funcs, classes, builtin-type names, or ffi consts (all
+        # handled above), and they were never assigned a real global slot, so
+        # reading them through the generic global/slot path below loads an
+        # UNINITIALIZED slot -- a garbage pointer. Boxed into an `any` slot and
+        # later read back, that garbage flows into the read-choke's box-magic
+        # dereference (`_lower_read_any_tag`) and faults on unmapped memory.
+        # Yield a null (None) placeholder instead, the value-position analogue
+        # of the graceful call stub (`_call_target_is_unresolvable`): the
+        # reference survives as a harmless None as long as it isn't actually
+        # invoked/used at runtime, exactly as an unmodeled builtin should.
+        _in_active_comp = any(e.name in shadows for shadows in ctx.comprehension_shadows)
+        if (
+            e.name in _UNMODELED_BUILTIN_VALUES
+            and not _is_global_name(ctx, e.name)
+            and e.name not in ctx.slot_ty
+            and e.name not in ctx.mctx.global_types
+            and not _in_active_comp
+        ):
+            return _none_const(ctx)
         # A local can shadow an unrelated module-level global of the same
         # name (e.g. `x = 0.0` at module scope, `for x in xs:` inside a
         # function that never declared `global x`) -- when that's the
