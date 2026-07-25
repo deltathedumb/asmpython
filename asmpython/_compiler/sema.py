@@ -5996,17 +5996,26 @@ class SemaAnalyzer:
                     else:
                         scope.add(s.var, el_t)
                 elif it_t == "tuple":
-                    # Iterating a tuple needs a single element type, so only
-                    # homogeneous tuples may be iterated; index heterogeneous
-                    # ones instead.
+                    # Iterating a tuple binds the loop var to a single element
+                    # type. A homogeneous tuple uses that type directly; a
+                    # heterogeneous one binds "any" (every slot is a uniform
+                    # 8-byte value, read opaquely per iteration) -- e.g. a
+                    # `(int, str, list)` record iterated generically. Only a
+                    # tuple whose kinds mix float with a pointer-sized kind
+                    # stays rejected: a float slot lives in its bit pattern and
+                    # an "any"/int iteration variable would misread it, so
+                    # those must be indexed element-by-element instead.
                     ets = self._tuple_elem_types(s.iter, scope)
                     if not ets:
                         scope.add(s.var, "int")
                     elif _all_same(ets):
                         scope.add(s.var, ets[0])
+                    elif "float" not in ets:
+                        scope.add(s.var, "any")
                     else:
                         raise SemaError(
-                            "cannot iterate a heterogeneous tuple; index its elements instead",
+                            "cannot iterate a tuple that mixes float with other "
+                            "kinds; index its elements instead",
                             s.pos,
                             ErrorCode.E_HETEROGENEOUS_TUPLE,
                         )
