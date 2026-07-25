@@ -10654,6 +10654,60 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             else:
                 ctx.emit(IRInstr("store", None, [val, addr]))
             return
+        if obj_ty == "any":
+            # `x[k] = v` where x's static type is opaque ("any") -- x may at
+            # runtime be a dict/set (`_abi_new_instance` shape) or a
+            # list/tuple. Dispatch on the runtime shape, mirroring how the
+            # membership/slice `any` paths discriminate: a dict/set holds a
+            # small TOMBSTONE COUNT at word-2 (offset 16), a list its BUFFER
+            # POINTER, so "word-2 is a small int, not a heap address" selects
+            # the dict path. The value is boxed via the store choke point in
+            # both arms so its runtime kind survives a later `x[k]` read that
+            # auto-unboxes (a raw list slot holds the box pointer fine). Was a
+            # hard "unsupported stmt IndexAssign (any)".
+            obj_v = _lower_expr(ctx, target.obj)
+            val = _lower_value_into_any_slot(ctx, s.value)
+            obj_slot = ctx.ensure_slot(f"__idxasany_obj_{id(s)}", PTR)
+            val_slot = ctx.ensure_slot(f"__idxasany_val_{id(s)}", val.type)
+            ctx.emit(IRInstr("store", None, [obj_v, obj_slot]))
+            ctx.emit(IRInstr("store", None, [val, val_slot]))
+
+            PTR_THRESHOLD = 0x10000
+            w2_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", w2_addr, [obj_v, 16]))
+            w2 = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", w2, [w2_addr]))
+            thr = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", thr, [PTR_THRESHOLD]))
+            w2_is_ptr = ctx.tmp(I64)
+            ctx.emit(IRInstr("icmp.gt", w2_is_ptr, [w2, thr]))
+
+            list_b = ctx.new_block("idxasanylist")
+            dict_b = ctx.new_block("idxasanydict")
+            end_b = ctx.new_block("idxasanyend")
+            ctx.emit(IRInstr("br.t", None, [w2_is_ptr, list_b.label, dict_b.label]))
+
+            ctx.switch_to(dict_b)
+            d_obj = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", d_obj, [obj_slot]))
+            key_v = _lower_dict_key(ctx, target.index)
+            d_val = ctx.tmp(val.type)
+            ctx.emit(IRInstr("load", d_val, [val_slot]))
+            ctx.emit(IRInstr("call", None, ["_abi_dict_set", d_obj, key_v, d_val]))
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+
+            ctx.switch_to(list_b)
+            l_obj = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", l_obj, [obj_slot]))
+            l_idx = _lower_expr(ctx, target.index)
+            l_addr = _list_elem_addr(ctx, l_obj, l_idx)
+            l_val = ctx.tmp(val.type)
+            ctx.emit(IRInstr("load", l_val, [val_slot]))
+            ctx.emit(IRInstr("store", None, [l_val, l_addr]))
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+
+            ctx.switch_to(end_b)
+            return
         if obj_ty != "list":
             raise LowerError(f"unsupported stmt IndexAssign ({obj_ty})")
         obj_v = _lower_expr(ctx, target.obj)
