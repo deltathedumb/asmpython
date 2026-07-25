@@ -8423,6 +8423,14 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     out = ctx.tmp(I64)
                     ctx.emit(IRInstr("call", out, [f"{owner}____int__", obj_v]))
                     return out
+            if arg_t == "any":
+                # `int(x)` on an opaque value that may be a boxed scalar cell
+                # (a scalar read out of a `dict[str, object]` / `list[object]`,
+                # see `_lower_value_into_any_slot`): unbox to the raw payload.
+                # A never-boxed opaque value passes through unchanged (unbox is
+                # a shape-safe no-op on a non-cell), so this is always safe.
+                obj_v = _lower_expr_inner(ctx, arg)
+                return _lower_unbox_any(ctx, obj_v)
             return _lower_expr(ctx, arg)
         if e.func == "float" and len(e.args) == 1:
             arg = e.args[0]
@@ -9139,6 +9147,25 @@ def _lower_box_any(ctx: "_FuncCtx", value_v: IRValue, static_ty: str, e: A.Expr 
     return cell
 
 
+def _lower_value_into_any_slot(ctx: "_FuncCtx", e: A.Expr) -> IRValue:
+    """Lower `e` for storage into a genuinely-heterogeneous ("any"-valued)
+    container slot, boxing a concrete scalar so its runtime kind survives.
+
+    A scalar stored raw into a `dict[str, object]` / `list[object]` loses its
+    kind, so a later `type(x)` / `isinstance(x, int)` on the read-out value
+    can't answer. Box it (the same tagged cell `_lower_box_any` builds), so
+    the kind travels with the value; consumers unbox transiently. A non-scalar
+    passes through unchanged. Only call this when the slot is genuinely "any"
+    (an `object`-typed container) -- never for a homogeneous `dict[str, int]`
+    whose value kind is precisely known (now that annotated field container
+    kinds are preserved, those correctly report "int", not "any")."""
+    static_ty = A.expr_type(e)
+    if static_ty in _BOXABLE_STATIC_TYPES:
+        value_v = _lower_expr(ctx, e)
+        return _lower_box_any(ctx, value_v, static_ty, e)
+    return _lower_expr(ctx, e)
+
+
 def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     """Runtime kind tag (I64) of a possibly-boxed opaque value.
 
@@ -9735,12 +9762,20 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         if obj_ty == "dict":
             obj_v = _lower_expr(ctx, target.obj)
             key_v = _lower_dict_key(ctx, target.index)
-            val = _lower_expr(ctx, s.value)
-            if A.expr_type(s.value) == "float":
-                # Same int-only-cell constraint as A.AttrAssign/A.ListLit.
-                iv = ctx.tmp(I64)
-                ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
-                val = iv
+            slot_vt = getattr(target.obj, "value_type", "int")
+            if slot_vt == "any" and A.expr_type(s.value) in _BOXABLE_STATIC_TYPES:
+                # `d[k] = scalar` into a genuinely heterogeneous
+                # `dict[str, object]`: box so `type(d[k])` / `isinstance(d[k],
+                # int)` on the read-out value can answer. A homogeneous
+                # `dict[str, int]` has slot_vt "int" (not "any") and skips this.
+                val = _lower_value_into_any_slot(ctx, s.value)
+            else:
+                val = _lower_expr(ctx, s.value)
+                if A.expr_type(s.value) == "float":
+                    # Same int-only-cell constraint as A.AttrAssign/A.ListLit.
+                    iv = ctx.tmp(I64)
+                    ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
+                    val = iv
             ctx.emit(IRInstr("call", None, ["_abi_dict_set", obj_v, key_v, val]))
             return
         setitem_cls = getattr(target, "_setitem_class", "")
