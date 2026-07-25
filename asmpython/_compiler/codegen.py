@@ -86,9 +86,20 @@ BUILTIN_EXC_IDS: dict[str, int] = {
 
 # A bare builtin scalar/container type name used as a value (`{"type": str}`,
 # mimicking argparse's `type=str`) -- same RTTI-id trick as class_ids /
-# BUILTIN_EXC_IDS: asmpython has no first-class type objects, so this is just
-# a stable, unique-per-name placeholder the program never actually inspects.
-# Negative so it can never collide with class_ids (which starts at 0).
+# BUILTIN_EXC_IDS. Negative so it can never collide with class_ids (which
+# starts at 0).
+#
+# Historically these ids were a compile-time-only placeholder the program
+# never inspected at runtime. They are now ALSO the runtime type tag written
+# into a boxed opaque cell's "__class__" key whenever a scalar value (int,
+# float, bool, str) crosses into a genuinely unknown ("any") static type --
+# see ir_lower.py's `_lower_box_any`/`_lower_read_any_tag`. type()/
+# isinstance() on an "any"-typed operand read this same tag at runtime
+# (mirroring how a user instance's own "__class__" tag already works),
+# instead of guessing from the operand's (nonexistent, for "any") static
+# type. NONE_TYPE_ID has no bare-name entry above `type X` syntax can
+# produce (`None` isn't a type name), so it's kept as a separate constant
+# rather than a BUILTIN_TYPE_IDS member.
 BUILTIN_TYPE_IDS: dict[str, int] = {
     "int": -1,
     "float": -2,
@@ -99,6 +110,12 @@ BUILTIN_TYPE_IDS: dict[str, int] = {
     "tuple": -7,
     "set": -8,
 }
+NONE_TYPE_ID = -9
+# Sentinel returned by the runtime tag read when a pointer carries no
+# recognizable "__class__" tag at all (an ordinary, never-boxed dict/list/
+# tuple/instance-shaped value, or a value that predates this feature).
+# Disjoint from every real id above and from every real class id (>= 0).
+UNTAGGED_ID = -1000
 
 
 # --- Function metadata --------------------------------------------------------

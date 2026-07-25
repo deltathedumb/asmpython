@@ -172,6 +172,7 @@ BUILTINS: dict[str, tuple[int, int]] = {
     "bitcast_f2i": (1, 1),  # bitcast_f2i(x: float) -> int: raw IEEE-754 bit pattern, not a numeric conversion
     "bitcast_i2f": (1, 1),  # bitcast_i2f(x: int) -> float: reverse of bitcast_f2i (bit pattern, not a numeric conversion)
     "repr": (1, 1),
+    "ascii": (1, 1),
     "type": (1, 1),  # type(x) -> opaque type object (`.__name__` reads lenient)
     "id": (1, 1),  # id(x) -> the object's pointer value (unique per object)
     "open": (1, 3),  # open(file[, mode[, encoding]]) -> file object (opaque)
@@ -281,6 +282,21 @@ BUILTIN_EXCEPTIONS: frozenset[str] = frozenset({
 BUILTIN_TYPE_NAMES: frozenset[str] = frozenset({
     "int", "float", "str", "bool", "list", "dict", "tuple", "set",
 })
+
+
+# Static types accepted as a dict KEY. asmpython's dict runtime is string-keyed;
+# ir_lower's `_lower_dict_key` encodes every one of these to a canonical string
+# (str used directly, int to its decimal spelling, everything else to its
+# `repr()`) so a value-equal key always maps to the same slot. Mirrors Python's
+# own rule that keys must be hashable-by-value: the immutable scalar/tuple kinds
+# qualify, the mutable containers (list/dict/set) do not. "any" is the untracked
+# opaque key (lenient -- it's a real string pointer at runtime); an `instance:*`
+# key is likewise accepted (a user object encodes via its repr).
+def _is_dict_key_type(ty: str) -> bool:
+    return (
+        ty in ("str", "any", "int", "bool", "float", "tuple")
+        or ty.startswith("instance:")
+    )
 
 
 # Interpreter-only `<module>.<method>` calls: features that require a live
@@ -1465,6 +1481,110 @@ class SemaAnalyzer:
                             pinfo[p] = ("any", None, None, None, None)
                 self._scan_field_assigns(m_body_cf, sig, pinfo)
 
+        # Every class sig is populated now, so the class-qualified spelling of
+        # the same rule can run over the whole module: `ClassName.x = <value>`
+        # from module level, a function body, or any method teaches the same
+        # tables `self.x = <value>` just did (see _scan_class_var_assigns).
+        self._scan_class_var_assigns(self.mod.body)
+        for f in self.mod.funcs:
+            self._scan_class_var_assigns(f.body)
+        for c in self.mod.classes:
+            for m in c.methods:
+                self._scan_class_var_assigns(m.body)
+
+    def _value_shape(self, value, pinfo: dict):
+        """(ty, el, val, tup) of an assigned value, with a container literal's
+        own element/value kind recovered from its contents.
+
+        `_static_value_info`/`_literal_arg_type` deliberately report a bare
+        ("list"/"dict", None, None, None) for a container literal, because
+        `_check_expr` hasn't stamped `el_type`/`value_type` onto the node yet
+        at field-collection time. The literal's elements are right there in
+        the syntax, so read the shape off them directly -- otherwise an
+        unannotated `x = {"a": "b"}` never learns its "str" value kind and
+        every later `x[k]` read falls back to the "int" unknown sentinel,
+        which codegen formats as a decimal integer instead of dereferencing
+        as a string."""
+        raw = self._static_value_info(value, pinfo)
+        ty, el, val, tup = raw[0], raw[1], raw[2], raw[3]
+        if el is None and isinstance(value, A.ListLit):
+            el = self._literal_shape_el_type(value)
+        if val is None and isinstance(value, A.DictLit):
+            val = self._literal_shape_value_type(value)
+        return ty, el, val, tup
+
+    def _teach_container_shape(
+        self, sig: ClassSig, name: str, ty: str, el, val, tup, elval
+    ) -> None:
+        """Record a container field/class-var's element/value kinds, filling in
+        only what isn't already known.
+
+        Deliberately independent of the field's own type-update guard in
+        `_scan_field_assigns`: a field is routinely typed "dict"/"list" by an
+        EMPTY initializer (`self.x = {}`, or a `x = {}` class-body default)
+        that carries no element kind at all, so the only statement that knows
+        the real kind is a later assignment -- which that guard skips, since
+        the type itself isn't changing. The `.append()` / `self.x[k] = v`
+        mutation rules below exist for exactly this gap; this is the same
+        rule for plain assignment."""
+        if ty == "list" and el is not None:
+            if name not in sig.field_el_types:
+                sig.field_el_types[name] = el
+            if el in ("list", "dict"):
+                if elval is not None and name not in sig.field_inner_value_types:
+                    sig.field_inner_value_types[name] = elval
+            elif el == "tuple" and tup and name not in sig.field_value_tuple_types:
+                sig.field_value_tuple_types[name] = tup
+        elif ty == "dict" and val is not None:
+            if name not in sig.field_el_types:
+                sig.field_el_types[name] = val
+            if val in ("list", "dict"):
+                if elval is not None and name not in sig.field_inner_value_types:
+                    sig.field_inner_value_types[name] = elval
+            elif val == "tuple" and tup and name not in sig.field_value_tuple_types:
+                sig.field_value_tuple_types[name] = tup
+        elif ty == "tuple" and tup and name not in sig.field_tuple_types:
+            sig.field_tuple_types[name] = tup
+
+    def _scan_class_var_assigns(self, stmts: list) -> None:
+        """Teach class-level container vars their element/value kind from
+        `ClassName.x = <value>` assignments, wherever they appear.
+
+        `self.x = <value>` inside a method is already scanned by
+        `_scan_field_assigns`, but a class var is just as often (re)assigned
+        through the class itself, from outside any method -- a module-level
+        registry/configuration table is the common shape. Both spellings
+        address the identical `__cv_<Class>__<name>` storage and are read
+        back through the same field tables, so both must teach those tables;
+        otherwise a class body's empty `x = {}` default leaves the value kind
+        unknown forever no matter what is later assigned to it."""
+        for s in stmts:
+            if (
+                isinstance(s, A.AttrAssign)
+                and isinstance(s.obj, A.Name)
+                and s.obj.name in self.classes
+            ):
+                sig = self.classes[s.obj.name]
+                # Only names the class actually declares -- never invent a
+                # field from an assignment to something else.
+                if s.name in sig.fields:
+                    ty, el, val, tup = self._value_shape(s.value, {})
+                    self._teach_container_shape(sig, s.name, ty, el, val, tup, None)
+            elif isinstance(s, A.If):
+                self._scan_class_var_assigns(s.then)
+                self._scan_class_var_assigns(s.orelse)
+            elif isinstance(s, A.While):
+                self._scan_class_var_assigns(s.body)
+            elif isinstance(s, A.For):
+                self._scan_class_var_assigns(s.body)
+            elif isinstance(s, A.Try):
+                self._scan_class_var_assigns(s.body)
+                self._scan_class_var_assigns(s.handler)
+                for _types, _bind, hbody in s.extra_handlers:
+                    self._scan_class_var_assigns(hbody)
+                self._scan_class_var_assigns(s.else_body)
+                self._scan_class_var_assigns(s.finally_body)
+
     def _scan_field_assigns(self, stmts: list, sig: ClassSig, pinfo: dict) -> None:
         for s in stmts:
             if (
@@ -1485,28 +1605,18 @@ class SemaAnalyzer:
                     tup = r[3]
                     elval = r[4]
                 else:
-                    raw = self._static_value_info(s.value, pinfo)
-                    ty, el, val, tup = raw[0], raw[1], raw[2], raw[3]
+                    ty, el, val, tup = self._value_shape(s.value, pinfo)
                     elval = None
                 existing = sig.fields.get(s.name)
                 # Don't let a later `= 0` reset placeholder downgrade a field we
                 # already typed more precisely.
                 if existing is None or (existing == "int" and ty != "int"):
                     sig.fields[s.name] = ty
-                    if ty == "list" and el is not None:
-                        sig.field_el_types[s.name] = el
-                        if el in ("list", "dict") and elval is not None:
-                            sig.field_inner_value_types[s.name] = elval
-                        elif el == "tuple" and tup:
-                            sig.field_value_tuple_types[s.name] = tup
-                    elif ty == "dict" and val is not None:
-                        sig.field_el_types[s.name] = val
-                        if val in ("list", "dict") and elval is not None:
-                            sig.field_inner_value_types[s.name] = elval
-                        elif val == "tuple" and tup:
-                            sig.field_value_tuple_types[s.name] = tup
-                    elif ty == "tuple" and tup:
-                        sig.field_tuple_types[s.name] = tup
+                # The element/value kind is learnable from any assignment that
+                # reveals it, including one the guard above skips because the
+                # field's own type isn't changing (`self.x = {}` then a later
+                # `self.x = {...}`). See _teach_container_shape.
+                self._teach_container_shape(sig, s.name, ty, el, val, tup, elval)
             elif (
                 isinstance(s, A.ExprStmt)
                 and isinstance(s.expr, A.MethodCall)
@@ -2507,6 +2617,19 @@ class SemaAnalyzer:
                 and value.func not in self.classes
             ):
                 return ("any", None, None)
+            if isinstance(value, A.Call) and value.func in self.classes:
+                # `nested = SomeClass(...)` captured by an inner closure: the
+                # free var is an instance, not the int unknown-sentinel. Was
+                # unhandled (the two Call branches above deliberately EXCLUDE
+                # `value.func in self.classes`), so scan_closurebinds fell
+                # through to ("int", None, None) and the closure body's
+                # `nested.method(...)` failed with "int has no method 'X'".
+                # Confirmed via a minimal repro (`class Box: def show(self)`;
+                # `def outer(): nested = Box(5); def inner(): nested.show()`)
+                # and by portapy's frontend.py comprehension lowering, where
+                # a `nested = _Lowerer(...)` captured by an `emit_nested`
+                # closure hit exactly this.
+                return (f"instance:{value.func}", None, None)
             return None
 
         def collect_annot_locals(stmts: list, acc: dict) -> None:
@@ -6176,8 +6299,12 @@ class SemaAnalyzer:
                 # "int" doubles as asmpython's unknown sentinel (an untracked
                 # element/slot that is a str at runtime), so it's lenient here.
                 _ikt = A.expr_type(s.target.index)
-                if _ikt not in ("str", "any", "int") and not _ikt.startswith("instance:"):
-                    raise SemaError("dict keys must be strings", s.pos, ErrorCode.E_DICT_KEY_TYPE)
+                if not _is_dict_key_type(_ikt):
+                    raise SemaError(
+                        f"dict key must be hashable (str/int/float/bool/tuple/"
+                        f"instance), got {_ikt}",
+                        s.pos, ErrorCode.E_DICT_KEY_TYPE,
+                    )
                 dvt = self._dict_value_type(s.target.obj, scope)
                 if (
                     dvt not in ("any", "int")
@@ -6871,8 +6998,12 @@ class SemaAnalyzer:
                     )
             elif obj_t == "dict":
                 ikt: str = A.expr_type(t.index)
-                if ikt not in ("str", "any", "int") and not ikt.startswith("instance:"):
-                    raise SemaError("dict keys must be strings", pos, ErrorCode.E_DICT_KEY_TYPE)
+                if not _is_dict_key_type(ikt):
+                    raise SemaError(
+                        f"dict key must be hashable (str/int/float/bool/tuple/"
+                        f"instance), got {ikt}",
+                        pos, ErrorCode.E_DICT_KEY_TYPE,
+                    )
                 dvt = self._dict_value_type(t.obj, scope)
                 if (
                     dvt not in ("any", "int")
@@ -7213,9 +7344,10 @@ class SemaAnalyzer:
                             )
                         continue
                     if rt == "dict":
-                        if lt not in ("str", "any", "int"):
+                        if not _is_dict_key_type(lt):
                             raise SemaError(
-                                f"'{op}' on dict requires str key, got {lt}",
+                                f"'{op}' on dict needs a hashable key "
+                                f"(str/int/float/bool/tuple/instance), got {lt}",
                                 e.pos,
                                 ErrorCode.E_DICT_KEY_TYPE,
                             )
@@ -7754,15 +7886,23 @@ class SemaAnalyzer:
             if e.cond is not None:
                 self._check_expr(e.cond, child)
             self._check_expr(e.key, child)
-            # Dict keys are always str at the runtime level (see Scope's
-            # "Keys are always str in v1" doc comment) -- codegen has no way
-            # to encode an int/tuple key into a real dict, so "int"/"tuple"
-            # must NOT be accepted here even though `A.expr_type` can report
-            # them (e.g. `{v: k for k, v in d.items()}` where `v` is int).
+            # Dict keys are stored as strings at the runtime level. Non-str
+            # keys work for LOOKUP (subscript / `in` / literal construction --
+            # ir_lower's `_lower_dict_key` encodes each to a canonical string),
+            # but a comprehension exists to be MATERIALIZED and then usually
+            # iterated/printed, and iteration yields the stored strings, not
+            # the original keys (`{v: k ...}` with int `v` would print/repr as
+            # `{'1': ...}`, not `{1: ...}`). So a comprehension key stays
+            # restricted to str/any -- where store and iterate agree -- rather
+            # than silently producing a value that round-trips wrong. (A
+            # genuinely non-str-keyed dict that is only ever looked up, like an
+            # lru_cache memo, is still fully supported via the imperative
+            # `cache[k] = v` / `k in cache` spellings, which don't iterate.)
             if A.expr_type(e.key) not in ("str", "any"):
                 raise SemaError(
                     "dict comprehension keys must be strings "
-                    "(other types not supported yet)",
+                    "(other key kinds work for lookup but not when the "
+                    "comprehension's result is iterated/printed)",
                     getattr(e.key, "pos", e.pos),
                     ErrorCode.E_DICT_KEY_TYPE,
                 )
@@ -7802,9 +7942,11 @@ class SemaAnalyzer:
                         )
                     continue
                 self._check_expr(k, scope)
-                if A.expr_type(k) not in ("str", "any", "int") and not A.expr_type(k).startswith("instance:"):
+                _klt = A.expr_type(k)
+                if not _is_dict_key_type(_klt):
                     raise SemaError(
-                        "dict keys must be strings (other types not supported yet)",
+                        f"dict key must be hashable (str/int/float/bool/tuple/"
+                        f"instance), got {_klt}",
                         getattr(k, "pos", e.pos),
                         ErrorCode.E_DICT_KEY_TYPE,
                     )
@@ -8021,8 +8163,13 @@ class SemaAnalyzer:
                 )
             elif obj_t == "dict":
                 # "int" doubles as the unknown sentinel; lenient (see above).
-                if A.expr_type(e.index) not in ("str", "any", "int"):
-                    raise SemaError("dict keys must be strings", e.pos, ErrorCode.E_DICT_KEY_TYPE)
+                _rkt = A.expr_type(e.index)
+                if not _is_dict_key_type(_rkt):
+                    raise SemaError(
+                        f"dict key must be hashable (str/int/float/bool/tuple/"
+                        f"instance), got {_rkt}",
+                        e.pos, ErrorCode.E_DICT_KEY_TYPE,
+                    )
                 e.inferred_type = self._dict_value_type(e.obj, scope)
                 # A nested container value (dict[str, dict] / dict[str, list]):
                 # carry the outer dict's tracked inner kind onto the read-out
@@ -8140,6 +8287,27 @@ class SemaAnalyzer:
                 cvt = self._class_var_type(e.obj.name, e.name)
                 if cvt is not None:
                     e.inferred_type = cvt
+                    # `ClassName.x` and `self.x` name the same storage, so this
+                    # read carries the same collection element/value kinds the
+                    # instance-qualified read below already carries. Without
+                    # them a `ClassName.x[k]` / `.get(k)` result falls back to
+                    # the "int" unknown sentinel and a str value gets formatted
+                    # as a decimal integer.
+                    cvcls: str = e.obj.name
+                    if cvt == "list":
+                        e.list_el_type = self._resolve_field_el(cvcls, e.name)
+                        if e.list_el_type in ("list", "dict"):
+                            e.el_value_type = self._resolve_field_inner_value(cvcls, e.name)
+                        elif e.list_el_type == "tuple":
+                            e.el_tuple_types = self._resolve_field_value_tuple(cvcls, e.name)
+                    elif cvt == "dict":
+                        e.value_type = self._resolve_field_el(cvcls, e.name)
+                        if e.value_type in ("list", "dict"):
+                            e.inner_value_type = self._resolve_field_inner_value(cvcls, e.name)
+                        elif e.value_type == "tuple":
+                            e.value_tuple_elem_types = self._resolve_field_value_tuple(cvcls, e.name)
+                    elif cvt == "tuple":
+                        e.tuple_elem_types = self._resolve_field_tuple(cvcls, e.name)
                     return
             # Special-case module attribute: math.pi, math.sqrt(...).
             if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
@@ -8177,6 +8345,24 @@ class SemaAnalyzer:
             # (all attribute values are int, since instances use a str->int dict).
             self._check_expr(e.obj, scope)
             obj_t: str = A.expr_type(e.obj)
+            if (
+                e.name == "__name__"
+                and isinstance(e.obj, A.Call)
+                and e.obj.func == "type"
+                and len(e.obj.args) == 1
+            ):
+                # `type(x).__name__` is always a str (the class's name).
+                # ir_lower's `_lower_type_name_attr` already produces a real
+                # string pointer here; without typing it "str", the result
+                # read as "any"/int and (a) formatted as a raw pointer when
+                # printed, and (b) hashed/compared wrong as a dict key or `in`
+                # needle -- breaking the class-keyed-dict lowering (see
+                # `_rewrite_class_keyed_dicts`) that rewrites `D[type(x)]` to
+                # `D[type(x).__name__]`. Str typing routes it through
+                # _runtime_str_eq / string hashing, the same path a literal
+                # key uses, so the two match.
+                e.inferred_type = "str"
+                return
             if obj_t.startswith("instance:"):
                 # A field of a user instance carries the type sema inferred for
                 # it (str / instance / list / ... ). An undeclared field (one
@@ -10443,12 +10629,35 @@ class SemaAnalyzer:
                         e.inferred_type = "any"
                     return
             if e.dstar is not None:
-                raise SemaError(
-                    f"**expr call argument requires a statically known "
-                    f"parameter list; {e.func!r} doesn't have one here",
-                    e.dstar.pos,
-                    ErrorCode.E_DSTAR_NO_PARAM_LIST,
-                )
+                # `target(**kwargs)` where `target` is an opaque callable
+                # VALUE (a parameter/variable bound to something callable,
+                # not a statically-resolvable function/class/instance-with-
+                # __call__). There's no compile-time parameter list to expand
+                # each `**kwargs` key onto a fixed slot, but the dict already
+                # exists as a real runtime value -- so pass it straight
+                # through as the call's trailing dict-typed argument, exactly
+                # the ABI position `_bind_args` would place a `**kwargs`
+                # param's packed DictLit. The callee is expected to accept a
+                # `**kwargs` parameter (asmpython already supports declaring
+                # and receiving one -- see `_bind_args`'s `kwarg` handling);
+                # this is the missing OTHER half, the dynamic call site.
+                # Marked with `dstar_dynamic` so ir_lower emits the indirect
+                # call with the dict appended rather than trying to expand it.
+                self._check_expr(e.dstar, scope)
+                _dstar_t = A.expr_type(e.dstar)
+                if _dstar_t not in ("dict", "any"):
+                    raise SemaError(
+                        "**expr call argument must be a dict",
+                        e.dstar.pos,
+                        ErrorCode.E_DSTAR_NOT_DICT,
+                    )
+                for _kn, _kv in e.kwargs:
+                    self._check_expr(_kv, scope)
+                for a in e.args:
+                    self._check_expr(a, scope)
+                e.dstar_dynamic = True  # type: ignore
+                e.inferred_type = "any"
+                return
             for a in e.args:
                 self._check_expr(a, scope)
             # A name bound to a lambda: use the lambda's body type so the call
@@ -10467,6 +10676,289 @@ class SemaAnalyzer:
                 e.inferred_type = "int"
             return
         raise SemaError(f"undefined function {e.func!r}", e.pos, ErrorCode.E_UNDEFINED_FUNC)
+
+
+def _walk_call_sites(statements: list):
+    """Yield every `A.Call` node reachable from `statements`, at any nesting
+    depth (expressions inside expressions, statements inside statements).
+
+    A minimal, self-contained walker deliberately NOT shared with the
+    `*_compat_fixes.py` modules' own walkers: those import `SemaAnalyzer` from
+    this module, so importing one of them back here would be circular. Only
+    the child-attribute names actually needed to reach every `A.Call` in
+    practice are covered (mirrors the coverage of e.g.
+    `object_flow_compat_fixes._walk_expression`/`_walk_statements`)."""
+    def walk_expr(e):
+        if e is None:
+            return
+        if isinstance(e, A.Call):
+            yield e
+        for name in ("left", "right", "operand", "obj", "index", "test",
+                     "body", "orelse", "value", "elt", "key", "iter"):
+            child = getattr(e, name, None)
+            if child is not None and not isinstance(child, (list, str)):
+                yield from walk_expr(child)
+        for name in ("args", "elems", "operands", "values", "keys",
+                     "segments", "extra_for_iters", "extra_for_conds"):
+            children = getattr(e, name, None)
+            if isinstance(children, list):
+                for child in children:
+                    yield from walk_expr(child)
+        kwargs = getattr(e, "kwargs", None)
+        if isinstance(kwargs, list):
+            for _name, child in kwargs:
+                yield from walk_expr(child)
+
+    for s in statements:
+        for name in ("expr", "value", "test", "iter", "target", "obj"):
+            expr = getattr(s, name, None)
+            if expr is not None and not isinstance(expr, str):
+                yield from walk_expr(expr)
+        values = getattr(s, "values", None)
+        if isinstance(values, list) and not isinstance(s, (A.ListLit, A.TupleLit, A.SetLit)):
+            for expr in values:
+                if expr is not None and not isinstance(expr, str):
+                    yield from walk_expr(expr)
+        for name in ("then", "orelse", "body", "handler", "else_body", "finally_body"):
+            nested = getattr(s, name, None)
+            if isinstance(nested, list):
+                yield from _walk_call_sites(nested)
+        if isinstance(s, A.Try):
+            for _types, _binding, body in s.extra_handlers:
+                yield from _walk_call_sites(body)
+
+
+def _resolve_class_aliases(mod: A.Module) -> None:
+    """Rewrite `Alias(...)` call sites to `RealClass(...)` wherever a module-
+    level statement unconditionally binds `Alias = RealClass` (transitively:
+    `B = A; C = B` both resolve to `A`).
+
+    Runs BEFORE `SemaAnalyzer` is constructed -- i.e. before any of the
+    `*_compat_fixes.py` layers wrapping `SemaAnalyzer.analyze` see the module
+    at all -- because several of those layers independently re-derive their
+    own reachability/type information straight from the raw AST's `A.Call`
+    nodes (e.g. `live_definition_compat_fixes`'s "is this class ever
+    constructed" reachability scan checks `call.func in class_names`
+    directly). Resolving the alias only inside `SemaAnalyzer._check_call`
+    left every earlier layer still seeing the alias name, so a class
+    constructed exclusively through an alias looked unreachable to them and
+    got its methods replaced with inert stubs -- while sema itself compiled
+    the call correctly. Rewriting the AST once, up front, is the only fix
+    that reaches every layer uniformly instead of teaching each one alias
+    resolution individually.
+
+    asmpython has no runtime class objects: a bare class name used as a value
+    loads its RTTI id (a plain int), so `Alias(...)` through a name bound
+    this way previously called through that integer id and crashed. Only
+    UNCONDITIONAL, single module-level assignment is trusted as an alias -- a
+    name reassigned more than once, or assigned inside a function/method/
+    conditional, isn't a stable compile-time alias for a class the way an
+    import alias is, so it's left alone (a genuinely dynamic rebinding stays
+    opaque and is rejected at the call site like any other call on a
+    non-class value, rather than silently picking one arm)."""
+    class_names = {c.name for c in mod.classes}
+    assigned_once: dict[str, str] = {}
+    reassigned: set[str] = set()
+    for s in mod.body:
+        if isinstance(s, A.Assign) and isinstance(s.value, A.Name):
+            if s.target in assigned_once or s.target in reassigned:
+                reassigned.add(s.target)
+                assigned_once.pop(s.target, None)
+            else:
+                assigned_once[s.target] = s.value.name
+        elif isinstance(s, A.Assign):
+            reassigned.add(s.target)
+            assigned_once.pop(s.target, None)
+
+    aliases: dict[str, str] = {}
+    for alias, target in assigned_once.items():
+        seen: set[str] = {alias}
+        current = target
+        while current in assigned_once and current not in seen:
+            seen.add(current)
+            current = assigned_once[current]
+        if current in class_names:
+            aliases[alias] = current
+    if not aliases:
+        return
+
+    def rewrite(call: A.Call) -> None:
+        if call.func in aliases and call.func not in class_names:
+            call.func = aliases[call.func]
+
+    for call in _walk_call_sites(mod.body):
+        rewrite(call)
+    for f in mod.funcs:
+        for call in _walk_call_sites(f.body):
+            rewrite(call)
+    for c in mod.classes:
+        for m in c.methods:
+            for call in _walk_call_sites(m.body):
+                rewrite(call)
+
+
+def _class_key_name(key: "A.Expr | None") -> "str | None":
+    """If `key` is a class-OBJECT dict key -- a bare class reference used as a
+    key, either `ClassName` (A.Name) or `module.ClassName` (A.Attr, e.g.
+    `ast.Add`) -- return the leaf class name (`"Add"`); else None.
+
+    Deliberately excludes anything that is already a supported key: string and
+    int literals, and `**spread` entries (a None key). Only a Name/Attr whose
+    referenced identifier looks like a class (leading uppercase letter) counts,
+    which is exactly the `{ast.Add: ..., ast.Sub: ...}` shape asmpython's
+    string-only dict runtime can't store directly."""
+    if isinstance(key, A.Name):
+        return key.name if key.name[:1].isupper() else None
+    if isinstance(key, A.Attr) and isinstance(key.obj, (A.Name, A.Attr)):
+        return key.name if key.name[:1].isupper() else None
+    return None
+
+
+def _is_type_call(e: "A.Expr | None") -> bool:
+    """`type(x)` -- a one-argument call to the `type` builtin."""
+    return isinstance(e, A.Call) and e.func == "type" and len(e.args) == 1
+
+
+def _rewrite_class_keyed_dicts(mod: A.Module) -> None:
+    """Support constant dicts keyed by CLASS OBJECTS, looked up via `type(x)`.
+
+    asmpython's dict runtime stores string keys only (keys are strdup'd and
+    hashed as C strings -- see codegen.py's `_runtime_dict_set`). A dict
+    literal like `_BINARY_OPS = {ast.Add: Op.BINARY_ADD, ast.Sub: ...}`, read
+    as `_BINARY_OPS[type(node.op)]` / tested as `type(node.op) in
+    _BINARY_OPS`, therefore can't be compiled directly.
+
+    But a class object's identity is fully captured by its (unique) NAME here,
+    and asmpython already supports `type(x).__name__` (a str) and string-keyed
+    dicts. So rewrite the whole pattern to its string-keyed equivalent, up
+    front, before sema/codegen ever see the unsupported key type:
+      * every class-object key `ast.Add` -> the string literal `"Add"`
+      * every `D[type(x)]`            -> `D[type(x).__name__]`
+      * every `type(x) in/not in D`   -> `type(x).__name__ in/not in D`
+
+    Only dicts whose keys are ALL class-object references are touched (a
+    genuinely str/int-keyed dict is left exactly as-is), and only the two
+    lookup spellings above are rewritten. Runs as a module-level pre-pass
+    (like `_resolve_class_aliases`) so it reaches every downstream layer
+    uniformly. Pure AST-to-AST: no runtime, codegen, or backend changes, so
+    it works identically across every target/backend."""
+    class_keyed: set[str] = set()
+
+    def dict_is_class_keyed(d: A.DictLit) -> bool:
+        if not d.keys:
+            return False
+        saw_class_key = False
+        for k in d.keys:
+            if k is None:
+                return False  # a **spread entry -- not a plain class-keyed dict
+            name = _class_key_name(k)
+            if name is None:
+                return False
+            saw_class_key = True
+        return saw_class_key
+
+    # Pass 1: find module-level `NAME = {ClassRef: v, ...}` globals and rewrite
+    # their keys to string literals. Record the global names so their lookup
+    # sites can be rewritten to match.
+    for s in mod.body:
+        if (
+            isinstance(s, A.Assign)
+            and isinstance(s.target, str)
+            and isinstance(s.value, A.DictLit)
+            and dict_is_class_keyed(s.value)
+        ):
+            d = s.value
+            d.keys = [
+                A.StrLit(value=_class_key_name(k), pos=getattr(k, "pos", d.pos))
+                for k in d.keys
+            ]
+            class_keyed.add(s.target)
+
+    if not class_keyed:
+        return
+
+    def rewrite_expr(e):
+        """Recursively rewrite `D[type(x)]` and `type(x) (not) in D` lookups
+        against a known class-keyed dict `D`. Returns the (possibly new) node
+        so callers can rebind the field they read it from."""
+        if e is None or isinstance(e, str):
+            return e
+        if isinstance(e, A.Subscript):
+            e.obj = rewrite_expr(e.obj)
+            e.index = rewrite_expr(e.index)
+            if (
+                isinstance(e.obj, A.Name)
+                and e.obj.name in class_keyed
+                and _is_type_call(e.index)
+            ):
+                e.index = A.Attr(obj=e.index, name="__name__", pos=e.index.pos)
+            return e
+        if isinstance(e, A.Compare):
+            e.operands = [rewrite_expr(o) for o in e.operands]
+            for i, op in enumerate(e.ops):
+                if op in ("in", "not in"):
+                    needle = e.operands[i]
+                    haystack = e.operands[i + 1]
+                    if (
+                        isinstance(haystack, A.Name)
+                        and haystack.name in class_keyed
+                        and _is_type_call(needle)
+                    ):
+                        e.operands[i] = A.Attr(
+                            obj=needle, name="__name__", pos=needle.pos
+                        )
+            return e
+        # Generic recursion into every child expression field so a lookup
+        # nested anywhere (a call argument, an f-string segment, a ternary
+        # arm, ...) is still reached.
+        for name in ("left", "right", "operand", "obj", "index", "test",
+                     "body", "orelse", "value", "elt", "key", "iter", "cond"):
+            child = getattr(e, name, None)
+            if child is not None and not isinstance(child, (list, str)):
+                setattr(e, name, rewrite_expr(child))
+        for name in ("args", "elems", "operands", "values", "keys",
+                     "segments", "extra_for_iters", "extra_for_conds"):
+            children = getattr(e, name, None)
+            if isinstance(children, list):
+                for i, child in enumerate(children):
+                    if child is not None and not isinstance(child, str):
+                        children[i] = rewrite_expr(child)
+        kwargs = getattr(e, "kwargs", None)
+        if isinstance(kwargs, list):
+            for i, pair in enumerate(kwargs):
+                kname, child = pair
+                kwargs[i] = (kname, rewrite_expr(child))
+        return e
+
+    def rewrite_stmts(stmts: list) -> None:
+        for s in stmts:
+            for name in ("expr", "value", "test", "iter", "target", "obj",
+                         "index", "cond"):
+                child = getattr(s, name, None)
+                if child is not None and not isinstance(child, str):
+                    setattr(s, name, rewrite_expr(child))
+            values = getattr(s, "values", None)
+            if isinstance(values, list) and not isinstance(
+                s, (A.ListLit, A.TupleLit, A.SetLit)
+            ):
+                for i, child in enumerate(values):
+                    if child is not None and not isinstance(child, str):
+                        values[i] = rewrite_expr(child)
+            for name in ("then", "orelse", "body", "handler", "else_body",
+                         "finally_body"):
+                nested = getattr(s, name, None)
+                if isinstance(nested, list):
+                    rewrite_stmts(nested)
+            if isinstance(s, A.Try):
+                for _types, _binding, body in s.extra_handlers:
+                    rewrite_stmts(body)
+
+    rewrite_stmts(mod.body)
+    for f in mod.funcs:
+        rewrite_stmts(f.body)
+    for c in mod.classes:
+        for m in c.methods:
+            rewrite_stmts(m.body)
 
 
 def analyze(
@@ -10490,6 +10982,8 @@ def analyze(
     `constants`) are enforced at the semantic-analysis level rather than
     via new syntax alone.
     """
+    _resolve_class_aliases(mod)
+    _rewrite_class_keyed_dicts(mod)
     SemaAnalyzer(
         mod,
         source_dir=source_dir,

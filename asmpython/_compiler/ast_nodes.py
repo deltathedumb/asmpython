@@ -885,6 +885,13 @@ class Call:
     # statically known parameter list (function/constructor/`__call__`) --
     # see DoubleStarred's docstring.
     dstar: "Expr | None" = None
+    # `target(**kwargs)` where `target` is an opaque callable VALUE with no
+    # statically known parameter list to expand `dstar` against. Set by sema
+    # instead of raising E_DSTAR_NO_PARAM_LIST: the `**expr` dict stays in
+    # `dstar` (never expanded into `kwargs`) and ir_lower passes it through
+    # as the indirect call's trailing dict-typed argument, matching the ABI
+    # slot a `**kwargs`-declared callee receives its packed dict in.
+    dstar_dynamic: bool = False
     # `overload` extension: the mangled symbol name of the specific
     # @overload signature sema resolved this call to, or None for an
     # ordinary (non-overloaded) call. Set by SemaAnalyzer._resolve_overload,

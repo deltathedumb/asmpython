@@ -39,7 +39,14 @@ from .ir import (
     PTR,
     ir_type_for,
 )
-from .codegen import BUILTIN_EXC_IDS, BUILTIN_EXC_PARENTS, BUILTIN_TYPE_IDS, EXC_ANY
+from .codegen import (
+    BUILTIN_EXC_IDS,
+    BUILTIN_EXC_PARENTS,
+    BUILTIN_TYPE_IDS,
+    EXC_ANY,
+    NONE_TYPE_ID,
+    UNTAGGED_ID,
+)
 
 
 class LowerError(Exception):
@@ -227,6 +234,27 @@ class _FuncCtx:
         self.closure_free_counts: dict[str, int] = {}
         self.nonlocal_names: set[str] = set()
         self.boxed_names: set[str] = set()
+        # var name -> concrete asmpython type string, active only while
+        # lowering the "then" body of an `if type(x) is T:` / `if
+        # isinstance(x, T):` check on that name (pushed/popped by A.If's
+        # lowering; see `_narrowed_if_type`). A boxed "any"-typed value
+        # (see `_lower_box_any`) can only be safely unboxed ONCE -- static
+        # sema typing has no notion of "this specific read happens after a
+        # runtime check proved the concrete type," so without this, every
+        # read of a checked-any variable either never unboxes (leaving the
+        # payload unreachable) or unboxes repeatedly (crashing on the
+        # second read, since the first read's raw payload isn't a valid
+        # boxed-cell pointer -- see `_lower_expr`'s docstring for the
+        # confirmed repro). `_lower_narrowed_name_ptr` consults this to
+        # unbox exactly once per branch, into a dedicated scratch slot, so
+        # every read inside the narrowed branch after the first reuses the
+        # SAME already-unboxed value instead of re-unboxing.
+        self.narrowed_types: dict[str, str] = {}
+        # var name -> IRValue holding the already-unboxed scratch pointer
+        # for the CURRENT narrowed branch (see narrowed_types above).
+        # Cleared alongside narrowed_types when the branch is left, so a
+        # later, unrelated narrowed branch on the same name starts fresh.
+        self.narrowed_cache: dict[str, IRValue] = {}
         self.local_names = local_names or set()
         self.declared_globals = declared_globals or set()
         self.module_body = module_body
@@ -285,6 +313,32 @@ class _FuncCtx:
         # bits got interpreted as a float's bit pattern with no sitofp,
         # producing tiny garbage values like 6.95186e-310.
         self.ret_ty: str | None = None
+        # True only when this function's OWN `return` statements provably
+        # disagree on concrete type (see `_has_genuinely_heterogeneous_
+        # returns`, set once by `lower_func` right after `ret_ty`). Guards
+        # the `A.Return` boxing branch (see its own comment) against
+        # `ret_ty == "any"` for reasons that have NOTHING to do with
+        # genuine heterogeneity -- confirmed via two separate, unrelated
+        # real cases: a self-recursive function (`fib(n)`: "any" purely
+        # because its own return type isn't resolved yet during sema's
+        # fixed-point pass) and a function with unannotated parameters
+        # and no call-site type signal (`add6(a, b, c, d, e, f): return a
+        # + b + ... + f`, from asmpython's own stack-args test: every
+        # param defaults to "any" with no annotation, so the whole sum
+        # stays "any" even though nothing about it is heterogeneous).
+        # Boxing either of those, with no corresponding unboxing at their
+        # callers (this codebase has no safe way to unbox on every read --
+        # see `_lower_expr`'s docstring for why that crashed), turned a
+        # previously-correct raw int into an unread boxed cell pointer
+        # printed as garbage. Restricting boxing to PROVABLE literal
+        # heterogeneity is deliberately conservative: it misses a real
+        # case too (portapy's `VirtualMachine.run`/`_run_frame`, whose
+        # returns are all opaque forwards with no literal type of their
+        # own to compare) -- but an under-approximation that leaves a
+        # target case unboxed is far safer than an over-approximation
+        # that silently corrupts otherwise-correct, currently-passing
+        # code across the test suite.
+        self.box_any_returns = False
 
     def tmp(self, ty: IRType) -> IRValue:
         self._tmp += 1
@@ -2426,6 +2480,25 @@ def _dict_value_repr_kind(e: A.Expr) -> int:
 
 
 def _lower_dict_key(ctx: _FuncCtx, e: A.Expr) -> IRValue:
+    """Lower a dict key expression to the STRING it's stored under.
+
+    asmpython's dict runtime is string-keyed (keys are strdup'd and hashed as
+    C strings -- see codegen.py's `_runtime_dict_set`). Every other key type is
+    encoded to a canonical string here so a value-equal key always maps to the
+    same slot:
+      * str / any  -> used directly (an "any" key is already a real pointer;
+                      the runtime hashes whatever string it points at).
+      * int        -> its decimal spelling (`_abi_int_to_base`).
+      * everything else (float / bool / tuple / a nested container / an
+        instance) -> its `repr()` string, via the same `_lower_expr_as_str`
+        machinery f-strings/`repr()` already use. repr_mode makes the encoding
+        UNAMBIGUOUS across kinds: a str key `"1"` reprs to `'1'` while an int
+        key `1` encodes to `1`, so they never collide; a tuple key
+        `(1, 2)` reprs to its canonical `(1, 2)`. This is exactly what a
+        by-value-hashable key (a tuple of scalars -- e.g. an lru_cache key
+        `(args, sorted_kwargs)`) needs: value-equal tuples produce identical
+        repr strings and therefore hit the same slot.
+    """
     key_ty = A.expr_type(e)
     if key_ty in ("str", "any"):
         return _lower_expr(ctx, e)
@@ -2439,7 +2512,10 @@ def _lower_dict_key(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         out = ctx.tmp(PTR)
         ctx.emit(IRInstr("call", out, ["_abi_int_to_base", key_v, base, empty_v]))
         return out
-    raise LowerError(f"unsupported dict key type {key_ty!r}")
+    # float / bool / tuple / list / dict / set / instance: encode by repr, a
+    # deterministic canonical string per value. repr_mode keeps str vs non-str
+    # keys distinguishable (a str key is quoted, an int/tuple key is not).
+    return _lower_expr_as_str(ctx, e, repr_mode=True)
 
 
 def _collect_declared_globals(stmts: list, out: set[str]) -> None:
@@ -3258,6 +3334,64 @@ def _lower_str_format(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
 
 def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr, repr_mode: bool = False) -> IRValue:
     ty = A.expr_type(e)
+    if isinstance(e, A.Name) and e.name in ctx.narrowed_types:
+        # `print(value)`/f-string/str()/repr() on a variable narrowed by an
+        # enclosing `if type(value) is T:`/`if isinstance(value, T):` (see
+        # `_narrowed_if_type`) -- format it as T, the concrete type the
+        # runtime check already proved, instead of falling through to the
+        # "any"-typed default further below (which silently assumes int,
+        # the same pre-existing, separately-scoped gap this whole feature
+        # was careful not to depend on being fixed -- narrowing sidesteps
+        # it here by supplying a real static type where one is actually
+        # known, rather than trying to fix the "any" fallback in general).
+        #
+        # Deliberately does NOT gate on `ty == "any"` first: sema stamps
+        # `inferred_type` per AST NODE, not per variable, so two different
+        # `A.Name("value")` occurrences for the same parameter can carry
+        # different static types depending on where they sit in the
+        # source (confirmed via a repro where this exact print()'s own
+        # `value` argument was independently typed "int", the unrelated
+        # unknown-sentinel default, even though the enclosing
+        # `isinstance(value, bool)` check right above it proved the
+        # runtime kind). Being in `ctx.narrowed_types` at all is the
+        # authoritative signal that this read is inside a branch that
+        # already proved the concrete kind, regardless of what this
+        # PARTICULAR node's own (possibly stale/unrelated) static type
+        # says.
+        ty = ctx.narrowed_types[e.name]
+    if ty == "bool":
+        # Mirrors the `A.is_bool_expr(e)` branch under `ty == "int"` below
+        # exactly, just reached directly: a narrowed name has no AST-level
+        # `is_bool` flag of its own to trigger that branch (it's a runtime
+        # fact proven by the enclosing type check, not a literal the
+        # parser tagged), so this is the same runtime true/false-string
+        # dispatch, inlined for the "bool" narrowed type specifically.
+        n_v = _lower_expr(ctx, e)
+        zero = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero, [0]))
+        is_zero = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.eq", is_zero, [n_v, zero]))
+        false_b = ctx.new_block("narrowboolstrfalse")
+        true_b = ctx.new_block("narrowboolstrtrue")
+        end_b = ctx.new_block("narrowboolstrend")
+        res_ptr = ctx.ensure_slot(f"__narrowbool_str_{id(e)}", PTR)
+        ctx.emit(IRInstr("br.t", None, [is_zero, false_b.label, true_b.label]))
+        ctx.switch_to(false_b)
+        false_name = ctx.mctx.intern_str("False")
+        false_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", false_v, [false_name]))
+        ctx.emit(IRInstr("store", None, [false_v, res_ptr]))
+        ctx.emit(IRInstr("br", None, [end_b.label]))
+        ctx.switch_to(true_b)
+        true_name = ctx.mctx.intern_str("True")
+        true_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", true_v, [true_name]))
+        ctx.emit(IRInstr("store", None, [true_v, res_ptr]))
+        ctx.emit(IRInstr("br", None, [end_b.label]))
+        ctx.switch_to(end_b)
+        out = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", out, [res_ptr]))
+        return out
     if ty == "str":
         s = _lower_expr(ctx, e)
         if not repr_mode:
@@ -3439,20 +3573,68 @@ def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr, repr_mode: bool = False) -> IRV
 def _lower_type_name_attr(ctx: _FuncCtx, e: A.Attr) -> IRValue:
     arg = e.obj.args[0]
     arg_t = A.expr_type(arg)
-    _lower_expr(ctx, arg)
-    if arg_t == "int" and A.is_bool_expr(arg):
-        name = "bool"
-    elif arg_t == "int" and A.is_none_expr(arg):
-        name = "NoneType"
-    elif arg_t in ("int", "float", "str", "list", "dict", "tuple", "set"):
-        name = arg_t
-    elif arg_t.startswith("instance:"):
-        name = arg_t.split(":", 1)[1]
-    else:
-        name = ""
-    sym = ctx.mctx.intern_str(name)
+    if arg_t != "any":
+        _lower_expr(ctx, arg)
+        if arg_t == "int" and A.is_bool_expr(arg):
+            name = "bool"
+        elif arg_t == "int" and A.is_none_expr(arg):
+            name = "NoneType"
+        elif arg_t in ("int", "float", "str", "list", "dict", "tuple", "set"):
+            name = arg_t
+        elif arg_t.startswith("instance:"):
+            name = arg_t.split(":", 1)[1]
+        else:
+            name = ""
+        sym = ctx.mctx.intern_str(name)
+        out = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", out, [sym]))
+        return out
+    # `type(x).__name__` where x's STATIC type is "any" -- same runtime
+    # tag dispatch as the `type()` call site itself (see its "any" branch
+    # for the full rationale), just without the "<class '...'>" wrapping.
+    obj_v = _lower_expr_inner(ctx, arg)
+    tag_v = _lower_read_any_tag(ctx, obj_v)
+    out_ptr = ctx.ensure_slot(f"__typename_out_{id(e)}", PTR)
+    empty_sym = ctx.mctx.intern_str("")
+    empty_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", empty_v, [empty_sym]))
+    ctx.emit(IRInstr("store", None, [empty_v, out_ptr]))
+    end_b = ctx.new_block("typenameend")
+    name_by_tag: list = [
+        ("bool", BUILTIN_TYPE_IDS["bool"]),
+        ("NoneType", NONE_TYPE_ID),
+        ("int", BUILTIN_TYPE_IDS["int"]),
+        ("float", BUILTIN_TYPE_IDS["float"]),
+        ("str", BUILTIN_TYPE_IDS["str"]),
+    ]
+    # A user-class instance carries a positive RTTI class id as its tag --
+    # dispatch each one to its own class NAME too (not just the builtin
+    # scalars above), so `type(instance).__name__` recovers "MyClass"
+    # instead of falling through to "". Required for the class-keyed-dict
+    # lowering (see sema's `_rewrite_class_keyed_dicts`), whose rewritten
+    # `D[type(x).__name__]` key must equal the string key "MyClass" the
+    # dict was rewritten to use.
+    for cname, cid in ctx.mctx.class_ids.items():
+        name_by_tag.append((cname, cid))
+    for kind, tag in name_by_tag:
+        match_b = ctx.new_block(f"typename_{kind}")
+        next_b = ctx.new_block(f"typenamenext_{kind}")
+        tag_const = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", tag_const, [tag]))
+        eq_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.eq", eq_v, [tag_v, tag_const]))
+        ctx.emit(IRInstr("br.t", None, [eq_v, match_b.label, next_b.label]))
+        ctx.switch_to(match_b)
+        text_sym = ctx.mctx.intern_str(kind)
+        text_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", text_v, [text_sym]))
+        ctx.emit(IRInstr("store", None, [text_v, out_ptr]))
+        ctx.emit(IRInstr("br", None, [end_b.label]))
+        ctx.switch_to(next_b)
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+    ctx.switch_to(end_b)
     out = ctx.tmp(PTR)
-    ctx.emit(IRInstr("global_addr", out, [sym]))
+    ctx.emit(IRInstr("load", out, [out_ptr]))
     return out
 
 
@@ -3923,6 +4105,204 @@ def _lower_set_subset(ctx: _FuncCtx, sub_e: A.Expr, sup_e: A.Expr, tag: int) -> 
     return out
 
 
+_NARROW_PRIM_NAMES = ("bool", "int", "float", "str", "list", "dict", "tuple", "set")
+
+
+def _narrowed_if_type(ctx: _FuncCtx, test: A.Expr) -> tuple[str, str] | None:
+    """Recognize `if type(x) is T:` / `if isinstance(x, T):` (plain bare
+    name `x`, single concrete target `T`) and return `(x, T)` so `A.If`'s
+    lowering can narrow `x` to concrete type `T` for the "then" body only.
+
+    Only fires when `x`'s STATIC type is genuinely "any" -- narrowing a
+    variable that's already concretely typed has nothing to do (its reads
+    already return the right thing), and narrowing would be actively wrong
+    for a variable sema already knows isn't "any" (its slot never holds
+    one of `_lower_box_any`'s tagged cells to unbox in the first place).
+    Returns None for every other shape (chained comparisons, `isinstance`
+    with a tuple of targets, a non-bare-name receiver, an already-concrete
+    receiver, ...) -- the caller's narrowing is simply skipped, which is
+    always safe (merely means the checked-any payload stays boxed/
+    unreadable inside that branch, the pre-existing state of the world
+    before this function existed).
+    """
+    if (
+        isinstance(test, A.Compare)
+        and len(test.ops) == 1
+        and test.ops[0] == "is"
+        and isinstance(test.operands[0], A.Call)
+        and test.operands[0].func == "type"
+        and len(test.operands[0].args) == 1
+        and isinstance(test.operands[0].args[0], A.Name)
+        and isinstance(test.operands[1], A.Name)
+    ):
+        name_node = test.operands[0].args[0]
+        target = test.operands[1]
+        if A.expr_type(name_node) != "any":
+            return None
+        if target.name in ctx.mctx.class_ids:
+            return name_node.name, f"instance:{target.name}"
+        if target.name in _NARROW_PRIM_NAMES:
+            return name_node.name, target.name
+        return None
+    if (
+        isinstance(test, A.Call)
+        and test.func == "isinstance"
+        and len(test.args) == 2
+        and isinstance(test.args[0], A.Name)
+    ):
+        name_node = test.args[0]
+        if A.expr_type(name_node) != "any":
+            return None
+        target = test.args[1]
+        if isinstance(target, A.Name):
+            if target.name in ctx.mctx.class_ids:
+                return name_node.name, f"instance:{target.name}"
+            if target.name in _NARROW_PRIM_NAMES:
+                return name_node.name, target.name
+        return None
+    return None
+
+
+def _lower_narrowed_name_read(ctx: _FuncCtx, name: str) -> IRValue:
+    """Read a variable currently narrowed to a concrete type (see
+    `_narrowed_if_type`/`A.If`'s lowering), unboxing its (possibly still
+    boxed -- see `_lower_box_any`) value exactly once per branch and
+    caching the result so every subsequent read in the same branch reuses
+    it instead of unboxing again (unsafe -- see `_lower_expr`'s
+    docstring)."""
+    cached = ctx.narrowed_cache.get(name)
+    if cached is not None:
+        return cached
+    ty = ctx.slot_ty.get(name, ctx.mctx.global_types.get(name, PTR))
+    ptr = _name_value_ptr(ctx, name, ty)
+    raw = ctx.tmp(ty)
+    ctx.emit(IRInstr("load", raw, [ptr]))
+    unboxed = _lower_unbox_any(ctx, raw)
+    if ctx.narrowed_types.get(name) == "float":
+        # `_lower_unbox_any` always returns a PTR-typed IRValue (it has no
+        # way to know from the boxed cell alone whether the caller wants
+        # the raw bit pattern reinterpreted as a pointer or a float) --
+        # its bits ARE the right float bit pattern (boxed by
+        # `_lower_box_any` via `bitcast_f2i`), just carrying the wrong IR
+        # type tag, which would put it in a general-purpose register
+        # instead of an XMM one downstream. Round-trip through a fresh
+        # stack slot to reinterpret (not convert) the bits as F64 --
+        # relabeling the SAME SSA value in place (mirrors the sext-relabel
+        # pattern used elsewhere in this file for an identical "right
+        # bits, wrong declared IRType" situation) made the register
+        # allocator crash (`RegLoc has no attribute 'offset'`) once the
+        # value was cached and reused across statements; a real
+        # store/load pair is the safe way to reinterpret bits across a
+        # register-class boundary that survives caching. An actual
+        # `bitcast_i2f` would be WRONG here -- it numerically converts the
+        # pointer's bit pattern into a numerically-equal double instead of
+        # reinterpreting the same bits.
+        reinterp_ptr = ctx.ensure_slot(f"__anyunbox_f64_{name}", F64)
+        int_view_ptr = IRValue(reinterp_ptr.name, PTR)
+        ctx.emit(IRInstr("store", None, [unboxed, int_view_ptr]))
+        fv = ctx.tmp(F64)
+        ctx.emit(IRInstr("load", fv, [reinterp_ptr]))
+        unboxed = fv
+    ctx.narrowed_cache[name] = unboxed
+    return unboxed
+
+
+def _lower_type_is_compare(ctx: _FuncCtx, type_call: A.Call, target: A.Expr) -> IRValue | None:
+    """`type(x) is T` / `type(x) is not T` -- idiomatic Python's usual
+    spelling of a concrete-type check (portapy's own `_full_box`, the
+    motivating real-world case for this whole feature, is written this
+    way throughout, not with `isinstance`).
+
+    This is NOT the same AST shape `isinstance()` gets: `type(x) is T` is
+    a plain `A.Compare`, and without this special case it falls through to
+    the generic chained-comparison path far below, which lowers `type(x)`
+    (now correctly, via the runtime tag dispatch added elsewhere in this
+    file) and `T` (a bare class/builtin-type name, which loads its
+    RTTI/BUILTIN_TYPE_IDS id -- an int) SEPARATELY and then compares a
+    STRING POINTER against a small int, which is never true. Confirmed via
+    a repro: `type(value) is int` inside a function always took the "not
+    int" branch even for a genuine int argument.
+
+    Only the two operand shapes `type(x) is <bare name>` / `<bare name> is
+    type(x)` are recognized (`target` must resolve to a real class or
+    BUILTIN_TYPE_IDS name) -- anything else (e.g. `type(x) is type(y)`)
+    returns None so the caller falls through to the ordinary identity-
+    compare path, unchanged from today's (already broken, out of scope)
+    behavior for that shape.
+    """
+    if not (isinstance(target, A.Name) and (target.name in BUILTIN_TYPE_IDS or target.name in ctx.mctx.class_ids)):
+        return None
+    arg = type_call.args[0]
+    arg_t = A.expr_type(arg)
+    if target.name in ctx.mctx.class_ids:
+        # `type(x) is SomeClass` -- exact match only (unlike isinstance,
+        # `type()` never matches a subclass), so compare against exactly
+        # this one class id, not the whole _subclass_ids accept-list.
+        if arg_t.startswith("instance:") or arg_t == "any":
+            obj_v = _lower_expr_inner(ctx, arg)
+            zero = ctx.tmp(PTR)
+            ctx.emit(IRInstr("const", zero, [0]))
+            out_ptr = ctx.ensure_slot(f"__typeis_out_{id(type_call)}", I64)
+            none_b = ctx.new_block("typeisnone")
+            live_b = ctx.new_block("typeislive")
+            end_b = ctx.new_block("typeisend")
+            is_none = ctx.tmp(I64)
+            ctx.emit(IRInstr("icmp.eq", is_none, [obj_v, zero]))
+            ctx.emit(IRInstr("br.t", None, [is_none, none_b.label, live_b.label]))
+            ctx.switch_to(none_b)
+            false_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", false_v, [0]))
+            ctx.emit(IRInstr("store", None, [false_v, out_ptr]))
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+            ctx.switch_to(live_b)
+            tag_v = _lower_read_any_tag(ctx, obj_v)
+            cid_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", cid_v, [ctx.mctx.class_ids[target.name]]))
+            match_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("icmp.eq", match_v, [tag_v, cid_v]))
+            ctx.emit(IRInstr("store", None, [match_v, out_ptr]))
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+            ctx.switch_to(end_b)
+            out = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", out, [out_ptr]))
+            return out
+        out = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", out, [1 if arg_t == f"instance:{target.name}" else 0]))
+        return out
+    prim_tags = {
+        "bool": BUILTIN_TYPE_IDS["bool"],
+        "int": BUILTIN_TYPE_IDS["int"],
+        "float": BUILTIN_TYPE_IDS["float"],
+        "str": BUILTIN_TYPE_IDS["str"],
+        "list": BUILTIN_TYPE_IDS["list"],
+        "dict": BUILTIN_TYPE_IDS["dict"],
+        "tuple": BUILTIN_TYPE_IDS["tuple"],
+        "set": BUILTIN_TYPE_IDS["set"],
+    }
+    if arg_t != "any":
+        _lower_expr(ctx, arg)
+        if target.name == "bool":
+            match = arg_t == "int" and A.is_bool_expr(arg)
+        elif target.name == "int":
+            match = arg_t == "int" and not A.is_bool_expr(arg) and not A.is_none_expr(arg)
+        else:
+            match = arg_t == target.name
+        out = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", out, [1 if match else 0]))
+        return out
+    # `type(x) is <primitive>` where x's STATIC type is "any": read the
+    # runtime tag (see `_lower_read_any_tag`) and compare against exactly
+    # this one BUILTIN_TYPE_IDS entry (`type()` is always an exact match,
+    # never a subclass match).
+    obj_v = _lower_expr_inner(ctx, arg)
+    tag_v = _lower_read_any_tag(ctx, obj_v)
+    want_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", want_v, [prim_tags[target.name]]))
+    out = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", out, [tag_v, want_v]))
+    return out
+
+
 def _lower_isinstance(ctx: _FuncCtx, e: A.Call) -> IRValue:
     targets: list[str] = []
     cls_arg = e.args[1]
@@ -3960,11 +4340,45 @@ def _lower_isinstance(ctx: _FuncCtx, e: A.Call) -> IRValue:
                 prim_match = True
             if t == "bool" and A.is_bool_expr(arg0):
                 prim_match = True
-    if has_prim_target:
+    if has_prim_target and arg0_t != "any":
         _lower_expr(ctx, arg0)
         out = ctx.tmp(I64)
         ctx.emit(IRInstr("const", out, [1 if prim_match else 0]))
         return out
+
+    if has_prim_target:
+        # `isinstance(x, int)` (etc.) where x's STATIC type is "any" --
+        # unlike the branch above, the answer genuinely isn't known at
+        # compile time (x could be any boxed scalar kind at runtime). Read
+        # the runtime tag `_lower_box_any` stamped on it (see that
+        # function's docstring) and compare against the SAME primitive
+        # targets' BUILTIN_TYPE_IDS ids, the scalar-kind mirror of the
+        # class-target branch below (which already does this for
+        # instances via `_subclass_ids`/class_ids). Uses
+        # `_lower_expr_inner`, not `_lower_expr`, so it sees the raw
+        # (possibly still-boxed) cell instead of the wrapper's
+        # auto-unboxed value.
+        accept_tags: list[int] = []
+        for t in targets:
+            if t == "bool":
+                accept_tags.append(BUILTIN_TYPE_IDS["bool"])
+            elif t == "int":
+                accept_tags.append(BUILTIN_TYPE_IDS["int"])
+            elif t in BUILTIN_TYPE_IDS:
+                accept_tags.append(BUILTIN_TYPE_IDS[t])
+        obj_v = _lower_expr_inner(ctx, arg0)
+        tag_v = _lower_read_any_tag(ctx, obj_v)
+        match_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", match_v, [0]))
+        for tag in accept_tags:
+            tag_const = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", tag_const, [tag]))
+            eq_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("icmp.eq", eq_v, [tag_v, tag_const]))
+            next_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("ior", next_v, [match_v, eq_v]))
+            match_v = next_v
+        return match_v
 
     accept: list[int] = []
     for t in targets:
@@ -3972,7 +4386,7 @@ def _lower_isinstance(ctx: _FuncCtx, e: A.Call) -> IRValue:
             if cid not in accept:
                 accept.append(cid)
 
-    obj_v = _lower_expr(ctx, arg0)
+    obj_v = _lower_expr_inner(ctx, arg0)
     zero = ctx.tmp(PTR if obj_v.type == PTR else I64)
     ctx.emit(IRInstr("const", zero, [0]))
     out_ptr = ctx.ensure_slot(f"__isinst_out_{id(e)}", I64)
@@ -4693,7 +5107,7 @@ def _lower_thread_ctor(ctx: _FuncCtx, e: A.Call) -> IRValue:
     return obj_v
 
 
-def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
+def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     if isinstance(e, A.IntLit):
         v = ctx.tmp(I64)
         ctx.emit(IRInstr("const", v, [int(e.value)]))
@@ -4705,6 +5119,8 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         return v
 
     if isinstance(e, A.Name):
+        if e.name in ctx.narrowed_types:
+            return _lower_narrowed_name_read(ctx, e.name)
         if e.name in ctx.mctx.func_names and e.name not in ctx.slot_ty:
             v = ctx.tmp(PTR)
             ctx.emit(IRInstr("global_addr", v, [e.name]))
@@ -5095,6 +5511,22 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         return v
 
     if isinstance(e, A.Compare):
+        if len(e.ops) == 1 and e.ops[0] in ("is", "is not"):
+            type_call, type_target = None, None
+            if isinstance(e.operands[0], A.Call) and e.operands[0].func == "type" and len(e.operands[0].args) == 1:
+                type_call, type_target = e.operands[0], e.operands[1]
+            elif isinstance(e.operands[1], A.Call) and e.operands[1].func == "type" and len(e.operands[1].args) == 1:
+                type_call, type_target = e.operands[1], e.operands[0]
+            if type_call is not None:
+                result = _lower_type_is_compare(ctx, type_call, type_target)
+                if result is not None:
+                    if e.ops[0] == "is not":
+                        zero = ctx.tmp(I64)
+                        ctx.emit(IRInstr("const", zero, [0]))
+                        inv = ctx.tmp(I64)
+                        ctx.emit(IRInstr("icmp.eq", inv, [result, zero]))
+                        return inv
+                    return result
         if len(e.ops) == 1 and e.ops[0] in ("in", "not in"):
             contains_owner = getattr(e, "dunder_contains_owner", None)
             if contains_owner is not None:
@@ -8000,20 +8432,65 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         if e.func == "type" and len(e.args) == 1:
             arg = e.args[0]
             arg_t = A.expr_type(arg)
-            _lower_expr(ctx, arg)
-            if arg_t == "int" and A.is_bool_expr(arg):
-                text = "<class 'bool'>"
-            elif arg_t == "int" and A.is_none_expr(arg):
-                text = "<class 'NoneType'>"
-            elif arg_t in ("int", "float", "str", "list", "dict", "tuple", "set"):
-                text = f"<class '{arg_t}'>"
-            elif arg_t.startswith("instance:"):
-                text = f"<class '__main__.{arg_t.split(':', 1)[1]}'>"
-            else:
-                text = ""
-            sym = ctx.mctx.intern_str(text)
+            if arg_t != "any":
+                _lower_expr(ctx, arg)
+                if arg_t == "int" and A.is_bool_expr(arg):
+                    text = "<class 'bool'>"
+                elif arg_t == "int" and A.is_none_expr(arg):
+                    text = "<class 'NoneType'>"
+                elif arg_t in ("int", "float", "str", "list", "dict", "tuple", "set"):
+                    text = f"<class '{arg_t}'>"
+                elif arg_t.startswith("instance:"):
+                    text = f"<class '__main__.{arg_t.split(':', 1)[1]}'>"
+                else:
+                    text = ""
+                sym = ctx.mctx.intern_str(text)
+                out = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", out, [sym]))
+                return out
+            # `type(x)` where x's STATIC type is "any": the answer isn't
+            # known at compile time. Read the runtime tag `_lower_box_any`
+            # stamped on x (mirroring `isinstance`'s "any" branch just
+            # above) and pick the matching pre-interned class-name string
+            # at runtime. Falls back to "" (this call site's own
+            # pre-existing unknown-type behavior) for a tag this dispatch
+            # doesn't recognize -- an ordinary never-boxed container/
+            # instance whose tag isn't one of the scalar BUILTIN_TYPE_IDS
+            # entries below. Uses `_lower_expr_inner`, not `_lower_expr`,
+            # so it sees the raw (possibly still-boxed) cell.
+            obj_v = _lower_expr_inner(ctx, arg)
+            tag_v = _lower_read_any_tag(ctx, obj_v)
+            out_ptr = ctx.ensure_slot(f"__typeof_out_{id(e)}", PTR)
+            empty_sym = ctx.mctx.intern_str("")
+            empty_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("global_addr", empty_v, [empty_sym]))
+            ctx.emit(IRInstr("store", None, [empty_v, out_ptr]))
+            end_b = ctx.new_block("typeofend")
+            for kind, tag in (
+                ("bool", BUILTIN_TYPE_IDS["bool"]),
+                ("NoneType", NONE_TYPE_ID),
+                ("int", BUILTIN_TYPE_IDS["int"]),
+                ("float", BUILTIN_TYPE_IDS["float"]),
+                ("str", BUILTIN_TYPE_IDS["str"]),
+            ):
+                match_b = ctx.new_block(f"typeof_{kind}")
+                next_b = ctx.new_block(f"typeofnext_{kind}")
+                tag_const = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", tag_const, [tag]))
+                eq_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.eq", eq_v, [tag_v, tag_const]))
+                ctx.emit(IRInstr("br.t", None, [eq_v, match_b.label, next_b.label]))
+                ctx.switch_to(match_b)
+                text_sym = ctx.mctx.intern_str(f"<class '{kind}'>")
+                text_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", text_v, [text_sym]))
+                ctx.emit(IRInstr("store", None, [text_v, out_ptr]))
+                ctx.emit(IRInstr("br", None, [end_b.label]))
+                ctx.switch_to(next_b)
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+            ctx.switch_to(end_b)
             out = ctx.tmp(PTR)
-            ctx.emit(IRInstr("global_addr", out, [sym]))
+            ctx.emit(IRInstr("load", out, [out_ptr]))
             return out
         if e.func == "chr" and len(e.args) == 1:
             n_v = _lower_expr(ctx, e.args[0])
@@ -8333,6 +8810,16 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 )
             captured_args.append(captured)
         args = captured_args + [_lower_expr(ctx, a) for a in e.args]
+        if getattr(e, "dstar_dynamic", False) and e.dstar is not None:
+            # `target(**kwargs)` against an opaque callable value: sema left
+            # the runtime dict in `e.dstar` (never expanded it against a
+            # non-existent static param list). Pass it as the call's trailing
+            # argument -- the exact ABI slot a `**kwargs`-declared callee
+            # receives its packed dict in (see sema's `_bind_args`, which
+            # appends the DictLit last for a known `**kwargs` function). The
+            # callee is responsible for accepting a `**kwargs` parameter.
+            dstar_dict = _lower_expr(ctx, e.dstar)
+            args = args + [dstar_dict]
         v = ctx.tmp(ir_type_for(A.expr_type(e)))
         # A call through a plain variable (not a real function/class name)
         # -- e.g. `double = lambda x: x*2; double(21)`, or a lambda/func
@@ -8367,6 +8854,230 @@ def _lower_expr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         return v
 
     raise LowerError(f"unsupported expr {type(e).__name__}")
+
+
+_BOXABLE_STATIC_TYPES = ("int", "float", "bool", "str")
+
+
+def _none_const(ctx: "_FuncCtx") -> IRValue:
+    v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("const", v, [0]))
+    return v
+
+
+def _class_tag_key(ctx: "_FuncCtx") -> IRValue:
+    sym = ctx.mctx.intern_str("__class__")
+    key_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", key_v, [sym]))
+    return key_v
+
+
+def _boxed_value_key(ctx: "_FuncCtx") -> IRValue:
+    sym = ctx.mctx.intern_str("__value__")
+    key_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", key_v, [sym]))
+    return key_v
+
+
+def _lower_box_any(ctx: "_FuncCtx", value_v: IRValue, static_ty: str, e: A.Expr | None) -> IRValue:
+    """Wrap a concrete scalar value in a tagged cell so its runtime kind
+    survives crossing into a genuinely unknown ("any") static type.
+
+    Reuses the exact mechanism a user-class instance already uses to carry
+    its own runtime type (an `_abi_new_instance`-allocated dict-shaped cell
+    with a reserved "__class__" key -- see the class-construction lowering
+    a few hundred lines above this function). A boxed scalar is the same
+    shape, with "__class__" holding the value's BUILTIN_TYPE_IDS tag instead
+    of a user class id, and a second reserved key "__value__" holding the
+    payload (the scalar's raw bits for int/bool, the bitcast pattern for
+    float, or the original string pointer for str -- containers/instances
+    are NOT boxed here, see the module-level docstring note above
+    _lower_expr for why).
+
+    `is_bool_expr`/`is_none_expr` distinguish `bool`/`None` from a plain
+    `int` the same way every other type()/isinstance() call site in this
+    file already does (there is no separate AST/static type for them --
+    both are spelled "int"). `e` may be None when the caller has no AST
+    node to consult (already knows the concrete kind some other way); pass
+    the real expression whenever one exists so bool/None are tagged
+    correctly.
+    """
+    if static_ty == "int" and e is not None and A.is_none_expr(e):
+        # None is already a universal, unambiguous 0 pointer everywhere in
+        # the program -- boxing it would make every existing `is None` /
+        # null check need to know about boxing too. Leave it as plain 0;
+        # the runtime tag reader treats an all-zero pointer as NoneType
+        # directly, without needing a cell at all.
+        return _none_const(ctx)
+    if static_ty == "int" and e is not None and A.is_bool_expr(e):
+        tag = BUILTIN_TYPE_IDS["bool"]
+        payload = value_v
+    elif static_ty == "int":
+        tag = BUILTIN_TYPE_IDS["int"]
+        payload = value_v
+    elif static_ty == "float":
+        tag = BUILTIN_TYPE_IDS["float"]
+        payload = ctx.tmp(I64)
+        ctx.emit(IRInstr("bitcast_f2i", payload, [value_v]))
+    elif static_ty == "str":
+        tag = BUILTIN_TYPE_IDS["str"]
+        payload = value_v
+    else:
+        # Not one of the boxable scalar kinds (container/instance/etc.) --
+        # already carries enough runtime shape of its own; pass through.
+        return value_v
+    cell = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", cell, ["_abi_new_instance"]))
+    tag_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", tag_v, [tag]))
+    ctx.emit(IRInstr("call", None, ["_abi_dict_set", cell, _class_tag_key(ctx), tag_v]))
+    ctx.emit(IRInstr("call", None, ["_abi_dict_set", cell, _boxed_value_key(ctx), payload]))
+    return cell
+
+
+def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
+    """Runtime kind tag (I64) of a possibly-boxed opaque value.
+
+    Returns: `NONE_TYPE_ID` for a null pointer, the value's `BUILTIN_TYPE_IDS`
+    entry for a boxed scalar cell (see `_lower_box_any`), a real (>= 0) user
+    class id for a tagged instance (the pre-existing mechanism), or
+    `UNTAGGED_ID` for anything else (an ordinary, never-boxed container --
+    ordinary because boxing is only applied to scalars, see `_lower_box_any`).
+    """
+    zero = ctx.tmp(PTR)
+    ctx.emit(IRInstr("const", zero, [0]))
+    none_b = ctx.new_block("anytagnone")
+    live_b = ctx.new_block("anytaglive")
+    end_b = ctx.new_block("anytagend")
+    out_ptr = ctx.ensure_slot(f"__anytag_out_{none_b.label}", I64)
+    is_none = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_none, [obj_v, zero]))
+    ctx.emit(IRInstr("br.t", None, [is_none, none_b.label, live_b.label]))
+
+    ctx.switch_to(none_b)
+    none_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", none_v, [NONE_TYPE_ID]))
+    ctx.emit(IRInstr("store", None, [none_v, out_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(live_b)
+    miss_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", miss_v, [UNTAGGED_ID]))
+    tag_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", tag_v, ["_abi_dict_get_default", obj_v, _class_tag_key(ctx), miss_v]))
+    ctx.emit(IRInstr("store", None, [tag_v, out_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(end_b)
+    out = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", out, [out_ptr]))
+    return out
+
+
+def _lower_unbox_any(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
+    """Inverse of `_lower_box_any`: given a possibly-boxed opaque `PTR`,
+    return the underlying value transparently.
+
+    A cell tagged with a scalar BUILTIN_TYPE_IDS id unwraps to its raw
+    payload (bitcast back to float for a float tag). Anything else --
+    null, a real instance, an ordinary never-boxed container, or a value
+    this function has already unboxed once -- passes through unchanged, so
+    calling this on a value that was never boxed is always a safe no-op.
+    """
+    tag_v = _lower_read_any_tag(ctx, obj_v)
+    boxed_b = ctx.new_block("anyunboxboxed")
+    float_b = ctx.new_block("anyunboxfloat")
+    payload_b = ctx.new_block("anyunboxpayload")
+    end_b = ctx.new_block("anyunboxend")
+    out_ptr = ctx.ensure_slot(f"__anyunbox_out_{boxed_b.label}", PTR)
+    ctx.emit(IRInstr("store", None, [obj_v, out_ptr]))
+
+    float_tag = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", float_tag, [BUILTIN_TYPE_IDS["float"]]))
+    is_float = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_float, [tag_v, float_tag]))
+    is_scalar = ctx.tmp(I64)
+    # Every BUILTIN_TYPE_IDS scalar tag this function boxes is >= "bool"'s
+    # id (-4) and <= "int"'s id (-1); "list"/"dict"/"tuple"/"set" (-5..-8)
+    # are never boxed (see _lower_box_any) so are deliberately excluded --
+    # only compare within the boxed subrange, not the whole table.
+    lo_bound = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", lo_bound, [BUILTIN_TYPE_IDS["bool"]]))
+    hi_bound = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", hi_bound, [BUILTIN_TYPE_IDS["int"]]))
+    ge_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.ge", ge_v, [tag_v, lo_bound]))
+    le_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.le", le_v, [tag_v, hi_bound]))
+    ctx.emit(IRInstr("iand", is_scalar, [ge_v, le_v]))
+
+    ctx.emit(IRInstr("br.t", None, [is_scalar, boxed_b.label, end_b.label]))
+
+    ctx.switch_to(boxed_b)
+    ctx.emit(IRInstr("br.t", None, [is_float, float_b.label, payload_b.label]))
+
+    ctx.switch_to(payload_b)
+    miss_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", miss_v, [0]))
+    raw_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", raw_v, ["_abi_dict_get_default", obj_v, _boxed_value_key(ctx), miss_v]))
+    ctx.emit(IRInstr("store", None, [raw_v, out_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(float_b)
+    fmiss_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", fmiss_v, [0]))
+    fraw_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", fraw_v, ["_abi_dict_get_default", obj_v, _boxed_value_key(ctx), fmiss_v]))
+    ctx.emit(IRInstr("store", None, [fraw_v, out_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(end_b)
+    out = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", out, [out_ptr]))
+    return out
+
+
+def _lower_expr(ctx: "_FuncCtx", e: A.Expr) -> IRValue:
+    """Thin wrapper around `_lower_expr_inner`.
+
+    Deliberately does NOT auto-unbox "any"-typed values. A boxed cell (see
+    `_lower_box_any`) is produced only at an `A.Return` whose function's
+    type is "any", and it is designed to stay boxed indefinitely -- sitting
+    in a variable, a field, a container, passed around -- exactly like a
+    real Python object would, until something needs its concrete runtime
+    kind (`type()`/`isinstance()`, which call `_lower_expr_inner` directly
+    to see the still-boxed cell -- see `_lower_isinstance`, the `type()`
+    case, and `_lower_type_name_attr`) or is inside an `if type(x) is T:`/
+    `if isinstance(x, T):`-narrowed branch (`_lower_narrowed_name_read`,
+    which unboxes explicitly, exactly once, and caches the result -- see
+    its own docstring).
+
+    A revision that auto-unboxed here (mirroring how every other type is
+    handled) crashed: after the first read unboxes a boxed cell into its
+    raw payload (e.g. the literal int `5`), every SUBSEQUENT read of the
+    same "any"-typed variable is still statically typed "any" (sema never
+    learns it's now a plain int), so it tried to unbox AGAIN -- calling
+    `_abi_dict_get_default` on the raw int `5` reinterpreted as a dict
+    pointer and dereferencing address `0x5` (confirmed via a segfaulting
+    repro: `x = maybe(1); y = x`, the second read of `x`). A later
+    attempt made storage sites (`A.Assign` etc.) bypass this wrapper so
+    they'd never unbox on the way in, keeping every read-out idempotent
+    -- but that also crashed elsewhere (not fully root-caused before time
+    ran out), so it was reverted too.
+
+    The known, accepted cost of staying this conservative: an "any"-typed
+    value's concrete payload is unreachable to a caller that never
+    narrows it with `type()`/`isinstance()` first (e.g. `functools.
+    reduce()`'s return, read by a caller that just prints it -- confirmed
+    still wrong: `153_functools_module.py`, pre-existing, not something
+    this feature broke or fixes). Fixing that safely needs either
+    per-storage-site box/unbox bookkeeping done correctly (the attempt
+    above), or call-site analysis to box only when a real `type()`/
+    `isinstance()` consumer exists -- both out of scope for this pass;
+    flagged clearly as the next step, not solved here.
+    """
+    return _lower_expr_inner(ctx, e)
 
 
 def _for_zip_spec(s: A.For):
@@ -9028,6 +9739,31 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
                 fv = ctx.tmp(F64)
                 ctx.emit(IRInstr("sitofp", fv, [ret_val]))
                 ret_val = fv
+            # A function whose unified return type is genuinely unknown
+            # ("any" -- e.g. one branch returns an int, another a str)
+            # returning a concretely-typed expression from THIS branch:
+            # box it so the caller (who only knows the function returns
+            # "any") can still recover its real runtime kind via
+            # type()/isinstance(). Mirrors the sitofp promotion just above
+            # -- both reconcile a per-branch concrete type with the
+            # function's own unified return type at the return site, the
+            # one place that unification is already known. `_lower_expr`
+            # already unboxed `s.value` if IT was "any"-typed, so this only
+            # fires for a genuinely concrete-this-branch value.
+            #
+            # Guarded by `ctx.box_any_returns` (see `_FuncCtx.__init__`'s
+            # docstring for that field, and `_has_genuinely_heterogeneous_
+            # returns` for how it's computed) -- deliberately conservative,
+            # see that field's docstring for the concrete cases it exists
+            # to protect (a self-recursive function, and a function whose
+            # unannotated parameters default to "any" with no real
+            # heterogeneity involved).
+            elif (
+                ctx.ret_ty == "any"
+                and ctx.box_any_returns
+                and A.expr_type(s.value) in _BOXABLE_STATIC_TYPES
+            ):
+                ret_val = _lower_box_any(ctx, ret_val, A.expr_type(s.value), s.value)
         # Restore any enclosing try-block exception handlers before returning,
         # innermost first.  Without this the stale handler pointer left in
         # _runtime_handler_top makes a later `raise` longjmp into a dead frame.
@@ -9064,9 +9800,27 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         merge_b = ctx.new_block("endif")
         ctx.emit(IRInstr("br.t", None, [cond, then_b.label, else_b.label]))
 
+        narrowed = _narrowed_if_type(ctx, s.test)
+
         ctx.switch_to(then_b)
+        if narrowed is not None:
+            name, ty = narrowed
+            outer_ty = ctx.narrowed_types.get(name)
+            outer_cache = ctx.narrowed_cache.get(name)
+            ctx.narrowed_types[name] = ty
+            ctx.narrowed_cache.pop(name, None)
         for st in s.then:
             _lower_stmt(ctx, st)
+        if narrowed is not None:
+            name = narrowed[0]
+            if outer_ty is None:
+                ctx.narrowed_types.pop(name, None)
+            else:
+                ctx.narrowed_types[name] = outer_ty
+            if outer_cache is None:
+                ctx.narrowed_cache.pop(name, None)
+            else:
+                ctx.narrowed_cache[name] = outer_cache
         ctx.emit(IRInstr("br", None, [merge_b.label]))
 
         ctx.switch_to(else_b)
@@ -9865,6 +10619,41 @@ def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
     ctx.switch_to(end_b)
 
 
+def _collect_return_values(stmts: list, out: list) -> None:
+    """Recursively gather every `A.Return`'s value expression reachable
+    from `stmts`, at any control-flow nesting depth. Self-contained (not
+    shared with sema.py's own `_collect_returns`, a different module) --
+    only needs enough coverage to find every return in a function body,
+    which the same statement-container attribute set every other
+    recursive-statement-walker in this file already uses (`then`/`orelse`/
+    `body`/`handler`/`else_body`/`finally_body` + `A.Try.extra_handlers`)
+    provides."""
+    for s in stmts:
+        if isinstance(s, A.Return):
+            if s.value is not None:
+                out.append(s.value)
+            continue
+        for name in ("then", "orelse", "body", "handler", "else_body", "finally_body"):
+            nested = getattr(s, name, None)
+            if isinstance(nested, list):
+                _collect_return_values(nested, out)
+        if isinstance(s, A.Try):
+            for _types, _binding, body in s.extra_handlers:
+                _collect_return_values(body, out)
+
+
+def _has_genuinely_heterogeneous_returns(body: list) -> bool:
+    """True if this function's own `return` statements provably disagree
+    on concrete type -- i.e. at least two distinct, non-"any" static types
+    appear among them. See `_FuncCtx.box_any_returns`'s docstring for why
+    this conservative guard exists."""
+    values: list = []
+    _collect_return_values(body, values)
+    concrete_types = {A.expr_type(v) for v in values}
+    concrete_types.discard("any")
+    return len(concrete_types) >= 2
+
+
 def lower_func(
     f: A.FuncDef,
     mctx: _ModuleCtx,
@@ -9906,6 +10695,8 @@ def lower_func(
     ctx.nonlocal_names = declared_nonlocals
     if isinstance(f.ret_type, tuple) and f.ret_type:
         ctx.ret_ty = f.ret_type[0]
+    if ctx.ret_ty == "any":
+        ctx.box_any_returns = _has_genuinely_heterogeneous_returns(f.body)
     entry = ctx.new_block("entry")
     ctx.switch_to(entry)
     ctx.shared_zero = ctx.tmp(I64)

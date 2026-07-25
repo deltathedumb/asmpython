@@ -1327,11 +1327,25 @@ class Parser:
             if self._check("OP", "**"):
                 self._eat()
                 kwarg = self._expect("NAME").value
+                # `**kw: T` annotates each VALUE as type T (the dict is
+                # always `dict[str, T]`). Carry that value kind into the
+                # dict's value type so `kw["x"]` reads recover it. With no
+                # annotation -- or an explicit `object`/opaque one -- the
+                # values are genuinely heterogeneous, so the value type is
+                # "any" (NOT the int unknown-sentinel, which would format a
+                # string/float value's pointer as an integer -- the concrete
+                # bug this fixes). Previously the annotation was parsed and
+                # thrown away and the value type hardcoded to None (== int),
+                # silently miscompiling every `**kwargs` value read of a
+                # non-int value.
+                value_kind = "any"
                 if self._check("OP", ":"):
                     self._eat()
-                    self._parse_type_annotation()  # value-type annotation; dict[str, T] either way
+                    inner = self._parse_type_annotation()  # dict[str, T] value type
+                    if inner and inner[0] not in (None, "object", "any"):
+                        value_kind = inner[0]
                 params.append(kwarg)
-                param_types.append(("dict", None))
+                param_types.append(("dict", value_kind))
                 defaults.append(None)
                 continue
             if self._check("OP", "/"):

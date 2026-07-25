@@ -60,6 +60,22 @@ def _scan_body(
                 for _keyword, argument in expression.kwargs:
                     if isinstance(argument, A.Name) and argument.name in class_names:
                         classes.add(argument.name)
+            elif isinstance(expression, A.Name):
+                # A bare function reference used as a first-class VALUE
+                # (passed as a callback argument, assigned to a variable,
+                # stored in a list/dict, returned, ...) rather than called
+                # by name -- e.g. `apply(f, 3, 4)`, `handlers = [on_ok,
+                # on_err]`. `expression.func in function_names` above only
+                # catches the "called by its own name" case; a function
+                # only ever reached this way still gets compiled (real
+                # code calls it indirectly through the parameter/variable
+                # it was passed into), so treating it as dead and
+                # replacing its body with `return 0` (see _neutral_body)
+                # silently miscompiled it. Confirmed via a minimal repro:
+                # `def apply(target, a, b): return target(a, b)` called as
+                # `apply(f, 3, 4)` ran `f`'s stub instead of `f` itself.
+                if expression.name in function_names:
+                    functions.add(expression.name)
     return functions, classes, methods
 
 

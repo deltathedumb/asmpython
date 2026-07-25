@@ -49,6 +49,7 @@ def _parameter_has_dynamic_usage(definition, parameter: str) -> bool:
                 "setattr",
                 "hasattr",
                 "callable",
+                "type",
             ) and any(_name_is(argument, parameter) for argument in node.args):
                 return True
 
@@ -66,7 +67,11 @@ def _parameter_has_dynamic_usage(definition, parameter: str) -> bool:
                 if isinstance(nested, A.Call):
                     if nested.func == parameter:
                         return True
-                    if nested.func in ("isinstance", "issubclass") and any(
+                    if nested.func in (
+                        "isinstance",
+                        "issubclass",
+                        "type",
+                    ) and any(
                         _name_is(argument, parameter) for argument in nested.args
                     ):
                         return True
