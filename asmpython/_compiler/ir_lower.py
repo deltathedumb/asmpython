@@ -267,6 +267,14 @@ class _FuncCtx:
         self.local_names = local_names or set()
         self.declared_globals = declared_globals or set()
         self.module_body = module_body
+        # For a method body, the owning class name and the name of its receiver
+        # parameter (`self`/`cls`), so a `<receiver>.<classvar>` access can bind
+        # statically to the owner's `__cv_<Owner>__<var>` global. Critical for a
+        # @classmethod, whose `cls` is a null placeholder that must never be
+        # dereferenced (asmpython has no runtime class objects) -- see
+        # `_lower_expr`'s A.Attr handling. Both None for ordinary functions.
+        self.method_owner_class: str | None = None
+        self.receiver_param: str | None = None
         # Names currently shadowed by an active comprehension's own loop
         # variable, tracked as a stack of sets (nested comprehensions push
         # their own on top). A comprehension variable is ALWAYS local, in
@@ -8600,6 +8608,75 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(ir_type_for(A.expr_type(e)))
             ctx.emit(IRInstr("call", v, [sym, *args]))
             return v
+        # `@classmethod`/`@staticmethod` call on a `type` value whose concrete
+        # class isn't a literal name -- e.g. iterating a tuple of classes
+        # (`for cls in (Server, Shared, Client): cls.supports_runtime(...)`).
+        # A `type` value already *is* the class's RTTI id (that's how a bare
+        # class name lowers, see the A.Name branch), so unlike the opaque-
+        # instance dispatch below we use the receiver directly as the class id
+        # rather than reading a `__class__` tag off an instance dict. Class
+        # methods receive an implicit `cls` (shared_zero -- asmpython has no
+        # class objects and classmethod bodies that only touch class vars /
+        # call other statics never dereference it); static methods take the
+        # args verbatim. An equality chain over every candidate class id routes
+        # to the concrete `{owner}__{method}`.
+        if obj_ty == "type":
+            type_rows = _classes_resolving_method(ctx, e.method)
+            if type_rows:
+                recv_v = _lower_expr(ctx, e.obj)  # the class id itself
+                first_owner = type_rows[0][1]
+                is_static = _resolved_method_is_static(ctx, first_owner, e.method)
+                _mann = _callee_param_annots(ctx, f"{first_owner}__{e.method}")
+                # self/cls is param 0 for classmethods, so a call arg i maps to
+                # param i+1; a staticmethod has no implicit param, so arg i maps
+                # to param i.
+                ann_shift = 0 if is_static else 1
+                call_args = [
+                    _lower_call_arg(
+                        ctx,
+                        a,
+                        _mann[i + ann_shift] if i + ann_shift < len(_mann) else None,
+                    )
+                    for i, a in enumerate(e.args)
+                ]
+                args = call_args if is_static else [ctx.shared_zero] + call_args
+                res_ty = ir_type_for(A.expr_type(e))
+                res_ptr = ctx.ensure_slot(f"__typedisp_res_{id(e)}", res_ty)
+
+                check_blocks = [ctx.new_block(f"typedispcheck{i}") for i in range(len(type_rows))]
+                hit_blocks = [ctx.new_block(f"typedisphit{i}") for i in range(len(type_rows))]
+                stub_b = ctx.new_block("typedispstub")
+                end_b = ctx.new_block("typedispend")
+
+                ctx.emit(IRInstr("br", None, [check_blocks[0].label]))
+
+                for i, (cid, ow) in enumerate(type_rows):
+                    ctx.switch_to(check_blocks[i])
+                    cid_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", cid_v, [cid]))
+                    is_match = ctx.tmp(I64)
+                    ctx.emit(IRInstr("icmp.eq", is_match, [recv_v, cid_v]))
+                    next_label = check_blocks[i + 1].label if i + 1 < len(check_blocks) else stub_b.label
+                    ctx.emit(IRInstr("br.t", None, [is_match, hit_blocks[i].label, next_label]))
+
+                    ctx.switch_to(hit_blocks[i])
+                    mv = ctx.tmp(res_ty)
+                    ctx.emit(IRInstr("call", mv, [f"{ow}__{e.method}", *args]))
+                    ctx.emit(IRInstr("store", None, [mv, res_ptr]))
+                    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+                # Class id matched no candidate: a genuine opaque type value.
+                # Preserve the graceful-stub behaviour and yield 0.
+                ctx.switch_to(stub_b)
+                stub_v = ctx.tmp(res_ty)
+                ctx.emit(IRInstr("const", stub_v, [0]))
+                ctx.emit(IRInstr("store", None, [stub_v, res_ptr]))
+                ctx.emit(IRInstr("br", None, [end_b.label]))
+
+                ctx.switch_to(end_b)
+                out = ctx.tmp(res_ty)
+                ctx.emit(IRInstr("load", out, [res_ptr]))
+                return out
         # Method call on an opaque/`any`-typed receiver whose static type
         # names no class (e.g. a value read out of a `list[object]`, an
         # `object` parameter, or an `any` return). If some user class defines
@@ -8694,6 +8771,35 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             and len(e.obj.args) == 1
         ):
             return _lower_type_name_attr(ctx, e)
+        if (
+            isinstance(e.obj, A.Name)
+            and ctx.receiver_param is not None
+            and e.obj.name == ctx.receiver_param
+            and ctx.method_owner_class is not None
+        ):
+            # `self.<classvar>` / `cls.<classvar>` inside a method body, where
+            # <classvar> is a class-level variable declared on the owning class
+            # or an ancestor (e.g. `class RealmRoot: runtime_realms = (...)`;
+            # `cls.runtime_realms` in its @classmethod). Bind statically to the
+            # resolved owner's `__cv_<Owner>__<var>` global. Essential for a
+            # @classmethod: its `cls` is a null placeholder (asmpython has no
+            # runtime class objects), so a class-var read through it must NOT
+            # dereference the receiver -- and because each subclass compiles its
+            # own `Subclass__method` symbol, resolving up *this* owner's chain
+            # picks up the right per-subclass override. An INSTANCE attribute of
+            # the same name (set in __init__) is handled by the generic fallback
+            # below and is unaffected: this only fires for names that resolve to
+            # a real class-var label. Missing here previously meant `cls.tag`
+            # read through the null `cls` and returned 0.
+            for owner in _resolve_class_chain(ctx, ctx.method_owner_class):
+                if (owner, e.name) in ctx.mctx.class_var_labels:
+                    label = ctx.mctx.class_var_labels[(owner, e.name)]
+                    ty = ctx.mctx.global_types.get(label, ir_type_for(A.expr_type(e)))
+                    ptr = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("global_addr", ptr, [label]))
+                    v = ctx.tmp(ty)
+                    ctx.emit(IRInstr("load", v, [ptr]))
+                    return v
         if isinstance(e.obj, A.Name) and (e.obj.name, e.name) in ctx.mctx.class_var_labels:
             # `ClassName.attr` (a plain class's own static class-level
             # variable, e.g. `class Config: version = 5`) -- reads the
@@ -10493,9 +10599,18 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             return
         # Route through the store choke point: an "any"-typed value keeps its
         # boxed form so a later read of this variable re-unboxes the same
-        # cell; a concrete value stores raw. (The slot's kind is the value's
-        # own static type -- a fresh binding takes it.)
-        val = _lower_for_slot(ctx, s.value, A.expr_type(s.value))
+        # cell; a concrete value stores raw.
+        #
+        # The slot's kind is the TARGET's static type, not the value's. For an
+        # ANNOTATED binding (`x: int = expr`) the annotation is authoritative:
+        # `x: int = some_object_value` must UNBOX the `any` value into the int
+        # slot, not keep it boxed. Using the value's own type here (which is
+        # "any") would route through `_lower_value_into_any_slot` and store the
+        # box pointer raw, so a later `int` read of `x` sees a garbage pointer.
+        # A plain (unannotated) binding takes the value's type, as before.
+        _annot_slot_ty = _annot_base(getattr(s, "annot", None))
+        _slot_ty = _annot_slot_ty if _annot_slot_ty else A.expr_type(s.value)
+        val = _lower_for_slot(ctx, s.value, _slot_ty)
         ptr = _name_value_ptr(
             ctx, s.target, ctx.mctx.global_types.get(s.target, val.type)
         )
@@ -11886,6 +12001,13 @@ def lower_func(
         module_body=module_body,
     )
     ctx.nonlocal_names = declared_nonlocals
+    owner_class = getattr(f, "method_owner_class", None)
+    if owner_class is not None:
+        ctx.method_owner_class = owner_class
+        # A non-static method's first parameter is its receiver (self/cls);
+        # a staticmethod has no implicit receiver.
+        if "staticmethod" not in getattr(f, "decorators", []) and f.params:
+            ctx.receiver_param = f.params[0]
     if isinstance(f.ret_type, tuple) and f.ret_type:
         ctx.ret_ty = f.ret_type[0]
     if ctx.ret_ty == "any":
@@ -12062,8 +12184,20 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                 # already handles the None-owner (non-user-class base)
                 # case as a no-op.
                 add_resolved(obj_ty.split(":", 1)[1], node.method)
-            elif obj_ty == "type" and isinstance(node.obj, A.Name):
+            elif obj_ty == "type" and isinstance(node.obj, A.Name) and node.obj.name in class_names:
                 add_resolved(node.obj.name, node.method)
+            elif obj_ty == "type":
+                # A classmethod/staticmethod call on a `type` value whose
+                # concrete class isn't a literal name (a variable holding a
+                # class, e.g. iterating `(Server, Shared, Client)`). ir_lower's
+                # MethodCall lowering emits a runtime class-id dispatch chain
+                # over EVERY user class resolving this method (mirroring the
+                # `any` case above, but keyed off the type value itself rather
+                # than an instance's __class__ tag). Mark every such candidate
+                # owner reachable, or the emitted `{owner}__{method}` calls
+                # would be undefined symbols at link time.
+                for cname in classes_sig:
+                    add_resolved(cname, dispatch_method)
             # `node.obj` (the receiver) is visited (or deliberately
             # skipped, for a bare Name) once, uniformly for both
             # MethodCall and Attr, in the generic dataclass-field
@@ -12386,6 +12520,8 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                     access_policy=m.access_policy,
                     abi_name=m.abi_name,
                     is_public_export=cls.is_public_export or m.is_public_export,
+                    decorators=list(m.decorators),
+                    method_owner_class=cls.name,
                 )
             )
     return out_funcs, out_methods
