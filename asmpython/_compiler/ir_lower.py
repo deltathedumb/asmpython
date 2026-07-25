@@ -589,6 +589,177 @@ def _lower_list_pop_front(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
     return result
 
 
+def _lower_membership_any(ctx: _FuncCtx, needle_e: A.Expr, hay_e: A.Expr, negate: bool) -> IRValue:
+    """`needle in haystack` when the haystack's static type is opaque ("any").
+
+    Emits a runtime tag dispatch mirroring CPython's `in` on the value's
+    actual type: a str does a substring test (`_abi_str_index_of`), a
+    dict/set does a hashed key/element containment (`_abi_dict_contains`),
+    and everything else (list/tuple, or a value this backend can't
+    classify) does a linear element scan. The needle is lowered once; each
+    branch consumes it in the shape that arm needs (a str compare uses
+    `_abi_str_eq`, matching the concrete-type membership paths above). The
+    result is a plain 0/1 with `negate` applied uniformly at the end, so the
+    caller sees the same boolean shape as every other membership case.
+    """
+    STR_TAG = BUILTIN_TYPE_IDS["str"]
+
+    needle_v = _lower_expr(ctx, needle_e)
+    # Read the haystack as its RAW (possibly still-boxed) cell -- NOT the
+    # auto-unboxed value `_lower_expr` would yield. A str stored in an "any"
+    # slot is a scalar BOX cell whose tag is only legible on the box itself;
+    # unboxing first would strip the tag to a bare str pointer that the tag
+    # reader can no longer classify as a str (it would look UNTAGGED and be
+    # mis-scanned as a list, faulting). So read the tag from the boxed cell,
+    # then unbox per-branch (`_lower_unbox_any` yields the str/scalar payload
+    # for a box and is a safe no-op for an already-raw list/dict/set).
+    hay_boxed = _lower_expr_inner(ctx, hay_e)
+    tag_v = _lower_read_any_tag(ctx, hay_boxed)
+    hay_v = _lower_unbox_any(ctx, hay_boxed)
+    needle_ty = A.expr_type(needle_e)
+    needle_is_str = needle_ty in ("str", "any")
+
+    needle_ptr = ctx.ensure_slot(f"__memany_needle_{id(needle_e)}_{id(hay_e)}", needle_v.type)
+    hay_ptr = ctx.ensure_slot(f"__memany_hay_{id(needle_e)}_{id(hay_e)}", PTR)
+    res_ptr = ctx.ensure_slot(f"__memany_res_{id(needle_e)}_{id(hay_e)}", I64)
+    idx_ptr = ctx.ensure_slot(f"__memany_idx_{id(needle_e)}_{id(hay_e)}", I64)
+    ctx.emit(IRInstr("store", None, [needle_v, needle_ptr]))
+    ctx.emit(IRInstr("store", None, [hay_v, hay_ptr]))
+    zero0 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero0, [0]))
+    ctx.emit(IRInstr("store", None, [zero0, res_ptr]))
+
+    strcheck_b = ctx.new_block("memanystrcheck")
+    str_b = ctx.new_block("memanystr")
+    dictcheck_b = ctx.new_block("memanydictcheck")
+    dict_b = ctx.new_block("memanydict")
+    scan_b = ctx.new_block("memanyscan")
+    end_b = ctx.new_block("memanyend")
+
+    ctx.emit(IRInstr("br", None, [strcheck_b.label]))
+
+    # str tag -> substring test
+    ctx.switch_to(strcheck_b)
+    str_tag_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", str_tag_v, [STR_TAG]))
+    is_str = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_str, [tag_v, str_tag_v]))
+    ctx.emit(IRInstr("br.t", None, [is_str, str_b.label, dictcheck_b.label]))
+
+    ctx.switch_to(str_b)
+    s_needle = ctx.tmp(needle_v.type)
+    ctx.emit(IRInstr("load", s_needle, [needle_ptr]))
+    s_hay = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", s_hay, [hay_ptr]))
+    idx_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", idx_v, ["_abi_str_index_of", s_hay, s_needle]))
+    neg1 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", neg1, [-1]))
+    found_s = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.ne", found_s, [idx_v, neg1]))
+    ctx.emit(IRInstr("store", None, [found_s, res_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    # Not a str: distinguish a dict/set from a list/tuple STRUCTURALLY, since
+    # `_lower_read_any_tag` reports UNTAGGED for every raw (never-boxed)
+    # container and so can't tell them apart by tag. A dict/set cell
+    # (`_abi_new_instance` shape) holds a small TOMBSTONE COUNT at word-2
+    # (offset 16); a list/tuple holds its BUFFER POINTER there. So "word-2 is
+    # a small int, not a heap address" selects the dict/set hashed-containment
+    # path -- the same low-address discriminator `_lower_read_any_tag` uses.
+    ctx.switch_to(dictcheck_b)
+    PTR_THRESHOLD = 0x10000
+    w2_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", w2_addr, [hay_v, 16]))
+    w2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", w2, [w2_addr]))
+    thr = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", thr, [PTR_THRESHOLD]))
+    w2_is_ptr = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.gt", w2_is_ptr, [w2, thr]))
+    # w2 looks like a pointer -> list/tuple -> scan; else dict/set -> hashed.
+    ctx.emit(IRInstr("br.t", None, [w2_is_ptr, scan_b.label, dict_b.label]))
+
+    ctx.switch_to(dict_b)
+    d_hay = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", d_hay, [hay_ptr]))
+    key_v = _lower_dict_key(ctx, needle_e)
+    contains_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", contains_v, ["_abi_dict_contains", d_hay, key_v]))
+    ctx.emit(IRInstr("store", None, [contains_v, res_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    # otherwise -> linear element scan (list/tuple, or unclassified). Uses
+    # the same list header layout the concrete list/tuple case does.
+    ctx.switch_to(scan_b)
+    scan_idx_ptr = idx_ptr
+    zscan = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zscan, [0]))
+    ctx.emit(IRInstr("store", None, [zscan, scan_idx_ptr]))
+    scan_head = ctx.new_block("memanyscanhead")
+    scan_body = ctx.new_block("memanyscanbody")
+    scan_found = ctx.new_block("memanyscanfound")
+    scan_cont = ctx.new_block("memanyscancont")
+    ctx.emit(IRInstr("br", None, [scan_head.label]))
+
+    ctx.switch_to(scan_head)
+    cur_i = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", cur_i, [scan_idx_ptr]))
+    cur_hay = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", cur_hay, [hay_ptr]))
+    len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_addr, [cur_hay, _LIST_LEN_OFF]))
+    len_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", len_v, [len_addr]))
+    more = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", more, [cur_i, len_v]))
+    ctx.emit(IRInstr("br.t", None, [more, scan_body.label, end_b.label]))
+
+    ctx.switch_to(scan_body)
+    b_hay = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", b_hay, [hay_ptr]))
+    b_idx = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", b_idx, [scan_idx_ptr]))
+    elem_addr = _list_elem_addr(ctx, b_hay, b_idx)
+    elem_v = ctx.tmp(needle_v.type)
+    ctx.emit(IRInstr("load", elem_v, [elem_addr]))
+    b_needle = ctx.tmp(needle_v.type)
+    ctx.emit(IRInstr("load", b_needle, [needle_ptr]))
+    eq_v = ctx.tmp(I64)
+    if needle_is_str:
+        ctx.emit(IRInstr("call", eq_v, ["_abi_str_eq", b_needle, elem_v]))
+    else:
+        ctx.emit(IRInstr("icmp.eq", eq_v, [b_needle, elem_v]))
+    ctx.emit(IRInstr("br.t", None, [eq_v, scan_found.label, scan_cont.label]))
+
+    ctx.switch_to(scan_found)
+    one_f = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one_f, [1]))
+    ctx.emit(IRInstr("store", None, [one_f, res_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(scan_cont)
+    ci = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", ci, [scan_idx_ptr]))
+    one_c = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one_c, [1]))
+    ni = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", ni, [ci, one_c]))
+    ctx.emit(IRInstr("store", None, [ni, scan_idx_ptr]))
+    ctx.emit(IRInstr("br", None, [scan_head.label]))
+
+    ctx.switch_to(end_b)
+    raw = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", raw, [res_ptr]))
+    if negate:
+        zc = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zc, [0]))
+        inv = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.eq", inv, [raw, zc]))
+        return inv
+    return raw
+
+
 def _lower_membership(ctx: _FuncCtx, needle_e: A.Expr, hay_e: A.Expr, negate: bool) -> IRValue:
     hay_ty = A.expr_type(hay_e)
     if hay_ty in ("dict", "set"):
@@ -621,6 +792,15 @@ def _lower_membership(ctx: _FuncCtx, needle_e: A.Expr, hay_e: A.Expr, negate: bo
         op = "icmp.eq" if negate else "icmp.ne"
         ctx.emit(IRInstr(op, result, [idx_v, neg1]))
         return result
+    if hay_ty == "any":
+        # `needle in haystack` where the haystack's static type is opaque
+        # ("any") -- it may at runtime be a str, a dict/set, or a
+        # list/tuple, so dispatch on its runtime tag (the same tag
+        # type()/isinstance() read via `_lower_read_any_tag`) exactly as
+        # CPython dispatches `in` on the value's actual type. Without this a
+        # membership test on any object-typed value (a function parameter, a
+        # container element, an `any` return) was a hard LowerError.
+        return _lower_membership_any(ctx, needle_e, hay_e, negate)
     if hay_ty not in ("list", "tuple"):
         raise LowerError(
             f"unsupported compare membership ({hay_ty}) at "
