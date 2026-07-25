@@ -11130,6 +11130,48 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
                 val = bits
             ctx.emit(IRInstr("call", None, ["_abi_dict_set", class_object, key, val]))
             return
+        if A.expr_type(s.obj) == "type" and ctx.mctx.class_ids:
+            # `cls.attr = value` where the class isn't a literal name -- a class
+            # object flowing through a variable/param (e.g. a registry's
+            # `def register(self, name, cls): cls.__somnia_type__ = name`). The
+            # receiver is the class's RTTI id, not an instance dict; storing
+            # through the generic instance path below would `_abi_dict_set` on
+            # that small integer and fault. Dispatch on the runtime id to the
+            # matching class's mutable namespace (`__classobj_<owner>`), the
+            # same per-class dict the literal `ClassName.attr = v` branch writes.
+            recv_v = _lower_expr(ctx, s.obj)  # the class id
+            key_name = ctx.mctx.intern_str(s.name)
+            val = _lower_expr(ctx, s.value)
+            if A.expr_type(s.value) == "float":
+                bits = ctx.tmp(I64)
+                ctx.emit(IRInstr("bitcast_f2i", bits, [val]))
+                val = bits
+            rows = sorted(ctx.mctx.class_ids.items(), key=lambda kv: kv[1])
+            check_blocks = [ctx.new_block(f"clsattrset_chk{i}") for i in range(len(rows))]
+            hit_blocks = [ctx.new_block(f"clsattrset_hit{i}") for i in range(len(rows))]
+            end_b = ctx.new_block("clsattrset_end")
+            ctx.emit(IRInstr("br", None, [check_blocks[0].label]))
+            for i, (cname, cid) in enumerate(rows):
+                ctx.switch_to(check_blocks[i])
+                cid_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", cid_v, [cid]))
+                is_match = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.eq", is_match, [recv_v, cid_v]))
+                next_label = check_blocks[i + 1].label if i + 1 < len(check_blocks) else end_b.label
+                ctx.emit(IRInstr("br.t", None, [is_match, hit_blocks[i].label, next_label]))
+
+                ctx.switch_to(hit_blocks[i])
+                label = ctx.mctx.class_object_labels[cname]
+                class_ptr = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", class_ptr, [label]))
+                class_object = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", class_object, [class_ptr]))
+                key = ctx.tmp(PTR)
+                ctx.emit(IRInstr("global_addr", key, [key_name]))
+                ctx.emit(IRInstr("call", None, ["_abi_dict_set", class_object, key, val]))
+                ctx.emit(IRInstr("br", None, [end_b.label]))
+            ctx.switch_to(end_b)
+            return
         # obj.name = value -> _abi_dict_set(obj, name, value); see the
         # A.Attr read path's comment for why this goes through a shim.
         obj_val = _lower_expr(ctx, s.obj)
@@ -12552,6 +12594,16 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
 
     for st in mod.body:
         visit(st)
+    # Class-var DEFAULT initializers (`name = Property(...)` in a class body)
+    # run at module startup for EVERY class (lower_module emits them all as
+    # __cv_<Class>__<var> init statements), so any constructor/function they
+    # reference is genuinely reachable and its body must be emitted -- e.g. a
+    # `Property` class built only by other classes' field defaults, whose
+    # `Property____init__` was otherwise an undefined symbol at link time.
+    for cls in mod.classes:
+        for cv in getattr(cls, "class_vars", []) or []:
+            if cv[2] is not None:
+                visit(cv[2])
     if any(f.name == "main" for f in mod.funcs):
         add_func("main")
     if any(f.name == "_threading_bootstrap" for f in mod.funcs):
@@ -12786,7 +12838,14 @@ def lower_module(mod: A.Module) -> IRModule:
     has_explicit_main = any(f.name == "main" for f in mod.funcs)
     if has_explicit_main or mod.force_module_init:
         init_body = class_var_init_stmts + _module_init_stmts(mod)
-        if init_body:
+        # Emit __asmpy_module_init whenever there are user classes even if
+        # init_body is empty: lower_func(module_body=True) is what allocates
+        # each class's mutable namespace dict (`__classobj_<name>`, the
+        # _abi_new_instance loop at entry), and a `cls.attr = v` / literal
+        # `ClassName.attr = v` store reads that global. With no class vars and
+        # no guarded module statements the function was skipped, leaving every
+        # __classobj_<name> a null pointer -- _abi_dict_set on it faulted.
+        if init_body or mctx.class_object_labels:
             init_body_fn = A.FuncDef(
                 name="__asmpy_module_init",
                 params=[],
