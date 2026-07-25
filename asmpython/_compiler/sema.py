@@ -8715,13 +8715,17 @@ class SemaAnalyzer:
                         raise SemaError("list.pop() takes at most 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = el_t if el_t != "?" else "int"
                 elif e.method == "extend":
-                    # xs.extend(ys): append every element of another list.
+                    # xs.extend(ys): append every element of another iterable.
+                    # Python's extend takes any iterable; a tuple/set shares
+                    # the list buffer layout at runtime so _abi_list_extend
+                    # walks it identically to a list. str stays rejected (its
+                    # elements are chars, a different element representation).
                     if len(e.args) != 1:
                         raise SemaError("list.extend() takes 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
                     at = A.expr_type(e.args[0])
-                    if at not in ("list", "any"):
+                    if at not in ("list", "tuple", "set", "any"):
                         raise SemaError(
-                            f"list.extend() expects a list, got {at}", e.pos,
+                            f"list.extend() expects an iterable, got {at}", e.pos,
                             ErrorCode.E_ARG_TYPE,
                         )
                     e.inferred_type = "int"  # returns None ~ 0

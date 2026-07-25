@@ -7269,7 +7269,9 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 obj_v = _lower_expr(ctx, e.obj)
                 ctx.emit(IRInstr("call", None, ["_abi_list_reverse", obj_v]))
                 return ctx.shared_zero
-            if e.method == "extend" and len(e.args) == 1 and A.expr_type(e.args[0]) == "list":
+            if e.method == "extend" and len(e.args) == 1 and A.expr_type(e.args[0]) in ("list", "tuple", "set"):
+                # A tuple/set shares the list buffer layout, so _abi_list_extend
+                # walks it exactly like a list (sema already accepts these).
                 obj_v = _lower_expr(ctx, e.obj)
                 other_v = _lower_expr(ctx, e.args[0])
                 ctx.emit(IRInstr("call", None, ["_abi_list_extend", obj_v, other_v]))
