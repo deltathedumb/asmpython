@@ -9457,10 +9457,58 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             # source-level defs were each renamed to their own mangled
             # names during sema's overload pre-pass).
             call_target = getattr(e, "resolved_overload_symbol", None) or e.func
+            resolved_ov = getattr(e, "resolved_overload_symbol", None)
+            if resolved_ov is None and _call_target_is_unresolvable(ctx, e.func):
+                # `e.func` names no user function/class, no FFI import, no
+                # callable variable, and no builtin this backend models
+                # (every modeled builtin -- len/print/str/sorted/... -- is
+                # intercepted earlier in this function). It is therefore an
+                # unmodeled builtin (`next`/`iter`/`dir`/`delattr`) or a
+                # lazily-imported symbol that whole-program merge never
+                # compiled in (`from .loader import default_builtins`). Emitting
+                # a bare `call e.func` would be an undefined external at link
+                # time. Instead evaluate the args for side effects (already
+                # done above) and yield 0 -- the SAME graceful "survive
+                # unmodeled callables" degradation the opaque-receiver method
+                # stub applies, so a build survives code paths it can't model
+                # as long as they aren't actually executed at runtime.
+                zero_v = ctx.tmp(ir_type_for(A.expr_type(e)))
+                ctx.emit(IRInstr("const", zero_v, [0]))
+                return zero_v
             ctx.emit(IRInstr("call", v, [call_target, *args]))
         return v
 
     raise LowerError(f"unsupported expr {type(e).__name__}")
+
+
+def _call_target_is_unresolvable(ctx: "_FuncCtx", name: str) -> bool:
+    """True when a direct `A.Call` target names no symbol this backend can
+    ever emit or link -- an unmodeled builtin (`next`/`iter`/`dir`/`delattr`)
+    or a lazily-imported name whole-program merge never compiled in
+    (`from .loader import default_builtins`). Such a call would otherwise be
+    a bare `call name` that fails at link time as an undefined external.
+
+    Conservative by construction: returns True ONLY when `name` is absent
+    from every set of resolvable call targets --
+    - `func_names`: a real top-level user function (methods are A.MethodCall,
+      not A.Call, so they never reach the direct-call fallthrough);
+    - `class_names`: a constructor call;
+    - `ffi_funcs` / `imported_funcs` / `imported_modules`: an FFI or
+      dynamically-imported symbol (these also take dedicated lowering paths
+      before the fallthrough, but are checked here for safety);
+    - `mlang_code_funcs`: an mlang-compiled Code method.
+    Every builtin this backend actually models (len/print/str/sorted/range/
+    ...) is intercepted earlier in `_lower_expr_inner` and never reaches the
+    fallthrough at all, so a modeled builtin is never mistaken for
+    unresolvable here.
+    """
+    if name in ctx.mctx.func_names or name in ctx.mctx.class_names:
+        return False
+    if name in ctx.mctx.ffi_funcs or name in ctx.mctx.imported_funcs:
+        return False
+    if name in ctx.mctx.imported_modules or name in ctx.mctx.mlang_code_funcs:
+        return False
+    return True
 
 
 _BOXABLE_STATIC_TYPES = ("int", "float", "bool", "str")

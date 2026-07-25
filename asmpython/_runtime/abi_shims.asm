@@ -122,6 +122,8 @@ global __chkstk
 global _abi_list_append
 global _abi_list_pop
 global _abi_list_slice
+global _abi_list_slice_step
+global _abi_str_slice_step
 global _abi_list_slice_assign
 global _abi_str_eq
 global _abi_str_cmp
