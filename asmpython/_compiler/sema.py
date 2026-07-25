@@ -855,6 +855,11 @@ class SemaAnalyzer:
         # ir_lower box each scalar written in and unbox each read out, so
         # `type(d[k])`/`isinstance(d[k], T)` answer correctly per key.
         self._explicit_object_dicts: set[str] = set()
+        # Same idea for a `list[object]` local: a genuinely heterogeneous list
+        # whose scalar elements must be boxed on the way in so `type(xs[i])`
+        # answers, and which a bare `list` (element kind unknown, left raw for
+        # existing homogeneous-list code) must NOT be confused with.
+        self._explicit_object_lists: set[str] = set()
         # Module-level names (imports + top-level assignments). Populated by
         # analyze() before function/method bodies are checked.
         self.global_scope: Scope = Scope()
@@ -5484,6 +5489,17 @@ class SemaAnalyzer:
                     # resolving to "any"/lenient, or every later .append()
                     # of a non-int value would wrongly fail to type-check.
                     el_type = ael if (ael and ael != "any") else self._list_el_type_if_known(value, scope)
+                    # An EXPLICIT `list[object]` (raw annot ('list','any'), vs a
+                    # bare `list` whose raw annot is ('list', None)) is a
+                    # genuinely heterogeneous list: track it so ir_lower boxes
+                    # scalars appended into it and its element reads stay "any".
+                    # A bare `list` (element kind simply unknown) is left alone,
+                    # so existing homogeneous-list code keeps raw elements.
+                    if annot == ("list", "any"):
+                        el_type = "any"
+                        self._explicit_object_lists.add(target)
+                    else:
+                        self._explicit_object_lists.discard(target)
                     scope.add(
                         target,
                         "list",
@@ -8697,6 +8713,16 @@ class SemaAnalyzer:
                 return
             if obj_t == "list":
                 el_t = self._list_el_type(e.obj, scope)
+                # Mark an append onto an EXPLICIT `list[object]` so ir_lower
+                # boxes a scalar element (see `_explicit_object_lists`); a bare
+                # `list` (also el "any", but element kind merely unknown) is
+                # left raw so existing homogeneous-list code is unaffected.
+                if (
+                    e.method == "append"
+                    and isinstance(e.obj, A.Name)
+                    and e.obj.name in self._explicit_object_lists
+                ):
+                    e.box_element = True  # type: ignore[attr-defined]
                 if e.method == "append":
                     if len(e.args) != 1:
                         raise SemaError(

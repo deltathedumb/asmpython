@@ -7211,21 +7211,23 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         if obj_ty == "list":
             if e.method == "append" and len(e.args) == 1:
                 obj_v = _lower_expr(ctx, e.obj)
-                val = _lower_expr(ctx, e.args[0])
-                if A.expr_type(e.args[0]) == "float":
-                    # A list cell is a raw 8-byte int slot -- bitcast the
-                    # double's bits into an I64 so the runtime append
-                    # helper (which just copies 8 raw bytes) doesn't need
-                    # to know or care it's really a float. Mirrors
-                    # codegen.py's `movq rax, xmm0` before its own
-                    # _runtime_list_append call exactly. Was previously a
-                    # hard LowerError -- float lists (`xs: list[float] =
-                    # []; xs.append(1.5)`) were entirely unbuildable on
-                    # this backend even though float list ELEMENT READS
-                    # already worked fine elsewhere.
-                    iv = ctx.tmp(I64)
-                    ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
-                    val = iv
+                if getattr(e, "box_element", False) and A.expr_type(e.args[0]) in _BOXABLE_STATIC_TYPES:
+                    # `xs.append(scalar)` on an EXPLICIT `list[object]` (sema
+                    # stamped box_element): box so `type(xs[i])` / `isinstance(
+                    # xs[i], int)` on the read-out element can answer.
+                    val = _lower_value_into_any_slot(ctx, e.args[0])
+                else:
+                    val = _lower_expr(ctx, e.args[0])
+                    if A.expr_type(e.args[0]) == "float":
+                        # A list cell is a raw 8-byte int slot -- bitcast the
+                        # double's bits into an I64 so the runtime append
+                        # helper (which just copies 8 raw bytes) doesn't need
+                        # to know or care it's really a float. Mirrors
+                        # codegen.py's `movq rax, xmm0` before its own
+                        # _runtime_list_append call exactly.
+                        iv = ctx.tmp(I64)
+                        ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
+                        val = iv
                 ctx.emit(IRInstr("call", None, ["_abi_list_append", obj_v, val]))
                 return ctx.shared_zero  # list.append() returns None
             if e.method == "insert" and len(e.args) == 2:
