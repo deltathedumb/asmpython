@@ -7705,9 +7705,15 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 obj_v = _lower_expr(ctx, e.obj)
                 ctx.emit(IRInstr("call", None, ["_abi_list_reverse", obj_v]))
                 return ctx.shared_zero
-            if e.method == "extend" and len(e.args) == 1 and A.expr_type(e.args[0]) in ("list", "tuple", "set"):
+            if e.method == "extend" and len(e.args) == 1 and A.expr_type(e.args[0]) in ("list", "tuple", "set", "any"):
                 # A tuple/set shares the list buffer layout, so _abi_list_extend
-                # walks it exactly like a list (sema already accepts these).
+                # walks it exactly like a list (sema already accepts these). An
+                # "any" argument that is a list/tuple/set at runtime works
+                # identically -- `_lower_expr` unboxes it to the raw
+                # list-shaped pointer, which is exactly what the helper walks;
+                # a non-sequence "any" would be a runtime type error in real
+                # Python too, so accepting it here matches CPython's own
+                # deferral of the check to runtime.
                 obj_v = _lower_expr(ctx, e.obj)
                 other_v = _lower_expr(ctx, e.args[0])
                 ctx.emit(IRInstr("call", None, ["_abi_list_extend", obj_v, other_v]))
