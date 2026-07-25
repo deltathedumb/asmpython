@@ -137,6 +137,15 @@ class FuncDef:
     # re-deriving access_policy/abi_name at every consumer (codegen's NASM
     # `global` injection, ir_lower's IRFunc.visibility).
     is_public_export: bool = False
+    # For a method FuncDef synthesized from a class body (ir_lower's
+    # _reachable_callables mangles each into a standalone `Class__method`
+    # function), the owning class name. Lets the body's lowering resolve a
+    # `cls.<classvar>` / `self.<classvar>` access to the owner's dedicated
+    # `__cv_<Owner>__<var>` global -- a @classmethod receives its `cls` as a
+    # null placeholder (asmpython has no class objects), so class-var reads
+    # through it must bind statically to the owner rather than dereference the
+    # null receiver. None for ordinary top-level functions.
+    method_owner_class: "str | None" = None
 
 
 @dataclass

@@ -4816,13 +4816,17 @@ def _lower_isinstance(ctx: _FuncCtx, e: A.Call) -> IRValue:
     ctx.emit(IRInstr("br", None, [end_b.label]))
 
     ctx.switch_to(live_b)
-    key_sym = ctx.mctx.intern_str("__class__")
-    key_v = ctx.tmp(PTR)
-    ctx.emit(IRInstr("global_addr", key_v, [key_sym]))
-    miss_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", miss_v, [-1]))
-    class_id = ctx.tmp(I64)
-    ctx.emit(IRInstr("call", class_id, ["_abi_dict_get_default", obj_v, key_v, miss_v]))
+    # Read the runtime class id via the FAULT-SAFE tag reader, not a direct
+    # `_abi_dict_get_default(obj, "__class__", -1)` dict-probe. `obj_v` here is
+    # the raw (possibly BOXED) value of an `any` argument: `isinstance(x,
+    # UserClass)` where x is a boxed scalar (a `dict[str,object]` value, an
+    # `object` field/param) would otherwise dereference the box cell as a dict
+    # -- reading its payload word as a slot-buffer pointer and faulting.
+    # `_lower_read_any_tag` returns a scalar box's BUILTIN_TYPE_IDS tag (never
+    # a user class id, so a boxed int correctly fails the class check) for a
+    # box, the real class id for an instance dict, and UNTAGGED for a raw
+    # container -- all without ever dereferencing a non-instance.
+    class_id = _lower_read_any_tag(ctx, obj_v)
     match_v = ctx.tmp(I64)
     ctx.emit(IRInstr("const", match_v, [0]))
     for cid in accept:

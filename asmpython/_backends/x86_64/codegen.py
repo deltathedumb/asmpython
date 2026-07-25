@@ -222,6 +222,18 @@ class FuncCodegen:
         if isinstance(loc, XmmLoc):
             return loc.reg, b""
         scratch = self._SCRATCH_XMM2 if alt_scratch else self._SCRATCH_XMM
+        if isinstance(loc, RegLoc):
+            # The f64 value lives in a GP register, not an XMM one -- regalloc
+            # can home a float-typed IRValue in a GP RegLoc when it was produced
+            # as raw 64-bit bits (e.g. an `any`-typed value loaded/stored through
+            # the GP path, then reinterpreted as a float). Move the raw bits into
+            # the scratch XMM with movq, mirroring `_gp`'s own RegLoc case (which
+            # returns the GP register directly). Previously this fell through to
+            # the StackLoc branch and read `loc.offset` on a RegLoc -- an
+            # AttributeError that aborted the whole compile (hit compiling
+            # Somnia's provider model, whose classmethod dispatch routes a float
+            # transform component through a GP-homed `any` value).
+            return scratch, encode_movq_xmm_gp(scratch, loc.reg)
         return scratch, encode_movsd_rm(scratch, Mem(Reg.RBP, loc.offset))
 
     def _xmm_f32(self, val: Any, alt_scratch: bool = False) -> tuple[XmmReg, bytes]:
@@ -231,6 +243,12 @@ class FuncCodegen:
         if isinstance(loc, XmmLoc):
             return loc.reg, b""
         scratch = self._SCRATCH_XMM2 if alt_scratch else self._SCRATCH_XMM
+        if isinstance(loc, RegLoc):
+            # f32 value homed in a GP register -- see `_xmm`'s RegLoc branch for
+            # the full rationale. The raw bits are moved in via movq; the low 32
+            # bits are the single-precision value the caller's movss-based ops
+            # read.
+            return scratch, encode_movq_xmm_gp(scratch, loc.reg)
         return scratch, encode_movss_rm(scratch, Mem(Reg.RBP, loc.offset))
 
     def _dst_gp(self, result: Any) -> Reg:

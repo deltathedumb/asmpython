@@ -54,6 +54,21 @@ def _scan_body(
                         classes.add(argument.name)
             elif isinstance(expression, A.MethodCall):
                 methods.add(expression.method)
+                # `ClassName.method(...)` -- a @classmethod/@staticmethod called
+                # directly on the class -- keeps that class live. Its receiver is
+                # a bare class name, not a constructed instance, so the `Call`
+                # branch above (which only sees `ClassName(...)` construction and
+                # class-name arguments) never marked it live. Without this, a
+                # class whose ONLY use is such a call had every one of its method
+                # bodies neutralized to `return 0` (the owner-not-live arm of the
+                # dead-body check below), so e.g. `Config.get_version()` returned
+                # 0 instead of reading its class var. Confirmed via
+                # `Config.version` classmethod repro.
+                if (
+                    isinstance(expression.obj, A.Name)
+                    and expression.obj.name in class_names
+                ):
+                    classes.add(expression.obj.name)
                 for argument in expression.args:
                     if isinstance(argument, A.Name) and argument.name in class_names:
                         classes.add(argument.name)
@@ -76,6 +91,17 @@ def _scan_body(
                 # `apply(f, 3, 4)` ran `f`'s stub instead of `f` itself.
                 if expression.name in function_names:
                     functions.add(expression.name)
+                # A bare CLASS reference used as a first-class value -- stored in
+                # a tuple/list, returned, assigned, passed positionally -- keeps
+                # that class live even though it is never constructed here. Its
+                # methods (e.g. a @classmethod dispatched later through the
+                # variable the class flowed into, `for root in (Server, Client):
+                # root.supports(...)`) must survive dead-code neutralization.
+                # Mirrors the function-value case just above; without it the
+                # whole class was treated as dead and every method body stubbed
+                # to `return 0`.
+                if expression.name in class_names:
+                    classes.add(expression.name)
     return functions, classes, methods
 
 
