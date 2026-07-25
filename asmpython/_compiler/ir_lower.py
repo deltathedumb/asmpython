@@ -9191,6 +9191,8 @@ def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     zero = ctx.tmp(PTR)
     ctx.emit(IRInstr("const", zero, [0]))
     none_b = ctx.new_block("anytagnone")
+    rawint_b = ctx.new_block("anytagrawint")
+    heap_b = ctx.new_block("anytagheap")
     live_b = ctx.new_block("anytaglive")
     dictish_b = ctx.new_block("anytagdictish")
     listish_b = ctx.new_block("anytaglistish")
@@ -9198,12 +9200,35 @@ def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     out_ptr = ctx.ensure_slot(f"__anytag_out_{none_b.label}", I64)
     is_none = ctx.tmp(I64)
     ctx.emit(IRInstr("icmp.eq", is_none, [obj_v, zero]))
-    ctx.emit(IRInstr("br.t", None, [is_none, none_b.label, live_b.label]))
+    ctx.emit(IRInstr("br.t", None, [is_none, none_b.label, heap_b.label]))
 
     ctx.switch_to(none_b)
     none_v = ctx.tmp(I64)
     ctx.emit(IRInstr("const", none_v, [NONE_TYPE_ID]))
     ctx.emit(IRInstr("store", None, [none_v, out_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(heap_b)
+    # A nonzero value below the reserved low-address range is a raw scalar (an
+    # ordinary int in an "any" slot -- an unboxed value that was never boxed),
+    # NOT a heap pointer. Dereferencing it (the header/word-2 reads below)
+    # would fault, so report UNTAGGED for it directly. A boxed scalar cell
+    # always lives at a real heap address (>= the threshold), so this never
+    # misclassifies one. (A raw int >= the threshold -- rare -- still reaches
+    # the header probe; the list/dict word-2 discriminator below keeps that
+    # safe against a genuine list/tuple, and a raw int large enough to look
+    # like a heap pointer is an accepted edge the tagging feature doesn't aim
+    # to cover.)
+    thr0 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", thr0, [PTR_THRESHOLD]))
+    is_heap = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.gt", is_heap, [obj_v, thr0]))
+    ctx.emit(IRInstr("br.t", None, [is_heap, live_b.label, rawint_b.label]))
+
+    ctx.switch_to(rawint_b)
+    rawint_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", rawint_v, [UNTAGGED_ID]))
+    ctx.emit(IRInstr("store", None, [rawint_v, out_ptr]))
     ctx.emit(IRInstr("br", None, [end_b.label]))
 
     ctx.switch_to(live_b)
