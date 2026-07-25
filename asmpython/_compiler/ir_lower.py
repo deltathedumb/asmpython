@@ -9147,11 +9147,26 @@ def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     class id for a tagged instance (the pre-existing mechanism), or
     `UNTAGGED_ID` for anything else (an ordinary, never-boxed container --
     ordinary because boxing is only applied to scalars, see `_lower_box_any`).
+
+    An ordinary list/tuple/set is NOT dict-shaped, so probing it with
+    `_abi_dict_get_default` (a hash lookup that dereferences the dict's
+    slot-buffer pointer) would read past the value's real layout and fault.
+    A dict/instance cell (from `_abi_new_instance`) and a list share the first
+    two header words (cap@0, len@8) but diverge at word 2 (offset 16): a dict
+    holds its small TOMBSTONE COUNT there, a list holds its BUFFER POINTER.
+    So guard the lookup with a "does word-2 look like a heap pointer" check --
+    a real tombstone count is a tiny integer, never a heap address -- and
+    report `UNTAGGED_ID` for a list-shaped value instead of dereferencing it
+    as a dict. This is the same low-address discriminator the dynamic-slice
+    subscript uses for an opaque index.
     """
+    PTR_THRESHOLD = 0x10000
     zero = ctx.tmp(PTR)
     ctx.emit(IRInstr("const", zero, [0]))
     none_b = ctx.new_block("anytagnone")
     live_b = ctx.new_block("anytaglive")
+    dictish_b = ctx.new_block("anytagdictish")
+    listish_b = ctx.new_block("anytaglistish")
     end_b = ctx.new_block("anytagend")
     out_ptr = ctx.ensure_slot(f"__anytag_out_{none_b.label}", I64)
     is_none = ctx.tmp(I64)
@@ -9165,6 +9180,24 @@ def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     ctx.emit(IRInstr("br", None, [end_b.label]))
 
     ctx.switch_to(live_b)
+    # word-2 (offset 16): dict tombstone-count vs list buffer-pointer.
+    word2_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", word2_addr, [obj_v, 16]))
+    word2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", word2, [word2_addr]))
+    thresh = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", thresh, [PTR_THRESHOLD]))
+    looks_ptr = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.gt", looks_ptr, [word2, thresh]))
+    ctx.emit(IRInstr("br.t", None, [looks_ptr, listish_b.label, dictish_b.label]))
+
+    ctx.switch_to(listish_b)
+    untagged_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", untagged_v, [UNTAGGED_ID]))
+    ctx.emit(IRInstr("store", None, [untagged_v, out_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(dictish_b)
     miss_v = ctx.tmp(I64)
     ctx.emit(IRInstr("const", miss_v, [UNTAGGED_ID]))
     tag_v = ctx.tmp(I64)
