@@ -7546,6 +7546,15 @@ class SemaAnalyzer:
                 # sentinel, which doubles as asmpython's unknown type. Let the
                 # concrete arm win so the result keeps a useful type.
                 e.inferred_type = ot if bt == "int" else bt
+            elif "float" not in (bt, ot) and "str" not in (bt, ot):
+                # Two different pointer-sized kinds (e.g. `tuple(xs) if c else
+                # set(xs)`, a list-vs-dict guard, an instance-vs-container
+                # branch): both are 8-byte heap pointers, so the result shares
+                # one uniform slot -- take "any" rather than rejecting, the
+                # same leniency the heterogeneous-list and DictLit-value rules
+                # already apply. Only float (xmm register class) and str (reads
+                # assume a real string label) stay a hard mismatch.
+                e.inferred_type = "any"
             else:
                 raise SemaError(
                     f"conditional expression arms have mismatched types ({bt} vs {ot})",
