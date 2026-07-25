@@ -6723,12 +6723,22 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("call", None, ["_abi_dict_update", dict_v, other_v]))
                 continue
             key_ptr = _lower_dict_key(ctx, k)
-            val = _lower_expr(ctx, v)
-            if A.expr_type(v) == "float":
-                # Same int-only-cell constraint as A.AttrAssign/A.ListLit.
-                iv = ctx.tmp(I64)
-                ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
-                val = iv
+            # A value stored into an EXPLICIT `dict[str, object]` literal
+            # (sema stamps `box_values` ONLY for that annotated case, not for
+            # a bare `{...}` whose values merely happen to be mixed -- those
+            # are consumed raw by bare-`dict` readers that never unbox, so
+            # boxing them would break a `d[k] == "x"` compare) is routed
+            # through the store choke point so a scalar value is boxed,
+            # keeping its kind for a later `d[k]` read that auto-unboxes.
+            if getattr(e, "box_values", False):
+                val = _lower_value_into_any_slot(ctx, v)
+            else:
+                val = _lower_expr(ctx, v)
+                if A.expr_type(v) == "float":
+                    # Same int-only-cell constraint as A.AttrAssign/A.ListLit.
+                    iv = ctx.tmp(I64)
+                    ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
+                    val = iv
             ctx.emit(IRInstr("call", None, ["_abi_dict_set", dict_v, key_ptr, val]))
         return dict_v
 
@@ -7667,7 +7677,15 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("br.t", None, [has_v, present_b.label, missing_b.label]))
 
                 ctx.switch_to(missing_b)
-                default_v = _lower_expr(ctx, e.args[1])
+                # The default is stored INTO the dict, so route it through the
+                # store choke point with the dict's OWN value-slot kind (from
+                # `e.obj.value_type`, the same source the IndexAssign store
+                # uses -- NOT `A.expr_type(e)`, which is the setdefault call's
+                # result type and can differ in a narrowed/match context): an
+                # object-valued dict boxes a scalar so a later `d[k]` read
+                # re-unboxes the same cell.
+                _sd_vt = getattr(e.obj, "value_type", "int")
+                default_v = _lower_for_slot(ctx, e.args[1], _sd_vt)
                 ctx.emit(IRInstr("call", None, ["_abi_dict_set", obj_v, key_v, default_v]))
                 ctx.emit(IRInstr("store", None, [default_v, res_ptr]))
                 ctx.emit(IRInstr("br", None, [end_b.label]))

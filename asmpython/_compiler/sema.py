@@ -5559,6 +5559,19 @@ class SemaAnalyzer:
                     if aval == "any":
                         value_type = "any"
                         self._explicit_object_dicts.add(target)
+                        # Flag the RHS literal so ir_lower boxes each scalar
+                        # value at construction (an EXPLICIT
+                        # `{...}: dict[str, object]`). Gated by this flag, NOT
+                        # value_type=="any", so a bare `{...}` whose values are
+                        # merely mixed (also value_type "any") is NOT boxed --
+                        # those are consumed raw by bare-`dict` readers that
+                        # never unbox, and boxing would break a `d[k] == "x"`
+                        # compare (confirmed: 424_match_structural). Only this
+                        # annotated-object-dict case has an "any"-typed reader
+                        # on the variable that will unbox.
+                        if isinstance(value, A.DictLit):
+                            value.value_type = "any"
+                            value.box_values = True
                     else:
                         self._explicit_object_dicts.discard(target)
                     scope.add(
