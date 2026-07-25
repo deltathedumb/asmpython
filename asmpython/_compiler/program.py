@@ -1570,6 +1570,204 @@ def _project_root(entry: Path) -> Path:
     return package_root
 
 
+def _collect_referenced_names(stmts: list, out: set[str]) -> None:
+    """Collect every bare `Name` read and direct `Call` callee name reachable
+    from a statement list (recursively, through all dataclass/list/dict AST
+    fields). Used to decide whether a candidate-for-renaming global is truly
+    module-private (referenced only inside its own defining module)."""
+    def walk(value) -> None:
+        if isinstance(value, A.Name):
+            out.add(value.name)
+            return
+        if isinstance(value, A.Call):
+            out.add(value.func)
+        if dataclasses.is_dataclass(value):
+            for fld in dataclasses.fields(value):
+                walk(getattr(value, fld.name))
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+
+    for s in stmts:
+        walk(s)
+
+
+def _rewrite_name_refs_in_stmts(stmts: list, renames: dict[str, str]) -> None:
+    """Rewrite every bare `Name`/`Call`-callee reference to a renamed global,
+    recursively through a statement list. Only bare name reads and direct
+    call targets are rewritten (an attribute name `obj.field` or a dict/str
+    key is never a global reference). Local rebinds are NOT tracked -- a
+    module-private global chosen for renaming here is, by construction, only
+    ever referenced (never shadowed by a same-named local in the same module,
+    which would make it not module-private in the first place)."""
+    def rw_expr(value) -> None:
+        if isinstance(value, A.Name):
+            if value.name in renames:
+                value.name = renames[value.name]
+            return
+        if isinstance(value, A.Call):
+            if value.func in renames:
+                value.func = renames[value.func]
+        if dataclasses.is_dataclass(value):
+            for fld in dataclasses.fields(value):
+                rw_expr(getattr(value, fld.name))
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                rw_expr(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                rw_expr(item)
+
+    for s in stmts:
+        rw_expr(s)
+
+
+def _rename_colliding_module_globals(
+    entry: A.Module,
+    entry_path: Path,
+    parsed: dict[str, A.Module],
+    discovery_order: list[str],
+    root: Path,
+) -> None:
+    """Give same-named module-level VALUE globals from different merged modules
+    distinct internal names, mirroring the class-collision renaming.
+
+    Whole-program merging flattens every module into one namespace. Two modules
+    that each define a top-level `_BINARY_OPS = {...}` (with *different*
+    contents -- e.g. one keyed by ast node classes, another by operator
+    strings) previously collapsed to a single global ("first wins", see
+    `_merge_import_bindings`), silently giving one module the other's dict and
+    breaking every lookup. Classes already avoid this via
+    `__asmpython_module_N` renaming; value globals now get the same treatment.
+
+    Only a genuinely MODULE-PRIVATE global is renamed: one no other module
+    imports by that name (renaming a shared/exported value would break its
+    importers, which `_materialize_value_imports` wires up by the original
+    name). The first-discovered definition keeps the bare name; each later
+    colliding module's copy is renamed and that module's own function/method/
+    body references are rewritten to match."""
+    # name -> list of module paths (in discovery order) that define it as a
+    # top-level PLAIN-VALUE global. Deliberately restricted to plain data
+    # initializers (dict/list/tuple/set/str/int/float literals and the like):
+    # a class/function/exception name, or a name bound to a call result, may be
+    # referenced across module boundaries through the flattened namespace and
+    # must never be renamed out from under those references. `__dunder__` names
+    # (`__all__`, `__version__`, ...) are also excluded -- they're conventional
+    # module metadata, not the differently-valued same-name data globals this
+    # pass exists to separate.
+    def _is_plain_value_assign(stmt) -> bool:
+        if not (isinstance(stmt, A.Assign) and isinstance(stmt.target, str)):
+            return False
+        if stmt.target.startswith("__") and stmt.target.endswith("__"):
+            return False
+        return isinstance(
+            stmt.value,
+            (A.DictLit, A.ListLit, A.TupleLit, A.SetLit, A.StrLit, A.IntLit, A.FloatLit),
+        )
+
+    # name -> the DISTINCT module paths that define it (a name reassigned
+    # several times within one module is still a single definer -- collect a
+    # per-module name set first, so `i = 0` twice in one file doesn't look
+    # like a two-module collision and get spuriously renamed).
+    definers: dict[str, list[str]] = {}
+    for mod_path in discovery_order:
+        mod = parsed.get(mod_path)
+        if mod is None:
+            continue
+        local_names: set[str] = set()
+        for stmt in mod.body:
+            if _is_plain_value_assign(stmt):
+                local_names.add(stmt.target)
+        for name in local_names:
+            definers.setdefault(name, []).append(mod_path)
+
+    # Names any module imports as a value (`from .x import NAME`): renaming
+    # these would break the import wiring, so they're off-limits.
+    imported_value_names: set[str] = set()
+    for mod_path in discovery_order:
+        mod = parsed.get(mod_path)
+        if mod is None:
+            continue
+        for stmt in mod.body:
+            if isinstance(stmt, A.FromImport):
+                orig = stmt.orig_names if stmt.orig_names else stmt.names
+                for nm in orig:
+                    imported_value_names.add(nm)
+                for nm in stmt.names:
+                    imported_value_names.add(nm)
+
+    # A name referenced by a module that does NOT define it is shared through
+    # the flattened namespace -- renaming any one copy would strand that
+    # reference. Only rename a name that is truly module-private: referenced
+    # exclusively inside its own definers. Collect, per name, the set of
+    # module paths that reference it anywhere (body/funcs/methods).
+    #
+    # CRITICAL: the ENTRY module's `.funcs`/`.classes` have, by this point,
+    # already absorbed every OTHER module's merged funcs/classes (the queue
+    # loop did `entry.funcs.append(f)`). Scanning them would attribute a
+    # merged function's references to the entry, making every merged private
+    # global look cross-referenced ("referenced by the entry"). So for the
+    # entry, scan only its own top-level `body`; each merged func's real
+    # references are already counted under its ORIGIN module below.
+    entry_key = str(entry_path.resolve())
+    referencing_modules: dict[str, set[str]] = {}
+    for mod_path in discovery_order:
+        mod = parsed.get(mod_path)
+        if mod is None:
+            continue
+        refs: set[str] = set()
+        _collect_referenced_names(mod.body, refs)
+        if str(Path(mod_path).resolve()) == entry_key:
+            for nm in refs:
+                referencing_modules.setdefault(nm, set()).add(mod_path)
+            continue
+        for f in mod.funcs:
+            _collect_referenced_names(f.body, refs)
+        for c in mod.classes:
+            for m in c.methods:
+                _collect_referenced_names(m.body, refs)
+        for nm in refs:
+            referencing_modules.setdefault(nm, set()).add(mod_path)
+
+    used_internal: set[str] = set()
+    for name, paths in definers.items():
+        if len(paths) < 2 or name in imported_value_names:
+            continue
+        # Module-privacy check: every module that references this name must be
+        # one of its definers. If any other module reads it (via the flat
+        # namespace), renaming a copy would break that read -- skip it.
+        definer_set = set(paths)
+        if not referencing_modules.get(name, set()) <= definer_set:
+            continue
+        # First definer keeps the bare name; rename the rest.
+        for idx, mod_path in enumerate(paths[1:], start=1):
+            mod = parsed.get(mod_path)
+            if mod is None:
+                continue
+            module_index = discovery_order.index(mod_path)
+            internal = f"{name}__asmpython_modvar_{module_index}"
+            suffix = 1
+            while internal in used_internal or internal in definers:
+                internal = f"{name}__asmpython_modvar_{module_index}_{suffix}"
+                suffix += 1
+            used_internal.add(internal)
+            renames = {name: internal}
+            # Rewrite the module's own defining assign + every reference in its
+            # body, funcs, and methods.
+            for s in mod.body:
+                if isinstance(s, A.Assign) and s.target == name:
+                    s.target = internal
+            _rewrite_name_refs_in_stmts(mod.body, renames)
+            for f in mod.funcs:
+                _rewrite_name_refs_in_stmts(f.body, renames)
+            for c in mod.classes:
+                for m in c.methods:
+                    _rewrite_name_refs_in_stmts(m.body, renames)
+
+
 def _toplevel_value_assigns(module: A.Module) -> dict[str, A.Stmt]:
     """Top-level `name = <expr>` (and annotated) assignments in a module, keyed
     by target name. These are the module's exported *values* — a sibling that
@@ -1734,6 +1932,9 @@ def load_program(
         func_names,
         func_origin,
         active_extensions,
+    )
+    _rename_colliding_module_globals(
+        entry, entry_path, parsed, discovery_order, root
     )
     _merge_import_bindings(entry, parsed, discovery_order)
     _materialize_value_imports(entry, parsed, discovery_order, root, class_origin, func_origin)
