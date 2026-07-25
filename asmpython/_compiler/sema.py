@@ -1746,6 +1746,18 @@ class SemaAnalyzer:
             return ("list", "int", None, None)
         if isinstance(value, A.Call) and value.func in self.classes:
             return (f"instance:{value.func}", None, None, None)
+        if isinstance(value, A.Name) and (
+            value.name in self.classes
+            or value.name in BUILTIN_EXCEPTIONS
+            or value.name in BUILTIN_TYPE_NAMES
+        ):
+            # A bare class name passed as an argument is a first-class `type`
+            # value (its RTTI id) -- lets an unannotated parameter that only
+            # ever receives a class (a registry's `register(self, name, cls)`,
+            # `cls.attr = ...`) be inferred `type` rather than the `int`
+            # last-resort, so attribute stores/reads through it dispatch on the
+            # class object instead of faulting on the raw id.
+            return ("type", None, None, None)
         if isinstance(value, A.Comprehension):
             # `[Trite() for _ in range(16)]` -- elt's syntactic type becomes
             # the produced list's element kind, same as a literal list would
@@ -6551,7 +6563,11 @@ class SemaAnalyzer:
                 return
             self._check_expr(s.obj, scope)
             obj_t: str = A.expr_type(s.obj)
-            if not obj_t.startswith("instance:") and obj_t not in ("any", "module", "int"):
+            # `type` is allowed: `cls.attr = v` sets a class attribute (CPython
+            # allows it -- a registry's `cls.__somnia_type__ = name`). ir_lower
+            # dispatches it on the runtime class id to the class's mutable
+            # namespace dict, like a literal `ClassName.attr = v`.
+            if not obj_t.startswith("instance:") and obj_t not in ("any", "module", "int", "type"):
                 raise SemaError(
                     f"cannot assign attribute on {obj_t}",
                     s.pos,
@@ -7211,7 +7227,9 @@ class SemaAnalyzer:
             return
         self._check_expr(t.obj, scope)
         obj_t: str = A.expr_type(t.obj)
-        if not obj_t.startswith("instance:") and obj_t not in ("any", "module", "int"):
+        # `type` allowed: `cls.attr = v` sets a class attribute (see the
+        # matching guard in the A.AttrAssign statement handler).
+        if not obj_t.startswith("instance:") and obj_t not in ("any", "module", "int", "type"):
             raise SemaError(f"cannot assign attribute on {obj_t}", pos, ErrorCode.E_NO_ATTR)
         if obj_t.startswith("instance:"):
             cls_name = obj_t.split(":", 1)[1]

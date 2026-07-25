@@ -145,6 +145,31 @@ def _live_definitions(mod: A.Module) -> tuple[set[str], set[str], set[str]]:
     for name, definition in functions.items():
         if getattr(definition, "is_public_export", False):
             live_functions.add(name)
+    # Every class's class-var DEFAULT initializers (`name = Property(...)` in a
+    # class body) are evaluated at module startup for EVERY class, regardless of
+    # whether that class is ever constructed -- lower_module emits them all as
+    # __cv_<Class>__<var> init statements. So a class/function referenced only
+    # from such a default (e.g. `Property` built solely by other classes' field
+    # defaults) is genuinely reachable; scan those initializer expressions as
+    # roots too. Missing this left `Property____init__` an undefined symbol
+    # (nothing else constructs it) and, where a partial reference did link,
+    # neutralized initializers that startup then ran -- reading through the
+    # stubbed result and faulting.
+    for owner in mod.classes:
+        for _cvname, _cvannot, cvdefault in getattr(owner, "class_vars", []) or []:
+            if cvdefault is None:
+                continue
+            for expression in _walk_expression(cvdefault):
+                if isinstance(expression, A.Call):
+                    if expression.func in class_names:
+                        live_classes.add(expression.func)
+                    if expression.func in function_names:
+                        live_functions.add(expression.func)
+                elif isinstance(expression, A.Name):
+                    if expression.name in class_names:
+                        live_classes.add(expression.name)
+                    if expression.name in function_names:
+                        live_functions.add(expression.name)
     for class_name, owner in classes.items():
         class_public = getattr(owner, "is_public_export", False)
         if class_public:
