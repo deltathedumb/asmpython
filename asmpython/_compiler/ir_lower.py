@@ -6866,6 +6866,27 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(F64 if result_ty == "float" else I64)
             ctx.emit(IRInstr("load", v, [addr]))
             return v
+        if obj_ty == "any" and A.expr_type(e.index) == "str":
+            # `opaque[strkey]` -- an "any"-typed object indexed by a STRING is
+            # a dict access at runtime (a list/tuple only ever takes an int
+            # index). The generic "any is a list" fallthrough below would run
+            # the string key through the integer-index list path and read
+            # garbage / fault. Route it through the same dict-get the
+            # `obj_ty == "dict"` case uses. Reached for a heterogeneous list's
+            # elements (`items: list = [some_tuple, some_dict]; items[1][k]`),
+            # whose element static type collapses to "any".
+            res_is_float = A.expr_type(e) == "float"
+            obj_v = _lower_expr(ctx, e.obj)
+            key_v = _lower_dict_key(ctx, e.index)
+            zero = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", zero, [0]))
+            v = ctx.tmp(I64)
+            ctx.emit(IRInstr("call", v, ["_abi_dict_get_default", obj_v, key_v, zero]))
+            if res_is_float:
+                fv = ctx.tmp(F64)
+                ctx.emit(IRInstr("bitcast_i2f", fv, [v]))
+                return fv
+            return v
         if obj_ty not in ("list", "tuple", "any"):
             raise LowerError(f"unsupported expr Subscript ({obj_ty})")
         # obj_ty == "any" (e.g. a lambda parameter -- sema.py seeds every

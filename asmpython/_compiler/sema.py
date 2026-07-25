@@ -7618,32 +7618,21 @@ class SemaAnalyzer:
                 if seen is None or seen == "any":
                     seen = et
                 elif seen != et:
-                    # Two different element kinds. A nested container (list/
-                    # dict/tuple/set/instance) mixed with plain "int" collapses
-                    # to opaque ("any") -- both are 8-byte slots (a heap pointer
-                    # or a raw integer), the same leniency DictLit already
-                    # applies to its values, e.g. an ELF header literal mixing
-                    # a nested byte-array list with scalar int fields. Anything
-                    # else (str mixed with int/a container, or any float mix)
-                    # stays a hard error: str's "any"-typed read sites assume a
-                    # real string label, and a float lives in a different
-                    # register class than every pointer-sized kind.
-                    is_container = (
-                        lambda t: t in ("list", "dict", "tuple", "set")
-                        or t.startswith("instance:")
-                    )
-                    if (
-                        "float" not in (seen, et)
-                        and "str" not in (seen, et)
-                        and (
-                            (seen == "int" and is_container(et))
-                            or (et == "int" and is_container(seen))
-                            or (
-                                seen.startswith("instance:")
-                                and et.startswith("instance:")
-                            )
-                        )
-                    ):
+                    # Two different element kinds. Every pointer-sized kind --
+                    # "int" (a raw integer, or asmpython's unknown sentinel) and
+                    # every heap-pointer kind (list/dict/tuple/set/instance) --
+                    # occupies the same uniform 8-byte slot, so any MIX of them
+                    # collapses to opaque ("any") rather than erroring: e.g. a
+                    # list holding both tuples and dicts (a bytecode constant
+                    # pool, an AST node list), or an ELF header literal mixing a
+                    # nested byte-array list with scalar int fields. Reads off
+                    # such a list stay lenient ("any"). The same leniency DictLit
+                    # already applies to its values. Only "float" (lives in an
+                    # xmm register, a different class than every pointer-sized
+                    # kind) and "str" (its "any"-typed read sites assume a real
+                    # string label) stay hard errors when mixed with a different
+                    # kind -- a genuine register-class / representation clash.
+                    if "float" not in (seen, et) and "str" not in (seen, et):
                         seen = "any"
                         continue
                     raise SemaError(
