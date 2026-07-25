@@ -3571,13 +3571,14 @@ def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr, repr_mode: bool = False) -> IRV
         return out
     if isinstance(e, A.FString):
         return _lower_fstring(ctx, e)
-    if ty == "any" and not repr_mode:
+    if ty == "any":
         # An opaque value that may be a boxed scalar: format on its runtime
         # tag from the RAW (still-boxed) cell (`_lower_expr_inner`). A
         # never-boxed value falls through to the same `_abi_fmt_elem` path
-        # inside the formatter, unchanged.
+        # inside the formatter, unchanged. repr_mode adds the surrounding
+        # quotes for a boxed str (int/float/bool/None repr == str).
         raw = _lower_expr_inner(ctx, e)
-        return _lower_format_any_value(ctx, raw)
+        return _lower_format_any_value(ctx, raw, repr_mode=repr_mode)
     val = _lower_expr(ctx, e)
     kind = ctx.tmp(I64)
     ctx.emit(IRInstr("const", kind, [0]))
@@ -8350,7 +8351,10 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("global_addr", key_ptr, [name]))
         zero = ctx.tmp(I64)
         ctx.emit(IRInstr("const", zero, [0]))
-        v = ctx.tmp(I64)
+        # An "any"-typed field holds a box-or-raw pointer-sized value; type it
+        # PTR so the read choke point (`_lower_expr`) auto-unboxes it (its gate
+        # is `v.type is PTR`). A concretely-typed field stays I64 as before.
+        v = ctx.tmp(PTR if A.expr_type(e) == "any" else I64)
         ctx.emit(IRInstr("call", v, ["_abi_dict_get_default", obj_val, key_ptr, zero]))
         if A.expr_type(e) == "float":
             # Every dict/instance-attribute cell is a plain 8-byte int slot
@@ -9562,7 +9566,7 @@ def _lower_unbox_any(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     return out
 
 
-def _lower_format_any_value(ctx: "_FuncCtx", val_v: IRValue) -> IRValue:
+def _lower_format_any_value(ctx: "_FuncCtx", val_v: IRValue, repr_mode: bool = False) -> IRValue:
     """Format a possibly-boxed opaque ("any") value to a str, dispatching on
     its runtime tag. `val_v` must be the RAW (still-boxed) cell -- pass the
     `_lower_expr_inner` result.
@@ -9651,6 +9655,17 @@ def _lower_format_any_value(ctx: "_FuncCtx", val_v: IRValue) -> IRValue:
     ctx.emit(IRInstr("br.t", None, [iss, str_b.label, fallback_b.label]))
     ctx.switch_to(str_b)
     sp = _lower_unbox_any(ctx, val_v)
+    if repr_mode:
+        # repr(str) wraps in single quotes, matching `_lower_expr_as_str`'s
+        # own repr path (`'` + text + `'`).
+        q_name = ctx.mctx.intern_str("'")
+        q = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", q, [q_name]))
+        opened = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", opened, ["_abi_str_concat", q, sp]))
+        closed = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", closed, ["_abi_str_concat", opened, q]))
+        sp = closed
     ctx.emit(IRInstr("store", None, [sp, out_ptr]))
     ctx.emit(IRInstr("br", None, [end_b.label]))
 
