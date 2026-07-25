@@ -41,6 +41,15 @@ class Module:
     # Library builders set this so top-level initializers are emitted as a
     # callable module-init symbol instead of being folded into process main.
     force_module_init: bool = False
+    # Module-qualifier names (import aliases) that resolve to a MERGED PROJECT
+    # module -- i.e. `foo` in `import foo` / `from . import foo` where foo.py
+    # was actually merged into this whole program and contributes classes.
+    # Set by program.py's load_program during the class-merge pass. Lets sema
+    # tell a real project module (`native_ast.MatchAs()` IS the merged class)
+    # from an external CPython module whose leaf name merely collides with a
+    # merged class (`ast.MatchAs(...)` must stay an opaque module call, not be
+    # rewritten to the user class's constructor).
+    project_module_qualifiers: set = field(default_factory=set)
 
 
 @dataclass

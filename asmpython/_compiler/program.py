@@ -1387,6 +1387,13 @@ def _merge_classes_with_module_identity(
         direct, qualified = _class_import_bindings(
             module, module_path_obj, root, class_names_by_module
         )
+        # Every `qualified` key is a module-qualifier alias that resolved to a
+        # real merged project module carrying classes (see
+        # _class_import_bindings, which only records a qualifier whose target
+        # path is in class_names_by_module). Collect them so sema can tell a
+        # genuine `projmod.Class()` construction from an opaque external
+        # `ast.Class(...)` whose leaf merely collides with a merged class.
+        entry.project_module_qualifiers.update(qualified.keys())
         for cls in module.classes:
             if cls.parent is None:
                 continue

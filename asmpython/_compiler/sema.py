@@ -8619,6 +8619,23 @@ class SemaAnalyzer:
                 and e.obj.name not in self.imported_modules
                 and scope.types.get(e.obj.name) == "module"
                 and (e.method in self.classes or e.method in self.funcs)
+                and (
+                    # Only rewrite `mod.Thing()` -> `Thing()` when `mod` is a
+                    # genuinely MERGED PROJECT module (its own classes/funcs
+                    # were flattened into this program). An external CPython
+                    # module used opaquely (e.g. `import ast; ast.MatchAs(...)`)
+                    # whose leaf name merely collides with a merged user class
+                    # must NOT be retargeted at that class's constructor --
+                    # doing so enforced the user class's arity against the
+                    # external call and rejected valid code (`ast.MatchAs(
+                    # name=x)`, where ast's own MatchAs has an optional
+                    # pattern). A function call (`ospath.join(...)`) has no such
+                    # collision risk, so it stays permitted regardless, keeping
+                    # the whole-program stdlib-function dispatch this rewrite
+                    # was originally for.
+                    e.method in self.funcs
+                    or e.obj.name in getattr(self.mod, "project_module_qualifiers", set())
+                )
             ):
                 e.__class__ = A.Call  # type: ignore[assignment]
                 e.func = e.method  # type: ignore[attr-defined]
