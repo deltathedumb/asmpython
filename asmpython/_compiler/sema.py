@@ -4684,7 +4684,13 @@ class SemaAnalyzer:
         if t == "list":
             el = self._list_el_type(e, scope)
             return "any" if el == "?" else el
-        if t in ("str", "dict"):
+        if t in ("str", "dict", "set"):
+            # Iterating a str yields its chars; a dict/set yields its keys --
+            # all str-shaped values (see A.For's own generic set/dict
+            # iteration, which types the loop var "str" for the same reason).
+            # `set` was previously missing here, so a set-source comprehension
+            # (`[len(x) for x in someset]`) typed its loop var "int" and
+            # mis-lowered every use of it.
             return "str"
         if t == "tuple":
             ets = self._tuple_elem_types(e, scope)
@@ -7839,7 +7845,13 @@ class SemaAnalyzer:
             if it_t == "list":
                 el = self._list_el_type(e.iter, scope)
             elif it_t in ("str", "dict", "set"):
-                el = "str" if it_t in ("str", "dict") else "any"  # str chars / dict keys / set members (any)
+                # str chars / dict keys / set members are all str-shaped
+                # values in this backend (`_abi_dict_keys` yields the keys as
+                # strings; A.For's own generic set/dict iteration types its
+                # loop var "str" identically). `set` previously bound the
+                # loop var "any", which mis-typed every use of it in the
+                # element expression (e.g. `len(x)` read garbage).
+                el = "str"
             elif it_t == "tuple":
                 ets = A.tuple_element_types(e.iter)
                 el = ets[0] if ets else "int"

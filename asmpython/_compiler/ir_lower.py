@@ -1719,12 +1719,24 @@ def _lower_comprehension(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
     iter_ty = A.expr_type(e.iter)
     if iter_ty == "any":
         iter_ty = "list"
+    # A dict/set comprehension source iterates its KEYS -- convert to the
+    # plain key-list via `_abi_dict_keys` (exactly as A.For's generic
+    # iterable path does for `for x in someset`) and iterate that list. Was
+    # a hard "unsupported expr Comprehension (iter set)"/(iter dict) error.
+    iter_from_keys = iter_ty in ("dict", "set")
+    if iter_from_keys:
+        iter_ty = "list"
     if iter_ty not in ("str", "list", "tuple"):
         raise LowerError(f"unsupported expr Comprehension (iter {iter_ty})")
     if A.expr_type(e.elt) == "float":
         raise LowerError("unsupported expr Comprehension (float element)")
 
-    iter_v = _lower_expr(ctx, e.iter)
+    if iter_from_keys:
+        src_v = _lower_expr(ctx, e.iter)
+        iter_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", iter_v, ["_abi_dict_keys", src_v]))
+    else:
+        iter_v = _lower_expr(ctx, e.iter)
     iter_ptr = ctx.ensure_slot(f"__comp_iter_{id(e)}", ir_type_for(iter_ty))
     ctx.emit(IRInstr("store", None, [iter_v, iter_ptr]))
 
@@ -1786,7 +1798,15 @@ def _lower_comprehension(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
         var_ty = PTR
     else:
         elem_addr = _list_elem_addr(ctx, body_iter_v, body_idx_v)
-        elem_kind = "any" if A.expr_type(e.iter) == "any" else (getattr(e.iter, "list_el_type", "int") or "int")
+        if iter_from_keys:
+            # `_abi_dict_keys` yields the set/dict keys as str-shaped values
+            # -- mirror A.For's generic set/dict iteration, which types the
+            # loop var "str" for exactly this reason (see its `el_ty = "str"`
+            # for dict/set). A non-str key kind isn't distinguished by the
+            # key-list ABI, so "str" is the correct, For-consistent choice.
+            elem_kind = "str"
+        else:
+            elem_kind = "any" if A.expr_type(e.iter) == "any" else (getattr(e.iter, "list_el_type", "int") or "int")
         var_ty = ir_type_for(elem_kind)
         elem_v = ctx.tmp(var_ty)
         ctx.emit(IRInstr("load", elem_v, [elem_addr]))
