@@ -760,6 +760,104 @@ def _lower_membership_any(ctx: _FuncCtx, needle_e: A.Expr, hay_e: A.Expr, negate
     return raw
 
 
+def _lower_slice_any(ctx: _FuncCtx, e: A.Subscript, sentinel_min: int, sentinel_max: int) -> IRValue:
+    """Slice `obj[a:b(:c)]` when obj's static type is opaque ("any").
+
+    Dispatches on the runtime shape -- a str (identified by the scalar-box
+    tag read off the still-boxed cell) slices via `_abi_str_slice(_step)`, a
+    list/tuple via `_abi_list_slice(_step)` -- exactly as CPython slices by
+    type. Each arm applies that type's own missing-bound defaults (str: 0 /
+    strlen for no-step, SENTINEL_MIN for step; list: SENTINEL_MIN /
+    SENTINEL_MAX). Both return a pointer, carried fine by the "any" result
+    type. The index sub-expressions are lowered once, in the shared
+    pre-header, so each is emitted exactly once regardless of which arm runs.
+    """
+    STR_TAG = BUILTIN_TYPE_IDS["str"]
+    sl = e.index
+    has_step = sl.step is not None
+
+    hay_boxed = _lower_expr_inner(ctx, e.obj)
+    tag_v = _lower_read_any_tag(ctx, hay_boxed)
+    obj_v = _lower_unbox_any(ctx, hay_boxed)
+
+    # Lower the explicit bounds once (a missing bound is filled per-arm since
+    # str and list use different sentinels/defaults).
+    start_present = sl.start is not None
+    stop_present = sl.stop is not None
+    start_expr_v = _lower_expr(ctx, sl.start) if start_present else None
+    stop_expr_v = _lower_expr(ctx, sl.stop) if stop_present else None
+    step_v = _lower_expr(ctx, sl.step) if has_step else None
+
+    obj_ptr = ctx.ensure_slot(f"__sliceany_obj_{id(e)}", PTR)
+    res_ptr = ctx.ensure_slot(f"__sliceany_res_{id(e)}", PTR)
+    ctx.emit(IRInstr("store", None, [obj_v, obj_ptr]))
+
+    str_b = ctx.new_block("sliceanystr")
+    list_b = ctx.new_block("sliceanylist")
+    end_b = ctx.new_block("sliceanyend")
+
+    str_tag_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", str_tag_v, [STR_TAG]))
+    is_str = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_str, [tag_v, str_tag_v]))
+    ctx.emit(IRInstr("br.t", None, [is_str, str_b.label, list_b.label]))
+
+    # --- str arm ---
+    ctx.switch_to(str_b)
+    s_obj = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", s_obj, [obj_ptr]))
+    if has_step:
+        s_start = start_expr_v if start_present else _const_i64(ctx, sentinel_min)
+        s_stop = stop_expr_v if stop_present else _const_i64(ctx, sentinel_min)
+        sv = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", sv, ["_abi_str_slice_step", s_obj, s_start, s_stop, step_v]))
+    else:
+        if start_present:
+            s_start = start_expr_v
+        else:
+            s_start = _const_i64(ctx, 0)
+        if stop_present:
+            s_stop = stop_expr_v
+        else:
+            s_stop = ctx.tmp(I64)
+            ctx.emit(IRInstr("call", s_stop, ["strlen", s_obj]))
+        sv = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", sv, ["_abi_str_slice", s_obj, s_start, s_stop]))
+    # Re-box the str result so its runtime kind survives into the "any"
+    # result slot (a raw str pointer would read UNTAGGED downstream and be
+    # mis-formatted as an int). The list/tuple arm stays raw -- containers are
+    # never boxed (see `_lower_box_any`), matching the uniform invariant.
+    sv_boxed = _lower_box_any(ctx, sv, "str", None)
+    ctx.emit(IRInstr("store", None, [sv_boxed, res_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    # --- list/tuple arm ---
+    ctx.switch_to(list_b)
+    l_obj = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", l_obj, [obj_ptr]))
+    l_start = start_expr_v if start_present else _const_i64(ctx, sentinel_min)
+    l_stop = stop_expr_v if stop_present else _const_i64(ctx, sentinel_max)
+    if has_step:
+        lv = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", lv, ["_abi_list_slice_step", l_obj, l_start, l_stop, step_v]))
+    else:
+        lv = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", lv, ["_abi_list_slice", l_obj, l_start, l_stop]))
+    ctx.emit(IRInstr("store", None, [lv, res_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(end_b)
+    out = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", out, [res_ptr]))
+    return out
+
+
+def _const_i64(ctx: _FuncCtx, value: int) -> IRValue:
+    v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", v, [value]))
+    return v
+
+
 def _lower_membership(ctx: _FuncCtx, needle_e: A.Expr, hay_e: A.Expr, negate: bool) -> IRValue:
     hay_ty = A.expr_type(hay_e)
     if hay_ty in ("dict", "set"):
@@ -7099,6 +7197,14 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 v = ctx.tmp(PTR)
                 ctx.emit(IRInstr("call", v, ["_abi_str_slice_step", obj_v, start_v, stop_v, step_v]))
                 return v
+            if obj_ty == "any":
+                # Slice of an opaque ("any") value -- a param, an attribute
+                # (e.g. `self.__mro__[1:]`), an object-typed element. The
+                # value may at runtime be a str or a list/tuple, so dispatch
+                # on its runtime shape (str-box tag vs raw container) exactly
+                # as CPython slices by type. Both arms return a pointer, which
+                # the "any" result type carries fine. Was a hard LowerError.
+                return _lower_slice_any(ctx, e, SENTINEL_MIN, SENTINEL_MAX)
             raise LowerError("unsupported expr Subscript (slice)")
         obj_ty = A.expr_type(e.obj)
         if obj_ty == "str":
