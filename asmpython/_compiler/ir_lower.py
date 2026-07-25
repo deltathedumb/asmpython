@@ -5901,7 +5901,26 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("call", None, ["printf", fmt_ptr]))
         else:
             fmt_parts = ["%s"] * len(e.args)
-            call_args = [_lower_expr_as_str(ctx, arg) for arg in e.args]
+            # Each argument is coerced to a str, then SPILLED to a stack slot
+            # before the next argument is lowered: an "any"-typed argument's
+            # str coercion goes through `_lower_format_any_value`, whose
+            # tag-dispatch introduces basic-block branches, across which an
+            # earlier argument's result (held only in a register) is not
+            # guaranteed to survive -- without the spill the first of
+            # `print(x, y)` came out as garbage/"(null)". Reload all just
+            # before the printf call. (Same hazard the str-concat lhs spill
+            # addresses.)
+            arg_slots: list = []
+            for i, arg in enumerate(e.args):
+                s_v = _lower_expr_as_str(ctx, arg)
+                slot = ctx.ensure_slot(f"__printarg_{i}_{id(e)}", PTR)
+                ctx.emit(IRInstr("store", None, [s_v, slot]))
+                arg_slots.append(slot)
+            call_args = []
+            for slot in arg_slots:
+                a_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", a_v, [slot]))
+                call_args.append(a_v)
             fmt_name = ctx.mctx.intern_str(sep_str.join(fmt_parts) + end_str)
             fmt_ptr = ctx.tmp(PTR)
             ctx.emit(IRInstr("global_addr", fmt_ptr, [fmt_name]))
@@ -9364,13 +9383,30 @@ def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     ctx.emit(IRInstr("br", None, [end_b.label]))
 
     ctx.switch_to(heap_b)
-    # A nonzero value below the reserved low-address range is a raw scalar (an
-    # ordinary int in an "any" slot), NOT a heap pointer. Report UNTAGGED
-    # without dereferencing it.
+    # Before dereferencing `obj_v` as a possible boxed cell, require BOTH:
+    #   (1) obj_v > PTR_THRESHOLD -- rejects small raw ints;
+    #   (2) obj_v is 8-byte aligned -- every real heap object (box/list/dict/
+    #       instance/string; all malloc- or zalloc-allocated) is at least
+    #       pointer-aligned, so a value with low bits set (a raw int like
+    #       0x160e72421ba2) CANNOT be a real object pointer.
+    # A raw int that passes (1) but fails (2) reports UNTAGGED instead of
+    # faulting on `[obj_v]`. This is what keeps the read-side auto-unbox from
+    # crashing on the pointer-sized raw values that flow through an "any"
+    # slot in code that hasn't (yet) been made to box at every entry.
     thr0 = ctx.tmp(I64)
     ctx.emit(IRInstr("const", thr0, [PTR_THRESHOLD]))
+    gt_thr = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.gt", gt_thr, [obj_v, thr0]))
+    seven = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", seven, [7]))
+    low_bits = ctx.tmp(I64)
+    ctx.emit(IRInstr("iand", low_bits, [obj_v, seven]))
+    zero_lb = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero_lb, [0]))
+    aligned = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", aligned, [low_bits, zero_lb]))
     is_heap = ctx.tmp(I64)
-    ctx.emit(IRInstr("icmp.gt", is_heap, [obj_v, thr0]))
+    ctx.emit(IRInstr("iand", is_heap, [gt_thr, aligned]))
     ctx.emit(IRInstr("br.t", None, [is_heap, boxcheck_b.label, rawint_b.label]))
 
     ctx.switch_to(rawint_b)
