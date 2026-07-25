@@ -7556,14 +7556,20 @@ class SemaAnalyzer:
                 # sentinel, which doubles as asmpython's unknown type. Let the
                 # concrete arm win so the result keeps a useful type.
                 e.inferred_type = ot if bt == "int" else bt
-            elif "float" not in (bt, ot) and "str" not in (bt, ot):
+            elif "float" not in (bt, ot):
                 # Two different pointer-sized kinds (e.g. `tuple(xs) if c else
-                # set(xs)`, a list-vs-dict guard, an instance-vs-container
-                # branch): both are 8-byte heap pointers, so the result shares
-                # one uniform slot -- take "any" rather than rejecting, the
-                # same leniency the heterogeneous-list and DictLit-value rules
-                # already apply. Only float (xmm register class) and str (reads
-                # assume a real string label) stay a hard mismatch.
+                # set(xs)`, a list-vs-dict guard, `some_instance if c else
+                # "name"`): all are 8-byte pointers (heap object or str label),
+                # so the result shares one uniform slot -- take "any" rather
+                # than rejecting, the same leniency the heterogeneous-list and
+                # DictLit-value rules already apply. The int case is already
+                # handled above (int doubles as the unknown sentinel and picks
+                # the concrete arm), so neither side is int here. Only float
+                # (an xmm-register value, a genuine register-class clash with
+                # every pointer-sized kind) stays a hard mismatch. A str arm
+                # collapsing to "any" means a later use reads it opaquely (the
+                # same well-understood "any"-formatting leniency everywhere),
+                # not a crash.
                 e.inferred_type = "any"
             else:
                 raise SemaError(
