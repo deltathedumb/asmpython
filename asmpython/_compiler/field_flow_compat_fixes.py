@@ -611,10 +611,25 @@ def _annotate_object_fields(mod: A.Module) -> None:
                 parents,
             )
             if isinstance(node.value, A.Name):
-                inferred = _common_type(
-                    parameter_values.get(node.value.name, []),
-                    parents,
-                ) or inferred
+                # Narrow `self.x = param` from the types seen at construction
+                # call sites ONLY when `param` has no explicit annotation. An
+                # explicitly-annotated parameter -- above all `object`/`Any`
+                # (declared type "any") -- must keep its declared type: a
+                # `def __init__(self, v: object)` deliberately accepts any
+                # kind, so a `T("hello")` call site must NOT pin field `v` to
+                # "str". Doing so drops the box on `self.v`, and a later
+                # `x: str = t.v` reads the raw box cell as a string (garbage).
+                # `_parameter_type` returns the declared annotation name, or
+                # _UNKNOWN for a genuinely unannotated parameter -- only the
+                # latter is safe to specialize from call sites.
+                declared = parameter_environment.get(node.value.name, _UNKNOWN)
+                if declared == _UNKNOWN:
+                    inferred = _common_type(
+                        parameter_values.get(node.value.name, []),
+                        parents,
+                    ) or inferred
+                else:
+                    inferred = declared
             elif isinstance(node.value, A.BoolOp):
                 names = [
                     expression.name
