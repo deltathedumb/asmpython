@@ -6490,6 +6490,7 @@ class SemaAnalyzer:
             )
             if (
                 vt != "str"
+                and vt != "any"
                 and not vt.startswith("instance:")
                 and vt != "type"
                 and not is_exc_ctor
@@ -6498,6 +6499,12 @@ class SemaAnalyzer:
                     "raise requires a string message or an exception", s.pos,
                     ErrorCode.E_NOT_AN_EXCEPTION,
                 )
+            # `raise <opaque value>` (vt == "any"): a re-raise of a caught /
+            # dynamically-held exception object (`except ...: raise pending`,
+            # a VM forwarding a stored error). ir_lower's _exc_raise_type_id_ir
+            # already falls back to EXC_ANY for a value it can't name
+            # statically, so lowering handles it; the message comes from the
+            # value's own runtime payload / the active-exception forwarding.
             return
         if isinstance(s, A.With):
             self._check_expr(s.expr, scope)
