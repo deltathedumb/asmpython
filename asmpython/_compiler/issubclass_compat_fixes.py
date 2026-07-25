@@ -20,30 +20,41 @@ from . import ir_lower as IR
 _ORIGINAL_LOWER_EXPR = IR._lower_expr
 
 
-def _target_class_names(ctx, expression) -> list[str] | None:
+def _target_class_names(ctx, expression) -> list[str]:
+    """User-class names named by an ``issubclass`` target expression.
+
+    Only names that are real user classes (present in ``class_ids``)
+    contribute -- a builtin-type target (``int``, ``BaseException``, ...) or
+    a dynamic/opaque expression contributes nothing. asmpython does not model
+    builtin-type hierarchies, so ``issubclass(UserClass, <builtin>)``
+    conservatively yields False (no accepted ids) rather than aborting the
+    whole compile, mirroring how ``_lower_isinstance`` degrades an unmodeled
+    builtin/opaque target to a False result. Tuple targets flatten the same
+    way as Python's ``issubclass(C, (A, B))``.
+    """
     if isinstance(expression, A.Name):
         if expression.name in ctx.mctx.class_ids:
             return [expression.name]
-        return None
+        return []
     if isinstance(expression, A.TupleLit):
         names: list[str] = []
         for element in expression.elems:
-            nested = _target_class_names(ctx, element)
-            if nested is None:
-                return None
-            for name in nested:
+            for name in _target_class_names(ctx, element):
                 if name not in names:
                     names.append(name)
         return names
-    return None
+    return []
 
 
 def _lower_issubclass(ctx, expression: A.Call):
+    # A target naming no user class (a builtin type like BaseException, or a
+    # dynamic expression) leaves `targets` empty -- the candidate is still
+    # evaluated for side effects below and the check yields False, the same
+    # graceful degradation `_lower_isinstance` applies to an unmodeled
+    # builtin/opaque target. This must not hard-error: idiomatic Python code
+    # (`issubclass(exc, BaseException)`) routinely tests against builtin bases
+    # asmpython doesn't model as user classes.
     targets = _target_class_names(ctx, expression.args[1])
-    if targets is None:
-        raise IR.LowerError(
-            "unsupported expr Call (issubclass target must be a user class or tuple of user classes)"
-        )
 
     accepted_ids: list[int] = []
     for target in targets:

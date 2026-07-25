@@ -4418,6 +4418,36 @@ def _lower_isinstance(ctx: _FuncCtx, e: A.Call) -> IRValue:
             match_v = next_v
         return match_v
 
+    # `isinstance(x, object)` is True for every value in Python (object is
+    # the universal base). Answer it directly -- object is not a user class,
+    # so it would otherwise fall through to the instance dict-probe below and
+    # both mis-answer (empty `accept` -> always False) and, on a non-dict
+    # value, dereference a non-dict cell and fault.
+    if "object" in targets:
+        _lower_expr(ctx, arg0)
+        out = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", out, [1]))
+        return out
+
+    # `isinstance(x, type)` asks whether x is itself a class object. asmpython
+    # represents a class value as its small non-negative class-id integer,
+    # which is ambiguous with an ordinary int at the value level, so there is
+    # no reliable runtime discriminator; but the dominant use is a guard like
+    # `isinstance(err, type) and issubclass(err, ...)` where `err` is an
+    # ordinary value (an exception INSTANCE, an int, a str) -- never a bare
+    # class. Answer conservatively False via the fault-safe tag reader (so a
+    # boxed/opaque value never reaches the crashing dict-probe below), which
+    # correctly skips the issubclass branch for every non-class value. `type`
+    # is not a user class, so leaving it in `targets` would otherwise fall
+    # into that dict-probe and fault on a boxed-int/raw value.
+    if "type" in targets and not any(t in ctx.mctx.class_ids for t in targets):
+        # Evaluate the tag for its fault-safety/side effects, then yield 0.
+        obj_v = _lower_expr_inner(ctx, arg0)
+        _lower_read_any_tag(ctx, obj_v)
+        out = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", out, [0]))
+        return out
+
     accept: list[int] = []
     for t in targets:
         # A descriptor-wrapper target (`isinstance(v, staticmethod)` /
