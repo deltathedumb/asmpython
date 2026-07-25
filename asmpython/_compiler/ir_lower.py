@@ -48,6 +48,15 @@ from .codegen import (
     UNTAGGED_ID,
 )
 
+# Magic word stamped at offset 0 of every boxed-scalar cell (`_abi_new_box`
+# in abi_shims.asm -- keep the two in sync). No other runtime object has this
+# value at word 0 (a list's word-0 is its capacity, a dict/instance's is 8, a
+# string's is its length/first bytes), so a single fault-safe load at offset
+# 0 identifies a boxed cell with no risk of dereferencing a raw string/list/
+# dict as something it isn't. The Python int is the signed reading of the
+# unsigned 0xB0BE11EDB0BE11ED the assembly writes.
+BOX_MAGIC = 0xB0BE11EDB0BE11ED - (1 << 64)
+
 
 class LowerError(Exception):
     pass
@@ -9140,12 +9149,17 @@ def _lower_box_any(ctx: "_FuncCtx", value_v: IRValue, static_ty: str, e: A.Expr 
         # Not one of the boxable scalar kinds (container/instance/etc.) --
         # already carries enough runtime shape of its own; pass through.
         return value_v
-    cell = ctx.tmp(PTR)
-    ctx.emit(IRInstr("call", cell, ["_abi_new_instance"]))
+    # Allocate a dedicated 24-byte BOX cell -- `[BOX_MAGIC][tag][payload]`
+    # (see `_abi_new_box` in abi_shims.asm) -- NOT the old dict-shaped
+    # `_abi_new_instance`. The magic word at offset 0 lets a reader identify
+    # a boxed scalar with one fault-safe load (see `_lower_read_any_tag`),
+    # so unboxing/tag-reading is safe on ANY value in an "any" slot,
+    # including a raw string/list/dict pointer (which the old dict-probe
+    # dereferenced unsafely).
     tag_v = ctx.tmp(I64)
     ctx.emit(IRInstr("const", tag_v, [tag]))
-    ctx.emit(IRInstr("call", None, ["_abi_dict_set", cell, _class_tag_key(ctx), tag_v]))
-    ctx.emit(IRInstr("call", None, ["_abi_dict_set", cell, _boxed_value_key(ctx), payload]))
+    cell = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", cell, ["_abi_new_box", tag_v, payload]))
     return cell
 
 
@@ -9190,14 +9204,17 @@ def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     subscript uses for an opaque index.
     """
     PTR_THRESHOLD = 0x10000
+    DICT_CAP_INIT = 8  # word-0 of an _abi_new_instance dict cell (DICT_CAP_OFF=8)
     zero = ctx.tmp(PTR)
     ctx.emit(IRInstr("const", zero, [0]))
     none_b = ctx.new_block("anytagnone")
     rawint_b = ctx.new_block("anytagrawint")
     heap_b = ctx.new_block("anytagheap")
+    boxcheck_b = ctx.new_block("anytagboxcheck")
+    box_b = ctx.new_block("anytagbox")
+    instcheck_b = ctx.new_block("anytaginstcheck")
     live_b = ctx.new_block("anytaglive")
     dictish_b = ctx.new_block("anytagdictish")
-    listish_b = ctx.new_block("anytaglistish")
     end_b = ctx.new_block("anytagend")
     out_ptr = ctx.ensure_slot(f"__anytag_out_{none_b.label}", I64)
     is_none = ctx.tmp(I64)
@@ -9212,20 +9229,13 @@ def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
 
     ctx.switch_to(heap_b)
     # A nonzero value below the reserved low-address range is a raw scalar (an
-    # ordinary int in an "any" slot -- an unboxed value that was never boxed),
-    # NOT a heap pointer. Dereferencing it (the header/word-2 reads below)
-    # would fault, so report UNTAGGED for it directly. A boxed scalar cell
-    # always lives at a real heap address (>= the threshold), so this never
-    # misclassifies one. (A raw int >= the threshold -- rare -- still reaches
-    # the header probe; the list/dict word-2 discriminator below keeps that
-    # safe against a genuine list/tuple, and a raw int large enough to look
-    # like a heap pointer is an accepted edge the tagging feature doesn't aim
-    # to cover.)
+    # ordinary int in an "any" slot), NOT a heap pointer. Report UNTAGGED
+    # without dereferencing it.
     thr0 = ctx.tmp(I64)
     ctx.emit(IRInstr("const", thr0, [PTR_THRESHOLD]))
     is_heap = ctx.tmp(I64)
     ctx.emit(IRInstr("icmp.gt", is_heap, [obj_v, thr0]))
-    ctx.emit(IRInstr("br.t", None, [is_heap, live_b.label, rawint_b.label]))
+    ctx.emit(IRInstr("br.t", None, [is_heap, boxcheck_b.label, rawint_b.label]))
 
     ctx.switch_to(rawint_b)
     rawint_v = ctx.tmp(I64)
@@ -9233,8 +9243,54 @@ def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     ctx.emit(IRInstr("store", None, [rawint_v, out_ptr]))
     ctx.emit(IRInstr("br", None, [end_b.label]))
 
+    # A real heap pointer: is it a BOXED SCALAR cell? Load word-0 (always
+    # safe -- every heap object is >= 8 bytes) and compare to BOX_MAGIC. This
+    # is the fault-safe discriminator: a raw string/list/dict/instance never
+    # has BOX_MAGIC at word 0, so we never dereference one as something it
+    # isn't.
+    ctx.switch_to(boxcheck_b)
+    w0_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", w0_addr, [obj_v, 0]))
+    w0 = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", w0, [w0_addr]))
+    magic_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", magic_v, [BOX_MAGIC]))
+    is_box = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_box, [w0, magic_v]))
+    ctx.emit(IRInstr("br.t", None, [is_box, box_b.label, instcheck_b.label]))
+
+    ctx.switch_to(box_b)
+    tag_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", tag_addr, [obj_v, 8]))  # box tag @8
+    boxtag = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", boxtag, [tag_addr]))
+    ctx.emit(IRInstr("store", None, [boxtag, out_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    # Not a box: might be a user-class INSTANCE (an _abi_new_instance dict
+    # cell carrying a "__class__" id -- the pre-existing tagged-instance
+    # mechanism). Only probe it as a dict when it is SHAPED like one: word-0
+    # == the dict cell's initial capacity (8) AND word-2 (tomb count) is a
+    # small int, never a heap pointer. A raw string/list has neither shape,
+    # so it reports UNTAGGED here without ever being dereferenced as a dict.
+    ctx.switch_to(instcheck_b)
+    notinst_b = ctx.new_block("anytagnotinst")
+    cap_is8 = ctx.tmp(I64)
+    cap8 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", cap8, [DICT_CAP_INIT]))
+    ctx.emit(IRInstr("icmp.eq", cap_is8, [w0, cap8]))
+    ctx.emit(IRInstr("br.t", None, [cap_is8, live_b.label, notinst_b.label]))
+
+    ctx.switch_to(notinst_b)
+    notinst_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", notinst_v, [UNTAGGED_ID]))
+    ctx.emit(IRInstr("store", None, [notinst_v, out_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
     ctx.switch_to(live_b)
-    # word-2 (offset 16): dict tombstone-count vs list buffer-pointer.
+    # word-2 (offset 16): a dict/instance holds a small TOMBSTONE COUNT there,
+    # a list holds its BUFFER POINTER. Guard the dict probe on "word-2 is a
+    # small int, not a heap address".
     word2_addr = ctx.tmp(PTR)
     ctx.emit(IRInstr("gep", word2_addr, [obj_v, 16]))
     word2 = ctx.tmp(I64)
@@ -9243,9 +9299,10 @@ def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     ctx.emit(IRInstr("const", thresh, [PTR_THRESHOLD]))
     looks_ptr = ctx.tmp(I64)
     ctx.emit(IRInstr("icmp.gt", looks_ptr, [word2, thresh]))
-    ctx.emit(IRInstr("br.t", None, [looks_ptr, listish_b.label, dictish_b.label]))
+    untagged_b = ctx.new_block("anytaguntagged")
+    ctx.emit(IRInstr("br.t", None, [looks_ptr, untagged_b.label, dictish_b.label]))
 
-    ctx.switch_to(listish_b)
+    ctx.switch_to(untagged_b)
     untagged_v = ctx.tmp(I64)
     ctx.emit(IRInstr("const", untagged_v, [UNTAGGED_ID]))
     ctx.emit(IRInstr("store", None, [untagged_v, out_ptr]))
@@ -9307,19 +9364,23 @@ def _lower_unbox_any(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     ctx.switch_to(boxed_b)
     ctx.emit(IRInstr("br.t", None, [is_float, float_b.label, payload_b.label]))
 
+    # The box payload lives at offset 16 (`[BOX_MAGIC][tag][payload]`), read
+    # with a direct load -- `is_scalar` above already proved (via the
+    # BOX_MAGIC check inside `_lower_read_any_tag`) that `obj_v` is a real box
+    # cell, so this load is safe.
     ctx.switch_to(payload_b)
-    miss_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", miss_v, [0]))
+    pay_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", pay_addr, [obj_v, 16]))
     raw_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("call", raw_v, ["_abi_dict_get_default", obj_v, _boxed_value_key(ctx), miss_v]))
+    ctx.emit(IRInstr("load", raw_v, [pay_addr]))
     ctx.emit(IRInstr("store", None, [raw_v, out_ptr]))
     ctx.emit(IRInstr("br", None, [end_b.label]))
 
     ctx.switch_to(float_b)
-    fmiss_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", fmiss_v, [0]))
+    fpay_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", fpay_addr, [obj_v, 16]))
     fraw_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("call", fraw_v, ["_abi_dict_get_default", obj_v, _boxed_value_key(ctx), fmiss_v]))
+    ctx.emit(IRInstr("load", fraw_v, [fpay_addr]))
     ctx.emit(IRInstr("store", None, [fraw_v, out_ptr]))
     ctx.emit(IRInstr("br", None, [end_b.label]))
 

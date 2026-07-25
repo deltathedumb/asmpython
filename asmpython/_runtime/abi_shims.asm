@@ -116,6 +116,7 @@ global _abi_set_repr
 global _abi_str_char_at
 global _abi_str_slice
 global _abi_new_instance
+global _abi_new_box
 global _abi_new_list
 global _abi_list_append
 global _abi_list_pop
@@ -412,6 +413,38 @@ _abi_new_instance:
     mov rcx, [rsp+32]
     mov [rcx+32], rax            ; DICT_ORDER_OFF
     mov rax, rcx
+    add rsp, 48
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; rax = new tagged BOX carrying a scalar's runtime kind.
+;
+; A box is a 24-byte heap cell with a distinctive magic word at offset 0
+; that NO other runtime object type ever has there (a list's word-0 is its
+; capacity, a dict/instance's is 8, a string's is its length/first bytes --
+; none can equal BOX_MAGIC, a large odd sentinel). That single word makes
+; "is this pointer a boxed scalar cell?" answerable with ONE fault-safe load
+; at offset 0 (every heap object is >= 8 bytes, so the load never reads past
+; an allocation), instead of the old dict-shaped probe that dereferenced a
+; raw string/list AS A DICT and faulted. Layout:
+;   [BOX_MAGIC @0][tag @8][payload @16]
+; tag is a BUILTIN_TYPE_IDS id (int/float/bool/str/None); payload is the raw
+; scalar bits (float bit-pattern for float, string pointer for str).
+;
+;   _abi_new_box(tag=rcx, payload=rdx) -> rax
+_abi_new_box:
+    WIN64_RUNTIME_ENTER
+    sub rsp, 48
+    mov [rsp+32], rcx           ; spill tag across malloc
+    mov [rsp+40], rdx           ; spill payload across malloc
+    mov rcx, 24                 ; box is 3 words
+    call malloc
+    mov rcx, [rsp+32]
+    mov rdx, [rsp+40]
+    mov rbx, 0xB0BE11EDB0BE11ED ; BOX_MAGIC -- keep in sync with ir_lower.py
+    mov qword [rax+0], rbx
+    mov qword [rax+8], rcx      ; tag
+    mov qword [rax+16], rdx     ; payload
     add rsp, 48
     WIN64_RUNTIME_LEAVE
     ret

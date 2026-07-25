@@ -99,6 +99,7 @@ global _abi_set_repr
 global _abi_str_char_at
 global _abi_str_slice
 global _abi_new_instance
+global _abi_new_box
 global _abi_new_list
 global _abi_list_append
 global _abi_list_pop
@@ -320,6 +321,26 @@ _abi_new_instance:
     mov rdi, [rsp+32]
     mov [rdi+32], rax            ; DICT_ORDER_OFF
     mov rax, rdi
+    add rsp, 48
+    pop rbx
+    ret
+
+; rax = new tagged BOX (see abi_shims.asm's _abi_new_box for the full
+; rationale/layout). SysV: _abi_new_box(tag=rdi, payload=rsi) -> rax.
+; Layout: [BOX_MAGIC @0][tag @8][payload @16].
+_abi_new_box:
+    push rbx
+    sub rsp, 48
+    mov [rsp+32], rdi           ; spill tag across malloc
+    mov [rsp+40], rsi           ; spill payload across malloc
+    mov rdi, 24
+    call malloc
+    mov rcx, [rsp+32]
+    mov rdx, [rsp+40]
+    mov rbx, 0xB0BE11EDB0BE11ED ; BOX_MAGIC -- keep in sync with ir_lower.py
+    mov qword [rax+0], rbx
+    mov qword [rax+8], rcx      ; tag
+    mov qword [rax+16], rdx     ; payload
     add rsp, 48
     pop rbx
     ret
