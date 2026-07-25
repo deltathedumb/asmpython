@@ -8459,6 +8459,41 @@ class SemaAnalyzer:
                 )
             ):
                 e.obj.name = self.current_class
+            # A dynamic `cls.<classvar>` we deliberately left un-rewritten (a
+            # subclass overrides it; lowering resolves the value per runtime
+            # class id). It still has a KNOWN static SHAPE -- every override is
+            # the same kind of class var -- so type the node (and stamp its
+            # tuple/list element metadata) from `current_class`'s own
+            # declaration, mirroring the `ClassName.x` class-var branch below.
+            # Without this the read stays "any", and `realm in cls.realms`
+            # takes _lower_membership's opaque path (`_lower_expr_inner`, which
+            # bypasses the dynamic-classvar interception) instead of the
+            # concrete tuple scan -- silently reading through a null `cls`.
+            if (
+                isinstance(e.obj, A.Name)
+                and self.classmethod_cls_param is not None
+                and e.obj.name == self.classmethod_cls_param
+                and self.current_class is not None
+            ):
+                cvt_dyn = self._class_var_type(self.current_class, e.name)
+                if cvt_dyn is not None:
+                    e.inferred_type = cvt_dyn
+                    cvcls_dyn: str = self.current_class
+                    if cvt_dyn == "list":
+                        e.list_el_type = self._resolve_field_el(cvcls_dyn, e.name)
+                        if e.list_el_type in ("list", "dict"):
+                            e.el_value_type = self._resolve_field_inner_value(cvcls_dyn, e.name)
+                        elif e.list_el_type == "tuple":
+                            e.el_tuple_types = self._resolve_field_value_tuple(cvcls_dyn, e.name)
+                    elif cvt_dyn == "dict":
+                        e.value_type = self._resolve_field_el(cvcls_dyn, e.name)
+                        if e.value_type in ("list", "dict"):
+                            e.inner_value_type = self._resolve_field_inner_value(cvcls_dyn, e.name)
+                        elif e.value_type == "tuple":
+                            e.value_tuple_elem_types = self._resolve_field_value_tuple(cvcls_dyn, e.name)
+                    elif cvt_dyn == "tuple":
+                        e.tuple_elem_types = self._resolve_field_tuple(cvcls_dyn, e.name)
+                    return
             # `enum` extension: `Color.RED` resolves entirely at sema time --
             # fold this Attr node into an equivalent IntLit in place (mirrors
             # the Match -> If in-place rewrite elsewhere in this file), so

@@ -8659,7 +8659,19 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             sym = f"{e.obj.name}__{e.method}"
             is_static = _resolved_method_is_static(ctx, e.obj.name, e.method)
             call_args = [_lower_expr(ctx, a) for a in e.args]
-            args = call_args if is_static else [ctx.shared_zero] + call_args
+            # Pass this class's RTTI id as the implicit `cls` (not shared_zero):
+            # the classmethod body may read a `cls.<classvar>` that a subclass
+            # overrides, dispatched at runtime on the receiver's class id
+            # (dynamic_classvar_compat_fixes). Even a LITERAL `Server.method()`
+            # therefore needs the real id so that read resolves to Server's
+            # override rather than falling through to the id-0/null default. A
+            # staticmethod takes no receiver.
+            if is_static:
+                args = call_args
+            else:
+                cls_id_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", cls_id_v, [ctx.mctx.class_ids[e.obj.name]]))
+                args = [cls_id_v] + call_args
             v = ctx.tmp(ir_type_for(A.expr_type(e)))
             ctx.emit(IRInstr("call", v, [sym, *args]))
             return v
@@ -8694,7 +8706,6 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     )
                     for i, a in enumerate(e.args)
                 ]
-                args = call_args if is_static else [ctx.shared_zero] + call_args
                 res_ty = ir_type_for(A.expr_type(e))
                 res_ptr = ctx.ensure_slot(f"__typedisp_res_{id(e)}", res_ty)
 
@@ -8715,6 +8726,16 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     ctx.emit(IRInstr("br.t", None, [is_match, hit_blocks[i].label, next_label]))
 
                     ctx.switch_to(hit_blocks[i])
+                    # Pass the MATCHED class id as the implicit `cls` (not
+                    # shared_zero) -- a classmethod body may dispatch a
+                    # `cls.<classvar>` read on it (dynamic_classvar_compat_fixes
+                    # keys off the receiver's runtime class id), so `cls` must
+                    # carry the concrete class, not null. This block only runs
+                    # when `recv_v == cid`, so the constant `cid` IS that value.
+                    # A staticmethod takes no receiver.
+                    hit_cid_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", hit_cid_v, [cid]))
+                    args = call_args if is_static else [hit_cid_v] + call_args
                     mv = ctx.tmp(res_ty)
                     ctx.emit(IRInstr("call", mv, [f"{ow}__{e.method}", *args]))
                     ctx.emit(IRInstr("store", None, [mv, res_ptr]))
@@ -10119,11 +10140,42 @@ def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     # so it reports UNTAGGED here without ever being dereferenced as a dict.
     ctx.switch_to(instcheck_b)
     notinst_b = ctx.new_block("anytagnotinst")
-    cap_is8 = ctx.tmp(I64)
-    cap8 = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", cap8, [DICT_CAP_INIT]))
-    ctx.emit(IRInstr("icmp.eq", cap_is8, [w0, cap8]))
-    ctx.emit(IRInstr("br.t", None, [cap_is8, live_b.label, notinst_b.label]))
+    # A dict/instance's word-0 is its CAPACITY: 8 initially, DOUBLED on every
+    # grow (_runtime_dict_grow: `new_cap = old_cap * 2`), so ALWAYS a power of
+    # two >= 8 (8/16/32/64/...). The old check required EXACTLY 8, which
+    # wrongly reported UNTAGGED for any instance with enough fields to resize
+    # its dict past the initial 8 slots -- e.g. a VM object with a dozen
+    # fields -- silently breaking type()/isinstance()/virtual-dispatch on it
+    # (the receiver's runtime class id read back as UNTAGGED, so an opaque
+    # method call fell through to the graceful 0-stub instead of dispatching).
+    # Accept any power-of-two capacity in [8, 2^30] instead. This reads only
+    # word-0 (offset 0, always safe); the word-2 tombstone-vs-buffer-pointer
+    # guard below still separates a real dict from a list, and boxes were
+    # already ruled out above, so it stays fault-safe on a raw string/list.
+    cap_ge8 = ctx.tmp(I64)
+    eight = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", eight, [DICT_CAP_INIT]))
+    ctx.emit(IRInstr("icmp.ge", cap_ge8, [w0, eight]))
+    cap_max = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", cap_max, [1 << 30]))
+    cap_le_max = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.le", cap_le_max, [w0, cap_max]))
+    # power of two <=> (cap & (cap - 1)) == 0
+    one_c = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one_c, [1]))
+    cap_minus1 = ctx.tmp(I64)
+    ctx.emit(IRInstr("isub", cap_minus1, [w0, one_c]))
+    cap_and = ctx.tmp(I64)
+    ctx.emit(IRInstr("iand", cap_and, [w0, cap_minus1]))
+    zero_c = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero_c, [0]))
+    is_pow2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_pow2, [cap_and, zero_c]))
+    cap_range = ctx.tmp(I64)
+    ctx.emit(IRInstr("iand", cap_range, [cap_ge8, cap_le_max]))
+    cap_ok = ctx.tmp(I64)
+    ctx.emit(IRInstr("iand", cap_ok, [cap_range, is_pow2]))
+    ctx.emit(IRInstr("br.t", None, [cap_ok, live_b.label, notinst_b.label]))
 
     ctx.switch_to(notinst_b)
     notinst_v = ctx.tmp(I64)
