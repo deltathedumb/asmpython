@@ -335,6 +335,22 @@ class FuncCodegen:
                 self.fixups.append((call_off + 1, "__chkstk", R_X86_64_PLT32))
             self._emit(encode_sub_ri(Reg.RSP, self.alloc.stack_bytes))
 
+        # Copy every call-crossing parameter out of its (caller-saved) incoming
+        # ABI argument register into the stack slot regalloc assigned it. Must
+        # be the first thing after the frame exists and before any user code,
+        # since the argument registers are live only on entry -- and must run
+        # even when stack_bytes is 0 for the frame-less case to stay correct.
+        # See regalloc.py's `_home_param` for why these parameters cannot stay
+        # in their argument registers.
+        for reg, offset, type_name in self.alloc.param_spills:
+            mem = Mem(Reg.RBP, offset)
+            if type_name == "f64":
+                self._emit(encode_movsd_mr(mem, reg))
+            elif type_name == "f32":
+                self._emit(encode_movss_mr(mem, reg))
+            else:
+                self._emit(encode_mov_mr(mem, reg))
+
     def _epilogue(self) -> None:
         if self.alloc.stack_bytes:
             self._emit(encode_add_ri(Reg.RSP, self.alloc.stack_bytes))

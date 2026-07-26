@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Union
 
+from ..._compiler.cfg import loop_membership
 from .encoder import (
     Reg, XmmReg,
     ARG_REGS_SYSV, ARG_REGS_WIN64,
@@ -52,6 +53,12 @@ class AllocResult:
     stack_bytes:      int                   # total bytes to SUB RSP in prologue
     callee_saved:     list[Reg]             # must push/pop in prologue / epilogue
     callee_saved_xmm: list[XmmReg]         # Win64: XMM6-15 if clobbered
+    # Parameters that outlive a call and so cannot stay in their (caller-saved)
+    # incoming ABI argument register: the prologue must copy each one into the
+    # given RBP-relative slot, which `locs` already points at. Entries are
+    # (incoming_register, rbp_offset, ir_type_name); the register is a Reg for
+    # integer/pointer parameters and an XmmReg for float ones.
+    param_spills:     list[tuple[object, int, str]] = field(default_factory=list)
 
 
 # ── Register pools ────────────────────────────────────────────────────────────
@@ -79,6 +86,58 @@ def _slot_size(type_name: str) -> int:
     return 16 if type_name == "v128" else 8
 
 
+def _loop_carried(func: Any) -> dict[str, Any]:
+    """Values whose live range crosses a back edge -> the IRValue defining them.
+
+    A loop-carried value is read in a block that the linear walk visits BEFORE
+    the block defining it, with both inside the same natural loop. The only way
+    such a read can be meaningful is by observing the value the *previous*
+    iteration produced, so the value is live around the entire loop.
+
+    This matters because the allocator is a linear scan over blocks in index
+    order: it reserves a register when it reaches a value's definition. For a
+    loop-carried value that is too late -- the register is still unassigned at
+    the earlier read, so the allocator is free to hand it to something else,
+    and the two collide. Extending the value's LAST use cannot fix that; its
+    live range starts too early, not ends too soon.
+
+    Phi elimination produces exactly this shape: the copy implementing a
+    back-edge phi operand lands in the latch, while the value being copied is
+    computed in a body block emitted later (ir_lower orders the
+    possibly-raising helper blocks after the latch). Observed as a loop
+    accumulator silently resetting -- Counter.total() returning the first
+    element instead of the sum.
+    """
+    loop_blocks = loop_membership(func)
+    if not loop_blocks:
+        return {}
+
+    def_block: dict[str, int] = {}
+    values: dict[str, Any] = {}
+    for param in func.params:
+        def_block[param.name] = 0
+        values[param.name] = param
+    for bi, block in enumerate(func.blocks):
+        for instr in block.instrs:
+            if instr.result is not None:
+                def_block.setdefault(instr.result.name, bi)
+                values.setdefault(instr.result.name, instr.result)
+
+    carried: dict[str, Any] = {}
+    for bi, block in enumerate(func.blocks):
+        body = loop_blocks.get(bi)
+        if body is None:
+            continue
+        for instr in block.instrs:
+            for op in instr.operands:
+                if not hasattr(op, "name"):
+                    continue
+                db = def_block.get(op.name)
+                if db is not None and db in body and db > bi:
+                    carried[op.name] = values.get(op.name, op)
+    return carried
+
+
 def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
     """Return the (block_idx, instr_idx) of each value's final use.
 
@@ -103,66 +162,17 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
     would make almost everything in a loop "alive" simultaneously and
     exhaust the register pool for no reason.
     """
-    label_to_idx = {b.label: bi for bi, b in enumerate(func.blocks)}
-
-    # try/except lowering (ir_lower.py's _lower_try) produces MULTIPLE
-    # backward-by-block-index branches that are NOT loops:
-    #  - a normal-completion `br` back to the try's own `end_b` (created
-    #    EARLY, right after handler_b/body_b, before the per-handler
-    #    check_blocks) from a later-indexed block (the body-ok path, a
-    #    matched-handler path, the re-raise path) -- the try's own
-    #    convergent exit point.
-    #  - a per-handler type-match `br.t` whose "matched" target
-    #    (`try_run_*`, created BEFORE the mid-loop that builds the
-    #    `try_check_next_*` chain checking each candidate exception id)
-    #    sits at a LOWER index than the `br.t` emitting it, once more than
-    #    one exception id needs checking -- a one-shot dispatch, not a
-    #    loop, but backward by index all the same.
-    # Without excluding these, the loop-back-edge scan below misidentifies
-    # the whole enclosing span as one "loop", force-extending the liveness
-    # of every value referenced anywhere in it (including inside handler
-    # blocks that never execute on the taken path) all the way to the
-    # region's end -- confirmed via a real repro: a value pinned by this
-    # false loop starved the callee-saved register pool for an unrelated
-    # later value crossing a call, which fell through to a caller-saved
-    # register the call then clobbered (silently corrupting a string
-    # pointer into an unrelated int). Rather than tracking every such
-    # helper block individually, exclude any backward branch whose TARGET
-    # falls inside a try_regions span, (setjmp_bi, end_bi] -- _lower_try
-    # never emits a genuine loop of its own, so every backward-looking
-    # branch found strictly within one of its regions is one of these
-    # dispatch artifacts, not a real loop needing liveness extension
-    # (nested loops inside a try BODY are unaffected: their own back edges
-    # target blocks the loop itself created, at or after the try's
-    # setjmp_bi, but a genuine loop's back edge stays within the loop's
-    # own narrower span and this broader try-region exclusion only ever
-    # widens what's IGNORED as a loop, never suppresses a real one whose
-    # target lies outside every try_regions span).
-    try_regions = getattr(func, "try_regions", ())
-
-    def _in_try_region(idx: int) -> bool:
-        return any(setjmp_bi < idx <= end_bi for setjmp_bi, end_bi in try_regions)
-
-    # For each block bi, the [start, end] of the widest loop containing it
-    # (its own index for both if bi isn't in any loop). A back edge from
-    # block `src` to block `dst` (dst <= src) means every block in
-    # [dst, src] belongs to one loop spanning exactly that range;
-    # overlapping/nested loops just take the widest start/end seen.
-    loop_start = list(range(len(func.blocks)))
-    loop_end = list(range(len(func.blocks)))
-    for bi, block in enumerate(func.blocks):
-        for instr in block.instrs:
-            if instr.op not in ("br", "br.t"):
-                continue
-            targets = instr.operands[1:] if instr.op == "br.t" else instr.operands
-            for t in targets:
-                ti = label_to_idx.get(str(t))
-                if ti is not None and ti <= bi and not _in_try_region(ti):
-                    for k in range(ti, bi + 1):
-                        if loop_start[k] > ti:
-                            loop_start[k] = ti
-                        if loop_end[k] < bi:
-                            loop_end[k] = bi
+    # Loop structure comes from the shared CFG analysis (_compiler/cfg.py):
+    # real natural loops, derived from dominance. That replaces an older
+    # block-index-range approximation which both invented loops (try/except
+    # dispatch branches jump backward by index without being loops -- they
+    # needed an explicit try_regions exclusion) and missed loop bodies
+    # (ir_lower emits the KeyError raise/ok helper pair at HIGHER indices than
+    # the latch, so real body blocks fell outside the assumed span and values
+    # used there were never extended across the back edge -- a loop accumulator
+    # could silently reset). A branch is a back edge only when its target
+    # dominates its source, so both problems are gone by construction.
+    loop_blocks = loop_membership(func)
 
     def_block: dict[str, int] = {}
     for param in func.params:
@@ -209,8 +219,34 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
     # so this is a pure widening -- never moves a value's recorded
     # lifetime backward.
     for name, (bi, _ii) in list(last.items()):
-        start, end = loop_start[bi], loop_end[bi]
-        if end >= bi and def_block.get(name, bi) < start:
+        body = loop_blocks.get(bi)
+        if body is None:
+            continue                      # last use isn't inside any loop
+
+        # A value must survive to the end of the loop exactly when its live
+        # range crosses the back edge. Two ways that happens:
+        #
+        #  1. Defined OUTSIDE the loop, used inside -- nothing in the loop
+        #     refreshes it, so it is still needed on the next iteration.
+        #  2. Defined INSIDE the loop at a later block than the use. The
+        #     allocator walks blocks in index order, so a use that precedes
+        #     its own definition can only be reading the value produced by the
+        #     PREVIOUS iteration. Phi elimination creates exactly this shape:
+        #     the copy implementing a back-edge phi operand sits in the latch,
+        #     while the value it copies is computed in a body block emitted
+        #     later. Without this, the allocator frees the register at the
+        #     early use and the value is clobbered before the copy reads it --
+        #     a loop accumulator silently resets (Counter.total() returning
+        #     the first element instead of the sum).
+        #
+        # A value defined inside the loop and used only after its definition
+        # is refreshed every iteration and needs no extension -- extending
+        # those would pin nearly every loop temporary live at once.
+        def_bi = def_block.get(name, bi)
+        if def_bi in body and def_bi <= bi:
+            continue
+        end = max(body)
+        if end >= bi:
             last[name] = (end, len(func.blocks[end].instrs))
 
     # try/except handler blocks are reached via an IMPLICIT control
@@ -456,7 +492,11 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
 
     # ── inner helpers that close over the mutable state ───────────────────────
 
-    def _take_gp(prefer_callee_saved: bool = False, avoid_rcx: bool = False) -> Reg:
+    def _take_gp(
+        prefer_callee_saved: bool = False,
+        avoid_rcx: bool = False,
+        require_callee_saved: bool = False,
+    ) -> "Reg | None":
         nonlocal stack_top
         if prefer_callee_saved:
             # A value crossing a call must not land in a caller-saved
@@ -479,11 +519,12 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
             for i, r in enumerate(free_gp):
                 if r in callee_gp:
                     return free_gp.pop(i)
-            if free_gp:  # only caller-saved free -- evict a callee-saved holder instead
-                victim = _pick_evict(
-                    {n: r for n, r in in_gp.items() if r in callee_gp} or in_gp,
-                    last_use, now,
-                )
+            # Evict a callee-saved HOLDER to stack and take its register. Only a
+            # holder OF a callee-saved register helps: evicting a caller-saved
+            # holder would just hand back another register the callee may clobber.
+            callee_holders = {n: r for n, r in in_gp.items() if r in callee_gp}
+            if callee_holders:
+                victim = _pick_evict(callee_holders, last_use, now)
                 stack_top += 8
                 locs[victim] = StackLoc(-stack_top)
                 freed = in_gp.pop(victim)
@@ -491,6 +532,15 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
                 for i, r in enumerate(free_gp):
                     if r in callee_gp:
                         return free_gp.pop(i)
+            if require_callee_saved:
+                # No callee-saved register is obtainable. Falling through here
+                # would hand a call-crossing value a caller-saved register that
+                # the next `call` clobbers -- the exact silent miscompile this
+                # branch exists to prevent (the old `or in_gp` eviction could
+                # also free a caller-saved register and then fall through).
+                # Signal "no safe register" so `_alloc_gp` homes the value on
+                # the stack, which always survives a call.
+                return None
         if avoid_rcx:
             # A value crossing a variable-count shl/shr/sar must not land
             # in RCX -- `_shift`'s codegen unconditionally does `mov rcx,
@@ -537,10 +587,19 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
         return free_xmm.pop(0)
 
     def _alloc_gp(name: str) -> None:
+        nonlocal stack_top
+        crosses = name in crosses_call
         r = _take_gp(
-            prefer_callee_saved=name in crosses_call,
+            prefer_callee_saved=crosses,
             avoid_rcx=name in crosses_var_shift,
+            require_callee_saved=crosses,
         )
+        if r is None:
+            # Nothing callee-saved available for a call-crossing value: home it
+            # on the stack. A caller-frame slot survives any call.
+            stack_top += 8
+            locs[name] = StackLoc(-stack_top)
+            return
         locs[name] = RegLoc(r)
         in_gp[name] = r
         if r in callee_gp:
@@ -567,46 +626,90 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
     # ── Assign function parameters to ABI entry locations ─────────────────────
 
     stack_params: list[str] = []
+    param_spills: list[tuple[object, int, str]] = []
+
+    def _home_param(name: str, reg: object, type_name: str) -> bool:
+        """Home a call-crossing parameter on the stack instead of its arg register.
+
+        Incoming ABI argument registers (RCX/RDX/... , RDI/RSI/... , XMM0-3/0-7)
+        are ALL caller-saved, so a parameter still live after a `call` is
+        clobbered by the callee. Every other call-crossing value is protected
+        (`_alloc_gp`'s callee-saved preference, or the stack-homing branch in the
+        instruction walk), but a parameter is pinned to its entry location and
+        never consulted `crosses_call` -- silently miscompiling any function that
+        uses a parameter after calling something.
+
+        Latent while the frontend stored every parameter into a stack slot
+        immediately (the parameter died in the entry block); reachable as soon as
+        an optimization pass (mem2reg) promotes those slots to SSA values.
+        Returns True if the parameter was homed on the stack.
+        """
+        nonlocal stack_top
+        if name not in crosses_call:
+            return False
+        stack_top += _slot_size(type_name)
+        locs[name] = StackLoc(-stack_top)
+        param_spills.append((reg, -stack_top, type_name))
+        return True
+
     int_i = xmm_i = 0
     for arg_i, param in enumerate(func.params):
         if _is_float(param.type.name):
             if abi == "win64":
                 if arg_i < len(xmm_args):
                     x = xmm_args[arg_i]
-                    locs[param.name] = XmmLoc(x)
-                    in_xmm[param.name] = x
-                    if x in free_xmm:
-                        free_xmm.remove(x)
+                    if not _home_param(param.name, x, param.type.name):
+                        locs[param.name] = XmmLoc(x)
+                        in_xmm[param.name] = x
+                        if x in free_xmm:
+                            free_xmm.remove(x)
                 else:
                     stack_params.append(param.name)
             else:
                 if xmm_i < len(xmm_args):
                     x = xmm_args[xmm_i]; xmm_i += 1
-                    locs[param.name] = XmmLoc(x)
-                    in_xmm[param.name] = x
-                    if x in free_xmm:
-                        free_xmm.remove(x)
+                    if not _home_param(param.name, x, param.type.name):
+                        locs[param.name] = XmmLoc(x)
+                        in_xmm[param.name] = x
+                        if x in free_xmm:
+                            free_xmm.remove(x)
                 else:
                     stack_params.append(param.name)
         else:
             if abi == "win64":
                 if arg_i < len(int_args):
                     r = int_args[arg_i]
-                    locs[param.name] = RegLoc(r)
-                    in_gp[param.name] = r
-                    if r in free_gp:
-                        free_gp.remove(r)
+                    if not _home_param(param.name, r, param.type.name):
+                        locs[param.name] = RegLoc(r)
+                        in_gp[param.name] = r
+                        if r in free_gp:
+                            free_gp.remove(r)
                 else:
                     stack_params.append(param.name)
             else:
                 if int_i < len(int_args):
                     r = int_args[int_i]; int_i += 1
-                    locs[param.name] = RegLoc(r)
-                    in_gp[param.name] = r
-                    if r in free_gp:
-                        free_gp.remove(r)
+                    if not _home_param(param.name, r, param.type.name):
+                        locs[param.name] = RegLoc(r)
+                        in_gp[param.name] = r
+                        if r in free_gp:
+                            free_gp.remove(r)
                 else:
                     stack_params.append(param.name)
+
+    # ── Reserve loop-carried values before the walk ───────────────────────────
+    # These are read earlier in block order than they are defined (see
+    # `_loop_carried`), so the walk would not reserve anything for them until
+    # after the read that needs them. Assign their home up front; the walk then
+    # skips them because they are already in `locs`. Their last use is already
+    # extended to the end of the loop, so nothing reclaims the home mid-loop.
+    for _name, _value in _loop_carried(func).items():
+        if _name in locs:
+            continue
+        if _is_float(_value.type.name):
+            _alloc_xmm(_name)
+        else:
+            _alloc_gp(_name)
 
     # ── Walk all instructions ─────────────────────────────────────────────────
 
@@ -712,4 +815,5 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
         stack_bytes      = stack_top,
         callee_saved     = sorted(used_callee_gp,  key=int),
         callee_saved_xmm = sorted(used_callee_xmm, key=int),
+        param_spills     = param_spills,
     )
