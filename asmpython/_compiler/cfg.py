@@ -253,9 +253,64 @@ def dominance_frontiers(func, idom=None, preds=None) -> dict[int, set[int]]:
     return frontier
 
 
+def try_regions_resolved(func) -> list[tuple[int, frozenset[int]]]:
+    """Resolve ``IRFunc.try_regions`` against the CURRENT block list.
+
+    Returns ``(setjmp_block_index, member_block_indices)`` per region. The
+    consumers (both register allocators) reason in block indices, so the stored
+    labels are resolved at the moment of the query -- which is the whole point
+    of storing labels: a pass may have inserted, deleted, merged, or reordered
+    blocks since lowering emitted them.
+
+    Member labels that no longer name a block are dropped. That is correct
+    rather than merely convenient: a pass removes a block only when its code is
+    unreachable or has been folded elsewhere, and a region over code that cannot
+    execute imposes no liveness requirement. A pass that KEEPS the code while
+    moving it under another label must rewrite the region instead -- see
+    ``rewrite_try_region_labels``.
+
+    Also accepts the older ``(setjmp_label, end_label)`` pair form, expanding it
+    to the span it denoted, so an out-of-tree frontend written against the
+    previous contract keeps working.
+    """
+    regions = getattr(func, "try_regions", ()) or ()
+    if not regions:
+        return []
+    index = {block.label: i for i, block in enumerate(func.blocks)}
+    n = len(func.blocks)
+
+    def resolve(label):
+        if isinstance(label, int):
+            return label if 0 <= label < n else None
+        return index.get(label)
+
+    out: list[tuple[int, frozenset[int]]] = []
+    for entry in regions:
+        if not isinstance(entry, tuple) or len(entry) != 2:
+            continue
+        start, members = entry
+        si = resolve(start)
+        if si is None:
+            continue
+        if isinstance(members, (str, int)):
+            # legacy pair form: the span (setjmp, end]
+            ei = resolve(members)
+            if ei is None:
+                continue
+            lo, hi = (si, ei) if si <= ei else (ei, si)
+            resolved = frozenset(range(lo + 1, hi + 1))
+        else:
+            resolved = frozenset(
+                bi for bi in (resolve(m) for m in members) if bi is not None
+            )
+        if resolved:
+            out.append((si, resolved))
+    return out
+
+
 __all__ = [
     "successors", "successor_indices", "predecessor_indices",
     "reverse_postorder", "dominators", "dominates", "back_edges",
     "natural_loop_body", "natural_loops", "loop_membership",
-    "dominance_frontiers",
+    "dominance_frontiers", "try_regions_resolved",
 ]

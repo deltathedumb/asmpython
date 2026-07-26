@@ -40,6 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Union
 
+from ..._compiler.cfg import loop_membership, try_regions_resolved
 from .encoder import (
     Reg, VReg,
     ARG_REGS, FP_ARG_REGS,
@@ -129,35 +130,24 @@ def _slot_size(type_name: str) -> int:
 def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
     """Return the (block_idx, instr_idx) of each value's final use.
 
-    Ported verbatim from x86_64/regalloc.py's `_last_uses` -- this is pure
-    IR-level analysis (loop back-edge detection via br/br.t targets,
-    try_regions exclusion, loop-liveness extension) with no x86-specific
-    reasoning anywhere in it. See that module's docstring for the full
-    rationale and the two real production bugs (`end >= bi` off-by-one;
-    try-region handler-block implicit-control-transfer) this logic exists
-    to avoid reintroducing.
+    Kept in step with x86_64/regalloc.py's `_last_uses` -- this is pure
+    IR-level analysis (natural-loop detection, loop-liveness extension, the
+    try-region liveness extension) with no x86-specific reasoning anywhere in
+    it. See that module's docstring for the full rationale and the real
+    production bugs (`end >= bi` off-by-one; try-region handler-block implicit
+    control transfer; loop-carried values read before their own definition)
+    this logic exists to avoid reintroducing.
+
+    Loop structure comes from the shared CFG analysis (_compiler/cfg.py), the
+    same as x86-64. It previously came from a block-INDEX RANGE, which invented
+    loops (try/except dispatch branches jump backward by index without being
+    loops -- the only reason the `try_regions` exclusion that used to sit here
+    existed) and missed loop bodies (ir_lower emits helper blocks at HIGHER
+    indices than the latch, so real body blocks fell outside the assumed span
+    and a loop accumulator could silently reset). A branch is a back edge only
+    when its target dominates its source, so both are gone by construction.
     """
-    label_to_idx = {b.label: bi for bi, b in enumerate(func.blocks)}
-    try_regions = getattr(func, "try_regions", ())
-
-    def _in_try_region(idx: int) -> bool:
-        return any(setjmp_bi < idx <= end_bi for setjmp_bi, end_bi in try_regions)
-
-    loop_start = list(range(len(func.blocks)))
-    loop_end = list(range(len(func.blocks)))
-    for bi, block in enumerate(func.blocks):
-        for instr in block.instrs:
-            if instr.op not in ("br", "br.t"):
-                continue
-            targets = instr.operands[1:] if instr.op == "br.t" else instr.operands
-            for t in targets:
-                ti = label_to_idx.get(str(t))
-                if ti is not None and ti <= bi and not _in_try_region(ti):
-                    for k in range(ti, bi + 1):
-                        if loop_start[k] > ti:
-                            loop_start[k] = ti
-                        if loop_end[k] < bi:
-                            loop_end[k] = bi
+    loop_blocks = loop_membership(func)
 
     def_block: dict[str, int] = {}
     for param in func.params:
@@ -174,12 +164,28 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
                 if hasattr(op, "name"):
                     last[op.name] = (bi, ii)
 
+    # Extend a use inside a loop to that loop's last block. Two cases need it:
+    # a value defined OUTSIDE the loop (nothing refreshes it, so the next
+    # iteration still needs it), and a value defined INSIDE the loop at a later
+    # block than the use -- the allocator walks blocks in index order, so a use
+    # preceding its own definition can only be reading the previous iteration's
+    # value. Phi elimination creates exactly that shape: the back-edge copy sits
+    # in the latch while the value is computed in a body block emitted later.
+    # A value defined in the loop and used only after its definition is
+    # refreshed every iteration and must NOT be extended, or nearly every loop
+    # temporary is pinned live at once and the register pool is exhausted.
     for name, (bi, _ii) in list(last.items()):
-        start, end = loop_start[bi], loop_end[bi]
-        if end >= bi and def_block.get(name, bi) < start:
+        body = loop_blocks.get(bi)
+        if body is None:
+            continue
+        def_bi = def_block.get(name, bi)
+        if def_bi in body and def_bi <= bi:
+            continue
+        end = max(body)
+        if end >= bi:
             last[name] = (end, len(func.blocks[end].instrs))
 
-    try_regions = getattr(func, "try_regions", ())
+    try_regions = try_regions_resolved(func)
     if try_regions:
         region_referenced: dict[int, set[str]] = {}
         for bi, block in enumerate(func.blocks):
@@ -187,12 +193,13 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
                 for op in instr.operands:
                     if not hasattr(op, "name"):
                         continue
-                    for ri, (setjmp_bi, end_bi) in enumerate(try_regions):
-                        if setjmp_bi < bi <= end_bi:
+                    for ri, (_setjmp_bi, members) in enumerate(try_regions):
+                        if bi in members:
                             region_referenced.setdefault(ri, set()).add(op.name)
         for name, (bi, _ii) in list(last.items()):
             db = def_block.get(name, bi)
-            for ri, (setjmp_bi, end_bi) in enumerate(try_regions):
+            for ri, (setjmp_bi, members) in enumerate(try_regions):
+                end_bi = max(members)
                 if (
                     db <= setjmp_bi
                     and name in region_referenced.get(ri, ())

@@ -7,10 +7,12 @@ how the module was produced. It catches the mistakes a hand-written or
 newly-built frontend actually makes: dangling value references, blocks that
 don't end in a terminator, branches to non-existent labels, malformed types.
 
-It intentionally does *not* enforce full SSA dominance (the IR uses a memory-SSA
-style where locals are ``alloca``+``load``/``store``, so a plain
-defined-somewhere check is the right altitude) nor per-op typing rules beyond
-type well-formedness -- those would bake in policy the neutral IR doesn't own.
+It does enforce **SSA dominance** -- every use reachable from its definition --
+because that is what makes block order irrelevant, and every optimization pass
+depends on it. Without the check, IR that only works by accident of emission
+order passes verification and then miscompiles the moment a pass moves a block.
+It does not enforce per-op typing rules beyond type well-formedness; those would
+bake in policy the neutral IR doesn't own.
 
 Usage::
 
@@ -21,6 +23,7 @@ Usage::
 
 from __future__ import annotations
 
+from .cfg import dominates, dominators
 from .ir import IRBlock, IRFunc, IRInstr, IRModule, IRValue
 
 #: Ops that end a basic block. Every block's last instruction must be one of
@@ -73,6 +76,33 @@ def _check_func(func: IRFunc, errors: list[str]) -> None:
     for param in func.params:
         _type_ok(param, f"func {fn!r} param", errors)
 
+    # try_regions names blocks by label. A region naming a block that is gone
+    # is not itself an error -- a pass may legitimately delete unreachable
+    # handler code -- but a malformed entry is, because the register allocator
+    # silently ignores what it cannot resolve and the resulting loss of a
+    # liveness guarantee only shows up as a segfault at runtime.
+    for region in getattr(func, "try_regions", ()) or ():
+        if not isinstance(region, tuple) or len(region) != 2:
+            errors.append(f"func {fn!r}: malformed try_region {region!r} "
+                          f"(want a (setjmp_label, member_labels) pair)")
+            continue
+        start, members = region
+        if not isinstance(start, (str, int)):
+            errors.append(f"func {fn!r}: try_region setjmp endpoint {start!r} is "
+                          f"neither a block label nor an index")
+        if isinstance(members, (str, int)):
+            continue                     # legacy (setjmp, end) pair form
+        if not isinstance(members, (tuple, list)):
+            errors.append(f"func {fn!r}: try_region members {members!r} is not a "
+                          f"sequence of block labels")
+            continue
+        for label in members:
+            if not isinstance(label, (str, int)):
+                errors.append(f"func {fn!r}: try_region member {label!r} is "
+                              f"neither a block label nor an index")
+
+    _check_dominance(func, errors)
+
     for block in func.blocks:
         where_b = f"func {fn!r} block {block.label!r}"
         if not block.instrs:
@@ -108,6 +138,70 @@ def _check_func(func: IRFunc, errors: list[str]) -> None:
                 if operands and not isinstance(operands[0], IRValue):
                     errors.append(f"{where}: br.t condition is not a value")
                 _check_labels(instr, operands[1:3], label_set, where, errors)
+
+
+def _check_dominance(func: IRFunc, errors: list[str]) -> None:
+    """Every use must be dominated by its definition.
+
+    This is the invariant that makes block order irrelevant. Without it the IR
+    only works by accident of emission order -- the register allocator walks
+    blocks in list order, so a definition that merely sits at a lower index
+    appears to satisfy a use it does not actually dominate. Any pass that
+    reorders, merges, or deletes blocks then breaks the program, and the failure
+    surfaces as a wild memory access far from the pass responsible.
+
+    A phi operand is exempt from the ordinary rule: it must dominate the
+    predecessor its edge arrives from, not the block holding the phi.
+    """
+    if not func.blocks:
+        return
+    def_block: dict[str, int] = {}
+    for bi, block in enumerate(func.blocks):
+        for instr in block.instrs:
+            if instr.result is not None:
+                def_block.setdefault(instr.result.name, bi)
+    if not def_block:
+        return
+
+    index = {b.label: i for i, b in enumerate(func.blocks)}
+    idom = dominators(func)
+    reported: set[tuple[str, int]] = set()
+
+    for bi, block in enumerate(func.blocks):
+        for instr in block.instrs:
+            operands = instr.operands or []
+            if instr.op == "phi":
+                # (value, incoming_label) pairs: check against the predecessor.
+                for k in range(0, len(operands) - 1, 2):
+                    value, label = operands[k], operands[k + 1]
+                    name = getattr(value, "name", None)
+                    pred = index.get(str(label))
+                    if name is None or name not in def_block or pred is None:
+                        continue
+                    db = def_block[name]
+                    if db != pred and not dominates(idom, db, pred):
+                        key = (name, bi)
+                        if key not in reported:
+                            reported.add(key)
+                            errors.append(
+                                f"func {func.name!r} block {block.label!r}: phi "
+                                f"operand {name!r} does not dominate its incoming "
+                                f"edge from {str(label)!r}")
+                continue
+            for op in operands:
+                name = getattr(op, "name", None)
+                if name is None or name not in def_block:
+                    continue
+                db = def_block[name]
+                if db != bi and not dominates(idom, db, bi):
+                    key = (name, bi)
+                    if key in reported:
+                        continue
+                    reported.add(key)
+                    errors.append(
+                        f"func {func.name!r} block {block.label!r}: uses {name!r} "
+                        f"defined in {func.blocks[db].label!r}, which does not "
+                        f"dominate it")
 
 
 def _check_labels(instr: IRInstr, candidates, label_set, where, errors) -> None:

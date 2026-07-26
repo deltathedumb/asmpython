@@ -225,11 +225,50 @@ class IRFunc:
     ret_type: IRType | None
     blocks: list[IRBlock] = field(default_factory=list)
     visibility: Visibility = Visibility.UNDEFINED
-    # (setjmp_block_index, end_block_index) per try/except region. Exception
+    # (setjmp_block_label, member_block_labels) per try/except region. Exception
     # transfers are not ordinary CFG edges, so register allocation consumes this
-    # metadata to keep values live across handlers without misclassifying the
-    # synthetic backward edges as loops.
-    try_regions: list[tuple[int, int]] = field(default_factory=list)
+    # metadata to keep values live across handlers.
+    #
+    # A SET of labels, not a positional (start, end) span, and both halves of
+    # that are load-bearing. Indices silently rot: any pass inserting or
+    # deleting a block renumbers every span after it. But labels alone are not
+    # enough either -- a (start, end) pair stays positional even when its
+    # endpoints are labels, and block merging can fuse the end block into an
+    # earlier one, collapsing the implied range to a fraction of the try.
+    # Storing membership says what the consumers actually ask ("is this block
+    # executing while the try is active"), and survives insertion, deletion,
+    # merging, and reordering alike. A member label that no longer names a block
+    # is simply dropped.
+    #
+    # The legacy (setjmp_label, end_label) pair form is still accepted by
+    # `cfg.try_regions_resolved` for out-of-tree frontends.
+    try_regions: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
+
+
+def rewrite_try_region_labels(func: "IRFunc", mapping: dict[str, str]) -> None:
+    """Repoint ``func.try_regions`` after blocks were renamed or fused away.
+
+    A pass that removes a block but KEEPS its code -- block merging fuses ``B``
+    into ``A``, so the instructions still run, just under A's label -- must map
+    ``B -> A`` here. Otherwise the region names a block that no longer exists,
+    the consumers drop it as dead code, and the liveness guarantee it carried
+    quietly disappears: a value read inside an exception handler stops being
+    kept alive across it and is clobbered, which surfaces as a segfault far from
+    the pass that caused it.
+
+    This is the exact counterpart of rewriting phi incoming labels for the same
+    fused edge, and is required for the same reason.
+
+    A pass that removes a block because it is UNREACHABLE must not call this --
+    a region over code that cannot execute imposes no liveness requirement, and
+    the consumers dropping it is correct.
+    """
+    if not mapping or not getattr(func, "try_regions", None):
+        return
+    func.try_regions = [
+        (mapping.get(start, start), mapping.get(end, end))
+        for start, end in func.try_regions
+    ]
 
 
 @dataclass

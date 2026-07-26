@@ -331,16 +331,15 @@ class _FuncCtx:
         # a try body and popped when leaving. A `return` inside a try body must
         # restore `_runtime_handler_top` for every enclosing try before the ret.
         self.try_handler_stack: list[str] = []
-        # (setjmp_block_index, end_block_index) per try/except this
-        # function lowers -- populated by _lower_try, consumed by
-        # lower_func to stamp IRFunc.try_regions for the x86-64 backend's
-        # register allocator (see IRFunc.try_regions' own docstring for
-        # why this exists -- including how regalloc.py's `_last_uses`
-        # also uses these same spans to exclude every backward-by-index
-        # branch _lower_try's own control-flow-dispatch machinery
-        # produces from loop-back-edge detection, since none of them are
-        # real loops).
-        self.try_regions: list[tuple[int, int]] = []
+        # (setjmp_block_label, member_block_labels) per try/except this
+        # function lowers -- populated by the three setjmp-installing lowerings
+        # via `_record_try_region`, consumed by lower_func to stamp
+        # IRFunc.try_regions for the register allocators. See that field's
+        # docstring for why it is a label set rather than an index span.
+        #
+        # Record the setjmp LABEL where the block is still `ctx.cur`; by the
+        # time the region is closed `ctx.cur` has moved on.
+        self.try_regions: list[tuple[str, tuple[str, ...]]] = []
         # One shared, function-entry-defined zero, reused everywhere a
         # discardable "return value" is needed (print()/list.append() etc.
         # are all expression-shaped but really void) -- set once by
@@ -1605,6 +1604,38 @@ def _lower_comprehension_multi_for(ctx: _FuncCtx, e: A.Comprehension) -> IRValue
     return final_out_v
 
 
+def _record_try_region(ctx, setjmp_block_label: str) -> None:
+    """Record the blocks belonging to the try whose setjmp sits in `setjmp_block_label`.
+
+    A region is the SET of blocks this try's lowering created -- every block
+    after the setjmp block, at the moment the region is closed. It is recorded
+    as labels, and as a set rather than a span, because both properties are
+    load-bearing for the optimizer:
+
+      labels, not indices -- inserting or deleting any earlier block renumbers
+      positions, silently sliding the region onto unrelated code.
+
+      a set, not a (start, end) pair -- a pair is still positional even when its
+      endpoints are labels. Block merging can fuse the end block into an earlier
+      one, and the implied span then collapses to a fraction of the try. That
+      was observed: `blockmerge` shrank a region from ten blocks to three, the
+      allocator stopped extending liveness across the handler, and a `finally`
+      that runs on `break` lost its output.
+
+    Membership is what the consumers actually want -- "is this block executing
+    while the try is active" -- so recording it directly removes the ordering
+    assumption instead of encoding it.
+    """
+    labels = [b.label for b in ctx.blocks]
+    try:
+        start = labels.index(setjmp_block_label)
+    except ValueError:            # setjmp block gone: nothing to protect
+        return
+    members = tuple(labels[start + 1:])
+    if members:
+        ctx.try_regions.append((setjmp_block_label, members))
+
+
 def _lower_comprehension_instance_iter(ctx: _FuncCtx, e: A.Comprehension, cls_name: str) -> IRValue:
     """`[elt for x in obj]` where obj is a user class with __iter__/
     __next__ (this also covers a yield-based generator function's
@@ -1652,7 +1683,7 @@ def _lower_comprehension_instance_iter(ctx: _FuncCtx, e: A.Comprehension, cls_na
     ctx.emit(IRInstr("store", None, [cur_top, parent_ptr]))
     _store_global(ctx, "_runtime_handler_top", buf_ptr)
 
-    setjmp_block_index = ctx.blocks.index(ctx.cur)
+    setjmp_block_label = ctx.cur.label
     setjmp_result = ctx.tmp(I64)
     ctx.emit(IRInstr("call", setjmp_result, ["_abi_setjmp", buf_ptr]))
     ctx.emit(IRInstr("br.t", None, [setjmp_result, handler_b.label, body_b.label]))
@@ -1738,7 +1769,7 @@ def _lower_comprehension_instance_iter(ctx: _FuncCtx, e: A.Comprehension, cls_na
     ctx.emit(IRInstr("call", None, ["_abi_raise", reraise_msg, exc_type_v]))
     ctx.emit(IRInstr("br", None, [end_b.label]))
 
-    ctx.try_regions.append((setjmp_block_index, len(ctx.blocks) - 1))
+    _record_try_region(ctx, setjmp_block_label)
     ctx.switch_to(end_b)
     final_out_v = ctx.tmp(PTR)
     ctx.emit(IRInstr("load", final_out_v, [out_ptr]))
@@ -13169,7 +13200,7 @@ def _lower_for_iter_protocol(ctx: _FuncCtx, s: A.For, cls_name: str) -> None:
     ctx.emit(IRInstr("store", None, [cur_top, parent_ptr]))
     _store_global(ctx, "_runtime_handler_top", buf_ptr)
 
-    setjmp_block_index = ctx.blocks.index(ctx.cur)
+    setjmp_block_label = ctx.cur.label
     setjmp_result = ctx.tmp(I64)
     ctx.emit(IRInstr("call", setjmp_result, ["_abi_setjmp", buf_ptr]))
     ctx.emit(IRInstr("br.t", None, [setjmp_result, handler_b.label, body_b.label]))
@@ -13236,7 +13267,7 @@ def _lower_for_iter_protocol(ctx: _FuncCtx, s: A.For, cls_name: str) -> None:
             _lower_stmt(ctx, st)
         ctx.emit(IRInstr("br", None, [end_b.label]))
 
-    ctx.try_regions.append((setjmp_block_index, len(ctx.blocks) - 1))
+    _record_try_region(ctx, setjmp_block_label)
     ctx.switch_to(end_b)
 
 
@@ -13274,7 +13305,7 @@ def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
     _store_global(ctx, "_runtime_handler_top", buf_ptr)
 
     # setjmp(jmp_buf) -> 0 on direct call, nonzero after longjmp
-    setjmp_block_index = ctx.blocks.index(ctx.cur)
+    setjmp_block_label = ctx.cur.label
     setjmp_result = ctx.tmp(I64)
     ctx.emit(IRInstr("call", setjmp_result, ["_abi_setjmp", buf_ptr]))
 
@@ -13379,7 +13410,7 @@ def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
     # is fine: a nested try's own narrower region is recorded separately
     # and both cover the value correctly). See IRFunc.try_regions'
     # docstring for why the x86-64 backend's regalloc.py needs this.
-    ctx.try_regions.append((setjmp_block_index, len(ctx.blocks) - 1))
+    _record_try_region(ctx, setjmp_block_label)
 
     ctx.switch_to(end_b)
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Union
 
-from ..._compiler.cfg import loop_membership
+from ..._compiler.cfg import loop_membership, try_regions_resolved
 from .encoder import (
     Reg, XmmReg,
     ARG_REGS_SYSV, ARG_REGS_WIN64,
@@ -274,10 +274,15 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
     # segfaulting the following loop's own unrelated code (which reused
     # the same now-scrambled physical register).
     #
-    # Fix: ir_lower.py stamps the exact [setjmp_block_index,
-    # end_block_index] span per try statement onto IRFunc.try_regions
-    # (computed directly from the blocks it just created -- no label
-    # parsing needed). Only extend values actually REFERENCED somewhere
+    # Fix: ir_lower.py stamps the LABELS of the blocks belonging to each try
+    # onto IRFunc.try_regions, and `try_regions_resolved` maps them back to
+    # indices in the block list as it stands right now -- so an optimization
+    # pass may insert, delete, merge, or reorder blocks in between without
+    # silently shifting the region onto the wrong code. Membership is stored
+    # rather than a (start, end) span precisely because a span is positional
+    # even when its endpoints are labels: block merging can move the end block
+    # earlier and collapse the implied range to a fraction of the try.
+    # Only extend values actually REFERENCED somewhere
     # inside the region (setjmp_bi, end_bi] -- e.g. read inside a handler
     # block -- to stay live through the region's end; a value merely
     # defined earlier and last used before the try even starts (the
@@ -287,7 +292,7 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
     # last use and starves the allocator's register pool / crashes the
     # "GP result expected" assert when a short-lived value like a `br.t`
     # condition gets evicted to a stack slot it was never meant to need.
-    try_regions = getattr(func, "try_regions", ())
+    try_regions = try_regions_resolved(func)
     if try_regions:
         region_referenced: dict[int, set[str]] = {}
         for bi, block in enumerate(func.blocks):
@@ -295,12 +300,13 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
                 for op in instr.operands:
                     if not hasattr(op, "name"):
                         continue
-                    for ri, (setjmp_bi, end_bi) in enumerate(try_regions):
-                        if setjmp_bi < bi <= end_bi:
+                    for ri, (_setjmp_bi, members) in enumerate(try_regions):
+                        if bi in members:
                             region_referenced.setdefault(ri, set()).add(op.name)
         for name, (bi, _ii) in list(last.items()):
             db = def_block.get(name, bi)
-            for ri, (setjmp_bi, end_bi) in enumerate(try_regions):
+            for ri, (setjmp_bi, members) in enumerate(try_regions):
+                end_bi = max(members)
                 if (
                     db <= setjmp_bi
                     and name in region_referenced.get(ri, ())
