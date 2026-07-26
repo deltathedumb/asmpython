@@ -5038,6 +5038,13 @@ def _lower_sort_key_call(ctx: _FuncCtx, sort_key: A.Lambda, el_kind: str, item_v
         and isinstance(key_body.obj, A.Name)
         and key_body.obj.name == param
         and isinstance(key_body.index, A.IntLit)
+        # This reads slot N of the element's list/tuple buffer, so it only
+        # applies to list/tuple-shaped elements. A STR element's `s[1]` is a
+        # character read, not a buffer slot -- taking this path on a real str
+        # dereferenced its bytes as a header and crashed. Let it fall through
+        # to the general synthesized-function call, which handles str
+        # correctly now that the lambda's parameter is typed.
+        and el_kind != "str"
     ):
         key_idx = ctx.tmp(I64)
         ctx.emit(IRInstr("const", key_idx, [int(key_body.index.value)]))
@@ -5056,7 +5063,7 @@ def _lower_sort_key_call(ctx: _FuncCtx, sort_key: A.Lambda, el_kind: str, item_v
         key_v = ctx.tmp(I64)
         ctx.emit(IRInstr("call", key_v, ["strlen", item_v]))
         return key_v
-    if el_kind in ("int", "str") or el_kind.startswith("instance:"):
+    if el_kind in ("int", "str", "dict") or el_kind.startswith("instance:"):
         # Call the lambda's own synthesized function with the element. `str`
         # and instance elements used to be excluded because sema typed every
         # lambda parameter "any", so the body mis-compiled (a `len(s)` inside
