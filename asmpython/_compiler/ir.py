@@ -188,3 +188,58 @@ class ModuleBackend(IRBackend):
             outputs={name: len(data) for name, data in outputs.items()},
         )
         return outputs
+
+
+@dataclass(frozen=True)
+class FrontendContext:
+    """Everything a frontend needs to turn source text into a typed module.
+
+    Mirrors the argument dictionaries backends receive: a frontend gets one
+    of these instead of a loose kwargs bag so new pipeline knobs can be added
+    without breaking every ``IRFrontend.parse`` signature. ``Path``-typed
+    fields are left as forward-reference annotations (this module deliberately
+    avoids importing ``pathlib`` at runtime).
+    """
+
+    source_dir: "object | None" = None      # Path | None
+    entry_path: "object | None" = None       # Path | None
+    whole_program: bool = True
+    all_errors: bool = False
+    active_extensions: "frozenset[str] | None" = None
+
+
+class IRFrontend(abc.ABC):
+    """Interface every ASMPython source-language frontend implements.
+
+    A frontend is the mirror image of :class:`IRBackend`: where a backend turns
+    the shared IR into artifacts, a frontend turns source text of some language
+    into the typed AST *module* that the rest of the pipeline
+    (``ir_lower`` -> a backend, or the legacy codegen) already consumes. This is
+    the single "side chute" into the IR pipeline -- whatever a frontend returns
+    from :meth:`parse` is handed straight to ``driver._run_backend`` exactly as
+    the built-in Python path's sema'd module is.
+
+    The default ``python`` frontend wraps the existing lexer/parser/sema. Any
+    other language only has to produce a module object exposing the same surface
+    the backends read (function/class defs, and flags like ``uses_overload`` /
+    ``has_asm_source``).
+    """
+
+    #: Canonical selector name, e.g. ``"python"``. Set by implementations.
+    name: str = ""
+    #: Source-file extensions this frontend claims (advisory; ``()`` = any).
+    source_extensions: tuple[str, ...] = ()
+    #: Whether this frontend is fit for real builds (scaffolds set False).
+    production_suitable: bool = True
+
+    @property
+    def requested_args(self) -> list[dict]:
+        """CLI arguments this frontend wants the driver to register.
+
+        Symmetric to :attr:`IRBackend.requested_args`; empty by default.
+        """
+        return []
+
+    @abc.abstractmethod
+    def parse(self, src: str, ctx: FrontendContext) -> object:
+        """Parse+analyze ``src`` into the typed module the IR pipeline consumes."""

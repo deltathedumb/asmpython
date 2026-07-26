@@ -9,10 +9,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .lexer import Lexer
-from .parser import Parser
-from .program import load_program
-from .sema import analyze as sema_analyze
 from .target_freestanding import FreestandingCodegen
 from .target_linux import LinuxCodegen
 from .target_windows import WindowsCodegen
@@ -278,6 +274,12 @@ def _build_icon_resource(icon_path: Path, stem: Path, gcc: str) -> Path:
     return res_obj
 
 
+def _registered_frontend_names() -> list[str]:
+    from .._frontends import registered_names
+
+    return list(registered_names())
+
+
 def _compile_program(
     src: str,
     *,
@@ -286,26 +288,37 @@ def _compile_program(
     whole_program: bool,
     all_errors: bool,
     active_extensions: "frozenset[str] | None" = None,
+    frontend: str = "python",
 ):
-    """Lex / parse / sema (target-independent front-end). Returns the typed module.
+    """Turn source into the typed module the IR pipeline consumes.
+
+    The chosen `frontend` (default `python`) is the single "side chute" into the
+    pipeline: it is looked up in `asmpython._frontends` and its `parse` produces
+    the module that `_run_backend` then lowers. The built-in `python` frontend
+    is the former inline lex/parse/sema, so the default path is unchanged.
 
     `active_extensions` is always empty now -- the opt-in compiler-syntax
     extension system was withdrawn (see `asmpython/_compiler/extensions.py`
     and `archived/extensions/`). The parameter is kept only so this
     function's signature (and every caller's) doesn't need to change.
     """
-    if whole_program and entry_path is not None:
-        module = load_program(src, entry_path, active_extensions=active_extensions)
-    else:
-        tokens = Lexer(src).tokenize()
-        module = Parser(tokens, active_extensions).parse()
-    sema_analyze(
-        module,
+    from .._frontends import get_frontend
+    from .ir import FrontendContext
+
+    impl = get_frontend(frontend)
+    if impl is None:
+        names = _registered_frontend_names()
+        raise ValueError(
+            f"unknown frontend {frontend!r} (have: {', '.join(names)})"
+        )
+    ctx = FrontendContext(
         source_dir=source_dir,
-        collect_errors=all_errors,
+        entry_path=entry_path,
+        whole_program=whole_program,
+        all_errors=all_errors,
         active_extensions=active_extensions,
     )
-    return module
+    return impl.parse(src, ctx)
 
 
 def _write_backend_output(
@@ -876,6 +889,7 @@ def compile_source(
     backend: str = "legacy",
     linker: str | None = None,
     active_extensions: "frozenset[str] | None" = None,
+    frontend: str = "python",
 ) -> BuildResult:
     module = _compile_program(
         src,
@@ -884,6 +898,7 @@ def compile_source(
         whole_program=whole_program,
         all_errors=all_errors,
         active_extensions=active_extensions,
+        frontend=frontend,
     )
     return _run_backend(
         module,
@@ -925,6 +940,7 @@ def compile_targets(
     backend: str = "legacy",
     linker: str | None = None,
     active_extensions: "frozenset[str] | None" = None,
+    frontend: str = "python",
 ) -> list[BuildResult]:
     """Compile src for multiple targets, sharing the front-end (lex/parse/sema).
 
@@ -939,6 +955,7 @@ def compile_targets(
         whole_program=whole_program,
         all_errors=all_errors,
         active_extensions=active_extensions,
+        frontend=frontend,
     )
     results: list[BuildResult] = []
     for target, out_path in zip(targets, out_paths):

@@ -11,7 +11,7 @@ import struct
 import sys
 from types import ModuleType
 
-from . import annotations, backend, embedded, extras, linker, mlang, runtime
+from . import annotations, backend, embedded, extras, frontend, linker, mlang, runtime
 from .capabilities import CapabilitySet, Dependency
 from .extension import Extension
 from .annotations import *
@@ -30,7 +30,6 @@ from ._version import (
     python_version,
     __version__,
 )
-
 
 def __getattr__(name: str):
     """Resolve CPython-only host adapters without defining compiler intrinsics."""
@@ -133,6 +132,7 @@ __all__ = [
     "backend",
     "embedded",
     "extras",
+    "frontend",
     "import_binary",
     "linker",
     "mlang",

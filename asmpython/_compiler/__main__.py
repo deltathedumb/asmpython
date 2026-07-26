@@ -426,6 +426,16 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         "the runtime helpers (smaller .asm; archive built on demand)",
     )
     build_grp.add_argument(
+        "--frontend",
+        metavar="NAME",
+        default=None,
+        help="source-language frontend: 'python' (default; the built-in "
+        "lexer/parser/sema), any planned language scaffold (lua, javascript, "
+        "typescript, c, go -- discoverable but not yet implemented), or any "
+        "frontend registered via asmpython.frontend.Frontend(...). May also be "
+        "a path to a .py plugin that registers one.",
+    )
+    build_grp.add_argument(
         "--backend",
         metavar="NAME",
         default=None,
@@ -652,6 +662,47 @@ def _load_linker_plugin(path: Path) -> str:
     return next(iter(new_names))
 
 
+def _load_frontend_plugin(path: Path) -> str:
+    """Exec a plugin .py file and return the name of the frontend it
+    registered. Mirrors `_load_backend_plugin`, diffing
+    `asmpython._frontends._REGISTRY` -- a Frontend's registered name IS what
+    `--frontend` selects."""
+    from asmpython import _frontends
+
+    before = set(_frontends._REGISTRY.keys())
+    try:
+        src = path.read_text(encoding="utf-8")
+        ns: dict = {"__name__": f"asmpython_frontend_plugin_{path.stem}", "__file__": str(path)}
+        exec(compile(src, str(path), "exec"), ns)
+    except Exception as e:
+        raise RuntimeError(f"failed to load frontend plugin {path}: {e}") from e
+    after = set(_frontends._REGISTRY.keys())
+    new_names = after - before
+    if len(new_names) == 0:
+        raise RuntimeError(
+            f"frontend plugin {path} did not register any "
+            f"asmpython.frontend.Frontend(...)"
+        )
+    if len(new_names) > 1:
+        raise RuntimeError(
+            f"frontend plugin {path} registered multiple frontends "
+            f"({', '.join(sorted(new_names))}) -- register exactly one"
+        )
+    return next(iter(new_names))
+
+
+def _resolve_frontend_flag(value: "str | None") -> "str | None":
+    """Resolve --frontend's value: a bare registered name passes through
+    unchanged; a filesystem path (a .py plugin) is loaded first and its
+    registered name is used instead. Mirrors `_resolve_backend_flag`."""
+    if value is None:
+        return None
+    p = Path(value)
+    if p.is_file():
+        return _load_frontend_plugin(p)
+    return value
+
+
 def _resolve_backend_flag(value: "str | None") -> "str | None":
     """Resolve --backend's value: a bare registered name passes through
     unchanged; a filesystem path (bare .py or .apb package) is loaded first
@@ -757,6 +808,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     # override.
     try:
         effective_backend = _resolve_backend_flag(args.backend)
+        effective_frontend = _resolve_frontend_flag(args.frontend) or "python"
         args.linker = _resolve_linker_flag(args.linker)
     except RuntimeError as e:
         print(f"asmpython: error: {e}", file=sys.stderr)
@@ -879,6 +931,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 backend=effective_backend,
                 linker=args.linker,
                 active_extensions=active_extensions,
+                frontend=effective_frontend,
             )
         else:
             compile_targets(
@@ -900,6 +953,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 backend=effective_backend,
                 linker=args.linker,
                 active_extensions=active_extensions,
+                frontend=effective_frontend,
             )
     except MultiSemaError as me:
         # Give the target-neutral interpreter a chance before reporting a
