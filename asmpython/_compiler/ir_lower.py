@@ -5056,7 +5056,14 @@ def _lower_sort_key_call(ctx: _FuncCtx, sort_key: A.Lambda, el_kind: str, item_v
         key_v = ctx.tmp(I64)
         ctx.emit(IRInstr("call", key_v, ["strlen", item_v]))
         return key_v
-    if el_kind == "int":
+    if el_kind in ("int", "str") or el_kind.startswith("instance:"):
+        # Call the lambda's own synthesized function with the element. `str`
+        # and instance elements used to be excluded because sema typed every
+        # lambda parameter "any", so the body mis-compiled (a `len(s)` inside
+        # it read a list header off a real str). Sema now types the parameter
+        # from the sequence's element kind (see its `param_hint`), so the
+        # general path is correct for these too -- which is what makes
+        # `key=lambda s: s.lower()` work.
         fn_name = sort_key.func_name  # type: ignore[attr-defined]
         key_ty = ir_type_for(getattr(sort_key, "lambda_ret", "int"))
         key_v = ctx.tmp(key_ty)

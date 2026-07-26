@@ -9834,8 +9834,17 @@ class SemaAnalyzer:
             # Seed with outer scope's names so captured variables resolve.
             for nm, ty in scope.types.items():
                 inner_scope.add(nm, ty)
-            for p in e.params:
-                inner_scope.add(p, "any")
+            # A lambda parameter is normally opaque ("any") -- nothing at the
+            # definition site says what it will be called with. But a lambda
+            # passed to sorted(key=)/min/max/map/filter is ALWAYS called with
+            # the source sequence's elements, and those call sites stamp
+            # `param_hint` with that element kind. Using it matters: with "any",
+            # `len(w)` on a str element lowers to a LIST-header read (a real str
+            # has no header) and yields garbage, and `w.upper()` doesn't resolve
+            # at all. Only the FIRST parameter is hinted (the element).
+            _p_hint = getattr(e, "param_hint", None)
+            for _pi, p in enumerate(e.params):
+                inner_scope.add(p, _p_hint if (_pi == 0 and _p_hint) else "any")
             if e.vararg:
                 # Vararg absorbs surplus positional args into a list at the
                 # call site (identical binding as a real `def f(*args)`, see
@@ -9860,6 +9869,11 @@ class SemaAnalyzer:
             synth_param_types = [None] * len(e.params) + (
                 [("list", None)] if e.vararg else []
             )
+            if _p_hint and e.params:
+                # Carry the element-kind hint into the synthesized function's
+                # own signature too, so its BODY compiles against the real kind
+                # (the inner_scope typing above only affects this check pass).
+                synth_param_types[0] = (_p_hint, None)
             self._ensure_synthetic_func(
                 A.FuncDef(
                     name=lname,
@@ -9934,6 +9948,37 @@ class SemaAnalyzer:
             ai += 1
         e.inferred_type = "str"  # type: ignore
 
+    def _callable_name_as_lambda(
+        self, name: str, scope: Scope, pos, param_hint: "Optional[str]" = None
+    ) -> "Optional[A.Lambda]":
+        """Wrap a bare one-argument callable NAME in the equivalent lambda
+        (`len` -> `lambda _k: len(_k)`), or None if the name isn't one.
+
+        The `key=`/`map()`/`filter()` lowerings all call a Lambda's synthesized
+        function, so a bare name reference -- a builtin, a top-level function,
+        or a variable bound to a lambda -- has nothing to dispatch to and used
+        to be a hard error. Checking the synthesized Lambda here creates that
+        hidden function (see `_check_expr`'s A.Lambda case), producing exactly
+        the shape a hand-written `lambda x: len(x)` compiles to, so no new
+        lowering path is needed.
+        """
+        is_callable_name = (
+            name in self.lambda_rets
+            or name in self.funcs
+            or (name in BUILTINS and BUILTINS[name][0] <= 1 <= BUILTINS[name][1])
+        )
+        if not is_callable_name:
+            return None
+        lam = A.Lambda(
+            params=["_k"],
+            body=A.Call(func=name, args=[A.Name(name="_k", pos=pos)], pos=pos),
+            pos=pos,
+        )
+        if param_hint:
+            lam.param_hint = param_hint  # type: ignore[attr-defined]
+        self._check_expr(lam, scope)
+        return lam
+
     def _check_sort_kwargs(self, e, scope: Scope, allow_default: bool = False) -> None:
         """Validate and resolve the `key=`/`reverse=` kwargs shared by
         `sorted()`, `min()`/`max()`, and `list.sort()`.
@@ -9963,81 +10008,51 @@ class SemaAnalyzer:
             else:
                 raise SemaError(f"unexpected keyword argument {kname!r}", e.pos, ErrorCode.E_ARG_COUNT)
         if key_expr is not None:
+            # The key function is always called with the sequence's ELEMENTS,
+            # so hint the lambda's parameter with that kind (see `param_hint`
+            # in _check_expr's A.Lambda case) -- without it a str element's
+            # `len(s)`/`s.lower()` inside the key mistypes. The sequence is the
+            # receiver for `list.sort()` and the first argument otherwise; both
+            # have already been checked by the time this runs.
+            _seq = e.obj if isinstance(e, A.MethodCall) else (e.args[0] if e.args else None)
+            _seq_el = self._iter_element_type(_seq, scope) if _seq is not None else None
+            if _seq_el in ("", "?", "any"):
+                _seq_el = None
+            if _seq_el and isinstance(key_expr, A.Lambda):
+                key_expr.param_hint = _seq_el  # type: ignore[attr-defined]
             self._check_expr(key_expr, scope)
             if isinstance(key_expr, A.Lambda):
                 ret_t: str = getattr(key_expr, "lambda_ret", "int")
             elif isinstance(key_expr, A.Name):
-                if key_expr.name in self.lambda_rets:
-                    ret_t = self.lambda_rets[key_expr.name]
-                    # Same bare-Name-to-Lambda desugar as the function case
-                    # below (`f = lambda p: -p; sorted(xs, key=f)`).
-                    _kl = key_expr.name
-                    key_expr = A.Lambda(
-                        params=["_k"],
-                        body=A.Call(
-                            func=_kl,
-                            args=[A.Name(name="_k", pos=e.pos)],
-                            pos=e.pos,
-                        ),
-                        pos=e.pos,
-                    )
-                    self._check_expr(key_expr, scope)
-                elif key_expr.name in self.funcs:
-                    sig = self.funcs[key_expr.name]
-                    required = sig.arity - sig.n_defaults
-                    if required > 1:
+                # A bare callable NAME -- a top-level function, a variable
+                # bound to a lambda, or a one-argument builtin (`key=len`).
+                # All three become the equivalent lambda: the sort lowering
+                # only knows how to call a Lambda's synthesized function, so a
+                # Name reached it as "unsupported expr Call (sorted key)" (or,
+                # for a builtin, was rejected outright here).
+                _kname = key_expr.name
+                if _kname in self.funcs and _kname not in self.lambda_rets:
+                    _ksig = self.funcs[_kname]
+                    if _ksig.arity - _ksig.n_defaults > 1:
                         raise SemaError(
-                            f"key= function {key_expr.name!r} must take exactly "
+                            f"key= function {_kname!r} must take exactly "
                             "one argument (the element being compared)",
                             e.pos,
                             ErrorCode.E_SORT_KEY_ARITY,
                         )
-                    ret_t = sig.ret_type[0] if sig.ret_type is not None else "int"
-                    # Desugar the bare function reference into the equivalent
-                    # lambda (`key=neg` -> `lambda _k: neg(_k)`): the sort
-                    # lowering only knows how to call a Lambda's synthesized
-                    # function, so a bare Name reached it as "unsupported expr
-                    # Call (sorted key)" even though sema accepted it here.
-                    _kf = key_expr.name
-                    key_expr = A.Lambda(
-                        params=["_k"],
-                        body=A.Call(
-                            func=_kf,
-                            args=[A.Name(name="_k", pos=e.pos)],
-                            pos=e.pos,
-                        ),
-                        pos=e.pos,
-                    )
-                    self._check_expr(key_expr, scope)
-                elif key_expr.name in BUILTINS and BUILTINS[key_expr.name][0] <= 1 <= BUILTINS[key_expr.name][1]:
-                    # `key=len` / `key=abs` / `key=str` ... -- a one-argument
-                    # BUILTIN used directly as the key function. There's no
-                    # user-level function to point at, so desugar it into the
-                    # equivalent lambda (`lambda _k: len(_k)`) and check that:
-                    # _check_expr on a Lambda synthesizes the hidden
-                    # module-level function, so this needs no separate lowering
-                    # path -- it becomes exactly the shape a hand-written
-                    # `key=lambda x: len(x)` already produces.
-                    _kb = key_expr.name
-                    key_expr = A.Lambda(
-                        params=["_k"],
-                        body=A.Call(
-                            func=_kb,
-                            args=[A.Name(name="_k", pos=e.pos)],
-                            pos=e.pos,
-                        ),
-                        pos=e.pos,
-                    )
-                    self._check_expr(key_expr, scope)
-                    ret_t = getattr(key_expr, "lambda_ret", "int")
-                else:
+                _klam = self._callable_name_as_lambda(
+                    _kname, scope, e.pos, param_hint=_seq_el
+                )
+                if _klam is None:
                     raise SemaError(
                         "key= must be a lambda literal, a name bound to a "
-                        f"lambda, or a top-level function ({key_expr.name!r} "
+                        f"lambda, or a top-level function ({_kname!r} "
                         "is none of these)",
                         e.pos,
                         ErrorCode.E_SORT_KEY_TYPE,
                     )
+                key_expr = _klam
+                ret_t = getattr(_klam, "lambda_ret", "int")
             else:
                 raise SemaError(
                     "key= must be a lambda literal or a name bound to a lambda",
@@ -10760,6 +10775,24 @@ class SemaAnalyzer:
                     e.pos,
                     ErrorCode.E_ARG_COUNT,
                 )
+            if e.func in ("map", "filter") and len(e.args) >= 2:
+                # The function is called with the source sequence's elements --
+                # tell the lambda so its parameter types correctly (see
+                # `param_hint` in _check_expr's A.Lambda case).
+                self._check_expr(e.args[1], scope)
+                _mf_el = self._iter_element_type(e.args[1], scope)
+                if isinstance(e.args[0], A.Name):
+                    # `map(str, xs)` / `filter(is_even, xs)`: the lowering calls
+                    # a Lambda's synthesized function, so a bare callable NAME
+                    # was "unsupported expr Call (map() with a non-lambda
+                    # predicate)". Desugar it, exactly as `key=` does.
+                    _mf_lam = self._callable_name_as_lambda(
+                        e.args[0].name, scope, e.pos, param_hint=_mf_el
+                    )
+                    if _mf_lam is not None:
+                        e.args[0] = _mf_lam
+                elif isinstance(e.args[0], A.Lambda):
+                    e.args[0].param_hint = _mf_el  # type: ignore[attr-defined]
             for a in e.args:
                 self._check_expr(a, scope)
             # `sum` follows its element type: summing a float list/tuple (or
@@ -10841,6 +10874,15 @@ class SemaAnalyzer:
                 # subscript index (see ir_lower's _lower_slice_ctor).
                 "slice": "any",
             }[e.func]
+            if e.func in ("map", "filter") and len(e.args) >= 2:
+                # The result list's ELEMENT kind: map() yields whatever the
+                # mapping function returns, filter() yields the source's own
+                # elements. Left untracked, `list(map(str, xs))` typed its
+                # elements "int" and printed string pointers as integers.
+                if e.func == "filter":
+                    e.list_el_type = self._list_el_type(e.args[1], scope)
+                elif isinstance(e.args[0], A.Lambda):
+                    e.list_el_type = getattr(e.args[0], "lambda_ret", "int")
             if e.func == "abs":
                 # abs preserves the operand's numeric type (float -> float so
                 # the result prints/operates as a float, not its raw bits).
