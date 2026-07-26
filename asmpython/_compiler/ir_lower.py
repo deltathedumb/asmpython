@@ -3433,8 +3433,14 @@ def _lower_tuple_repr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     and their types are known at compile time, so this unrolls per
     element rather than looping like _abi_list_repr does for a
     uniformly-typed list."""
-    kinds = A.tuple_element_types(e)
-    obj = _lower_expr(ctx, e)
+    return _emit_tuple_repr_value(ctx, _lower_expr(ctx, e), A.tuple_element_types(e))
+
+
+def _emit_tuple_repr_value(ctx: _FuncCtx, obj: IRValue, kinds: list) -> IRValue:
+    """The body of `_lower_tuple_repr`, but driven by an already-lowered tuple
+    VALUE plus its per-slot kinds -- so a caller that has a tuple in hand at
+    runtime (each element of a list[tuple], say) can format it the same way
+    instead of only working from an AST node."""
     buf_addr = ctx.tmp(PTR)
     ctx.emit(IRInstr("gep", buf_addr, [obj, _LIST_BUF_OFF]))
     buf_v = ctx.tmp(PTR)
@@ -3484,6 +3490,86 @@ def _lower_tuple_repr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     out = ctx.tmp(PTR)
     ctx.emit(IRInstr("call", out, ["_abi_str_concat", acc, close_v]))
     return out
+
+
+def _lower_list_of_tuples_repr(ctx: _FuncCtx, e, obj_v: IRValue, slots: list) -> IRValue:
+    """repr of a `list[tuple]` as `[(a, b), (c, d)]`, formatting every slot by
+    its own static kind.
+
+    `_abi_list_repr`'s tuple element kind (5) is hard-coded for the dict-items
+    shape -- a (str, int) pair -- because that is what it was written for. Any
+    other slot layout was misread: an (int, str) pair had its leading int
+    formatted as a string POINTER, which segfaults (`print([(1,'b')])` crashes
+    outright), and other layouts silently printed pointer numbers. Build the
+    text here instead, reusing the per-slot tuple formatter.
+    """
+    res_ptr = ctx.ensure_slot(f"__ltrep_res_{id(e)}", PTR)
+    open_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", open_v, [ctx.mctx.intern_str("[")]))
+    ctx.emit(IRInstr("store", None, [open_v, res_ptr]))
+    len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_addr, [obj_v, _LIST_LEN_OFF]))
+    len_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", len_v, [len_addr]))
+    idx_ptr = ctx.ensure_slot(f"__ltrep_idx_{id(e)}", I64)
+    z0 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", z0, [0]))
+    ctx.emit(IRInstr("store", None, [z0, idx_ptr]))
+    h_b = ctx.new_block("ltrephead")
+    b_b = ctx.new_block("ltrepbody")
+    sep_b = ctx.new_block("ltrepsep")
+    elt_b = ctx.new_block("ltrepelt")
+    e_b = ctx.new_block("ltrepend")
+    ctx.emit(IRInstr("br", None, [h_b.label]))
+    ctx.switch_to(h_b)
+    i_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_v, [idx_ptr]))
+    go_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", go_v, [i_v, len_v]))
+    ctx.emit(IRInstr("br.t", None, [go_v, b_b.label, e_b.label]))
+    ctx.switch_to(b_b)
+    bi_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", bi_v, [idx_ptr]))
+    zc = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zc, [0]))
+    first_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", first_v, [bi_v, zc]))
+    ctx.emit(IRInstr("br.t", None, [first_v, elt_b.label, sep_b.label]))
+    ctx.switch_to(sep_b)
+    cs = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", cs, [res_ptr]))
+    comma_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", comma_v, [ctx.mctx.intern_str(", ")]))
+    cs2 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", cs2, ["_abi_str_concat", cs, comma_v]))
+    ctx.emit(IRInstr("store", None, [cs2, res_ptr]))
+    ctx.emit(IRInstr("br", None, [elt_b.label]))
+    ctx.switch_to(elt_b)
+    bi2_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", bi2_v, [idx_ptr]))
+    ea = _list_elem_addr(ctx, obj_v, bi2_v)
+    tup_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", tup_v, [ea]))
+    tr_v = _emit_tuple_repr_value(ctx, tup_v, list(slots))
+    cs3 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", cs3, [res_ptr]))
+    cs4 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", cs4, ["_abi_str_concat", cs3, tr_v]))
+    ctx.emit(IRInstr("store", None, [cs4, res_ptr]))
+    one_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one_v, [1]))
+    ni_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", ni_v, [bi2_v, one_v]))
+    ctx.emit(IRInstr("store", None, [ni_v, idx_ptr]))
+    ctx.emit(IRInstr("br", None, [h_b.label]))
+    ctx.switch_to(e_b)
+    fin_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", fin_v, [res_ptr]))
+    close2_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", close2_v, [ctx.mctx.intern_str("]")]))
+    out2 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", out2, ["_abi_str_concat", fin_v, close2_v]))
+    return out2
 
 
 # ── f-string format-spec parsing (pure, compile-time; ports codegen.py's
@@ -4042,6 +4128,17 @@ def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr, repr_mode: bool = False) -> IRV
             _rd = _resolve_str_dunder(ctx, _el.split(":", 1)[1], repr_first=True)
             if _rd is not None:
                 return _lower_list_instance_repr(ctx, e, obj, _rd[0], _rd[1])
+        if _el == "tuple":
+            # A list of tuples with known slot kinds: format each slot by its
+            # own kind. `_abi_list_repr`'s tuple kind assumes the dict-items
+            # (str, int) layout and misreads anything else -- see
+            # `_lower_list_of_tuples_repr`.
+            _slots = (
+                list(getattr(e, "el_tuple_types", []) or [])
+                or list(getattr(e, "tuple_elem_types", []) or [])
+            )
+            if _slots:
+                return _lower_list_of_tuples_repr(ctx, e, obj, _slots)
         kind = ctx.tmp(I64)
         ctx.emit(IRInstr("const", kind, [_list_repr_kind(e)]))
         out = ctx.tmp(PTR)
