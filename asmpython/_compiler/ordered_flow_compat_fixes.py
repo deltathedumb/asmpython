@@ -299,6 +299,19 @@ def _analyze_with_ordered_flow(self: SemaAnalyzer) -> None:
     _lower_static_data_descriptors(self.mod)
     _lower_type_parameter_specializations(self.mod)
     _mark_dynamic_parameters(self.mod)
+    # Infer unannotated parameter types from call sites, and stamp a FLOAT
+    # inference onto the FuncDef's `param_types`, BEFORE whole-program return
+    # inference runs below. Return inference reads parameter types to type a
+    # `return a + b` / `return x` body, and FuncSig construction (in the
+    # original analyze that runs last) reads the same `param_types` -- so a
+    # float parameter learned only from call sites has to be in place first,
+    # or `def add(a, b): return a + b` called `add(1.5, 2.5)` freezes its
+    # return type at `any` here (param still untyped) and later marshals the
+    # float arguments through GP registers, reinterpreting their bits as ints.
+    # `_infer_unannotated_params` still runs again inside the original analyze
+    # (idempotent: these params are now annotated, so it re-confirms the rest).
+    self._infer_unannotated_params()
+    self._apply_inferred_float_params()
     _infer_dynamic_returns(self.mod)
     _infer_specific_returns(self.mod)
 

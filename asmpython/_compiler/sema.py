@@ -2040,6 +2040,54 @@ class SemaAnalyzer:
             if found_any and len(candidates) == 1:
                 self.inferred_param_types[f"{qualname}:{i}"] = candidates[0]
 
+    def _apply_inferred_float_params(self) -> None:
+        """Propagate a FLOAT parameter type inferred from call sites (see
+        `_infer_unannotated_params`) into the parameter's ABI, not just the
+        body type-check scope.
+
+        Float is the one inferred kind whose calling convention differs from
+        the `any`/int default -- a float argument travels in an XMM register,
+        an int/pointer in a GP register. `_infer_unannotated_params` records
+        the inferred kind and `_seed_param` types the body from it, but the
+        FuncSig's `param_types` (how a caller marshals the argument) and the
+        FuncDef's `param_types` (the callee's own IR parameter ABI, read
+        directly by ir_lower) both stayed `any`. So `def add(a, b): return
+        a + b` called `add(1.5, 2.5)` emitted float arithmetic in the body
+        while the caller passed -- and the callee read -- the operands through
+        GP registers, reinterpreting each float's 64 bits as an integer and
+        returning garbage (2.65e-314). Writing the float type into BOTH tables
+        keeps every consumer in agreement. Pointer-shaped inferred kinds
+        (str/list/dict/set/instance) share the GP convention with `any`, so
+        they need no ABI change and keep their existing scope-only seeding.
+        Only fills a genuinely unannotated slot -- an explicit annotation is
+        always authoritative."""
+        def _apply(qualname: str, fn, sig, start: int) -> None:
+            fn_pts: list = fn.param_types
+            n: int = len(fn.params)
+            for i in range(n):
+                if i < start:
+                    continue
+                inferred = self.inferred_param_types.get(f"{qualname}:{i}")
+                if inferred is None or inferred[0] != "float":
+                    continue
+                cur = fn_pts[i] if i < len(fn_pts) else None
+                if cur is not None:
+                    continue  # never override a real annotation
+                while len(fn_pts) <= i:
+                    fn_pts.append(None)
+                fn_pts[i] = ("float", None)
+                if sig is not None:
+                    sig_pts: list = sig.param_types
+                    if i < len(sig_pts):
+                        sig_pts[i] = "float"
+        for f in self.mod.funcs:
+            _apply(f.name, f, self.funcs.get(f.name), 0)
+        for c in self.mod.classes:
+            csig = self.classes.get(c.name)
+            for m in c.methods:
+                msig = csig.methods.get(m.name) if csig is not None else None
+                _apply(f"{c.name}.{m.name}", m, msig, 1)
+
     def _infer_lambda_param_types(self, target: str, value: "A.Lambda") -> None:
         """Same idea as `_infer_call_target_params`, but for a lambda bound
         directly to a name (`greet = lambda name: "hi " + name`).
