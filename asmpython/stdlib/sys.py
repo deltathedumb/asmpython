@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from . import Func, Const
-from .. import __version__
+from .._version import PYTHON_LANGUAGE_VERSION
 
 BINDINGS: dict = {
     # sys.exit(code)
@@ -16,8 +16,11 @@ BINDINGS: dict = {
     "getenv": Func(arg_types=("str",), ret_type="str", c_name="getenv"),
     # sys.abort() — unrecoverable crash
     "abort": Func(arg_types=(), ret_type="int", c_name="abort"),
-    # Constants
-    "version": Const(ty="str", value=f"asmpython {__version__}"),
+    # Constants. Like CPython's sys.version, this reports the Python *language*
+    # version the toolchain implements (with a release-stage suffix), not the
+    # asmpython package's own semver -- mirrors the interpreter's
+    # "pyinbin 3.14-preview" in pyinbin/native.py.
+    "version": Const(ty="str", value=f"asmpython {PYTHON_LANGUAGE_VERSION}-preview"),
     "maxsize": Const(ty="int", value=9223372036854775807),
     "byteorder": Const(ty="str", value="little"),
     "platform": Const(ty="str", value="linux", value_windows="win32"),
