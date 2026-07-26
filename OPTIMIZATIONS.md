@@ -56,32 +56,39 @@ canonicalize so the redundancy passes can match, the CFG passes collapse what
 became statically decidable, and `adce`/`globaldce` sweep last. Change the
 list only together with a fresh differential run.
 
-### `o2` has 16 known miscompiles — the 149-case certification was too small
+### Full-corpus `o2` certification
 
-Certifying against the **full** corpus rather than a 149-case sample:
+Certifying against the **whole** corpus rather than the 149-case sample earlier
+numbers used:
 
 ```text
 identical=790  DIFFERENT=17  nondeterministic=50  skipped(pre-existing)=170
 ```
 
-Sixteen of those 17 reproduce byte-identically with every CFG pass skipping
-try/except functions, so they are **pre-existing** and were simply outside the
-sample every earlier "149/149" was measured on. They are real miscompiles in a
-shipped preset, in three shapes:
+Every one of those 17 was then checked against CPython, which is the question
+that actually matters — a native-vs-native diff flags *any* change, including a
+change to output that was already wrong:
 
-| Shape | Cases |
+| | Cases |
 |---|---|
-| `o2` crashes what ran | `deeply_nested_comprehension`, `sim_grade_report`, `type_alias_annotation` |
-| `o2` changes a value | `r40_percentage_change` (`100.0` → a pointer), `float_func_return` (`1` → a pointer), `sim_discount_calc` (`100.0` → `20.0`), `r40_gradient` (`[8, 8]` → `[0, 1]`), `lambda_default_arg`, `lib_itertools_repeat`, `lib_mimetypes`, `float_func_simple_div`, `float_percentage_func` |
-| `o2` *fixes* a crash | `382_nested_listcomp`, `999_comprehensive_codegen`, `lib_functools_reduce_strings`, `str_capitalize_manual` |
+| correct at baseline → broken by `o2` | **none** |
+| already wrong at baseline, `o2` makes it **correct** | `382_nested_listcomp`, `425_generator_pipeline`, `999_comprehensive_codegen` |
+| already wrong at baseline, still wrong (differently) | the other 14 |
 
-The lesson is about the sample, not the passes: a 149-case gate certified a
-pipeline that miscompiles a dozen programs. **Certify against the whole corpus.**
-Bisecting these to the responsible pass is the top open item.
+So `o2` does not break a single correct program in the corpus. The 14 are
+programs whose output already diverged from CPython — pre-existing frontend and
+lowering parity gaps — where optimization rearranges the garbage. Sixteen of the
+17 reproduce byte-identically with the old try/except guards in place, so they
+predate this work; the seventeenth (`425_generator_pipeline`) is one of the
+three `o2` now fixes.
 
-Presets otherwise contain only differential-certified passes. `mem2reg` is
-deliberately excluded (see below); a preset must never silently change program
-behavior.
+Two lessons worth keeping. **Certify against the whole corpus** — the 149-case
+gate never reached any of this. And **classify a differential hit against ground
+truth before calling it a miscompile**: "the output changed" and "the output
+became wrong" are different claims, and only the second is a bug in the pass.
+
+Presets contain only differential-certified passes. `mem2reg` is deliberately
+excluded (see below); a preset must never silently change program behavior.
 
 ## Impact
 
