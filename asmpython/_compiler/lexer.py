@@ -633,7 +633,7 @@ class Lexer:
     def _read_operator(self) -> Token:
         line, col = self.line, self.col
         three = self.src[self.pos : self.pos + 3]
-        if three in ("//=", "**=", "..."):
+        if three in ("//=", "**=", "<<=", ">>=", "..."):
             self._advance()
             self._advance()
             self._advance()
