@@ -7335,7 +7335,16 @@ class SemaAnalyzer:
             # is a first-class "type" object. Builtin exception classes and
             # builtin scalar/container type names (e.g. `{"type": str}`,
             # mimicking argparse's `type=str`) count too.
-            if (
+            #
+            # A local binding shadows all of these (Python's LEGB rule: Local
+            # before Builtin). Without the `not in scope.types` guard a
+            # parameter or variable named like a builtin -- e.g.
+            # `def basicConfig(format: str = ""): ... len(format)` -- resolves
+            # the *name* to the builtin instead of the bound value, so its type
+            # is lost ("type"/"any") and `len(format)` reads garbage. The
+            # `min`/`max` and module-function checks around here already guard
+            # this way.
+            if e.name not in scope.types and (
                 e.name in self.classes
                 or e.name in BUILTIN_EXCEPTIONS
                 or e.name in BUILTIN_TYPE_NAMES
@@ -7346,7 +7355,7 @@ class SemaAnalyzer:
             # example when an interpreter seeds a globals dictionary with
             # ``{"print": print, "len": len}``. Calls still use the normal
             # builtin lowering when the name appears in call position.
-            if e.name in BUILTIN_VALUE_NAMES:
+            if e.name in BUILTIN_VALUE_NAMES and e.name not in scope.types:
                 e.inferred_type = "any"
                 return
             # A module-level function used as a value (passed, stored in a var).
