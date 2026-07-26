@@ -3616,6 +3616,42 @@ class SemaAnalyzer:
         r: list = []
         return r
 
+    def _gen_replace_returns(self, stmts: list) -> list:
+        """Rewrite every `return` in a generator body into `raise
+        StopIteration()`, recursively through nested statement bodies.
+
+        In a generator, `return` ends the iteration -- CPython raises
+        StopIteration, which is exactly how the transformed loop already
+        reports exhaustion. (A returned VALUE is only observable through
+        `yield from`, so it is dropped.) The rewrite has to recurse because
+        the return is typically inside a non-yielding branch, which
+        `_gen_body_transform` copies through untouched.
+        """
+        out: list = stmts[0:0]
+        for s in stmts:
+            if isinstance(s, A.Return):
+                out.append(A.Raise(
+                    value=A.Call(func="StopIteration", args=[], pos=s.pos),
+                    pos=s.pos,
+                ))
+            elif isinstance(s, A.If):
+                out.append(A.If(
+                    test=s.test,
+                    then=self._gen_replace_returns(s.then),
+                    orelse=self._gen_replace_returns(s.orelse or []),
+                    pos=s.pos,
+                ))
+            elif isinstance(s, A.While):
+                out.append(A.While(
+                    test=s.test,
+                    body=self._gen_replace_returns(s.body),
+                    orelse=self._gen_replace_returns(s.orelse or []),
+                    pos=s.pos,
+                ))
+            else:
+                out.append(s)
+        return out
+
     def _gen_body_transform(self, stmts: list, continuation, all_names, pos, result_name):
         """Transform a generator loop body for __next__.
 
@@ -3638,6 +3674,14 @@ class SemaAnalyzer:
                     return True
             return False
 
+        # A `return` anywhere in a generator's body ends the iteration, so
+        # rewrite it to the same StopIteration raise the exhausted loop uses --
+        # recursively, because it usually sits in a non-yielding `if` branch
+        # (`if x < 0: return`), which the transform below copies verbatim.
+        # Left alone, __next__ returned a bogus value that the caller appended
+        # as a real element and then kept iterating.
+        stmts = self._gen_replace_returns(stmts)
+
         result = stmts[0:0]
         for i, s in enumerate(stmts):
             local_remaining = stmts[i + 1:]
@@ -3652,6 +3696,21 @@ class SemaAnalyzer:
                 result.extend(self._rename_stmts(full_cont, all_names, pos))
                 result.append(A.Return(
                     value=A.Name(name=result_name, pos=pos), pos=pos
+                ))
+                break
+
+            elif isinstance(s, A.Return):
+                # `return` inside a generator ENDS the iteration -- CPython
+                # raises StopIteration (the return value, if any, is only
+                # observable through `yield from`, so it's dropped here). This
+                # is the same exhaustion signal the transformed loop already
+                # raises when it runs out. Left as a plain `return`, __next__
+                # handed back a bogus value that the caller appended as a real
+                # element and then kept iterating: `take_until_neg` produced
+                # [1, 2, 0, 3] instead of [1, 2].
+                result.append(A.Raise(
+                    value=A.Call(func="StopIteration", args=[], pos=pos),
+                    pos=pos,
                 ))
                 break
 
