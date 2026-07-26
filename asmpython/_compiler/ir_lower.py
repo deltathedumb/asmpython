@@ -6933,17 +6933,26 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         return final_out
 
     if isinstance(e, A.Call) and e.func == "sum" and len(e.args) in (1, 2):
-        # `sum(xs[, start])`: integer accumulation over a list/tuple
-        # buffer. Was entirely unimplemented, falling through to a
-        # direct-symbol-call linking against a nonexistent symbol `sum`.
+        # `sum(xs[, start])`: accumulate over a list/tuple buffer. Integer by
+        # default; FLOAT (xmm slot + fadd) when sema typed this call float --
+        # a float-element list/tuple or a float `start` (see the sum result
+        # typing in sema). Loading a float element into an int accumulator and
+        # `iadd`-ing added the raw bit patterns as integers, returning garbage.
+        is_f = A.expr_type(e) == "float"
+        acc_ty = F64 if is_f else I64
+        add_op = "fadd" if is_f else "iadd"
         xs_v = _lower_expr(ctx, e.args[0])
-        acc_ptr = ctx.ensure_slot(f"__sum_acc_{id(e)}", I64)
+        acc_ptr = ctx.ensure_slot(f"__sum_acc_{id(e)}", acc_ty)
         if len(e.args) == 2:
             start_v = _lower_expr(ctx, e.args[1])
+            if is_f and A.expr_type(e.args[1]) != "float":
+                start_f = ctx.tmp(F64)
+                ctx.emit(IRInstr("sitofp", start_f, [start_v]))
+                start_v = start_f
             ctx.emit(IRInstr("store", None, [start_v, acc_ptr]))
         else:
-            zero0 = ctx.tmp(I64)
-            ctx.emit(IRInstr("const", zero0, [0]))
+            zero0 = ctx.tmp(acc_ty)
+            ctx.emit(IRInstr("const", zero0, [0.0 if is_f else 0]))
             ctx.emit(IRInstr("store", None, [zero0, acc_ptr]))
         len_addr = ctx.tmp(PTR)
         ctx.emit(IRInstr("gep", len_addr, [xs_v, _LIST_LEN_OFF]))
@@ -6969,12 +6978,12 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         idx_v2 = ctx.tmp(I64)
         ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
         addr = _list_elem_addr(ctx, xs_v, idx_v2)
-        elem_v = ctx.tmp(I64)
+        elem_v = ctx.tmp(acc_ty)
         ctx.emit(IRInstr("load", elem_v, [addr]))
-        acc_v = ctx.tmp(I64)
+        acc_v = ctx.tmp(acc_ty)
         ctx.emit(IRInstr("load", acc_v, [acc_ptr]))
-        new_acc = ctx.tmp(I64)
-        ctx.emit(IRInstr("iadd", new_acc, [acc_v, elem_v]))
+        new_acc = ctx.tmp(acc_ty)
+        ctx.emit(IRInstr(add_op, new_acc, [acc_v, elem_v]))
         ctx.emit(IRInstr("store", None, [new_acc, acc_ptr]))
         one_v = ctx.tmp(I64)
         ctx.emit(IRInstr("const", one_v, [1]))
@@ -6984,7 +6993,7 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("br", None, [head_b.label]))
 
         ctx.switch_to(end_b)
-        final_v = ctx.tmp(I64)
+        final_v = ctx.tmp(acc_ty)
         ctx.emit(IRInstr("load", final_v, [acc_ptr]))
         return final_v
 
@@ -11571,8 +11580,6 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             )
         else:
             el_ty = getattr(s.iter, "list_el_type", "int") or "int"
-        if el_ty == "float" and iter_t != "tuple":
-            raise LowerError("unsupported stmt For (float list elements)")
         var_ty = PTR if s.targets else ir_type_for(el_ty)
 
         if iter_t in ("dict", "set"):

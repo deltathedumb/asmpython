@@ -5951,16 +5951,12 @@ class SemaAnalyzer:
                 )
             for t, v in zip(s.targets, s.values):
                 vt: str = A.expr_type(v)
-                # Parallel assignment moves each value through rax, so any
-                # 8-byte scalar works (int / str-ptr / instance-ptr). Floats
-                # live in xmm and aren't plumbed through this path yet.
-                if vt == "float":
-                    raise SemaError(
-                        f"tuple assign target: float values aren't supported in "
-                        "parallel assignment yet (assign separately)",
-                        s.pos,
-                        ErrorCode.E_TUPLE_ASSIGN_VALUE_TYPE,
-                    )
+                # `float` is fine on the x86-64 IR backend: each RHS is lowered
+                # by `_lower_expr` (an f64 value for a float) and stored via
+                # `_store_tuple_assign_target`, which slots it at its own
+                # `val.type` -- no "everything through rax" assumption (that was
+                # the legacy NASM backend, which this path no longer targets).
+                # So `a, b = 1.5, 2.5` and `x, y = y, x` on floats work.
                 if vt not in (
                     "int",
                     "str",
@@ -5969,6 +5965,7 @@ class SemaAnalyzer:
                     "dict",
                     "tuple",
                     "set",
+                    "float",
                 ) and not vt.startswith("instance:"):
                     raise SemaError(
                         f"tuple assign target: unsupported value type {vt}",
@@ -10553,6 +10550,24 @@ class SemaAnalyzer:
                 )
             for a in e.args:
                 self._check_expr(a, scope)
+            # `sum` follows its element type: summing a float list/tuple (or
+            # passing a float `start`) yields a float, not an int. Computed
+            # here so codegen accumulates in xmm (fadd) and the result reads
+            # back as a real double instead of the int bits of the last add.
+            _sum_ty = "int"
+            if e.func == "sum" and e.args:
+                _xs = e.args[0]
+                _xt = A.expr_type(_xs)
+                _el = "int"
+                if _xt == "list":
+                    _el = self._list_el_type(_xs, scope)
+                elif _xt == "tuple":
+                    _tts = A.tuple_element_types(_xs)
+                    _el = _tts[0] if _tts and all(t == _tts[0] for t in _tts) else "int"
+                if _el == "float" or (
+                    len(e.args) >= 2 and A.expr_type(e.args[1]) == "float"
+                ):
+                    _sum_ty = "float"
             # Set the static return type so codegen knows how to interpret it.
             e.inferred_type = {
                 "print": "int",
@@ -10567,7 +10582,7 @@ class SemaAnalyzer:
                 "dict": "dict",
                 "set": "set",
                 "frozenset": "set",
-                "sum": "int",
+                "sum": _sum_ty,
                 "min": "any",
                 "max": "any",
                 "abs": "any",
