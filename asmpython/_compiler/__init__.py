@@ -31,6 +31,7 @@ from . import dynamic_index_assignment_compat_fixes as _dynamic_index_assignment
 from . import issubclass_compat_fixes as _issubclass_compat_fixes
 from . import inherited_classmethod_compat_fixes as _inherited_classmethod_compat_fixes
 from . import dynamic_classvar_compat_fixes as _dynamic_classvar_compat_fixes
+from . import iter_next_compat_fixes as _iter_next_compat_fixes
 from . import public_abi_exports as _public_abi_exports
 
 __all__ = ["__version__"]
