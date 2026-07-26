@@ -10403,6 +10403,23 @@ class SemaAnalyzer:
                 self._check_expr(a, scope)
             e.inferred_type = "any"
             return
+        if e.method == "replace" and len(e.args) == 3:
+            # `s.replace(old, new, count)` -- the optional occurrence limit.
+            for _ra in e.args:
+                self._check_expr(_ra, scope)
+            if (
+                A.expr_type(e.args[0]) not in ("str", "any")
+                or A.expr_type(e.args[1]) not in ("str", "any")
+            ):
+                raise SemaError(
+                    "str.replace() old/new must be str", e.pos, ErrorCode.E_ARG_TYPE
+                )
+            if A.expr_type(e.args[2]) not in ("int", "any"):
+                raise SemaError(
+                    "str.replace() count must be an int", e.pos, ErrorCode.E_ARG_TYPE
+                )
+            e.inferred_type = "str"
+            return
         if e.method in ("strip", "lstrip", "rstrip") and len(e.args) == 1:
             # `s.strip(chars)` strips any character in `chars` from the ends
             # (CPython) rather than whitespace. The no-argument form stays on
