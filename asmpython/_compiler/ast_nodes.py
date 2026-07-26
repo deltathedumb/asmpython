@@ -1342,6 +1342,7 @@ def is_bool_expr(e: Expr) -> bool:
         return e.method in (
             "isdigit", "isalpha", "isalnum", "isspace",
             "isupper", "islower", "isdecimal", "isidentifier",
+            "isnumeric", "isprintable",
             "startswith", "endswith",
         ) or getattr(e, "is_bool", False)
     if isinstance(e, Name):

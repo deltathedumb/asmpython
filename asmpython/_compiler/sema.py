@@ -391,6 +391,7 @@ _STR_METHOD_ARGC: dict = {
     "replace": 2,
     "isdigit": 0, "isalpha": 0, "isalnum": 0, "isspace": 0,
     "isupper": 0, "islower": 0, "isidentifier": 0,
+    "isnumeric": 0, "isprintable": 0,
 }
 _STR_METHOD_RET: dict = {
     "upper": "str", "lower": "str", "casefold": "str", "capitalize": "str",
@@ -401,6 +402,7 @@ _STR_METHOD_RET: dict = {
     "replace": "str",
     "isdigit": "int", "isalpha": "int", "isalnum": "int", "isspace": "int",
     "isupper": "int", "islower": "int", "isidentifier": "int",
+    "isnumeric": "int", "isprintable": "int",
 }
 
 

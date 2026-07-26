@@ -8839,6 +8839,112 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 "rjust": "_abi_str_rjust",
                 "center": "_abi_str_center",
             }
+            if e.method in ("isnumeric", "isprintable", "isidentifier") and not e.args:
+                # Per-character classification the runtime has no helper for.
+                # Scan the bytes directly (`gep`+U8 `load`, the same addressing
+                # ord() uses) and clear a result flag on the first character
+                # that fails the test. ASCII ranges only -- the same
+                # simplification the rest of this file's str machinery makes.
+                kind = e.method
+                slen_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", slen_v, ["strlen", obj_v]))
+                res_ptr = ctx.ensure_slot(f"__spred_res_{id(e)}", I64)
+                idx_ptr = ctx.ensure_slot(f"__spred_idx_{id(e)}", I64)
+                one_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", one_v, [1]))
+                ctx.emit(IRInstr("store", None, [one_v, res_ptr]))
+                zero_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", zero_v, [0]))
+                ctx.emit(IRInstr("store", None, [zero_v, idx_ptr]))
+                if kind in ("isnumeric", "isidentifier"):
+                    # "" is False for these two (but True for isprintable).
+                    empty_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("icmp.eq", empty_v, [slen_v, zero_v]))
+                    emp_b = ctx.new_block("spredempty")
+                    non_b = ctx.new_block("sprednonempty")
+                    ctx.emit(IRInstr("br.t", None, [empty_v, emp_b.label, non_b.label]))
+                    ctx.switch_to(emp_b)
+                    ctx.emit(IRInstr("store", None, [zero_v, res_ptr]))
+                    ctx.emit(IRInstr("br", None, [non_b.label]))
+                    ctx.switch_to(non_b)
+                ph_b = ctx.new_block("spredhead")
+                pb_b = ctx.new_block("spredbody")
+                pn_b = ctx.new_block("sprednext")
+                pf_b = ctx.new_block("spredfail")
+                pe_b = ctx.new_block("spredend")
+                ctx.emit(IRInstr("br", None, [ph_b.label]))
+                ctx.switch_to(ph_b)
+                pi_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", pi_v, [idx_ptr]))
+                pgo_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.lt", pgo_v, [pi_v, slen_v]))
+                ctx.emit(IRInstr("br.t", None, [pgo_v, pb_b.label, pe_b.label]))
+                ctx.switch_to(pb_b)
+                pbi_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", pbi_v, [idx_ptr]))
+                caddr = ctx.tmp(PTR)
+                ctx.emit(IRInstr("gep", caddr, [obj_v, pbi_v]))
+                cb_v = ctx.tmp(U8)
+                ctx.emit(IRInstr("load", cb_v, [caddr]))
+                c_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("zext", c_v, [cb_v]))
+
+                def _in_range(lo: int, hi: int) -> IRValue:
+                    lo_c = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", lo_c, [lo]))
+                    hi_c = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", hi_c, [hi]))
+                    ge_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("icmp.ge", ge_v, [c_v, lo_c]))
+                    le_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("icmp.le", le_v, [c_v, hi_c]))
+                    both = ctx.tmp(I64)
+                    ctx.emit(IRInstr("iand", both, [ge_v, le_v]))
+                    return both
+
+                def _any_of(vals: list) -> IRValue:
+                    acc = vals[0]
+                    for nxt in vals[1:]:
+                        merged = ctx.tmp(I64)
+                        ctx.emit(IRInstr("ior", merged, [acc, nxt]))
+                        acc = merged
+                    return acc
+
+                if kind == "isnumeric":
+                    ok_v = _in_range(48, 57)
+                elif kind == "isprintable":
+                    ok_v = _in_range(32, 126)
+                else:
+                    # isidentifier: letters and '_' anywhere, digits only after
+                    # the first character.
+                    us_c = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", us_c, [95]))
+                    is_us = ctx.tmp(I64)
+                    ctx.emit(IRInstr("icmp.eq", is_us, [c_v, us_c]))
+                    alpha_v = _any_of([_in_range(65, 90), _in_range(97, 122)])
+                    digit_v = _in_range(48, 57)
+                    notfirst = ctx.tmp(I64)
+                    ctx.emit(IRInstr("icmp.gt", notfirst, [pbi_v, zero_v]))
+                    digit_ok = ctx.tmp(I64)
+                    ctx.emit(IRInstr("iand", digit_ok, [digit_v, notfirst]))
+                    ok_v = _any_of([is_us, alpha_v, digit_ok])
+                ctx.emit(IRInstr("br.t", None, [ok_v, pn_b.label, pf_b.label]))
+                ctx.switch_to(pn_b)
+                pstep_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", pstep_v, [1]))
+                pnx_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("iadd", pnx_v, [pbi_v, pstep_v]))
+                ctx.emit(IRInstr("store", None, [pnx_v, idx_ptr]))
+                ctx.emit(IRInstr("br", None, [ph_b.label]))
+                ctx.switch_to(pf_b)
+                pz_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", pz_v, [0]))
+                ctx.emit(IRInstr("store", None, [pz_v, res_ptr]))
+                ctx.emit(IRInstr("br", None, [pe_b.label]))
+                ctx.switch_to(pe_b)
+                pout_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", pout_v, [res_ptr]))
+                return pout_v
             if e.method in ("strip", "lstrip", "rstrip") and len(e.args) == 1:
                 # `s.strip(chars)` / lstrip / rstrip: trim any character that
                 # appears in `chars` from the relevant end(s), rather than
