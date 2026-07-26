@@ -9134,6 +9134,20 @@ class SemaAnalyzer:
                             ErrorCode.E_ARG_COUNT,
                         )
                     arg_t = A.expr_type(e.args[0])
+                    if (
+                        isinstance(e.obj, A.MethodCall)
+                        and e.obj.method == "setdefault"
+                        and isinstance(e.obj.obj, A.Name)
+                        and arg_t not in ("int", "?")
+                        and e.obj.obj.name not in self._explicit_object_dicts
+                    ):
+                        # `d.setdefault(k, []).append(v)` -- the appended value
+                        # teaches the element kind of the lists this dict holds.
+                        # The receiver is a temporary with no scope slot of its
+                        # own, so record it against the DICT; otherwise a later
+                        # `d[k]` read yields a list whose elements still read as
+                        # raw ints (printing pointers instead of strings).
+                        scope.dict_inner_value_types[e.obj.obj.name] = arg_t
                     # Every asmpython value is a uniform 8-byte slot, so a list
                     # may hold nested collections (list/dict/tuple/set) and
                     # instances as well as scalars — they're stored as pointers.
@@ -9426,6 +9440,33 @@ class SemaAnalyzer:
                     if A.expr_type(e.args[0]) not in ("str", "any"):
                         raise SemaError("dict.setdefault() key must be a str", e.pos, ErrorCode.E_ARG_TYPE)
                     e.inferred_type = self._dict_value_type(e.obj, scope)
+                    if len(e.args) == 2 and e.inferred_type in ("int", "?"):
+                        # The dict's value kind is unknown (a bare `{}` resolves
+                        # to the "int" sentinel), but setdefault returns either
+                        # the stored value or the DEFAULT -- so a concrete
+                        # default tells us the kind. Without this,
+                        # `d.setdefault(k, []).append(v)` -- the standard
+                        # dict-of-lists idiom -- failed with "[E113] int has no
+                        # method 'append'".
+                        _sd_dt = A.expr_type(e.args[1])
+                        if _sd_dt not in ("int", "?"):
+                            e.inferred_type = _sd_dt
+                            if (
+                                isinstance(e.obj, A.Name)
+                                and e.obj.name not in self._explicit_object_dicts
+                            ):
+                                # setdefault WRITES the default into the dict,
+                                # so it teaches the dict's value kind exactly
+                                # like a first `d[k] = v` does -- otherwise a
+                                # later `d[k]` read still sees the unknown
+                                # sentinel and returns raw bits.
+                                scope.dict_value_types[e.obj.name] = _sd_dt
+                            if _sd_dt == "list":
+                                e.list_el_type = self._list_el_type(e.args[1], scope)
+                                return
+                            if _sd_dt == "dict":
+                                e.value_type = self._dict_value_type(e.args[1], scope)
+                                return
                     if e.inferred_type == "list":
                         e.list_el_type = self._dict_inner_value_type(e.obj, scope)
                         if e.list_el_type == "tuple":
