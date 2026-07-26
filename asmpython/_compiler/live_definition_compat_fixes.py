@@ -54,6 +54,26 @@ def _scan_body(
                         classes.add(argument.name)
             elif isinstance(expression, A.MethodCall):
                 methods.add(expression.method)
+                # A module-qualified call to a merged top-level FUNCTION --
+                # `colorsys.rgb_to_yiq(...)`, `ospath.join(...)`. Whole-program
+                # compilation flattens every imported module's functions into a
+                # single namespace, so `module.func(...)` is really a use of the
+                # top-level function named by `.method`; keep it live. Without
+                # this, a stdlib (or user-module) function reached ONLY through
+                # `module.func(...)` syntax -- never a bare `func(...)` call --
+                # was deemed dead and neutralized to `return 0`, which destroyed
+                # BOTH its real body AND its declared return type: e.g.
+                # `colorsys.rgb_to_yiq(0.2, 0.4, 0.6)` returned 0 and its
+                # `-> list[float]` contract collapsed to `int`, so every `[i]` /
+                # tuple-unpack at the call site broke (E017 "cannot index a int",
+                # or a corrupted unpack of a scalar into N targets). Mirrors the
+                # bare-Name first-class-value arm below and the A.Call arm above;
+                # purely additive, so it can only keep more definitions live
+                # (a method call whose name merely collides with an unrelated
+                # dead function keeps that function compiled -- conservative,
+                # never a miscompile).
+                if expression.method in function_names:
+                    functions.add(expression.method)
                 # `ClassName.method(...)` -- a @classmethod/@staticmethod called
                 # directly on the class -- keeps that class live. Its receiver is
                 # a bare class name, not a constructed instance, so the `Call`
