@@ -8376,7 +8376,16 @@ class SemaAnalyzer:
                 return
             self._check_expr(e.index, scope)
             if obj_t == "list":
-                e.inferred_type = self._list_el_type(e.obj, scope)
+                # Normalize a bare class-name element kind to `instance:<Class>`
+                # so a method call on the read-out element resolves: indexing a
+                # `list[Handler]` yields an INSTANCE of Handler, but
+                # `_list_el_type` returns the annotation's bare class name, and
+                # `h = xs[i]; h.method()` then failed with "[E113] <Class> has no
+                # method" (the bare name reads as a type, not an instance).
+                # Scalars/containers/any/already-`instance:` pass through.
+                e.inferred_type = self._normalize_instance_type(
+                    self._list_el_type(e.obj, scope)
+                )
                 # A nested container element (list[dict] / list[list]): carry the
                 # tracked leaf kind onto the read-out container so `xs[i][k]`
                 # recovers the value type. Falls back to "any" when untracked.
