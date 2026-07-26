@@ -6909,6 +6909,74 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         isinstance(e, A.Call)
         and e.func in ("list", "tuple")
         and len(e.args) == 1
+        and A.expr_type(e.args[0]) in ("dict", "set")
+    ):
+        # `list(d)` / `list(s)` -- iterating a dict yields its keys and a set
+        # its members, which is exactly the fresh list `_abi_dict_keys` builds
+        # (dicts and sets share the instance layout). Previously `list(set)`
+        # was rejected outright by sema and `list(dict)` reached no lowering
+        # at all, falling through to a call of a nonexistent `list` symbol.
+        src_v = _lower_expr(ctx, e.args[0])
+        out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out_v, ["_abi_dict_keys", src_v]))
+        return out_v
+
+    if (
+        isinstance(e, A.Call)
+        and e.func in ("list", "tuple")
+        and len(e.args) == 1
+        and A.expr_type(e.args[0]) == "str"
+    ):
+        # `list("abc")` -> ['a', 'b', 'c']: one 1-character string per
+        # position, the same `_abi_str_char_at` walk a str comprehension does.
+        src_v = _lower_expr(ctx, e.args[0])
+        slen_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", slen_v, ["strlen", src_v]))
+        cap_v = ctx.tmp(I64)
+        one_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one_v, [1]))
+        ctx.emit(IRInstr("iadd", cap_v, [slen_v, one_v]))
+        lst_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", lst_v, ["_abi_new_list", cap_v]))
+        lst_ptr = ctx.ensure_slot(f"__lstr_out_{id(e)}", PTR)
+        ctx.emit(IRInstr("store", None, [lst_v, lst_ptr]))
+        idx_ptr = ctx.ensure_slot(f"__lstr_idx_{id(e)}", I64)
+        zero_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero_v, [0]))
+        ctx.emit(IRInstr("store", None, [zero_v, idx_ptr]))
+        lh_b = ctx.new_block("lstrhead")
+        lb_b = ctx.new_block("lstrbody")
+        le_b = ctx.new_block("lstrend")
+        ctx.emit(IRInstr("br", None, [lh_b.label]))
+        ctx.switch_to(lh_b)
+        i_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", i_v, [idx_ptr]))
+        go_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", go_v, [i_v, slen_v]))
+        ctx.emit(IRInstr("br.t", None, [go_v, lb_b.label, le_b.label]))
+        ctx.switch_to(lb_b)
+        bi_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", bi_v, [idx_ptr]))
+        ch_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", ch_v, ["_abi_str_char_at", src_v, bi_v]))
+        cur_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", cur_v, [lst_ptr]))
+        ctx.emit(IRInstr("call", None, ["_abi_list_append", cur_v, ch_v]))
+        st_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", st_v, [1]))
+        ni_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", ni_v, [bi_v, st_v]))
+        ctx.emit(IRInstr("store", None, [ni_v, idx_ptr]))
+        ctx.emit(IRInstr("br", None, [lh_b.label]))
+        ctx.switch_to(le_b)
+        fin_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", fin_v, [lst_ptr]))
+        return fin_v
+
+    if (
+        isinstance(e, A.Call)
+        and e.func in ("list", "tuple")
+        and len(e.args) == 1
         and A.expr_type(e.args[0]) in ("list", "tuple", "any")
     ):
         # `list(x)`/`tuple(x)` from an existing list/tuple source: a

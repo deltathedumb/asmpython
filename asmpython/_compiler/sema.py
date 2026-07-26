@@ -11052,11 +11052,17 @@ class SemaAnalyzer:
                 # list(x) yields a list; carry the source's element kind so
                 # later `for el in list(x)` / indexing pick the right register.
                 t = A.expr_type(e.args[0])
-                if t not in ("list", "tuple", "str", "dict", "any"):
+                if t not in ("list", "tuple", "str", "dict", "set", "any"):
                     raise SemaError(
-                        "list() requires a list, tuple, dict, or string", e.pos,
+                        "list() requires a list, tuple, dict, set, or string",
+                        e.pos,
                         ErrorCode.E_ARG_TYPE,
                     )
+                if t in ("dict", "set", "str"):
+                    # Iterating a dict/set yields its (str) keys; iterating a
+                    # str yields 1-character strings.
+                    e.list_el_type = "str"
+                    return
                 e.list_el_type = self._list_el_type(e.args[0], scope)
                 # Propagate per-slot tuple types so `for a, b in list(zip(...))` works.
                 tup_types = self._list_el_tuple_types(e.args[0], scope)

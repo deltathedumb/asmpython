@@ -161,6 +161,13 @@ def _check_expr_with_collection_fields(self: SemaAnalyzer, expression, scope) ->
         isinstance(expression, A.Call)
         and expression.func in ("list", "tuple")
         and len(expression.args) == 1
+        # Only a list/tuple source passes its element kind straight through.
+        # A dict/set source yields its KEYS and a str source yields single
+        # characters -- all str -- which sema already stamped on the call.
+        # Copying the source's own `list_el_type` here (a Name node carries the
+        # "int" default) clobbered that back to int, so `list(some_dict)`
+        # printed its string keys as pointers.
+        and A.expr_type(expression.args[0]) in ("list", "tuple", "any")
     ):
         source = expression.args[0]
         element = getattr(source, "list_el_type", None)
