@@ -9969,6 +9969,19 @@ class SemaAnalyzer:
             elif isinstance(key_expr, A.Name):
                 if key_expr.name in self.lambda_rets:
                     ret_t = self.lambda_rets[key_expr.name]
+                    # Same bare-Name-to-Lambda desugar as the function case
+                    # below (`f = lambda p: -p; sorted(xs, key=f)`).
+                    _kl = key_expr.name
+                    key_expr = A.Lambda(
+                        params=["_k"],
+                        body=A.Call(
+                            func=_kl,
+                            args=[A.Name(name="_k", pos=e.pos)],
+                            pos=e.pos,
+                        ),
+                        pos=e.pos,
+                    )
+                    self._check_expr(key_expr, scope)
                 elif key_expr.name in self.funcs:
                     sig = self.funcs[key_expr.name]
                     required = sig.arity - sig.n_defaults
@@ -9980,6 +9993,43 @@ class SemaAnalyzer:
                             ErrorCode.E_SORT_KEY_ARITY,
                         )
                     ret_t = sig.ret_type[0] if sig.ret_type is not None else "int"
+                    # Desugar the bare function reference into the equivalent
+                    # lambda (`key=neg` -> `lambda _k: neg(_k)`): the sort
+                    # lowering only knows how to call a Lambda's synthesized
+                    # function, so a bare Name reached it as "unsupported expr
+                    # Call (sorted key)" even though sema accepted it here.
+                    _kf = key_expr.name
+                    key_expr = A.Lambda(
+                        params=["_k"],
+                        body=A.Call(
+                            func=_kf,
+                            args=[A.Name(name="_k", pos=e.pos)],
+                            pos=e.pos,
+                        ),
+                        pos=e.pos,
+                    )
+                    self._check_expr(key_expr, scope)
+                elif key_expr.name in BUILTINS and BUILTINS[key_expr.name][0] <= 1 <= BUILTINS[key_expr.name][1]:
+                    # `key=len` / `key=abs` / `key=str` ... -- a one-argument
+                    # BUILTIN used directly as the key function. There's no
+                    # user-level function to point at, so desugar it into the
+                    # equivalent lambda (`lambda _k: len(_k)`) and check that:
+                    # _check_expr on a Lambda synthesizes the hidden
+                    # module-level function, so this needs no separate lowering
+                    # path -- it becomes exactly the shape a hand-written
+                    # `key=lambda x: len(x)` already produces.
+                    _kb = key_expr.name
+                    key_expr = A.Lambda(
+                        params=["_k"],
+                        body=A.Call(
+                            func=_kb,
+                            args=[A.Name(name="_k", pos=e.pos)],
+                            pos=e.pos,
+                        ),
+                        pos=e.pos,
+                    )
+                    self._check_expr(key_expr, scope)
+                    ret_t = getattr(key_expr, "lambda_ret", "int")
                 else:
                     raise SemaError(
                         "key= must be a lambda literal, a name bound to a "
