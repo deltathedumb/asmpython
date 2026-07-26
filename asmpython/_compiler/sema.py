@@ -3995,6 +3995,60 @@ class SemaAnalyzer:
                         pos=c.pos,
                     )
                     c.methods.append(repr_func)
+                # Synthesise __eq__ for a @dataclass that doesn't define one:
+                # field-by-field equality (CPython compares the tuple of
+                # fields), instead of the default identity comparison that made
+                # two equal dataclass values compare False. Returns int 1/0 --
+                # the same shape the hand-written stdlib dunders use, and what
+                # the `==`/`!=` instance dispatch above expects. `!=` reuses it
+                # negated, so no separate __ne__ is needed.
+                has_eq = any(m.name == "__eq__" for m in c.methods)
+                if not has_eq and c.class_vars:
+                    _eqx = None
+                    for _efn, _eann, _eval in c.class_vars:
+                        _ecmp = A.Compare(
+                            ops=["=="],
+                            operands=[
+                                A.Attr(
+                                    obj=A.Name(name="self", pos=c.pos),
+                                    name=_efn,
+                                    pos=c.pos,
+                                ),
+                                A.Attr(
+                                    obj=A.Name(name="other", pos=c.pos),
+                                    name=_efn,
+                                    pos=c.pos,
+                                ),
+                            ],
+                            pos=c.pos,
+                        )
+                        _eqx = (
+                            _ecmp
+                            if _eqx is None
+                            else A.BoolOp(op="and", left=_eqx, right=_ecmp, pos=c.pos)
+                        )
+                    eq_func = A.FuncDef(
+                        name="__eq__",
+                        params=["self", "other"],
+                        body=[
+                            A.Return(
+                                value=A.IfExp(
+                                    test=_eqx,
+                                    body=A.IntLit(value=1, pos=c.pos),
+                                    orelse=A.IntLit(value=0, pos=c.pos),
+                                    pos=c.pos,
+                                ),
+                                pos=c.pos,
+                            )
+                        ],
+                        defaults=[None, None],
+                        # `other` is annotated as this same class so its field
+                        # reads resolve; annotations are (base, param) tuples.
+                        param_types=[None, (c.name, None)],
+                        ret_type=("int", None),
+                        pos=c.pos,
+                    )
+                    c.methods.append(eq_func)
 
         # `enum` extension: collect enum type tables before class signatures
         # (Color.RED reads need this in place by the time any body is
