@@ -1,8 +1,32 @@
 """SSA IR types consumed by ASMPython compiler backends.
 
-ASMPython's own type strings collapse onto three machine-facing IR types at the
-register-allocation level. Every backend receives shared build options through
-its argument dictionaries, including speedy-lossy and sanitizer policy.
+This IR is deliberately **language-neutral**: nothing here encodes Python (or
+any source language's) semantics. Source-specific behavior -- boxing, dynamic
+dispatch, builtin type ids, the exception object model -- lives entirely in a
+frontend's *lowering* (e.g. ``ir_lower.py`` for the Python frontend) and the
+runtime it calls, never in these types. Any frontend (C, Lua, a DSL) can target
+this IR directly by emitting the same instruction/type vocabulary.
+
+The type model is a small, machine-facing system:
+
+* **Integers** ``i1/i8/i16/i32/i64`` (signed) and ``u8/u16/u32/u64``
+  (unsigned). Signedness is carried on the type *and* on the op (``idiv`` vs
+  ``udiv``, ``icmp.lt`` vs ``icmp.ult``); the type is the source of truth.
+* **Floats** ``f32``/``f64``.
+* **Pointers** ``ptr`` -- always 8 bytes. A pointer may optionally carry a
+  ``pointee`` type for verification/layout; its ``name`` stays ``"ptr"`` so
+  codegen treats every pointer identically.
+* **Vectors** ``v128`` (SIMD).
+* **Structs** -- aggregates with C-style layout (natural field alignment,
+  trailing pad to the struct's own alignment). Struct *values* live in memory:
+  a struct is manipulated through a ``ptr`` to its storage (``alloca`` of
+  ``size_bytes``), fields via ``gep`` at ``field_offset(i)`` + a width-typed
+  ``load``/``store``. No struct value ever occupies a register.
+
+``name`` is the canonical machine tag every backend already switches on
+(``i32``, ``u8``, ``f64``, ``ptr`` ...); ``kind``/``bits``/``signed``/
+``size_bytes``/``align`` are derived from it, so existing ``IRType("i32")``
+construction and ``.name`` reads keep working unchanged.
 """
 from __future__ import annotations
 
@@ -11,12 +35,113 @@ import enum
 from dataclasses import dataclass, field
 
 
+def _struct_layout(fields: "tuple[IRType, ...]") -> "tuple[tuple[int, ...], int, int]":
+    """C-style layout for a struct: (field offsets, total size, alignment).
+
+    Each field starts at the next offset that satisfies its own alignment;
+    the struct's size is padded up to the largest field alignment so arrays
+    of the struct stay aligned.
+    """
+    offsets: list[int] = []
+    off = 0
+    max_align = 1
+    for f in fields:
+        a = f.align
+        if a > max_align:
+            max_align = a
+        off = (off + a - 1) & ~(a - 1)
+        offsets.append(off)
+        off += f.size_bytes
+    total = (off + max_align - 1) & ~(max_align - 1) if fields else 0
+    return tuple(offsets), total, max_align
+
+
 @dataclass(frozen=True)
 class IRType:
+    #: Canonical machine tag backends switch on: i1/i8/.../i64, u8.../u64,
+    #: f32/f64, ptr, v128, or a struct's (advisory) name.
     name: str
+    #: Ordered field types for a struct aggregate; None for every scalar/ptr.
+    fields: "tuple[IRType, ...] | None" = None
+    #: Optional target type of a pointer (name stays "ptr"); None = opaque.
+    pointee: "IRType | None" = None
 
     def __repr__(self) -> str:
+        if self.fields is not None:
+            return f"{self.name}{{{', '.join(f.name for f in self.fields)}}}"
+        if self.pointee is not None:
+            return f"ptr({self.pointee!r})"
         return self.name
+
+    # ── classification (derived from `name`, the canonical tag) ──────────────
+    @property
+    def kind(self) -> str:
+        """One of: int, float, ptr, vector, struct, other."""
+        if self.fields is not None:
+            return "struct"
+        n = self.name
+        if n == "ptr":
+            return "ptr"
+        if n == "v128":
+            return "vector"
+        c = n[:1]
+        if c == "f":
+            return "float"
+        if c in ("i", "u"):
+            return "int"
+        return "other"
+
+    @property
+    def signed(self) -> bool:
+        """True for signed integers (``i*``); False otherwise."""
+        return self.kind == "int" and self.name[0] == "i"
+
+    @property
+    def bits(self) -> int:
+        """Scalar bit width. Raises for struct/other."""
+        k = self.kind
+        if k in ("int", "float"):
+            return int(self.name[1:])
+        if k == "ptr":
+            return 64
+        if k == "vector":
+            return 128
+        raise ValueError(f"type {self.name!r} ({k}) has no scalar bit width")
+
+    @property
+    def size_bytes(self) -> int:
+        """Storage size in bytes (i1 rounds up to 1)."""
+        k = self.kind
+        if k == "struct":
+            return _struct_layout(self.fields)[1]
+        if k == "ptr":
+            return 8
+        if k == "vector":
+            return 16
+        return max(1, (self.bits + 7) // 8)
+
+    @property
+    def align(self) -> int:
+        """Natural alignment in bytes."""
+        if self.kind == "struct":
+            return _struct_layout(self.fields)[2]
+        return self.size_bytes
+
+    # ── struct helpers ───────────────────────────────────────────────────────
+    @property
+    def field_offsets(self) -> "tuple[int, ...]":
+        if self.kind != "struct":
+            raise ValueError(f"{self.name!r} is not a struct type")
+        return _struct_layout(self.fields)[0]
+
+    def field_offset(self, index: int) -> int:
+        """Byte offset of field ``index`` -- use as the ``gep`` offset operand."""
+        return self.field_offsets[index]
+
+    def field_type(self, index: int) -> "IRType":
+        if self.kind != "struct":
+            raise ValueError(f"{self.name!r} is not a struct type")
+        return self.fields[index]
 
 
 class Visibility(enum.Enum):
@@ -26,9 +151,42 @@ class Visibility(enum.Enum):
     UNDEFINED = "undefined"
 
 
+# Canonical scalar/pointer constants. i64/f64/ptr keep their historic names so
+# existing frontends and the backends are untouched; the narrower widths make a
+# non-Python frontend (C's int32/uint8/..., Lua's number) expressible directly.
+I1 = IRType("i1")
+I8 = IRType("i8")
+I16 = IRType("i16")
+I32 = IRType("i32")
 I64 = IRType("i64")
+U8 = IRType("u8")
+U16 = IRType("u16")
+U32 = IRType("u32")
+U64 = IRType("u64")
+F32 = IRType("f32")
 F64 = IRType("f64")
 PTR = IRType("ptr")
+V128 = IRType("v128")
+
+
+def int_type(bits: int, signed: bool = True) -> IRType:
+    """Construct an integer type, e.g. ``int_type(32)`` -> i32, unsigned u32."""
+    return IRType(f"{'i' if signed else 'u'}{bits}")
+
+
+def float_type(bits: int) -> IRType:
+    return IRType(f"f{bits}")
+
+
+def ptr_to(pointee: IRType | None = None) -> IRType:
+    """A pointer carrying an (optional) pointee type; ``name`` stays ``"ptr"``."""
+    return IRType("ptr", pointee=pointee)
+
+
+def struct_type(fields: "list[IRType] | tuple[IRType, ...]", name: str = "struct") -> IRType:
+    """An aggregate with C-style layout. See :func:`_struct_layout`."""
+    return IRType(name, fields=tuple(fields))
+
 
 _ASM_TYPE_TO_IR = {
     "int": I64,
@@ -243,3 +401,33 @@ class IRFrontend(abc.ABC):
     @abc.abstractmethod
     def parse(self, src: str, ctx: FrontendContext) -> object:
         """Parse+analyze ``src`` into the typed module the IR pipeline consumes."""
+
+
+class IRPass(abc.ABC):
+    """Interface every optimization/transform pass implements.
+
+    A pass is a plain IR->IR transform over the *neutral* IR: it must not
+    depend on which frontend produced the module (see ``ir_contract.md``). This
+    is the third registration axis alongside :class:`IRFrontend` and
+    :class:`IRBackend`, selected with ``--passes name1,name2``.
+
+    ``requires``/``provides``/``preserves`` are a deliberately tiny invariant
+    system (a set of string tags, e.g. ``"ssa"``), just enough for the pass
+    manager to reject an impossible ordering -- not LLVM's full analysis
+    -preservation machinery. Keep it small: legibility is the point.
+    """
+
+    #: Canonical selector name, e.g. ``"mem2reg"``. Set by implementations.
+    name: str = ""
+    #: One-line description, shown by ``--passes help``.
+    description: str = ""
+    #: Invariants that must hold before this pass runs (e.g. ``{"ssa"}``).
+    requires: frozenset[str] = frozenset()
+    #: Invariants this pass establishes (mem2reg provides ``"ssa"``).
+    provides: frozenset[str] = frozenset()
+    #: Invariants this pass keeps intact; anything else it may invalidate.
+    preserves: frozenset[str] = frozenset({"cfg"})
+
+    @abc.abstractmethod
+    def run(self, module: IRModule) -> bool:
+        """Transform ``module`` in place. Return True if anything changed."""
