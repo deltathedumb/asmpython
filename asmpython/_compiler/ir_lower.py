@@ -10910,6 +10910,23 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             ctx.closure_value_names.add(s.target)
         return
 
+    if isinstance(s, A.MultiAssign):
+        # `a = b = c = value` -- CPython evaluates the RHS ONCE and binds every
+        # target to that same value, left to right. Mirrors the single-target
+        # Assign store above, reusing the one computed value for each name.
+        # Was entirely unhandled by this SSA backend (codegen.py had it), so it
+        # fell through to the generic "unsupported stmt MultiAssign".
+        _ma_ty = A.expr_type(s.value)
+        _ma_val = _lower_for_slot(ctx, s.value, _ma_ty)
+        for _ma_target in s.targets:
+            _ma_ptr = _name_value_ptr(
+                ctx, _ma_target, ctx.mctx.global_types.get(_ma_target, _ma_val.type)
+            )
+            ctx.emit(IRInstr("store", None, [_ma_val, _ma_ptr]))
+            if not _is_global_name(ctx, _ma_target) and _ma_ty == "list":
+                ctx.slot_el_ty[_ma_target] = getattr(s.value, "list_el_type", "int")
+        return
+
     if isinstance(s, A.AugAssign):
         # `target op= value` -> `target = target op value`, same int/float
         # binop dispatch as a plain BinOp (the target's current static type
