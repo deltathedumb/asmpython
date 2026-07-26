@@ -101,6 +101,18 @@ def _descriptor_bindings(mod: A.Module) -> tuple:
                     value.name,
                     global_types[value.name],
                 )
+    # descriptor_precedence_compat_fixes strips descriptor class vars once they
+    # become @property shadows, so the class_vars scan above misses any owner
+    # whose fields were all removed -- leaving `bindings` empty and silently
+    # disabling metaclass metadata materialization (the reflected classmethod
+    # then reads a null class attribute and faults). _lower_static_data_
+    # descriptors records the authoritative (owner, field) -> (global, type)
+    # map as it creates each descriptor global; fold in any binding the
+    # class_vars scan didn't already recover.
+    for (owner_name, field_name), (global_name, type_name) in getattr(
+        mod, "_descriptor_field_bindings", {}
+    ).items():
+        bindings.setdefault((owner_name, field_name), (global_name, type_name))
 
     descriptor_globals = set(global_types)
     init_offset = 0

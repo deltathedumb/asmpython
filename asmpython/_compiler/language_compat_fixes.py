@@ -299,6 +299,18 @@ def _lower_static_data_descriptors(mod: A.Module) -> None:
             methods = descriptor_methods[descriptor_name]
             exposed_type = _descriptor_value_annotation(initializer)
             global_name = f"__asmpy_descriptor_{owner.name}_{field_name}"
+            # Record the (owner, field) -> (global, descriptor-type) binding on
+            # the module as it's created. Downstream passes (metaclass metadata
+            # materialization) need this mapping, but can't reliably recover it
+            # by scanning class_vars afterward: descriptor_precedence_compat_
+            # fixes STRIPS these descriptor class vars (they become @property
+            # shadows), so a later class_vars scan finds nothing. Keyed on the
+            # authoritative source instead of reverse-engineering global names.
+            field_bindings = getattr(mod, "_descriptor_field_bindings", None)
+            if field_bindings is None:
+                field_bindings = {}
+                mod._descriptor_field_bindings = field_bindings
+            field_bindings[(owner.name, field_name)] = (global_name, descriptor_name)
             module_init.append(
                 A.Assign(target=global_name, value=initializer, pos=owner.pos)
             )

@@ -170,6 +170,18 @@ def _live_definitions(mod: A.Module) -> tuple[set[str], set[str], set[str]]:
                         live_classes.add(expression.name)
                     if expression.name in function_names:
                         live_functions.add(expression.name)
+    # A class used as another class's `metaclass=` is never constructed the
+    # ordinary way (`Meta(...)`), so nothing above marks it live -- but its
+    # `__new__` must survive dead-code neutralization long enough for the
+    # metaclass compat pass (metaclass_compat_fixes) to read and statically
+    # lower its descriptor-collection pattern. Without this, `Meta.__new__`
+    # was stubbed to `return 0` first, the metaclass pattern went unrecognized,
+    # and the metadata dict the reflected classmethod reads was never
+    # materialized -- a null-attribute fault at construction time.
+    for owner in mod.classes:
+        meta_name = getattr(owner, "metaclass", None)
+        if meta_name in classes:
+            live_classes.add(meta_name)
     for class_name, owner in classes.items():
         class_public = getattr(owner, "is_public_export", False)
         if class_public:
