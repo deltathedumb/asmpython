@@ -154,7 +154,14 @@ def run_positive(case: Path, target: str) -> TestResult:
         return TestResult(case.name, False, f"compile failed:\n{cp.stderr}{cp.stdout}")
 
     stdin_data = _parse_stdin(case.read_text(encoding="utf-8"))
-    run = subprocess.run([str(out)], capture_output=True, text=True, input=stdin_data, **exe_flags)
+    try:
+        run = subprocess.run([str(out)], capture_output=True, text=True,
+                             input=stdin_data, timeout=30, **exe_flags)
+    except subprocess.TimeoutExpired:
+        # A compiled program that never terminates (e.g. asmpython miscompiling
+        # `x[::0]` into an infinite loop) must be a FAIL, not a hang that freezes
+        # the whole suite. 30s is far beyond any legitimate test case's runtime.
+        return TestResult(case.name, False, "program timed out (>30s, likely infinite loop)")
     if run.returncode != 0:
         return TestResult(case.name, False, f"program exited {run.returncode}\n{run.stderr}")
     got = "\n".join(l.rstrip() for l in run.stdout.replace("\r\n", "\n").rstrip("\n").split("\n"))
