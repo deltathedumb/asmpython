@@ -8,12 +8,11 @@ expressible while loops were approximated by block-index ranges.
 
 Preheaders
 ----------
-LICM needs somewhere outside the loop to hoist to, and this pass will not create
-one. It hoists only when the header has exactly one predecessor from outside the
-loop and that block's only successor is the header -- i.e. a preheader already
-exists. Inserting one would mean adding a block, and ``IRFunc.try_regions``
-records positional block indices, so renumbering has to be handled before any
-pass may create or delete blocks freely.
+LICM needs somewhere outside the loop to hoist to. It hoists only when the
+header has exactly one predecessor from outside the loop and that block's only
+successor is the header -- i.e. a preheader already exists. Creating one when it
+does not is now unblocked (``try_regions`` is label-based, so inserting a block
+no longer shifts it onto the wrong code) and is the next step for this pass.
 
 Safety
 ------
@@ -137,8 +136,6 @@ class LoopDeletePass(IRPass):
     def run(self, module: IRModule) -> bool:
         changed = False
         for func in module.funcs:
-            if getattr(func, "try_regions", None):
-                continue              # positional block indices -- see cfgopt
             if self._run_func(func):
                 changed = True
         return changed

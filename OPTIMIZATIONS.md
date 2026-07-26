@@ -56,8 +56,32 @@ canonicalize so the redundancy passes can match, the CFG passes collapse what
 became statically decidable, and `adce`/`globaldce` sweep last. Change the
 list only together with a fresh differential run.
 
-Presets contain **only** differential-certified passes. `mem2reg` is deliberately
-excluded (see below); a preset must never silently change program behavior.
+### `o2` has 16 known miscompiles — the 149-case certification was too small
+
+Certifying against the **full** corpus rather than a 149-case sample:
+
+```text
+identical=790  DIFFERENT=17  nondeterministic=50  skipped(pre-existing)=170
+```
+
+Sixteen of those 17 reproduce byte-identically with every CFG pass skipping
+try/except functions, so they are **pre-existing** and were simply outside the
+sample every earlier "149/149" was measured on. They are real miscompiles in a
+shipped preset, in three shapes:
+
+| Shape | Cases |
+|---|---|
+| `o2` crashes what ran | `deeply_nested_comprehension`, `sim_grade_report`, `type_alias_annotation` |
+| `o2` changes a value | `r40_percentage_change` (`100.0` → a pointer), `float_func_return` (`1` → a pointer), `sim_discount_calc` (`100.0` → `20.0`), `r40_gradient` (`[8, 8]` → `[0, 1]`), `lambda_default_arg`, `lib_itertools_repeat`, `lib_mimetypes`, `float_func_simple_div`, `float_percentage_func` |
+| `o2` *fixes* a crash | `382_nested_listcomp`, `999_comprehensive_codegen`, `lib_functools_reduce_strings`, `str_capitalize_manual` |
+
+The lesson is about the sample, not the passes: a 149-case gate certified a
+pipeline that miscompiles a dozen programs. **Certify against the whole corpus.**
+Bisecting these to the responsible pass is the top open item.
+
+Presets otherwise contain only differential-certified passes. `mem2reg` is
+deliberately excluded (see below); a preset must never silently change program
+behavior.
 
 ## Impact
 
@@ -80,8 +104,10 @@ independent of any pass — optimization only made them observable.
 ## Certification: the differential harness
 
 **The ordinary test suite cannot detect silent miscompiles.** It scored
-*identically* with a pass that was actively corrupting output. Every pass must
-therefore clear a differential sweep before entering a preset:
+*identically* with a pass that was actively corrupting output — a case that
+failed before and fails after is a pass/fail no-op no matter how wrong the bytes
+got. Every pass must therefore clear a differential sweep, `tests/diff_passes.py`,
+before entering a preset:
 
 1. compile each `tests/cases/*.py` twice — with and without the pipeline,
 2. run both binaries,
@@ -89,6 +115,26 @@ therefore clear a differential sweep before entering a preset:
 
 Any difference is a miscompile. The harness caught 8/60 divergences on its first
 run. This is a hard requirement for any new pass, including third-party ones.
+
+```sh
+# certify a pass or pipeline
+python tests/diff_passes.py --passes o2
+
+# an always-on change: record, apply the change, then check
+python tests/diff_passes.py --mode record --state before.json
+python tests/diff_passes.py --mode check  --state before.json
+```
+
+`record`/`check` exists because a change that is *always on* (lowering, sema,
+codegen, regalloc) cannot have both versions in one process. Native-vs-native
+across your own diff is what separates a regression you caused from a parity gap
+that was already there.
+
+**Nondeterministic cases are excluded, not counted as differences.** Each binary
+is run twice; a case whose own two runs disagree is dropped. 45 corpus cases
+print a raw heap address where a value was meant (a container repr'd as its
+pointer), so they differ against *themselves* and would otherwise be reported as
+miscompiles forever — which trains the reader to ignore the real ones.
 
 ## Register allocator
 
@@ -166,21 +212,51 @@ intended to grow into LLVM's analysis-preservation machinery.
 A pass must work regardless of which frontend produced the module: it runs below
 the IR waist and sees only the neutral vocabulary.
 
-**Constraint for block-deleting passes:** `IRFunc.try_regions` records
-`(setjmp_block_index, end_block_index)` as *positional block indices*, read by
-regalloc's `_in_try_region`. Deleting a block renumbers them silently, so
-`simplifycfg` skips functions that have any — do the same, or remap the indices.
+**Constraint for block-moving passes.** The IR does **not** currently satisfy SSA
+dominance, so a pass must not change the *relative order* of blocks.
+
+`ir_lower` duplicates a `finally` body once per exit path, and the
+exception-path copy reads allocas defined only in the normal-path copy — a use
+its definition does not dominate. It works solely because the register allocator
+walks blocks in list order and the definition happens to sit at a lower index.
+Move either block and those reads become garbage. `asmpython/_compiler/ir_verify.py`
+now checks dominance; at last measure **36 of 394 corpus cases (9%) violate it,
+178 violations**, and not only via try/except — `enumerate` loops and `match`/`case`
+do it too.
+
+Consequences for a pass:
+
+- Deleting a block is fine (survivors keep their order).
+- Rewriting a branch target is fine (`jumpthread`).
+- Moving an instruction *later*, into its single use block, is fine (`sink`
+  inserts at the top of the target, so the definition still precedes the use).
+- **Fusing two blocks is only safe when they are adjacent** — fusing `B` into `A`
+  relocates B's code to A's position, moving it earlier whenever B is not the
+  next block. `blockmerge` enforces adjacency for exactly this reason.
+
+The fix is in lowering: emit `alloca` in the **entry block**, as every SSA
+compiler does. A stack slot is a frame offset, not a conditionally-computed
+value. Once lowering satisfies dominance, the adjacency restriction comes off.
+
+`IRFunc.try_regions` itself is no longer positional — it records the *set* of
+block labels belonging to each try (`cfg.try_regions_resolved` maps them back to
+current indices). A pass that fuses a block away while keeping its code must
+repoint the region with `ir.rewrite_try_region_labels`, exactly as it must
+rewrite phi incoming labels for the same edge.
 
 ## Roadmap
 
-Ported so far covers LLVM's cheap local tier. Still open, roughly in order:
+Ported so far covers LLVM's cheap local tier plus the loop entry tier. Still
+open, roughly in order:
 
-- **Dominator-based natural loops in regalloc** — unblocks `mem2reg`, and is a
-  prerequisite for anything loop-based
-- **SCCP** — sparse conditional constant propagation (subsumes `constfold` +
-  `simplifycfg` reachability)
-- **GVN** — global value numbering, extends `cse` beyond a single block
-- **LICM** — loop-invariant code motion
+- **Entry-block allocas in lowering** — the dominance fix above. It is the
+  single highest-leverage item left: it unblocks every block-creating and
+  block-reordering pass at once, and lets `mem2reg` promote reliably.
+- **LICM preheader insertion** — `licm` currently hoists only when a preheader
+  happens to exist. Creating one requires inserting a block (see above).
+- **`gvn` phi-operand dominance** — a phi operand must dominate its *own*
+  incoming predecessor, not the phi's block. This is why `gvn` is experimental.
+- **Loop rotation / unswitching** — both need block insertion.
 - **Inlining**
 - **Graph-coloring register allocation** to replace the linear scan
 

@@ -4,14 +4,17 @@
 ``blockmerge``   fuse a block into its sole predecessor
 ``phisimplify``  collapse a phi whose incoming values are all the same
 
-All three SKIP functions carrying ``try_regions``: that metadata is positional
-BLOCK INDICES read by the register allocator (``_in_try_region``), so removing
-or reordering a block silently repoints those spans. See ``simplifycfg``.
+``try_regions`` is label-based, so these run on functions containing try/except
+like any other. A pass that fuses a block away while keeping its code must
+repoint the region at the surviving label (``rewrite_try_region_labels``) --
+``blockmerge`` does, for the same reason it rewrites phi incoming labels.
 """
 
 from __future__ import annotations
 
-from .._compiler.ir import IRModule, IRPass, IRValue
+from .._compiler.ir import (
+    IRModule, IRPass, IRValue, rewrite_try_region_labels,
+)
 
 
 def _succs(block) -> list[str]:
@@ -56,7 +59,7 @@ class JumpThreadPass(IRPass):
     def run(self, module: IRModule) -> bool:
         changed = False
         for func in module.funcs:
-            if getattr(func, "try_regions", None) or not func.blocks:
+            if not func.blocks:
                 continue
             by_label = {b.label: b for b in func.blocks}
             entry = func.blocks[0].label
@@ -124,7 +127,7 @@ class BlockMergePass(IRPass):
     def run(self, module: IRModule) -> bool:
         changed = False
         for func in module.funcs:
-            if getattr(func, "try_regions", None) or not func.blocks:
+            if not func.blocks:
                 continue
             if self._run_func(func):
                 changed = True
@@ -137,6 +140,7 @@ class BlockMergePass(IRPass):
             merged_any = False
             preds = _preds(func)
             by_label = {b.label: b for b in func.blocks}
+            position = {b.label: i for i, b in enumerate(func.blocks)}
             entry = func.blocks[0].label
 
             for block in func.blocks:
@@ -149,6 +153,25 @@ class BlockMergePass(IRPass):
                         or len(preds.get(target, [])) != 1 or _has_phi(dest)):
                     continue
                 if not block.instrs or block.instrs[-1].op != "br":
+                    continue
+                # Merge only ADJACENT blocks: fusing B into A relocates B's code
+                # to A's position, which moves it EARLIER whenever B is not the
+                # next block. That is only safe if every value B reads is
+                # defined in a block that dominates it -- and ir_lower does not
+                # guarantee that. It duplicates a `finally` body per exit path,
+                # and the exception-path copy reads allocas defined only in the
+                # normal-path copy; the program works solely because the
+                # allocator walks blocks in list order and the definition
+                # happens to sit at a lower index. Relocating the reader above
+                # its definition turns those reads into garbage -- observed as
+                # an access violation on `exc_break_in_try`, where a `finally`
+                # reached via `break` lost its output entirely.
+                #
+                # Adjacent merging keeps every block's relative order, so it is
+                # correct regardless. The verifier's dominance check reports the
+                # underlying violation (9% of the corpus at last measure); once
+                # lowering satisfies it, this restriction can be lifted.
+                if position.get(target) != position.get(block.label, -2) + 1:
                     continue
 
                 # Splice: drop A's terminator, append all of B.
@@ -173,6 +196,10 @@ class BlockMergePass(IRPass):
                             if (i % 2 == 1 and str(op) == target) else op
                             for i, op in enumerate(instr.operands)
                         ]
+
+                # B's code survives under A's label, so any try region naming B
+                # must now name A -- same reason as the phi rewrite above.
+                rewrite_try_region_labels(func, {target: block.label})
 
                 func.blocks = [b for b in func.blocks if b.label != target]
                 merged_any = changed = True

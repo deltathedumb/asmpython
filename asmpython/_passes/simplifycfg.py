@@ -18,15 +18,13 @@ edge that no longer exists.
 Pairs naturally with ``constfold``, which is what turns a runtime condition into
 the constant this pass folds on -- run ``constfold`` first.
 
-SKIPPED for functions with ``try_regions``
------------------------------------------
-``IRFunc.try_regions`` records ``(setjmp_block_index, end_block_index)`` pairs as
-**positional block indices**, and the register allocator reads them to decide
-which backward branches are exception-dispatch artifacts rather than loops (see
-``regalloc.py``'s ``_in_try_region``). Deleting a block renumbers every later
-index and would silently point those spans at the wrong blocks. Rather than
-re-derive the spans, this pass leaves such functions alone -- correctness first;
-functions with try/except are a minority of the corpus.
+Functions with ``try_regions``
+------------------------------
+Handled like any other. ``IRFunc.try_regions`` names blocks by LABEL, so
+deleting a block cannot silently repoint a region at different code the way
+positional indices did. A region whose blocks this pass proves UNREACHABLE is
+dropped by the consumers, which is correct: code that cannot execute imposes no
+liveness requirement on the register allocator.
 """
 
 from __future__ import annotations
@@ -42,8 +40,6 @@ class SimplifyCFGPass(IRPass):
     def run(self, module: IRModule) -> bool:
         changed = False
         for func in module.funcs:
-            if getattr(func, "try_regions", None):
-                continue                  # index-based metadata -- see docstring
             if self._run_func(func):
                 changed = True
         return changed
