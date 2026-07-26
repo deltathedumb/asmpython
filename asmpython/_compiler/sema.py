@@ -10089,6 +10089,14 @@ class SemaAnalyzer:
                 e.pos,
                 ErrorCode.E_ARG_COUNT,
             )
+        # str.startswith/endswith also accept a TUPLE of candidate prefixes/
+        # suffixes -- True if the string matches ANY of them (CPython). ir_lower
+        # iterates the tuple's str elements and ORs the per-element result.
+        if e.method in ("startswith", "endswith") and len(e.args) == 1:
+            self._check_expr(e.args[0], scope)
+            if A.expr_type(e.args[0]) == "tuple":
+                e.inferred_type = _STR_METHOD_RET.get(e.method, "int")
+                return
         # All str methods that accept arguments require str-typed values.
         _si = 0
         for a in e.args:

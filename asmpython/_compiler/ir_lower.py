@@ -8549,6 +8549,65 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 v = ctx.tmp(I64)
                 ctx.emit(IRInstr("call", v, [no_arg_int_methods[e.method], obj_v]))
                 return v
+            if (
+                e.method in ("startswith", "endswith")
+                and len(e.args) == 1
+                and A.expr_type(e.args[0]) == "tuple"
+            ):
+                # str.startswith/endswith(tuple): True if the string matches ANY
+                # candidate prefix/suffix. Iterate the tuple's slots (list
+                # layout) and OR each per-candidate 0/1 result into an
+                # accumulator. Handles both a literal `("a","b")` and a tuple
+                # variable uniformly.
+                fn = (
+                    "_abi_str_starts_with"
+                    if e.method == "startswith"
+                    else "_abi_str_ends_with"
+                )
+                tup_v = _lower_expr(ctx, e.args[0])
+                res_ptr = ctx.ensure_slot(f"__swtup_res_{id(e)}", I64)
+                idx_ptr = ctx.ensure_slot(f"__swtup_idx_{id(e)}", I64)
+                z = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", z, [0]))
+                ctx.emit(IRInstr("store", None, [z, res_ptr]))
+                ctx.emit(IRInstr("store", None, [z, idx_ptr]))
+                len_addr = ctx.tmp(PTR)
+                ctx.emit(IRInstr("gep", len_addr, [tup_v, _LIST_LEN_OFF]))
+                tlen = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", tlen, [len_addr]))
+                sw_head = ctx.new_block("swtuphead")
+                sw_body = ctx.new_block("swtupbody")
+                sw_end = ctx.new_block("swtupend")
+                ctx.emit(IRInstr("br", None, [sw_head.label]))
+                ctx.switch_to(sw_head)
+                i_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", i_v, [idx_ptr]))
+                go = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.lt", go, [i_v, tlen]))
+                ctx.emit(IRInstr("br.t", None, [go, sw_body.label, sw_end.label]))
+                ctx.switch_to(sw_body)
+                bi = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", bi, [idx_ptr]))
+                ea = _list_elem_addr(ctx, tup_v, bi)
+                cand = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", cand, [ea]))
+                r = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", r, [fn, obj_v, cand]))
+                cr = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", cr, [res_ptr]))
+                nr = ctx.tmp(I64)
+                ctx.emit(IRInstr("ior", nr, [cr, r]))
+                ctx.emit(IRInstr("store", None, [nr, res_ptr]))
+                one = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", one, [1]))
+                ni = ctx.tmp(I64)
+                ctx.emit(IRInstr("iadd", ni, [bi, one]))
+                ctx.emit(IRInstr("store", None, [ni, idx_ptr]))
+                ctx.emit(IRInstr("br", None, [sw_head.label]))
+                ctx.switch_to(sw_end)
+                sw_out = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", sw_out, [res_ptr]))
+                return sw_out
             if e.method in one_arg_int_methods and len(e.args) == 1:
                 if A.expr_type(e.args[0]) != "str":
                     raise LowerError(f"unsupported expr MethodCall (str.{e.method} non-str arg)")
