@@ -546,7 +546,19 @@ class Parser:
                 funcs.append(fdef)
                 body.extend(self._desugar_decorator_exprs(pending, fdef.name, fdef.pos))
             elif self._check("KEYWORD", "class"):
-                classes.append(self._parse_classdef(decorators=decorators))
+                cdef = self._parse_classdef(decorators=decorators)
+                classes.append(cdef)
+                # Apply a general class decorator (`@register_object_class(
+                # "somnia.Game") class Game: ...`) at module init, exactly like
+                # the def case above: emit `__deco_tmp = register_object_class(
+                # "somnia.Game")` then `__deco_tmp(Game)` for its side effect.
+                # The class is passed by name -- a bare class name is a `type`
+                # value (its RTTI id), so a registration decorator that stores
+                # `cls`/sets `cls.__attr__` and returns it works unchanged.
+                # Previously these exprs were parsed and stashed but never
+                # applied for a class, so registration-pattern decorators (a
+                # whole object-type registry) silently did nothing.
+                body.extend(self._desugar_decorator_exprs(pending, cdef.name, cdef.pos))
             elif self._check("NAME", "final") and self._looks_like_final_class():
                 classes.append(self._dispatch_final_class())
             elif self._check("NAME", "sealed") and self._looks_like_sealed_class():
@@ -877,6 +889,19 @@ class Parser:
         """
         stmts: list = []
         for expr in exprs:
+            if isinstance(expr, A.Name):
+                # A bare-name decorator (`@deco`): apply it as a DIRECT call
+                # `deco(target)`, not through an intermediate `__deco_tmp =
+                # deco; __deco_tmp(target)`. The direct form lets sema's
+                # call-site parameter inference (which matches by callee name)
+                # see the class/function argument and type `deco`'s parameter
+                # accordingly -- essential for a class decorator whose body
+                # does `cls.attr = ...` on the passed class value, which needs
+                # the parameter typed `type` to dispatch to the class object
+                # rather than faulting on its raw RTTI id.
+                call = A.Call(func=expr.name, args=[A.Name(name=func_name, pos=pos)], pos=pos)
+                stmts.append(A.ExprStmt(expr=call, pos=pos))
+                continue
             self._deco_tmp_counter += 1
             tmp_name = f"__deco_tmp_{self._deco_tmp_counter}"
             stmts.append(A.Assign(target=tmp_name, value=expr, pos=pos))
