@@ -4469,6 +4469,108 @@ def _lower_int_floordivmod(ctx: _FuncCtx, a: IRValue, b: IRValue, want: str, tag
     return out
 
 
+def _lower_set_pairop(ctx: _FuncCtx, obj_e: A.Expr, other_e: A.Expr, method: str, tag: int) -> IRValue:
+    """The set operations that TEST or MUTATE in place, rather than building a
+    fresh set the way `_lower_set_setop` does:
+
+      isdisjoint(o)           -> no key of self is in o
+      issuperset(o)           -> every key of o is in self
+      intersection_update(o)  -> drop keys of self that aren't in o
+      difference_update(o)    -> drop keys of o from self
+
+    All four are one walk over a key snapshot with a membership test against
+    the other side, so they share this loop. `_abi_dict_keys` returns a fresh
+    list, so popping from the set while walking that snapshot is safe (sets
+    are dict-backed, hence the dict helpers).
+    """
+    obj_v = _lower_expr(ctx, obj_e)
+    other_v = _lower_expr(ctx, other_e)
+    # isdisjoint/intersection_update ask about SELF's keys; the other two ask
+    # about the argument's keys.
+    scan_self = method in ("isdisjoint", "intersection_update")
+    scan_v = obj_v if scan_self else other_v
+    test_v = other_v if scan_self else obj_v
+    is_pred = method in ("isdisjoint", "issuperset")
+
+    keys_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", scan_v]))
+    res_ptr = ctx.ensure_slot(f"__spair_res_{tag}", I64)
+    idx_ptr = ctx.ensure_slot(f"__spair_idx_{tag}", I64)
+    one_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one_v, [1]))
+    ctx.emit(IRInstr("store", None, [one_v, res_ptr]))
+    z0_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", z0_v, [0]))
+    ctx.emit(IRInstr("store", None, [z0_v, idx_ptr]))
+    klen_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", klen_addr, [keys_v, _LIST_LEN_OFF]))
+    klen_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", klen_v, [klen_addr]))
+
+    h_b = ctx.new_block("spairhead")
+    b_b = ctx.new_block("spairbody")
+    act_b = ctx.new_block("spairact")
+    c_b = ctx.new_block("spaircont")
+    e_b = ctx.new_block("spairend")
+    ctx.emit(IRInstr("br", None, [h_b.label]))
+
+    ctx.switch_to(h_b)
+    i_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_v, [idx_ptr]))
+    go_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", go_v, [i_v, klen_v]))
+    ctx.emit(IRInstr("br.t", None, [go_v, b_b.label, e_b.label]))
+
+    ctx.switch_to(b_b)
+    bi_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", bi_v, [idx_ptr]))
+    kaddr = _list_elem_addr(ctx, keys_v, bi_v)
+    key_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", key_v, [kaddr]))
+    if method == "difference_update":
+        # Unconditional: every key of the argument leaves self.
+        ctx.emit(IRInstr("br", None, [act_b.label]))
+    else:
+        has_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", has_v, ["_abi_dict_contains", test_v, key_v]))
+        zc_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zc_v, [0]))
+        hit_v = ctx.tmp(I64)
+        if method in ("isdisjoint",):
+            # act when the key IS shared (disjointness violated)
+            ctx.emit(IRInstr("icmp.ne", hit_v, [has_v, zc_v]))
+        else:
+            # issuperset: act when a key is MISSING; intersection_update: drop
+            # the keys that are missing from the other side.
+            ctx.emit(IRInstr("icmp.eq", hit_v, [has_v, zc_v]))
+        ctx.emit(IRInstr("br.t", None, [hit_v, act_b.label, c_b.label]))
+
+    ctx.switch_to(act_b)
+    if is_pred:
+        pz_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", pz_v, [0]))
+        ctx.emit(IRInstr("store", None, [pz_v, res_ptr]))
+        ctx.emit(IRInstr("br", None, [e_b.label]))  # short-circuit
+    else:
+        ctx.emit(IRInstr("call", None, ["_abi_dict_pop", obj_v, key_v]))
+        ctx.emit(IRInstr("br", None, [c_b.label]))
+
+    ctx.switch_to(c_b)
+    ci_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", ci_v, [idx_ptr]))
+    s1_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", s1_v, [1]))
+    ni_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", ni_v, [ci_v, s1_v]))
+    ctx.emit(IRInstr("store", None, [ni_v, idx_ptr]))
+    ctx.emit(IRInstr("br", None, [h_b.label]))
+
+    ctx.switch_to(e_b)
+    out_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", out_v, [res_ptr]))
+    return out_v
+
+
 def _lower_set_setop(ctx: _FuncCtx, obj_e: A.Expr, other_e: A.Expr, method: str, tag: int) -> IRValue:
     """s.union(o) / s.intersection(o) / s.difference(o) -- ports
     codegen.py's _gen_set_setop exactly. union is a fresh set with both
@@ -8700,6 +8802,14 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 return ctx.shared_zero
             if e.method in ("union", "intersection", "difference") and len(e.args) == 1:
                 return _lower_set_setop(ctx, e.obj, e.args[0], e.method, id(e))
+            if (
+                e.method in (
+                    "isdisjoint", "issuperset",
+                    "intersection_update", "difference_update",
+                )
+                and len(e.args) == 1
+            ):
+                return _lower_set_pairop(ctx, e.obj, e.args[0], e.method, id(e))
             if e.method in ("discard", "remove") and len(e.args) == 1:
                 key_v = _set_member_key(e.args[0])
                 if e.method == "discard":

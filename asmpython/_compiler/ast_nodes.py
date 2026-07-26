@@ -1344,6 +1344,7 @@ def is_bool_expr(e: Expr) -> bool:
             "isupper", "islower", "isdecimal", "isidentifier",
             "isnumeric", "isprintable",
             "startswith", "endswith",
+            "isdisjoint", "issuperset", "issubset",
         ) or getattr(e, "is_bool", False)
     if isinstance(e, Name):
         return getattr(e, "is_bool", False)

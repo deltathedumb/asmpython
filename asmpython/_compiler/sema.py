@@ -9866,6 +9866,26 @@ class SemaAnalyzer:
                     e.inferred_type = "int"
                 elif e.method in ("update", "clear"):
                     e.inferred_type = "int"
+                elif e.method in (
+                    "isdisjoint", "issuperset",
+                    "intersection_update", "difference_update",
+                ):
+                    # The testing / in-place set operations. The two
+                    # predicates render True/False (see is_bool_expr); the two
+                    # *_update forms mutate and return None.
+                    if len(e.args) != 1:
+                        raise SemaError(
+                            f"set.{e.method}() takes 1 argument", e.pos,
+                            ErrorCode.E_ARG_COUNT,
+                        )
+                    if A.expr_type(e.args[0]) not in ("set", "any"):
+                        raise SemaError(
+                            f"set.{e.method}() argument must be a set, "
+                            f"got {A.expr_type(e.args[0])}",
+                            e.pos,
+                            ErrorCode.E_ARG_TYPE,
+                        )
+                    e.inferred_type = "int"
                 elif e.method in ("union", "intersection", "difference"):
                     if len(e.args) != 1:
                         raise SemaError(
