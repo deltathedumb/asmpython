@@ -74,6 +74,19 @@ def _scan_body(
                 # never a miscompile).
                 if expression.method in function_names:
                     functions.add(expression.method)
+                # A module-qualified CONSTRUCTION of a merged class --
+                # `collections.Counter(...)`, `collections.OrderedDict(...)`,
+                # `decimal.Decimal(...)`. Same flattening as the function case
+                # above: `module.Class(...)` is really `Class(...)`, so the
+                # class (named by `.method`) is live and its methods must not be
+                # neutralized. Without this, a stdlib class reached ONLY through
+                # `module.Class(...)` (never a bare `Class(...)`) was treated as
+                # dead, and every method body -- including annotated ones like
+                # `most_common(self) -> list[tuple[str,int]]` -- was replaced
+                # with `return 0` / `int`, so `collections.Counter(x).most_common
+                # (1)[0]` failed to compile (E017 "cannot index a int").
+                if expression.method in class_names:
+                    classes.add(expression.method)
                 # `ClassName.method(...)` -- a @classmethod/@staticmethod called
                 # directly on the class -- keeps that class live. Its receiver is
                 # a bare class name, not a constructed instance, so the `Call`
