@@ -4470,7 +4470,14 @@ class SemaAnalyzer:
             if getattr(f, "is_lifted", False):
                 continue
             sig = self.funcs.get(f.name)
-            if sig is None or sig.ret_type is not None:
+            # Proceed when the return type is unset OR was inferred as the
+            # `any` fallback: `return <closure>` otherwise lands on `any`
+            # (a closure is an opaque value to the scalar-return inference),
+            # which then blocked this more-specific closure detection. A
+            # closure return is a real, dispatchable kind -- prefer it.
+            if sig is None or (
+                sig.ret_type is not None and sig.ret_type[0] != "any"
+            ):
                 continue
             # Check if the function returns a name that is a ClosureBind.
             for s in f.body:
@@ -4482,7 +4489,13 @@ class SemaAnalyzer:
                         sig.ret_type = ("closure", None, None, None, None)
                         closure_factories.add(f.name)
                         break
-        # Re-type Call nodes in the module body that target closure factories.
+        # Re-type Call nodes that target closure factories, so a variable a
+        # factory's result is assigned to (`add5 = make_adder(5)`) carries the
+        # "closure" kind and its own later call dispatches correctly. Scans the
+        # module body AND every function/method body -- an escaping closure is
+        # most often assigned and called inside a function (`add5 = make_adder(
+        # 5); add5(10)`), not at module scope, so a module-body-only scan missed
+        # exactly the case that makes closures escape.
         def _retype_closure_calls(stmts: list) -> None:
             for s in stmts:
                 if isinstance(s, A.Assign) and isinstance(s.value, A.Call):
@@ -4495,7 +4508,19 @@ class SemaAnalyzer:
                     _retype_closure_calls(s.orelse)
                 elif isinstance(s, A.While):
                     _retype_closure_calls(s.body)
+                elif isinstance(s, A.Try):
+                    _retype_closure_calls(s.body)
+                    _retype_closure_calls(s.handler)
+                    _retype_closure_calls(s.else_body)
+                    _retype_closure_calls(s.finally_body)
+                elif isinstance(s, A.With):
+                    _retype_closure_calls(s.body)
         _retype_closure_calls(self.mod.body)
+        for f in self.mod.funcs:
+            _retype_closure_calls(f.body)
+        for c in self.mod.classes:
+            for m in c.methods:
+                _retype_closure_calls(m.body)
 
         # Hand resolved tables to codegen via the Module.
         self.mod.imported_modules = self.imported_modules

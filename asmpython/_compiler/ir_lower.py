@@ -271,6 +271,14 @@ class _FuncCtx:
         self.slot_el_ty: dict[str, str] = {}
         self.closure_names: set[str] = set()
         self.closure_free_counts: dict[str, int] = {}
+        # Variables holding an ESCAPING closure value -- a closure OBJECT
+        # (magic/fn-ptr/captures list) returned from a factory and stored here
+        # (`add5 = make_adder(5)`), as opposed to `closure_names` which are a
+        # function's OWN locally-bound closures with a statically-known capture
+        # count. An escaping closure's capture count isn't known at this call
+        # site (the object came from elsewhere), so its call reads the count
+        # from the object at runtime. Sema types the factory's result "closure".
+        self.closure_value_names: set[str] = set()
         self.nonlocal_names: set[str] = set()
         self.boxed_names: set[str] = set()
         # var name -> concrete asmpython type string, active only while
@@ -9528,6 +9536,71 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(ir_type_for(A.expr_type(e)))
             ctx.emit(IRInstr("call", v, [f"{call_owner}____call__", *args]))
             return v
+        if e.func in ctx.closure_value_names:
+            # Call an ESCAPING closure value (`add5 = make_adder(5); add5(10)`).
+            # add5 holds a closure OBJECT [magic, fn_ptr, cap0..capN-1] whose
+            # capture count N isn't known here (the object came from a factory).
+            # sema typed add5 "closure", so it's safe to read as a list object.
+            # Read fn_ptr and the runtime count (list length - 2), then branch
+            # on N to emit a fixed-arity `fn(cap0..capN-1, args...)` call per
+            # candidate N -- the leading-captured-params calling convention the
+            # lifted function already expects (same shape as the closure_names
+            # path, but with a runtime count instead of a static one).
+            MAX_CAPTURES = 8
+            closure_obj = _lower_expr_inner(ctx, A.Name(name=e.func, pos=e.pos))
+            buf_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", buf_addr, [closure_obj, _LIST_BUF_OFF]))
+            buf = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", buf, [buf_addr]))
+            len_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", len_addr, [closure_obj, _LIST_LEN_OFF]))
+            list_len = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", list_len, [len_addr]))
+            two = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", two, [2]))
+            count = ctx.tmp(I64)
+            ctx.emit(IRInstr("isub", count, [list_len, two]))
+            fn_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", fn_addr, [buf, 8]))
+            fn = ctx.tmp(PTR)
+            ctx.emit(IRInstr("load", fn, [fn_addr]))
+            call_args = [_lower_expr(ctx, argument) for argument in e.args]
+            res_ty = ir_type_for(A.expr_type(e))
+            res_ptr = ctx.ensure_slot(f"__clv_res_{id(e)}", res_ty)
+            check_blocks = [ctx.new_block(f"clvcheck{n}") for n in range(MAX_CAPTURES + 1)]
+            hit_blocks = [ctx.new_block(f"clvhit{n}") for n in range(MAX_CAPTURES + 1)]
+            stub_b = ctx.new_block("clvstub")
+            end_b = ctx.new_block("clvend")
+            ctx.emit(IRInstr("br", None, [check_blocks[0].label]))
+            for n in range(MAX_CAPTURES + 1):
+                ctx.switch_to(check_blocks[n])
+                n_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", n_v, [n]))
+                is_match = ctx.tmp(I64)
+                ctx.emit(IRInstr("icmp.eq", is_match, [count, n_v]))
+                nxt = check_blocks[n + 1].label if n < MAX_CAPTURES else stub_b.label
+                ctx.emit(IRInstr("br.t", None, [is_match, hit_blocks[n].label, nxt]))
+                ctx.switch_to(hit_blocks[n])
+                caps: list[IRValue] = []
+                for i in range(n):
+                    cap_addr = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("gep", cap_addr, [buf, (i + 2) * 8]))
+                    cap_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("load", cap_v, [cap_addr]))
+                    caps.append(cap_v)
+                mv = ctx.tmp(res_ty)
+                ctx.emit(IRInstr("call", mv, [fn, *caps, *call_args]))
+                ctx.emit(IRInstr("store", None, [mv, res_ptr]))
+                ctx.emit(IRInstr("br", None, [end_b.label]))
+            ctx.switch_to(stub_b)
+            stub_v = ctx.tmp(res_ty)
+            ctx.emit(IRInstr("const", stub_v, [0]))
+            ctx.emit(IRInstr("store", None, [stub_v, res_ptr]))
+            ctx.emit(IRInstr("br", None, [end_b.label]))
+            ctx.switch_to(end_b)
+            out = ctx.tmp(res_ty)
+            ctx.emit(IRInstr("load", out, [res_ptr]))
+            return out
         if e.func in ctx.closure_names:
             closure = _lower_expr(ctx, A.Name(name=e.func, pos=e.pos))
             buffer_address = ctx.tmp(PTR)
@@ -10724,6 +10797,12 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         ctx.emit(IRInstr("store", None, [val, ptr]))
         if not _is_global_name(ctx, s.target) and A.expr_type(s.value) == "list":
             ctx.slot_el_ty[s.target] = getattr(s.value, "list_el_type", "int")
+        if A.expr_type(s.value) == "closure":
+            # This variable now holds an escaping closure object (a factory's
+            # result). Record it so a later `s.target(...)` call dispatches
+            # through the closure object instead of calling the raw object
+            # pointer as a function.
+            ctx.closure_value_names.add(s.target)
         return
 
     if isinstance(s, A.AugAssign):
