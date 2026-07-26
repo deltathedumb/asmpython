@@ -388,7 +388,7 @@ _STR_METHOD_ARGC: dict = {
     "title": 0, "strip": 0, "lstrip": 0, "rstrip": 0,
     "startswith": 1, "endswith": 1,
     "removeprefix": 1, "removesuffix": 1, "count": 1,
-    "replace": 2,
+    "replace": 2, "translate": 1,
     "isdigit": 0, "isalpha": 0, "isalnum": 0, "isspace": 0,
     "isupper": 0, "islower": 0, "isidentifier": 0,
     "isnumeric": 0, "isprintable": 0,
@@ -399,7 +399,7 @@ _STR_METHOD_RET: dict = {
     "rstrip": "str",
     "startswith": "int", "endswith": "int",
     "removeprefix": "str", "removesuffix": "str", "count": "int",
-    "replace": "str",
+    "replace": "str", "translate": "str",
     "isdigit": "int", "isalpha": "int", "isalnum": "int", "isspace": "int",
     "isupper": "int", "islower": "int", "isidentifier": "int",
     "isnumeric": "int", "isprintable": "int",
@@ -9566,6 +9566,30 @@ class SemaAnalyzer:
             ):
                 if (
                     isinstance(e.obj, A.Name)
+                    and e.obj.name == "str"
+                    and e.method == "maketrans"
+                ):
+                    # `str.maketrans(frm, to[, delete])` -- a translation table.
+                    # asmpython models it as a dict mapping each single-char
+                    # string to its replacement ("" for a deleted character),
+                    # which is what `str.translate` consumes.
+                    if not (2 <= len(e.args) <= 3):
+                        raise SemaError(
+                            "str.maketrans() takes (frm, to[, delete])", e.pos,
+                            ErrorCode.E_ARG_COUNT,
+                        )
+                    for _ma in e.args:
+                        self._check_expr(_ma, scope)
+                        if A.expr_type(_ma) not in ("str", "any"):
+                            raise SemaError(
+                                "str.maketrans() arguments must be str", e.pos,
+                                ErrorCode.E_ARG_TYPE,
+                            )
+                    e.inferred_type = "dict"
+                    e.value_type = "str"
+                    return
+                if (
+                    isinstance(e.obj, A.Name)
                     and e.obj.name == "dict"
                     and e.method == "fromkeys"
                 ):
@@ -10402,6 +10426,17 @@ class SemaAnalyzer:
             for a in e.args:
                 self._check_expr(a, scope)
             e.inferred_type = "any"
+            return
+        if e.method == "translate" and len(e.args) == 1:
+            # `s.translate(table)` where table came from str.maketrans().
+            self._check_expr(e.args[0], scope)
+            if A.expr_type(e.args[0]) not in ("dict", "any"):
+                raise SemaError(
+                    "str.translate() table must be a str.maketrans() mapping",
+                    e.pos,
+                    ErrorCode.E_ARG_TYPE,
+                )
+            e.inferred_type = "str"
             return
         if e.method == "replace" and len(e.args) == 3:
             # `s.replace(old, new, count)` -- the optional occurrence limit.
