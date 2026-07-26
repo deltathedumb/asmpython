@@ -6909,6 +6909,77 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         isinstance(e, A.Call)
         and e.func in ("list", "tuple")
         and len(e.args) == 1
+        and A.expr_type(e.args[0]).startswith("instance:")
+    ):
+        # `list(obj)` where obj is a user class with __iter__/__next__ -- which
+        # is also what a generator function returns (sema desugars `yield` into
+        # exactly such a class), so this covers `list(gen())` too. Draining an
+        # iterator is precisely `[x for x in obj]`, so synthesize that
+        # comprehension and reuse its iterator-protocol lowering (the
+        # setjmp/StopIteration loop) rather than duplicating it here.
+        _it_cls = A.expr_type(e.args[0]).split(":", 1)[1]
+        if _resolve_method_owner(ctx, _it_cls, "__next__") is not None:
+            _synth = A.Comprehension(
+                elt=A.Name(name="_it", pos=e.pos, inferred_type=getattr(e, "list_el_type", "any")),
+                var="_it",
+                iter=e.args[0],
+                cond=None,
+                pos=e.pos,
+                list_el_type=getattr(e, "list_el_type", "any"),
+            )
+            return _lower_comprehension_instance_iter(ctx, _synth, _it_cls)
+        # Sequence protocol (`__len__` + `__getitem__`, e.g. deque): walk it by
+        # index and append each element.
+        _gi_owner = _resolve_method_owner(ctx, _it_cls, "__getitem__") or _it_cls
+        _ln_owner = _resolve_method_owner(ctx, _it_cls, "__len__") or _it_cls
+        obj_v = _lower_expr(ctx, e.args[0])
+        n_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", n_v, [f"{_ln_owner}____len__", obj_v]))
+        cap_v = ctx.tmp(I64)
+        one_c = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one_c, [1]))
+        ctx.emit(IRInstr("iadd", cap_v, [n_v, one_c]))
+        acc_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", acc_v, ["_abi_new_list", cap_v]))
+        acc_ptr = ctx.ensure_slot(f"__lseq_out_{id(e)}", PTR)
+        ctx.emit(IRInstr("store", None, [acc_v, acc_ptr]))
+        si_ptr = ctx.ensure_slot(f"__lseq_idx_{id(e)}", I64)
+        z_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", z_v, [0]))
+        ctx.emit(IRInstr("store", None, [z_v, si_ptr]))
+        sh_b = ctx.new_block("lseqhead")
+        sb_b = ctx.new_block("lseqbody")
+        se_b = ctx.new_block("lseqend")
+        ctx.emit(IRInstr("br", None, [sh_b.label]))
+        ctx.switch_to(sh_b)
+        si_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", si_v, [si_ptr]))
+        sgo_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", sgo_v, [si_v, n_v]))
+        ctx.emit(IRInstr("br.t", None, [sgo_v, sb_b.label, se_b.label]))
+        ctx.switch_to(sb_b)
+        sbi_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", sbi_v, [si_ptr]))
+        el_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", el_v, [f"{_gi_owner}____getitem__", obj_v, sbi_v]))
+        scur_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", scur_v, [acc_ptr]))
+        ctx.emit(IRInstr("call", None, ["_abi_list_append", scur_v, el_v]))
+        s1_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", s1_v, [1]))
+        sn_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", sn_v, [sbi_v, s1_v]))
+        ctx.emit(IRInstr("store", None, [sn_v, si_ptr]))
+        ctx.emit(IRInstr("br", None, [sh_b.label]))
+        ctx.switch_to(se_b)
+        sfin_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", sfin_v, [acc_ptr]))
+        return sfin_v
+
+    if (
+        isinstance(e, A.Call)
+        and e.func in ("list", "tuple")
+        and len(e.args) == 1
         and A.expr_type(e.args[0]) in ("dict", "set")
     ):
         # `list(d)` / `list(s)` -- iterating a dict yields its keys and a set
@@ -12867,6 +12938,18 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                 arg_t = A.expr_type(node.args[0])
                 if arg_t.startswith("instance:"):
                     add_resolved(arg_t.split(":", 1)[1], "__int__")
+            if node.func in ("list", "tuple") and len(node.args) == 1:
+                # `list(obj)` drains an iterable object through either the
+                # iterator protocol or the sequence protocol (see the matching
+                # lowering) -- keep whichever dunders that dispatch needs, or
+                # DCE drops them and the link fails on e.g.
+                # `_genobj_countdown____iter__`.
+                arg_t = A.expr_type(node.args[0])
+                if arg_t.startswith("instance:"):
+                    _lcls = arg_t.split(":", 1)[1]
+                    for _dn in ("__iter__", "__next__", "__len__", "__getitem__"):
+                        if _resolve_method_owner_in_sigs(classes_sig, _lcls, _dn) is not None:
+                            add_resolved(_lcls, _dn)
             if node.func in ("print", "str", "repr"):
                 # `print(instance)` / `str(instance)` / `repr(instance)`
                 # -- the value-to-string coercion these all funnel

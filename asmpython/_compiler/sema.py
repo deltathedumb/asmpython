@@ -11093,6 +11093,30 @@ class SemaAnalyzer:
                 # list(x) yields a list; carry the source's element kind so
                 # later `for el in list(x)` / indexing pick the right register.
                 t = A.expr_type(e.args[0])
+                if t.startswith("instance:"):
+                    # An iterable object: a user class with __iter__/__next__,
+                    # which is also the shape a generator function's result
+                    # takes (sema desugars `yield` into exactly such a class).
+                    # `list(gen())` / `list(deque_obj)` drains it -- lowered by
+                    # running the iterator protocol.
+                    _lc = t.split(":", 1)[1]
+                    _lnx = self._resolve_method(_lc, "__next__")
+                    if _lnx is None:
+                        # No iterator protocol -- accept the sequence protocol
+                        # instead (`__len__` + `__getitem__`, what deque and
+                        # other container classes provide); the lowering walks
+                        # it by index.
+                        _lnx = self._resolve_method(_lc, "__getitem__")
+                        if _lnx is None or self._resolve_method(_lc, "__len__") is None:
+                            raise SemaError(
+                                f"list() argument {_lc} is not iterable "
+                                "(needs __next__, or __len__ and __getitem__)",
+                                e.pos,
+                                ErrorCode.E_ARG_TYPE,
+                            )
+                    _lrt = getattr(_lnx[1], "ret_type", None)
+                    e.list_el_type = _lrt[0] if isinstance(_lrt, tuple) and _lrt else "any"
+                    return
                 if t not in ("list", "tuple", "str", "dict", "set", "any"):
                     raise SemaError(
                         "list() requires a list, tuple, dict, set, or string",
