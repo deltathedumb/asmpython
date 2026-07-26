@@ -7766,6 +7766,55 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         obj_ty = A.expr_type(e.obj)
         if obj_ty == "int" and e.method == "to_bytes":
             return _lower_int_to_bytes(ctx, e)
+        if obj_ty == "int" and e.method in ("bit_length", "bit_count") and not e.args:
+            # bit_length(): how many bits the value needs -- shift right until
+            # it's zero, counting steps. bit_count(): population count -- same
+            # walk, accumulating the low bit instead. Both are plain loops
+            # rather than a runtime helper (no BSR/POPCNT IR op exists, and
+            # this keeps them backend-independent).
+            src_v = _lower_expr(ctx, e.obj)
+            val_ptr = ctx.ensure_slot(f"__bitv_{id(e)}", I64)
+            acc_ptr = ctx.ensure_slot(f"__bitn_{id(e)}", I64)
+            ctx.emit(IRInstr("store", None, [src_v, val_ptr]))
+            zc = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", zc, [0]))
+            ctx.emit(IRInstr("store", None, [zc, acc_ptr]))
+            bh_b = ctx.new_block("bithead")
+            bb_b = ctx.new_block("bitbody")
+            be_b = ctx.new_block("bitend")
+            ctx.emit(IRInstr("br", None, [bh_b.label]))
+            ctx.switch_to(bh_b)
+            cur_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", cur_v, [val_ptr]))
+            zc2 = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", zc2, [0]))
+            more_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("icmp.ne", more_v, [cur_v, zc2]))
+            ctx.emit(IRInstr("br.t", None, [more_v, bb_b.label, be_b.label]))
+            ctx.switch_to(bb_b)
+            bv = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", bv, [val_ptr]))
+            acc = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", acc, [acc_ptr]))
+            one_c = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", one_c, [1]))
+            if e.method == "bit_count":
+                lowbit = ctx.tmp(I64)
+                ctx.emit(IRInstr("iand", lowbit, [bv, one_c]))
+                step = lowbit
+            else:
+                step = one_c
+            nacc = ctx.tmp(I64)
+            ctx.emit(IRInstr("iadd", nacc, [acc, step]))
+            ctx.emit(IRInstr("store", None, [nacc, acc_ptr]))
+            shifted = ctx.tmp(I64)
+            ctx.emit(IRInstr("shr", shifted, [bv, one_c]))
+            ctx.emit(IRInstr("store", None, [shifted, val_ptr]))
+            ctx.emit(IRInstr("br", None, [bh_b.label]))
+            ctx.switch_to(be_b)
+            out_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", out_v, [acc_ptr]))
+            return out_v
         if isinstance(e.obj, A.Name) and e.obj.name in ctx.mctx.imported_modules:
             # `os.getcwd()`/`os.cpu_count()`: inline codegen helpers, not
             # real BINDINGS entries (no single C symbol covers Python's

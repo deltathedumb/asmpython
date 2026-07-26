@@ -9540,6 +9540,11 @@ class SemaAnalyzer:
                 self._check_str_method(e, scope)
                 return
             elif obj_t == "int":
+                if e.method in ("bit_length", "bit_count") and not e.args:
+                    # bit_length(): position of the highest set bit.
+                    # bit_count(): number of set bits (CPython 3.10+).
+                    e.inferred_type = "int"
+                    return
                 if e.method == "to_bytes":
                     if not (1 <= len(e.args) <= 3):
                         raise SemaError("int.to_bytes() takes length[, byteorder[, signed]]", e.pos, ErrorCode.E_ARG_COUNT)
