@@ -627,7 +627,36 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
                     size = (size + 7) & ~7        # 8-byte align
                     stack_top += size
                     alloca_slots[result.name] = -stack_top
-                elif instr.op == "call" and result.name in crosses_call:
+                elif result.name in crosses_call and (
+                    instr.op == "call"
+                    or result.type.name in ("f32", "f64")
+                ):
+                    # A value live across a call cannot stay in a caller-saved
+                    # register -- the callee is free to clobber it. Two result
+                    # classes are homed on the stack here rather than in a
+                    # register:
+                    #   * ANY call result (it comes back in a caller-saved reg,
+                    #     RAX / XMM0), and
+                    #   * ANY SCALAR float value (f32/f64), because scalar floats
+                    #     have no dependable callee-saved home across ABIs: SysV
+                    #     has NO callee-saved XMM registers at all, and while
+                    #     Win64 nominally preserves XMM6-15, this backend's
+                    #     prologue/epilogue don't save them -- so a float parked
+                    #     in a caller-saved XMM across a call was silently
+                    #     clobbered. Observed as `round(0.362, 2)` returning
+                    #     0.0 / 100.0 nondeterministically: the `x` operand (a
+                    #     `const`, not a call result, so it missed the
+                    #     call-result case above) was destroyed by the internal
+                    #     `pow(10, ndigits)` call before the `x * scale` multiply
+                    #     could read it.
+                    # v128 (SIMD) values are deliberately NOT included: they need
+                    # a 16-byte spill/reload (movdqu), whereas the scalar spill
+                    # path homes them in an 8-byte slot -- and a packed vector
+                    # living across a call is rare enough that it keeps its
+                    # prior (register) treatment rather than widening this path.
+                    # Non-call GP values that cross a call are handled by
+                    # `_alloc_gp`'s `prefer_callee_saved` path instead (a
+                    # callee-saved GP register survives the call for free).
                     stack_top += _slot_size(result.type.name)
                     locs[result.name] = StackLoc(-stack_top)
                 elif _is_float(result.type.name):

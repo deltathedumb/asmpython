@@ -298,13 +298,25 @@ class FuncCodegen:
         scratch = self._SCRATCH2 if alt_scratch else self._SCRATCH
         return scratch, lambda: self._emit(encode_mov_mr(Mem(Reg.RBP, loc.offset), scratch))
 
-    def _dst_xmm_spillable(self, result: Any) -> "tuple[XmmReg, Callable[[], None]]":
-        """XMM counterpart of `_dst_gp_spillable` -- see its docstring."""
+    def _dst_xmm_spillable(self, result: Any, alt_scratch: bool = False) -> "tuple[XmmReg, Callable[[], None]]":
+        """XMM counterpart of `_dst_gp_spillable` -- see its docstring.
+
+        `alt_scratch=True` routes the spilled case through `_SCRATCH_XMM2`
+        (XMM14) instead of `_SCRATCH_XMM` (XMM15) -- required at any site
+        whose own operand load may already occupy `_SCRATCH_XMM` (a spilled
+        XMM operand read via `_xmm`, or an op like `fneg` that stakes out
+        `_SCRATCH_XMM` for a constant it builds), so destination and operand
+        don't alias the one scratch. Same hazard `_dst_gp_spillable`'s
+        `alt_scratch` guards against on the GP side.
+
+        Emits a `movsd` (8-byte) store, so this is for SCALAR f32/f64 results
+        only; a v128 result would need a 16-byte `movdqu` and must not be
+        routed through here."""
         loc = self._loc(result)
         if isinstance(loc, XmmLoc):
             return loc.reg, lambda: None
         assert isinstance(loc, StackLoc), f"XMM result expected for {result.name}"
-        scratch = self._SCRATCH_XMM
+        scratch = self._SCRATCH_XMM2 if alt_scratch else self._SCRATCH_XMM
         return scratch, lambda: self._emit(encode_movsd_mr(Mem(Reg.RBP, loc.offset), scratch))
 
     # ── Prologue / epilogue ───────────────────────────────────────────────────
@@ -390,13 +402,19 @@ class FuncCodegen:
     def _binop_xmm(self, result: Any, a: Any, b: Any, rr_fn, f32: bool = False) -> None:
         get = self._xmm_f32 if f32 else self._xmm
         mov = encode_movss_rr if f32 else encode_movsd_rr
-        dst       = self._dst_xmm(result)
+        # Spillable dst: a scalar float result can be homed on the stack when
+        # it lives across a call (see regalloc's crosses-call spill). `dst`
+        # defaults to _SCRATCH_XMM when spilled -- the same scratch `a` uses,
+        # which is fine: if `a` is also spilled the `a_x != dst` guard skips a
+        # redundant self-move, and `b` reads through the alt scratch below.
+        dst, spill = self._dst_xmm_spillable(result)
         a_x, a_ld = get(a)
         b_x, b_ld = get(b, alt_scratch=True)
         self._emit(a_ld + b_ld)
         if a_x != dst:
             self._emit(mov(dst, a_x))
         self._emit(rr_fn(dst, b_x))
+        spill()
 
     def _binop_simd(self, result: Any, a: Any, b: Any, rr_fn) -> None:
         """Packed XMM binary op (v128 / SIMD)."""
@@ -939,21 +957,28 @@ class FuncCodegen:
             self._binop_xmm(r, ops[0], ops[1], tbl[op], f32=f32); return
 
         if op == "fneg":
-            dst = self._dst_xmm(r)
+            # dst uses the ALT xmm scratch: this op stakes out _SCRATCH_XMM
+            # (XMM15) to build the sign-bit mask below, so a spilled dst must
+            # not alias it. The src->dst copy is also emitted BEFORE the mask
+            # is materialized, so that even a `src` loaded into _SCRATCH_XMM
+            # (spilled operand) is safely captured in dst before the mask
+            # overwrites _SCRATCH_XMM.
+            dst, spill = self._dst_xmm_spillable(r, alt_scratch=True)
             f32 = ops[0].type.name == "f32"
             src_x, ld = (self._xmm_f32 if f32 else self._xmm)(ops[0])
             self._emit(ld)
+            mov = encode_movss_rr if f32 else encode_movsd_rr
+            if src_x != dst: self._emit(mov(dst, src_x))
             sign_bits = 0x80000000 if f32 else (1 << 63)
             self._emit(encode_mov_ri(self._SCRATCH, sign_bits))
             self._emit(_gp_to_xmm(self._SCRATCH_XMM, self._SCRATCH))
-            mov = encode_movss_rr if f32 else encode_movsd_rr
-            if src_x != dst: self._emit(mov(dst, src_x))
             xor_op = 0x57
             pfx    = b"" if f32 else bytes([0x66])
             rex_b  = bytes([0x40 | (_hi(dst) << 2) | _hi(self._SCRATCH_XMM)]) \
                      if (_hi(dst) or _hi(self._SCRATCH_XMM)) else b""
             self._emit(pfx + rex_b + bytes([0x0F, xor_op,
                         0xC0 | ((int(dst) & 7) << 3) | (int(self._SCRATCH_XMM) & 7)]))
+            spill()
             return
 
         # ── float compare ─────────────────────────────────────────────────────
@@ -1193,10 +1218,15 @@ class FuncCodegen:
         if op == "sitofp":
             src_r, ld = self._gp(ops[0])
             self._emit(ld)
+            # Spillable dst (see regalloc's crosses-call float spill). The
+            # operand is a GP register, disjoint from the XMM scratch, so no
+            # alt-scratch aliasing to guard against.
+            dst, spill = self._dst_xmm_spillable(r)
             if r.type.name == "f32":
-                self._emit(encode_cvtsi2ss(self._dst_xmm(r), src_r))
+                self._emit(encode_cvtsi2ss(dst, src_r))
             else:
-                self._emit(encode_cvtsi2sd(self._dst_xmm(r), src_r))
+                self._emit(encode_cvtsi2sd(dst, src_r))
+            spill()
             return
 
         if op == "fptosi":
@@ -1216,14 +1246,16 @@ class FuncCodegen:
 
         if op == "fpext":
             src_x, ld = self._xmm_f32(ops[0])
-            dst = self._dst_xmm(r)
+            dst, spill = self._dst_xmm_spillable(r)
             self._emit(ld); self._emit(_cvtss2sd(dst, src_x))
+            spill()
             return
 
         if op == "fptrunc":
             src_x, ld = self._xmm(ops[0])
-            dst = self._dst_xmm(r)
+            dst, spill = self._dst_xmm_spillable(r)
             self._emit(ld); self._emit(_cvtsd2ss(dst, src_x))
+            spill()
             return
 
         if op == "bitcast_i2f":
@@ -1233,8 +1265,9 @@ class FuncCodegen:
             # int-only storage slot (dict/list cell, generic "call" arg
             # marshaling) and must be read back as a real double.
             src_r, ld = self._gp(ops[0])
-            dst = self._dst_xmm(r)
+            dst, spill = self._dst_xmm_spillable(r)
             self._emit(ld); self._emit(encode_movq_xmm_gp(dst, src_r))
+            spill()
             return
 
         if op == "bitcast_f2i":
@@ -1288,10 +1321,19 @@ class FuncCodegen:
             if r is None:
                 return
             if _is_xmm(r.type.name):
-                dst = self._dst_xmm(r)
+                loc = self._loc(r)
                 src_x, ld = self._xmm(ops[0])
                 self._emit(ld)
-                if src_x != dst: self._emit(encode_movdqa_rr(dst, src_x))
+                if isinstance(loc, XmmLoc):
+                    if src_x != loc.reg: self._emit(encode_movdqa_rr(loc.reg, src_x))
+                else:
+                    # A scalar f32/f64 phi copy homed on the stack because it
+                    # lives across a call (regalloc's crosses-call spill). Only
+                    # the low 64 bits matter for a scalar, so store via movsd
+                    # into the 8-byte slot; v128 phi results never reach this
+                    # branch (they keep a register, so `loc` is an XmmLoc above).
+                    assert isinstance(loc, StackLoc), f"XMM mov dst expected for {r.name}"
+                    self._emit(encode_movsd_mr(Mem(Reg.RBP, loc.offset), src_x))
             else:
                 src_r, ld = self._gp(ops[0])
                 dst, spill = self._dst_gp_spillable(r, alt_scratch=True)
