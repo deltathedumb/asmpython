@@ -9564,6 +9564,32 @@ class SemaAnalyzer:
                 obj_t == "type"
                 or (isinstance(e.obj, A.Name) and e.obj.name == "int")
             ):
+                if (
+                    isinstance(e.obj, A.Name)
+                    and e.obj.name == "dict"
+                    and e.method == "fromkeys"
+                ):
+                    # `dict.fromkeys(keys[, value])` -- a constructor on the
+                    # type itself, so it lands here rather than in the dict
+                    # method table.
+                    if not (1 <= len(e.args) <= 2):
+                        raise SemaError(
+                            "dict.fromkeys() takes (keys[, value])", e.pos,
+                            ErrorCode.E_ARG_COUNT,
+                        )
+                    for _fa in e.args:
+                        self._check_expr(_fa, scope)
+                    if A.expr_type(e.args[0]) not in ("list", "tuple", "any"):
+                        raise SemaError(
+                            "dict.fromkeys() keys must be a list or tuple",
+                            e.pos,
+                            ErrorCode.E_ARG_TYPE,
+                        )
+                    e.inferred_type = "dict"
+                    e.value_type = (
+                        A.expr_type(e.args[1]) if len(e.args) == 2 else "int"
+                    )
+                    return
                 if isinstance(e.obj, A.Name) and e.obj.name in self.classes:
                     cls_name = e.obj.name
                     resolved = self._resolve_method(cls_name, e.method)
