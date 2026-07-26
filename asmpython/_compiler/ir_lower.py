@@ -11084,6 +11084,12 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             res = _lower_int_floordivmod(ctx, cur, rhs, s.op, id(s))
             ctx.emit(IRInstr("store", None, [res, ptr]))
             return
+        elif s.op == "**":
+            # `x **= n` for ints: no single IR op, reuse the same
+            # non-negative-exponent multiply loop the `**` BinOp / pow() use.
+            res = _lower_int_pow(ctx, cur, rhs, id(s))
+            ctx.emit(IRInstr("store", None, [res, ptr]))
+            return
         else:
             if s.op not in _BINOP:
                 raise LowerError(f"unsupported augassign op {s.op!r}")
