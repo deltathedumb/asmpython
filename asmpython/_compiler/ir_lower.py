@@ -5152,12 +5152,30 @@ def _lower_minmax(ctx: _FuncCtx, e: A.Call) -> IRValue:
     ctx.emit(IRInstr("gep", len_addr, [src_v, _LIST_LEN_OFF]))
     len_v = ctx.tmp(I64)
     ctx.emit(IRInstr("load", len_v, [len_addr]))
+    best_ptr = ctx.ensure_slot(f"__minmax1_best_{id(e)}", el_ir_ty)
+    done_b = ctx.new_block("minmax1done")
+    minmax_default = getattr(e, "minmax_default", None)
+    if minmax_default is not None:
+        # default= : an empty iterable yields the default rather than reading
+        # element 0 (which would index one past the end). Branch on len == 0;
+        # the non-empty path falls through to the normal first-element seed.
+        zero_len = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero_len, [0]))
+        is_empty = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.eq", is_empty, [len_v, zero_len]))
+        empty_b = ctx.new_block("minmax1empty")
+        nonempty_b = ctx.new_block("minmax1nonempty")
+        ctx.emit(IRInstr("br.t", None, [is_empty, empty_b.label, nonempty_b.label]))
+        ctx.switch_to(empty_b)
+        def_v = _lower_expr(ctx, minmax_default)
+        ctx.emit(IRInstr("store", None, [def_v, best_ptr]))
+        ctx.emit(IRInstr("br", None, [done_b.label]))
+        ctx.switch_to(nonempty_b)
     zero_idx = ctx.tmp(I64)
     ctx.emit(IRInstr("const", zero_idx, [0]))
     first_addr = _list_elem_addr(ctx, src_v, zero_idx)
     first_el = ctx.tmp(el_ir_ty)
     ctx.emit(IRInstr("load", first_el, [first_addr]))
-    best_ptr = ctx.ensure_slot(f"__minmax1_best_{id(e)}", el_ir_ty)
     ctx.emit(IRInstr("store", None, [first_el, best_ptr]))
 
     key_ty = "int"
@@ -5223,6 +5241,9 @@ def _lower_minmax(ctx: _FuncCtx, e: A.Call) -> IRValue:
     ctx.emit(IRInstr("br", None, [head_b.label]))
 
     ctx.switch_to(end_b)
+    ctx.emit(IRInstr("br", None, [done_b.label]))
+    # Both the loop exit (non-empty) and the empty-default path converge here.
+    ctx.switch_to(done_b)
     out = ctx.tmp(el_ir_ty)
     ctx.emit(IRInstr("load", out, [best_ptr]))
     return out

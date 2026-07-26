@@ -9832,7 +9832,7 @@ class SemaAnalyzer:
             ai += 1
         e.inferred_type = "str"  # type: ignore
 
-    def _check_sort_kwargs(self, e, scope: Scope) -> None:
+    def _check_sort_kwargs(self, e, scope: Scope, allow_default: bool = False) -> None:
         """Validate and resolve the `key=`/`reverse=` kwargs shared by
         `sorted()`, `min()`/`max()`, and `list.sort()`.
 
@@ -9843,14 +9843,21 @@ class SemaAnalyzer:
         Stamps `e.sort_key` (Optional[expr]), `e.sort_key_ret` ("str"/"int"),
         and `e.sort_reverse` (Optional[expr]), then clears `e.kwargs` so
         normal call-arg checks don't see them.
+
+        `allow_default` additionally accepts min()/max()'s `default=` kwarg
+        (the value returned when the iterable is empty); it stamps
+        `e.minmax_default` (Optional[expr]). Only min/max pass it.
         """
         key_expr = None
         reverse_expr = None
+        default_expr = None
         for kname, kexpr in e.kwargs:
             if kname == "key":
                 key_expr = kexpr
             elif kname == "reverse":
                 reverse_expr = kexpr
+            elif kname == "default" and allow_default:
+                default_expr = kexpr
             else:
                 raise SemaError(f"unexpected keyword argument {kname!r}", e.pos, ErrorCode.E_ARG_COUNT)
         if key_expr is not None:
@@ -9899,6 +9906,9 @@ class SemaAnalyzer:
             e.sort_reverse = reverse_expr  # type: ignore[attr-defined]
         else:
             e.sort_reverse = None  # type: ignore[attr-defined]
+        if default_expr is not None:
+            self._check_expr(default_expr, scope)
+        e.minmax_default = default_expr  # type: ignore[attr-defined]
         e.kwargs = []
 
     def _check_str_method(self, e: A.MethodCall, scope: Scope) -> None:
@@ -10770,15 +10780,37 @@ class SemaAnalyzer:
                 # (reverse= is meaningless here but accepted for symmetry with
                 # sorted()'s kwarg set — codegen ignores it). The variadic
                 # scalar form (min(a, b, ...)) doesn't support key=.
-                self._check_sort_kwargs(e, scope)
+                self._check_sort_kwargs(e, scope, allow_default=True)
                 if len(e.args) == 1:
                     e.inferred_type = self._list_el_type(e.args[0], scope)
                     if e.inferred_type == "tuple":
                         e.tuple_elem_types = self._list_el_tuple_types(e.args[0], scope)
+                    _dflt = getattr(e, "minmax_default", None)
+                    if _dflt is not None and e.inferred_type in ("int", "?"):
+                        # An empty/untyped iterable (e.g. the literal `[]`)
+                        # resolves its element kind to the "int" unknown
+                        # sentinel. When a default of a concrete non-int kind is
+                        # supplied, the result is really that kind
+                        # (`min([], default="x")` -> str): adopt it so the
+                        # returned value lands in a correctly-typed slot instead
+                        # of a str/float being read back as raw int bits.
+                        _dflt_t = A.expr_type(_dflt)
+                        if _dflt_t not in ("int", "?"):
+                            e.inferred_type = _dflt_t
                 else:
                     if e.sort_key is not None:
                         raise SemaError(
                             f"{e.func}(): key= is only supported for the "
+                            "single-iterable form",
+                            e.pos,
+                            ErrorCode.E_KEY_UNSUPPORTED_FORM,
+                        )
+                    if getattr(e, "minmax_default", None) is not None:
+                        # CPython: "Cannot specify a default for {min,max}()
+                        # with multiple positional arguments" -- default only
+                        # makes sense for the possibly-empty iterable form.
+                        raise SemaError(
+                            f"{e.func}(): default= is only supported for the "
                             "single-iterable form",
                             e.pos,
                             ErrorCode.E_KEY_UNSUPPORTED_FORM,
