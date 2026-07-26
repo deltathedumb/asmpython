@@ -4800,7 +4800,14 @@ class SemaAnalyzer:
         t: str = A.expr_type(e)
         if t == "list":
             el = self._list_el_type(e, scope)
-            return "any" if el == "?" else el
+            # Iterating a `list[Node]` yields INSTANCES of Node. `_list_el_type`
+            # returns the annotation's bare class name ("Node"), which fails the
+            # `instance:`-prefix gates on the loop variable's later uses (e.g.
+            # `for e in self._queue: new.append(e)` -> E132, or a method call ->
+            # E113). Normalize to `instance:<class>`, exactly as the subscript
+            # read and `_dict_value_type` already do. Scalars/containers/`any`
+            # pass through unchanged.
+            return "any" if el == "?" else self._normalize_instance_type(el)
         if t in ("str", "dict", "set"):
             # Iterating a str yields its chars; a dict/set yields its keys --
             # all str-shaped values (see A.For's own generic set/dict
@@ -6204,6 +6211,13 @@ class SemaAnalyzer:
                     el_t = self._list_el_type(s.iter, scope)
                     if el_t == "?":
                         el_t = "any"
+                    # A `list[Node]` yields INSTANCES of Node; the raw element
+                    # kind is the annotation's bare class name. Normalize to
+                    # `instance:<class>` so the loop variable's later uses pass
+                    # the `instance:`-prefix gates (append/method-call). Leaves
+                    # tuple/dict/list/any/scalars untouched -- their dedicated
+                    # branches below still match.
+                    el_t = self._normalize_instance_type(el_t)
                     if el_t == "tuple":
                         # Single-var iteration over list[tuple] (`for pair in xs`).
                         # Multi-target unpack is handled by the branch above and
