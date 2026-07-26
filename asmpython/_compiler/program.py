@@ -2001,6 +2001,15 @@ def _merge_function_import_aliases(
                     continue
                 imported.name = local
                 _rename_call_targets(imported.body, {original: local})
+                # A function aliased out of a stdlib module keeps its stdlib
+                # provenance -- the main merge marks stdlib funcs `is_stdlib`
+                # (so they may legitimately shadow a builtin name), but this
+                # alias path parses a FRESH copy that never went through that
+                # marking. Without it, `from fnmatch import fnfilter as filter`
+                # registered a non-stdlib `filter` FuncDef and tripped the
+                # "cannot redefine builtin 'filter'" guard [E143].
+                if _is_within_stdlib(target_path):
+                    imported.is_stdlib = True
                 entry.funcs.append(imported)
                 func_names.add(local)
                 func_origin[local] = target_key
