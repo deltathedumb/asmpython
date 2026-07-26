@@ -146,6 +146,18 @@ class Counter:
     def get(self, key: str, default: int = 0) -> int:
         return self._counts.get(key, default)
 
+    def keys(self) -> list[str]:
+        return self._counts.keys()
+
+    def values(self) -> list[int]:
+        return self._counts.values()
+
+    def items(self) -> list[tuple]:
+        # `list[tuple]` (not a bare `list`): the element kind has to survive the
+        # return annotation, or a caller's `sorted(c.items())` reprs the pairs
+        # as raw pointers.
+        return self._counts.items()
+
     def elements(self) -> list[str]:
         result: list[str] = []
         for k in self._counts:
