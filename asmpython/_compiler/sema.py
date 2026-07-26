@@ -3947,6 +3947,54 @@ class SemaAnalyzer:
                         pos=c.pos,
                     )
                     c.methods.insert(0, init_func)
+                # Synthesise __repr__ for a @dataclass that doesn't define one:
+                # `ClassName(f1=<repr>, f2=<repr>, ...)` (CPython uses repr() for
+                # each field value, so a str field shows quotes). Built as a
+                # plain str-concatenation Return so it flows through the normal
+                # method type-check/lower path -- no runtime support needed.
+                has_repr = any(m.name == "__repr__" for m in c.methods)
+                if not has_repr and c.class_vars:
+                    _rparts: list = [A.StrLit(value=c.name + "(", pos=c.pos)]
+                    for _ri, (_rfn, _rann, _rval) in enumerate(c.class_vars):
+                        if _ri > 0:
+                            _rparts.append(A.StrLit(value=", ", pos=c.pos))
+                        _rparts.append(A.StrLit(value=_rfn + "=", pos=c.pos))
+                        _rattr = A.Attr(
+                            obj=A.Name(name="self", pos=c.pos), name=_rfn, pos=c.pos
+                        )
+                        # Annotations are normalized descriptors `(base, param)`
+                        # (see parser._parse_type_annotation), so read the base.
+                        _rann_base = (
+                            _rann[0]
+                            if isinstance(_rann, (tuple, list)) and _rann
+                            else _rann
+                        )
+                        if _rann_base == "bool":
+                            # bool collapses to int here, so repr() would print
+                            # 1/0 -- emit "True"/"False" via a ternary instead.
+                            _rparts.append(
+                                A.IfExp(
+                                    test=_rattr,
+                                    body=A.StrLit(value="True", pos=c.pos),
+                                    orelse=A.StrLit(value="False", pos=c.pos),
+                                    pos=c.pos,
+                                )
+                            )
+                        else:
+                            _rparts.append(A.Call(func="repr", args=[_rattr], pos=c.pos))
+                    _rparts.append(A.StrLit(value=")", pos=c.pos))
+                    _rexpr = _rparts[0]
+                    for _rp in _rparts[1:]:
+                        _rexpr = A.BinOp(op="+", left=_rexpr, right=_rp, pos=c.pos)
+                    repr_func = A.FuncDef(
+                        name="__repr__",
+                        params=["self"],
+                        body=[A.Return(value=_rexpr, pos=c.pos)],
+                        defaults=[None],
+                        param_types=[None],
+                        pos=c.pos,
+                    )
+                    c.methods.append(repr_func)
 
         # `enum` extension: collect enum type tables before class signatures
         # (Color.RED reads need this in place by the time any body is
