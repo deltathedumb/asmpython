@@ -9188,7 +9188,17 @@ class SemaAnalyzer:
                     # elsewhere too, e.g. _dict_inner_value_type).
                     if e.inferred_type == "any" and len(e.args) == 2:
                         default_t = A.expr_type(e.args[1])
-                        if default_t in ("str", "int", "float"):
+                        # Only borrow a FLOAT default's type: a float result
+                        # keeps the `res_is_float` bitcast path in codegen (so
+                        # at least the key-absent/default case is a real double),
+                        # and an `any` dict's boxed float values are a known
+                        # remaining gap either way. For an int/str default, leave
+                        # the result "any": the values an `any` dict stores are
+                        # BOXED, so codegen must unbox them (see the get() lower
+                        # in ir_lower), and the box tag lets `print` format them
+                        # -- which is what the old int/str override existed to
+                        # work around before values were boxed.
+                        if default_t == "float":
                             e.inferred_type = default_t
                     if e.inferred_type == "list":
                         e.list_el_type = self._dict_inner_value_type(e.obj, scope)

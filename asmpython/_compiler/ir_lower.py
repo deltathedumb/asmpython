@@ -7926,17 +7926,32 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             if e.method == "get" and len(e.args) in (1, 2):
                 obj_v = _lower_expr(ctx, e.obj)
                 key_v = _lower_dict_key(ctx, e.args[0])
-                res_is_float = A.expr_type(e) == "float"
+                res_ty = A.expr_type(e)
+                res_is_float = res_ty == "float"
+                # An `any`-valued dict boxes its stored values, so `get` must
+                # return a PTR box for the read choke to unbox (same fix as the
+                # `d[k]` subscript path). Box the DEFAULT too so the key-absent
+                # result is a box as well -- otherwise a raw default would be
+                # unboxed as if it were a box pointer. (sema keeps the result
+                # "any" for int/str defaults precisely so this fires.)
+                any_val = res_ty == "any"
                 if len(e.args) == 2:
-                    default_v = _lower_expr(ctx, e.args[1])
-                    if res_is_float and A.expr_type(e.args[1]) == "float":
-                        dv = ctx.tmp(I64)
-                        ctx.emit(IRInstr("bitcast_f2i", dv, [default_v]))
-                        default_v = dv
+                    if any_val:
+                        default_v = _lower_value_into_any_slot(ctx, e.args[1])
+                    else:
+                        default_v = _lower_expr(ctx, e.args[1])
+                        if res_is_float and A.expr_type(e.args[1]) == "float":
+                            dv = ctx.tmp(I64)
+                            ctx.emit(IRInstr("bitcast_f2i", dv, [default_v]))
+                            default_v = dv
+                elif any_val:
+                    default_v = _lower_value_into_any_slot(
+                        ctx, A.IntLit(value=0, pos=e.pos)
+                    )
                 else:
                     default_v = ctx.tmp(I64)
                     ctx.emit(IRInstr("const", default_v, [0]))
-                v = ctx.tmp(I64)
+                v = ctx.tmp(PTR if any_val else I64)
                 ctx.emit(IRInstr("call", v, ["_abi_dict_get_default", obj_v, key_v, default_v]))
                 if res_is_float:
                     # Same int-only-cell constraint as every other dict/
