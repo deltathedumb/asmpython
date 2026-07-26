@@ -11161,16 +11161,33 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             "int",
         ):
             # Single-iterable unpack (a, b = some_tuple_or_list_expr).
+            # Each target takes its element's REAL type: a tuple RHS carries
+            # per-index kinds in `tuple_elem_types` (e.g. `(y, i, q)` of floats),
+            # a list RHS shares one homogeneous element type. Loading every
+            # element as I64 -- the old behavior -- reinterpreted a float
+            # element's bits as an int for the target slot, so the first target
+            # (whose slot happened to line up) read right but any float target
+            # after it came back as garbage. Mirrors the starred-unpack arm
+            # above (`ir_type_for(el_ty)` load + `_store_loop_target`).
             src_v = _lower_expr(ctx, s.values[0])
+            rhs_t = A.expr_type(s.values[0])
+            uniform_el = _iter_element_type(s.values[0]) if rhs_t == "list" else None
+            elem_types = getattr(s.values[0], "tuple_elem_types", [])
             for i, name in enumerate(names):
                 idx_v = ctx.tmp(I64)
                 ctx.emit(IRInstr("const", idx_v, [i]))
                 addr = _list_elem_addr(ctx, src_v, idx_v)
-                elem_ty = I64
-                val = ctx.tmp(elem_ty)
+                if uniform_el is not None:
+                    el_ty = uniform_el
+                elif i < len(elem_types):
+                    el_ty = elem_types[i]
+                else:
+                    # No tracked element type (unannotated iterable, the "int"
+                    # sentinel path): keep the historical int-shaped load.
+                    el_ty = "int"
+                val = ctx.tmp(ir_type_for(el_ty))
                 ctx.emit(IRInstr("load", val, [addr]))
-                ptr = _name_ptr(ctx, name, ctx.mctx.global_types.get(name, elem_ty))
-                ctx.emit(IRInstr("store", None, [val, ptr]))
+                _store_loop_target(ctx, name, val, el_ty)
             return
         raise LowerError(
             f"unsupported stmt TupleAssign (shape) at {s.pos}: "
