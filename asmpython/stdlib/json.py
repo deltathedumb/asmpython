@@ -216,20 +216,47 @@ def _val_to_json(v: str) -> str:
     return _dumps_str(v)
 
 
+# The `_dumps_val` dispatcher takes its argument as `object` and identifies a
+# dict/list at runtime via isinstance -- but an UNBOXED container passed as
+# `object` reads back as UNTAGGED, so isinstance(obj, dict/list) is False and
+# the container's pointer gets serialized as a bare number. These typed entry
+# points already KNOW the shape, so they serialize it directly: they iterate
+# the concrete dict/list and hand each ELEMENT (a real str/int value, which
+# boxes and identifies correctly) to `_dumps_val`.
 def dumps_dict(obj: dict[str, str], indent: int = 0) -> str:
-    return dumps(obj, indent)
+    if len(obj) == 0:
+        return "{}"
+    kv: list[str] = []
+    for key in _dict_keys(obj, False):
+        kv.append(_dumps_str(key) + ": " + _dumps_str(obj[key]))
+    return "{" + ", ".join(kv) + "}"
 
 
 def dumps_dict_int(obj: dict[str, int], indent: int = 0) -> str:
-    return dumps(obj, indent)
+    if len(obj) == 0:
+        return "{}"
+    kv: list[str] = []
+    for key in _dict_keys(obj, False):
+        kv.append(_dumps_str(key) + ": " + str(obj[key]))
+    return "{" + ", ".join(kv) + "}"
 
 
 def dumps_list(obj: list[str], indent: int = 0) -> str:
-    return dumps(obj, indent)
+    if len(obj) == 0:
+        return "[]"
+    parts: list[str] = []
+    for item in obj:
+        parts.append(_dumps_str(item))
+    return "[" + ", ".join(parts) + "]"
 
 
 def dumps_list_int(obj: list[int], indent: int = 0) -> str:
-    return dumps(obj, indent)
+    if len(obj) == 0:
+        return "[]"
+    parts2: list[str] = []
+    for item2 in obj:
+        parts2.append(str(item2))
+    return "[" + ", ".join(parts2) + "]"
 
 
 # --- loads -------------------------------------------------------------------
