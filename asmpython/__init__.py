@@ -11,7 +11,10 @@ import struct
 import sys
 from types import ModuleType
 
-from . import annotations, backend, embedded, extras, frontend, linker, mlang, runtime
+from . import (
+    annotations, backend, compiler_pass, embedded, extras, frontend, linker,
+    mlang, runtime,
+)
 from .capabilities import CapabilitySet, Dependency
 from .extension import Extension
 from .annotations import *
@@ -130,6 +133,7 @@ __all__ = [
     "python_version",
     "annotations",
     "backend",
+    "compiler_pass",
     "embedded",
     "extras",
     "frontend",

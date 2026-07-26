@@ -83,11 +83,17 @@ def _can_stitch(
     emit_asm_only: bool,
     keep_intermediates: bool,
     bundle_mode: str,
+    passes: str | None = None,
 ) -> tuple[bool, str | None]:
     if not fastcomp_enabled():
         return False, None
     if backend != "legacy":
         return False, "selected backend owns its own FastComp implementation"
+    if passes:
+        # Fragment stitching is an AST->NASM-text path with no IRModule for an
+        # IR->IR pass to transform. Defer to the ordinary driver, which reports
+        # the --passes/--backend legacy combination as the error it is.
+        return False, "--passes requires an IR backend, not fragment stitching"
     if target not in {"windows", "linux"}:
         return False, f"legacy fragment stitching does not support target {target!r}"
     if bundle_mode != "onefile":
@@ -120,6 +126,7 @@ def _run_backend_fastcomp(
     entry_path: Path | None = None,
     backend: str = "legacy",
     linker: str | None = None,
+    passes: str | None = None,
     _asm_stem_suffix: str = "",
 ):
     allowed, reason = _can_stitch(
@@ -129,6 +136,7 @@ def _run_backend_fastcomp(
         emit_asm_only=emit_asm_only,
         keep_intermediates=keep_intermediates,
         bundle_mode=bundle_mode,
+        passes=passes,
     )
     if not allowed:
         if fastcomp_enabled() and reason:
@@ -149,6 +157,7 @@ def _run_backend_fastcomp(
             entry_path=entry_path,
             backend=backend,
             linker=linker,
+            passes=passes,
             _asm_stem_suffix=_asm_stem_suffix,
         )
 
@@ -177,6 +186,7 @@ def _run_backend_fastcomp(
             entry_path=entry_path,
             backend=backend,
             linker=linker,
+            passes=passes,
             _asm_stem_suffix=_asm_stem_suffix,
         )
 

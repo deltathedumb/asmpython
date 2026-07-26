@@ -341,6 +341,23 @@ def _write_backend_output(
     return resolved
 
 
+def _apply_passes(ir_mod, passes: "str | None"):
+    """Run the ``--passes`` pipeline over a lowered IR module.
+
+    A no-op when ``passes`` is unset, so the default build is byte-identical to
+    the unoptimized pipeline. Passes are neutral IR->IR transforms; see
+    ``asmpython/_passes/`` and ``ir_contract.md``.
+    """
+    if not passes:
+        return
+    from .._passes import run_passes
+
+    run_passes(
+        ir_mod, passes,
+        verbose=bool(os.environ.get("ASMPYTHON_PASS_VERBOSE")),
+    )
+
+
 def _run_backend_x86_64(
     module,
     target: str,
@@ -350,6 +367,7 @@ def _run_backend_x86_64(
     linker: str | None = None,
     output_type: str = "executable",
     soname: str | None = None,
+    passes: "str | None" = None,
 ) -> BuildResult:
     """asmpython's built-in x86-64 backend: AST -> ir_lower.py -> the
     vendored backend (asmpython/_backends/x86_64), which compiles to an
@@ -376,6 +394,14 @@ def _run_backend_x86_64(
     from .._runtime.build import build_abi_shims, build_runtime, runtime_object_path
 
     ir_mod = ir_lower.lower_module(module)
+    _apply_passes(ir_mod, passes)
+    # Opt-in structural check of the neutral IR (no language knowledge). Off by
+    # default so it never affects normal builds; set ASMPYTHON_VERIFY_IR=1 to
+    # have malformed IR fail loudly at the waist rather than deep in codegen.
+    if os.environ.get("ASMPYTHON_VERIFY_IR"):
+        from .ir_verify import validate_ir
+
+        validate_ir(ir_mod)
     compiled = backend.compile(ir_mod, {"target_os": target, "abi": abi})
     program_obj = next(iter(compiled.values()))
 
@@ -454,7 +480,7 @@ def _run_backend_x86_64(
     return BuildResult(asm_path=out_path, obj_path=out_path, exe_path=out_path)
 
 
-def _run_backend_ternary(module, out_path: Path) -> BuildResult:
+def _run_backend_ternary(module, out_path: Path, passes: "str | None" = None) -> BuildResult:
     """Compile a Python module to a flat ternary binary image.
 
     Output is a .tern file: a sequence of 4-byte little-endian signed
@@ -465,6 +491,7 @@ def _run_backend_ternary(module, out_path: Path) -> BuildResult:
     from .._backends.ternary import __module_backend__ as backend
 
     ir_mod = ir_lower.lower_module(module)
+    _apply_passes(ir_mod, passes)
     compiled = backend.compile(ir_mod, {})
     out_bytes = next(iter(compiled.values()))
 
@@ -475,7 +502,9 @@ def _run_backend_ternary(module, out_path: Path) -> BuildResult:
     return BuildResult(asm_path=out_path, obj_path=out_path, exe_path=out_path)
 
 
-def _run_backend_registered(module, backend_name: str, out_path: Path) -> BuildResult:
+def _run_backend_registered(
+    module, backend_name: str, out_path: Path, passes: "str | None" = None
+) -> BuildResult:
     """Compile+link `module` via a third-party `IRBackend` registered under
     `backend_name` (see `asmpython._backends.get_backend`/
     `asmpython.backend.Backend(...)`, the public authoring API). Mirrors
@@ -492,6 +521,7 @@ def _run_backend_registered(module, backend_name: str, out_path: Path) -> BuildR
         raise ValueError(f"unknown backend {backend_name!r} (have: {', '.join(names)})")
 
     ir_mod = ir_lower.lower_module(module)
+    _apply_passes(ir_mod, passes)
     compiled = backend.compile(ir_mod, {})
     program_obj = next(iter(compiled.values()))
     linked = backend.link([program_obj], {})
@@ -527,6 +557,7 @@ def _run_backend(
     entry_path: Path | None = None,
     backend: str = "legacy",
     linker: str | None = None,
+    passes: str | None = None,
     _asm_stem_suffix: str = "",
 ) -> BuildResult:
     """Target-specific back-end: codegen -> nasm -> gcc."""
@@ -572,6 +603,13 @@ def _run_backend(
             "supported on --backend x86-64 today (not 'legacy' or any "
             "other registered backend)"
         )
+    if passes and backend == "legacy":
+        # The legacy backend goes AST -> NASM text directly; it never builds an
+        # IRModule, so there is nothing for an IR->IR pass to transform.
+        raise ValueError(
+            "--passes requires an IR backend (x86-64/ternary/registered); "
+            "--backend legacy has no IR stage"
+        )
     if backend == "x86-64":
         if emit_asm_only or keep_assembly:
             raise ValueError("--backend x86-64 has no assembly stage; drop --emit-asm/--keep-assembly")
@@ -588,14 +626,14 @@ def _run_backend(
         return _run_backend_x86_64(
             module, target, out_path,
             gcc_path=gcc_path, linker=linker,
-            output_type=output_type,
+            output_type=output_type, passes=passes,
         )
     elif backend == "ternary":
-        return _run_backend_ternary(module, out_path)
+        return _run_backend_ternary(module, out_path, passes)
     elif backend != "legacy":
         # Not one of the two built-in IR-backend names -- check the
         # third-party registry (asmpython.backend.Backend(...)) before giving up.
-        return _run_backend_registered(module, backend, out_path)
+        return _run_backend_registered(module, backend, out_path, passes)
     elif linker is not None and linker != "gcc":
         raise ValueError(f"--backend legacy only supports --linker gcc, got {linker!r}")
 
@@ -890,6 +928,7 @@ def compile_source(
     linker: str | None = None,
     active_extensions: "frozenset[str] | None" = None,
     frontend: str = "python",
+    passes: str | None = None,
 ) -> BuildResult:
     module = _compile_program(
         src,
@@ -916,6 +955,7 @@ def compile_source(
         entry_path=entry_path,
         backend=backend,
         linker=linker,
+        passes=passes,
     )
 
 
@@ -941,6 +981,7 @@ def compile_targets(
     linker: str | None = None,
     active_extensions: "frozenset[str] | None" = None,
     frontend: str = "python",
+    passes: str | None = None,
 ) -> list[BuildResult]:
     """Compile src for multiple targets, sharing the front-end (lex/parse/sema).
 
@@ -973,6 +1014,7 @@ def compile_targets(
             output_type=output_type,
             backend=backend,
             linker=linker,
+            passes=passes,
             icon_path=icon_path,
             entry_path=entry_path,
             _asm_stem_suffix=f"-{target}",

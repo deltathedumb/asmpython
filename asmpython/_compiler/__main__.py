@@ -426,6 +426,17 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         "the runtime helpers (smaller .asm; archive built on demand)",
     )
     build_grp.add_argument(
+        "--passes",
+        metavar="LIST",
+        default=None,
+        help="comma-separated IR optimization passes to run, in order: "
+        "'mem2reg' (promote stack slots to SSA + phi), 'constfold', 'dce', "
+        "a preset ('o1', 'o2'), a path to a .py plugin registering one via "
+        "asmpython.compiler_pass.CompilerPass(...), or 'help' to list all "
+        "registered passes. Requires an IR backend (not --backend legacy). "
+        "Default: no passes.",
+    )
+    build_grp.add_argument(
         "--frontend",
         metavar="NAME",
         default=None,
@@ -662,6 +673,65 @@ def _load_linker_plugin(path: Path) -> str:
     return next(iter(new_names))
 
 
+def _load_pass_plugin(path: Path) -> str:
+    """Exec a plugin .py file and return the name of the pass it registered.
+    Mirrors `_load_frontend_plugin`, diffing `asmpython._passes._REGISTRY`."""
+    from asmpython import _passes
+
+    before = set(_passes._REGISTRY.keys())
+    try:
+        src = path.read_text(encoding="utf-8")
+        ns: dict = {"__name__": f"asmpython_pass_plugin_{path.stem}", "__file__": str(path)}
+        exec(compile(src, str(path), "exec"), ns)
+    except Exception as e:
+        raise RuntimeError(f"failed to load pass plugin {path}: {e}") from e
+    new_names = set(_passes._REGISTRY.keys()) - before
+    if len(new_names) == 0:
+        raise RuntimeError(
+            f"pass plugin {path} did not register any "
+            f"asmpython.compiler_pass.CompilerPass(...)"
+        )
+    if len(new_names) > 1:
+        raise RuntimeError(
+            f"pass plugin {path} registered multiple passes "
+            f"({', '.join(sorted(new_names))}) -- register exactly one"
+        )
+    return next(iter(new_names))
+
+
+def _resolve_passes_flag(value: "str | None") -> "str | None":
+    """Resolve --passes: each comma-separated entry is a registered pass name,
+    a preset, or a path to a .py plugin (loaded here, replaced by its
+    registered name). Mirrors `_resolve_backend_flag`, but list-valued."""
+    if value is None:
+        return None
+    resolved: list[str] = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        p = Path(part)
+        resolved.append(_load_pass_plugin(p) if p.is_file() else part)
+    return ",".join(resolved)
+
+
+def _print_registered_passes() -> int:
+    from asmpython import _passes
+
+    print("available compiler passes (--passes):\n")
+    for name, description in _passes.describe():
+        print(f"  {name:<14} {description}")
+    aliases = _passes.registered_aliases()
+    if aliases:
+        print("\naliases:")
+        for alias, canonical in sorted(aliases.items()):
+            print(f"  {alias:<14} -> {canonical}")
+    print("\npresets:")
+    for preset, names in _passes.PIPELINES.items():
+        print(f"  {preset:<14} {','.join(names)}")
+    return 0
+
+
 def _load_frontend_plugin(path: Path) -> str:
     """Exec a plugin .py file and return the name of the frontend it
     registered. Mirrors `_load_backend_plugin`, diffing
@@ -727,6 +797,10 @@ def _resolve_linker_flag(value: "str | None") -> "str | None":
 
 
 def cmd_build(args: argparse.Namespace) -> int:
+    # Informational: `--passes help` lists the registry and exits, so it works
+    # without a source file.
+    if args.passes and args.passes.strip() == "help":
+        return _print_registered_passes()
     if args.source is None:
         print(
             "asmpython: error: no source file given (try `asmpython build --help`)",
@@ -809,6 +883,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     try:
         effective_backend = _resolve_backend_flag(args.backend)
         effective_frontend = _resolve_frontend_flag(args.frontend) or "python"
+        effective_passes = _resolve_passes_flag(args.passes)
         args.linker = _resolve_linker_flag(args.linker)
     except RuntimeError as e:
         print(f"asmpython: error: {e}", file=sys.stderr)
@@ -932,6 +1007,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 linker=args.linker,
                 active_extensions=active_extensions,
                 frontend=effective_frontend,
+                passes=effective_passes,
             )
         else:
             compile_targets(
@@ -954,6 +1030,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 linker=args.linker,
                 active_extensions=active_extensions,
                 frontend=effective_frontend,
+                passes=effective_passes,
             )
     except MultiSemaError as me:
         # Give the target-neutral interpreter a chance before reporting a
