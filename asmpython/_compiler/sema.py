@@ -10231,11 +10231,46 @@ class SemaAnalyzer:
                 key_expr = _klam
                 ret_t = getattr(_klam, "lambda_ret", "int")
             else:
-                raise SemaError(
-                    "key= must be a lambda literal or a name bound to a lambda",
-                    e.pos,
-                    ErrorCode.E_SORT_KEY_TYPE,
-                )
+                # `key=str.lower` -- an UNBOUND method used as the key function.
+                # It is shorthand for `lambda _k: _k.lower()`, so rewrite it and
+                # let the ordinary lambda path take over.
+                #
+                # itemgetter(N)/attrgetter("a") would desugar the same way
+                # (`_k[N]` / `_k.a`) and type-check fine, but a tuple-slot key
+                # whose value is a STR currently crashes the sort at runtime --
+                # `sorted(pairs, key=lambda p: p[1])` on `[(1,'b'),(2,'a')]`
+                # segfaults today, with no desugaring involved. Enabling them
+                # would turn a clean compile error into that crash, so they stay
+                # rejected until the str-keyed pair sort is fixed.
+                _kbody = None
+                if (
+                    isinstance(key_expr, A.Attr)
+                    and isinstance(key_expr.obj, A.Name)
+                    and (
+                        key_expr.obj.name in BUILTIN_TYPE_NAMES
+                        or key_expr.obj.name in self.classes
+                    )
+                ):
+                    _kbody = A.MethodCall(
+                        obj=A.Name(name="_k", pos=e.pos),
+                        method=key_expr.name,
+                        args=[],
+                        kwargs=[],
+                        pos=e.pos,
+                    )
+                if _kbody is None:
+                    raise SemaError(
+                        "key= must be a lambda literal, a name bound to a "
+                        "lambda, a one-argument builtin/function, or an "
+                        "unbound method like str.lower",
+                        e.pos,
+                        ErrorCode.E_SORT_KEY_TYPE,
+                    )
+                key_expr = A.Lambda(params=["_k"], body=_kbody, pos=e.pos)
+                if _seq_el:
+                    key_expr.param_hint = _seq_el  # type: ignore[attr-defined]
+                self._check_expr(key_expr, scope)
+                ret_t = getattr(key_expr, "lambda_ret", "int")
             # Lambda params are typed "any", so most non-str results (int,
             # float-as-bits, "any") compare correctly as ints; only an
             # explicit "str" result needs the string comparator.
