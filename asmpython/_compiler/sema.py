@@ -10355,6 +10355,20 @@ class SemaAnalyzer:
                 self._check_expr(a, scope)
             e.inferred_type = "any"
             return
+        if e.method in ("strip", "lstrip", "rstrip") and len(e.args) == 1:
+            # `s.strip(chars)` strips any character in `chars` from the ends
+            # (CPython) rather than whitespace. The no-argument form stays on
+            # the runtime helper; this one is lowered as a scan.
+            self._check_expr(e.args[0], scope)
+            if A.expr_type(e.args[0]) not in ("str", "any"):
+                raise SemaError(
+                    f"str.{e.method}() argument 1: expected str, "
+                    f"got {A.expr_type(e.args[0])}",
+                    e.pos,
+                    ErrorCode.E_ARG_TYPE,
+                )
+            e.inferred_type = "str"
+            return
         if len(e.args) != _n_expected:
             raise SemaError(
                 f"str.{e.method}() takes {_n_expected} argument(s), got {len(e.args)}",
