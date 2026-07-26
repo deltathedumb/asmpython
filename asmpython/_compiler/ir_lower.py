@@ -7316,13 +7316,25 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", v, ["_abi_str_char_at", obj_v, idx_v]))
             return v
         if obj_ty == "dict":
-            res_is_float = A.expr_type(e) == "float"
+            res_ty = A.expr_type(e)
+            res_is_float = res_ty == "float"
             obj_v = _lower_expr(ctx, e.obj)
             key_v = _lower_dict_key(ctx, e.index)
             _emit_dict_key_check(ctx, obj_v, key_v, id(e))
             zero = ctx.tmp(I64)
             ctx.emit(IRInstr("const", zero, [0]))
-            v = ctx.tmp(I64)
+            # A bare / `any`-valued dict stores its values BOXED (the store
+            # choke `_lower_value_into_any_slot`). Type the fetched value PTR so
+            # `_lower_expr`'s read choke actually unboxes it -- that choke only
+            # unboxes an "any"-typed value whose IR type is PTR, and an I64
+            # result slipped straight past it, so `d[k] + 1`, `y: int = d[k]`,
+            # and a typed `return self.m[k]` all used the raw box pointer as an
+            # int and produced garbage (a scalar payload the box wrapped). A
+            # homogeneous `dict[str, V]` stores its values raw and is typed V
+            # (not "any") here, so it keeps the I64 path unchanged. Unboxing is a
+            # safe no-op on the non-scalar values (lists/instances) an "any"
+            # dict passes through unboxed, so this is correct for them too.
+            v = ctx.tmp(PTR if res_ty == "any" else I64)
             ctx.emit(IRInstr("call", v, ["_abi_dict_get_default", obj_v, key_v, zero]))
             if res_is_float:
                 # Same int-only-cell constraint as dict.get()'s own
