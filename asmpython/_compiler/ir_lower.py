@@ -7864,6 +7864,58 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("load", v, [addr]))
         return v
 
+    if (
+        isinstance(e, A.MethodCall)
+        and isinstance(e.obj, A.Name)
+        and e.obj.name == "dict"
+        and e.method == "fromkeys"
+        and 1 <= len(e.args) <= 2
+    ):
+        # `dict.fromkeys(keys[, value])`: fresh dict, every key mapped to the
+        # same value (0 when omitted, matching CPython's None closely enough
+        # for asmpython's int-default convention).
+        keys_v = _lower_expr(ctx, e.args[0])
+        if len(e.args) == 2:
+            fill_v = _lower_for_slot(ctx, e.args[1], A.expr_type(e.args[1]))
+        else:
+            fill_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", fill_v, [0]))
+        out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", out_v, ["_abi_new_instance"]))
+        fk_len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", fk_len_addr, [keys_v, _LIST_LEN_OFF]))
+        fk_len = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", fk_len, [fk_len_addr]))
+        fk_idx = ctx.ensure_slot(f"__fromkeys_idx_{id(e)}", I64)
+        fk_z = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", fk_z, [0]))
+        ctx.emit(IRInstr("store", None, [fk_z, fk_idx]))
+        fh_b = ctx.new_block("fromkeyshead")
+        fb_b = ctx.new_block("fromkeysbody")
+        fe_b = ctx.new_block("fromkeysend")
+        ctx.emit(IRInstr("br", None, [fh_b.label]))
+        ctx.switch_to(fh_b)
+        fi_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", fi_v, [fk_idx]))
+        fgo_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", fgo_v, [fi_v, fk_len]))
+        ctx.emit(IRInstr("br.t", None, [fgo_v, fb_b.label, fe_b.label]))
+        ctx.switch_to(fb_b)
+        fbi_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", fbi_v, [fk_idx]))
+        fk_addr = _list_elem_addr(ctx, keys_v, fbi_v)
+        fkey_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", fkey_v, [fk_addr]))
+        ctx.emit(IRInstr("call", None, ["_abi_dict_set", out_v, fkey_v, fill_v]))
+        f1_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", f1_v, [1]))
+        fn_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", fn_v, [fbi_v, f1_v]))
+        ctx.emit(IRInstr("store", None, [fn_v, fk_idx]))
+        ctx.emit(IRInstr("br", None, [fh_b.label]))
+        ctx.switch_to(fe_b)
+        return out_v
+
     if isinstance(e, A.MethodCall):
         obj_ty = A.expr_type(e.obj)
         if obj_ty == "int" and e.method == "to_bytes":
@@ -9255,6 +9307,51 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 arg_v = _lower_expr(ctx, e.args[0])
                 v = ctx.tmp(PTR)
                 ctx.emit(IRInstr("call", v, ["_abi_str_split", obj_v, arg_v]))
+                if len(e.args) == 2:
+                    # maxsplit: the runtime always splits on every occurrence,
+                    # so put the surplus back -- keep the first `maxsplit`
+                    # pieces and re-join the rest with the separator, which is
+                    # exactly what CPython's remainder is. Previously the
+                    # argument was accepted and silently ignored, so
+                    # 'a,b,c,d'.split(',', 2) returned 4 pieces instead of 3.
+                    ms_v = _lower_expr(ctx, e.args[1])
+                    plen_addr = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("gep", plen_addr, [v, _LIST_LEN_OFF]))
+                    plen_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("load", plen_v, [plen_addr]))
+                    keep_v = ctx.tmp(I64)
+                    one_c = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", one_c, [1]))
+                    ctx.emit(IRInstr("iadd", keep_v, [ms_v, one_c]))
+                    res_ptr = ctx.ensure_slot(f"__splitms_{id(e)}", PTR)
+                    ctx.emit(IRInstr("store", None, [v, res_ptr]))
+                    zc_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", zc_v, [0]))
+                    neg_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("icmp.lt", neg_v, [ms_v, zc_v]))
+                    over_v = ctx.tmp(I64)
+                    ctx.emit(IRInstr("icmp.gt", over_v, [plen_v, keep_v]))
+                    trim_b = ctx.new_block("splitmstrim")
+                    done_b = ctx.new_block("splitmsdone")
+                    chk_b = ctx.new_block("splitmschk")
+                    # A negative maxsplit means "no limit" (CPython).
+                    ctx.emit(IRInstr("br.t", None, [neg_v, done_b.label, chk_b.label]))
+                    ctx.switch_to(chk_b)
+                    ctx.emit(IRInstr("br.t", None, [over_v, trim_b.label, done_b.label]))
+                    ctx.switch_to(trim_b)
+                    head_v = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("call", head_v, ["_abi_list_slice", v, zc_v, ms_v]))
+                    tail_v = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("call", tail_v, ["_abi_list_slice", v, ms_v, plen_v]))
+                    rest_v = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("call", rest_v, ["_abi_str_join", arg_v, tail_v]))
+                    ctx.emit(IRInstr("call", None, ["_abi_list_append", head_v, rest_v]))
+                    ctx.emit(IRInstr("store", None, [head_v, res_ptr]))
+                    ctx.emit(IRInstr("br", None, [done_b.label]))
+                    ctx.switch_to(done_b)
+                    out_v = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("load", out_v, [res_ptr]))
+                    return out_v
                 return v
             if e.method == "rsplit" and len(e.args) == 2:
                 if A.expr_type(e.args[0]) != "str":
