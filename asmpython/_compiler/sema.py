@@ -10020,8 +10020,14 @@ class SemaAnalyzer:
             # has no header) and yields garbage, and `w.upper()` doesn't resolve
             # at all. Only the FIRST parameter is hinted (the element).
             _p_hint = getattr(e, "param_hint", None)
+            _p_slots = list(getattr(e, "param_tuple_types", []) or [])
             for _pi, p in enumerate(e.params):
-                inner_scope.add(p, _p_hint if (_pi == 0 and _p_hint) else "any")
+                if _pi == 0 and _p_hint == "tuple" and _p_slots:
+                    # A tuple parameter with known slot kinds, so `p[1]` inside
+                    # the body resolves to that slot's type rather than "any".
+                    inner_scope.add(p, "tuple", tuple_types=_p_slots)
+                else:
+                    inner_scope.add(p, _p_hint if (_pi == 0 and _p_hint) else "any")
             if e.vararg:
                 # Vararg absorbs surplus positional args into a list at the
                 # call site (identical binding as a real `def f(*args)`, see
@@ -10126,7 +10132,8 @@ class SemaAnalyzer:
         e.inferred_type = "str"  # type: ignore
 
     def _callable_name_as_lambda(
-        self, name: str, scope: Scope, pos, param_hint: "Optional[str]" = None
+        self, name: str, scope: Scope, pos, param_hint: "Optional[str]" = None,
+        param_tuple_types: "Optional[list]" = None,
     ) -> "Optional[A.Lambda]":
         """Wrap a bare one-argument callable NAME in the equivalent lambda
         (`len` -> `lambda _k: len(_k)`), or None if the name isn't one.
@@ -10153,6 +10160,8 @@ class SemaAnalyzer:
         )
         if param_hint:
             lam.param_hint = param_hint  # type: ignore[attr-defined]
+            if param_tuple_types:
+                lam.param_tuple_types = list(param_tuple_types)  # type: ignore[attr-defined]
         self._check_expr(lam, scope)
         return lam
 
@@ -10195,8 +10204,21 @@ class SemaAnalyzer:
             _seq_el = self._iter_element_type(_seq, scope) if _seq is not None else None
             if _seq_el in ("", "?", "any"):
                 _seq_el = None
+            # For a sequence of TUPLES, also carry the per-slot kinds, so a
+            # `lambda p: p[1]` key body resolves to that slot's real type
+            # instead of "any". That matters beyond neatness: an "any" key was
+            # loaded as a raw 8-byte value and sorted with the INTEGER
+            # comparator, so a str key sorted by pointer address -- silently
+            # returning an unsorted list.
+            _seq_slots = (
+                self._list_el_tuple_types(_seq, scope)
+                if (_seq is not None and _seq_el == "tuple")
+                else []
+            )
             if _seq_el and isinstance(key_expr, A.Lambda):
                 key_expr.param_hint = _seq_el  # type: ignore[attr-defined]
+                if _seq_slots:
+                    key_expr.param_tuple_types = list(_seq_slots)  # type: ignore[attr-defined]
             self._check_expr(key_expr, scope)
             if isinstance(key_expr, A.Lambda):
                 ret_t: str = getattr(key_expr, "lambda_ret", "int")
@@ -10218,7 +10240,8 @@ class SemaAnalyzer:
                             ErrorCode.E_SORT_KEY_ARITY,
                         )
                 _klam = self._callable_name_as_lambda(
-                    _kname, scope, e.pos, param_hint=_seq_el
+                    _kname, scope, e.pos, param_hint=_seq_el,
+                    param_tuple_types=_seq_slots,
                 )
                 if _klam is None:
                     raise SemaError(
@@ -10231,17 +10254,12 @@ class SemaAnalyzer:
                 key_expr = _klam
                 ret_t = getattr(_klam, "lambda_ret", "int")
             else:
-                # `key=str.lower` -- an UNBOUND method used as the key function.
-                # It is shorthand for `lambda _k: _k.lower()`, so rewrite it and
-                # let the ordinary lambda path take over.
-                #
-                # itemgetter(N)/attrgetter("a") would desugar the same way
-                # (`_k[N]` / `_k.a`) and type-check fine, but a tuple-slot key
-                # whose value is a STR currently crashes the sort at runtime --
-                # `sorted(pairs, key=lambda p: p[1])` on `[(1,'b'),(2,'a')]`
-                # segfaults today, with no desugaring involved. Enabling them
-                # would turn a clean compile error into that crash, so they stay
-                # rejected until the str-keyed pair sort is fixed.
+                # The remaining conventional key= spellings are all shorthand
+                # for a one-argument lambda, so rewrite them into one and let
+                # the ordinary lambda path handle the rest:
+                #   str.lower       -> lambda _k: _k.lower()   (unbound method)
+                #   itemgetter(N)   -> lambda _k: _k[N]
+                #   attrgetter("a") -> lambda _k: _k.a
                 _kbody = None
                 if (
                     isinstance(key_expr, A.Attr)
@@ -10258,17 +10276,40 @@ class SemaAnalyzer:
                         kwargs=[],
                         pos=e.pos,
                     )
+                elif (
+                    isinstance(key_expr, A.Call)
+                    and key_expr.func == "itemgetter"
+                    and len(key_expr.args) == 1
+                ):
+                    _kbody = A.Subscript(
+                        obj=A.Name(name="_k", pos=e.pos),
+                        index=key_expr.args[0],
+                        pos=e.pos,
+                    )
+                elif (
+                    isinstance(key_expr, A.Call)
+                    and key_expr.func == "attrgetter"
+                    and len(key_expr.args) == 1
+                    and isinstance(key_expr.args[0], A.StrLit)
+                ):
+                    _kbody = A.Attr(
+                        obj=A.Name(name="_k", pos=e.pos),
+                        name=key_expr.args[0].value,
+                        pos=e.pos,
+                    )
                 if _kbody is None:
                     raise SemaError(
                         "key= must be a lambda literal, a name bound to a "
-                        "lambda, a one-argument builtin/function, or an "
-                        "unbound method like str.lower",
+                        "lambda, a one-argument builtin/function, an unbound "
+                        "method like str.lower, or itemgetter/attrgetter",
                         e.pos,
                         ErrorCode.E_SORT_KEY_TYPE,
                     )
                 key_expr = A.Lambda(params=["_k"], body=_kbody, pos=e.pos)
                 if _seq_el:
                     key_expr.param_hint = _seq_el  # type: ignore[attr-defined]
+                    if _seq_slots:
+                        key_expr.param_tuple_types = list(_seq_slots)  # type: ignore[attr-defined]
                 self._check_expr(key_expr, scope)
                 ret_t = getattr(key_expr, "lambda_ret", "int")
             # Lambda params are typed "any", so most non-str results (int,
@@ -11290,6 +11331,14 @@ class SemaAnalyzer:
                     e.list_el_type = "str"
                 else:
                     e.list_el_type = self._list_el_type(e.args[0], scope)
+                    if e.list_el_type == "tuple":
+                        # Carry the per-slot kinds through: sorting a list of
+                        # pairs returns a list of the SAME pairs, and the repr
+                        # needs those kinds to format each slot (without them
+                        # the result falls back to the dict-items assumption
+                        # and an (int, str) pair crashes -- see
+                        # `_lower_list_of_tuples_repr`).
+                        e.el_tuple_types = self._list_el_tuple_types(e.args[0], scope)
                 return
             if e.func == "tuple":
                 # tuple(x): a shallow copy in the shared list/tuple layout. The
