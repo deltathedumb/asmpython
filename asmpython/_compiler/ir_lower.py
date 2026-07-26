@@ -1333,6 +1333,14 @@ def _lower_comprehension_enumerate(ctx: _FuncCtx, e: A.Comprehension) -> IRValue
         cur_out_v = ctx.tmp(PTR)
         ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
         item_v = _lower_expr(ctx, e.elt)
+        if A.expr_type(e.elt) == "float":
+            # A list cell is a raw 8-byte int slot; bitcast the double's bits
+            # into an I64 so `_abi_list_append` (which copies 8 raw bytes)
+            # stores the right pattern instead of leaving the value in an XMM
+            # register the helper never reads. Same as list.append(float).
+            iv = ctx.tmp(I64)
+            ctx.emit(IRInstr("bitcast_f2i", iv, [item_v]))
+            item_v = iv
         ctx.emit(IRInstr("call", None, ["_abi_list_append", cur_out_v, item_v]))
         ctx.emit(IRInstr("br", None, [cont_b.label]))
     finally:
@@ -1380,8 +1388,6 @@ def _lower_comprehension_multi_for(ctx: _FuncCtx, e: A.Comprehension) -> IRValue
         outer_iter_ty = "list"
     if outer_iter_ty not in ("str", "list", "tuple"):
         raise LowerError(f"unsupported expr Comprehension (iter {outer_iter_ty})")
-    if A.expr_type(e.elt) == "float":
-        raise LowerError("unsupported expr Comprehension (float element)")
 
     all_iters = [e.iter] + list(e.extra_for_iters)
     all_vars = [e.var] + list(e.extra_for_vars)
@@ -1575,6 +1581,12 @@ def _lower_comprehension_multi_for(ctx: _FuncCtx, e: A.Comprehension) -> IRValue
         cur_out_v = ctx.tmp(PTR)
         ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
         item_v = _lower_expr(ctx, e.elt)
+        if A.expr_type(e.elt) == "float":
+            # A list cell is a raw 8-byte int slot; bitcast the double's bits
+            # into an I64 so `_abi_list_append` stores the right pattern.
+            iv = ctx.tmp(I64)
+            ctx.emit(IRInstr("bitcast_f2i", iv, [item_v]))
+            item_v = iv
         ctx.emit(IRInstr("call", None, ["_abi_list_append", cur_out_v, item_v]))
         ctx.emit(IRInstr("br", None, [cont_bs[n_levels - 1].label]))
     finally:
@@ -1693,6 +1705,14 @@ def _lower_comprehension_instance_iter(ctx: _FuncCtx, e: A.Comprehension, cls_na
         cur_out_v = ctx.tmp(PTR)
         ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
         item_v = _lower_expr(ctx, e.elt)
+        if A.expr_type(e.elt) == "float":
+            # A list cell is a raw 8-byte int slot; bitcast the double's bits
+            # into an I64 so `_abi_list_append` (which copies 8 raw bytes)
+            # stores the right pattern instead of leaving the value in an XMM
+            # register the helper never reads. Same as list.append(float).
+            iv = ctx.tmp(I64)
+            ctx.emit(IRInstr("bitcast_f2i", iv, [item_v]))
+            item_v = iv
         ctx.emit(IRInstr("call", None, ["_abi_list_append", cur_out_v, item_v]))
         ctx.emit(IRInstr("br", None, [cont_b.label]))
     finally:
@@ -1774,8 +1794,6 @@ def _lower_comprehension(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
         iter_ty = "list"
     if iter_ty not in ("str", "list", "tuple"):
         raise LowerError(f"unsupported expr Comprehension (iter {iter_ty})")
-    if A.expr_type(e.elt) == "float":
-        raise LowerError("unsupported expr Comprehension (float element)")
 
     if iter_from_keys:
         src_v = _lower_expr(ctx, e.iter)
@@ -1910,6 +1928,14 @@ def _lower_comprehension(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
         cur_out_v = ctx.tmp(PTR)
         ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
         item_v = _lower_expr(ctx, e.elt)
+        if A.expr_type(e.elt) == "float":
+            # A list cell is a raw 8-byte int slot; bitcast the double's bits
+            # into an I64 so `_abi_list_append` (which copies 8 raw bytes)
+            # stores the right pattern instead of leaving the value in an XMM
+            # register the helper never reads. Same as list.append(float).
+            iv = ctx.tmp(I64)
+            ctx.emit(IRInstr("bitcast_f2i", iv, [item_v]))
+            item_v = iv
         ctx.emit(IRInstr("call", None, ["_abi_list_append", cur_out_v, item_v]))
         ctx.emit(IRInstr("br", None, [cont_b.label]))
     finally:
@@ -1935,6 +1961,10 @@ def _lower_dict_comprehension(ctx: _FuncCtx, e: A.DictComprehension) -> IRValue:
     if getattr(e, "extra_for_iters", []):
         raise LowerError("unsupported expr DictComprehension (multiple for clauses)")
     if A.expr_type(e.value) == "float":
+        # A float VALUE store is fine (bitcast below), but reading a float value
+        # back out of a float-sourced items() loop var isn't typed correctly yet
+        # and float register pressure here can crash regalloc -- keep the guard
+        # until both are handled (list comprehensions already support floats).
         raise LowerError("unsupported expr DictComprehension (float value)")
 
     out_v = ctx.tmp(PTR)
@@ -2047,6 +2077,12 @@ def _lower_dict_comprehension(ctx: _FuncCtx, e: A.DictComprehension) -> IRValue:
         ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
         key_v = _lower_dict_key(ctx, e.key)
         val_v = _lower_expr(ctx, e.value)
+        if val_v.type is F64:
+            # dict cells are raw 8-byte slots -- store a float's bits as I64
+            # (same as a plain `d[k] = <float>` assignment does).
+            iv = ctx.tmp(I64)
+            ctx.emit(IRInstr("bitcast_f2i", iv, [val_v]))
+            val_v = iv
         ctx.emit(IRInstr("call", None, ["_abi_dict_set", cur_out_v, key_v, val_v]))
         ctx.emit(IRInstr("br", None, [cont_b.label]))
 
@@ -2132,6 +2168,12 @@ def _lower_dict_comprehension(ctx: _FuncCtx, e: A.DictComprehension) -> IRValue:
         ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
         key_v = _lower_dict_key(ctx, e.key)
         val_v = _lower_expr(ctx, e.value)
+        if val_v.type is F64:
+            # dict cells are raw 8-byte slots -- store a float's bits as I64
+            # (same as a plain `d[k] = <float>` assignment does).
+            iv = ctx.tmp(I64)
+            ctx.emit(IRInstr("bitcast_f2i", iv, [val_v]))
+            val_v = iv
         ctx.emit(IRInstr("call", None, ["_abi_dict_set", cur_out_v, key_v, val_v]))
         ctx.emit(IRInstr("br", None, [cont_b.label]))
 
@@ -2224,6 +2266,12 @@ def _lower_dict_comprehension(ctx: _FuncCtx, e: A.DictComprehension) -> IRValue:
     ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
     key_v = _lower_dict_key(ctx, e.key)
     val_v = _lower_expr(ctx, e.value)
+    if val_v.type is F64:
+        # dict cells are raw 8-byte slots -- store a float's bits as I64
+        # (same as a plain `d[k] = <float>` assignment does).
+        iv = ctx.tmp(I64)
+        ctx.emit(IRInstr("bitcast_f2i", iv, [val_v]))
+        val_v = iv
     ctx.emit(IRInstr("call", None, ["_abi_dict_set", cur_out_v, key_v, val_v]))
     ctx.emit(IRInstr("br", None, [cont_b.label]))
 
