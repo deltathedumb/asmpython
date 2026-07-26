@@ -2895,6 +2895,92 @@ def _list_repr_kind(e: A.Expr) -> int:
     return _composite_repr_kind(el, inner)
 
 
+def _lower_list_instance_repr(ctx: _FuncCtx, e, obj_v: IRValue, owner: str, method: str) -> IRValue:
+    """repr of a `list[instance:X]` as `[<x0 repr>, <x1 repr>, ...]`.
+
+    The `_abi_list_repr` runtime helper formats each cell by a fixed kind tag
+    and has no way to call a user-defined `__repr__`/`__str__`, so an instance
+    list otherwise prints raw element pointers. Build the text here instead: a
+    compile-time loop that calls `X`'s resolved dunder per element and joins the
+    results with ", " inside brackets. `owner`/`method` come from
+    `_resolve_str_dunder`, so the dispatch matches a single instance's repr.
+    """
+    res_ptr = ctx.ensure_slot(f"__lirep_res_{id(e)}", PTR)
+    open_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", open_v, [ctx.mctx.intern_str("[")]))
+    ctx.emit(IRInstr("store", None, [open_v, res_ptr]))
+    len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_addr, [obj_v, _LIST_LEN_OFF]))
+    len_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", len_v, [len_addr]))
+    idx_ptr = ctx.ensure_slot(f"__lirep_idx_{id(e)}", I64)
+    zero0 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero0, [0]))
+    ctx.emit(IRInstr("store", None, [zero0, idx_ptr]))
+    # Block-creation order matters for regalloc liveness (see this file's
+    # comprehension-loop note): head/body first, the inner sep/elt blocks next,
+    # and the loop-exit `end` block LAST.
+    head_b = ctx.new_block("lirephead")
+    body_b = ctx.new_block("lirepbody")
+    sep_b = ctx.new_block("lirepsep")
+    elt_b = ctx.new_block("lirepelt")
+    end_b = ctx.new_block("lirepend")
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+    ctx.switch_to(head_b)
+    i_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_v, [idx_ptr]))
+    go = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", go, [i_v, len_v]))
+    ctx.emit(IRInstr("br.t", None, [go, body_b.label, end_b.label]))
+    # body: emit ", " before every element after the first
+    ctx.switch_to(body_b)
+    bi = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", bi, [idx_ptr]))
+    zc = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zc, [0]))
+    is_first = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_first, [bi, zc]))
+    ctx.emit(IRInstr("br.t", None, [is_first, elt_b.label, sep_b.label]))
+    ctx.switch_to(sep_b)
+    cs = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", cs, [res_ptr]))
+    comma = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", comma, [ctx.mctx.intern_str(", ")]))
+    cs2 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", cs2, ["_abi_str_concat", cs, comma]))
+    ctx.emit(IRInstr("store", None, [cs2, res_ptr]))
+    ctx.emit(IRInstr("br", None, [elt_b.label]))
+    # elt: append this element's repr
+    ctx.switch_to(elt_b)
+    bi2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", bi2, [idx_ptr]))
+    ea = _list_elem_addr(ctx, obj_v, bi2)
+    elem = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", elem, [ea]))
+    er = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", er, [f"{owner}__{method}", elem]))
+    cs3 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", cs3, [res_ptr]))
+    cs4 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", cs4, ["_abi_str_concat", cs3, er]))
+    ctx.emit(IRInstr("store", None, [cs4, res_ptr]))
+    one = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one, [1]))
+    ni = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", ni, [bi2, one]))
+    ctx.emit(IRInstr("store", None, [ni, idx_ptr]))
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+    # end: close bracket
+    ctx.switch_to(end_b)
+    fin = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", fin, [res_ptr]))
+    close = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", close, [ctx.mctx.intern_str("]")]))
+    out = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", out, ["_abi_str_concat", fin, close]))
+    return out
+
+
 def _dict_value_repr_kind(e: A.Expr) -> int:
     vt = getattr(e, "value_type", "int") or "int"
     inner = getattr(e, "inner_value_type", "int") or "int"
@@ -3946,6 +4032,16 @@ def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr, repr_mode: bool = False) -> IRV
         return _lower_tuple_repr(ctx, e)
     if ty == "list":
         obj = _lower_expr(ctx, e)
+        _el = getattr(e, "list_el_type", "int") or "int"
+        if isinstance(e, A.ListLit):
+            _el = e.el_type or "int"
+        if _el.startswith("instance:"):
+            # A list of user instances: elements are repr'd via the class's
+            # own __repr__/__str__ (containers always use repr for elements),
+            # which the _abi_list_repr runtime helper can't call.
+            _rd = _resolve_str_dunder(ctx, _el.split(":", 1)[1], repr_first=True)
+            if _rd is not None:
+                return _lower_list_instance_repr(ctx, e, obj, _rd[0], _rd[1])
         kind = ctx.tmp(I64)
         ctx.emit(IRInstr("const", kind, [_list_repr_kind(e)]))
         out = ctx.tmp(PTR)
@@ -12726,6 +12822,26 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                         )
                         method = first if _resolve_method_owner_in_sigs(classes_sig, cls_name, first) is not None else second
                         add(owner, method)
+                    elif arg_t == "list":
+                        # `print([inst, ...])` reprs each element via the class's
+                        # __repr__ (containers use repr for elements -- see
+                        # ir_lower's `_lower_list_instance_repr`). Same
+                        # "lowering dispatches, walker must keep it live" shape;
+                        # match that helper's repr-first resolution.
+                        _lel = getattr(arg, "list_el_type", "") or ""
+                        if _lel.startswith("instance:"):
+                            _lcn = _lel.split(":", 1)[1]
+                            _lowner = (
+                                _resolve_method_owner_in_sigs(classes_sig, _lcn, "__repr__")
+                                or _resolve_method_owner_in_sigs(classes_sig, _lcn, "__str__")
+                            )
+                            if _lowner is not None:
+                                _lmethod = (
+                                    "__repr__"
+                                    if _resolve_method_owner_in_sigs(classes_sig, _lcn, "__repr__") is not None
+                                    else "__str__"
+                                )
+                                add(_lowner, _lmethod)
         elif isinstance(node, A.Lambda):
             add_func(getattr(node, "func_name", None))
         elif isinstance(node, A.BinOp):
