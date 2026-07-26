@@ -97,6 +97,24 @@ def _mutated_field_names(mod: A.Module) -> set[str]:
                 if not initializing_empty:
                     mutated.add(node.name)
 
+            # `self.d[k] = v` / `self.buf[i] = x` -- index assignment into a
+            # collection FIELD is a mutation, but it is a statement
+            # (A.IndexAssign), not one of the A.MethodCall mutators scanned
+            # below. Missing it wrongly "proved" a dict/list field that is
+            # populated by subscript-store (the single most common way to fill
+            # a dict: `self._d = {}` then `self._d[k] = 1`) still empty, so this
+            # pass elided every read/iteration of it -- `self._d[k]` came back
+            # as garbage and `for k in self._d` ran zero times.
+            if isinstance(node, A.IndexAssign):
+                tgt = node.target
+                if (
+                    isinstance(tgt, A.Subscript)
+                    and isinstance(tgt.obj, A.Attr)
+                    and isinstance(tgt.obj.obj, A.Name)
+                    and tgt.obj.obj.name == "self"
+                ):
+                    mutated.add(tgt.obj.name)
+
             expressions = []
             for name in ("expr", "value", "test", "iter", "target", "obj"):
                 expression = getattr(node, name, None)
