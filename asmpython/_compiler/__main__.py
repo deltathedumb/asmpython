@@ -20,6 +20,7 @@ import re
 import sys
 from pathlib import Path
 
+from . import native_libraries as _native_libraries
 from .driver import compile_source, compile_targets, detect_default_target
 from .errors import CompileError, MultiSemaError, explain as _explain_code
 from .packages import (
@@ -460,6 +461,19 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         "given explicitly.",
     )
     build_grp.add_argument(
+        "--link-library",
+        metavar="NAME[=PATH|:SYM,...]",
+        action="append",
+        default=None,
+        help="link against an external native library, repeatable. NAME is "
+        "the load name ('SDL2.dll', 'libopenblas.so.0'); its exported symbols "
+        "are read from PATH when given, else from a file named NAME, else "
+        "listed explicitly after ':'. Replaces editing the linkers' built-in "
+        "symbol tables. To CALL into a library, declare it under "
+        "`native_libraries` in project.json instead, which also carries the "
+        "function signatures.",
+    )
+    build_grp.add_argument(
         "--linker",
         metavar="NAME",
         default=None,
@@ -855,6 +869,28 @@ def cmd_build(args: argparse.Namespace) -> int:
     targets: list[str] = cli_targets or (cfg.target if cfg and cfg.target else None) or [
         detect_default_target()
     ]
+    # External native libraries: project.json's `native_libraries`, then any
+    # --link-library flags. Populating the registry here (before sema, which
+    # needs the FFI bindings, and before the driver, which needs the symbol
+    # map at link time) is what lets a build reference a library the linkers'
+    # builtin tables have never heard of.
+    try:
+        registry = _native_libraries.NativeLibraryRegistry(
+            search_dirs=_native_libraries.default_search_dirs(
+                project_dir, cfg.library_dirs if cfg is not None else None
+            )
+        )
+        if cfg is not None:
+            for entry in cfg.native_libraries:
+                registry.declare(_native_libraries.from_mapping(entry))
+        for raw_decl in args.link_library or ():
+            registry.declare(_native_libraries.parse_declaration(raw_decl))
+        _native_libraries.set_active_registry(registry)
+        registry.install_bindings(targets)
+    except _native_libraries.NativeLibraryError as e:
+        print(f"asmpython: native library: {e}", file=sys.stderr)
+        return 1
+
     output_type = args.output_type or (cfg.output_type if cfg else None) or "executable"
     bundle_mode = args.bundle_mode or (cfg.bundle_mode if cfg else None) or "onefile"
     icon_path = args.icon

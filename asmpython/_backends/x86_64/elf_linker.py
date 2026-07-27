@@ -119,6 +119,7 @@ def link_elf(
     is_library: bool = False,
     exports: "list[str] | tuple[str, ...]" = (),
     soname: str = "libportapy.so",
+    symbol_libraries: "dict[str, str] | None" = None,
 ) -> bytes:
     """Link into an ELF64 ET_EXEC executable, or (`is_library=True`) an
     ET_DYN shared object.
@@ -130,8 +131,22 @@ def link_elf(
     below) is published in `.dynsym` as a DEFINED symbol (SHN_ABS, its
     real resolved address) instead of the UNDEF entries every import
     already gets, so `dlsym()` can resolve each one by name.
+
+    `symbol_libraries` supplies EXTRA symbol -> .so mappings for this link,
+    built from the project's declared native libraries (see
+    `_compiler.native_libraries`). It is consulted only where
+    `_SO_FOR_SYMBOL` misses, so the runtime's own imports can never be
+    retargeted by a project file and a build that declares nothing links
+    byte-for-byte as it did before this parameter existed. Each declared
+    library named here becomes its own DT_NEEDED entry.
     """
     parsed: list[ElfObject] = [parse_elf(o) for o in objects]
+    extra_libraries = symbol_libraries or {}
+
+    def so_for(name: str) -> str:
+        """The .so providing `name`: builtin table first, declarations second."""
+        so = _SO_FOR_SYMBOL.get(name)
+        return so if so is not None else extra_libraries[name]
 
     # ── 1. Merge .text/.data/.rodata across objects (.bss sized below). ──
     bucket_bytes = {"text": bytearray(), "data": bytearray(), "rdata": bytearray()}
@@ -202,10 +217,13 @@ def link_elf(
                     bss_size += _DATA_SYMBOLS[name]
                     global_syms[name] = ("bss", data_slot_off[name])
                     continue
-                if name not in _SO_FOR_SYMBOL:
+                if name not in _SO_FOR_SYMBOL and name not in extra_libraries:
                     raise LinkError(
-                        f"undefined symbol {name!r} has no known .so "
-                        f"(add it to elf_linker._SO_FOR_SYMBOL if it's a real import)"
+                        f"undefined symbol {name!r} has no known .so. Declare "
+                        f"the library providing it -- `native_libraries` in "
+                        f"project.json, or --link-library NAME=PATH -- or, if "
+                        f"it is part of asmpython's own runtime, add it to "
+                        f"elf_linker._SO_FOR_SYMBOL."
                     )
                 seen.add(name)
                 func_imports.append(name)
@@ -220,7 +238,7 @@ def link_elf(
     if not is_library and "exit" not in seen:
         seen.add("exit")
         func_imports.append("exit")
-    func_imports.sort(key=lambda n: (_SO_FOR_SYMBOL[n], n))
+    func_imports.sort(key=lambda n: (so_for(n), n))
 
     # ── 4. Lay out .text: merged code, then one 6-byte thunk per function
     # import (`jmp qword [rip+disp32]` into its GOT slot), then the entry
@@ -303,7 +321,7 @@ def link_elf(
 
     # ── 6. Dynamic-linking metadata (.dynstr/.dynsym/.hash/.got), laid
     # out within the "rest" segment right after rodata+data. ──
-    needed_sos = sorted({_SO_FOR_SYMBOL[n] for n in func_imports})
+    needed_sos = sorted({so_for(n) for n in func_imports})
     sorted_exports = sorted(set(exports))
     # index 0 = STN_UNDEF, always empty name. Exported (DEFINED) names come
     # after the UNDEF import names -- order doesn't matter for correctness

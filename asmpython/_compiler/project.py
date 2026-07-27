@@ -49,6 +49,11 @@ class ProjectConfig:
     # Source roots available only when a genuinely dynamic import makes pyinbin
     # fallback eligible. Static imports never use these roots.
     pyinbin_imports: list[str] = field(default_factory=list)
+    # External shared libraries this project links against, each a JSON object
+    # parsed by native_libraries.from_mapping (name/path/module/functions).
+    # Declaring one here is what replaces editing the linkers' hardcoded
+    # symbol->library tables.
+    native_libraries: list = field(default_factory=list)
     # Compatibility attributes for untouched legacy CLI internals. They are
     # always empty and omitted from project.json; no private package store exists.
     pypi_packages: list[str] = field(default_factory=list)
@@ -96,6 +101,7 @@ class ProjectConfig:
         known.add("library_dirs")
         known.add("packages")
         known.add("pyinbin_imports")
+        known.add("native_libraries")
         unknown: list = sorted([k for k in data if k not in known])
         name: str = data["name"] if "name" in data else "project"
         entry: str = data["entry"] if "entry" in data else "main.py"
@@ -108,6 +114,7 @@ class ProjectConfig:
         library_dirs: list = data["library_dirs"] if "library_dirs" in data else ["libs"]
         packages: list = data["packages"] if "packages" in data else []
         pyinbin_imports: list = data["pyinbin_imports"] if "pyinbin_imports" in data else []
+        native_libraries: list = data["native_libraries"] if "native_libraries" in data else []
         cfg: ProjectConfig = ProjectConfig(
             name=name,
             entry=entry,
@@ -120,6 +127,7 @@ class ProjectConfig:
             library_dirs=library_dirs,
             packages=packages,
             pyinbin_imports=pyinbin_imports,
+            native_libraries=native_libraries,
         )
         cfg.validate()
         return cfg, unknown

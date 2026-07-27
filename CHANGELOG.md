@@ -17,6 +17,28 @@ deliverable.
 
 ### Added
 
+- **External native libraries are declarable** (`_compiler/native_libraries.py`,
+  `docs/NATIVE_LIBRARIES.md`) — linking against a shared library the compiler
+  didn't ship with no longer means editing the compiler. Both linkers resolved
+  undefined symbols through a hardcoded table (`pe_linker._DLL_FOR_SYMBOL`,
+  `elf_linker._SO_FOR_SYMBOL`) and refused anything unlisted; a project now
+  declares the library instead, via `native_libraries` in `project.json` or a
+  repeatable `--link-library NAME[=PATH|:SYM,...]` flag. Exported symbols are
+  discovered by reading the library's own export table (PE `.edata`, ELF
+  `.dynsym`), so naming one library doesn't mean transcribing thousands of
+  symbol names. A declaration may also carry function signatures under a
+  `module` name, which are installed as ordinary FFI `Func` bindings — so a
+  declared library is reached with a plain `import` and type-checks through the
+  same path as a built-in binding, no separate resolution rule.
+  The builtin tables keep precedence: a declaration can only ADD a mapping for
+  a symbol the linker didn't already know, so no project file can retarget
+  `malloc` away from the C runtime, and a build that declares nothing links
+  byte-for-byte as before (verified by hash-comparing a corpus case linked with
+  and without the mechanism). Scope: this links against a **C ABI**. It does
+  not compile C/C++ source (`--frontend c` is still a scaffold), and it does
+  not load CPython extension modules — a `.pyd`/`.so` built against CPython
+  needs the CPython C-API, which the native runtime doesn't implement.
+
 - **`asmpython pypi install|uninstall|list`** — real PyPI package installation
   (`asmpython/_compiler/pypi.py`), resolved against PyPI's own public JSON API
   and sha256-verified against the digest PyPI supplies for every file. v1 is
