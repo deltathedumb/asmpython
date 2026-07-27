@@ -5227,7 +5227,20 @@ class SemaAnalyzer:
         if isinstance(e, A.Call):
             # A user function annotated `-> list[tuple[T1,T2]]` stamps the
             # per-slot kinds onto the call node (see _check_call).
-            return list(getattr(e, "tuple_elem_types", []))
+            #
+            # Both spellings, because both are in use: a call whose RESULT is a
+            # tuple carries `tuple_elem_types`, while a call whose result is a
+            # LIST OF tuples carries `el_tuple_types` (what `sorted()` stamps).
+            # Reading only the former silently dropped the shape of every
+            # `sorted(list_of_pairs, ...)`, so assigning that result to a name
+            # left the name shapeless and its repr fell back to the dict-items
+            # assumption -- a SEGFAULT for any pair that isn't (str, int).
+            # ir_lower's own repr dispatch already reads both; this is the
+            # sema-side half that was missing.
+            return (
+                list(getattr(e, "el_tuple_types", []) or [])
+                or list(getattr(e, "tuple_elem_types", []) or [])
+            )
         if isinstance(e, A.Attr):
             return list(getattr(e, "el_tuple_types", []))
         if isinstance(e, A.BinOp):
@@ -7762,6 +7775,18 @@ class SemaAnalyzer:
             if e.inferred_type == "list":
                 e.list_el_type = scope.list_el_types.get(e.name, "int")
                 e.list_el_value_type = scope.list_el_value_types.get(e.name, "int")
+                if e.list_el_type == "tuple":
+                    # A list[tuple] READ has to carry its per-slot kinds onto
+                    # the node, not just leave them in the scope: ir_lower's
+                    # repr reads them off the expression. Without this a
+                    # list of pairs held in a VARIABLE (as opposed to written
+                    # inline at the print) had no shape, so its repr fell back
+                    # to `_abi_list_repr`'s dict-items assumption and any pair
+                    # that isn't (str, int) formatted its leading slot as a
+                    # string POINTER -- a segfault, not wrong output.
+                    e.el_tuple_types = list(  # type: ignore[attr-defined]
+                        scope.list_el_tuple_types.get(e.name, [])
+                    )
             elif e.inferred_type == "dict":
                 e.value_type = scope.dict_value_types.get(e.name, "int")
                 e.inner_value_type = scope.dict_inner_value_types.get(e.name, "int")
