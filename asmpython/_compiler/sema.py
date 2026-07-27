@@ -2422,6 +2422,12 @@ class SemaAnalyzer:
             ty = self._infer_return_type(f, f.name)
             if ty is not None:
                 sig.ret_type = ty
+                # The inference gives the SHAPE ("it returns a list") but no
+                # element kind, so a caller of an unannotated
+                # `def f(): return [[1, 2]]` read the inner lists as ints and
+                # printed pointers. Same fill the bare-annotation case gets.
+                if self._needs_return_element_kind(sig):
+                    self._fill_return_element_kind(sig, f, f.name)
         for c in self.mod.classes:
             for m in c.methods:
                 sig = self.classes[c.name].methods[m.name]
@@ -2437,6 +2443,10 @@ class SemaAnalyzer:
                 ty = self._infer_return_type(m, f"{c.name}.{m.name}", c.name)
                 if ty is not None:
                     sig.ret_type = ty
+                    if self._needs_return_element_kind(sig):
+                        self._fill_return_element_kind(
+                            sig, m, f"{c.name}.{m.name}", c.name
+                        )
 
     def _needs_return_element_kind(self, sig) -> bool:
         """True for a signature annotated with a bare CONTAINER -- `-> list`,
@@ -2478,6 +2488,15 @@ class SemaAnalyzer:
             _rv = getattr(_r, "value", None)
             if isinstance(_rv, A.ListLit):
                 _k = self._literal_shape_el_type(_rv)
+                if _k is None and _rv.elems and all(
+                    isinstance(_el, A.ListLit) for _el in _rv.elems
+                ):
+                    # A list OF LISTS: the element kind is "list".
+                    _k = "list"
+                elif _k is None and _rv.elems and all(
+                    isinstance(_el, A.DictLit) for _el in _rv.elems
+                ):
+                    _k = "dict"
                 if _k is None and _rv.elems:
                     # A list of tuples: its element kind is "tuple", and the
                     # per-slot shape is what the repr actually needs.
