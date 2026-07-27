@@ -7796,7 +7796,10 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("load", elem_v, [addr]))
 
         if is_truthy_filter:
-            keep_v = _value_truthy(ctx, elem_v)
+            # `filter(None, xs)` keeps the TRUTHY elements, and a str/container
+            # element is falsy on its contents -- `filter(None, ['', 'a'])` kept
+            # both, because an empty string is still a non-NULL pointer.
+            keep_v = _value_truthy_typed(ctx, elem_v, el_ty, id(e))
             ctx.emit(IRInstr("br.t", None, [keep_v, keep_b.label, skip_b.label]))
             ctx.switch_to(keep_b)
             out_v1 = ctx.tmp(PTR)
@@ -8265,6 +8268,10 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         # unimplemented: `any`/`all` as bare symbols fell through to a
         # direct-symbol-call linking against a nonexistent DLL import.
         is_all = e.func == "all"
+        # The element kind decides truthiness: a str/container element is falsy
+        # on its CONTENTS, so `any(['', ''])` was True (both are non-NULL
+        # pointers) until this was threaded through.
+        el_kind_aa = _repr_el_kind(e.args[0])
         xs_v = _lower_expr(ctx, e.args[0])
         len_addr = ctx.tmp(PTR)
         ctx.emit(IRInstr("gep", len_addr, [xs_v, _LIST_LEN_OFF]))
@@ -8297,7 +8304,7 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         addr = _list_elem_addr(ctx, xs_v, idx_v2)
         elem_v = ctx.tmp(I64)
         ctx.emit(IRInstr("load", elem_v, [addr]))
-        truthy_v = _value_truthy(ctx, elem_v)
+        truthy_v = _value_truthy_typed(ctx, elem_v, el_kind_aa, id(e))
         if is_all:
             ctx.emit(IRInstr("br.t", None, [truthy_v, cont_b.label, hit_b.label]))
         else:
