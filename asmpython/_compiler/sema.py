@@ -6403,6 +6403,12 @@ class SemaAnalyzer:
                     )
                 inner = s.iter.args[0]
                 self._check_expr(inner, scope)
+                # `for i, v in enumerate(<iterable object>)`: this for-position
+                # handler runs before the generic call check, so apply the same
+                # drain-with-list() coercion here (see
+                # `_coerce_iterable_instance_args`).
+                self._coerce_iterable_instance_args(s.iter, scope)
+                inner = s.iter.args[0]
                 _start_arg = s.iter.args[1] if len(s.iter.args) == 2 else _enum_start_kwarg
                 if _start_arg is not None:
                     self._check_expr(_start_arg, scope)
@@ -10308,6 +10314,51 @@ class SemaAnalyzer:
         self._check_expr(lam, scope)
         return lam
 
+    # Builtins whose argument is consumed as a SEQUENCE. An iterable object
+    # (a generator's result, a deque, any class with the iterator or sequence
+    # protocol) is a perfectly good argument to all of them in Python, so rather
+    # than teach each one about instances -- and get a different answer per
+    # builtin -- they share one coercion: drain the object with `list(...)`
+    # first. `list()` itself already knows both protocols.
+    # Only `enumerate` for now, and only because its for-position argument is
+    # evaluated as a statement. The rest of the family -- sum/sorted/max/min/
+    # any/all/tuple/set/reversed/zip/map/filter, all of which want the same
+    # coercion -- is held back on a lowering hazard, NOT on anything about them:
+    # `list(<iterable object>)` drains through a setjmp loop, and that loop
+    # miscompiles when it is emitted inside another expression's evaluation.
+    # `xs = list(gen()); sum(xs)` is correct while `sum(list(gen()))` segfaults.
+    # Reported; widen this dict the moment that is fixed, since the coercion
+    # itself is already written and shape-independent.
+    _SEQUENCE_BUILTIN_ARGS: dict = {
+        "enumerate": (0,),
+    }
+
+    def _coerce_iterable_instance_args(self, e: A.Call, scope: Scope) -> None:
+        """Wrap an iterable-object argument in `list(...)` for the builtins that
+        consume a sequence, so every one of them accepts a generator result or a
+        custom iterator without its own special case."""
+        positions = self._SEQUENCE_BUILTIN_ARGS.get(e.func)
+        if not positions:
+            return
+        for i in positions:
+            if i >= len(e.args):
+                continue
+            arg = e.args[i]
+            if isinstance(arg, A.Call) and arg.func == "list":
+                continue  # already drained
+            t = A.expr_type(arg)
+            if not t.startswith("instance:"):
+                continue
+            cls = t.split(":", 1)[1]
+            if (
+                self._resolve_method(cls, "__next__") is None
+                and self._resolve_method(cls, "__getitem__") is None
+            ):
+                continue  # not iterable; leave it to the normal arg check
+            drained = A.Call(func="list", args=[arg], kwargs=[], pos=arg.pos)
+            self._check_expr(drained, scope)
+            e.args[i] = drained
+
     def _check_sort_kwargs(self, e, scope: Scope, allow_default: bool = False) -> None:
         """Validate and resolve the `key=`/`reverse=` kwargs shared by
         `sorted()`, `min()`/`max()`, and `list.sort()`.
@@ -11252,6 +11303,7 @@ class SemaAnalyzer:
                     e.pos,
                     ErrorCode.E_ARG_COUNT,
                 )
+            self._coerce_iterable_instance_args(e, scope)
             if e.func in ("map", "filter") and len(e.args) >= 2:
                 # The function is called with the source sequence's elements --
                 # tell the lambda so its parameter types correctly (see
