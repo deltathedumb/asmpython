@@ -158,6 +158,17 @@ def _is_asmpython_stdlib(module: str) -> bool:
     if _is_ffi_stdlib(module):
         return True
     top = module.split(".")[0]
+    if top == "asmpython":
+        # The compiler's own package is never user code. `from asmpython import
+        # Public, access` imports compile-time metadata the frontend handles
+        # itself, and `asmpython.stdlib.*` resolves through the registry.
+        #
+        # Without this the check depends on where asmpython happens to live: on
+        # PYTHONPATH nothing looks for it in site-packages, but once it is
+        # pip-INSTALLED the resolver finds it there and tries to compile the
+        # compiler -- so `from asmpython import access` fails for exactly the
+        # people who installed asmpython the normal way.
+        return True
     if program._is_bundled_source_stdlib(top):
         return True
     return program._resolve_bundled_stdlib(module) is not None

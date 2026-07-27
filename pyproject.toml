@@ -41,4 +41,14 @@ where = ["."]
 include = ["asmpython*"]
 
 [tool.setuptools.package-data]
-"asmpython" = ["stdlib/**/*.py", "asmlib/*.py", "_runtime/**/*", "_vendor/**/*"]
+"asmpython" = [
+    "stdlib/**/*.py",
+    "asmlib/*.py",
+    "_runtime/**/*",
+    "_vendor/**/*",
+    # A backend may ship support sources it compiles at link time -- the JVM
+    # backend's runtime is .java, built by javac into the output jar. Without
+    # this a pip install looks complete and then fails at the first build with
+    # no runtime to compile.
+    "_backends/**/runtime/**/*",
+]
