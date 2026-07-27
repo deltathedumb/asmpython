@@ -353,6 +353,20 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         "project's `output_type` field, then 'executable'.",
     )
     build_grp.add_argument(
+        "--class-version",
+        default="",
+        metavar="N",
+        help="JVM backend: class-file major version to emit (45-69; 52 = Java 8, "
+        "65 = Java 21). Overrides --java-version.",
+    )
+    build_grp.add_argument(
+        "--java-version",
+        default="",
+        metavar="RELEASE",
+        help="JVM backend: target Java release (e.g. 8, 17, 21) - emits the "
+        "highest class-file version that release produces.",
+    )
+    build_grp.add_argument(
         "--emit-asm",
         action="store_true",
         help="stop after writing the NASM .asm file (no assemble / link)",
@@ -1004,6 +1018,10 @@ def cmd_build(args: argparse.Namespace) -> int:
                 icon_path=icon_path,
                 all_errors=all_errors,
                 backend=effective_backend,
+                backend_args={
+                    "class_version": getattr(args, "class_version", ""),
+                    "java_version": getattr(args, "java_version", ""),
+                },
                 linker=args.linker,
                 active_extensions=active_extensions,
                 frontend=effective_frontend,

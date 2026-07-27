@@ -31,6 +31,7 @@ from typing import Any
 
 from .. import register_backend
 from ..._compiler.ir import ModuleBackend
+from .classfile import resolve_class_version
 from .module import DEFAULT_CLASS, compile_module
 
 production_suitable = False
@@ -41,15 +42,31 @@ default_linker = "builtin"
 
 requested_args: list[dict] = [
     {
-        "flags": ["--jvm-class"],
-        "help": "fully qualified name of the generated class "
+        "name": "--jvm-class",
+        "help": "Fully qualified name of the generated class "
                 f"(default {DEFAULT_CLASS.replace('/', '.')})",
         "default": DEFAULT_CLASS.replace("/", "."),
+        "type": str,
     },
     {
-        "flags": ["--jvm-javac"],
+        "name": "--jvm-javac",
         "help": "javac used to build the runtime support class (default: javac on PATH)",
         "default": "javac",
+        "type": str,
+    },
+    {
+        "name": "--class-version",
+        "help": "Class-file major version to emit (45-69; 52 = Java 8, 65 = Java 21). "
+                "Overrides --java-version.",
+        "default": "",
+        "type": str,
+    },
+    {
+        "name": "--java-version",
+        "help": "Target Java release (e.g. 8, 17, 21) — emits the highest "
+                "class-file version that release produces",
+        "default": "",
+        "type": str,
     },
 ]
 
@@ -59,7 +76,8 @@ _RUNTIME_SOURCE = Path(__file__).with_name("runtime")
 def run_backend_codegen(ir: Any, args: dict) -> dict[str, bytes]:
     """IRModule -> the generated program class."""
     class_name = _class_name(args)
-    return {class_name + ".class": compile_module(ir, class_name)}
+    version = resolve_class_version(args.get("class_version"), args.get("java_version"))
+    return {class_name + ".class": compile_module(ir, class_name, version)}
 
 
 def run_backend_link(objects: list[bytes], args: dict) -> dict[str, bytes]:
@@ -71,7 +89,8 @@ def run_backend_link(objects: list[bytes], args: dict) -> dict[str, bytes]:
     """
     class_name = _class_name(args)
     javac = str(args.get("jvm_javac") or "javac")
-    runtime_classes = _build_runtime(javac)
+    version = resolve_class_version(args.get("class_version"), args.get("java_version"))
+    runtime_classes = _build_runtime(javac, version)
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as jar:
@@ -93,7 +112,7 @@ def _class_name(args: dict) -> str:
     return str(raw).replace(".", "/")
 
 
-def _build_runtime(javac: str) -> dict[str, bytes]:
+def _build_runtime(javac: str, class_version: int) -> dict[str, bytes]:
     """Compile Runtime.java, returning {class-file path: bytes}."""
     if shutil.which(javac) is None:
         raise RuntimeError(
@@ -105,7 +124,8 @@ def _build_runtime(javac: str) -> dict[str, bytes]:
         out.mkdir()
         sources = [str(p) for p in _RUNTIME_SOURCE.rglob("*.java")]
         result = subprocess.run(
-            [javac, "-nowarn", "-d", str(out), *sources],
+            [javac, "-nowarn", "--release", str(_java_release(class_version)),
+             "-d", str(out), *sources],
             capture_output=True,
             text=True,
         )
@@ -123,3 +143,13 @@ backend = __module_backend__
 register_backend("jvm", __module_backend__, aliases=("JVM", "jar"))
 
 __all__ = ["__module_backend__", "backend", "run_backend_codegen", "run_backend_link"]
+
+
+def _java_release(class_version: int) -> int:
+    """The Java release matching a class-file version, floored at 8.
+
+    javac cannot target releases below 8 any more, and the runtime only has to
+    be loadable by the JVM that runs the program -- not to match the generated
+    class byte for byte.
+    """
+    return max(8, class_version - 44)

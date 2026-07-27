@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import struct
 
-from .classfile import ClassBuilder, MethodBuilder
+from .classfile import ITEM_DOUBLE, ITEM_LONG, ClassBuilder, MethodBuilder
 
 RUNTIME = "asmpython/jvm/Runtime"
 
@@ -45,6 +45,7 @@ GETSTATIC, PUTSTATIC = 0xB2, 0xB3
 POP2 = 0x58
 ICONST_0, ICONST_1 = 0x03, 0x04
 I2L = 0x85
+WIDE = 0xC4
 
 _ICMP_TO_BRANCH = {
     "icmp.eq": IFEQ,
@@ -86,6 +87,7 @@ class FunctionEmitter:
         self.class_name = class_name
         self.globals_map = globals_map
         self.slots: dict[str, int] = {}
+        self.slot_kinds: dict[int, int] = {}  # slot -> ITEM_LONG | ITEM_DOUBLE
         self.next_slot = 0
         self.method: MethodBuilder | None = None
 
@@ -101,22 +103,37 @@ class FunctionEmitter:
             return existing
         slot = self.next_slot
         self.slots[name] = slot
+        self.slot_kinds[slot] = ITEM_DOUBLE if _is_double(value) else ITEM_LONG
         self.next_slot += 2  # every value here is long or double
         return slot
 
     # ---- value movement --------------------------------------------------
 
-    def push(self, value) -> None:
+    def local_op(self, opcode: int, slot: int) -> None:
+        """Emit a local load/store, widening the index when it needs it.
+
+        lload/lstore take a ONE-BYTE local index. A function with more than 128
+        IR values overflows that (each long takes two slots), and the index
+        silently wraps to another live local -- so this is a correctness bug at
+        every class-file version, not just one the newer verifier happens to
+        catch. Indices from 256 need the `wide` prefix and a u2 operand.
+        """
         m = self.method
+        if slot < 256:
+            m.u1(opcode)
+            m.u1(slot)
+        else:
+            m.u1(WIDE)
+            m.u1(opcode)
+            m.u2(slot)
+
+    def push(self, value) -> None:
         if isinstance(value, str):
             raise UnsupportedIR(f"bare string operand {value!r}")
-        m.u1(DLOAD if _is_double(value) else LLOAD)
-        m.u1(self.slot_of(value))
+        self.local_op(DLOAD if _is_double(value) else LLOAD, self.slot_of(value))
 
     def pop_into(self, value) -> None:
-        m = self.method
-        m.u1(DSTORE if _is_double(value) else LSTORE)
-        m.u1(self.slot_of(value))
+        self.local_op(DSTORE if _is_double(value) else LSTORE, self.slot_of(value))
 
     def push_long(self, raw: int) -> None:
         m = self.method
@@ -142,6 +159,14 @@ class FunctionEmitter:
         for param in self.func.params:
             self.slot_of(param)
 
+        # Assign a slot to every value up front, then zero the non-parameter
+        # ones. Pre-initialising is what keeps each slot's type constant for
+        # the whole method, which is what lets the StackMapTable be a single
+        # repeated frame instead of a dataflow analysis (see
+        # MethodBuilder.stack_map_table).
+        self._preassign_slots()
+        self._zero_non_parameters()
+
         for block in self.func.blocks:
             self.method.mark(block.label)
             for instr in block.instrs:
@@ -149,7 +174,10 @@ class FunctionEmitter:
 
         # A function whose last block falls through still needs a return, and
         # it has to match the declared descriptor or the verifier rejects the
-        # class before main() ever runs.
+        # class before main() ever runs. This epilogue usually follows a `ret`
+        # or a `goto`, so it is unreachable by fallthrough and needs its own
+        # stack map frame.
+        self.method.frame_point()
         if descriptor.endswith(")D"):
             self.push_double(0.0)
             self.method.u1(DRETURN)
@@ -159,6 +187,35 @@ class FunctionEmitter:
         else:
             self.method.u1(RETURN)
         self.method.max_locals = max(self.next_slot, 2)
+        self.method.frame_locals = self.frame_locals()
+
+    def _preassign_slots(self) -> None:
+        """Give every value defined anywhere in the function its slot now."""
+        for block in self.func.blocks:
+            for instr in block.instrs:
+                if instr.result is not None:
+                    self.slot_of(instr.result)
+                for operand in instr.operands:
+                    if hasattr(operand, "name") and hasattr(operand, "type"):
+                        self.slot_of(operand)
+
+    def _zero_non_parameters(self) -> None:
+        """Write a zero into every slot the caller did not supply."""
+        parameter_slots = {self.slots[p.name] for p in self.func.params}
+        for name, slot in sorted(self.slots.items(), key=lambda kv: kv[1]):
+            if slot in parameter_slots:
+                continue
+            if self.slot_kinds.get(slot) == ITEM_DOUBLE:
+                self.push_double(0.0)
+                self.local_op(DSTORE, slot)
+            else:
+                self.method.u1(LCONST_0)
+                self.local_op(LSTORE, slot)
+
+    def frame_locals(self) -> list:
+        """Slot layout for the StackMapTable, in slot order."""
+        return [(slot, self.slot_kinds[slot])
+                for slot in sorted(self.slot_kinds)]
 
     # ---- instructions ----------------------------------------------------
 
@@ -333,16 +390,22 @@ class FunctionEmitter:
         self.push(instr.operands[1])
         m.u1(DCMPL if double else LCMP)
 
+        # Both arms store into the result slot before merging, so the operand
+        # stack is EMPTY at `true_label` and at `done_label`. Leaving the value
+        # on the stack across the merge would work fine for the old verifier
+        # but makes every StackMapTable frame different, which is exactly the
+        # analysis this backend avoids having to do.
         true_label = f"__cmp_t{m.here()}"
         done_label = f"__cmp_d{m.here()}"
         m.jump(branch, true_label)
         m.u1(LCONST_0)
+        self.pop_into(instr.result)
         m.jump(GOTO, done_label)
         m.mark(true_label)
         m.u1(ICONST_1)
         m.u1(I2L)
-        m.mark(done_label)
         self.pop_into(instr.result)
+        m.mark(done_label)
 
     def emit_call(self, instr) -> None:
         m = self.method

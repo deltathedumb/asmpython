@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .classfile import ClassBuilder
+from .classfile import CLASS_VERSION_MAJOR, ClassBuilder
 from .codegen import (
     FunctionEmitter,
     GETSTATIC,
@@ -20,7 +20,8 @@ from .codegen import (
 DEFAULT_CLASS = "asmpython/jvm/Program"
 
 
-def compile_module(ir_module, class_name: str = DEFAULT_CLASS) -> bytes:
+def compile_module(ir_module, class_name: str = DEFAULT_CLASS,
+                   class_version: int = CLASS_VERSION_MAJOR) -> bytes:
     """Emit one class containing every function in the module.
 
     Data-section globals become ``static long`` fields holding heap addresses.
@@ -28,7 +29,7 @@ def compile_module(ir_module, class_name: str = DEFAULT_CLASS) -> bytes:
     at class-initialisation time and stores the address, so ``global_addr``
     lowers to a plain ``getstatic``.
     """
-    cls = ClassBuilder(class_name)
+    cls = ClassBuilder(class_name, class_version=class_version)
     function_names = {f.name for f in ir_module.funcs}
     FunctionEmitter.cls_functions = {f.name: f for f in ir_module.funcs}
 

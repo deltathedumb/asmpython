@@ -127,6 +127,7 @@ def _run_backend_fastcomp(
     backend: str = "legacy",
     linker: str | None = None,
     passes: str | None = None,
+    backend_args: dict | None = None,
     _asm_stem_suffix: str = "",
 ):
     allowed, reason = _can_stitch(
@@ -158,6 +159,7 @@ def _run_backend_fastcomp(
             backend=backend,
             linker=linker,
             passes=passes,
+            backend_args=backend_args,
             _asm_stem_suffix=_asm_stem_suffix,
         )
 
@@ -187,6 +189,7 @@ def _run_backend_fastcomp(
             backend=backend,
             linker=linker,
             passes=passes,
+            backend_args=backend_args,
             _asm_stem_suffix=_asm_stem_suffix,
         )
 

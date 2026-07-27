@@ -503,7 +503,8 @@ def _run_backend_ternary(module, out_path: Path, passes: "str | None" = None) ->
 
 
 def _run_backend_registered(
-    module, backend_name: str, out_path: Path, passes: "str | None" = None
+    module, backend_name: str, out_path: Path, passes: "str | None" = None,
+    backend_args: "dict | None" = None,
 ) -> BuildResult:
     """Compile+link `module` via a third-party `IRBackend` registered under
     `backend_name` (see `asmpython._backends.get_backend`/
@@ -522,9 +523,12 @@ def _run_backend_registered(
 
     ir_mod = ir_lower.lower_module(module)
     _apply_passes(ir_mod, passes)
-    compiled = backend.compile(ir_mod, {})
+    # Registered backends used to get no options at all, which left every
+    # `requested_args` entry unreachable. Forward whatever the caller resolved.
+    options = dict(backend_args or {})
+    compiled = backend.compile(ir_mod, options)
     program_obj = next(iter(compiled.values()))
-    linked = backend.link([program_obj], {})
+    linked = backend.link([program_obj], options)
     out_bytes = next(iter(linked.values()))
 
     out_path = out_path.resolve()
@@ -558,6 +562,7 @@ def _run_backend(
     backend: str = "legacy",
     linker: str | None = None,
     passes: str | None = None,
+    backend_args: dict | None = None,
     _asm_stem_suffix: str = "",
 ) -> BuildResult:
     """Target-specific back-end: codegen -> nasm -> gcc."""
@@ -633,7 +638,9 @@ def _run_backend(
     elif backend != "legacy":
         # Not one of the two built-in IR-backend names -- check the
         # third-party registry (asmpython.backend.Backend(...)) before giving up.
-        return _run_backend_registered(module, backend, out_path, passes)
+        return _run_backend_registered(
+            module, backend, out_path, passes, backend_args=backend_args,
+        )
     elif linker is not None and linker != "gcc":
         raise ValueError(f"--backend legacy only supports --linker gcc, got {linker!r}")
 
@@ -925,6 +932,7 @@ def compile_source(
     icon_path: Path | None = None,
     all_errors: bool = False,
     backend: str = "legacy",
+    backend_args: dict | None = None,
     linker: str | None = None,
     active_extensions: "frozenset[str] | None" = None,
     frontend: str = "python",
@@ -956,6 +964,7 @@ def compile_source(
         backend=backend,
         linker=linker,
         passes=passes,
+        backend_args=backend_args,
     )
 
 
