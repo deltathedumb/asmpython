@@ -3272,6 +3272,125 @@ class SemaAnalyzer:
 
         return [fix_stmt(x) for x in stmts]
 
+    def _transform_straightline_generator(self, f: A.FuncDef, cls_name: str, pos):
+        """Desugar a generator whose body is a straight run of `yield`s into a
+        factory plus a state-machine iterator class.
+
+        `def g(): yield 1; yield 2` becomes a class holding `_state`, whose
+        `__next__` is a chain of `if self._state == N:` arms -- each advancing the
+        state and returning that yield's expression -- ending in
+        `raise StopIteration()`. Parameters are stored as fields by `__init__`
+        (so a yielded expression may reference them) exactly as the loop-based
+        transform does.
+        """
+        params_no_self = list(f.params)
+        param_types_no_self = list(f.param_types) if f.param_types else [None] * len(f.params)
+        all_names = set(params_no_self)
+
+        init_body: list = []
+        for p in params_no_self:
+            init_body.append(A.AttrAssign(
+                obj=A.Name(name="self", pos=pos), name=p,
+                value=A.Name(name=p, pos=pos), pos=pos,
+            ))
+        init_body.append(A.AttrAssign(
+            obj=A.Name(name="self", pos=pos), name="_state",
+            value=A.IntLit(value=0, pos=pos), pos=pos,
+        ))
+        init_func = A.FuncDef(
+            name="__init__",
+            params=["self"] + params_no_self,
+            body=init_body,
+            defaults=[None] + [None] * len(params_no_self),
+            param_types=[None] + list(param_types_no_self),
+            pos=pos,
+        )
+        iter_func = A.FuncDef(
+            name="__iter__",
+            params=["self"],
+            body=[A.Return(value=A.Name(name="self", pos=pos), pos=pos)],
+            defaults=[None],
+            param_types=[None],
+            pos=pos,
+        )
+
+        next_body: list = []
+        for i, stmt in enumerate(f.body):
+            arm: list = [
+                A.AttrAssign(
+                    obj=A.Name(name="self", pos=pos), name="_state",
+                    value=A.IntLit(value=i + 1, pos=pos), pos=pos,
+                ),
+                A.Return(
+                    value=self._rename_expr(stmt.value, all_names), pos=pos
+                ),
+            ]
+            next_body.append(A.If(
+                test=A.Compare(
+                    ops=["=="],
+                    operands=[
+                        A.Attr(obj=A.Name(name="self", pos=pos), name="_state", pos=pos),
+                        A.IntLit(value=i, pos=pos),
+                    ],
+                    pos=pos,
+                ),
+                then=arm,
+                orelse=[],
+                pos=pos,
+            ))
+        next_body.append(A.Raise(
+            value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
+        ))
+        # `__next__` returns ONE YIELDED VALUE. A generator function's own return
+        # type resolves to the SEQUENCE it produces (`-> list[int]`), so take the
+        # element kind from it -- declaring `__next__` as returning the container
+        # made the caller read a yielded int as a list pointer and segfault.
+        _rt = f.ret_type
+        if (
+            isinstance(_rt, tuple) and len(_rt) >= 2
+            and _rt[0] in ("list", "tuple", "set") and _rt[1]
+        ):
+            _next_ret = (_rt[1], None)
+        elif isinstance(_rt, tuple) and _rt and _rt[0] not in ("list", "tuple", "set"):
+            _next_ret = _rt
+        else:
+            _next_ret = ("int", None)
+        next_func = A.FuncDef(
+            name="__next__",
+            params=["self"],
+            body=next_body,
+            defaults=[None],
+            param_types=[None],
+            ret_type=_next_ret,
+            pos=pos,
+        )
+        cls = A.ClassDef(
+            name=cls_name, parent=None,
+            methods=[init_func, iter_func, next_func], pos=pos,
+        )
+        factory_func = A.FuncDef(
+            name=f.name,
+            params=params_no_self,
+            body=[A.Return(
+                value=A.Call(
+                    func=cls_name,
+                    args=[A.Name(name=p, pos=pos) for p in params_no_self],
+                    pos=pos,
+                ),
+                pos=pos,
+            )],
+            defaults=list(f.defaults) if f.defaults else [None] * len(params_no_self),
+            param_types=list(param_types_no_self),
+            # The BARE class name, matching the loop-based transform: sema
+            # normalises it to `instance:<cls>` itself, and pre-normalising here
+            # produced a factory whose return type never resolved.
+            ret_type=(cls_name, None),
+            pos=pos,
+            vararg=f.vararg,
+            kwarg=f.kwarg,
+        )
+        return factory_func, cls
+
     def _transform_generator(self, f: A.FuncDef) -> "tuple[A.FuncDef, A.ClassDef] | None":
         """Transform a generator function into a factory + iterator class.
 
@@ -3308,6 +3427,21 @@ class SemaAnalyzer:
                 post_stmts.append(s)
 
         if loop_stmt is None:
+            # No loop, but a generator all the same: a STRAIGHT-LINE body whose
+            # statements are all `yield`. Each yield is one state of a tiny state
+            # machine -- `__next__` returns the Nth expression and advances a
+            # `_state` field, then raises StopIteration once past the last. That
+            # is the general desugaring for this shape (any number of yields, any
+            # expression, params referenced as fields), rather than a special
+            # case for two-yield functions.
+            #
+            # Restricted to bodies of NOTHING BUT yields on purpose: a statement
+            # between two yields would have to run in the right segment AND its
+            # locals would have to survive between `__next__` calls as fields.
+            # Anything else returns None and is left alone rather than silently
+            # mis-sequenced.
+            if f.body and all(isinstance(_s, A.YieldStmt) for _s in f.body):
+                return self._transform_straightline_generator(f, cls_name, pos)
             return None  # No loop found
 
         # Check that the loop contains exactly one YieldStmt in its body.
