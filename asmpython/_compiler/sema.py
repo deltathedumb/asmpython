@@ -2523,6 +2523,73 @@ class SemaAnalyzer:
                 return
         sig.ret_type = ("float", None, None)
 
+    def _learn_return_element_kind(self, value, scope: Scope) -> None:
+        """Record the element kind of a returned container onto the enclosing
+        function's signature, when the signature has none.
+
+        The pre-passes that infer return types run before any body is checked,
+        so they can only read kinds off literals. HERE the full scope is
+        available -- a local list built by appends of arbitrary expressions has
+        a known element kind by the time its `return` is reached. Nothing else
+        about the signature is touched, and a signature that already knows its
+        element kind is left alone.
+        """
+        _fn_name = self.in_function
+        if _fn_name is None:
+            return
+        _sig = self.funcs.get(_fn_name)
+        if _sig is None and "__" in _fn_name:
+            _cls_part, _, _m_part = _fn_name.rpartition("__")
+            _cs = self.classes.get(_cls_part)
+            if _cs is not None:
+                _sig = _cs.methods.get(_m_part)
+        if _sig is None:
+            return
+        _rt = getattr(_sig, "ret_type", None)
+        if not (isinstance(_rt, tuple) and _rt and _rt[0] == "list"):
+            return
+        if _rt[1] not in (None, "any", "int"):
+            return  # already knows something concrete
+        if A.expr_type(value) != "list":
+            return
+        _el = self._list_el_type(value, scope)
+        if _el in ("", "int", "any", "?"):
+            return
+        _sig.ret_type = ("list", _el, _rt[2] if len(_rt) > 2 else None)
+        if _el == "tuple":
+            _slots = self._list_el_tuple_types(value, scope)
+            if _slots:
+                _sig.ret_list_tuple_types = list(_slots)
+
+    def _restamp_module_call_types(self) -> None:
+        """Re-stamp element kinds onto module-body call nodes after every
+        function body has been checked.
+
+        Function bodies are checked AFTER the module body -- they have to be,
+        since they read module-level globals -- so a return kind only learned
+        while checking a body arrives too late for the call sites that consumed
+        it. This walks those call nodes and copies the now-known kinds across.
+        Deliberately a RE-STAMP and not a re-check: re-checking would re-run
+        `_bind_args` over already-normalized arguments and repack a `*args`
+        list inside itself.
+        """
+        for _call in _walk_call_sites(self.mod.body):
+            _sig = self.funcs.get(_call.func)
+            if _sig is None:
+                continue
+            _rt = getattr(_sig, "ret_type", None)
+            if not (isinstance(_rt, tuple) and _rt and _rt[0] == "list"):
+                continue
+            if _rt[1] in (None, "any", "int"):
+                continue
+            if A.expr_type(_call) != "list":
+                continue
+            if getattr(_call, "list_el_type", "int") not in ("int", "any", ""):
+                continue
+            _call.list_el_type = _rt[1]  # type: ignore[attr-defined]
+            if _rt[1] == "tuple" and getattr(_sig, "ret_list_tuple_types", None):
+                _call.tuple_elem_types = list(_sig.ret_list_tuple_types)  # type: ignore
+
     def _needs_return_element_kind(self, sig) -> bool:
         """True for a signature annotated with a bare CONTAINER -- `-> list`,
         `-> dict` -- and therefore carrying no element/value kind."""
@@ -5193,6 +5260,11 @@ class SemaAnalyzer:
                 self._locked_params = set()
                 self._locally_bound = set()
 
+        # Every body has now been checked, so any return kind learned from a
+        # local's appends is available -- push it back onto the module-body call
+        # sites that were typed before those bodies ran.
+        self._restamp_module_call_types()
+
         # Raise all collected errors now that every body has been checked.
         if self._collected_errors:
             from .errors import MultiSemaError
@@ -6775,6 +6847,7 @@ class SemaAnalyzer:
                 raise SemaError("'return' outside of a function", s.pos, ErrorCode.E_RETURN_OUTSIDE_FUNC)
             if s.value is not None:
                 self._check_expr(s.value, scope)
+                self._learn_return_element_kind(s.value, scope)
             return
         if isinstance(s, A.If):
             self._check_expr(s.test, scope)

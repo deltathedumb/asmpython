@@ -2718,6 +2718,45 @@ def _value_truthy(ctx: _FuncCtx, v: IRValue) -> IRValue:
     return v
 
 
+def _value_truthy_typed(
+    ctx: _FuncCtx, v: IRValue, t: str, tag: int
+) -> IRValue:
+    """`_value_truthy` for a value whose static TYPE is known.
+
+    A str or container is falsy on its CONTENTS, not on its allocation
+    pointer: `''` is a non-NULL interned pointer, so the plain nonzero test
+    called it truthy and `'' or 'a'` evaluated to `''`. `_lower_truthy` already
+    gets this right for conditions; this is the same rule for a value that has
+    already been lowered (the operand-returning `and`/`or` path, which must not
+    evaluate its operand twice).
+    """
+    if t == "str" or t in ("list", "tuple", "dict", "set"):
+        res_ptr = ctx.ensure_slot(f"__vtruthy_{tag}", I64)
+        zero = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero, [0]))
+        ctx.emit(IRInstr("store", None, [zero, res_ptr]))
+        nonnull_b = ctx.new_block(f"vtruthynn{tag}")
+        end_b = ctx.new_block(f"vtruthyend{tag}")
+        # Keep the NULL check: an Optional value must not be dereferenced.
+        ctx.emit(IRInstr("br.t", None, [v, nonnull_b.label, end_b.label]))
+        ctx.switch_to(nonnull_b)
+        if t == "str":
+            payload = ctx.tmp(I64)
+            ctx.emit(IRInstr("call", payload, ["strlen", v]))
+        else:
+            len_ptr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", len_ptr, [v, _LIST_LEN_OFF]))
+            payload = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", payload, [len_ptr]))
+        ctx.emit(IRInstr("store", None, [payload, res_ptr]))
+        ctx.emit(IRInstr("br", None, [end_b.label]))
+        ctx.switch_to(end_b)
+        out = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", out, [res_ptr]))
+        return out
+    return _value_truthy(ctx, v)
+
+
 def _lower_truthy(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     """Lower `e` then convert its value to truthy I64 -- see
     `_value_truthy`. Use this (not `_value_truthy` directly) whenever `e`
@@ -6702,7 +6741,7 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ptr = ctx.ensure_slot(tmp_name, res_ty)
         left_v = _lower_expr(ctx, e.left)
         ctx.emit(IRInstr("store", None, [left_v, ptr]))
-        cond = _value_truthy(ctx, left_v)
+        cond = _value_truthy_typed(ctx, left_v, A.expr_type(e.left), id(e))
 
         rhs_b = ctx.new_block("boolrhs")
         merge_b = ctx.new_block("boolend")
