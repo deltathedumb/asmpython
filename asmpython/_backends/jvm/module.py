@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .classfile import CLASS_VERSION_MAJOR, ClassBuilder
+from .classfile import ACC_FINAL, ACC_PUBLIC, CLASS_VERSION_MAJOR, ClassBuilder
 from .codegen import (
     DEFAULT_RUNTIME,
     FunctionEmitter,
@@ -20,18 +20,36 @@ from .codegen import (
 
 DEFAULT_CLASS = "asmpython/jvm/Program"
 
+ALOAD_0 = 0x2A
+INVOKESPECIAL = 0xB7
+
 
 def compile_module(ir_module, class_name: str = DEFAULT_CLASS,
                    class_version: int = CLASS_VERSION_MAJOR,
-                   runtime: str = DEFAULT_RUNTIME) -> bytes:
+                   runtime: str = DEFAULT_RUNTIME,
+                   annotations: "list[tuple[str, dict]] | None" = None,
+                   instantiate: bool = False,
+                   runtime_package: str = "asmpython/jvm") -> bytes:
     """Emit one class containing every function in the module.
 
     Data-section globals become ``static long`` fields holding heap addresses.
     A generated ``<clinit>`` writes each global's bytes into the runtime heap
     at class-initialisation time and stores the address, so ``global_addr``
     lowers to a plain ``getstatic``.
+
+    `annotations` and `instantiate` exist for frameworks that discover and load
+    a class rather than being called by it -- a plugin loader that scans for an
+    annotation and then constructs what it finds. Both are described entirely
+    by the caller: this backend emits what it is told to and knows nothing
+    about any particular framework.
     """
     cls = ClassBuilder(class_name, class_version=class_version)
+    for descriptor, elements in annotations or []:
+        cls.annotate(descriptor, **elements)
+    if instantiate:
+        # A framework that constructs the class cannot construct a final one
+        # with no constructor.
+        cls.access &= ~ACC_FINAL
     function_names = {f.name for f in ir_module.funcs}
     FunctionEmitter.cls_functions = {f.name: f for f in ir_module.funcs}
     # try/except landing sites are identified by an id that must be unique
@@ -50,11 +68,43 @@ def compile_module(ir_module, class_name: str = DEFAULT_CLASS,
     runtime_globals: list[str] = []
     for func in ir_module.funcs:
         FunctionEmitter(cls, func, class_name, globals_map, runtime,
-                        runtime_globals).emit()
+                        runtime_globals, runtime_package).emit()
 
     _emit_clinit(cls, ir_module, class_name, globals_map, runtime_globals, runtime)
     _emit_main(cls, class_name, function_names)
+    if instantiate:
+        _emit_constructor(cls, class_name, function_names)
     return cls.serialize()
+
+
+def _entry_name(function_names: set) -> "str | None":
+    """The module's entry point, whatever the frontend called it."""
+    for candidate in ("main", "__asmpy_module_init", "__asmpy_main"):
+        if candidate in function_names:
+            return candidate
+    return None
+
+
+def _emit_constructor(cls, class_name: str, function_names: set) -> None:
+    """A public no-arg constructor that runs the module entry.
+
+    For frameworks that load a class by instantiating it, where `main` is never
+    called. Running the entry from the constructor is what makes "the framework
+    made an instance" and "the Python module body ran" the same event.
+    """
+    method = cls.method("<init>", "()V", access=ACC_PUBLIC)
+    method.u1(ALOAD_0)
+    method.u1(INVOKESPECIAL)
+    method.u2(method.pool.methodref("java/lang/Object", "<init>", "()V"))
+
+    entry = _entry_name(function_names)
+    if entry is not None:
+        method.u1(INVOKESTATIC)
+        method.u2(method.pool.methodref(class_name, _java_name(entry), "()J"))
+        method.u1(POP2)
+    method.u1(RETURN)
+    method.max_locals = 1
+    method.max_stack = 4
 
 
 def _global_bytes(global_) -> bytes:
@@ -129,12 +179,7 @@ def _emit_clinit(cls, ir_module, class_name: str, globals_map: dict,
 
 def _emit_main(cls, class_name: str, function_names: set) -> None:
     """A `public static void main(String[])` that calls the module entry."""
-    entry = "main" if "main" in function_names else None
-    if entry is None:
-        for candidate in ("__asmpy_module_init", "__asmpy_main"):
-            if candidate in function_names:
-                entry = candidate
-                break
+    entry = _entry_name(function_names)
     method = cls.method("main", "([Ljava/lang/String;)V")
     if entry is not None:
         method.u1(INVOKESTATIC)

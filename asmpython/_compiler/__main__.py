@@ -379,6 +379,39 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         "(default: javac on PATH).",
     )
     build_grp.add_argument(
+        "--jvm-annotation",
+        action="append",
+        default=[],
+        metavar="ANNOTATION",
+        help="JVM backend: add a runtime-visible class annotation to the "
+        "generated class, e.g. com.example.Plugin(value=demo). Repeatable. "
+        "Lets a framework that discovers classes by annotation find one "
+        "asmpython generated.",
+    )
+    build_grp.add_argument(
+        "--jvm-resource",
+        action="append",
+        default=[],
+        metavar="PATH=FILE",
+        help="JVM backend: add a file to the output jar at PATH. Repeatable. "
+        "For the descriptor or metadata a host expects alongside the classes.",
+    )
+    build_grp.add_argument(
+        "--jvm-instantiate",
+        action="store_true",
+        help="JVM backend: also emit a public no-arg constructor that runs the "
+        "module body, for frameworks that load a class by constructing it.",
+    )
+    build_grp.add_argument(
+        "--jvm-runtime-package",
+        default="",
+        metavar="PACKAGE",
+        help="JVM backend: package to compile the bundled runtime into "
+        "(default asmpython.jvm). Two jars carrying it under the same package "
+        "are a split package the module system rejects, so relocate it when a "
+        "host may load more than one compiled jar.",
+    )
+    build_grp.add_argument(
         "--class-version",
         default="",
         metavar="N",

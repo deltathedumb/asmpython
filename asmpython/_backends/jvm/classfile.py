@@ -316,6 +316,14 @@ class ClassBuilder:
         self.class_version = class_version
         self.methods: list[MethodBuilder] = []
         self.fields: list[tuple[str, str]] = []
+        # Class-level annotations, as (descriptor, {element: string value}).
+        # Only String elements: that covers the marker annotations a framework
+        # uses to FIND a class (`@Mod("id")`), which is the reason a generated
+        # class needs any annotation at all.
+        self.annotations: list[tuple[str, dict]] = []
+        # Cleared when a class needs a subclass or an instance; a generated
+        # program is final and abstract-free by default.
+        self.access = ACC_PUBLIC | ACC_SUPER | ACC_FINAL
 
     @property
     def needs_stack_map(self) -> bool:
@@ -323,6 +331,30 @@ class ClassBuilder:
 
     def add_field(self, name: str, descriptor: str) -> None:
         self.fields.append((name, descriptor))
+
+    def annotate(self, descriptor: str, **elements: str) -> None:
+        """Add a runtime-visible class annotation, e.g.
+
+            cls.annotate("Lnet/neoforged/fml/common/Mod;", value="examplemod")
+
+        Runtime-VISIBLE specifically: a mod loader finds its entry point by
+        reflecting over annotations at load time, and an invisible one is not
+        there to be found.
+        """
+        self.annotations.append((descriptor, dict(elements)))
+
+    def _annotations_attribute(self) -> bytes:
+        """The RuntimeVisibleAnnotations attribute, or empty if there are none."""
+        if not self.annotations:
+            return b""
+        body = struct.pack(">H", len(self.annotations))
+        for descriptor, elements in self.annotations:
+            body += struct.pack(">HH", self.pool.utf8(descriptor), len(elements))
+            for name, value in elements.items():
+                body += struct.pack(">H", self.pool.utf8(name))
+                body += b"s" + struct.pack(">H", self.pool.utf8(str(value)))
+        return struct.pack(">HI", self.pool.utf8("RuntimeVisibleAnnotations"),
+                           len(body)) + body
 
     def method(self, name: str, descriptor: str,
                access: int = ACC_PUBLIC | ACC_STATIC) -> MethodBuilder:
@@ -341,15 +373,18 @@ class ClassBuilder:
                 ">HHHH", ACC_PUBLIC | ACC_STATIC, self.pool.utf8(name),
                 self.pool.utf8(descriptor), 0,
             )
+        # Annotations are built before the pool is written for the same reason
+        # method bodies are: they intern strings into it.
+        annotations = self._annotations_attribute()
         this_class = self.pool.class_ref(self.internal_name)
         super_class = self.pool.class_ref(self.superclass)
 
         out = b"\xca\xfe\xba\xbe"
         out += struct.pack(">HH", CLASS_VERSION_MINOR, self.class_version)
         out += self.pool.serialize()
-        out += struct.pack(">HHH", ACC_PUBLIC | ACC_SUPER | ACC_FINAL, this_class, super_class)
+        out += struct.pack(">HHH", self.access, this_class, super_class)
         out += struct.pack(">H", 0)  # interfaces
         out += struct.pack(">H", len(self.fields)) + field_bytes
         out += struct.pack(">H", len(self.methods)) + method_bytes
-        out += struct.pack(">H", 0)  # class attributes
+        out += struct.pack(">H", 1 if annotations else 0) + annotations
         return out

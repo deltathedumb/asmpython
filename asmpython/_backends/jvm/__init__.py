@@ -29,6 +29,25 @@ Status: scalars, control flow, calls, strings, lists, dicts, classes and
 exceptions all match CPython (`tests/jvm_differential.py`, which diffs against
 CPython rather than against the x86-64 backend, since two backends agreeing is
 also what being wrong the same way looks like).
+
+Loadable by a host
+------------------
+A jar is often not just run but *loaded* -- by a plugin system, a mod loader, a
+container -- which finds a class, checks its annotations, and constructs it.
+Four options shape the jar for that, and none of them names a particular
+framework: this backend emits what it is told to.
+
+    --jvm-class NAME             the generated class's name
+    --jvm-annotation A(k=v)      a runtime-visible class annotation
+    --jvm-instantiate            a public no-arg constructor running the module
+    --jvm-resource PATH=FILE     a file to carry in the jar
+    --jvm-runtime-package PKG    where the bundled runtime is compiled to
+
+The last one matters more than it looks. Two jars carrying the runtime under
+the same package are a SPLIT PACKAGE, which the module system rejects outright,
+so two independently compiled programs could not be loaded side by side.
+Relocating gives each its own copy, which is what makes a self-contained jar
+actually self-contained.
 """
 
 from __future__ import annotations
@@ -77,6 +96,33 @@ requested_args: list[dict] = [
         "type": str,
     },
     {
+        "name": "--jvm-annotation",
+        "help": "Add a runtime-visible class annotation to the generated class, "
+                "e.g. com.example.Plugin(value=demo). Repeatable.",
+        "default": "",
+        "type": str,
+    },
+    {
+        "name": "--jvm-resource",
+        "help": "Add a file to the output jar: ARCHIVE_PATH=FILE. Repeatable.",
+        "default": "",
+        "type": str,
+    },
+    {
+        "name": "--jvm-instantiate",
+        "help": "Also emit a public no-arg constructor that runs the module body, "
+                "for frameworks that load a class by constructing it.",
+        "default": False,
+        "type": bool,
+    },
+    {
+        "name": "--jvm-runtime-package",
+        "help": "Package to compile the bundled runtime into (default asmpython.jvm). "
+                "Relocate it so two compiled jars can be loaded side by side.",
+        "default": "",
+        "type": str,
+    },
+    {
         "name": "--java-version",
         "help": "Target Java release (e.g. 8, 17, 21) — emits the highest "
                 "class-file version that release produces",
@@ -92,8 +138,84 @@ def run_backend_codegen(ir: Any, args: dict) -> dict[str, bytes]:
     """IRModule -> the generated program class."""
     class_name = _class_name(args)
     version = resolve_class_version(args.get("class_version"), args.get("java_version"))
-    runtime = str(args.get("jvm_runtime") or DEFAULT_RUNTIME).replace(".", "/")
-    return {class_name + ".class": compile_module(ir, class_name, version, runtime)}
+    runtime = _runtime_class(args)
+    return {
+        class_name + ".class": compile_module(
+            ir, class_name, version, runtime,
+            annotations=parse_annotations(args.get("jvm_annotation")),
+            instantiate=bool(args.get("jvm_instantiate")),
+            runtime_package=runtime_package(args).replace(".", "/"),
+        )
+    }
+
+
+def parse_annotations(specs) -> "list[tuple[str, dict]]":
+    """Parse `--jvm-annotation` values into (descriptor, elements) pairs.
+
+    Written Java-side-up rather than as a class-file descriptor, because the
+    person passing it is reading a framework's documentation, not the JVM spec:
+
+        com.example.Plugin
+        com.example.Plugin(value=demo)
+        com.example.Plugin(value=demo, category=tools)
+
+    Only String elements. That covers the marker annotations a loader scans for
+    to FIND a class, which is the reason a generated class needs one at all;
+    anything richer is better served by a hand-written Java class.
+    """
+    parsed: list[tuple[str, dict]] = []
+    for spec in _as_list(specs):
+        text = str(spec).strip()
+        if not text:
+            continue
+        elements: dict[str, str] = {}
+        if text.endswith(")") and "(" in text:
+            name, _, argument = text[:-1].partition("(")
+            for pair in argument.split(","):
+                if not pair.strip():
+                    continue
+                key, sep, value = pair.partition("=")
+                if not sep:
+                    raise ValueError(
+                        f"--jvm-annotation {text!r}: element {pair.strip()!r} needs a "
+                        "key=value form"
+                    )
+                elements[key.strip()] = value.strip().strip("'\"")
+        else:
+            name = text
+        parsed.append(("L" + name.strip().replace(".", "/") + ";", elements))
+    return parsed
+
+
+def parse_resources(specs) -> "dict[str, bytes]":
+    """Parse `--jvm-resource ARCHIVE_PATH=FILE` into jar entries.
+
+    A jar is often only loadable when it also carries metadata a framework
+    reads -- a descriptor, a service file, a manifest of its own. Naming the
+    archive path explicitly keeps that the caller's decision rather than a
+    layout this backend invents.
+    """
+    entries: dict[str, bytes] = {}
+    for spec in _as_list(specs):
+        text = str(spec).strip()
+        if not text:
+            continue
+        archive_path, sep, source = text.partition("=")
+        if not sep:
+            raise ValueError(
+                f"--jvm-resource {text!r}: expected ARCHIVE_PATH=FILE"
+            )
+        path = Path(source.strip())
+        if not path.is_file():
+            raise FileNotFoundError(f"--jvm-resource {text!r}: no such file: {path}")
+        entries[archive_path.strip().replace("\\", "/")] = path.read_bytes()
+    return entries
+
+
+def _as_list(value) -> list:
+    if value is None or value == "":
+        return []
+    return list(value) if isinstance(value, (list, tuple)) else [value]
 
 
 def run_backend_link(objects: list[bytes], args: dict) -> dict[str, bytes]:
@@ -106,7 +228,7 @@ def run_backend_link(objects: list[bytes], args: dict) -> dict[str, bytes]:
     class_name = _class_name(args)
     javac = str(args.get("jvm_javac") or "javac")
     version = resolve_class_version(args.get("class_version"), args.get("java_version"))
-    runtime_classes = _build_runtime(javac, version)
+    runtime_classes = _build_runtime(javac, version, runtime_package(args))
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as jar:
@@ -120,7 +242,24 @@ def run_backend_link(objects: list[bytes], args: dict) -> dict[str, bytes]:
             jar.writestr(name, blob)
         for path, blob in runtime_classes.items():
             jar.writestr(path, blob)
+        # Last, so a caller-supplied file wins over anything generated above --
+        # including the manifest, which a framework may want to own.
+        for path, blob in parse_resources(args.get("jvm_resource")).items():
+            jar.writestr(path, blob)
     return {"program.jar": buffer.getvalue()}
+
+
+def _runtime_class(args: dict) -> str:
+    """Internal name of the class generated code calls into.
+
+    An explicit --jvm-runtime wins: that names a HOST-supplied class, which
+    this backend must not generate or relocate. Otherwise it is the bundled
+    Runtime, in whichever package it was relocated to.
+    """
+    explicit = str(args.get("jvm_runtime") or "").strip()
+    if explicit:
+        return explicit.replace(".", "/")
+    return (runtime_package(args) + ".Runtime").replace(".", "/")
 
 
 def _class_name(args: dict) -> str:
@@ -128,8 +267,24 @@ def _class_name(args: dict) -> str:
     return str(raw).replace(".", "/")
 
 
-def _build_runtime(javac: str, class_version: int) -> dict[str, bytes]:
-    """Compile Runtime.java, returning {class-file path: bytes}."""
+DEFAULT_RUNTIME_PACKAGE = "asmpython.jvm"
+
+
+def runtime_package(args: dict) -> str:
+    """The package the bundled runtime is compiled into."""
+    return str(args.get("jvm_runtime_package") or DEFAULT_RUNTIME_PACKAGE).strip()
+
+
+def _build_runtime(javac: str, class_version: int,
+                   package: str = DEFAULT_RUNTIME_PACKAGE) -> dict[str, bytes]:
+    """Compile the runtime sources, returning {class-file path: bytes}.
+
+    `package` relocates them. Two jars that each bundle the runtime under the
+    same package are a SPLIT PACKAGE, which the module system rejects outright
+    -- "Modules a and b export package asmpython.jvm" -- so two independently
+    compiled programs could not be loaded side by side. Relocating is what lets
+    each carry its own copy, which is the point of a self-contained jar.
+    """
     if shutil.which(javac) is None:
         raise RuntimeError(
             f"the JVM backend needs {javac!r} to build its runtime support class; "
@@ -138,7 +293,7 @@ def _build_runtime(javac: str, class_version: int) -> dict[str, bytes]:
     with tempfile.TemporaryDirectory() as work:
         out = Path(work) / "classes"
         out.mkdir()
-        sources = [str(p) for p in _RUNTIME_SOURCE.rglob("*.java")]
+        sources = _relocated_sources(Path(work) / "src", package)
         result = subprocess.run(
             [javac, "-nowarn", "--release", str(_java_release(class_version)),
              "-d", str(out), *sources],
@@ -151,6 +306,33 @@ def _build_runtime(javac: str, class_version: int) -> dict[str, bytes]:
         for path in out.rglob("*.class"):
             classes[str(path.relative_to(out)).replace(os.sep, "/")] = path.read_bytes()
         return classes
+
+
+def _relocated_sources(root: Path, package: str) -> "list[str]":
+    """Stage the runtime sources under `package`, returning their paths.
+
+    A textual package rewrite rather than bytecode relocation: the runtime is a
+    handful of files in ONE package that reference each other unqualified, so
+    changing the declaration is the whole job. Compiling from source is already
+    how this backend produces the runtime.
+    """
+    if package == DEFAULT_RUNTIME_PACKAGE:
+        return sorted(str(p) for p in _RUNTIME_SOURCE.rglob("*.java"))
+
+    target = root / Path(*package.split("."))
+    target.mkdir(parents=True, exist_ok=True)
+    staged: list[str] = []
+    for source in sorted(_RUNTIME_SOURCE.rglob("*.java")):
+        text = source.read_text(encoding="utf-8")
+        text = text.replace(f"package {DEFAULT_RUNTIME_PACKAGE};", f"package {package};")
+        # Fully qualified self-references appear in javadoc and in the one
+        # place a class names its own package (Runtime extends Containers is
+        # unqualified, but `asmpython.jvm.Runtime` shows up in prose).
+        text = text.replace(f"{DEFAULT_RUNTIME_PACKAGE}.", f"{package}.")
+        destination = target / source.name
+        destination.write_text(text, encoding="utf-8")
+        staged.append(str(destination))
+    return staged
 
 
 __module_backend__ = ModuleBackend(sys.modules[__name__])

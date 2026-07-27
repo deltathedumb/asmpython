@@ -65,8 +65,17 @@ POP = 0x57
 ATHROW = 0xBF
 
 # The Java class a raise arrives as. Nested in Containers, so the internal
-# name uses '$'.
-ASMPYTHON_ERROR = "asmpython/jvm/Containers$AsmPythonError"
+# name uses '$'. It follows the runtime PACKAGE rather than the runtime class:
+# a host-supplied runtime extends the bundled one, so the exception is still
+# the bundled one's.
+DEFAULT_RUNTIME_PACKAGE = "asmpython/jvm"
+
+
+def error_class(runtime_package: str = DEFAULT_RUNTIME_PACKAGE) -> str:
+    return runtime_package.replace(".", "/") + "/Containers$AsmPythonError"
+
+
+ASMPYTHON_ERROR = error_class()
 
 _ICMP_TO_BRANCH = {
     "icmp.eq": IFEQ,
@@ -104,7 +113,9 @@ class FunctionEmitter:
 
     def __init__(self, cls: ClassBuilder, func, class_name: str, globals_map: dict,
                  runtime: str = DEFAULT_RUNTIME,
-                 runtime_globals: "list | None" = None) -> None:
+                 runtime_globals: "list | None" = None,
+                 runtime_package: str = DEFAULT_RUNTIME_PACKAGE) -> None:
+        self.error_class = error_class(runtime_package)
         self.runtime = runtime
         self.cls = cls
         self.func = func
@@ -308,7 +319,7 @@ class FunctionEmitter:
 
         m = self.method
         pad = m.here()
-        m.catch(body_start, pad, pad, ASMPYTHON_ERROR)
+        m.catch(body_start, pad, pad, self.error_class)
 
         m.u1(POP)                                   # the exception; globals carry it
 
