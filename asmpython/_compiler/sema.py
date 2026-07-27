@@ -9483,6 +9483,15 @@ class SemaAnalyzer:
                     if e.args:
                         raise SemaError("dict.clear() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "int"
+                elif e.method == "popitem":
+                    # d.popitem() -> removes and returns a (key, value) pair.
+                    if e.args:
+                        raise SemaError(
+                            "dict.popitem() takes no arguments", e.pos,
+                            ErrorCode.E_ARG_COUNT,
+                        )
+                    e.inferred_type = "tuple"
+                    e.tuple_elem_types = ["str", self._dict_value_type(e.obj, scope)]
                 elif e.method == "copy":
                     if e.args:
                         raise SemaError("dict.copy() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)

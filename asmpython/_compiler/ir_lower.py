@@ -8816,6 +8816,38 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 final_out = ctx.tmp(PTR)
                 ctx.emit(IRInstr("load", final_out, [out_ptr]))
                 return final_out
+            if e.method == "popitem" and not e.args:
+                # d.popitem() -> remove and return a (key, value) pair. CPython
+                # pops the LAST inserted entry, which is the last key
+                # `_abi_dict_keys` reports (insertion order is preserved).
+                # The value moves as raw bits for the same reason items() does:
+                # the pair cell is a raw 8-byte slot and its kind is static.
+                obj_v = _lower_expr(ctx, e.obj)
+                pk_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", pk_v, ["_abi_dict_keys", obj_v]))
+                pl_addr = ctx.tmp(PTR)
+                ctx.emit(IRInstr("gep", pl_addr, [pk_v, _LIST_LEN_OFF]))
+                pl_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", pl_v, [pl_addr]))
+                p1_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", p1_v, [1]))
+                plast_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("isub", plast_v, [pl_v, p1_v]))
+                pkaddr = _list_elem_addr(ctx, pk_v, plast_v)
+                pkey_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", pkey_v, [pkaddr]))
+                pz_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", pz_v, [0]))
+                pval_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", pval_v, ["_abi_dict_get_default", obj_v, pkey_v, pz_v]))
+                ctx.emit(IRInstr("call", None, ["_abi_dict_pop", obj_v, pkey_v]))
+                pcap_v = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", pcap_v, [2]))
+                ppair_v = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", ppair_v, ["_abi_new_list", pcap_v]))
+                ctx.emit(IRInstr("call", None, ["_abi_list_append", ppair_v, pkey_v]))
+                ctx.emit(IRInstr("call", None, ["_abi_list_append", ppair_v, pval_v]))
+                return ppair_v
             if e.method == "items" and not e.args:
                 obj_v = _lower_expr(ctx, e.obj)
                 keys_v = ctx.tmp(PTR)
