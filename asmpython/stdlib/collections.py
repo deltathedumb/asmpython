@@ -295,27 +295,41 @@ class Counter:
 class defaultdict:
     """dict that auto-initialises missing keys.
 
-    Pass a type-name string as the default_factory:
-      "list"  -> default value is []
-      "int"   -> default value is 0
-      "str"   -> default value is ""
-      "set"   -> default value is set()
-      "dict"  -> default value is {}
+    Takes the same argument CPython does -- the TYPE itself:
 
-    This replaces CPython's callable default_factory since asmpython does not
-    support storing arbitrary callables in instance fields.
+        defaultdict(int)   -> missing keys default to 0
+        defaultdict(list)  -> to []
+        defaultdict(str)   -> to ""
+        defaultdict(set)   -> to set()
+        defaultdict(dict)  -> to {}
+
+    A bare type name is a first-class value in asmpython (it loads the type's
+    RTTI id), and two type values compare equal exactly when they name the same
+    type -- so the factory is stored and dispatched directly, with no
+    string-name stand-in. The previous signature took a type-NAME STRING, so
+    the CPython spelling `defaultdict(int)` passed a type id into a str-typed
+    field and every `f == "list"` compared that id against a string POINTER,
+    which segfaulted.
+
+    A type-name string is still accepted, so existing callers keep working.
     """
 
-    def __init__(self, default_factory: str = "") -> None:
+    def __init__(self, default_factory: object = 0) -> None:
         self._data: dict = {}
         self.default_factory = default_factory
 
     def _make_default(self) -> object:
         f = self.default_factory
+        if f == list:
+            return []
+        if f == int:
+            return 0
+        if f == str:
+            return ""
+        if f == dict:
+            return {}
         if f == "list":
             return []
-        if f == "int":
-            return 0
         if f == "str":
             return ""
         if f == "dict":
@@ -324,7 +338,7 @@ class defaultdict:
 
     def __getitem__(self, key: str) -> object:
         if key not in self._data:
-            if self.default_factory == "":
+            if self.default_factory == 0:
                 raise KeyError(key)
             self._data[key] = self._make_default()
         return self._data[key]
@@ -344,7 +358,10 @@ class defaultdict:
     def values(self) -> list:
         return list(self._data.values())
 
-    def items(self) -> list:
+    def items(self) -> list[tuple]:
+        # `list[tuple]`, not a bare `list`: a mapping's items are always
+        # pairs, and the shape has to survive the annotation or a caller's
+        # `sorted(d.items())` reprs them as raw pointers.
         return list(self._data.items())
 
     def pop(self, key: str, default: object = 0) -> object:
@@ -394,7 +411,10 @@ class OrderedDict:
     def values(self) -> list:
         return list(self._data.values())
 
-    def items(self) -> list:
+    def items(self) -> list[tuple]:
+        # `list[tuple]`, not a bare `list`: a mapping's items are always
+        # pairs, and the shape has to survive the annotation or a caller's
+        # `sorted(d.items())` reprs them as raw pointers.
         return list(self._data.items())
 
     def pop(self, key: str, default: object = 0) -> object:
@@ -532,7 +552,10 @@ class UserDict:
     def values(self) -> list:
         return self.data.values()
 
-    def items(self) -> list:
+    def items(self) -> list[tuple]:
+        # `list[tuple]`, not a bare `list`: a mapping's items are always
+        # pairs, and the shape has to survive the annotation or a caller's
+        # `sorted(d.items())` reprs them as raw pointers.
         return self.data.items()
 
     def update(self, other: dict = {}) -> None:
