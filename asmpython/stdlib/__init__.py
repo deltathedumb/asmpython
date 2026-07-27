@@ -98,7 +98,6 @@ from ._gui_ttf      import BINDINGS as _TTF_BINDINGS           # noqa: E402
 from ._audio_sdl    import BINDINGS as _AUDIO_BINDINGS         # noqa: E402
 from .network       import BINDINGS as _NETWORK_BINDINGS       # noqa: E402
 from .hardware      import BINDINGS as _HARDWARE_BINDINGS      # noqa: E402
-from .mcjvm         import BINDINGS as _MCJVM_BINDINGS         # noqa: E402
 
 STDLIB_BINDINGS: dict[str, dict] = {
     "math":          _MATH_BINDINGS,
@@ -113,5 +112,31 @@ STDLIB_BINDINGS: dict[str, dict] = {
     "_audio_sdl":    _AUDIO_BINDINGS,
     "network":       _NETWORK_BINDINGS,
     "hardware":      _HARDWARE_BINDINGS,
-    "mcjvm":         _MCJVM_BINDINGS,
 }
+
+
+def register_bindings(module: str, bindings: dict, *, replace: bool = False) -> None:
+    """Contribute an FFI binding module from outside this package.
+
+    A BACKEND is the expected caller. Its intrinsics are its own business --
+    calling Java is meaningful to the JVM backend and meaningless to x86-64 --
+    so the module that declares them belongs next to the backend, not in this
+    package. What lives here is the registry, which knows nothing about who
+    fills it.
+
+    `_backends/arm64/source_build.py` already swaps `math` for an arm64 build
+    by assigning into STDLIB_BINDINGS directly; this is the same move with a
+    name, so a backend adding a module does not have to reach into a dict and
+    hope about ordering.
+
+    Registering the same name twice is refused unless `replace` says so: two
+    backends silently fighting over one module name is a bug that would only
+    surface as the wrong symbol being called.
+    """
+    existing = STDLIB_BINDINGS.get(module)
+    if existing is not None and existing is not bindings and not replace:
+        raise ValueError(
+            f"binding module {module!r} is already registered; "
+            "pass replace=True to override it deliberately"
+        )
+    STDLIB_BINDINGS[module] = bindings

@@ -67,6 +67,11 @@ from ..._compiler.ir import ModuleBackend
 from .classfile import resolve_class_version
 from .codegen import DEFAULT_RUNTIME
 from .module import DEFAULT_CLASS, compile_module
+from . import bindings as _bindings
+
+# `import java` only means something when this backend is in play, so the
+# module is contributed by the backend rather than shipped in the core stdlib.
+_bindings.install()
 
 production_suitable = False
 # This backend packages its own jar in run_backend_link, so no external linker

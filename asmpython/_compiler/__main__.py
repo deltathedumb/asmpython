@@ -403,6 +403,16 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         "module body, for frameworks that load a class by constructing it.",
     )
     build_grp.add_argument(
+        "--bindings",
+        action="append",
+        default=[],
+        metavar="MODULE",
+        help="load a Python file declaring BINDINGS and register it as an "
+        "importable FFI module (NAME=FILE, or FILE to use its stem). "
+        "Repeatable. For a host exposing its own API to compiled code, so "
+        "such a module does not have to live in asmpython's stdlib.",
+    )
+    build_grp.add_argument(
         "--jvm-runtime-package",
         default="",
         metavar="PACKAGE",
@@ -869,6 +879,44 @@ def _resolve_linker_flag(value: "str | None") -> "str | None":
     return value
 
 
+def _load_binding_modules(specs: "list[str]") -> None:
+    """Register host-supplied FFI modules named by `--bindings`.
+
+    A host that exposes an API to compiled code needs a module describing it,
+    and that module is the HOST's -- it belongs beside the host, not in
+    asmpython's stdlib. Loading one here is what lets that be true; without it
+    the only place such a module can live is inside this package, which is how
+    a Minecraft binding once ended up shipped with the compiler.
+    """
+    import importlib.util
+
+    from ..stdlib import register_bindings
+
+    for spec in specs or []:
+        text = str(spec).strip()
+        if not text:
+            continue
+        name, sep, source = text.partition("=")
+        if not sep:
+            source, name = text, Path(text).stem
+        path = Path(source).expanduser()
+        if not path.is_file():
+            raise SystemExit(f"asmpython: --bindings: no such file: {path}")
+
+        spec_obj = importlib.util.spec_from_file_location(f"_asmpy_bindings_{name}", path)
+        if spec_obj is None or spec_obj.loader is None:
+            raise SystemExit(f"asmpython: --bindings: cannot load {path}")
+        module = importlib.util.module_from_spec(spec_obj)
+        spec_obj.loader.exec_module(module)
+
+        bindings = getattr(module, "BINDINGS", None)
+        if not isinstance(bindings, dict):
+            raise SystemExit(
+                f"asmpython: --bindings: {path} defines no BINDINGS dict"
+            )
+        register_bindings(name.strip(), bindings, replace=True)
+
+
 def _backend_args(args: argparse.Namespace, backend_name: str) -> dict:
     """The backend-specific options to hand the selected backend.
 
@@ -904,6 +952,10 @@ def _backend_args(args: argparse.Namespace, backend_name: str) -> dict:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
+    # Before anything resolves imports: a host-supplied module has to be
+    # registered for `import <name>` in the source to find it.
+    _load_binding_modules(getattr(args, "bindings", []))
+
     # Informational: `--passes help` lists the registry and exits, so it works
     # without a source file.
     if args.passes and args.passes.strip() == "help":

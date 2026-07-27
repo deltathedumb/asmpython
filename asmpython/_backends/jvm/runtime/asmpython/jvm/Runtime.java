@@ -4,8 +4,9 @@ import java.io.PrintStream;
 
 /**
  * Runtime support for asmpython's JVM backend: strings, formatting and output,
- * on top of {@link Containers} (lists, dicts, boxes) and {@link Memory} (the
- * flat heap that makes all of it addressable).
+ * on top of {@link Java} (calling ordinary Java), {@link Containers} (lists,
+ * dicts, boxes) and {@link Memory} (the flat heap that makes all of it
+ * addressable).
  *
  * <p>Every method the generated code calls resolves here, because unresolved IR
  * calls lower to {@code invokestatic Runtime.<name>} — and {@code invokestatic}
@@ -17,7 +18,7 @@ import java.io.PrintStream;
  * pointing at the subclass. The generated code then links against one class and
  * gets both the memory primitives and the host API.
  */
-public class Runtime extends Containers {
+public class Runtime extends Java {
 
     private static final PrintStream OUT = System.out;
 
