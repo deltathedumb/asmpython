@@ -103,6 +103,7 @@ BINDINGS: dict = {
 # attach a constant, and no reason to know one is needed. The backend splits it
 # back out at codegen (see codegen.emit_call).
 NEW_PREFIX = "__jvm_new$"
+CLASS_PREFIX = "__jvm_class$"
 
 
 class JavaPackage(dict):
@@ -132,11 +133,17 @@ class JavaPackage(dict):
     def __getitem__(self, attribute):
         if attribute not in self:
             raise KeyError(attribute)
-        # Zero-arg construction. A constructor taking arguments still needs
-        # java.jnew_s / jnew_i, because a Func declares one fixed arity and
-        # this mapping cannot know the class's constructors without loading it.
+        # Two symbols, because reading a class and calling it differ: `Gson =
+        # gson.Gson` wants the class, `gson.Gson()` wants an instance.
+        #
+        # Variadic: a class's constructors are not knowable without loading
+        # it, and loading eagerly would turn an unused import into a build
+        # failure. The backend marshals whatever arguments appear.
+        full = self._class_name(attribute)
         return Func(arg_types=(), ret_type="int",
-                    c_name=NEW_PREFIX + self._class_name(attribute))
+                    c_name=NEW_PREFIX + full,
+                    read_c_name=CLASS_PREFIX + full,
+                    variadic=True)
 
     def get(self, attribute, default=None):
         return self[attribute] if attribute in self else default

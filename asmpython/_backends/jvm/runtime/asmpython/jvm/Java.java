@@ -685,6 +685,23 @@ public class Java extends Containers {
         return construct(jclass_named(className), NONE);
     }
 
+    /**
+     * Construct by name with any number of arguments.
+     *
+     * <p>One entry point for every arity, because a Java constructor's
+     * signature is not knowable when the Python is compiled. `kinds` says how
+     * to read each word -- 1 for a string address, 0 for a number -- since a
+     * word alone cannot say.
+     */
+    public static long jnew_named_v(String className, long[] words, long[] kinds) {
+        Object[] arguments = new Object[words.length];
+        for (int i = 0; i < words.length; i++) {
+            arguments[i] = kinds[i] == KIND_STRING ? readString(words[i])
+                                                   : Long.valueOf(words[i]);
+        }
+        return construct(jclass_named(className), arguments);
+    }
+
     public static long jnew_named_s(String className, long a) {
         return construct(jclass_named(className), new Object[]{readString(a)});
     }

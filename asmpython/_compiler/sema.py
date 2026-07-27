@@ -957,6 +957,10 @@ class SemaAnalyzer:
         # Imported FFI: bindings either bound under a module prefix or
         # lifted directly into the namespace via from-import.
         self.imported_modules: dict[str, dict] = {}
+        # Imports that resolved to nothing. Kept so that CALLING through one
+        # can be reported: such a call compiles to nothing at all, and the
+        # program then runs and quietly does less than it says.
+        self.unresolved_modules: dict[str, str] = {}
         self.ffi_funcs: dict[str, stdlib.Func] = {}
         self.ffi_consts: dict[str, stdlib.Const] = {}
         # asmpython.mlang support: uid (str(id(assign_stmt))) -> the
@@ -7403,6 +7407,7 @@ class SemaAnalyzer:
                 # standard CPython modules can still be checked. The name
                 # becomes a dummy in scope; any subsequent `x.attr` lookup
                 # will still error at the attribute resolution step.
+                self.unresolved_modules[bind_name] = _im_module
                 scope.add(bind_name, "module")
                 return
             self.imported_modules[bind_name] = bindings
@@ -10003,6 +10008,23 @@ class SemaAnalyzer:
                 e.inferred_type = sig.ret_type
                 e._mlang_call = True  # type: ignore[attr-defined]
                 return
+            # `com.google.gson.Gson()` reaches here with an attribute CHAIN
+            # as its object, not a bare name, so the root has to be walked to.
+            _root = e.obj
+            while isinstance(_root, A.Attr):
+                _root = _root.obj
+            if (isinstance(_root, A.Name)
+                    and _root.name in self.unresolved_modules
+                    and _root.name not in self.imported_modules):
+                module = self.unresolved_modules[_root.name]
+                raise SemaError(
+                    f"cannot call {_root.name}....{e.method}(): no module "
+                    f"{module!r} is available. An import that resolves to "
+                    "nothing compiles to nothing, so this call would silently "
+                    "do nothing at run time.",
+                    e.pos,
+                    ErrorCode.E_NO_SUCH_MODULE,
+                )
             # Module function call: math.sqrt(x), math.pow(a, b).
             if isinstance(e.obj, A.Name) and e.obj.name in self.imported_modules:
                 # os.getcwd() / os.listdir(path): inline codegen helpers not in
@@ -11838,6 +11860,12 @@ class SemaAnalyzer:
                         args.append(A.IntLit(value=_dv, pos=pos))
                     else:
                         args.append(A.StrLit(value=str(_dv), pos=pos))
+        if getattr(fn, "variadic", False):
+            # Arity and types are the backend's to interpret; all sema can do
+            # here is make sure each argument itself checks out.
+            for a in args:
+                self._check_expr(a, scope)
+            return
         if len(args) != len(_fn_arg_types):
             raise SemaError(
                 f"{label}() takes {len(_fn_arg_types)} argument(s), got {len(args)}",

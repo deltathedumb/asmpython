@@ -11138,6 +11138,16 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             # output, so unconditionally prefer it when present, matching
             # target_windows.py's `_platform_const_value`).
             b = ctx.mctx.imported_modules[e.obj.name].get(e.name)
+            # A binding that means something different when READ than when
+            # called (`read_c_name`) resolves by calling that symbol. Without
+            # this a bare `mod.Thing` falls through to the instance-attribute
+            # fallback and reads the module name as a pointer, which is not a
+            # miscompile so much as a segfault waiting for a caller.
+            read_symbol = getattr(b, "read_c_name", None) if b is not None else None
+            if read_symbol:
+                v = ctx.tmp(I64)
+                ctx.emit(IRInstr("call", v, [read_symbol]))
+                return v
             if b is not None and not hasattr(b, "arg_types"):  # a Const, not a Func
                 value = getattr(b, "value_windows", None)
                 if value is None:

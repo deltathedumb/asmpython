@@ -38,6 +38,23 @@ class Func:
     # the high half), corrupting any heap address that doesn't happen to
     # fit and round-trip through a signed 32-bit value -- which most don't.
     ret_conv: str | None = None
+    # Symbol to call when the name is READ rather than called.
+    #
+    # `x = mod.Thing` and `mod.Thing()` can mean different things: the first
+    # wants the thing itself, the second wants the result of using it. A Java
+    # class is the motivating case -- reading it should give the class, calling
+    # it should construct an instance -- and no single symbol can serve both.
+    #
+    # Left None by every ordinary binding, where reading a function name is
+    # meaningless anyway.
+    read_c_name: str | None = None
+    # Accepts any number of arguments of any type.
+    #
+    # For a foreign callee whose real signature is not knowable at compile
+    # time -- a Java constructor, say, where finding the arity would mean
+    # loading the class and turning an unused import into a build failure.
+    # The backend sees the actual arguments and decides what to emit.
+    variadic: bool = False
     # Trailing default argument VALUES, so a short call is padded rather than
     # rejected. An FFI binding declares a fixed C arity, but the CPython
     # function it stands in for very often has optional tail parameters

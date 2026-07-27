@@ -43,23 +43,37 @@ Java; `import java.com.google.gson` is a subpath of a module that is already
 registered, so the rule names no namespace at all — whoever registered the
 prefix decides.
 
-A class attribute becomes a zero-argument constructor whose symbol carries the
-class name (`__jvm_new$com.google.gson.Gson`), because the frontend emits
-`call <name>` and has no way to attach a constant to a call. The backend splits
-it back out at codegen. All the Java knowledge is on the backend side of that
-symbol.
+A class attribute becomes a constructor whose symbol carries the class name
+(`__jvm_new$com.google.gson.Gson`), because the frontend emits `call <name>`
+and has no way to attach a constant to a call. Reading the name rather than
+calling it resolves a second symbol (`__jvm_class$…`) instead. The backend
+splits both back out at codegen, so all the Java knowledge is on its side of
+that string.
 
-### What the sugar does not cover
+### Bare references and constructor arguments
 
-- **A bare class reference.** `Gson = gson.Gson` does not work; only
-  `gson.Gson()`. A class handle is obtained at runtime, and a bare attribute
-  has no call to hang that on.
-- **Constructors with arguments.** `ju.ArrayList()` is fine;
-  `ju.ArrayList(10)` is not. A binding declares one fixed arity, and this
-  mapping cannot know a class's constructors without loading it. Use
-  `java.jnew_i(java.jclass("java.util.ArrayList"), 10)`.
-- **Methods.** There is no `items.add("x")`; that would mean teaching the
-  compiler what a Java object is.
+Both work:
+
+```python
+Gson = gson.Gson                    # the class itself
+sb = jl.StringBuilder("start")      # a constructor argument
+sized = ju.ArrayList(32)
+```
+
+Reading a class and calling it are different operations, so a binding may name
+a second symbol for the read (`read_c_name`) -- `mod.Thing` resolves the class,
+`mod.Thing()` constructs one. And because a Java constructor's signature is not
+knowable without loading the class -- which would turn an unused import into a
+build failure -- the binding is `variadic`: sema checks each argument but
+leaves arity and types to the backend, which marshals whatever appears.
+
+### What the sugar still does not cover
+
+- **Methods.** There is no `items.add("x")`; use `java.jcall_s(items, "add",
+  "x")`. Sugaring it would mean teaching the compiler what a Java object is.
+- **Overload choice on a constructor.** Arguments are matched by fit, as with
+  method calls, so a genuinely ambiguous pair of constructors resolves to
+  whichever fits best rather than one you named.
 
 ## The explicit form
 
@@ -174,10 +188,21 @@ Where two overloads genuinely tie, name the descriptor:
 java.callExact(obj, "valueOf", "(I)Ljava/lang/String;", ...)
 ```
 
-## A caveat worth knowing
+## Unresolvable imports
 
-An import asmpython cannot resolve does **not** fail the build. The calls
-through it compile to nothing, and the program runs and does less than it
-should. So if a `java.*` call seems to have no effect, check that the backend
-is `jvm` — the same silence is what you get from `import com.google.gson`,
-which is not a module asmpython knows.
+Importing a module asmpython cannot resolve is still allowed — plenty of source
+imports things the compiler ignores — but **calling** through one is an error:
+
+```text
+cannot call com....Gson(): no module 'com.google.gson' is available. An import
+that resolves to nothing compiles to nothing, so this call would silently do
+nothing at run time.
+```
+
+That was the quiet failure mode: the calls compiled to nothing and the program
+ran and did less than it said. A bare `import typing` with no calls through it
+still builds.
+
+Note the shape of the fix — only *calls* are rejected. Reading an attribute of
+an unresolved module stays lenient, because source that mentions an unmodeled
+attribute of a real CPython module should still type-check.

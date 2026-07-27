@@ -109,8 +109,24 @@ def _site_root_for(path: Path) -> Path | None:
 
 
 def _is_ffi_stdlib(module: str) -> bool:
-    """Inline mirror of ``asmpython.stdlib.STDLIB_BINDINGS`` module keys."""
+    """Whether `module` is an FFI binding module rather than site-packages.
+
+    Asks the live registry first. A hardcoded mirror cannot be right any more:
+    the registry is extensible now -- a backend contributes its own modules and
+    a host can add one with `--bindings` -- so anything not in the list would be
+    looked for in site-packages and reported missing.
+
+    The inline list below stays as the fallback for a self-hosted build, where
+    the registry may not be importable at all.
+    """
     top = module.split(".")[0]
+    try:
+        from asmpython.stdlib import STDLIB_BINDINGS
+
+        if module in STDLIB_BINDINGS or top in STDLIB_BINDINGS:
+            return True
+    except ImportError:
+        pass
     if top == "math":
         return True
     if top == "os":

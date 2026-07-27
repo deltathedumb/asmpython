@@ -67,7 +67,7 @@ LDC = 0x12
 
 # Symbols the `java` binding module synthesises for `p.Thing()`; the class name
 # rides in the symbol because a call carries no constant of its own.
-from .bindings import NEW_PREFIX  # noqa: E402
+from .bindings import CLASS_PREFIX, NEW_PREFIX  # noqa: E402
 
 
 def _is_string_arg(value) -> bool:
@@ -629,6 +629,10 @@ class FunctionEmitter:
             self.emit_named_construction(instr, target[len(NEW_PREFIX):], args)
             return
 
+        if target.startswith(CLASS_PREFIX):
+            self.emit_named_class(instr, target[len(CLASS_PREFIX):])
+            return
+
         for arg in args:
             self.push(arg)
 
@@ -655,14 +659,25 @@ class FunctionEmitter:
             # site ignores the result, or the operand stack never unwinds.
             m.u1(POP2)
 
+    def emit_named_class(self, instr, class_name: str) -> None:
+        """`import java.<pkg> as p; X = p.Thing` -> a handle to the class."""
+        m = self.method
+        m.u1(LDC)
+        m.u1(m.pool.string(class_name) & 0xFF)
+        self.call_runtime("jclass_named", "(Ljava/lang/String;)J")
+        if instr.result is not None:
+            self.pop_into(instr.result)
+        else:
+            m.u1(POP2)
+
     def emit_named_construction(self, instr, class_name: str, args) -> None:
-        """`import java.<pkg> as p; p.Thing()` -> construct that class.
+        """`import java.<pkg> as p; p.Thing(...)` -> construct that class.
 
         The class name arrives inside the SYMBOL rather than as an argument,
         because the frontend emits `call <name>` and nothing else -- it has no
         way to attach a constant to a call and no reason to know one is wanted.
-        Splitting it back out here is what keeps the import sugar entirely on
-        this side of the compiler.
+        Splitting it back out here keeps the import sugar on this side of the
+        compiler.
 
         Pushed with `ldc` as a real java.lang.String, not interned into the
         heap: the name is known at compile time, so a heap copy per call would
@@ -672,22 +687,45 @@ class FunctionEmitter:
         m.u1(LDC)
         m.u1(m.pool.string(class_name) & 0xFF)
 
-        if len(args) == 0:
+        if not args:
             self.call_runtime("jnew_named", "(Ljava/lang/String;)J")
-        elif len(args) == 1:
-            self.push(args[0])
-            suffix = "_i" if not _is_string_arg(args[0]) else "_s"
-            self.call_runtime("jnew_named" + suffix, "(Ljava/lang/String;J)J")
         else:
-            raise UnsupportedIR(
-                f"constructing {class_name} with {len(args)} arguments: use "
-                "java.jnew_* with an explicit class handle"
-            )
+            # Words and kinds as two long[], the same shape printf uses. One
+            # path for every arity beats a method per argument combination.
+            self.push_word_array(args)
+            self.push_kind_array(args)
+            self.call_runtime("jnew_named_v", "(Ljava/lang/String;[J[J)J")
 
         if instr.result is not None:
             self.pop_into(instr.result)
         else:
             m.u1(POP2)
+
+    def push_word_array(self, args) -> None:
+        """A `long[]` of the argument words, doubles bit-cast to their bits."""
+        m = self.method
+        self.push_int(len(args))
+        m.u1(NEWARRAY)
+        m.u1(T_LONG)
+        for index, arg in enumerate(args):
+            m.u1(DUP)
+            self.push_int(index)
+            self.push(arg)
+            if _is_double(arg):
+                self.call_runtime("doubleToRawLongBits", "(D)J")
+            m.u1(LASTORE)
+
+    def push_kind_array(self, args) -> None:
+        """A `long[]` saying how to read each word: 1 = string, 0 = number."""
+        m = self.method
+        self.push_int(len(args))
+        m.u1(NEWARRAY)
+        m.u1(T_LONG)
+        for index, arg in enumerate(args):
+            m.u1(DUP)
+            self.push_int(index)
+            self.push_long(1 if _is_string_arg(arg) else 0)
+            m.u1(LASTORE)
 
     def emit_setjmp(self, instr, args) -> None:
         """`setjmp(buf)`: stamp this site's id into the buffer, return 0.
