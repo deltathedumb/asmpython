@@ -2718,6 +2718,73 @@ def _value_truthy(ctx: _FuncCtx, v: IRValue) -> IRValue:
     return v
 
 
+def _emit_closure_value_call(ctx: "_FuncCtx", closure_obj: IRValue, e) -> IRValue:
+    """Call an ESCAPING closure VALUE: `[magic, fn_ptr, cap0..capN-1]` whose
+    capture count N is not a compile-time fact (the object came from a factory).
+
+    Reads fn_ptr and the runtime count (list length - 2), then branches on N to
+    emit a fixed-arity `fn(cap0..capN-1, args...)` call per candidate -- the
+    leading-captured-params convention the lifted function expects. Driven by an
+    already-lowered object so both spellings share it: a closure held in a
+    NAME (`add5 = make_adder(5); add5(10)`) and one produced by an EXPRESSION
+    (`adder(5)(10)`), which has no slot to load from.
+    """
+    MAX_CAPTURES = 8
+    buf_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", buf_addr, [closure_obj, _LIST_BUF_OFF]))
+    buf = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", buf, [buf_addr]))
+    len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_addr, [closure_obj, _LIST_LEN_OFF]))
+    list_len = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", list_len, [len_addr]))
+    two = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", two, [2]))
+    count = ctx.tmp(I64)
+    ctx.emit(IRInstr("isub", count, [list_len, two]))
+    fn_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", fn_addr, [buf, 8]))
+    fn = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", fn, [fn_addr]))
+    call_args = [_lower_expr(ctx, argument) for argument in e.args]
+    res_ty = ir_type_for(A.expr_type(e))
+    res_ptr = ctx.ensure_slot(f"__clv_res_{id(e)}", res_ty)
+    check_blocks = [ctx.new_block(f"clvcheck{n}") for n in range(MAX_CAPTURES + 1)]
+    hit_blocks = [ctx.new_block(f"clvhit{n}") for n in range(MAX_CAPTURES + 1)]
+    stub_b = ctx.new_block("clvstub")
+    end_b = ctx.new_block("clvend")
+    ctx.emit(IRInstr("br", None, [check_blocks[0].label]))
+    for n in range(MAX_CAPTURES + 1):
+        ctx.switch_to(check_blocks[n])
+        n_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", n_v, [n]))
+        is_match = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.eq", is_match, [count, n_v]))
+        nxt = check_blocks[n + 1].label if n < MAX_CAPTURES else stub_b.label
+        ctx.emit(IRInstr("br.t", None, [is_match, hit_blocks[n].label, nxt]))
+        ctx.switch_to(hit_blocks[n])
+        caps: list[IRValue] = []
+        for i in range(n):
+            cap_addr = ctx.tmp(PTR)
+            ctx.emit(IRInstr("gep", cap_addr, [buf, (i + 2) * 8]))
+            cap_v = ctx.tmp(I64)
+            ctx.emit(IRInstr("load", cap_v, [cap_addr]))
+            caps.append(cap_v)
+        mv = ctx.tmp(res_ty)
+        ctx.emit(IRInstr("call", mv, [fn, *caps, *call_args]))
+        ctx.emit(IRInstr("store", None, [mv, res_ptr]))
+        ctx.emit(IRInstr("br", None, [end_b.label]))
+    ctx.switch_to(stub_b)
+    stub_v = ctx.tmp(res_ty)
+    ctx.emit(IRInstr("const", stub_v, [0]))
+    ctx.emit(IRInstr("store", None, [stub_v, res_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+    ctx.switch_to(end_b)
+    out = ctx.tmp(res_ty)
+    ctx.emit(IRInstr("load", out, [res_ptr]))
+    return out
+
+
 def _value_truthy_typed(
     ctx: _FuncCtx, v: IRValue, t: str, tag: int
 ) -> IRValue:
@@ -11693,6 +11760,13 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             v = ctx.tmp(ir_type_for(A.expr_type(e)))
             ctx.emit(IRInstr("call", v, [f"{call_owner}____call__", *args]))
             return v
+        if getattr(e, "closure_call_on_expr", False):
+            # A closure VALUE produced by an expression (`adder(5)(10)`).
+            # Identical dispatch to the name-callee case below, but the object
+            # comes from evaluating `func_expr` instead of loading a slot.
+            return _emit_closure_value_call(
+                ctx, _lower_expr_inner(ctx, e.func_expr), e
+            )
         if e.func in ctx.closure_value_names:
             # Call an ESCAPING closure value (`add5 = make_adder(5); add5(10)`).
             # add5 holds a closure OBJECT [magic, fn_ptr, cap0..capN-1] whose
@@ -11703,61 +11777,9 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             # candidate N -- the leading-captured-params calling convention the
             # lifted function already expects (same shape as the closure_names
             # path, but with a runtime count instead of a static one).
-            MAX_CAPTURES = 8
-            closure_obj = _lower_expr_inner(ctx, A.Name(name=e.func, pos=e.pos))
-            buf_addr = ctx.tmp(PTR)
-            ctx.emit(IRInstr("gep", buf_addr, [closure_obj, _LIST_BUF_OFF]))
-            buf = ctx.tmp(PTR)
-            ctx.emit(IRInstr("load", buf, [buf_addr]))
-            len_addr = ctx.tmp(PTR)
-            ctx.emit(IRInstr("gep", len_addr, [closure_obj, _LIST_LEN_OFF]))
-            list_len = ctx.tmp(I64)
-            ctx.emit(IRInstr("load", list_len, [len_addr]))
-            two = ctx.tmp(I64)
-            ctx.emit(IRInstr("const", two, [2]))
-            count = ctx.tmp(I64)
-            ctx.emit(IRInstr("isub", count, [list_len, two]))
-            fn_addr = ctx.tmp(PTR)
-            ctx.emit(IRInstr("gep", fn_addr, [buf, 8]))
-            fn = ctx.tmp(PTR)
-            ctx.emit(IRInstr("load", fn, [fn_addr]))
-            call_args = [_lower_expr(ctx, argument) for argument in e.args]
-            res_ty = ir_type_for(A.expr_type(e))
-            res_ptr = ctx.ensure_slot(f"__clv_res_{id(e)}", res_ty)
-            check_blocks = [ctx.new_block(f"clvcheck{n}") for n in range(MAX_CAPTURES + 1)]
-            hit_blocks = [ctx.new_block(f"clvhit{n}") for n in range(MAX_CAPTURES + 1)]
-            stub_b = ctx.new_block("clvstub")
-            end_b = ctx.new_block("clvend")
-            ctx.emit(IRInstr("br", None, [check_blocks[0].label]))
-            for n in range(MAX_CAPTURES + 1):
-                ctx.switch_to(check_blocks[n])
-                n_v = ctx.tmp(I64)
-                ctx.emit(IRInstr("const", n_v, [n]))
-                is_match = ctx.tmp(I64)
-                ctx.emit(IRInstr("icmp.eq", is_match, [count, n_v]))
-                nxt = check_blocks[n + 1].label if n < MAX_CAPTURES else stub_b.label
-                ctx.emit(IRInstr("br.t", None, [is_match, hit_blocks[n].label, nxt]))
-                ctx.switch_to(hit_blocks[n])
-                caps: list[IRValue] = []
-                for i in range(n):
-                    cap_addr = ctx.tmp(PTR)
-                    ctx.emit(IRInstr("gep", cap_addr, [buf, (i + 2) * 8]))
-                    cap_v = ctx.tmp(I64)
-                    ctx.emit(IRInstr("load", cap_v, [cap_addr]))
-                    caps.append(cap_v)
-                mv = ctx.tmp(res_ty)
-                ctx.emit(IRInstr("call", mv, [fn, *caps, *call_args]))
-                ctx.emit(IRInstr("store", None, [mv, res_ptr]))
-                ctx.emit(IRInstr("br", None, [end_b.label]))
-            ctx.switch_to(stub_b)
-            stub_v = ctx.tmp(res_ty)
-            ctx.emit(IRInstr("const", stub_v, [0]))
-            ctx.emit(IRInstr("store", None, [stub_v, res_ptr]))
-            ctx.emit(IRInstr("br", None, [end_b.label]))
-            ctx.switch_to(end_b)
-            out = ctx.tmp(res_ty)
-            ctx.emit(IRInstr("load", out, [res_ptr]))
-            return out
+            return _emit_closure_value_call(
+                ctx, _lower_expr_inner(ctx, A.Name(name=e.func, pos=e.pos)), e
+            )
         if e.func in ctx.closure_names:
             closure = _lower_expr(ctx, A.Name(name=e.func, pos=e.pos))
             buffer_address = ctx.tmp(PTR)

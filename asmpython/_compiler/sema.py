@@ -872,6 +872,7 @@ class SemaAnalyzer:
         # against the target's real signature, which is the only way a target
         # declaring `*args` gets its arguments packed.
         self._closure_targets: dict[str, str] = {}
+        self._closure_factories: set = set()
         self._closure_var_targets: dict[str, str] = {}
         # Local names EXPLICITLY declared `dict[str, object]` (a genuinely
         # heterogeneous dict). Their value kind must stay "any" -- unlike a
@@ -2586,6 +2587,40 @@ class SemaAnalyzer:
             if _slots:
                 _sig.ret_list_tuple_types = list(_slots)
 
+    def _detect_closure_factories(self) -> None:
+        """Mark every function that returns a closure with a "closure" return
+        type, so a call on it -- in any position -- dispatches correctly.
+
+        Syntactic: a function whose `return <name>` names something a
+        `ClosureBind` in the same body created. Fills `_closure_factories` and
+        `_closure_targets`.
+        """
+        def _has_bind(body: list, name: str) -> bool:
+            for _s in body:
+                if isinstance(_s, A.ClosureBind) and _s.func_name == name:
+                    return True
+            return False
+        # LIFTED functions count too: `def a(x): def b(y): def c(z): ...` makes
+        # `b` a lifted function that is itself a closure factory, and
+        # `a(1)(2)(3)` needs each step's result typed.
+        for f in self.mod.funcs:
+            sig = self.funcs.get(f.name)
+            if sig is None or (
+                sig.ret_type is not None and sig.ret_type[0] != "any"
+            ):
+                continue
+            for _s in f.body:
+                if (
+                    isinstance(_s, A.Return)
+                    and _s.value is not None
+                    and isinstance(_s.value, A.Name)
+                    and _has_bind(f.body, _s.value.name)
+                ):
+                    sig.ret_type = ("closure", None, None, None, None)
+                    self._closure_factories.add(f.name)
+                    self._closure_targets[f.name] = _s.value.name
+                    break
+
     def _pack_closure_vararg_call(self, call, funcs_by_name: dict) -> None:
         """Pack a closure call's surplus positional arguments into the single
         list parameter its `*args` target expects.
@@ -2737,6 +2772,22 @@ class SemaAnalyzer:
                             return
                         if _sl:
                             _slots = _sl
+            elif isinstance(_rv, A.DictLit):
+                # The dict's VALUE kind: a uniform literal kind, or -- what a
+                # dispatch table actually holds -- a callable.
+                _k = self._literal_shape_value_type(_rv)
+                if _k is None and _rv.values:
+                    _cvs: str | None = None
+                    for _dv in _rv.values:
+                        _ck = self._callable_type_of(_dv, Scope())
+                        if _ck is None:
+                            _cvs = None
+                            break
+                        if _cvs is None:
+                            _cvs = _ck
+                        elif _cvs != _ck:
+                            _cvs = "callable:any"
+                    _k = _cvs
             elif isinstance(_rv, A.Comprehension):
                 _k = getattr(_rv, "list_el_type", None)
             elif isinstance(_rv, A.Name):
@@ -2753,7 +2804,16 @@ class SemaAnalyzer:
                 _kind = _k
             elif _kind != _k:
                 return  # returns disagree
-        if _kind is None or _rt[0] != "list":
+        if _kind is None:
+            return
+        if _rt[0] == "dict":
+            # A returned DICT's VALUE kind, same idea as a list's element kind.
+            # `def make_ops(): return {'inc': lambda x: x + 1}` -- without it the
+            # caller's `ops['inc']` reads a value of unknown kind, so
+            # `ops['inc'](5)` was not recognized as a call at all.
+            sig.ret_type = (_rt[0], _rt[1], _kind)
+            return
+        if _rt[0] != "list":
             return
         sig.ret_type = (_rt[0], _kind, _rt[2])
         if _kind == "tuple" and _slots:
@@ -5133,6 +5193,15 @@ class SemaAnalyzer:
         # `_infer_unannotated_returns`.
         self._infer_unannotated_returns()
 
+        # Detect closure factories BEFORE any body is checked. The detection is
+        # purely syntactic (does the function return a name bound by a
+        # ClosureBind), so it needs nothing from the checking passes -- and
+        # running it afterwards meant a DIRECT call on the result
+        # (`adder(5)(10)`, as opposed to `f = adder(5); f(10)`) saw the factory
+        # typed "any" and was rejected as not callable. The late pass below
+        # still runs, to retype assignment call nodes.
+        self._detect_closure_factories()
+
         self.global_scope = Scope()
         # Module dunders the runtime always provides.
         self.global_scope.add("__name__", "str")
@@ -5342,7 +5411,7 @@ class SemaAnalyzer:
                 if isinstance(s, A.ClosureBind) and s.func_name == name:
                     return True
             return False
-        closure_factories: set = set()
+        closure_factories: set = self._closure_factories
         for f in self.mod.funcs:
             if getattr(f, "is_lifted", False):
                 continue
@@ -12238,6 +12307,23 @@ class SemaAnalyzer:
                 else:
                     e.inferred_type = "any"
                 return
+        # A CLOSURE VALUE as the callee (`adder(5)(10)`, `a(1)(2)(3)`): the
+        # object is `[magic, fn_ptr, caps...]`, not a code pointer, so it needs
+        # the capture-count dispatch rather than a plain indirect call. Marked
+        # for ir_lower, which already has that dispatch for the name-callee
+        # form.
+        if _ct == "closure":
+            for _a in e.args:
+                self._check_expr(_a, scope)
+            e.closure_call_on_expr = True  # type: ignore[attr-defined]
+            # NOT propagated as another "closure" when the target is itself a
+            # factory: that types a chain like `a(1)(2)(3)` all the way through
+            # and it COMPILES, but answers 5 for 1+2+3 -- the transitive
+            # capture forwarding through two levels drops one. A clean compile
+            # error beats a silently wrong number, so the chain stays out until
+            # that forwarding is right.
+            e.inferred_type = "any"
+            return
         ctype = self._callable_type_of(callee, scope)
         if ctype is None:
             _shown = A.expr_type(callee) or "value"
@@ -13377,7 +13463,16 @@ class SemaAnalyzer:
             # imported class/constructor: `Path(...)`, `Token(...)`). Either way
             # the result is "any" so attribute/method access stays lenient.
             # Anything else falls back to int.
-            elif scope.types.get(e.func) == "any" or e.func[:1].isupper():
+            elif (
+                scope.types.get(e.func) in ("any", "closure")
+                or e.func[:1].isupper()
+            ):
+                # A "closure"-typed name is an opaque callable like any other
+                # here: its result kind is unknown, not int. Before closure
+                # factories were detected up front this name typed "any" and
+                # landed in this same branch; keeping "closure" with it
+                # preserves that, rather than falling through to the int
+                # default and printing the result as a number.
                 e.inferred_type = "any"
             else:
                 e.inferred_type = "int"
