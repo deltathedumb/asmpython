@@ -4067,6 +4067,14 @@ class SemaAnalyzer:
         # self.local = 0 for each local
         for loc in all_locals:
             init_body.append(A.AttrAssign(obj=A.Name(name="self", pos=pos), name=loc, value=A.IntLit(value=0, pos=pos), pos=pos))
+        # The statements BEFORE the loop run once, when the generator object is
+        # created -- `def c(start): n = start; while True: yield n; n += 1`.
+        # They were collected and then DROPPED entirely, so every such local
+        # kept the zero the placeholder loop above gave it: that generator
+        # yielded 0, 1, 2 instead of 10, 11, 12. Renamed into `self.<local>`
+        # like the loop body's own statements, and appended AFTER the
+        # placeholders so a real initializer wins.
+        init_body.extend(self._rename_stmts(pre_stmts, all_locals, pos))
 
         init_func = A.FuncDef(
             name="__init__",

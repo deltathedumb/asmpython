@@ -14739,6 +14739,17 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                 arg_t = A.expr_type(node.args[0])
                 if arg_t.startswith("instance:"):
                     add_resolved(arg_t.split(":", 1)[1], "__hash__")
+            if node.func in ("next", "iter") and len(node.args) >= 1:
+                # `next(g)` / `iter(g)` called DIRECTLY on an iterator object --
+                # including a generator function's result, which sema desugars
+                # into exactly such a class. The `for` and comprehension arms
+                # cover iteration syntax; this covers the builtin, which
+                # otherwise had nothing keeping `__next__` alive:
+                # "undefined symbol _genobj_counter____next__" at link time.
+                _nt = A.expr_type(node.args[0])
+                if _nt.startswith("instance:"):
+                    add_resolved(_nt.split(":", 1)[1], "__next__")
+                    add_resolved(_nt.split(":", 1)[1], "__iter__")
             if node.func in ("int", "float") and len(node.args) == 1:
                 arg_t = A.expr_type(node.args[0])
                 if arg_t.startswith("instance:"):
@@ -14802,7 +14813,17 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                         # ir_lower's `_lower_list_instance_repr`). Same
                         # "lowering dispatches, walker must keep it live" shape;
                         # match that helper's repr-first resolution.
-                        _lel = getattr(arg, "list_el_type", "") or ""
+                        # A LITERAL list carries its element kind in `el_type`,
+                        # not `list_el_type` -- exactly the split the repr
+                        # dispatch itself honours. Reading only the latter left
+                        # `print([Point(1, 2)])` with no dunder marked, so DCE
+                        # dropped the `__repr__` the lowering then called:
+                        # "undefined symbol Point____repr__" at link time.
+                        _lel = (
+                            (getattr(arg, "el_type", "") or "")
+                            if isinstance(arg, A.ListLit)
+                            else (getattr(arg, "list_el_type", "") or "")
+                        )
                         if _lel.startswith("instance:"):
                             _lcn = _lel.split(":", 1)[1]
                             _lowner = (
@@ -14907,12 +14928,17 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                 seg_ty = A.expr_type(seg)
                 if seg_ty.startswith("instance:"):
                     cls_name = seg_ty.split(":", 1)[1]
-                    owner = (
-                        _resolve_method_owner_in_sigs(classes_sig, cls_name, "__str__")
-                        or _resolve_method_owner_in_sigs(classes_sig, cls_name, "__repr__")
-                    )
-                    method = "__str__" if _resolve_method_owner_in_sigs(classes_sig, cls_name, "__str__") is not None else "__repr__"
-                    add(owner, method)
+                    # BOTH dunders, when the class has both: a segment's `!r`
+                    # conversion dispatches to `__repr__` while a plain one
+                    # takes `__str__`, and the conversion is per-segment. Marking
+                    # only the str-first winner left `f'{P()!r}'` calling a
+                    # `__repr__` that DCE had already dropped -- undefined symbol
+                    # at link time. Keeping an extra method costs a little code
+                    # size; dropping a called one does not link.
+                    for _m in ("__str__", "__repr__"):
+                        _o = _resolve_method_owner_in_sigs(classes_sig, cls_name, _m)
+                        if _o is not None:
+                            add(_o, _m)
 
         if isinstance(node, list):
             for item in node:
