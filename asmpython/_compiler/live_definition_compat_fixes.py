@@ -323,8 +323,22 @@ def _neutral_body(definition) -> None:
     definition.ret_list_tuple_types = []
 
 
+# A function sema may RETARGET to a sibling at check time has to keep that
+# sibling alive here -- this pass runs BEFORE `SemaAnalyzer.analyze`, so it
+# cannot see the retarget, and neutralizing the sibling leaves the retargeted
+# call returning int. `json.loads` is the case: the module carries three real
+# parsers (scalar/dict/list) and sema picks the one matching the argument's
+# statically-known JSON type.
+_RETARGET_SIBLINGS: dict = {
+    "loads": ("loads_dict", "loads_list"),
+}
+
+
 def _analyze_live_project_definitions(self: SemaAnalyzer) -> None:
     live_functions, live_classes, live_methods = _live_definitions(self.mod)
+    for _name in list(live_functions):
+        for _sib in _RETARGET_SIBLINGS.get(_name, ()):  # type: ignore[arg-type]
+            live_functions.add(_sib)
 
     for function in self.mod.funcs:
         if function.name not in live_functions:

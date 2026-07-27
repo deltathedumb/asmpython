@@ -2885,6 +2885,35 @@ class SemaAnalyzer:
                 return None
         return seen
 
+    def _yielded_value_kind(self, stmts: list) -> "str | None":
+        """The common kind of every `yield`ed expression in `stmts`, or None if
+        they disagree or none is statically knowable.
+
+        Syntax-only, like the other pre-pass inference: this runs before any
+        body is checked. `x.upper()` and friends are recognized through
+        `_literal_arg_type`, which already knows the fixed-result builtins and
+        str methods it needs.
+        """
+        _kinds: set = set()
+        for _s in self._walk_stmts_flat(stmts):
+            if not isinstance(_s, A.YieldStmt):
+                continue
+            _v = getattr(_s, "value", None)
+            if _v is None:
+                return None
+            if isinstance(_v, A.MethodCall) and _v.method in _STR_METHOD_RET:
+                _kinds.add(_STR_METHOD_RET[_v.method])
+                continue
+            _lit = self._literal_arg_type(_v)
+            if _lit is None:
+                return None
+            _kinds.add(_lit[0])
+        if len(_kinds) != 1:
+            return None
+        for _k in _kinds:
+            return _k
+        return None
+
     def _walk_stmts_flat(self, stmts: list):
         """Every statement in `stmts` at any nesting depth."""
         for _s in stmts:
@@ -4089,6 +4118,14 @@ class SemaAnalyzer:
         # self.local = 0 for each local
         for loc in all_locals:
             init_body.append(A.AttrAssign(obj=A.Name(name="self", pos=pos), name=loc, value=A.IntLit(value=0, pos=pos), pos=pos))
+        # The statements BEFORE the loop run once, when the generator object is
+        # created -- `def c(start): n = start; while True: yield n; n += 1`.
+        # They were collected and then DROPPED entirely, so every such local
+        # kept the zero the placeholder loop above gave it: that generator
+        # yielded 0, 1, 2 instead of 10, 11, 12. Renamed into `self.<local>`
+        # like the loop body's own statements, and appended AFTER the
+        # placeholders so a real initializer wins.
+        init_body.extend(self._rename_stmts(pre_stmts, all_locals, pos))
 
         init_func = A.FuncDef(
             name="__init__",
@@ -4232,7 +4269,11 @@ class SemaAnalyzer:
         elif isinstance(_rt, tuple) and _rt and _rt[0] not in ("list", "tuple", "set"):
             ret_type = _rt
         else:
-            ret_type = ("int", None)
+            # UNANNOTATED generator: the yielded expressions say what `__next__`
+            # returns. Defaulting to int made `''.join(chars())` -- a generator
+            # of strings -- fail as "requires list[str], got list[int]", and
+            # every other consumer read the yielded strings as integers.
+            ret_type = (self._yielded_value_kind(f.body) or "int", None)
 
         next_func = A.FuncDef(
             name="__next__",
@@ -7130,6 +7171,14 @@ class SemaAnalyzer:
                     )
                 inner = s.iter.args[0]
                 self._check_expr(inner, scope)
+                # `for i, k in enumerate(d)` over a MAPPING (or a set): iterating
+                # one yields its keys, and `list(d)` is exactly that list. The
+                # lowering only walks a list/tuple/str buffer, so without the
+                # drain this was "unsupported stmt For (enumerate 'dict')".
+                if A.expr_type(inner) in ("dict", "set"):
+                    inner = A.Call(func="list", args=[inner], kwargs=[], pos=inner.pos)
+                    self._check_expr(inner, scope)
+                    s.iter.args[0] = inner
                 # `for i, v in enumerate(<iterable object>)`: this for-position
                 # handler runs before the generic call check, so apply the same
                 # drain-with-list() coercion here (see
@@ -8958,6 +9007,13 @@ class SemaAnalyzer:
                 else:
                     self._check_expr(el, scope)
                     et = A.expr_type(el)
+                    # A lambda / function reference element is a CALLABLE VALUE
+                    # (`[lambda x: x + 1, f]`), recorded as `callable:<ret>` so
+                    # reading one back out is recognized as a call. Same
+                    # producer the dict-value and append paths use.
+                    _el_cv = self._callable_type_of(el, scope)
+                    if _el_cv is not None:
+                        et = _el_cv
                 # Every asmpython value is a uniform 8-byte slot, so a list may
                 # hold nested collections (list/dict/tuple/set) and instances as
                 # well as scalars — they're stored as pointers (mirrors what
@@ -8971,7 +9027,9 @@ class SemaAnalyzer:
                     "list",
                     "dict",
                     "set",
-                ) and not et.startswith("instance:"):
+                ) and not et.startswith("instance:") and not et.startswith(
+                    "callable:"
+                ):
                     raise SemaError(
                         f"list element of type {et} is not supported yet",
                         getattr(el, "pos", e.pos),
@@ -9453,7 +9511,19 @@ class SemaAnalyzer:
             for el in e.elems:
                 self._check_expr(el, scope)
                 et = A.expr_type(el)
-                if et not in ("str", "int", "any", "tuple"):
+                # float / bool are fine: a set element goes through the SAME
+                # key encoder dict keys do (`_lower_dict_key`), which gives a
+                # float a canonical repr string, and membership uses that
+                # identical encoding -- so `1.5 in {1.5, 2.5}` was rejected for
+                # no reason the backend still has.
+                #
+                # INSTANCES stay rejected: the encoder keys them by repr, but a
+                # class defining `__hash__`/`__eq__` expects dedup by THOSE,
+                # and the two disagree (verified: a 2-element set came out with
+                # 3). A clean error beats a wrong count. Set COMPREHENSIONS of
+                # floats stay rejected for the same reason -- their elements
+                # read back as the encoded strings.
+                if et not in ("str", "int", "any", "tuple", "float", "bool"):
                     raise SemaError(
                         f"set elements of type {et} are not supported yet "
                         "(sets are str/int-keyed in v1)",
@@ -10166,6 +10236,13 @@ class SemaAnalyzer:
                             ErrorCode.E_ARG_COUNT,
                         )
                     arg_t = A.expr_type(e.args[0])
+                    # A lambda / function reference appended to a list is a
+                    # CALLABLE VALUE: record it as `callable:<ret>` so reading
+                    # the element back out (`handlers[0](x)`) is recognized as a
+                    # call. Same producer the dict-value path uses.
+                    _ap_cv = self._callable_type_of(e.args[0], scope)
+                    if _ap_cv is not None:
+                        arg_t = _ap_cv
                     if (
                         isinstance(e.obj, A.MethodCall)
                         and e.obj.method == "setdefault"
@@ -10193,7 +10270,12 @@ class SemaAnalyzer:
                         "list",
                         "dict",
                         "set",
-                    ) and not arg_t.startswith("instance:"):
+                    ) and not arg_t.startswith("instance:") and not arg_t.startswith(
+                        "callable:"
+                    ):
+                        # `callable:<ret>` is a code POINTER, so it fits the
+                        # uniform 8-byte element slot like any other pointer --
+                        # a list of handlers is an ordinary list.
                         raise SemaError(
                             f"list.append() element of type {arg_t} not supported",
                             e.pos,
@@ -11612,6 +11694,11 @@ class SemaAnalyzer:
                 arg_el = self._list_el_type(e.args[0], scope)
                 # An opaque element kind ("any") is accepted — we can't prove it's
                 # str, but join only ever runs on str elements in practice.
+                # NOT "?" (a list built by appends whose kind was never
+                # pinned): accepting it replaced a clean compile error with a
+                # SEGFAULT, because the join lowering needs a real element kind
+                # to read the cells with. The fix for those belongs upstream,
+                # in whatever left the kind unpinned.
                 if arg_el not in ("str", "any"):
                     raise SemaError(
                         f"str.join() requires list[str], got list[{arg_el}]", e.pos,
@@ -12498,6 +12585,44 @@ class SemaAnalyzer:
             resolved = self.mod.func_aliases[func_name]
             if resolved in self.funcs:
                 e.func = resolved
+        if (
+            e.func == "loads"
+            and len(e.args) == 1
+            and "loads_dict" in self.funcs
+            and "loads_list" in self.funcs
+        ):
+            # `json.loads(s)` returns whatever JSON `s` holds, but a static
+            # signature has to pick ONE type -- so the module carries three real
+            # parsers and `loads` is the scalar one, which made
+            # `json.loads('{"x": 1}')['x']` a "string index must be an int"
+            # error. The JSON type IS statically knowable in the two shapes that
+            # occur: a string LITERAL announces it with its first non-space
+            # character, and a round-trip `loads(dumps(X))` has X's own shape.
+            # Any other argument keeps the scalar parser.
+            #
+            # The dead-code pass runs BEFORE this and would have neutralized
+            # whichever parser nobody appeared to call, so it keeps all three
+            # alive (see `_RETARGET_SIBLINGS` there).
+            _js_kind = None
+            _ja = e.args[0]
+            if isinstance(_ja, A.StrLit):
+                _txt = _ja.value.lstrip()
+                if _txt.startswith("{"):
+                    _js_kind = "loads_dict"
+                elif _txt.startswith("["):
+                    _js_kind = "loads_list"
+            elif isinstance(_ja, A.Call) and _ja.func.startswith("dumps"):
+                self._check_expr(_ja, scope)
+                _inner = _ja.args[0] if _ja.args else None
+                _it = A.expr_type(_inner) if _inner is not None else ""
+                if _it == "dict":
+                    _js_kind = "loads_dict"
+                elif _it in ("list", "tuple"):
+                    _js_kind = "loads_list"
+            if _js_kind is not None:
+                e.func = _js_kind
+                self._check_call(e, scope)
+                return
         if e.func == "list" and len(e.args) == 1:
             _l0 = e.args[0]
             if isinstance(_l0, A.Call) and _l0.func in ("map", "filter"):
