@@ -9522,6 +9522,33 @@ class SemaAnalyzer:
                             e.pos,
                             ErrorCode.E_LIST_ELEMENT_TYPE_UNSUPPORTED,
                         )
+                    if arg_t == "tuple" and isinstance(e.obj, A.Name):
+                        # Appending a TUPLE teaches the element tuple's per-slot
+                        # shape, not just "the elements are tuples". Without the
+                        # shape the list's repr falls back to
+                        # `_abi_list_repr`'s dict-items (str, int) assumption
+                        # and formats a leading int as a string POINTER, so
+                        # `out.append((1, 1)); print(out)` SEGFAULTED -- the
+                        # ordinary way to build a list of pairs
+                        # (`for x, y in zip(a, b): out.append((x, y))`).
+                        # Appends that disagree on the shape widen each
+                        # differing slot to "any", the same rule a list literal
+                        # of tuples already uses.
+                        _ap_slots = self._tuple_elem_types(e.args[0], scope)
+                        if _ap_slots:
+                            _prev_slots = scope.list_el_tuple_types.get(e.obj.name)
+                            if not _prev_slots:
+                                scope.list_el_tuple_types[e.obj.name] = list(_ap_slots)
+                            elif len(_prev_slots) != len(_ap_slots):
+                                scope.list_el_tuple_types[e.obj.name] = []
+                            else:
+                                _merged: list = []
+                                for _sj in range(len(_ap_slots)):
+                                    if _prev_slots[_sj] == _ap_slots[_sj]:
+                                        _merged.append(_prev_slots[_sj])
+                                    else:
+                                        _merged.append("any")
+                                scope.list_el_tuple_types[e.obj.name] = _merged
                     if arg_t == "any":
                         # Opaque value: compatible with any element kind, and it
                         # mustn't pin an empty list's type (we don't know it).
