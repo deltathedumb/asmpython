@@ -487,6 +487,10 @@ class ClassSig:
     # True/False rather than 1/0. Mirrors `FuncSig.ret_bool` and `Scope`'s own
     # `bool_flags` for locals.
     field_bools: set = field(default_factory=set)
+    # Bases after the first (`class C(A, B)`). Resolution tries `parent`'s chain
+    # first, then these in declaration order -- Python's own left-to-right
+    # search for the flat mixin shape this models.
+    extra_bases: list = field(default_factory=list)
     # Companion collection-shape info for fields, so `self.xs[i]`, `for x in
     # self.xs`, and nested reads like `self.rows[i]["k"]` recover the same
     # metadata locals carry in Scope. `field_el_types` holds the outer list
@@ -1131,6 +1135,15 @@ class SemaAnalyzer:
                 return None
             if method in cls.methods:
                 return cur, cls.methods[method]
+            # Try the EXTRA bases before moving up `parent`'s chain: for
+            # `class C(A, B)` with the method on B, walking only `parent` (A)
+            # never found it and `c.b()` was "C has no method 'b'".
+            for _eb in getattr(cls, "extra_bases", []) or []:
+                if _eb in seen:
+                    continue
+                _found = self._resolve_method(_eb, method)
+                if _found is not None:
+                    return _found
             cur = cls.parent
         return None
 
@@ -4888,6 +4901,7 @@ class SemaAnalyzer:
                     ErrorCode.E_CLASS_NAME_COLLISION,
                 )
             sig = ClassSig(name=c.name, parent=c.parent, pos=c.pos)
+            sig.extra_bases = list(getattr(c, "extra_bases", []) or [])
             sig.is_final = getattr(c, "is_final", False)
             sig.is_sealed = getattr(c, "is_sealed", False)
             sig.sealed_permits = list(getattr(c, "sealed_permits", []) or [])
@@ -10487,6 +10501,40 @@ class SemaAnalyzer:
             elif obj_t == "str":
                 self._check_str_method(e, scope)
                 return
+            elif obj_t == "float":
+                # float's own methods. `is_integer()` is the one real programs
+                # use; there was no float-method branch at all, so it fell
+                # through to the generic "no method" error.
+                if e.method == "is_integer":
+                    if e.args:
+                        raise SemaError(
+                            "float.is_integer() takes no arguments", e.pos,
+                            ErrorCode.E_ARG_COUNT,
+                        )
+                    e.inferred_type = "int"
+                    e.is_bool = True  # renders True/False, like every predicate
+                    return
+                if e.method == "as_integer_ratio":
+                    if e.args:
+                        raise SemaError(
+                            "float.as_integer_ratio() takes no arguments", e.pos,
+                            ErrorCode.E_ARG_COUNT,
+                        )
+                    e.inferred_type = "tuple"
+                    e.tuple_elem_types = ["int", "int"]
+                    return
+                if e.method == "hex":
+                    if e.args:
+                        raise SemaError(
+                            "float.hex() takes no arguments", e.pos,
+                            ErrorCode.E_ARG_COUNT,
+                        )
+                    e.inferred_type = "str"
+                    return
+                raise SemaError(
+                    f"float has no method {e.method!r}", e.pos,
+                    ErrorCode.E_NO_METHOD,
+                )
             elif obj_t == "int":
                 if e.method in ("bit_length", "bit_count") and not e.args:
                     # bit_length(): position of the highest set bit.

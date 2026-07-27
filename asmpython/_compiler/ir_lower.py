@@ -2943,12 +2943,29 @@ def _lower_truthy(ctx: _FuncCtx, e: A.Expr) -> IRValue:
 
 
 def _resolve_class_chain(ctx: _FuncCtx, name: str) -> list[str]:
+    """The classes to search for a member, `name` first.
+
+    Depth-first, left to right: each class's own `parent` chain, then its EXTRA
+    bases (`class C(A, B)`) in declaration order. Without the extra bases a
+    mixin's methods resolved in sema but the call site emitted `C__b` for a
+    method that only exists as `B__b`, failing at link time.
+    """
     out: list[str] = []
-    cur = name
-    while cur is not None and cur not in out:
+    stack: list[str] = [name]
+    while stack:
+        cur = stack.pop(0)
+        if cur is None or cur in out:
+            continue
         out.append(cur)
         sig = ctx.mctx.classes_sig.get(cur)
-        cur = sig.parent if sig is not None else None
+        if sig is None:
+            continue
+        _nexts: list = []
+        if sig.parent is not None:
+            _nexts.append(sig.parent)
+        for _eb in getattr(sig, "extra_bases", []) or []:
+            _nexts.append(_eb)
+        stack = _nexts + stack
     return out
 
 
@@ -9028,6 +9045,18 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", fv, [fn_v, *fc_args]))
             return fv
         obj_ty = A.expr_type(e.obj)
+        if obj_ty == "float" and e.method == "is_integer" and not e.args:
+            # `x.is_integer()`: true when the value equals its own truncation.
+            # `floor` would be wrong for a negative fraction; truncation toward
+            # zero is exactly the identity CPython tests.
+            _fv = _lower_expr(ctx, e.obj)
+            _ti = ctx.tmp(I64)
+            ctx.emit(IRInstr("fptosi", _ti, [_fv]))
+            _tf = ctx.tmp(F64)
+            ctx.emit(IRInstr("sitofp", _tf, [_ti]))
+            _r = ctx.tmp(I64)
+            ctx.emit(IRInstr("fcmp.eq", _r, [_fv, _tf]))
+            return _r
         if obj_ty == "int" and e.method == "to_bytes":
             return _lower_int_to_bytes(ctx, e)
         if obj_ty == "int" and e.method in ("bit_length", "bit_count") and not e.args:
@@ -14514,16 +14543,26 @@ def lower_func(
 
 
 def _resolve_method_owner_in_sigs(classes_sig: dict, class_name: str, method: str) -> str | None:
+    """Same search order as `_resolve_class_chain`, including extra bases, but
+    driven by a bare signature table (no _FuncCtx available here)."""
     seen: set[str] = set()
-    cur = class_name
-    while cur is not None and cur not in seen:
+    stack: list[str] = [class_name]
+    while stack:
+        cur = stack.pop(0)
+        if cur is None or cur in seen:
+            continue
         seen.add(cur)
         sig = classes_sig.get(cur)
         if sig is None:
-            return None
+            continue
         if method in sig.methods:
             return cur
-        cur = sig.parent
+        _nexts: list = []
+        if sig.parent is not None:
+            _nexts.append(sig.parent)
+        for _eb in getattr(sig, "extra_bases", []) or []:
+            _nexts.append(_eb)
+        stack = _nexts + stack
     return None
 
 

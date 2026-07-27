@@ -1006,6 +1006,7 @@ class Parser:
         start = self._expect("KEYWORD", "class").pos
         name = self._expect("NAME").value
         parent = None
+        extra_bases: list = []
         parent_qualifier = None
         sealed_permits: list = []
         implements_interface: "str | None" = None
@@ -1088,10 +1089,9 @@ class Parser:
                                     break
                                 self._parse_expr()
                         self._expect("OP", "]")
-                # Extra bases / keyword bases (multiple inheritance, metaclass=,
-                # or a `permits=` clause after a real base class) aren't
-                # modelled beyond the sealed-permits capture above -- single
-                # inheritance only. Skip the rest so the source still parses.
+                # Extra bases are CAPTURED now (see ClassDef.extra_bases) so a
+                # mixin's methods resolve; keyword bases (metaclass=, permits=,
+                # interface=) are still handled separately below.
                 while self._check("OP", ","):
                     self._eat()
                     if (
@@ -1124,7 +1124,14 @@ class Parser:
                         self._eat()
                         metaclass_name = ".".join(self._parse_dotted_name_parts())
                         continue
-                    self._parse_expr()
+                    _extra = self._parse_expr()
+                    # A plain (possibly dotted) base name is a real base class.
+                    # Anything else (a subscripted generic, a call) is not
+                    # something this compiler models, and is dropped as before.
+                    if isinstance(_extra, A.Name):
+                        extra_bases.append(_extra.name)
+                    elif isinstance(_extra, A.Attr):
+                        extra_bases.append(_extra.name)
             self._expect("OP", ")")
         self._expect("OP", ":")
         # Single-line class body (`class C: pass` / `class C: ...`) -- same
@@ -1141,6 +1148,7 @@ class Parser:
                 return A.ClassDef(  # type: ignore
                     name=name,  # type: ignore
                     parent=parent,  # type: ignore
+                    extra_bases=list(extra_bases),
                     methods=[],
                     pos=start,  # type: ignore
                     parent_qualifier=parent_qualifier,
@@ -1255,6 +1263,7 @@ class Parser:
         return A.ClassDef(  # type: ignore
             name=name,  # type: ignore
             parent=parent,  # type: ignore
+            extra_bases=list(extra_bases),
             methods=methods,
             pos=start,  # type: ignore
             parent_qualifier=parent_qualifier,

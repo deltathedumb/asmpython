@@ -160,6 +160,11 @@ class ClassDef:
     parent: Optional[str]
     methods: list[FuncDef]
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    # Bases AFTER the first, for `class C(A, B)`. `parent` stays the first base
+    # (every existing single-inheritance path reads it unchanged); resolution
+    # falls back to these in declaration order, which is Python's own
+    # left-to-right method search for the flat mixin shape.
+    extra_bases: list = field(default_factory=list)
     # Module qualifier from a dotted base expression.  ``parent`` remains the
     # leaf class name consumed by sema/codegen; the whole-program loader uses
     # this qualifier to distinguish e.g. ``class Layer(previous.Layer)`` from
@@ -1364,6 +1369,7 @@ def is_bool_expr(e: Expr) -> bool:
             "isnumeric", "isprintable",
             "startswith", "endswith",
             "isdisjoint", "issuperset", "issubset",
+            "is_integer",
         ) or getattr(e, "is_bool", False)
     if isinstance(e, Name):
         return getattr(e, "is_bool", False)

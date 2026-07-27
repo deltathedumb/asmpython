@@ -264,6 +264,13 @@ def _live_definitions(mod: A.Module) -> tuple[set[str], set[str], set[str]]:
             if owner.parent in classes and owner.parent not in live_classes:
                 live_classes.add(owner.parent)
                 changed = True
+            # EXTRA bases too (`class C(A, B)`). Without them B was never live,
+            # so its methods were neutralized to `return 0` -- `c.b()` linked
+            # against a real symbol and returned 0 instead of running.
+            for extra in getattr(owner, "extra_bases", []) or []:
+                if extra in classes and extra not in live_classes:
+                    live_classes.add(extra)
+                    changed = True
 
         for name in list(live_classes):
             owner = classes.get(name)
