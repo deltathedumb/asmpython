@@ -416,12 +416,46 @@ class _FuncCtx:
         if instr.op in ("ret", "br", "br.t"):
             self.terminated = True
 
+    def emit_alloca(self, instr: IRInstr) -> None:
+        """Emit a frame reservation into the ENTRY block, wherever we are now.
+
+        An ``alloca`` is a frame offset, not a computed value: it must be
+        available on every path, and it must not be conditional on the control
+        flow that happened to be current when the slot was first needed.
+
+        Emitting it into the current block breaks both. The slot's defining
+        instruction then sits in whichever block first mentioned the name, and a
+        block reached another way reads a slot whose ``alloca`` never executed --
+        a use its definition does not dominate. It appears to work only because
+        the register allocator walks blocks in list order, so a definition at a
+        lower index satisfies a use it does not actually dominate; any pass that
+        reorders or merges blocks turns those reads into wild pointers.
+
+        The concrete case: lowering duplicates a ``finally`` body once per exit
+        path, and the exception-path copy reads the slots the normal-path copy
+        allocated. Measured at 36 of 394 corpus cases, 178 violations, also
+        covering ``enumerate`` loops and ``match``/``case``.
+
+        Entry-block allocas are what every SSA compiler does, and for this
+        reason. Note this deliberately bypasses ``emit``'s dropping of
+        instructions after a terminator: reserving stack space is not
+        unreachable code, even when the block that first needed it is.
+        """
+        if not self.blocks:
+            self.emit(instr)
+            return
+        entry = self.blocks[0]
+        at = len(entry.instrs)
+        if at and entry.instrs[-1].op in ("ret", "br", "br.t"):
+            at -= 1                      # stay before the terminator
+        entry.instrs.insert(at, instr)
+
     def ensure_slot(self, name: str, ty: IRType) -> IRValue:
         if name not in self.slot:
             ptr = self.tmp(IRType("ptr"))
             self.slot[name] = ptr
             self.slot_ty[name] = ty
-            self.emit(IRInstr("alloca", ptr, []))
+            self.emit_alloca(IRInstr("alloca", ptr, []))
         return self.slot[name]
 
     def raw_slot(self, name: str, n_bytes: int) -> IRValue:
@@ -430,7 +464,7 @@ class _FuncCtx:
             ptr = self.tmp(PTR)
             self.slot[name] = ptr
             self.slot_ty[name] = PTR
-            self.emit(IRInstr("alloca", ptr, [n_bytes]))
+            self.emit_alloca(IRInstr("alloca", ptr, [n_bytes]))
         return self.slot[name]
 
 

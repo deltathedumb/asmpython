@@ -154,23 +154,23 @@ class BlockMergePass(IRPass):
                     continue
                 if not block.instrs or block.instrs[-1].op != "br":
                     continue
-                # Merge only ADJACENT blocks: fusing B into A relocates B's code
-                # to A's position, which moves it EARLIER whenever B is not the
-                # next block. That is only safe if every value B reads is
-                # defined in a block that dominates it -- and ir_lower does not
-                # guarantee that. It duplicates a `finally` body per exit path,
-                # and the exception-path copy reads allocas defined only in the
-                # normal-path copy; the program works solely because the
-                # allocator walks blocks in list order and the definition
-                # happens to sit at a lower index. Relocating the reader above
-                # its definition turns those reads into garbage -- observed as
-                # an access violation on `exc_break_in_try`, where a `finally`
-                # reached via `break` lost its output entirely.
+                # Merge only ADJACENT blocks. Fusing B into A relocates B's
+                # code to A's position, moving it EARLIER whenever B is not the
+                # next block; adjacency is what keeps every block's relative
+                # order intact.
                 #
-                # Adjacent merging keeps every block's relative order, so it is
-                # correct regardless. The verifier's dominance check reports the
-                # underlying violation (9% of the corpus at last measure); once
-                # lowering satisfies it, this restriction can be lifted.
+                # This was originally required because lowering emitted uses
+                # that their definitions did not dominate (a `finally` body
+                # duplicated per exit path, the exception-path copy reading the
+                # normal-path copy's allocas). That is FIXED -- allocas are
+                # emitted in the entry block and the corpus now verifies clean.
+                #
+                # The restriction stays anyway, because lifting it still breaks
+                # 425_generator_pipeline under o2. So dominance was necessary
+                # and not sufficient: some second ordering assumption remains,
+                # unidentified. Do not remove this without finding it and
+                # running the full differential -- the failure is a segfault
+                # with no output, not a build error.
                 if position.get(target) != position.get(block.label, -2) + 1:
                     continue
 
