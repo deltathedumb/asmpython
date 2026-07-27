@@ -20,11 +20,19 @@ def test_backends_list_and_info(capsys: pytest.CaptureFixture[str]) -> None:
     assert "jvm" in output
     assert "scaffold" in output
 
+    # jvm is implemented now, so it reports as experimental rather than as a
+    # scaffold. Its options are real arguments, not planned ones.
     assert cli.main(["backends", "jvm", "--json"]) == 0
     document = json.loads(capsys.readouterr().out)
     assert document["name"] == "jvm"
-    assert document["status"] == "scaffold"
-    assert "--java-version" in document["planned_parameters"]
+    assert document["status"] == "experimental"
+    assert any(arg["name"] == "--java-version" for arg in document["requested_args"])
+
+    # A backend still waiting to be written reports the other way round.
+    assert cli.main(["backends", "riscv", "--json"]) == 0
+    scaffold = json.loads(capsys.readouterr().out)
+    assert scaffold["status"] == "scaffold"
+    assert scaffold["planned_parameters"]
 
 
 def test_removed_commands_have_replacements(capsys: pytest.CaptureFixture[str]) -> None:

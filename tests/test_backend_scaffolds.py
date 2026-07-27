@@ -43,6 +43,16 @@ BACKEND_MODULES = {
 
 EXPECTED_BACKENDS = set(BACKEND_MODULES)
 
+# Backends that have GRADUATED: a real implementation replaced the scaffold, so
+# the scaffold assertions below no longer apply to them.
+#
+# Listed explicitly rather than detected, so that a backend quietly LOSING its
+# implementation still fails this file. Graduating one is a deliberate edit
+# here, which is the point.
+IMPLEMENTED_BACKENDS = {"x86", "jvm"}
+
+SCAFFOLD_ONLY = sorted(EXPECTED_BACKENDS - IMPLEMENTED_BACKENDS)
+
 
 def test_every_planned_backend_is_registered_once() -> None:
     names = [spec.name for spec in SCAFFOLD_BACKEND_SPECS]
@@ -52,7 +62,15 @@ def test_every_planned_backend_is_registered_once() -> None:
     assert set(SCAFFOLD_BACKENDS) == EXPECTED_BACKENDS
 
 
-@pytest.mark.parametrize("name", sorted(EXPECTED_BACKENDS))
+@pytest.mark.parametrize("name", sorted(IMPLEMENTED_BACKENDS))
+def test_implemented_backends_are_not_scaffolds(name: str) -> None:
+    """A graduated backend is real, and still answers to its planned name."""
+    backend = get_backend(name)
+    assert not isinstance(backend, ScaffoldBackend)
+    assert name in registered_names()
+
+
+@pytest.mark.parametrize("name", SCAFFOLD_ONLY)
 def test_scaffold_operations_fail_loudly(name: str) -> None:
     backend = get_backend(name)
     assert isinstance(backend, ScaffoldBackend)
@@ -77,7 +95,10 @@ def test_scaffold_operations_fail_loudly(name: str) -> None:
         backend.package({})
 
 
-@pytest.mark.parametrize("name,module_name", sorted(BACKEND_MODULES.items()))
+@pytest.mark.parametrize(
+    "name,module_name",
+    sorted((n, m) for n, m in BACKEND_MODULES.items() if n not in IMPLEMENTED_BACKENDS),
+)
 def test_backend_package_exposes_registered_scaffold(name: str, module_name: str) -> None:
     module = importlib.import_module(f"asmpython._backends.{module_name}")
     registered = get_backend(name)

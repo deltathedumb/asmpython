@@ -15,6 +15,8 @@ flag what's clearly wrong).
 
 from __future__ import annotations
 
+import pathlib as _pathlib
+
 from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Optional
 
@@ -6590,6 +6592,23 @@ class SemaAnalyzer:
             locked.update(params)
         return locked
 
+    def _is_project_module(self, name: str) -> bool:
+        """Whether `name` looks like a module of the project being compiled.
+
+        Checked against the source directory, because the whole-program merge
+        that really resolves these runs after sema -- so this is the only
+        evidence available at this point. Being wrong in the lenient direction
+        costs a missed diagnostic; being wrong the other way rejects a valid
+        program.
+        """
+        if not self.source_dir or not name:
+            return False
+        try:
+            root = _pathlib.Path(self.source_dir)
+        except (TypeError, ValueError):
+            return False
+        return (root / (name + ".py")).is_file() or (root / name / "__init__.py").is_file()
+
     def _require_assignable(self, name: str, pos) -> None:
         """Raise E_CONST_REASSIGNED if `name` was ever declared `const`.
 
@@ -7456,7 +7475,13 @@ class SemaAnalyzer:
                 # standard CPython modules can still be checked. The name
                 # becomes a dummy in scope; any subsequent `x.attr` lookup
                 # will still error at the attribute resolution step.
-                self.unresolved_modules[bind_name] = _im_module
+                #
+                # Only record it as unresolvable when it is not PROJECT SOURCE.
+                # `import leaf` beside a leaf.py is resolved later by the
+                # whole-program merge, long after this runs, so treating it as
+                # missing here rejects perfectly good multi-module programs.
+                if not self._is_project_module(top_name):
+                    self.unresolved_modules[bind_name] = _im_module
                 scope.add(bind_name, "module")
                 return
             self.imported_modules[bind_name] = bindings

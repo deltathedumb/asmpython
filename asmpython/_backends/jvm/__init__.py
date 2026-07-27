@@ -79,39 +79,43 @@ production_suitable = False
 # recognises, hence "builtin" rather than something honest like "none".
 default_linker = "builtin"
 
+# Declared metadata for `asmpython backends info`, which serialises it as
+# JSON -- so `type` is the NAME of a type, not the type object. A bare `str`
+# here makes that command fail with "Object of type type is not JSON
+# serializable", and nothing reads the field as a callable.
 requested_args: list[dict] = [
     {
         "name": "--jvm-class",
         "help": "Fully qualified name of the generated class "
                 f"(default {DEFAULT_CLASS.replace('/', '.')})",
         "default": DEFAULT_CLASS.replace("/", "."),
-        "type": str,
+        "type": "str",
     },
     {
         "name": "--jvm-javac",
         "help": "javac used to build the runtime support class (default: javac on PATH)",
         "default": "javac",
-        "type": str,
+        "type": "str",
     },
     {
         "name": "--class-version",
         "help": "Class-file major version to emit (45-69; 52 = Java 8, 65 = Java 21). "
                 "Overrides --java-version.",
         "default": "",
-        "type": str,
+        "type": "str",
     },
     {
         "name": "--jvm-annotation",
         "help": "Add a runtime-visible class annotation to the generated class, "
                 "e.g. com.example.Plugin(value=demo). Repeatable.",
         "default": "",
-        "type": str,
+        "type": "str",
     },
     {
         "name": "--jvm-resource",
         "help": "Add a file to the output jar: ARCHIVE_PATH=FILE. Repeatable.",
         "default": "",
-        "type": str,
+        "type": "str",
     },
     {
         "name": "--jvm-instantiate",
@@ -119,21 +123,21 @@ requested_args: list[dict] = [
                 "frameworks that load a class by constructing it. An optional "
                 "comma-separated parameter-type list says what it takes.",
         "default": None,
-        "type": str,
+        "type": "str",
     },
     {
         "name": "--jvm-runtime-package",
         "help": "Package to compile the bundled runtime into (default asmpython.jvm). "
                 "Relocate it so two compiled jars can be loaded side by side.",
         "default": "",
-        "type": str,
+        "type": "str",
     },
     {
         "name": "--java-version",
         "help": "Target Java release (e.g. 8, 17, 21) — emits the highest "
                 "class-file version that release produces",
         "default": "",
-        "type": str,
+        "type": "str",
     },
 ]
 
