@@ -10610,6 +10610,16 @@ class SemaAnalyzer:
                     return
                 if isinstance(e.obj, A.Name) and e.obj.name in self.classes:
                     cls_name = e.obj.name
+                    # `Outer.Inner()`: a class NESTED in another class is lifted
+                    # to module level under its own name, so the qualified
+                    # spelling is just a constructor call on that class. It read
+                    # as a method lookup and failed with "Outer has no method
+                    # 'Inner'".
+                    if e.method in self.classes and e.method != cls_name:
+                        e.__class__ = A.Call  # type: ignore[assignment]
+                        e.func = e.method  # type: ignore[attr-defined]
+                        self._check_call(e, scope)  # type: ignore[arg-type]
+                        return
                     resolved = self._resolve_method(cls_name, e.method)
                     if resolved is None:
                         raise SemaError(f"{cls_name} has no method {e.method!r}", e.pos, ErrorCode.E_NO_METHOD)
