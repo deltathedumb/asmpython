@@ -5246,7 +5246,16 @@ class SemaAnalyzer:
         if isinstance(e, A.BinOp):
             return list(getattr(e, "el_tuple_types", []))
         if isinstance(e, A.Subscript):
-            return list(getattr(e, "tuple_elem_types", []))
+            # Both spellings, same reason as the A.Call branch: a SLICE of a
+            # list[tuple] is itself a list of tuples and carries
+            # `el_tuple_types`, while an ELEMENT read carries its own tuple's
+            # slots in `tuple_elem_types`. Reading only the latter dropped the
+            # shape on `x = ps[:2]`, leaving `x` shapeless -- and a shapeless
+            # list[tuple] segfaults in repr.
+            return (
+                list(getattr(e, "el_tuple_types", []) or [])
+                or list(getattr(e, "tuple_elem_types", []) or [])
+            )
         return []
 
     def _inparam_el_type(self, e, scope: Scope) -> str:
@@ -8829,6 +8838,16 @@ class SemaAnalyzer:
                     # Propagate element type onto the Subscript so codegen and
                     # downstream `_list_el_type` see the right kind.
                     e.list_el_type = self._list_el_type(e.obj, scope)
+                    if e.list_el_type == "tuple":
+                        # ...and the per-slot shape with it. A slice of a
+                        # list[tuple] is still a list of the SAME tuples, but
+                        # without their shape the result's repr falls back to
+                        # `_abi_list_repr`'s dict-items (str, int) assumption
+                        # and formats a leading int as a string pointer --
+                        # `ps[:1]` segfaulted where `ps` printed fine.
+                        e.el_tuple_types = self._list_el_tuple_types(  # type: ignore[attr-defined]
+                            e.obj, scope
+                        )
                 else:
                     e.inferred_type = "str"
                 return
