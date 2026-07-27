@@ -405,6 +405,18 @@ public class Java extends Containers {
         Class<?> type = isStatic ? (Class<?>) receiver : receiver.getClass();
 
         Method best = pick(type, method, arguments);
+        if (best == null && isStatic) {
+            // A Class handle means "call a static method of this class" almost
+            // always, but a Class is also an ordinary object with methods of
+            // its own. Without this fallback `getClass().getName()` cannot be
+            // expressed at all: getName is an instance method OF Class, and
+            // looking only for statics on the class it describes never finds
+            // it.
+            best = pick(Class.class, method, arguments);
+            if (best != null) {
+                isStatic = false;
+            }
+        }
         if (best == null) {
             _abi_raise(allocateString("AttributeError: " + type.getName()
                     + " has no method '" + method + "' taking "
@@ -621,6 +633,35 @@ public class Java extends Containers {
     /** {@code jclass(name)} — the name the `java` module binds to. */
     public static long jclass(long name) {
         return jvm_class(name);
+    }
+
+    // ---- named entry points, for `import java.<package> as p` ------------
+    //
+    // These take a real java.lang.String rather than a heap address, because
+    // the class name comes from the IMPORT rather than from a Python value:
+    // the codegen has it at compile time and can push it with `ldc`, which
+    // saves interning a copy in the heap on every call.
+
+    public static long jclass_named(String className) {
+        try {
+            return handle(Class.forName(className, false, classLoader()));
+        } catch (ClassNotFoundException e) {
+            _abi_raise(allocateString(
+                    "ImportError: no Java class named '" + className + "'"), 0);
+            return 0;
+        }
+    }
+
+    public static long jnew_named(String className) {
+        return construct(jclass_named(className), NONE);
+    }
+
+    public static long jnew_named_s(String className, long a) {
+        return construct(jclass_named(className), new Object[]{readString(a)});
+    }
+
+    public static long jnew_named_i(String className, long a) {
+        return construct(jclass_named(className), new Object[]{a});
     }
 
     /** {@code jnull()} — the handle for Java null, so it can be passed along. */

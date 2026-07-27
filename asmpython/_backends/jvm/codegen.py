@@ -63,6 +63,20 @@ VARIADIC_RUNTIME_CALLS = {"printf"}
 
 POP = 0x57
 ATHROW = 0xBF
+LDC = 0x12
+
+# Symbols the `java` binding module synthesises for `p.Thing()`; the class name
+# rides in the symbol because a call carries no constant of its own.
+from .bindings import NEW_PREFIX  # noqa: E402
+
+
+def _is_string_arg(value) -> bool:
+    """Whether an IR value is a string pointer rather than a number.
+
+    The IR types both as 64-bit, so this reads the declared type; getting it
+    wrong picks the int constructor for a string and fails to match any.
+    """
+    return str(getattr(value, "type", "")) in ("str", "ptr")
 
 # The Java class a raise arrives as. Nested in Containers, so the internal
 # name uses '$'. It follows the runtime PACKAGE rather than the runtime class:
@@ -611,6 +625,10 @@ class FunctionEmitter:
             self.emit_setjmp(instr, args)
             return
 
+        if target.startswith(NEW_PREFIX):
+            self.emit_named_construction(instr, target[len(NEW_PREFIX):], args)
+            return
+
         for arg in args:
             self.push(arg)
 
@@ -635,6 +653,40 @@ class FunctionEmitter:
         elif callee is not None and not signature.endswith(")V"):
             # A user function always returns a long; discard it when the call
             # site ignores the result, or the operand stack never unwinds.
+            m.u1(POP2)
+
+    def emit_named_construction(self, instr, class_name: str, args) -> None:
+        """`import java.<pkg> as p; p.Thing()` -> construct that class.
+
+        The class name arrives inside the SYMBOL rather than as an argument,
+        because the frontend emits `call <name>` and nothing else -- it has no
+        way to attach a constant to a call and no reason to know one is wanted.
+        Splitting it back out here is what keeps the import sugar entirely on
+        this side of the compiler.
+
+        Pushed with `ldc` as a real java.lang.String, not interned into the
+        heap: the name is known at compile time, so a heap copy per call would
+        be work with nothing to show for it.
+        """
+        m = self.method
+        m.u1(LDC)
+        m.u1(m.pool.string(class_name) & 0xFF)
+
+        if len(args) == 0:
+            self.call_runtime("jnew_named", "(Ljava/lang/String;)J")
+        elif len(args) == 1:
+            self.push(args[0])
+            suffix = "_i" if not _is_string_arg(args[0]) else "_s"
+            self.call_runtime("jnew_named" + suffix, "(Ljava/lang/String;J)J")
+        else:
+            raise UnsupportedIR(
+                f"constructing {class_name} with {len(args)} arguments: use "
+                "java.jnew_* with an explicit class handle"
+            )
+
+        if instr.result is not None:
+            self.pop_into(instr.result)
+        else:
             m.u1(POP2)
 
     def emit_setjmp(self, instr, args) -> None:

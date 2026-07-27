@@ -115,6 +115,15 @@ STDLIB_BINDINGS: dict[str, dict] = {
 }
 
 
+# A bindings dict may map this key to `callable(subpath) -> dict | None`,
+# letting the module answer for its own subpaths. That is what makes a
+# namespace too large to enumerate importable: nothing can list every class in
+# every Java package, but the module owning that namespace can resolve one on
+# request. The registry itself names no namespace -- whoever registered the
+# prefix decides.
+SUBMODULE_RESOLVER = "__resolve_submodule__"
+
+
 def register_bindings(module: str, bindings: dict, *, replace: bool = False) -> None:
     """Contribute an FFI binding module from outside this package.
 

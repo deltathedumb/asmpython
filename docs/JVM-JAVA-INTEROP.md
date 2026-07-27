@@ -1,7 +1,69 @@
 # Calling Java from compiled Python
 
-The JVM backend contributes a `java` module. Import it and you can reach any
-class the host can see:
+Import a Java package under `java.` and construct its classes directly:
+
+```python
+import java
+import java.util as ju
+import java.com.google.gson as gson
+
+
+def main():
+    items = ju.ArrayList()
+    java.jcall_s(items, "add", "hello")
+    print(java.jcalls(items, "toString"))      # [hello]
+
+    g = gson.Gson()
+    print(java.jcalls_s(g, "toJson", "hello")) # "hello"
+
+
+main()
+```
+
+`java.util` is the JDK's `java.util`. Anything else under `java.` has the
+prefix stripped: `java.com.google.gson` is the package `com.google.gson`. The
+leading `java.` is the marker saying "the rest of this is Java", which is what
+lets the compiler stay out of it — see below.
+
+## How the import resolves, without the core knowing about Java
+
+The core gained one generic rule: **a registered binding module may answer for
+its own subpaths.** A module's `BINDINGS` may carry a
+`__resolve_submodule__(subpath)` callable, and `import a.b.c` asks `a` to
+resolve `b.c` when nothing is registered under the full name.
+
+That is what makes a namespace too large to enumerate importable. No registry
+can list every class in `com.google.gson`, and asking the JVM is neither cheap
+nor reliable — a package is not a closed set. But the module that *owns* the
+namespace can resolve one on request.
+
+Rooting it under `java.` is what keeps this honest. `import com.google.gson`
+would require the compiler to guess that an unresolvable dotted import means
+Java; `import java.com.google.gson` is a subpath of a module that is already
+registered, so the rule names no namespace at all — whoever registered the
+prefix decides.
+
+A class attribute becomes a zero-argument constructor whose symbol carries the
+class name (`__jvm_new$com.google.gson.Gson`), because the frontend emits
+`call <name>` and has no way to attach a constant to a call. The backend splits
+it back out at codegen. All the Java knowledge is on the backend side of that
+symbol.
+
+### What the sugar does not cover
+
+- **A bare class reference.** `Gson = gson.Gson` does not work; only
+  `gson.Gson()`. A class handle is obtained at runtime, and a bare attribute
+  has no call to hang that on.
+- **Constructors with arguments.** `ju.ArrayList()` is fine;
+  `ju.ArrayList(10)` is not. A binding declares one fixed arity, and this
+  mapping cannot know a class's constructors without loading it. Use
+  `java.jnew_i(java.jclass("java.util.ArrayList"), 10)`.
+- **Methods.** There is no `items.add("x")`; that would mean teaching the
+  compiler what a Java object is.
+
+## The explicit form
+
+Everything above is sugar over these, which always work:
 
 ```python
 import java

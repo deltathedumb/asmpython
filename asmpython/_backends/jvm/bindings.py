@@ -33,7 +33,7 @@ core, which is exactly what this arrangement avoids.
 
 from __future__ import annotations
 
-from ...stdlib import Func, register_bindings
+from ...stdlib import SUBMODULE_RESOLVER, Func, register_bindings
 
 
 def _f(args: "tuple[str, ...]", ret: str, name: str) -> Func:
@@ -86,6 +86,83 @@ BINDINGS: dict = {
 }
 
 
+# --------------------------------------------------------------------------
+# `import java.<package> as name`
+# --------------------------------------------------------------------------
+
+# The symbol a class attribute lowers to. The class name rides in the symbol
+# because the frontend emits `call <name>` and nothing else -- it has no way to
+# attach a constant, and no reason to know one is needed. The backend splits it
+# back out at codegen (see codegen.emit_call).
+NEW_PREFIX = "__jvm_new$"
+
+
+class JavaPackage(dict):
+    """A Java package, resolved a class at a time.
+
+    A plain dict cannot back this: no registry can enumerate the classes in
+    `com.google.gson`, and asking the JVM to is neither cheap nor reliable
+    (a package is not a closed set). So membership is answered on demand, and
+    a name is taken to be a class if it starts with a capital -- the Java
+    convention, and the only signal available without loading it.
+
+    Loading eagerly to check would turn a typo into a class-loading error at
+    COMPILE time and make an import of an unused class fail a build that does
+    not need it.
+    """
+
+    def __init__(self, package: str) -> None:
+        super().__init__()
+        self.package = package
+
+    def _class_name(self, attribute: str) -> str:
+        return f"{self.package}.{attribute}" if self.package else attribute
+
+    def __contains__(self, attribute) -> bool:
+        return isinstance(attribute, str) and bool(attribute) and attribute[0].isupper()
+
+    def __getitem__(self, attribute):
+        if attribute not in self:
+            raise KeyError(attribute)
+        # Zero-arg construction. A constructor taking arguments still needs
+        # java.jnew_s / jnew_i, because a Func declares one fixed arity and
+        # this mapping cannot know the class's constructors without loading it.
+        return Func(arg_types=(), ret_type="int",
+                    c_name=NEW_PREFIX + self._class_name(attribute))
+
+    def get(self, attribute, default=None):
+        return self[attribute] if attribute in self else default
+
+
+def _resolve_submodule(subpath: str):
+    """`import java.<subpath>` -> the Java package of that name.
+
+    Everything under `java.` is a Java package by construction, so this accepts
+    any subpath rather than guessing. `java.util` is `java.util`; `java.com.
+    google.gson` is `com.google.gson` -- the leading `java.` is the marker that
+    says "the rest of this is Java", not part of the package name, EXCEPT for
+    the JDK's own `java.*` packages, which keep it.
+    """
+    if not subpath:
+        return None
+    head = subpath.split(".")[0]
+    package = f"java.{subpath}" if head in _JDK_ROOTS else subpath
+    return JavaPackage(package)
+
+
+# JDK packages whose real name starts with a segment that would otherwise be
+# stripped. `import java.util` must mean java.util, not util.
+_JDK_ROOTS = {"util", "lang", "io", "nio", "net", "time", "math", "text", "security"}
+
+
+BINDINGS[SUBMODULE_RESOLVER] = lambda subpath: _resolve_submodule(subpath)
+
+
 def install() -> None:
-    """Make `import java` resolve. Called when this backend is loaded."""
+    """Make `import java` and `import java.<package>` resolve.
+
+    Called when this backend is loaded. Nothing in the core knows what a Java
+    package is; it only knows that the module registered under `java` offered
+    to resolve its own subpaths.
+    """
     register_bindings("java", BINDINGS, replace=True)

@@ -20,7 +20,7 @@ from typing import Optional
 
 from . import ast_nodes as A
 from .. import stdlib
-from ..stdlib import STDLIB_BINDINGS
+from ..stdlib import STDLIB_BINDINGS, SUBMODULE_RESOLVER
 from .errors import ErrorCode, SemaError
 
 
@@ -810,6 +810,24 @@ def _load_module(name: str) -> dict:
     if key in STDLIB_BINDINGS:
         b = STDLIB_BINDINGS[key]
         return b
+
+    # A registered module may answer for its own subpaths. `import a.b.c` when
+    # only `a` is registered asks `a` to resolve "b.c", and it may decline.
+    #
+    # This is how a namespace too large to enumerate becomes importable -- the
+    # registry cannot list every class in every Java package, but the module
+    # that owns that namespace can resolve one on request. The rule here names
+    # no particular namespace: it is "whoever registered the prefix decides".
+    parts = key.split(".")
+    for cut in range(len(parts) - 1, 0, -1):
+        owner = STDLIB_BINDINGS.get(".".join(parts[:cut]))
+        resolver = owner.get(SUBMODULE_RESOLVER) if isinstance(owner, dict) else None
+        if resolver is None:
+            continue
+        resolved = resolver(".".join(parts[cut:]))
+        if resolved is not None:
+            return resolved
+
     raise SemaError(f"no such module: {name!r}", code=ErrorCode.E_NO_SUCH_MODULE)
 
 
@@ -7371,7 +7389,14 @@ class SemaAnalyzer:
             bind_name: str = _im_alias if _im_alias else top_name
             self._require_assignable(bind_name, s.pos)
             try:
-                bindings = _load_module(top_name)
+                # The FULL dotted path first, then the leading segment. Only
+                # trying the segment makes `import a.b.c as d` bind `d` to `a`,
+                # so `d.thing` looks for `thing` in the wrong module and reports
+                # it missing -- which is both wrong and hard to read.
+                try:
+                    bindings = _load_module(_im_module)
+                except SemaError:
+                    bindings = _load_module(top_name)
             except SemaError:
                 # Module isn't in asmpython's stdlib registry — accept the
                 # statement as a parser-level no-op so source that uses
