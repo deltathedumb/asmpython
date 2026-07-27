@@ -1348,7 +1348,15 @@ def is_bool_expr(e: Expr) -> bool:
     if isinstance(e, IfExp):
         return is_bool_expr(e.body) and is_bool_expr(e.orelse)
     if isinstance(e, Call):
-        return e.func in ("bool", "isinstance", "any", "all") or getattr(e, "is_bool", False)
+        # Every builtin here RETURNS a bool in CPython. This only affects how
+        # the value is RENDERED (True/False rather than 1/0) -- the static type
+        # stays "int", which is what bool is throughout asmpython. Retyping
+        # these to a distinct bool type is a different, unsafe change: the
+        # read-choke path then derefs the raw 0/1 as a boxed pointer.
+        return e.func in (
+            "bool", "isinstance", "any", "all",
+            "callable", "hasattr", "issubclass",
+        ) or getattr(e, "is_bool", False)
     if isinstance(e, MethodCall):
         return e.method in (
             "isdigit", "isalpha", "isalnum", "isspace",
@@ -1358,6 +1366,10 @@ def is_bool_expr(e: Expr) -> bool:
             "isdisjoint", "issuperset", "issubset",
         ) or getattr(e, "is_bool", False)
     if isinstance(e, Name):
+        return getattr(e, "is_bool", False)
+    if isinstance(e, Attr):
+        # A `bool`-annotated field/class variable: sema stamps `is_bool` on the
+        # read (see `_field_is_bool`), same as it does for a Name.
         return getattr(e, "is_bool", False)
     if isinstance(e, NamedExpr):
         return is_bool_expr(e.value)

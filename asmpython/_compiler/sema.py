@@ -482,6 +482,11 @@ class ClassSig:
     # resolution/dispatch (incl. virtual dispatch) handles it unchanged.
     setters: dict[str, str] = field(default_factory=dict)
     fields: dict[str, str] = field(default_factory=dict)
+    # Fields whose annotation was `bool`. asmpython has no bool type -- bool IS
+    # int -- so this only decides RENDERING: `print(cfg.debug)` writes
+    # True/False rather than 1/0. Mirrors `FuncSig.ret_bool` and `Scope`'s own
+    # `bool_flags` for locals.
+    field_bools: set = field(default_factory=set)
     # Companion collection-shape info for fields, so `self.xs[i]`, `for x in
     # self.xs`, and nested reads like `self.rows[i]["k"]` recover the same
     # metadata locals carry in Scope. `field_el_types` holds the outer list
@@ -1314,6 +1319,19 @@ class SemaAnalyzer:
         e.field_callable = True  # type: ignore
         return True
 
+    def _field_is_bool(self, class_name: str, field_name: str) -> bool:
+        """True if `field_name` was annotated `bool` on `class_name` or any
+        ancestor. Walks the parent chain exactly as `_resolve_field_type` does."""
+        seen: set = set()
+        cur = class_name
+        while cur is not None and cur in self.classes and cur not in seen:
+            seen.add(cur)
+            _cs = self.classes[cur]
+            if field_name in getattr(_cs, "field_bools", set()):
+                return True
+            cur = _cs.parent
+        return False
+
     def _resolve_field_type(self, class_name: str, field_name: str) -> Optional[str]:
         """Walk the parent chain to find the static type of an instance field.
         Returns the type string or None if no class in the chain declares it."""
@@ -1516,6 +1534,8 @@ class SemaAnalyzer:
                 else:
                     ty, el, val = "int", None, None
                 sig.fields[cname] = ty
+                if isinstance(cannot, tuple) and cannot and cannot[0] == "bool":
+                    sig.field_bools.add(cname)
                 if ty == "list" and el is not None:
                     sig.field_el_types[cname] = el
                     if el in ("list", "dict") and elval is not None:
@@ -1686,6 +1706,14 @@ class SemaAnalyzer:
                 # it carries element/value kinds the initializer (often `{}`/`[]`)
                 # can't. Otherwise fall back to the value's static type.
                 _raw_annot = getattr(s, "annot", None)
+                if (
+                    isinstance(_raw_annot, tuple)
+                    and _raw_annot
+                    and _raw_annot[0] == "bool"
+                ):
+                    # `self.x: bool` -- the same rendering flag the class-var
+                    # path records, for the instance-attribute spelling.
+                    sig.field_bools.add(s.name)
                 r = self._resolve_annot(_raw_annot)  # type: ignore
                 if r is not None:
                     # Same fix as elsewhere: subscript reads with an
@@ -9296,6 +9324,10 @@ class SemaAnalyzer:
                 cvt = self._class_var_type(e.obj.name, e.name)
                 if cvt is not None:
                     e.inferred_type = cvt
+                    if self._field_is_bool(e.obj.name, e.name):
+                        # `ClassName.flag` where `flag: bool` -- same rendering
+                        # rule as the instance-qualified read below.
+                        e.is_bool = True  # type: ignore[attr-defined]
                     # `ClassName.x` and `self.x` name the same storage, so this
                     # read carries the same collection element/value kinds the
                     # instance-qualified read below already carries. Without
@@ -9417,6 +9449,11 @@ class SemaAnalyzer:
                     self._check_access(cls, e.name, is_field=True, pos=e.pos)
                     ft = self._resolve_field_type(cls, e.name)
                     e.inferred_type = ft if ft is not None else "any"
+                    if self._field_is_bool(cls, e.name):
+                        # A `bool`-annotated field renders True/False rather
+                        # than 1/0; its static type stays "int" (bool IS int
+                        # here), so nothing about the value changes.
+                        e.is_bool = True  # type: ignore[attr-defined]
                     # Carry the collection element/value kinds so a later
                     # `self.xs[i]` / `for x in self.xs` reads the right kind.
                     if e.inferred_type == "list":

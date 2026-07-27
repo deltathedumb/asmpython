@@ -1,8 +1,8 @@
 # expect:
-# 1
-# 1
-# 0
-# 1
+# True
+# True
+# False
+# True
 
 class Base:
     pass

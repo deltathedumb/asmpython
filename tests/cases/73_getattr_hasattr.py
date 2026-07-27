@@ -1,8 +1,8 @@
 # expect:
 # kind=int
 # missing=none
-# present=1
-# absent=0
+# present=True
+# absent=False
 # 7
 # vararg=42
 # membership ok
