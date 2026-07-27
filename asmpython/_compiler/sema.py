@@ -1850,6 +1850,29 @@ class SemaAnalyzer:
             return ("set", None, None, None)
         if isinstance(value, A.TupleLit):
             return ("tuple", None, None, None)
+        if isinstance(value, A.BinOp) and value.op == "/":
+            # TRUE DIVISION always yields a float in Python 3, whatever the
+            # operands are. Without this, `def half(x): return x / 2` inferred
+            # an int return and the caller printed the double's raw bits as a
+            # pointer-sized integer.
+            return ("float", None, None, None)
+        if isinstance(value, A.BinOp) and value.op in ("+", "-", "*", "%", "**"):
+            # Numeric promotion: a float on either side makes the result float.
+            # Only literal-shaped operands are consulted (this runs before any
+            # expression has been checked), the same standard the rest of this
+            # function holds itself to.
+            _lhs = self._literal_arg_type(value.left)
+            _rhs = self._literal_arg_type(value.right)
+            if (_lhs is not None and _lhs[0] == "float") or (
+                _rhs is not None and _rhs[0] == "float"
+            ):
+                return ("float", None, None, None)
+            if (
+                value.op == "+"
+                and _lhs is not None and _rhs is not None
+                and _lhs[0] == "str" and _rhs[0] == "str"
+            ):
+                return ("str", None, None, None)
         if isinstance(value, A.Lambda):
             # A lambda passed as an argument / stored in a field is a CALLABLE
             # VALUE (a code pointer). Typing the receiving parameter/field
@@ -2414,6 +2437,7 @@ class SemaAnalyzer:
         `_infer_unannotated_params` just determined for `x`)."""
         for f in self.mod.funcs:
             sig = self.funcs[f.name]
+            self._correct_true_division_return(sig, f)
             if self._needs_return_element_kind(sig):
                 self._fill_return_element_kind(sig, f, f.name)
                 continue
@@ -2431,6 +2455,7 @@ class SemaAnalyzer:
         for c in self.mod.classes:
             for m in c.methods:
                 sig = self.classes[c.name].methods[m.name]
+                self._correct_true_division_return(sig, m)
                 if self._needs_return_element_kind(sig):
                     self._fill_return_element_kind(sig, m, f"{c.name}.{m.name}", c.name)
                     continue
@@ -2447,6 +2472,34 @@ class SemaAnalyzer:
                         self._fill_return_element_kind(
                             sig, m, f"{c.name}.{m.name}", c.name
                         )
+
+    def _correct_true_division_return(self, sig, fn) -> None:
+        """Correct an `int` return type on a function whose every `return`
+        yields a TRUE DIVISION.
+
+        `/` yields a float in Python 3 no matter what its operands are, so
+        `def half(x): return x / 2` returns a float -- but the pre-sema return
+        inference merges the operand types and concludes `int`, and the caller
+        then printed the returned double's raw bits as a pointer-sized integer.
+        Runs before the element-kind and unannotated-inference passes below,
+        both of which skip a signature that already has a type.
+
+        Deliberately requires EVERY return to be a division: a function with
+        one `/` return and one int return is a genuine mix this must not
+        silently retype.
+        """
+        _rt = getattr(sig, "ret_type", None)
+        if not (isinstance(_rt, tuple) and _rt and _rt[0] == "int"):
+            return
+        _rets: list = []
+        self._collect_returns(fn.body, _rets)
+        if not _rets:
+            return
+        for _r in _rets:
+            _v = getattr(_r, "value", None)
+            if not (isinstance(_v, A.BinOp) and _v.op == "/"):
+                return
+        sig.ret_type = ("float", None, None)
 
     def _needs_return_element_kind(self, sig) -> bool:
         """True for a signature annotated with a bare CONTAINER -- `-> list`,

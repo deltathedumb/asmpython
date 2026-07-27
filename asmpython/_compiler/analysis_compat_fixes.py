@@ -271,6 +271,12 @@ def _expression_annotation(
         )
 
     if isinstance(expression, A.BinOp):
+        if expression.op == "/":
+            # TRUE DIVISION always yields a float in Python 3, whatever the
+            # operands are -- merging the operand types instead inferred `int`
+            # for `def half(x): return x / 2`, and the caller then printed the
+            # returned double's raw bits as a pointer-sized integer.
+            return "float"
         left = _expression_annotation(
             expression.left,
             environment,
