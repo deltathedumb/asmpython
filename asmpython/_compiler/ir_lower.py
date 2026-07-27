@@ -3814,16 +3814,29 @@ def _lower_dict_of_tuples_repr(
     val_v = ctx.tmp(PTR)
     ctx.emit(IRInstr("call", val_v, ["_abi_dict_get_default", obj_v, k_v, dflt]))
     if slots:
+        # An unrolled formatter: creates no blocks, so values stay live.
         vtxt = _emit_tuple_repr_value(ctx, val_v, slots)
+        _acc_v = wc_v
+        _idx_now = ei_v
     else:
+        # The runtime-length formatter is a LOOP. Spill everything the rest of
+        # this block needs before it and reload after: a value held in a
+        # register across a construct that creates blocks is live across
+        # back-edges that did not exist when it was defined, which is exactly
+        # what made the recursive sequence comparison loop forever.
+        ctx.emit(IRInstr("store", None, [wc_v, res_ptr]))
         vtxt = _emit_tuple_repr_dynamic(ctx, val_v, "any", e)
+        _acc_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", _acc_v, [res_ptr]))
+        _idx_now = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", _idx_now, [idx_ptr]))
     after_v = ctx.tmp(PTR)
-    ctx.emit(IRInstr("call", after_v, ["_abi_str_concat", wc_v, vtxt]))
+    ctx.emit(IRInstr("call", after_v, ["_abi_str_concat", _acc_v, vtxt]))
     ctx.emit(IRInstr("store", None, [after_v, res_ptr]))
     ni_v = ctx.tmp(I64)
     one_v = ctx.tmp(I64)
     ctx.emit(IRInstr("const", one_v, [1]))
-    ctx.emit(IRInstr("iadd", ni_v, [ei_v, one_v]))
+    ctx.emit(IRInstr("iadd", ni_v, [_idx_now, one_v]))
     ctx.emit(IRInstr("store", None, [ni_v, idx_ptr]))
     ctx.emit(IRInstr("br", None, [h_b.label]))
 
