@@ -1685,7 +1685,8 @@ class SemaAnalyzer:
                 # An explicit declaration annotation (`self.x: T = ...`) wins —
                 # it carries element/value kinds the initializer (often `{}`/`[]`)
                 # can't. Otherwise fall back to the value's static type.
-                r = self._resolve_annot(getattr(s, "annot", None))  # type: ignore
+                _raw_annot = getattr(s, "annot", None)
+                r = self._resolve_annot(_raw_annot)  # type: ignore
                 if r is not None:
                     # Same fix as elsewhere: subscript reads with an
                     # explicit `ty: str`, not a tuple-unpack.
@@ -1694,9 +1695,44 @@ class SemaAnalyzer:
                     val = r[2]
                     tup = r[3]
                     elval = r[4]
+                    # A BARE `list`/`dict` annotation resolves its element kind
+                    # to "any", but "any" here means UNWRITTEN, not "the author
+                    # declared a heterogeneous container". Recording it pins the
+                    # field as heterogeneous, which BOXES every element written
+                    # in -- so `self.items = []` (whose annotation is the bare
+                    # `list` synthesized from the initializer) followed by
+                    # `self.items.append(1)` printed pointers instead of ints.
+                    # The raw annotation still distinguishes the two: an
+                    # explicit `list[object]` carries an element part, a bare
+                    # `list` does not.
+                    if (
+                        isinstance(_raw_annot, tuple)
+                        and len(_raw_annot) >= 2
+                        and _raw_annot[1] is None
+                    ):
+                        if el == "any":
+                            el = None
+                        if val == "any":
+                            val = None
                 else:
                     ty, el, val, tup = self._value_shape(s.value, pinfo)
                     elval = None
+                    # An EMPTY container literal has no element kind, and
+                    # `_value_shape` reports that absence as "any". Teaching
+                    # "any" pins the field as a genuinely HETEROGENEOUS
+                    # container, which makes every element written into it get
+                    # BOXED -- so `self.items = []` followed by
+                    # `self.items.append(1)` printed pointers instead of ints.
+                    # An explicit `self.items: list[object] = []` still records
+                    # "any", because that goes through the annotation branch
+                    # above, where the author really did say so.
+                    if (
+                        isinstance(s.value, A.ListLit) and not s.value.elems
+                    ) or (
+                        isinstance(s.value, A.DictLit) and not s.value.values
+                    ):
+                        el = None
+                        val = None
                 existing = sig.fields.get(s.name)
                 # Don't let a later `= 0` reset placeholder downgrade a field we
                 # already typed more precisely.
@@ -1728,7 +1764,15 @@ class SemaAnalyzer:
                 fname = s.expr.obj.name
                 if fname not in sig.field_el_types:
                     el = self._static_value_info(s.expr.args[0], pinfo)[0]
-                    if el != "int":
+                    # "any" is not a kind, it is the ABSENCE of one -- this scan
+                    # runs before parameter inference, so `self.items.append(x)`
+                    # on an unannotated parameter sees nothing. Recording "any"
+                    # anyway pinned the field as a heterogeneous list, which
+                    # BOXES every element written into it, so `self.items = [];
+                    # self.items.append(1); print(self.items)` printed pointers.
+                    # Teaching nothing leaves the field at the unknown-int
+                    # sentinel, which stores raw -- the right default.
+                    if el not in ("int", "any"):
                         sig.field_el_types[fname] = el
             elif (
                 isinstance(s, A.IndexAssign)
