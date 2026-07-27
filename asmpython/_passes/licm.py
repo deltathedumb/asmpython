@@ -16,8 +16,10 @@ no longer shifts it onto the wrong code) and is the next step for this pass.
 
 Safety
 ------
-Only instructions that are pure, whose operands are all defined outside the
-loop, are hoisted. Nothing that can trap or observe memory moves: division is
+Only instructions that are pure, and whose operands are available AT the
+preheader -- defined outside the loop AND in a block dominating it -- are
+hoisted. "Outside the loop" alone is not enough: a value from a sibling branch
+is outside the loop but does not reach the preheader. Nothing that can trap or observe memory moves: division is
 excluded (a divide-by-zero must stay under its original guard), and so are
 ``load``/``call``/``store``, which a later iteration could otherwise observe
 differently. Hoisting a pure computation is safe even if the loop runs zero
@@ -26,7 +28,10 @@ times, because it has no effect beyond producing its value.
 
 from __future__ import annotations
 
-from .._compiler.cfg import natural_loops, predecessor_indices, successor_indices
+from .._compiler.cfg import (
+    dominates, dominators, natural_loops, predecessor_indices,
+    successor_indices,
+)
 from .._compiler.ir import IRModule, IRPass, IRValue
 
 #: Pure and trap-free: safe to execute unconditionally.
@@ -88,6 +93,29 @@ class LICMPass(IRPass):
                 if instr.result is not None
             }
 
+            # "Not defined in the loop" is NOT sufficient to hoist. The operand
+            # must also be available AT the preheader -- its defining block must
+            # dominate the preheader -- or a value computed in a sibling branch,
+            # which merely happens to sit outside the loop, is read above its own
+            # definition. At runtime that is a wild read of whatever the register
+            # last held; the verifier reports it as a use its definition does not
+            # dominate.
+            idom = dominators(func)
+            params = {p.name for p in func.params}
+            def_block: dict[str, int] = {}
+            for dbi, dblock in enumerate(func.blocks):
+                for dinstr in dblock.instrs:
+                    if dinstr.result is not None:
+                        def_block.setdefault(dinstr.result.name, dbi)
+
+            def _available_at_preheader(name: str) -> bool:
+                if name in params:
+                    return True                  # live for the whole function
+                where = def_block.get(name)
+                if where is None:
+                    return False                 # unknown provenance: refuse
+                return dominates(idom, where, preheader)
+
             # Repeat: each hoist can make another instruction invariant.
             moved_any = True
             while moved_any:
@@ -98,7 +126,9 @@ class LICMPass(IRPass):
                     for instr in block.instrs:
                         if instr.op not in _HOISTABLE or instr.result is None:
                             continue
-                        if any(isinstance(op, IRValue) and op.name in defined_in_loop
+                        if any(isinstance(op, IRValue)
+                               and (op.name in defined_in_loop
+                                    or not _available_at_preheader(op.name))
                                for op in (instr.operands or [])):
                             continue
                         hoist.append(instr)
@@ -113,6 +143,7 @@ class LICMPass(IRPass):
                     for offset, instr in enumerate(hoist):
                         target.instrs.insert(at + offset, instr)
                         defined_in_loop.discard(instr.result.name)
+                        def_block[instr.result.name] = preheader
                     moved_any = changed = True
         return changed
 
