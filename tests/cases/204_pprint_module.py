@@ -1,6 +1,6 @@
 # expect:
 # 42
-# hello
+# 'hello'
 
 from pprint import pprint, pformat
 

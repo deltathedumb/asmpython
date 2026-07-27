@@ -2141,8 +2141,26 @@ class SemaAnalyzer:
             for m in c.methods:
                 self._collect_calls_stmts(m.body, calls)
 
+        _mod_names = {
+            _mn for _mn in getattr(self.mod, "project_module_qualifiers", set())
+        }
         for f in self.mod.funcs:
             sites = [c for c in calls if isinstance(c, A.Call) and c.func == f.name]
+            # A MODULE-QUALIFIED call (`pprint.pformat(x)`) is a call to this
+            # same merged function -- whole-program compilation flattens the
+            # namespace -- but it is still an A.MethodCall at THIS point,
+            # because the rewrite to a plain Call happens during checking,
+            # which runs later. Collecting only A.Call left every such callee's
+            # parameters uninferred: `pformat`'s `o` defaulted to int, so its
+            # `str(o)` formatted a dict POINTER as a decimal integer.
+            for _c in calls:
+                if (
+                    isinstance(_c, A.MethodCall)
+                    and _c.method == f.name
+                    and isinstance(_c.obj, A.Name)
+                    and _c.obj.name not in self.imported_modules
+                ):
+                    sites.append(_c)
             self._infer_call_target_params(f.name, f, sites, start=0)
 
         for c in self.mod.classes:

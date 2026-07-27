@@ -13,8 +13,13 @@ def _indent_str(n: int) -> str:
 
 def pformat(obj, indent: int = 1, width: int = 80, depth: int = -1,
             compact: int = 0) -> str:
-    """Format obj as a string."""
-    return str(obj)
+    """Format obj as a string.
+
+    CPython's pprint formats with REPR, not str -- `pprint.pformat('hi')` is
+    `"'hi'"`, not `hi`. For containers the two agree (a container's str IS its
+    repr), so this only shows up on a bare string.
+    """
+    return repr(obj)
 
 
 def pprint(obj, indent: int = 1, width: int = 80, depth: int = -1,
