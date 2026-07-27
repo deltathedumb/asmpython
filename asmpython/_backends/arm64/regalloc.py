@@ -40,7 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Union
 
-from ..._compiler.cfg import loop_membership, try_regions_resolved
+from ..._compiler.cfg import try_regions_resolved
 from .encoder import (
     Reg, VReg,
     ARG_REGS, FP_ARG_REGS,
@@ -147,7 +147,6 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
     and a loop accumulator could silently reset). A branch is a back edge only
     when its target dominates its source, so both are gone by construction.
     """
-    loop_blocks = loop_membership(func)
 
     def_block: dict[str, int] = {}
     for param in func.params:
@@ -174,15 +173,45 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
     # A value defined in the loop and used only after its definition is
     # refreshed every iteration and must NOT be extended, or nearly every loop
     # temporary is pinned live at once and the register pool is exhausted.
+    # Loop liveness uses the block-INDEX SPAN of a backward-looking branch, with
+    # try/except dispatch excluded. This is the rule that shipped before the
+    # natural-loop rework and it is restored deliberately.
+    #
+    # cfg.py's dominance-based analysis is the correct description of a LOOP, and
+    # the passes use it. It is not, on its own, a correct description of
+    # LIVENESS here, and substituting it silently miscompiled four programs
+    # (r39_running_average's running sum stuck at its first value,
+    # 382_nested_listcomp, 425_generator_pipeline, 999_comprehensive_codegen).
+    # Replacing it again needs a full differential run, not a case-by-case fix:
+    # every variant tried so far trades one set of programs for another --
+    # tightening the range frees a register that is still live, and widening it
+    # exhausts the pool and crashes the "GP result expected" path instead.
+    regions = try_regions_resolved(func)
+
+    def _in_try_region(idx: int) -> bool:
+        return any(idx in members for _setjmp, members in regions)
+
+    label_to_idx = {b.label: bi for bi, b in enumerate(func.blocks)}
+    loop_start = list(range(len(func.blocks)))
+    loop_end = list(range(len(func.blocks)))
+    for bi, block in enumerate(func.blocks):
+        for instr in block.instrs:
+            if instr.op not in ("br", "br.t"):
+                continue
+            targets = instr.operands[1:] if instr.op == "br.t" else instr.operands
+            for target in targets:
+                ti = label_to_idx.get(str(target))
+                if ti is None or ti > bi or _in_try_region(ti):
+                    continue
+                for k in range(ti, bi + 1):
+                    if loop_start[k] > ti:
+                        loop_start[k] = ti
+                    if loop_end[k] < bi:
+                        loop_end[k] = bi
+
     for name, (bi, _ii) in list(last.items()):
-        body = loop_blocks.get(bi)
-        if body is None:
-            continue
-        def_bi = def_block.get(name, bi)
-        if def_bi in body and def_bi <= bi:
-            continue
-        end = max(body)
-        if end >= bi:
+        start, end = loop_start[bi], loop_end[bi]
+        if end >= bi and def_block.get(name, bi) < start:
             last[name] = (end, len(func.blocks[end].instrs))
 
     try_regions = try_regions_resolved(func)

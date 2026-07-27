@@ -253,6 +253,136 @@ def dominance_frontiers(func, idom=None, preds=None) -> dict[int, set[int]]:
     return frontier
 
 
+def strongly_connected_components(func, succs=None) -> list[frozenset[int]]:
+    """Tarjan's SCCs of the CFG, in reverse topological order.
+
+    Iterative rather than recursive: a large function nests deeper than
+    CPython's stack allows.
+    """
+    if succs is None:
+        succs = successor_indices(func)
+    n = len(func.blocks)
+    index: dict[int, int] = {}
+    low: dict[int, int] = {}
+    on_stack: set[int] = set()
+    stack: list[int] = []
+    result: list[frozenset[int]] = []
+    counter = 0
+
+    for root in range(n):
+        if root in index:
+            continue
+        work: list[tuple[int, int]] = [(root, 0)]
+        while work:
+            node, child_i = work[-1]
+            if child_i == 0:
+                index[node] = low[node] = counter
+                counter += 1
+                stack.append(node)
+                on_stack.add(node)
+            children = succs[node]
+            if child_i < len(children):
+                work[-1] = (node, child_i + 1)
+                child = children[child_i]
+                if child not in index:
+                    work.append((child, 0))
+                elif child in on_stack:
+                    low[node] = min(low[node], index[child])
+                continue
+            work.pop()
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+            if low[node] == index[node]:
+                component = []
+                while True:
+                    w = stack.pop()
+                    on_stack.discard(w)
+                    component.append(w)
+                    if w == node:
+                        break
+                result.append(frozenset(component))
+    return result
+
+
+def cycles(func) -> list[frozenset[int]]:
+    """Every cycle in the CFG, kept SEPARATE -- nested cycles are not merged.
+
+    Not currently consumed: the register allocator went back to its index-span
+    liveness rule after the dominance-based one miscompiled four programs (see
+    ``_backends/x86_64/regalloc.py``'s ``_last_uses``). This is kept because it
+    is the correct analysis for the retry, and because the nesting property
+    below is the specific thing the naive replacement got wrong.
+
+    This is what liveness needs, and the distinction from ``loop_membership`` is
+    not cosmetic. That function unions every loop containing a block, and the
+    union destroys the nesting: a value defined in an OUTER loop's body and read
+    inside an INNER loop looks "defined inside the loop", so it is treated as
+    refreshed each iteration and its live range is not extended. It is not
+    refreshed -- it still crosses the inner cycle's back edge, and the allocator
+    reuses its register mid-loop.
+
+    Lowering produces exactly that shape routinely: a float division emits a
+    divide-by-zero guard whose ``ok`` block branches back to the loop's
+    continuation, creating an inner cycle nested inside the ordinary loop.
+    Observed as ``r39_running_average`` printing 10/1, 10/2, 10/3, 10/4 -- the
+    running sum stuck at its first value while the divisor kept incrementing.
+
+    Natural loops (which nest) plus non-trivial SCCs (which catch the
+    irreducible cycles dominance-based analysis cannot see) together cover both
+    kinds. Overlap between the two is harmless: a caller tests each cycle
+    independently.
+    """
+    out: list[frozenset[int]] = [body for _header, body in natural_loops(func)]
+    succs = successor_indices(func)
+    for component in strongly_connected_components(func, succs):
+        if len(component) > 1:
+            pass
+        else:
+            (only,) = tuple(component)
+            if only not in succs[only]:
+                continue
+        if not any(component <= existing for existing in out):
+            out.append(component)
+    return out
+
+
+def cycle_membership(func) -> dict[int, frozenset[int]]:
+    """Block index -> the set of blocks in its CFG cycle, or absent if acyclic.
+
+    This is what *liveness* wants, and it is deliberately not
+    :func:`loop_membership`. A value read in a block that can re-execute must
+    stay live until the whole cycle is done, and that is true of every cycle,
+    not only the well-structured ones.
+
+    ``natural_loops`` requires a back edge's target to DOMINATE its source,
+    which is the definition of a reducible loop. Lowering emits irreducible
+    ones: a float division emits a divide-by-zero guard whose ``ok`` block
+    branches back to the loop's continuation, giving the body a second entry, so
+    no single header dominates the latch. Analyzing only natural loops silently
+    drops those -- the allocator then reuses the accumulator's register
+    mid-loop, and a running sum stops accumulating while everything around it
+    keeps working (``r39_running_average`` printing 10/1, 10/2, 10/3, 10/4).
+
+    An SCC of size > 1, or a single block branching to itself, is a cycle
+    regardless of structure, so this covers both kinds without special-casing
+    either. Nested loops collapse into one enclosing SCC, which over-approximates
+    the inner loop's extent; that costs some register pressure and is always
+    safe, whereas under-approximating corrupts values.
+    """
+    succs = successor_indices(func)
+    membership: dict[int, frozenset[int]] = {}
+    for component in strongly_connected_components(func, succs):
+        if len(component) > 1:
+            for node in component:
+                membership[node] = component
+        else:
+            (only,) = tuple(component)
+            if only in succs[only]:
+                membership[only] = component
+    return membership
+
+
 def try_regions_resolved(func) -> list[tuple[int, frozenset[int]]]:
     """Resolve ``IRFunc.try_regions`` against the CURRENT block list.
 
@@ -313,4 +443,5 @@ __all__ = [
     "reverse_postorder", "dominators", "dominates", "back_edges",
     "natural_loop_body", "natural_loops", "loop_membership",
     "dominance_frontiers", "try_regions_resolved",
+    "strongly_connected_components", "cycle_membership", "cycles",
 ]

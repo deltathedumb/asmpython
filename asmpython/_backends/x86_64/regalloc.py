@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Union
 
-from ..._compiler.cfg import loop_membership, try_regions_resolved
+from ..._compiler.cfg import try_regions_resolved
 from .encoder import (
     Reg, XmmReg,
     ARG_REGS_SYSV, ARG_REGS_WIN64,
@@ -86,58 +86,6 @@ def _slot_size(type_name: str) -> int:
     return 16 if type_name == "v128" else 8
 
 
-def _loop_carried(func: Any) -> dict[str, Any]:
-    """Values whose live range crosses a back edge -> the IRValue defining them.
-
-    A loop-carried value is read in a block that the linear walk visits BEFORE
-    the block defining it, with both inside the same natural loop. The only way
-    such a read can be meaningful is by observing the value the *previous*
-    iteration produced, so the value is live around the entire loop.
-
-    This matters because the allocator is a linear scan over blocks in index
-    order: it reserves a register when it reaches a value's definition. For a
-    loop-carried value that is too late -- the register is still unassigned at
-    the earlier read, so the allocator is free to hand it to something else,
-    and the two collide. Extending the value's LAST use cannot fix that; its
-    live range starts too early, not ends too soon.
-
-    Phi elimination produces exactly this shape: the copy implementing a
-    back-edge phi operand lands in the latch, while the value being copied is
-    computed in a body block emitted later (ir_lower orders the
-    possibly-raising helper blocks after the latch). Observed as a loop
-    accumulator silently resetting -- Counter.total() returning the first
-    element instead of the sum.
-    """
-    loop_blocks = loop_membership(func)
-    if not loop_blocks:
-        return {}
-
-    def_block: dict[str, int] = {}
-    values: dict[str, Any] = {}
-    for param in func.params:
-        def_block[param.name] = 0
-        values[param.name] = param
-    for bi, block in enumerate(func.blocks):
-        for instr in block.instrs:
-            if instr.result is not None:
-                def_block.setdefault(instr.result.name, bi)
-                values.setdefault(instr.result.name, instr.result)
-
-    carried: dict[str, Any] = {}
-    for bi, block in enumerate(func.blocks):
-        body = loop_blocks.get(bi)
-        if body is None:
-            continue
-        for instr in block.instrs:
-            for op in instr.operands:
-                if not hasattr(op, "name"):
-                    continue
-                db = def_block.get(op.name)
-                if db is not None and db in body and db > bi:
-                    carried[op.name] = values.get(op.name, op)
-    return carried
-
-
 def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
     """Return the (block_idx, instr_idx) of each value's final use.
 
@@ -172,7 +120,6 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
     # used there were never extended across the back edge -- a loop accumulator
     # could silently reset). A branch is a back edge only when its target
     # dominates its source, so both problems are gone by construction.
-    loop_blocks = loop_membership(func)
 
     def_block: dict[str, int] = {}
     for param in func.params:
@@ -218,35 +165,64 @@ def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
     # instruction index is always < the block's own instruction count),
     # so this is a pure widening -- never moves a value's recorded
     # lifetime backward.
-    for name, (bi, _ii) in list(last.items()):
-        body = loop_blocks.get(bi)
-        if body is None:
-            continue                      # last use isn't inside any loop
+    # Extend a use inside a cycle to that cycle's last block. Each containing
+    # loops loses values defined in an outer body and read in an inner one.
+    #
+    # A value must survive to the end of a cycle when its live range crosses
+    # that cycle's back edge, which happens two ways:
+    #
+    #  1. It is defined OUTSIDE the cycle. Nothing in the cycle refreshes it, so
+    #     the next iteration still needs it.
+    #  2. It is defined INSIDE the cycle at a LATER block than the use. The
+    #     allocator walks blocks in index order, so a use preceding its own
+    #     definition can only be reading the previous iteration's value. Phi
+    #     elimination creates exactly this: the back-edge copy lands in the
+    #     latch while the value is computed in a body block emitted later.
+    #     Without this a loop accumulator silently resets (Counter.total()
+    #     returning the first element instead of the sum).
+    #
+    # A value defined inside the cycle and used only after its definition is
+    # refreshed every iteration and must NOT be extended, or nearly every loop
+    # temporary is pinned live at once and the register pool is exhausted.
+    # Loop liveness uses the block-INDEX SPAN of a backward-looking branch, with
+    # try/except dispatch excluded. This is the rule that shipped before the
+    # natural-loop rework and it is restored deliberately.
+    #
+    # cfg.py's dominance-based analysis is the correct description of a LOOP, and
+    # the passes use it. It is not, on its own, a correct description of
+    # LIVENESS here, and substituting it silently miscompiled four programs
+    # (r39_running_average's running sum stuck at its first value,
+    # 382_nested_listcomp, 425_generator_pipeline, 999_comprehensive_codegen).
+    # Replacing it again needs a full differential run, not a case-by-case fix:
+    # every variant tried so far trades one set of programs for another --
+    # tightening the range frees a register that is still live, and widening it
+    # exhausts the pool and crashes the "GP result expected" path instead.
+    regions = try_regions_resolved(func)
 
-        # A value must survive to the end of the loop exactly when its live
-        # range crosses the back edge. Two ways that happens:
-        #
-        #  1. Defined OUTSIDE the loop, used inside -- nothing in the loop
-        #     refreshes it, so it is still needed on the next iteration.
-        #  2. Defined INSIDE the loop at a later block than the use. The
-        #     allocator walks blocks in index order, so a use that precedes
-        #     its own definition can only be reading the value produced by the
-        #     PREVIOUS iteration. Phi elimination creates exactly this shape:
-        #     the copy implementing a back-edge phi operand sits in the latch,
-        #     while the value it copies is computed in a body block emitted
-        #     later. Without this, the allocator frees the register at the
-        #     early use and the value is clobbered before the copy reads it --
-        #     a loop accumulator silently resets (Counter.total() returning
-        #     the first element instead of the sum).
-        #
-        # A value defined inside the loop and used only after its definition
-        # is refreshed every iteration and needs no extension -- extending
-        # those would pin nearly every loop temporary live at once.
-        def_bi = def_block.get(name, bi)
-        if def_bi in body and def_bi <= bi:
-            continue
-        end = max(body)
-        if end >= bi:
+    def _in_try_region(idx: int) -> bool:
+        return any(idx in members for _setjmp, members in regions)
+
+    label_to_idx = {b.label: bi for bi, b in enumerate(func.blocks)}
+    loop_start = list(range(len(func.blocks)))
+    loop_end = list(range(len(func.blocks)))
+    for bi, block in enumerate(func.blocks):
+        for instr in block.instrs:
+            if instr.op not in ("br", "br.t"):
+                continue
+            targets = instr.operands[1:] if instr.op == "br.t" else instr.operands
+            for target in targets:
+                ti = label_to_idx.get(str(target))
+                if ti is None or ti > bi or _in_try_region(ti):
+                    continue
+                for k in range(ti, bi + 1):
+                    if loop_start[k] > ti:
+                        loop_start[k] = ti
+                    if loop_end[k] < bi:
+                        loop_end[k] = bi
+
+    for name, (bi, _ii) in list(last.items()):
+        start, end = loop_start[bi], loop_end[bi]
+        if end >= bi and def_block.get(name, bi) < start:
             last[name] = (end, len(func.blocks[end].instrs))
 
     # try/except handler blocks are reached via an IMPLICIT control
@@ -702,20 +678,6 @@ def allocate(func: Any, abi: str = "sysv") -> AllocResult:
                             free_gp.remove(r)
                 else:
                     stack_params.append(param.name)
-
-    # ── Reserve loop-carried values before the walk ───────────────────────────
-    # These are read earlier in block order than they are defined (see
-    # `_loop_carried`), so the walk would not reserve anything for them until
-    # after the read that needs them. Assign their home up front; the walk then
-    # skips them because they are already in `locs`. Their last use is already
-    # extended to the end of the loop, so nothing reclaims the home mid-loop.
-    for _name, _value in _loop_carried(func).items():
-        if _name in locs:
-            continue
-        if _is_float(_value.type.name):
-            _alloc_xmm(_name)
-        else:
-            _alloc_gp(_name)
 
     # ── Walk all instructions ─────────────────────────────────────────────────
 
