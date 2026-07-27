@@ -1992,10 +1992,11 @@ def _lower_dict_comprehension(ctx: _FuncCtx, e: A.DictComprehension) -> IRValue:
     if getattr(e, "extra_for_iters", []):
         raise LowerError("unsupported expr DictComprehension (multiple for clauses)")
     if A.expr_type(e.value) == "float":
-        # A float VALUE store is fine (bitcast below), but reading a float value
-        # back out of a float-sourced items() loop var isn't typed correctly yet
-        # and float register pressure here can crash regalloc -- keep the guard
-        # until both are handled (list comprehensions already support floats).
+        # Float dict-comp VALUES stay unsupported: the store itself is fine
+        # (bitcast below), but two float dict comprehensions in one function
+        # still crash the backend with "'XmmLoc' object has no attribute
+        # 'offset'", and a float read can be clobbered by a preceding loop over
+        # the same items() -- both in float register allocation, not here.
         raise LowerError("unsupported expr DictComprehension (float value)")
 
     out_v = ctx.tmp(PTR)
@@ -8863,9 +8864,25 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("call", pair_v, ["_abi_new_list", pair_cap]))
                 ctx.emit(IRInstr("call", None, ["_abi_list_append", pair_v, key_item]))
                 val_ty = e.tuple_elem_types[1] if len(e.tuple_elem_types) >= 2 else "any"
-                default_v = ctx.tmp(ir_type_for(val_ty))
+                # The pair's value cell is a raw 8-byte slot, and the consumer
+                # (target unpack / repr) already knows the slot's kind, so move
+                # the value through as RAW BITS.
+                #
+                # A float value must not be typed F64 here: `_abi_dict_get_default`
+                # returns in a GP register, so an F64-typed result makes the
+                # backend read XMM0 instead -- the same ABI mismatch this file
+                # documents around its other float/GP boundaries -- and
+                # `_abi_list_append` would then need a bitcast anyway. The
+                # symptom was a float-valued dict's items() pairs holding a
+                # POINTER-shaped denormal (`{'a': 1.5}.items()` reprs as
+                # `[('a', 2.9e-317)]`) while `d[k]` and `.values()` were both
+                # correct, plus an 'XmmLoc has no attribute offset' regalloc
+                # crash once a second float dict comprehension raised register
+                # pressure.
+                _val_ir = I64 if val_ty == "float" else ir_type_for(val_ty)
+                default_v = ctx.tmp(_val_ir)
                 ctx.emit(IRInstr("const", default_v, [0]))
-                val_v = ctx.tmp(ir_type_for(val_ty))
+                val_v = ctx.tmp(_val_ir)
                 ctx.emit(IRInstr("call", val_v, ["_abi_dict_get_default", obj_v, key_item, default_v]))
                 ctx.emit(IRInstr("call", None, ["_abi_list_append", pair_v, val_v]))
                 cur_out = ctx.tmp(PTR)
