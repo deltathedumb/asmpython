@@ -2863,6 +2863,35 @@ class SemaAnalyzer:
                 return None
         return seen
 
+    def _yielded_value_kind(self, stmts: list) -> "str | None":
+        """The common kind of every `yield`ed expression in `stmts`, or None if
+        they disagree or none is statically knowable.
+
+        Syntax-only, like the other pre-pass inference: this runs before any
+        body is checked. `x.upper()` and friends are recognized through
+        `_literal_arg_type`, which already knows the fixed-result builtins and
+        str methods it needs.
+        """
+        _kinds: set = set()
+        for _s in self._walk_stmts_flat(stmts):
+            if not isinstance(_s, A.YieldStmt):
+                continue
+            _v = getattr(_s, "value", None)
+            if _v is None:
+                return None
+            if isinstance(_v, A.MethodCall) and _v.method in _STR_METHOD_RET:
+                _kinds.add(_STR_METHOD_RET[_v.method])
+                continue
+            _lit = self._literal_arg_type(_v)
+            if _lit is None:
+                return None
+            _kinds.add(_lit[0])
+        if len(_kinds) != 1:
+            return None
+        for _k in _kinds:
+            return _k
+        return None
+
     def _walk_stmts_flat(self, stmts: list):
         """Every statement in `stmts` at any nesting depth."""
         for _s in stmts:
@@ -4218,7 +4247,11 @@ class SemaAnalyzer:
         elif isinstance(_rt, tuple) and _rt and _rt[0] not in ("list", "tuple", "set"):
             ret_type = _rt
         else:
-            ret_type = ("int", None)
+            # UNANNOTATED generator: the yielded expressions say what `__next__`
+            # returns. Defaulting to int made `''.join(chars())` -- a generator
+            # of strings -- fail as "requires list[str], got list[int]", and
+            # every other consumer read the yielded strings as integers.
+            ret_type = (self._yielded_value_kind(f.body) or "int", None)
 
         next_func = A.FuncDef(
             name="__next__",
@@ -9448,7 +9481,19 @@ class SemaAnalyzer:
             for el in e.elems:
                 self._check_expr(el, scope)
                 et = A.expr_type(el)
-                if et not in ("str", "int", "any", "tuple"):
+                # float / bool are fine: a set element goes through the SAME
+                # key encoder dict keys do (`_lower_dict_key`), which gives a
+                # float a canonical repr string, and membership uses that
+                # identical encoding -- so `1.5 in {1.5, 2.5}` was rejected for
+                # no reason the backend still has.
+                #
+                # INSTANCES stay rejected: the encoder keys them by repr, but a
+                # class defining `__hash__`/`__eq__` expects dedup by THOSE,
+                # and the two disagree (verified: a 2-element set came out with
+                # 3). A clean error beats a wrong count. Set COMPREHENSIONS of
+                # floats stay rejected for the same reason -- their elements
+                # read back as the encoded strings.
+                if et not in ("str", "int", "any", "tuple", "float", "bool"):
                     raise SemaError(
                         f"set elements of type {et} are not supported yet "
                         "(sets are str/int-keyed in v1)",
@@ -11602,6 +11647,11 @@ class SemaAnalyzer:
                 arg_el = self._list_el_type(e.args[0], scope)
                 # An opaque element kind ("any") is accepted — we can't prove it's
                 # str, but join only ever runs on str elements in practice.
+                # NOT "?" (a list built by appends whose kind was never
+                # pinned): accepting it replaced a clean compile error with a
+                # SEGFAULT, because the join lowering needs a real element kind
+                # to read the cells with. The fix for those belongs upstream,
+                # in whatever left the kind unpinned.
                 if arg_el not in ("str", "any"):
                     raise SemaError(
                         f"str.join() requires list[str], got list[{arg_el}]", e.pos,
