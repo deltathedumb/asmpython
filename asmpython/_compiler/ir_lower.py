@@ -2025,13 +2025,6 @@ def _lower_comprehension(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
 def _lower_dict_comprehension(ctx: _FuncCtx, e: A.DictComprehension) -> IRValue:
     if getattr(e, "extra_for_iters", []):
         raise LowerError("unsupported expr DictComprehension (multiple for clauses)")
-    if A.expr_type(e.value) == "float":
-        # Float dict-comp VALUES stay unsupported: the store itself is fine
-        # (bitcast below), but two float dict comprehensions in one function
-        # still crash the backend with "'XmmLoc' object has no attribute
-        # 'offset'", and a float read can be clobbered by a preceding loop over
-        # the same items() -- both in float register allocation, not here.
-        raise LowerError("unsupported expr DictComprehension (float value)")
 
     out_v = ctx.tmp(PTR)
     ctx.emit(IRInstr("call", out_v, ["_abi_new_instance"]))
