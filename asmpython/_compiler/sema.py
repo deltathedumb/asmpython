@@ -10812,7 +10812,27 @@ class SemaAnalyzer:
             _ec2.args = new_args
             _ec2.kwargs = []
 
-    def _expand_starred_args(self, args: list, scope: Scope) -> list:
+    def _starred_expand_count(self, args: list, callee: "Optional[str]") -> "Optional[int]":
+        """How many positional arguments a lone `*expr` must supply, or None.
+
+        Known only when the callee is a plain top-level function with a fixed
+        parameter list: the count is its parameters minus the plain arguments
+        already present. A callee with its own `*vararg` is excluded -- the
+        argument count is genuinely unknown there, which is the case that still
+        needs real runtime varargs.
+        """
+        if callee is None or callee not in self.funcs:
+            return None
+        sig = self.funcs[callee]
+        if getattr(sig, "vararg", None):
+            return None
+        n_starred = sum(1 for a in args if isinstance(a, A.Starred))
+        if n_starred != 1:
+            return None
+        need = sig.arity - (len(args) - 1)
+        return need if need > 0 else None
+
+    def _expand_starred_args(self, args: list, scope: Scope, callee: "Optional[str]" = None) -> list:
         """Rewrite `*expr` call arguments in place into one Subscript per
         tuple slot (`expr[0], expr[1], ...`), since asmpython has no runtime
         varargs. Returns the (possibly unchanged) args list."""
@@ -10826,6 +10846,25 @@ class SemaAnalyzer:
             self._check_expr(a.value, scope)
             ets = self._tuple_elem_types(a.value, scope)
             if not ets:
+                # No compile-time slot shape (a LIST, or a tuple whose kinds
+                # aren't tracked). If the callee is a known function with a
+                # fixed parameter count, the number of arguments to produce IS
+                # known even though the sequence's contents aren't, so expand to
+                # that many subscripts -- `point(*coords)` becomes
+                # `point(coords[0], coords[1])`. A shorter sequence at runtime
+                # then raises IndexError from the ordinary subscript bounds
+                # check, where CPython would raise TypeError.
+                _n_star = self._starred_expand_count(args, callee)
+                if _n_star is not None and A.expr_type(a.value) in (
+                    "list", "tuple", "any",
+                ):
+                    for i in range(_n_star):
+                        sub = A.Subscript(
+                            obj=a.value, index=A.IntLit(value=i, pos=a.pos), pos=a.pos
+                        )
+                        self._check_expr(sub, scope)
+                        new_args.append(sub)
+                    continue
                 raise SemaError(
                     "*expr argument unpacking requires a tuple with known "
                     "element types",
@@ -10911,7 +10950,7 @@ class SemaAnalyzer:
             resolved = self.mod.func_aliases[func_name]
             if resolved in self.funcs:
                 e.func = resolved
-        e.args = self._expand_starred_args(e.args, scope)
+        e.args = self._expand_starred_args(e.args, scope, callee=e.func)
         # Builtins are shadowable: after whole-program merge a call like
         # `re.compile(...)` rewrites to a plain `compile(...)`, and that must
         # resolve to the merged stdlib function, not the interpreter-only
