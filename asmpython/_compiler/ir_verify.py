@@ -23,7 +23,7 @@ Usage::
 
 from __future__ import annotations
 
-from .cfg import dominates, dominators
+from .cfg import dominates, dominators, reverse_postorder
 from .ir import IRBlock, IRFunc, IRInstr, IRModule, IRValue
 
 #: Ops that end a basic block. Every block's last instruction must be one of
@@ -167,7 +167,16 @@ def _check_dominance(func: IRFunc, errors: list[str]) -> None:
     idom = dominators(func)
     reported: set[tuple[str, int]] = set()
 
+    # Only blocks reachable from entry are checked. Dominance is undefined for
+    # unreachable code -- nothing dominates it because no path reaches it -- so
+    # every use inside it would be reported, which is noise: the code cannot
+    # execute. A pass that leaves a block unreachable is not thereby wrong;
+    # `simplifycfg` deletes such blocks later.
+    reachable = set(reverse_postorder(func))
+
     for bi, block in enumerate(func.blocks):
+        if bi not in reachable:
+            continue
         for instr in block.instrs:
             operands = instr.operands or []
             if instr.op == "phi":

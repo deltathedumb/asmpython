@@ -245,6 +245,60 @@ class IRFunc:
     try_regions: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
 
 
+def layout_blocks_rpo(func: "IRFunc") -> bool:
+    """Reorder blocks into reverse postorder. Returns True if anything moved.
+
+    The register allocator is a linear scan over blocks IN LIST ORDER: it
+    reserves a register when it reaches a value's definition and frees it after
+    the last use it has seen. That is only sound if every definition appears
+    before its uses in that order, and the only edges that may legitimately
+    violate it are real loop back edges, which the liveness extension handles.
+
+    Lowering does not emit blocks in that order. An ``if/elif`` chain has its
+    join blocks emitted BEFORE the later branches, so control runs
+    ``then_3 -> endif_3 -> endif_2`` with indices 18 -> 20 -> 17: the scan
+    processes the reader at 17 before the writer at 20 and sees a use with no
+    definition yet. Observed as base32 encoding dropping a byte under
+    ``mem2reg`` (``MZXW6===`` becoming ``MZXW====``), where the value read was
+    whichever earlier branch had last written the register.
+
+    Reverse postorder is exactly the order that guarantees the property for
+    every acyclic edge, so this makes the allocator's own assumption true
+    instead of compensating for it downstream. Unreachable blocks keep their
+    relative order and are appended at the end -- they are never executed, but
+    dropping them would invalidate labels that other metadata may still name.
+
+    Safe with respect to ``try_regions`` only because those are label-based; the
+    positional form this replaced would have been silently repointed.
+
+    NOT CURRENTLY CALLED, and it must not be enabled on its own. The allocator's
+    liveness rule derives loops from the block-INDEX SPAN of a backward-looking
+    branch, so it is coupled to lowering's emission order: reordering the blocks
+    changes which branches look backward and the spans come out wrong.
+    Enabling this alone breaks r39_running_average, zip_two_lists and
+    999_comprehensive_codegen.
+
+    In theory the two fit together -- in reverse postorder a backward-by-index
+    edge IS a back edge for any reducible CFG, which would make the span rule
+    exact rather than approximate. Landing them as one change, with a full
+    differential, is the way to get both. Do not enable this without that.
+    """
+    from .cfg import reverse_postorder
+
+    if len(func.blocks) < 3:
+        return False
+    order = reverse_postorder(func)
+    if not order or order[0] != 0:
+        return False
+    seen = set(order)
+    tail = [i for i in range(len(func.blocks)) if i not in seen]
+    new_order = order + tail
+    if new_order == list(range(len(func.blocks))):
+        return False
+    func.blocks = [func.blocks[i] for i in new_order]
+    return True
+
+
 def rewrite_try_region_labels(func: "IRFunc", mapping: dict[str, str]) -> None:
     """Repoint ``func.try_regions`` after blocks were renamed or fused away.
 
