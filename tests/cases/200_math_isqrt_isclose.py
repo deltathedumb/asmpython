@@ -1,8 +1,8 @@
 # expect:
 # 4
 # 3
-# 1
-# 0
+# True
+# False
 
 import math
 

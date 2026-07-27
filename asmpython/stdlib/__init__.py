@@ -38,6 +38,24 @@ class Func:
     # the high half), corrupting any heap address that doesn't happen to
     # fit and round-trip through a signed 32-bit value -- which most don't.
     ret_conv: str | None = None
+    # Trailing default argument VALUES, so a short call is padded rather than
+    # rejected. An FFI binding declares a fixed C arity, but the CPython
+    # function it stands in for very often has optional tail parameters
+    # (`math.isclose(a, b, rel_tol=1e-09, abs_tol=0.0)`,
+    # `random.randrange(start, stop)`). Sema fills these in at the call site,
+    # so one mechanism covers every such binding instead of a per-function
+    # special case. `defaults[-k:]` line up with `arg_types[-k:]`.
+    defaults: tuple = ()
+    # This binding's CPython counterpart is VARIADIC and associative
+    # (`math.gcd(*integers)`, `math.hypot(*coordinates)`, `math.lcm`). The C
+    # symbol is binary, so sema folds an N-argument call left-to-right into
+    # nested binary calls -- mathematically identical for all three.
+    variadic_fold: bool = False
+    # The CPython function this stands in for returns a `bool`. asmpython has
+    # no separate bool type (bool IS int everywhere), so the binding still
+    # declares ret_type="int" -- this only tells print()/str()/f-strings to
+    # render True/False instead of 1/0, via `is_bool_expr`.
+    ret_bool: bool = False
 
 
 @dataclass(frozen=True)

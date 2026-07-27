@@ -51,7 +51,8 @@ BINDINGS = {
     # Two-argument float, float -> float
     "pow":   Func(arg_types=("float", "float"), ret_type="float", c_name="pow"),
     "atan2": Func(arg_types=("float", "float"), ret_type="float", c_name="atan2"),
-    "hypot": Func(arg_types=("float", "float"), ret_type="float", c_name="hypot"),
+    "hypot": Func(arg_types=("float", "float"), ret_type="float", c_name="hypot",
+                 variadic_fold=True),
     "fmod":  Func(arg_types=("float", "float"), ret_type="float", c_name="fmod"),
     "copysign":  Func(arg_types=("float", "float"), ret_type="float", c_name="copysign"),
     "nextafter": Func(arg_types=("float", "float"), ret_type="float", c_name="nextafter"),
@@ -62,11 +63,11 @@ BINDINGS = {
 
     # Classification predicates (return int 0/1 like CPython's bool)
     # isnan(x) -> bool: True if x is NaN
-    "isnan":    Func(arg_types=("float",), ret_type="int", c_name="_math_isnan"),
+    "isnan":    Func(arg_types=("float",), ret_type="int", c_name="_math_isnan", ret_bool=True),
     # isinf(x) -> bool: True if x is +inf or -inf
-    "isinf":    Func(arg_types=("float",), ret_type="int", c_name="_math_isinf"),
+    "isinf":    Func(arg_types=("float",), ret_type="int", c_name="_math_isinf", ret_bool=True),
     # isfinite(x) -> bool: True if x is finite (not nan, not inf)
-    "isfinite": Func(arg_types=("float",), ret_type="int", c_name="_math_isfinite"),
+    "isfinite": Func(arg_types=("float",), ret_type="int", c_name="_math_isfinite", ret_bool=True),
 
     # Angle conversion
     # degrees(x: float) -> float: radians to degrees
@@ -76,9 +77,11 @@ BINDINGS = {
 
     # GCD / LCM (integer inputs, CPython 3.5+)
     # gcd(a, b) -> int
-    "gcd":      Func(arg_types=("int", "int"), ret_type="int", c_name="_math_gcd"),
+    "gcd":      Func(arg_types=("int", "int"), ret_type="int", c_name="_math_gcd",
+                    variadic_fold=True),
     # lcm(a, b) -> int (CPython 3.9+)
-    "lcm":      Func(arg_types=("int", "int"), ret_type="int", c_name="_math_lcm"),
+    "lcm":      Func(arg_types=("int", "int"), ret_type="int", c_name="_math_lcm",
+                    variadic_fold=True),
 
     # Combinatorics (CPython 3.8+)
     # factorial(n) -> int
@@ -107,7 +110,8 @@ BINDINGS = {
     "isqrt":    Func(arg_types=("int",),  ret_type="int",   c_name="_math_isqrt"),
 
     # isclose(a, b, rel_tol, abs_tol) -> bool: True if a ≈ b within tolerances
-    "isclose":  Func(arg_types=("float", "float", "float", "float"), ret_type="int", c_name="_math_isclose"),
+    "isclose":  Func(arg_types=("float", "float", "float", "float"), ret_type="int", c_name="_math_isclose",
+                    defaults=(1e-09, 0.0), ret_bool=True),
 
     # erf / erfc (error function, C99). Neither is a real msvcrt.dll export
     # (confirmed via ctypes.WinDLL('msvcrt.dll') attribute lookup). The

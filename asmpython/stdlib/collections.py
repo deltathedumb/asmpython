@@ -17,16 +17,37 @@ from __future__ import annotations
 class deque:
     """Double-ended queue. append/appendleft are O(1); random access is O(n)."""
 
-    def __init__(self, iterable: list = []) -> None:
+    def __init__(self, iterable: list = [], maxlen: int = -1) -> None:
         self._data: list = []
+        # -1 stands for CPython's `maxlen=None` (unbounded); asmpython has no
+        # None-vs-int union for a field, and a real deque bound is always >= 0.
+        self._maxlen: int = maxlen
         for item in iterable:
             self._data.append(item)
+        self._trim_right()
+
+    def _trim_right(self) -> None:
+        """Drop from the LEFT until the bound holds -- what `append` past a
+        bounded deque's capacity does in CPython."""
+        if self._maxlen < 0:
+            return
+        while len(self._data) > self._maxlen:
+            del self._data[0]
+
+    def _trim_left(self) -> None:
+        """The mirror of `_trim_right`, for growth at the front."""
+        if self._maxlen < 0:
+            return
+        while len(self._data) > self._maxlen:
+            del self._data[len(self._data) - 1]
 
     def append(self, x: object) -> None:
         self._data.append(x)
+        self._trim_right()
 
     def appendleft(self, x: object) -> None:
         self._data.insert(0, x)
+        self._trim_left()
 
     def pop(self) -> object:
         n = len(self._data)
@@ -46,6 +67,7 @@ class deque:
     def extend(self, iterable: list) -> None:
         for item in iterable:
             self._data.append(item)
+        self._trim_right()
 
     def extendleft(self, iterable: list) -> None:
         for item in iterable:
@@ -67,7 +89,7 @@ class deque:
         self._data = []
 
     def copy(self) -> deque:
-        return deque(self._data)
+        return deque(self._data, self._maxlen)
 
     def count(self, x: object) -> int:
         c = 0
@@ -346,8 +368,13 @@ class OrderedDict:
     the CPython-compatible API surface.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, items: list = []) -> None:
         self._data: dict = {}
+        # `OrderedDict([('a', 1), ('b', 2)])` -- CPython's constructor takes
+        # any iterable of key/value pairs (and a mapping, which asmpython's
+        # dict() already handles for the caller).
+        for pair in items:
+            self._data[pair[0]] = pair[1]
 
     def __getitem__(self, key: str) -> object:
         return self._data[key]

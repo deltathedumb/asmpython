@@ -9339,11 +9339,14 @@ class SemaAnalyzer:
                         ErrorCode.E_MODULE_NO_CALLABLE,
                     )
                 fn = bindings[e.method]
+                e.args = self._fold_variadic_ffi(fn, e, e.args)
                 self._check_ffi_call(
                     fn, e.args, e.pos, scope, label=f"{e.obj.name}.{e.method}"
                 )
                 _fn_ret: str = getattr(fn, "ret_type", "int")
                 e.inferred_type = _fn_ret if _fn_ret else "int"
+                if getattr(fn, "ret_bool", False):
+                    e.is_bool = True  # type: ignore[attr-defined]
                 return
             # `module.Thing(args)` where `module` is a merged *project* module
             # (not an FFI registry module) and `Thing` is a merged class or
@@ -10916,6 +10919,36 @@ class SemaAnalyzer:
         _ret: str = _STR_METHOD_RET.get(e.method, "str")
         e.inferred_type = _ret
 
+    def _fold_variadic_ffi(self, fn, e, args: list) -> list:
+        """Fold an N-argument call to an ASSOCIATIVE binary FFI binding into
+        nested binary calls: `gcd(a, b, c)` -> `gcd(gcd(a, b), c)`.
+
+        CPython's `math.gcd`/`lcm`/`hypot` are variadic; the C symbols behind
+        them are binary. Folding is exact for all three. Handles both call
+        shapes -- the bare `gcd(...)` a `from math import gcd` produces, and
+        the `math.gcd(...)` module-qualified form -- by rebuilding a node of
+        whichever shape it was given, so this stays one mechanism rather than
+        one per call syntax.
+        """
+        if not getattr(fn, "variadic_fold", False):
+            return args
+        _want = len(getattr(fn, "arg_types", []))
+        if _want != 2 or len(args) <= 2:
+            return args
+        acc = args[0]
+        for nxt in args[1:]:
+            if isinstance(e, A.MethodCall):
+                acc = A.MethodCall(
+                    obj=e.obj, method=e.method, args=[acc, nxt],
+                    kwargs=[], pos=e.pos,
+                )
+            else:
+                acc = A.Call(
+                    func=e.func, args=[acc, nxt], kwargs=[], pos=e.pos,
+                )
+        # `acc` is the OUTERMOST call; this node takes over its argument pair.
+        return list(acc.args)
+
     def _check_ffi_call(
         self, fn: stdlib.Func, args: list, pos, scope: Scope, *, label: str
     ) -> None:
@@ -10923,6 +10956,24 @@ class SemaAnalyzer:
         int->float promotion at the call site (so the user can write
         `math.sqrt(4)` without writing `4.0`)."""
         _fn_arg_types: list = getattr(fn, "arg_types", [])
+        # Pad a short call from the binding's declared trailing defaults, so an
+        # FFI binding can stand in for a CPython function with optional tail
+        # parameters (see `Func.defaults`). Mutates `args` in place because the
+        # caller passes the live `e.args` list -- codegen needs the full
+        # positional list the C symbol actually expects.
+        _fn_defaults: tuple = tuple(getattr(fn, "defaults", ()) or ())
+        if _fn_defaults and len(args) < len(_fn_arg_types):
+            _missing = len(_fn_arg_types) - len(args)
+            if _missing <= len(_fn_defaults):
+                for _dv in _fn_defaults[len(_fn_defaults) - _missing:]:
+                    if isinstance(_dv, bool):
+                        args.append(A.IntLit(value=1 if _dv else 0, pos=pos))
+                    elif isinstance(_dv, float):
+                        args.append(A.FloatLit(value=_dv, pos=pos))
+                    elif isinstance(_dv, int):
+                        args.append(A.IntLit(value=_dv, pos=pos))
+                    else:
+                        args.append(A.StrLit(value=str(_dv), pos=pos))
         if len(args) != len(_fn_arg_types):
             raise SemaError(
                 f"{label}() takes {len(_fn_arg_types)} argument(s), got {len(args)}",
@@ -12160,9 +12211,12 @@ class SemaAnalyzer:
             return
         if e.func in self.ffi_funcs:
             fn = self.ffi_funcs[e.func]
+            e.args = self._fold_variadic_ffi(fn, e, e.args)
             self._check_ffi_call(fn, e.args, e.pos, scope, label=e.func)
             _fn_ret2: str = getattr(fn, "ret_type", "int")
             e.inferred_type = _fn_ret2 if _fn_ret2 else "int"
+            if getattr(fn, "ret_bool", False):
+                e.is_bool = True  # type: ignore[attr-defined]
             return
         if e.func in self.classes:
             # Constructor call: ClassName(args). If __init__ exists, validate

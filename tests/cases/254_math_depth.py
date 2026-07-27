@@ -4,9 +4,9 @@
 # 6
 # 24
 # 10
-# 1
-# 0
-# 1
+# True
+# False
+# True
 
 import math
 
