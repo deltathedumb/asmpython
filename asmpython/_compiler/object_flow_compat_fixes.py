@@ -181,6 +181,7 @@ def _walk_expression(expression):
         "left",
         "right",
         "operand",
+        "func_expr",
         "obj",
         "index",
         "test",

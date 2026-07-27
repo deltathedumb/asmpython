@@ -34,6 +34,7 @@ def _walk_expr(expr):
         "left",
         "right",
         "operand",
+        "func_expr",
         "test",
         "body",
         "orelse",

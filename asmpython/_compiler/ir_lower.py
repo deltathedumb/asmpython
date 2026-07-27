@@ -6648,6 +6648,43 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     if isinstance(e, A.FString):
         return _lower_fstring(ctx, e)
 
+    if isinstance(e, A.Call) and getattr(e, "dunder_call_on_expr", False):
+        # `<expr>(args)` where the callee is an instance with `__call__`: a
+        # DIRECT call to the resolved dunder with the evaluated receiver as
+        # `self`, not an indirect call (the callee is an object, not a code
+        # pointer).
+        _dc_owner = e.dunder_call_owner
+        recv_v = _lower_expr(ctx, e.func_expr)
+        _dc_ann = _callee_param_annots(ctx, f"{_dc_owner}____call__")
+        dc_args = [recv_v] + [
+            _lower_call_arg(ctx, a, _dc_ann[i + 1] if i + 1 < len(_dc_ann) else None)
+            for i, a in enumerate(e.args)
+        ]
+        dv = ctx.tmp(ir_type_for(A.expr_type(e)))
+        ctx.emit(IRInstr("call", dv, [f"{_dc_owner}____call__", *dc_args]))
+        return dv
+
+    if isinstance(e, A.Call) and getattr(e, "callable_indirect", False):
+        # `<expr>(args)` -- a call through a CALLABLE VALUE. Sema proved the
+        # callee's static type is `callable:<ret>`, which is exactly the set of
+        # values that lower to a bare code pointer (an `A.Lambda`, a function
+        # reference, or a read of one back out of a dict value / list element /
+        # instance field). The backend's "call" op is already an indirect call
+        # whenever its target operand is an IRValue rather than a symbol name,
+        # so there is nothing to add below the IR for this.
+        #
+        # Deliberately NOT the closure path: a CAPTURING closure is a heap
+        # object `[magic, fn_ptr, caps...]`, not a code pointer, and the two
+        # cannot be told apart at runtime without dereferencing (which would
+        # fault on a real code pointer). Sema only ever stamps `callable:` on
+        # the non-capturing form, so the discrimination stays static.
+        fn_v = _lower_expr(ctx, e.func_expr)
+        call_args = [_lower_expr(ctx, a) for a in e.args]
+        res_ty = ir_type_for(A.expr_type(e))
+        v = ctx.tmp(res_ty)
+        ctx.emit(IRInstr("call", v, [fn_v, *call_args]))
+        return v
+
     if isinstance(e, A.Call) and e.func == "len" and len(e.args) == 1 and A.expr_type(e.args[0]) == "str":
         obj_v = _lower_expr(ctx, e.args[0])
         v = ctx.tmp(I64)
@@ -8163,6 +8200,18 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         return out_v
 
     if isinstance(e, A.MethodCall):
+        if getattr(e, "field_callable", False):
+            # `obj.fn(args)` where `fn` is a FIELD holding a callable, not a
+            # method (sema resolved that -- see `_try_field_callable_call`).
+            # Read the field, then call through it: the same indirect call the
+            # `callable_indirect` A.Call path emits, just with the callee
+            # spelled as an attribute read.
+            fn_v = _lower_expr(ctx, A.Attr(obj=e.obj, name=e.method, pos=e.pos))
+            fc_args = [_lower_expr(ctx, a) for a in e.args]
+            fc_ty = ir_type_for(A.expr_type(e))
+            fv = ctx.tmp(fc_ty)
+            ctx.emit(IRInstr("call", fv, [fn_v, *fc_args]))
+            return fv
         obj_ty = A.expr_type(e.obj)
         if obj_ty == "int" and e.method == "to_bytes":
             return _lower_int_to_bytes(ctx, e)

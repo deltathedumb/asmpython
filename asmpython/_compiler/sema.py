@@ -824,6 +824,17 @@ class SemaAnalyzer:
         self.active_extensions: frozenset = active_extensions or frozenset()
         self.funcs: dict[str, FuncSig] = {}
         self.classes: dict[str, ClassSig] = {}
+        # Every class name in the module, known from the moment sema starts.
+        # `self.classes` (full signatures) is only filled in during the class
+        # pass, which runs AFTER function signatures are built -- so
+        # `_resolve_annot` could not recognize a user class by name while
+        # resolving `def make() -> Factory:`, and silently fell through to the
+        # int default. That mistyped the RESULT of every factory function in
+        # the language, and made a `p: SomeClass` parameter resolve to an
+        # opaque external instance instead of the real class (losing its
+        # methods). A name-only set, seeded up front, is what makes annotation
+        # resolution independent of pass order.
+        self._class_name_set: set[str] = set()
         # `enum` extension: enum type name -> {member name -> resolved int
         # value}. Pure sema-side bookkeeping -- `Color.RED` folds to a plain
         # IntLit at the read site, so this table exists only to let
@@ -1279,6 +1290,29 @@ class SemaAnalyzer:
                 pos,
                 ErrorCode.E_IMMUTABLE_FIELD_REASSIGNED,
             )
+
+    def _try_field_callable_call(self, e, class_name: str, scope: Scope) -> bool:
+        """`obj.fn(args)` where `fn` is a FIELD holding a callable value, not a
+        method: `self.fn = fn` in __init__, then `self.fn(x)`.
+
+        The parser can't tell the two apart (both are `obj.name(...)`), and
+        method resolution rightly fails -- but the field's own type says
+        `callable:<ret>`, so this is an ordinary indirect call through that
+        field's slot. Stamped rather than rewritten in place because a
+        `_check_expr` case can't replace the node in its parent; ir_lower reads
+        `field_callable` and lowers the field read as the call target.
+        """
+        ftype = self._resolve_field_type(class_name, e.method)
+        if not (isinstance(ftype, str) and ftype.startswith("callable:")):
+            return False
+        for a in e.args:
+            self._check_expr(a, scope)
+        for _kn, _kv in getattr(e, "kwargs", []) or []:
+            self._check_expr(_kv, scope)
+        ret = ftype.split(":", 1)[1] or "any"
+        e.inferred_type = "any" if ret in ("", "any") else ret
+        e.field_callable = True  # type: ignore
+        return True
 
     def _resolve_field_type(self, class_name: str, field_name: str) -> Optional[str]:
         """Walk the parent chain to find the static type of an instance field.
@@ -1744,6 +1778,23 @@ class SemaAnalyzer:
             return ("set", None, None, None)
         if isinstance(value, A.TupleLit):
             return ("tuple", None, None, None)
+        if isinstance(value, A.Lambda):
+            # A lambda passed as an argument / stored in a field is a CALLABLE
+            # VALUE (a code pointer). Typing the receiving parameter/field
+            # `callable:<ret>` rather than the `int` last resort is what makes
+            # `self.fn = fn; self.fn(x)` and `apply(fn, v)` work off one
+            # mechanism -- see `_callable_type_of`. Its return kind isn't
+            # checked yet at inference time (the body hasn't been walked), so
+            # take the annotation-free `any`; the call's result stays opaque,
+            # which is correct for a callable whose signature is unknown.
+            return ("callable:" + (getattr(value, "lambda_ret", None) or "any"),
+                    None, None, None)
+        if isinstance(value, A.Name) and value.name in self.funcs and value.name not in self.classes:
+            # A bare function reference (`register(handler)`), same deal --
+            # here the callee's real return kind IS known from its signature.
+            _fsig = self.funcs[value.name]
+            _frt = getattr(_fsig, "ret_type", None)
+            return ("callable:" + (_frt[0] if _frt else "int"), None, None, None)
         if isinstance(value, A.Call) and value.func in ("bytes", "bytearray"):
             return ("list", "int", None, None)
         if isinstance(value, A.Call) and value.func in self.classes:
@@ -2602,7 +2653,7 @@ class SemaAnalyzer:
             return ("any", None, None, None, None)
         if base == "none":
             return None
-        if base in self.classes:
+        if base in self.classes or base in self._class_name_set:
             return (f"instance:{base}", None, None, None, None)
         # A dotted reference to a class we do model (`module.ClassName`, e.g.
         # `argparse.ArgumentParser`): match on the leaf so the annotation
@@ -2611,7 +2662,7 @@ class SemaAnalyzer:
         # silently break the inheritance chain for any subclass returned
         # through a base-class-annotated function.
         leaf = base.split(".")[-1]
-        if leaf in self.classes:
+        if leaf in self.classes or leaf in self._class_name_set:
             return (f"instance:{leaf}", None, None, None, None)
         # An external / imported class annotation (`Token`, `A.IntLit`,
         # `FuncInfo`). We can't see its methods or fields, so model it as an
@@ -3904,6 +3955,11 @@ class SemaAnalyzer:
         # target with a mlang:<uid> marker type, before any other analysis
         # needs to resolve `code.add(...)`-style calls against it.
         self._inject_mlang_if_needed()
+        # Seed the class-NAME set before anything resolves an annotation (see
+        # `_class_name_set`). Refreshed again after the generator transform
+        # below, which synthesizes new `_genobj_*` classes.
+        for _c0 in self.mod.classes:
+            self._class_name_set.add(_c0.name)
         # Transform generator functions (functions with yield) into factory +
         # iterator class pairs before any other analysis.
         new_funcs: list = []
@@ -3930,6 +3986,8 @@ class SemaAnalyzer:
                 new_funcs.append(f)
         self.mod.funcs = new_funcs
         self.mod.classes = list(self.mod.classes) + new_classes
+        for _c1 in new_classes:
+            self._class_name_set.add(_c1.name)
         # `overload` extension pre-pass: group same-named module-level defs
         # where EVERY copy is @overload-marked into self.overload_sets,
         # before the main signature-collection loop runs -- that loop's
@@ -8587,6 +8645,14 @@ class SemaAnalyzer:
                 else:
                     self._check_expr(v, scope)
                     vt = A.expr_type(v)
+                    # A callable value (lambda / function reference) is a code
+                    # pointer, so it fits the dict's uniform 8-byte value slot
+                    # like any other pointer. Recording it as `callable:<ret>`
+                    # is what lets `handlers[k](...)` be recognized as a call
+                    # -- see `_callable_type_of`.
+                    _cv = self._callable_type_of(v, scope)
+                    if _cv is not None:
+                        vt = _cv
                     if vt not in (
                         "int",
                         "str",
@@ -8597,7 +8663,7 @@ class SemaAnalyzer:
                         "list",
                         "set",
                         "type",
-                    ) and not vt.startswith("instance:"):
+                    ) and not vt.startswith("instance:") and not vt.startswith("callable:"):
                         raise SemaError(
                             f"dict value of type {vt} is not supported yet",
                             getattr(v, "pos", e.pos),
@@ -8622,7 +8688,14 @@ class SemaAnalyzer:
                             getattr(v, "pos", e.pos),
                             ErrorCode.E_DICT_VALUE_TYPE_MIXED,
                         )
-                    seen_v = "any"
+                    # Two callables that disagree only on their RETURN kind are
+                    # still both callable: keep the values callable (with an
+                    # opaque result) rather than collapsing to plain "any",
+                    # which would lose the callability itself.
+                    if seen_v.startswith("callable:") and vt.startswith("callable:"):
+                        seen_v = "callable:any"
+                    else:
+                        seen_v = "any"
             e.value_type = seen_v if seen_v is not None else ("any" if saw_opaque_value else "int")
             # When the values are themselves dicts/lists, record their common
             # inner value/element kind, so a chained `outer[k][k2]` read can
@@ -9959,6 +10032,8 @@ class SemaAnalyzer:
                             self._check_expr(_ext_a, scope)
                         e.inferred_type = "any"
                         return
+                    if self._try_field_callable_call(e, class_name, scope):
+                        return
                     raise SemaError(
                         f"{class_name} has no method {e.method!r}",
                         e.pos,
@@ -10123,6 +10198,8 @@ class SemaAnalyzer:
                 cls_name = e.obj.name
                 resolved = self._resolve_method(cls_name, e.method)
                 if resolved is None:
+                    if self._try_field_callable_call(e, cls_name, scope):
+                        return
                     raise SemaError(
                         f"{cls_name} has no method {e.method!r}", e.pos,
                         ErrorCode.E_NO_METHOD,
@@ -11117,7 +11194,140 @@ class SemaAnalyzer:
             e.kwargs.append((name, sub))
         e.dstar = None
 
+    def _callable_type_of(self, e, scope: Scope) -> "str | None":
+        """The `callable:<ret>` descriptor for an expression that denotes a
+        CALLABLE VALUE, or None if it doesn't denote one.
+
+        A callable value at runtime is just a code pointer (`A.Lambda` and a
+        bare function reference both lower to `global_addr <symbol>`), so it
+        rides in any 8-byte slot -- a variable, a dict value, a list element,
+        an instance field, a parameter. What was missing was a TYPE for it, so
+        a read back out of one of those slots could be recognized as callable
+        again. Encoding the return kind INTO the type string (`callable:int`,
+        `callable:str`) is what makes that uniform: every existing single-string
+        type channel -- `scope.types`, `dict_value_types`, `list_el_type`,
+        field types, `-> ` annotations -- carries it with no per-container
+        bookkeeping, so `dict[str, callable]` and `list[callable]` and
+        `self.fn` all work off one mechanism rather than one special case each.
+        """
+        if isinstance(e, A.Lambda):
+            return "callable:" + (getattr(e, "lambda_ret", None) or "int")
+        if isinstance(e, A.Name):
+            nm = e.name
+            # A local binding always wins over a same-named global function
+            # (ordinary LEGB), and its own type may already BE a callable.
+            _t = scope.types.get(nm)
+            if isinstance(_t, str) and _t.startswith("callable:"):
+                return _t
+            if nm in self.lambda_rets and nm not in self.funcs:
+                return "callable:" + (self.lambda_rets[nm] or "int")
+            if nm not in scope.types and nm in self.funcs:
+                _sig = self.funcs[nm]
+                _rt = getattr(_sig, "ret_type", None)
+                return "callable:" + (_rt[0] if _rt else "int")
+            return None
+        # A read out of a container/field: the callable descriptor was stored
+        # as that slot's element/value/field kind, so just read it back.
+        _et = A.expr_type(e)
+        if isinstance(_et, str) and _et.startswith("callable:"):
+            return _et
+        return None
+
+    def _check_callable_expr_call(self, e: A.Call, scope: Scope) -> None:
+        """`<expr>(args)` -- a call whose callee is an expression, not a name.
+
+        The callee is checked as an ordinary expression, its `callable:<ret>`
+        descriptor decides the call's result type, and ir_lower emits an
+        indirect call through the resulting code pointer.
+        """
+        callee = e.func_expr
+        # `type(x)(args)` -- construct another instance of x's class. asmpython
+        # has no runtime class objects (see the `cls(...)` rewrite in
+        # _check_call), so a type value is only ever as precise as the static
+        # type of what it was taken from: resolve it to that class and let the
+        # ordinary constructor path handle the call. Done BEFORE checking the
+        # callee, so `type(x)` never has to become a callable value at all.
+        if (
+            isinstance(callee, A.Call)
+            and callee.func == "type"
+            and len(callee.args) == 1
+            and not callee.kwargs
+        ):
+            self._check_expr(callee.args[0], scope)
+            _at = A.expr_type(callee.args[0])
+            if isinstance(_at, str) and _at.startswith("instance:"):
+                _cls_of = _at.split(":", 1)[1]
+                if _cls_of in self.classes:
+                    e.func = _cls_of
+                    e.func_expr = None
+                    self._check_call(e, scope)
+                    return
+        self._check_expr(callee, scope)
+        # A callee that is an INSTANCE with `__call__` (`make_factory()(42)`,
+        # `registry[k](x)` over a list of functors): dispatch to the class's
+        # own `__call__`, exactly as the name-callee path does a few hundred
+        # lines below -- the only difference is that the receiver is an
+        # expression, so ir_lower evaluates it instead of loading a slot.
+        _ct = A.expr_type(callee)
+        if isinstance(_ct, str) and _ct.startswith("instance:"):
+            _ccls = _ct.split(":", 1)[1]
+            _cres = self._resolve_method(_ccls, "__call__")
+            if _cres is not None:
+                _cowner: str = _cres[0]
+                _csig: FuncSig = _cres[1]
+                _cnames: list = _csig.param_names
+                _cdefs: list = _csig.param_defaults
+                self._bind_args(
+                    e, _cnames[1:], _cdefs[1:], _csig.vararg, e.pos,
+                    f"{_ccls}.__call__", kwarg=_csig.kwarg,
+                )
+                for _a in e.args:
+                    self._check_expr(_a, scope)
+                e.dunder_call_owner = _cowner  # type: ignore
+                e.dunder_call_on_expr = True  # type: ignore
+                if _csig.ret_type is not None:
+                    _rty, _rel, _rval = _csig.ret_type  # type: ignore
+                    e.inferred_type = _rty
+                    if _rty == "list" and _rel is not None:
+                        e.list_el_type = _rel  # type: ignore
+                    elif _rty == "dict" and _rval is not None:
+                        e.value_type = _rval  # type: ignore
+                else:
+                    e.inferred_type = "any"
+                return
+        ctype = self._callable_type_of(callee, scope)
+        if ctype is None:
+            _shown = A.expr_type(callee) or "value"
+            raise SemaError(
+                f"{_shown!r} is not callable "
+                "(only a function, lambda, or a value holding one can be "
+                "called; asmpython needs the callable's type to be known "
+                "statically at the call site)",
+                e.pos,
+                ErrorCode.E_NO_METHOD,
+            )
+        for a in e.args:
+            self._check_expr(a, scope)
+        for _kn, _kv in e.kwargs:
+            self._check_expr(_kv, scope)
+        ret = ctype.split(":", 1)[1] or "int"
+        # `callable:list[int]` style descriptors keep the element kind so the
+        # result of the call is a fully typed list, not a bare `list`.
+        if "[" in ret and ret.endswith("]"):
+            base, _, el = ret[:-1].partition("[")
+            e.inferred_type = base
+            if base in ("list", "set", "tuple"):
+                e.list_el_type = el  # type: ignore
+            elif base == "dict":
+                e.value_type = el  # type: ignore
+        else:
+            e.inferred_type = ret
+        e.callable_indirect = True  # type: ignore
+
     def _check_call(self, e: A.Call, scope: Scope) -> None:
+        if getattr(e, "func_expr", None) is not None:
+            self._check_callable_expr_call(e, scope)
+            return
         self._extract_dstar(e)
         # `cls(...)` inside a @classmethod — asmpython has no runtime class
         # objects, so `cls` always means "the class this classmethod is
@@ -11990,7 +12200,7 @@ def _walk_call_sites(statements: list):
             return
         if isinstance(e, A.Call):
             yield e
-        for name in ("left", "right", "operand", "obj", "index", "test",
+        for name in ("left", "right", "operand", "obj", "index", "test", "func_expr",
                      "body", "orelse", "value", "elt", "key", "iter"):
             child = getattr(e, name, None)
             if child is not None and not isinstance(child, (list, str)):
@@ -12208,7 +12418,7 @@ def _rewrite_class_keyed_dicts(mod: A.Module) -> None:
         # Generic recursion into every child expression field so a lookup
         # nested anywhere (a call argument, an f-string segment, a ternary
         # arm, ...) is still reached.
-        for name in ("left", "right", "operand", "obj", "index", "test",
+        for name in ("left", "right", "operand", "obj", "index", "test", "func_expr",
                      "body", "orelse", "value", "elt", "key", "iter", "cond"):
             child = getattr(e, name, None)
             if child is not None and not isinstance(child, (list, str)):

@@ -917,6 +917,17 @@ class Call:
     # overload call jumps to the right symbol instead of the bare (and
     # therefore ambiguous) function name.
     resolved_overload_symbol: "str | None" = None
+    # A call whose CALLEE is an arbitrary expression rather than a name:
+    # `handlers['add'](3, 4)`, `(lambda x: x + 1)(5)`, `self.fn(x)`,
+    # `compose(f, g)(5)`. `func` stays the sentinel `"<callable>"` so every
+    # existing `e.func == "..."` / `e.func in ...` dispatch simply misses,
+    # and the real callee lives here. Sema types it via the uniform
+    # `callable:<ret>` type descriptor; ir_lower lowers it to a code pointer
+    # and emits an indirect call.
+    func_expr: "Expr | None" = None
+
+
+CALLABLE_EXPR_SENTINEL = "<callable>"
 
 
 @dataclass

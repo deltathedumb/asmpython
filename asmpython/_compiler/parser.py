@@ -3708,6 +3708,25 @@ class Parser:
                 else:
                     # obj.name — attribute access (e.g. math.pi)
                     atom = A.Attr(obj=atom, name=name, pos=dot.pos)  # type: ignore
+            elif self._check("OP", "("):
+                # A CALL on an arbitrary callee expression. A plain `name(...)`
+                # never reaches here (the atom parser consumes its own arg
+                # list), so this only fires where the callee is a real
+                # expression: `handlers['add'](3, 4)`, `(lambda x: x+1)(5)`,
+                # `compose(f, g)(5)`, `registry[k].fn(v)`. Python's grammar
+                # allows a call trailer after any primary, and a newline
+                # token separates statements, so no valid non-call `(` can
+                # follow an atom on the same logical line.
+                lp = self._eat()
+                args, kwargs = self._parse_call_args()  # type: ignore
+                self._expect("OP", ")")
+                atom = A.Call(
+                    func=A.CALLABLE_EXPR_SENTINEL,
+                    args=args,
+                    kwargs=kwargs,
+                    func_expr=atom,  # type: ignore
+                    pos=lp.pos,
+                )
             else:
                 return atom
 
