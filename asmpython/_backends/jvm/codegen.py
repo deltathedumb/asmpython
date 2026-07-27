@@ -51,6 +51,15 @@ POP2 = 0x58
 ICONST_0, ICONST_1 = 0x03, 0x04
 I2L = 0x85
 WIDE = 0xC4
+DUP = 0x59
+BIPUSH, SIPUSH = 0x10, 0x11
+NEWARRAY, LASTORE = 0xBC, 0x50
+T_LONG = 11                      # NEWARRAY's atype for long[]
+
+# Calls that are variadic in C and must become one array argument here.
+# `printf` is the only one the lowering emits, but naming the set rather than
+# the symbol keeps the special case honest about what it is.
+VARIADIC_RUNTIME_CALLS = {"printf"}
 
 _ICMP_TO_BRANCH = {
     "icmp.eq": IFEQ,
@@ -418,6 +427,11 @@ class FunctionEmitter:
         m = self.method
         target = _unquote(instr.operands[0])
         args = instr.operands[1:]
+
+        if target in VARIADIC_RUNTIME_CALLS and target not in self.cls_functions:
+            self.emit_variadic_call(target, args)
+            return
+
         for arg in args:
             self.push(arg)
 
@@ -443,6 +457,58 @@ class FunctionEmitter:
             # A user function always returns a long; discard it when the call
             # site ignores the result, or the operand stack never unwinds.
             m.u1(POP2)
+
+    def emit_variadic_call(self, target: str, args) -> None:
+        """A C-variadic runtime call, as `(format, long[] rest)`.
+
+        Fixed-arity overloads cannot express this. The lowering emits printf
+        with however many arguments the statement happens to have, so any set
+        of overloads is one `print` away from a NoSuchMethodError -- and a
+        float argument pushes a `D`, which would need an overload per position
+        as well as per count.
+
+        Packing the tail into a `long[]` removes both problems at once: a
+        double is bit-cast to its 64-bit word on the way in, which is exactly
+        what a C varargs call passes and what the native runtime reads.
+        """
+        m = self.method
+        rest = list(args[1:])
+
+        if args:
+            self.push(args[0])
+        else:
+            self.push_long(0)
+
+        self.push_int(len(rest))
+        m.u1(NEWARRAY)
+        m.u1(T_LONG)
+        for index, arg in enumerate(rest):
+            m.u1(DUP)
+            self.push_int(index)
+            self.push(arg)
+            if _is_double(arg):
+                # The array holds raw WORDS, so this must reinterpret the bits.
+                # D2L would convert numerically -- 3.5 would arrive as 3 -- and
+                # the runtime's %f, which bit-casts back, would then print
+                # garbage rather than the number.
+                self.call_runtime("doubleToRawLongBits", "(D)J")
+            m.u1(LASTORE)
+
+        self.call_runtime(target, "(J[J)V")
+
+    def push_int(self, value: int) -> None:
+        """An int on the stack, for an array length or index."""
+        m = self.method
+        if value == 0:
+            m.u1(ICONST_0)
+        elif value == 1:
+            m.u1(ICONST_1)
+        elif -128 <= value <= 127:
+            m.u1(BIPUSH)
+            m.u1(value & 0xFF)
+        else:
+            m.u1(SIPUSH)
+            m.u2(value & 0xFFFF)
 
     cls_functions: dict = {}
 

@@ -7,14 +7,24 @@ JIT does the register allocation.
 
 The interesting design point is memory. asmpython's IR assumes a flat address
 space (`alloca`/`load`/`store`/`gep` over integer addresses), which the JVM does
-not have, so `Runtime.java` provides one as a ByteBuffer with a bump allocator.
+not have, so `Memory.java` provides one as a ByteBuffer with a bump allocator.
 A pointer is then just a `long` index into it, which is why no generated
 bytecode ever handles a JVM reference.
 
-Status: covers the scalar, control-flow and call core of the IR. Container and
-object ABI helpers (`_abi_list_*`, `_abi_dict_*`, ...) are not ported yet, so a
-program using lists, dicts, classes or exceptions fails with a missing runtime
-method rather than misbehaving silently.
+That choice is what forces the rest. Generated code reads container headers
+DIRECTLY -- a `for x in xs` loads the list's length from +8 and its buffer from
++16 and indexes that itself, never calling the ABI -- so `Containers.java` uses
+the native runtime's exact layouts rather than any convenient JVM structure. A
+different layout would not fail; it would read the wrong words.
+
+Status: scalars, control flow, calls, strings, lists, dicts and classes all
+match CPython (`tests/jvm_differential.py`, which diffs against CPython rather
+than against the x86-64 backend, since two backends agreeing is also what being
+wrong the same way looks like).
+
+Not yet ported: exceptions. `try`/`except` needs `_runtime_exc_*` and setjmp
+-style unwinding, and fails at compile time with an unknown-global error rather
+than misbehaving at runtime.
 """
 
 from __future__ import annotations
