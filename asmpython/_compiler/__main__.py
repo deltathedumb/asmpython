@@ -352,6 +352,10 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         "shared library: .dll on Windows, .so on Linux). Falls back to the "
         "project's `output_type` field, then 'executable'.",
     )
+    # The JVM backend also lists these in its own `requested_args`. That list
+    # is not wired into this parser, so an option declared only there is
+    # silently rejected -- which is what happened to --jvm-class. Both lists
+    # have to be kept in step until argument negotiation reads the backend's.
     build_grp.add_argument(
         "--jvm-runtime",
         default="",
@@ -359,6 +363,20 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         help="JVM backend: internal name of the class providing runtime and "
         "host functions (default asmpython/jvm/Runtime). Extend that class to "
         "add your own host API.",
+    )
+    build_grp.add_argument(
+        "--jvm-class",
+        default="",
+        metavar="CLASS",
+        help="JVM backend: fully qualified name of the generated class "
+        "(default asmpython.jvm.Program).",
+    )
+    build_grp.add_argument(
+        "--jvm-javac",
+        default="",
+        metavar="PATH",
+        help="JVM backend: javac used to build the runtime support classes "
+        "(default: javac on PATH).",
     )
     build_grp.add_argument(
         "--class-version",
@@ -818,6 +836,40 @@ def _resolve_linker_flag(value: "str | None") -> "str | None":
     return value
 
 
+def _backend_args(args: argparse.Namespace, backend_name: str) -> dict:
+    """The backend-specific options to hand the selected backend.
+
+    Driven by the backend's own `requested_args` rather than a list kept here.
+    A hardcoded list is silently lossy: an option can be declared by the
+    backend, accepted by the parser, and still never arrive -- which is exactly
+    what happened to --jvm-class, where the generated class name was ignored
+    with no error at all.
+
+    The three names below are always forwarded so a backend that declares
+    nothing still sees the shared JVM/codegen options.
+    """
+    collected = {
+        "class_version": getattr(args, "class_version", ""),
+        "java_version": getattr(args, "java_version", ""),
+        "jvm_runtime": getattr(args, "jvm_runtime", ""),
+    }
+    try:
+        from .._backends import get_backend
+
+        backend = get_backend(backend_name)
+    except Exception:
+        return collected
+
+    for request in getattr(backend, "requested_args", None) or []:
+        name = request.get("name") if isinstance(request, dict) else None
+        if not name:
+            continue
+        dest = name.lstrip("-").replace("-", "_")
+        if hasattr(args, dest):
+            collected[dest] = getattr(args, dest)
+    return collected
+
+
 def cmd_build(args: argparse.Namespace) -> int:
     # Informational: `--passes help` lists the registry and exits, so it works
     # without a source file.
@@ -1026,11 +1078,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 icon_path=icon_path,
                 all_errors=all_errors,
                 backend=effective_backend,
-                backend_args={
-                    "class_version": getattr(args, "class_version", ""),
-                    "java_version": getattr(args, "java_version", ""),
-                    "jvm_runtime": getattr(args, "jvm_runtime", ""),
-                },
+                backend_args=_backend_args(args, effective_backend),
                 linker=args.linker,
                 active_extensions=active_extensions,
                 frontend=effective_frontend,
