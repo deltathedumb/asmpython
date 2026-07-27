@@ -134,6 +134,10 @@ def run_backend_codegen(ir: Any, args: dict) -> dict[str, bytes]:
         return {f"output{ext}": b""}
 
     # Phi elimination must run before register allocation (mutates functions in place).
+    #
+    # NOTE: `ir.layout_blocks_rpo` belongs here in principle -- reverse postorder
+    # is what makes the allocator's "definitions precede uses" assumption true --
+    # but it CANNOT land alone. See that function's docstring.
     for func in ir.funcs:
         eliminate_phi(func)
 
