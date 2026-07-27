@@ -12833,6 +12833,18 @@ class SemaAnalyzer:
                     raise SemaError("reversed() takes exactly 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
                 src = e.args[0]
                 src_t = A.expr_type(src)
+                # A class defining `__reversed__` provides its own reversal --
+                # rewrite to that call, which is what CPython does. Handled
+                # before the type check because the object is not a sequence.
+                if src_t.startswith("instance:"):
+                    _rv_cls = src_t.split(":", 1)[1]
+                    if self._resolve_method(_rv_cls, "__reversed__") is not None:
+                        e.__class__ = A.MethodCall  # type: ignore[assignment]
+                        e.obj = src  # type: ignore[attr-defined]
+                        e.method = "__reversed__"  # type: ignore[attr-defined]
+                        e.args = []
+                        self._check_expr(e, scope)
+                        return
                 if src_t not in ("list", "tuple", "str", "any"):
                     raise SemaError(
                         "reversed() argument must be a list, tuple, or str",
@@ -13027,12 +13039,25 @@ class SemaAnalyzer:
                         e.dict_from_pairs = True
                 return
             if e.func == "divmod":
-                # divmod(a, b) -> (a // b, a % b), both ints (floor semantics).
+                # divmod(a, b) -> (a // b, a % b), floor semantics. FLOAT
+                # arguments are valid Python and give float results
+                # (`divmod(7.5, 2)` is `(3.0, 1.5)`) -- rejecting them made a
+                # correct program a compile error.
+                _dm_float = False
                 for a in e.args:
                     t = A.expr_type(a)
-                    if t not in ("int", "any"):
-                        raise SemaError("divmod() requires int arguments", e.pos, ErrorCode.E_ARG_TYPE)
-                e.tuple_elem_types = ["int", "int"]
+                    if t == "float":
+                        _dm_float = True
+                    elif t not in ("int", "any"):
+                        raise SemaError(
+                            "divmod() requires int or float arguments", e.pos,
+                            ErrorCode.E_ARG_TYPE,
+                        )
+                if _dm_float:
+                    e.divmod_float = True  # type: ignore[attr-defined]
+                    e.tuple_elem_types = ["float", "float"]
+                else:
+                    e.tuple_elem_types = ["int", "int"]
                 return
             # Argument-type sanity for builtins that care. An opaque ("any")
             # argument is accepted everywhere — we can't know its real type.

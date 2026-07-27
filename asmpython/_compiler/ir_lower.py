@@ -11557,6 +11557,40 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", out, ["_abi_int_to_base", n_v, base, prefix_v]))
             return out
         if e.func == "divmod" and len(e.args) == 2:
+            if getattr(e, "divmod_float", False):
+                # FLOAT divmod: `(floor(a / b), a - floor(a / b) * b)`, which is
+                # Python's floor-division pair for floats. `_abi_divmod` is an
+                # integer helper -- handing it doubles reinterpreted the bit
+                # patterns as integers.
+                _fa = _lower_expr(ctx, e.args[0])
+                if _fa.type is not F64:
+                    _t = ctx.tmp(F64)
+                    ctx.emit(IRInstr("sitofp", _t, [_fa]))
+                    _fa = _t
+                _fb = _lower_expr(ctx, e.args[1])
+                if _fb.type is not F64:
+                    _t2 = ctx.tmp(F64)
+                    ctx.emit(IRInstr("sitofp", _t2, [_fb]))
+                    _fb = _t2
+                _q_raw = ctx.tmp(F64)
+                ctx.emit(IRInstr("fdiv", _q_raw, [_fa, _fb]))
+                _q = ctx.tmp(F64)
+                ctx.emit(IRInstr("call", _q, ["floor", _q_raw]))
+                _qb = ctx.tmp(F64)
+                ctx.emit(IRInstr("fmul", _qb, [_q, _fb]))
+                _r = ctx.tmp(F64)
+                ctx.emit(IRInstr("fsub", _r, [_fa, _qb]))
+                # The pair is a 2-slot tuple; a float in a raw 8-byte cell has
+                # to cross as its BITS (the recurring float-in-container rule).
+                _cap = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", _cap, [2]))
+                _tup = ctx.tmp(PTR)
+                ctx.emit(IRInstr("call", _tup, ["_abi_new_list", _cap]))
+                for _slot in (_q, _r):
+                    _bits = ctx.tmp(I64)
+                    ctx.emit(IRInstr("bitcast_f2i", _bits, [_slot]))
+                    ctx.emit(IRInstr("call", None, ["_abi_list_append", _tup, _bits]))
+                return _tup
             a_v = _lower_expr(ctx, e.args[0])
             b_v = _lower_expr(ctx, e.args[1])
             out = ctx.tmp(PTR)
