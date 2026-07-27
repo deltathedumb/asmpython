@@ -3619,9 +3619,22 @@ class SemaAnalyzer:
                 value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
             ))
 
-        # Determine the yield value's return type from original function annotation,
-        # or default to int.
-        ret_type = f.ret_type if f.ret_type else ("int", None)
+        # `__next__` returns ONE YIELDED VALUE, but a generator function's own
+        # return annotation describes the SEQUENCE it produces (`-> list[int]`),
+        # so take the element kind from it. Declaring `__next__` as returning the
+        # container makes the caller read a yielded scalar as a pointer -- that
+        # was a live segfault in the straight-line transform and is latent here
+        # for any generator that carries an explicit sequence annotation.
+        _rt = f.ret_type
+        if (
+            isinstance(_rt, tuple) and len(_rt) >= 2
+            and _rt[0] in ("list", "tuple", "set") and _rt[1]
+        ):
+            ret_type = (_rt[1], None)
+        elif isinstance(_rt, tuple) and _rt and _rt[0] not in ("list", "tuple", "set"):
+            ret_type = _rt
+        else:
+            ret_type = ("int", None)
 
         next_func = A.FuncDef(
             name="__next__",
