@@ -89,12 +89,34 @@ def _constructor_params(spec) -> "list[str]":
     return [part.strip() for part in spec.split(",") if part.strip()]
 
 
-def _entry_name(function_names: set) -> "str | None":
-    """The module's entry point, whatever the frontend called it."""
-    for candidate in ("main", "__asmpy_module_init", "__asmpy_main"):
+def _entry_sequence(function_names: set) -> "list[str]":
+    """What starting the program means, in order.
+
+    BOTH the module body and `main`, matching what the native backend does:
+    `__asmpy_module_init` assigns the module's globals and `main` is then
+    called as the entry point, whether or not the source calls it itself.
+    (That is a deliberate asmpython convention rather than CPython's, and the
+    backends have to agree on it.)
+
+    Running only one of the two is the bug this replaced. Picking `main` alone
+    leaves every module-level global unset, which surfaces not as a crash but
+    as empty strings and zeros deep inside otherwise-working code -- a mod
+    printing "[] registered :thing" because its MOD_ID was never assigned.
+    """
+    ordered = []
+    for candidate in ("__asmpy_module_init", "main", "__asmpy_main"):
         if candidate in function_names:
-            return candidate
-    return None
+            ordered.append(candidate)
+            if candidate == "main":
+                break        # __asmpy_main is the fallback for a missing main
+    return ordered
+
+
+def _emit_entry_calls(method, class_name: str, function_names: set) -> None:
+    for entry in _entry_sequence(function_names):
+        method.u1(INVOKESTATIC)
+        method.u2(method.pool.methodref(class_name, _java_name(entry), "()J"))
+        method.u1(POP2)
 
 
 CONSTRUCT_HOOK = "on_construct"
@@ -122,11 +144,7 @@ def _emit_constructor(cls, class_name: str, function_names: set,
     method.u1(INVOKESPECIAL)
     method.u2(method.pool.methodref("java/lang/Object", "<init>", "()V"))
 
-    entry = _entry_name(function_names)
-    if entry is not None:
-        method.u1(INVOKESTATIC)
-        method.u2(method.pool.methodref(class_name, _java_name(entry), "()J"))
-        method.u1(POP2)
+    _emit_entry_calls(method, class_name, function_names)
 
     # The module body first, then the hook: a hook that used a global the body
     # defines would otherwise see it unset.
@@ -225,12 +243,8 @@ def _emit_clinit(cls, ir_module, class_name: str, globals_map: dict,
 
 def _emit_main(cls, class_name: str, function_names: set) -> None:
     """A `public static void main(String[])` that calls the module entry."""
-    entry = _entry_name(function_names)
     method = cls.method("main", "([Ljava/lang/String;)V")
-    if entry is not None:
-        method.u1(INVOKESTATIC)
-        method.u2(method.pool.methodref(class_name, _java_name(entry), "()J"))
-        method.u1(POP2)
+    _emit_entry_calls(method, class_name, function_names)
     method.u1(RETURN)
     method.max_locals = 1
     method.max_stack = 8
