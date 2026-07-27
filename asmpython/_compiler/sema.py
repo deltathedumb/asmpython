@@ -11638,6 +11638,76 @@ class SemaAnalyzer:
             resolved = self.mod.func_aliases[func_name]
             if resolved in self.funcs:
                 e.func = resolved
+        if (
+            e.func == "enumerate"
+            and e.func not in self.funcs
+            and e.func not in self.mod.func_aliases
+        ):
+            # `enumerate(seq[, start])` used as a VALUE. It was only ever
+            # recognized in a `for` header, so `list(enumerate(xs))` failed with
+            # "undefined function 'enumerate'" -- enumerate is not in BUILTINS
+            # at all, because that for-position handling consumed it.
+            #
+            # As a value it materializes the pairs, which is exactly
+            #   [(i + start, seq[i]) for i in range(len(seq))]
+            # built out of nodes that already exist, so no new lowering is
+            # needed. The source is drained through `list()` first, which makes
+            # this work uniformly over a str, a mapping, or a generator, not
+            # just a list.
+            _en_start = None
+            for _kn, _kv in list(e.kwargs):
+                if _kn == "start":
+                    _en_start = _kv
+            _en_pos = list(e.args)
+            if _en_start is None and len(_en_pos) == 2:
+                _en_start = _en_pos[1]
+            if len(_en_pos) not in (1, 2):
+                raise SemaError(
+                    "enumerate() takes 1 or 2 arguments", e.pos,
+                    ErrorCode.E_ARG_COUNT,
+                )
+            _en_src = _en_pos[0]
+            self._check_expr(_en_src, scope)
+            if A.expr_type(_en_src) != "list":
+                _en_src = A.Call(func="list", args=[_en_src], kwargs=[], pos=e.pos)
+                self._check_expr(_en_src, scope)
+            _en_var = f"_en{id(e) % 100000}"
+            _en_idx = A.Name(name=_en_var, pos=e.pos)
+            _en_i = (
+                _en_idx
+                if _en_start is None
+                else A.BinOp(op="+", left=_en_idx, right=_en_start, pos=e.pos)
+            )
+            _en_elt = A.TupleLit(
+                elems=[
+                    _en_i,
+                    A.Subscript(
+                        obj=_en_src, index=A.Name(name=_en_var, pos=e.pos), pos=e.pos
+                    ),
+                ],
+                pos=e.pos,
+            )
+            _en_comp = A.Comprehension(
+                elt=_en_elt,
+                var=_en_var,
+                iter=A.Call(
+                    func="range",
+                    args=[A.Call(func="len", args=[_en_src], kwargs=[], pos=e.pos)],
+                    kwargs=[],
+                    pos=e.pos,
+                ),
+                pos=e.pos,
+                list_el_type="tuple",
+            )
+            e.func = "list"
+            e.args = [_en_comp]
+            e.kwargs = []
+            self._check_call(e, scope)
+            e.list_el_type = "tuple"
+            e.el_tuple_types = [  # type: ignore[attr-defined]
+                "int", self._list_el_type(_en_src, scope),
+            ]
+            return
         if e.func == "print" and any(isinstance(a, A.Starred) for a in e.args):
             self._desugar_starred_print(e, scope)
         e.args = self._expand_starred_args(e.args, scope, callee=e.func)
