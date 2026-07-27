@@ -4522,6 +4522,10 @@ class SemaAnalyzer:
                     ret_inner_el_type=(mr[4] if mr is not None and mr[1] in ("list", "dict") else None),
                     param_names=list(m.params),
                     param_defaults=list(m.defaults),
+                    # Methods never carried their resolved parameter types --
+                    # only top-level functions did -- so anything keyed on them
+                    # silently did nothing for a method or constructor.
+                    param_types=self._resolve_param_types(m),
                     vararg=m.vararg,
                     kwarg=m.kwarg,
                     ret_tuple=(mr[3] if mr is not None and mr[0] == "tuple" else self._scan_tuple_return(m_body)),
@@ -5723,6 +5727,49 @@ class SemaAnalyzer:
                 st_finally: list = s.finally_body
                 self._collect_returns(st_else, acc)
                 self._collect_returns(st_finally, acc)
+
+    def _coerce_args_to_param_types(self, e, sig, scope: Scope, skip: int = 0) -> None:
+        """Drain an iterable argument that lands on a `list`-annotated
+        PARAMETER, so a callee written against a list accepts the other
+        iterables CPython would.
+
+        `Counter('mississippi')` is the shape that motivated this: the
+        constructor declares `iterable: list[str]`, receives a str, and its
+        `for item in iterable` read a raw char pointer as a list header and
+        faulted. Same coercion as the sequence builtins get, applied to a
+        user-declared parameter instead of a builtin's argument position, so
+        every function and constructor in the program (and in the bundled
+        stdlib) gets it from one place.
+
+        `skip` drops the leading `self`/`cls` slots the call site does not
+        supply.
+        """
+        _ptypes: list = list(getattr(sig, "param_types", []) or [])
+        if not _ptypes:
+            return
+        for _i in range(len(e.args)):
+            _pi = _i + skip
+            if _pi >= len(_ptypes) or _ptypes[_pi] != "list":
+                continue
+            _a = e.args[_i]
+            if isinstance(_a, A.Call) and _a.func == "list":
+                continue
+            if isinstance(_a, (A.Name, A.Attr, A.Subscript)):
+                self._check_expr(_a, scope)
+            _at = A.expr_type(_a)
+            if _at in ("str", "dict", "set"):
+                _drained = A.Call(func="list", args=[_a], kwargs=[], pos=_a.pos)
+                self._check_expr(_drained, scope)
+                e.args[_i] = _drained
+            elif _at.startswith("instance:"):
+                _cls = _at.split(":", 1)[1]
+                if (
+                    self._resolve_method(_cls, "__next__") is not None
+                    or self._resolve_method(_cls, "__getitem__") is not None
+                ):
+                    _drained = A.Call(func="list", args=[_a], kwargs=[], pos=_a.pos)
+                    self._check_expr(_drained, scope)
+                    e.args[_i] = _drained
 
     def _resolve_param_types(self, f) -> list:
         """`overload` extension: resolve each parameter's static type from
@@ -12476,6 +12523,7 @@ class SemaAnalyzer:
                 e, sig.param_names, sig.param_defaults, sig.vararg, e.pos, e.func,
                 kwarg=sig.kwarg,
             )
+            self._coerce_args_to_param_types(e, sig, scope)
             for a in e.args:
                 self._check_expr(a, scope)
             # Return type priority: an inferred `return a, b` tuple shape wins
@@ -12611,6 +12659,8 @@ class SemaAnalyzer:
                     e.func,
                     kwarg=sig.kwarg,
                 )
+                # `self` occupies slot 0 of the signature but not of the call.
+                self._coerce_args_to_param_types(e, sig, scope, skip=1)
             for a in e.args:
                 self._check_expr(a, scope)
             e.inferred_type = f"instance:{e.func}"
