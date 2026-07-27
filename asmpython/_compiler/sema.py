@@ -10438,14 +10438,28 @@ class SemaAnalyzer:
     # Only `enumerate` for now, and only because its for-position argument is
     # evaluated as a statement. The rest of the family -- sum/sorted/max/min/
     # any/all/tuple/set/reversed/zip/map/filter, all of which want the same
-    # coercion -- is held back on a lowering hazard, NOT on anything about them:
-    # `list(<iterable object>)` drains through a setjmp loop, and that loop
-    # miscompiles when it is emitted inside another expression's evaluation.
-    # `xs = list(gen()); sum(xs)` is correct while `sum(list(gen()))` segfaults.
-    # Reported; widen this dict the moment that is fixed, since the coercion
-    # itself is already written and shape-independent.
+    # coercion -- was held back on a lowering hazard, NOT on anything about
+    # them: `list(<iterable object>)` drains through a setjmp loop, and that
+    # loop miscompiled when emitted inside another expression's evaluation
+    # (`xs = list(gen()); sum(xs)` was correct while `sum(list(gen()))`
+    # segfaulted). The backend's block-layout fix cleared that, so the full set
+    # is enabled. Each entry is the argument POSITIONS that take a sequence.
     _SEQUENCE_BUILTIN_ARGS: dict = {
         "enumerate": (0,),
+        "sum": (0,),
+        "sorted": (0,),
+        "min": (0,),
+        "max": (0,),
+        "any": (0,),
+        "all": (0,),
+        "tuple": (0,),
+        "set": (0,),
+        # NOT `reversed`: CPython raises "'generator' object is not
+        # reversible" for exactly this, so draining one here would make
+        # asmpython accept a program CPython rejects.
+        "zip": (0, 1, 2),
+        "map": (1,),
+        "filter": (1,),
     }
 
     def _coerce_iterable_instance_args(self, e: A.Call, scope: Scope) -> None:
@@ -10461,6 +10475,25 @@ class SemaAnalyzer:
             arg = e.args[i]
             if isinstance(arg, A.Call) and arg.func == "list":
                 continue  # already drained
+            if isinstance(arg, A.Call) and not getattr(arg, "_seq_precheck", False):
+                # The argument's TYPE is what decides whether it needs draining,
+                # and a Call node carries its default "int" until it has been
+                # checked -- this coercion runs before the builtin's own branch
+                # checks its arguments, so an unchecked `gen()` looked like a
+                # plain int and every generator argument slipped through
+                # untouched (the sequence builtin then read the iterator OBJECT
+                # as a list header and faulted).
+                #
+                # A call to a `*args`/`**kwargs` callee is left alone: checking
+                # it twice would re-run `_bind_args` over an already-packed
+                # argument list and nest the packed list inside itself.
+                _cal = self.funcs.get(arg.func)
+                if _cal is None or (
+                    getattr(_cal, "vararg", None) is None
+                    and getattr(_cal, "kwarg", None) is None
+                ):
+                    arg._seq_precheck = True  # type: ignore[attr-defined]
+                    self._check_expr(arg, scope)
             t = A.expr_type(arg)
             if not t.startswith("instance:"):
                 continue
