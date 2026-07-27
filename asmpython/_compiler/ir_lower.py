@@ -7285,6 +7285,80 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     if isinstance(e, A.FString):
         return _lower_fstring(ctx, e)
 
+    if isinstance(e, A.Call) and getattr(e, "starred_dynamic", False):
+        # `f(*a)` where `f` is a CALLABLE VALUE and `a`'s length is a runtime
+        # fact -- the decorator forwarding shape:
+        #
+        #     def deco(f):
+        #         def wrap(*a):
+        #             return f(*a)
+        #
+        # Neither the callee's arity nor len(a) is known at compile time, but
+        # both are known at RUNTIME, so dispatch on the length: one fixed-arity
+        # indirect call per candidate count. Same shape as the closure
+        # capture-count dispatch, which solves the identical problem for
+        # captures rather than arguments.
+        MAX_STAR_ARITY = 8
+        _sd_star = None
+        _sd_fixed: list = []
+        for _a in e.args:
+            if isinstance(_a, A.Starred):
+                _sd_star = _a
+            else:
+                _sd_fixed.append(_a)
+        _sd_fn = _lower_expr(ctx, A.Name(name=e.func, pos=e.pos))
+        _sd_pre = [_lower_expr(ctx, _a) for _a in _sd_fixed]
+        _sd_seq = _lower_expr(ctx, _sd_star.value)
+        _sd_len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", _sd_len_addr, [_sd_seq, _LIST_LEN_OFF]))
+        _sd_len = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", _sd_len, [_sd_len_addr]))
+        _sd_buf_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", _sd_buf_addr, [_sd_seq, _LIST_BUF_OFF]))
+        _sd_buf = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", _sd_buf, [_sd_buf_addr]))
+
+        _sd_res_ty = ir_type_for(A.expr_type(e))
+        _sd_res = ctx.ensure_slot(f"__stardyn_{id(e)}", _sd_res_ty)
+        _sd_check = [ctx.new_block(f"stardynchk{n}_{id(e) % 9999}")
+                     for n in range(MAX_STAR_ARITY + 1)]
+        _sd_hit = [ctx.new_block(f"stardynhit{n}_{id(e) % 9999}")
+                   for n in range(MAX_STAR_ARITY + 1)]
+        _sd_none = ctx.new_block(f"stardynnone_{id(e) % 9999}")
+        _sd_end = ctx.new_block(f"stardynend_{id(e) % 9999}")
+        ctx.emit(IRInstr("br", None, [_sd_check[0].label]))
+        for n in range(MAX_STAR_ARITY + 1):
+            ctx.switch_to(_sd_check[n])
+            _nv = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", _nv, [n]))
+            _eq = ctx.tmp(I64)
+            ctx.emit(IRInstr("icmp.eq", _eq, [_sd_len, _nv]))
+            _nxt = (
+                _sd_check[n + 1].label if n < MAX_STAR_ARITY else _sd_none.label
+            )
+            ctx.emit(IRInstr("br.t", None, [_eq, _sd_hit[n].label, _nxt]))
+            ctx.switch_to(_sd_hit[n])
+            _unpacked: list = []
+            for i in range(n):
+                _ea = ctx.tmp(PTR)
+                ctx.emit(IRInstr("gep", _ea, [_sd_buf, i * 8]))
+                _ev = ctx.tmp(I64)
+                ctx.emit(IRInstr("load", _ev, [_ea]))
+                _unpacked.append(_ev)
+            _rv = ctx.tmp(_sd_res_ty)
+            ctx.emit(IRInstr("call", _rv, [_sd_fn, *_sd_pre, *_unpacked]))
+            ctx.emit(IRInstr("store", None, [_rv, _sd_res]))
+            ctx.emit(IRInstr("br", None, [_sd_end.label]))
+        ctx.switch_to(_sd_none)
+        _zv = ctx.tmp(_sd_res_ty)
+        ctx.emit(IRInstr("const", _zv, [0]))
+        ctx.emit(IRInstr("store", None, [_zv, _sd_res]))
+        ctx.emit(IRInstr("br", None, [_sd_end.label]))
+        ctx.switch_to(_sd_end)
+        _out = ctx.tmp(_sd_res_ty)
+        ctx.emit(IRInstr("load", _out, [_sd_res]))
+        return _out
+
     if isinstance(e, A.Call) and getattr(e, "dunder_call_on_expr", False):
         # `<expr>(args)` where the callee is an instance with `__call__`: a
         # DIRECT call to the resolved dunder with the evaluated receiver as

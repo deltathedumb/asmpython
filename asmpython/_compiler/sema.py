@@ -866,6 +866,13 @@ class SemaAnalyzer:
         # Variable name -> return type of the lambda bound to it, so an indirect
         # call `f(...)` on a name-bound lambda gets the right result type.
         self.lambda_rets: dict[str, str] = {}
+        # Closure factory name -> the lifted function its returned closure
+        # wraps, and variable name -> that same function for a variable a
+        # factory's result was assigned to. A call through such a variable binds
+        # against the target's real signature, which is the only way a target
+        # declaring `*args` gets its arguments packed.
+        self._closure_targets: dict[str, str] = {}
+        self._closure_var_targets: dict[str, str] = {}
         # Local names EXPLICITLY declared `dict[str, object]` (a genuinely
         # heterogeneous dict). Their value kind must stay "any" -- unlike a
         # bare `dict`/`{}`, a later single-kind write must NOT narrow it to
@@ -2578,6 +2585,43 @@ class SemaAnalyzer:
             _slots = self._list_el_tuple_types(value, scope)
             if _slots:
                 _sig.ret_list_tuple_types = list(_slots)
+
+    def _pack_closure_vararg_call(self, call, funcs_by_name: dict) -> None:
+        """Pack a closure call's surplus positional arguments into the single
+        list parameter its `*args` target expects.
+
+        `def mk(f): def go(*a): ...; return go` then `g = mk(d); g(4, 5)`: the
+        call goes through a closure VALUE, so there was no signature to bind
+        against and `go` received two raw arguments where it expects one packed
+        list -- the call silently did nothing. The target is known here (see
+        `_closure_targets`), so bind by hand.
+
+        A lifted function's free variables were PREPENDED to its parameter list,
+        and the closure object supplies those itself at the call, so the
+        user-visible parameters start after them.
+        """
+        _tgt_name = self._closure_var_targets.get(call.func)
+        if _tgt_name is None or getattr(call, "_closure_packed", False):
+            return
+        _tgt = funcs_by_name.get(_tgt_name)
+        if _tgt is None or not getattr(_tgt, "vararg", None):
+            return
+        _nfree = len(getattr(_tgt, "free_vars", []) or [])
+        _fixed = list(_tgt.params)[_nfree:]
+        # `params` INCLUDES the vararg (and kwarg) name; those are not fixed
+        # positional slots, so drop them or every count below is off by one.
+        for _tail in (getattr(_tgt, "vararg", None), getattr(_tgt, "kwarg", None)):
+            if _tail and _fixed and _fixed[-1] == _tail:
+                _fixed.pop()
+        if len(call.args) < len(_fixed):
+            return
+        _packed = list(call.args[len(_fixed):])
+        if len(_packed) == 1 and isinstance(_packed[0], A.ListLit):
+            return  # already packed
+        call.args = list(call.args[: len(_fixed)]) + [
+            A.ListLit(elems=_packed, pos=call.pos)
+        ]
+        call._closure_packed = True  # type: ignore[attr-defined]
 
     def _restamp_module_call_types(self) -> None:
         """Re-stamp element kinds onto module-body call nodes after every
@@ -5321,6 +5365,13 @@ class SemaAnalyzer:
                     ):
                         sig.ret_type = ("closure", None, None, None, None)
                         closure_factories.add(f.name)
+                        # Remember WHICH lifted function the closure wraps. A
+                        # call through the closure otherwise has no signature to
+                        # bind against, so a target declaring `*args` never got
+                        # its arguments packed into the single list parameter it
+                        # expects -- `g = mk(d); g(4, 5)` passed two raw
+                        # arguments and the call did nothing at all.
+                        self._closure_targets[f.name] = s.value.name
                         break
         # Re-type Call nodes that target closure factories, so a variable a
         # factory's result is assigned to (`add5 = make_adder(5)`) carries the
@@ -5334,6 +5385,9 @@ class SemaAnalyzer:
                 if isinstance(s, A.Assign) and isinstance(s.value, A.Call):
                     if s.value.func in closure_factories:
                         s.value.inferred_type = "closure"
+                        _tgt = self._closure_targets.get(s.value.func)
+                        if _tgt is not None and isinstance(s.target, str):
+                            self._closure_var_targets[s.target] = _tgt
                 elif isinstance(s, A.For):
                     _retype_closure_calls(s.body)
                 elif isinstance(s, A.If):
@@ -5354,6 +5408,20 @@ class SemaAnalyzer:
         for c in self.mod.classes:
             for m in c.methods:
                 _retype_closure_calls(m.body)
+        # Now that closure variables are known, pack the arguments of calls
+        # through them when the target declares `*args`. This runs as a pure
+        # AST rewrite in this same late pass -- the calls were type-checked
+        # before the closure targets were known, and re-checking them would
+        # re-run `_bind_args` over already-normalized arguments.
+        if self._closure_var_targets:
+            _funcs_by_name = {_f.name: _f for _f in self.mod.funcs}
+            for _stmts in (
+                [self.mod.body]
+                + [_f.body for _f in self.mod.funcs]
+                + [_m.body for _c in self.mod.classes for _m in _c.methods]
+            ):
+                for _call in _walk_call_sites(_stmts):
+                    self._pack_closure_vararg_call(_call, _funcs_by_name)
 
         # Hand resolved tables to codegen via the Module.
         self.mod.imported_modules = self.imported_modules
@@ -8205,6 +8273,14 @@ class SemaAnalyzer:
 
     def _check_expr(self, e: A.Expr, scope: Scope) -> None:
         if isinstance(e, A.IntLit) or isinstance(e, A.FloatLit) or isinstance(e, A.StrLit):
+            return
+        if isinstance(e, A.Starred):
+            # A `*expr` argument normally disappears in
+            # `_expand_starred_args`. The one shape that keeps it is a call
+            # through a callable VALUE, where the argument count is only known
+            # at runtime (`starred_dynamic`) -- the call's own arg loop then
+            # reaches the Starred itself, so check what it wraps.
+            self._check_expr(e.value, scope)
             return
         if isinstance(e, A.Name):
             if e.name in self.ffi_consts:
@@ -11928,6 +12004,7 @@ class SemaAnalyzer:
         varargs. Returns the (possibly unchanged) args list."""
         if not any(isinstance(a, A.Starred) for a in args):
             return args
+        self._last_starred_dynamic = False
         new_args: list = []
         for a in args:
             if not isinstance(a, A.Starred):
@@ -11969,6 +12046,22 @@ class SemaAnalyzer:
                         )
                         self._check_expr(sub, scope)
                         new_args.append(sub)
+                    continue
+                # The callee is a CALLABLE VALUE, not a statically known
+                # function -- `def wrap(*a): return f(*a)`, the decorator
+                # forwarding shape. Neither its arity nor the sequence's length
+                # is a compile-time fact, but BOTH are known at runtime, so the
+                # call site dispatches on `len(seq)` (see ir_lower's
+                # `starred_dynamic` handling). Leave the Starred for it.
+                if (
+                    callee is not None
+                    and callee not in self.funcs
+                    and callee not in self.classes
+                    and callee in scope.types
+                    and A.expr_type(a.value) in ("list", "tuple", "any")
+                ):
+                    new_args.append(a)
+                    self._last_starred_dynamic = True
                     continue
                 raise SemaError(
                     "*expr argument unpacking requires a tuple with known "
@@ -12373,7 +12466,10 @@ class SemaAnalyzer:
             return
         if e.func == "print" and any(isinstance(a, A.Starred) for a in e.args):
             self._desugar_starred_print(e, scope)
+        self._last_starred_dynamic = False
         e.args = self._expand_starred_args(e.args, scope, callee=e.func)
+        if getattr(self, "_last_starred_dynamic", False):
+            e.starred_dynamic = True  # type: ignore[attr-defined]
         # Builtins are shadowable: after whole-program merge a call like
         # `re.compile(...)` rewrites to a plain `compile(...)`, and that must
         # resolve to the merged stdlib function, not the interpreter-only

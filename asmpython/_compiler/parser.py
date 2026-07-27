@@ -32,6 +32,11 @@ class Parser:
         # can resolve calls to them (closures aren't compiled, but parsing
         # must succeed so the self-hosting gauntlet can proceed).
         self._nested_funcs: list = []
+        # Stack of the PARAMETER names of each function currently being parsed,
+        # outermost first. A nested `def` consults it to tell an enclosing
+        # scope's variable from a module-level function when it sees a name in
+        # CALL position -- see `_find_free_vars`.
+        self._enclosing_params: list = []
         # Nested class definitions are lifted the same way. This keeps
         # function-local helper classes (notably ctypes.Structure declarations)
         # visible to sema/codegen without modeling Python's local class scope.
@@ -446,11 +451,38 @@ class Parser:
         # (iter, then push scope, then elt/cond/extras, then pop) real
         # Python's own comprehension scoping needs.
         comp_suppressed: list = []
+        # Parameters of every function enclosing this one. A name in CALL
+        # position is a bare string on A.Call, not an A.Name, so the walk below
+        # never saw it -- which meant a nested function that only ever CALLS a
+        # captured callable had NO free variables recorded:
+        #
+        #     def deco(f):
+        #         def wrap(x):
+        #             return f(x)      # `f` was invisible here
+        #         return wrap
+        #
+        # so `f` was neither captured nor passed in, and sema reported
+        # "undefined function 'f'" -- the whole decorator idiom. Recording
+        # EVERY callee would wrongly capture module-level function names, so
+        # only a name that is a PARAMETER of an enclosing function counts:
+        # that is exactly the set that can only have come from an outer scope.
+        _outer_params: set = set()
+        for _frame in self._enclosing_params:
+            _outer_params.update(_frame)
+
         def on_expr(node) -> bool:
             if isinstance(node, A.Name):
                 if node.name not in comp_suppressed:
                     referenced.add(node.name)
                 return False
+            if isinstance(node, A.Call):
+                _cf = node.func
+                if (
+                    isinstance(_cf, str)
+                    and _cf in _outer_params
+                    and _cf not in comp_suppressed
+                ):
+                    referenced.add(_cf)
             if isinstance(node, A.Comprehension):
                 self._walk_expr(node.iter, on_expr)
                 _comp_vars: list = []
@@ -544,7 +576,9 @@ class Parser:
             if self._check("KEYWORD", "def"):
                 fdef = self._parse_funcdef(decorators=decorators)
                 funcs.append(fdef)
-                body.extend(self._desugar_decorator_exprs(pending, fdef.name, fdef.pos))
+                body.extend(
+                    self._desugar_function_decorators(fdef, pending)
+                )
             elif self._check("KEYWORD", "class"):
                 cdef = self._parse_classdef(decorators=decorators)
                 classes.append(cdef)
@@ -873,6 +907,56 @@ class Parser:
                 names.append(name)  # type: ignore
             self._skip_newlines()
         return names
+
+    def _desugar_function_decorators(self, fdef, pending: list) -> list:
+        """Apply general decorators to a top-level `def`, REBINDING the name.
+
+        `@deco def g(...)` means `g = deco(g)` in Python -- the decorator's
+        result replaces the function. The existing desugaring called the
+        decorator for its side effect and DISCARDED the result, which models
+        only the registration pattern (a decorator that returns its argument
+        unchanged); a decorator that returns a wrapper had that wrapper thrown
+        away, so `@deco def g(x)` still called the undecorated `g`. The whole
+        decorator idiom silently did nothing.
+
+        To make the rebinding actually take effect, the function is RENAMED:
+        `g(5)` resolves a top-level function name before a variable, so leaving
+        the original name on the FuncDef would keep every call going to the
+        undecorated version. The original name becomes a module-level variable
+        holding the decorated value, which is the ordinary
+        callable-value-in-a-variable shape (`add5 = partial(...)`; `add5(3)`)
+        that already works. Recursive self-calls inside the body then go through
+        the decorated name, matching CPython.
+
+        Decorators apply bottom-up, i.e. the one nearest the `def` first.
+        """
+        if not pending:
+            return []
+        _orig_name = fdef.name
+        self._deco_tmp_counter += 1
+        _inner_name = f"__undecorated_{self._deco_tmp_counter}_{_orig_name}"
+        fdef.name = _inner_name
+        stmts: list = []
+        # Built as ONE nested expression -- `g = deco2(deco1(orig))` -- rather
+        # than a chain of intermediate assignments. Routing each step through a
+        # temp loses the closure type on the way back out (`t = deco(orig)`
+        # types t "closure", but `g = t` then re-derives g's type from a plain
+        # Name read), and the call site needs that type to dispatch a closure
+        # VALUE rather than a direct symbol call.
+        _cur = A.Name(name=_inner_name, pos=fdef.pos)
+        for expr in reversed(pending):
+            if isinstance(expr, A.Name):
+                _cur = A.Call(func=expr.name, args=[_cur], pos=fdef.pos)
+            else:
+                # `@factory(args)`: the factory expression is evaluated once
+                # into a temp, because a call on an arbitrary expression's
+                # result needs a name to hang off here.
+                self._deco_tmp_counter += 1
+                _tmp = f"__deco_tmp_{self._deco_tmp_counter}"
+                stmts.append(A.Assign(target=_tmp, value=expr, pos=fdef.pos))
+                _cur = A.Call(func=_tmp, args=[_cur], pos=fdef.pos)
+        stmts.append(A.Assign(target=_orig_name, value=_cur, pos=fdef.pos))
+        return stmts
 
     def _desugar_decorator_exprs(self, exprs: list, func_name: str, pos) -> list:
         """Turn deferred general-decorator exprs into real application stmts.
@@ -1413,7 +1497,18 @@ class Parser:
             self._eat()
             ret_type = self._parse_type_annotation()
         self._expect("OP", ":")
-        body = self._parse_block()
+        # Publish this function's parameters while its body (and therefore any
+        # nested `def` inside it) is parsed.
+        _encl_frame: set = set(params)
+        if vararg:
+            _encl_frame.add(vararg)
+        if kwarg:
+            _encl_frame.add(kwarg)
+        self._enclosing_params.append(_encl_frame)
+        try:
+            body = self._parse_block()
+        finally:
+            self._enclosing_params.pop()
         asm_body = None
         asm_symbol = None
         if decorators and self._ASM_DECORATOR in decorators:
