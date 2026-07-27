@@ -12532,6 +12532,44 @@ class SemaAnalyzer:
             resolved = self.mod.func_aliases[func_name]
             if resolved in self.funcs:
                 e.func = resolved
+        if (
+            e.func == "loads"
+            and len(e.args) == 1
+            and "loads_dict" in self.funcs
+            and "loads_list" in self.funcs
+        ):
+            # `json.loads(s)` returns whatever JSON `s` holds, but a static
+            # signature has to pick ONE type -- so the module carries three real
+            # parsers and `loads` is the scalar one, which made
+            # `json.loads('{"x": 1}')['x']` a "string index must be an int"
+            # error. The JSON type IS statically knowable in the two shapes that
+            # occur: a string LITERAL announces it with its first non-space
+            # character, and a round-trip `loads(dumps(X))` has X's own shape.
+            # Any other argument keeps the scalar parser.
+            #
+            # The dead-code pass runs BEFORE this and would have neutralized
+            # whichever parser nobody appeared to call, so it keeps all three
+            # alive (see `_RETARGET_SIBLINGS` there).
+            _js_kind = None
+            _ja = e.args[0]
+            if isinstance(_ja, A.StrLit):
+                _txt = _ja.value.lstrip()
+                if _txt.startswith("{"):
+                    _js_kind = "loads_dict"
+                elif _txt.startswith("["):
+                    _js_kind = "loads_list"
+            elif isinstance(_ja, A.Call) and _ja.func.startswith("dumps"):
+                self._check_expr(_ja, scope)
+                _inner = _ja.args[0] if _ja.args else None
+                _it = A.expr_type(_inner) if _inner is not None else ""
+                if _it == "dict":
+                    _js_kind = "loads_dict"
+                elif _it in ("list", "tuple"):
+                    _js_kind = "loads_list"
+            if _js_kind is not None:
+                e.func = _js_kind
+                self._check_call(e, scope)
+                return
         if e.func == "list" and len(e.args) == 1:
             _l0 = e.args[0]
             if isinstance(_l0, A.Call) and _l0.func in ("map", "filter"):

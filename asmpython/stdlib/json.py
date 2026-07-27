@@ -349,8 +349,13 @@ def loads(s: str) -> str:
     return s
 
 
-def loads_dict(s: str) -> dict:
-    """Parse a JSON object into a dict[str, str] with stringified values."""
+def loads_dict(s: str) -> dict[str, str]:
+    """Parse a JSON object into a dict[str, str] with stringified values.
+
+    `dict[str, str]`, not a bare `dict`: the values really are strings, and the
+    annotation has to say so or a caller's `d[k]` reads a value of unknown kind
+    and prints its address.
+    """
     result: dict[str, str] = {}
     i = _skip_ws(s, 0)
     n = len(s)
