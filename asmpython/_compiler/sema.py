@@ -7116,6 +7116,14 @@ class SemaAnalyzer:
                     )
                 inner = s.iter.args[0]
                 self._check_expr(inner, scope)
+                # `for i, k in enumerate(d)` over a MAPPING (or a set): iterating
+                # one yields its keys, and `list(d)` is exactly that list. The
+                # lowering only walks a list/tuple/str buffer, so without the
+                # drain this was "unsupported stmt For (enumerate 'dict')".
+                if A.expr_type(inner) in ("dict", "set"):
+                    inner = A.Call(func="list", args=[inner], kwargs=[], pos=inner.pos)
+                    self._check_expr(inner, scope)
+                    s.iter.args[0] = inner
                 # `for i, v in enumerate(<iterable object>)`: this for-position
                 # handler runs before the generic call check, so apply the same
                 # drain-with-list() coercion here (see
@@ -8936,6 +8944,13 @@ class SemaAnalyzer:
                 else:
                     self._check_expr(el, scope)
                     et = A.expr_type(el)
+                    # A lambda / function reference element is a CALLABLE VALUE
+                    # (`[lambda x: x + 1, f]`), recorded as `callable:<ret>` so
+                    # reading one back out is recognized as a call. Same
+                    # producer the dict-value and append paths use.
+                    _el_cv = self._callable_type_of(el, scope)
+                    if _el_cv is not None:
+                        et = _el_cv
                 # Every asmpython value is a uniform 8-byte slot, so a list may
                 # hold nested collections (list/dict/tuple/set) and instances as
                 # well as scalars — they're stored as pointers (mirrors what
@@ -8949,7 +8964,9 @@ class SemaAnalyzer:
                     "list",
                     "dict",
                     "set",
-                ) and not et.startswith("instance:"):
+                ) and not et.startswith("instance:") and not et.startswith(
+                    "callable:"
+                ):
                     raise SemaError(
                         f"list element of type {et} is not supported yet",
                         getattr(el, "pos", e.pos),
@@ -10127,6 +10144,13 @@ class SemaAnalyzer:
                             ErrorCode.E_ARG_COUNT,
                         )
                     arg_t = A.expr_type(e.args[0])
+                    # A lambda / function reference appended to a list is a
+                    # CALLABLE VALUE: record it as `callable:<ret>` so reading
+                    # the element back out (`handlers[0](x)`) is recognized as a
+                    # call. Same producer the dict-value path uses.
+                    _ap_cv = self._callable_type_of(e.args[0], scope)
+                    if _ap_cv is not None:
+                        arg_t = _ap_cv
                     if (
                         isinstance(e.obj, A.MethodCall)
                         and e.obj.method == "setdefault"
@@ -10154,7 +10178,12 @@ class SemaAnalyzer:
                         "list",
                         "dict",
                         "set",
-                    ) and not arg_t.startswith("instance:"):
+                    ) and not arg_t.startswith("instance:") and not arg_t.startswith(
+                        "callable:"
+                    ):
+                        # `callable:<ret>` is a code POINTER, so it fits the
+                        # uniform 8-byte element slot like any other pointer --
+                        # a list of handlers is an ordinary list.
                         raise SemaError(
                             f"list.append() element of type {arg_t} not supported",
                             e.pos,
