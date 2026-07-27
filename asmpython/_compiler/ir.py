@@ -293,6 +293,17 @@ def layout_blocks_rpo(func: "IRFunc") -> bool:
     seen = set(order)
     tail = [i for i in range(len(func.blocks)) if i not in seen]
     new_order = order + tail
+
+    # Exit blocks stay last, in their original relative order. Codegen emits
+    # blocks in list order and expects the function to end at its `ret`; plain
+    # reverse postorder happily moves a `ret` into the middle (observed: index
+    # 16 of 17 -> index 6), after which the tail of the function is unreachable
+    # code that runs off the end.
+    exits = [i for i in new_order if func.blocks[i].instrs
+             and func.blocks[i].instrs[-1].op == "ret"]
+    if exits:
+        exit_set = set(exits)
+        new_order = [i for i in new_order if i not in exit_set] + exits
     if new_order == list(range(len(func.blocks))):
         return False
     func.blocks = [func.blocks[i] for i in new_order]
