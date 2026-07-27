@@ -6577,12 +6577,24 @@ class SemaAnalyzer:
                         # compilable (a subscript result types as int otherwise).
                         is_str = flat and ti < len(shape) and shape[ti] == "str"
                         is_flt = flat and ti < len(shape) and shape[ti] == "float"
+                        # An "int" slot binds as int rather than falling into
+                        # the lenient bucket. A target left "any" is a value
+                        # whose static kind is genuinely unknown, and every
+                        # consumer that needs a real kind has to guess -- the
+                        # dict-key encoder guessed "already a string pointer"
+                        # and hashed a raw integer as an address, so
+                        # `for k, v in d.items(): inv[v] = k` segfaulted for
+                        # any int-valued dict. The slot kind IS known here.
+                        is_int = flat and ti < len(shape) and shape[ti] == "int"
                         if is_str:
                             scope.add(nm, "str")
                             ttypes.append("str")
                         elif is_flt:
                             scope.add(nm, "float")
                             ttypes.append("float")
+                        elif is_int:
+                            scope.add(nm, "int")
+                            ttypes.append("int")
                         else:
                             scope.add(nm, "any")
                             ttypes.append("any")
