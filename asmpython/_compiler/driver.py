@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import native_libraries as _native_libraries
 from .target_freestanding import FreestandingCodegen
 from .target_linux import LinuxCodegen
 from .target_windows import WindowsCodegen
@@ -461,6 +462,11 @@ def _run_backend_x86_64(
         "output_type": output_type,
         "exports": ir_mod.exports,
         "soname": soname,
+        # Symbols provided by libraries this project declared (project.json's
+        # `native_libraries`, or --link-library). Empty for a build that
+        # declares none, and the linkers' own tables take precedence over it,
+        # so an undeclared build links exactly as it always did.
+        "symbol_libraries": _native_libraries.active_registry().symbol_map(target),
     }
     objects = [program_obj, shim_obj, runtime_obj]
     objects += extra_objs

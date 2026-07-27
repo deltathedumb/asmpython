@@ -131,6 +131,7 @@ def link_pe(
     *,
     is_library: bool = False,
     exports: "list[str] | tuple[str, ...]" = (),
+    symbol_libraries: "dict[str, str] | None" = None,
 ) -> bytes:
     """Link into a PE32+ executable, or (`is_library=True`) a DLL.
 
@@ -141,8 +142,21 @@ def link_pe(
     `exports` (each name must be a real merged global symbol, checked
     below) becomes the PE export directory (`.edata`), letting an external
     host `GetProcAddress` each one by name.
+
+    `symbol_libraries` supplies EXTRA symbol -> DLL mappings for this link,
+    built from the project's declared native libraries (see
+    `_compiler.native_libraries`). It is consulted only where
+    `_DLL_FOR_SYMBOL` misses, so the runtime's own imports can never be
+    retargeted by a project file and a build that declares nothing links
+    byte-for-byte as it did before this parameter existed.
     """
     parsed: list[CoffObject] = [parse_coff(o) for o in objects]
+    extra_libraries = symbol_libraries or {}
+
+    def dll_for(name: str) -> str:
+        """The DLL providing `name`: builtin table first, declarations second."""
+        dll = _DLL_FOR_SYMBOL.get(name)
+        return dll if dll is not None else extra_libraries[name]
 
     # ── 1. Merge .text/.data/.rdata sections, track each object's section
     # base offset within its bucket so symbol values can be translated. ──
@@ -257,10 +271,12 @@ def link_pe(
     def _want_import(name: str) -> None:
         if name in global_syms or name in seen_imports:
             return
-        if name not in _DLL_FOR_SYMBOL:
+        if name not in _DLL_FOR_SYMBOL and name not in extra_libraries:
             raise LinkError(
-                f"undefined symbol {name!r} has no known DLL "
-                f"(add it to pe_linker._DLL_FOR_SYMBOL if it's a real import)"
+                f"undefined symbol {name!r} has no known DLL. Declare the "
+                f"library providing it -- `native_libraries` in project.json, "
+                f"or --link-library NAME=PATH -- or, if it is part of "
+                f"asmpython's own runtime, add it to pe_linker._DLL_FOR_SYMBOL."
             )
         imports.append(name)
         seen_imports.add(name)
@@ -294,7 +310,7 @@ def link_pe(
     # exiting the process -- so this import is only forced for an exe link.
     if not is_library:
         _want_import("ExitProcess")
-    imports.sort(key=lambda n: (_DLL_FOR_SYMBOL[n], n))
+    imports.sort(key=lambda n: (dll_for(n), n))
 
     # ── 4. Lay out .text: merged code, then one 6-byte thunk per import
     # (`jmp qword [rip+disp32]` into its IAT slot), then the __acrt_iob_func
@@ -407,7 +423,7 @@ def link_pe(
     # ── 6. Build .idata (import directory + ILT/IAT + hint/name + DLL names). ──
     dlls: dict[str, list[str]] = {}
     for name in imports:
-        dlls.setdefault(_DLL_FOR_SYMBOL[name], []).append(name)
+        dlls.setdefault(dll_for(name), []).append(name)
 
     num_dlls = len(dlls)
     dir_table_len = (num_dlls + 1) * 20
@@ -470,7 +486,7 @@ def link_pe(
 
     # IAT slot RVA for each imported symbol, needed by the thunks.
     def iat_slot_rva(name: str) -> int:
-        dll = _DLL_FOR_SYMBOL[name]
+        dll = dll_for(name)
         j = dlls[dll].index(name)
         return rva_idata + iat_off[dll] + j * 8
 

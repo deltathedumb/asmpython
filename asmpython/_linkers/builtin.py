@@ -20,11 +20,19 @@ def link(ctx: dict) -> bytes:
     entry_symbol = ctx.get("entry_symbol", "main")
     is_library = ctx.get("output_type") == "library"
     exports = ctx.get("exports") or []
+    # symbol -> shared library, for symbols the linkers' builtin tables don't
+    # own. Built by the driver from the project's declared native libraries;
+    # absent for every build that declares none.
+    symbol_libraries = ctx.get("symbol_libraries") or None
 
     if target_os == "windows":
         from asmpython._backends.x86_64.pe_linker import link_pe
         return link_pe(
-            objects, entry_symbol=entry_symbol, is_library=is_library, exports=exports
+            objects,
+            entry_symbol=entry_symbol,
+            is_library=is_library,
+            exports=exports,
+            symbol_libraries=symbol_libraries,
         )
 
     if target_os == "linux":
@@ -35,6 +43,7 @@ def link(ctx: dict) -> bytes:
             is_library=is_library,
             exports=exports,
             soname=ctx.get("soname") or "libportapy.so",
+            symbol_libraries=symbol_libraries,
         )
 
     raise NotImplementedError(
