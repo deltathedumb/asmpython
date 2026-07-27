@@ -3499,7 +3499,132 @@ def _lower_tuple_repr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     and their types are known at compile time, so this unrolls per
     element rather than looping like _abi_list_repr does for a
     uniformly-typed list."""
-    return _emit_tuple_repr_value(ctx, _lower_expr(ctx, e), A.tuple_element_types(e))
+    _kinds = A.tuple_element_types(e)
+    if not _kinds:
+        # A tuple with no static slot shape -- `tuple(xs)` over a list whose
+        # LENGTH is a runtime value, which is what the transpose idiom
+        # (`zip(*rows)`) and every other tuple-from-iterable produces. The
+        # unrolled formatter has nothing to unroll there and emitted a bare
+        # "()", silently printing a populated tuple as empty. Walk the real
+        # length instead, formatting each slot by the source's element kind.
+        return _emit_tuple_repr_dynamic(
+            ctx, _lower_expr(ctx, e), getattr(e, "list_el_type", "any"), e
+        )
+    return _emit_tuple_repr_value(ctx, _lower_expr(ctx, e), _kinds)
+
+
+def _emit_tuple_repr_dynamic(
+    ctx: _FuncCtx, obj_v: IRValue, el_kind: str, e
+) -> IRValue:
+    """repr of a tuple whose LENGTH is only known at runtime, as "(a, b)".
+
+    Same loop shape as `_lower_list_of_tuples_repr`, but bracketed as a tuple
+    and with CPython's 1-element trailing comma. Every slot formats with the
+    same kind, which is what a tuple built from an iterable actually has.
+    """
+    if el_kind in ("", "any", "int"):
+        el_kind = "int" if el_kind in ("", "int") else "any"
+    res_ptr = ctx.ensure_slot(f"__dtrep_res_{id(e)}", PTR)
+    open_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", open_v, [ctx.mctx.intern_str("(")]))
+    ctx.emit(IRInstr("store", None, [open_v, res_ptr]))
+    buf_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", buf_addr, [obj_v, _LIST_BUF_OFF]))
+    buf_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", buf_v, [buf_addr]))
+    len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_addr, [obj_v, _LIST_LEN_OFF]))
+    len_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", len_v, [len_addr]))
+    idx_ptr = ctx.ensure_slot(f"__dtrep_idx_{id(e)}", I64)
+    z0 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", z0, [0]))
+    ctx.emit(IRInstr("store", None, [z0, idx_ptr]))
+    h_b = ctx.new_block("dtrephead")
+    b_b = ctx.new_block("dtrepbody")
+    sep_b = ctx.new_block("dtrepsep")
+    elt_b = ctx.new_block("dtrepelt")
+    e_b = ctx.new_block("dtrepend")
+    ctx.emit(IRInstr("br", None, [h_b.label]))
+    ctx.switch_to(h_b)
+    i_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_v, [idx_ptr]))
+    go_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", go_v, [i_v, len_v]))
+    ctx.emit(IRInstr("br.t", None, [go_v, b_b.label, e_b.label]))
+    ctx.switch_to(b_b)
+    bi_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", bi_v, [idx_ptr]))
+    zc = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zc, [0]))
+    first_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", first_v, [bi_v, zc]))
+    ctx.emit(IRInstr("br.t", None, [first_v, elt_b.label, sep_b.label]))
+    ctx.switch_to(sep_b)
+    cur_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", cur_v, [res_ptr]))
+    comma_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", comma_v, [ctx.mctx.intern_str(", ")]))
+    withsep_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", withsep_v, ["_abi_str_concat", cur_v, comma_v]))
+    ctx.emit(IRInstr("store", None, [withsep_v, res_ptr]))
+    ctx.emit(IRInstr("br", None, [elt_b.label]))
+    ctx.switch_to(elt_b)
+    ei_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", ei_v, [idx_ptr]))
+    eight = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", eight, [8]))
+    off_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("imul", off_v, [ei_v, eight]))
+    slot_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", slot_addr, [buf_v, off_v]))
+    slot_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", slot_v, [slot_addr]))
+    kind_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", kind_v, [_value_repr_kind(el_kind)]))
+    txt_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", txt_v, ["_abi_fmt_elem", slot_v, kind_v]))
+    prev_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", prev_v, [res_ptr]))
+    app_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", app_v, ["_abi_str_concat", prev_v, txt_v]))
+    ctx.emit(IRInstr("store", None, [app_v, res_ptr]))
+    ni_v = ctx.tmp(I64)
+    one_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one_v, [1]))
+    ctx.emit(IRInstr("iadd", ni_v, [ei_v, one_v]))
+    ctx.emit(IRInstr("store", None, [ni_v, idx_ptr]))
+    ctx.emit(IRInstr("br", None, [h_b.label]))
+    ctx.switch_to(e_b)
+    # CPython writes a 1-tuple as "(x,)"; pick the closer at runtime since the
+    # length is not a compile-time fact here.
+    one2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one2, [1]))
+    is_single = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_single, [len_v, one2]))
+    close_ptr = ctx.ensure_slot(f"__dtrep_close_{id(e)}", PTR)
+    s1_b = ctx.new_block("dtrepone")
+    sn_b = ctx.new_block("dtrepmany")
+    fin_b = ctx.new_block("dtrepfin")
+    ctx.emit(IRInstr("br.t", None, [is_single, s1_b.label, sn_b.label]))
+    ctx.switch_to(s1_b)
+    c1_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", c1_v, [ctx.mctx.intern_str(",)")]))
+    ctx.emit(IRInstr("store", None, [c1_v, close_ptr]))
+    ctx.emit(IRInstr("br", None, [fin_b.label]))
+    ctx.switch_to(sn_b)
+    cn_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", cn_v, [ctx.mctx.intern_str(")")]))
+    ctx.emit(IRInstr("store", None, [cn_v, close_ptr]))
+    ctx.emit(IRInstr("br", None, [fin_b.label]))
+    ctx.switch_to(fin_b)
+    body_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", body_v, [res_ptr]))
+    cl_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", cl_v, [close_ptr]))
+    out_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", out_v, ["_abi_str_concat", body_v, cl_v]))
+    return out_v
 
 
 def _emit_tuple_repr_value(ctx: _FuncCtx, obj: IRValue, kinds: list) -> IRValue:

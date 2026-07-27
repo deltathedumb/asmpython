@@ -11070,7 +11070,33 @@ class SemaAnalyzer:
                     )
         new_args = list(slots)
         if vararg is not None:
-            new_args.append(A.ListLit(elems=extra, pos=pos))
+            if any(isinstance(_x, A.Starred) for _x in extra):
+                # `f(1, *rest)` into a `*args` parameter: the packed slot is
+                # the concatenation of the plain surplus arguments and each
+                # starred sequence, built with the ordinary list `+` so no new
+                # lowering is needed. A `*seq` is materialized through `list()`
+                # rather than aliased, matching CPython -- the callee's `args`
+                # tuple is a fresh object, so mutating it must not touch `seq`.
+                _parts: list = []
+                _run: list = []
+                for _x in extra:
+                    if isinstance(_x, A.Starred):
+                        if _run:
+                            _parts.append(A.ListLit(elems=_run, pos=pos))
+                            _run = []
+                        _parts.append(
+                            A.Call(func="list", args=[_x.value], kwargs=[], pos=pos)
+                        )
+                    else:
+                        _run.append(_x)
+                if _run:
+                    _parts.append(A.ListLit(elems=_run, pos=pos))
+                _packed = _parts[0]
+                for _extra_part in _parts[1:]:
+                    _packed = A.BinOp(op="+", left=_packed, right=_extra_part, pos=pos)
+                new_args.append(_packed)
+            else:
+                new_args.append(A.ListLit(elems=extra, pos=pos))
         if kwarg is not None:
             kw_keys: list = []
             kw_vals: list = []
@@ -11086,6 +11112,70 @@ class SemaAnalyzer:
             _ec2: A.Call = e
             _ec2.args = new_args
             _ec2.kwargs = []
+
+    def _desugar_starred_print(self, e: A.Call, scope: Scope) -> None:
+        """`print(*seq, sep=S)` -- print a sequence whose LENGTH is only known
+        at runtime.
+
+        print's lowering bakes its argument count into the printf format
+        string, so a runtime-length argument list can't go through it. Rather
+        than add a second, loop-shaped print lowering, rewrite the call into
+        one the existing machinery already handles exactly:
+
+            print(a, *seq, b, sep=S, end=E)
+              ->  print(S.join([str(a)] + [str(_v) for _v in seq] + [str(b)]),
+                        end=E)
+
+        `str.join` over a comprehension is all pre-existing, so this is
+        general over any mix of plain and starred arguments and any separator,
+        including the default " ".
+        """
+        sep_val = " "
+        kept_kwargs: list = []
+        for kn, kv in e.kwargs:
+            if kn == "sep" and isinstance(kv, A.StrLit):
+                sep_val = kv.value
+            else:
+                kept_kwargs.append((kn, kv))
+        parts: list = []
+        run: list = []
+        for a in e.args:
+            if isinstance(a, A.Starred):
+                if run:
+                    parts.append(A.ListLit(elems=list(run), pos=e.pos))
+                    run = []
+                var = f"_pv{len(parts)}"
+                parts.append(
+                    A.Comprehension(
+                        elt=A.Call(
+                            func="str",
+                            args=[A.Name(name=var, pos=a.pos)],
+                            kwargs=[],
+                            pos=a.pos,
+                        ),
+                        var=var,
+                        iter=a.value,
+                        pos=a.pos,
+                        list_el_type="str",
+                    )
+                )
+            else:
+                run.append(A.Call(func="str", args=[a], kwargs=[], pos=e.pos))
+        if run:
+            parts.append(A.ListLit(elems=list(run), pos=e.pos))
+        joined_src = parts[0]
+        for extra in parts[1:]:
+            joined_src = A.BinOp(op="+", left=joined_src, right=extra, pos=e.pos)
+        e.args = [
+            A.MethodCall(
+                obj=A.StrLit(value=sep_val, pos=e.pos),
+                method="join",
+                args=[joined_src],
+                kwargs=[],
+                pos=e.pos,
+            )
+        ]
+        e.kwargs = kept_kwargs
 
     def _starred_expand_count(self, args: list, callee: "Optional[str]") -> "Optional[int]":
         """How many positional arguments a lone `*expr` must supply, or None.
@@ -11129,6 +11219,21 @@ class SemaAnalyzer:
                 # `point(coords[0], coords[1])`. A shorter sequence at runtime
                 # then raises IndexError from the ordinary subscript bounds
                 # check, where CPython would raise TypeError.
+                # The callee declares `*args`. A `*seq` argument that lands in
+                # that slot needs no unpacking AT ALL: the vararg slot is
+                # itself a list, so the sequence can be handed over whole.
+                # Leave the Starred in place and let `_bind_args` pack it --
+                # this is the case `_starred_expand_count` deliberately
+                # excludes, because the argument COUNT is unknown; what makes
+                # it work anyway is that the count never has to be known.
+                if (
+                    callee is not None
+                    and callee in self.funcs
+                    and getattr(self.funcs[callee], "vararg", None)
+                    and A.expr_type(a.value) in ("list", "tuple", "any")
+                ):
+                    new_args.append(a)
+                    continue
                 _n_star = self._starred_expand_count(args, callee)
                 if _n_star is not None and A.expr_type(a.value) in (
                     "list", "tuple", "any",
@@ -11358,6 +11463,8 @@ class SemaAnalyzer:
             resolved = self.mod.func_aliases[func_name]
             if resolved in self.funcs:
                 e.func = resolved
+        if e.func == "print" and any(isinstance(a, A.Starred) for a in e.args):
+            self._desugar_starred_print(e, scope)
         e.args = self._expand_starred_args(e.args, scope, callee=e.func)
         # Builtins are shadowable: after whole-program merge a call like
         # `re.compile(...)` rewrites to a plain `compile(...)`, and that must
