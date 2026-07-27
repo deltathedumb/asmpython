@@ -10469,9 +10469,11 @@ class SemaAnalyzer:
         "all": (0,),
         "tuple": (0,),
         "set": (0,),
-        # NOT `reversed`: CPython raises "'generator' object is not
-        # reversible" for exactly this, so draining one here would make
-        # asmpython accept a program CPython rejects.
+        # `reversed` is here for its STR argument only -- `reversed('abc')` is
+        # valid Python. The instance branch below refuses it, because CPython
+        # raises "'generator' object is not reversible" and accepting one would
+        # make asmpython take a program CPython rejects.
+        "reversed": (0,),
         "zip": (0, 1, 2),
         "map": (1,),
         "filter": (1,),
@@ -10564,6 +10566,8 @@ class SemaAnalyzer:
                 continue
             if not t.startswith("instance:"):
                 continue
+            if e.func == "reversed":
+                continue  # see the table: a generator is not reversible
             if e.func in ("min", "max") and len(e.args) != 1:
                 continue  # ditto: `max(a, b)` compares, it does not iterate
             cls = t.split(":", 1)[1]
@@ -11638,6 +11642,40 @@ class SemaAnalyzer:
             resolved = self.mod.func_aliases[func_name]
             if resolved in self.funcs:
                 e.func = resolved
+        if e.func == "list" and len(e.args) == 1:
+            _l0 = e.args[0]
+            if isinstance(_l0, A.Call) and _l0.func in ("map", "filter"):
+                # Mark the one shape ir_lower materializes directly, so the
+                # self-wrap below leaves it alone instead of producing
+                # `list(list(map(...)))`.
+                _l0._in_list_call = True  # type: ignore[attr-defined]
+        if (
+            e.func in ("map", "filter")
+            and e.func not in self.funcs
+            and e.func not in self.mod.func_aliases
+            and not getattr(e, "_in_list_call", False)
+        ):
+            # A `map`/`filter` result is only ever MATERIALIZED by the
+            # `list(map(...))` lowering. Used anywhere else --
+            # `','.join(map(str, xs))`, `any(map(pred, xs))`,
+            # `sum(map(f, xs))`, or just assigned to a name -- the call fell
+            # through to a symbol that does not exist and the program
+            # segfaulted.
+            #
+            # asmpython materializes lazy sequences eagerly everywhere else
+            # (a generator expression is already an eager list, see
+            # A.Comprehension), so the consistent fix is to materialize these
+            # too: wrap the call in `list(...)` and let the one existing
+            # lowering handle every position uniformly.
+            _mf_inner = A.Call(
+                func=e.func, args=list(e.args), kwargs=list(e.kwargs), pos=e.pos
+            )
+            _mf_inner._in_list_call = True  # type: ignore[attr-defined]
+            e.func = "list"
+            e.args = [_mf_inner]
+            e.kwargs = []
+            self._check_call(e, scope)
+            return
         if (
             e.func == "enumerate"
             and e.func not in self.funcs
