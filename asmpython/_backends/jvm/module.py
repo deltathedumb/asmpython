@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .classfile import CLASS_VERSION_MAJOR, ClassBuilder
 from .codegen import (
+    DEFAULT_RUNTIME,
     FunctionEmitter,
     GETSTATIC,
     INVOKESTATIC,
@@ -21,7 +22,8 @@ DEFAULT_CLASS = "asmpython/jvm/Program"
 
 
 def compile_module(ir_module, class_name: str = DEFAULT_CLASS,
-                   class_version: int = CLASS_VERSION_MAJOR) -> bytes:
+                   class_version: int = CLASS_VERSION_MAJOR,
+                   runtime: str = DEFAULT_RUNTIME) -> bytes:
     """Emit one class containing every function in the module.
 
     Data-section globals become ``static long`` fields holding heap addresses.
@@ -40,9 +42,9 @@ def compile_module(ir_module, class_name: str = DEFAULT_CLASS,
         cls.add_field(field, "J")
 
     for func in ir_module.funcs:
-        FunctionEmitter(cls, func, class_name, globals_map).emit()
+        FunctionEmitter(cls, func, class_name, globals_map, runtime).emit()
 
-    _emit_clinit(cls, ir_module, class_name, globals_map)
+    _emit_clinit(cls, ir_module, class_name, globals_map, runtime)
     _emit_main(cls, class_name, function_names)
     return cls.serialize()
 
@@ -62,7 +64,8 @@ def _global_bytes(global_) -> bytes:
     return b"\x00" * 8
 
 
-def _emit_clinit(cls, ir_module, class_name: str, globals_map: dict) -> None:
+def _emit_clinit(cls, ir_module, class_name: str, globals_map: dict,
+                 runtime: str = DEFAULT_RUNTIME) -> None:
     method = cls.method("<clinit>", "()V", access=0x0008)  # ACC_STATIC
     for global_ in getattr(ir_module, "data", []) or []:
         field = globals_map[global_.name]
@@ -74,7 +77,7 @@ def _emit_clinit(cls, ir_module, class_name: str, globals_map: dict) -> None:
         method.u1(LDC2_W)
         method.u2(method.pool.long(size))
         method.u1(INVOKESTATIC)
-        method.u2(method.pool.methodref(RUNTIME, "allocate", "(J)J"))
+        method.u2(method.pool.methodref(runtime, "allocate", "(J)J"))
         method.u1(0x5C)  # dup2 -- keep the address for the store below
         method.u1(PUTSTATIC)
         method.u2(method.pool.fieldref(class_name, field, "J"))
@@ -87,7 +90,7 @@ def _emit_clinit(cls, ir_module, class_name: str, globals_map: dict) -> None:
             method.u1(LDC2_W)
             method.u2(method.pool.long(byte))
             method.u1(INVOKESTATIC)
-            method.u2(method.pool.methodref(RUNTIME, "storeByte", "(JJ)V"))
+            method.u2(method.pool.methodref(runtime, "storeByte", "(JJ)V"))
         method.u1(POP2)  # drop the retained address
     method.u1(RETURN)
     method.max_locals = 2

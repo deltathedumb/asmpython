@@ -32,6 +32,7 @@ from typing import Any
 from .. import register_backend
 from ..._compiler.ir import ModuleBackend
 from .classfile import resolve_class_version
+from .codegen import DEFAULT_RUNTIME
 from .module import DEFAULT_CLASS, compile_module
 
 production_suitable = False
@@ -77,7 +78,8 @@ def run_backend_codegen(ir: Any, args: dict) -> dict[str, bytes]:
     """IRModule -> the generated program class."""
     class_name = _class_name(args)
     version = resolve_class_version(args.get("class_version"), args.get("java_version"))
-    return {class_name + ".class": compile_module(ir, class_name, version)}
+    runtime = str(args.get("jvm_runtime") or DEFAULT_RUNTIME).replace(".", "/")
+    return {class_name + ".class": compile_module(ir, class_name, version, runtime)}
 
 
 def run_backend_link(objects: list[bytes], args: dict) -> dict[str, bytes]:

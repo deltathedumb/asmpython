@@ -18,7 +18,7 @@ import java.nio.ByteOrder;
  * two backends must agree on layout for a value round-tripped through
  * {@code bitcast}.
  */
-public final class Runtime {
+public class Runtime {
 
     private static final int HEAP_BYTES = 64 * 1024 * 1024;
     private static final ByteBuffer HEAP =
@@ -29,7 +29,14 @@ public final class Runtime {
 
     private static final PrintStream OUT = System.out;
 
-    private Runtime() {
+    /**
+     * Subclassable on purpose: a host embedding this backend extends Runtime
+     * and adds its own static host functions, then compiles with
+     * --jvm-runtime pointing at the subclass. invokestatic resolves inherited
+     * statics, so the generated code links against one class and gets both the
+     * memory primitives and the host API.
+     */
+    protected Runtime() {
     }
 
     // ---- allocation ------------------------------------------------------

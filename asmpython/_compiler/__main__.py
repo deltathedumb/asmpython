@@ -353,6 +353,14 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         "project's `output_type` field, then 'executable'.",
     )
     build_grp.add_argument(
+        "--jvm-runtime",
+        default="",
+        metavar="CLASS",
+        help="JVM backend: internal name of the class providing runtime and "
+        "host functions (default asmpython/jvm/Runtime). Extend that class to "
+        "add your own host API.",
+    )
+    build_grp.add_argument(
         "--class-version",
         default="",
         metavar="N",
@@ -1021,6 +1029,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 backend_args={
                     "class_version": getattr(args, "class_version", ""),
                     "java_version": getattr(args, "java_version", ""),
+                    "jvm_runtime": getattr(args, "jvm_runtime", ""),
                 },
                 linker=args.linker,
                 active_extensions=active_extensions,

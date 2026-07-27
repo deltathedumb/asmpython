@@ -98,6 +98,7 @@ from ._gui_ttf      import BINDINGS as _TTF_BINDINGS           # noqa: E402
 from ._audio_sdl    import BINDINGS as _AUDIO_BINDINGS         # noqa: E402
 from .network       import BINDINGS as _NETWORK_BINDINGS       # noqa: E402
 from .hardware      import BINDINGS as _HARDWARE_BINDINGS      # noqa: E402
+from .mcjvm         import BINDINGS as _MCJVM_BINDINGS         # noqa: E402
 
 STDLIB_BINDINGS: dict[str, dict] = {
     "math":          _MATH_BINDINGS,
@@ -112,4 +113,5 @@ STDLIB_BINDINGS: dict[str, dict] = {
     "_audio_sdl":    _AUDIO_BINDINGS,
     "network":       _NETWORK_BINDINGS,
     "hardware":      _HARDWARE_BINDINGS,
+    "mcjvm":         _MCJVM_BINDINGS,
 }

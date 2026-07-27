@@ -22,7 +22,12 @@ import struct
 
 from .classfile import ITEM_DOUBLE, ITEM_LONG, ClassBuilder, MethodBuilder
 
-RUNTIME = "asmpython/jvm/Runtime"
+DEFAULT_RUNTIME = "asmpython/jvm/Runtime"
+# Overridden by --jvm-runtime. A host embedding this backend points it at its
+# own class -- which may simply extend the default one, since invokestatic
+# resolves inherited statics -- so host functions link without the compiler
+# knowing anything about them.
+RUNTIME = DEFAULT_RUNTIME
 
 # --- opcodes used here ---------------------------------------------------
 LLOAD = 0x16
@@ -81,7 +86,9 @@ def _is_double(value) -> bool:
 class FunctionEmitter:
     """Emits one IRFunc as a static JVM method."""
 
-    def __init__(self, cls: ClassBuilder, func, class_name: str, globals_map: dict) -> None:
+    def __init__(self, cls: ClassBuilder, func, class_name: str, globals_map: dict,
+                 runtime: str = DEFAULT_RUNTIME) -> None:
+        self.runtime = runtime
         self.cls = cls
         self.func = func
         self.class_name = class_name
@@ -148,7 +155,7 @@ class FunctionEmitter:
     def call_runtime(self, name: str, descriptor: str) -> None:
         m = self.method
         m.u1(INVOKESTATIC)
-        m.u2(m.pool.methodref(RUNTIME, name, descriptor))
+        m.u2(m.pool.methodref(self.runtime, name, descriptor))
 
     # ---- entry -----------------------------------------------------------
 
@@ -425,7 +432,7 @@ class FunctionEmitter:
             returns_double = instr.result is not None and _is_double(instr.result)
             signature = "(" + "".join("D" if _is_double(a) else "J" for a in args) + ")"
             signature += "D" if returns_double else ("J" if instr.result is not None else "V")
-            owner, name = RUNTIME, _java_name(target)
+            owner, name = self.runtime, _java_name(target)
 
         m.u1(INVOKESTATIC)
         m.u2(m.pool.methodref(owner, name, signature))
