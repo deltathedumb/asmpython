@@ -1850,6 +1850,28 @@ class SemaAnalyzer:
             return ("set", None, None, None)
         if isinstance(value, A.TupleLit):
             return ("tuple", None, None, None)
+        if isinstance(value, A.Call) and value.func in (
+            "str", "repr", "chr", "hex", "oct", "bin", "format", "input",
+        ):
+            # Builtins with a fixed result kind. Knowable from syntax alone,
+            # which is this function's contract -- and the append/return scans
+            # that call it bail entirely on one unknown value, so recognizing
+            # these decides whether a whole list gets an element kind.
+            return ("str", None, None, None)
+        if isinstance(value, A.Call) and value.func in (
+            "len", "ord", "int", "round", "abs", "id", "hash",
+        ):
+            return ("int", None, None, None)
+        if isinstance(value, A.Call) and value.func == "float":
+            return ("float", None, None, None)
+        if isinstance(value, A.BoolOp):
+            # `a or b` / `a and b` evaluate to ONE of the operands, so when both
+            # sides are the same knowable kind the result is that kind. A single
+            # unknown side leaves it unknown rather than guessing.
+            _bl = self._literal_arg_type(value.left)
+            _br = self._literal_arg_type(value.right)
+            if _bl is not None and _br is not None and _bl[0] == _br[0]:
+                return (_bl[0], None, None, None)
         if isinstance(value, A.BinOp) and value.op == "/":
             # TRUE DIVISION always yields a float in Python 3, whatever the
             # operands are. Without this, `def half(x): return x / 2` inferred
@@ -2588,6 +2610,12 @@ class SemaAnalyzer:
                             _slots = _sl
             elif isinstance(_rv, A.Comprehension):
                 _k = getattr(_rv, "list_el_type", None)
+            elif isinstance(_rv, A.Name):
+                # `result = []` ... `result.append(v)` ... `return result` --
+                # the standard build-and-return shape. The local's element kind
+                # is only knowable from its appends, which is exactly what the
+                # field version of this scan does for `self.xs.append(v)`.
+                _k = self._appended_element_kind(fn.body, _rv.name)
             else:
                 _k = None
             if _k is None:
@@ -2601,6 +2629,48 @@ class SemaAnalyzer:
         sig.ret_type = (_rt[0], _kind, _rt[2])
         if _kind == "tuple" and _slots:
             sig.ret_list_tuple_types = list(_slots)
+
+    def _appended_element_kind(self, stmts: list, name: str) -> "str | None":
+        """The common element kind appended to the local list `name` anywhere in
+        `stmts`, or None if there are no appends or they disagree.
+
+        Mirrors `_scan_field_assigns`'s `self.xs.append(v)` rule for a LOCAL
+        list. Only literal-shaped values count: this runs in a pre-pass, before
+        any expression has a stamped type.
+        """
+        seen: str | None = None
+        for _s in self._walk_stmts_flat(stmts):
+            if not (
+                isinstance(_s, A.ExprStmt)
+                and isinstance(_s.expr, A.MethodCall)
+                and _s.expr.method == "append"
+                and len(_s.expr.args) == 1
+                and isinstance(_s.expr.obj, A.Name)
+                and _s.expr.obj.name == name
+            ):
+                continue
+            _lit = self._literal_arg_type(_s.expr.args[0])
+            if _lit is None:
+                # One append whose kind isn't statically knowable makes the
+                # whole list unknown -- guessing from the others would be wrong
+                # for a genuinely mixed list.
+                return None
+            if seen is None:
+                seen = _lit[0]
+            elif seen != _lit[0]:
+                return None
+        return seen
+
+    def _walk_stmts_flat(self, stmts: list):
+        """Every statement in `stmts` at any nesting depth."""
+        for _s in stmts:
+            yield _s
+            for _attr in ("body", "then", "orelse", "handler", "else_body",
+                          "finally_body"):
+                _sub = getattr(_s, _attr, None)
+                if isinstance(_sub, list):
+                    for _inner in self._walk_stmts_flat(_sub):
+                        yield _inner
 
     def _collect_returns(self, stmts: list, out: list) -> None:
         """Every `A.Return` with a value reachable in `stmts`, at any depth."""
