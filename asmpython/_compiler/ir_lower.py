@@ -5328,14 +5328,16 @@ def _lower_sort_key_call(ctx: _FuncCtx, sort_key: A.Lambda, el_kind: str, item_v
         key_v = ctx.tmp(I64)
         ctx.emit(IRInstr("call", key_v, ["strlen", item_v]))
         return key_v
-    if el_kind in ("int", "str", "dict") or el_kind.startswith("instance:"):
-        # Call the lambda's own synthesized function with the element. `str`
-        # and instance elements used to be excluded because sema typed every
-        # lambda parameter "any", so the body mis-compiled (a `len(s)` inside
-        # it read a list header off a real str). Sema now types the parameter
-        # from the sequence's element kind (see its `param_hint`), so the
-        # general path is correct for these too -- which is what makes
-        # `key=lambda s: s.lower()` work.
+    if el_kind in ("int", "str", "dict", "tuple", "list") or el_kind.startswith("instance:"):
+        # Call the lambda's own synthesized function with the element. Every
+        # element kind except float routes through here, so an ARBITRARY body
+        # works rather than only the three hard-coded fast shapes above --
+        # `key=lambda s: s.lower()`, `key=lambda x: -x[1]`, `key=by_second`.
+        # These kinds were previously excluded because sema typed every lambda
+        # parameter "any", which mis-compiled the body (a `len(s)` on a real str
+        # read a list header off it); the parameter is now typed from the
+        # sequence's element kind, and for a tuple element from its per-slot
+        # kinds too (`param_hint` / `param_tuple_types`).
         fn_name = sort_key.func_name  # type: ignore[attr-defined]
         key_ty = ir_type_for(getattr(sort_key, "lambda_ret", "int"))
         key_v = ctx.tmp(key_ty)
