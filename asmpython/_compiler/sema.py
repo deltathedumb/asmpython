@@ -10490,6 +10490,14 @@ class SemaAnalyzer:
             arg = e.args[i]
             if isinstance(arg, A.Call) and arg.func == "list":
                 continue  # already drained
+            if isinstance(arg, (A.Name, A.Attr, A.Subscript)):
+                # Same reason as the Call case below: the coercion decides from
+                # the argument's TYPE, and none of these carry a real one until
+                # `_check_expr` stamps it -- a bare `scores` read "int" and a
+                # dict argument slipped through untouched. All three are
+                # idempotent to check (unlike a Call, which re-runs
+                # `_bind_args`), so there is nothing to guard against here.
+                self._check_expr(arg, scope)
             if isinstance(arg, A.Call) and not getattr(arg, "_seq_precheck", False):
                 # The argument's TYPE is what decides whether it needs draining,
                 # and a Call node carries its default "int" until it has been
@@ -10510,6 +10518,19 @@ class SemaAnalyzer:
                     arg._seq_precheck = True  # type: ignore[attr-defined]
                     self._check_expr(arg, scope)
             t = A.expr_type(arg)
+            if t in ("dict", "set") and e.func in ("min", "max"):
+                # Iterating a dict yields its KEYS (a set, its members), but
+                # min/max read their argument as a list header, so the mapping
+                # object went through as one and faulted. `list(d)` is already
+                # exactly "the keys as a list" -- the same coercion, one more
+                # source kind. Only min/max need it: `sorted`/`sum`/`any`/`all`
+                # over a mapping already route through their own key walk.
+                if len(e.args) != 1:
+                    continue
+                drained_d = A.Call(func="list", args=[arg], kwargs=[], pos=arg.pos)
+                self._check_expr(drained_d, scope)
+                e.args[i] = drained_d
+                continue
             if t == "str":
                 # A str IS a sequence in CPython -- `sorted('listen')` gives
                 # its characters, `min('banana')` its smallest one. These
