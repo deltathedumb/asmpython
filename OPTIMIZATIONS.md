@@ -13,6 +13,10 @@ asmpython build prog.py --passes help      # list everything registered
 
 ## Passes
 
+Differential figures below are FULL CORPUS unless marked otherwise. Rows still
+reading `149/149` were certified against a 149-case sample and are due a
+full-corpus re-run; the sample missed real divergences elsewhere.
+
 | Pass | Ported from | Does | Differential | State |
 |---|---|---|---|---|
 | `constfold` | ConstantFolding | Fold constant integer arithmetic/compares, wrapped to the result width | 149/149 | in `o1`/`o2` |
@@ -37,8 +41,8 @@ asmpython build prog.py --passes help      # list everything registered
 | `globaldce` | GlobalDCE | Drop globals nothing references | 149/149 | in `o2` |
 | `licm` | LICM | Hoist loop-invariant computations into the preheader | 149/149 | in `o2` |
 | `loopdelete` | LoopDeletion | Remove loops with no effect and no live result | 149/149 | in `o2` |
-| `gvn` | GVN | Global value numbering over the dominator tree | 138/149 | **experimental** |
-| `mem2reg` | PromoteMemoryToRegister | Promote stack slots to SSA, phi at dominance frontiers | 146/149 alone | **experimental** |
+| `gvn` | GVN | Global value numbering over the dominator tree | 812/820 full corpus | **experimental** |
+| `mem2reg` | PromoteMemoryToRegister | Promote stack slots to SSA, phi at dominance frontiers | 1 divergence, see below | **experimental** |
 
 Aliases: `constprop`/`fold`, `instcombine`/`simplify`, `earlycse`, `cfg`/`simplify-cfg`,
 `deadcode`, `promote`/`sroa-lite`.
@@ -219,8 +223,42 @@ intended to grow into LLVM's analysis-preservation machinery.
 A pass must work regardless of which frontend produced the module: it runs below
 the IR waist and sees only the neutral vocabulary.
 
-**Constraint for block-moving passes.** The IR does **not** currently satisfy SSA
-dominance, so a pass must not change the *relative order* of blocks.
+### The block-order defect — why `mem2reg` and `gvn` are not in a preset
+
+One structural defect explains every remaining divergence in the promoting
+passes. `172_base64_module` is broken by exactly three passes and clean under
+every other:
+
+| Pass | Result | Verdict |
+| --- | --- | --- |
+| *(no passes)* | `MZXW6===` | correct |
+| `mem2reg` | `MZXW====` | broken |
+| `gvn` | `M=======` | broken |
+| `licm` | `M` | broken |
+| `cse`, `sccp`, `peephole`, `dse` | `MZXW6===` | correct |
+
+The three that break it are precisely the three that **move a definition across
+blocks**. Every pass that stays inside a block is fine.
+
+The allocator is a linear scan over blocks **in list order**, and it assumes a
+definition appears before its uses in that order. Lowering does not emit blocks
+that way: an `if`/`elif` chain puts its join blocks *before* the later branches,
+so for `rem == 3` control runs `Lthen19 (b18) → Lendif21 (b20) → Lendif18 (b17)`
+and the scan processes the reader at b17 before the writer at b20. While every
+value lives in a stack slot that is harmless; the moment a pass gives a value a
+register spanning those blocks, the allocator frees it too early and the reader
+picks up whatever the register last held.
+
+The fix is reverse-postorder layout before allocation
+(`ir.layout_blocks_rpo`, written and committed but deliberately **not called**).
+It cannot land alone — the liveness rule derives loops from block-index spans, so
+it is coupled to emission order, and reordering alone breaks
+`r39_running_average`, `zip_two_lists` and `999_comprehensive_codegen`. The two
+must change together, with a full differential on both halves. This is the
+highest-value backend item outstanding.
+
+**Constraint for block-moving passes.** Until that lands, a pass must not change
+the *relative order* of blocks.
 
 `ir_lower` duplicates a `finally` body once per exit path, and the
 exception-path copy reads allocas defined only in the normal-path copy — a use
