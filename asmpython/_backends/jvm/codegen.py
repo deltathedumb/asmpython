@@ -61,6 +61,13 @@ T_LONG = 11                      # NEWARRAY's atype for long[]
 # the symbol keeps the special case honest about what it is.
 VARIADIC_RUNTIME_CALLS = {"printf"}
 
+POP = 0x57
+ATHROW = 0xBF
+
+# The Java class a raise arrives as. Nested in Containers, so the internal
+# name uses '$'.
+ASMPYTHON_ERROR = "asmpython/jvm/Containers$AsmPythonError"
+
 _ICMP_TO_BRANCH = {
     "icmp.eq": IFEQ,
     "icmp.ne": IFNE,
@@ -96,12 +103,16 @@ class FunctionEmitter:
     """Emits one IRFunc as a static JVM method."""
 
     def __init__(self, cls: ClassBuilder, func, class_name: str, globals_map: dict,
-                 runtime: str = DEFAULT_RUNTIME) -> None:
+                 runtime: str = DEFAULT_RUNTIME,
+                 runtime_globals: "list | None" = None) -> None:
         self.runtime = runtime
         self.cls = cls
         self.func = func
         self.class_name = class_name
         self.globals_map = globals_map
+        # Shared across every function in the module: one function may be the
+        # first to touch a runtime global that several then use.
+        self.runtime_globals = runtime_globals if runtime_globals is not None else []
         self.slots: dict[str, int] = {}
         self.slot_kinds: dict[int, int] = {}  # slot -> ITEM_LONG | ITEM_DOUBLE
         self.next_slot = 0
@@ -166,6 +177,19 @@ class FunctionEmitter:
         m.u1(INVOKESTATIC)
         m.u2(m.pool.methodref(self.runtime, name, descriptor))
 
+    def declare_runtime_global(self, name: str) -> str:
+        """Add a field for a global the data section never declared.
+
+        Safe to do mid-emission: fields are only written out at serialize time,
+        and `<clinit>` is built after every function, so it sees the final set.
+        `runtime_globals` records the order for that initialisation.
+        """
+        field = f"r{len(self.runtime_globals)}_{_java_name(name)}"
+        self.globals_map[name] = field
+        self.runtime_globals.append(name)
+        self.cls.add_field(field, "J")
+        return field
+
     # ---- entry -----------------------------------------------------------
 
     def emit(self) -> None:
@@ -181,7 +205,17 @@ class FunctionEmitter:
         # repeated frame instead of a dataflow analysis (see
         # MethodBuilder.stack_map_table).
         self._preassign_slots()
+
+        # Reserve the landing pad's scratch BEFORE zeroing, so it is written on
+        # entry like every other local. A slot the verifier sees as `top` at the
+        # handler cannot be claimed as a long by the stack map, and the handler
+        # is reached without executing anything that would have written it.
+        self.setjmp_sites = self._find_setjmp_sites()
+        if self.setjmp_sites:
+            self._scratch_slot()
+
         self._zero_non_parameters()
+        body_start = self.method.here()
 
         for block in self.func.blocks:
             self.method.mark(block.label)
@@ -202,8 +236,132 @@ class FunctionEmitter:
             self.method.u1(LRETURN)
         else:
             self.method.u1(RETURN)
+
+        self._emit_landing_pad(body_start)
         self.method.max_locals = max(self.next_slot, 2)
         self.method.frame_locals = self.frame_locals()
+
+    # ---- exceptions ------------------------------------------------------
+    #
+    # asmpython lowers try/except to setjmp/longjmp, which the JVM does not
+    # have. It has something strictly stronger: throw already unwinds the
+    # stack, so a raise crossing frames needs nothing at all. What is left is
+    # landing in the right place, and that is what this does.
+
+    def _find_setjmp_sites(self) -> "dict[str, int]":
+        """Pair each `_abi_setjmp` call with the block its handler lives in.
+
+        The lowering emits, inside one block:
+
+            t = call _abi_setjmp(buf)
+            br.t t, handler_block, body_block
+
+        so the block to resume at is readable straight off the branch. Landing
+        on a BLOCK is what keeps this cheap -- a block already has a stack map
+        frame and an empty operand stack, where resuming mid-block would need a
+        frame invented at an arbitrary offset.
+
+        Also records the id per call RESULT, so the call site can stamp it into
+        the jmp_buf as it is emitted.
+        """
+        sites: dict[str, int] = {}
+        self.setjmp_ids = {}
+        for block in self.func.blocks:
+            pending = None
+            for instr in block.instrs:
+                if (instr.op == "call" and instr.operands
+                        and _unquote(instr.operands[0]) == "_abi_setjmp"):
+                    pending = instr.result
+                elif (pending is not None and instr.op == "br.t"
+                      and instr.operands and instr.operands[0] is pending):
+                    # Unique across the MODULE, not the method. Per-method
+                    # numbering makes every function's first try id 1, so a
+                    # function whose own try has already finished sees a
+                    # caller's live handler as its own, jumps into a handler
+                    # that was never entered, and loops.
+                    site_id = FunctionEmitter.next_site_id
+                    FunctionEmitter.next_site_id += 1
+                    sites[_unquote(instr.operands[1])] = site_id
+                    self.setjmp_ids[_value_key(pending)] = site_id
+                    pending = None
+        return sites
+
+    def _emit_landing_pad(self, body_start: int) -> None:
+        """Catch a raise and resume at the try that is currently installed.
+
+        One handler per method, not per try: the JVM's exception table maps a
+        bytecode RANGE to a target, while asmpython's handler stack is dynamic
+        state, so the choice of landing site has to be made at runtime. The
+        site id stored in each jmp_buf is what makes it.
+
+        A site id that is not this method's means the live handler belongs to
+        some outer frame, and the exception is rethrown so it keeps unwinding.
+        Without that check a function that merely CONTAINS a try would swallow
+        exceptions belonging to its callers.
+        """
+        if not self.setjmp_sites:
+            return
+
+        handler_top = self.globals_map.get("_runtime_handler_top")
+        if handler_top is None:
+            return
+
+        m = self.method
+        pad = m.here()
+        m.catch(body_start, pad, pad, ASMPYTHON_ERROR)
+
+        m.u1(POP)                                   # the exception; globals carry it
+
+        # site = loadLong(loadLong(&_runtime_handler_top))
+        m.u1(GETSTATIC)
+        m.u2(m.pool.fieldref(self.class_name, handler_top, "J"))
+        self.call_runtime("loadLong", "(J)J")
+        self.call_runtime("loadLong", "(J)J")
+        scratch = self._scratch_slot()
+        self.local_op(LSTORE, scratch)
+
+        for label, site_id in self.setjmp_sites.items():
+            self.local_op(LLOAD, scratch)
+            self.push_long(site_id)
+            m.u1(LCMP)
+            m.jump(IFEQ, label)
+            m.frame_point()                          # the fallthrough after a branch
+
+        # Not ours: keep unwinding. Rebuilt from the globals rather than
+        # rethrowing the caught object, which would need a reference local and
+        # break the one-shape-fits-all stack map. `_abi_rethrow` always throws,
+        # but the verifier still needs a terminator after it.
+        self.call_runtime("_abi_rethrow", "()V")
+        descriptor = self.method.descriptor
+        if descriptor.endswith(")D"):
+            self.push_double(0.0)
+            m.u1(DRETURN)
+        elif descriptor.endswith(")J"):
+            m.u1(LCONST_0)
+            m.u1(LRETURN)
+        else:
+            m.u1(RETURN)
+
+    def _scratch_slot(self) -> int:
+        """A long slot for the landing pad, outside the IR's value slots.
+
+        Registered in `slots` under a name no IR value can have, so the entry
+        zeroing and the stack map both pick it up automatically rather than
+        needing to know it exists.
+        """
+        if self._landing_scratch is None:
+            self._landing_scratch = self.next_slot
+            self.slots["__landing_site"] = self._landing_scratch
+            self.slot_kinds[self._landing_scratch] = ITEM_LONG
+            self.next_slot += 2
+        return self._landing_scratch
+
+    _landing_scratch = None
+    setjmp_sites: dict = {}
+    setjmp_ids: dict = {}
+    # Module-wide, reset per module by compile_module. See _find_setjmp_sites
+    # for why this cannot be per-method.
+    next_site_id: int = 1
 
     def _preassign_slots(self) -> None:
         """Give every value defined anywhere in the function its slot now."""
@@ -358,7 +516,13 @@ class FunctionEmitter:
             name = _unquote(instr.operands[0])
             field = self.globals_map.get(name)
             if field is None:
-                raise UnsupportedIR(f"unknown global {name!r}")
+                # Runtime state rather than a data-section literal: the
+                # exception machinery keeps `_runtime_exc_msg` and friends in
+                # storage that outlives any function, which the native backend
+                # gets from the runtime library's .bss. Declared on demand
+                # rather than from a list, so a lowering that introduces a new
+                # one does not come back as "unknown global".
+                field = self.declare_runtime_global(name)
             m.u1(GETSTATIC)
             m.u2(m.pool.fieldref(self.class_name, field, "J"))
             self.pop_into(instr.result)
@@ -432,6 +596,10 @@ class FunctionEmitter:
             self.emit_variadic_call(target, args)
             return
 
+        if target == "_abi_setjmp":
+            self.emit_setjmp(instr, args)
+            return
+
         for arg in args:
             self.push(arg)
 
@@ -457,6 +625,31 @@ class FunctionEmitter:
             # A user function always returns a long; discard it when the call
             # site ignores the result, or the operand stack never unwinds.
             m.u1(POP2)
+
+    def emit_setjmp(self, instr, args) -> None:
+        """`setjmp(buf)`: stamp this site's id into the buffer, return 0.
+
+        There is no saved machine context to restore, because the JVM's throw
+        already unwinds for us. All the buffer has to carry is WHICH try
+        installed it, so the landing pad can resume at the matching block.
+
+        Returning 0 unconditionally is correct: the nonzero "returned from a
+        longjmp" case never comes back through here, it is entered by the
+        landing pad jumping straight at the handler block.
+        """
+        m = self.method
+        site_id = self.setjmp_ids.get(_value_key(instr.result))
+        if site_id is None:
+            # A setjmp whose branch was not found: refuse rather than emit code
+            # that silently never catches anything.
+            raise UnsupportedIR("_abi_setjmp with no matching conditional branch")
+
+        self.push(args[0])
+        self.push_long(site_id)
+        self.call_runtime("storeLong", "(JJ)V")
+
+        m.u1(LCONST_0)
+        self.pop_into(instr.result)
 
     def emit_variadic_call(self, target: str, args) -> None:
         """A C-variadic runtime call, as `(format, long[] rest)`.
@@ -544,6 +737,11 @@ def descriptor_for(func) -> str:
     else:
         result = "V"
     return f"({params}){result}"
+
+
+def _value_key(value) -> str:
+    """A stable identity for an IR value, for keying per-site tables."""
+    return getattr(value, "name", None) or str(value)
 
 
 def _java_name(symbol: str) -> str:

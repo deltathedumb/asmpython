@@ -40,6 +40,7 @@ ITEM_INTEGER = 1
 ITEM_FLOAT = 2
 ITEM_DOUBLE = 3
 ITEM_LONG = 4
+ITEM_OBJECT = 7
 
 
 def resolve_class_version(class_version=None, java_version=None) -> int:
@@ -195,6 +196,11 @@ class MethodBuilder:
         # fallthrough, and the verifier demands a frame there.
         self._extra_frame_points: set[int] = set()
         self._patches: list[tuple[int, str, int]] = []  # (offset, label, base)
+        # (start, end, handler, caught class) — the JVM's answer to longjmp.
+        self.exception_table: list[tuple[int, int, int, str]] = []
+        # Offsets that are catch targets. Their frame is the one exception to
+        # the empty-stack invariant: the JVM pushes the caught exception.
+        self._handler_stack: dict[int, str] = {}
 
     # ---- raw emission ----------------------------------------------------
 
@@ -243,6 +249,7 @@ class MethodBuilder:
         targets = sorted(
             {self._labels[label] for _, label, _ in self._patches if label in self._labels}
             | {p for p in self._extra_frame_points if p < len(self.code)}
+            | {p for p in self._handler_stack if p < len(self.code)}
         )
         if not targets or not self.frame_locals:
             return None
@@ -259,8 +266,20 @@ class MethodBuilder:
             entries += bytes([255])                    # full_frame
             entries += struct.pack(">H", delta)
             entries += locals_blob
-            entries += struct.pack(">H", 0)            # empty operand stack
+            caught = self._handler_stack.get(offset)
+            if caught is None:
+                entries += struct.pack(">H", 0)        # empty operand stack
+            else:
+                # A catch target is the one place the stack is not empty: the
+                # JVM has already pushed the caught exception onto it.
+                entries += struct.pack(">H", 1)
+                entries += bytes([ITEM_OBJECT]) + struct.pack(">H", self.pool.class_ref(caught))
         return struct.pack(">H", len(targets)) + entries
+
+    def catch(self, start: int, end: int, handler: int, caught: str) -> None:
+        """Route exceptions thrown in [start, end) to `handler`."""
+        self.exception_table.append((start, end, handler, caught))
+        self._handler_stack[handler] = caught
 
     def serialize(self, emit_frames: bool = True) -> bytes:
         self.finish()
@@ -275,7 +294,10 @@ class MethodBuilder:
 
         code_attr = struct.pack(">HHI", self.max_stack, self.max_locals, len(self.code))
         code_attr += bytes(self.code)
-        code_attr += struct.pack(">H", 0)  # exception table
+        code_attr += struct.pack(">H", len(self.exception_table))
+        for start, end, handler, caught in self.exception_table:
+            code_attr += struct.pack(">HHHH", start, end, handler,
+                                     self.pool.class_ref(caught))
         code_attr += struct.pack(">H", attribute_count) + attributes
         body = struct.pack(">HHHH", self.access, self.pool.utf8(self.name),
                            self.pool.utf8(self.descriptor), 1)

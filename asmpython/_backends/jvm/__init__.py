@@ -17,14 +17,18 @@ DIRECTLY -- a `for x in xs` loads the list's length from +8 and its buffer from
 the native runtime's exact layouts rather than any convenient JVM structure. A
 different layout would not fail; it would read the wrong words.
 
-Status: scalars, control flow, calls, strings, lists, dicts and classes all
-match CPython (`tests/jvm_differential.py`, which diffs against CPython rather
-than against the x86-64 backend, since two backends agreeing is also what being
-wrong the same way looks like).
+Exceptions are the other place the JVM's shape shows through. asmpython lowers
+`try`/`except` to setjmp/longjmp, which the JVM does not have -- but `athrow`
+already unwinds the stack, which is the hard half done for free. What is left
+is landing in the right place, so each `setjmp` stamps a module-unique site id
+into its jmp_buf and one landing pad per method reads the live handler's id and
+jumps to the matching block. An id belonging to another frame is rethrown, so a
+function that merely CONTAINS a try does not swallow its caller's exceptions.
 
-Not yet ported: exceptions. `try`/`except` needs `_runtime_exc_*` and setjmp
--style unwinding, and fails at compile time with an unknown-global error rather
-than misbehaving at runtime.
+Status: scalars, control flow, calls, strings, lists, dicts, classes and
+exceptions all match CPython (`tests/jvm_differential.py`, which diffs against
+CPython rather than against the x86-64 backend, since two backends agreeing is
+also what being wrong the same way looks like).
 """
 
 from __future__ import annotations

@@ -285,6 +285,120 @@ main()
 """)
 
 # ---------------------------------------------------------------------------
+# exceptions
+#
+# The JVM has no setjmp, so these are the cases that prove the landing-pad
+# translation: a raise crossing a frame, a handler that must NOT catch, and
+# finally running on every path.
+# ---------------------------------------------------------------------------
+
+case("exc_basic", """
+def risky(n):
+    if n < 0:
+        raise ValueError("negative")
+    return n * 2
+def main():
+    try:
+        print(risky(5))
+        print(risky(-1))
+    except ValueError as e:
+        print("caught:", e)
+    finally:
+        print("done")
+main()
+""")
+
+case("exc_not_raised", """
+def main():
+    try:
+        print("body")
+    except ValueError as e:
+        print("never")
+    print("after")
+main()
+""")
+
+case("exc_finally_on_success", """
+def main():
+    try:
+        print("ok")
+    finally:
+        print("cleanup")
+    print("end")
+main()
+""")
+
+case("exc_nested", """
+def main():
+    try:
+        try:
+            raise ValueError("inner")
+        except ValueError as e:
+            print("inner caught:", e)
+        print("between")
+        raise ValueError("outer")
+    except ValueError as e:
+        print("outer caught:", e)
+main()
+""")
+
+case("exc_across_frames", """
+def deep(n):
+    if n == 0:
+        raise ValueError("bottom")
+    return deep(n - 1)
+def middle(n):
+    return deep(n)
+def main():
+    try:
+        middle(5)
+    except ValueError as e:
+        print("caught from depth:", e)
+    print("survived")
+main()
+""")
+
+case("exc_handler_not_mine", """
+def inner():
+    try:
+        print("inner try")
+    except ValueError as e:
+        print("inner handler")
+    raise ValueError("after inner try")
+def main():
+    try:
+        inner()
+    except ValueError as e:
+        print("outer caught:", e)
+main()
+""")
+
+case("exc_in_loop", """
+def main():
+    total = 0
+    for i in range(5):
+        try:
+            if i % 2 == 0:
+                raise ValueError("even")
+            total = total + i
+        except ValueError as e:
+            total = total + 100
+    print(total)
+main()
+""")
+
+case("exc_index", """
+def main():
+    xs = [1, 2, 3]
+    try:
+        print(xs[10])
+    except IndexError as e:
+        print("index error")
+    print("done")
+main()
+""")
+
+# ---------------------------------------------------------------------------
 # mixed
 # ---------------------------------------------------------------------------
 

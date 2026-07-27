@@ -526,9 +526,54 @@ public class Containers extends Memory {
         return loadLong(value) == BOX_MAGIC ? 1 : 0;
     }
 
-    /** Declared here so containers can raise; Runtime supplies the behaviour. */
+    // ======================================================================
+    // raising
+    // ======================================================================
+    //
+    // asmpython lowers try/except to setjmp/longjmp. The JVM has no setjmp,
+    // but throw already unwinds the stack, which is the hard half of longjmp
+    // done for free. What a raise still has to do is publish the exception
+    // where the generated handler will look for it: two heap cells the module
+    // allocates and registers here at class-initialisation time.
+
+    private static long excMessageCell;
+    private static long excTypeCell;
+
+    /**
+     * Tell the runtime where this module keeps its exception state.
+     *
+     * <p>The cells belong to the generated class, not to the runtime — the
+     * lowering reads them as ordinary globals — so their addresses have to
+     * come the other way. Registering once beats threading them through every
+     * raise.
+     */
+    public static void installExceptionSlots(long messageCell, long typeCell) {
+        excMessageCell = messageCell;
+        excTypeCell = typeCell;
+    }
+
+    /** {@code _abi_raise(message, typeId)} — publish, then unwind. */
     public static void _abi_raise(long message, long code) {
+        if (excMessageCell != 0) {
+            storeLong(excMessageCell, message);
+            storeLong(excTypeCell, code);
+        }
         throw new AsmPythonError(readString(message), code);
+    }
+
+    /**
+     * Keep unwinding after a landing pad decides the live handler is not its
+     * own.
+     *
+     * <p>Rebuilt from the published state rather than rethrowing the caught
+     * object: holding the original would need a reference local in the
+     * generated method, and every local there is a long or double — which is
+     * exactly what lets the StackMapTable be one repeated frame.
+     */
+    public static void _abi_rethrow() {
+        long message = excMessageCell == 0 ? 0 : loadLong(excMessageCell);
+        long code = excTypeCell == 0 ? 0 : loadLong(excTypeCell);
+        throw new AsmPythonError(message == 0 ? "" : readString(message), code);
     }
 
     /** A raised Python exception, carrying the type id the lowering assigned. */

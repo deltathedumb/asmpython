@@ -34,6 +34,9 @@ def compile_module(ir_module, class_name: str = DEFAULT_CLASS,
     cls = ClassBuilder(class_name, class_version=class_version)
     function_names = {f.name for f in ir_module.funcs}
     FunctionEmitter.cls_functions = {f.name: f for f in ir_module.funcs}
+    # try/except landing sites are identified by an id that must be unique
+    # across the whole class, not per method.
+    FunctionEmitter.next_site_id = 1
 
     globals_map: dict[str, str] = {}
     for index, global_ in enumerate(getattr(ir_module, "data", []) or []):
@@ -41,10 +44,15 @@ def compile_module(ir_module, class_name: str = DEFAULT_CLASS,
         globals_map[global_.name] = field
         cls.add_field(field, "J")
 
+    # Globals the data section never declares -- the exception machinery's
+    # `_runtime_exc_msg` and friends -- are declared by the emitters as they
+    # meet them, and collected here for <clinit> to initialise.
+    runtime_globals: list[str] = []
     for func in ir_module.funcs:
-        FunctionEmitter(cls, func, class_name, globals_map, runtime).emit()
+        FunctionEmitter(cls, func, class_name, globals_map, runtime,
+                        runtime_globals).emit()
 
-    _emit_clinit(cls, ir_module, class_name, globals_map, runtime)
+    _emit_clinit(cls, ir_module, class_name, globals_map, runtime_globals, runtime)
     _emit_main(cls, class_name, function_names)
     return cls.serialize()
 
@@ -65,8 +73,30 @@ def _global_bytes(global_) -> bytes:
 
 
 def _emit_clinit(cls, ir_module, class_name: str, globals_map: dict,
+                 runtime_globals: "list[str] | None" = None,
                  runtime: str = DEFAULT_RUNTIME) -> None:
     method = cls.method("<clinit>", "()V", access=0x0008)  # ACC_STATIC
+
+    # Runtime-state globals first: a word each, already zero because the bump
+    # allocator never reuses memory.
+    for name in runtime_globals or []:
+        method.u1(LDC2_W)
+        method.u2(method.pool.long(8))
+        method.u1(INVOKESTATIC)
+        method.u2(method.pool.methodref(runtime, "allocate", "(J)J"))
+        method.u1(PUTSTATIC)
+        method.u2(method.pool.fieldref(class_name, globals_map[name], "J"))
+
+    # The runtime raises, so it has to know where to publish the exception. The
+    # cells belong to this class, so the addresses travel this way rather than
+    # the runtime owning state the lowering reads as ordinary globals.
+    if "_runtime_exc_msg" in globals_map and "_runtime_exc_type" in globals_map:
+        for name in ("_runtime_exc_msg", "_runtime_exc_type"):
+            method.u1(GETSTATIC)
+            method.u2(method.pool.fieldref(class_name, globals_map[name], "J"))
+        method.u1(INVOKESTATIC)
+        method.u2(method.pool.methodref(runtime, "installExceptionSlots", "(JJ)V"))
+
     for global_ in getattr(ir_module, "data", []) or []:
         field = globals_map[global_.name]
         payload = _global_bytes(global_)
