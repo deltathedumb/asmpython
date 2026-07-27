@@ -9857,6 +9857,7 @@ class SemaAnalyzer:
                 e.inferred_type = _fn_ret if _fn_ret else "int"
                 if getattr(fn, "ret_bool", False):
                     e.is_bool = True  # type: ignore[attr-defined]
+                self._apply_ffi_element_return(fn, e, scope)
                 return
             # `module.Thing(args)` where `module` is a merged *project* module
             # (not an FFI registry module) and `Thing` is a merged class or
@@ -11514,6 +11515,26 @@ class SemaAnalyzer:
         _ret: str = _STR_METHOD_RET.get(e.method, "str")
         e.inferred_type = _ret
 
+    def _apply_ffi_element_return(self, fn, e, scope: Scope) -> None:
+        """Type a binding declared `ret_from_element=N` as the element kind of
+        its Nth argument -- `random.choice(seq)` returns one of seq's items, not
+        a value of a fixed kind. Its declared `ret_type` stays the fallback for
+        a source whose element kind isn't tracked."""
+        _idx = getattr(fn, "ret_from_element", None)
+        if _idx is None or _idx >= len(e.args):
+            return
+        _src = e.args[_idx]
+        if A.expr_type(_src) not in ("list", "tuple"):
+            return
+        _el = self._list_el_type(_src, scope)
+        if _el in ("", "int", "any", "?"):
+            return
+        e.inferred_type = _el
+        if _el == "tuple":
+            _slots = self._list_el_tuple_types(_src, scope)
+            if _slots:
+                e.tuple_elem_types = list(_slots)
+
     def _fold_variadic_ffi(self, fn, e, args: list) -> list:
         """Fold an N-argument call to an ASSOCIATIVE binary FFI binding into
         nested binary calls: `gcd(a, b, c)` -> `gcd(gcd(a, b), c)`.
@@ -12428,6 +12449,27 @@ class SemaAnalyzer:
             for a in e.args:
                 self._check_expr(a, scope)
             e.inferred_type = "any"
+            # `getattr(o, 'name', default)`: when the attribute is NOT a known
+            # field of a known class, the result is the default -- so it has the
+            # default's type. "any" was a raw pointer with no tag, printing the
+            # default string's address as a decimal.
+            if len(e.args) == 3:
+                _ga_obj_t = A.expr_type(e.args[0])
+                _ga_known = False
+                if _ga_obj_t.startswith("instance:") and isinstance(e.args[1], A.StrLit):
+                    _ga_cls = _ga_obj_t.split(":", 1)[1]
+                    _ga_known = (
+                        self._resolve_field_type(_ga_cls, e.args[1].value) is not None
+                        or self._resolve_method(_ga_cls, e.args[1].value) is not None
+                    )
+                if not _ga_known:
+                    _ga_dflt = A.expr_type(e.args[2])
+                    if _ga_dflt not in ("any", ""):
+                        e.inferred_type = _ga_dflt
+                        if _ga_dflt == "list":
+                            e.list_el_type = self._list_el_type(e.args[2], scope)
+                        elif _ga_dflt == "dict":
+                            e.value_type = self._dict_value_type(e.args[2], scope)
             return
         if e.func == "hasattr":
             # hasattr(obj, "name") -> int 0/1.
@@ -12733,6 +12775,14 @@ class SemaAnalyzer:
                     e.inferred_type = self._list_el_type(e.args[0], scope)
                     if e.inferred_type == "tuple":
                         e.tuple_elem_types = self._list_el_tuple_types(e.args[0], scope)
+                    elif e.inferred_type == "dict":
+                        # `max(rows, key=...)` over a list of DICTS returns one
+                        # of those dicts, so the result carries their value
+                        # kind -- without it `max(...)['name']` read a str value
+                        # as an int and printed a pointer.
+                        e.value_type = self._list_el_value_type(e.args[0], scope)
+                    elif e.inferred_type == "list":
+                        e.list_el_type = self._list_el_value_type(e.args[0], scope)
                     _dflt = getattr(e, "minmax_default", None)
                     if _dflt is not None and e.inferred_type in ("int", "?"):
                         # An empty/untyped iterable (e.g. the literal `[]`)
@@ -12996,6 +13046,7 @@ class SemaAnalyzer:
             e.inferred_type = _fn_ret2 if _fn_ret2 else "int"
             if getattr(fn, "ret_bool", False):
                 e.is_bool = True  # type: ignore[attr-defined]
+            self._apply_ffi_element_return(fn, e, scope)
             return
         if e.func in self.classes:
             # Constructor call: ClassName(args). If __init__ exists, validate

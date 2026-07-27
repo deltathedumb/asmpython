@@ -27,7 +27,8 @@ BINDINGS: dict = {
     # random.randrange(stop) -> int in [0, stop)
     "randrange": Func(arg_types=("int",),         ret_type="int",   c_name="_random_randrange"),
     # random.choice(seq) -> element: pick a random element from seq (list)
-    "choice":   Func(arg_types=("list",),         ret_type="any",   c_name="_random_choice"),
+    "choice":   Func(arg_types=("list",),         ret_type="any",   c_name="_random_choice",
+                     ret_from_element=0),
     # random.shuffle(seq) -> None: shuffle seq in-place (Fisher-Yates)
     "shuffle":  Func(arg_types=("list",),         ret_type="int",   c_name="_random_shuffle"),
     # random.sample(population, k) -> list: k unique random elements

@@ -56,6 +56,12 @@ class Func:
     # declares ret_type="int" -- this only tells print()/str()/f-strings to
     # render True/False instead of 1/0, via `is_bool_expr`.
     ret_bool: bool = False
+    # This binding returns an ELEMENT of one of its arguments, not a value of a
+    # fixed kind -- `random.choice(seq)` gives back one of seq's items. The
+    # value is the 0-based index of that argument; sema types the call as that
+    # sequence's element kind. `ret_type` stays the fallback for a source whose
+    # element kind isn't tracked.
+    ret_from_element: "int | None" = None
 
 
 @dataclass(frozen=True)
