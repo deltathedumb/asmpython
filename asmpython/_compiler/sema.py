@@ -10472,6 +10472,18 @@ class SemaAnalyzer:
         positions = self._SEQUENCE_BUILTIN_ARGS.get(e.func)
         if not positions:
             return
+        if (
+            e.func in self.funcs
+            or e.func in self.classes
+            or e.func in self.mod.func_aliases
+        ):
+            # Builtins are SHADOWABLE. `from fnmatch import fnfilter as filter`
+            # binds a two-argument (names, pattern) function to the name
+            # `filter`, whose second argument is a PATTERN STRING -- coercing
+            # it as if it were builtin filter's sequence argument drained the
+            # pattern into a list of characters. Argument coercion keyed on a
+            # builtin's name must never apply to a name the program has rebound.
+            return
         for i in positions:
             if i >= len(e.args):
                 continue
@@ -10498,8 +10510,29 @@ class SemaAnalyzer:
                     arg._seq_precheck = True  # type: ignore[attr-defined]
                     self._check_expr(arg, scope)
             t = A.expr_type(arg)
+            if t == "str":
+                # A str IS a sequence in CPython -- `sorted('listen')` gives
+                # its characters, `min('banana')` its smallest one. These
+                # lowerings all read their argument as a LIST HEADER, so a raw
+                # char pointer went straight through as one and faulted.
+                # Draining to `list(s)` (a lowering that already exists) is the
+                # same coercion an iterable object gets, just from a different
+                # source kind.
+                #
+                # `sum` is excluded: CPython raises TypeError for `sum('abc')`,
+                # so accepting it would be a divergence, not a fix.
+                if e.func == "sum":
+                    continue
+                if e.func in ("min", "max") and len(e.args) != 1:
+                    continue  # the 2-arg form compares its arguments directly
+                drained_s = A.Call(func="list", args=[arg], kwargs=[], pos=arg.pos)
+                self._check_expr(drained_s, scope)
+                e.args[i] = drained_s
+                continue
             if not t.startswith("instance:"):
                 continue
+            if e.func in ("min", "max") and len(e.args) != 1:
+                continue  # ditto: `max(a, b)` compares, it does not iterate
             cls = t.split(":", 1)[1]
             if (
                 self._resolve_method(cls, "__next__") is None

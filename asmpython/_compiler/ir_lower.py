@@ -4939,6 +4939,285 @@ def _lower_set_setop(ctx: _FuncCtx, obj_e: A.Expr, other_e: A.Expr, method: str,
     return new_v
 
 
+def _lower_dict_eq(
+    ctx: _FuncCtx, lhs_e: A.Expr, rhs_e: A.Expr, val_kind: str, tag: int
+) -> IRValue:
+    """1 if two dicts are equal BY VALUE (same size, same keys, equal values).
+
+    Walks the left dict's ordered key list, requiring each key to be present in
+    the right dict with an equal value; combined with the length check that is
+    exactly CPython's mapping equality. Same shape as `_lower_set_subset`,
+    which walks keys the same way -- dicts and sets share the layout.
+    """
+    res_ptr = ctx.ensure_slot(f"__deq_{tag}", I64)
+    z0 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", z0, [0]))
+    ctx.emit(IRInstr("store", None, [z0, res_ptr]))
+
+    lhs_v = _lower_expr(ctx, lhs_e)
+    rhs_v = _lower_expr(ctx, rhs_e)
+    la = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", la, [lhs_v, _LIST_LEN_OFF]))
+    llen = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", llen, [la]))
+    ra = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", ra, [rhs_v, _LIST_LEN_OFF]))
+    rlen = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", rlen, [ra]))
+
+    keys_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", lhs_v]))
+    kbuf_a = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", kbuf_a, [keys_v, _LIST_BUF_OFF]))
+    kbuf = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", kbuf, [kbuf_a]))
+    klen_a = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", klen_a, [keys_v, _LIST_LEN_OFF]))
+    klen = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", klen, [klen_a]))
+
+    idx_ptr = ctx.ensure_slot(f"__deqi_{tag}", I64)
+    z1 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", z1, [0]))
+    ctx.emit(IRInstr("store", None, [z1, idx_ptr]))
+
+    head_b = ctx.new_block(f"deqhead{tag}")
+    body_b = ctx.new_block(f"deqbody{tag}")
+    cmp_b = ctx.new_block(f"deqcmp{tag}")
+    next_b = ctx.new_block(f"deqnext{tag}")
+    same_b = ctx.new_block(f"deqsame{tag}")
+    end_b = ctx.new_block(f"deqend{tag}")
+
+    len_same = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", len_same, [llen, rlen]))
+    ctx.emit(IRInstr("br.t", None, [len_same, head_b.label, end_b.label]))
+
+    ctx.switch_to(head_b)
+    i_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_v, [idx_ptr]))
+    more = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", more, [i_v, klen]))
+    ctx.emit(IRInstr("br.t", None, [more, body_b.label, same_b.label]))
+
+    ctx.switch_to(body_b)
+    bi = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", bi, [idx_ptr]))
+    eight = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", eight, [8]))
+    off = ctx.tmp(I64)
+    ctx.emit(IRInstr("imul", off, [bi, eight]))
+    k_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", k_addr, [kbuf, off]))
+    k_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", k_v, [k_addr]))
+    has_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", has_v, ["_abi_dict_contains", rhs_v, k_v]))
+    ctx.emit(IRInstr("br.t", None, [has_v, cmp_b.label, end_b.label]))
+
+    ctx.switch_to(cmp_b)
+    dflt = ctx.tmp(PTR)
+    ctx.emit(IRInstr("const", dflt, [0]))
+    lval = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", lval, ["_abi_dict_get_default", lhs_v, k_v, dflt]))
+    dflt2 = ctx.tmp(PTR)
+    ctx.emit(IRInstr("const", dflt2, [0]))
+    rval = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", rval, ["_abi_dict_get_default", rhs_v, k_v, dflt2]))
+    veq = ctx.tmp(I64)
+    if val_kind == "str":
+        ctx.emit(IRInstr("call", veq, ["_abi_str_eq", lval, rval]))
+    elif val_kind == "float":
+        lf = ctx.tmp(F64)
+        ctx.emit(IRInstr("bitcast_i2f", lf, [lval]))
+        rf = ctx.tmp(F64)
+        ctx.emit(IRInstr("bitcast_i2f", rf, [rval]))
+        ctx.emit(IRInstr("fcmp.eq", veq, [lf, rf]))
+    else:
+        ctx.emit(IRInstr("icmp.eq", veq, [lval, rval]))
+    ctx.emit(IRInstr("br.t", None, [veq, next_b.label, end_b.label]))
+
+    ctx.switch_to(next_b)
+    ni = ctx.tmp(I64)
+    one = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one, [1]))
+    ctx.emit(IRInstr("iadd", ni, [bi, one]))
+    ctx.emit(IRInstr("store", None, [ni, idx_ptr]))
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+
+    ctx.switch_to(same_b)
+    one2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one2, [1]))
+    ctx.emit(IRInstr("store", None, [one2, res_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(end_b)
+    out = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", out, [res_ptr]))
+    return out
+
+
+def _repr_el_kind(e) -> str:
+    """The static element kind of a list/tuple expression, as the equality and
+    repr paths need it: a tuple's slots are per-position, so a tuple only has a
+    single element kind when every slot agrees."""
+    _t = A.expr_type(e)
+    if _t == "tuple":
+        _slots = A.tuple_element_types(e)
+        if not _slots:
+            return "any"
+        for _k in _slots:
+            if _k != _slots[0]:
+                return "mixed"
+        return _slots[0]
+    if isinstance(e, A.ListLit):
+        return e.el_type or "int"
+    return getattr(e, "list_el_type", "int") or "int"
+
+
+def _lower_sequence_eq(
+    ctx: _FuncCtx, lhs_e: A.Expr, rhs_e: A.Expr, el_kind: str, tag: int
+) -> IRValue:
+    """1 if two lists/tuples are equal BY VALUE (same length, elementwise
+    equal), else 0.
+
+    Python container equality is structural, but `==` on two list/tuple
+    operands fell through to the chained-comparison path, which compares the
+    two operands' raw POINTERS -- so `[1, 2] == [1, 2]` was False and
+    `sorted(a) == sorted(b)` (the standard anagram test) could never be True.
+    Short-circuits on the first unequal element.
+
+    Elements compare by their static kind: str through `_abi_str_eq`, float
+    through `fcmp.eq` (so 0.0 == -0.0 holds and NaN != NaN, as in CPython --
+    a raw bit compare gets both backwards), everything else as a plain
+    integer/pointer word.
+    """
+    return _emit_sequence_eq_value(
+        ctx,
+        _lower_expr(ctx, lhs_e),
+        _lower_expr(ctx, rhs_e),
+        el_kind,
+        _inner_el_kind(lhs_e),
+        tag,
+    )
+
+
+def _inner_el_kind(e) -> str:
+    """One level further in: the element kind of a list/tuple's own elements,
+    when those elements are themselves sequences. "any" when unknown."""
+    _iv = getattr(e, "list_el_value_type", None)
+    if isinstance(_iv, str) and _iv:
+        return _iv
+    return "any"
+
+
+def _emit_sequence_eq_value(
+    ctx: _FuncCtx,
+    lhs_v: IRValue,
+    rhs_v: IRValue,
+    el_kind: str,
+    inner_kind: str,
+    tag: int,
+) -> IRValue:
+    """`_lower_sequence_eq`'s body, driven by two already-lowered sequence
+    VALUES -- which is what lets it recurse: a list of lists compares each
+    element pair with this same routine one level down, instead of comparing
+    the two element POINTERS. Nesting depth is bounded by the static type, so
+    the recursion always terminates.
+    """
+    res_ptr = ctx.ensure_slot(f"__seqeq_{tag}", I64)
+    zero_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero_v, [0]))
+    ctx.emit(IRInstr("store", None, [zero_v, res_ptr]))
+
+    llen_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", llen_addr, [lhs_v, _LIST_LEN_OFF]))
+    llen_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", llen_v, [llen_addr]))
+    rlen_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", rlen_addr, [rhs_v, _LIST_LEN_OFF]))
+    rlen_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", rlen_v, [rlen_addr]))
+    lbuf_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", lbuf_addr, [lhs_v, _LIST_BUF_OFF]))
+    lbuf_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", lbuf_v, [lbuf_addr]))
+    rbuf_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", rbuf_addr, [rhs_v, _LIST_BUF_OFF]))
+    rbuf_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", rbuf_v, [rbuf_addr]))
+
+    idx_ptr = ctx.ensure_slot(f"__seqeqi_{tag}", I64)
+    z2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", z2, [0]))
+    ctx.emit(IRInstr("store", None, [z2, idx_ptr]))
+
+    head_b = ctx.new_block(f"seqeqhead{tag}")
+    body_b = ctx.new_block(f"seqeqbody{tag}")
+    next_b = ctx.new_block(f"seqeqnext{tag}")
+    same_b = ctx.new_block(f"seqeqsame{tag}")
+    end_b = ctx.new_block(f"seqeqend{tag}")
+
+    len_same = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", len_same, [llen_v, rlen_v]))
+    ctx.emit(IRInstr("br.t", None, [len_same, head_b.label, end_b.label]))
+
+    ctx.switch_to(head_b)
+    i_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_v, [idx_ptr]))
+    more_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", more_v, [i_v, llen_v]))
+    ctx.emit(IRInstr("br.t", None, [more_v, body_b.label, same_b.label]))
+
+    ctx.switch_to(body_b)
+    bi_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", bi_v, [idx_ptr]))
+    eight_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", eight_v, [8]))
+    off_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("imul", off_v, [bi_v, eight_v]))
+    la_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", la_addr, [lbuf_v, off_v]))
+    ra_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", ra_addr, [rbuf_v, off_v]))
+    if el_kind == "float":
+        la_v = ctx.tmp(F64)
+        ctx.emit(IRInstr("load", la_v, [la_addr]))
+        ra_v = ctx.tmp(F64)
+        ctx.emit(IRInstr("load", ra_v, [ra_addr]))
+        eq_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("fcmp.eq", eq_v, [la_v, ra_v]))
+    else:
+        la_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", la_v, [la_addr]))
+        ra_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", ra_v, [ra_addr]))
+        eq_v = ctx.tmp(I64)
+        if el_kind == "str":
+            ctx.emit(IRInstr("call", eq_v, ["_abi_str_eq", la_v, ra_v]))
+        else:
+            ctx.emit(IRInstr("icmp.eq", eq_v, [la_v, ra_v]))
+    ctx.emit(IRInstr("br.t", None, [eq_v, next_b.label, end_b.label]))
+
+    ctx.switch_to(next_b)
+    ni_v = ctx.tmp(I64)
+    one_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one_v, [1]))
+    ctx.emit(IRInstr("iadd", ni_v, [bi_v, one_v]))
+    ctx.emit(IRInstr("store", None, [ni_v, idx_ptr]))
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+
+    ctx.switch_to(same_b)
+    one2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one2, [1]))
+    ctx.emit(IRInstr("store", None, [one2, res_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(end_b)
+    out_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", out_v, [res_ptr]))
+    return out_v
+
+
 def _lower_set_subset(ctx: _FuncCtx, sub_e: A.Expr, sup_e: A.Expr, tag: int) -> IRValue:
     """1 if every member of `sub_e` is also a member of `sup_e` (subset
     test underlying `<=`/`<`/`>=`/`>` on two sets), else 0. Ports
@@ -6622,6 +6901,75 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         if len(e.ops) == 1:
             lt0 = A.expr_type(e.operands[0])
             rt0 = A.expr_type(e.operands[1])
+            if e.ops[0] in ("==", "!=") and lt0 == "dict" and rt0 == "dict":
+                _vk_l = getattr(e.operands[0], "value_type", "int") or "int"
+                _vk_r = getattr(e.operands[1], "value_type", "int") or "int"
+                if _vk_l == _vk_r:
+                    _deq = _lower_dict_eq(
+                        ctx, e.operands[0], e.operands[1], _vk_l, id(e)
+                    )
+                    if e.ops[0] == "!=":
+                        _dz = ctx.tmp(I64)
+                        ctx.emit(IRInstr("const", _dz, [0]))
+                        _dinv = ctx.tmp(I64)
+                        ctx.emit(IRInstr("icmp.eq", _dinv, [_deq, _dz]))
+                        return _dinv
+                    return _deq
+            if (
+                e.ops[0] in ("==", "!=")
+                and lt0 in ("list", "tuple", "set")
+                and rt0 in ("list", "tuple", "set")
+                and (lt0 == "set") == (rt0 == "set")
+            ):
+                # Python container equality is STRUCTURAL. Without this these
+                # fell through to the chained-comparison path below, which
+                # compares the operands' raw pointers -- so `[1, 2] == [1, 2]`
+                # was False, and `sorted(a) == sorted(b)` (the standard anagram
+                # test) could never be True.
+                if lt0 == "set":
+                    # Two sets are equal iff each is a subset of the other --
+                    # and given equal LENGTHS, one subset test is sufficient.
+                    _sl = _lower_expr(ctx, e.operands[0])
+                    _sr = _lower_expr(ctx, e.operands[1])
+                    _sla = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("gep", _sla, [_sl, _LIST_LEN_OFF]))
+                    _slv = ctx.tmp(I64)
+                    ctx.emit(IRInstr("load", _slv, [_sla]))
+                    _sra = ctx.tmp(PTR)
+                    ctx.emit(IRInstr("gep", _sra, [_sr, _LIST_LEN_OFF]))
+                    _srv = ctx.tmp(I64)
+                    ctx.emit(IRInstr("load", _srv, [_sra]))
+                    _same_len = ctx.tmp(I64)
+                    ctx.emit(IRInstr("icmp.eq", _same_len, [_slv, _srv]))
+                    _sub = _lower_set_subset(ctx, e.operands[0], e.operands[1], id(e))
+                    _ceq = ctx.tmp(I64)
+                    ctx.emit(IRInstr("iand", _ceq, [_same_len, _sub]))
+                else:
+                    _el_l = _repr_el_kind(e.operands[0])
+                    _el_r = _repr_el_kind(e.operands[1])
+                    # Mixed element kinds can't be compared slot-for-slot by a
+                    # single static rule; fall back to the pointer comparison
+                    # that was the only behaviour before (never worse).
+                    if _el_l != _el_r or _el_l in ("list", "tuple", "dict", "set"):
+                        # Differing element kinds have no single slot-for-slot
+                        # rule, and a NESTED container element would need this
+                        # routine to recurse -- attempted, and the emitted
+                        # nested loop hangs at runtime, so it stays out. Both
+                        # fall back to the pointer comparison that was the only
+                        # behaviour before, which is never worse.
+                        _ceq = None
+                    else:
+                        _ceq = _lower_sequence_eq(
+                            ctx, e.operands[0], e.operands[1], _el_l, id(e)
+                        )
+                if _ceq is not None:
+                    if e.ops[0] == "!=":
+                        _z = ctx.tmp(I64)
+                        ctx.emit(IRInstr("const", _z, [0]))
+                        _inv = ctx.tmp(I64)
+                        ctx.emit(IRInstr("icmp.eq", _inv, [_ceq, _z]))
+                        return _inv
+                    return _ceq
             if lt0 == "set" and rt0 == "set" and e.ops[0] in ("<=", ">=", "<", ">"):
                 # Set subset/superset comparisons (PEP-3119-style: `a <= b`
                 # is `a.issubset(b)`, `a < b` is a proper subset i.e.
