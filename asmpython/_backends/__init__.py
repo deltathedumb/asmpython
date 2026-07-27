@@ -84,8 +84,10 @@ del _register_scaffold_backends
 # NotImplementedError-raising scaffold forever, even though the real
 # codegen/elf/coff/linker modules underneath are complete and verified.
 from . import x86 as _x86  # noqa: F401  (imported for its registration side effect)
+from . import jvm as _jvm  # noqa: F401  (same: replaces the "jvm" scaffold)
 
 del _x86
+del _jvm
 
 
 __all__ = [
