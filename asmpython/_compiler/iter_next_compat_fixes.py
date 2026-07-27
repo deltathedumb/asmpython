@@ -302,16 +302,28 @@ def _lower_next_call(ctx, e):
     live_b = ctx.new_block(f"next_live_{id(e)}")
     ctx.emit(IR.IRInstr("br.t", None, [at_end, stop_b.label, live_b.label]))
 
-    # end of sequence -> raise StopIteration (propagates to an enclosing
-    # `except StopIteration`, exactly as the __next__ protocol's own end does)
     ctx.switch_to(stop_b)
-    empty_sym = ctx.mctx.intern_str("")
-    msg_v = ctx.tmp(IR.PTR)
-    ctx.emit(IR.IRInstr("global_addr", msg_v, [empty_sym]))
-    ctx.emit(IR.IRInstr("call", None, ["_abi_raise", msg_v, _const(ctx, IR.BUILTIN_EXC_IDS["StopIteration"])]))
-    # unreachable, but keep the block terminated / res_ptr defined
-    ctx.emit(IR.IRInstr("store", None, [_const(ctx, 0), res_ptr]))
-    ctx.emit(IR.IRInstr("br", None, [end_b.label]))
+    if len(e.args) >= 2:
+        # `next(it, default)` -- exhaustion yields the DEFAULT instead of
+        # raising. Route it through the any-slot store choke so a str/int/float
+        # default round-trips as a tagged value, the same as any other value
+        # reaching an "any"-typed result (this call's own type). Without this
+        # the second argument was ignored entirely and exhaustion produced 0,
+        # so `next(it, 'done')` printed 0.
+        dflt_v = IR._lower_value_into_any_slot(ctx, e.args[1])
+        ctx.emit(IR.IRInstr("store", None, [dflt_v, res_ptr]))
+        ctx.emit(IR.IRInstr("br", None, [end_b.label]))
+    else:
+        # end of sequence -> raise StopIteration (propagates to an enclosing
+        # `except StopIteration`, exactly as the __next__ protocol's own end
+        # does)
+        empty_sym = ctx.mctx.intern_str("")
+        msg_v = ctx.tmp(IR.PTR)
+        ctx.emit(IR.IRInstr("global_addr", msg_v, [empty_sym]))
+        ctx.emit(IR.IRInstr("call", None, ["_abi_raise", msg_v, _const(ctx, IR.BUILTIN_EXC_IDS["StopIteration"])]))
+        # unreachable, but keep the block terminated / res_ptr defined
+        ctx.emit(IR.IRInstr("store", None, [_const(ctx, 0), res_ptr]))
+        ctx.emit(IR.IRInstr("br", None, [end_b.label]))
 
     ctx.switch_to(live_b)
     seq_v = _dict_get(ctx, itv, "_seq", miss, ty=IR.PTR)
@@ -380,7 +392,11 @@ def _lower_inner_with_iter_next(ctx, e):
     if isinstance(e, A.Call) and getattr(e, "dstar", None) is None and not getattr(e, "kwargs", None):
         if e.func == "iter" and len(e.args) == 1:
             return _lower_iter_call(ctx, e)
-        if e.func == "next" and len(e.args) == 1:
+        if e.func == "next" and len(e.args) in (1, 2):
+            # 1 or 2 args: `next(it, default)` returns the default on
+            # exhaustion instead of raising (see `_lower_next_call`). The
+            # two-argument form used to fall through to the generic builtin
+            # call, which produced 0 and never advanced the iterator at all.
             return _lower_next_call(ctx, e)
     return _ORIGINAL_LOWER_INNER(ctx, e)
 
