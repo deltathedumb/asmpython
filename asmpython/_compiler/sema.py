@@ -8417,6 +8417,15 @@ class SemaAnalyzer:
                 self._check_expr(e.elt, child)
                 e.inferred_type = "list"
                 e.list_el_type = A.expr_type(e.elt)
+                if e.list_el_type == "tuple":
+                    # The general comprehension path below records the element
+                    # tuple's per-slot kinds; this enumerate fast path did not,
+                    # so `[(i, v) for i, v in enumerate(xs)]` produced a
+                    # list[tuple] with NO shape. Its repr then fell back to
+                    # `_abi_list_repr`'s dict-items (str, int) assumption and
+                    # formatted the leading int as a string POINTER -- a
+                    # segfault.
+                    e.el_tuple_types = self._tuple_elem_types(e.elt, child)
                 self._merge_walrus_bindings(scope, child, loop_vars)
                 return
             self._check_expr(e.iter, scope)
@@ -11650,6 +11659,79 @@ class SemaAnalyzer:
                 # `list(list(map(...)))`.
                 _l0._in_list_call = True  # type: ignore[attr-defined]
         if (
+            e.func == "map"
+            and len(e.args) > 2
+            and e.func not in self.funcs
+            and e.func not in self.mod.func_aliases
+        ):
+            # `map(f, a, b, ...)` over SEVERAL iterables applies f across them
+            # in lockstep, stopping at the shortest. Only the single-iterable
+            # form has a lowering, so this crashed. Rewrite it into the
+            # comprehension it means:
+            #
+            #   [f(a[i], b[i]) for i in range(min(len(a), len(b)))]
+            #
+            # The call on `f` is a call on a callable EXPRESSION, which is now
+            # a first-class thing (see `_check_callable_expr_call`), so this
+            # needs no new lowering of its own.
+            _mm_fn = e.args[0]
+            _mm_srcs = list(e.args[1:])
+            for _si in range(len(_mm_srcs)):
+                self._check_expr(_mm_srcs[_si], scope)
+                if A.expr_type(_mm_srcs[_si]) != "list":
+                    _wrapped = A.Call(
+                        func="list", args=[_mm_srcs[_si]], kwargs=[], pos=e.pos
+                    )
+                    self._check_expr(_wrapped, scope)
+                    _mm_srcs[_si] = _wrapped
+            _mm_var = f"_mm{id(e) % 100000}"
+            _mm_len = A.Call(
+                func="len",
+                args=[self._clone_default_expr(_mm_srcs[0])],
+                kwargs=[],
+                pos=e.pos,
+            )
+            for _src in _mm_srcs[1:]:
+                _mm_len = A.Call(
+                    func="min",
+                    args=[
+                        _mm_len,
+                        A.Call(
+                            func="len",
+                            args=[self._clone_default_expr(_src)],
+                            kwargs=[],
+                            pos=e.pos,
+                        ),
+                    ],
+                    kwargs=[],
+                    pos=e.pos,
+                )
+            _mm_call = A.Call(
+                func=A.CALLABLE_EXPR_SENTINEL,
+                args=[
+                    A.Subscript(
+                        obj=self._clone_default_expr(_src2),
+                        index=A.Name(name=_mm_var, pos=e.pos),
+                        pos=e.pos,
+                    )
+                    for _src2 in _mm_srcs
+                ],
+                kwargs=[],
+                func_expr=_mm_fn,
+                pos=e.pos,
+            )
+            _mm_comp = A.Comprehension(
+                elt=_mm_call,
+                var=_mm_var,
+                iter=A.Call(func="range", args=[_mm_len], kwargs=[], pos=e.pos),
+                pos=e.pos,
+            )
+            e.func = "list"
+            e.args = [_mm_comp]
+            e.kwargs = []
+            self._check_call(e, scope)
+            return
+        if (
             e.func in ("map", "filter")
             and e.func not in self.funcs
             and e.func not in self.mod.func_aliases
@@ -11720,7 +11802,13 @@ class SemaAnalyzer:
                 elems=[
                     _en_i,
                     A.Subscript(
-                        obj=_en_src, index=A.Name(name=_en_var, pos=e.pos), pos=e.pos
+                        # Its OWN copy of the source: codegen keys per-literal
+                        # scratch slots off id(expr), so sharing one node
+                        # between the `len(...)` in the range header and the
+                        # element read in the body collides on a single slot.
+                        obj=self._clone_default_expr(_en_src),
+                        index=A.Name(name=_en_var, pos=e.pos),
+                        pos=e.pos,
                     ),
                 ],
                 pos=e.pos,
