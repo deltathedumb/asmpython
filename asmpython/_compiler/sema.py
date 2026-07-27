@@ -11409,6 +11409,26 @@ class SemaAnalyzer:
         if e.method == "join":
             if len(e.args) != 1:
                 raise SemaError("str.join() takes 1 argument", e.pos, ErrorCode.E_ARG_COUNT)
+            # `sep.join(<any iterable>)`: join consumes a SEQUENCE, so a
+            # generator result, a mapping, a set or a str drains through
+            # `list()` first -- the same coercion the sequence builtins get,
+            # applied to a method argument. `','.join(gen())` was rejected
+            # outright.
+            _j0 = e.args[0]
+            if isinstance(_j0, (A.Name, A.Attr, A.Subscript, A.Call, A.MethodCall)):
+                self._check_expr(_j0, scope)
+            _jt = A.expr_type(_j0)
+            _j_drain = _jt in ("dict", "set")
+            if _jt.startswith("instance:"):
+                _jc = _jt.split(":", 1)[1]
+                _j_drain = (
+                    self._resolve_method(_jc, "__next__") is not None
+                    or self._resolve_method(_jc, "__getitem__") is not None
+                )
+            if _j_drain:
+                _jd = A.Call(func="list", args=[_j0], kwargs=[], pos=_j0.pos)
+                self._check_expr(_jd, scope)
+                e.args[0] = _jd
             arg_t = A.expr_type(e.args[0])
             if arg_t not in ("list", "any", "int"):
                 # "int" is the default type for unannotated vars; accept it
@@ -13035,7 +13055,15 @@ class SemaAnalyzer:
                     raise SemaError("int() requires str / float / int", e.pos, ErrorCode.E_ARG_TYPE)
             elif e.func == "float":
                 t = A.expr_type(e.args[0])
-                if t not in ("str", "int", "float", "any"):
+                # An instance defining `__float__` converts through it, exactly
+                # as `int()` already accepts `__int__`. Rejecting it outright
+                # made `float(obj)` a compile error for a class that implements
+                # the conversion CPython asks for.
+                if t not in ("str", "int", "float", "any") and not (
+                    t.startswith("instance:")
+                    and self._resolve_method(t.split(":", 1)[1], "__float__")
+                    is not None
+                ):
                     raise SemaError("float() requires str / int / float", e.pos, ErrorCode.E_ARG_TYPE)
             elif e.func == "str":
                 t = A.expr_type(e.args[0])

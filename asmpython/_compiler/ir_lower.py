@@ -11257,6 +11257,7 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     out = ctx.tmp(I64)
                     ctx.emit(IRInstr("call", out, [f"{owner}____int__", obj_v]))
                     return out
+
             if arg_t == "any":
                 # `int(x)` on an opaque value that may be a boxed scalar cell
                 # (a scalar read out of a `dict[str, object]` / `list[object]`,
@@ -11306,6 +11307,24 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 out = ctx.tmp(F64)
                 ctx.emit(IRInstr("sitofp", out, [int_v]))
                 return out
+            if arg_t.startswith("instance:"):
+                # `float(obj)` converts through the class's `__float__`, the
+                # mirror of `int()`'s `__int__` dispatch. Deliberately NO
+                # cross-fallback between the two dunders: CPython raises
+                # TypeError for `int(x)` on a `__float__`-only class and for
+                # `float(x)` on an `__int__`-only one, so accepting either
+                # would take a program CPython rejects.
+                _fowner = _resolve_method_owner(
+                    ctx, arg_t.split(":", 1)[1], "__float__"
+                )
+                if _fowner is not None:
+                    obj_v = _lower_expr(ctx, arg)
+                    out = ctx.tmp(F64)
+                    ctx.emit(
+                        IRInstr("call", out, [f"{_fowner}____float__", obj_v])
+                    )
+                    return out
+
             # float -> float: identity.
             return _lower_expr(ctx, arg)
         if e.func in ("min", "max") and len(e.args) >= 1:
@@ -14625,10 +14644,14 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                 arg_t = A.expr_type(node.args[0])
                 if arg_t.startswith("instance:"):
                     add_resolved(arg_t.split(":", 1)[1], "__hash__")
-            if node.func == "int" and len(node.args) == 1:
+            if node.func in ("int", "float") and len(node.args) == 1:
                 arg_t = A.expr_type(node.args[0])
                 if arg_t.startswith("instance:"):
+                    # Both dunders: `int()` falls back to `__float__` and
+                    # `float()` dispatches to it, so either can be the one this
+                    # call reaches. Losing it to DCE fails the link.
                     add_resolved(arg_t.split(":", 1)[1], "__int__")
+                    add_resolved(arg_t.split(":", 1)[1], "__float__")
             if node.func in ("list", "tuple") and len(node.args) == 1:
                 # `list(obj)` drains an iterable object through either the
                 # iterator protocol or the sequence protocol (see the matching
