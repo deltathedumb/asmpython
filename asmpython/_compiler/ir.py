@@ -271,17 +271,30 @@ def layout_blocks_rpo(func: "IRFunc") -> bool:
     Safe with respect to ``try_regions`` only because those are label-based; the
     positional form this replaced would have been silently repointed.
 
-    NOT CURRENTLY CALLED, and it must not be enabled on its own. The allocator's
-    liveness rule derives loops from the block-INDEX SPAN of a backward-looking
-    branch, so it is coupled to lowering's emission order: reordering the blocks
-    changes which branches look backward and the spans come out wrong.
-    Enabling this alone breaks r39_running_average, zip_two_lists and
-    999_comprehensive_codegen.
+    NOT CURRENTLY CALLED. Enabling it is a coupled change with the allocator's
+    liveness rule, which derives loops from block-INDEX SPANS and is therefore
+    tied to lowering's emission order.
 
-    In theory the two fit together -- in reverse postorder a backward-by-index
-    edge IS a back edge for any reducible CFG, which would make the span rule
-    exact rather than approximate. Landing them as one change, with a full
-    differential, is the way to get both. Do not enable this without that.
+    Measured state of that work, so the next attempt does not restart it:
+
+      * The layout itself is correct -- entry preserved, block set unchanged,
+        verifier clean, and (checked directly) ZERO uses precede their
+        definition on any acyclic edge afterwards. That was the whole point.
+      * Exit blocks must stay last, which is why this function pins them; plain
+        RPO moved a `ret` from index 16 of 17 to index 6 and everything after it
+        ran off the end.
+      * Loop-carried RESERVATION is NOT needed alongside it. Measured after
+        layout: zero values are read before their definition even inside cycles,
+        in every function checked. The separate reservation pass that used to
+        exist is redundant here.
+      * With layout + pinned exits + a union of span- and cycle-based liveness,
+        these become correct: the base32 repro, 425_generator_pipeline, and
+        472_generator_method_and_class_factory (the last in the DEFAULT
+        pipeline, where it had needed --passes licm).
+      * Two remain broken: r39_running_average and zip_two_lists. Both are
+        comprehension loops. Not register pressure -- their cycles are small (3
+        cycles, largest 10 of 17 blocks) -- and not layout, so it is something
+        else in the liveness half still unidentified.
     """
     from .cfg import reverse_postorder
 
