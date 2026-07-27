@@ -2342,6 +2342,9 @@ class SemaAnalyzer:
         `_infer_unannotated_params` just determined for `x`)."""
         for f in self.mod.funcs:
             sig = self.funcs[f.name]
+            if self._needs_return_element_kind(sig):
+                self._fill_return_element_kind(sig, f, f.name)
+                continue
             if sig.ret_type is not None or sig.ret_tuple is not None:
                 continue
             ty = self._infer_return_type(f, f.name)
@@ -2350,6 +2353,9 @@ class SemaAnalyzer:
         for c in self.mod.classes:
             for m in c.methods:
                 sig = self.classes[c.name].methods[m.name]
+                if self._needs_return_element_kind(sig):
+                    self._fill_return_element_kind(sig, m, f"{c.name}.{m.name}", c.name)
+                    continue
                 if (
                     sig.ret_type is not None
                     or sig.ret_tuple is not None
@@ -2359,6 +2365,109 @@ class SemaAnalyzer:
                 ty = self._infer_return_type(m, f"{c.name}.{m.name}", c.name)
                 if ty is not None:
                     sig.ret_type = ty
+
+    def _needs_return_element_kind(self, sig) -> bool:
+        """True for a signature annotated with a bare CONTAINER -- `-> list`,
+        `-> dict` -- and therefore carrying no element/value kind."""
+        _rt = getattr(sig, "ret_type", None)
+        if not isinstance(_rt, tuple) or len(_rt) < 3:
+            return False
+        # A bare `list` resolves to element kind "any" (not None) -- that is
+        # what "no element kind was written" looks like after resolution. An
+        # explicit `list[object]` resolves the same way, so the fill below only
+        # narrows when EVERY return agrees on one concrete literal kind, which
+        # a genuinely heterogeneous `list[object]` never will.
+        if _rt[0] == "list":
+            return _rt[1] in (None, "any")
+        if _rt[0] == "dict":
+            return _rt[2] in (None, "any")
+        return False
+
+    def _fill_return_element_kind(self, sig, fn, qualname: str, cls_name=None) -> None:
+        """Fill in the element/value kind of a bare `-> list` / `-> dict`
+        annotation by scanning the function's own `return` statements.
+
+        A bare container annotation states the SHAPE but not what is in it, and
+        every consumer downstream needs the element kind: a caller's
+        `sorted(f())` over a list of pairs reprs them as raw POINTERS without
+        it, and a list-of-tuples with no slot shape crashes outright. The
+        annotation is more specific than nothing, so it is kept -- only the
+        missing half is inferred, using the same body scan that an entirely
+        unannotated function already gets.
+        """
+        _rt: tuple = sig.ret_type
+        _rets: list = []
+        self._collect_returns(fn.body, _rets)
+        if not _rets:
+            return
+        _kind: str | None = None
+        _slots: list = []
+        for _r in _rets:
+            _rv = getattr(_r, "value", None)
+            if isinstance(_rv, A.ListLit):
+                _k = self._literal_shape_el_type(_rv)
+                if _k is None and _rv.elems:
+                    # A list of tuples: its element kind is "tuple", and the
+                    # per-slot shape is what the repr actually needs.
+                    if all(isinstance(_el, A.TupleLit) for _el in _rv.elems):
+                        _k = "tuple"
+                        # Read the slot kinds straight off the LITERALS. This
+                        # pre-pass runs before any expression has been checked,
+                        # so `_common_tuple_slots` (which reads stamped types)
+                        # sees nothing yet.
+                        _sl: list = []
+                        _shape_ok = True
+                        for _el in _rv.elems:
+                            _this: list = []
+                            for _slot in _el.elems:
+                                _lit = self._literal_arg_type(_slot)
+                                if _lit is None:
+                                    _shape_ok = False
+                                    break
+                                _this.append(_lit[0])
+                            if not _shape_ok:
+                                break
+                            if not _sl:
+                                _sl = _this
+                            elif len(_sl) != len(_this):
+                                _shape_ok = False
+                                break
+                            else:
+                                for _si in range(len(_sl)):
+                                    if _sl[_si] != _this[_si]:
+                                        _sl[_si] = "any"
+                        if not _shape_ok:
+                            _sl = []
+                        if _slots and _sl and _slots != _sl:
+                            return
+                        if _sl:
+                            _slots = _sl
+            elif isinstance(_rv, A.Comprehension):
+                _k = getattr(_rv, "list_el_type", None)
+            else:
+                _k = None
+            if _k is None:
+                return  # one return with no knowable kind: infer nothing
+            if _kind is None:
+                _kind = _k
+            elif _kind != _k:
+                return  # returns disagree
+        if _kind is None or _rt[0] != "list":
+            return
+        sig.ret_type = (_rt[0], _kind, _rt[2])
+        if _kind == "tuple" and _slots:
+            sig.ret_list_tuple_types = list(_slots)
+
+    def _collect_returns(self, stmts: list, out: list) -> None:
+        """Every `A.Return` with a value reachable in `stmts`, at any depth."""
+        for _s in stmts:
+            if isinstance(_s, A.Return) and getattr(_s, "value", None) is not None:
+                out.append(_s)
+            for _attr in ("body", "then", "orelse", "handler", "else_body",
+                          "finally_body"):
+                _sub = getattr(_s, _attr, None)
+                if isinstance(_sub, list):
+                    self._collect_returns(_sub, out)
 
     def _infer_return_type(self, fn: A.FuncDef, qualname: str, cls_name: str | None = None):
         """(ty, el, val) for every reachable `return` in `fn.body`, if all
