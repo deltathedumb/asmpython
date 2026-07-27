@@ -66,7 +66,7 @@ Certifying against the **whole** corpus rather than the 149-case sample earlier
 numbers used:
 
 ```text
-identical=790  DIFFERENT=17  nondeterministic=50  skipped(pre-existing)=170
+identical=811  DIFFERENT=14  nondeterministic=50  skipped(pre-existing)=152
 ```
 
 Every one of those 17 was then checked against CPython, which is the question
@@ -75,16 +75,13 @@ change to output that was already wrong:
 
 | | Cases |
 |---|---|
-| correct at baseline → broken by `o2` | **none** |
-| already wrong at baseline, `o2` makes it **correct** | `382_nested_listcomp`, `425_generator_pipeline`, `999_comprehensive_codegen` |
-| already wrong at baseline, still wrong (differently) | the other 14 |
+| correct at baseline → broken by `o2` | **none — all 14 checked individually** |
+| already wrong at baseline, still wrong (differently) | all 14 |
 
-So `o2` does not break a single correct program in the corpus. The 14 are
-programs whose output already diverged from CPython — pre-existing frontend and
-lowering parity gaps — where optimization rearranges the garbage. Sixteen of the
-17 reproduce byte-identically with the old try/except guards in place, so they
-predate this work; the seventeenth (`425_generator_pipeline`) is one of the
-three `o2` now fixes.
+So `o2` does not break a single correct program in the corpus. Every divergence
+is a program whose output already diverged from CPython — pre-existing frontend
+and lowering parity gaps — where optimization rearranges output that was already
+wrong. Re-verified after the `licm` dominance fix landed.
 
 Two lessons worth keeping. **Certify against the whole corpus** — the 149-case
 gate never reached any of this. And **classify a differential hit against ground
