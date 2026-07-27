@@ -1,0 +1,19 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "MIT"
+
+[[mods]]
+modId = "demomod"
+version = "1.0.0"
+displayName = "Demo Mod (Python)"
+description = '''
+A Minecraft mod written in Python and compiled to JVM bytecode by asmpython.
+Registers demomod:bat through the real NeoForge registries.
+'''
+
+[[dependencies.demomod]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1,)"
+ordering = "NONE"
+side = "BOTH"

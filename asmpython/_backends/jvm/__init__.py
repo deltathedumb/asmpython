@@ -115,10 +115,11 @@ requested_args: list[dict] = [
     },
     {
         "name": "--jvm-instantiate",
-        "help": "Also emit a public no-arg constructor that runs the module body, "
-                "for frameworks that load a class by constructing it.",
-        "default": False,
-        "type": bool,
+        "help": "Also emit a public constructor that runs the module body, for "
+                "frameworks that load a class by constructing it. An optional "
+                "comma-separated parameter-type list says what it takes.",
+        "default": None,
+        "type": str,
     },
     {
         "name": "--jvm-runtime-package",
@@ -148,7 +149,7 @@ def run_backend_codegen(ir: Any, args: dict) -> dict[str, bytes]:
         class_name + ".class": compile_module(
             ir, class_name, version, runtime,
             annotations=parse_annotations(args.get("jvm_annotation")),
-            instantiate=bool(args.get("jvm_instantiate")),
+            instantiate=args.get("jvm_instantiate"),
             runtime_package=runtime_package(args).replace(".", "/"),
         )
     }

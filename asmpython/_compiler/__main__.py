@@ -398,9 +398,15 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
     )
     build_grp.add_argument(
         "--jvm-instantiate",
-        action="store_true",
-        help="JVM backend: also emit a public no-arg constructor that runs the "
-        "module body, for frameworks that load a class by constructing it.",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="TYPES",
+        help="JVM backend: also emit a public constructor that runs the module "
+        "body, for frameworks that load a class by constructing it. An "
+        "optional comma-separated list of parameter types (e.g. "
+        "'com.example.Context') declares what the framework passes; those "
+        "arrive at an exported `on_construct` as handles.",
     )
     build_grp.add_argument(
         "--bindings",

@@ -313,8 +313,8 @@ public class Java extends Containers {
         if (declared == void.class || result == null) {
             return 0;
         }
-        if (result instanceof CharSequence) {
-            return allocateString(result.toString());
+        if (result instanceof String) {
+            return allocateString((String) result);
         }
         if (result instanceof Boolean) {
             return ((Boolean) result) ? 1 : 0;
@@ -562,6 +562,16 @@ public class Java extends Containers {
         return invoke(target, readString(name), new Object[]{readString(a), b}, false);
     }
 
+    public static long jcall_so(long target, long name, long a, long b) {
+        return invoke(target, readString(name),
+                new Object[]{readString(a), target(b)}, false);
+    }
+
+    public static long jcall_oo(long target, long name, long a, long b) {
+        return invoke(target, readString(name),
+                new Object[]{target(a), target(b)}, false);
+    }
+
     public static long jcall_ii(long target, long name, long a, long b) {
         return invoke(target, readString(name), new Object[]{a, b}, false);
     }
@@ -642,13 +652,32 @@ public class Java extends Containers {
     // the codegen has it at compile time and can push it with `ldc`, which
     // saves interning a copy in the heap on every call.
 
+    /**
+     * A class named by an import, resolved as written or under `java.`.
+     *
+     * <p>`import java.util as u` gives `util.ArrayList`, and `import
+     * java.net.neoforged.neoforge as n` gives `net.neoforged.neoforge.X`. Both
+     * are legitimate and no compile-time rule separates them -- `java.net` and
+     * `net.neoforged` both exist -- so the resolution is simply attempted.
+     */
     public static long jclass_named(String className) {
-        try {
-            return handle(Class.forName(className, false, classLoader()));
-        } catch (ClassNotFoundException e) {
-            _abi_raise(allocateString(
-                    "ImportError: no Java class named '" + className + "'"), 0);
+        Class<?> found = tryLoad(className);
+        if (found == null) {
+            found = tryLoad("java." + className);
+        }
+        if (found == null) {
+            _abi_raise(allocateString("ImportError: no Java class named '"
+                    + className + "' or 'java." + className + "'"), 0);
             return 0;
+        }
+        return handle(found);
+    }
+
+    private static Class<?> tryLoad(String name) {
+        try {
+            return Class.forName(name, false, classLoader());
+        } catch (ClassNotFoundException | NoClassDefFoundError e) {
+            return null;
         }
     }
 
@@ -672,6 +701,186 @@ public class Java extends Containers {
     /** {@code jstr(handle)} — String.valueOf, for printing a Java object. */
     public static long jstr(long target) {
         return jvm_str(target);
+    }
+
+    // ======================================================================
+    // Python implementing a Java interface
+    // ======================================================================
+    //
+    // Java APIs built on callbacks -- listeners, suppliers, consumers -- cannot
+    // be reached at all otherwise. Compiled code has no way to hand Java a
+    // function, so this goes the other way: a java.lang.reflect.Proxy stands in
+    // for the interface and forwards every call to a static method on the
+    // generated program class.
+    //
+    // That is what turns "call Java from Python" into "take part in a Java
+    // framework". Registering a Minecraft item, to pick the case this was built
+    // for, is a Supplier handed to a DeferredRegister -- there is no
+    // callback-free version of it.
+
+    private static Class<?> programClass;
+
+    /**
+     * Tell the runtime which class holds the compiled Python.
+     *
+     * <p>Emitted into `<clinit>` by the backend, because only the compiler
+     * knows the generated class's name and only the runtime needs it.
+     */
+    public static void installProgram(String className) {
+        programClass = tryLoad(className);
+    }
+
+    /**
+     * {@code jproxy(interfaceName, callback)} — an object implementing
+     * `interfaceName` whose methods call the Python function `callback`.
+     *
+     * <p>The Python side must be exported (`@access(Public)`) or reachability
+     * analysis drops it and the proxy has nothing to call.
+     *
+     * <p>Arguments arrive as words: a handle for an object, an address for a
+     * string. The return word is read back according to what the interface
+     * method declares, which is the one place the Java side knows more than
+     * the Python side and can say so.
+     */
+    public static long jproxy(long interfaceName, long callback) {
+        String name = readString(interfaceName);
+        String method = readString(callback);
+
+        Class<?> type = tryLoad(name);
+        if (type == null) {
+            type = tryLoad("java." + name);
+        }
+        if (type == null || !type.isInterface()) {
+            _abi_raise(allocateString("TypeError: " + name
+                    + " is not an interface that can be implemented"), 0);
+            return 0;
+        }
+        if (programClass == null) {
+            _abi_raise(allocateString(
+                    "RuntimeError: jproxy needs the program class; "
+                    + "the backend should have installed it"), 0);
+            return 0;
+        }
+
+        Object proxy = java.lang.reflect.Proxy.newProxyInstance(
+                type.getClassLoader() != null ? type.getClassLoader() : classLoader(),
+                new Class<?>[]{type},
+                (self, called, arguments) -> dispatch(method, called, arguments));
+        return handle(proxy);
+    }
+
+    private static Object dispatch(String callback, Method called, Object[] arguments)
+            throws Throwable {
+        Object[] safe = arguments == null ? NONE : arguments;
+
+        // Object's own methods must not be forwarded: a proxy is still an
+        // object, and sending toString/equals/hashCode to Python would break
+        // anything that puts it in a collection or logs it.
+        if (called.getDeclaringClass() == Object.class) {
+            switch (called.getName()) {
+                case "toString":
+                    return "<python " + callback + ">";
+                case "hashCode":
+                    return System.identityHashCode(safe.length == 0 ? callback : safe);
+                case "equals":
+                    return safe.length == 1 && safe[0] != null
+                            && System.identityHashCode(safe[0]) == 0;
+                default:
+                    break;
+            }
+        }
+
+        Class<?>[] wordTypes = new Class<?>[safe.length];
+        java.util.Arrays.fill(wordTypes, long.class);
+        Method target;
+        try {
+            target = programClass.getMethod(callback, wordTypes);
+        } catch (NoSuchMethodException e) {
+            throw new AsmPythonError("jproxy: " + programClass.getName() + " has no "
+                    + callback + " taking " + safe.length
+                    + " argument(s) -- is it marked @access(Public)?", 0);
+        }
+
+        Object[] words = new Object[safe.length];
+        for (int i = 0; i < safe.length; i++) {
+            words[i] = toWord(safe[i]);
+        }
+        Object result = target.invoke(null, words);
+        long word = result instanceof Long ? (Long) result : 0L;
+        return fromWord(unbox(word), called.getReturnType());
+    }
+
+    /** A Java value as the word compiled Python will see. */
+    private static long toWord(Object value) {
+        if (value == null) {
+            return 0;
+        }
+        if (value instanceof String) {
+            return allocateString((String) value);
+        }
+        if (value instanceof Boolean) {
+            return ((Boolean) value) ? 1 : 0;
+        }
+        if (value instanceof Double || value instanceof Float) {
+            return Double.doubleToRawLongBits(((Number) value).doubleValue());
+        }
+        if (value instanceof Number) {
+            return ((Number) value).longValue();
+        }
+        return handle(value);
+    }
+
+    /**
+     * The payload of a boxed scalar, or the word unchanged.
+     *
+     * <p>An EXPORTED Python function returns a BOX -- a heap cell holding a
+     * tag and a payload -- because its return type is "any" and the lowering
+     * cannot know better. A Python caller unboxes it as a matter of course; a
+     * Java caller reaching in through reflection just gets the cell, and would
+     * otherwise see every returned object as a meaningless address.
+     */
+    private static long unbox(long word) {
+        return isBox(word) != 0 ? loadLong(word + BOX_PAYLOAD_OFF) : word;
+    }
+
+    /** A word from Python as the type the interface method declares. */
+    private static Object fromWord(long word, Class<?> declared) {
+        if (declared == void.class) {
+            return null;
+        }
+        if (declared == boolean.class || declared == Boolean.class) {
+            return word != 0;
+        }
+        if (declared == int.class || declared == Integer.class) {
+            return (int) word;
+        }
+        if (declared == long.class || declared == Long.class) {
+            return word;
+        }
+        if (declared == double.class || declared == Double.class) {
+            return Double.longBitsToDouble(word);
+        }
+        if (declared == float.class || declared == Float.class) {
+            return (float) Double.longBitsToDouble(word);
+        }
+        if (declared == String.class || declared == CharSequence.class) {
+            return word == 0 ? null : readString(word);
+        }
+        if (word == 0) {
+            return null;
+        }
+        // An object-typed return. A handle is unambiguous; anything smaller is
+        // a number, because a word carries no tag and the two cases cannot be
+        // told apart otherwise. That makes `Supplier<Item>` work -- Python
+        // returns a handle -- while a Python string returned through an
+        // Object-typed callback arrives as its address rather than its text.
+        // Declare the interface method as returning String to get the string.
+        return isHandle(word) ? target(word) : Long.valueOf(word);
+    }
+
+    private static synchronized boolean isHandle(long word) {
+        long index = word - HANDLE_BASE;
+        return index >= 0 && index < OBJECTS.size();
     }
 
     // ---- arrays ----------------------------------------------------------

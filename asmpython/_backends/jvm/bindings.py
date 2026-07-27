@@ -64,6 +64,8 @@ BINDINGS: dict = {
     "jcall_si": _f(("int", "str", "str", "int"), "int", "jcall_si"),
     "jcall_ii": _f(("int", "str", "int", "int"), "int", "jcall_ii"),
     "jcall_io": _f(("int", "str", "int", "int"), "int", "jcall_io"),
+    "jcall_so": _f(("int", "str", "str", "int"), "int", "jcall_so"),
+    "jcall_oo": _f(("int", "str", "int", "int"), "int", "jcall_oo"),
 
     # --- calls returning a string ----------------------------------------
     "jcalls": _f(("int", "str"), "str", "jcalls"),
@@ -79,6 +81,12 @@ BINDINGS: dict = {
     "jarray": _f(("int", "int"), "int", "jvm_array"),
     "jarray_get": _f(("int", "int"), "int", "jvm_array_get"),
     "jarray_len": _f(("int",), "int", "jvm_array_length"),
+
+    # --- implementing a Java interface from Python ------------------------
+    # jproxy(interface, callback) -> an object implementing `interface` whose
+    # methods call the exported Python function named by `callback`. Callback
+    # APIs (listeners, suppliers, consumers) are unreachable without this.
+    "jproxy": _f(("str", "str"), "int", "jproxy"),
 
     # --- misc -------------------------------------------------------------
     "jstr": _f(("int",), "str", "jstr"),
@@ -137,22 +145,18 @@ class JavaPackage(dict):
 def _resolve_submodule(subpath: str):
     """`import java.<subpath>` -> the Java package of that name.
 
-    Everything under `java.` is a Java package by construction, so this accepts
-    any subpath rather than guessing. `java.util` is `java.util`; `java.com.
-    google.gson` is `com.google.gson` -- the leading `java.` is the marker that
-    says "the rest of this is Java", not part of the package name, EXCEPT for
-    the JDK's own `java.*` packages, which keep it.
+    The subpath is passed through untouched; whether `util.ArrayList` means
+    `java.util.ArrayList` is decided at RUNTIME, which can just try both.
+
+    Guessing here does not work. A first-segment test ("is it a JDK package?")
+    has to put `util` in the JDK set, and `net` too -- and then
+    `java.net.neoforged.neoforge` resolves to `java.net.neoforged.neoforge`,
+    which does not exist. The ambiguity is real (`java.net` and `net.neoforged`
+    are both genuine), so the only honest resolution is to attempt the load.
     """
     if not subpath:
         return None
-    head = subpath.split(".")[0]
-    package = f"java.{subpath}" if head in _JDK_ROOTS else subpath
-    return JavaPackage(package)
-
-
-# JDK packages whose real name starts with a segment that would otherwise be
-# stripped. `import java.util` must mean java.util, not util.
-_JDK_ROOTS = {"util", "lang", "io", "nio", "net", "time", "math", "text", "security"}
+    return JavaPackage(subpath)
 
 
 BINDINGS[SUBMODULE_RESOLVER] = lambda subpath: _resolve_submodule(subpath)

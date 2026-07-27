@@ -5,6 +5,7 @@ from __future__ import annotations
 from .classfile import ACC_FINAL, ACC_PUBLIC, CLASS_VERSION_MAJOR, ClassBuilder
 from .codegen import (
     DEFAULT_RUNTIME,
+    LDC,
     FunctionEmitter,
     GETSTATIC,
     INVOKESTATIC,
@@ -28,7 +29,7 @@ def compile_module(ir_module, class_name: str = DEFAULT_CLASS,
                    class_version: int = CLASS_VERSION_MAJOR,
                    runtime: str = DEFAULT_RUNTIME,
                    annotations: "list[tuple[str, dict]] | None" = None,
-                   instantiate: bool = False,
+                   instantiate: "str | bool | None" = None,
                    runtime_package: str = "asmpython/jvm") -> bytes:
     """Emit one class containing every function in the module.
 
@@ -46,7 +47,7 @@ def compile_module(ir_module, class_name: str = DEFAULT_CLASS,
     cls = ClassBuilder(class_name, class_version=class_version)
     for descriptor, elements in annotations or []:
         cls.annotate(descriptor, **elements)
-    if instantiate:
+    if instantiate is not None and instantiate is not False:
         # A framework that constructs the class cannot construct a final one
         # with no constructor.
         cls.access &= ~ACC_FINAL
@@ -72,9 +73,20 @@ def compile_module(ir_module, class_name: str = DEFAULT_CLASS,
 
     _emit_clinit(cls, ir_module, class_name, globals_map, runtime_globals, runtime)
     _emit_main(cls, class_name, function_names)
-    if instantiate:
-        _emit_constructor(cls, class_name, function_names)
+    if instantiate is not None and instantiate is not False:
+        # The runtime must be the one this module was compiled against: a
+        # relocated runtime means the constructor's own helper calls have to
+        # follow it, or the class links against a package that is not there.
+        _emit_constructor(cls, class_name, function_names,
+                          _constructor_params(instantiate), runtime)
     return cls.serialize()
+
+
+def _constructor_params(spec) -> "list[str]":
+    """Parameter type names from `--jvm-instantiate`'s optional value."""
+    if not isinstance(spec, str) or not spec.strip():
+        return []
+    return [part.strip() for part in spec.split(",") if part.strip()]
 
 
 def _entry_name(function_names: set) -> "str | None":
@@ -85,14 +97,27 @@ def _entry_name(function_names: set) -> "str | None":
     return None
 
 
-def _emit_constructor(cls, class_name: str, function_names: set) -> None:
-    """A public no-arg constructor that runs the module entry.
+CONSTRUCT_HOOK = "on_construct"
+
+
+def _emit_constructor(cls, class_name: str, function_names: set,
+                      params: "list[str] | None" = None,
+                      runtime: str = DEFAULT_RUNTIME) -> None:
+    """A public constructor that runs the module entry.
 
     For frameworks that load a class by instantiating it, where `main` is never
     called. Running the entry from the constructor is what makes "the framework
     made an instance" and "the Python module body ran" the same event.
+
+    Declared parameters are handed to an exported `on_construct` as HANDLES,
+    which is how a framework passes the compiled code the context it needs --
+    an event bus, a plugin manager, whatever it constructs mods with. Without
+    that, code loaded this way can only ever be told "you were loaded", never
+    "here is what to use".
     """
-    method = cls.method("<init>", "()V", access=ACC_PUBLIC)
+    params = params or []
+    descriptor = "(" + "".join(f"L{p.replace('.', '/')};" for p in params) + ")V"
+    method = cls.method("<init>", descriptor, access=ACC_PUBLIC)
     method.u1(ALOAD_0)
     method.u1(INVOKESPECIAL)
     method.u2(method.pool.methodref("java/lang/Object", "<init>", "()V"))
@@ -102,9 +127,23 @@ def _emit_constructor(cls, class_name: str, function_names: set) -> None:
         method.u1(INVOKESTATIC)
         method.u2(method.pool.methodref(class_name, _java_name(entry), "()J"))
         method.u1(POP2)
+
+    # The module body first, then the hook: a hook that used a global the body
+    # defines would otherwise see it unset.
+    if params and CONSTRUCT_HOOK in function_names:
+        for index, _ in enumerate(params):
+            method.u1(ALOAD_0 + 1 + index)      # aload_1, aload_2, ...
+            method.u1(INVOKESTATIC)
+            method.u2(method.pool.methodref(
+                runtime, "handle", "(Ljava/lang/Object;)J"))
+        method.u1(INVOKESTATIC)
+        method.u2(method.pool.methodref(
+            class_name, CONSTRUCT_HOOK, "(" + "J" * len(params) + ")J"))
+        method.u1(POP2)
+
     method.u1(RETURN)
-    method.max_locals = 1
-    method.max_stack = 4
+    method.max_locals = 1 + len(params)
+    method.max_stack = 4 + 2 * len(params)
 
 
 def _global_bytes(global_) -> bytes:
@@ -146,6 +185,13 @@ def _emit_clinit(cls, ir_module, class_name: str, globals_map: dict,
             method.u2(method.pool.fieldref(class_name, globals_map[name], "J"))
         method.u1(INVOKESTATIC)
         method.u2(method.pool.methodref(runtime, "installExceptionSlots", "(JJ)V"))
+
+    # jproxy calls back into this class by name, and only the compiler knows
+    # what that name is.
+    method.u1(LDC)
+    method.u1(method.pool.string(class_name.replace("/", ".")) & 0xFF)
+    method.u1(INVOKESTATIC)
+    method.u2(method.pool.methodref(runtime, "installProgram", "(Ljava/lang/String;)V"))
 
     for global_ in getattr(ir_module, "data", []) or []:
         field = globals_map[global_.name]
