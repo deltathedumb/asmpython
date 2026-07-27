@@ -5350,6 +5350,16 @@ def _emit_sequence_eq_value(
         ctx.emit(IRInstr("load", ra_v, [ra_addr]))
         eq_v = ctx.tmp(I64)
         ctx.emit(IRInstr("fcmp.eq", eq_v, [la_v, ra_v]))
+    elif el_kind in ("list", "tuple"):
+        # A NESTED container element compares by value too, one level down.
+        # Depth is bounded by the static type, so the recursion terminates.
+        la_p = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", la_p, [la_addr]))
+        ra_p = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", ra_p, [ra_addr]))
+        eq_v = _emit_sequence_eq_value(
+            ctx, la_p, ra_p, inner_kind, "any", tag * 31 + 7
+        )
     else:
         la_v = ctx.tmp(I64)
         ctx.emit(IRInstr("load", la_v, [la_addr]))
@@ -5363,10 +5373,17 @@ def _emit_sequence_eq_value(
     ctx.emit(IRInstr("br.t", None, [eq_v, next_b.label, end_b.label]))
 
     ctx.switch_to(next_b)
+    # RELOAD the index rather than reusing the value the body loaded. When the
+    # element comparison is itself a loop (a list OF lists recurses here), a
+    # value carried from the body block across that inner cycle is live across
+    # a back-edge that did not exist when it was defined -- the emitted program
+    # then looped forever. Reloading keeps every live range inside one block.
+    ni_prev = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", ni_prev, [idx_ptr]))
     ni_v = ctx.tmp(I64)
     one_v = ctx.tmp(I64)
     ctx.emit(IRInstr("const", one_v, [1]))
-    ctx.emit(IRInstr("iadd", ni_v, [bi_v, one_v]))
+    ctx.emit(IRInstr("iadd", ni_v, [ni_prev, one_v]))
     ctx.emit(IRInstr("store", None, [ni_v, idx_ptr]))
     ctx.emit(IRInstr("br", None, [head_b.label]))
 
@@ -7114,13 +7131,13 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     # Mixed element kinds can't be compared slot-for-slot by a
                     # single static rule; fall back to the pointer comparison
                     # that was the only behaviour before (never worse).
-                    if _el_l != _el_r or _el_l in ("list", "tuple", "dict", "set"):
+                    if _el_l != _el_r or _el_l in ("dict", "set"):
                         # Differing element kinds have no single slot-for-slot
-                        # rule, and a NESTED container element would need this
-                        # routine to recurse -- attempted, and the emitted
-                        # nested loop hangs at runtime, so it stays out. Both
-                        # fall back to the pointer comparison that was the only
-                        # behaviour before, which is never worse.
+                        # rule, and a dict/set element would need a different
+                        # routine than the sequence walk. Both fall back to the
+                        # pointer comparison that was the only behaviour
+                        # before, which is never worse. A nested LIST/TUPLE
+                        # element does recurse (see `_emit_sequence_eq_value`).
                         _ceq = None
                     else:
                         _ceq = _lower_sequence_eq(
