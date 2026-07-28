@@ -1923,23 +1923,57 @@ class SemaAnalyzer:
             # an int return and the caller printed the double's raw bits as a
             # pointer-sized integer.
             return ("float", None, None, None)
-        if isinstance(value, A.BinOp) and value.op in ("+", "-", "*", "%", "**"):
-            # Numeric promotion: a float on either side makes the result float.
-            # Only literal-shaped operands are consulted (this runs before any
-            # expression has been checked), the same standard the rest of this
-            # function holds itself to.
+        if isinstance(value, A.BinOp) and value.op in (
+            "+", "-", "*", "%", "**", "//", "&", "|", "^", "<<", ">>"
+        ):
+            # Numeric promotion. Only literal-shaped operands are consulted
+            # (this runs before any expression has been checked), the same
+            # standard the rest of this function holds itself to.
             _lhs = self._literal_arg_type(value.left)
             _rhs = self._literal_arg_type(value.right)
-            if (_lhs is not None and _lhs[0] == "float") or (
-                _rhs is not None and _rhs[0] == "float"
+            _bitwise = value.op in ("&", "|", "^", "<<", ">>")
+            if not _bitwise and (
+                (_lhs is not None and _lhs[0] == "float")
+                or (_rhs is not None and _rhs[0] == "float")
             ):
                 return ("float", None, None, None)
-            if (
-                value.op == "+"
-                and _lhs is not None and _rhs is not None
-                and _lhs[0] == "str" and _rhs[0] == "str"
-            ):
-                return ("str", None, None, None)
+            if _lhs is not None and _rhs is not None:
+                _lk, _rk = _lhs[0], _rhs[0]
+                if value.op == "+" and _lk == "str" and _rk == "str":
+                    return ("str", None, None, None)
+                # `"ab" * 3` / `3 * "ab"` repeat, and `"%d" % x` formats.
+                if value.op == "*" and {_lk, _rk} == {"str", "int"}:
+                    return ("str", None, None, None)
+                if value.op == "%" and _lk == "str":
+                    return ("str", None, None, None)
+                # Two integers make an integer. This case was missing, so an
+                # `xs.append(a + b)` left the list's element kind unknown even
+                # though both operands were plainly ints. The caller then read
+                # the element as "any", and the read-side tag probe treats a
+                # large 8-byte-aligned integer as a heap pointer and
+                # dereferences it -- a segfault for any aligned value above
+                # PTR_THRESHOLD (`_lower_read_any_tag` in ir_lower.py).
+                if _lk in ("int", "bool") and _rk in ("int", "bool"):
+                    return ("int", None, None, None)
+        if isinstance(value, A.UnaryOp):
+            # `-x` / `+x` keep the operand's numeric kind; `~x` is integer-only;
+            # `not x` is a bool whatever the operand is.
+            if value.op == "not":
+                return ("bool", None, None, None)
+            _uk = self._literal_arg_type(value.operand)
+            if _uk is not None and _uk[0] in ("int", "float", "bool"):
+                if value.op == "~":
+                    return ("int", None, None, None)
+                return (_uk[0], None, None, None)
+        if isinstance(value, A.Compare):
+            # Every comparison yields a bool, regardless of what is compared.
+            return ("bool", None, None, None)
+        if isinstance(value, A.IfExp):
+            # `a if c else b` evaluates to one arm, so matching arms decide it.
+            _tk = self._literal_arg_type(value.body)
+            _fk = self._literal_arg_type(value.orelse)
+            if _tk is not None and _fk is not None and _tk[0] == _fk[0]:
+                return (_tk[0], None, None, None)
         if isinstance(value, A.Lambda):
             # A lambda passed as an argument / stored in a field is a CALLABLE
             # VALUE (a code pointer). Typing the receiving parameter/field
