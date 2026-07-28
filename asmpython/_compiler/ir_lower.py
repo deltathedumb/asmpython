@@ -8572,15 +8572,21 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 other_v = _lower_expr(ctx, el.value)
                 ctx.emit(IRInstr("call", None, ["_abi_list_extend", list_v, other_v]))
                 continue
-            val = _lower_expr(ctx, el)
-            if A.expr_type(el) == "float":
-                # _abi_list_append's cell is a plain 8-byte int slot (same
-                # constraint as _abi_dict_set -- see A.AttrAssign's
-                # matching comment); store the float's raw bits, read back
-                # via bitcast_i2f wherever an element is loaded as "float".
-                iv = ctx.tmp(I64)
-                ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
-                val = iv
+            if getattr(e, "el_type", "") == "any":
+                # Declared heterogeneous (explicit list[object], or the list a
+                # call packs an unannotated *args into): elements are read back
+                # through the "any" path, so they must be BOXED going in.
+                val = _lower_value_into_any_slot(ctx, el)
+            else:
+                val = _lower_expr(ctx, el)
+                if A.expr_type(el) == "float":
+                    # _abi_list_append's cell is a plain 8-byte int slot (same
+                    # constraint as _abi_dict_set -- see A.AttrAssign's
+                    # matching comment); store the float's raw bits, read back
+                    # via bitcast_i2f wherever an element is loaded as "float".
+                    iv = ctx.tmp(I64)
+                    ctx.emit(IRInstr("bitcast_f2i", iv, [val]))
+                    val = iv
             ctx.emit(IRInstr("call", None, ["_abi_list_append", list_v, val]))
         return list_v
 
@@ -11369,6 +11375,17 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         if e.func == "float" and len(e.args) == 1:
             arg = e.args[0]
             arg_t = A.expr_type(arg)
+            if arg_t == "any":
+                # Mirror of `int(x)` on an opaque value above: a scalar read
+                # out of a list[object] -- or an unannotated *args -- is a
+                # boxed cell. The payload holds the double's BITS, so
+                # reinterpret rather than convert. Without this, every float
+                # passed through *args read back as 0.0.
+                obj_v = _lower_expr_inner(ctx, arg)
+                payload = _lower_unbox_any(ctx, obj_v)
+                out = ctx.tmp(F64)
+                ctx.emit(IRInstr("bitcast_i2f", out, [payload]))
+                return out
             # float("nan")/float("inf")/float("-inf") emit the bit
             # pattern directly rather than relying on strtod (matches
             # codegen.py's own special-case, since UCRT's strtod

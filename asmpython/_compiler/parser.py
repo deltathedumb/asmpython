@@ -1485,7 +1485,9 @@ class Parser:
                     # `*args`: a single list-typed parameter that absorbs the
                     # caller's surplus positional arguments.
                     vararg = self._expect("NAME").value  # type: ignore
-                    el = None
+                    # Heterogeneous unless annotated: *args holds whatever the
+                    # caller passed. An annotation below overrides this.
+                    el = "any"
                     if self._check("OP", ":"):
                         self._eat()
                         inner = self._parse_type_annotation()

@@ -9122,6 +9122,11 @@ class SemaAnalyzer:
                     if "float" not in (seen, et) and "str" not in (seen, et):
                         seen = "any"
                         continue
+                    if getattr(e, "el_type", None) == "any":
+                        # Declared heterogeneous: its elements are boxed, so a
+                        # float beside an int is the point, not a clash.
+                        seen = "any"
+                        continue
                     raise SemaError(
                         f"mixed list element types ({seen} and {et}); "
                         "mixed-type lists need a tagged-value runtime, not yet implemented",
@@ -9129,7 +9134,11 @@ class SemaAnalyzer:
                         ErrorCode.E_HETEROGENEOUS_LIST,
                     )
             # Empty literal stays "?" until the first append pins the type.
-            e.el_type = seen if seen is not None else "?"
+            # A literal already DECLARED heterogeneous keeps that declaration;
+            # narrowing it to whatever kind its elements happen to have would
+            # store them raw and break the "any" reads on the other side.
+            if getattr(e, "el_type", None) != "any":
+                e.el_type = seen if seen is not None else "?"
             # When elements are nested containers (list[dict] / list[list]),
             # remember the common leaf kind so `xs[i][k]` / `for x in xs: x[k]`
             # recover the value type one level down.
@@ -12243,7 +12252,29 @@ class SemaAnalyzer:
                     _packed = A.BinOp(op="+", left=_packed, right=_extra_part, pos=pos)
                 new_args.append(_packed)
             else:
-                new_args.append(A.ListLit(elems=extra, pos=pos))
+                # The packed slot's element kind is the CALLEE's, not the
+                # arguments'. `*args: int` stays an int list (elements raw, as
+                # the callee reads them); only an unannotated `*args`, which
+                # the parser records as list[any], is heterogeneous and needs
+                # its elements boxed.
+                # Read the element kind off the FUNCDEF, not the FuncSig:
+                # FuncSig.param_types is collapsed to base strings ("list"),
+                # so it cannot tell list[int] from list[any].
+                _va_el = None
+                for _va_fd in self.mod.funcs:
+                    if _va_fd.name != label:
+                        continue
+                    _va_pts = getattr(_va_fd, "param_types", None) or []
+                    if _va_pts:
+                        _va_last = _va_pts[-1]
+                        if (isinstance(_va_last, tuple) and len(_va_last) >= 2
+                                and _va_last[0] == "list"):
+                            _va_el = _va_last[1]
+                    break
+                if _va_el == "any":
+                    new_args.append(A.ListLit(elems=extra, pos=pos, el_type="any"))
+                else:
+                    new_args.append(A.ListLit(elems=extra, pos=pos))
         if kwarg is not None:
             kw_keys: list = []
             kw_vals: list = []
