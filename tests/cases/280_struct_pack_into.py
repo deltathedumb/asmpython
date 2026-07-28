@@ -14,6 +14,6 @@ print(data[0])
 print(data[1])
 
 buf = [0, 0, 0, 0]
-pack_into("<BB", buf, 0, [10, 20])
+pack_into("<BB", buf, 0, 10, 20)
 print(buf[2])
 print(buf[0] + buf[1] - 10 - 20 + 255)

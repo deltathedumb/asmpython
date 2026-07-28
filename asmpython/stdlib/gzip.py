@@ -5,7 +5,6 @@ the API surface with pure-Python decompression for small payloads and
 wraps the zlib FFI when available.
 """
 from __future__ import annotations
-import struct
 
 
 FTEXT: int    = 0x01

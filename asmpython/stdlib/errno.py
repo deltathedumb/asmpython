@@ -1,19 +1,12 @@
-"""errno module: standard system error codes.
+"""errno: the standard system error codes.
 
-Provides the numeric error code constants that C's errno.h defines.
-POSIX values are used; Windows CRT uses the same numbers for the shared
-subset.
-
-`errorcode` is a dict[str,str] keyed by the string form of the code
-(e.g. errorcode["2"] == "ENOENT"), matching cpython's int-keyed dict
-semantics as closely as the compiler's string-key-only dict allows.
-Use errno.strerror(code) for a description string.
+Mirrors CPython on this platform: every constant CPython exposes, with its
+value, plus `errorcode` mapping code -> name. `errorcode` is int-keyed, as
+in CPython -- the previous string-keyed form here worked around a dict
+restriction the compiler no longer has.
 """
 from __future__ import annotations
 
-import sys
-
-# Shared POSIX / Windows CRT subset
 EPERM: int = 1
 ENOENT: int = 2
 ESRCH: int = 3
@@ -46,100 +39,215 @@ EMLINK: int = 31
 EPIPE: int = 32
 EDOM: int = 33
 ERANGE: int = 34
+EDEADLK: int = 36
+EDEADLOCK: int = 36
+ENAMETOOLONG: int = 38
+ENOLCK: int = 39
+ENOSYS: int = 40
+ENOTEMPTY: int = 41
+EILSEQ: int = 42
+EBADMSG: int = 104
+ECANCELED: int = 105
+EIDRM: int = 111
+ENODATA: int = 120
+ENOLINK: int = 121
+ENOMSG: int = 122
+ENOSR: int = 124
+ENOSTR: int = 125
+ENOTRECOVERABLE: int = 127
+ENOTSUP: int = 129
+EOVERFLOW: int = 132
+EOWNERDEAD: int = 133
+EPROTO: int = 134
+ETIME: int = 137
+ETXTBSY: int = 139
+WSABASEERR: int = 10000
+WSAEINTR: int = 10004
+WSAEBADF: int = 10009
+WSAEACCES: int = 10013
+WSAEFAULT: int = 10014
+WSAEINVAL: int = 10022
+WSAEMFILE: int = 10024
+EWOULDBLOCK: int = 10035
+WSAEWOULDBLOCK: int = 10035
+EINPROGRESS: int = 10036
+WSAEINPROGRESS: int = 10036
+EALREADY: int = 10037
+WSAEALREADY: int = 10037
+ENOTSOCK: int = 10038
+WSAENOTSOCK: int = 10038
+EDESTADDRREQ: int = 10039
+WSAEDESTADDRREQ: int = 10039
+EMSGSIZE: int = 10040
+WSAEMSGSIZE: int = 10040
+EPROTOTYPE: int = 10041
+WSAEPROTOTYPE: int = 10041
+ENOPROTOOPT: int = 10042
+WSAENOPROTOOPT: int = 10042
+EPROTONOSUPPORT: int = 10043
+WSAEPROTONOSUPPORT: int = 10043
+ESOCKTNOSUPPORT: int = 10044
+WSAESOCKTNOSUPPORT: int = 10044
+EOPNOTSUPP: int = 10045
+WSAEOPNOTSUPP: int = 10045
+EPFNOSUPPORT: int = 10046
+WSAEPFNOSUPPORT: int = 10046
+EAFNOSUPPORT: int = 10047
+WSAEAFNOSUPPORT: int = 10047
+EADDRINUSE: int = 10048
+WSAEADDRINUSE: int = 10048
+EADDRNOTAVAIL: int = 10049
+WSAEADDRNOTAVAIL: int = 10049
+ENETDOWN: int = 10050
+WSAENETDOWN: int = 10050
+ENETUNREACH: int = 10051
+WSAENETUNREACH: int = 10051
+ENETRESET: int = 10052
+WSAENETRESET: int = 10052
+ECONNABORTED: int = 10053
+WSAECONNABORTED: int = 10053
+ECONNRESET: int = 10054
+WSAECONNRESET: int = 10054
+ENOBUFS: int = 10055
+WSAENOBUFS: int = 10055
+EISCONN: int = 10056
+WSAEISCONN: int = 10056
+ENOTCONN: int = 10057
+WSAENOTCONN: int = 10057
+ESHUTDOWN: int = 10058
+WSAESHUTDOWN: int = 10058
+ETOOMANYREFS: int = 10059
+WSAETOOMANYREFS: int = 10059
+ETIMEDOUT: int = 10060
+WSAETIMEDOUT: int = 10060
+ECONNREFUSED: int = 10061
+WSAECONNREFUSED: int = 10061
+ELOOP: int = 10062
+WSAELOOP: int = 10062
+WSAENAMETOOLONG: int = 10063
+EHOSTDOWN: int = 10064
+WSAEHOSTDOWN: int = 10064
+EHOSTUNREACH: int = 10065
+WSAEHOSTUNREACH: int = 10065
+WSAENOTEMPTY: int = 10066
+WSAEPROCLIM: int = 10067
+EUSERS: int = 10068
+WSAEUSERS: int = 10068
+EDQUOT: int = 10069
+WSAEDQUOT: int = 10069
+ESTALE: int = 10070
+WSAESTALE: int = 10070
+EREMOTE: int = 10071
+WSAEREMOTE: int = 10071
+WSASYSNOTREADY: int = 10091
+WSAVERNOTSUPPORTED: int = 10092
+WSANOTINITIALISED: int = 10093
+WSAEDISCON: int = 10101
 
-if sys.platform == "win32":
-    EDEADLK: int = 36
-    ENAMETOOLONG: int = 38
-    ENOLCK: int = 39
-    ENOSYS: int = 40
-    ENOTEMPTY: int = 41
-    EILSEQ: int = 42
-    EADDRINUSE: int = 100
-    EADDRNOTAVAIL: int = 101
-    EAFNOSUPPORT: int = 102
-    EALREADY: int = 103
-    ECONNABORTED: int = 106
-    ECONNREFUSED: int = 107
-    ECONNRESET: int = 108
-    EDESTADDRREQ: int = 109
-    EHOSTUNREACH: int = 110
-    EINPROGRESS: int = 112
-    EISCONN: int = 113
-    ELOOP: int = 114
-    EMSGSIZE: int = 115
-    ENETDOWN: int = 116
-    ENETRESET: int = 117
-    ENETUNREACH: int = 118
-    ENOBUFS: int = 119
-    ENOPROTOOPT: int = 123
-    ENOTCONN: int = 126
-    ENOTSOCK: int = 128
-    EOPNOTSUPP: int = 130
-    EPROTONOSUPPORT: int = 135
-    EPROTOTYPE: int = 136
-    ETIMEDOUT: int = 138
-    EWOULDBLOCK: int = 140
-    ENOTSUP: int = 129
-else:
-    EDEADLK: int = 35
-    ENAMETOOLONG: int = 36
-    ENOLCK: int = 37
-    ENOSYS: int = 38
-    ENOTEMPTY: int = 39
-    ELOOP: int = 40
-    EWOULDBLOCK: int = 11
-    ENOMSG: int = 42
-    EIDRM: int = 43
-    ENOSTR: int = 60
-    ENODATA: int = 61
-    ETIME: int = 62
-    ENOSR: int = 63
-    EREMOTE: int = 66
-    ENOLINK: int = 67
-    EPROTO: int = 71
-    EMULTIHOP: int = 72
-    EBADMSG: int = 74
-    EOVERFLOW: int = 75
-    EILSEQ: int = 84
-    EUSERS: int = 87
-    ENOTSOCK: int = 88
-    EDESTADDRREQ: int = 89
-    EMSGSIZE: int = 90
-    EPROTOTYPE: int = 91
-    ENOPROTOOPT: int = 92
-    EPROTONOSUPPORT: int = 93
-    EAFNOSUPPORT: int = 97
-    EADDRINUSE: int = 98
-    EADDRNOTAVAIL: int = 99
-    ENETDOWN: int = 100
-    ENETUNREACH: int = 101
-    ENETRESET: int = 102
-    ECONNABORTED: int = 103
-    ECONNRESET: int = 104
-    ENOBUFS: int = 105
-    EISCONN: int = 106
-    ENOTCONN: int = 107
-    ETIMEDOUT: int = 110
-    ECONNREFUSED: int = 111
-    EHOSTUNREACH: int = 113
-    EALREADY: int = 114
-    EINPROGRESS: int = 115
-    EOPNOTSUPP: int = 95
-    ENOTSUP: int = 95
-
-# String-keyed lookup: errorcode[str(n)] -> name string.
-# (asmpython dicts use string keys; CPython's errno.errorcode is int-keyed.)
-errorcode: dict[str, str] = {
-    "1": "EPERM", "2": "ENOENT", "3": "ESRCH", "4": "EINTR",
-    "5": "EIO", "6": "ENXIO", "7": "E2BIG", "8": "ENOEXEC",
-    "9": "EBADF", "10": "ECHILD", "11": "EAGAIN", "12": "ENOMEM",
-    "13": "EACCES", "14": "EFAULT", "16": "EBUSY", "17": "EEXIST",
-    "18": "EXDEV", "19": "ENODEV", "20": "ENOTDIR", "21": "EISDIR",
-    "22": "EINVAL", "23": "ENFILE", "24": "EMFILE", "25": "ENOTTY",
-    "27": "EFBIG", "28": "ENOSPC", "29": "ESPIPE", "30": "EROFS",
-    "31": "EMLINK", "32": "EPIPE", "33": "EDOM", "34": "ERANGE",
+#: Maps each error code to the name of the first constant defining it.
+errorcode: dict = {
+    1: "EPERM",
+    2: "ENOENT",
+    3: "ESRCH",
+    4: "EINTR",
+    5: "EIO",
+    6: "ENXIO",
+    7: "E2BIG",
+    8: "ENOEXEC",
+    9: "EBADF",
+    10: "ECHILD",
+    11: "EAGAIN",
+    12: "ENOMEM",
+    13: "EACCES",
+    14: "EFAULT",
+    16: "EBUSY",
+    17: "EEXIST",
+    18: "EXDEV",
+    19: "ENODEV",
+    20: "ENOTDIR",
+    21: "EISDIR",
+    22: "EINVAL",
+    23: "ENFILE",
+    24: "EMFILE",
+    25: "ENOTTY",
+    27: "EFBIG",
+    28: "ENOSPC",
+    29: "ESPIPE",
+    30: "EROFS",
+    31: "EMLINK",
+    32: "EPIPE",
+    33: "EDOM",
+    34: "ERANGE",
+    36: "EDEADLOCK",
+    38: "ENAMETOOLONG",
+    39: "ENOLCK",
+    40: "ENOSYS",
+    41: "ENOTEMPTY",
+    42: "EILSEQ",
+    104: "EBADMSG",
+    105: "ECANCELED",
+    111: "EIDRM",
+    120: "ENODATA",
+    121: "ENOLINK",
+    122: "ENOMSG",
+    124: "ENOSR",
+    125: "ENOSTR",
+    127: "ENOTRECOVERABLE",
+    129: "ENOTSUP",
+    132: "EOVERFLOW",
+    133: "EOWNERDEAD",
+    134: "EPROTO",
+    137: "ETIME",
+    139: "ETXTBSY",
+    10000: "WSABASEERR",
+    10004: "WSAEINTR",
+    10009: "WSAEBADF",
+    10013: "WSAEACCES",
+    10014: "WSAEFAULT",
+    10022: "WSAEINVAL",
+    10024: "WSAEMFILE",
+    10035: "WSAEWOULDBLOCK",
+    10036: "WSAEINPROGRESS",
+    10037: "WSAEALREADY",
+    10038: "WSAENOTSOCK",
+    10039: "WSAEDESTADDRREQ",
+    10040: "WSAEMSGSIZE",
+    10041: "WSAEPROTOTYPE",
+    10042: "WSAENOPROTOOPT",
+    10043: "WSAEPROTONOSUPPORT",
+    10044: "WSAESOCKTNOSUPPORT",
+    10045: "WSAEOPNOTSUPP",
+    10046: "WSAEPFNOSUPPORT",
+    10047: "WSAEAFNOSUPPORT",
+    10048: "WSAEADDRINUSE",
+    10049: "WSAEADDRNOTAVAIL",
+    10050: "WSAENETDOWN",
+    10051: "WSAENETUNREACH",
+    10052: "WSAENETRESET",
+    10053: "WSAECONNABORTED",
+    10054: "WSAECONNRESET",
+    10055: "WSAENOBUFS",
+    10056: "WSAEISCONN",
+    10057: "WSAENOTCONN",
+    10058: "WSAESHUTDOWN",
+    10059: "WSAETOOMANYREFS",
+    10060: "WSAETIMEDOUT",
+    10061: "WSAECONNREFUSED",
+    10062: "WSAELOOP",
+    10063: "WSAENAMETOOLONG",
+    10064: "WSAEHOSTDOWN",
+    10065: "WSAEHOSTUNREACH",
+    10066: "WSAENOTEMPTY",
+    10067: "WSAEPROCLIM",
+    10068: "WSAEUSERS",
+    10069: "WSAEDQUOT",
+    10070: "WSAESTALE",
+    10071: "WSAEREMOTE",
+    10091: "WSASYSNOTREADY",
+    10092: "WSAVERNOTSUPPORTED",
+    10093: "WSANOTINITIALISED",
+    10101: "WSAEDISCON",
 }
-
 
 def strerror(code: int) -> str:
     """Return a string describing error code *code*."""

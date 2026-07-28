@@ -7,6 +7,38 @@ Implements the most commonly used parts of urllib.parse:
 """
 from __future__ import annotations
 
+#: Schemes whose URLs support relative references, a netloc, params, a query,
+#: or a fragment. CPython exposes these and `urljoin` is defined in terms of
+#: them, so they are part of the interface, not an implementation detail.
+uses_relative: list = [
+    "", "ftp", "http", "gopher", "nntp", "imap", "wais", "file", "https",
+    "shttp", "mms", "prospero", "rtsp", "rtspu", "sftp", "svn", "svn+ssh",
+    "ws", "wss",
+]
+uses_netloc: list = [
+    "", "ftp", "http", "gopher", "nntp", "telnet", "imap", "wais", "file",
+    "mms", "https", "shttp", "snews", "prospero", "rtsp", "rtspu", "rsync",
+    "svn", "svn+ssh", "sftp", "nfs", "git", "git+ssh", "ws", "wss", "itms-services",
+]
+uses_params: list = [
+    "", "ftp", "hdl", "prospero", "http", "imap", "https", "shttp", "rtsp",
+    "rtspu", "sip", "sips", "mms", "sftp", "tel",
+]
+uses_fragment: list = [
+    "", "ftp", "hdl", "http", "gopher", "news", "nntp", "wais", "https",
+    "shttp", "snews", "file", "prospero",
+]
+uses_query: list = [
+    "", "http", "wais", "imap", "https", "shttp", "mms", "gopher", "rtsp",
+    "rtspu", "sip", "sips",
+]
+
+#: Characters legal in a scheme name, per RFC 3986.
+scheme_chars: str = (
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+-."
+)
+
+
 
 _HEX: str = "0123456789ABCDEF"
 _SAFE_CHARS: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
@@ -43,6 +75,38 @@ def _hex_val(c: str) -> int:
     return 0
 
 
+def _utf8_decode(data: list[int]) -> str:
+    """Decode a UTF-8 byte run, substituting U+FFFD for anything malformed."""
+    out: str = ""
+    i: int = 0
+    n: int = len(data)
+    while i < n:
+        b: int = data[i]
+        if b < 0x80:
+            out = out + chr(b)
+            i = i + 1
+        elif b & 0xE0 == 0xC0 and i + 1 < n:
+            out = out + chr(((b & 0x1F) << 6) | (data[i + 1] & 0x3F))
+            i = i + 2
+        elif b & 0xF0 == 0xE0 and i + 2 < n:
+            out = out + chr(
+                ((b & 0x0F) << 12) | ((data[i + 1] & 0x3F) << 6) | (data[i + 2] & 0x3F)
+            )
+            i = i + 3
+        elif b & 0xF8 == 0xF0 and i + 3 < n:
+            out = out + chr(
+                ((b & 0x07) << 18)
+                | ((data[i + 1] & 0x3F) << 12)
+                | ((data[i + 2] & 0x3F) << 6)
+                | (data[i + 3] & 0x3F)
+            )
+            i = i + 4
+        else:
+            out = out + chr(0xFFFD)
+            i = i + 1
+    return out
+
+
 def quote(string: str, safe: str = "/", encoding: str = "utf-8") -> str:
     """Percent-encode string, leaving safe chars unencoded."""
     result: str = ""
@@ -60,13 +124,25 @@ def quote(string: str, safe: str = "/", encoding: str = "utf-8") -> str:
                 b2: int = 0x80 | (code & 0x3F)
                 result = result + "%" + _hex_digit(b1 >> 4) + _hex_digit(b1 & 0xF)
                 result = result + "%" + _hex_digit(b2 >> 4) + _hex_digit(b2 & 0xF)
-            else:
+            elif code < 65536:
                 b3: int = 0xE0 | (code >> 12)
                 b4: int = 0x80 | ((code >> 6) & 0x3F)
                 b5: int = 0x80 | (code & 0x3F)
                 result = result + "%" + _hex_digit(b3 >> 4) + _hex_digit(b3 & 0xF)
                 result = result + "%" + _hex_digit(b4 >> 4) + _hex_digit(b4 & 0xF)
                 result = result + "%" + _hex_digit(b5 >> 4) + _hex_digit(b5 & 0xF)
+            else:
+                # Astral plane: four bytes. Without this branch the 3-byte form
+                # was used for everything above U+07FF, so U+1F600 encoded as
+                # 0xE0 | (0x1F600 >> 12) == 0xFF -- not even valid UTF-8.
+                b6: int = 0xF0 | (code >> 18)
+                b7: int = 0x80 | ((code >> 12) & 0x3F)
+                b8: int = 0x80 | ((code >> 6) & 0x3F)
+                b9: int = 0x80 | (code & 0x3F)
+                result = result + "%" + _hex_digit(b6 >> 4) + _hex_digit(b6 & 0xF)
+                result = result + "%" + _hex_digit(b7 >> 4) + _hex_digit(b7 & 0xF)
+                result = result + "%" + _hex_digit(b8 >> 4) + _hex_digit(b8 & 0xF)
+                result = result + "%" + _hex_digit(b9 >> 4) + _hex_digit(b9 & 0xF)
         i = i + 1
     return result
 
@@ -86,16 +162,27 @@ def quote_plus(string: str, safe: str = "", encoding: str = "utf-8") -> str:
 
 
 def unquote(string: str, encoding: str = "utf-8") -> str:
-    """Replace %XX escapes with their single-character equivalent."""
+    """Replace %XX escapes with the characters they encode.
+
+    Escapes are gathered into a byte run and decoded as UTF-8 together. Doing
+    it one escape at a time yields one character per BYTE, so any non-ASCII
+    character came back as mojibake.
+    """
     result: str = ""
     i: int = 0
-    while i < len(string):
+    n: int = len(string)
+    while i < n:
         c: str = string[i]
-        if c == "%" and i + 2 < len(string):
-            hi: int = _hex_val(string[i + 1])
-            lo: int = _hex_val(string[i + 2])
-            result = result + chr(hi * 16 + lo)
-            i = i + 3
+        if c == "%" and i + 2 < n:
+            run: list[int] = []
+            while i + 2 < n and string[i] == "%":
+                hi: int = _hex_val(string[i + 1])
+                lo: int = _hex_val(string[i + 2])
+                if hi < 0 or lo < 0:
+                    break
+                run.append(hi * 16 + lo)
+                i = i + 3
+            result = result + _utf8_decode(run)
         else:
             result = result + c
             i = i + 1
@@ -115,7 +202,7 @@ def unquote_plus(string: str, encoding: str = "utf-8") -> str:
     return unquote(replaced, encoding)
 
 
-def urlencode(query: list, doseq: int = 0) -> str:
+def urlencode(query: list, doseq: bool = False) -> str:
     """Encode a list of (key, value) pairs as a URL query string."""
     parts: list = []
     i: int = 0
@@ -155,7 +242,7 @@ class ParseResult:
                 ", path=" + self.path + ")")
 
 
-def urlparse(urlstring: str, scheme: str = "", allow_fragments: int = 1) -> ParseResult:
+def urlparse(urlstring: str, scheme: str = "", allow_fragments: bool = True) -> ParseResult:
     """Parse a URL into 6 components."""
     rest: str = urlstring
     found_scheme: str = scheme
@@ -224,6 +311,25 @@ def urlparse(urlstring: str, scheme: str = "", allow_fragments: int = 1) -> Pars
             found_scheme = maybe_scheme.lower()
             rest = rest[colon_idx + 1:]
 
+    # A protocol-relative URL ("//host/path") carries a netloc with no scheme.
+    # CPython strips the scheme first and then treats any leading "//" as the
+    # authority, so this is not specific to the scheme-less case.
+    if len(found_netloc) == 0 and len(rest) >= 2 and rest[0] == "/" and rest[1] == "/":
+        rest = rest[2:]
+        slash_after: int = -1
+        q: int = 0
+        while q < len(rest):
+            if rest[q] == "/":
+                slash_after = q
+                break
+            q = q + 1
+        if slash_after >= 0:
+            found_netloc = rest[:slash_after]
+            rest = rest[slash_after:]
+        else:
+            found_netloc = rest
+            rest = ""
+
     param_idx: int = -1
     i = 0
     while i < len(rest):
@@ -280,7 +386,7 @@ class SplitResult:
 
 
 def urlsplit(urlstring: str, scheme: str = "",
-             allow_fragments: int = 1) -> SplitResult:
+             allow_fragments: bool = True) -> SplitResult:
     """Parse URL without splitting params from path."""
     pr: ParseResult = urlparse(urlstring, scheme, allow_fragments)
     path_params: str = pr.path
@@ -289,9 +395,9 @@ def urlsplit(urlstring: str, scheme: str = "",
     return SplitResult(pr.scheme, pr.netloc, path_params, pr.query, pr.fragment)
 
 
-def parse_qsl(qs: str, keep_blank_values: int = 0) -> list:
-    """Parse a query string, returning list of [key, value] pairs."""
-    result: list = []
+def parse_qsl(qs: str, keep_blank_values: bool = False) -> list:
+    """Parse a query string into a list of (key, value) tuples."""
+    result: list[int] = []
     if len(qs) == 0:
         return result
     i: int = 0
@@ -299,7 +405,7 @@ def parse_qsl(qs: str, keep_blank_values: int = 0) -> list:
         amp_idx: int = len(qs)
         j: int = i
         while j < len(qs):
-            if qs[j] == "&" or qs[j] == ";":
+            if qs[j] == "&":
                 amp_idx = j
                 break
             j = j + 1
@@ -320,12 +426,44 @@ def parse_qsl(qs: str, keep_blank_values: int = 0) -> list:
         else:
             key = unquote_plus(part)
             val = ""
-        if len(val) > 0 or keep_blank_values == 1:
-            result.append([key, val])
+        if len(val) > 0 or keep_blank_values:
+            result.append((key, val))
     return result
 
 
-def urljoin(base: str, url: str, allow_fragments: int = 1) -> str:
+def _remove_dot_segments(path: str) -> str:
+    """RFC 3986 5.2.4: resolve '.' and '..' inside a path.
+
+    Without this, urljoin("http://a/x/y", "../z") produced
+    "http://a/x/../z" instead of "http://a/z".
+    """
+    leading = path.startswith("/")
+    trailing = path.endswith("/") or path.endswith("/.") or path.endswith("/..")
+    out: list[int] = []
+    start = 0
+    i = 0
+    n = len(path)
+    while i <= n:
+        if i == n or path[i] == "/":
+            seg = path[start:i]
+            if seg == "..":
+                if len(out) > 0:
+                    out.pop()
+            elif seg != "." and len(seg) > 0:
+                out.append(seg)
+            start = i + 1
+        i = i + 1
+    joined = "/".join(out)
+    if leading:
+        joined = "/" + joined
+    if trailing and len(joined) > 0 and not joined.endswith("/"):
+        joined = joined + "/"
+    if len(joined) == 0 and leading:
+        return "/"
+    return joined
+
+
+def urljoin(base: str, url: str, allow_fragments: bool = True) -> str:
     """Join base URL with a possibly relative URL."""
     if len(url) == 0:
         return base
@@ -359,11 +497,12 @@ def urljoin(base: str, url: str, allow_fragments: int = 1) -> str:
             path = bp.path[:slash + 1] + path
         else:
             path = "/" + path
+    path = _remove_dot_segments(path)
     return urlunparse(ParseResult(scheme, netloc, path, up.params, query, fragment))
 
 
-def parse_qs(qs: str, keep_blank_values: int = 0,
-             strict_parsing: int = 0) -> list:
+def parse_qs(qs: str, keep_blank_values: bool = False,
+             strict_parsing: bool = False) -> list:
     """Parse a query string given as a string.
 
     Returns a list of [key, value] pairs (one per unique key).
@@ -371,7 +510,7 @@ def parse_qs(qs: str, keep_blank_values: int = 0,
     dicts must have homogeneous value types.
     """
     pairs: list = parse_qsl(qs, keep_blank_values)
-    result: list = []
+    result: list[int] = []
     keys: list[str] = []
     vals: list = []
     for pair in pairs:

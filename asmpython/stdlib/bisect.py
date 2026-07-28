@@ -1,64 +1,80 @@
-"""bisect module: array bisection algorithm.
+"""bisect: maintain a list in sorted order without re-sorting it.
 
-Provides bisect_left, bisect_right, insort_left, insort_right for
-maintaining sorted lists. All operations are O(log n).
+Mirrors CPython, including the `hi=None` sentinel and the `key` parameter added
+in 3.10. The previous version here defaulted `hi` to -1, so an explicit
+`hi=-1` searched the whole list where CPython searches an empty range.
 """
 from __future__ import annotations
 
 
-def bisect_left(a: list, x: int, lo: int = 0, hi: int = -1) -> int:
-    """Return leftmost insertion point for x in sorted list a."""
-    if hi == -1:
+def bisect_left(a: list, x, lo: int = 0, hi=None, key=None) -> int:
+    """Leftmost index where `x` can be inserted and keep `a` sorted."""
+    if lo < 0:
+        raise ValueError("lo must be non-negative")
+    if hi is None:
         hi = len(a)
+    if key is None:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if a[mid] < x:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
     while lo < hi:
-        mid: int = (lo + hi) >> 1
-        if a[mid] < x:
+        mid = (lo + hi) // 2
+        if key(a[mid]) < x:
             lo = mid + 1
         else:
             hi = mid
     return lo
 
 
-def bisect_right(a: list, x: int, lo: int = 0, hi: int = -1) -> int:
-    """Return rightmost insertion point for x in sorted list a."""
-    if hi == -1:
+def bisect_right(a: list, x, lo: int = 0, hi=None, key=None) -> int:
+    """Rightmost index where `x` can be inserted and keep `a` sorted."""
+    if lo < 0:
+        raise ValueError("lo must be non-negative")
+    if hi is None:
         hi = len(a)
+    if key is None:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if x < a[mid]:
+                hi = mid
+            else:
+                lo = mid + 1
+        return lo
     while lo < hi:
-        mid: int = (lo + hi) >> 1
-        if x < a[mid]:
+        mid = (lo + hi) // 2
+        if x < key(a[mid]):
             hi = mid
         else:
             lo = mid + 1
     return lo
 
 
-def insort_left(a: list, x: int, lo: int = 0, hi: int = -1) -> None:
-    """Insert x into sorted list a at leftmost position."""
-    pos: int = bisect_left(a, x, lo, hi)
-    i: int = len(a)
-    a.append(x)
-    while i > pos:
-        a[i] = a[i - 1]
-        i = i - 1
-    a[pos] = x
+def insort_left(a: list, x, lo: int = 0, hi=None, key=None) -> None:
+    """Insert `x` into `a` before any equal entries, keeping it sorted."""
+    if key is None:
+        position = bisect_left(a, x, lo, hi)
+    else:
+        position = bisect_left(a, key(x), lo, hi, key)
+    a.insert(position, x)
 
 
-def insort_right(a: list, x: int, lo: int = 0, hi: int = -1) -> None:
-    """Insert x into sorted list a at rightmost position."""
-    pos: int = bisect_right(a, x, lo, hi)
-    i: int = len(a)
-    a.append(x)
-    while i > pos:
-        a[i] = a[i - 1]
-        i = i - 1
-    a[pos] = x
+def insort_right(a: list, x, lo: int = 0, hi=None, key=None) -> None:
+    """Insert `x` into `a` after any equal entries, keeping it sorted."""
+    if key is None:
+        position = bisect_right(a, x, lo, hi)
+    else:
+        position = bisect_right(a, key(x), lo, hi, key)
+    a.insert(position, x)
 
 
-def bisect(a: list, x: int, lo: int = 0, hi: int = -1) -> int:
-    """Alias for bisect_right."""
-    return bisect_right(a, x, lo, hi)
+# CPython's historical aliases: plain `bisect`/`insort` are the right-hand forms.
+def bisect(a: list, x, lo: int = 0, hi=None, key=None) -> int:
+    return bisect_right(a, x, lo, hi, key)
 
 
-def insort(a: list, x: int, lo: int = 0, hi: int = -1) -> None:
-    """Alias for insort_right."""
-    insort_right(a, x, lo, hi)
+def insort(a: list, x, lo: int = 0, hi=None, key=None) -> None:
+    insort_right(a, x, lo, hi, key)
