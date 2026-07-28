@@ -151,7 +151,7 @@ public class Java extends Containers {
                 continue;
             }
             try {
-                Object result = candidate.invoke(isStatic ? null : receiver,
+                Object result = callMethod(candidate, isStatic ? null : receiver,
                         coerce(arguments, candidate.getParameterTypes()));
                 return wrap(result, candidate.getReturnType());
             } catch (IllegalArgumentException e) {
@@ -179,7 +179,7 @@ public class Java extends Containers {
                 continue;
             }
             try {
-                Object result = candidate.invoke(isStatic ? null : receiver,
+                Object result = callMethod(candidate, isStatic ? null : receiver,
                         coerce(marshal(words, kinds, count), candidate.getParameterTypes()));
                 return wrap(result, candidate.getReturnType());
             } catch (ReflectiveOperationException e) {
@@ -223,6 +223,87 @@ public class Java extends Containers {
             _abi_raise(allocateString("TypeError: " + value + " is not a Java class"), 0);
         }
         return (Class<?>) value;
+    }
+
+    /**
+     * Invoke a method, re-resolving it if the module system refuses.
+     *
+     * <p>Reflection finds a method on the receiver's CONCRETE class, which in a
+     * modular application is very often an implementation type its module does
+     * not export -- Create's `SimpleRegistryImpl$SingleImpl` for a
+     * `SimpleRegistry`, say. The member is public and the call is legal; what
+     * fails is naming that class from outside its module.
+     *
+     * <p>The same method declared on an exported INTERFACE is callable, so a
+     * refusal is retried against the supertypes rather than reported. Without
+     * this, any API whose implementation is hidden -- which is most of them --
+     * is unreachable.
+     */
+    private static Object callMethod(Method method, Object receiver, Object[] arguments)
+            throws ReflectiveOperationException {
+        try {
+            return method.invoke(receiver, arguments);
+        } catch (IllegalAccessException refused) {
+            Class<?> from = receiver != null ? receiver.getClass() : method.getDeclaringClass();
+            Method exported = exportedVariant(method, from);
+            if (exported != null) {
+                return exported.invoke(receiver, arguments);
+            }
+            try {
+                method.setAccessible(true);
+                return method.invoke(receiver, arguments);
+            } catch (RuntimeException | IllegalAccessException stillRefused) {
+                throw refused;
+            }
+        }
+    }
+
+    /** The same signature declared on a supertype we are allowed to name. */
+    private static Method exportedVariant(Method method, Class<?> type) {
+        for (Class<?> candidate : supertypes(type)) {
+            if (candidate == method.getDeclaringClass()) {
+                continue;
+            }
+            try {
+                Method found = candidate.getMethod(method.getName(), method.getParameterTypes());
+                if (!found.equals(method)) {
+                    return found;
+                }
+            } catch (NoSuchMethodException exact) {
+                // Generics erase, so an interface declaring `get(K)` has
+                // `get(Object)` while the implementation has `get(Block)`.
+                // Matching on name and arity finds it where an exact signature
+                // cannot.
+                for (Method loose : candidate.getMethods()) {
+                    if (loose.getName().equals(method.getName())
+                            && loose.getParameterCount() == method.getParameterCount()
+                            && !loose.equals(method)) {
+                        return loose;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static List<Class<?>> supertypes(Class<?> type) {
+        List<Class<?>> out = new ArrayList<>();
+        for (Class<?> c = type; c != null; c = c.getSuperclass()) {
+            collectInterfaces(c, out);
+            if (c != type) {
+                out.add(c);
+            }
+        }
+        return out;
+    }
+
+    private static void collectInterfaces(Class<?> type, List<Class<?>> out) {
+        for (Class<?> iface : type.getInterfaces()) {
+            if (!out.contains(iface)) {
+                out.add(iface);
+                collectInterfaces(iface, out);
+            }
+        }
     }
 
     private static Object[] marshal(long words, long kinds, long count) {
@@ -424,7 +505,7 @@ public class Java extends Containers {
             return 0;
         }
         try {
-            Object result = best.invoke(isStatic ? null : receiver,
+            Object result = callMethod(best, isStatic ? null : receiver,
                     coerce(arguments, best.getParameterTypes()));
             if (wantString) {
                 return result == null ? allocateString("null")
@@ -823,6 +904,14 @@ public class Java extends Containers {
             words[i] = toWord(safe[i]);
         }
         Object result = target.invoke(null, words);
+
+        // A Python function returning a float compiles to a method returning
+        // DOUBLE, not a word -- `descriptor_for` reads the return type off the
+        // `ret` instructions. Treating every result as a Long silently handed
+        // the interface a 0, which is the wrong answer with no error anywhere.
+        if (result instanceof Double) {
+            return coerceOne(result, called.getReturnType());
+        }
         long word = result instanceof Long ? (Long) result : 0L;
         return fromWord(unbox(word), called.getReturnType());
     }

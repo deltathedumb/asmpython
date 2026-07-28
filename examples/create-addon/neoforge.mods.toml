@@ -1,0 +1,26 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "MIT"
+
+[[mods]]
+modId = "createpy"
+version = "1.0.0"
+displayName = "Create: Python Addon"
+description = '''
+A Create addon written in Python and compiled to JVM bytecode by asmpython.
+Makes magma blocks heat a steam boiler.
+'''
+
+[[dependencies.createpy]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.createpy]]
+modId = "create"
+type = "required"
+versionRange = "[6.0,)"
+ordering = "AFTER"
+side = "BOTH"
