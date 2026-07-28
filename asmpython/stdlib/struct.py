@@ -6,7 +6,11 @@ The actual bytes are represented as a list[int] where each element is a byte.
 
 Supported format chars: B (uint8), b (int8), H (uint16), h (int16),
 I (uint32), i (int32), Q (uint64), q (int64), x (pad), ? (bool),
-< > ! = @ (byte order, no-op).
+s/c (byte).
+
+Byte order follows CPython: '>' and '!' are big-endian, '<' is little-endian,
+and '=', '@' or no prefix use native order, which is little-endian on every
+target asmpython currently emits for.
 """
 from __future__ import annotations
 
@@ -43,6 +47,47 @@ def _parse_fmt(fmt: str) -> list:
     return result
 
 
+def _is_big_endian(fmt: str) -> bool:
+    """True when the format asks for big-endian, i.e. starts with '>' or '!'.
+
+    CPython treats '!' as network order, which is big-endian, and leaves '<',
+    '=', '@' and a missing prefix on the native order.
+    """
+    if len(fmt) == 0:
+        return False
+    lead: str = fmt[0]
+    return lead == ">" or lead == "!"
+
+
+def _reverse_range(buf: list, start: int, end: int) -> None:
+    """Reverse buf[start:end] in place, to flip one field to big-endian.
+
+    Applied per field rather than per format, so a single-byte code is
+    untouched and a string never has its characters reordered.
+    """
+    i: int = start
+    j: int = end - 1
+    while i < j:
+        swap: int = buf[i]
+        buf[i] = buf[j]
+        buf[j] = swap
+        i = i + 1
+        j = j - 1
+
+
+def _read_uint(data: list, pos: int, width: int, big: bool) -> int:
+    """Assemble `width` bytes at `pos` into an unsigned int in the given order."""
+    value: int = 0
+    i: int = 0
+    while i < width:
+        if big:
+            value = (value << 8) | data[pos + i]
+        else:
+            value = (value << 8) | data[pos + width - 1 - i]
+        i = i + 1
+    return value
+
+
 def calcsize(fmt: str) -> int:
     """Return the size in bytes of the struct described by format string."""
     specs: list = _parse_fmt(fmt)
@@ -68,6 +113,7 @@ def calcsize(fmt: str) -> int:
 def pack(fmt: str, *args) -> list:
     """Pack values into a list of bytes according to format string."""
     specs: list = _parse_fmt(fmt)
+    big: bool = _is_big_endian(fmt)
     result: list = []
     arg_idx: int = 0
     spec_idx: int = 0
@@ -77,6 +123,10 @@ def pack(fmt: str, *args) -> list:
         code: int = spec.code
         rep: int = 0
         while rep < repeat:
+            # Each branch below emits its field little-endian; flipping the
+            # bytes it just wrote is what makes '>' and '!' work, for every
+            # width, without duplicating the emit code per byte order.
+            field_start: int = len(result)
             if code == 120:  # x = pad byte
                 result.append(0)
             elif code == 66:  # B = uint8
@@ -149,6 +199,8 @@ def pack(fmt: str, *args) -> list:
                 vchar: int = args[arg_idx]
                 result.append(vchar & 0xFF)
                 arg_idx = arg_idx + 1
+            if big:
+                _reverse_range(result, field_start, len(result))
             rep = rep + 1
         spec_idx = spec_idx + 1
     return result
@@ -157,6 +209,7 @@ def pack(fmt: str, *args) -> list:
 def unpack(fmt: str, data: list) -> list:
     """Unpack bytes from data list according to format string. Returns list[int]."""
     specs: list = _parse_fmt(fmt)
+    big: bool = _is_big_endian(fmt)
     result: list = []
     pos: int = 0
     spec_idx: int = 0
@@ -181,35 +234,28 @@ def unpack(fmt: str, data: list) -> list:
                 result.append(1 if data[pos] != 0 else 0)
                 pos = pos + 1
             elif code == 72:  # H = uint16
-                hval: int = data[pos] | (data[pos + 1] << 8)
-                result.append(hval)
+                result.append(_read_uint(data, pos, 2, big))
                 pos = pos + 2
             elif code == 104:  # h = int16
-                hval2: int = data[pos] | (data[pos + 1] << 8)
+                hval2: int = _read_uint(data, pos, 2, big)
                 if hval2 >= 32768:
                     hval2 = hval2 - 65536
                 result.append(hval2)
                 pos = pos + 2
             elif code == 73:  # I = uint32
-                ival: int = data[pos] | (data[pos+1] << 8) | (data[pos+2] << 16) | (data[pos+3] << 24)
-                result.append(ival)
+                result.append(_read_uint(data, pos, 4, big))
                 pos = pos + 4
             elif code == 105:  # i = int32
-                ival2: int = data[pos] | (data[pos+1] << 8) | (data[pos+2] << 16) | (data[pos+3] << 24)
+                ival2: int = _read_uint(data, pos, 4, big)
                 if ival2 >= 2147483648:
                     ival2 = ival2 - 4294967296
                 result.append(ival2)
                 pos = pos + 4
             elif code == 81:  # Q = uint64
-                qval: int = (data[pos] | (data[pos+1] << 8) | (data[pos+2] << 16) |
-                             (data[pos+3] << 24) | (data[pos+4] << 32) |
-                             (data[pos+5] << 40) | (data[pos+6] << 48) | (data[pos+7] << 56))
-                result.append(qval)
+                result.append(_read_uint(data, pos, 8, big))
                 pos = pos + 8
             elif code == 113:  # q = int64
-                qval2: int = (data[pos] | (data[pos+1] << 8) | (data[pos+2] << 16) |
-                              (data[pos+3] << 24) | (data[pos+4] << 32) |
-                              (data[pos+5] << 40) | (data[pos+6] << 48) | (data[pos+7] << 56))
+                qval2: int = _read_uint(data, pos, 8, big)
                 if qval2 >= 9223372036854775808:
                     qval2 = qval2 - 18446744073709551616
                 result.append(qval2)
