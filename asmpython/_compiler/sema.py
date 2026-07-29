@@ -4054,10 +4054,449 @@ class SemaAnalyzer:
         )
         return factory_func, cls
 
+    # ---- general generator flattening ------------------------------------
+    #
+    # The two transforms above recognise SHAPES: a straight run of yields, or
+    # one loop containing exactly one yield per iteration path. Anything else
+    # -- two yields in one loop body, a yield before AND after a loop, nested
+    # loops that yield -- was left untransformed and reached lowering as a
+    # bare `yield`, which has no lowering. The transform below encodes the
+    # body as a state machine instead of matching a shape, so a resume point
+    # is just a state number and there is no limit on how many there are or
+    # where they sit. It runs FIRST; the shape-matchers remain as a fallback
+    # for the few constructs it declines to encode.
+
+    def _gen_stmt_bodies(self, s) -> list:
+        """Nested statement lists of `s`, for recursive scans."""
+        out: list = []
+        if isinstance(s, A.If):
+            out.append(s.then)
+            out.append(s.orelse or [])
+        elif isinstance(s, A.While):
+            out.append(s.body)
+            out.append(s.orelse or [])
+        elif isinstance(s, A.For):
+            out.append(s.body)
+            out.append(s.orelse or [])
+        elif isinstance(s, A.With):
+            out.append(s.body)
+        elif isinstance(s, A.Try):
+            out.append(s.body)
+            out.append(s.handler)
+            for _t, _n, _b in s.extra_handlers:
+                out.append(_b)
+            out.append(s.else_body)
+            out.append(s.finally_body)
+        elif isinstance(s, A.Match):
+            # A case is a (pattern, guard, body) TUPLE, not an object.
+            for _pat, _guard, _body in s.cases:
+                out.append(_body)
+        return out
+
+    def _gen_contains_yield(self, stmts: list) -> bool:
+        for s in stmts:
+            if isinstance(s, A.YieldStmt):
+                return True
+            for body in self._gen_stmt_bodies(s):
+                if self._gen_contains_yield(body):
+                    return True
+        return False
+
+    def _gen_binds_loop_ctrl(self, stmts: list) -> bool:
+        """True if `stmts` holds a break/continue binding to the loop
+        ENCLOSING them -- not one nested inside its own loop. Such a statement
+        cannot be copied verbatim into a flattened loop's block: the only real
+        loop left there is `__next__`'s dispatch `while`, which it would
+        wrongly break out of."""
+        for s in stmts:
+            if isinstance(s, (A.Break, A.Continue)):
+                return True
+            if isinstance(s, (A.While, A.For)):
+                continue  # binds to that inner loop, not to ours
+            for body in self._gen_stmt_bodies(s):
+                if self._gen_binds_loop_ctrl(body):
+                    return True
+        return False
+
+    def _gen_for_to_while(self, s: A.For, counter: list, extra_init: list, pos):
+        """Rewrite `for v in it: body` into (pre_stmts, While) over a
+        materialised list and an index, so the flattener only ever has to
+        encode `while`. Returns None for the shapes it will not encode (a
+        tuple-target loop, a `for ... else`)."""
+        if s.targets or s.orelse:
+            return None
+        var = s.var
+        if not var:
+            return None
+        if s.iter is not None:
+            it = s.iter
+        elif s.range_args:
+            it = A.Call(func="range", args=list(s.range_args), pos=pos)
+        else:
+            return None
+        counter[0] += 1
+        lname = f"_genfor_list{counter[0]}"
+        iname = f"_genfor_idx{counter[0]}"
+        # Seed each hidden field with a value of the right KIND rather than a
+        # bare 0: the field's type is taken from what `__init__` puts in it,
+        # and a list field seeded with an int lowers as an int.
+        extra_init.append((lname, A.ListLit(elems=[], pos=pos)))
+        extra_init.append((iname, A.IntLit(value=0, pos=pos)))
+        pre = [
+            A.Assign(target=lname, value=A.Call(func="list", args=[it], pos=pos), pos=pos),
+            A.Assign(target=iname, value=A.IntLit(value=0, pos=pos), pos=pos),
+        ]
+        body = [
+            A.Assign(
+                target=var,
+                value=A.Subscript(
+                    obj=A.Name(name=lname, pos=pos),
+                    index=A.Name(name=iname, pos=pos),
+                    pos=pos,
+                ),
+                pos=pos,
+            ),
+            A.Assign(
+                target=iname,
+                value=A.BinOp(
+                    op="+",
+                    left=A.Name(name=iname, pos=pos),
+                    right=A.IntLit(value=1, pos=pos),
+                    pos=pos,
+                ),
+                pos=pos,
+            ),
+        ] + list(s.body)
+        _cmp: list = []
+        _cmp.append(A.Name(name=iname, pos=pos))
+        _cmp.append(A.Call(func="len", args=[A.Name(name=lname, pos=pos)], pos=pos))
+        wh = A.While(
+            test=A.Compare(ops=["<"], operands=_cmp, pos=pos),
+            body=body,
+            pos=pos,
+        )
+        return pre, wh
+
+    def _gen_flatten(self, body: list, pos):
+        """Flatten a generator body into basic blocks.
+
+        Returns (blocks, extra_fields) or None when the body holds a construct
+        this encoding declines (a yield inside try/with/match, a tuple-target
+        `for`). Returning None lets the caller fall back rather than silently
+        mis-sequencing.
+
+        Each block is `{"stmts": [...], "term": <terminator>}`; terminators are
+        ("goto", T) / ("branch", test, A, B) / ("yield", value, T) / ("stop",).
+        Renaming locals to `self.<name>` happens later, in one pass over the
+        finished blocks -- flattening is purely structural.
+        """
+        blocks: list = []
+        extra_init: list = []
+        counter = [0]
+
+        def new_block() -> int:
+            blocks.append({"stmts": [], "term": ("stop",)})
+            return len(blocks) - 1
+
+        # `emit(stmts, follow, loops)` builds the blocks for `stmts`, whose
+        # exit falls through to block `follow`, and returns the ENTRY block id
+        # (or None if some nested statement could not be encoded). `loops` is a
+        # stack of (break_target, continue_target).
+        def emit(stmts: list, follow: int, loops: list):
+            cur = new_block()
+            entry = cur
+            pending: list = []
+
+            def flush_to(term) -> None:
+                blocks[cur]["stmts"] = pending[:]
+                blocks[cur]["term"] = term
+
+            for i, s in enumerate(stmts):
+                rest = stmts[i + 1:]
+                if not (
+                    isinstance(s, (A.YieldStmt, A.Break, A.Continue))
+                    or self._gen_contains_yield([s])
+                    or self._gen_binds_loop_ctrl([s])
+                ):
+                    # No suspension point and no loop-level jump inside: this
+                    # statement lowers exactly as it would in an ordinary
+                    # function, so keep it whole instead of flattening it.
+                    pending.append(s)
+                    continue
+                if isinstance(s, A.YieldStmt):
+                    tail = emit(rest, follow, loops)
+                    if tail is None:
+                        return None
+                    flush_to(("yield", s.value, tail))
+                    return entry
+                if isinstance(s, A.Break):
+                    if not loops:
+                        return None
+                    flush_to(("goto", loops[-1][0]))
+                    return entry
+                if isinstance(s, A.Continue):
+                    if not loops:
+                        return None
+                    flush_to(("goto", loops[-1][1]))
+                    return entry
+                if isinstance(s, A.If):
+                    tail = emit(rest, follow, loops)
+                    if tail is None:
+                        return None
+                    then_entry = emit(s.then, tail, loops)
+                    if then_entry is None:
+                        return None
+                    else_entry = emit(s.orelse or [], tail, loops)
+                    if else_entry is None:
+                        return None
+                    flush_to(("branch", s.test, then_entry, else_entry))
+                    return entry
+                if isinstance(s, A.While):
+                    tail = emit(rest, follow, loops)
+                    if tail is None:
+                        return None
+                    head = new_block()
+                    body_entry = emit(s.body, head, loops + [(tail, head)])
+                    if body_entry is None:
+                        return None
+                    # `break` leaves the loop WITHOUT running its else-clause;
+                    # failing the test runs it. That is the whole difference
+                    # between the two exits, and why break targets `tail`.
+                    natural = tail
+                    if s.orelse:
+                        natural = emit(s.orelse, tail, loops)
+                        if natural is None:
+                            return None
+                    blocks[head]["term"] = ("branch", s.test, body_entry, natural)
+                    flush_to(("goto", head))
+                    return entry
+                if isinstance(s, A.For):
+                    desugared = self._gen_for_to_while(s, counter, extra_init, pos)
+                    if desugared is None:
+                        return None
+                    pre, wh = desugared
+                    inner = emit(list(pre) + [wh] + rest, follow, loops)
+                    if inner is None:
+                        return None
+                    flush_to(("goto", inner))
+                    return entry
+                # A yield inside try/with/match: not encoded.
+                return None
+
+            flush_to(("goto", follow))
+            return entry
+
+        # Block 0 is reserved as the entry, since `__init__` seeds `_state = 0`
+        # and `emit` allocates in its own order.
+        blocks.append({"stmts": [], "term": ("stop",)})
+        stop_block = new_block()
+        entry = emit(body, stop_block, [])
+        if entry is None:
+            return None
+        blocks[0]["term"] = ("goto", entry)
+        return blocks, extra_init
+
+    def _gen_first_assigned_value(self, name: str, stmts: list):
+        """RHS of the first `name = <expr>` anywhere in `stmts`, else None."""
+        for s in stmts:
+            if isinstance(s, A.Assign) and s.target == name:
+                return s.value
+            for body in self._gen_stmt_bodies(s):
+                found = self._gen_first_assigned_value(name, body)
+                if found is not None:
+                    return found
+        return None
+
+    def _gen_local_seed(self, name: str, stmts: list, pos):
+        """Placeholder `__init__` gives a lifted local before the body runs.
+        Every local used to be seeded with integer `0` whatever it holds, which
+        types the FIELD int -- so a generator local holding a string, a float
+        or a list got the wrong register class on its first real write. Seed
+        from the kind of its first assignment; anything unrecognised keeps the
+        old `0`."""
+        found = self._gen_first_assigned_value(name, stmts)
+        if isinstance(found, A.FloatLit):
+            return A.FloatLit(value=0.0, pos=pos)
+        if isinstance(found, A.StrLit):
+            return A.StrLit(value="", pos=pos)
+        if isinstance(found, A.ListLit):
+            return A.ListLit(elems=[], pos=pos)
+        if isinstance(found, A.Call) and found.func == "list":
+            return A.ListLit(elems=[], pos=pos)
+        return A.IntLit(value=0, pos=pos)
+
+    def _gen_emit_next_body(self, blocks: list, all_names: set, pos) -> list:
+        """`__next__`'s body: `while True:` over one `if self._state == K:` arm
+        per block, ending in `raise StopIteration()` for an exhausted or
+        unknown state. Locals inside an arm are renamed to `self.<name>` so
+        they survive between calls."""
+        def set_state(n: int):
+            return A.AttrAssign(
+                obj=A.Name(name="self", pos=pos), name="_state",
+                value=A.IntLit(value=n, pos=pos), pos=pos,
+            )
+
+        def state_is(n: int):
+            ops: list = []
+            ops.append(A.Attr(obj=A.Name(name="self", pos=pos), name="_state", pos=pos))
+            ops.append(A.IntLit(value=n, pos=pos))
+            return A.Compare(ops=["=="], operands=ops, pos=pos)
+
+        def stop_stmt():
+            return A.Raise(
+                value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
+            )
+
+        def term_stmts(term) -> list:
+            kind = term[0]
+            if kind == "goto":
+                return [set_state(term[1]), A.Continue(pos=pos)]
+            if kind == "branch":
+                return [A.If(
+                    test=self._rename_expr(term[1], all_names),
+                    then=[set_state(term[2]), A.Continue(pos=pos)],
+                    orelse=[set_state(term[3]), A.Continue(pos=pos)],
+                    pos=pos,
+                )]
+            if kind == "yield":
+                return [
+                    set_state(term[2]),
+                    A.Return(value=self._rename_expr(term[1], all_names), pos=pos),
+                ]
+            return [stop_stmt()]
+
+        arms: list = []
+        for i, b in enumerate(blocks):
+            body: list = []
+            body.extend(self._rename_stmts(b["stmts"], all_names, pos))
+            body.extend(term_stmts(b["term"]))
+            arms.append(A.If(test=state_is(i), then=body, orelse=[], pos=pos))
+        arms.append(stop_stmt())
+        out: list = []
+        out.append(A.While(
+            test=A.IntLit(value=1, pos=pos, is_bool=True), body=arms, pos=pos
+        ))
+        return out
+
+    def _transform_generator_cfg(self, f: A.FuncDef, cls_name: str, pos):
+        """General generator desugaring: flatten the body into basic blocks and
+        emit `__next__` as a dispatch on `self._state`. Returns
+        (factory_func, iterator_class), or None when the flattener declines the
+        body -- the caller then falls back to the shape-matching transforms."""
+        params_no_self = list(f.params)
+        param_types_no_self = (
+            list(f.param_types) if f.param_types else [None] * len(f.params)
+        )
+
+        # `return` inside a generator ends the iteration, which is the same
+        # StopIteration the exhausted state raises. Rewrite BEFORE flattening
+        # so the flattener only ever sees raises.
+        body = self._gen_replace_returns(list(f.body))
+
+        flat = self._gen_flatten(body, pos)
+        if flat is None:
+            return None
+        blocks, extra_fields = flat
+
+        all_params = set(params_no_self)
+        all_locals = list(self._collect_gen_locals(body, all_params))
+        seed_override: dict = {}
+        for _n, _seed in extra_fields:
+            seed_override[_n] = _seed
+            if _n not in all_locals:
+                all_locals.append(_n)
+        all_names = all_params | set(all_locals)
+
+        init_body: list = []
+        for p in params_no_self:
+            init_body.append(A.AttrAssign(
+                obj=A.Name(name="self", pos=pos), name=p,
+                value=A.Name(name=p, pos=pos), pos=pos,
+            ))
+        for loc in all_locals:
+            seed = seed_override.get(loc)
+            if seed is None:
+                seed = self._gen_local_seed(loc, body, pos)
+            init_body.append(A.AttrAssign(
+                obj=A.Name(name="self", pos=pos), name=loc, value=seed, pos=pos,
+            ))
+        init_body.append(A.AttrAssign(
+            obj=A.Name(name="self", pos=pos), name="_state",
+            value=A.IntLit(value=0, pos=pos), pos=pos,
+        ))
+        init_func = A.FuncDef(
+            name="__init__",
+            params=["self"] + params_no_self,
+            body=init_body,
+            defaults=[None] + [None] * len(params_no_self),
+            param_types=[None] + list(param_types_no_self),
+            pos=pos,
+        )
+        iter_func = A.FuncDef(
+            name="__iter__",
+            params=["self"],
+            body=[A.Return(value=A.Name(name="self", pos=pos), pos=pos)],
+            defaults=[None],
+            param_types=[None],
+            pos=pos,
+        )
+
+        # `__next__` returns ONE yielded value, but the generator function's
+        # own annotation describes the SEQUENCE (`-> list[int]`) -- take the
+        # element kind from it, exactly as the other two transforms do.
+        _rt = f.ret_type
+        if (
+            isinstance(_rt, tuple) and len(_rt) >= 2
+            and _rt[0] in ("list", "tuple", "set") and _rt[1]
+        ):
+            next_ret = (_rt[1], None)
+        elif isinstance(_rt, tuple) and _rt and _rt[0] not in ("list", "tuple", "set"):
+            next_ret = _rt
+        else:
+            next_ret = ("int", None)
+
+        next_func = A.FuncDef(
+            name="__next__",
+            params=["self"],
+            body=self._gen_emit_next_body(blocks, all_names, pos),
+            defaults=[None],
+            param_types=[None],
+            ret_type=next_ret,
+            pos=pos,
+        )
+        cls = A.ClassDef(
+            name=cls_name, parent=None,
+            methods=[init_func, iter_func, next_func], pos=pos,
+        )
+        factory_func = A.FuncDef(
+            name=f.name,
+            params=params_no_self,
+            body=[A.Return(
+                value=A.Call(
+                    func=cls_name,
+                    args=[A.Name(name=p, pos=pos) for p in params_no_self],
+                    pos=pos,
+                ),
+                pos=pos,
+            )],
+            defaults=list(f.defaults) if f.defaults else [None] * len(params_no_self),
+            param_types=list(param_types_no_self),
+            # The BARE class name: sema normalises it to `instance:<cls>`
+            # itself, and pre-normalising here leaves the factory's return type
+            # unresolved.
+            ret_type=(cls_name, None),
+            pos=pos,
+            vararg=f.vararg,
+            kwarg=f.kwarg,
+        )
+        return factory_func, cls
+
     def _transform_generator(self, f: A.FuncDef) -> "tuple[A.FuncDef, A.ClassDef] | None":
         """Transform a generator function into a factory + iterator class.
 
-        Supports:
+        Tries the general state-machine encoding (`_transform_generator_cfg`)
+        first, which places no limit on how many `yield`s the body has or where
+        they sit. Falls back to the older shape matchers when that declines:
           - Pre-loop stmts (init code before the while/for loop)
           - A single while loop containing exactly one yield per iteration path
           - A single for loop with yield in body
@@ -4066,6 +4505,10 @@ class SemaAnalyzer:
         """
         pos = f.pos
         cls_name = f"_genobj_{f.name}"
+
+        general = self._transform_generator_cfg(f, cls_name, pos)
+        if general is not None:
+            return general
         params_no_self = list(f.params)  # e.g. ["n"]
         param_types_no_self = list(f.param_types) if f.param_types else [None] * len(f.params)
 
@@ -4433,8 +4876,95 @@ class SemaAnalyzer:
             elif isinstance(s, A.Return):
                 result.append(A.Return(value=self._rename_expr(s.value, local_names), pos=s.pos))
             else:
-                result.append(s)
+                # Everything the chain above does not name used to be appended
+                # UNTOUCHED -- a `for`, a `raise`, `xs[i] = v`, `a, b = ...`, a
+                # `with`, a `try` kept their bare local names while every
+                # reference around them became `self.<name>`, so those locals
+                # read as undefined (or, worse, as an unrelated same-named
+                # global). `_rename_stmts_extra` covers them; anything it also
+                # declines still falls through unchanged, as before.
+                extra = self._rename_stmts_extra(s, local_names, pos)
+                result.append(extra if extra is not None else s)
         return result
+
+    def _rename_stmts_extra(self, s, local_names: set, pos):
+        """Rename arm for the statement kinds `_rename_stmts`'s own chain does
+        not cover. Returns the rewritten statement, or None to leave `s` as
+        it is."""
+        if isinstance(s, A.For):
+            # A loop TARGET is a plain string on A.For, so it cannot be
+            # rewritten to `self.<name>` the way every other reference is.
+            # Leaving it bare desynchronises the loop from its own body: the
+            # loop writes the local while the renamed body reads the field,
+            # which still holds `__init__`'s seed. Bind a fresh name instead
+            # and copy it into the field on entry -- the native loop lowering
+            # is kept, and the field is what the body (and any later
+            # statement) reads.
+            new_var = s.var
+            copy_out: list = []
+            if isinstance(s.var, str) and s.var in local_names:
+                new_var = f"_genlv_{s.var}"
+                copy_out.append(A.AttrAssign(
+                    obj=A.Name(name="self", pos=s.pos), name=s.var,
+                    value=A.Name(name=new_var, pos=s.pos), pos=s.pos,
+                ))
+            new_targets: list = []
+            for t in s.targets:
+                if isinstance(t, str) and t in local_names:
+                    tmp = f"_genlv_{t}"
+                    new_targets.append(tmp)
+                    copy_out.append(A.AttrAssign(
+                        obj=A.Name(name="self", pos=s.pos), name=t,
+                        value=A.Name(name=tmp, pos=s.pos), pos=s.pos,
+                    ))
+                else:
+                    new_targets.append(t)
+            return A.For(
+                var=new_var,
+                range_args=[self._rename_expr(a, local_names) for a in s.range_args],
+                body=copy_out + self._rename_stmts(s.body, local_names, pos),
+                pos=s.pos,
+                iter=self._rename_expr(s.iter, local_names),
+                targets=new_targets,
+                target_types=list(s.target_types),
+                orelse=self._rename_stmts(s.orelse or [], local_names, pos),
+            )
+        if isinstance(s, A.Raise):
+            return A.Raise(value=self._rename_expr(s.value, local_names), pos=s.pos)
+        if isinstance(s, A.IndexAssign):
+            return A.IndexAssign(
+                target=self._rename_expr(s.target, local_names),
+                value=self._rename_expr(s.value, local_names),
+                pos=s.pos,
+            )
+        if isinstance(s, A.TupleAssign):
+            return A.TupleAssign(
+                targets=[self._rename_expr(t, local_names) for t in s.targets],
+                values=[self._rename_expr(v, local_names) for v in s.values],
+                pos=s.pos,
+            )
+        if isinstance(s, A.With):
+            return A.With(
+                expr=self._rename_expr(s.expr, local_names),
+                name=s.name,
+                body=self._rename_stmts(s.body, local_names, pos),
+                pos=s.pos,
+            )
+        if isinstance(s, A.Try):
+            return A.Try(
+                body=self._rename_stmts(s.body, local_names, pos),
+                handler=self._rename_stmts(s.handler, local_names, pos),
+                bind_name=s.bind_name,
+                pos=s.pos,
+                handler_types=list(s.handler_types),
+                extra_handlers=[
+                    (list(t), n, self._rename_stmts(b, local_names, pos))
+                    for (t, n, b) in s.extra_handlers
+                ],
+                else_body=self._rename_stmts(s.else_body, local_names, pos),
+                finally_body=self._rename_stmts(s.finally_body, local_names, pos),
+            )
+        return None
 
     def _make_stmt_list(self) -> list:
         r: list = []
@@ -4470,6 +5000,52 @@ class SemaAnalyzer:
                     test=s.test,
                     body=self._gen_replace_returns(s.body),
                     orelse=self._gen_replace_returns(s.orelse or []),
+                    pos=s.pos,
+                ))
+            elif isinstance(s, A.For):
+                # `for` was missing from this recursion, so a `return` inside a
+                # for-loop body stayed a real return: `__next__` returned None
+                # (a 0) as if it were a yielded value AND left the state
+                # untouched, so the next call resumed the same block and the
+                # iteration continued past the point it should have stopped.
+                out.append(A.For(
+                    var=s.var,
+                    range_args=list(s.range_args),
+                    body=self._gen_replace_returns(s.body),
+                    pos=s.pos,
+                    iter=s.iter,
+                    targets=list(s.targets),
+                    target_types=list(s.target_types),
+                    orelse=self._gen_replace_returns(s.orelse or []),
+                ))
+            elif isinstance(s, A.With):
+                out.append(A.With(
+                    expr=s.expr,
+                    name=s.name,
+                    body=self._gen_replace_returns(s.body),
+                    pos=s.pos,
+                ))
+            elif isinstance(s, A.Try):
+                out.append(A.Try(
+                    body=self._gen_replace_returns(s.body),
+                    handler=self._gen_replace_returns(s.handler),
+                    bind_name=s.bind_name,
+                    pos=s.pos,
+                    handler_types=list(s.handler_types),
+                    extra_handlers=[
+                        (list(t), n, self._gen_replace_returns(b))
+                        for (t, n, b) in s.extra_handlers
+                    ],
+                    else_body=self._gen_replace_returns(s.else_body),
+                    finally_body=self._gen_replace_returns(s.finally_body),
+                ))
+            elif isinstance(s, A.Match):
+                out.append(A.Match(
+                    subject=s.subject,
+                    cases=[
+                        (pat, guard, self._gen_replace_returns(body))
+                        for (pat, guard, body) in s.cases
+                    ],
                     pos=s.pos,
                 ))
             else:
