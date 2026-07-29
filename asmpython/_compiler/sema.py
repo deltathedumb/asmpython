@@ -4307,7 +4307,34 @@ class SemaAnalyzer:
                     return found
         return None
 
-    def _gen_local_seed(self, name: str, stmts: list, pos):
+    def _gen_iter_elem_kind(self, it, range_args: list, param_kinds: dict) -> str:
+        """Static element kind of a `for` loop's iterable, or "" when unknown.
+        Only the forms whose kind is readable WITHOUT full type inference --
+        this runs during the generator transform, before the body has been
+        analysed."""
+        if it is None:
+            return "int" if range_args else ""
+        if isinstance(it, A.Call) and it.func == "range":
+            return "int"
+        if isinstance(it, A.ListLit) and it.elems:
+            first = it.elems[0]
+            if isinstance(first, A.FloatLit):
+                return "float"
+            if isinstance(first, A.StrLit):
+                return "str"
+            if isinstance(first, A.IntLit):
+                return "int"
+            return ""
+        if isinstance(it, A.Name):
+            annot = param_kinds.get(it.name)
+            if isinstance(annot, tuple) and len(annot) >= 2 and annot[0] in (
+                "list",
+                "tuple",
+            ):
+                return annot[1] or ""
+        return ""
+
+    def _gen_local_seed(self, name: str, stmts: list, pos, param_kinds=None):
         """Placeholder `__init__` gives a lifted local before the body runs.
         Every local used to be seeded with integer `0` whatever it holds, which
         types the FIELD int -- so a generator local holding a string, a float
@@ -4315,6 +4342,21 @@ class SemaAnalyzer:
         from the kind of its first assignment; anything unrecognised keeps the
         old `0`."""
         found = self._gen_first_assigned_value(name, stmts)
+        if found is None:
+            # A `for` loop VARIABLE is never the target of an Assign, so it has
+            # no first-assignment to read a kind from. Take the kind from what
+            # the loop iterates instead -- without this, `for w in xs:` over a
+            # `list[str]` parameter seeded `self.w = 0` and every use of `w`
+            # inside the generator was typed int (`w + "!"` became int + str;
+            # a list[float] read the double's bits as an integer).
+            kind = self._gen_for_var_kind(name, stmts, param_kinds or {})
+            if kind == "float":
+                return A.FloatLit(value=0.0, pos=pos)
+            if kind == "str":
+                return A.StrLit(value="", pos=pos)
+            if kind in ("list", "tuple"):
+                return A.ListLit(elems=[], pos=pos)
+            return A.IntLit(value=0, pos=pos)
         if isinstance(found, A.FloatLit):
             return A.FloatLit(value=0.0, pos=pos)
         if isinstance(found, A.StrLit):
@@ -4324,6 +4366,20 @@ class SemaAnalyzer:
         if isinstance(found, A.Call) and found.func == "list":
             return A.ListLit(elems=[], pos=pos)
         return A.IntLit(value=0, pos=pos)
+
+    def _gen_for_var_kind(self, name: str, stmts: list, param_kinds: dict) -> str:
+        """Element kind of the `for` loop that binds `name`, or "" if `name` is
+        not a loop variable (or the iterable's kind is not statically clear)."""
+        for s in stmts:
+            if isinstance(s, A.For) and s.var == name:
+                kind = self._gen_iter_elem_kind(s.iter, s.range_args, param_kinds)
+                if kind:
+                    return kind
+            for body in self._gen_stmt_bodies(s):
+                kind = self._gen_for_var_kind(name, body, param_kinds)
+                if kind:
+                    return kind
+        return ""
 
     def _gen_emit_next_body(self, blocks: list, all_names: set, pos) -> list:
         """`__next__`'s body: `while True:` over one `if self._state == K:` arm
@@ -4413,10 +4469,14 @@ class SemaAnalyzer:
                 obj=A.Name(name="self", pos=pos), name=p,
                 value=A.Name(name=p, pos=pos), pos=pos,
             ))
+        param_kinds: dict = {}
+        for _pi, _pn in enumerate(params_no_self):
+            if _pi < len(param_types_no_self):
+                param_kinds[_pn] = param_types_no_self[_pi]
         for loc in all_locals:
             seed = seed_override.get(loc)
             if seed is None:
-                seed = self._gen_local_seed(loc, body, pos)
+                seed = self._gen_local_seed(loc, body, pos, param_kinds)
             init_body.append(A.AttrAssign(
                 obj=A.Name(name="self", pos=pos), name=loc, value=seed, pos=pos,
             ))
