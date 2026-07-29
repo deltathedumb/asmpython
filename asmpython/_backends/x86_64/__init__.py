@@ -247,3 +247,19 @@ def run_backend_link(objects: list[bytes], args: dict) -> dict[str, bytes]:
 
 
 __module_backend__ = ModuleBackend(sys.modules[__name__])
+
+
+# ── Public low-level surface (asmpython.lllib.x86_64) ─────────────────────────
+# One opt-in symbol; see asmpython/lllib/__init__.py. What is published here is
+# what is genuinely x86-specific -- instruction encoding, the register pools and
+# ABI rules, the relocation vocabulary, and the two container writers. Anything
+# architecture-independent belongs in _backends/_common and is reachable from
+# `asmpython.lllib` directly instead.
+class __lllib__:                       # noqa: N801  (a namespace, not a class)
+    """x86-64 code generation internals."""
+
+    from . import codegen, coff, coff_parse, elf, elf_parse, encoder
+    from . import elf_linker, pe_linker, phi_elim, regalloc
+
+    compile_module = staticmethod(run_backend_codegen)
+    link_objects = staticmethod(run_backend_link)

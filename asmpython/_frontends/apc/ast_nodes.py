@@ -200,6 +200,19 @@ class FieldDecl(Node):
 
 
 @dataclass
+class NameDecl(Node):
+    """``name lllib::bits`` or ``name lllib::bits { ... }``
+
+    Without a block it names the namespace the REST OF THE FILE belongs to --
+    one line at the top instead of indenting everything. With a block it scopes
+    just that block, so a file can hold more than one.
+    """
+    name: str = ""                     # may be qualified: "lllib::bits"
+    parent: str | None = None
+    body: list | None = None           # None => applies to the rest of the file
+
+
+@dataclass
 class TypeDecl(Node):
     name: str = ""
     parent: str | None = None

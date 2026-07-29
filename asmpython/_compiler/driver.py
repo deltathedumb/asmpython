@@ -440,6 +440,13 @@ def _run_backend_x86_64(
 
     ir_mod = _as_ir_module(module)
     _apply_passes(ir_mod, passes)
+    # Fix COMPILE_DATA for this build before anything can observe it.
+    from ..compile_data import _freeze as _freeze_compile_data
+
+    _freeze_compile_data(
+        backend="x86-64", target=target, abi=abi, arch="x86_64",
+        passes=tuple(p for p in (passes or "").split(",") if p),
+    )
     # Dump the IR the backend is about to consume (ASMPYTHON_EMIT_IR).
     from .ir_print import emit_if_requested as _emit_ir
 

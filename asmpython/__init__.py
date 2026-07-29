@@ -16,6 +16,7 @@ from . import (
     mlang, runtime,
 )
 from .capabilities import CapabilitySet, Dependency
+from .compile_data import COMPILE_DATA, CompileData
 from .extension import Extension
 from .annotations import *
 from .annotations import __all__ as _annotations_all
@@ -117,6 +118,8 @@ if not hasattr(builtins, "bitcast_i2f"):
 
 
 __all__ = [
+    "COMPILE_DATA",
+    "CompileData",
     "ASMPYTHON_VERSION",
     "CapabilitySet",
     "Dependency",

@@ -148,9 +148,21 @@ class ModuleEmitter:
             return name if ns is None else f"{ns}::{name}"
 
         def symbolize(name: str) -> str:
-            return name if ns is None else f"{ns}__{name}"
+            # `lllib::bits` -> `lllib__bits__popcount`. A symbol has no
+            # notion of nesting, so the whole path flattens.
+            return name if ns is None else f"{ns.replace('::', '__')}__{name}"
 
-        for decl in decls:
+        for index, decl in enumerate(decls):
+            if isinstance(decl, A.NameDecl):
+                if decl.body is None:
+                    # No block: this names the namespace the REST of this file
+                    # belongs to. Re-run the remainder under it and stop, so a
+                    # one-line declaration at the top is exactly equivalent to
+                    # wrapping the whole file in a block.
+                    self._collect(decls[index + 1:], funcs, ns=decl.name)
+                    return
+                self._collect(decl.body, funcs, ns=decl.name)
+                continue
             if isinstance(decl, A.ImportDecl):
                 self._load_import(decl, funcs)
             elif isinstance(decl, A.LayoutDecl):
@@ -167,7 +179,16 @@ class ModuleEmitter:
                 if ns is not None:
                     self.enums[qualify(decl.name)] = self.enums[decl.name]
             elif isinstance(decl, A.ExportDecl):
-                self.exports.extend(n.split("::")[-1] for n in decl.names)
+                # An export names a function as written, but what gets
+                # published is the emitted SYMBOL -- and inside a `name` block
+                # those differ (`popcount` is emitted as
+                # `lllib__bits__popcount`). Resolve through the symbol table,
+                # falling back to the bare name for a plain top-level export.
+                for written in decl.names:
+                    local = written.split("::")[-1]
+                    self.exports.append(
+                        self.symbols.get(qualify(local),
+                                         self.symbols.get(written, local)))
             elif isinstance(decl, A.VarDecl):
                 self._collect_const(decl)
             elif isinstance(decl, A.FuncDecl):

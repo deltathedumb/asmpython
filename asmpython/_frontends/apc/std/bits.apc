@@ -1,0 +1,175 @@
+# ══════════════════════════════════════════════════════════════════════════
+#  std/bits.apc — APC's bit primitives, and the low-level half of lllib.bits.
+#
+#  Same functions as bits.py, written where the widths are real. The Python
+#  version masks arbitrary-precision integers back down to `width` bits on
+#  every operation; here a u32 IS 32 bits, so the masking disappears and the
+#  loops operate on machine words.
+#
+#      import std::bits
+#      const n = bits::popcount(value)
+#
+#  Also compiles standalone and exports under C names, so a program in any
+#  frontend can link against it:
+#
+#      asmpython build bits.apc --frontend apc --linker none -o bits.o
+#
+#  A backend that has single instructions for these (x86 POPCNT/LZCNT/TZCNT/
+#  BSWAP, AArch64 CNT/CLZ/RBIT/REV) should publish those instead; lllib
+#  prefers a backend implementation over this one, and this one over bits.py.
+# ══════════════════════════════════════════════════════════════════════════
+
+
+
+# NOT namespaced with `name lllib::bits`, deliberately, though the frontend now
+# supports both that and the block form.
+#
+# This file is reached as `import std::bits`, which already namespaces it under
+# `bits` from its path -- so callers say `bits::popcount`. Declaring
+# `name lllib::bits` on top of that renames every symbol to
+# `lllib__bits__popcount` and breaks those callers, because a declared
+# namespace and an import-derived one are two different answers to the same
+# question and nothing currently reconciles them. Resolving that is a design
+# decision, not a bug fix: either the declaration wins (and `import` learns to
+# read it), or the path wins (and a declaration inside an imported file is an
+# error). Until then this file takes its namespace from its path.
+
+
+# All-ones for `width` bits. Guarded at 64 because `1 << 64` in a u64 is 0,
+# and 0 - 1 only happens to give the right answer by wraparound -- relying on
+# that would be a trap for the next person widening this.
+func mask(width: i64) {
+    if (width >= 64) { ret 0xFFFFFFFFFFFFFFFF as u64 }
+    ret ((1 as u64) << width) - 1
+}: u64
+
+
+func popcount(v: u64) {
+    let x = v
+    let n = 0
+    while (x) {
+        x = x & (x - 1)          # clears the lowest set bit
+        n = n + 1
+    }
+    ret n
+}: i64
+
+
+func clz(v: u64, width: i64) {
+    if (v is 0) { ret width }
+    let n = 0
+    let bit = (1 as u64) << (width - 1)
+    while (!(v & bit)) {
+        n = n + 1
+        bit = bit >> 1
+    }
+    ret n
+}: i64
+
+
+func ctz(v: u64, width: i64) {
+    if (v is 0) { ret width }
+    let x = v
+    let n = 0
+    while (!(x & 1)) {
+        n = n + 1
+        x = x >> 1
+    }
+    ret n
+}: i64
+
+
+func parity(v: u64) {
+    ret popcount(v) & 1
+}: i64
+
+
+# The shift happens in a 64-bit register whatever `width` says, so the result
+# must be masked back down -- without it, rotl(0x80000001, 1, 32) returns
+# 0x1_00000003 instead of 0x3. Caught by differential-testing this against
+# lllib/bits.py, which is the reason both implementations exist.
+func rotl(v: u64, amount: i64, width: i64) {
+    const m = mask(width)
+    const x = v & m
+    const n = amount % width
+    if (n is 0) { ret x }
+    ret ((x << n) | (x >> (width - n))) & m
+}: u64
+
+
+func rotr(v: u64, amount: i64, width: i64) {
+    const m = mask(width)
+    const x = v & m
+    const n = amount % width
+    if (n is 0) { ret x }
+    ret ((x >> n) | (x << (width - n))) & m
+}: u64
+
+
+func byteswap64(v: u64) {
+    let x = v
+    let out = 0 as u64
+    for (i = 0..8) {
+        out = (out << 8) | (x & 0xFF)
+        x = x >> 8
+    }
+    ret out
+}: u64
+
+
+func byteswap32(v: u32) {
+    let x = v
+    let out = 0 as u32
+    for (i = 0..4) {
+        out = (out << 8) | (x & 0xFF)
+        x = x >> 8
+    }
+    ret out
+}: u32
+
+
+func reverse_bits(v: u64, width: i64) {
+    let x = v
+    let out = 0 as u64
+    for (i = 0..width) {
+        out = (out << 1) | (x & 1)
+        x = x >> 1
+    }
+    ret out
+}: u64
+
+
+# Alignment. Both require `alignment` to be a power of two; that is the
+# caller's contract, and checking it here would cost more than the operation.
+func align_up(value: i64, alignment: i64) {
+    ret (value + alignment - 1) & ~(alignment - 1)
+}: i64
+
+
+func align_down(value: i64, alignment: i64) {
+    ret value & ~(alignment - 1)
+}: i64
+
+
+func is_power_of_two(value: i64) {
+    if (value <= 0) { ret 0 }
+    ret !(value & (value - 1))
+}: i64
+
+
+# One name per line: `export (a, b)` is not the grammar. Parens attached to
+# `export` mean "where this comes from" (`export(Crc32::of) crc32_compute`), so
+# a bare list would be a source with no name following it.
+export mask
+export popcount
+export clz
+export ctz
+export parity
+export rotl
+export rotr
+export byteswap64
+export byteswap32
+export reverse_bits
+export align_up
+export align_down
+export is_power_of_two

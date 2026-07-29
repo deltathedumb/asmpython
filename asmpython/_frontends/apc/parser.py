@@ -92,6 +92,8 @@ class Parser:
             return self.parse_enum()
         if tok.is_kw("type"):
             return self.parse_type_decl()
+        if tok.is_kw("name"):
+            return self.parse_name_decl()
         if tok.is_kw("const") or tok.is_kw("let"):
             return self.parse_var_decl()
         raise self.error(f"unexpected {tok.value!r} at top level")
@@ -257,6 +259,33 @@ class Parser:
                 self.advance()
             self.skip_newlines()
         self.expect_op("}")
+        return node
+
+    def parse_name_decl(self) -> A.NameDecl:
+        """``name lllib::bits`` / ``name lllib::bits(Parent) { ... }``"""
+        tok = self.advance()                     # `name`
+        node = A.NameDecl(tok.line, tok.col)
+        parts = [self.expect_ident("namespace name").value]
+        while self.cur.is_op("::"):
+            self.advance()
+            parts.append(self.expect_ident("namespace name").value)
+        node.name = "::".join(parts)
+        if self.cur.is_op("("):
+            self.advance()
+            node.parent = self.expect_ident("parent namespace").value
+            self.expect_op(")")
+        if self.cur.is_op("{"):
+            node.body = []
+            self.advance()
+            self.skip_newlines()
+            while not self.cur.is_op("}"):
+                if self.at_eof():
+                    raise self.error(f"unterminated 'name {node.name}'")
+                node.body.append(self.parse_declaration())
+                self.skip_newlines()
+            self.expect_op("}")
+        # No block: `body` stays None and the emitter applies the namespace to
+        # every declaration after this one in the file.
         return node
 
     def parse_type_decl(self) -> A.TypeDecl:

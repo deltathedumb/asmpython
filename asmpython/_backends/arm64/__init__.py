@@ -88,3 +88,14 @@ __all__ = [
     "validate_runtime_object",
     "validate_runtime_requirements",
 ]
+
+
+# ── Public low-level surface (asmpython.lllib.arm64) ──────────────────────────
+# One opt-in symbol; see asmpython/lllib/__init__.py. Liveness analysis and the
+# ELF64 container are NOT here -- they are architecture-independent, live in
+# _backends/_common, and are reachable from `asmpython.lllib` directly.
+class __lllib__:                       # noqa: N801  (a namespace, not a class)
+    """AArch64 code generation internals."""
+
+    from . import codegen, elf, elf_inspect, encoder, linux_link
+    from . import module_codegen, regalloc, runtime_manifest

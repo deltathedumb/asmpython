@@ -361,3 +361,17 @@ def _java_release(class_version: int) -> int:
     class byte for byte.
     """
     return max(8, class_version - 44)
+
+
+# ── Public low-level surface (asmpython.lllib.jvm) ────────────────────────────
+# One opt-in symbol; see asmpython/lllib/__init__.py. A bytecode backend has no
+# register allocator, no relocations and no ELF, so it publishes a genuinely
+# different shape -- which is the point of the per-backend layer. The universal
+# `asmpython.lllib` surface (the neutral IR) still applies to it unchanged.
+class __lllib__:                       # noqa: N801  (a namespace, not a class)
+    """JVM class-file generation internals."""
+
+    from . import bindings, classfile, codegen, module
+
+    compile_module = staticmethod(run_backend_codegen)
+    link_objects = staticmethod(run_backend_link)
