@@ -27,89 +27,44 @@ if TYPE_CHECKING:
     from .codegen import FuncCode
     from uasm import IRGlobal
 
-# ── ELF constants ─────────────────────────────────────────────────────────────
-
-ET_REL       = 1
 EM_X86_64    = 62
-EV_CURRENT   = 1
-ELFCLASS64   = 2
-ELFDATA2LSB  = 1
-
-SHT_NULL     = 0
-SHT_PROGBITS = 1
-SHT_SYMTAB   = 2
-SHT_STRTAB   = 3
-SHT_RELA     = 4
-
-SHF_WRITE     = 0x1
-SHF_ALLOC     = 0x2
-SHF_EXECINSTR = 0x4
-SHF_TLS       = 0x400
-
-STB_LOCAL  = 0
-STB_GLOBAL = 1
-STT_NOTYPE = 0
-STT_OBJECT = 1
-STT_FUNC   = 2
-STT_SECTION = 3
-
 SHN_UNDEF = 0
 SHN_ABS   = 0xFFF1
 
-# Relocation types
+# Relocation types -- the architecture-specific half of the format.
 R_X86_64_64      = 1    # absolute 64-bit (used in .eh_frame FDE initial_location)
 R_X86_64_PC32    = 2    # PC-relative 32-bit (data symbol refs via LEA)
 R_X86_64_PLT32   = 4    # PLT-relative 32-bit (function calls)
 R_X86_64_TPOFF32 = 23   # thread-pointer-relative 32-bit (TLS local-exec)
 
 
-# ── Low-level struct builders ─────────────────────────────────────────────────
+# ELF64 container primitives (header/section/symbol/relocation records, the
+# string table, and IRGlobal serialization) are architecture-independent and
+# live in _backends/_common/elf64.py. Only e_machine and the relocation type
+# numbers below differ per architecture. The two copies this replaced had
+# already diverged: x86-64's global serializer hard-coded signed=True and
+# raised OverflowError on any legal u64 above i64's maximum, which arm64's had
+# fixed. See that module.
+from .._common.elf64 import (  # noqa: F401  (re-exported; names kept local)
+    ELFCLASS64, ELFDATA2LSB, ET_REL, EV_CURRENT,
+    SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_WRITE,
+    SHT_NULL, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB,
+    STB_GLOBAL, STB_LOCAL, STT_FUNC, STT_NOTYPE, STT_OBJECT, STT_SECTION,
+    _TYPE_SIZES,
+    align as _align,
+    build_strtab as _build_strtab,
+    global_bytes as _global_bytes,
+    rela as _rela,
+    shdr as _shdr,
+    sym as _sym,
+)
+from .._common.elf64 import EM_X86_64 as _EM
+from .._common.elf64 import ehdr as _ehdr_raw
+
 
 def _ehdr(shoff: int, shnum: int, shstrndx: int) -> bytes:
-    ident = (bytes([0x7F, 0x45, 0x4C, 0x46,  # \x7FELF
-                    ELFCLASS64, ELFDATA2LSB, EV_CURRENT, 0])
-             + bytes(8))
-    return struct.pack("<16sHHIQQQIHHHHHH",
-        ident, ET_REL, EM_X86_64, EV_CURRENT,
-        0, 0, shoff, 0,
-        64, 0, 0, 64, shnum, shstrndx,
-    )
+    return _ehdr_raw(_EM, shoff, shnum, shstrndx)
 
-
-def _shdr(name: int, typ: int, flags: int, off: int, size: int,
-          link: int = 0, info: int = 0, align: int = 1,
-          entsize: int = 0) -> bytes:
-    return struct.pack("<IIQQQQIIQQ",
-        name, typ, flags, 0, off, size, link, info, align, entsize)
-
-
-def _sym(name: int, bind: int, typ: int, shndx: int,
-         value: int, size: int) -> bytes:
-    return struct.pack("<IBBHQQ",
-        name, (bind << 4) | typ, 0, shndx, value, size)
-
-
-def _rela(offset: int, sym_idx: int, rtype: int, addend: int) -> bytes:
-    r_info = (sym_idx << 32) | (rtype & 0xFFFFFFFF)
-    return struct.pack("<QQq", offset, r_info, addend)
-
-
-# ── String table ──────────────────────────────────────────────────────────────
-
-def _build_strtab(names: "list[str]") -> "tuple[bytes, dict[str, int]]":
-    buf  = bytearray(b"\x00")
-    offs: dict[str, int] = {"": 0}
-    for n in names:
-        if n and n not in offs:
-            offs[n] = len(buf)
-            buf.extend(n.encode() + b"\x00")
-    return bytes(buf), offs
-
-
-# ── Alignment ─────────────────────────────────────────────────────────────────
-
-def _align(n: int, a: int) -> int:
-    return (n + a - 1) & ~(a - 1)
 
 
 # ── DWARF minimal CIE for x86-64 ─────────────────────────────────────────────
@@ -236,31 +191,8 @@ def _build_debug_line(
 
 # ── Global data section builders ──────────────────────────────────────────────
 
-_TYPE_SIZES = {"i8": 1, "u8": 1, "i16": 2, "u16": 2,
-               "i32": 4, "u32": 4, "i64": 8, "u64": 8,
-               "f32": 4, "f64": 8, "ptr": 8}
 
 
-def _global_bytes(g: "IRGlobal") -> bytes:
-    """Serialize a global's initial value to bytes."""
-    tname = g.type.name
-    val   = g.value
-    size  = _TYPE_SIZES.get(tname, 8)
-
-    if isinstance(val, str):
-        # String literal: null-terminated UTF-8
-        return val.encode("utf-8") + b"\x00"
-    if isinstance(val, float):
-        if tname == "f32":
-            return struct.pack("<f", val)
-        return struct.pack("<d", val)
-    if isinstance(val, list):
-        # Array of ints (e.g. byte array)
-        return bytes(int(x) & 0xFF for x in val)
-    if isinstance(val, int):
-        return val.to_bytes(size, "little", signed=True)
-    # None / 0 — zero initialise
-    return bytes(size)
 
 
 # ── Main builder ──────────────────────────────────────────────────────────────

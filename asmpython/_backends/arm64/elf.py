@@ -29,157 +29,35 @@ if TYPE_CHECKING:
 
 
 ET_REL = 1
-EM_AARCH64 = 183
-EV_CURRENT = 1
-ELFCLASS64 = 2
-ELFDATA2LSB = 1
-
-SHT_NULL = 0
-SHT_PROGBITS = 1
-SHT_SYMTAB = 2
-SHT_STRTAB = 3
-SHT_RELA = 4
-
-SHF_WRITE = 0x1
-SHF_ALLOC = 0x2
-SHF_EXECINSTR = 0x4
-SHF_TLS = 0x400
-
-STB_LOCAL = 0
-STB_GLOBAL = 1
-STT_NOTYPE = 0
-STT_OBJECT = 1
-STT_FUNC = 2
-
 SHN_UNDEF = 0
 
-
-_TYPE_SIZES = {
-    "i8": 1,
-    "u8": 1,
-    "i16": 2,
-    "u16": 2,
-    "i32": 4,
-    "u32": 4,
-    "i64": 8,
-    "u64": 8,
-    "f32": 4,
-    "f64": 8,
-    "ptr": 8,
-}
-
-
-def _align(value: int, alignment: int) -> int:
-    return (value + alignment - 1) & ~(alignment - 1)
+# ELF64 container primitives (header/section/symbol/relocation records, the
+# string table, and IRGlobal serialization) are architecture-independent and
+# live in _backends/_common/elf64.py. Only e_machine -- and, where a backend
+# has them, the relocation type numbers -- differ. This file previously carried
+# its own copy of all of it, byte-identical to x86-64's apart from formatting,
+# and the two had already diverged in a way neither could see: x86-64's global
+# serializer raised OverflowError on any legal u64 above i64's maximum, which
+# the version here had fixed. That fix now applies to both.
+from .._common.elf64 import (  # noqa: F401  (re-exported; names kept local)
+    ELFCLASS64, ELFDATA2LSB, ET_REL, EV_CURRENT,
+    SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_WRITE,
+    SHT_NULL, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB,
+    STB_GLOBAL, STB_LOCAL, STT_FUNC, STT_NOTYPE, STT_OBJECT,
+    _TYPE_SIZES,
+    align as _align,
+    build_strtab as _build_string_table,
+    global_bytes as _global_bytes,
+    rela as _rela,
+    shdr as _shdr,
+    sym as _sym,
+)
+from .._common.elf64 import EM_AARCH64
+from .._common.elf64 import ehdr as _ehdr_raw
 
 
 def _ehdr(section_offset: int, section_count: int, shstr_index: int) -> bytes:
-    ident = bytes(
-        [
-            0x7F,
-            0x45,
-            0x4C,
-            0x46,
-            ELFCLASS64,
-            ELFDATA2LSB,
-            EV_CURRENT,
-            0,
-        ]
-    ) + bytes(8)
-    return struct.pack(
-        "<16sHHIQQQIHHHHHH",
-        ident,
-        ET_REL,
-        EM_AARCH64,
-        EV_CURRENT,
-        0,
-        0,
-        section_offset,
-        0,
-        64,
-        0,
-        0,
-        64,
-        section_count,
-        shstr_index,
-    )
-
-
-def _shdr(
-    name: int,
-    kind: int,
-    flags: int,
-    offset: int,
-    size: int,
-    link: int = 0,
-    info: int = 0,
-    alignment: int = 1,
-    entry_size: int = 0,
-) -> bytes:
-    return struct.pack(
-        "<IIQQQQIIQQ",
-        name,
-        kind,
-        flags,
-        0,
-        offset,
-        size,
-        link,
-        info,
-        alignment,
-        entry_size,
-    )
-
-
-def _sym(
-    name: int,
-    binding: int,
-    kind: int,
-    section_index: int,
-    value: int,
-    size: int,
-) -> bytes:
-    return struct.pack(
-        "<IBBHQQ",
-        name,
-        (binding << 4) | kind,
-        0,
-        section_index,
-        value,
-        size,
-    )
-
-
-def _rela(offset: int, symbol_index: int, relocation_type: int, addend: int = 0) -> bytes:
-    info = (symbol_index << 32) | (relocation_type & 0xFFFFFFFF)
-    return struct.pack("<QQq", offset, info, addend)
-
-
-def _build_string_table(names: list[str]) -> tuple[bytes, dict[str, int]]:
-    data = bytearray(b"\x00")
-    offsets = {"": 0}
-    for name in names:
-        if name and name not in offsets:
-            offsets[name] = len(data)
-            data.extend(name.encode("utf-8") + b"\x00")
-    return bytes(data), offsets
-
-
-def _global_bytes(global_: "IRGlobal") -> bytes:
-    type_name = global_.type.name
-    value = global_.value
-    size = _TYPE_SIZES.get(type_name, 8)
-
-    if isinstance(value, str):
-        return value.encode("utf-8") + b"\x00"
-    if isinstance(value, float):
-        return struct.pack("<f" if type_name == "f32" else "<d", value)
-    if isinstance(value, list):
-        return bytes(int(item) & 0xFF for item in value)
-    if isinstance(value, int):
-        signed = not type_name.startswith("u")
-        return value.to_bytes(size, "little", signed=signed)
-    return bytes(size)
+    return _ehdr_raw(EM_AARCH64, section_offset, section_count, shstr_index)
 
 
 def _visibility_value(func_code: "FuncCode") -> str | None:
