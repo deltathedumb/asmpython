@@ -328,7 +328,11 @@ class _FuncCtx:
         # `_is_global_name`'s normal logic; popped once the comprehension
         # finishes lowering. See `_lower_comprehension`/
         # `_lower_dict_comprehension`'s push/pop around the loop-var slot.
-        self.comprehension_shadows: list[set[str]] = []
+        #: One frame per comprehension being lowered, innermost last, mapping
+        #: each target name to the PRIVATE slot it binds. Membership still
+        #: answers "is this name the comprehension's own" for _is_global_name;
+        #: the value additionally keeps it off the enclosing scope's slot.
+        self.comprehension_shadows: list[dict[str, str]] = []
         self.loop_stack: list[tuple[str, str]] = []  # (continue_label, break_label)
         # Stack of slot names for active try-block parent-handler pointers.
         # Each entry is the `__try_parent_<uid>` slot name pushed when entering
@@ -1387,7 +1391,7 @@ def _lower_comprehension_enumerate(ctx: _FuncCtx, e: A.Comprehension) -> IRValue
     # which raises TypeError on a nested group (`for i, (a, b) in ...`) because
     # a list is not hashable -- and that shape is exactly the one P026 exempts
     # for enumerate, so it does reach here.
-    shadow_names = _target_shadow_names(e.targets, e.var)
+    shadow_names = _target_shadow_names(e.targets, e.var, id(e))
     ctx.comprehension_shadows.append(shadow_names)
     try:
         _store_loop_target(ctx, e.targets[0], body_idx_v, "int")
@@ -1559,9 +1563,9 @@ def _lower_comprehension_multi_for(ctx: _FuncCtx, e: A.Comprehension) -> IRValue
     # ordering note in _lower_comprehension. Accumulating it meant
     # `a = 90; b = 91; [a + b for a, b in pairs for q in [0]]` stored into the
     # globals and read never-written locals, giving [0] instead of [30].
-    shadow_names: set = set()
+    shadow_names: dict = {}
     for _lvl_targets, _lvl_var in zip(all_targets, all_vars):
-        shadow_names |= _target_shadow_names(_lvl_targets, _lvl_var)
+        shadow_names.update(_target_shadow_names(_lvl_targets, _lvl_var, id(e)))
     ctx.comprehension_shadows.append(shadow_names)
 
     def emit_level_head(k: int) -> None:
@@ -1610,7 +1614,7 @@ def _lower_comprehension_multi_for(ctx: _FuncCtx, e: A.Comprehension) -> IRValue
                 _store_loop_target(ctx, target, item_v, target_ty)
         else:
             var_name = all_vars[k]
-            var_ptr = ctx.ensure_slot(var_name, ir_type_for(elem_kind))
+            var_ptr = ctx.ensure_slot(_comp_slot(ctx, var_name), ir_type_for(elem_kind))
             ctx.emit(IRInstr("store", None, [elem_v, var_ptr]))
 
         pass_target = init_bs[k + 1].label if k + 1 < n_levels else append_b.label
@@ -1795,7 +1799,7 @@ def _lower_comprehension_instance_iter(ctx: _FuncCtx, e: A.Comprehension, cls_na
     # paths -- see the ordering note in _lower_comprehension. Iterating a class
     # instance is no different: a comprehension over a user __iter__/__next__
     # with `k = 99; [k for k, v in Pairs()]` produced [0, 0] instead of [1, 2].
-    shadow_names = _target_shadow_names(e.targets, e.var)
+    shadow_names = _target_shadow_names(e.targets, e.var, id(e))
     ctx.comprehension_shadows.append(shadow_names)
     try:
         if e.targets:
@@ -1809,7 +1813,7 @@ def _lower_comprehension_instance_iter(ctx: _FuncCtx, e: A.Comprehension, cls_na
                 ctx.emit(IRInstr("load", item_v, [item_addr]))
                 _store_loop_target(ctx, target, item_v, target_ty)
         else:
-            var_ptr = ctx.ensure_slot(e.var, ir_type_for(el_kind))
+            var_ptr = ctx.ensure_slot(_comp_slot(ctx, e.var), ir_type_for(el_kind))
             ctx.emit(IRInstr("store", None, [next_v, var_ptr]))
 
         if e.cond is not None:
@@ -2010,7 +2014,7 @@ def _lower_comprehension(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
     # had written. `k = 1; v = 2; [k + v for k, v in pairs]` evaluated to 0
     # instead of 30, wrong for exactly the names that were already bound and
     # correct for fresh ones, compiling clean either way.
-    shadow_names = _target_shadow_names(e.targets, e.var)
+    shadow_names = _target_shadow_names(e.targets, e.var, id(e))
     ctx.comprehension_shadows.append(shadow_names)
     try:
         if e.targets:
@@ -2028,7 +2032,7 @@ def _lower_comprehension(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
                 ctx.emit(IRInstr("load", item_v, [item_addr]))
                 _store_loop_target(ctx, target, item_v, target_ty)
         else:
-            var_ptr = ctx.ensure_slot(e.var, var_ty)
+            var_ptr = ctx.ensure_slot(_comp_slot(ctx, e.var), var_ty)
             ctx.emit(IRInstr("store", None, [elem_v, var_ptr]))
         if e.cond is not None:
             cond_v = _lower_truthy(ctx, e.cond)
@@ -2353,7 +2357,7 @@ def _lower_dict_comprehension(ctx: _FuncCtx, e: A.DictComprehension) -> IRValue:
     # `{'1': 1, '2': 2}` -- one entry, because every iteration rebuilt the same
     # key from the untouched global. Pushed before the stores for the ordering
     # reason documented in _lower_comprehension.
-    shadow_names = _target_shadow_names(e.targets, e.var)
+    shadow_names = _target_shadow_names(e.targets, e.var, id(e))
     ctx.comprehension_shadows.append(shadow_names)
     try:
         if e.targets:
@@ -2369,7 +2373,7 @@ def _lower_dict_comprehension(ctx: _FuncCtx, e: A.DictComprehension) -> IRValue:
                 ctx.emit(IRInstr("load", item_v, [item_addr]))
                 _store_loop_target(ctx, target, item_v, target_ty)
         else:
-            var_ptr = ctx.ensure_slot(e.var, ir_type_for(var_ty))
+            var_ptr = ctx.ensure_slot(_comp_slot(ctx, e.var), ir_type_for(var_ty))
             ctx.emit(IRInstr("store", None, [elem_v, var_ptr]))
         if e.cond is not None:
             cond_v = _lower_truthy(ctx, e.cond)
@@ -3236,6 +3240,56 @@ def _lower_list_instance_repr(ctx: _FuncCtx, e, obj_v: IRValue, owner: str, meth
     return out
 
 
+def _list_element_type(e: A.Expr) -> str:
+    """A list expression's element type, from a literal or sema's carrier."""
+    if isinstance(e, A.ListLit):
+        return e.el_type or "int"
+    return getattr(e, "list_el_type", "int") or "int"
+
+
+def _tuple_slot_repr_kinds(e: A.Expr, slot_types: list) -> list:
+    """Per-slot fmt kinds for a tuple, composing a CONTAINER slot's inner kind.
+
+    `_value_repr_kind` answers 0 (int) for "list"/"dict"/"tuple", so a tuple
+    slot holding a container had its pointer formatted as an integer:
+    `print(([1], 2))` gave `(8550672, 2)`. Mixed SCALARS were always fine, and
+    list-in-list and list-in-dict were fine too, because those paths already go
+    through `_composite_repr_kind` -- only the tuple path did not.
+
+    The nested container's element type is not recorded per slot
+    (A.TupleLit.elem_types is one type string per slot), but for a tuple
+    LITERAL the slot's own expression is right here, and `_list_repr_kind` /
+    `_dict_value_repr_kind` read the element kind straight off it. So the inner
+    kind is recovered from the expression rather than guessed: assuming "int"
+    would have fixed `([1], 2)` and silently corrupted `(['a'], 2)`.
+
+    Slots whose expression is unavailable (a tuple from a call or an unpack,
+    where only the type strings survive) keep the previous kind, so this
+    narrows the bug to that case rather than trading it for a new one.
+    """
+    elems = list(getattr(e, "elems", None) or [])
+    kinds: list = []
+    for i, t in enumerate(slot_types):
+        sub = elems[i] if i < len(elems) else None
+        if sub is not None and t == "list":
+            # base 3 (list) with the ELEMENT kind in the high nibble.
+            # `_list_repr_kind(sub)` is the element kind alone, which is what
+            # goes in that nibble -- passing it as the whole kind formatted the
+            # list pointer as its element type instead: `(['a','b'], 1)` printed
+            # `('', 1)` (pointer read as a str) and `([1], 2)` stayed a pointer
+            # (element kind int == 0).
+            kinds.append(_composite_repr_kind("list", _list_element_type(sub)))
+        elif sub is not None and t == "dict":
+            kinds.append(
+                _composite_repr_kind("dict", getattr(sub, "value_type", "int") or "int")
+            )
+        elif t == "tuple":
+            kinds.append(_composite_repr_kind("tuple", "int"))
+        else:
+            kinds.append(_value_repr_kind(t))
+    return kinds
+
+
 def _dict_value_repr_kind(e: A.Expr) -> int:
     vt = getattr(e, "value_type", "int") or "int"
     inner = getattr(e, "inner_value_type", "int") or "int"
@@ -3596,12 +3650,28 @@ def _name_ptr(ctx: _FuncCtx, name: str, ty: IRType) -> IRValue:
         ptr = ctx.tmp(PTR)
         ctx.emit(IRInstr("global_addr", ptr, [name]))
         return ptr
-    return ctx.ensure_slot(name, ty)
+    # A comprehension target resolves to its own slot, never the enclosing
+    # scope's -- see _target_shadow_names.
+    return ctx.ensure_slot(_comp_slot(ctx, name), ty)
 
 
 def _name_value_ptr(ctx: _FuncCtx, name: str, ty: IRType) -> IRValue:
     """Storage containing a name's value, dereferencing closure boxes."""
     ptr = _name_ptr(ctx, name, ty)
+    # A comprehension-private slot is never a closure box, even when the
+    # enclosing scope's name of the same spelling IS one. The test below keys on
+    # the WRITTEN name, which after the rename no longer describes where
+    # _name_ptr just pointed, so a captured name reused as a comprehension
+    # target would have had its private slot dereferenced as a box pointer.
+    #
+    # Guarding rather than fixing an observed failure: the case that led here
+    # (`n = 5; [inner() for n in [1, 2]]` with `inner` capturing `n`) turned out
+    # to fail for an unrelated pre-existing reason -- a list nested in a tuple
+    # renders as its pointer, `print(([3, 4], 6))` gives `(8876096, 6)` with no
+    # comprehension anywhere. This check is still required for the rename to be
+    # sound; it just is not what that symptom was.
+    if _comp_slot(ctx, name) != name:
+        return ptr
     if name not in ctx.nonlocal_names and name not in ctx.boxed_names:
         return ptr
     if name in ctx.boxed_names:
@@ -3622,23 +3692,47 @@ def _iter_element_type(e: A.Expr) -> str:
     return getattr(e, "list_el_type", "int") or "int"
 
 
-def _target_shadow_names(targets: list, var: str) -> set:
-    """The names a comprehension's own targets bind.
+def _target_shadow_names(targets: list, var: str, uid: int = 0) -> dict:
+    """Map each name a comprehension's targets bind to a PRIVATE slot name.
 
-    These must shadow same-named module globals for the whole target-store AND
-    body region -- see the ordering note in _lower_comprehension. Nested groups
-    contribute their inner names too, since those are bound just as locally.
+    Two separate jobs, which is why this returns a mapping rather than a set:
+
+    * Membership shadows a same-named module GLOBAL for the whole target-store
+      and body region -- see the ordering note in _lower_comprehension.
+    * The mapped name keeps the target off the ENCLOSING scope's slot. A
+      comprehension is its own scope in Python, so `[k for k, v in pairs]`
+      inside a function must not rebind that function's `k`. Reusing the
+      enclosing slot meant it did: a function whose locals were k=1, v=2 saw
+      them left as 10, 20 afterwards, so `s + k + v` returned 60 where CPython
+      says 33. Distinct per comprehension (`uid`) so nested comprehensions over
+      the same name do not share one slot.
+
+    Nested groups contribute their inner names too, since those bind just as
+    locally.
     """
-    names: set = set()
+    names: list = []
     if targets:
         for t in targets:
             if isinstance(t, str):
-                names.add(t)
+                names.append(t)
             elif isinstance(t, list):
-                names.update(n for n in t if isinstance(n, str))
+                names.extend(n for n in t if isinstance(n, str))
     elif var:
-        names.add(var)
-    return names
+        names.append(var)
+    return {n: f"__comptgt{uid}_{n}" for n in names}
+
+
+def _comp_slot(ctx: _FuncCtx, name: str) -> str:
+    """`name`'s private comprehension slot, if it is a target of one.
+
+    Innermost frame wins, so an inner comprehension reusing an outer target's
+    name gets its own slot rather than writing the outer one.
+    """
+    for frame in reversed(ctx.comprehension_shadows):
+        private = frame.get(name)
+        if private is not None:
+            return private
+    return name
 
 
 def _store_loop_target(ctx: _FuncCtx, target, value: IRValue, ty: str) -> None:
@@ -3730,7 +3824,9 @@ def _lower_tuple_repr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         if isinstance(e, A.Call) and not getattr(e, "_tuple_el_known", False):
             _el = "any"
         return _emit_tuple_repr_dynamic(ctx, _lower_expr(ctx, e), _el, e)
-    return _emit_tuple_repr_value(ctx, _lower_expr(ctx, e), _kinds)
+    return _emit_tuple_repr_value(
+        ctx, _lower_expr(ctx, e), _kinds, _tuple_slot_repr_kinds(e, _kinds)
+    )
 
 
 def _emit_tuple_repr_dynamic(
@@ -3847,11 +3943,18 @@ def _emit_tuple_repr_dynamic(
     return out_v
 
 
-def _emit_tuple_repr_value(ctx: _FuncCtx, obj: IRValue, kinds: list) -> IRValue:
+def _emit_tuple_repr_value(
+    ctx: _FuncCtx, obj: IRValue, kinds: list, slot_kinds: list | None = None
+) -> IRValue:
     """The body of `_lower_tuple_repr`, but driven by an already-lowered tuple
     VALUE plus its per-slot kinds -- so a caller that has a tuple in hand at
     runtime (each element of a list[tuple], say) can format it the same way
-    instead of only working from an AST node."""
+    instead of only working from an AST node.
+
+    `kinds` holds the per-slot TYPE STRINGS, which still drive the load width.
+    `slot_kinds`, when given, supplies the fmt kind per slot instead of
+    `_value_repr_kind(k)` -- that is how a container slot gets a composed kind
+    (see _tuple_slot_repr_kinds)."""
     buf_addr = ctx.tmp(PTR)
     ctx.emit(IRInstr("gep", buf_addr, [obj, _LIST_BUF_OFF]))
     buf_v = ctx.tmp(PTR)
@@ -3887,7 +3990,11 @@ def _emit_tuple_repr_value(ctx: _FuncCtx, obj: IRValue, kinds: list) -> IRValue:
             ctx.emit(IRInstr("bitcast_f2i", iv, [elem_v]))
             fmt_v = iv
         kind_v = ctx.tmp(I64)
-        ctx.emit(IRInstr("const", kind_v, [_value_repr_kind(k)]))
+        _fmt_kind = (
+            slot_kinds[i] if slot_kinds is not None and i < len(slot_kinds)
+            else _value_repr_kind(k)
+        )
+        ctx.emit(IRInstr("const", kind_v, [_fmt_kind]))
         elem_repr = ctx.tmp(PTR)
         ctx.emit(IRInstr("call", elem_repr, ["_abi_fmt_elem", fmt_v, kind_v]))
         new_acc2 = ctx.tmp(PTR)
