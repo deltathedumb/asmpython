@@ -1730,9 +1730,288 @@ def load_program(
     _rename_colliding_module_globals(
         entry, entry_path, parsed, discovery_order, root
     )
+    _bind_module_qualified_names(
+        entry, entry_path, parsed, discovery_order, root, func_origin, class_origin
+    )
     _merge_import_bindings(entry, parsed, discovery_order)
     _materialize_value_imports(entry, parsed, discovery_order, root, class_origin, func_origin)
     return entry
+
+
+def _rewrite_module_qualified(
+    stmts: list, renames: dict[str, str], shadowed: set[str]
+) -> None:
+    """Rewrite `M.f(...)` -> `f(...)` and `M.v` -> `v` throughout `stmts`.
+
+    `renames` is keyed by the dotted SPELLING (`"json.dumps"`) so one lookup
+    settles both which module is being dotted and which merged symbol it means.
+    `shadowed` names a module alias that some local binding has taken over in
+    this scope; those are left untouched, since `json = 5` makes `json.x` an
+    attribute access on an int, not a module reference.
+
+    Reuses `_walk_exprs` for the statement shapes rather than repeating the
+    per-node chain a third time.
+    """
+    def fix(e):
+        if isinstance(e, A.MethodCall):
+            obj = e.obj
+            if (
+                isinstance(obj, A.Name)
+                and obj.name not in shadowed
+                and f"{obj.name}.{e.method}" in renames
+            ):
+                return A.Call(
+                    func=renames[f"{obj.name}.{e.method}"],
+                    args=list(e.args),
+                    kwargs=list(e.kwargs),
+                    pos=e.pos,
+                )
+            return None
+        if isinstance(e, A.Attr):
+            obj = e.obj
+            if (
+                isinstance(obj, A.Name)
+                and obj.name not in shadowed
+                and f"{obj.name}.{e.name}" in renames
+            ):
+                return A.Name(name=renames[f"{obj.name}.{e.name}"], pos=e.pos)
+            return None
+        return None
+
+    _map_exprs(stmts, fix)
+
+
+def _map_exprs(stmts: list, fix) -> None:
+    """Walk every expression under `stmts`, replacing any node for which
+    `fix(node)` returns a replacement (None leaves it alone). Bottom-up: the
+    children of a node are visited before the node itself, so a rewrite of an
+    inner expression is visible to an outer one.
+
+    Deliberately shares no code with `_rename_call_targets`: that one mutates
+    `Call.func` strings in place and cannot substitute one node kind for
+    another, which is exactly what turning a `MethodCall` into a `Call`
+    requires.
+    """
+    def walk_expr(e):
+        if e is None or not hasattr(e, "__dataclass_fields__"):
+            return e
+        for fname in list(e.__dataclass_fields__):
+            val = getattr(e, fname, None)
+            if isinstance(val, list):
+                setattr(e, fname, [
+                    walk_expr(item) if hasattr(item, "__dataclass_fields__") else item
+                    for item in val
+                ])
+            elif hasattr(val, "__dataclass_fields__"):
+                setattr(e, fname, walk_expr(val))
+        replaced = fix(e)
+        return replaced if replaced is not None else e
+
+    def walk_stmts(ss) -> None:
+        for s in ss or []:
+            if s is None or not hasattr(s, "__dataclass_fields__"):
+                continue
+            for fname in list(s.__dataclass_fields__):
+                val = getattr(s, fname, None)
+                if isinstance(val, list):
+                    # A statement's list field is either nested statements or
+                    # nested expressions; `A.Match.cases` is neither (it holds
+                    # (pattern, guard, body) tuples), so it gets its own arm.
+                    if val and isinstance(val[0], tuple):
+                        continue
+                    if val and _is_stmt_node(val[0]):
+                        walk_stmts(val)
+                    else:
+                        setattr(s, fname, [
+                            walk_expr(item)
+                            if hasattr(item, "__dataclass_fields__") else item
+                            for item in val
+                        ])
+                elif hasattr(val, "__dataclass_fields__"):
+                    if _is_stmt_node(val):
+                        walk_stmts([val])
+                    else:
+                        setattr(s, fname, walk_expr(val))
+            if isinstance(s, A.Match):
+                new_cases: list = []
+                for pattern, guard, body in s.cases:
+                    walk_stmts(body)
+                    new_cases.append(
+                        (pattern, walk_expr(guard) if guard is not None else None, body)
+                    )
+                s.cases = new_cases
+            elif isinstance(s, A.Try):
+                for _t, _b, hbody in s.extra_handlers:
+                    walk_stmts(hbody)
+
+    walk_stmts(stmts)
+
+
+_STMT_TYPES = (
+    A.Assign, A.AugAssign, A.MultiAssign, A.TupleAssign, A.ConstDecl,
+    A.Return, A.If, A.While, A.For, A.Break, A.Continue, A.ExprStmt,
+    A.Pass, A.Import, A.FromImport, A.AttrAssign, A.IndexAssign,
+    A.With, A.Try, A.Raise, A.Global, A.Nonlocal, A.Del, A.Match,
+    A.YieldStmt, A.FuncDef, A.ClassDef, A.ClosureBind,
+)
+
+
+def _is_stmt_node(node: object) -> bool:
+    return isinstance(node, _STMT_TYPES)
+
+
+def _module_alias_targets(
+    module: A.Module, module_path: Path, root: Path
+) -> dict[str, str]:
+    """`import M` / `import M as A` in `module`, as {bound name -> resolved
+    module path}, for MERGED modules only.
+
+    A merged module is one whose source is pulled into the program: bundled
+    SOURCE stdlib, or project source. FFI modules (os, sys, math, socket, ...)
+    are deliberately excluded -- they resolve through the BINDINGS registry and
+    sema already types `os.getcwd()` correctly, so rewriting them would break a
+    path that works.
+    """
+    out: dict[str, str] = {}
+    for stmt in _collect_import_stmts(module):
+        if not isinstance(stmt, A.Import):
+            continue
+        target = _resolve_absolute(stmt.module, root)
+        if target is None:
+            target = _resolve_user_module(stmt.module, module_path, root)
+        if target is None:
+            target = _resolve_bundled_stdlib(stmt.module)
+        if target is None:
+            continue
+        # `import a.b.c as d` binds `d`; without an alias the name bound is the
+        # LEADING segment (`import a.b.c` binds `a`), which cannot name the
+        # leaf module's own functions -- only the aliased spelling can.
+        if stmt.alias:
+            out[stmt.alias] = str(target.resolve())
+        elif "." not in stmt.module:
+            out[stmt.module] = str(target.resolve())
+    return out
+
+
+def _rebinds_name(stmts: list, name: str) -> bool:
+    """True if `stmts` assigns `name` anywhere, so a module alias of that name
+    is shadowed and must not be rewritten inside this scope."""
+    for s in stmts or []:
+        if isinstance(s, (A.Assign, A.AugAssign, A.ConstDecl)):
+            target = getattr(s, "target", None) or getattr(s, "name", None)
+            if target == name:
+                return True
+        elif isinstance(s, A.TupleAssign):
+            for t in s.targets:
+                if isinstance(t, A.Name) and t.name == name:
+                    return True
+        elif isinstance(s, A.For):
+            if s.var == name or name in s.targets:
+                return True
+            if _rebinds_name(s.body, name) or _rebinds_name(s.orelse, name):
+                return True
+        elif isinstance(s, A.With):
+            if s.name == name or _rebinds_name(s.body, name):
+                return True
+        elif isinstance(s, A.If):
+            if _rebinds_name(s.then, name) or _rebinds_name(s.orelse, name):
+                return True
+        elif isinstance(s, A.While):
+            if _rebinds_name(s.body, name) or _rebinds_name(s.orelse, name):
+                return True
+        elif isinstance(s, A.Try):
+            if (
+                _rebinds_name(s.body, name)
+                or _rebinds_name(s.handler, name)
+                or _rebinds_name(s.else_body, name)
+                or _rebinds_name(s.finally_body, name)
+            ):
+                return True
+            for _t, _b, hbody in s.extra_handlers:
+                if _rebinds_name(hbody, name):
+                    return True
+    return False
+
+
+def _bind_module_qualified_names(
+    entry: A.Module,
+    entry_path: Path,
+    parsed: dict[str, A.Module],
+    discovery_order: list[str],
+    root: Path,
+    func_origin: dict[str, str],
+    class_origin: dict[str, str],
+) -> None:
+    """Make `import M` + `M.f()` reach the merged `f`.
+
+    Whole-program merging flattens every module's top-level definitions into
+    one namespace, which is why `from json import dumps` works: `dumps` simply
+    becomes a global. Nothing connected the DOTTED spelling to the same symbol,
+    so `import json` + `json.dumps(x)` resolved to nothing, and sema reported
+    E005 "no module 'json' is available" -- for a module whose source had in
+    fact been merged into the program moments earlier.
+
+    That one gap accounted for 133 of the corpus's failures. It applied to
+    every bundled source module (struct, bisect, copy, operator, json, io, re,
+    ... all confirmed) and to project source modules imported the same way.
+
+    This pass rewrites, in the entry and in every merged module's bodies:
+
+        MethodCall(obj=Name(M), method=f, args)  ->  Call(func=f, args)
+        Attr(obj=Name(M), name=v)                ->  Name(v)
+
+    `func_origin` / `class_origin` map each merged name to the module it came
+    from, so a rewrite only happens when the flattened symbol of that name
+    ACTUALLY came from the module being dotted. When two merged modules define
+    the same top-level name, the loser is left alone rather than silently bound
+    to the wrong function -- so this pass can convert a failure into a success,
+    never a success into a wrong answer.
+    """
+    modules: list[tuple[A.Module, Path]] = [(entry, entry_path)]
+    for mod_path in discovery_order:
+        mod = parsed.get(mod_path)
+        if mod is not None and mod is not entry:
+            modules.append((mod, Path(mod_path)))
+
+    for module, module_path in modules:
+        aliases = _module_alias_targets(module, module_path, root)
+        if not aliases:
+            continue
+        renames: dict[str, str] = {}
+        for alias, target_key in aliases.items():
+            target = parsed.get(target_key)
+            if target is None:
+                continue
+            for f in target.funcs:
+                if f.is_lifted:
+                    continue
+                if func_origin.get(f.name) == target_key:
+                    renames[f"{alias}.{f.name}"] = f.name
+            for c in target.classes:
+                if class_origin.get(c.name) == target_key:
+                    renames[f"{alias}.{c.name}"] = c.name
+            for stmt in target.body:
+                if isinstance(stmt, (A.Assign, A.ConstDecl)):
+                    value_name = getattr(stmt, "target", None) or getattr(
+                        stmt, "name", None
+                    )
+                    if isinstance(value_name, str):
+                        renames.setdefault(f"{alias}.{value_name}", value_name)
+        if not renames:
+            continue
+        shadowed = {a for a in aliases if _rebinds_name(module.body, a)}
+        _rewrite_module_qualified(module.body, renames, shadowed)
+        for f in module.funcs:
+            local_shadow = shadowed | {
+                a for a in aliases if a in f.params or _rebinds_name(f.body, a)
+            }
+            _rewrite_module_qualified(f.body, renames, local_shadow)
+        for c in module.classes:
+            for m in c.methods:
+                local_shadow = shadowed | {
+                    a for a in aliases if a in m.params or _rebinds_name(m.body, a)
+                }
+                _rewrite_module_qualified(m.body, renames, local_shadow)
 
 
 def _merge_function_import_aliases(
