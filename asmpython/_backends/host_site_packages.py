@@ -149,8 +149,6 @@ def _is_ffi_stdlib(module: str) -> bool:
         return True
     if top == "network":
         return True
-    if top == "hardware":
-        return True
     return False
 
 

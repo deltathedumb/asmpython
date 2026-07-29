@@ -12,7 +12,7 @@ First public release. Core language, standard library bindings, and two targets.
 
 **Language:** integer/float arithmetic, strings (concat, repeat, compare, index, slice, methods), f-strings, lists, dicts, sets, tuples, classes (single inheritance, `__init__`, instance attrs, methods, `super()`), exceptions (`try`/`except`/`raise`/`finally`/`else`), `with` statement, `@classmethod`/`@staticmethod`/`@property`, list/dict/set comprehensions, `*args`, default arguments, keyword arguments, `lambda`, first-class functions, decorators, inline assembly.
 
-**Standard library:** `math` (22 functions), `os`, `sys`, `time`, `random`, `io`, `pathlib`, `json`, `struct`, `enum`, `fractions`, `contextlib`, `collections`, `statistics`, `uuid`, `argparse` (partial), and the full `asmlib` suite (`hardware`, `network`, `gui`).
+**Standard library:** `math` (22 functions), `os`, `sys`, `time`, `random`, `io`, `pathlib`, `json`, `struct`, `enum`, `fractions`, `contextlib`, `collections`, `statistics`, `uuid`, `argparse` (partial), and the `asmlib` suite (`network`, `gui`).
 
 **Targets:** Windows PE64, Linux ELF64, `--target freestanding` (Multiboot1 bare-metal with VGA + serial + bump allocator), `--target freestanding16` (raw BIOS MBR image, real mode → long mode bootstrap).
 

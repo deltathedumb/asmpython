@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- **`hardware`** — the bare-metal FFI bindings module (port I/O, MMIO, MSRs,
+  CR0-4, `invlpg`, `lidt`, `cli`/`sti`/`hlt`, PIC/PIT, VGA text mode, plus
+  `rdtsc`/`cpuid`/`rdrand`). It could not actually be targeted through the
+  backends, so the bindings had no reachable implementation path. Removed
+  along with `asmlib.hardware` from the docs and its two test cases.
+- **`lumen`** — the graphics package (`Canvas`, `Framebuffer`, `PixelBuffer`,
+  `TileMap`, `gl`, `audio`, joystick and image helpers). It existed to cover
+  a gap before the general graphics packages worked; those cover it now, so
+  it was scaffolding kept past its purpose. `stdlib/_font8x8.py` went with
+  it — the 8x8 bitmap font had no importer outside `lumen`.
+
+  The bundled-PACKAGE import machinery in `program.py` is unchanged and still
+  used by `stdlib/assembly/`; its comments were re-pointed there, since they
+  had cited `lumen` as the motivating example.
+
 ### Added
 
 - **Compiler extension system**: `extend <name>` / `retract <name>`

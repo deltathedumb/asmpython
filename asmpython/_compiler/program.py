@@ -493,7 +493,6 @@ _BUNDLED_SOURCE_STDLIB: frozenset[str] = frozenset({
     "ipaddress", "numbers", "hmac", "timeit", "getpass",
     "gzip", "zipfile", "pickle",
     "colorsys", "cmath", "sched",
-    "lumen", "_font8x8",
     # 3.14 stdlib additions (batch 1)
     "errno", "stat", "getopt", "binascii", "array", "unittest",
     "urllib_request", "urllib_error",
@@ -611,12 +610,12 @@ def _bundled_dotted_stem(module: str) -> str | None:
 
 
 def _resolve_bundled_stdlib(module: str) -> Path | None:
-    # `import asmpython.stdlib.lumen as lumen` (the fully-qualified form,
+    # `import asmpython.stdlib.assembly as assembly` (the fully-qualified form,
     # mirroring how the bundled stdlib is laid out on disk) names the same
-    # file as plain `import lumen`, but every lookup below keys off the bare
+    # file as plain `import assembly`, but every lookup below keys off the bare
     # stdlib-relative name. Without this strip, the qualified form silently
     # resolves to None here -- not a hard error, since an unresolved module
-    # name just leaves the import's bound name untyped ("any") -- so `lumen`
+    # name just leaves the import's bound name untyped ("any") -- so `assembly`
     # was never merged, none of its classes (Canvas, PixelBuffer, ...) existed
     # in self.classes, and every method call on a value built from it fell
     # back through opaque/"any" dispatch heuristics instead of real per-class
@@ -635,7 +634,7 @@ def _resolve_bundled_stdlib(module: str) -> Path | None:
         rest = module.split(".")[1:]
         if rest:
             # A genuine dotted submodule path inside a bundled *package*
-            # (`lumen.framebuffer` -> stdlib/lumen/framebuffer.py), distinct
+            # (`assembly.x86` -> stdlib/assembly/x86.py), distinct
             # from `_bundled_dotted_stem`'s flat-file aliases (`os.path` ->
             # stdlib/ospath.py, a different file entirely, not a real
             # `os/path.py` submodule). Only a real package directory (not a
@@ -1268,14 +1267,13 @@ def _project_imports(module: A.Module, importer: Path, root: Path) -> list[Path]
                 # `from asmpython.pkg import X`: X may be a name defined in the
                 # package's module/__init__, OR a *submodule*. Try each
                 # imported name as a submodule FIRST: a name that resolves as
-                # its own file (`from lumen import framebuffer` ->
-                # stdlib/lumen/framebuffer.py) must NOT also pull in the
-                # package's __init__.py — some bundled packages split
-                # genuinely independent submodules with different link
-                # requirements (lumen's __init__ needs SDL2; lumen.framebuffer
-                # needs neither), and merging __init__ in regardless would
-                # drag SDL2 into a program that only wants the bare-metal
-                # framebuffer. Only fall back to resolving the base module
+                # its own file (`from assembly import x86` ->
+                # stdlib/assembly/x86.py) must NOT also pull in the
+                # package's __init__.py — a bundled package may split
+                # genuinely independent submodules whose link requirements
+                # differ, and merging __init__ in regardless would drag its
+                # dependencies into a program that imported only one leaf.
+                # Only fall back to resolving the base module
                 # itself when at least one imported name *isn't* its own
                 # submodule (so it must live in the package's __init__/be the
                 # module itself, e.g. `from os.path import join`).

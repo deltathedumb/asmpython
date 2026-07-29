@@ -146,26 +146,12 @@ misreported as a compiled executable.
 | `uuid` | `uuid4` |
 | `argparse` | `ArgumentParser`, `add_argument`, `parse_args` (partial) |
 
-### asmlib — hardware, network, and GUI
+### asmlib — network and GUI
 
 `asmlib` is part of the standard library. Import its modules directly:
 
 ```python
-from asmlib import hardware, network, gui
-```
-
-#### `asmlib.hardware`
-
-Low-level hardware access for freestanding targets: console I/O, CPUID,
-RDTSC, memory-mapped I/O, and port-mapped I/O.
-
-```python
-from asmlib import hardware
-
-hardware.console.clear()
-hardware.console.print_at(5, 5, "Hello!")
-tsc = hardware.cpu.rdtsc()
-hardware.port.out8(0x3F8, 0x41)  # write byte to COM1
+from asmlib import network, gui
 ```
 
 #### `asmlib.network`
