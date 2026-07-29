@@ -5722,7 +5722,20 @@ class SemaAnalyzer:
         (name, had_before, saved_type) to pass to `_undo_narrow`."""
         name, nty = spec
         token = (name, name in scope.types, scope.types.get(name))
+        was_opaque = scope.types.get(name) == "any"
         scope.types[name] = nty
+        if was_opaque:
+            # `isinstance(o, list)` on an OPAQUE value tells you the container
+            # kind and nothing else -- its elements/values stay opaque. Without
+            # saying so, they default to "int", and an element that is really a
+            # boxed value is then read raw AND re-boxed as an int on the way
+            # out, so one unbox yields the inner box pointer. That is what made
+            # json's encoder print a nested list as a number: its
+            # `isinstance(obj, list)` branch iterated elements typed "int".
+            if nty in ("list", "tuple"):
+                scope.list_el_types[name] = "any"
+            elif nty == "dict":
+                scope.dict_value_types[name] = "any"
         return token
 
     def _undo_narrow(self, token, nty, scope: Scope) -> None:

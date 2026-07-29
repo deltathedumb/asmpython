@@ -5921,6 +5921,17 @@ def _lower_isinstance(ctx: _FuncCtx, e: A.Call) -> IRValue:
                 accept_tags.append(BUILTIN_TYPE_IDS["int"])
             elif t in BUILTIN_TYPE_IDS:
                 accept_tags.append(BUILTIN_TYPE_IDS[t])
+        # A never-boxed value in an "any" slot reports UNTAGGED. In this
+        # runtime such a word IS a plain integer -- that is the same
+        # assumption `_lower_format_any_value`'s fallback makes when it
+        # formats an untagged value with element kind 0 (int). So accept
+        # UNTAGGED for an `int` target: without it, a homogeneous
+        # `dict[str, int]` (whose values are stored RAW, not boxed) read
+        # through an opaque reference answered `isinstance(v, int)` False and
+        # fell through to a string fallback -- json serialised {"a": 1} as
+        # {"a": "1"}.
+        if "int" in targets:
+            accept_tags.append(UNTAGGED_ID)
         obj_v = _lower_expr_inner(ctx, arg0)
         tag_v = _lower_read_any_tag(ctx, obj_v)
         match_v = ctx.tmp(I64)
@@ -8884,6 +8895,18 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             return v
         if obj_ty == "dict":
             res_ty = A.expr_type(e)
+            if (
+                isinstance(e.obj, A.Name)
+                and e.obj.name in ctx.narrowed_types
+                and not getattr(e, "value_type", "")
+            ):
+                # `if isinstance(o, dict): o[k]` -- narrowing an OPAQUE value
+                # tells you the container kind, not the VALUE kind, so the
+                # values stay opaque. Sema types this read "int" by default,
+                # which loads the value raw and then re-boxes it as an int on
+                # the way out, so one unbox yields the inner box pointer. Same
+                # rule as the matching `for x in <narrowed>` case.
+                res_ty = "any"
             res_is_float = res_ty == "float"
             obj_v = _lower_expr(ctx, e.obj)
             key_v = _lower_dict_key(ctx, e.index)
@@ -14032,10 +14055,18 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         elif isinstance(s.iter, A.ListLit):
             el_ty = s.iter.el_type
         elif isinstance(s.iter, A.Name):
-            el_ty = ctx.slot_el_ty.get(
-                s.iter.name,
-                ctx.mctx.global_list_el_ty.get(s.iter.name, "int"),
-            )
+            _default_el = ctx.mctx.global_list_el_ty.get(s.iter.name, "int")
+            if s.iter.name in ctx.narrowed_types and s.iter.name not in ctx.slot_el_ty:
+                # `if isinstance(o, list): for item in o:` -- narrowing an
+                # OPAQUE value tells you the container kind, not the element
+                # kind, so the elements stay opaque. Defaulting them to "int"
+                # loaded each element raw and then RE-BOXED it as an int when
+                # it was passed on, so one unbox yielded the inner box pointer.
+                # That is what made json's encoder print a nested list as a
+                # number: `for item in obj` inside its `isinstance(obj, list)`
+                # branch double-boxed every element.
+                _default_el = "any"
+            el_ty = ctx.slot_el_ty.get(s.iter.name, _default_el)
         else:
             el_ty = getattr(s.iter, "list_el_type", "int") or "int"
         var_ty = PTR if s.targets else ir_type_for(el_ty)
