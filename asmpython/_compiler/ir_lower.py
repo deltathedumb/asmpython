@@ -3671,9 +3671,21 @@ def _lower_tuple_repr(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         # unrolled formatter has nothing to unroll there and emitted a bare
         # "()", silently printing a populated tuple as empty. Walk the real
         # length instead, formatting each slot by the source's element kind.
-        return _emit_tuple_repr_dynamic(
-            ctx, _lower_expr(ctx, e), getattr(e, "list_el_type", "any"), e
-        )
+        # `getattr(..., "any")` never fired for a CALL result: A.Call declares
+        # `list_el_type: str = "int"` as a dataclass default, so the attribute
+        # is always present and the fallback was unreachable. A function
+        # annotated `-> tuple` carries no slot shape, so its elements are
+        # exactly the case this fallback was written for -- struct.unpack's
+        # `(1, 2)` printed as a pair of pointers because its boxed elements
+        # were formatted with the int kind.
+        #
+        # Preferring the tagged kind is safe even when the elements turn out
+        # to be raw: kind 6 checks for a box and falls through to the integer
+        # path when there isn't one.
+        _el = getattr(e, "list_el_type", "any") or "any"
+        if isinstance(e, A.Call) and not getattr(e, "_tuple_el_known", False):
+            _el = "any"
+        return _emit_tuple_repr_dynamic(ctx, _lower_expr(ctx, e), _el, e)
     return _emit_tuple_repr_value(ctx, _lower_expr(ctx, e), _kinds)
 
 
