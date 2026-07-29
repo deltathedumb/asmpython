@@ -817,6 +817,7 @@ class Codegen:
         # Build the publish list without set ops (self-host: no set runtime).
         publish = list(self.RUNTIME_GLOBALS)
         publish.append("itoa_str_buf")
+        publish.append("_gc_head")
         publish.append("input_buf")
         publish.append("_float_repr_x")
         publish.append("_float_repr_notation")
@@ -844,6 +845,12 @@ class Codegen:
     RUNTIME_GLOBALS = [
         # Dict runtime
         "_runtime_zalloc",
+        "_runtime_objalloc",
+        "_runtime_objfree",
+        "_runtime_gc_count",
+        "_runtime_gc_is_object",
+        "_runtime_gc_mark",
+        "_runtime_gc_sweep",
         "_runtime_hash_string",
         "_runtime_dict_lookup_slot",
         "_runtime_dict_set",
@@ -4743,6 +4750,143 @@ class Codegen:
         self.emitf("mov rbx, [rbp-8]")
         self._emit_libc_memset_zero()
         self.emitf("leave", "ret")
+
+        # ---- _runtime_objalloc: allocate a tracked OBJECT. rbx = payload size.
+        # Returns rax = payload pointer, with a 16-byte header behind it:
+        #
+        #     [ size ][ next ]  <- payload starts here; callers get this
+        #      -16      -8         0
+        #
+        # `next` threads `_gc_head`, a singly-linked registry of every live
+        # object. Field offsets are measured from the payload, so every
+        # existing layout constant (LIST_CAP_OFF, DICT_LEN_OFF, the box
+        # layout) is unchanged.
+        #
+        # OBJECTS ONLY. Element buffers keep using `_runtime_zalloc` and stay
+        # unregistered on purpose: a buffer has no identity, is reachable only
+        # through its owner, and dies with it -- the collector frees it via the
+        # owner. That also keeps `realloc` (which list growth calls directly,
+        # and which MOVES blocks) completely out of the GC's way; registering
+        # buffers would invalidate a registry link on every append.
+        # In:  rcx = payload size.  Out: rax = payload pointer.
+        # PRESERVES RBX -- deliberately a drop-in for `mov rcx, N; call malloc`,
+        # which is how the object constructors allocate. rbx is callee-saved in
+        # both ABIs and `_abi_new_list` keeps the list's capacity there across
+        # the allocation, so taking the size in rbx (as _runtime_zalloc does)
+        # silently destroyed it and corrupted the heap.
+        self.label("_runtime_objalloc")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+        self.emitf("mov [rbp-24], rbx")        # save caller's rbx
+        self.emitf("mov [rbp-8], rcx")         # payload size
+        self.emitf("mov rax, rcx", "add rax, 16")
+        self._emit_libc_malloc_size_in_rax()   # rax = block base
+        self.emitf("mov [rbp-16], rax")
+        # Zero the payload; the header is written explicitly.
+        self.emitf("add rax, 16")
+        self.emitf("mov rbx, [rbp-8]")
+        self._emit_libc_memset_zero()
+        self.emitf("mov rax, [rbp-16]")
+        self.emitf("mov rcx, [rbp-8]")
+        self.emitf("mov [rax], rcx")           # header.size
+        self.emitf("mov rcx, [_gc_head]")
+        self.emitf("mov [rax+8], rcx")         # header.next = old head
+        self.emitf("mov [_gc_head], rax")      # head = this block
+        self.emitf("add rax, 16")              # -> payload
+        self.emitf("mov rbx, [rbp-24]")        # restore caller's rbx
+        self.emitf("leave", "ret")
+
+        # ---- _runtime_objfree: free a tracked object by PAYLOAD pointer.
+        # libc free needs the base malloc returned, 16 bytes back. Only the
+        # sweep calls this; it does NOT unlink, because the sweep rebuilds the
+        # registry as it walks.
+        self.label("_runtime_objfree")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+        self.emitf("test rax, rax", "jz ._objfree_done")
+        self.emitf("sub rax, 16")
+        self._emit_libc_free()
+        self.label("._objfree_done")
+        self.emitf("leave", "ret")
+
+        # ---- _runtime_gc_sweep: free every UNMARKED tracked object.
+        #
+        # The mark bit is bit 0 of header.size. Sizes are always multiples of
+        # 8 (every object is a whole number of 8-byte fields), so the low three
+        # bits are free and no size information is lost.
+        #
+        # Walks `_gc_head`, rebuilding the list from the survivors: a marked
+        # object is unmarked and relinked, an unmarked one is freed. Rebuilding
+        # rather than unlinking in place is what makes `_runtime_objfree` able
+        # to skip unlinking -- there is no node left to unlink from.
+        #
+        # Returns rax = number of objects freed, which is what gc.collect()
+        # reports.
+        self.label("_runtime_gc_sweep")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+        self.emitf("mov rax, [_gc_head]", "mov [rbp-8], rax")   # cursor
+        self.emitf("mov qword [rbp-16], 0")                     # new head
+        self.emitf("mov qword [rbp-24], 0")                     # freed count
+        self.label("._sweep_loop")
+        self.emitf("mov rax, [rbp-8]", "test rax, rax", "jz ._sweep_done")
+        self.emitf("mov rcx, [rax+8]", "mov [rbp-32], rcx")     # next, saved first
+        self.emitf("mov rbx, [rax]")                            # size | mark
+        self.emitf("test rbx, 1", "jz ._sweep_dead")
+        # Live: clear the mark, relink onto the new list.
+        self.emitf("and rbx, -2", "mov [rax], rbx")
+        self.emitf("mov rcx, [rbp-16]", "mov [rax+8], rcx")
+        self.emitf("mov [rbp-16], rax")
+        self.emitf("jmp ._sweep_next")
+        self.label("._sweep_dead")
+        self.emitf("add rax, 16")                               # -> payload
+        self.emitf("call _runtime_objfree")
+        self.emitf("inc qword [rbp-24]")
+        self.label("._sweep_next")
+        self.emitf("mov rax, [rbp-32]", "mov [rbp-8], rax")
+        self.emitf("jmp ._sweep_loop")
+        self.label("._sweep_done")
+        self.emitf("mov rax, [rbp-16]", "mov [_gc_head], rax")
+        self.emitf("mov rax, [rbp-24]")
+        self.emitf("leave", "ret")
+
+        # ---- _runtime_gc_mark: mark one object by PAYLOAD pointer (rax).
+        # Sets bit 0 of its header size. Idempotent, and a null is ignored, so
+        # a root scanner can call it on anything it believes is an object.
+        self.label("_runtime_gc_mark")
+        self.emitf("test rax, rax", "jz ._mark_done")
+        self.emitf("mov rbx, [rax-16]", "or rbx, 1", "mov [rax-16], rbx")
+        self.label("._mark_done")
+        self.emitf("ret")
+
+        # ---- _runtime_gc_is_object: rax = candidate -> rax = 1 if it is a
+        # PAYLOAD pointer we handed out, else 0.
+        #
+        # This is what makes a conservative root scan respectable rather than a
+        # guess. `_lower_read_any_tag` currently asks "does this look like a
+        # pointer" (above a threshold, 8-byte aligned, then a magic probe); the
+        # registry lets the question be "is this exactly an address we handed
+        # out", which has no false positives. O(n) in live objects -- fine for
+        # a stop-the-world scan, and the reason a real collector would swap the
+        # list for a sorted table or bitmap later.
+        self.label("_runtime_gc_is_object")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+        self.emitf("mov rcx, rax", "sub rcx, 16")               # candidate base
+        self.emitf("mov rax, [_gc_head]")
+        self.label("._isobj_loop")
+        self.emitf("test rax, rax", "jz ._isobj_no")
+        self.emitf("cmp rax, rcx", "je ._isobj_yes")
+        self.emitf("mov rax, [rax+8]", "jmp ._isobj_loop")
+        self.label("._isobj_yes")
+        self.emitf("mov rax, 1", "leave", "ret")
+        self.label("._isobj_no")
+        self.emitf("xor rax, rax", "leave", "ret")
+
+        # ---- _runtime_gc_count: rax = number of live tracked objects.
+        self.label("_runtime_gc_count")
+        self.emitf("xor rcx, rcx", "mov rax, [_gc_head]")
+        self.label("._gccount_loop")
+        self.emitf("test rax, rax", "jz ._gccount_done")
+        self.emitf("inc rcx", "mov rax, [rax+8]", "jmp ._gccount_loop")
+        self.label("._gccount_done")
+        self.emitf("mov rax, rcx", "ret")
 
         # ---- _runtime_hash_string: FNV-1a 64-bit. rax = str ptr -> rax = hash.
         self.label("_runtime_hash_string")

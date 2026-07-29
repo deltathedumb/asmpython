@@ -29,6 +29,8 @@ extern _runtime_set_repr
 extern _runtime_str_char_at
 extern _runtime_str_slice
 extern _runtime_zalloc
+extern _runtime_objalloc
+extern _runtime_objfree
 extern _runtime_list_append
 extern _runtime_list_pop
 extern _runtime_list_slice
@@ -402,7 +404,7 @@ _abi_new_instance:
     WIN64_RUNTIME_ENTER
     sub rsp, 48
     mov rcx, 40                  ; DICT_HEADER
-    call malloc
+    call _runtime_objalloc       ; tracked object (header behind ptr)
     mov qword [rax+0], 8         ; DICT_CAP_OFF = 8 initial slots
     mov qword [rax+8], 0         ; DICT_LEN_OFF
     mov qword [rax+16], 0        ; DICT_TOMB_OFF
@@ -441,7 +443,7 @@ _abi_new_box:
     mov [rsp+32], rcx           ; spill tag across malloc
     mov [rsp+40], rdx           ; spill payload across malloc
     mov rcx, 24                 ; box is 3 words
-    call malloc
+    call _runtime_objalloc      ; tracked object
     mov rcx, [rsp+32]
     mov rdx, [rsp+40]
     mov rbx, 0xB0BE11EDB0BE11ED ; BOX_MAGIC -- keep in sync with ir_lower.py
@@ -497,7 +499,7 @@ _abi_new_list:
     mov rbx, 1
 .cap_ok:
     mov rcx, 24                  ; LIST_HEADER
-    call malloc
+    call _runtime_objalloc       ; tracked object
     mov [rax+0], rbx             ; LIST_CAP_OFF = cap
     mov qword [rax+8], 0         ; LIST_LEN_OFF
     mov [rsp+32], rax            ; spill header ptr

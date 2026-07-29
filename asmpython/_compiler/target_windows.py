@@ -628,6 +628,9 @@ class WindowsCodegen(Codegen):
             self.emit("section .bss")
             self.emit("itoa_str_buf: resb 32")
             self.emit("input_buf:    resb 256")
+            # Head of the object registry: a singly-linked list through
+            # each tracked object's header. Zero = empty, the right start.
+            self.emit("_gc_head:     resq 1")
             # Scratch for _emit_float_repr_search's shortest-round-trip
             # precision search (see that method's docstring).
             self.emit("_float_repr_x:          resq 1")
