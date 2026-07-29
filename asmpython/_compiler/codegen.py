@@ -8504,6 +8504,8 @@ class Codegen:
             "je ._fe_dict",
             "cmp rbx, 5",
             "je ._fe_items_tuple",
+            "cmp rbx, 6",
+            "je ._fe_tagged",
         )
         self._emit_int_to_str()
         self.emitf("leave", "ret")
@@ -8537,6 +8539,114 @@ class Codegen:
             "shr rcx, 4",
             "mov rbx, 1",
             "call _runtime_dict_repr",
+            "leave",
+            "ret",
+        )
+        # kind 6 -- the element is a BOXED value, so its kind is only knowable
+        # at runtime. Every other kind here encodes a shape the compiler knew;
+        # a heterogeneous container has no such shape, so `repr()` of one used
+        # to print each element with the only available static kind (0, int)
+        # and a nested list came out as its ADDRESS.
+        #
+        # The recursion is the point: list/dict/set arms pass kind 6 back down,
+        # so nesting works to any depth without the compiler knowing anything
+        # about it. Frame: [rbp-56] = value/payload, [rbp-64] = tag.
+        self.label("._fe_tagged")
+        self.emitf(
+            "mov [rbp-56], rax",
+            # Guard the dereference exactly as the compiler-side tag reader
+            # does: a real box is a heap pointer, so it is above the low-address
+            # threshold AND 8-byte aligned. A raw integer that fails either test
+            # is printed as the integer it is.
+            "cmp rax, 0x10000",
+            "jbe ._fe_tagged_int",
+            "test rax, 7",
+            "jnz ._fe_tagged_int",
+            "mov rbx, 0xB0BE11EDB0BE11ED",  # BOX_MAGIC, see abi_shims.asm
+            "cmp [rax], rbx",
+            "jne ._fe_tagged_int",
+            "mov rbx, [rax+8]",   # tag
+            "mov rax, [rax+16]",  # payload
+            "mov [rbp-56], rax",
+            "mov [rbp-64], rbx",
+            "cmp rbx, -1",
+            "je ._fe_tagged_int",
+            "cmp rbx, -4",
+            "je ._fe_tagged_bool",
+            "cmp rbx, -2",
+            "je ._fe_tagged_float",
+            "cmp rbx, -3",
+            "je ._fe_tagged_str",
+            "cmp rbx, -5",
+            "je ._fe_tagged_list",
+            "cmp rbx, -7",
+            "je ._fe_tagged_list",  # a tuple shares the list layout
+            "cmp rbx, -6",
+            "je ._fe_tagged_dict",
+            "cmp rbx, -8",
+            "je ._fe_tagged_set",
+        )
+        # Untagged, or tagged int: both print the word at [rbp-56] as an
+        # integer -- for the untagged case that is the original value, for the
+        # int case it is the unwrapped payload.
+        self.label("._fe_tagged_int")
+        self.emitf("mov rax, [rbp-56]")
+        self._emit_int_to_str()
+        self.emitf("leave", "ret")
+        self.label("._fe_tagged_bool")
+        self.emitf(
+            "mov rax, [rbp-56]",
+            "test rax, rax",
+            "jz ._fe_tagged_false",
+            "lea rax, [_runtime_true_str]",
+            "call _runtime_str_concat_dup",
+            "leave",
+            "ret",
+        )
+        self.label("._fe_tagged_false")
+        self.emitf(
+            "lea rax, [_runtime_false_str]",
+            "call _runtime_str_concat_dup",
+            "leave",
+            "ret",
+        )
+        self.label("._fe_tagged_float")
+        self.emitf("mov rax, [rbp-56]", "movq xmm0, rax")
+        self._emit_float_to_str()
+        self.emitf("leave", "ret")
+        self.label("._fe_tagged_str")
+        # repr of a str is quoted, matching kind 1's own behaviour.
+        self.emitf(
+            "mov rbx, [rbp-56]",
+            "lea rax, [_runtime_quote_str]",
+            "call _runtime_str_concat",
+            "lea rbx, [_runtime_quote_str]",
+            "call _runtime_str_concat",
+            "leave",
+            "ret",
+        )
+        self.label("._fe_tagged_list")
+        self.emitf(
+            "mov rax, [rbp-56]",
+            "mov rbx, 6",
+            "call _runtime_list_repr",
+            "leave",
+            "ret",
+        )
+        self.label("._fe_tagged_dict")
+        self.emitf(
+            "mov rax, [rbp-56]",
+            "mov rbx, 1",  # keys are str
+            "mov rcx, 6",
+            "call _runtime_dict_repr",
+            "leave",
+            "ret",
+        )
+        self.label("._fe_tagged_set")
+        self.emitf(
+            "mov rax, [rbp-56]",
+            "mov rbx, 6",
+            "call _runtime_set_repr",
             "leave",
             "ret",
         )

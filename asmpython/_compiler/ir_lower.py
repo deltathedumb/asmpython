@@ -12880,10 +12880,15 @@ def _lower_format_any_value(ctx: "_FuncCtx", val_v: IRValue, repr_mode: bool = F
     # -- the same choice an unannotated container makes. Without these arms the
     # fallback below printed the box's ADDRESS, which is what made
     # `json.dumps({...})` return "8938224".
+    # Element kind 6 means "this element is boxed; read its tag" and recurses
+    # with itself, so a nested container renders properly however deep it goes.
+    # Passing 0 (int) here -- the only STATIC answer available for an opaque
+    # container -- printed every nested value as its address.
+    _TAGGED = 6
     for _cty, _helper, _extra in (
-        ("list", "_abi_list_repr", (0,)),
-        ("dict", "_abi_dict_repr", (1, 0)),
-        ("set", "_abi_set_repr", (1,)),
+        ("list", "_abi_list_repr", (_TAGGED,)),
+        ("dict", "_abi_dict_repr", (1, _TAGGED)),
+        ("set", "_abi_set_repr", (_TAGGED,)),
     ):
         hit_b = ctx.new_block(f"fmtany{_cty}")
         miss_b = ctx.new_block(f"fmtanyafter{_cty}")
