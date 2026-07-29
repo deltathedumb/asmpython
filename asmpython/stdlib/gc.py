@@ -1,19 +1,36 @@
 """gc module: garbage collector interface.
 
-Backed by a real collector when the program is built with `--gc=MODE`:
+Backed by a real collector: a stop-the-world mark-sweep whose roots are the
+machine stack, the module-globals area, and any exact roots on the shadow
+stack, with registry membership as the "is this word really an object" test.
 
-    off           allocations are never reclaimed (the historical behaviour,
-                  and still the default so nothing changes unasked)
-    conservative  mark-sweep; roots found by scanning the machine stack and
-                  the module-globals area, with registry membership as the
-                  "is this really an object" test
-    precise       mark-sweep with exact roots from a shadow stack
-    refcount      CPython-parity: deterministic frees, mark-sweep kept as the
-                  cycle collector
+`collect()` returns the number of objects actually reclaimed, so it reports
+real work rather than a fixed 0.
 
-`collect()` returns the number of objects reclaimed, so it reports real work
-rather than a fixed 0. Under `off` it returns 0 because there is nothing to
-sweep, which is honest rather than a stub.
+Automatic collection runs after `get_threshold()` object allocations, and is
+armed by `enable()` (or by building with `--gc=on`, which only the legacy
+targets honour). While disabled, an explicit `collect()` still works -- same
+split as CPython.
+
+TWO THINGS DO NOT MATCH CPython, both because this collector traces rather
+than counts references:
+
+  * `del obj` does not free at the `del`, and `__del__` does not run at a
+    predictable point. That needs refcounting; `--gc=refcount` names the gap
+    and refuses rather than pretending.
+  * `collect()` returns 0 and frees NOTHING unless BOTH root sets are
+    available -- the machine stack and the module-globals range. A missing
+    root set is not a degraded collection but a wrong one: without the stack,
+    every object held only by a local is freed; without the globals range,
+    every object held only by a module-level name is freed. Refusing is the
+    only safe answer.
+
+    Neither root set needs help from the backend, which matters because the
+    default x86-64 backend emits no entry prologue and so never calls
+    `_runtime_gc_init`: on Win64 the stack base comes from the TEB and the
+    globals range from walking the program's own PE headers. Linux has
+    neither hook yet, so there `collect()` returns 0 and frees nothing --
+    which is a deliberate no-op, not a sign that nothing was garbage.
 """
 from __future__ import annotations
 
@@ -21,6 +38,8 @@ from _gcffi import _gc_collect
 from _gcffi import _gc_live_count
 from _gcffi import _gc_set_enabled
 from _gcffi import _gc_get_enabled
+from _gcffi import _gc_set_threshold
+from _gcffi import _gc_get_threshold
 
 
 def enable() -> None:
@@ -57,9 +76,13 @@ def get_count() -> list:
 
 
 def get_threshold() -> list:
-    """Return collection thresholds (stub)."""
+    """Return collection thresholds.
+
+    Only the first is real -- the collector is not generational, so the two
+    sub-generation thresholds are reported as CPython's defaults and ignored.
+    """
     result: list = []
-    result.append(700)
+    result.append(_gc_get_threshold())
     result.append(10)
     result.append(10)
     return result
@@ -67,8 +90,12 @@ def get_threshold() -> list:
 
 def set_threshold(threshold0: int, threshold1: int = 10,
                   threshold2: int = 10) -> None:
-    """Set collection thresholds (no-op)."""
-    pass
+    """Set the number of object allocations between automatic collections.
+
+    `threshold0` of 0 restores the default rather than collecting on every
+    allocation, matching how the runtime reads an unset slot.
+    """
+    _gc_set_threshold(threshold0)
 
 
 def get_objects(generation: int = -1) -> list:

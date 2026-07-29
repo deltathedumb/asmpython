@@ -18,6 +18,7 @@ The archive contains every `_runtime_*` symbol plus the scratch buffers
 from __future__ import annotations
 
 import argparse
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -56,20 +57,37 @@ def _build_dir() -> Path:
     return Path(__file__).resolve().parent / "_build"
 
 
-def _newest_source_mtime(target: str) -> float:
-    """Newest mtime among the files whose contents determine the runtime .asm.
-
-    The runtime body comes from the codegen + the per-target subclass (both
-    under `_compiler/`) and from this build script. If any is newer than a
-    cached archive, that archive is stale.
-    """
+def _source_paths(target: str) -> list[Path]:
+    """The files whose CONTENTS determine the runtime .asm."""
     compiler_dir = Path(__file__).resolve().parent.parent / "_compiler"
-    sources = [
+    return [
         compiler_dir / "codegen.py",
         compiler_dir / f"target_{target}.py",
         Path(__file__).resolve(),
     ]
-    return max(p.stat().st_mtime for p in sources)
+
+
+def _source_digest(target: str) -> str:
+    """Hash of the sources that determine the runtime .asm.
+
+    CONTENT, not mtime. The mtime check this replaces silently served a stale
+    archive whenever a source was restored with an older-or-equal timestamp --
+    `git stash pop`, `git checkout`, and any edit landing inside the archive's
+    mtime granularity all do that. The failure is invisible in the worst
+    possible way: the build prints nothing, exits 0, and every test that
+    follows measures the OLD runtime while appearing to test the new one. That
+    cost a full day's verification here -- a stress run, a corpus run, and a
+    set of conclusions drawn from a library that never contained the change
+    under test.
+    """
+    h = hashlib.sha256()
+    for path in _source_paths(target):
+        h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+def _stamp_path(archive_path: Path) -> Path:
+    return archive_path.with_suffix(archive_path.suffix + ".srcdigest")
 
 
 def _empty_module() -> A.Module:
@@ -120,11 +138,21 @@ def build_runtime(target: str, *, force: bool = False) -> Path:
     obj_suffix = ".obj" if target == "windows" else ".o"
     obj_path = out_dir / archive_name.replace(".a", obj_suffix)
 
+    digest = _source_digest(target)
+    stamp = _stamp_path(archive_path)
     if archive_path.exists() and not force:
-        # Check timestamps: rebuild if any source file is newer.
-        newest_src = _newest_source_mtime(target)
-        if archive_path.stat().st_mtime >= newest_src:
+        # Rebuild unless the archive was built from exactly these sources.
+        if stamp.exists() and stamp.read_text(encoding="utf-8").strip() == digest:
             return archive_path
+
+    # INVALIDATE FIRST. If assembling or archiving fails below, there must be
+    # no stamp left claiming the artifacts match some source state -- the
+    # .asm has already been overwritten by then, so the archive and the stamp
+    # would disagree with it. Worse, reverting the source afterwards makes the
+    # digest match the OLD stamp again, and the stale artifact is then served
+    # forever. That exact sequence happened here: a transient assembler
+    # failure, a revert, and a build that silently kept the wrong runtime.
+    stamp.unlink(missing_ok=True)
 
     # Codegen the runtime .asm
     gen = cls(_empty_module(), use_runtime_lib=False)
@@ -148,6 +176,10 @@ def build_runtime(target: str, *, force: bool = False) -> Path:
         archive_path.unlink()
     ar = _which("ar")
     _run([ar, "rcs", str(archive_path), str(obj_path)])
+    # Record WHAT this archive was built from. Written only after the build
+    # succeeds, so a failed build leaves the old stamp and the next run
+    # rebuilds rather than trusting a half-made archive.
+    stamp.write_text(digest, encoding="utf-8")
     print(f"wrote {archive_path}")
     return archive_path
 
@@ -257,12 +289,14 @@ def build_runtime_shared(target: str, *, force: bool = False) -> Path:
         shared_name.replace(".dll", obj_suffix).replace(".so", obj_suffix)
     )
 
+    digest = _source_digest(target)
+    stamp = _stamp_path(shared_path)
     if shared_path.exists() and not force:
-        # Same staleness check as the static archive: rebuild if any source
-        # file is newer.
-        newest_src = _newest_source_mtime(target)
-        if shared_path.stat().st_mtime >= newest_src:
+        # Same content-hash check as the static archive.
+        if stamp.exists() and stamp.read_text(encoding="utf-8").strip() == digest:
             return shared_path
+
+    stamp.unlink(missing_ok=True)   # invalidate first; see build_runtime
 
     # Codegen the runtime .asm. We pass `use_runtime_lib=False` so the
     # codegen emits every helper inline -- that's exactly what we want here,
@@ -294,6 +328,7 @@ def build_runtime_shared(target: str, *, force: bool = False) -> Path:
     if target == "windows":
         link += ["-Wl,--export-all-symbols"]
     _run(link)
+    stamp.write_text(digest, encoding="utf-8")
     print(f"wrote {shared_path}")
     return shared_path
 

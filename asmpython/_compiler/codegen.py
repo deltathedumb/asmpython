@@ -142,6 +142,10 @@ class Codegen:
         #: Shadow-stack capacity (entries). Overflow degrades to the
         #: conservative scan rather than failing.
         self.GC_SHADOW_SLOTS = 4096
+        #: Objects allocated between automatic collections. 700 is
+        #: CPython's gen-0 default; matching it keeps the tuning
+        #: advice that exists for CPython applicable here.
+        self.GC_DEFAULT_THRESHOLD = 700
         # The compiled program's own source path, for the __file__ dunder.
         # None when compiling a string with no real file (e.g. some test
         # harnesses) -- __file__ then falls back to "".
@@ -831,6 +835,8 @@ class Codegen:
         publish.append("_gc_head")
         publish.append("_gc_stack_base")
         publish.append("_gc_enabled")
+        publish.append("_gc_threshold")
+        publish.append("_gc_alloc_count")
         publish.append("_gc_shadow_top")
         publish.append("_gc_shadow")
         publish.append("_gc_globals_hi")
@@ -866,6 +872,8 @@ class Codegen:
         "_runtime_objfree",
         "_runtime_gc_memcpy",
         "_runtime_gc_init",
+        "_runtime_gc_get_threshold",
+        "_runtime_gc_set_threshold",
         "_runtime_gc_shadow_depth",
         "_runtime_gc_shadow_pop_to",
         "_runtime_gc_shadow_push",
@@ -4819,6 +4827,40 @@ class Codegen:
         self.emitf("mov [rbp-24], rbx")        # save caller's rbx
         self.emitf("mov [rbp-32], rdx")        # kind
         self.emitf("mov [rbp-8], rcx")         # payload size
+        # Automatic collection. Without this nothing ever reclaims unless the
+        # program calls gc.collect() by hand, which is not a garbage collector,
+        # it is a manual free with extra steps.
+        #
+        # The trigger fires BEFORE the allocation, never after: at this point
+        # the new object does not exist yet, so there is no window in which it
+        # is live-but-unreachable. Collecting after the malloc would have to
+        # keep the fresh pointer rooted, and the only place it lives is a
+        # caller-saved register.
+        #
+        # Roots are still safe here because a value the caller needs across
+        # this call is, by both ABIs, either in a callee-saved register (which
+        # _runtime_gc_collect pushes and therefore scans) or spilled to the
+        # caller's frame (which the stack scan covers). A value live only in a
+        # caller-saved register across a call is not preserved by the ABI at
+        # all, so no correct caller has one.
+        self.emitf("mov rax, [_gc_alloc_count]", "inc rax",
+                   "mov [_gc_alloc_count], rax")
+        # Threshold 0 means "never set", not "collect constantly": the slot
+        # lives in .bss and every target zeroes it, so a literal compare
+        # against it would fire on every single allocation.
+        self.emitf("mov rdx, [_gc_threshold]", "test rdx, rdx",
+                   "jnz ._objalloc_have_thr")
+        self.emitf(f"mov rdx, {self.GC_DEFAULT_THRESHOLD}")
+        self.label("._objalloc_have_thr")
+        self.emitf("cmp rax, rdx", "jb ._objalloc_go")
+        self.emitf("mov qword [_gc_alloc_count], 0")
+        self.emitf("mov rax, [_gc_enabled]", "test rax, rax",
+                   "jz ._objalloc_go")
+        self.emitf("call _runtime_gc_collect")
+        self.label("._objalloc_go")
+        self.emitf("mov rbx, [rbp-24]")        # collect clobbers nothing, but
+        self.emitf("mov rdx, [rbp-32]")        # rcx/rdx are caller-saved
+        self.emitf("mov rcx, [rbp-8]")
         self.emitf("mov rax, rcx", "add rax, 16")
         self._emit_libc_malloc_size_in_rax()   # rax = block base
         self.emitf("mov [rbp-16], rax")
@@ -4954,7 +4996,12 @@ class Codegen:
         # while live. That reads as correct until the memory is reused, which
         # is exactly how it was found.
         self._emit_gc_stack_base_fallback()   # -> rbx, or 0 if unavailable
-        self.emitf("test rbx, rbx", "jz ._collect_globals")
+        # NO STACK BASE -> DO NOT SWEEP. Skipping the stack scan and carrying
+        # on looks conservative and is the exact opposite: every object
+        # reachable only from a local is then unmarked, and the sweep frees it
+        # while it is live. A target without a stack-base hook (Linux today)
+        # must therefore no-op the collector, not run it half-rooted.
+        self.emitf("test rbx, rbx", "jz ._collect_abort")
         self.emitf("mov [_gc_stack_base], rbx")
         self.label("._collect_stack")
         self.emitf("mov rax, rsp")
@@ -4964,9 +5011,26 @@ class Codegen:
         # the program's own .bss), so the program hands it over at startup via
         # _runtime_gc_init rather than the runtime referencing program symbols
         # -- the runtime library is linked separately and cannot see them.
+        #
+        # NO RANGE -> DO NOT SWEEP, for the same reason as a missing stack
+        # base. A module-level `keep = build(2000)` is reachable ONLY from
+        # that .bss slot; skipping the range leaves it unmarked and the sweep
+        # frees it while it is live. Measured, not theorised: a program whose
+        # totals should read 11994000 printed 39718203 after the freed memory
+        # was reused, and the same program crashed once collection ran often
+        # enough to reuse it sooner.
         self.emitf("mov rax, [_gc_globals_lo]")
         self.emitf("mov rbx, [_gc_globals_hi]")
-        self.emitf("cmp rax, rbx", "jae ._collect_sweep")
+        self.emitf("cmp rax, rbx", "jb ._collect_globals_scan")
+        # Never handed over -- only a LEGACY entry prologue calls
+        # _runtime_gc_init, so under the default backend this is the normal
+        # path, not the exception. Ask the target to find its own globals the
+        # way Win64 already finds its own stack base, and cache the answer.
+        self._emit_gc_globals_fallback()          # -> rbx = lo, rcx = hi
+        self.emitf("cmp rbx, rcx", "jae ._collect_abort")
+        self.emitf("mov [_gc_globals_lo], rbx", "mov [_gc_globals_hi], rcx")
+        self.emitf("mov rax, rbx", "mov rbx, rcx")   # scan_range wants rax/rbx
+        self.label("._collect_globals_scan")
         self.emitf("call _runtime_gc_scan_range")
         self.label("._collect_sweep")
         # Shadow-stack roots: exact, and additive. In conservative mode the
@@ -4980,9 +5044,14 @@ class Codegen:
         self.label("._collect_reclaim")
         # Reclaim.
         self.emitf("call _runtime_gc_sweep")
+        self.label("._collect_epilogue")
         self.emitf("add rsp, 32")
         self.emitf("pop r15", "pop r14", "pop r13", "pop r12", "pop rbx")
         self.emitf("leave", "ret")
+        self.label("._collect_abort")
+        # Report 0 freed. A caller cannot tell this from "nothing was
+        # garbage", which is the right story: both mean the heap is unchanged.
+        self.emitf("xor rax, rax", "jmp ._collect_epilogue")
 
         # ---- GC mode + enable flag.
         # Baked in by the build (`--gc=MODE`): 0 off, 1 on. `_gc_enabled` is the runtime
@@ -4990,6 +5059,16 @@ class Codegen:
         # only whether automatic collection runs.
         self.label("_runtime_gc_mode")
         self.emitf(f"mov rax, {self.gc_mode}", "ret")
+
+        self.label("_runtime_gc_set_threshold")
+        self.emitf("mov rax, [_gc_threshold]", "mov [_gc_threshold], rcx", "ret")
+
+        self.label("_runtime_gc_get_threshold")
+        self.emitf("mov rax, [_gc_threshold]", "test rax, rax",
+                   "jnz ._getthr_done")
+        self.emitf(f"mov rax, {self.GC_DEFAULT_THRESHOLD}")
+        self.label("._getthr_done")
+        self.emitf("ret")
 
         self.label("_runtime_gc_get_enabled")
         self.emitf("mov rax, [_gc_enabled]", "ret")
@@ -10438,6 +10517,7 @@ class Codegen:
         if _shadows_global and not e.targets:
             info.locals_[e.var] = var
 
+
         # result = empty list (cap 4)
         cap = 4
         self._emit_malloc(self.LIST_HEADER)
@@ -10607,6 +10687,7 @@ class Codegen:
         _saved_var_local = info.locals_.get(e.var) if not e.targets else None
         if _shadows_global and not e.targets:
             info.locals_[e.var] = var
+
 
         # Build empty result list.
         cap = 4
@@ -16816,6 +16897,17 @@ class Codegen:
     def _emit_malloc(self, n: int) -> None:
         """Compile-time `n` bytes -> rax = ptr. (`n` is used by overrides.)"""
         raise NotImplementedError
+
+    def _emit_gc_globals_fallback(self) -> None:
+        """Report the module-globals range in rbx (lo) / rcx (hi).
+
+        Default: an EMPTY range, which makes `_runtime_gc_collect` refuse to
+        sweep. Deliberate -- a target with no way to locate its own globals
+        cannot collect safely, because every object reachable only from a
+        module-level name would be unmarked and freed. Windows overrides this
+        by parsing its own PE headers; Linux has no equivalent hook yet.
+        """
+        self.emitf("xor rbx, rbx", "xor rcx, rcx")
 
     def _emit_gc_stack_base_fallback(self) -> None:
         """Leave the top of the machine stack in rbx, or 0 if this target has

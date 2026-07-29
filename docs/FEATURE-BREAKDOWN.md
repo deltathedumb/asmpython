@@ -232,12 +232,31 @@ These are intentionally **not** goals — asmpython compiles to flat machine cod
 so the interpreter machinery has no analogue:
 
 - The GIL, bytecode / `dis`, the C-API / C extensions (`.pyd`/`.so` modules).
-- Reference counting and `__del__` finalizers. The `gc` module is now REAL under
-  `--gc=on`: `gc.collect()` runs a mark-sweep and returns the number of objects
-  freed, and `enable`/`disable`/`isenabled` drive the runtime flag. What is still
-  absent is CPython's *deterministic* destruction -- `del obj` does not free at
-  the `del`, and `__del__` does not run at a predictable point -- because those
-  need refcounting, not tracing. `--gc=refcount` names that gap and refuses.
+- Reference counting and `__del__` finalizers. The `gc` module is REAL: `collect()`
+  runs a mark-sweep and returns the number of objects actually freed,
+  `enable`/`disable`/`isenabled` drive the runtime flag, and
+  `set_threshold`/`get_threshold` set how many object allocations pass between
+  automatic collections (default 700, CPython's gen-0 number). What is absent is
+  CPython's *deterministic* destruction -- `del obj` does not free at the `del`,
+  and `__del__` does not run at a predictable point -- because that needs
+  refcounting, not tracing. `--gc=refcount` names the gap and refuses rather than
+  running mark-sweep under a name that promises otherwise.
+  `get_objects`/`get_referrers`/`get_referents`/`is_tracked` are still stubs: the
+  registry could answer the first and last, but the tracer walks words rather than
+  building an object graph, so referrer queries have nothing to read.
+
+  Two KNOWN parity gaps in the `gc` module itself, both currently enshrined in
+  `tests/cases/207_gc_module.py` and `277_gc_module.py`, which is why fixing them
+  is a corpus change and not just a stdlib one:
+
+  1. `gc.isenabled()` returns an `int` (`0`/`1`), where CPython returns a `bool`
+     (`False`/`True`), so it prints `1` where CPython prints `True`.
+  2. Automatic collection starts DISABLED; in CPython it starts enabled. So
+     `gc.isenabled()` on a fresh program answers `0` here and `True` there.
+
+  (2) is the substantive one: matching CPython means every program pays for
+  automatic collection by default, which is a behaviour change big enough to want
+  its own gate rather than riding along with the collector.
 - `eval` / `exec` / `compile` / dynamic code, `globals()`/`locals()`/`vars()` introspection. **Rejected with a clear located error** ("not supported: requires a Python interpreter") rather than a codegen crash.
 - `importlib.import_module()` / dynamic import by string name. Same clear rejection. (Static `import math` / `from x import y` are fine.)
 - Monkeypatching, runtime attribute injection on arbitrary objects, `setattr` on non-instances.

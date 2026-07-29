@@ -594,18 +594,18 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         metavar="MODE",
         default="off",
         choices=("off", "on", "refcount"),
-        help="garbage collection mode. 'off' (default) never reclaims -- the "
-        "historical behaviour, and still the only mode with zero overhead. "
-        "'on' is a stop-the-world mark-sweep: roots come from scanning the "
-        "machine stack and the module-globals area, with registry membership "
-        "as the 'is this really an object' test, plus any exact roots recorded "
-        "on the shadow stack. 'refcount' (CPython's deterministic-destruction "
-        "semantics) is ACCEPTED BUT REJECTED -- it is not implemented, and is "
-        "listed so the gap has a name rather than looking like an oversight. "
-        "NOTE: the mode is currently honoured only by the legacy targets, "
-        "which emit the entry prologue that carries it; an x86-64 build links "
-        "the prebuilt runtime and reaches the collector through the `gc` "
-        "module regardless of this flag.",
+        help="whether AUTOMATIC garbage collection is armed at startup. The "
+        "collector itself is always linked and `gc.collect()` always works -- "
+        "same as CPython, where an explicit collect() runs even while gc is "
+        "disabled -- so 'off' does NOT mean 'no collector', it means nothing "
+        "collects unless the program asks. 'on' arms the periodic collection "
+        "that fires every gc.get_threshold()[0] object allocations. "
+        "'refcount' (CPython's deterministic-destruction semantics) is "
+        "ACCEPTED BUT REJECTED: it is not implemented, and is listed so the "
+        "gap has a name rather than looking like an oversight. "
+        "NOTE: this flag is currently honoured only by the legacy targets, "
+        "which emit the entry prologue that carries it; under the default "
+        "backend, arm automatic collection with gc.enable() instead.",
     )
     build_grp.add_argument(
         "--backend",

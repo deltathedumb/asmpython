@@ -106,6 +106,33 @@ generalize:
    second time, and no amount of source reading showed it. See
    `_compiler/ir_print.py`.
 
+### Make sure you are testing the code you think you are testing
+
+The runtime is a **prebuilt library**, not part of the program you compile.
+Editing `_compiler/codegen.py` changes nothing a test can see until
+`python -m asmpython._runtime.build` regenerates it. That build used to decide
+staleness by mtime and, when it decided "up to date", printed nothing and
+exited 0 — so a stale library looked exactly like a successful rebuild.
+
+It now hashes source **content** (`<archive>.srcdigest`) and invalidates the
+stamp before rebuilding, so a failed assemble cannot leave a stamp that
+outlives the artifacts it describes. Two habits still worth keeping:
+
+- Before trusting a measurement, confirm your change is actually IN the
+  emitted runtime: `grep <your new symbol> asmpython/_runtime/_build/*.asm`.
+- Pass `--force` when a result would be expensive to get wrong.
+
+This is not a hypothetical. A stress run, a full corpus run, and the
+conclusions drawn from both were once measured against a library that never
+contained the change under test — and the write-up confidently reported that
+the change was sound under load. **A number produced by the wrong binary is
+worse than no number**, because it is indistinguishable from a real one.
+
+Corollary for A/B testing: `git stash` and `git checkout` restore content with
+timestamps that defeat mtime checks, and in a shared working tree they will
+also take a *different agent's* uncommitted work with them. Stage and revert by
+explicit path.
+
 ## Recurring bug classes (check for these first when debugging similar symptoms)
 
 These have each appeared **more than once**, in different specific spots,

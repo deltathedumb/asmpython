@@ -36,6 +36,15 @@ BINDINGS: dict = {
     "_gc_set_enabled": Func(
         arg_types=("int",), ret_type="int", c_name="_runtime_gc_set_enabled",
     ),
+    # _runtime_gc_set_threshold(n) -> previous threshold.
+    # Objects allocated between automatic collections.
+    "_gc_set_threshold": Func(
+        arg_types=("int",), ret_type="int", c_name="_runtime_gc_set_threshold",
+    ),
+    # _runtime_gc_get_threshold() -> current threshold (the default if unset).
+    "_gc_get_threshold": Func(
+        arg_types=(), ret_type="int", c_name="_runtime_gc_get_threshold",
+    ),
     # _runtime_gc_get_enabled() -> current flag.
     "_gc_get_enabled": Func(
         arg_types=(), ret_type="int", c_name="_runtime_gc_get_enabled",

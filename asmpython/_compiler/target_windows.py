@@ -109,6 +109,72 @@ class WindowsCodegen(Codegen):
         cooperation from the entry code required."""
         self.emitf("mov rbx, [gs:8]")
 
+    def _emit_gc_globals_fallback(self) -> None:
+        """Win64: derive the module-globals range from our own PE headers.
+
+        Needs nothing from the backend, which is the point -- the default
+        x86-64 backend emits no entry prologue, so `_runtime_gc_init` is never
+        called and the collector would otherwise refuse forever. Same shape as
+        `_emit_gc_stack_base_fallback` reading the TEB.
+
+            gs:[0x60]            -> PEB (x64: TEB+0x60)
+            PEB+0x10            -> ImageBase
+            ImageBase+0x00      -> "MZ"
+            ImageBase+0x3C      -> e_lfanew
+            +e_lfanew           -> "PE",0,0
+              +0x06             -> NumberOfSections      (COFF+2)
+              +0x14             -> SizeOfOptionalHeader  (COFF+16)
+              +0x18 + optsz     -> section table, 40 bytes each
+                +0x08 VirtualSize  +0x0C VirtualAddress  +0x24 Characteristics
+
+        Offsets were verified by walking a live image rather than recalled.
+
+        BOTH signatures are checked, and that is what makes a misparse SAFE:
+        any failure leaves the range empty, so the collector refuses and the
+        program behaves exactly as it does with no collector at all. The only
+        dangerous outcome would be a plausible-but-wrong range, and a bad
+        ImageBase cannot produce one without also failing "MZ"/"PE".
+
+        Takes the union over every WRITABLE section rather than hunting for a
+        section called ".data": the name is not load-bearing, and an
+        over-approximation is fine -- the scan is conservative and registry
+        membership rejects any word that is not really a tracked object.
+        Scanning a little extra costs time, never correctness.
+        """
+        self.emitf("xor rbx, rbx", "xor rcx, rcx")        # default: empty
+        self.emitf("mov rax, [gs:0x60]")                  # PEB
+        self.emitf("test rax, rax", "jz ._gcglob_done")
+        self.emitf("mov rax, [rax+0x10]")                 # ImageBase
+        self.emitf("test rax, rax", "jz ._gcglob_done")
+        self.emitf("cmp word [rax], 0x5A4D", "jne ._gcglob_done")        # "MZ"
+        self.emitf("mov edx, [rax+0x3C]")                 # e_lfanew
+        self.emitf("lea rdx, [rax+rdx]")                  # -> PE header
+        self.emitf("cmp dword [rdx], 0x00004550", "jne ._gcglob_done")   # "PE"
+        self.emitf("movzx r8, word [rdx+6]")              # NumberOfSections
+        self.emitf("test r8, r8", "jz ._gcglob_done")
+        self.emitf("movzx r9, word [rdx+20]")             # SizeOfOptionalHeader
+        self.emitf("lea r9, [rdx+r9+24]")                 # -> section table
+        self.label("._gcglob_loop")
+        # bit 31 = IMAGE_SCN_MEM_WRITE, so a 32-bit test puts it in SF.
+        self.emitf("mov r10d, [r9+36]")                   # Characteristics
+        self.emitf("test r10d, r10d", "jns ._gcglob_next")
+        self.emitf("mov r11d, [r9+12]")                   # VirtualAddress
+        self.emitf("lea r11, [rax+r11]")                  # absolute lo
+        self.emitf("mov r10d, [r9+8]")                    # VirtualSize
+        self.emitf("add r10, r11")                        # absolute hi
+        self.emitf("test rbx, rbx", "jz ._gcglob_first")
+        self.emitf("cmp r11, rbx", "jae ._gcglob_hi")
+        self.label("._gcglob_first")
+        self.emitf("mov rbx, r11")
+        self.label("._gcglob_hi")
+        self.emitf("cmp r10, rcx", "jbe ._gcglob_next")
+        self.emitf("mov rcx, r10")
+        self.label("._gcglob_next")
+        self.emitf("add r9, 40")
+        self.emitf("dec r8", "jnz ._gcglob_loop")
+        self.label("._gcglob_done")
+        self.emitf("nop")
+
     def emit_entry_prologue(self, info: FuncInfo) -> None:
         # main(argc, argv): Win64 passes these in rcx/rdx. Stash them before
         # they're clobbered so sys.argv can be built from them.
@@ -646,6 +712,8 @@ class WindowsCodegen(Codegen):
             self.emit("_gc_globals_lo: resq 1")
             self.emit("_gc_globals_hi: resq 1")
             self.emit("_gc_enabled:    resq 1")
+            self.emit("_gc_alloc_count: resq 1")
+            self.emit("_gc_threshold:   resq 1")
             # Shadow stack: exact roots for --gc=precise.
             self.emit("_gc_shadow_top: resq 1")
             self.emit("_gc_shadow:     resq 4096")
