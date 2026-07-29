@@ -9079,6 +9079,15 @@ class SemaAnalyzer:
             return
         if isinstance(e, A.ListLit):
             seen: str | None = None
+            # True once two DIFFERENT concrete kinds have been seen, which
+            # widens the literal to opaque permanently. Distinct from
+            # `seen == "any"` arising because an ELEMENT was itself opaque --
+            # that is a fallback a later concrete element is allowed to
+            # override, and narrowing after a real mix stores the elements raw.
+            # `["a", [3], 1]` is the shape that exposed the difference: str
+            # then list widens to "any", then the trailing int narrowed it
+            # straight back to "int" and every element printed as a raw word.
+            mixed = False
             for el in e.elems:
                 if isinstance(el, A.Starred):
                     self._check_expr(el.value, scope)
@@ -9135,9 +9144,9 @@ class SemaAnalyzer:
                     if seen is None:
                         seen = "any"
                     continue
-                if seen is None or seen == "any":
+                if not mixed and (seen is None or seen == "any"):
                     seen = et
-                elif seen != et:
+                elif seen != et and not mixed:
                     # Two different element kinds. Every pointer-sized kind --
                     # "int" (a raw integer, or asmpython's unknown sentinel) and
                     # every heap-pointer kind (list/dict/tuple/set/instance) --
@@ -9152,20 +9161,25 @@ class SemaAnalyzer:
                     # kind) and "str" (its "any"-typed read sites assume a real
                     # string label) stay hard errors when mixed with a different
                     # kind -- a genuine register-class / representation clash.
-                    if "float" not in (seen, et) and "str" not in (seen, et):
-                        seen = "any"
-                        continue
-                    if getattr(e, "el_type", None) == "any":
-                        # Declared heterogeneous: its elements are boxed, so a
-                        # float beside an int is the point, not a clash.
-                        seen = "any"
-                        continue
-                    raise SemaError(
-                        f"mixed list element types ({seen} and {et}); "
-                        "mixed-type lists need a tagged-value runtime, not yet implemented",
-                        getattr(el, "pos", e.pos),
-                        ErrorCode.E_HETEROGENEOUS_LIST,
-                    )
+                    # Any mix collapses to opaque ("any"), which makes every
+                    # element boxed and tag-dispatched at read/format time.
+                    #
+                    # "float" and "str" used to stay hard errors here on the
+                    # grounds that a float lives in an xmm register and a str's
+                    # "any"-typed read sites assume a real string label -- both
+                    # true of a RAW element, and both answered by boxing: a
+                    # boxed element is a pointer-sized tagged cell whatever it
+                    # holds, and `_runtime_fmt_elem` kind 6 dispatches on that
+                    # tag (see codegen.py's `._fe_tagged`, which recurses with
+                    # the same kind so nesting works).
+                    #
+                    # This is the whole of what made `["a", [3], 1]` fail: it
+                    # did not miscompile, sema refused it, and the driver's
+                    # pyinbin fallback then ran it correctly -- so the symptom
+                    # read as a repr bug from program output.
+                    seen = "any"
+                    mixed = True
+                    continue
             # Empty literal stays "?" until the first append pins the type.
             # A literal already DECLARED heterogeneous keeps that declaration;
             # narrowing it to whatever kind its elements happen to have would
