@@ -630,3 +630,70 @@ class BackendIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NamespaceAndExportFormTests(unittest.TestCase):
+    """`name` namespaces, qualified exports, and how the two interact.
+
+    The interaction is the interesting part: a file reached by `import` has a
+    namespace implied by its path AND may declare one. Those are two answers to
+    the same question, and the declaration wins -- a file states its own
+    identity, and a path-derived name silently changes if the file moves.
+    """
+
+    def test_bodyless_name_scopes_the_rest_of_the_file(self) -> None:
+        mod = build("name a::b\nfunc f() { ret 1 }: i64\nfunc g() { ret 2 }: i64")
+        self.assertEqual([f.name for f in mod.funcs], ["a__b__f", "a__b__g"])
+
+    def test_block_form_is_equivalent(self) -> None:
+        block = build("name a::b {\n func f() { ret 1 }: i64\n}")
+        bodyless = build("name a::b\nfunc f() { ret 1 }: i64")
+        self.assertEqual([f.name for f in block.funcs],
+                         [f.name for f in bodyless.funcs])
+
+    def test_block_form_scopes_only_its_block(self) -> None:
+        mod = build("name a {\n func f() { ret 1 }: i64\n}\nfunc g() { ret 2 }: i64")
+        self.assertEqual({f.name for f in mod.funcs}, {"a__f", "g"})
+
+    def test_qualified_path_flattens_to_one_symbol_prefix(self) -> None:
+        """A symbol has no notion of nesting."""
+        mod = build("name x::y::z\nfunc f() { ret 1 }: i64")
+        self.assertEqual([f.name for f in mod.funcs], ["x__y__z__f"])
+
+    def test_qualified_export(self) -> None:
+        mod = build("name a::b\nfunc f() { ret 1 }: i64\nexport a::b::f")
+        self.assertEqual(mod.exports, ["a__b__f"])
+
+    def test_qualified_export_list(self) -> None:
+        mod = build("name a::b\nfunc f() { ret 1 }: i64\n"
+                    "func g() { ret 2 }: i64\nexport a::b::(f, g)")
+        self.assertEqual(mod.exports, ["a__b__f", "a__b__g"])
+
+    def test_export_rename_publishes_the_external_name(self) -> None:
+        """The frontend owns mangling, so it emits the function under the
+        external name rather than teaching the linker about aliases."""
+        mod = build("func hot() { ret 1 }: i64\nexport(hot) external_name")
+        self.assertEqual(mod.exports, ["external_name"])
+        self.assertIn("external_name", {f.name for f in mod.funcs})
+        self.assertNotIn("hot", {f.name for f in mod.funcs})
+
+    def test_unqualified_export_still_works_inside_a_namespace(self) -> None:
+        """`export f` next to `func f` resolves through the namespace."""
+        mod = build("name a::b\nfunc f() { ret 1 }: i64\nexport f")
+        self.assertEqual(mod.exports, ["a__b__f"])
+
+    def test_a_declared_namespace_beats_the_import_path(self) -> None:
+        """std/bits.apc is reached as `import std::bits` but declares
+        `name lllib::bits`, so callers use the declared one."""
+        mod = build("import std::bits\n"
+                    "func main() { ret lllib::bits::popcount(11 as u64) }: i64")
+        names = {f.name for f in mod.funcs}
+        self.assertIn("lllib__bits__popcount", names)
+        self.assertNotIn("bits__popcount", names)
+
+    def test_the_path_derived_name_no_longer_resolves(self) -> None:
+        """The two namespaces are alternatives, not aliases -- if both worked,
+        moving the file would silently change which one callers got."""
+        with self.assertRaises(APCError):
+            build("import std::bits\n"
+                  "func main() { ret bits::popcount(11 as u64) }: i64")

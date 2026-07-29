@@ -117,23 +117,46 @@ class Parser:
         return node
 
     def parse_export(self):
+        """``export f`` / ``export a::b::f`` / ``export a::b::(f, g)``
+
+        Also ``export(Source) name``, which renames on the way out -- the
+        parens hold where it comes from, matching `const(T) x`.
+        """
         tok = self.advance()                     # `export`
         node = A.ExportDecl(tok.line, tok.col)
-        base = self.expect_ident("exported name").value
-        if self.cur.is_op("::"):
+
+        if self.cur.is_op("("):                  # export(Crc32::of) crc32_compute
             self.advance()
-            if self.cur.is_op("("):              # export Parser::(scan, other)
+            source = self._qualified_name()
+            self.expect_op(")")
+            alias = self.expect_ident("exported name").value
+            node.names.append(source)
+            setattr(node, "alias", alias)
+            return node
+
+        parts = [self.expect_ident("exported name").value]
+        while self.cur.is_op("::"):
+            self.advance()
+            if self.cur.is_op("("):              # a::b::(f, g)
                 self.advance()
+                prefix = "::".join(parts)
                 while not self.cur.is_op(")"):
-                    node.names.append(f"{base}::{self.expect_ident().value}")
+                    node.names.append(
+                        f"{prefix}::{self.expect_ident('exported name').value}")
                     if self.cur.is_op(","):
                         self.advance()
                 self.expect_op(")")
                 return node
-            node.names.append(f"{base}::{self.expect_ident().value}")
-            return node
-        node.names.append(base)
+            parts.append(self.expect_ident("exported name").value)
+        node.names.append("::".join(parts))
         return node
+
+    def _qualified_name(self) -> str:
+        parts = [self.expect_ident("name").value]
+        while self.cur.is_op("::"):
+            self.advance()
+            parts.append(self.expect_ident("name").value)
+        return "::".join(parts)
 
     def parse_func(self) -> A.FuncDecl:
         tok = self.cur
@@ -534,6 +557,15 @@ class Parser:
                     ns.namespace = expr.ident
                     ns.member = member
                     expr = ns
+                elif isinstance(expr, A.NsAccess):
+                    # `lllib::bits::popcount`: absorb the previous member into
+                    # the namespace rather than treating it as a field access.
+                    # A namespace has arbitrary depth; only the final component
+                    # is ever the member.
+                    deeper = A.NsAccess(tok.line, tok.col)
+                    deeper.namespace = f"{expr.namespace}::{expr.member}"
+                    deeper.member = member
+                    expr = deeper
                 else:
                     mem = A.Member(tok.line, tok.col)
                     mem.obj = expr

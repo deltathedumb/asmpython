@@ -21,18 +21,11 @@
 
 
 
-# NOT namespaced with `name lllib::bits`, deliberately, though the frontend now
-# supports both that and the block form.
-#
-# This file is reached as `import std::bits`, which already namespaces it under
-# `bits` from its path -- so callers say `bits::popcount`. Declaring
-# `name lllib::bits` on top of that renames every symbol to
-# `lllib__bits__popcount` and breaks those callers, because a declared
-# namespace and an import-derived one are two different answers to the same
-# question and nothing currently reconciles them. Resolving that is a design
-# decision, not a bug fix: either the declaration wins (and `import` learns to
-# read it), or the path wins (and a declaration inside an imported file is an
-# error). Until then this file takes its namespace from its path.
+# This file declares its own namespace, and `import` reads it: a file states
+# its own identity, and a path-derived name silently changes if the file moves.
+# So `import std::bits` here yields `lllib::bits`, and callers say
+# `lllib::bits::popcount`.
+name lllib::bits
 
 
 # All-ones for `width` bits. Guarded at 64 because `1 << 64` in a u64 is 0,

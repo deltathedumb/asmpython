@@ -95,6 +95,8 @@ class ModuleEmitter:
         self.symbols: dict[str, str] = {}
         self.module_members: dict[str, set[str]] = {}
         self.exports: list[str] = []
+        #: emitted symbol -> the external name it is published under
+        self.export_aliases: dict[str, str] = {}
         self._strings: dict[str, str] = {}
 
     # ── diagnostics ──────────────────────────────────────────────────────
@@ -125,6 +127,13 @@ class ModuleEmitter:
                     continue
                 self.module.funcs.append(
                     FuncEmitter(self, mdecl, owner=ty, ns=ty.ns).run())
+
+        # Rename before publishing, so `exports` and the IRFunc agree.
+        for func in self.module.funcs:
+            alias = self.export_aliases.get(func.name)
+            if alias is not None:
+                func.name = alias
+        self.exports = [self.export_aliases.get(n, n) for n in self.exports]
 
         defined = {f.name for f in self.module.funcs}
         for name in self.exports:
@@ -179,16 +188,23 @@ class ModuleEmitter:
                 if ns is not None:
                     self.enums[qualify(decl.name)] = self.enums[decl.name]
             elif isinstance(decl, A.ExportDecl):
-                # An export names a function as written, but what gets
-                # published is the emitted SYMBOL -- and inside a `name` block
-                # those differ (`popcount` is emitted as
-                # `lllib__bits__popcount`). Resolve through the symbol table,
-                # falling back to the bare name for a plain top-level export.
+                # An export names a function as WRITTEN; what gets published is
+                # the emitted SYMBOL, and inside a `name` block those differ
+                # (`popcount` emits as `lllib__bits__popcount`). Try the fully
+                # qualified path first, then the enclosing namespace, then the
+                # bare name for a plain top-level export.
+                alias = getattr(decl, "alias", None)
                 for written in decl.names:
                     local = written.split("::")[-1]
-                    self.exports.append(
-                        self.symbols.get(qualify(local),
-                                         self.symbols.get(written, local)))
+                    symbol = (self.symbols.get(written)
+                              or self.symbols.get(qualify(local))
+                              or self.symbols.get(local, local))
+                    self.exports.append(symbol)
+                    if alias is not None:
+                        # `export(Crc32::of) crc32_compute`: the frontend owns
+                        # mangling, so emit the function under the external
+                        # name rather than teaching the linker about aliases.
+                        self.export_aliases[symbol] = alias
             elif isinstance(decl, A.VarDecl):
                 self._collect_const(decl)
             elif isinstance(decl, A.FuncDecl):
@@ -217,12 +233,25 @@ class ModuleEmitter:
         if not path.is_file():
             raise self.err(f"no module {decl.module!r} at {path}", decl)
 
-        self.module_members.setdefault(short, set())
         self._declare_native_libraries(path, decl)
         text = path.read_text(encoding="utf-8")
+
+        # A file may declare its own namespace, and that declaration WINS over
+        # the one implied by its path. A file states its own identity; where it
+        # happens to sit is incidental, and a path-derived name silently
+        # changes if the file moves. So `std/bits.apc` opening with
+        # `name lllib::bits` is imported as `lllib::bits`, and callers say
+        # `lllib::bits::popcount` -- `import` reads the declaration rather than
+        # the two disagreeing.
+        parsed = _parse(text)
+        for first in parsed.decls:
+            if isinstance(first, A.NameDecl) and first.body is None:
+                short = first.name
+            break
+        self.module_members.setdefault(short, set())
         outer_src, self.src = self.src, text
         try:
-            self._collect(_parse(text).decls, funcs, ns=short)
+            self._collect(parsed.decls, funcs, ns=short)
         finally:
             self.src = outer_src
 
