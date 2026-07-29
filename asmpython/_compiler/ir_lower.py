@@ -5703,6 +5703,65 @@ def _lower_narrowed_name_read(ctx: _FuncCtx, name: str) -> IRValue:
     return unboxed
 
 
+def _lower_is_bool_literal(ctx: _FuncCtx, e: A.Compare) -> IRValue | None:
+    """`x is True` / `x is False` (either operand order) where the other side
+    is opaque. Returns None when the comparison is not that shape.
+
+    In CPython `1 is True` is False: `True` is a distinct object from the
+    integer 1. asmpython has no separate bool type -- bool IS int everywhere
+    (see `A.is_bool_expr`'s docstring) -- so once the read choke unboxes an
+    "any" operand, a boxed `1` and a boxed `True` are the same integer and
+    plain identity cannot separate them.
+
+    The BOX still can: `_lower_box_any` tags them bool(-4) and int(-1)
+    respectively. So compare the runtime TAG as well as the payload, reading
+    it from the still-boxed cell (`_lower_expr_inner`) before the unbox
+    happens. A never-boxed operand reports UNTAGGED and correctly answers
+    False.
+
+    This is what made `json.dumps({"a": 1})` render 1 as `true`: stdlib
+    json's encoder tests `if obj is True` first, exactly as CPython's does,
+    and every integer 1 matched it.
+    """
+    lit = None
+    other = None
+    for a, b in ((e.operands[0], e.operands[1]), (e.operands[1], e.operands[0])):
+        if isinstance(a, A.IntLit) and getattr(a, "is_bool", False):
+            lit, other = a, b
+            break
+    if lit is None or other is None:
+        return None
+    if A.expr_type(other) != "any":
+        # A concretely-typed operand carries no box to read a tag from, and
+        # `x is True` on a real int is already answered by the ordinary
+        # identity compare below.
+        return None
+
+    raw = _lower_expr_inner(ctx, other)
+    tag_v = _lower_read_any_tag(ctx, raw)
+    payload = _lower_unbox_any(ctx, raw)
+
+    bool_tag = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", bool_tag, [BUILTIN_TYPE_IDS["bool"]]))
+    is_bool_tagged = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_bool_tagged, [tag_v, bool_tag]))
+
+    want = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", want, [1 if lit.value else 0]))
+    same_value = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", same_value, [payload, want]))
+
+    result = ctx.tmp(I64)
+    ctx.emit(IRInstr("iand", result, [is_bool_tagged, same_value]))
+    if e.ops[0] == "is not":
+        zero = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero, [0]))
+        inv = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.eq", inv, [result, zero]))
+        return inv
+    return result
+
+
 def _lower_type_is_compare(ctx: _FuncCtx, type_call: A.Call, target: A.Expr) -> IRValue | None:
     """`type(x) is T` / `type(x) is not T` -- idiomatic Python's usual
     spelling of a concrete-type check (portapy's own `_full_box`, the
@@ -7134,6 +7193,9 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
 
     if isinstance(e, A.Compare):
         if len(e.ops) == 1 and e.ops[0] in ("is", "is not"):
+            bool_res = _lower_is_bool_literal(ctx, e)
+            if bool_res is not None:
+                return bool_res
             type_call, type_target = None, None
             if isinstance(e.operands[0], A.Call) and e.operands[0].func == "type" and len(e.operands[0].args) == 1:
                 type_call, type_target = e.operands[0], e.operands[1]
@@ -8684,14 +8746,22 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("call", None, ["_abi_dict_update", dict_v, other_v]))
                 continue
             key_ptr = _lower_dict_key(ctx, k)
-            # A value stored into an EXPLICIT `dict[str, object]` literal
-            # (sema stamps `box_values` ONLY for that annotated case, not for
-            # a bare `{...}` whose values merely happen to be mixed -- those
-            # are consumed raw by bare-`dict` readers that never unbox, so
-            # boxing them would break a `d[k] == "x"` compare) is routed
-            # through the store choke point so a scalar value is boxed,
-            # keeping its kind for a later `d[k]` read that auto-unboxes.
-            if getattr(e, "box_values", False):
+            # A value stored into an "any"-valued dict literal is routed
+            # through the store choke point, so its kind survives for a later
+            # `d[k]` read.
+            #
+            # This used to fire ONLY for an explicitly annotated
+            # `dict[str, object]` (sema's `box_values`), on the grounds that a
+            # bare `{...}` with merely-mixed values "is consumed raw by
+            # bare-dict readers that never unbox, so boxing would break a
+            # `d[k] == "x"` compare". That is no longer true: an "any"-valued
+            # dict read is typed PTR at the subscript site precisely so the
+            # read choke unboxes it, the same way a list literal's elements
+            # were already handled. Leaving bare mixed dicts unboxed meant
+            # `{"a": 1, "b": [2, 3]}` handed `isinstance()` a value with no
+            # tag -- so json's encoder could not tell an int from a nested
+            # list and serialised the list as its pointer.
+            if getattr(e, "box_values", False) or getattr(e, "value_type", "") == "any":
                 val = _lower_value_into_any_slot(ctx, v)
             else:
                 val = _lower_expr(ctx, v)
@@ -8893,12 +8963,19 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             # `obj_ty == "dict"` case uses. Reached for a heterogeneous list's
             # elements (`items: list = [some_tuple, some_dict]; items[1][k]`),
             # whose element static type collapses to "any".
-            res_is_float = A.expr_type(e) == "float"
+            _res_ty = A.expr_type(e)
+            res_is_float = _res_ty == "float"
             obj_v = _lower_expr(ctx, e.obj)
             key_v = _lower_dict_key(ctx, e.index)
             zero = ctx.tmp(I64)
             ctx.emit(IRInstr("const", zero, [0]))
-            v = ctx.tmp(I64)
+            # Same PTR typing as the `obj_ty == "dict"` read above, and for the
+            # same reason: an "any" result must be typed PTR or `_lower_expr`'s
+            # read choke skips it and the box POINTER flows on as if it were
+            # the value. This path is the one a bundled module takes when it
+            # walks an opaque object as a dict (`obj[k]` inside
+            # `def f(obj: object)`), which is exactly what json's encoder does.
+            v = ctx.tmp(PTR if _res_ty == "any" else I64)
             ctx.emit(IRInstr("call", v, ["_abi_dict_get_default", obj_v, key_v, zero]))
             if res_is_float:
                 fv = ctx.tmp(F64)
@@ -12051,7 +12128,14 @@ def _call_target_is_unresolvable(ctx: "_FuncCtx", name: str) -> bool:
     return True
 
 
-_BOXABLE_STATIC_TYPES = ("int", "float", "bool", "str")
+_BOXABLE_STATIC_TYPES = (
+    "int", "float", "bool", "str",
+    # Containers are boxed too. Unboxed, they reach an "any" slot as bare
+    # pointers that `_lower_read_any_tag` cannot tell apart from each other or
+    # from a user instance, so type()/isinstance()/str() on an `object`-typed
+    # parameter could not answer correctly for them.
+    "list", "dict", "tuple", "set",
+)
 
 
 def _none_const(ctx: "_FuncCtx") -> IRValue:
@@ -12276,9 +12360,24 @@ def _lower_box_any(ctx: "_FuncCtx", value_v: IRValue, static_ty: str, e: A.Expr 
     elif static_ty == "str":
         tag = BUILTIN_TYPE_IDS["str"]
         payload = value_v
+    elif static_ty in ("list", "dict", "tuple", "set"):
+        # A container was passed through unboxed on the theory that it "already
+        # carries enough runtime shape of its own". It does not: a list, a dict
+        # and a user instance are all just pointers, and `_lower_read_any_tag`
+        # can only report UNTAGGED for them. So `isinstance(o, dict)` inside
+        # `def f(o: object)` answered False for an actual dict, and `str(o)`
+        # printed the pointer -- which is why json.dumps({...}) returned
+        # "8938224" and pprint rendered {'a': 9920656}.
+        #
+        # Boxing them makes the tag exact, and BUILTIN_TYPE_IDS already had the
+        # ids (-5..-8) waiting. The payload is the container pointer, so
+        # `_lower_unbox_any` hands the real container back to every reader.
+        tag = BUILTIN_TYPE_IDS[static_ty]
+        payload = value_v
     else:
-        # Not one of the boxable scalar kinds (container/instance/etc.) --
-        # already carries enough runtime shape of its own; pass through.
+        # An instance, a callable, or a kind with no tag of its own: pass
+        # through. A user instance already carries a real "__class__" tag that
+        # `_lower_read_any_tag` reads directly.
         return value_v
     # Allocate a dedicated 24-byte BOX cell -- `[BOX_MAGIC][tag][payload]`
     # (see `_abi_new_box` in abi_shims.asm) -- NOT the old dict-shaped
@@ -12599,12 +12698,14 @@ def _lower_unbox_any(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     is_float = ctx.tmp(I64)
     ctx.emit(IRInstr("icmp.eq", is_float, [tag_v, float_tag]))
     is_scalar = ctx.tmp(I64)
-    # Every BUILTIN_TYPE_IDS scalar tag this function boxes is >= "bool"'s
-    # id (-4) and <= "int"'s id (-1); "list"/"dict"/"tuple"/"set" (-5..-8)
-    # are never boxed (see _lower_box_any) so are deliberately excluded --
-    # only compare within the boxed subrange, not the whole table.
+    # The boxed tag range is "set"'s id (-8) through "int"'s id (-1): the four
+    # scalars AND the four container kinds, all of which `_lower_box_any`
+    # wraps in an `_abi_new_box` cell. It deliberately stops at -8 rather than
+    # covering the whole table: staticmethod/classmethod/property/slice
+    # (-10..-13) are instance-shaped "__class__"-keyed cells, not box cells,
+    # so reading a payload at offset 16 would be reading the wrong layout.
     lo_bound = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", lo_bound, [BUILTIN_TYPE_IDS["bool"]]))
+    ctx.emit(IRInstr("const", lo_bound, [BUILTIN_TYPE_IDS["set"]]))
     hi_bound = ctx.tmp(I64)
     ctx.emit(IRInstr("const", hi_bound, [BUILTIN_TYPE_IDS["int"]]))
     ge_v = ctx.tmp(I64)
@@ -12726,11 +12827,12 @@ def _lower_format_any_value(ctx: "_FuncCtx", val_v: IRValue, repr_mode: bool = F
     ctx.switch_to(after_float_b)
 
     str_b = ctx.new_block("fmtanystr")
+    after_str_b = ctx.new_block("fmtanyafterstr")
     st = ctx.tmp(I64)
     ctx.emit(IRInstr("const", st, [BUILTIN_TYPE_IDS["str"]]))
     iss = ctx.tmp(I64)
     ctx.emit(IRInstr("icmp.eq", iss, [tag_v, st]))
-    ctx.emit(IRInstr("br.t", None, [iss, str_b.label, fallback_b.label]))
+    ctx.emit(IRInstr("br.t", None, [iss, str_b.label, after_str_b.label]))
     ctx.switch_to(str_b)
     sp = _lower_unbox_any(ctx, val_v)
     if repr_mode:
@@ -12746,12 +12848,51 @@ def _lower_format_any_value(ctx: "_FuncCtx", val_v: IRValue, repr_mode: bool = F
         sp = closed
     ctx.emit(IRInstr("store", None, [sp, out_ptr]))
     ctx.emit(IRInstr("br", None, [end_b.label]))
+    ctx.switch_to(after_str_b)
+
+    # Containers are boxed too (see `_lower_box_any`), so their tag is exact
+    # here. Format from the UNBOXED pointer through the same runtime repr
+    # helpers a statically-typed container uses. The element kind is not
+    # knowable at runtime, so each uses the default (integer-ish) element kind
+    # -- the same choice an unannotated container makes. Without these arms the
+    # fallback below printed the box's ADDRESS, which is what made
+    # `json.dumps({...})` return "8938224".
+    for _cty, _helper, _extra in (
+        ("list", "_abi_list_repr", (0,)),
+        ("dict", "_abi_dict_repr", (1, 0)),
+        ("set", "_abi_set_repr", (1,)),
+    ):
+        hit_b = ctx.new_block(f"fmtany{_cty}")
+        miss_b = ctx.new_block(f"fmtanyafter{_cty}")
+        ct = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", ct, [BUILTIN_TYPE_IDS[_cty]]))
+        isc = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.eq", isc, [tag_v, ct]))
+        ctx.emit(IRInstr("br.t", None, [isc, hit_b.label, miss_b.label]))
+        ctx.switch_to(hit_b)
+        cptr = _lower_unbox_any(ctx, val_v)
+        kinds: list = []
+        for _k in _extra:
+            kv = ctx.tmp(I64)
+            ctx.emit(IRInstr("const", kv, [_k]))
+            kinds.append(kv)
+        cout = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", cout, [_helper, cptr, *kinds]))
+        ctx.emit(IRInstr("store", None, [cout, out_ptr]))
+        ctx.emit(IRInstr("br", None, [end_b.label]))
+        ctx.switch_to(miss_b)
+    # The last container miss falls into the generic fallback.
+    ctx.emit(IRInstr("br", None, [fallback_b.label]))
 
     ctx.switch_to(fallback_b)
+    # Unbox before formatting: a tuple (boxed, but with no dedicated repr
+    # helper taking a runtime element kind) and every never-boxed value both
+    # reach here, and `_lower_unbox_any` is a safe no-op on the latter.
+    fb_val = _lower_unbox_any(ctx, val_v)
     k0 = ctx.tmp(I64)
     ctx.emit(IRInstr("const", k0, [0]))
     fbo = ctx.tmp(PTR)
-    ctx.emit(IRInstr("call", fbo, ["_abi_fmt_elem", val_v, k0]))
+    ctx.emit(IRInstr("call", fbo, ["_abi_fmt_elem", fb_val, k0]))
     ctx.emit(IRInstr("store", None, [fbo, out_ptr]))
     ctx.emit(IRInstr("br", None, [end_b.label]))
 
