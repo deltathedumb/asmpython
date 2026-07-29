@@ -527,6 +527,52 @@ class Parser:
                 return True
             return False
         self._walk_stmt(fdef.body, on_expr)
+
+        # `x += 1` READS x before writing it, but an AugAssign's target is a
+        # bare string on the node, not an A.Name, so the expression walk above
+        # never sees it -- the same shape as A.Call.func, fixed just above for
+        # exactly the same reason.
+        #
+        # Restricted to names declared `nonlocal`, which is the only case that
+        # needs it: _collect_assigned already excludes those from local_names,
+        # so without this the name is neither local NOR free and sema reports
+        # "augmented assignment to undefined variable". A plain `x = x + 1`
+        # worked because its right-hand `x` IS an A.Name and got recorded.
+        #
+        # Recording EVERY AugAssign target instead looks safe -- a real local
+        # is in local_names and subtracts out -- but is not, and cost 11 cases
+        # against 1 fixed. A GLOBAL augmented inside a lifted function
+        # (`count += 1` with no `global` declaration) is never plainly assigned
+        # there, so it is not in local_names either: it became a free variable,
+        # got prepended as a parameter, and the enclosing scope had nothing to
+        # pass. Broke str concat/repeat, deque, gc, atexit, signal, subprocess
+        # and import_binary.
+        # Recursion mirrors _collect_assigned above statement for statement --
+        # same node shapes, same attribute names (A.If is .then/.orelse, not
+        # .body). A generic getattr walk silently missed `if`, which is where
+        # a conditional `x += 1` lives.
+        def _collect_augassign_targets(stmts: list) -> None:
+            for s in stmts:
+                if isinstance(s, A.AugAssign):
+                    if isinstance(s.target, str) and s.target in nonlocal_names:
+                        referenced.add(s.target)
+                elif isinstance(s, A.For):
+                    _collect_augassign_targets(s.body)
+                elif isinstance(s, A.If):
+                    _collect_augassign_targets(s.then)
+                    _collect_augassign_targets(s.orelse)
+                elif isinstance(s, A.While):
+                    _collect_augassign_targets(s.body)
+                elif isinstance(s, A.Try):
+                    _collect_augassign_targets(s.body)
+                    for _eh in (s.handler or []):
+                        if isinstance(_eh, list):
+                            _collect_augassign_targets(_eh)
+                    _collect_augassign_targets(getattr(s, "else_body", None) or [])
+                    _collect_augassign_targets(getattr(s, "finally_body", None) or [])
+
+        _collect_augassign_targets(fdef.body)
+
         # Free vars = referenced names that are not locally bound.
         BUILTINS = {
             "print", "len", "range", "str", "int", "float", "bool", "list",
@@ -2208,6 +2254,17 @@ class Parser:
                 self._eat()
                 values.append(self._parse_expr())
             self._expect("NEWLINE")
+            # `a, *rest = 1, 2, 3, 4` -- a starred target with a bare tuple
+            # RHS. CPython binds `rest` to a LIST either way, so this is
+            # exactly `a, *rest = [1, 2, 3, 4]`; rewriting it here routes the
+            # statement through the single-list unpack path that sema and
+            # ir_lower already implement and test, instead of adding a second
+            # lowering for a form that means the same thing.
+            #
+            # Only when a star is present: a plain `a, b = 1, 2` is a PARALLEL
+            # assignment, not an unpack, and must keep its separate values.
+            if len(values) > 1 and any(isinstance(t, A.StarTarget) for t in targets):
+                values = [A.ListLit(elems=values, pos=pos)]
             return A.TupleAssign(targets=targets, values=values, pos=pos)
         if isinstance(expr, A.Subscript) and self._check("OP", "="):
             self._eat()
@@ -3339,6 +3396,14 @@ class Parser:
             self._eat()
             values.append(self._parse_expr())
         self._expect("NEWLINE")
+        # See the identical rewrite in _parse_stmt: a starred target with a
+        # bare tuple RHS (`a, *rest = 1, 2, 3, 4`) means the same as
+        # `a, *rest = [1, 2, 3, 4]`, because CPython binds the star to a list
+        # either way. Rewriting here reuses the single-list unpack path rather
+        # than adding a second lowering. NAME-only sequences reach this site,
+        # which is where `a, *rest` actually lands.
+        if len(values) > 1 and any(isinstance(t, A.StarTarget) for t in targets):
+            values = [A.ListLit(elems=values, pos=first.pos)]
         return A.TupleAssign(targets=targets, values=values, pos=first.pos)  # type: ignore
 
     def _parse_aug_assign(self) -> A.AugAssign:
@@ -3400,12 +3465,19 @@ class Parser:
             orelse = self._parse_block()
         return A.While(test=test, body=body, pos=kw.pos, orelse=orelse)
 
-    def _parse_for_target(self) -> list:
-        """A single for-loop target. Returns a flat list of name strings.
-        A plain name returns a one-element list; a parenthesized group returns
-        all its names flat so callers can always use len(targets)==1 to detect
-        the single-variable case without isinstance checks (which compile to
-        a static False in gen1 when the list element has inferred type 'int')."""
+    def _parse_for_target_group(self) -> tuple[list, bool]:
+        """One for-loop target, as a flat list of names, plus whether it was
+        PARENTHESIZED.
+
+        A plain name gives a one-element list; a parenthesized group gives all
+        its names flat, so callers can use len(targets)==1 to detect the
+        single-variable case without isinstance checks (which compile to a
+        static False in gen1 when the list element has inferred type 'int').
+
+        The caller needs that second answer to tell `for (k, v) in ...` from
+        `for a, (b, c) in ...`; the flat name list alone cannot -- see
+        `_parse_for_target_list`.
+        """
         if self._check("OP", "("):
             self._eat()
             names: list = [self._expect("NAME").value]
@@ -3415,21 +3487,83 @@ class Parser:
                     break  # trailing comma
                 names.append(self._expect("NAME").value)
             self._expect("OP", ")")
-            return names
+            return names, True
         result: list = []
         result.append(self._expect("NAME").value)
-        return result
+        return result, False
 
-    def _parse_for(self) -> A.For:
-        kw = self._expect("KEYWORD", "for")
-        # One or more loop targets: `for x in ...` or `for k, v in ...`.
-        targets: list = self._parse_for_target()
+    def _parse_for_target_list(self) -> tuple[list, bool]:
+        """Every target of one `for` clause, flat, plus whether any group was
+        NESTED -- i.e. parenthesized while not spanning the whole list.
+
+        Flattening a parenthesized group is free when that group IS the whole
+        target list: `for (k, v) in items` means exactly `for k, v in items`,
+        so the parens carry no information.
+
+        A group that is one element among several is different in kind:
+        `for a, (b, c) in ...` flattens to `['a', 'b', 'c']`, an AST
+        byte-identical to `for a, b, c in ...`. Whether that is CORRECT then
+        depends entirely on the ITERABLE, which is parsed after the targets --
+        so this only reports the shape, and `_reject_nested_for_target` decides
+        once the iterable is known.
+        """
+        first = self._peek()
+        targets, grouped = self._parse_for_target_group()
+        groups = 1
         while self._check("OP", ","):
             self._eat()
             if self._check("KEYWORD", "in"):
                 break  # trailing comma before `in`
-            for _ft in self._parse_for_target():
-                targets.append(_ft)
+            names, was_grouped = self._parse_for_target_group()
+            grouped = grouped or was_grouped
+            groups += 1
+            targets.extend(names)
+        self._for_target_pos = first.pos
+        return targets, (grouped and groups > 1)
+
+    # Iterables whose lowering already yields a FLAT tuple, making a flattened
+    # nested target the correct reading rather than a wrong one.
+    #
+    # `enumerate(x)` yields (index, item), and the lowering spreads `item`, so
+    # `for i, (a, b) in enumerate(pairs)` genuinely wants ['i', 'a', 'b'].
+    # Three corpus cases depend on this and pass because of it:
+    # 74_zip.py and 388_zip_three.py (`enumerate(zip(...))`) and
+    # sim_leaderboard.py (`enumerate(ranked)`).
+    _FLATTENING_ITERABLES = ("enumerate",)
+
+    def _reject_nested_for_target(self, nested: bool, iter_expr) -> None:
+        """Refuse a nested loop target the lowering cannot honour.
+
+        The flattening above is not merely a bug to be removed -- it is
+        LOAD-BEARING for `enumerate(...)`, where the flat reading is the right
+        one. Refusing every nested target broke those three passing cases to
+        convert one already-documented failure, a net regression caught by
+        screening the loop/comprehension cases before committing.
+
+        For any other iterable the nesting is real and unimplemented, and
+        flattening it silently binds the inner tuple's ADDRESS: for
+        `for a, (b, c) in [(1, (2, 3))]` the corpus recorded
+        `1 8885232 0` where CPython prints `1 2 3`
+        (tests/cases/nested_unpacking_for.py). Refusing raises ParseError,
+        which is a CompileError, so the driver hands the program to the
+        interpreter fallback -- the same route the equivalent ASSIGNMENT
+        `a, (b, c) = ...` already takes -- and it runs correctly.
+        """
+        if not nested:
+            return
+        if isinstance(iter_expr, A.Call) and iter_expr.func in self._FLATTENING_ITERABLES:
+            return
+        raise ParseError(
+            "nested unpacking in a loop target is not supported natively "
+            "-- bind the item and unpack it inside the loop body",
+            self._for_target_pos,
+            ErrorCode.P_FOR_TARGET_NESTED,
+        )
+
+    def _parse_for(self) -> A.For:
+        kw = self._expect("KEYWORD", "for")
+        # One or more loop targets: `for x in ...` or `for k, v in ...`.
+        targets, _nested = self._parse_for_target_list()
         # A single bare name keeps the simple `var` path; any unpacking
         # (multiple targets, or a parenthesized group) goes through `targets`.
         single = len(targets) == 1
@@ -3461,6 +3595,9 @@ class Parser:
                     f"range() takes 1-3 arguments, got {len(args)}",
                     kw.pos,
                 )
+            # `range()` yields plain ints, so a nested target can never be the
+            # flat reading -- refuse it whatever the arguments are.
+            self._reject_nested_for_target(_nested, None)
             self._expect("OP", ":")
             body = self._parse_block()
             orelse_f: list = []
@@ -3472,6 +3609,7 @@ class Parser:
             return A.For(var=var, range_args=args, body=body, pos=kw.pos, targets=multi, orelse=orelse_f)  # type: ignore
         # Any other expression: treat as iterable.
         iter_expr = self._parse_expr()
+        self._reject_nested_for_target(_nested, iter_expr)
         self._expect("OP", ":")
         body = self._parse_block()
         orelse_f2: list = []
@@ -4165,18 +4303,13 @@ class Parser:
         self._expect("KEYWORD", "for")
         # One or more loop targets: `for x in ...` or `for k, v in ...`
         # (mirrors `_parse_for`).
-        targets: list = self._parse_for_target()
-        while self._check("OP", ","):
-            self._eat()
-            if self._check("KEYWORD", "in"):
-                break  # trailing comma before `in`
-            for _ft in self._parse_for_target():
-                targets.append(_ft)
+        targets, _nested = self._parse_for_target_list()
         single = len(targets) == 1
         var = targets[0] if single else ""
         multi = [] if single else targets
         self._expect("KEYWORD", "in")
         iter_expr = self._parse_or()
+        self._reject_nested_for_target(_nested, iter_expr)
         cond = None
         if self._check("KEYWORD", "if"):
             self._eat()
@@ -4187,17 +4320,12 @@ class Parser:
         ef_conds: list = []
         while self._check("KEYWORD", "for"):
             self._eat()
-            etargets: list = self._parse_for_target()
-            while self._check("OP", ","):
-                self._eat()
-                if self._check("KEYWORD", "in"):
-                    break
-                for _ft in self._parse_for_target():
-                    etargets.append(_ft)
+            etargets, _enested = self._parse_for_target_list()
             evar2: str = etargets[0] if len(etargets) == 1 else ""
             emulti2: list = [] if len(etargets) == 1 else etargets
             self._expect("KEYWORD", "in")
             eiter2 = self._parse_or()
+            self._reject_nested_for_target(_enested, eiter2)
             econd2 = None
             if self._check("KEYWORD", "if"):
                 self._eat()
@@ -4213,18 +4341,13 @@ class Parser:
         a DictComprehension. Same `for`/`in`/`if` grammar as the list form,
         including multi-target unpacking (`for k, v in ...`)."""
         self._expect("KEYWORD", "for")
-        targets: list = self._parse_for_target()
-        while self._check("OP", ","):
-            self._eat()
-            if self._check("KEYWORD", "in"):
-                break  # trailing comma before `in`
-            for _ft in self._parse_for_target():
-                targets.append(_ft)
+        targets, _nested = self._parse_for_target_list()
         single = len(targets) == 1
         var = targets[0] if single else ""
         multi = [] if single else targets
         self._expect("KEYWORD", "in")
         iter_expr = self._parse_or()
+        self._reject_nested_for_target(_nested, iter_expr)
         cond = None
         if self._check("KEYWORD", "if"):
             self._eat()

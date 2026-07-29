@@ -37,6 +37,38 @@ if sys.platform == "win32":
 else:
     BUILD = ROOT / "tests" / "_build"
 
+# Artifact names are per-RUN, not just per-case.
+#
+# Every case used to compile to `BUILD/<case stem>`, and on Windows BUILD is
+# the shared C:\Temp -- so two corpus runs at once (two agents, or one agent
+# measuring while a background sweep finishes) wrote and then EXECUTED the
+# same paths. Run A could compile a case, run B overwrite that exact file,
+# and run A then execute run B's binary: a result attributed to the wrong
+# tree, silently, with no error anywhere. That is the failure mode behind a
+# spread of 645/677/682/715/716 on supposedly comparable trees, and it defeats
+# worktree isolation completely, because the worktree isolates the SOURCE
+# while the artifacts still collide.
+#
+# The tag must stay in the FILENAME rather than becoming a subdirectory:
+# building directly into C:\Temp is what keeps Smart App Control from blocking
+# freshly-compiled exes (see above), so a per-run subdirectory would trade one
+# breakage for another.
+_RUN_TAG = f"r{os.getpid():d}"
+
+
+def _artifact(stem: str, target: str) -> Path:
+    """Where this RUN's binary for `stem` goes. Unique per run; see _RUN_TAG."""
+    return BUILD / f"{stem}_{_RUN_TAG}{'.exe' if target == 'windows' else ''}"
+
+
+def _clean_run_artifacts() -> None:
+    """Remove only THIS run's binaries, leaving a concurrent run's alone."""
+    for leftover in BUILD.glob(f"*_{_RUN_TAG}*"):
+        try:
+            leftover.unlink()
+        except OSError:
+            pass  # still mapped by a just-exited process; harmless to leave
+
 # Mutated by main() so subprocess calls pick it up.
 _use_runtime_lib = False
 # --backend/--no-pyinbin-fallback passthrough: previously silently ignored
@@ -134,7 +166,7 @@ def run_positive(case: Path, target: str) -> TestResult:
     if sys.platform == "win32":
         import re as _re
         stem = _re.sub(r"(?i)(update|install|setup|patch)", "test", stem)
-    out = BUILD / (stem + (".exe" if target == "windows" else ""))
+    out = _artifact(stem, target)
     src_text = case.read_text(encoding="utf-8")
     cmd = [sys.executable, "-m", "asmpython", str(case), "--target", target, "-o", str(out)]
     if _use_runtime_lib:
@@ -178,7 +210,9 @@ def run_negative(case: Path, target: str) -> TestResult:
         return TestResult(case.name, False, "no `# expect-error:` block found")
 
     BUILD.mkdir(parents=True, exist_ok=True)
-    out = BUILD / case.stem
+    # Same per-run tagging as run_positive: a negative case still writes an
+    # output path, so it can still collide with a concurrent run.
+    out = _artifact(case.stem, target)
     # --no-pyinbin-fallback: without it, the CLI's pyinbin fallback runs
     # after native compilation fails and its own (unrelated) error message
     # replaces the real, formatted native error in stderr -- these tests
@@ -224,17 +258,41 @@ def main() -> int:
                 workers = int(a[2:])
             except ValueError:
                 pass
+    # -k/--filter SUBSTR: run only cases whose filename contains SUBSTR.
+    #
+    # Verifying one fix used to cost a full ~1100-case run, so the cheapest way
+    # to check a single case was to not check it. That is how a -10 regression
+    # reached a commit. A substring filter makes checking one bucket a
+    # seconds-long operation, which is the difference between verifying every
+    # change and verifying the ones that seem worth the wait.
+    case_filter = None
+    for i, a in enumerate(args):
+        if a in ("-k", "--filter") and i + 1 < len(args):
+            case_filter = args[i + 1]
+        elif a.startswith("-k") and len(a) > 2:
+            case_filter = a[2:]
+
     target = _detect_target()
     mode = " (runtime-lib)" if _use_runtime_lib else ""
+    if case_filter:
+        mode += f" (filter={case_filter!r})"
     print(f"asmpython test runner (target={target}, workers={workers}){mode}")
+
+    def _wanted(case: Path) -> bool:
+        return case_filter is None or case_filter in case.name
 
     tasks: list[tuple] = []
     if CASES.is_dir():
         for case in sorted(CASES.glob("*.py")):
-            tasks.append((run_positive, case, target))
+            if _wanted(case):
+                tasks.append((run_positive, case, target))
     if CASES_FAIL.is_dir():
         for case in sorted(CASES_FAIL.glob("*.py")):
-            tasks.append((run_negative, case, target))
+            if _wanted(case):
+                tasks.append((run_negative, case, target))
+    if not tasks:
+        print(f"no cases matched filter {case_filter!r}")
+        return 1
 
     # Run tests in parallel; collect results in submission order.
     result_map: dict[str, TestResult] = {}
@@ -269,7 +327,17 @@ def main() -> int:
     # pass/fail breakdown from disk instead of re-running the whole suite
     # just to see what changed -- avoids repeated multi-minute full-corpus
     # runs when only the summary or one file's detail is actually needed.
-    (ROOT / "results.txt").write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    # Only a FULL run may write results.txt. A filtered run's partial list
+    # would look exactly like a full one to triage.py and to anyone diffing
+    # failure sets, silently reporting every unrun case as "fixed".
+    if case_filter is None:
+        (ROOT / "results.txt").write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    else:
+        print("(filtered run: results.txt left untouched)")
+    # Only this run's binaries; a concurrent run's are left untouched. Without
+    # this, C:\Temp accumulates one exe per case per run indefinitely (1045 had
+    # piled up before the tagging above made them individually identifiable).
+    _clean_run_artifacts()
     return 0 if not fails else 1
 
 

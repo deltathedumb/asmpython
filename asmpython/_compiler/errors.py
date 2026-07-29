@@ -92,6 +92,7 @@ class ErrorCode:
     P_INTERFACE_WITHOUT_EXTENSION = 123  # P023: 'interface' declaration used without --ext interface
     P_INTERFACE_STUB_BODY      = 124  # P024: interface method stub body contains real code
     P_ASSIGN_DECORATOR_UNSUPPORTED_TARGET = 125  # P025: @decorator above a non-assignment or parallel-tuple statement
+    P_FOR_TARGET_NESTED        = 126  # P026: nested unpacking in a loop target (`for a, (b, c) in ...`)
 
     # ---- Semantic (E) ------------------------------------------------------
     # Name resolution
