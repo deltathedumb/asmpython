@@ -146,6 +146,12 @@ class FuncDef:
     # through it must bind statically to the owner rather than dereference the
     # null receiver. None for ordinary top-level functions.
     method_owner_class: "str | None" = None
+    # `async def`. A flag rather than a separate node kind on purpose: every
+    # existing walk over FuncDef -- and there are many -- keeps working
+    # unchanged, and only the places that care about suspension look at it. A
+    # coroutine is a generator whose resume points are driven by an event loop
+    # instead of by `for`, so it reuses the same state-machine transform.
+    is_async: bool = False
 
 
 @dataclass
@@ -828,6 +834,24 @@ class BinOp:
 
 
 @dataclass
+class Await:
+    """`await <expr>` -- suspend until the awaited coroutine has a result.
+
+    Binds like `not`: tighter than `and`/`or`, looser than a comparison, so
+    `await a == b` awaits `a` and then compares, matching CPython.
+
+    This is an EXPRESSION, but a suspension point can only be encoded as a
+    statement (the generator/coroutine flattener splits at statements). A
+    normalisation pass hoists each `Await` out of expression position into its
+    own statement before flattening -- see `await_normalise.py`.
+    """
+
+    value: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    inferred_type: str = "any"
+
+
+@dataclass
 class UnaryOp:
     op: str
     operand: "Expr"
@@ -1231,6 +1255,7 @@ Expr = (
     | Starred
     | DoubleStarred
     | NamedExpr
+    | Await
 )
 
 

@@ -1427,6 +1427,10 @@ class Parser:
 
     def _parse_funcdef(self, decorators: "list[str] | None" = None) -> A.FuncDef:
         start = self._peek().pos
+        is_async = False
+        if self._check("KEYWORD", "async"):
+            self._eat()
+            is_async = True
         self._expect("KEYWORD", "def")
         name = self._expect("NAME").value
         self._expect("OP", "(")
@@ -1543,6 +1547,7 @@ class Parser:
             access_policy=access_policy,
             abi_name=abi_name or "AutoABI",
             is_public_export=access_policy == "Public" or abi_name is not None,
+            is_async=is_async,
         )
 
     def _extract_asm_body(self, name: str, body: list, pos) -> "tuple[str, str]":
@@ -1997,6 +2002,21 @@ class Parser:
         if t.kind == "KEYWORD":
             if t.value == "return":
                 return self._parse_return()
+            if t.value == "async":
+                # `async` introduces def/for/with and nothing else. For
+                # `async for` / `async with`, consume it and let the ordinary
+                # statement parser take over -- the awaiting lives in the
+                # desugaring (__anext__, __aenter__/__aexit__), not in the
+                # syntax. For `async def`, leave BOTH tokens in place:
+                # `_parse_funcdef` skips a leading `async` itself, so the `def`
+                # arm further down handles it unchanged.
+                #
+                # This has to sit ahead of the for/with arms: eating `async`
+                # advances past them, and control never comes back.
+                nxt = self._peek(1)
+                if nxt.kind == "KEYWORD" and nxt.value in ("for", "with"):
+                    self._eat()
+                    t = self._peek()
             if t.value == "if":
                 return self._parse_if()
             if t.value == "while":
@@ -2015,7 +2035,11 @@ class Parser:
                 pos = self._eat().pos
                 self._expect("NEWLINE")
                 return A.Continue(pos=pos)
-            if t.value == "def":
+            if t.value == "def" or (
+                t.value == "async"
+                and self._peek(1).kind == "KEYWORD"
+                and self._peek(1).value == "def"
+            ):
                 # Nested function definition: lift to module level. Detect
                 # free variables (names referenced in the body but not in the
                 # inner params or locally assigned) so codegen can build a
@@ -3680,6 +3704,15 @@ class Parser:
         return left
 
     def _parse_unary(self) -> "A.Expr":
+        if self._check("KEYWORD", "await"):
+            # CPython's grammar puts `await` in the power tier
+            # (`await_primary: AWAIT primary`), so it binds TIGHTER than every
+            # arithmetic operator: `await a() + await b()` is
+            # `(await a()) + (await b())`, a BinOp of two awaits. Verified
+            # against CPython's own ast. Parsing it at the `not` tier instead
+            # would have made it swallow the whole `a() + await b()`.
+            pos = self._eat().pos
+            return A.Await(value=self._parse_unary(), pos=pos)
         if self._check_any_op("-"):
             pos = self._eat().pos
             return A.UnaryOp(op="-", operand=self._parse_unary(), pos=pos)
