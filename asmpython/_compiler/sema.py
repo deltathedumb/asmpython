@@ -3860,8 +3860,17 @@ class SemaAnalyzer:
         return out
 
     def _gen_contains_yield(self, stmts: list) -> bool:
+        """True if `stmts` holds a SUSPENSION POINT anywhere inside.
+
+        Both `yield` and `await` count: a compound statement containing either
+        has to be flattened rather than copied whole, because control leaves
+        and re-enters it. Only counting yields left a `for` loop with an
+        `await` in its body looking like an ordinary statement, so it was
+        copied verbatim and the AwaitStmt reached lowering, which has no case
+        for it.
+        """
         for s in stmts:
-            if isinstance(s, A.YieldStmt):
+            if isinstance(s, (A.YieldStmt, A.AwaitStmt)):
                 return True
             for body in self._gen_stmt_bodies(s):
                 if self._gen_contains_yield(body):
@@ -3980,7 +3989,7 @@ class SemaAnalyzer:
             for i, s in enumerate(stmts):
                 rest = stmts[i + 1:]
                 if not (
-                    isinstance(s, (A.YieldStmt, A.Break, A.Continue))
+                    isinstance(s, (A.YieldStmt, A.AwaitStmt, A.Break, A.Continue))
                     or self._gen_contains_yield([s])
                     or self._gen_binds_loop_ctrl([s])
                 ):
@@ -3994,6 +4003,29 @@ class SemaAnalyzer:
                     if tail is None:
                         return None
                     flush_to(("yield", s.value, tail))
+                    return entry
+                if isinstance(s, A.AwaitStmt):
+                    tail = emit(rest, follow, loops)
+                    if tail is None:
+                        return None
+                    # Resuming means picking up the value the driver sent back
+                    # in. Bind it as the FIRST statement of the block control
+                    # returns to -- that is exactly where execution continues,
+                    # and it lets the ordinary local-to-field renaming carry
+                    # the target across the suspension for free.
+                    blocks[tail]["stmts"].insert(
+                        0,
+                        A.Assign(
+                            target=s.target,
+                            value=A.Attr(
+                                obj=A.Name(name="self", pos=pos),
+                                name="_sent",
+                                pos=pos,
+                            ),
+                            pos=pos,
+                        ),
+                    )
+                    flush_to(("await", s.value, tail))
                     return entry
                 if isinstance(s, A.Break):
                     if not loops:
@@ -4147,7 +4179,8 @@ class SemaAnalyzer:
                     return kind
         return ""
 
-    def _gen_emit_next_body(self, blocks: list, all_names: set, pos) -> list:
+    def _gen_emit_next_body(self, blocks: list, all_names: set, pos,
+                            stop_builder=None) -> list:
         """`__next__`'s body: `while True:` over one `if self._state == K:` arm
         per block, ending in `raise StopIteration()` for an exhausted or
         unknown state. Locals inside an arm are renamed to `self.<name>` so
@@ -4165,6 +4198,12 @@ class SemaAnalyzer:
             return A.Compare(ops=["=="], operands=ops, pos=pos)
 
         def stop_stmt():
+            # A generator signals exhaustion with StopIteration; a coroutine
+            # flags `_done` and returns, so the driver never has to catch
+            # anything. `stop_builder` lets the coroutine transform substitute
+            # its own without duplicating this whole emitter.
+            if stop_builder is not None:
+                return stop_builder()
             return A.Raise(
                 value=A.Call(func="StopIteration", args=[], pos=pos), pos=pos
             )
@@ -4185,6 +4224,28 @@ class SemaAnalyzer:
                     set_state(term[2]),
                     A.Return(value=self._rename_expr(term[1], all_names), pos=pos),
                 ]
+            if kind == "await":
+                # Hand the AWAITABLE back to whoever is driving and stop here.
+                # The driver resolves it and calls send(result), which resumes
+                # at the target state -- whose first statement binds `_sent`
+                # (inserted by the flattener).
+                return [
+                    A.AttrAssign(
+                        obj=A.Name(name="self", pos=pos),
+                        name="_awaiting",
+                        value=self._rename_expr(term[1], all_names),
+                        pos=pos,
+                    ),
+                    set_state(term[2]),
+                    A.Return(
+                        value=A.Attr(
+                            obj=A.Name(name="self", pos=pos),
+                            name="_awaiting",
+                            pos=pos,
+                        ),
+                        pos=pos,
+                    ),
+                ]
             return [stop_stmt()]
 
         arms: list = []
@@ -4199,6 +4260,244 @@ class SemaAnalyzer:
             test=A.IntLit(value=1, pos=pos, is_bool=True), body=arms, pos=pos
         ))
         return out
+
+    def _coro_normalise_awaits(self, stmts: list, hoister) -> "list | None":
+        """Rewrite `stmts` so every `await` sits in statement position.
+
+        Each hoisted await becomes an `A.AwaitStmt` placed immediately before
+        the statement that needed it, in evaluation order. Returns None if any
+        await sits somewhere the hoister declines (under `and`/`or`, in a
+        conditional expression, a comprehension or a lambda) -- hoisting those
+        would make a conditionally-evaluated operand unconditional.
+        """
+        from .await_normalise import contains_await
+
+        out: list = []
+        for s in stmts:
+            # Recurse into nested bodies first so an await inside a loop or
+            # branch is normalised within that body, not lifted out of it --
+            # lifting it would change how many times it runs.
+            for field in ("body", "then", "orelse", "handler", "finalbody"):
+                sub = getattr(s, field, None)
+                if isinstance(sub, list) and sub:
+                    new_sub = self._coro_normalise_awaits(sub, hoister)
+                    if new_sub is None:
+                        return None
+                    setattr(s, field, new_sub)
+            if not contains_await(s):
+                out.append(s)
+                continue
+            before = len(hoister.pending)
+            rewritten = self._coro_rewrite_stmt(s, hoister)
+            if hoister.declined or rewritten is None:
+                return None
+            for name, awaitable in hoister.pending[before:]:
+                out.append(A.AwaitStmt(target=f"{name}r", value=awaitable, pos=s.pos))
+            out.append(rewritten)
+        return out
+
+    def _coro_rewrite_stmt(self, s, hoister):
+        """`s` with its await-bearing expressions replaced by references to
+        the hoisted results. Only the statement shapes that can carry an
+        expression are handled; anything else is declined."""
+        if isinstance(s, A.Assign):
+            return A.Assign(
+                target=s.target, value=hoister.rewrite(s.value), pos=s.pos,
+                annot=s.annot,
+            )
+        if isinstance(s, A.Return):
+            return A.Return(value=hoister.rewrite(s.value), pos=s.pos)
+        if isinstance(s, A.ExprStmt):
+            return A.ExprStmt(expr=hoister.rewrite(s.expr), pos=s.pos)
+        if isinstance(s, A.AugAssign):
+            return A.AugAssign(
+                target=s.target, op=s.op, value=hoister.rewrite(s.value), pos=s.pos
+            )
+        if isinstance(s, A.AttrAssign):
+            return A.AttrAssign(
+                obj=s.obj, name=s.name, value=hoister.rewrite(s.value), pos=s.pos
+            )
+        if isinstance(s, A.If):
+            # The test is evaluated exactly once before either branch, so an
+            # await in it hoists cleanly; the branch bodies were already
+            # normalised in place by the caller.
+            return A.If(
+                test=hoister.rewrite(s.test), then=s.then, orelse=s.orelse, pos=s.pos
+            )
+        return None
+
+    def _coro_replace_returns(self, stmts: list, pos) -> list:
+        """`return X` in a coroutine flags completion and RETURNS the value.
+
+        The obvious encoding -- store the result in a field, then raise
+        StopIteration as CPython does -- loses the value's type. A field is
+        typed by what `__init__` seeds it with, so a `str` result stored into
+        an int-seeded `_result` is written raw and reads back as a pointer.
+
+        Returning it through `send` instead keeps it: `send` is declared to
+        return "any", so the value goes through the boxing choke point on the
+        way out and arrives at the driver correctly tagged. `_done` tells the
+        driver which of the two things it just received.
+        """
+        out: list = []
+        for s in stmts:
+            if isinstance(s, A.Return):
+                out.append(A.AttrAssign(
+                    obj=A.Name(name="self", pos=pos), name="_done",
+                    value=A.IntLit(value=1, pos=s.pos), pos=s.pos,
+                ))
+                out.append(A.Return(
+                    value=s.value if s.value is not None
+                    else A.IntLit(value=0, pos=s.pos),
+                    pos=s.pos,
+                ))
+                continue
+            for field in ("body", "then", "orelse", "handler", "finalbody"):
+                sub = getattr(s, field, None)
+                if isinstance(sub, list) and sub:
+                    setattr(s, field, self._coro_replace_returns(sub, pos))
+            out.append(s)
+        return out
+
+    def _transform_coroutine(self, f: A.FuncDef):
+        """Desugar an `async def` into a factory plus a coroutine object.
+
+        The object is a generator object with a different driving protocol:
+        `send(value)` resumes it, and it returns the AWAITABLE it is now
+        blocked on rather than a yielded value. When the body finishes it
+        stores its return value in `_result` and raises StopIteration, which
+        is how `await` gets a value out of it.
+
+        Returns None when the body cannot be encoded -- an await under a
+        short-circuit operand, in a comprehension, or inside try/with/match --
+        leaving the function alone rather than mis-sequencing it.
+        """
+        from .await_normalise import AwaitHoister
+
+        pos = f.pos
+        cls_name = f"_coroobj_{f.name}"
+        params_no_self = list(f.params)
+        param_types_no_self = (
+            list(f.param_types) if f.param_types else [None] * len(f.params)
+        )
+
+        body = self._coro_replace_returns(list(f.body), pos)
+        hoister = AwaitHoister()
+        body = self._coro_normalise_awaits(body, hoister)
+        if body is None:
+            return None
+
+        flat = self._gen_flatten(body, pos)
+        if flat is None:
+            return None
+        blocks, extra_fields = flat
+
+        all_params = set(params_no_self)
+        all_locals = list(self._collect_gen_locals(body, all_params))
+        # The hoisted await results are ordinary locals that must survive the
+        # suspension, so they are lifted to fields like every other local.
+        for _n, _seed in extra_fields:
+            if _n not in all_locals:
+                all_locals.append(_n)
+        for _i in range(1, hoister.count + 1):
+            _rn = f"_aw{_i}r"
+            if _rn not in all_locals:
+                all_locals.append(_rn)
+        seed_override = {n: s for n, s in extra_fields}
+        all_names = all_params | set(all_locals)
+
+        init_body: list = []
+        for p in params_no_self:
+            init_body.append(A.AttrAssign(
+                obj=A.Name(name="self", pos=pos), name=p,
+                value=A.Name(name=p, pos=pos), pos=pos,
+            ))
+        for loc in all_locals:
+            seed = seed_override.get(loc)
+            if seed is None:
+                seed = self._gen_local_seed(loc, body, pos)
+            init_body.append(A.AttrAssign(
+                obj=A.Name(name="self", pos=pos), name=loc, value=seed, pos=pos,
+            ))
+        for field_name in ("_state", "_sent", "_awaiting", "_done"):
+            init_body.append(A.AttrAssign(
+                obj=A.Name(name="self", pos=pos), name=field_name,
+                value=A.IntLit(value=0, pos=pos), pos=pos,
+            ))
+        init_func = A.FuncDef(
+            name="__init__",
+            params=["self"] + params_no_self,
+            body=init_body,
+            defaults=[None] + [None] * len(params_no_self),
+            param_types=[None] + list(param_types_no_self),
+            pos=pos,
+        )
+
+        # send(value): stash what the driver sent, then run to the next
+        # suspension. Same dispatch body a generator's __next__ uses.
+        send_body: list = [A.AttrAssign(
+            obj=A.Name(name="self", pos=pos), name="_sent",
+            value=A.Name(name="value", pos=pos), pos=pos,
+        )]
+        def _coro_stop():
+            # Falling off the end of a coroutine is `return None`.
+            return A.If(
+                test=A.IntLit(value=1, pos=pos, is_bool=True),
+                then=[
+                    A.AttrAssign(
+                        obj=A.Name(name="self", pos=pos), name="_done",
+                        value=A.IntLit(value=1, pos=pos), pos=pos,
+                    ),
+                    A.Return(value=A.IntLit(value=0, pos=pos), pos=pos),
+                ],
+                orelse=[],
+                pos=pos,
+            )
+
+        send_body.extend(
+            self._gen_emit_next_body(blocks, all_names, pos, stop_builder=_coro_stop)
+        )
+        send_func = A.FuncDef(
+            name="send",
+            params=["self", "value"],
+            body=send_body,
+            defaults=[None, None],
+            param_types=[None, ("any", None)],
+            ret_type=("any", None),
+            pos=pos,
+        )
+        # `await coro` nests: the inner coroutine is itself the awaitable.
+        await_func = A.FuncDef(
+            name="__await__",
+            params=["self"],
+            body=[A.Return(value=A.Name(name="self", pos=pos), pos=pos)],
+            defaults=[None],
+            param_types=[None],
+            pos=pos,
+        )
+        cls = A.ClassDef(
+            name=cls_name, parent=None,
+            methods=[init_func, send_func, await_func], pos=pos,
+        )
+        factory_func = A.FuncDef(
+            name=f.name,
+            params=params_no_self,
+            body=[A.Return(
+                value=A.Call(
+                    func=cls_name,
+                    args=[A.Name(name=p, pos=pos) for p in params_no_self],
+                    pos=pos,
+                ),
+                pos=pos,
+            )],
+            defaults=list(f.defaults) if f.defaults else [None] * len(params_no_self),
+            param_types=list(param_types_no_self),
+            ret_type=(cls_name, None),
+            pos=pos,
+            vararg=f.vararg,
+            kwarg=f.kwarg,
+        )
+        return factory_func, cls
 
     def _transform_generator_cfg(self, f: A.FuncDef, cls_name: str, pos):
         """General generator desugaring: flatten the body into basic blocks and
@@ -4618,7 +4917,19 @@ class SemaAnalyzer:
                         if sub and _has_yield(sub):
                             return True
                 return False
-            if _has_yield(f.body):
+            if getattr(f, "is_async", False):
+                # A coroutine is a generator whose resume points are driven by
+                # an event loop rather than by `for`, so it goes through the
+                # same state-machine encoding -- only the suspension statement
+                # and the driving protocol differ.
+                result = self._transform_coroutine(f)
+                if result is not None:
+                    factory, cls = result
+                    new_funcs.append(factory)
+                    new_classes.append(cls)
+                else:
+                    new_funcs.append(f)
+            elif _has_yield(f.body):
                 result = self._transform_generator(f)
                 if result is not None:
                     factory, cls = result

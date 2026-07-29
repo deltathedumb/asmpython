@@ -616,6 +616,21 @@ class Del:
 
 
 @dataclass
+class AwaitStmt:
+    """`<target> = await <value>` in STATEMENT position.
+
+    Produced by the await-normalisation pass, never by the parser. A
+    suspension point can only be encoded as a statement -- the coroutine
+    flattener splits a body at statements -- so every `A.Await` expression is
+    hoisted into one of these before flattening.
+    """
+
+    target: str
+    value: "Expr"
+    pos: SourcePos = field(default_factory=lambda: _NO_POS)
+
+
+@dataclass
 class YieldStmt:
     """`yield expr` — suspends a generator function and produces one value."""
 
@@ -748,6 +763,7 @@ Stmt = (
     | Del
     | Match
     | YieldStmt
+    | AwaitStmt
 )
 # IndexAssign is also a Stmt but forward-referenced because Subscript is defined below.
 

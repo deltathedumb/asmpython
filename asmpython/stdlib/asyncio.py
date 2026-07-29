@@ -1,11 +1,16 @@
 """asyncio: asynchronous I/O framework.
 
-In asmpython, ``async def`` and ``await`` are not supported. This module
-provides the API surface for code that *references* asyncio types (e.g.
-type annotations, exception classes, constants), but raises NotImplementedError
-for any runtime execution.
+`async def` / `await` compile to a state machine: sema turns each coroutine
+into an object whose `send(value)` resumes it and returns the awaitable it is
+now blocked on, raising StopIteration (with the result in `_result`) when the
+body finishes. This module is the DRIVER for that protocol.
 
-If you need cooperative concurrency, use ``threading.Thread`` instead.
+`run()` is a single-threaded trampoline. It keeps a stack of coroutines: the
+top one is stepped, and whatever it yields is either another coroutine (pushed,
+so the parent stays blocked until it finishes) or a value that resolves
+immediately. When a coroutine raises StopIteration its result is popped and
+sent into its parent. That is enough for `await`, nesting, `sleep` and
+`gather`; it has no I/O multiplexing, so nothing here blocks on a socket.
 """
 from __future__ import annotations
 
@@ -257,8 +262,90 @@ def get_running_loop() -> AbstractEventLoop:
 
 
 def run(coro: object, debug: int = 0) -> object:
-    """Run a coroutine (raises NotImplementedError)."""
-    raise NotImplementedError("asyncio.run: async/await not supported in asmpython")
+    """Drive `coro` to completion and return its result.
+
+    A trampoline rather than recursion: an awaited coroutine is PUSHED onto a
+    stack and stepped in the parent's place, so nesting depth costs stack
+    entries rather than native frames, and a coroutine that awaits in a loop
+    does not grow the machine stack at all.
+    """
+    stack: list = [coro]
+    sent: object = 0
+    result: object = 0
+    while len(stack) > 0:
+        current = stack[len(stack) - 1]
+        awaited: object = current.send(sent)
+        if current._done == 1:
+            # `send` returns the coroutine's RESULT once `_done` is set, so
+            # the value comes back through a slot typed "any" and keeps its
+            # runtime tag. Storing it in a field instead would lose that: a
+            # field's type is fixed by what __init__ seeds it with, so a str
+            # result written into an int-seeded field reads back as a pointer.
+            result = awaited
+            stack.pop()
+            sent = result
+        else:
+            if _is_immediate(awaited):
+                # Something that is already resolved (sleep, a plain value):
+                # feed it straight back rather than pushing a frame for it.
+                sent = _immediate_value(awaited)
+            else:
+                stack.append(awaited)
+                sent = 0
+    return result
+
+
+def _is_immediate(value: object) -> int:
+    """1 if `value` needs no further driving -- it already has its result."""
+    if isinstance(value, _Immediate):
+        return 1
+    return 0
+
+
+def _immediate_value(value: object) -> object:
+    if isinstance(value, _Immediate):
+        return value.value
+    return value
+
+
+class _Immediate:
+    """An awaitable that is already resolved.
+
+    `await asyncio.sleep(0)` and `await asyncio.gather(...)` both produce one:
+    the work is done by the time the driver sees it, so it carries the answer
+    instead of a resumption point.
+    """
+
+    def __init__(self, value: object) -> None:
+        self.value: object = value
+
+
+def sleep(delay: float = 0.0, result: object = 0) -> object:
+    """Suspend for `delay` seconds.
+
+    Resolves immediately. Single-threaded with no I/O to overlap, there is
+    nothing to yield TO, so `sleep(0)` -- the idiomatic "let other tasks run"
+    -- is exactly a no-op and correct.
+
+    A NON-ZERO delay is NOT honoured: the wall-clock wait is skipped rather
+    than blocking the only thread. That diverges from CPython for code that
+    measures elapsed time, and is the one place this module knowingly does
+    not mirror it. Honouring it needs a real timer wheel in the driver, which
+    in turn needs I/O multiplexing to be worth anything.
+    """
+    return _Immediate(result)
+
+
+def gather(*coros: object) -> object:
+    """Run each awaitable to completion and return their results in order.
+
+    Sequential, not concurrent: with no I/O to overlap there is nothing to be
+    gained by interleaving, and argument order is what callers depend on.
+    """
+    out: list = []
+    for c in coros:
+        out.append(run(c))
+    return _Immediate(out)
 
 
 # ---------------------------------------------------------------------------
