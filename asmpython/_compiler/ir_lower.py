@@ -553,6 +553,36 @@ def _list_elem_addr(ctx: _FuncCtx, list_v: IRValue, idx_v: IRValue) -> IRValue:
     return elem_addr
 
 
+def _load_list_elem(ctx: _FuncCtx, addr: IRValue, el_ty: str) -> IRValue:
+    """Load one element of a list/tuple buffer from `addr` (an address from
+    `_list_elem_addr`) in the representation its element kind implies.
+
+    The one that is easy to get wrong is "any": such a list stores its scalar
+    elements BOXED (the store choke `_lower_value_into_any_slot`), so a raw
+    `load` into an I64 yields the box's ADDRESS, not the value. Every consumer
+    that then treats it as a number -- `sum()`, a `for` body's `+=`, `min()`,
+    `join()` -- silently computes with pointers. Loading PTR-typed and routing
+    through `_lower_unbox_any` is what `_lower_expr`'s read choke does for the
+    same value reached via a subscript; this is that choke for the open-coded
+    buffer walks, which never go through `_lower_expr` at all.
+
+    Unboxing is a safe no-op on a never-boxed element (a raw int, a list/dict/
+    instance pointer): the magic-sentinel discriminator in
+    `_lower_read_any_tag` never dereferences a non-box.
+    """
+    if el_ty == "float":
+        v = ctx.tmp(F64)
+        ctx.emit(IRInstr("load", v, [addr]))
+        return v
+    if el_ty == "any":
+        raw = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", raw, [addr]))
+        return _lower_unbox_any(ctx, raw)
+    v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", v, [addr]))
+    return v
+
+
 _INPARAM_OUTPARAM_ELEM_SIZE = {
     "int": 8,
     "float": 8,
@@ -8421,8 +8451,22 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         idx_v2 = ctx.tmp(I64)
         ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
         addr = _list_elem_addr(ctx, xs_v, idx_v2)
-        elem_v = ctx.tmp(acc_ty)
-        ctx.emit(IRInstr("load", elem_v, [addr]))
+        # An "any"-element list holds BOXED scalars, so the element has to be
+        # unboxed before it can be added -- a raw load accumulated the elements'
+        # box ADDRESSES. `_load_list_elem` yields the payload; for a float sum
+        # that payload is the double's bit pattern, so reinterpret rather than
+        # convert (the same distinction `float(<any>)` makes).
+        sum_el_ty = _iter_element_type(e.args[0])
+        if sum_el_ty == "any":
+            payload = _load_list_elem(ctx, addr, "any")
+            if is_f:
+                elem_v = ctx.tmp(F64)
+                ctx.emit(IRInstr("bitcast_i2f", elem_v, [payload]))
+            else:
+                elem_v = payload
+        else:
+            elem_v = ctx.tmp(acc_ty)
+            ctx.emit(IRInstr("load", elem_v, [addr]))
         acc_v = ctx.tmp(acc_ty)
         ctx.emit(IRInstr("load", acc_v, [acc_ptr]))
         new_acc = ctx.tmp(acc_ty)
@@ -8893,7 +8937,20 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             return _lower_dynamic_slice_or_index(ctx, obj_v, idx_v, result_ty, id(e))
         _emit_list_index_bounds_check(ctx, obj_v, idx_v, id(e))
         addr = _list_elem_addr(ctx, obj_v, idx_v)
-        v = ctx.tmp(F64 if result_ty == "float" else I64)
+        # An "any"-element list stores its elements BOXED (the store choke
+        # `_lower_value_into_any_slot`, reached from the ListLit lowering and
+        # from `.append` into such a list), so the load has to be typed PTR for
+        # `_lower_expr`'s read choke to unbox it -- that choke only unboxes an
+        # "any"-typed value whose IR type is PTR, and an I64 result slips
+        # straight past it, leaving the raw box POINTER in play as if it were
+        # the value. Exactly the dict-element case already handled above, and
+        # the same reason: `xs[i] + xs[j]` added two box addresses and handed
+        # the sum to print(), which read its tag by dereferencing it. A
+        # homogeneous list is typed by its element kind (not "any") and keeps
+        # the I64/F64 path unchanged; unboxing is a safe no-op on the
+        # never-boxed pointer elements (lists/dicts/instances) an "any" list
+        # passes through, so those stay correct too.
+        v = ctx.tmp(F64 if result_ty == "float" else (PTR if result_ty == "any" else I64))
         ctx.emit(IRInstr("load", v, [addr]))
         return v
 
@@ -14543,6 +14600,22 @@ def lower_func(
             # the shape ("this name has a tracked element kind") is the
             # same idea.
             ctx.slot_el_ty[pname] = annot[1] or "int"
+        elif isinstance(annot, tuple) and len(annot) >= 2 and annot[0] in (
+            "list",
+            "tuple",
+        ) and annot[1]:
+            # Element kind of a `list[T]`/`tuple[T]` PARAMETER. A list-typed
+            # LOCAL has always recorded this (see the Assign handler's own
+            # `ctx.slot_el_ty[...] = ...`), but a parameter never did, so every
+            # open-coded buffer walk keyed off `ctx.slot_el_ty` -- most visibly
+            # `for x in xs:` -- fell back to the "int" default and loaded each
+            # element as a raw I64 regardless of what it actually holds.
+            # Two things were wrong as a result: a `list[float]` parameter's
+            # elements were read as ints (the double's bit pattern used as a
+            # number), and a `list[any]` parameter's elements (an unannotated
+            # `*args`, whose elements are BOXED) were read as ints too, leaving
+            # the box POINTER in play instead of the value.
+            ctx.slot_el_ty[pname] = annot[1]
 
     for st in f.body:
         _lower_stmt(ctx, st)
