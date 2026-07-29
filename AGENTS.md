@@ -63,6 +63,49 @@ generalize:
    the entry point or specific call sites instead of trusting what a
    piped/redirected run printed.
 
+3. **A pass/fail count cannot see a miscompile.** The suite scores a case that
+   failed before and fails after as a no-op no matter how wrong the bytes got,
+   so for an ALWAYS-ON change (frontend, sema, ir_lower, codegen, regalloc) the
+   suite is not a sufficient gate. Use:
+
+   ```text
+   git stash
+   python tests/diff_passes.py --mode record --state base.json --sample 150
+   git stash pop
+   python tests/diff_passes.py --mode check  --state base.json --sample 150
+   ```
+
+   It compiles each case twice and diffs actual stdout + exit code. The default
+   `--mode passes` builds both variants in ONE process and therefore cannot see
+   an always-on change at all. Comparing failure SETS between suite runs is
+   still worth doing — a fix and a regression cancel out in a count — but it
+   only covers cases that PASS; `diff_passes` is what covers the rest.
+   `tests/subset_runner.py` replays a named case list into a private build
+   directory when you want a cheap targeted re-check, or a baseline run in a
+   `git worktree` alongside a full run.
+
+4. **Confirm you are testing the compiler, not the interpreter.** When the
+   native backend rejects a source, `asmpython build` falls back to running it
+   under pyinbin and exits 0 with CPython-correct output. Correct output
+   therefore does not prove anything compiled. Build with
+   `--no-pyinbin-fallback` whenever a result matters. (The message now names
+   the rejection reason; it used to say only that the fallback succeeded, and
+   two agents independently mis-diagnosed a compiler bug from reading its
+   output.)
+
+5. **Suspect your harness before the compiler when a symptom looks
+   structurally impossible.** A reported "double bracket" bug — `[1, 'a']`
+   printing as `[[1, 'a']]` — turned out to be a test helper that wrapped
+   program output in literal brackets with `echo "[$out]"`. It sent one agent
+   chasing the container formatter while the real symptom, seen by another,
+   was raw pointers. Print the raw bytes before believing a shape.
+
+6. **Read the IR.** Two of the hardest bugs on this branch were settled by
+   dumping IR, not by reading source: `%tN:i64 = load(...)` immediately
+   followed by `_abi_new_box(-1, %tN)` is an already-boxed value being boxed a
+   second time, and no amount of source reading showed it. See
+   `_compiler/ir_print.py`.
+
 ## Recurring bug classes (check for these first when debugging similar symptoms)
 
 These have each appeared **more than once**, in different specific spots,
