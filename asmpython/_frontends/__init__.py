@@ -80,6 +80,11 @@ from .python_frontend import PythonFrontend as _PythonFrontend
 register_frontend("python", _PythonFrontend(), aliases=("Python", "py"))
 del _PythonFrontend
 
+from .apc import APCFrontend as _APCFrontend
+
+register_frontend("apc", _APCFrontend(), aliases=("APC", "asmpython-c"))
+del _APCFrontend
+
 
 __all__ = [
     "get_frontend",

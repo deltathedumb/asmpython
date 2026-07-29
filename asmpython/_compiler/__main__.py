@@ -299,6 +299,41 @@ Toolchain auto-discovery searches, in order:
 
 If a tool is missing, run `_download-deps.bat --nasm --gcc --python` to
 fetch a portable copy of the toolchain (Windows only).
+
+Diagnostics (environment variables -- these exist, and are otherwise only
+discoverable by reading the source):
+
+    ASMPYTHON_VERBOSE=1|2       report each build stage and its duration on
+                                stderr; 2 also reports every event, the IR's
+                                shape, and per-pass results
+    ASMPYTHON_EMIT_IR=PATH|-    dump the SSA IR the backend is about to
+                                consume, after passes. `-` means stderr. The
+                                dump reads back: see _compiler/ir_print.py's
+                                parse_module, which round-trips to
+                                byte-identical code, so a miscompile can be
+                                bisected by editing one instruction
+    ASMPYTHON_EMIT_ALLOC=1      annotate that dump with the register or stack
+                                slot each value was assigned
+    ASMPYTHON_VERIFY_IR=1       structurally verify the IR at the waist, so
+                                malformed IR fails loudly instead of deep in
+                                codegen
+    ASMPYTHON_PASS_VERBOSE=1    per-pass "changed / no change" only (implied
+                                by ASMPYTHON_VERBOSE)
+    ASMPYTHON_CODEGEN_PROCS=N   force N codegen worker processes; 0 disables
+                                them. Default: processes only above ~20k
+                                instructions, since spawning a pool costs
+                                about a second on Windows
+
+To check that a change to always-on code (sema, ir_lower, codegen, regalloc)
+did not silently alter program OUTPUT -- which a pass/fail count cannot see --
+use the differential harness in record/check mode:
+
+    python tests/diff_passes.py --mode record --state base.json --sample 150
+    ...apply the change...
+    python tests/diff_passes.py --mode check  --state base.json --sample 150
+
+Its default --mode passes builds twice in one process and therefore cannot
+observe an always-on change at all.
 """
 
 
@@ -567,9 +602,11 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         metavar="NAME",
         default=None,
         help="linker to use: 'gcc', 'builtin' (asmpython's own, no gcc/ld "
-        "involved), or any linker registered via asmpython.linker.Linker(...). "
-        "Default: whichever the selected --backend prefers (legacy -> gcc, "
-        "x86-64 -> builtin)",
+        "involved), 'none' (stop after codegen and write the relocatable "
+        "object -- also skips building the ABI shims and the runtime archive, "
+        "which dominate a small build), or any linker registered via "
+        "asmpython.linker.Linker(...). Default: whichever the selected "
+        "--backend prefers (legacy -> gcc, x86-64 -> builtin)",
     )
     build_grp.add_argument(
         "--no-pyinbin-fallback",
@@ -1155,9 +1192,19 @@ def cmd_build(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        # Say WHY it was rejected. `native_error` was already in scope and
+        # printed on the failure path, but the success path dropped it, so a
+        # source the native backend refuses ran under the interpreter and
+        # printed CPython-correct output with no indication that nothing was
+        # compiled. Two of us independently mis-diagnosed a compiler bug from
+        # that: one read correct interpreter output and concluded the compiler
+        # was fine, the other read a stale native artifact and concluded it was
+        # miscompiling. Neither ever saw the actual SemaError, which was the
+        # answer the whole time.
         print(
-            "asmpython: native backend rejected this source; "
-            "pyinbin fallback executed successfully (no native artifact produced)",
+            f"asmpython: native backend rejected this source: {native_error}\n"
+            "asmpython: pyinbin fallback executed successfully "
+            "(no native artifact produced)",
             file=sys.stderr,
         )
         return 0

@@ -107,10 +107,43 @@ def current_report() -> BuildReport | None:
     return _current_report.get()
 
 
+def verbosity() -> int:
+    """0 = quiet (default), 1 = stages, 2 = every event.
+
+    Read fresh each call rather than cached at import so a test or a harness
+    can turn it on around one build.
+    """
+    raw = os.environ.get("ASMPYTHON_VERBOSE", "")
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 1                      # any non-numeric truthy value means "on"
+
+
+def _render(kind: str, data: dict[str, Any]) -> str:
+    parts = []
+    for key, value in data.items():
+        if value is None or key == "success":
+            continue
+        if key == "duration_seconds":
+            parts.append(f"{value * 1000:.0f}ms")
+            continue
+        parts.append(f"{key}={_json_value(value)}")
+    return f"  {kind:<22} {' '.join(parts)}".rstrip()
+
+
+def _echo(kind: str, data: dict[str, Any], *, level: int) -> None:
+    if verbosity() >= level:
+        print(_render(kind, data), file=sys.stderr, flush=True)
+
+
 def event(kind: str, **data: Any) -> None:
     report = current_report()
     if report is not None:
         report.add_event(kind, **data)
+    _echo(kind, data, level=2)
 
 
 @contextlib.contextmanager
@@ -129,12 +162,18 @@ def stage(kind: str, **data: Any) -> Iterator[None]:
         )
         raise
     else:
+        elapsed = time.perf_counter() - start
         event(
             f"{kind}.finish",
-            duration_seconds=time.perf_counter() - start,
+            duration_seconds=elapsed,
             success=True,
             **data,
         )
+        # At -v a stage reports once, on completion, with its duration. At -vv
+        # the paired start/finish events already say that, so don't say it
+        # three times.
+        if verbosity() == 1:
+            _echo(kind, {**data, "duration_seconds": elapsed}, level=1)
 
 
 __all__ = ["BuildReport", "current_report", "event", "report_session", "stage"]

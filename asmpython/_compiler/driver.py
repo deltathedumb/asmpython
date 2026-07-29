@@ -319,7 +319,13 @@ def _compile_program(
         all_errors=all_errors,
         active_extensions=active_extensions,
     )
-    return impl.parse(src, ctx)
+    # Time every frontend, not just third-party ones -- `asmpython.frontend`'s
+    # wrapper already stages plugin parses, but the built-in python and apc
+    # frontends do not go through it, so a plain build reported nothing at all.
+    from .build_report import stage
+
+    with stage("frontend.parse", frontend=frontend, source_bytes=len(src)):
+        return impl.parse(src, ctx)
 
 
 def _write_backend_output(
@@ -342,6 +348,12 @@ def _write_backend_output(
     return resolved
 
 
+def _verbosity() -> int:
+    from .build_report import verbosity
+
+    return verbosity()
+
+
 def _apply_passes(ir_mod, passes: "str | None"):
     """Run the ``--passes`` pipeline over a lowered IR module.
 
@@ -355,8 +367,40 @@ def _apply_passes(ir_mod, passes: "str | None"):
 
     run_passes(
         ir_mod, passes,
-        verbose=bool(os.environ.get("ASMPYTHON_PASS_VERBOSE")),
+        # ASMPYTHON_VERBOSE is the single knob; the older, narrower
+        # ASMPYTHON_PASS_VERBOSE still works on its own.
+        verbose=bool(os.environ.get("ASMPYTHON_PASS_VERBOSE")) or _verbosity() >= 1,
     )
+
+
+def _as_ir_module(module) -> "IRModule":
+    """Accept either shape a frontend may return (see ``ir_contract.md``).
+
+    The built-in Python frontend returns a typed AST module for ``ir_lower`` to
+    lower. A frontend for a language whose semantics are already close to the
+    neutral IR (``apc``) builds an ``IRModule`` itself and hands it straight
+    through -- that is the documented "side chute", and lowering an already
+    lowered module would be nonsense.
+    """
+    from .build_report import event
+    from .ir import IRModule
+
+    def _report(ir_mod, source: str):
+        event(
+            "ir.module",
+            source=source,
+            funcs=len(ir_mod.funcs),
+            blocks=sum(len(f.blocks) for f in ir_mod.funcs),
+            instrs=sum(len(b.instrs) for f in ir_mod.funcs for b in f.blocks),
+            globals=len(ir_mod.data),
+        )
+        return ir_mod
+
+    if isinstance(module, IRModule):
+        return _report(module, "frontend")
+    from . import ir_lower
+
+    return _report(ir_lower.lower_module(module), "ir_lower")
 
 
 def _run_backend_x86_64(
@@ -394,8 +438,12 @@ def _run_backend_x86_64(
     from .._backends.x86_64 import __module_backend__ as backend
     from .._runtime.build import build_abi_shims, build_runtime, runtime_object_path
 
-    ir_mod = ir_lower.lower_module(module)
+    ir_mod = _as_ir_module(module)
     _apply_passes(ir_mod, passes)
+    # Dump the IR the backend is about to consume (ASMPYTHON_EMIT_IR).
+    from .ir_print import emit_if_requested as _emit_ir
+
+    _emit_ir(ir_mod, abi=abi)
     # Opt-in structural check of the neutral IR (no language knowledge). Off by
     # default so it never affects normal builds; set ASMPYTHON_VERIFY_IR=1 to
     # have malformed IR fail loudly at the waist rather than deep in codegen.
@@ -405,6 +453,21 @@ def _run_backend_x86_64(
         validate_ir(ir_mod)
     compiled = backend.compile(ir_mod, {"target_os": target, "abi": abi})
     program_obj = next(iter(compiled.values()))
+
+    if linker == "none":
+        # Stop after codegen: write the relocatable object and skip the ABI
+        # shims, the runtime archive, and linking entirely.
+        #
+        # Deliberately placed before build_abi_shims/build_runtime rather than
+        # just before the link call -- those two dominate a small build, and a
+        # request not to link is a request not to pay for them either. This is
+        # the mode for looking at what codegen produced (objdump, size, a
+        # relocation dump) and for a host that will do its own linking.
+        obj_path = out_path.with_suffix(".obj" if target == "windows" else ".o")
+        obj_path.parent.mkdir(parents=True, exist_ok=True)
+        obj_path.write_bytes(program_obj)
+        print(f"wrote {obj_path} (not linked: --linker none)")
+        return BuildResult(asm_path=obj_path, obj_path=obj_path, exe_path=None)
 
     shim_obj = build_abi_shims(target).read_bytes()
     build_runtime(target)  # ensures runtime_object_path's file is current
@@ -496,8 +559,12 @@ def _run_backend_ternary(module, out_path: Path, passes: "str | None" = None) ->
     from . import ir_lower
     from .._backends.ternary import __module_backend__ as backend
 
-    ir_mod = ir_lower.lower_module(module)
+    ir_mod = _as_ir_module(module)
     _apply_passes(ir_mod, passes)
+    # Dump the IR the backend is about to consume (ASMPYTHON_EMIT_IR).
+    from .ir_print import emit_if_requested as _emit_ir
+
+    _emit_ir(ir_mod, abi="sysv")
     compiled = backend.compile(ir_mod, {})
     out_bytes = next(iter(compiled.values()))
 
@@ -510,7 +577,7 @@ def _run_backend_ternary(module, out_path: Path, passes: "str | None" = None) ->
 
 def _run_backend_registered(
     module, backend_name: str, out_path: Path, passes: "str | None" = None,
-    backend_args: "dict | None" = None,
+    backend_args: "dict | None" = None, linker: "str | None" = None,
 ) -> BuildResult:
     """Compile+link `module` via a third-party `IRBackend` registered under
     `backend_name` (see `asmpython._backends.get_backend`/
@@ -527,13 +594,25 @@ def _run_backend_registered(
         names = ["legacy", "x86-64", "ternary", *_registered_backend_names()]
         raise ValueError(f"unknown backend {backend_name!r} (have: {', '.join(names)})")
 
-    ir_mod = ir_lower.lower_module(module)
+    ir_mod = _as_ir_module(module)
     _apply_passes(ir_mod, passes)
+    # Dump the IR the backend is about to consume (ASMPYTHON_EMIT_IR).
+    from .ir_print import emit_if_requested as _emit_ir
+
+    _emit_ir(ir_mod, abi="sysv")
     # Registered backends used to get no options at all, which left every
     # `requested_args` entry unreachable. Forward whatever the caller resolved.
     options = dict(backend_args or {})
     compiled = backend.compile(ir_mod, options)
     program_obj = next(iter(compiled.values()))
+
+    if linker == "none":
+        obj_path = out_path.with_suffix(".o")
+        obj_path.parent.mkdir(parents=True, exist_ok=True)
+        obj_path.write_bytes(program_obj)
+        print(f"wrote {obj_path} (not linked: --linker none)")
+        return BuildResult(asm_path=obj_path, obj_path=obj_path, exe_path=None)
+
     linked = backend.link([program_obj], options)
     out_bytes = next(iter(linked.values()))
 
@@ -574,9 +653,12 @@ def _run_backend(
     """Target-specific back-end: codegen -> nasm -> gcc."""
     if backend == "x86-64" and (
         any(getattr(f, "asm_body", None) is not None for f in module.funcs)
+        # `classes` only exists on a typed AST module. A frontend that returned
+        # a built IRModule has no AST to inspect and no `@assembly_func` to
+        # find, so `getattr` keeps this guard from raising on that path.
         or any(
             getattr(m, "asm_body", None) is not None
-            for c in module.classes
+            for c in getattr(module, "classes", ())
             for m in c.methods
         )
     ):
@@ -646,6 +728,7 @@ def _run_backend(
         # third-party registry (asmpython.backend.Backend(...)) before giving up.
         return _run_backend_registered(
             module, backend, out_path, passes, backend_args=backend_args,
+            linker=linker,
         )
     elif linker is not None and linker != "gcc":
         raise ValueError(f"--backend legacy only supports --linker gcc, got {linker!r}")

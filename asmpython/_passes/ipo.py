@@ -148,6 +148,24 @@ class SinkPass(IRPass):
         return changed
 
     def _run_func(self, func) -> bool:
+        from .._compiler.cfg import loop_membership
+
+        # Never sink INTO a loop the instruction is not already in.
+        #
+        # Two reasons, and the first alone settles it: moving a computation
+        # from outside a loop to inside makes it run once per iteration
+        # instead of once, which is precisely what LICM just finished
+        # undoing. `licm,sink` would hand work back and forth.
+        #
+        # It is also unsound in this backend today. The register allocator
+        # decides whether a value must stay live across a back edge by asking
+        # where it is DEFINED relative to the loop (see regalloc._last_uses),
+        # so relocating a definition across a loop boundary changes that
+        # answer underneath it. Observed as a wrong result -- not a crash --
+        # from `--passes licm,sink`, with the IR verifying clean either way.
+        membership = loop_membership(func)
+        index_of = {b.label: i for i, b in enumerate(func.blocks)}
+
         # Which blocks use each value; phi operands pin a value to the
         # predecessor edge, so treat any phi use as "don't move".
         use_blocks: dict[str, set[str]] = {}
@@ -175,6 +193,10 @@ class SinkPass(IRPass):
                     continue
                 target = next(iter(targets))
                 if target == block.label:
+                    continue
+                src_loops = membership.get(index_of[block.label], frozenset())
+                dst_loops = membership.get(index_of[target], frozenset())
+                if not dst_loops <= src_loops:
                     continue
                 # Operands must not be defined in this block, otherwise moving
                 # the instruction away would leave them behind out of order.

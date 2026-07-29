@@ -127,125 +127,21 @@ def _slot_size(type_name: str) -> int:
     return 16 if type_name == "v128" else 8
 
 
-def _last_uses(func: Any) -> dict[str, tuple[int, int]]:
-    """Return the (block_idx, instr_idx) of each value's final use.
-
-    Kept in step with x86_64/regalloc.py's `_last_uses` -- this is pure
-    IR-level analysis (natural-loop detection, loop-liveness extension, the
-    try-region liveness extension) with no x86-specific reasoning anywhere in
-    it. See that module's docstring for the full rationale and the real
-    production bugs (`end >= bi` off-by-one; try-region handler-block implicit
-    control transfer; loop-carried values read before their own definition)
-    this logic exists to avoid reintroducing.
-
-    Loop structure comes from the shared CFG analysis (_compiler/cfg.py), the
-    same as x86-64. It previously came from a block-INDEX RANGE, which invented
-    loops (try/except dispatch branches jump backward by index without being
-    loops -- the only reason the `try_regions` exclusion that used to sit here
-    existed) and missed loop bodies (ir_lower emits helper blocks at HIGHER
-    indices than the latch, so real body blocks fell outside the assumed span
-    and a loop accumulator could silently reset). A branch is a back edge only
-    when its target dominates its source, so both are gone by construction.
-    """
-
-    def_block: dict[str, int] = {}
-    for param in func.params:
-        def_block[param.name] = 0
-    for bi, block in enumerate(func.blocks):
-        for instr in block.instrs:
-            if instr.result is not None:
-                def_block.setdefault(instr.result.name, bi)
-
-    last: dict[str, tuple[int, int]] = {}
-    for bi, block in enumerate(func.blocks):
-        for ii, instr in enumerate(block.instrs):
-            for op in instr.operands:
-                if hasattr(op, "name"):
-                    last[op.name] = (bi, ii)
-
-    # Extend a use inside a loop to that loop's last block. Two cases need it:
-    # a value defined OUTSIDE the loop (nothing refreshes it, so the next
-    # iteration still needs it), and a value defined INSIDE the loop at a later
-    # block than the use -- the allocator walks blocks in index order, so a use
-    # preceding its own definition can only be reading the previous iteration's
-    # value. Phi elimination creates exactly that shape: the back-edge copy sits
-    # in the latch while the value is computed in a body block emitted later.
-    # A value defined in the loop and used only after its definition is
-    # refreshed every iteration and must NOT be extended, or nearly every loop
-    # temporary is pinned live at once and the register pool is exhausted.
-    # Loop liveness uses the block-INDEX SPAN of a backward-looking branch, with
-    # try/except dispatch excluded. This is the rule that shipped before the
-    # natural-loop rework and it is restored deliberately.
-    #
-    # cfg.py's dominance-based analysis is the correct description of a LOOP, and
-    # the passes use it. It is not, on its own, a correct description of
-    # LIVENESS here, and substituting it silently miscompiled four programs
-    # (r39_running_average's running sum stuck at its first value,
-    # 382_nested_listcomp, 425_generator_pipeline, 999_comprehensive_codegen).
-    # Replacing it again needs a full differential run, not a case-by-case fix:
-    # every variant tried so far trades one set of programs for another --
-    # tightening the range frees a register that is still live, and widening it
-    # exhausts the pool and crashes the "GP result expected" path instead.
-    regions = try_regions_resolved(func)
-
-    def _in_try_region(idx: int) -> bool:
-        return any(idx in members for _setjmp, members in regions)
-
-    label_to_idx = {b.label: bi for bi, b in enumerate(func.blocks)}
-    loop_start = list(range(len(func.blocks)))
-    loop_end = list(range(len(func.blocks)))
-    for bi, block in enumerate(func.blocks):
-        for instr in block.instrs:
-            if instr.op not in ("br", "br.t"):
-                continue
-            targets = instr.operands[1:] if instr.op == "br.t" else instr.operands
-            for target in targets:
-                ti = label_to_idx.get(str(target))
-                if ti is None or ti > bi or _in_try_region(ti):
-                    continue
-                for k in range(ti, bi + 1):
-                    if loop_start[k] > ti:
-                        loop_start[k] = ti
-                    if loop_end[k] < bi:
-                        loop_end[k] = bi
-
-    for name, (bi, _ii) in list(last.items()):
-        start, end = loop_start[bi], loop_end[bi]
-        if end >= bi and def_block.get(name, bi) < start:
-            last[name] = (end, len(func.blocks[end].instrs))
-
-    try_regions = try_regions_resolved(func)
-    if try_regions:
-        region_referenced: dict[int, set[str]] = {}
-        for bi, block in enumerate(func.blocks):
-            for instr in block.instrs:
-                for op in instr.operands:
-                    if not hasattr(op, "name"):
-                        continue
-                    for ri, (_setjmp_bi, members) in enumerate(try_regions):
-                        if bi in members:
-                            region_referenced.setdefault(ri, set()).add(op.name)
-        for name, (bi, _ii) in list(last.items()):
-            db = def_block.get(name, bi)
-            for ri, (setjmp_bi, members) in enumerate(try_regions):
-                end_bi = max(members)
-                if (
-                    db <= setjmp_bi
-                    and name in region_referenced.get(ri, ())
-                    and end_bi > last[name][0]
-                ):
-                    last[name] = (end_bi, len(func.blocks[end_bi].instrs))
-    return last
-
-
-def _pick_evict(in_reg: dict[str, Any],
-                last_use: dict[str, tuple[int, int]],
-                now: tuple[int, int]) -> str:
-    """Belady: evict the value used furthest in the future (or already
-    dead). Ported verbatim from x86_64/regalloc.py -- see that module's
-    docstring for why `<` (not `<=`) against `now` matters."""
-    _INF = (10**9, 10**9)
-    return max(in_reg, key=lambda n: _INF if last_use.get(n, (-1, -1)) < now else last_use[n])
+# Shared with x86-64 (and with RISC-V / MIPS when they arrive): liveness, loop
+# structure, the try-region extension, and Belady eviction are pure IR analysis.
+#
+# This file used to carry its own copy, with a comment saying it was "kept in
+# step with x86_64/regalloc.py". It was not: a loop-carried-value fix landed
+# there and never arrived here, and nothing could see the drift because each
+# backend only tested itself. On tests/cases/130_starred_unpack.py under
+# --passes mem2reg, counting simultaneously-live values sharing a register:
+# x86_64 scored 0 and this backend scored 949336.
+from .._common.liveness import (  # noqa: F401  (re-exported for tests)
+    block_liveness as _block_liveness,
+    last_uses as _last_uses,
+    live_before_definition as _live_before_definition,
+    pick_evict as _pick_evict,
+)
 
 
 def _compute_crosses_call(func: Any) -> set[str]:
@@ -316,6 +212,12 @@ def allocate(func: Any, abi: str = "aapcs64") -> AllocResult:
     in_fp: dict[str, VReg] = {}  # values currently in a D-register
 
     last_use = _last_uses(func)
+    # Values live before their own definition in block-list order (carried
+    # around a back edge) cannot be expressed in a linear-scan model: the
+    # register would have to be reserved before the walk reaches the
+    # definition. Home them on the stack, which is live for the whole
+    # function. Same reasoning and same shared analysis as x86-64.
+    loop_carried = _live_before_definition(func)
     crosses_call = _compute_crosses_call(func)
     now: tuple[int, int] = (-1, -1)
 
@@ -366,6 +268,11 @@ def allocate(func: Any, abi: str = "aapcs64") -> AllocResult:
         return free_fp.pop(0)
 
     def _alloc_gp(name: str) -> None:
+        nonlocal stack_top
+        if name in loop_carried:
+            stack_top += 8
+            locs[name] = StackLoc(-stack_top)
+            return
         r = _take_gp(prefer_callee_saved=name in crosses_call)
         locs[name] = RegLoc(r)
         in_gp[name] = r
@@ -373,6 +280,11 @@ def allocate(func: Any, abi: str = "aapcs64") -> AllocResult:
             used_callee_gp.add(r)
 
     def _alloc_fp(name: str) -> None:
+        nonlocal stack_top
+        if name in loop_carried:
+            stack_top += _slot_size("f64")
+            locs[name] = StackLoc(-stack_top)
+            return
         v = _take_fp()
         locs[name] = VLoc(v)
         in_fp[name] = v

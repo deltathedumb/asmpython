@@ -89,8 +89,10 @@ _tmp*.*
 # Zip for some reason
 asmpython.zip
 
-# VS Code specific files
-editors/vscode/node_modules/
-editors/vscode/out/
-editors/vscode/*.vsix
-editors/vscode/package-lock.json
+# VS Code specific files (one directory per extension under editors/vscode/)
+editors/vscode/*/node_modules/
+editors/vscode/*/out/
+editors/vscode/**/*.vsix
+editors/vscode/*/package-lock.json
+
+/threads/

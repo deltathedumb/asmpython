@@ -81,14 +81,56 @@ def _compile_one(payload: tuple) -> FuncCode:
     return compile_func(func, alloc, abi)
 
 
+# Instructions below which a process pool is not worth spawning.
+#
+# Starting one costs ~1s on Windows, where the spawn start method re-imports
+# asmpython in every worker, and that is paid whether there is a second of
+# codegen to do or five milliseconds of it. Measured before this guard: a
+# 30-instruction module spent 983ms in backend.compile and a module 20x larger
+# spent 1062ms -- i.e. compile time was pool startup, essentially independent
+# of the program. Codegen for the small one takes 5ms.
+#
+# Threads still overlap I/O and release the GIL inside the encoder's bytes
+# work, so they are the middle tier rather than going straight to serial.
+# Override with ASMPYTHON_CODEGEN_PROCS=<n> to force a floor (0 disables
+# processes entirely).
+_PROCESS_POOL_MIN_INSTRS = 20_000
+
+
+def _instruction_count(funcs: list) -> int:
+    return sum(len(b.instrs) for f in funcs for b in f.blocks)
+
+
 def _compile_all(funcs: list, abi: str) -> list[FuncCode]:
-    """Compile every function, using as many cores as available."""
+    """Compile every function, using as many cores as the work justifies."""
     n        = len(funcs)
     workers  = min(n, os.cpu_count() or 1)
     payloads = [(f, abi) for f in funcs]
 
     if workers <= 1:
         return [_compile_one(p) for p in payloads]
+
+    override = os.environ.get("ASMPYTHON_CODEGEN_PROCS")
+    if override is not None:
+        try:
+            floor = int(override)
+        except ValueError:
+            floor = -1
+        use_processes = floor > 0
+        if floor > 0:
+            workers = min(workers, floor)
+    else:
+        use_processes = _instruction_count(funcs) >= _PROCESS_POOL_MIN_INSTRS
+
+    if not use_processes:
+        results: dict[str, FuncCode] = {}
+        name_order = [f.name for f in funcs]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(_compile_one, p): p[0].name for p in payloads}
+            for fut in as_completed(futs):
+                fc = fut.result()
+                results[fc.name] = fc
+        return [results[name] for name in name_order]
 
     # Try multi-process (true parallelism — each process has its own GIL).
     # Fall back to threads if spawn fails (e.g. frozen executable, REPL).

@@ -1,0 +1,15 @@
+# Native libraries std::framebuf calls into.
+#   NAME:SYM,SYM,...      symbols this module needs from that library
+#   ... @windows          restrict a line to one target OS
+#
+# Declared here rather than in a backend's symbol table: a linker must not
+# know which frontend modules exist.
+
+# save() -- binary PPM output.
+msvcrt.dll:fwrite @windows
+
+# open()/present() -- window creation and blitting. user32/gdi32 ship with
+# the OS, so a built .exe needs nothing copied next to it (unlike SDL2).
+user32.dll:RegisterClassExA,CreateWindowExA,DestroyWindow,IsWindow,ShowWindow,UpdateWindow,DefWindowProcA,LoadCursorA,PeekMessageA,TranslateMessage,DispatchMessageA,SetWindowTextA,GetWindowLongPtrA,SetWindowLongPtrA,SetWindowPos,GetDC,ReleaseDC @windows
+gdi32.dll:StretchDIBits @windows
+kernel32.dll:GetModuleHandleA @windows

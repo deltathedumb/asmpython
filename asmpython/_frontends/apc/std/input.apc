@@ -1,0 +1,161 @@
+# ══════════════════════════════════════════════════════════════════════════
+#  std::input — one poll for every device.
+#
+#  There is no keyboard object and no controller object. A device is a value,
+#  and `poll` takes it:
+#
+#      import std::input
+#
+#      let ev: Event
+#      while (running) {
+#          if (input::poll(Device::Keyboard, ev)) {
+#              if (ev.kind is EventKind::KeyDown) { ... ev.code ... }
+#          }
+#      }
+#
+#  `poll` never blocks. It returns 1 when it filled `ev`, 0 when the device
+#  had nothing waiting. Polling a device with no backing returns 0 forever
+#  rather than failing, so a loop written against all three devices keeps
+#  working as backends arrive.
+#
+#  PLATFORM: the keyboard backend is msvcrt's console (_kbhit/_getch), so it
+#  is Windows-only today. APC has no conditional compilation yet, so a POSIX
+#  backend needs either that or a separate module -- see `poll`'s comment.
+# ══════════════════════════════════════════════════════════════════════════
+
+extern func _kbhit(): i32
+extern func _getch(): i32
+
+
+enum Device {
+    Keyboard,
+    Mouse,
+    Controller,
+}
+
+enum EventKind {
+    None,
+    KeyDown,
+    KeyUp,
+    Motion,
+    Button,
+    Axis,
+}
+
+# Extended keys arrive as a 0x00/0xE0 prefix plus a scan code. They are
+# reported as 256 + scan so they never collide with an ASCII code.
+enum Key {
+    Up     = 328,
+    Down   = 336,
+    Left   = 331,
+    Right  = 333,
+    Escape = 27,
+    Enter  = 13,
+    Space  = 32,
+}
+
+
+# A single event. Which fields carry meaning depends on `kind`:
+#   KeyDown/KeyUp -> code, value        Motion -> x, y
+#   Button        -> code, value        Axis   -> code, value
+layout Event {
+    kind:   bytes[4]
+    device: bytes[4]
+    code:   bytes[4]
+    value:  bytes[4]
+    x:      bytes[4]
+    y:      bytes[4]
+}
+
+
+const EXT_PREFIX_A: int = 0
+const EXT_PREFIX_B: int = 224
+
+
+func clear(ev: Event) {
+    ev.kind   = EventKind::None
+    ev.device = 0
+    ev.code   = 0
+    ev.value  = 0
+    ev.x      = 0
+    ev.y      = 0
+    ret 0
+}: int
+
+
+# ── per-device backends ───────────────────────────────────────────────────
+
+func pollKeyboard(ev: Event) {
+    if (_kbhit() is 0) {
+        clear(ev)
+        ret 0
+    }
+
+    let code = _getch() as int
+    if (code is EXT_PREFIX_A) {
+        code = 256 + (_getch() as int)
+    }
+    if (code is EXT_PREFIX_B) {
+        code = 256 + (_getch() as int)
+    }
+
+    ev.kind   = EventKind::KeyDown
+    ev.device = Device::Keyboard
+    ev.code   = code
+    ev.value  = 1
+    ev.x      = 0
+    ev.y      = 0
+    ret 1
+}: int
+
+
+# No backing yet. Returning 0 rather than failing keeps a loop that already
+# polls the mouse correct once a backend lands.
+func pollMouse(ev: Event) {
+    clear(ev)
+    ret 0
+}: int
+
+
+func pollController(ev: Event) {
+    clear(ev)
+    ret 0
+}: int
+
+
+# ── the one entry point ───────────────────────────────────────────────────
+
+func poll(device: int, ev: Event) {
+    if (device is Device::Keyboard)   { ret pollKeyboard(ev) }
+    if (device is Device::Mouse)      { ret pollMouse(ev) }
+    if (device is Device::Controller) { ret pollController(ev) }
+    clear(ev)
+    ret 0
+}: int
+
+
+# Poll every device in order, returning on the first event.
+func pollAny(ev: Event) {
+    if (poll(Device::Keyboard, ev))   { ret 1 }
+    if (poll(Device::Mouse, ev))      { ret 1 }
+    if (poll(Device::Controller, ev)) { ret 1 }
+    ret 0
+}: int
+
+
+# Drain and discard whatever is queued on `device`.
+func flush(device: int) {
+    let ev: Event
+    let n = 0
+    while (poll(device, ev)) {
+        n = n + 1
+    }
+    ret n
+}: int
+
+
+func isKey(ev: Event, key: int) {
+    if (!(ev.kind as int is EventKind::KeyDown)) { ret 0 }
+    if (!(ev.code as int is key)) { ret 0 }
+    ret 1
+}: int

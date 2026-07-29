@@ -1,0 +1,414 @@
+# ══════════════════════════════════════════════════════════════════════════
+#  std::framebuf — a common in-memory framebuffer.
+#
+#  Pixels are 32-bit 0xAARRGGBB, row-major, tightly packed (no stride
+#  padding). The buffer is heap memory you own: `new` allocates it and
+#  `destroy` releases it. Nothing here talks to a window system -- this is
+#  the pixel surface, and presenting it is somebody else's job.
+#
+#      import std::framebuf
+#
+#      const frame = framebuf::new(320, 240)
+#      frame::clear(0xFF000000)
+#      frame::putPixel(10, 10, 0xFFFF0000)
+#      frame::save("out.ppm")
+#      framebuf::destroy(frame)
+# ══════════════════════════════════════════════════════════════════════════
+
+extern func malloc(n: u64): ptr
+extern func free(p: ptr): none
+extern func strlen(s: ptr): u64
+extern func sprintf(buf: ptr, fmt: string): i32
+extern func fopen(path: string, mode: string): ptr
+extern func fwrite(data: ptr, size: u64, count: u64, stream: ptr): u64
+extern func fclose(stream: ptr): i32
+
+# Windowing (see framebuf.libs for where these come from).
+extern func GetModuleHandleA(name: ptr): ptr
+extern func LoadCursorA(inst: ptr, name: i64): ptr
+extern func RegisterClassExA(cls: ptr): i32
+extern func CreateWindowExA(exstyle: i64, cls: string, title: string, style: i64,
+                            x: i64, y: i64, w: i64, h: i64,
+                            parent: ptr, menu: ptr, inst: ptr, param: ptr): ptr
+extern func DestroyWindow(hwnd: ptr): i32
+extern func IsWindow(hwnd: ptr): i32
+extern func ShowWindow(hwnd: ptr, cmd: i64): i32
+extern func UpdateWindow(hwnd: ptr): i32
+extern func DefWindowProcA(hwnd: ptr, msg: i64, w: i64, l: i64): i64
+extern func PeekMessageA(msg: ptr, hwnd: ptr, lo: i64, hi: i64, remove: i64): i32
+extern func TranslateMessage(msg: ptr): i32
+extern func DispatchMessageA(msg: ptr): i64
+extern func SetWindowTextA(hwnd: ptr, text: string): i32
+extern func GetWindowLongPtrA(hwnd: ptr, index: i64): i64
+extern func SetWindowLongPtrA(hwnd: ptr, index: i64, value: i64): i64
+extern func SetWindowPos(hwnd: ptr, after: ptr, x: i64, y: i64,
+                         w: i64, h: i64, flags: i64): i32
+extern func GetDC(hwnd: ptr): ptr
+extern func ReleaseDC(hwnd: ptr, dc: ptr): i32
+extern func StretchDIBits(dc: ptr, dx: i64, dy: i64, dw: i64, dh: i64,
+                          sx: i64, sy: i64, sw: i64, sh: i64,
+                          bits: ptr, info: ptr, usage: i64, rop: i64): i32
+
+
+# One pixel's storage. Geometry only -- `as` decides what the bytes mean.
+layout Pixel {
+    rgba: bytes[4]
+}
+
+# WNDCLASSEXA, MSG and BITMAPINFOHEADER as the OS lays them out. These are
+# foreign structures, so every offset is the ABI's choice, not ours.
+layout WndClass {
+    cbSize:        bytes[4]
+    style:         bytes[4]
+    lpfnWndProc:   bytes[8]
+    cbClsExtra:    bytes[4]
+    cbWndExtra:    bytes[4]
+    hInstance:     bytes[8]
+    hIcon:         bytes[8]
+    hCursor:       bytes[8]
+    hbrBackground: bytes[8]
+    lpszMenuName:  bytes[8]
+    lpszClassName: bytes[8]
+    hIconSm:       bytes[8]
+}
+
+layout Msg {
+    hwnd:    bytes[8]
+    message: bytes[4]
+    wParam:  bytes[8] = 16
+    lParam:  bytes[8]
+    time:    bytes[4]
+    ptx:     bytes[4]
+    pty:     bytes[4]
+}
+
+layout BitmapInfo {
+    biSize:          bytes[4]
+    biWidth:         bytes[4]
+    biHeight:        bytes[4]
+    biPlanes:        bytes[2]
+    biBitCount:      bytes[2]
+    biCompression:   bytes[4]
+    biSizeImage:     bytes[4]
+    biXPelsPerMeter: bytes[4]
+    biYPelsPerMeter: bytes[4]
+    biClrUsed:       bytes[4]
+    biClrImportant:  bytes[4]
+}
+
+const BYTES_PER_PIXEL: int = 4
+
+# Win32 constants.
+const WS_VISIBLE:        int = 0x10000000
+const WS_OVERLAPPEDWIN:  int = 0x00CF0000
+const WS_POPUP:          int = 0x80000000
+const SW_SHOW:           int = 5
+const PM_REMOVE:         int = 1
+const GWL_STYLE:         int = 0 - 16
+const SWP_NOMOVE:        int = 2
+const SWP_NOZORDER:      int = 4
+const SWP_FRAMECHANGED:  int = 32
+const DIB_RGB_COLORS:    int = 0
+const SRCCOPY:           int = 0x00CC0020
+const IDC_ARROW:         int = 32512
+const CLASS_NAME:        string = "apcFrameBuffer"
+
+
+type FrameBuffer {
+    func constructor(width: int, height: int) {
+        pub const Parent.Width:  int = width
+        pub const Parent.Height: int = height
+        pub const Parent.Pixels: ptr = malloc((width * height * BYTES_PER_PIXEL) as u64)
+        # Window state. Zero until open() is called; a framebuffer is a pixel
+        # surface first and only optionally has something showing it.
+        pub let Parent.Hwnd:     ptr = 0 as ptr
+        pub let Parent.Info:     ptr = 0 as ptr
+        pub let Parent.Bordered: int = 1
+    }: none
+
+    func width()  { ret Parent.Width  }: int
+    func height() { ret Parent.Height }: int
+    func pixels() { ret Parent.Pixels }: ptr
+
+    func inBounds(x: int, y: int) {
+        if (x < 0) { ret 0 }
+        if (y < 0) { ret 0 }
+        if (x >= Parent.Width)  { ret 0 }
+        if (y >= Parent.Height) { ret 0 }
+        ret 1
+    }: int
+
+    # Address of pixel (x, y). Callers that already know the point is in
+    # bounds use this directly and skip the check.
+    func pixelAt(x: int, y: int) {
+        ret Parent.Pixels + (y * Parent.Width + x) * BYTES_PER_PIXEL
+    }: ptr
+
+    # The clip and the address are written out rather than delegated to
+    # inBounds/pixelAt: this is the hottest function in the module, there is
+    # no inliner, and a call costs more than the work it wraps. Measured at
+    # 320x240x30: 90ms via three calls, 9ms writing straight through.
+    func putPixel(x: int, y: int, color: int) {
+        # Width is read once and reused: each `Parent.Width` is a real gep +
+        # load, and without mem2reg nothing will common them up for us.
+        const w = Parent.Width
+        if (x < 0) { ret 0 }
+        if (y < 0) { ret 0 }
+        if (x >= w) { ret 0 }
+        if (y >= Parent.Height) { ret 0 }
+        const px = (Parent.Pixels + (y * w + x) * BYTES_PER_PIXEL) as Pixel
+        px.rgba = color
+        ret 1
+    }: int
+
+    func getPixel(x: int, y: int) {
+        if (x < 0) { ret 0 }
+        if (y < 0) { ret 0 }
+        if (x >= Parent.Width)  { ret 0 }
+        if (y >= Parent.Height) { ret 0 }
+        const px = (Parent.Pixels
+                    + (y * Parent.Width + x) * BYTES_PER_PIXEL) as Pixel
+        ret px.rgba as int
+    }: int
+
+    # ── bulk writes ───────────────────────────────────────────────────────
+    # Clip once, then walk the run. A per-pixel call is the expensive part,
+    # so anything that can move a whole span at a time should.
+
+    func fillRow(y: int, x0: int, x1: int, color: int) {
+        if (y < 0) { ret 0 }
+        if (y >= Parent.Height) { ret 0 }
+        let lo = x0
+        let hi = x1
+        if (lo < 0) { lo = 0 }
+        if (hi > Parent.Width) { hi = Parent.Width }
+        if (lo >= hi) { ret 0 }
+
+        let addr = Parent.Pixels + (y * Parent.Width + lo) * BYTES_PER_PIXEL
+        for (i = lo..hi) {
+            const px = addr as Pixel
+            px.rgba = color
+            addr = addr + BYTES_PER_PIXEL
+        }
+        ret hi - lo
+    }: int
+
+    func clear(color: int) {
+        const count = Parent.Width * Parent.Height
+        for (i = 0..count) {
+            const px = (Parent.Pixels + i * BYTES_PER_PIXEL) as Pixel
+            px.rgba = color
+        }
+        ret count
+    }: int
+
+    func fillRect(x: int, y: int, w: int, h: int, color: int) {
+        let drawn = 0
+        for (row = 0..h) {
+            drawn = drawn + Parent::fillRow(y + row, x, x + w, color)
+        }
+        ret drawn
+    }: int
+
+    func drawRect(x: int, y: int, w: int, h: int, color: int) {
+        let drawn = 0
+        for (col = 0..w) {
+            drawn = drawn + Parent::putPixel(x + col, y, color)
+            drawn = drawn + Parent::putPixel(x + col, y + h - 1, color)
+        }
+        for (row = 0..h) {
+            drawn = drawn + Parent::putPixel(x, y + row, color)
+            drawn = drawn + Parent::putPixel(x + w - 1, y + row, color)
+        }
+        ret drawn
+    }: int
+
+    # Write a binary PPM (P6). Returns 1 on success, 0 if the file would
+    # not open. RGB only -- the alpha channel is dropped.
+    func save(path: string) {
+        const stream = fopen(path, "wb")
+        if (stream is 0) {
+            ret 0
+        }
+
+        const header = malloc(64)
+        sprintf(header, "P6\n%lld %lld\n255\n", Parent.Width, Parent.Height)
+        fwrite(header, 1, strlen(header), stream)
+        free(header)
+
+        const count = Parent.Width * Parent.Height
+        const rgb   = malloc((count * 3) as u64)
+        for (i = 0..count) {
+            const px = (Parent.Pixels + i * BYTES_PER_PIXEL) as Pixel
+            const c  = px.rgba as int
+            rgb[i * 3]     = (c >> 16) & 0xFF
+            rgb[i * 3 + 1] = (c >> 8)  & 0xFF
+            rgb[i * 3 + 2] = c & 0xFF
+        }
+        fwrite(rgb, 1, (count * 3) as u64, stream)
+
+        free(rgb)
+        fclose(stream)
+        ret 1
+    }: int
+
+    # ── window ────────────────────────────────────────────────────────────
+    # A framebuffer is a pixel surface; a window is optional. `open` creates
+    # one sized to the surface, `present` blits, and the property setters
+    # below change it while it is up.
+
+    func open(title: string) {
+        if (!(Parent.Hwnd as int is 0)) {
+            ret 1                                   # already open
+        }
+
+        const inst = GetModuleHandleA(0 as ptr)
+
+        let wc: WndClass
+        wc.cbSize        = 80
+        wc.style         = 3                        # CS_HREDRAW | CS_VREDRAW
+        # DefWindowProcA handles everything; no callback of our own, so no
+        # function pointer needs taking.
+        wc.lpfnWndProc   = DefWindowProcA as int
+        wc.cbClsExtra    = 0
+        wc.cbWndExtra    = 0
+        wc.hInstance     = inst as int
+        wc.hIcon         = 0
+        wc.hCursor       = LoadCursorA(0 as ptr, IDC_ARROW) as int
+        wc.hbrBackground = 0
+        wc.lpszMenuName  = 0
+        wc.lpszClassName = CLASS_NAME as int
+        wc.hIconSm       = 0
+        RegisterClassExA(wc)
+
+        const style = WS_OVERLAPPEDWIN | WS_VISIBLE
+        const hwnd = CreateWindowExA(0, CLASS_NAME, title, style,
+                                     120, 120,
+                                     Parent.Width + 16, Parent.Height + 39,
+                                     0 as ptr, 0 as ptr, inst, 0 as ptr)
+        if (hwnd as int is 0) {
+            ret 0
+        }
+        Parent.Hwnd = hwnd
+
+        # Top-down DIB: a negative height means row 0 is the top row, which
+        # matches this framebuffer's row-major order.
+        const info = malloc(40) as BitmapInfo
+        info.biSize          = 40
+        info.biWidth         = Parent.Width
+        info.biHeight        = 0 - Parent.Height
+        info.biPlanes        = 1
+        info.biBitCount      = 32
+        info.biCompression   = 0
+        info.biSizeImage     = 0
+        info.biXPelsPerMeter = 0
+        info.biYPelsPerMeter = 0
+        info.biClrUsed       = 0
+        info.biClrImportant  = 0
+        Parent.Info = info as ptr
+
+        ShowWindow(hwnd, SW_SHOW)
+        UpdateWindow(hwnd)
+        ret 1
+    }: int
+
+    func isOpen() {
+        if (Parent.Hwnd as int is 0) { ret 0 }
+        if (IsWindow(Parent.Hwnd) is 0) { ret 0 }
+        ret 1
+    }: int
+
+    # Drain pending messages. Returns 1 while the window is still up, 0 once
+    # it has been closed -- so `while (frame::pump())` is the event loop.
+    func pump() {
+        if (!Parent::isOpen()) { ret 0 }
+        let msg: Msg
+        while (PeekMessageA(msg, 0 as ptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(msg)
+            DispatchMessageA(msg)
+        }
+        ret Parent::isOpen()
+    }: int
+
+    func present() {
+        if (!Parent::isOpen()) { ret 0 }
+        const dc = GetDC(Parent.Hwnd)
+        StretchDIBits(dc, 0, 0, Parent.Width, Parent.Height,
+                          0, 0, Parent.Width, Parent.Height,
+                      Parent.Pixels, Parent.Info, DIB_RGB_COLORS, SRCCOPY)
+        ReleaseDC(Parent.Hwnd, dc)
+        ret 1
+    }: int
+
+    func setTitle(title: string) {
+        if (!Parent::isOpen()) { ret 0 }
+        SetWindowTextA(Parent.Hwnd, title)
+        ret 1
+    }: int
+
+    # The title bar and frame. `setBorder(0)` gives a bare surface with no
+    # decorations; `setBorder(1)` puts them back.
+    func setBorder(enabled: int) {
+        if (!Parent::isOpen()) { ret 0 }
+        let style = WS_VISIBLE
+        if (enabled) {
+            style = style | WS_OVERLAPPEDWIN
+        } else {
+            style = style | WS_POPUP
+        }
+        SetWindowLongPtrA(Parent.Hwnd, GWL_STYLE, style)
+        SetWindowPos(Parent.Hwnd, 0 as ptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED)
+        Parent.Bordered = enabled
+        ret 1
+    }: int
+
+    func bordered() { ret Parent.Bordered }: int
+
+    func setPosition(x: int, y: int) {
+        if (!Parent::isOpen()) { ret 0 }
+        SetWindowPos(Parent.Hwnd, 0 as ptr, x, y, 0, 0,
+                     SWP_NOZORDER | 1)               # | SWP_NOSIZE
+        ret 1
+    }: int
+
+    func closeWindow() {
+        if (Parent.Hwnd as int is 0) { ret 0 }
+        DestroyWindow(Parent.Hwnd)
+        Parent.Hwnd = 0 as ptr
+        if (!(Parent.Info as int is 0)) {
+            free(Parent.Info)
+            Parent.Info = 0 as ptr
+        }
+        ret 1
+    }: int
+}
+
+
+# ── module functions ──────────────────────────────────────────────────────
+
+# Heap-allocate a framebuffer and run its constructor. `FrameBuffer(...)`
+# on its own gives a frame-local instance, which must not outlive the call
+# that made it -- this is the version you can return and store.
+func new(width: int, height: int) {
+    const fb = malloc(sizeof(FrameBuffer)) as FrameBuffer
+    fb::constructor(width, height)
+    ret fb
+}: FrameBuffer
+
+
+func destroy(fb: FrameBuffer) {
+    free(fb.Pixels)
+    free(fb as ptr)
+    ret none
+}: none
+
+
+# Pack/unpack 0xAARRGGBB without anybody hand-writing the shifts.
+func rgb(r: int, g: int, b: int) {
+    ret 0xFF000000 | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF)
+}: int
+
+func red(color: int)   { ret (color >> 16) & 0xFF }: int
+func green(color: int) { ret (color >> 8)  & 0xFF }: int
+func blue(color: int)  { ret color & 0xFF }: int

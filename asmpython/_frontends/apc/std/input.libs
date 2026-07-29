@@ -1,0 +1,9 @@
+# Native libraries std::input calls into.
+#   NAME:SYM,SYM,...      symbols this module needs from that library
+#   ... @windows          restrict a line to one target OS
+#
+# Declared here rather than in a backend's symbol table: a linker must not
+# know which frontend modules exist.
+
+# Non-blocking console key polling (pollKeyboard).
+msvcrt.dll:_kbhit,_getch,_getche,getchar @windows
