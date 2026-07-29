@@ -39,7 +39,11 @@ from .ir import (
     PTR,
     ir_type_for,
 )
-from .codegen import (
+# Runtime type/exception IDs -- a contract shared with sema and every backend,
+# NOT something the legacy NASM backend owns. This used to import codegen.py,
+# so the modern IR pipeline pulled in a 16k-line legacy backend to read six
+# constants.
+from .type_ids import (
     BUILTIN_EXC_IDS,
     BUILTIN_EXC_PARENTS,
     BUILTIN_TYPE_IDS,
