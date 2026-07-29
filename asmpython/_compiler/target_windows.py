@@ -791,26 +791,6 @@ class WindowsCodegen(Codegen):
     # (rdi/rsi/…); the FFI dispatch path converts to Windows ABI before calling
     # any c_name symbol, so these helpers receive Windows ABI args.
 
-    _HW_STUBS = (
-        "_hw_in_byte", "_hw_out_byte", "_hw_in_word", "_hw_out_word",
-        "_hw_in_dword", "_hw_out_dword", "_hw_mmio_read8", "_hw_mmio_write8",
-        "_hw_mmio_read32", "_hw_mmio_write32", "_hw_rdtsc", "_hw_cpuid",
-        "_hw_halt", "_hw_cli", "_hw_sti", "_hw_pic_eoi", "_hw_pic_mask",
-        "_hw_pic_unmask", "_hw_pit_set_freq", "_hw_keyboard_read",
-        "_hw_keyboard_poll", "_hw_vga_set_color", "_hw_vga_set_cursor",
-        "_hw_vga_get_row", "_hw_vga_get_col",
-        "_hw_rdrand", "_hw_io_wait", "_hw_read_cr0", "_hw_read_cr2",
-        "_hw_read_cr3", "_hw_read_cr4", "_hw_write_cr3", "_hw_read_msr",
-        "_hw_write_msr", "_hw_invlpg", "_hw_lidt",
-        "_hw_console_clear", "_hw_console_putc", "_hw_console_write",
-        "_hw_console_set_color", "_hw_console_set_cursor",
-        "_hw_console_get_row", "_hw_console_get_col",
-    )
-    _HW_CONSOLE_SYMS = (
-        "_hw_console_clear", "_hw_console_putc", "_hw_console_write",
-        "_hw_console_set_color", "_hw_console_set_cursor",
-        "_hw_console_get_row", "_hw_console_get_col",
-    )
     _THREAD_SYMS = (
         "_threading_create", "_threading_join", "_threading_is_alive",
         "_threading_lock_init", "_threading_lock_acquire",
@@ -868,7 +848,7 @@ class WindowsCodegen(Codegen):
     )
 
     def _asmlib_inline_syms(self) -> set:
-        return (set(self._HW_STUBS) | set(self._NET_SYMS) | set(self._GUI_SYMS)
+        return (set(self._NET_SYMS) | set(self._GUI_SYMS)
                 | set(self._AUDIO_SYMS) | set(self._TTF_SYMS)
                 | set(self._MATH_SYMS) | set(self._RANDOM_SYMS) | set(self._TIME_SYMS)
                 | set(self._THREAD_SYMS))
@@ -893,7 +873,6 @@ class WindowsCodegen(Codegen):
                 any(s.startswith("TTF_") for s in self.ffi_called))
 
     def emit_asmlib_runtime(self) -> None:
-        needs_hw      = any(s in self.ffi_called for s in self._HW_STUBS)
         needs_net     = any(s in self.ffi_called for s in self._NET_SYMS)
         needs_gui     = any(s in self.ffi_called for s in self._GUI_SYMS)
         needs_audio   = any(s in self.ffi_called for s in self._AUDIO_SYMS)
@@ -902,7 +881,7 @@ class WindowsCodegen(Codegen):
         needs_random  = any(s in self.ffi_called for s in self._RANDOM_SYMS)
         needs_time    = any(s in self.ffi_called for s in self._TIME_SYMS)
         needs_thread  = any(s in self.ffi_called for s in self._THREAD_SYMS)
-        if not (needs_hw or needs_net or needs_gui or needs_audio or needs_ttf
+        if not (needs_net or needs_gui or needs_audio or needs_ttf
                 or needs_math or needs_random or needs_time or needs_thread):
             return
 
@@ -1355,34 +1334,6 @@ class WindowsCodegen(Codegen):
                 self.label("_time_sleep_ms")
                 self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48",
                            "call Sleep", "xor rax, rax", "leave", "ret")
-
-        if needs_hw:
-            # rdtsc/cpuid/rdrand are unprivileged (ring-3) instructions, so
-            # unlike the rest of asmlib.hardware (port I/O, MMIO, MSRs, CRn,
-            # PIC/PIT/keyboard/VGA, cli/sti/hlt -- all ring-0-only) they have
-            # real implementations on hosted targets too, not just
-            # freestanding.
-            if "_hw_rdtsc" in self.ffi_called:
-                self.label("_hw_rdtsc")
-                self.emitf("rdtsc", "shl rdx, 32", "or rax, rdx", "ret")
-            if "_hw_cpuid" in self.ffi_called:
-                # arg (leaf) arrives in ecx (Win64 ABI); returns EAX after CPUID.
-                self.label("_hw_cpuid")
-                self.emitf("mov eax, ecx", "push rbx", "cpuid",
-                           "pop rbx", "movsx rax, eax", "ret")
-            if "_hw_rdrand" in self.ffi_called:
-                self.label("_hw_rdrand")
-                self.label(".retry")
-                self.emitf("rdrand rax", "jnc .retry", "ret")
-
-            if any(s in self.ffi_called for s in self._HW_CONSOLE_SYMS):
-                self._emit_console_runtime()
-
-            for sym in self._HW_STUBS:
-                if sym in self.ffi_called and sym not in (
-                        "_hw_rdtsc", "_hw_cpuid", "_hw_rdrand") and sym not in self._HW_CONSOLE_SYMS:
-                    self.label(sym)
-                    self.emitf("xor rax, rax", "ret")
 
         # Windows Winsock2 network helpers.  Args arrive in Windows ABI regs.
         if needs_net:
