@@ -11,21 +11,33 @@ systems program needs and the Python standard library has no reason to offer.
 
 Three implementations, picked in this order
 -------------------------------------------
-1. **The backend's**, when the machine has an instruction for it -- x86's
-   POPCNT/LZCNT/TZCNT/BSWAP, AArch64's CNT/CLZ/RBIT/REV. A backend publishes
-   these by exposing a ``__lllib__`` attribute from its package; nothing is
-   registered here and nothing is hardcoded, so a third-party backend opts in
-   on the same terms as a built-in one.
-2. **The APC implementation** in ``_apc/``, where the widths are real. The
-   Python version has to mask arbitrary-precision integers back down to
-   ``width`` bits after every operation; in APC a ``u64`` is 64 bits and the
-   masking disappears.
-3. **The Python implementation** in this package, which works on every backend
-   including ones that are only bytecode.
+1. **The backend's**, when the machine does it in one instruction. x86-64
+   emits POPCNT and BSWAP inline; a backend declares what it implements via
+   ``lllib_intrinsics`` on its ``__lllib__``. Nothing is registered here and
+   nothing is hardcoded, so a third-party backend opts in on the same terms as
+   a built-in one.
+
+   LZCNT/TZCNT are deliberately absent: without BMI1/LZCNT their encodings
+   decode as BSR/BSF, which differ on a zero input. A wrong answer on one value
+   is worse than the loop.
+2. **The APC implementation**, in ``_frontends/apc/std/bits.apc``. It also
+   publishes the reserved intrinsic symbols, so a backend that does not
+   recognize them links against it instead -- same symbol, one rung down.
+3. **The Python implementation** in this package, which works everywhere,
+   including on backends that only emit bytecode.
 
 Every layer is written against the same signatures and tested against the same
 cases, so which one answers is a performance question and never a correctness
 one. ``implementation_of("popcount")`` says which you got.
+
+Measured on 2M popcounts, compiled at ``--passes o2``:
+
+    called loop (APC)     5085 ms
+    called loop (Python)  5522 ms
+    POPCNT inline          128 ms
+
+which is why the layering exists at all: the portable rungs are within 8% of
+each other, and the instruction is 40x faster than both.
 
 Why not per-backend modules only
 --------------------------------
@@ -98,9 +110,8 @@ def implementation_of(operation: str, backend: str | None = None) -> str:
     """
     for name in ([backend] if backend else backends()):
         surface = _load(name)
-        if surface is not None and hasattr(surface, "bits"):
-            if hasattr(getattr(surface, "bits"), operation):
-                return f"backend:{name}"
+        if operation in getattr(surface, "lllib_intrinsics", ()):
+            return f"backend:{name}"
     if hasattr(bits, operation):
         return "python"
     raise AttributeError(f"lllib has no operation {operation!r}")

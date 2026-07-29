@@ -173,6 +173,29 @@ def encode_imul_rr(dst: Reg, src: Reg) -> bytes:
             + bytes([0x0F, 0xAF, _modrm(0b11, int(dst), int(src))]))
 
 
+# ── Bit-counting / byte-order instructions ────────────────────────────────────
+#
+# These back lllib's bit primitives. Each replaces a loop that costs hundreds
+# of cycles with a single instruction; see codegen.py's `_call`, which
+# recognizes the reserved symbols and emits these inline instead of calling.
+#
+# POPCNT is SSE4.2 (2008) and BSWAP is 486-era, so both are safe on any x86-64
+# target. LZCNT/TZCNT are deliberately NOT here: without BMI1/LZCNT support
+# their encodings decode as BSR/BSF, which differ on a zero input -- BSR leaves
+# the destination undefined where LZCNT defines it as the width. A silently
+# wrong answer on one input value is worse than the loop.
+
+def encode_popcnt_rr(dst: Reg, src: Reg) -> bytes:
+    """POPCNT r64, r64 -- F3 REX.W 0F B8 /r"""
+    return (bytes([0xF3]) + _rex(w=1, r=_hi(dst), b=_hi(src))
+            + bytes([0x0F, 0xB8, _modrm(0b11, int(dst), int(src))]))
+
+
+def encode_bswap_r(reg: Reg) -> bytes:
+    """BSWAP r64 -- REX.W 0F C8+rd"""
+    return _rex(w=1, b=_hi(reg)) + bytes([0x0F, 0xC8 + (int(reg) & 7)])
+
+
 def encode_idiv_r(src: Reg) -> bytes:
     return _rex(w=1, b=_hi(src)) + bytes([0xF7, _modrm(0b11, 7, int(src))])
 

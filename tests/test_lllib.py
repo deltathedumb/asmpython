@@ -153,5 +153,36 @@ class BackendSurfaceTests(unittest.TestCase):
             lllib.implementation_of("no_such_operation")
 
 
+
+class IntrinsicTests(unittest.TestCase):
+    """The backend rung: operations the machine does in one instruction.
+
+    Encodings are checked against the Intel SDM by hand rather than against
+    the encoder's own output, which would be circular.
+    """
+
+    def test_popcnt_and_bswap_encodings(self) -> None:
+        from asmpython._backends.x86_64.encoder import (
+            Reg, encode_bswap_r, encode_popcnt_rr,
+        )
+        self.assertEqual(encode_popcnt_rr(Reg.RAX, Reg.RBX).hex(), "f3480fb8c3")
+        self.assertEqual(encode_popcnt_rr(Reg.R8, Reg.R9).hex(), "f34d0fb8c1")
+        self.assertEqual(encode_bswap_r(Reg.RAX).hex(), "480fc8")
+        self.assertEqual(encode_bswap_r(Reg.R12).hex(), "490fcc")
+
+    def test_x86_64_declares_what_it_implements(self) -> None:
+        self.assertEqual(lllib.implementation_of("popcount"), "backend:x86_64")
+        self.assertEqual(lllib.implementation_of("byteswap"), "backend:x86_64")
+
+    def test_operations_without_an_instruction_stay_portable(self) -> None:
+        """clz has no safe x86 encoding (LZCNT aliases BSR without BMI1), so
+        it must report the portable rung rather than claiming an intrinsic."""
+        self.assertEqual(lllib.implementation_of("clz"), "python")
+        self.assertEqual(lllib.implementation_of("rotl"), "python")
+
+    def test_a_backend_without_intrinsics_reports_portable(self) -> None:
+        self.assertEqual(lllib.implementation_of("popcount", backend="jvm"),
+                         "python")
+
 if __name__ == "__main__":
     unittest.main()

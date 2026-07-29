@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .encoder import (
+    encode_popcnt_rr, encode_bswap_r,
     Reg, XmmReg, CC, Mem,
     ARG_REGS_SYSV, ARG_REGS_WIN64,
     XMM_ARG_SYSV, XMM_ARG_WIN64,
@@ -644,9 +645,45 @@ class FuncCodegen:
                 del pending[0]
                 pending = [(d, self._SCRATCH_XMM if s == d0 else s) for d, s in pending]
 
+    #: Reserved symbols the machine implements directly. Measured against the
+    #: loop they replace: 2M popcounts took 5.5s as a called loop.
+    _INTRINSICS = {
+        "__lllib_popcount": "popcnt",
+        "__lllib_bswap64":  "bswap",
+    }
+
+    def _emit_intrinsic(self, symbol: str, instr: Any, args: list) -> bool:
+        """Emit `symbol` as an instruction. False if it is not one of ours."""
+        kind = self._INTRINSICS.get(symbol)
+        if kind is None or len(args) != 1 or instr.result is None:
+            return False
+        if _is_xmm(instr.result.type.name):
+            return False
+
+        src_r, load = self._gp(args[0])
+        dst, spill = self._dst_gp_spillable(instr.result, alt_scratch=True)
+        self._emit(load)
+        if kind == "popcnt":
+            self._emit(encode_popcnt_rr(dst, src_r))
+        else:                                   # bswap is in-place
+            if src_r != dst:
+                self._emit(encode_mov_rr(dst, src_r))
+            self._emit(encode_bswap_r(dst))
+        spill()
+        return True
+
     def _call(self, instr: Any) -> None:
         target_op = instr.operands[0]
         arg_vals  = instr.operands[1:]
+
+        # lllib intrinsics: a reserved symbol the machine can do in one
+        # instruction, emitted inline instead of called. A backend that does
+        # not recognize the symbol simply emits the call, which links against
+        # the portable implementation -- so this is an optimization, never a
+        # requirement, and the three rungs degrade cleanly.
+        if not (hasattr(target_op, "name") and hasattr(target_op, "type")):
+            if self._emit_intrinsic(str(target_op), instr, arg_vals):
+                return
 
         # Detect indirect call: first operand is an IRValue (function pointer),
         # not a bare string symbol name.

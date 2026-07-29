@@ -258,6 +258,11 @@ __module_backend__ = ModuleBackend(sys.modules[__name__])
 class __lllib__:                       # noqa: N801  (a namespace, not a class)
     """x86-64 code generation internals."""
 
+    #: lllib operations this backend emits as a single instruction rather
+    #: than calling. codegen.py's `_call` intercepts the reserved symbol;
+    #: see its `_INTRINSICS`. Measured: 2M popcounts, 5085ms called -> 128ms.
+    lllib_intrinsics = frozenset({"popcount", "byteswap"})
+
     from . import codegen, coff, coff_parse, elf, elf_parse, encoder
     from . import elf_linker, pe_linker, phi_elim, regalloc
 

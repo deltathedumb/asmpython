@@ -25,6 +25,22 @@
 # its own identity, and a path-derived name silently changes if the file moves.
 # So `import std::bits` here yields `lllib::bits`, and callers say
 # `lllib::bits::popcount`.
+# Reserved intrinsic names, deliberately OUTSIDE the namespace below.
+#
+# A backend that recognizes these emits the instruction inline and the call
+# disappears (x86-64: POPCNT, BSWAP). One that does not links against these,
+# which forward into the portable implementations -- so the symbol resolves
+# either way and the rungs degrade cleanly.
+#
+# They are separate functions rather than `export(popcount) __lllib_popcount`
+# because that form RENAMES: it would publish the intrinsic name at the cost of
+# the namespaced one, and `lllib::bits::popcount` would stop existing.
+func __lllib_popcount(v: u64) { ret lllib::bits::popcount(v) }: i64
+func __lllib_bswap64(v: u64) { ret lllib::bits::byteswap64(v) }: u64
+export __lllib_popcount
+export __lllib_bswap64
+
+
 name lllib::bits
 
 
