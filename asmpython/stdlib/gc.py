@@ -1,29 +1,51 @@
 """gc module: garbage collector interface.
 
-In asmpython, memory is not garbage-collected (malloc only, no GC).
-These stubs allow code importing gc to compile and run without errors.
+Backed by a real collector when the program is built with `--gc=MODE`:
+
+    off           allocations are never reclaimed (the historical behaviour,
+                  and still the default so nothing changes unasked)
+    conservative  mark-sweep; roots found by scanning the machine stack and
+                  the module-globals area, with registry membership as the
+                  "is this really an object" test
+    precise       mark-sweep with exact roots from a shadow stack
+    refcount      CPython-parity: deterministic frees, mark-sweep kept as the
+                  cycle collector
+
+`collect()` returns the number of objects reclaimed, so it reports real work
+rather than a fixed 0. Under `off` it returns 0 because there is nothing to
+sweep, which is honest rather than a stub.
 """
 from __future__ import annotations
 
+from _gcffi import _gc_collect
+from _gcffi import _gc_live_count
+from _gcffi import _gc_set_enabled
+from _gcffi import _gc_get_enabled
+from _gcffi import _gc_mode
+
 
 def enable() -> None:
-    """Enable automatic garbage collection (no-op in asmpython)."""
-    pass
+    """Enable automatic garbage collection."""
+    _gc_set_enabled(1)
 
 
 def disable() -> None:
-    """Disable automatic garbage collection (no-op in asmpython)."""
-    pass
+    """Disable automatic garbage collection. Explicit collect() still works."""
+    _gc_set_enabled(0)
 
 
 def isenabled() -> int:
-    """Return True if automatic garbage collection is enabled (always False)."""
-    return 0
+    """Return True if automatic garbage collection is enabled."""
+    return _gc_get_enabled()
 
 
 def collect(generation: int = 2) -> int:
-    """Run a full collection (no-op, returns 0)."""
-    return 0
+    """Run a full collection; returns the number of objects reclaimed.
+
+    `generation` is accepted for CPython compatibility and ignored: the
+    collector is not generational, so every collection is a full one.
+    """
+    return _gc_collect()
 
 
 def get_count() -> list:

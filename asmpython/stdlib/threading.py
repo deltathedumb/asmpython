@@ -82,7 +82,7 @@ class Thread:
     """A thread of execution backed by CreateThread / pthread_create."""
 
     def __init__(self, target: int = 0, name: str = "",
-                 args = None, kwargs = None, daemon: int = 0) -> None:
+                 args: any = None, kwargs: any = None, daemon: int = 0) -> None:
         self.target: int = target
         self.target_self: int = 0
         self.name: str = name

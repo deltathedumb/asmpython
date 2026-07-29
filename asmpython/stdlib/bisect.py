@@ -7,7 +7,7 @@ in 3.10. The previous version here defaulted `hi` to -1, so an explicit
 from __future__ import annotations
 
 
-def bisect_left(a: list, x, lo: int = 0, hi=None, key=None) -> int:
+def bisect_left(a: list, x: any, lo: int = 0, hi: any = None, key: any = None) -> int:
     """Leftmost index where `x` can be inserted and keep `a` sorted."""
     if lo < 0:
         raise ValueError("lo must be non-negative")
@@ -30,7 +30,7 @@ def bisect_left(a: list, x, lo: int = 0, hi=None, key=None) -> int:
     return lo
 
 
-def bisect_right(a: list, x, lo: int = 0, hi=None, key=None) -> int:
+def bisect_right(a: list, x: any, lo: int = 0, hi: any = None, key: any = None) -> int:
     """Rightmost index where `x` can be inserted and keep `a` sorted."""
     if lo < 0:
         raise ValueError("lo must be non-negative")
@@ -53,7 +53,7 @@ def bisect_right(a: list, x, lo: int = 0, hi=None, key=None) -> int:
     return lo
 
 
-def insort_left(a: list, x, lo: int = 0, hi=None, key=None) -> None:
+def insort_left(a: list, x: any, lo: int = 0, hi: any = None, key: any = None) -> None:
     """Insert `x` into `a` before any equal entries, keeping it sorted."""
     if key is None:
         position = bisect_left(a, x, lo, hi)
@@ -62,7 +62,7 @@ def insort_left(a: list, x, lo: int = 0, hi=None, key=None) -> None:
     a.insert(position, x)
 
 
-def insort_right(a: list, x, lo: int = 0, hi=None, key=None) -> None:
+def insort_right(a: list, x: any, lo: int = 0, hi: any = None, key: any = None) -> None:
     """Insert `x` into `a` after any equal entries, keeping it sorted."""
     if key is None:
         position = bisect_right(a, x, lo, hi)
@@ -72,9 +72,9 @@ def insort_right(a: list, x, lo: int = 0, hi=None, key=None) -> None:
 
 
 # CPython's historical aliases: plain `bisect`/`insort` are the right-hand forms.
-def bisect(a: list, x, lo: int = 0, hi=None, key=None) -> int:
+def bisect(a: list, x: any, lo: int = 0, hi: any = None, key: any = None) -> int:
     return bisect_right(a, x, lo, hi, key)
 
 
-def insort(a: list, x, lo: int = 0, hi=None, key=None) -> None:
+def insort(a: list, x: any, lo: int = 0, hi: any = None, key: any = None) -> None:
     insort_right(a, x, lo, hi, key)

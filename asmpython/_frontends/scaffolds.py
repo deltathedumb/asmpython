@@ -14,28 +14,20 @@ from collections.abc import Callable
 
 from ._scaffold import FrontendScaffoldSpec, ScaffoldFrontend
 
-
 SCAFFOLD_FRONTEND_SPECS: tuple[FrontendScaffoldSpec, ...] = (
     FrontendScaffoldSpec(
-        "lua", "Lua", "scripting", aliases=("Lua", "luau"),
-        source_extensions=(".lua", ".luau"),
-    ),
-    FrontendScaffoldSpec(
-        "javascript", "JavaScript", "scripting",
-        aliases=("JavaScript", "js", "ecmascript"),
-        source_extensions=(".js", ".mjs"),
-    ),
-    FrontendScaffoldSpec(
-        "typescript", "TypeScript", "scripting", aliases=("TypeScript", "ts"),
-        source_extensions=(".ts",),
-    ),
-    FrontendScaffoldSpec(
-        "c", "C", "systems", aliases=("C",),
+        "c",
+        "C",
+        "systems",
+        aliases=("C",),
         source_extensions=(".c", ".h"),
     ),
     FrontendScaffoldSpec(
-        "go", "Go", "systems", aliases=("Go", "golang"),
-        source_extensions=(".go",),
+        "cpp",
+        "C++",
+        "systems",
+        aliases=("C++", "cxx", "cc", "c++"),
+        source_extensions=(".cpp", ".hpp", ".cc", ".hh"),
     ),
 )
 

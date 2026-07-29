@@ -404,6 +404,7 @@ _abi_new_instance:
     WIN64_RUNTIME_ENTER
     sub rsp, 48
     mov rcx, 40                  ; DICT_HEADER
+    mov rdx, 2                   ; kind: dict/instance
     call _runtime_objalloc       ; tracked object (header behind ptr)
     mov qword [rax+0], 8         ; DICT_CAP_OFF = 8 initial slots
     mov qword [rax+8], 0         ; DICT_LEN_OFF
@@ -443,6 +444,7 @@ _abi_new_box:
     mov [rsp+32], rcx           ; spill tag across malloc
     mov [rsp+40], rdx           ; spill payload across malloc
     mov rcx, 24                 ; box is 3 words
+    xor rdx, rdx                ; kind: plain (payload scanned word-wise)
     call _runtime_objalloc      ; tracked object
     mov rcx, [rsp+32]
     mov rdx, [rsp+40]
@@ -499,6 +501,7 @@ _abi_new_list:
     mov rbx, 1
 .cap_ok:
     mov rcx, 24                  ; LIST_HEADER
+    mov rdx, 1                   ; kind: list-shaped
     call _runtime_objalloc       ; tracked object
     mov [rax+0], rbx             ; LIST_CAP_OFF = cap
     mov qword [rax+8], 0         ; LIST_LEN_OFF

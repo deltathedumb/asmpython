@@ -103,10 +103,23 @@ class WindowsCodegen(Codegen):
             self.emitf(f"mov rax, {frame}", "call ___chkstk_ms")
 
     # --- entry: main() -------------------------------------------------------
+    def _emit_gc_stack_base_fallback(self) -> None:
+        """Win64: the TEB is at gs:0 and its StackBase field is at offset 8,
+        so one load gives the true top of this thread's stack -- no
+        cooperation from the entry code required."""
+        self.emitf("mov rbx, [gs:8]")
+
     def emit_entry_prologue(self, info: FuncInfo) -> None:
         # main(argc, argv): Win64 passes these in rcx/rdx. Stash them before
         # they're clobbered so sys.argv can be built from them.
         self.emitf("mov [rel _prog_argc], rcx", "mov [rel _prog_argv], rdx")
+        # Hand the GC its root ranges: the stack base and the module-
+        # globals area, whose bounds are program-local symbols the
+        # separately linked runtime cannot see.
+        self.emitf("mov rax, rsp",
+                   "lea rbx, [_gc_globals_start]",
+                   "lea rcx, [_gc_globals_end]",
+                   "call _runtime_gc_init")
         self.emitf("push rbp", "mov rbp, rsp")
         frame = max(info.frame_size + 32, 48)  # shadow space for child calls
         if frame % 16 != 0:
@@ -628,6 +641,11 @@ class WindowsCodegen(Codegen):
             self.emit("section .bss")
             self.emit("itoa_str_buf: resb 32")
             self.emit("input_buf:    resb 256")
+            # GC roots, owned by the runtime (_gc_head is defined above).
+            self.emit("_gc_stack_base: resq 1")
+            self.emit("_gc_globals_lo: resq 1")
+            self.emit("_gc_globals_hi: resq 1")
+            self.emit("_gc_enabled:    resq 1")
             # Head of the object registry: a singly-linked list through
             # each tracked object's header. Zero = empty, the right start.
             self.emit("_gc_head:     resq 1")

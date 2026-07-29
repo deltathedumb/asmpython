@@ -291,7 +291,7 @@ def _read(data: list[int], pos: int, width: int, big: bool) -> int:
     return value
 
 
-def _as_bytes(value) -> list:
+def _as_bytes(value: any) -> list:
     """Normalize a bytes/bytearray/str argument for the `s` and `p` codes."""
     out: list[int] = []
     i = 0
@@ -468,7 +468,7 @@ def unpack_from(fmt: str, buffer: list, offset: int = 0) -> tuple:
     return tuple(out)
 
 
-def unpack(fmt: str, buffer) -> tuple:
+def unpack(fmt: str, buffer: any) -> tuple:
     """Unpack `buffer`, which must be exactly `calcsize(fmt)` bytes."""
     need = calcsize(fmt)
     if len(buffer) != need:
@@ -495,7 +495,7 @@ def pack_into(fmt: str, buffer: list, offset: int, *args) -> None:
         i = i + 1
 
 
-def iter_unpack(fmt: str, buffer) -> list:
+def iter_unpack(fmt: str, buffer: any) -> list:
     """Unpack repeatedly, yielding one tuple per `calcsize(fmt)` chunk."""
     size = calcsize(fmt)
     if size == 0:
@@ -520,14 +520,14 @@ class Struct:
     def pack(self, *args) -> bytes:
         return pack(self.format, *args)
 
-    def unpack(self, buffer) -> tuple:
+    def unpack(self, buffer: any) -> tuple:
         return unpack(self.format, buffer)
 
-    def unpack_from(self, buffer, offset: int = 0) -> tuple:
+    def unpack_from(self, buffer: any, offset: int = 0) -> tuple:
         return unpack_from(self.format, buffer, offset)
 
-    def pack_into(self, buffer, offset: int, *args) -> None:
+    def pack_into(self, buffer: any, offset: int, *args) -> None:
         pack_into(self.format, buffer, offset, *args)
 
-    def iter_unpack(self, buffer) -> list:
+    def iter_unpack(self, buffer: any) -> list:
         return iter_unpack(self.format, buffer)

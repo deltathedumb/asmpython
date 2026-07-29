@@ -29,7 +29,7 @@ _CRC32_TABLE: list = []
 _CRC_HQX_TABLE: list = []
 
 
-def _as_list(data) -> list[int]:
+def _as_list(data: any) -> list[int]:
     """Normalize bytes/bytearray/str input to a list of byte values."""
     out: list[int] = []
     i = 0
@@ -76,7 +76,7 @@ def _nibble(ch: int) -> int:
 # -- hex --------------------------------------------------------------------
 
 
-def hexlify(data, sep=b"", bytes_per_sep: int = 1) -> bytes:
+def hexlify(data: any, sep: any = b"", bytes_per_sep: int = 1) -> bytes:
     """Hex-encode `data`, optionally inserting `sep` every `bytes_per_sep`."""
     raw = _as_list(data)
     marker = _as_list(sep)
@@ -107,7 +107,7 @@ def hexlify(data, sep=b"", bytes_per_sep: int = 1) -> bytes:
     return bytes(out)
 
 
-def unhexlify(hexstr) -> bytes:
+def unhexlify(hexstr: any) -> bytes:
     """Decode a hex string back to bytes."""
     raw = _as_list(hexstr)
     if len(raw) % 2 != 0:
@@ -120,18 +120,18 @@ def unhexlify(hexstr) -> bytes:
     return bytes(out)
 
 
-def b2a_hex(data, sep=b"", bytes_per_sep: int = 1) -> bytes:
+def b2a_hex(data: any, sep: any = b"", bytes_per_sep: int = 1) -> bytes:
     return hexlify(data, sep, bytes_per_sep)
 
 
-def a2b_hex(hexstr) -> bytes:
+def a2b_hex(hexstr: any) -> bytes:
     return unhexlify(hexstr)
 
 
 # -- base64 -----------------------------------------------------------------
 
 
-def b2a_base64(data, newline: bool = True) -> bytes:
+def b2a_base64(data: any, newline: bool = True) -> bytes:
     """Base64-encode `data`, with a trailing newline unless `newline` is false."""
     raw = _as_list(data)
     out: list[int] = []
@@ -162,7 +162,7 @@ def b2a_base64(data, newline: bool = True) -> bytes:
     return bytes(out)
 
 
-def a2b_base64(data, strict_mode: bool = False) -> bytes:
+def a2b_base64(data: any, strict_mode: bool = False) -> bytes:
     """Decode base64. Non-alphabet bytes are skipped unless `strict_mode`."""
     raw = _as_list(data)
     out: list[int] = []
@@ -205,7 +205,7 @@ def a2b_base64(data, strict_mode: bool = False) -> bytes:
 # -- uuencode ---------------------------------------------------------------
 
 
-def b2a_uu(data, backtick: bool = False) -> bytes:
+def b2a_uu(data: any, backtick: bool = False) -> bytes:
     """Uuencode one line of at most 45 bytes."""
     raw = _as_list(data)
     if len(raw) > 45:
@@ -236,7 +236,7 @@ def _uu_char(value: int, backtick: bool) -> int:
     return value + 32
 
 
-def a2b_uu(data) -> bytes:
+def a2b_uu(data: any) -> bytes:
     """Decode a single uuencoded line."""
     raw = _as_list(data)
     while len(raw) > 0 and (raw[len(raw) - 1] == 10 or raw[len(raw) - 1] == 13):
@@ -282,7 +282,7 @@ def _needs_quote(ch: int, quotetabs: bool, header: bool) -> bool:
     return False
 
 
-def b2a_qp(data, quotetabs: bool = False, istext: bool = True,
+def b2a_qp(data: any, quotetabs: bool = False, istext: bool = True,
            header: bool = False) -> bytes:
     """Quoted-printable encode, with soft line breaks at 76 columns."""
     raw = _as_list(data)
@@ -335,7 +335,7 @@ def b2a_qp(data, quotetabs: bool = False, istext: bool = True,
     return bytes(out)
 
 
-def a2b_qp(data, header: bool = False) -> bytes:
+def a2b_qp(data: any, header: bool = False) -> bytes:
     """Decode quoted-printable, honouring soft line breaks."""
     raw = _as_list(data)
     out: list[int] = []
@@ -389,7 +389,7 @@ def _build_crc32_table() -> None:
         i = i + 1
 
 
-def crc32(data, crc: int = 0) -> int:
+def crc32(data: any, crc: int = 0) -> int:
     """CRC-32 as used by zip and png, matching zlib.crc32."""
     if len(_CRC32_TABLE) == 0:
         _build_crc32_table()
@@ -417,7 +417,7 @@ def _build_crc_hqx_table() -> None:
         i = i + 1
 
 
-def crc_hqx(data, crc: int) -> int:
+def crc_hqx(data: any, crc: int) -> int:
     """CRC-16/XMODEM, the binhq checksum."""
     if len(_CRC_HQX_TABLE) == 0:
         _build_crc_hqx_table()

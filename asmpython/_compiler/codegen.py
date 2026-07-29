@@ -131,6 +131,14 @@ class Codegen:
         self.mod = mod
         # If True, skip emitting runtime bodies and assume libasmpython_rt is linked.
         self.use_runtime_lib = use_runtime_lib
+        # GC mode baked into the binary by `--gc=MODE`:
+        #   0 off          leak, as before this existed
+        #   1 conservative mark-sweep, roots found by scanning
+        #   2 precise      mark-sweep, roots from a shadow stack
+        #   3 refcount     CPython-parity: deterministic frees,
+        #                  with mark-sweep as the cycle collector
+        # Default 0 so nothing changes for anyone who does not ask.
+        self.gc_mode = 0
         # The compiled program's own source path, for the __file__ dunder.
         # None when compiling a string with no real file (e.g. some test
         # harnesses) -- __file__ then falls back to "".
@@ -818,6 +826,10 @@ class Codegen:
         publish = list(self.RUNTIME_GLOBALS)
         publish.append("itoa_str_buf")
         publish.append("_gc_head")
+        publish.append("_gc_stack_base")
+        publish.append("_gc_enabled")
+        publish.append("_gc_globals_hi")
+        publish.append("_gc_globals_lo")
         publish.append("input_buf")
         publish.append("_float_repr_x")
         publish.append("_float_repr_notation")
@@ -847,6 +859,14 @@ class Codegen:
         "_runtime_zalloc",
         "_runtime_objalloc",
         "_runtime_objfree",
+        "_runtime_gc_memcpy",
+        "_runtime_gc_init",
+        "_runtime_gc_set_enabled",
+        "_runtime_gc_get_enabled",
+        "_runtime_gc_mode",
+        "_runtime_gc_collect",
+        "_runtime_gc_scan_range",
+        "_runtime_gc_trace",
         "_runtime_gc_count",
         "_runtime_gc_is_object",
         "_runtime_gc_mark",
@@ -985,12 +1005,18 @@ class Codegen:
         # bss: one zero-initialized 8-byte slot per module-level variable.
         # Module-level code (`main`) writes the real value at startup; every
         # function reads it through the symbol.
-        if self.global_vars or self.class_var_labels:
-            self.emit("section .bss")
-            for name in self.global_vars:
-                self.emit(f"{self._global_label(name)}: resq 1")
-            for label in self.class_var_labels.values():
-                self.emit(f"{label}: resq 1")
+        # Module-level variables are GC ROOTS: a list held only in a global is
+        # reachable from nowhere else. Bracket them with two labels so the
+        # collector can scan exactly that range. The bracket is emitted even
+        # when there are no globals, so `_runtime_gc_collect` always has the
+        # symbols to reference (an empty range simply scans nothing).
+        self.emit("section .bss")
+        self.emit("_gc_globals_start:")
+        for name in self.global_vars:
+            self.emit(f"{self._global_label(name)}: resq 1")
+        for label in self.class_var_labels.values():
+            self.emit(f"{label}: resq 1")
+        self.emit("_gc_globals_end:")
 
     # ---- entry point: top-level statements ----------------------------------
 
@@ -4774,9 +4800,16 @@ class Codegen:
         # both ABIs and `_abi_new_list` keeps the list's capacity there across
         # the allocation, so taking the size in rbx (as _runtime_zalloc does)
         # silently destroyed it and corrupted the heap.
+        # rdx = KIND (1 = list-shaped, 2 = dict/instance-shaped, 0 = plain).
+        # Packed into bits 32+ of header.meta so the tracer knows how to follow
+        # a container's contents. Without it the tracer cannot reach a list's
+        # ELEMENTS: they live in an unregistered buffer, and registering
+        # buffers instead means every path that creates or frees one has to
+        # agree -- measured as 7 regressions across list slice/repeat/extend.
         self.label("_runtime_objalloc")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
         self.emitf("mov [rbp-24], rbx")        # save caller's rbx
+        self.emitf("mov [rbp-32], rdx")        # kind
         self.emitf("mov [rbp-8], rcx")         # payload size
         self.emitf("mov rax, rcx", "add rax, 16")
         self._emit_libc_malloc_size_in_rax()   # rax = block base
@@ -4787,7 +4820,8 @@ class Codegen:
         self._emit_libc_memset_zero()
         self.emitf("mov rax, [rbp-16]")
         self.emitf("mov rcx, [rbp-8]")
-        self.emitf("mov [rax], rcx")           # header.size
+        self.emitf("mov rdx, [rbp-32]", "shl rdx, 32", "or rcx, rdx")
+        self.emitf("mov [rax], rcx")           # header.meta = size | kind<<32
         self.emitf("mov rcx, [_gc_head]")
         self.emitf("mov [rax+8], rcx")         # header.next = old head
         self.emitf("mov [_gc_head], rax")      # head = this block
@@ -4806,6 +4840,154 @@ class Codegen:
         self._emit_libc_free()
         self.label("._objfree_done")
         self.emitf("leave", "ret")
+
+        # ---- _runtime_gc_memcpy: rax = dst, rbx = src, rcx = n bytes.
+        # Byte-wise on purpose: the block sizes here are small and this avoids
+        # depending on any particular libc memcpy ABI across targets.
+        self.label("_runtime_gc_memcpy")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+        self.emitf("mov [rbp-8], rbx")   # rbx is callee-saved in both ABIs
+        self.emitf("test rcx, rcx", "jz ._gcmemcpy_done")
+        self.label("._gcmemcpy_loop")
+        self.emitf("mov dl, [rbx]", "mov [rax], dl",
+                   "inc rax", "inc rbx", "dec rcx",
+                   "test rcx, rcx", "jnz ._gcmemcpy_loop")
+        self.label("._gcmemcpy_done")
+        self.emitf("mov rbx, [rbp-8]")
+        self.emitf("leave", "ret")
+
+        # ---- _runtime_gc_trace: mark rax (a payload pointer) and everything
+        # reachable from it.
+        #
+        # Uniformly conservative: mark the object, then scan its payload words
+        # and recurse into any word that is itself a registered object. No
+        # per-kind layout knowledge is needed, which is exactly why BUFFERS are
+        # registered too -- a list's elements live in its buffer, so the chain
+        # list -> buffer -> element works out of the same rule.
+        #
+        # The mark bit doubles as the cycle guard: an already-marked object
+        # returns immediately, so a self-referential structure terminates.
+        self.label("_runtime_gc_trace")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+        self.emitf("mov [rbp-8], rbx")            # callee-saved
+        self.emitf("test rax, rax", "jz ._trace_done")
+        self.emitf("mov [rbp-16], rax")           # payload
+        # Registered? If not, it is not ours to trace.
+        self.emitf("call _runtime_gc_is_object")
+        self.emitf("test rax, rax", "jz ._trace_done")
+        self.emitf("mov rax, [rbp-16]")
+        # Already marked -> stop (this is what terminates cycles).
+        self.emitf("mov rcx, [rax-16]", "test rcx, 1", "jnz ._trace_done")
+        self.emitf("or rcx, 1", "mov [rax-16], rcx")   # mark
+        self.emitf("mov rdx, rcx", "shr rdx, 32", "mov [rbp-40], rdx")  # kind
+        # Isolate the low 32 bits (size|mark) then drop the mark. A literal
+        # `and rdx, 0xFFFFFFFF` does NOT work: NASM sign-extends a 32-bit
+        # immediate, so it becomes all-ones and the mask is a no-op, leaving
+        # the kind bits in the size. Shifting is unambiguous.
+        self.emitf("mov rdx, rcx", "shl rdx, 32", "shr rdx, 32")
+        self.emitf("and rdx, -2", "mov [rbp-24], rdx")  # payload size
+        self.emitf("mov qword [rbp-32], 0")            # offset
+        # A list-shaped object keeps its ELEMENTS in a separate, unregistered
+        # buffer: [cap][len][buf]. Follow len entries of that buffer directly.
+        self.emitf("mov rdx, [rbp-40]", "cmp rdx, 1", "jne ._trace_loop")
+        self.emitf("mov rax, [rbp-16]")
+        self.emitf("mov rcx, [rax+8]")                 # len
+        self.emitf("test rcx, rcx", "jle ._trace_loop")
+        self.emitf("shl rcx, 3")
+        self.emitf("mov rax, [rax+16]")                # buf
+        self.emitf("test rax, rax", "jz ._trace_loop")
+        self.emitf("mov rbx, rax", "add rbx, rcx")
+        self.emitf("call _runtime_gc_scan_range")
+        self.label("._trace_loop")
+        self.emitf("mov rcx, [rbp-32]", "cmp rcx, [rbp-24]", "jge ._trace_done")
+        self.emitf("mov rax, [rbp-16]", "add rax, rcx")
+        self.emitf("mov rax, [rax]")              # candidate word
+        self.emitf("call _runtime_gc_trace")      # recurse (guarded above)
+        self.emitf("mov rcx, [rbp-32]", "add rcx, 8", "mov [rbp-32], rcx")
+        self.emitf("jmp ._trace_loop")
+        self.label("._trace_done")
+        self.emitf("mov rbx, [rbp-8]")
+        self.emitf("leave", "ret")
+
+        # ---- _runtime_gc_scan_range: trace every word in [rax, rbx).
+        # Used for both root sets: the machine stack and the globals area.
+        self.label("_runtime_gc_scan_range")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 48")
+        self.emitf("mov [rbp-8], rax", "mov [rbp-16], rbx")
+        self.label("._scan_loop")
+        self.emitf("mov rax, [rbp-8]", "cmp rax, [rbp-16]", "jae ._scan_done")
+        self.emitf("mov rax, [rax]")
+        self.emitf("call _runtime_gc_trace")
+        self.emitf("mov rax, [rbp-8]", "add rax, 8", "mov [rbp-8], rax")
+        self.emitf("jmp ._scan_loop")
+        self.label("._scan_done")
+        self.emitf("leave", "ret")
+
+        # ---- _runtime_gc_collect: one stop-the-world mark-sweep.
+        # Returns rax = objects freed.
+        #
+        # Roots are the machine stack (from the current rsp up to the base
+        # recorded at entry) and the globals area. Callee-saved registers are
+        # pushed first so anything held only in a register is on the stack and
+        # therefore scanned -- without that, a live object reachable only
+        # through rbx/r12-r15 would be collected.
+        self.label("_runtime_gc_collect")
+        self.emitf("push rbp", "mov rbp, rsp")
+        self.emitf("push rbx", "push r12", "push r13", "push r14", "push r15")
+        self.emitf("sub rsp, 32")
+        # Stack roots: [rsp, _gc_stack_base)
+        self.emitf("mov rax, rsp")
+        self.emitf("mov rbx, [_gc_stack_base]")
+        self.emitf("test rbx, rbx", "jnz ._collect_stack")
+        # No base recorded: ask the OS. Depending on an init call from the
+        # entry prologue is not enough -- only the LEGACY targets emit that
+        # prologue, so an x86-64 build never set it, the stack scan was skipped
+        # entirely, and a structure referenced only by a local was collected
+        # while live. That reads as correct until the memory is reused, which
+        # is exactly how it was found.
+        self._emit_gc_stack_base_fallback()   # -> rbx, or 0 if unavailable
+        self.emitf("test rbx, rbx", "jz ._collect_globals")
+        self.emitf("mov [_gc_stack_base], rbx")
+        self.label("._collect_stack")
+        self.emitf("mov rax, rsp")
+        self.emitf("call _runtime_gc_scan_range")
+        self.label("._collect_globals")
+        # Global roots. The RANGE is program-local (module variables live in
+        # the program's own .bss), so the program hands it over at startup via
+        # _runtime_gc_init rather than the runtime referencing program symbols
+        # -- the runtime library is linked separately and cannot see them.
+        self.emitf("mov rax, [_gc_globals_lo]")
+        self.emitf("mov rbx, [_gc_globals_hi]")
+        self.emitf("cmp rax, rbx", "jae ._collect_sweep")
+        self.emitf("call _runtime_gc_scan_range")
+        self.label("._collect_sweep")
+        # Reclaim.
+        self.emitf("call _runtime_gc_sweep")
+        self.emitf("add rsp, 32")
+        self.emitf("pop r15", "pop r14", "pop r13", "pop r12", "pop rbx")
+        self.emitf("leave", "ret")
+
+        # ---- GC mode + enable flag.
+        # `_gc_mode_val` is baked in by the build (`--gc=MODE`): 0 off,
+        # 1 conservative, 2 precise, 3 refcount. `_gc_enabled` is the runtime
+        # toggle gc.enable()/gc.disable() drives; it does not change the mode,
+        # only whether automatic collection runs.
+        self.label("_runtime_gc_mode")
+        self.emitf(f"mov rax, {self.gc_mode}", "ret")
+
+        self.label("_runtime_gc_get_enabled")
+        self.emitf("mov rax, [_gc_enabled]", "ret")
+
+        self.label("_runtime_gc_set_enabled")
+        self.emitf("mov rax, [_gc_enabled]", "mov [_gc_enabled], rcx", "ret")
+
+        # ---- _runtime_gc_init: rax = stack base, rbx = globals lo,
+        # rcx = globals hi. Called once from the program entry point.
+        self.label("_runtime_gc_init")
+        self.emitf("mov [_gc_stack_base], rax")
+        self.emitf("mov [_gc_globals_lo], rbx")
+        self.emitf("mov [_gc_globals_hi], rcx")
+        self.emitf("ret")
 
         # ---- _runtime_gc_sweep: free every UNMARKED tracked object.
         #
@@ -16570,6 +16752,12 @@ class Codegen:
     def _emit_malloc(self, n: int) -> None:
         """Compile-time `n` bytes -> rax = ptr. (`n` is used by overrides.)"""
         raise NotImplementedError
+
+    def _emit_gc_stack_base_fallback(self) -> None:
+        """Leave the top of the machine stack in rbx, or 0 if this target has
+        no cheap way to ask. Overridden per target; the default skips the
+        stack scan rather than guessing a range."""
+        self.emitf("xor rbx, rbx")
 
     def _emit_libc_malloc_size_in_rax(self) -> None:
         """In: rax = size. Out: rax = ptr."""

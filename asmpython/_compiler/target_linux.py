@@ -76,6 +76,13 @@ class LinuxCodegen(Codegen):
         # main(argc, argv): SysV passes these in rdi/rsi. Stash them before
         # they're clobbered so sys.argv can be built from them.
         self.emitf("mov [rel _prog_argc], rdi", "mov [rel _prog_argv], rsi")
+        # Hand the GC its root ranges: the stack base and the module-
+        # globals area, whose bounds are program-local symbols the
+        # separately linked runtime cannot see.
+        self.emitf("mov rax, rsp",
+                   "lea rbx, [_gc_globals_start]",
+                   "lea rcx, [_gc_globals_end]",
+                   "call _runtime_gc_init")
         self.emitf("push rbp", "mov rbp, rsp")
         frame = info.frame_size
         if frame % 16 != 0:
@@ -511,6 +518,11 @@ class LinuxCodegen(Codegen):
             self.emit("section .bss")
             self.emit("itoa_str_buf: resb 32")
             self.emit("input_buf:    resb 256")
+            # GC roots, owned by the runtime (_gc_head is defined above).
+            self.emit("_gc_stack_base: resq 1")
+            self.emit("_gc_globals_lo: resq 1")
+            self.emit("_gc_globals_hi: resq 1")
+            self.emit("_gc_enabled:    resq 1")
             # Head of the object registry: a singly-linked list through
             # each tracked object's header. Zero = empty, the right start.
             self.emit("_gc_head:     resq 1")

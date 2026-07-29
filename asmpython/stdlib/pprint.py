@@ -63,14 +63,14 @@ class PrettyPrinter:
         self._compact: int = compact
         self._sort_dicts: int = sort_dicts
 
-    def pprint(self, obj) -> None:
+    def pprint(self, obj: any) -> None:
         print(obj)
 
-    def pformat(self, obj) -> str:
+    def pformat(self, obj: any) -> str:
         return str(obj)
 
-    def isreadable(self, obj) -> int:
+    def isreadable(self, obj: any) -> int:
         return isreadable(obj)
 
-    def isrecursive(self, obj) -> int:
+    def isrecursive(self, obj: any) -> int:
         return isrecursive(obj)
