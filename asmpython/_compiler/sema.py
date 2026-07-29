@@ -9823,6 +9823,10 @@ class SemaAnalyzer:
             # chained read (`d[k][k2]`) can recover it.
             seen_v: str | None = None
             saw_opaque_value = False
+            # True once a REAL mix of concrete value kinds has been
+            # seen, so a later concrete value cannot narrow the dict
+            # back off "any" and lose its boxing.
+            mixed_v = False
             for k, v in zip(e.keys, e.values):
                 if isinstance(k, A.Name) and k.name == "**":
                     # A `**other` spread contributes `other`'s value kind too,
@@ -9861,30 +9865,34 @@ class SemaAnalyzer:
                 if vt == "any":
                     saw_opaque_value = True
                     continue  # opaque value: compatible with any value kind
-                if seen_v is None or seen_v == "any":
+                if (seen_v is None or seen_v == "any") and not mixed_v:
+                    # `seen_v == "any"` because some value was OPAQUE is a
+                    # fallback a later concrete value should win over. Once a
+                    # real MIX has been seen it must not narrow back -- that
+                    # is the bug the list literal had, where a heterogeneous
+                    # literal ending on a run of one kind lost its boxing and
+                    # printed raw words.
                     seen_v = vt
-                elif seen_v != vt:
-                    # Two different value kinds. If both are pointer-sized
-                    # (instances / nested collections / the int-unknown
-                    # sentinel — anything but a float, which lives in xmm), the
-                    # dict still has a uniform 8-byte slot layout: collapse the
-                    # value kind to opaque ("any") rather than rejecting. A real
-                    # float-vs-pointer mix stays an error (register-class clash).
-                    if "float" in (seen_v, vt):
-                        raise SemaError(
-                            f"mixed dict value types ({seen_v} and {vt}); "
-                            "a float value can't share a dict with non-floats",
-                            getattr(v, "pos", e.pos),
-                            ErrorCode.E_DICT_VALUE_TYPE_MIXED,
-                        )
-                    # Two callables that disagree only on their RETURN kind are
-                    # still both callable: keep the values callable (with an
-                    # opaque result) rather than collapsing to plain "any",
-                    # which would lose the callability itself.
+                elif seen_v != vt and not mixed_v:
+                    # Two different value kinds. Every kind occupies the same
+                    # uniform 8-byte slot, so a mix collapses to opaque
+                    # ("any") and its values are boxed.
+                    #
+                    # A float used to be a hard error here -- "a float value
+                    # can't share a dict with non-floats" -- because a float
+                    # lives in an xmm register and could not survive the
+                    # shared slot. Boxing removes that clash: `_lower_box_any`
+                    # tags a float -2 and preserves its bit pattern through
+                    # bitcast, and the read choke unboxes it at each use. Same
+                    # reasoning that retired the equivalent list-literal guard.
                     if seen_v.startswith("callable:") and vt.startswith("callable:"):
+                        # Two callables differing only in RETURN kind are still
+                        # both callable; keep that rather than collapsing to
+                        # plain "any", which would lose the callability.
                         seen_v = "callable:any"
                     else:
                         seen_v = "any"
+                        mixed_v = True
             e.value_type = seen_v if seen_v is not None else ("any" if saw_opaque_value else "int")
             # When the values are themselves dicts/lists, record their common
             # inner value/element kind, so a chained `outer[k][k2]` read can
