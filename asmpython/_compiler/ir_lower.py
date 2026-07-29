@@ -1377,19 +1377,29 @@ def _lower_comprehension_enumerate(ctx: _FuncCtx, e: A.Comprehension) -> IRValue
     ctx.emit(IRInstr("load", body_iter_v, [iter_ptr]))
     body_idx_v = ctx.tmp(I64)
     ctx.emit(IRInstr("load", body_idx_v, [idx_ptr]))
-    _store_loop_target(ctx, e.targets[0], body_idx_v, "int")
-    if src_t == "str":
-        elem_v = ctx.tmp(PTR)
-        ctx.emit(IRInstr("call", elem_v, ["_abi_str_char_at", body_iter_v, body_idx_v]))
-    else:
-        addr = _list_elem_addr(ctx, body_iter_v, body_idx_v)
-        elem_v = ctx.tmp(ir_type_for(elem_ty))
-        ctx.emit(IRInstr("load", elem_v, [addr]))
-    _store_loop_target(ctx, e.targets[1], elem_v, elem_ty)
-
-    shadow_names = {e.targets[0], e.targets[1]}
+    # Pushed BEFORE the target stores -- see the ordering note in
+    # _lower_comprehension. With the push afterwards,
+    # `i = 99; [i for i, x in enumerate(xs)]` stored the index into the module
+    # global `i` and then read a never-written local slot, giving [0, 0]
+    # instead of [0, 1].
+    #
+    # Via _target_shadow_names rather than `{e.targets[0], e.targets[1]}`,
+    # which raises TypeError on a nested group (`for i, (a, b) in ...`) because
+    # a list is not hashable -- and that shape is exactly the one P026 exempts
+    # for enumerate, so it does reach here.
+    shadow_names = _target_shadow_names(e.targets, e.var)
     ctx.comprehension_shadows.append(shadow_names)
     try:
+        _store_loop_target(ctx, e.targets[0], body_idx_v, "int")
+        if src_t == "str":
+            elem_v = ctx.tmp(PTR)
+            ctx.emit(IRInstr("call", elem_v, ["_abi_str_char_at", body_iter_v, body_idx_v]))
+        else:
+            addr = _list_elem_addr(ctx, body_iter_v, body_idx_v)
+            elem_v = ctx.tmp(ir_type_for(elem_ty))
+            ctx.emit(IRInstr("load", elem_v, [addr]))
+        _store_loop_target(ctx, e.targets[1], elem_v, elem_ty)
+
         if e.cond is not None:
             cond_v = _lower_truthy(ctx, e.cond)
             ctx.emit(IRInstr("br.t", None, [cond_v, append_b.label, cont_b.label]))
@@ -1541,7 +1551,18 @@ def _lower_comprehension_multi_for(ctx: _FuncCtx, e: A.Comprehension) -> IRValue
     end_bs.reverse()
     # cont_bs[k]/end_bs[k] now index by level k, same as head_bs/body_bs.
 
+    # Every level's targets shadow same-named module globals, and the set is
+    # built for ALL levels up front rather than accumulated as levels are
+    # emitted. It has to be complete before the first target STORE, because
+    # _store_loop_target resolves a bare name through _is_global_name, which
+    # only answers "local" while the name is in an active shadow set -- see the
+    # ordering note in _lower_comprehension. Accumulating it meant
+    # `a = 90; b = 91; [a + b for a, b in pairs for q in [0]]` stored into the
+    # globals and read never-written locals, giving [0] instead of [30].
     shadow_names: set = set()
+    for _lvl_targets, _lvl_var in zip(all_targets, all_vars):
+        shadow_names |= _target_shadow_names(_lvl_targets, _lvl_var)
+    ctx.comprehension_shadows.append(shadow_names)
 
     def emit_level_head(k: int) -> None:
         idx_v = ctx.tmp(I64)
@@ -1587,13 +1608,10 @@ def _lower_comprehension_multi_for(ctx: _FuncCtx, e: A.Comprehension) -> IRValue
                 item_v = ctx.tmp(ir_type_for(target_ty))
                 ctx.emit(IRInstr("load", item_v, [item_addr]))
                 _store_loop_target(ctx, target, item_v, target_ty)
-                if isinstance(target, str):
-                    shadow_names.add(target)
         else:
             var_name = all_vars[k]
             var_ptr = ctx.ensure_slot(var_name, ir_type_for(elem_kind))
             ctx.emit(IRInstr("store", None, [elem_v, var_ptr]))
-            shadow_names.add(var_name)
 
         pass_target = init_bs[k + 1].label if k + 1 < n_levels else append_b.label
         cond = all_conds[k]
@@ -1638,7 +1656,6 @@ def _lower_comprehension_multi_for(ctx: _FuncCtx, e: A.Comprehension) -> IRValue
         ctx.switch_to(head_bs[k])
         emit_level_head(k)
 
-    ctx.comprehension_shadows.append(shadow_names)
     try:
         for k in range(n_levels):
             ctx.switch_to(body_bs[k])
@@ -1774,26 +1791,27 @@ def _lower_comprehension_instance_iter(ctx: _FuncCtx, e: A.Comprehension, cls_na
     ctx.emit(IRInstr("load", parent_v, [parent_ptr]))
     _store_global(ctx, "_runtime_handler_top", parent_v)
 
-    shadow_names: set = set()
-    if e.targets:
-        elem_types = getattr(e.iter, "tuple_elem_types", [])
-        for i, target in enumerate(e.targets):
-            idx = ctx.tmp(I64)
-            ctx.emit(IRInstr("const", idx, [i]))
-            item_addr = _list_elem_addr(ctx, next_v, idx)
-            target_ty = elem_types[i] if i < len(elem_types) else "any"
-            item_v = ctx.tmp(ir_type_for(target_ty))
-            ctx.emit(IRInstr("load", item_v, [item_addr]))
-            _store_loop_target(ctx, target, item_v, target_ty)
-            if isinstance(target, str):
-                shadow_names.add(target)
-    else:
-        var_ptr = ctx.ensure_slot(e.var, ir_type_for(el_kind))
-        ctx.emit(IRInstr("store", None, [next_v, var_ptr]))
-        shadow_names.add(e.var)
-
+    # Pushed BEFORE the target stores, as in the other three comprehension
+    # paths -- see the ordering note in _lower_comprehension. Iterating a class
+    # instance is no different: a comprehension over a user __iter__/__next__
+    # with `k = 99; [k for k, v in Pairs()]` produced [0, 0] instead of [1, 2].
+    shadow_names = _target_shadow_names(e.targets, e.var)
     ctx.comprehension_shadows.append(shadow_names)
     try:
+        if e.targets:
+            elem_types = getattr(e.iter, "tuple_elem_types", [])
+            for i, target in enumerate(e.targets):
+                idx = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", idx, [i]))
+                item_addr = _list_elem_addr(ctx, next_v, idx)
+                target_ty = elem_types[i] if i < len(elem_types) else "any"
+                item_v = ctx.tmp(ir_type_for(target_ty))
+                ctx.emit(IRInstr("load", item_v, [item_addr]))
+                _store_loop_target(ctx, target, item_v, target_ty)
+        else:
+            var_ptr = ctx.ensure_slot(e.var, ir_type_for(el_kind))
+            ctx.emit(IRInstr("store", None, [next_v, var_ptr]))
+
         if e.cond is not None:
             cond_v = _lower_truthy(ctx, e.cond)
             ctx.emit(IRInstr("br.t", None, [cond_v, append_b.label, cont_b.label]))
@@ -1973,50 +1991,45 @@ def _lower_comprehension(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
         var_ty = ir_type_for(elem_kind)
         elem_v = ctx.tmp(var_ty)
         ctx.emit(IRInstr("load", elem_v, [elem_addr]))
-    shadow_names: set = set()
-    if e.targets:
-        # `[elt for a, b in xs]` (tuple-unpack) -- was completely
-        # unhandled: this whole branch didn't exist, so `e.var` (always
-        # "" for this shape, per the parser) was used as the slot name
-        # unconditionally, silently storing the per-iteration tuple
-        # element under an empty-string-named slot and leaving `a`/`b`
-        # unbound inside `e.elt`/`e.cond` -- they then resolved through
-        # whatever `_is_global_name` happened to find (a stale value or
-        # an unrelated global), not the real per-iteration tuple slot.
-        # Confirmed via `[k for k, v in d.items() if v >= 2]` printing
-        # `['c', 'c', 'c']` (the LAST key, read three times) instead of
-        # `['b', 'c']`. Mirrors A.For's identical tuple-target unpack
-        # (see the list-For lowering above) -- elem_v here is the
-        # per-iteration tuple/2-tuple value; each target reads one slot
-        # out of it via _list_elem_addr (tuples share the list layout).
-        elem_types = getattr(e.iter, "tuple_elem_types", [])
-        for i, target in enumerate(e.targets):
-            idx = ctx.tmp(I64)
-            ctx.emit(IRInstr("const", idx, [i]))
-            item_addr = _list_elem_addr(ctx, elem_v, idx)
-            target_ty = elem_types[i] if i < len(elem_types) else "any"
-            item_v = ctx.tmp(ir_type_for(target_ty))
-            ctx.emit(IRInstr("load", item_v, [item_addr]))
-            _store_loop_target(ctx, target, item_v, target_ty)
-            if isinstance(target, str):
-                shadow_names.add(target)
-    else:
-        var_ptr = ctx.ensure_slot(e.var, var_ty)
-        ctx.emit(IRInstr("store", None, [elem_v, var_ptr]))
-        shadow_names.add(e.var)
-    # A comprehension's own loop variable(s) are ALWAYS local in real
-    # Python, even at module scope (PEP 572 carves comprehensions out as
-    # their own scope) -- `ensure_slot`/`_store_loop_target` above already
-    # get this right (always allocate a local slot), but a bare reference
-    # to the SAME name inside `e.cond`/`e.elt` would otherwise resolve as
-    # the module global of the same name if one exists (`_is_global_name`
-    # has no other way to know this particular `x` means the
-    # comprehension's `x`, not the module's). Confirmed via a minimal
-    # repro: `x = 7; xs = [x * 2 for x in [1,2,3]]` read the global `x`
-    # (7) inside the comprehension body instead of the loop variable,
-    # producing `[14, 14, 14]` instead of `[2, 4, 6]`.
+    # A comprehension's own loop variable(s) are ALWAYS local in real Python,
+    # even at module scope (comprehensions are their own scope) -- so a bare
+    # reference to the same name inside `e.cond`/`e.elt` must resolve to the
+    # loop variable, not to a module global of that name. Confirmed via
+    # `x = 7; xs = [x * 2 for x in [1,2,3]]`, which read the global `x` and
+    # produced `[14, 14, 14]` instead of `[2, 4, 6]`.
+    #
+    # The shadow set is pushed BEFORE the target stores, and that order is
+    # load-bearing. An earlier version pushed it after, with a comment claiming
+    # `ensure_slot`/`_store_loop_target` "already get this right (always
+    # allocate a local slot)". That holds for ensure_slot, which the
+    # single-variable branch uses, but NOT for _store_loop_target: a bare name
+    # goes through _name_ptr -> _is_global_name, which answers "local" only
+    # while the name sits in an active comprehension_shadows set. With the push
+    # afterwards, a target whose name matched a module global was stored into
+    # .bss, and then the body -- shadowed by then -- read a local slot nothing
+    # had written. `k = 1; v = 2; [k + v for k, v in pairs]` evaluated to 0
+    # instead of 30, wrong for exactly the names that were already bound and
+    # correct for fresh ones, compiling clean either way.
+    shadow_names = _target_shadow_names(e.targets, e.var)
     ctx.comprehension_shadows.append(shadow_names)
     try:
+        if e.targets:
+            # `[elt for a, b in xs]` (tuple-unpack). elem_v is the
+            # per-iteration tuple; each target reads one slot out of it via
+            # _list_elem_addr (tuples share the list layout). Mirrors A.For's
+            # identical tuple-target unpack.
+            elem_types = getattr(e.iter, "tuple_elem_types", [])
+            for i, target in enumerate(e.targets):
+                idx = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", idx, [i]))
+                item_addr = _list_elem_addr(ctx, elem_v, idx)
+                target_ty = elem_types[i] if i < len(elem_types) else "any"
+                item_v = ctx.tmp(ir_type_for(target_ty))
+                ctx.emit(IRInstr("load", item_v, [item_addr]))
+                _store_loop_target(ctx, target, item_v, target_ty)
+        else:
+            var_ptr = ctx.ensure_slot(e.var, var_ty)
+            ctx.emit(IRInstr("store", None, [elem_v, var_ptr]))
         if e.cond is not None:
             cond_v = _lower_truthy(ctx, e.cond)
             ctx.emit(IRInstr("br.t", None, [cond_v, append_b.label, cont_b.label]))
@@ -2333,40 +2346,52 @@ def _lower_dict_comprehension(ctx: _FuncCtx, e: A.DictComprehension) -> IRValue:
         var_ty = _iter_element_type(e.iter)
         elem_v = ctx.tmp(ir_type_for(var_ty))
         ctx.emit(IRInstr("load", elem_v, [elem_addr]))
-    if e.targets:
-        tuple_types = list(getattr(e.iter, "el_tuple_types", []))
-        if not tuple_types:
-            tuple_types = list(getattr(e.iter, "tuple_elem_types", []))
-        for i, target in enumerate(e.targets):
-            item_idx = ctx.tmp(I64)
-            ctx.emit(IRInstr("const", item_idx, [i]))
-            item_addr = _list_elem_addr(ctx, elem_v, item_idx)
-            target_ty = tuple_types[i] if i < len(tuple_types) and tuple_types[i] else "any"
-            item_v = ctx.tmp(ir_type_for(target_ty))
-            ctx.emit(IRInstr("load", item_v, [item_addr]))
-            _store_loop_target(ctx, target, item_v, target_ty)
-    else:
-        var_ptr = ctx.ensure_slot(e.var, ir_type_for(var_ty))
-        ctx.emit(IRInstr("store", None, [elem_v, var_ptr]))
-    if e.cond is not None:
-        cond_v = _lower_truthy(ctx, e.cond)
-        ctx.emit(IRInstr("br.t", None, [cond_v, insert_b.label, cont_b.label]))
-    else:
-        ctx.emit(IRInstr("br", None, [insert_b.label]))
+    # A dict comprehension's loop variable(s) are its own, exactly as in the
+    # list form -- this path had no shadow push at all, so a target sharing a
+    # name with a module global was BOTH stored to and read from that global:
+    # `n = 7; {str(n): n for n in [1, 2]}` produced `{'7': 7}` instead of
+    # `{'1': 1, '2': 2}` -- one entry, because every iteration rebuilt the same
+    # key from the untouched global. Pushed before the stores for the ordering
+    # reason documented in _lower_comprehension.
+    shadow_names = _target_shadow_names(e.targets, e.var)
+    ctx.comprehension_shadows.append(shadow_names)
+    try:
+        if e.targets:
+            tuple_types = list(getattr(e.iter, "el_tuple_types", []))
+            if not tuple_types:
+                tuple_types = list(getattr(e.iter, "tuple_elem_types", []))
+            for i, target in enumerate(e.targets):
+                item_idx = ctx.tmp(I64)
+                ctx.emit(IRInstr("const", item_idx, [i]))
+                item_addr = _list_elem_addr(ctx, elem_v, item_idx)
+                target_ty = tuple_types[i] if i < len(tuple_types) and tuple_types[i] else "any"
+                item_v = ctx.tmp(ir_type_for(target_ty))
+                ctx.emit(IRInstr("load", item_v, [item_addr]))
+                _store_loop_target(ctx, target, item_v, target_ty)
+        else:
+            var_ptr = ctx.ensure_slot(e.var, ir_type_for(var_ty))
+            ctx.emit(IRInstr("store", None, [elem_v, var_ptr]))
+        if e.cond is not None:
+            cond_v = _lower_truthy(ctx, e.cond)
+            ctx.emit(IRInstr("br.t", None, [cond_v, insert_b.label, cont_b.label]))
+        else:
+            ctx.emit(IRInstr("br", None, [insert_b.label]))
 
-    ctx.switch_to(insert_b)
-    cur_out_v = ctx.tmp(PTR)
-    ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
-    key_v = _lower_dict_key(ctx, e.key)
-    val_v = _lower_expr(ctx, e.value)
-    if val_v.type is F64:
-        # dict cells are raw 8-byte slots -- store a float's bits as I64
-        # (same as a plain `d[k] = <float>` assignment does).
-        iv = ctx.tmp(I64)
-        ctx.emit(IRInstr("bitcast_f2i", iv, [val_v]))
-        val_v = iv
-    ctx.emit(IRInstr("call", None, ["_abi_dict_set", cur_out_v, key_v, val_v]))
-    ctx.emit(IRInstr("br", None, [cont_b.label]))
+        ctx.switch_to(insert_b)
+        cur_out_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", cur_out_v, [out_ptr]))
+        key_v = _lower_dict_key(ctx, e.key)
+        val_v = _lower_expr(ctx, e.value)
+        if val_v.type is F64:
+            # dict cells are raw 8-byte slots -- store a float's bits as I64
+            # (same as a plain `d[k] = <float>` assignment does).
+            iv = ctx.tmp(I64)
+            ctx.emit(IRInstr("bitcast_f2i", iv, [val_v]))
+            val_v = iv
+        ctx.emit(IRInstr("call", None, ["_abi_dict_set", cur_out_v, key_v, val_v]))
+        ctx.emit(IRInstr("br", None, [cont_b.label]))
+    finally:
+        ctx.comprehension_shadows.pop()
 
     ctx.switch_to(cont_b)
     inc_idx_v = ctx.tmp(I64)
@@ -3595,6 +3620,25 @@ def _iter_element_type(e: A.Expr) -> str:
     if isinstance(e, A.ListLit):
         return e.el_type
     return getattr(e, "list_el_type", "int") or "int"
+
+
+def _target_shadow_names(targets: list, var: str) -> set:
+    """The names a comprehension's own targets bind.
+
+    These must shadow same-named module globals for the whole target-store AND
+    body region -- see the ordering note in _lower_comprehension. Nested groups
+    contribute their inner names too, since those are bound just as locally.
+    """
+    names: set = set()
+    if targets:
+        for t in targets:
+            if isinstance(t, str):
+                names.add(t)
+            elif isinstance(t, list):
+                names.update(n for n in t if isinstance(n, str))
+    elif var:
+        names.add(var)
+    return names
 
 
 def _store_loop_target(ctx: _FuncCtx, target, value: IRValue, ty: str) -> None:

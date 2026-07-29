@@ -3,36 +3,32 @@
 # [10]
 # [20]
 # [30]
+# [0, 1]
+# 60
+# {'1': 1, '2': 2}
+# {'0': 'p', '1': 'q'}
 
-# KNOWN FAILING at fa7087f7 -- tracked, not introduced here.
+# A comprehension's loop variables are its OWN, even when a module global of
+# the same name exists. Four separate lowering paths in ir_lower.py bind
+# comprehension targets, and each got this wrong in its own way; all four are
+# covered below so a fix to one cannot silently regress another.
 #
-# asmpython (beta/3.14.0) MISMATCH: prints '10 20', '[0]', '[0]', '[0]'.
+# The mechanism: _store_loop_target resolves a bare name through _name_ptr ->
+# _is_global_name, which answers "local" only while that name sits in an active
+# ctx.comprehension_shadows set. Three paths pushed the shadow set AFTER
+# emitting the target stores, so a target sharing a name with a module global
+# was STORED into .bss while the body -- shadowed by then -- read a
+# never-written local slot and saw 0. The dict-comprehension path pushed no
+# shadow set at all, so it both stored to and read from the global.
 #
-# A comprehension whose TUPLE-UNPACKING target reuses a name already bound in
-# the enclosing scope reads 0 for exactly the names that were already bound:
+# Observed before the fix:
+#   [k for k, v in pairs]                    -> [0]        want [10]
+#   [i for i, x in enumerate(xs)]            -> [0, 0]     want [0, 1]
+#   [k + v for k, v in pairs for w in [1,2]] -> 0          want 60
+#   {str(n): n for n in [1, 2]}              -> {'7': 7}   want two entries
 #
-#   k = 1; v = 2
-#   [k     for k, v in pairs]  -> [0]   (want [10])
-#   [v     for k, v in pairs]  -> [0]   (want [20])
-#   [k + v for k, v in pairs]  -> [0]   (want [30])
-#
-# Bind only `k` beforehand and it prints [20] (v correct, k reads 0); bind only
-# `v` and it prints [10]. Fresh names are unaffected, and the single-target form
-# `[n for n in xs]` with `n` pre-bound is correct -- so this is specific to the
-# tuple-unpacking path.
-#
-# Cause (codegen.py, the comprehension slot pre-pass): _cl_define SKIPS
-# allocation for a name that is a module global, because globals live in .bss.
-# The single-variable branch works around that by force-allocating a mangled
-# `__compvar_<id>_<name>` slot and temporarily exposing it under the real name
-# while the body is generated. The `if expr.targets:` branch just calls
-# _cl_define per name and never does either, so the unpack store and the body's
-# read disagree about where the value lives.
-#
-# Fixing it means extending that mangling to N targets plus the matching
-# save/restore in _gen_comprehension, _gen_comprehension_enumerate and the
-# dict-comprehension path. Deliberately left out of the P026 change set so the
-# two remain separately measurable.
+# Wrong for exactly the names that were already bound and correct for fresh
+# ones, which is why it survived: every one of these compiles clean.
 pairs = [(10, 20)]
 k = 1
 v = 2
@@ -40,6 +36,24 @@ v = 2
 for k, v in pairs:
     print(k, v)
 
+# generic list comprehension, tuple targets
 print([k for k, v in pairs])
 print([v for k, v in pairs])
 print([k + v for k, v in pairs])
+
+# enumerate path
+xs = ["p", "q"]
+i = 99
+x = "zz"
+print([i for i, x in enumerate(xs)])
+
+# multi-clause path (two `for`s)
+w = 77
+print(sum([k + v for k, v in pairs for w in [1, 2]]))
+
+# dict comprehension, single target
+n = 7
+print({str(n): n for n in [1, 2]})
+
+# dict comprehension, enumerate
+print({str(i): x for i, x in enumerate(xs)})

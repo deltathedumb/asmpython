@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +60,45 @@ _RUN_TAG = f"r{os.getpid():d}"
 def _artifact(stem: str, target: str) -> Path:
     """Where this RUN's binary for `stem` goes. Unique per run; see _RUN_TAG."""
     return BUILD / f"{stem}_{_RUN_TAG}{'.exe' if target == 'windows' else ''}"
+
+
+def _warm_runtime(target: str) -> None:
+    """Build the shared runtime archive ONCE, before any parallel work starts.
+
+    `asmpython/_runtime/_build/libasmpython_rt_win.a` and its objects are built
+    LAZILY by whichever compile needs them first. With several worker threads
+    starting at once, they all find it missing and build it simultaneously, into
+    the same paths -- so one truncates or locks the archive while another reads
+    it. That surfaces as compile failures attributed to whichever cases happen
+    to sort first:
+
+        unpack_from requires a buffer of at least 20 bytes ... (actual 0)
+        [WinError 32] ... used by another process: libasmpython_rt_win.a
+
+    Observed on 01_hello.py, 02_arith.py and 03_fib.py -- alphabetically the
+    first three cases, i.e. exactly the ones running before the archive exists.
+    All three pass on a re-run, which is the signature of a race rather than a
+    regression, and is why a phantom -3 can appear in any measurement.
+
+    Compiling one trivial program synchronously first does the one-time build
+    with nothing else running. Deliberately goes through the normal CLI rather
+    than calling into _runtime/build.py, so it exercises the same path the
+    cases do and cannot drift from it. Failures are ignored: if this compile is
+    broken the cases will say so themselves, with better detail.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "_warm.py"
+        src.write_text("print(0)\n", encoding="utf-8")
+        cmd = [sys.executable, "-m", "asmpython", str(src),
+               "--target", target, "-o", str(_artifact("_warm", target))]
+        if _use_runtime_lib:
+            cmd.append("--use-runtime-lib")
+        if _backend is not None:
+            cmd += ["--backend", _backend]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, timeout=300)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 
 def _clean_run_artifacts() -> None:
@@ -293,6 +333,10 @@ def main() -> int:
     if not tasks:
         print(f"no cases matched filter {case_filter!r}")
         return 1
+
+    # Serialise the one-time runtime-archive build before fanning out.
+    if workers > 1:
+        _warm_runtime(target)
 
     # Run tests in parallel; collect results in submission order.
     result_map: dict[str, TestResult] = {}
