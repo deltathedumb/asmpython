@@ -3080,15 +3080,29 @@ def _resolve_str_dunder(ctx: _FuncCtx, class_name: str, repr_first: bool = False
     return None
 
 
+#: `_runtime_fmt_elem`'s "this element is boxed -- dispatch on its runtime
+#: tag" kind. The only correct answer for a heterogeneous container, whose
+#: element kinds are not a compile-time property at all. See codegen.py's
+#: `._fe_tagged`, which recurses with this same kind so nesting works.
+TAGGED_REPR_KIND = 6
+
+
 def _value_repr_kind(t: str) -> int:
     if t == "str":
         return 1
     if t == "float":
         return 2
+    if t == "any":
+        return TAGGED_REPR_KIND
     return 0
 
 
 def _composite_repr_kind(t: str, inner: str) -> int:
+    if t == "any":
+        # A heterogeneous container: every element carries its own tag, so the
+        # tag-dispatching kind is what renders it. Without this, `[1, "a"]`
+        # printed its elements as raw words.
+        return TAGGED_REPR_KIND
     if t == "list":
         return 3 | (_value_repr_kind(inner) << 4)
     if t == "dict":
@@ -12843,8 +12857,20 @@ def _lower_format_any_value(ctx: "_FuncCtx", val_v: IRValue, repr_mode: bool = F
     ctx.emit(IRInstr("br.t", None, [isf, float_b.label, after_float_b.label]))
     ctx.switch_to(float_b)
     fp = _lower_unbox_any(ctx, val_v)
+    # `_lower_unbox_any` always yields a PTR-typed value -- it cannot know from
+    # the cell alone whether the caller wants the bits as a pointer or a
+    # double. The bits ARE the right double (boxed via bitcast_f2i), but a
+    # PTR-typed argument is passed in a GENERAL-PURPOSE register while
+    # `_abi_float_to_str` reads xmm0, so the callee saw whatever happened to be
+    # in xmm0. Round-trip through a stack slot to reinterpret the same bits as
+    # F64 -- the same technique `_lower_narrowed_name_read` uses, and for the
+    # same reason (a relabel in place breaks the register allocator).
+    _f_slot = ctx.ensure_slot(f"__fmtany_f64_{id(val_v)}", F64)
+    ctx.emit(IRInstr("store", None, [fp, IRValue(_f_slot.name, PTR)]))
+    fp_f = ctx.tmp(F64)
+    ctx.emit(IRInstr("load", fp_f, [_f_slot]))
     fo = ctx.tmp(PTR)
-    ctx.emit(IRInstr("call", fo, ["_abi_float_to_str", fp]))
+    ctx.emit(IRInstr("call", fo, ["_abi_float_to_str", fp_f]))
     ctx.emit(IRInstr("store", None, [fo, out_ptr]))
     ctx.emit(IRInstr("br", None, [end_b.label]))
     ctx.switch_to(after_float_b)
@@ -13268,7 +13294,16 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         )
         ctx.emit(IRInstr("store", None, [val, ptr]))
         if not _is_global_name(ctx, s.target) and A.expr_type(s.value) == "list":
-            ctx.slot_el_ty[s.target] = getattr(s.value, "list_el_type", "int")
+            # A ListLit carries its element kind as `el_type`; every other
+            # list-valued expression carries it as `list_el_type`. Reading only
+            # the latter meant `xs = [1, "a"]` recorded the "int" DEFAULT, so
+            # `for x in xs` loaded each element raw even though the literal had
+            # boxed them.
+            ctx.slot_el_ty[s.target] = (
+                s.value.el_type
+                if isinstance(s.value, A.ListLit)
+                else getattr(s.value, "list_el_type", "int")
+            )
         if A.expr_type(s.value) == "closure":
             # This variable now holds an escaping closure object (a factory's
             # result). Record it so a later `s.target(...)` call dispatches
