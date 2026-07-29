@@ -139,6 +139,9 @@ class Codegen:
         #                  with mark-sweep as the cycle collector
         # Default 0 so nothing changes for anyone who does not ask.
         self.gc_mode = 0
+        #: Shadow-stack capacity (entries). Overflow degrades to the
+        #: conservative scan rather than failing.
+        self.GC_SHADOW_SLOTS = 4096
         # The compiled program's own source path, for the __file__ dunder.
         # None when compiling a string with no real file (e.g. some test
         # harnesses) -- __file__ then falls back to "".
@@ -828,6 +831,8 @@ class Codegen:
         publish.append("_gc_head")
         publish.append("_gc_stack_base")
         publish.append("_gc_enabled")
+        publish.append("_gc_shadow_top")
+        publish.append("_gc_shadow")
         publish.append("_gc_globals_hi")
         publish.append("_gc_globals_lo")
         publish.append("input_buf")
@@ -861,6 +866,9 @@ class Codegen:
         "_runtime_objfree",
         "_runtime_gc_memcpy",
         "_runtime_gc_init",
+        "_runtime_gc_shadow_depth",
+        "_runtime_gc_shadow_pop_to",
+        "_runtime_gc_shadow_push",
         "_runtime_gc_set_enabled",
         "_runtime_gc_get_enabled",
         "_runtime_gc_mode",
@@ -4961,6 +4969,15 @@ class Codegen:
         self.emitf("cmp rax, rbx", "jae ._collect_sweep")
         self.emitf("call _runtime_gc_scan_range")
         self.label("._collect_sweep")
+        # Shadow-stack roots: exact, and additive. In conservative mode the
+        # region is empty, so this costs one compare.
+        self.emitf("lea rax, [_gc_shadow]")
+        self.emitf("mov rbx, [_gc_shadow_top]")
+        self.emitf("shl rbx, 3")
+        self.emitf("add rbx, rax")
+        self.emitf("cmp rax, rbx", "jae ._collect_reclaim")
+        self.emitf("call _runtime_gc_scan_range")
+        self.label("._collect_reclaim")
         # Reclaim.
         self.emitf("call _runtime_gc_sweep")
         self.emitf("add rsp, 32")
@@ -4968,8 +4985,7 @@ class Codegen:
         self.emitf("leave", "ret")
 
         # ---- GC mode + enable flag.
-        # `_gc_mode_val` is baked in by the build (`--gc=MODE`): 0 off,
-        # 1 conservative, 2 precise, 3 refcount. `_gc_enabled` is the runtime
+        # Baked in by the build (`--gc=MODE`): 0 off, 1 on. `_gc_enabled` is the runtime
         # toggle gc.enable()/gc.disable() drives; it does not change the mode,
         # only whether automatic collection runs.
         self.label("_runtime_gc_mode")
@@ -4980,6 +4996,54 @@ class Codegen:
 
         self.label("_runtime_gc_set_enabled")
         self.emitf("mov rax, [_gc_enabled]", "mov [_gc_enabled], rcx", "ret")
+
+        # ---- Reference counting (--gc=refcount) is NOT implemented.
+        #
+        # It needs a third header word for the count AND, far more expensively,
+        # an incref on every reference copy (assignment, argument pass,
+        # container store, return) with a matching decref on every overwrite
+        # and scope exit. A MISSED DECREF only leaks; a MISSED INCREF frees a
+        # live object. Landing that emission half-way is the failure mode this
+        # whole effort has been avoiding, so the mode is rejected at the CLI
+        # with a message instead of quietly running mark-sweep under a name
+        # that promises deterministic destruction.
+        #
+        # The primitives are deliberately absent rather than present-and-
+        # unused: an earlier draft of them indexed [payload-24] against a
+        # 16-byte header, which would have written through the heap the first
+        # time anything called them.
+
+        # ---- Shadow stack: exact roots, ADDITIVE to the conservative scan.
+        #
+        # Not a separate mode. A caller that records a reference here makes
+        # that root exact; everything else is still found by scanning the
+        # machine stack, so partial adoption is safe in a way that a
+        # precise-ONLY collector never is -- a precise collector with one
+        # missing root frees live data, while this one merely falls back to
+        # conservative for that slot.
+        #
+        # The alternative, stack maps from the register allocator, needs
+        # regalloc to report live references per safepoint. That liveness is
+        # currently derived from position in the block list, which is not a
+        # real live range, so stack maps would be built on an unsound input.
+        self.label("_runtime_gc_shadow_push")
+        self.emitf("mov rcx, [_gc_shadow_top]")
+        self.emitf(f"cmp rcx, {self.GC_SHADOW_SLOTS}", "jge ._shadow_push_full")
+        self.emitf("lea rdx, [_gc_shadow]")
+        self.emitf("mov [rdx+rcx*8], rax")
+        self.emitf("inc rcx", "mov [_gc_shadow_top], rcx")
+        self.label("._shadow_push_full")
+        # Overflow is not fatal: the slot is simply not recorded, and the
+        # conservative stack scan still runs underneath, so a missed shadow
+        # entry costs precision, never correctness.
+        self.emitf("ret")
+
+        self.label("_runtime_gc_shadow_pop_to")
+        # rax = the depth to restore (saved by the caller on entry).
+        self.emitf("mov [_gc_shadow_top], rax", "ret")
+
+        self.label("_runtime_gc_shadow_depth")
+        self.emitf("mov rax, [_gc_shadow_top]", "ret")
 
         # ---- _runtime_gc_init: rax = stack base, rbx = globals lo,
         # rcx = globals hi. Called once from the program entry point.

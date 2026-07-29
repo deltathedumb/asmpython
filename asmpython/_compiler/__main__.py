@@ -242,6 +242,24 @@ def _build_top_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _validate_gc(options) -> None:
+    """Refuse a --gc mode that is named but not implemented.
+
+    This lives at the CLI, not at the codegen construction site: only the
+    legacy path constructs a Codegen, so a check placed there let
+    `--gc=refcount` build an executable silently under the default backend.
+    """
+    if getattr(options, "gc", "off") == "refcount":
+        raise SystemExit(
+            "asmpython: --gc=refcount is not implemented. Reference counting "
+            "needs an incref on every reference copy and a decref on every "
+            "overwrite and scope exit; a single missed incref frees a live "
+            "object. Running mark-sweep under a name that promises "
+            "deterministic destruction would be worse than refusing. "
+            "Use --gc=on for the tracing collector."
+        )
+
+
 # ── `build` subcommand ──────────────────────────────────────────────────────────
 
 _BUILD_DESCRIPTION = """\
@@ -570,6 +588,24 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         "typescript, c, go -- discoverable but not yet implemented), or any "
         "frontend registered via asmpython.frontend.Frontend(...). May also be "
         "a path to a .py plugin that registers one.",
+    )
+    build_grp.add_argument(
+        "--gc",
+        metavar="MODE",
+        default="off",
+        choices=("off", "on", "refcount"),
+        help="garbage collection mode. 'off' (default) never reclaims -- the "
+        "historical behaviour, and still the only mode with zero overhead. "
+        "'on' is a stop-the-world mark-sweep: roots come from scanning the "
+        "machine stack and the module-globals area, with registry membership "
+        "as the 'is this really an object' test, plus any exact roots recorded "
+        "on the shadow stack. 'refcount' (CPython's deterministic-destruction "
+        "semantics) is ACCEPTED BUT REJECTED -- it is not implemented, and is "
+        "listed so the gap has a name rather than looking like an oversight. "
+        "NOTE: the mode is currently honoured only by the legacy targets, "
+        "which emit the entry prologue that carries it; an x86-64 build links "
+        "the prebuilt runtime and reaches the collector through the `gc` "
+        "module regardless of this flag.",
     )
     build_grp.add_argument(
         "--backend",
@@ -1965,6 +2001,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ap = _build_top_parser()
     args = ap.parse_args(processed)
+    _validate_gc(args)
 
     if args.explain is not None:
         desc = _explain_code(args.explain)

@@ -21,7 +21,6 @@ from _gcffi import _gc_collect
 from _gcffi import _gc_live_count
 from _gcffi import _gc_set_enabled
 from _gcffi import _gc_get_enabled
-from _gcffi import _gc_mode
 
 
 def enable() -> None:

@@ -26,6 +26,11 @@ BINDINGS: dict = {
     "_gc_live_count": Func(
         arg_types=(), ret_type="int", c_name="_runtime_gc_count",
     ),
+    # NOTE: there is deliberately no binding for the build-time MODE. The
+    # runtime library carries its own baked value, so a program built with
+    # --gc=conservative would still read the library's, and reporting the
+    # wrong mode is worse than not reporting one.
+
     # _runtime_gc_set_enabled(flag) -> previous flag.
     # Turns automatic collection on/off without discarding the registry.
     "_gc_set_enabled": Func(
@@ -34,11 +39,5 @@ BINDINGS: dict = {
     # _runtime_gc_get_enabled() -> current flag.
     "_gc_get_enabled": Func(
         arg_types=(), ret_type="int", c_name="_runtime_gc_get_enabled",
-    ),
-    # _runtime_gc_mode() -> 0 off, 1 conservative, 2 precise, 3 refcount.
-    # Baked in at build time by `--gc=MODE`; reported so `gc` can describe
-    # what it is actually doing rather than guessing.
-    "_gc_mode": Func(
-        arg_types=(), ret_type="int", c_name="_runtime_gc_mode",
     ),
 }

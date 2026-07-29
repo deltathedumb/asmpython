@@ -646,6 +646,9 @@ class WindowsCodegen(Codegen):
             self.emit("_gc_globals_lo: resq 1")
             self.emit("_gc_globals_hi: resq 1")
             self.emit("_gc_enabled:    resq 1")
+            # Shadow stack: exact roots for --gc=precise.
+            self.emit("_gc_shadow_top: resq 1")
+            self.emit("_gc_shadow:     resq 4096")
             # Head of the object registry: a singly-linked list through
             # each tracked object's header. Zero = empty, the right start.
             self.emit("_gc_head:     resq 1")

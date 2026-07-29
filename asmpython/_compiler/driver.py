@@ -403,6 +403,28 @@ def _as_ir_module(module) -> "IRModule":
     return _report(ir_lower.lower_module(module), "ir_lower")
 
 
+#: `--gc=MODE` -> the value baked into the emitted code. Drives what the
+#: COMPILER emits (shadow-stack pushes for precise, incref/decref for
+#: refcount); the collector itself is mode-independent.
+def _gc_mode_of(options) -> int:
+    """Map --gc to the baked-in mode, refusing what is not implemented."""
+    name = getattr(options, "gc", "off") or "off"
+    if name not in _GC_MODES:
+        raise SystemExit(
+            f"asmpython: --gc={name} is not implemented yet. Reference counting "
+            f"needs an incref on every reference copy; running mark-sweep under "
+            f"that name would promise deterministic destruction it cannot give. "
+            f"Use --gc=on for the tracing collector."
+        )
+    return _GC_MODES[name]
+
+
+_GC_MODES = {"off": 0, "on": 1}
+#: `refcount` is accepted by the parser so the gap has a name, but it is
+#: rejected here. See codegen's GC section: it needs an incref on every
+#: reference copy, and a single missed one frees a live object.
+
+
 def _run_backend_x86_64(
     module,
     target: str,
@@ -746,6 +768,7 @@ def _run_backend(
     entry_path_str = str(entry_path) if entry_path is not None else None
     if target == "linux":
         gen = LinuxCodegen(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
+        gen.gc_mode = _gc_mode_of(options)
         nasm_fmt = "elf64"
         obj_suffix = ".o"
     elif target == "x86_32_linux":
@@ -758,10 +781,12 @@ def _run_backend(
         # fails at the NASM/link step with a real, clear undefined-symbol
         # error, not a silent wrong answer.
         gen = X86_32LinuxCodegen(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
+        gen.gc_mode = _gc_mode_of(options)
         nasm_fmt = "elf32"
         obj_suffix = ".o"
     elif target == "windows":
         gen = WindowsCodegen(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
+        gen.gc_mode = _gc_mode_of(options)
         nasm_fmt = "win64"
         obj_suffix = ".obj"
     elif target == "freestanding":

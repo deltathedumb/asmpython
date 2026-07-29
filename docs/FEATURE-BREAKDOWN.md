@@ -232,7 +232,12 @@ These are intentionally **not** goals — asmpython compiles to flat machine cod
 so the interpreter machinery has no analogue:
 
 - The GIL, bytecode / `dis`, the C-API / C extensions (`.pyd`/`.so` modules).
-- Reference counting / `gc` module / `__del__` finalizers (memory currently leaks; a GC/refcount scheme is a roadmap item).
+- Reference counting and `__del__` finalizers. The `gc` module is now REAL under
+  `--gc=on`: `gc.collect()` runs a mark-sweep and returns the number of objects
+  freed, and `enable`/`disable`/`isenabled` drive the runtime flag. What is still
+  absent is CPython's *deterministic* destruction -- `del obj` does not free at
+  the `del`, and `__del__` does not run at a predictable point -- because those
+  need refcounting, not tracing. `--gc=refcount` names that gap and refuses.
 - `eval` / `exec` / `compile` / dynamic code, `globals()`/`locals()`/`vars()` introspection. **Rejected with a clear located error** ("not supported: requires a Python interpreter") rather than a codegen crash.
 - `importlib.import_module()` / dynamic import by string name. Same clear rejection. (Static `import math` / `from x import y` are fine.)
 - Monkeypatching, runtime attribute injection on arbitrary objects, `setattr` on non-instances.
