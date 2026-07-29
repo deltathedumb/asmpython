@@ -12972,6 +12972,24 @@ def _lower_del_target(ctx: _FuncCtx, tgt: "A.Expr") -> None:
 
 
 def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
+    if ctx.terminated:
+        # Unreachable: the current block already ended in ret/br/br.t, so this
+        # statement cannot execute. `emit` drops individual instructions in
+        # that state, but dropping at the INSTRUCTION level is not enough --
+        # a statement that needs several blocks (`%` emits a divide-by-zero
+        # check, `if`/`while` emit their own) calls `switch_to`, which CLEARS
+        # the flag, so the later blocks were emitted for real while the
+        # operands they read had been silently dropped. Regalloc then hit a
+        # use with no definition and the compiler died with a bare KeyError on
+        # the temp name. Concretely, this crashed the build:
+        #     for k in range(3):
+        #         break
+        #         if k % 4 > 2:   # unreachable, but lowered anyway
+        #             ...
+        # Skipping the whole statement is the same thing CPython's compiler
+        # does with unreachable code, and keeps the drop consistent: either
+        # all of a statement is lowered or none of it is.
+        return
     if isinstance(s, A.ConstDecl):
         # Normalize at entry rather than duplicating Assign's lowering in a
         # parallel branch: any future bugfix/feature added to A.Assign's
