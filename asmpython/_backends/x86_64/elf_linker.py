@@ -290,7 +290,13 @@ def link_elf(
     vaddr_rest = vaddr_text + _align(text_total_len, PAGE_SIZE)
 
     rdata_off_in_rest = 0
-    data_off_in_rest = len(bucket_bytes["rdata"])
+    # Align the mutable-data bucket to 8, same as pe_linker and for the same
+    # reasons: a pointer-sized global should be naturally aligned, and a
+    # conservative root scan that walks the globals range eight bytes at a time
+    # from an aligned base cannot see a slot that sits at 7 mod 8. `rest` is
+    # zero-filled and indexed by these offsets, so aligning the offset is
+    # enough -- the gap is already zero padding.
+    data_off_in_rest = _align(len(bucket_bytes["rdata"]), 8)
     rest_static_len = data_off_in_rest + len(bucket_bytes["data"])
 
     def _bucket_vaddr(bucket: str, off: int) -> int:

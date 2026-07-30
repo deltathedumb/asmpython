@@ -370,7 +370,19 @@ def link_pe(
     # single RWX blob (security heuristics) or a fully faithful
     # per-original-section layout (more bookkeeping for no benefit yet).
     rdata_base_in_section = 0
-    data_base_in_section = len(bucket_bytes["rdata"])
+    # Align the mutable-data bucket to 8. Without this it starts wherever the
+    # rodata blob happens to end, so a module global lands at an arbitrary
+    # address -- measured at 0x140007247, i.e. 7 mod 8.
+    #
+    # That is wrong for two independent reasons. A pointer-sized global should
+    # be naturally aligned on general principle (unaligned loads are legal on
+    # x86-64 but slower, and any SSE-aligned access to one would fault). And a
+    # word-granular conservative scan CANNOT SEE an unaligned slot at all: the
+    # GC's root scan walks the globals range eight bytes at a time from a
+    # page-aligned base, so it visits only addresses ≡ 0 mod 8 and stepped
+    # straight over every global. That is what made the collector free live
+    # module-level data -- not a wrong range, which was correct all along.
+    data_base_in_section = _align(len(bucket_bytes["rdata"]), 8)
 
     def resolve(name: str) -> int:
         """Final absolute address of a global symbol or import thunk."""
@@ -591,7 +603,11 @@ def link_pe(
                 struct.pack_into("<i", text, patch_off, rel)
 
     # ── 9. Assemble the PE file. ──
-    rdata_data_blob = bytes(bucket_bytes["rdata"]) + bytes(bucket_bytes["data"])
+    # Pad to the aligned data base so the bytes land where resolve() says they
+    # do; data_base_in_section is the single source of truth for both.
+    _rdata_blob = bytes(bucket_bytes["rdata"])
+    _rdata_blob += bytes(data_base_in_section - len(_rdata_blob))
+    rdata_data_blob = _rdata_blob + bytes(bucket_bytes["data"])
 
     # The OS entry point (executable) / DllMain (library) must be the
     # stub, not function index 0 of .text. A library with no module init

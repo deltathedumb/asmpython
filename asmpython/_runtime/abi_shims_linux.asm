@@ -16,6 +16,8 @@ BITS 64
 default rel
 
 extern _runtime_dict_get_default
+extern _runtime_objalloc
+extern _runtime_gc_is_object
 extern _runtime_dict_set
 extern _runtime_dict_contains
 extern _runtime_dict_keys
@@ -101,6 +103,7 @@ global _abi_str_slice
 global _abi_new_instance
 global _abi_new_box
 global _abi_new_list
+global _abi_gc_is_object
 global _abi_list_append
 global _abi_list_pop
 global _abi_list_slice
@@ -303,11 +306,26 @@ _abi_str_slice:
 
 ; rax = new empty instance dict (no args). See abi_shims.asm's matching
 ; function for the full layout rationale -- identical here, just SysV.
+; _abi_gc_is_object(candidate) -> 1 if the object registry handed that payload
+; pointer out, else 0. Bridges SysV (arg in rdi) to the _runtime_gc_* private
+; convention (arg and result in rax). Windows has the mirror of this in
+; abi_shims.asm; `_lower_read_any_tag` calls it on EVERY target, so a Linux
+; build fails to link without it.
+_abi_gc_is_object:
+    push rbx
+    sub rsp, 32
+    mov rax, rdi
+    call _runtime_gc_is_object
+    add rsp, 32
+    pop rbx
+    ret
+
 _abi_new_instance:
     push rbx
     sub rsp, 48
-    mov rdi, 40                  ; DICT_HEADER
-    call malloc
+    mov rcx, 40                  ; DICT_HEADER
+    mov rdx, 2                   ; kind: dict/instance-shaped
+    call _runtime_objalloc       ; tracked, so the GC registry sees it
     mov qword [rax+0], 8         ; DICT_CAP_OFF = 8 initial slots
     mov qword [rax+8], 0         ; DICT_LEN_OFF
     mov qword [rax+16], 0        ; DICT_TOMB_OFF
@@ -333,8 +351,9 @@ _abi_new_box:
     sub rsp, 48
     mov [rsp+32], rdi           ; spill tag across malloc
     mov [rsp+40], rsi           ; spill payload across malloc
-    mov rdi, 24
-    call malloc
+    mov rcx, 24                  ; box is 3 words
+    xor rdx, rdx                 ; kind: plain (payload scanned word-wise)
+    call _runtime_objalloc
     mov rcx, [rsp+32]
     mov rdx, [rsp+40]
     mov rbx, 0xB0BE11EDB0BE11ED ; BOX_MAGIC -- keep in sync with ir_lower.py
@@ -355,8 +374,9 @@ _abi_new_list:
     jge .cap_ok
     mov rbx, 1
 .cap_ok:
-    mov rdi, 24                  ; LIST_HEADER
-    call malloc
+    mov rcx, 24                  ; LIST_HEADER
+    mov rdx, 1                   ; kind: list-shaped
+    call _runtime_objalloc
     mov [rax+0], rbx             ; LIST_CAP_OFF = cap
     mov qword [rax+8], 0         ; LIST_LEN_OFF
     mov [rsp+32], rax            ; spill header ptr

@@ -28,9 +28,9 @@ than counts references:
     Neither root set needs help from the backend, which matters because the
     default x86-64 backend emits no entry prologue and so never calls
     `_runtime_gc_init`: on Win64 the stack base comes from the TEB and the
-    globals range from walking the program's own PE headers. Linux has
-    neither hook yet, so there `collect()` returns 0 and frees nothing --
-    which is a deliberate no-op, not a sign that nothing was garbage.
+    globals range from walking the program's own PE headers. Linux has neither
+    hook yet, so there `collect()` returns 0 and frees nothing -- a deliberate
+    no-op, not a sign that nothing was garbage.
 """
 from __future__ import annotations
 
