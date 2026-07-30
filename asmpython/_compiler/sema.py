@@ -442,6 +442,13 @@ class FuncSig:
     # per-parameter types. Needed here because overload dispatch has to
     # pick the best-matching signature by argument type, not just count.
     param_types: list = field(default_factory=list)
+    # Per-parameter dict VALUE kind, parallel to `param_names`: the `V` of a
+    # `dict[K, V]`-annotated parameter, "" for every other parameter. A dict
+    # literal passed into such a slot is a declared destination -- the callee
+    # reads it as raw V -- so the literal has to store raw V rather than boxed
+    # cells (see `_narrow_dict_lit_to_declared`). `param_types` records only
+    # the BASE kind ("dict"), which cannot answer that.
+    param_value_types: list = field(default_factory=list)
     # Name of the `*args` parameter (the trailing list slot), or None.
     vararg: Optional[str] = None
     # Name of the `**kwargs` parameter (the trailing dict slot), or None.
@@ -2715,15 +2722,7 @@ class SemaAnalyzer:
         about the signature is touched, and a signature that already knows its
         element kind is left alone.
         """
-        _fn_name = self.in_function
-        if _fn_name is None:
-            return
-        _sig = self.funcs.get(_fn_name)
-        if _sig is None and "__" in _fn_name:
-            _cls_part, _, _m_part = _fn_name.rpartition("__")
-            _cs = self.classes.get(_cls_part)
-            if _cs is not None:
-                _sig = _cs.methods.get(_m_part)
+        _sig = self._enclosing_func_sig()
         if _sig is None:
             return
         _rt = getattr(_sig, "ret_type", None)
@@ -5058,6 +5057,7 @@ class SemaAnalyzer:
                         param_names=list(g.params),
                         param_defaults=list(g.defaults),
                         param_types=self._resolve_param_types(g),
+                        param_value_types=self._resolve_param_value_types(g),
                         vararg=g.vararg,
                         kwarg=g.kwarg,
                         decorators=list(getattr(g, "decorators", [])),
@@ -5101,6 +5101,7 @@ class SemaAnalyzer:
                         param_names=list(f.params),
                         param_defaults=list(f.defaults),
                         param_types=self._resolve_param_types(f),
+                        param_value_types=self._resolve_param_value_types(f),
                         vararg=f.vararg,
                         kwarg=f.kwarg,
                         ret_tuple=(r[3] if r is not None and r[0] == "tuple" else None),
@@ -5145,6 +5146,7 @@ class SemaAnalyzer:
                 param_names=list(f.params),
                 param_defaults=list(f.defaults),
                 param_types=self._resolve_param_types(f),
+                param_value_types=self._resolve_param_value_types(f),
                 vararg=f.vararg,
                 kwarg=f.kwarg,
                 ret_tuple=(r[3] if r is not None and r[0] == "tuple" else None),
@@ -5489,6 +5491,7 @@ class SemaAnalyzer:
                             param_names=list(g.params),
                             param_defaults=list(g.defaults),
                             param_types=self._resolve_param_types(g),
+                            param_value_types=self._resolve_param_value_types(g),
                             vararg=g.vararg,
                             kwarg=g.kwarg,
                             decorators=list(getattr(g, "decorators", [])),
@@ -5566,6 +5569,7 @@ class SemaAnalyzer:
                     # only top-level functions did -- so anything keyed on them
                     # silently did nothing for a method or constructor.
                     param_types=self._resolve_param_types(m),
+                    param_value_types=self._resolve_param_value_types(m),
                     vararg=m.vararg,
                     kwarg=m.kwarg,
                     ret_tuple=(mr[3] if mr is not None and mr[0] == "tuple" else self._scan_tuple_return(m_body)),
@@ -6484,6 +6488,78 @@ class SemaAnalyzer:
             return f"instance:{t}"
         return t
 
+    def _dict_lit_values_fit(self, lit, kind: str) -> bool:
+        """True when at least one value of the dict LITERAL `lit` is OPAQUE and
+        every other value is already `kind`.
+
+        Answers "was this literal's `value_type == "any"` caused only by
+        opacity, not by a genuine kind mix?", which is what decides whether an
+        explicit `dict[K, kind]` annotation may narrow the literal back to raw
+        `kind` storage. Requiring an opaque value keeps this reconciliation
+        scoped to the literals opacity widened -- a literal that was already
+        "any" for some OTHER reason keeps whatever representation it had. A
+        `**spread` value contributes entries whose kinds this cannot see, so it
+        makes the literal non-narrowable."""
+        saw_opaque = False
+        for k, v in zip(lit.keys, lit.values):
+            if isinstance(k, A.Name) and k.name == "**":
+                return False
+            vt: str = A.expr_type(v)
+            if vt == "any":
+                saw_opaque = True
+            elif self._normalize_instance_type(vt) != kind:
+                return False
+        return saw_opaque
+
+    def _narrow_dict_lit_to_declared(self, value, declared: str) -> None:
+        """Re-narrow a dict LITERAL that widened itself to "any" back to the
+        CONCRETE value kind its destination declares.
+
+        A dict literal holding an OPAQUE value is heterogeneous as far as the
+        literal itself can tell, so its values are boxed (see the DictLit
+        branch of `_check_expr`). A concrete `dict[K, V]` on the destination --
+        an annotated variable/field, an annotated return, an annotated
+        parameter -- is the programmer PROMISING that the unknown value is a V,
+        and every read through that destination is raw-V. Store and read have
+        to agree, so the declaration wins here and the literal goes back to raw
+        storage.
+
+        Only a literal whose sole source of heterogeneity was opacity is
+        narrowed (`_dict_lit_values_fit`): one holding a genuinely different
+        concrete kind stays boxed, since storing that other kind raw under
+        `declared`'s representation would be wrong in a new way.
+        """
+        if not isinstance(value, A.DictLit):
+            return
+        if not declared or declared == "any":
+            return
+        if getattr(value, "value_type", "") != "any":
+            return
+        if getattr(value, "box_values", False):
+            return  # an explicit `dict[K, object]`: boxing is the declaration
+        # Normalized HERE, not by the callers: a `dict[K, SomeClass]` parameter
+        # kind is resolved during signature collection, which runs before the
+        # class table is filled, so `SomeClass` can only be canonicalized to
+        # `instance:SomeClass` once a body is actually being checked.
+        norm: str = self._normalize_instance_type(declared)
+        if self._dict_lit_values_fit(value, norm):
+            value.value_type = norm
+
+    def _enclosing_func_sig(self):
+        """FuncSig of the function/method whose body is currently being
+        checked, or None. `self.in_function` holds `"name"` for a function and
+        `"Class__method"` for a method."""
+        fn_name = self.in_function
+        if fn_name is None:
+            return None
+        sig = self.funcs.get(fn_name)
+        if sig is None and "__" in fn_name:
+            cls_part, _, m_part = fn_name.rpartition("__")
+            cs = self.classes.get(cls_part)
+            if cs is not None:
+                sig = cs.methods.get(m_part)
+        return sig
+
     def _dict_value_type(self, e, scope: Scope) -> str:
         """Value type of a dict-valued expression. 'int' if unknown."""
         return self._normalize_instance_type(self._dict_value_type_inner(e, scope))
@@ -6876,6 +6952,22 @@ class SemaAnalyzer:
             resolved = self._resolve_annot(annot)
             param_types.append(resolved[0] if resolved is not None else "any")
         return param_types
+
+    def _resolve_param_value_types(self, f) -> list:
+        """Per-parameter dict VALUE kind, parallel to `f.params`: the resolved
+        `V` of a `dict[K, V]` annotation, "" for anything else. Fills
+        `FuncSig.param_value_types` -- see its comment for why the base kind
+        `_resolve_param_types` records is not enough."""
+        param_vals: list = []
+        f_param_types: list = getattr(f, "param_types", []) or []
+        for i in range(len(f.params)):
+            annot = f_param_types[i] if i < len(f_param_types) else None
+            resolved = self._resolve_annot(annot)
+            if resolved is not None and resolved[0] == "dict" and resolved[2]:
+                param_vals.append(resolved[2])
+            else:
+                param_vals.append("")
+        return param_vals
 
     def _check_overload_group_distinct(self, name: str, sigs: list, pos) -> None:
         """`overload` extension: reject a group of @overload signatures
@@ -7275,6 +7367,19 @@ class SemaAnalyzer:
                             value.box_values = True
                     else:
                         self._explicit_object_dicts.discard(target)
+                        # A CONCRETE `dict[K, V]` annotation is authoritative
+                        # over the literal's own value-kind inference, and the
+                        # two have to agree on the REPRESENTATION: this
+                        # variable's reads are raw-V (a float even bitcast back
+                        # out of its i64 slot), so the literal must store raw V
+                        # rather than boxed cells. Only fires when the literal
+                        # widened ITSELF to "any" because some value was OPAQUE
+                        # -- unknown, hence compatible with V -- which is
+                        # exactly the case the annotation resolves. A literal
+                        # holding a genuinely DIFFERENT concrete kind is left
+                        # boxed: narrowing it to V would store that other kind
+                        # raw under the wrong representation.
+                        self._narrow_dict_lit_to_declared(value, value_type)
                     scope.add(
                         target,
                         "dict",
@@ -7561,6 +7666,13 @@ class SemaAnalyzer:
             if s.value is not None:
                 self._check_expr(s.value, scope)
                 self._learn_return_element_kind(s.value, scope)
+                # `-> dict[K, V]` with a concrete V is a declared destination
+                # for a returned literal, same as an annotated variable: the
+                # caller's reads are raw-V, so the literal must store raw V.
+                _rsig = self._enclosing_func_sig()
+                _rrt = getattr(_rsig, "ret_type", None) if _rsig is not None else None
+                if isinstance(_rrt, tuple) and len(_rrt) > 2 and _rrt[0] == "dict":
+                    self._narrow_dict_lit_to_declared(s.value, _rrt[2] or "")
             return
         if isinstance(s, A.If):
             self._check_expr(s.test, scope)
@@ -8276,6 +8388,24 @@ class SemaAnalyzer:
                         return
             self._check_expr(s.value, scope)
             value_t: str = A.expr_type(s.value)
+            # A field declared `dict[K, V]` with a concrete V is a declared
+            # destination for a dict literal, same as an annotated variable or
+            # return: reads of `self.f[k]` are raw-V, so the literal must store
+            # raw V rather than boxed cells.
+            if value_t == "dict" and obj_t.startswith("instance:"):
+                _fcls: str = obj_t.split(":", 1)[1]
+                _fdecl: str = ""
+                _fann = self._resolve_annot(getattr(s, "annot", None))
+                if _fann is not None and _fann[0] == "dict":
+                    # `self.f: dict[K, V] = {...}` -- written right here, so
+                    # even "int" is a real declaration.
+                    _fdecl = _fann[2] or ""
+                elif _fcls in self.classes and self._resolve_field_type(_fcls, s.name) == "dict":
+                    _fel: str = self._resolve_field_el(_fcls, s.name)
+                    # "int" doubles as `_resolve_field_el`'s UNKNOWN sentinel,
+                    # so it is not a declaration and must narrow nothing.
+                    _fdecl = _fel if _fel != "int" else ""
+                self._narrow_dict_lit_to_declared(s.value, _fdecl)
             # Instance fields hold any 8-byte value (int / str-ptr / instance /
             # list / dict / tuple / float bit pattern).
             user_instance = obj_t.startswith("instance:") and (
@@ -9947,8 +10077,20 @@ class SemaAnalyzer:
                             ErrorCode.E_DICT_VALUE_TYPE_UNSUPPORTED,
                         )
                 if vt == "any":
+                    # An OPAQUE value is NOT "compatible with any value kind":
+                    # its REPRESENTATION differs. A concrete value kind is
+                    # stored RAW (a float even bitcast to its i64 bit pattern),
+                    # while an opaque one is a BOXED, tag-carrying cell -- so a
+                    # dict holding both is heterogeneous no matter what the
+                    # concrete kind is, and claiming otherwise is the same trap
+                    # as writing "int" for an unknown. `seen_v`/`mixed_v` are
+                    # still tracked across the loop (a later value can still
+                    # widen a callable set), and the collapse to "any" is
+                    # applied once at the end, where `saw_opaque_value` is
+                    # known for the WHOLE literal rather than only for the
+                    # values seen so far.
                     saw_opaque_value = True
-                    continue  # opaque value: compatible with any value kind
+                    continue
                 if (seen_v is None or seen_v == "any") and not mixed_v:
                     # `seen_v == "any"` because some value was OPAQUE is a
                     # fallback a later concrete value should win over. Once a
@@ -9978,6 +10120,33 @@ class SemaAnalyzer:
                         seen_v = "any"
                         mixed_v = True
             e.value_type = seen_v if seen_v is not None else ("any" if saw_opaque_value else "int")
+            if saw_opaque_value and not e.value_type.startswith("callable:"):
+                # At least one value was opaque, so the literal is NOT
+                # homogeneous even if every OTHER value shared one kind. Force
+                # "any" so ir_lower's DictLit lowering routes every value
+                # through `_lower_value_into_any_slot` (boxed) and every read
+                # off this dict unboxes -- the representation mixed lists and
+                # genuinely mixed dicts already use.
+                #
+                # Measured (int_prog_stats.py): `return {'mean': <float>,
+                # 'min': min(nums)}` in an unannotated function typed the
+                # literal value_type "float" and stored the float RAW (bitcast
+                # to its bit pattern), while the caller -- whose `-> dict` was
+                # inferred with no value kind, i.e. "any" -- read it boxed and
+                # printed 4617315517961601024, the bit pattern of 5.0. Narrowing
+                # to "float" would fix that float and break the int value in the
+                # same dict; boxing is correct for BOTH.
+                #
+                # A callable value kind is kept: `_lower_value_into_any_slot`
+                # passes a code pointer through unchanged anyway, and plain
+                # "any" would lose the callability that makes `handlers[k](...)`
+                # resolve as a call.
+                e.value_type = "any"
+            # A literal passed straight into a `dict[K, V]`-annotated PARAMETER
+            # has a declared destination just like an annotated variable does;
+            # `_bind_args` stamped the kind on before this check ran, since the
+            # callee reads the slot as raw V.
+            self._narrow_dict_lit_to_declared(e, getattr(e, "declared_value_type", ""))
             # When the values are themselves dicts/lists, record their common
             # inner value/element kind, so a chained `outer[k][k2]` read can
             # recover the leaf type (one nesting level deep).
@@ -12536,6 +12705,7 @@ class SemaAnalyzer:
             e.pos,
             e.method,
             kwarg=sig.kwarg,
+            param_value_types=sig.param_value_types[skip:],
         )
 
     def _clone_default_expr(self, e):
@@ -12598,6 +12768,7 @@ class SemaAnalyzer:
         pos,
         label,
         kwarg=None,
+        param_value_types=None,
     ) -> None:
         """Rewrite a call's (positional, keyword) arguments into a single
         positional list matching `names`, so codegen sees an ordinary call.
@@ -12608,6 +12779,13 @@ class SemaAnalyzer:
         surplus positionals are packed into a ListLit passed in that slot.
         With a `**kwargs` parameter, excess keyword arguments are packed into
         a DictLit passed as a final trailing dict-typed slot.
+
+        `param_value_types` (trimmed to match `names`) is the callee's
+        per-parameter dict VALUE kind. Every call form -- function, method,
+        constructor, `__call__` -- routes through here BEFORE its arguments are
+        type-checked, which makes this the one place that can tell a dict
+        literal what value kind its destination parameter declares; the DictLit
+        branch of `_check_expr` reads the marker back off the node.
         """
         # Extract args/kwargs via isinstance narrowing: Call and MethodCall
         # have these fields at different offsets, so a typed local is needed.
@@ -12732,6 +12910,17 @@ class SemaAnalyzer:
                 kw_keys.append(A.StrLit(value=kname, pos=pos))
                 kw_vals.append(kexpr)
             new_args.append(A.DictLit(keys=kw_keys, values=kw_vals, pos=pos, value_type="any"))
+        # Mark each dict-literal argument with the value kind its destination
+        # parameter declares, before the argument is checked (see the
+        # `param_value_types` note in this method's docstring).
+        if param_value_types:
+            _pvt: list = list(param_value_types)
+            for _si in range(nfixed):
+                if _si >= len(_pvt) or not _pvt[_si]:
+                    continue
+                _sa = new_args[_si]
+                if isinstance(_sa, A.DictLit):
+                    _sa.declared_value_type = _pvt[_si]
         if isinstance(e, A.MethodCall):
             _em2: A.MethodCall = e
             _em2.args = new_args
@@ -13030,6 +13219,7 @@ class SemaAnalyzer:
                 self._bind_args(
                     e, _cnames[1:], _cdefs[1:], _csig.vararg, e.pos,
                     f"{_ccls}.__call__", kwarg=_csig.kwarg,
+                    param_value_types=_csig.param_value_types[1:],
                 )
                 for _a in e.args:
                     self._check_expr(_a, scope)
@@ -13973,6 +14163,7 @@ class SemaAnalyzer:
             self._bind_args(
                 e, sig.param_names, sig.param_defaults, sig.vararg, e.pos, e.func,
                 kwarg=sig.kwarg,
+                param_value_types=sig.param_value_types,
             )
             if sig.ret_type is not None:
                 ret_tuple_ov: tuple = sig.ret_type  # type: ignore
@@ -14006,6 +14197,7 @@ class SemaAnalyzer:
             self._bind_args(
                 e, sig.param_names, sig.param_defaults, sig.vararg, e.pos, e.func,
                 kwarg=sig.kwarg,
+                param_value_types=sig.param_value_types,
             )
             self._coerce_args_to_param_types(e, sig, scope)
             for a in e.args:
@@ -14143,6 +14335,7 @@ class SemaAnalyzer:
                     e.pos,
                     e.func,
                     kwarg=sig.kwarg,
+                    param_value_types=sig.param_value_types[1:],
                 )
                 # `self` occupies slot 0 of the signature but not of the call.
                 self._coerce_args_to_param_types(e, sig, scope, skip=1)
@@ -14185,6 +14378,7 @@ class SemaAnalyzer:
                         e.pos,
                         f"{_cls}.__call__",
                         kwarg=_sig.kwarg,
+                        param_value_types=_sig.param_value_types[1:],
                     )
                     for _a in e.args:
                         self._check_expr(_a, scope)
