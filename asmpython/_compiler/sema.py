@@ -2260,6 +2260,25 @@ class SemaAnalyzer:
                     ]
                 self._infer_call_target_params(f"{c.name}.{m.name}", m, sites, start=1)
 
+    def _literal_is_uniform(self, value) -> bool:
+        """Whether a container literal's elements all share one base kind.
+
+        Syntax-only, matching `_literal_arg_type`'s contract: an element whose
+        kind is not knowable from syntax makes the answer False, because
+        "cannot tell" must not be reported as uniform. An empty literal is
+        uniform by definition -- it constrains nothing.
+        """
+        elems = getattr(value, "elems", None)
+        if elems is None:
+            return True
+        kinds = set()
+        for el in elems:
+            lit = self._literal_arg_type(el)
+            if lit is None:
+                return False
+            kinds.add(lit[0])
+        return len(kinds) <= 1
+
     def _infer_call_target_params(
         self, qualname: str, fn: A.FuncDef, sites: list, start: int
     ) -> None:
@@ -2301,33 +2320,97 @@ class SemaAnalyzer:
                 lit = self._literal_arg_type(arg)
                 if lit is None:
                     continue
+                # A CONTAINER literal only informs the parameter's type when its
+                # elements are uniform. `_literal_arg_type` reports the base
+                # kind only, so a mixed literal would be recorded as plain
+                # "list" -- and writing that through drops the element type,
+                # turning "elements unknown, handle dynamically" into
+                # "elements homogeneous", which is a positive wrong claim.
+                #
+                # Measured: eval_postfix([3, 4, '+', 2, '*']) typed `tokens` as
+                # list, and the mixed int/str content that worked as `any` then
+                # hit [E051] "mixed list element types". Reporting "any" here
+                # keeps it out of _INFERRED_PARAM_KINDS, so nothing is written;
+                # and if another site passes a UNIFORM literal, the two
+                # candidates disagree and inference correctly declines.
+                if lit[0] in ("list", "set", "tuple") and not self._literal_is_uniform(arg):
+                    lit = ("any", None, None, None)
                 found_any = True
                 if lit not in candidates:
                     candidates.append(lit)
             if found_any and len(candidates) == 1:
                 self.inferred_param_types[f"{qualname}:{i}"] = candidates[0]
 
-    def _apply_inferred_float_params(self) -> None:
-        """Propagate a FLOAT parameter type inferred from call sites (see
-        `_infer_unannotated_params`) into the parameter's ABI, not just the
-        body type-check scope.
+    #: Inferred parameter kinds written through to the IR parameter type.
+    #:
+    #: "int" is excluded because it doubles as the UNKNOWN sentinel, so writing
+    #: it would turn "could not tell" into a positive claim.
+    #:
+    #: "dict" is excluded, and that is a TRADE-OFF rather than a clean win --
+    #: recorded here so the next person does not re-litigate it blind.
+    #: `_literal_arg_type` reports the BASE kind only, so a dict is written as
+    #: ("dict", None): a dict whose VALUE type is unknown, which consumers then
+    #: take as the int default. Measured both ways over the corpus:
+    #:
+    #:   including dict -> app_template_render.py PASSES (it needs its dict
+    #:     parameter typed) but app_validate_form.py degrades, going from
+    #:     [('age', <ptr>), ('email', <ptr>)] to [('age', <ptr>)]:
+    #:     `form.get('email')` yields an empty STRING whose pointer is
+    #:     non-zero, so `if not form.get('email')` stops firing and an entry is
+    #:     lost. That case fails either way, but losing an entry is a real
+    #:     behaviour regression inside a failing case.
+    #:   excluding dict -> app_validate_form keeps its baseline behaviour and
+    #:     app_template_render stays failing. Six fixes instead of seven, and no
+    #:     regression.
+    #:
+    #: Excluded on the rule "do not ship a known miscompile", not because
+    #: including it is worthless. The real resolution is to supply the VALUE
+    #: type from the literal so a mixed dict becomes ("dict", "any") -- keeping
+    #: the dynamic handling -- and a homogeneous one gets its true value type;
+    #: then both cases pass. That needs its own gate, and is recorded in
+    #: regression-log.txt.
+    #:
+    #: list/set/tuple carry the same latent risk whenever their element type is
+    #: not int; they are kept because the gate showed no divergence for them and
+    #: they account for real fixes.
+    _INFERRED_PARAM_KINDS = ("float", "str", "list", "set", "tuple")
 
-        Float is the one inferred kind whose calling convention differs from
-        the `any`/int default -- a float argument travels in an XMM register,
-        an int/pointer in a GP register. `_infer_unannotated_params` records
-        the inferred kind and `_seed_param` types the body from it, but the
-        FuncSig's `param_types` (how a caller marshals the argument) and the
-        FuncDef's `param_types` (the callee's own IR parameter ABI, read
-        directly by ir_lower) both stayed `any`. So `def add(a, b): return
-        a + b` called `add(1.5, 2.5)` emitted float arithmetic in the body
-        while the caller passed -- and the callee read -- the operands through
-        GP registers, reinterpreting each float's 64 bits as an integer and
-        returning garbage (2.65e-314). Writing the float type into BOTH tables
-        keeps every consumer in agreement. Pointer-shaped inferred kinds
-        (str/list/dict/set/instance) share the GP convention with `any`, so
-        they need no ABI change and keep their existing scope-only seeding.
+    def _apply_inferred_param_types(self) -> None:
+        """Propagate a parameter type inferred from call sites (see
+        `_infer_unannotated_params`) into the parameter's ABI and IR type, not
+        just the body type-check scope.
+
+        `_infer_unannotated_params` records the inferred kind and `_seed_param`
+        types the body's CHECK SCOPE from it, but the FuncSig's `param_types`
+        (how a caller marshals the argument) and the FuncDef's `param_types`
+        (the callee's own IR parameter type, read directly by ir_lower) stayed
+        untouched. Writing the inferred type into both keeps every consumer in
+        agreement.
+
+        Float was the original motivation, because its calling convention
+        differs -- a float travels in XMM, an int/pointer in GP -- so
+        `def add(a, b): return a + b` called `add(1.5, 2.5)` did float
+        arithmetic in a body whose operands arrived through GP registers and
+        returned garbage (2.65e-314).
+
+        It stopped at float on the reasoning that pointer-shaped kinds
+        (str/list/dict/set) "share the GP convention with `any`, so they need
+        no ABI change". That is true of the REGISTER CLASS and is not a reason
+        to skip the write: ir_lower reads FuncDef.param_types to decide how the
+        body TREATS the value, not merely how it arrives. Left as `any`, a
+        `str` parameter got list/int-shaped code, and with `f("abc")`:
+
+            def f(s): return s.upper()   -> printed 0    (want ABC)
+            def f(s): return s[0]        -> segfault     (list-index a str)
+            def f(s):
+                for ch in s: pass        -> segfault     (list-walk a str)
+
+        while `len(s)` happened to work, a length read being valid on either
+        header. tests/cases/algo_stack_balanced.py is exactly this shape.
+
         Only fills a genuinely unannotated slot -- an explicit annotation is
-        always authoritative."""
+        always authoritative -- and only when every literal call site agreed,
+        which is `_infer_call_target_params`' existing contract."""
         def _apply(qualname: str, fn, sig, start: int) -> None:
             fn_pts: list = fn.param_types
             n: int = len(fn.params)
@@ -2335,18 +2418,19 @@ class SemaAnalyzer:
                 if i < start:
                     continue
                 inferred = self.inferred_param_types.get(f"{qualname}:{i}")
-                if inferred is None or inferred[0] != "float":
+                if inferred is None or inferred[0] not in self._INFERRED_PARAM_KINDS:
                     continue
+                kind = inferred[0]
                 cur = fn_pts[i] if i < len(fn_pts) else None
                 if cur is not None:
                     continue  # never override a real annotation
                 while len(fn_pts) <= i:
                     fn_pts.append(None)
-                fn_pts[i] = ("float", None)
+                fn_pts[i] = (kind, None)
                 if sig is not None:
                     sig_pts: list = sig.param_types
                     if i < len(sig_pts):
-                        sig_pts[i] = "float"
+                        sig_pts[i] = kind
         for f in self.mod.funcs:
             _apply(f.name, f, self.funcs.get(f.name), 0)
         for c in self.mod.classes:

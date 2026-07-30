@@ -298,20 +298,36 @@ def _analyze_with_ordered_flow(self: SemaAnalyzer) -> None:
     _normalize_method_receivers(self.mod)
     _lower_static_data_descriptors(self.mod)
     _lower_type_parameter_specializations(self.mod)
-    _mark_dynamic_parameters(self.mod)
-    # Infer unannotated parameter types from call sites, and stamp a FLOAT
-    # inference onto the FuncDef's `param_types`, BEFORE whole-program return
-    # inference runs below. Return inference reads parameter types to type a
-    # `return a + b` / `return x` body, and FuncSig construction (in the
-    # original analyze that runs last) reads the same `param_types` -- so a
-    # float parameter learned only from call sites has to be in place first,
-    # or `def add(a, b): return a + b` called `add(1.5, 2.5)` freezes its
-    # return type at `any` here (param still untyped) and later marshals the
-    # float arguments through GP registers, reinterpreting their bits as ints.
+    # Infer unannotated parameter types from call sites and stamp them onto the
+    # FuncDef's `param_types`, BEFORE whole-program return inference runs below.
+    # Return inference reads parameter types to type a `return a + b` /
+    # `return x` body, and FuncSig construction (in the original analyze that
+    # runs last) reads the same `param_types` -- so a parameter learned only
+    # from call sites has to be in place first, or
+    # `def add(a, b): return a + b` called `add(1.5, 2.5)` freezes its return
+    # type at `any` here (param still untyped) and later marshals the float
+    # arguments through GP registers, reinterpreting their bits as ints.
     # `_infer_unannotated_params` still runs again inside the original analyze
     # (idempotent: these params are now annotated, so it re-confirms the rest).
     self._infer_unannotated_params()
-    self._apply_inferred_float_params()
+    self._apply_inferred_param_types()
+    # AFTER inference, not before. `_mark_dynamic_parameters` stamps
+    # ("any", None) onto an unannotated parameter it considers dynamically
+    # used -- which includes a parameter ITERATED BY A FOR LOOP -- and that
+    # mark then defeated inference two ways: `_infer_call_target_params` skips
+    # a parameter whose annotation resolves, and `_apply_inferred_param_types`
+    # refuses to overwrite one. So a parameter whose type every call site
+    # agreed on was recorded as `any` instead.
+    #
+    # `any` is not free for an iterable: the For lowering walks it with the
+    # list layout, so `def f(s): [ch for ch in s]` called `f("abc")` read
+    # string bytes as element words and segfaulted. Inferring `str` first makes
+    # the loop take the string path.
+    #
+    # Marking still happens for every parameter inference could NOT type --
+    # it already skips a slot that is not None -- so the dynamic fallback is
+    # unchanged for genuinely unknown parameters.
+    _mark_dynamic_parameters(self.mod)
     _infer_dynamic_returns(self.mod)
     _infer_specific_returns(self.mod)
 
