@@ -245,6 +245,16 @@ so the interpreter machinery has no analogue:
   registry could answer the first and last, but the tracer walks words rather than
   building an object graph, so referrer queries have nothing to read.
 
+  PLATFORM STATUS, because "the gc module is real" is not the same as "it
+  collects everywhere": on Windows it does real work -- live data reachable only
+  from a module-level name survives repeated collection and garbage is reclaimed.
+  On Linux `collect()` returns 0 and frees nothing, by design: the collector
+  refuses to sweep unless it can see every root set, and Linux has no stack-base
+  hook (Win64 reads the TEB) nor a globals-range hook (Win64 walks its own PE
+  headers). That refusal is deliberate -- a missing root set is not a degraded
+  collection but a wrong one, since anything reachable only through the missing
+  set gets freed while live.
+
   Two KNOWN parity gaps in the `gc` module itself, both currently enshrined in
   `tests/cases/207_gc_module.py` and `277_gc_module.py`, which is why fixing them
   is a corpus change and not just a stdlib one:

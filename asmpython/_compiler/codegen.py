@@ -835,6 +835,8 @@ class Codegen:
         publish.append("_gc_head")
         publish.append("_gc_stack_base")
         publish.append("_gc_enabled")
+        publish.append("_gc_memo_miss")
+        publish.append("_gc_memo_hit")
         publish.append("_gc_threshold")
         publish.append("_gc_alloc_count")
         publish.append("_gc_shadow_top")
@@ -4875,6 +4877,7 @@ class Codegen:
         self.emitf("mov rcx, [_gc_head]")
         self.emitf("mov [rax+8], rcx")         # header.next = old head
         self.emitf("mov [_gc_head], rax")      # head = this block
+        self.emitf("mov qword [_gc_memo_miss], 0")   # an absent address can now exist
         self.emitf("add rax, 16")              # -> payload
         self.emitf("mov rbx, [rbp-24]")        # restore caller's rbx
         self.emitf("leave", "ret")
@@ -4885,6 +4888,7 @@ class Codegen:
         # registry as it walks.
         self.label("_runtime_objfree")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+        self.emitf("mov qword [_gc_memo_hit], 0", "mov qword [_gc_memo_miss], 0")
         self.emitf("test rax, rax", "jz ._objfree_done")
         self.emitf("sub rax, 16")
         self._emit_libc_free()
@@ -5193,14 +5197,43 @@ class Codegen:
         # list for a sorted table or bitmap later.
         self.label("_runtime_gc_is_object")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
+        # Two one-entry memos in front of the walk. The tag probe calls this on
+        # every "any" read, and the walk is O(live objects), so a loop like
+        #     total = total + r[0] + r[1] + r[2]
+        # asks the same two questions over and over: "is `r` an object" (yes,
+        # three times in a row) and "is `total` an object" (no, every
+        # iteration). Caching one hit and one miss turns most of those into a
+        # compare.
+        #
+        # Invalidation is the whole correctness argument, so it is deliberately
+        # blunt: _runtime_objfree clears BOTH memos (a freed address must never
+        # answer "registered", and its slot may be handed back out), and
+        # _runtime_objalloc clears the MISS memo (an address that was not an
+        # object a moment ago can become one). Neither needs to match against
+        # the cached value first -- clearing unconditionally is cheaper than
+        # comparing and cannot be wrong.
+        # Null first, BEFORE the memo compares. Both memos live in .bss and are
+        # cleared to 0 on free, so without this `is_object(0)` would compare
+        # equal to a cleared hit-memo and answer YES for a null pointer. No
+        # current caller passes 0 (the tag probe filters on > PTR_THRESHOLD, and
+        # trace/scan_range null-check first), which is exactly why this needs to
+        # be here rather than left to hold by luck.
+        self.emitf("test rax, rax", "jz ._isobj_no")
+        self.emitf("cmp rax, [_gc_memo_hit]", "je ._isobj_yes")
+        self.emitf("cmp rax, [_gc_memo_miss]", "je ._isobj_no")
+        self.emitf("mov [rbp-8], rax")                          # candidate
         self.emitf("mov rcx, rax", "sub rcx, 16")               # candidate base
         self.emitf("mov rax, [_gc_head]")
         self.label("._isobj_loop")
-        self.emitf("test rax, rax", "jz ._isobj_no")
-        self.emitf("cmp rax, rcx", "je ._isobj_yes")
+        self.emitf("test rax, rax", "jz ._isobj_absent")
+        self.emitf("cmp rax, rcx", "je ._isobj_found")
         self.emitf("mov rax, [rax+8]", "jmp ._isobj_loop")
+        self.label("._isobj_found")
+        self.emitf("mov rax, [rbp-8]", "mov [_gc_memo_hit], rax")
         self.label("._isobj_yes")
         self.emitf("mov rax, 1", "leave", "ret")
+        self.label("._isobj_absent")
+        self.emitf("mov rax, [rbp-8]", "mov [_gc_memo_miss], rax")
         self.label("._isobj_no")
         self.emitf("xor rax, rax", "leave", "ret")
 

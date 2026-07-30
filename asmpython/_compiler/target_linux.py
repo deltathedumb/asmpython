@@ -523,6 +523,8 @@ class LinuxCodegen(Codegen):
             self.emit("_gc_globals_lo: resq 1")
             self.emit("_gc_globals_hi: resq 1")
             self.emit("_gc_enabled:    resq 1")
+            self.emit("_gc_memo_hit:  resq 1")
+            self.emit("_gc_memo_miss: resq 1")
             self.emit("_gc_alloc_count: resq 1")
             self.emit("_gc_threshold:   resq 1")
             # Shadow stack: exact roots for --gc=precise.
