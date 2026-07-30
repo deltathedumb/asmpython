@@ -659,7 +659,19 @@ class Parser:
             elif self._check("NAME", "interface") and self._looks_like_interface_decl():
                 interfaces.append(self._dispatch_interface_decl())
             else:
-                body.append(self._parse_stmt())
+                # A statement may expand to SEVERAL -- `import a, b` becomes one
+                # A.Import each, and a chained assignment led by an attribute or
+                # subscript target desugars the same way. _parse_block already
+                # flattens for a nested suite; this loop did not, so a
+                # list-valued statement reached sema as a nested list and became
+                # "[E145] internal: unhandled stmt list". Same dispatch-parity
+                # shape as the decorator and `async def` gaps: handled in one of
+                # the two statement collectors and not the other.
+                _stmt = self._parse_stmt()
+                if isinstance(_stmt, list):
+                    body.extend(_stmt)
+                else:
+                    body.append(_stmt)
             self._skip_newlines()
         # Add any nested functions parsed inside function bodies (lifted to
         # module level so calls to them resolve in sema).
@@ -3230,8 +3242,43 @@ class Parser:
         self._expect("NEWLINE")
         return A.Del(target=target, pos=kw.pos)
 
-    def _parse_import(self) -> A.Import:
+    def _parse_import(self):
+        """`import a` / `import a.b as c` / `import a, b as c, d`
+
+        Returns a single A.Import for the one-module form and a LIST when the
+        line names several. Python allows a comma-separated list here and each
+        entry may carry its own `as` alias; only the first was parsed, so
+        `import csv, io` stopped at the comma and raised
+        "[P002] expected NEWLINE, got OP ','". The `from x import a, b` form
+        already accepted a list, so this was a gap in one of the two import
+        statements rather than a missing concept.
+
+        A list is safe to return: parse() and _parse_block already flatten a
+        statement that expands to several (chained assignment does the same),
+        and each entry gets its own A.Import so alias handling, bound-name
+        recording and module resolution stay exactly as they are for a
+        single-module line.
+        """
         kw = self._expect("KEYWORD", "import")
+        first = self._parse_one_import_clause(kw)
+        if not self._check("OP", ","):
+            self._expect("NEWLINE")
+            return first
+        out: list = [first]
+        while self._check("OP", ","):
+            self._eat()
+            if self._check("NEWLINE"):
+                break  # tolerate a trailing comma
+            out.append(self._parse_one_import_clause(kw))
+        self._expect("NEWLINE")
+        return out
+
+    def _parse_one_import_clause(self, kw) -> A.Import:
+        """One `<dotted name> [as <alias>]` entry of an import statement.
+
+        Consumes no NEWLINE and no comma, so the caller decides whether more
+        entries follow.
+        """
         # Dotted module path: `import os.path`. Joined into one flat string.
         name = ".".join(self._parse_dotted_name_parts())
         # Optional `as` alias: keep the full dotted path in `module` (needed
@@ -3246,7 +3293,6 @@ class Parser:
         if self._check("KEYWORD", "as"):
             self._eat()
             alias = self._expect("NAME").value  # type: ignore[assignment]
-        self._expect("NEWLINE")
         self._import_bound_names.add(alias if alias else name.split(".")[0])
         self._imported_names.add(alias or name.split(".")[0])
         return A.Import(module=name, alias=alias, pos=kw.pos)  # type: ignore
