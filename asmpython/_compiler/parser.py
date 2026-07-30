@@ -619,7 +619,18 @@ class Parser:
             decorators = self._eat_decorators()
             pending = self._pending_decorator_exprs
             self._pending_decorator_exprs = []
-            if self._check("KEYWORD", "def"):
+            # `async def` at MODULE level. `_parse_funcdef` already consumes a
+            # leading `async` and records `is_async`, and `_parse_stmt` relies on
+            # exactly that -- it leaves BOTH tokens in place for its `def` arm.
+            # This loop only ever checked for `def`, so a module-level
+            # `async def f(): ...` was "[P001] unexpected token KEYWORD 'async'"
+            # while the identical definition nested inside a function parsed
+            # fine (tests/cases/async_def_parse.py).
+            if self._check("KEYWORD", "def") or (
+                self._check("KEYWORD", "async")
+                and self._peek(1).kind == "KEYWORD"
+                and self._peek(1).value == "def"
+            ):
                 fdef = self._parse_funcdef(decorators=decorators)
                 funcs.append(fdef)
                 body.extend(
@@ -2043,7 +2054,85 @@ class Parser:
             )
         return False
 
+    def _parse_decorated_stmt(self):
+        """A decorated `def`/`class` in statement position (inside a suite).
+
+        Mirrors the module-level path in `parse()`: consume the decorator
+        lines, take the general decorator EXPRESSIONS that `_eat_decorators`
+        stashes, then apply them with the same `_desugar_function_decorators`
+        rebinding used at module level -- so `@deco def inner(...)` really means
+        `inner = deco(inner)` here too, rather than calling the decorator for
+        its side effect and discarding the wrapper.
+
+        Returns a LIST, which `_parse_block`/`parse` already flatten: a nested
+        def lifts to module level and leaves behind at most a ClosureBind, and
+        the decorator rebinding is one or more assignments after it. The
+        ClosureBind must come FIRST -- it binds the captured values the lifted
+        function needs, and the decorator call happens after that.
+        """
+        decorators = self._eat_decorators()
+        pending = self._pending_decorator_exprs
+        self._pending_decorator_exprs = []
+
+        if self._check("KEYWORD", "class"):
+            cdef = self._parse_classdef(decorators=decorators)
+            self._nested_classes.append(cdef)
+            out: list = [A.Pass(pos=cdef.pos)]
+            out.extend(self._desugar_decorator_exprs(pending, cdef.name, cdef.pos))
+            return out
+
+        if not (
+            self._check("KEYWORD", "def")
+            or (
+                self._check("KEYWORD", "async")
+                and self._peek(1).kind == "KEYWORD"
+                and self._peek(1).value == "def"
+            )
+        ):
+            raise ParseError(
+                "a decorator must be followed by a function or class definition",
+                self._peek().pos,
+                ErrorCode.P_EXPECTED_TOKEN,
+            )
+
+        fdef = self._parse_funcdef(decorators=decorators)
+        fdef.is_lifted = True
+        free_vars, nonlocal_vars = self._find_free_vars(fdef)
+        fdef.free_vars = free_vars
+        fdef.nonlocal_vars = nonlocal_vars
+        self._nested_funcs.append(fdef)
+        stmts: list = []
+        if free_vars:
+            stmts.append(
+                A.ClosureBind(
+                    func_name=fdef.name,
+                    free_vars=free_vars,
+                    nonlocal_vars=nonlocal_vars,
+                    pos=fdef.pos,
+                )
+            )
+        deco_stmts = self._desugar_function_decorators(fdef, pending)
+        if not stmts and not deco_stmts:
+            return [A.Pass(pos=fdef.pos)]
+        stmts.extend(deco_stmts)
+        return stmts
+
     def _parse_stmt(self):
+        # A statement that BEGINS with `@` -- a decorated def/class inside any
+        # suite, not just at module level.
+        #
+        # The nested-def arm below calls `_eat_decorators()`, but only after
+        # dispatching on the `def` KEYWORD, so it could never see a leading
+        # `@`: the current token was OP '@' and dispatch fell through to
+        # "[P001] unexpected token OP '@'". Every decorated function inside
+        # another function was a parse error, which is the Flask app-factory
+        # shape (`def create_app(): @bp.route(...) def view(): ...`) and the
+        # first thing that stopped a real project compiling.
+        if self._check("OP", "@") and not (
+            self.ext_ctx.is_active("assign_decorators")
+            and self._looks_like_assign_decorator()
+        ):
+            return self._parse_decorated_stmt()
         t = self._peek()
         if t.kind == "KEYWORD":
             if t.value == "return":
