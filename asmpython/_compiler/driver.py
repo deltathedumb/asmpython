@@ -380,16 +380,19 @@ def _apply_passes(ir_mod, passes: "str | None"):
 #: would touch more code than this feature is worth, and the value is constant
 #: for the whole compilation.
 _TB_SOURCE_FILE: str = "<unknown>"
+_TB_SOURCE_PATH: str = ""
 _TB_EXE_NAME: str = "<program>"
 _TB_EMBED: bool = False
 
 
 def _set_traceback_config(source_file: "str | None", exe_name: "str | None",
                           embed: bool) -> None:
-    global _TB_SOURCE_FILE, _TB_EXE_NAME, _TB_EMBED
+    global _TB_SOURCE_FILE, _TB_SOURCE_PATH, _TB_EXE_NAME, _TB_EMBED
     # Basenames, not full paths: a traceback line is meant to be read, and the
     # absolute build path makes it unreadable without adding information.
     _TB_SOURCE_FILE = Path(source_file).name if source_file else "<unknown>"
+    # Full path kept for reading the source text; only the basename is shown.
+    _TB_SOURCE_PATH = source_file or ""
     _TB_EXE_NAME = Path(exe_name).name if exe_name else "<program>"
     _TB_EMBED = bool(embed)
 
@@ -425,6 +428,7 @@ def _as_ir_module(module) -> "IRModule":
         ir_lower.lower_module(
             module,
             source_file=_TB_SOURCE_FILE,
+            source_path=_TB_SOURCE_PATH,
             exe_name=_TB_EXE_NAME,
             embed_tracebacks=_TB_EMBED
         ),

@@ -236,15 +236,30 @@ so the interpreter machinery has no analogue:
   CPython's structure -- header, one indented frame line per level outermost
   first, exception last -- with native details:
 
-      Traceback (most recent last call):
-          File "app.py", index 0x140001798, line 9 (derived), in <module>
-          File "app.py", index 0x140001606, line 5 (derived), in outer
-          File "app.py", index 0x14000108F, line 2 (derived), in inner
+      Traceback (most recent call last)
+          File "main.exe" (tb.py), index 0x140001845 (line 9), in <module>
+              print(outer(data))
+          File "main.exe" (tb.py), index 0x140001678 (line 5), in outer
+              return inner(xs)
+          File "main.exe" (tb.py), index 0x1400010BC (line 2), in inner
+              return xs[10]
       Unhandled exception: list index out of range
 
-  `index` is the address the frame was entered from; `line` is marked `(derived)`
-  because it is reconstructed from a compile-time table rather than carried by an
-  interpreter frame. `<module>` is CPython's name for module-level code.
+  The binary is named first and the source file it came from in parentheses;
+  `<module>` is CPython's name for module-level code.
+
+  `index` is the **RVA of that frame's own compiled function**, which is what
+  makes it useful: add the image base and it lands on the function's prologue,
+  so it can be looked up in a linker map or `objdump`, and it is image-relative
+  so it is identical across runs. With `line` it pinpoints the statement.
+
+  A captured return address was tried first and does not work. The frame push
+  runs INSIDE the function it describes, so its return address points into that
+  function's own prologue rather than at the call site, and `[rbp+8]` cannot
+  recover the real one because the prologue pushes callee-saved registers before
+  `rbp` -- the return address sits at a per-function offset, which also rules out
+  a naive rbp-chain walk. A function address costs one `lea` per call and is
+  exact.
 
   Mechanism: the compiler maintains a frame stack, expressed entirely in
   existing IR ops, so no backend changes were needed. Each function pushes
@@ -269,10 +284,15 @@ so the interpreter machinery has no analogue:
   gets. Without it, dead frames' line-slot pointers aimed into reclaimed stack
   and the printer reported a pointer where a line belonged.
 
-  Not yet done: the source TEXT of each frame's line is not embedded, so a frame
-  shows `file`, `line` and `function` but not the code. That is additive -- each
-  statement's line is already interned as a string constant at the point the
-  marker is emitted.
+  The source text really is EMBEDDED, not read back from disk: each statement's
+  line is read at compile time, stripped, and interned as a string constant, so
+  a traceback shows the code on a machine that has never had the `.py` file.
+  Verified by renaming the source away and re-running the binary. Cost measured
+  at 1-2 KB per program (2.6-6.6%), page-granular.
+
+  Two indirections are checked before printing a source line -- the frame's
+  text-slot address, then the pointer in that slot -- because a frame that
+  faulted before reaching its first statement marker has a null slot.
 
 - Reference counting and `__del__` finalizers. The `gc` module is REAL: `collect()`
   runs a mark-sweep and returns the number of objects actually freed,

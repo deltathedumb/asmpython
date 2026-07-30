@@ -23,6 +23,8 @@ since nothing ever overwrites them.
 
 from __future__ import annotations
 
+import pathlib
+
 from dataclasses import fields, is_dataclass
 
 from . import ast_nodes as A
@@ -172,6 +174,7 @@ class _ModuleCtx:
         mlang_code_funcs: dict | None = None,
         imported_funcs: dict | None = None,
         source_file: str = "<unknown>",
+        source_path: str = "",
         exe_name: str = "<program>",
         embed_tracebacks: bool = False,
     ) -> None:
@@ -181,6 +184,10 @@ class _ModuleCtx:
         #: bookkeeping costs a push/pop per call, so nothing is paid unless
         #: --embed-tracebacks asked for it.
         self.source_file = source_file
+        #: Full path, kept alongside the display basename so the source TEXT of
+        #: each statement can be read at compile time and embedded.
+        self.source_path = source_path
+        self._src_lines: list[str] | None = None
         self.exe_name = exe_name
         self.embed_tracebacks = embed_tracebacks
         self.data: list[IRGlobal] = []
@@ -13871,14 +13878,51 @@ def _lower_del_target(ctx: _FuncCtx, tgt: "A.Expr") -> None:
 #: statement update affordable. `_runtime_tb_print` reads it through the
 #: address recorded at push time.
 _TB_LINE_SLOT = "__tb_line"
+#: Companion slot holding a pointer to the current statement's source text.
+_TB_TEXT_SLOT = "__tb_text"
+
+
+def _tb_source_line(mctx: "_ModuleCtx", line: int) -> str:
+    """The source text of `line`, stripped, or "" if unavailable.
+
+    Read from disk at COMPILE time and interned as a string constant, so the
+    binary carries its own source lines and a traceback works on a machine that
+    has never seen the .py file. Read once per module and cached; a miss (file
+    moved, line out of range) yields "" and the frame simply prints without a
+    source line rather than failing the build.
+    """
+    if mctx._src_lines is None:
+        try:
+            mctx._src_lines = pathlib.Path(mctx.source_path).read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()
+        except OSError:
+            mctx._src_lines = []
+    if 1 <= line <= len(mctx._src_lines):
+        return mctx._src_lines[line - 1].strip()
+    return ""
 
 
 def _tb_enabled(ctx: "_FuncCtx") -> bool:
     return bool(getattr(ctx.mctx, "embed_tracebacks", False))
 
 
-def _tb_emit_push(ctx: "_FuncCtx", func_name: str) -> None:
-    """Record this frame: name, file, and where its line slot lives."""
+def _tb_emit_push(ctx: "_FuncCtx", func_name: str, symbol: str,
+                  module_body: bool = False) -> None:
+    """Record this frame: name, file, its line/text slots, and its own code.
+
+    `symbol` is the emitted function symbol, whose ADDRESS becomes the frame's
+    `index`. That is what makes the number traceable: printed as an RVA it names
+    exactly one compiled function, findable in a linker map or `objdump`, and
+    stable across runs because it is image-relative.
+
+    A captured return address was tried first and is not usable. The push runs
+    inside the function it belongs to, so its return address points into that
+    function's own prologue, not at the call site; and `[rbp+8]` cannot rescue it
+    because the prologue pushes callee-saved registers BEFORE `rbp`, so the
+    return address sits at a per-function offset. Function address plus line is
+    both exact and cheap.
+    """
     if not _tb_enabled(ctx):
         return
     slot = ctx.ensure_slot(_TB_LINE_SLOT, I64)
@@ -13893,8 +13937,18 @@ def _tb_emit_push(ctx: "_FuncCtx", func_name: str) -> None:
     exe_v = ctx.tmp(PTR)
     ctx.emit(IRInstr("global_addr", exe_v,
                      [ctx.mctx.intern_str(ctx.mctx.exe_name)]))
+    tslot = ctx.ensure_slot(_TB_TEXT_SLOT, PTR)
+    znull = ctx.tmp(PTR)
+    ctx.emit(IRInstr("const", znull, [0]))
+    ctx.emit(IRInstr("store", None, [znull, tslot]))
+    # The executable name is program-wide, so the module body records it once
+    # rather than every frame carrying a copy.
+    if module_body:
+        _store_global(ctx, "_tb_exe", exe_v)
+    func_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", func_v, [symbol]))
     ctx.emit(IRInstr("call", None,
-                     ["_abi_tb_push", name_v, file_v, slot, exe_v]))
+                     ["_abi_tb_push", name_v, file_v, slot, tslot, func_v]))
 
 
 def _tb_emit_pop(ctx: "_FuncCtx") -> None:
@@ -13912,6 +13966,12 @@ def _tb_emit_line(ctx: "_FuncCtx", line: int) -> None:
     lv = ctx.tmp(I64)
     ctx.emit(IRInstr("const", lv, [line]))
     ctx.emit(IRInstr("store", None, [lv, slot]))
+    text = _tb_source_line(ctx.mctx, line)
+    if text:
+        tslot = ctx.ensure_slot(_TB_TEXT_SLOT, PTR)
+        tv = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", tv, [ctx.mctx.intern_str(text)]))
+        ctx.emit(IRInstr("store", None, [tv, tslot]))
 
 
 def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
@@ -15645,7 +15705,8 @@ def lower_func(
             ctx.slot_el_ty[pname] = annot[1]
 
     # `<module>` matches CPython's name for module-level code.
-    _tb_emit_push(ctx, "<module>" if module_body else f.name)
+    _tb_emit_push(ctx, "<module>" if module_body else f.name, f.name,
+                  module_body=module_body)
 
     for st in f.body:
         _lower_stmt(ctx, st)
@@ -16270,6 +16331,7 @@ def _module_init_stmts(mod: A.Module) -> list:
 
 
 def lower_module(mod: A.Module, *, source_file: str = "<unknown>",
+                 source_path: str = "",
                  exe_name: str = "<program>",
                  embed_tracebacks: bool = False) -> IRModule:
     top_funcs, method_funcs = _reachable_callables(mod)
@@ -16305,6 +16367,7 @@ def lower_module(mod: A.Module, *, source_file: str = "<unknown>",
         getattr(mod, "mlang_code_funcs", {}),
         imported_funcs,
         source_file=source_file,
+        source_path=source_path,
         exe_name=exe_name,
         embed_tracebacks=embed_tracebacks,
     )

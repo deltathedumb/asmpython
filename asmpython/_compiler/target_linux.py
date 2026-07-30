@@ -527,7 +527,7 @@ class LinuxCodegen(Codegen):
             # name ptr, file ptr, line-slot ptr, entry index.
             self.emit("_tb_depth:  resq 1")
             self.emit("_tb_exe:    resq 1")
-            self.emit("_tb_frames: resq 4096")
+            self.emit("_tb_frames: resq 8192")   # 1024 frames x 64 bytes
             self.emit("_gc_memo_hit:  resq 1")
             self.emit("_gc_memo_miss: resq 1")
             self.emit("_gc_alloc_count: resq 1")
