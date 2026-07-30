@@ -4,6 +4,7 @@ Ordinary Python remains the language contract. Compiler features are exposed
 through optional Python APIs, command-line options, installable extensions, and
 compiler-visible metadata decorators.
 """
+
 from __future__ import annotations
 
 import builtins
@@ -12,33 +13,30 @@ import sys
 from types import ModuleType
 
 from . import (
-    annotations, backend, compiler_pass, embedded, extras, frontend, linker,
-    mlang, runtime,
+    annotations,
+    backend,
+    compiler_pass,
+    embedded,
+    extras,
+    frontend,
+    linker,
+    mlang,
+    runtime,
 )
+from .annotations import *
+from .annotations import __all__ as _annotations_all
 from .capabilities import CapabilitySet, Dependency
 from .compile_data import COMPILE_DATA, CompileData
 from .extension import Extension
-from .annotations import *
-from .annotations import __all__ as _annotations_all
-from ._version import (
-    ASMPYTHON_VERSION,
-    FULL_VERSION,
-    FULL_VERSION_INFO,
-    PACKAGING_VERSION,
-    PYTHON_LANGUAGE_VERSION,
-    PYTHON_VERSION_INFO,
-    RELEASE_VERSION,
-    VERSION_INFO,
-    asmpython_version,
-    full_version,
-    python_version,
-    __version__,
-)
+
+__version__ = "3.14.0"
+
 
 def __getattr__(name: str):
     """Resolve CPython-only host adapters without defining compiler intrinsics."""
     if name == "import_binary":
         from ._host_import_binary import import_binary
+
         return import_binary
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
@@ -60,16 +58,14 @@ def compile_function(
     def decorator(func):
         previous = getattr(func, "__asmpython_config__", {})
         config = dict(previous) if isinstance(previous, dict) else {}
-        config.update(
-            {
-                "dyn": dyn,
-                "gc": gc,
-                "exc": exc,
-                "refl": refl,
-                "free": free,
-                "enforced": list(config.get("enforced", [])),
-            }
-        )
+        config.update({
+            "dyn": dyn,
+            "gc": gc,
+            "exc": exc,
+            "refl": refl,
+            "free": free,
+            "enforced": list(config.get("enforced", [])),
+        })
         func.__asmpython_config__ = config
         return func
 
@@ -124,16 +120,6 @@ __all__ = [
     "CapabilitySet",
     "Dependency",
     "Extension",
-    "FULL_VERSION",
-    "FULL_VERSION_INFO",
-    "PACKAGING_VERSION",
-    "PYTHON_LANGUAGE_VERSION",
-    "PYTHON_VERSION_INFO",
-    "RELEASE_VERSION",
-    "VERSION_INFO",
-    "asmpython_version",
-    "full_version",
-    "python_version",
     "annotations",
     "backend",
     "compiler_pass",
