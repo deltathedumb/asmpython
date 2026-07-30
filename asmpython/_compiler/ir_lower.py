@@ -1922,6 +1922,14 @@ def _lower_comprehension(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
     # iterable path does for `for x in someset`) and iterate that list. Was
     # a hard "unsupported expr Comprehension (iter set)"/(iter dict) error.
     iter_from_keys = iter_ty in ("dict", "set")
+    # A SET source yields real member values, decoded out of the string each is
+    # stored under; a dict source yields its (genuinely str) keys.
+    keys_el_kind = (
+        _set_element_type(e.iter) if iter_ty == "set"
+        else (_dict_key_type(e.iter) if iter_ty == "dict" else "?")
+    )
+    if not _decodes_stored_keys(keys_el_kind):
+        keys_el_kind = "str"
     if iter_from_keys:
         iter_ty = "list"
     if iter_ty not in ("str", "list", "tuple"):
@@ -1931,6 +1939,10 @@ def _lower_comprehension(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
         src_v = _lower_expr(ctx, e.iter)
         iter_v = ctx.tmp(PTR)
         ctx.emit(IRInstr("call", iter_v, ["_abi_dict_keys", src_v]))
+        iter_v = _lower_decode_stored_keys(
+            ctx, iter_v, keys_el_kind, f"comp_{id(e)}"
+        )
+
     else:
         iter_v = _lower_expr(ctx, e.iter)
     iter_ptr = ctx.ensure_slot(f"__comp_iter_{id(e)}", ir_type_for(iter_ty))
@@ -1995,12 +2007,11 @@ def _lower_comprehension(ctx: _FuncCtx, e: A.Comprehension) -> IRValue:
     else:
         elem_addr = _list_elem_addr(ctx, body_iter_v, body_idx_v)
         if iter_from_keys:
-            # `_abi_dict_keys` yields the set/dict keys as str-shaped values
-            # -- mirror A.For's generic set/dict iteration, which types the
-            # loop var "str" for exactly this reason (see its `el_ty = "str"`
-            # for dict/set). A non-str key kind isn't distinguished by the
-            # key-list ABI, so "str" is the correct, For-consistent choice.
-            elem_kind = "str"
+            # `_abi_dict_keys` yields the keys as str-shaped values; a set's
+            # have already been decoded back to its member kind above, so the
+            # loop variable takes THAT (a dict's keys really are strs). Mirrors
+            # A.For's generic set/dict iteration.
+            elem_kind = keys_el_kind
         else:
             elem_kind = "any" if A.expr_type(e.iter) == "any" else (getattr(e.iter, "list_el_type", "int") or "int")
         var_ty = ir_type_for(elem_kind)
@@ -3346,6 +3357,190 @@ def _lower_dict_key(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     return _lower_expr_as_str(ctx, e, repr_mode=True)
 
 
+def _set_element_type(e: A.Expr) -> str:
+    """A set expression's MEMBER kind as sema stamped it; "?" when unknown.
+
+    The set analogue of `_list_element_type`. See sema's `_set_el_type`: a set
+    is a str-keyed dict holding `_lower_dict_key`'s canonical STRING encoding of
+    each member, so this is the only record of what those encodings meant.
+    """
+    return getattr(e, "set_el_type", "?") or "?"
+
+
+def _dict_key_type(e: A.Expr) -> str:
+    """A dict expression's KEY kind as sema stamped it; "str" when unknown.
+
+    The dict twin of `_set_element_type` -- see sema's `_dict_key_type`. A dict's
+    store is str-keyed, so a non-str key lives there as `_lower_dict_key`'s
+    canonical string encoding and this says what to decode it back to.
+    """
+    return getattr(e, "key_type", "str") or "str"
+
+
+def _decodes_stored_keys(el_ty: str) -> bool:
+    """Does a stored key have to be decoded to recover the value it encoded?
+
+    Shared by sets (member kind) and dicts (key kind) -- one store, one encoding,
+    one rule.
+
+    "str" needs nothing (the stored key IS the string), and "any"/"?" mean the
+    kind isn't known, in which case the raw key -- a str -- is the only honest
+    answer and also the historical behaviour. int and float are the kinds
+    `_lower_dict_key` encodes REVERSIBLY (decimal spelling / `repr`), so those
+    are the ones that round-trip.
+
+    Deliberately NOT bool: `A.expr_type` reports a bool-valued expression as
+    "int", so the encoder writes "1"/"0" -- while a `set[bool]` ANNOTATION says
+    "bool" and would have this decode "True"/"False". The two disagree, and a
+    wrong decode is worse than the pre-existing str answer.
+
+    A tuple/list/dict member is encoded by `repr`, which is canonical but not
+    invertible here, so those also stay undecoded -- the same limitation as
+    before this decoder existed.
+    """
+    return el_ty in ("int", "float")
+
+
+def _lower_decode_stored_keys(
+    ctx: _FuncCtx, keys_v: IRValue, el_ty: str, tag: str
+) -> IRValue:
+    """Decode a key-string list back into `el_ty` values, in place.
+
+    The exact inverse of `_lower_dict_key`'s encoder, and the single choke point
+    every reader that hands a set's members or a dict's keys back as PYTHON
+    VALUES goes through (`sorted`, `list()`/`tuple()`, `for x in c`, `s.pop()`,
+    `d.keys()`, `d.items()`, `d.popitem()`, `repr`). Without it a set of ints
+    read back as the decimal strings it was stored under -- `sorted({1, 2})`
+    gave `['1', '2']`.
+
+    `keys_v` must be the FRESH list `_abi_dict_keys` builds (it is rewritten
+    cell by cell), never a list that aliases anything else. A no-op for the
+    kinds `_decodes_stored_keys` rejects, so callers can route unconditionally.
+    """
+    if not _decodes_stored_keys(el_ty):
+        return keys_v
+    keys_ptr = ctx.ensure_slot(f"__setdec_keys_{tag}", PTR)
+    ctx.emit(IRInstr("store", None, [keys_v, keys_ptr]))
+    idx_ptr = ctx.ensure_slot(f"__setdec_idx_{tag}", I64)
+    z_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", z_v, [0]))
+    ctx.emit(IRInstr("store", None, [z_v, idx_ptr]))
+    len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_addr, [keys_v, _LIST_LEN_OFF]))
+    len_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", len_v, [len_addr]))
+
+    head_b = ctx.new_block("setdechead")
+    body_b = ctx.new_block("setdecbody")
+    end_b = ctx.new_block("setdecend")
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+    ctx.switch_to(head_b)
+    i_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_v, [idx_ptr]))
+    go_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", go_v, [i_v, len_v]))
+    ctx.emit(IRInstr("br.t", None, [go_v, body_b.label, end_b.label]))
+
+    ctx.switch_to(body_b)
+    bi_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", bi_v, [idx_ptr]))
+    cur_keys = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", cur_keys, [keys_ptr]))
+    slot = _list_elem_addr(ctx, cur_keys, bi_v)
+    key_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", key_v, [slot]))
+    if el_ty == "int":
+        dec_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", dec_v, ["_abi_str_to_int", key_v]))
+    else:
+        # float: the stored spelling is repr(x), which strtod parses back
+        # exactly (the same call `float(str)` itself lowers to). The list cell
+        # is a raw 8-byte slot, so the bits go in as an integer -- how every
+        # other float-element container stores them.
+        null_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("const", null_v, [0]))
+        f_v = ctx.tmp(F64)
+        ctx.emit(IRInstr("call", f_v, ["strtod", key_v, null_v]))
+        dec_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("bitcast_f2i", dec_v, [f_v]))
+    slot2 = _list_elem_addr(ctx, cur_keys, bi_v)
+    ctx.emit(IRInstr("store", None, [dec_v, slot2]))
+    one_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one_v, [1]))
+    ni_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", ni_v, [bi_v, one_v]))
+    ctx.emit(IRInstr("store", None, [ni_v, idx_ptr]))
+    ctx.emit(IRInstr("br", None, [head_b.label]))
+
+    ctx.switch_to(end_b)
+    out_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", out_v, [keys_ptr]))
+    return out_v
+
+
+def _lower_encode_member_key(ctx: _FuncCtx, val_v: IRValue, el_ty: str) -> IRValue:
+    """The stored key STRING for an ALREADY-LOWERED member value of kind `el_ty`.
+
+    The value-level twin of `_lower_dict_key`, which needs an expression: a set
+    built by draining an iterable (`set(xs)`, `s.update(xs)`) only has the
+    loop-carried value. Both must agree, because `x in s` encodes through
+    `_lower_dict_key` and the reader decodes through
+    `_lower_decode_stored_keys` -- three views of ONE encoding.
+
+    `_abi_fmt_elem` is that encoding for every scalar kind (decimal for int,
+    `repr` for float, the string itself for str), which is exactly what
+    `_lower_dict_key` produces; the previous inline version handled only int and
+    stored a float's raw double BITS as if they were a string pointer.
+    """
+    if el_ty not in ("int", "float"):
+        # str/any pass through (a str member IS its own key); a container or
+        # instance member has no invertible spelling, so it keeps the raw slot
+        # it always had rather than gaining a new, differently-wrong one.
+        return val_v
+    kind_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", kind_v, [_value_repr_kind(el_ty)]))
+    out_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", out_v, ["_abi_fmt_elem", val_v, kind_v]))
+    return out_v
+
+
+def _lower_set_members(ctx: _FuncCtx, e: A.Expr, tag: str) -> tuple[IRValue, str]:
+    """A set expression's members as a FRESH list of real values, plus the kind
+    those cells now hold. The one place `_abi_dict_keys` + the decoder are paired.
+
+    The returned kind is the READ kind, not the raw stamp: a member kind that
+    isn't decodable ("?", "any", "tuple", ...) leaves the cells holding the
+    stored key STRINGS, so "str" is what the caller must be told. Handing back
+    the raw stamp instead would let `sorted()` pick its integer comparator and
+    sort string pointers by address.
+    """
+    src_v = _lower_expr(ctx, e)
+    keys_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", src_v]))
+    el_ty = _set_element_type(e)
+    if not _decodes_stored_keys(el_ty):
+        return keys_v, "str"
+    return _lower_decode_stored_keys(ctx, keys_v, el_ty, tag), el_ty
+
+
+def _lower_keys_of(ctx: _FuncCtx, e: A.Expr, tag: str) -> tuple[IRValue, str]:
+    """A dict-or-set expression's KEYS/MEMBERS as a FRESH list of real values.
+
+    Same choke point as `_lower_set_members`, for the sites that accept either
+    kind of container (`for k in d`, `sorted`, `list()`, a comprehension source).
+    Returns the list plus the kind its cells now hold.
+    """
+    if A.expr_type(e) == "set":
+        return _lower_set_members(ctx, e, tag)
+    src_v = _lower_expr(ctx, e)
+    keys_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", src_v]))
+    kt = _dict_key_type(e)
+    if not _decodes_stored_keys(kt):
+        return keys_v, "str"
+    return _lower_decode_stored_keys(ctx, keys_v, kt, tag), kt
+
+
 def _collect_declared_globals(stmts: list, out: set[str]) -> None:
     for s in stmts:
         if isinstance(s, A.Global):
@@ -4149,6 +4344,169 @@ def _lower_dict_of_tuples_repr(
     return out_v
 
 
+def _lower_set_raw_member_repr(ctx: _FuncCtx, e, obj_v: IRValue) -> IRValue:
+    """repr of a set whose members are NOT strs, as `{1, 2}`.
+
+    Each member is stored as text that already reads as the member itself
+    (`_lower_dict_key` writes an int as its decimal spelling and a float as its
+    `repr`), so the repr is those strings joined -- no per-element formatting at
+    all, hence `_abi_str_join` over the key list rather than another hand-rolled
+    concat loop. CPython spells the empty set `set()`, which is what
+    `_abi_set_repr` does too, so the empty case still defers to it.
+    """
+    keys_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", obj_v]))
+    len_a = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_a, [keys_v, _LIST_LEN_OFF]))
+    len_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", len_v, [len_a]))
+    res_ptr = ctx.ensure_slot(f"__srmrep_{id(e)}", PTR)
+    zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero, [0]))
+    nonempty = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.ne", nonempty, [len_v, zero]))
+    full_b = ctx.new_block("srmrepfull")
+    empty_b = ctx.new_block("srmrepempty")
+    end_b = ctx.new_block("srmrepend")
+    ctx.emit(IRInstr("br.t", None, [nonempty, full_b.label, empty_b.label]))
+
+    ctx.switch_to(empty_b)
+    ekind = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", ekind, [1]))
+    eout = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", eout, ["_abi_set_repr", obj_v, ekind]))
+    ctx.emit(IRInstr("store", None, [eout, res_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(full_b)
+    sep_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", sep_v, [ctx.mctx.intern_str(", ")]))
+    body_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", body_v, ["_abi_str_join", sep_v, keys_v]))
+    open_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", open_v, [ctx.mctx.intern_str("{")]))
+    opened = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", opened, ["_abi_str_concat", open_v, body_v]))
+    close_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", close_v, [ctx.mctx.intern_str("}")]))
+    closed = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", closed, ["_abi_str_concat", opened, close_v]))
+    ctx.emit(IRInstr("store", None, [closed, res_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(end_b)
+    out_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", out_v, [res_ptr]))
+    return out_v
+
+
+def _lower_dict_raw_key_repr(
+    ctx: _FuncCtx, e, obj_v: IRValue, val_kind: int
+) -> IRValue:
+    """repr of a dict whose keys are NOT strs, as `{0: 'a', 1: 'b'}`.
+
+    `_abi_dict_repr` formats every key with one runtime kind, and the only kind
+    that matches a stored key's shape is 1 (str) -- which QUOTES it. So an
+    int-keyed dict printed `{'0': 'a'}`: right characters, wrong type.
+
+    There is nothing to convert here, though: `_lower_dict_key` stores an int key
+    as its decimal spelling and a float key as its `repr`, which is EXACTLY the
+    text those keys should print as. So the key text is the stored string used
+    verbatim, unquoted, and only the value goes through `_abi_fmt_elem`. Same
+    walk-the-key-list shape as `_lower_dict_of_tuples_repr`, which exists for the
+    mirror-image reason on the value side.
+    """
+    res_ptr = ctx.ensure_slot(f"__drkrep_res_{id(e)}", PTR)
+    open_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", open_v, [ctx.mctx.intern_str("{")]))
+    ctx.emit(IRInstr("store", None, [open_v, res_ptr]))
+
+    keys_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", obj_v]))
+    klen_a = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", klen_a, [keys_v, _LIST_LEN_OFF]))
+    klen = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", klen, [klen_a]))
+    idx_ptr = ctx.ensure_slot(f"__drkrep_idx_{id(e)}", I64)
+    z0 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", z0, [0]))
+    ctx.emit(IRInstr("store", None, [z0, idx_ptr]))
+
+    h_b = ctx.new_block("drkrephead")
+    b_b = ctx.new_block("drkrepbody")
+    sep_b = ctx.new_block("drkrepsep")
+    ent_b = ctx.new_block("drkrepent")
+    e_b = ctx.new_block("drkrepend")
+    ctx.emit(IRInstr("br", None, [h_b.label]))
+
+    ctx.switch_to(h_b)
+    i_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_v, [idx_ptr]))
+    go_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", go_v, [i_v, klen]))
+    ctx.emit(IRInstr("br.t", None, [go_v, b_b.label, e_b.label]))
+
+    ctx.switch_to(b_b)
+    bi_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", bi_v, [idx_ptr]))
+    zc = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zc, [0]))
+    first_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", first_v, [bi_v, zc]))
+    ctx.emit(IRInstr("br.t", None, [first_v, ent_b.label, sep_b.label]))
+
+    ctx.switch_to(sep_b)
+    cur_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", cur_v, [res_ptr]))
+    comma_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", comma_v, [ctx.mctx.intern_str(", ")]))
+    ws_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", ws_v, ["_abi_str_concat", cur_v, comma_v]))
+    ctx.emit(IRInstr("store", None, [ws_v, res_ptr]))
+    ctx.emit(IRInstr("br", None, [ent_b.label]))
+
+    ctx.switch_to(ent_b)
+    ei_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", ei_v, [idx_ptr]))
+    k_addr = _list_elem_addr(ctx, keys_v, ei_v)
+    k_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", k_v, [k_addr]))
+    prev_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", prev_v, [res_ptr]))
+    wk_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", wk_v, ["_abi_str_concat", prev_v, k_v]))
+    colon_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", colon_v, [ctx.mctx.intern_str(": ")]))
+    wc_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", wc_v, ["_abi_str_concat", wk_v, colon_v]))
+    dflt = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", dflt, [0]))
+    val_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", val_v, ["_abi_dict_get_default", obj_v, k_v, dflt]))
+    vkind = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", vkind, [val_kind]))
+    vtxt = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", vtxt, ["_abi_fmt_elem", val_v, vkind]))
+    after_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", after_v, ["_abi_str_concat", wc_v, vtxt]))
+    ctx.emit(IRInstr("store", None, [after_v, res_ptr]))
+    one_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one_v, [1]))
+    ni_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", ni_v, [ei_v, one_v]))
+    ctx.emit(IRInstr("store", None, [ni_v, idx_ptr]))
+    ctx.emit(IRInstr("br", None, [h_b.label]))
+
+    ctx.switch_to(e_b)
+    body_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", body_v, [res_ptr]))
+    close_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", close_v, [ctx.mctx.intern_str("}")]))
+    out_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("call", out_v, ["_abi_str_concat", body_v, close_v]))
+    return out_v
+
+
 def _lower_list_of_tuples_repr(ctx: _FuncCtx, e, obj_v: IRValue, slots: list) -> IRValue:
     """repr of a `list[tuple]` as `[(a, b), (c, d)]`, formatting every slot by
     its own static kind.
@@ -4816,12 +5174,26 @@ def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr, repr_mode: bool = False) -> IRV
             # runtime-length tuple formatter for each value.
             _dslots = list(getattr(e, "value_tuple_elem_types", []) or [])
             return _lower_dict_of_tuples_repr(ctx, e, obj, _dslots)
+        if _decodes_stored_keys(_dict_key_type(e)):
+            # Non-str keys are stored as text that already reads as the key
+            # itself, so print it unquoted -- `_abi_dict_repr`'s single key kind
+            # cannot express that. See `_lower_dict_raw_key_repr`.
+            return _lower_dict_raw_key_repr(
+                ctx, e, obj, _dict_value_repr_kind(e)
+            )
         ctx.emit(IRInstr("const", val_kind, [_dict_value_repr_kind(e)]))
         out = ctx.tmp(PTR)
         ctx.emit(IRInstr("call", out, ["_abi_dict_repr", obj, key_kind, val_kind]))
         return out
     if ty == "set":
         obj = _lower_expr(ctx, e)
+        if _decodes_stored_keys(_set_element_type(e)):
+            # `_abi_set_repr` formats the STORED keys, and its only kind that
+            # matches their shape is 1 (str) -- which quotes them, so an int set
+            # printed {'1', '2'}. The stored text already reads as the member
+            # itself (decimal for int, `repr` for float), so joining the raw key
+            # strings is the repr. Same reasoning as `_lower_dict_raw_key_repr`.
+            return _lower_set_raw_member_repr(ctx, e, obj)
         kind = ctx.tmp(I64)
         ctx.emit(IRInstr("const", kind, [1]))
         out = ctx.tmp(PTR)
@@ -6316,13 +6688,33 @@ def _lower_sort_key_call(ctx: _FuncCtx, sort_key: A.Lambda, el_kind: str, item_v
 def _lower_sort_tuple_int_first(
     ctx: _FuncCtx, e, out_v: IRValue
 ) -> IRValue:
-    """Sort tuple-layout elements by their first integer slot."""
+    """Sort tuple-layout elements by their first INTEGER slot.
+
+    Every pointer that has to survive the loop lives in a FRAME SLOT, not in an
+    SSA temporary. The loop body calls `_abi_list_append`, and a call clobbers
+    the caller-saved registers, so a `keys`/`out_v` value held in a temporary
+    across it comes back as garbage and the sort dereferences it -- which
+    segfaulted `sorted(h.items())` for an int-keyed dict while the str-keyed
+    form was fine. The sibling key= path directly below already parks its
+    `elems`/`keys` in slots for exactly this reason; this mirrors it.
+
+    `length` is parked for the same reason, and the zero index is rebuilt inside
+    the body rather than carried in, since a const costs nothing.
+    """
     len_addr = ctx.tmp(PTR)
     ctx.emit(IRInstr("gep", len_addr, [out_v, _LIST_LEN_OFF]))
-    length = ctx.tmp(I64)
-    ctx.emit(IRInstr("load", length, [len_addr]))
-    keys = _new_list_from_len(ctx, length)
+    length0 = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", length0, [len_addr]))
+
+    elems_ptr = ctx.ensure_slot(f"__sorttuple_elems_{id(e)}", PTR)
+    keys_ptr = ctx.ensure_slot(f"__sorttuple_keys_{id(e)}", PTR)
+    len_ptr = ctx.ensure_slot(f"__sorttuple_len_{id(e)}", I64)
     idx_ptr = ctx.ensure_slot(f"__sorttuple_idx_{id(e)}", I64)
+
+    keys0 = _new_list_from_len(ctx, length0)
+    ctx.emit(IRInstr("store", None, [out_v, elems_ptr]))
+    ctx.emit(IRInstr("store", None, [keys0, keys_ptr]))
+    ctx.emit(IRInstr("store", None, [length0, len_ptr]))
     zero = ctx.tmp(I64)
     ctx.emit(IRInstr("const", zero, [0]))
     ctx.emit(IRInstr("store", None, [zero, idx_ptr]))
@@ -6336,18 +6728,28 @@ def _lower_sort_tuple_int_first(
     ctx.switch_to(head_b)
     index = ctx.tmp(I64)
     ctx.emit(IRInstr("load", index, [idx_ptr]))
+    length = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", length, [len_ptr]))
     keep_going = ctx.tmp(I64)
     ctx.emit(IRInstr("icmp.lt", keep_going, [index, length]))
     ctx.emit(IRInstr("br.t", None, [keep_going, body_b.label, end_b.label]))
 
     ctx.switch_to(body_b)
-    tuple_addr = _list_elem_addr(ctx, out_v, index)
+    body_index = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", body_index, [idx_ptr]))
+    body_elems = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", body_elems, [elems_ptr]))
+    tuple_addr = _list_elem_addr(ctx, body_elems, body_index)
     tuple_value = ctx.tmp(PTR)
     ctx.emit(IRInstr("load", tuple_value, [tuple_addr]))
-    first_addr = _list_elem_addr(ctx, tuple_value, zero)
+    body_zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", body_zero, [0]))
+    first_addr = _list_elem_addr(ctx, tuple_value, body_zero)
     first = ctx.tmp(I64)
     ctx.emit(IRInstr("load", first, [first_addr]))
-    ctx.emit(IRInstr("call", None, ["_abi_list_append", keys, first]))
+    body_keys = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", body_keys, [keys_ptr]))
+    ctx.emit(IRInstr("call", None, ["_abi_list_append", body_keys, first]))
     ctx.emit(IRInstr("br", None, [cont_b.label]))
 
     ctx.switch_to(cont_b)
@@ -6361,8 +6763,12 @@ def _lower_sort_tuple_int_first(
     ctx.emit(IRInstr("br", None, [head_b.label]))
 
     ctx.switch_to(end_b)
-    ctx.emit(IRInstr("call", None, ["_abi_sort_pairs_int", out_v, keys]))
-    return out_v
+    final_elems = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", final_elems, [elems_ptr]))
+    final_keys = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", final_keys, [keys_ptr]))
+    ctx.emit(IRInstr("call", None, ["_abi_sort_pairs_int", final_elems, final_keys]))
+    return final_elems
 
 
 def _lower_sort_inplace(
@@ -6645,10 +7051,10 @@ def _lower_sorted(ctx: _FuncCtx, e: A.Call) -> IRValue:
     arg = e.args[0]
     arg_t = A.expr_type(arg)
     if arg_t in ("set", "dict"):
-        src_v = _lower_expr(ctx, arg)
-        out_v = ctx.tmp(PTR)
-        ctx.emit(IRInstr("call", out_v, ["_abi_dict_keys", src_v]))
-        el_kind = "str"
+        # A set's members / a dict's keys are stored as their canonical STRING
+        # encoding, so they have to be decoded back before sorting -- otherwise
+        # `sorted({1, 2})` sorted (and returned) the decimal spellings.
+        out_v, el_kind = _lower_keys_of(ctx, arg, f"sorted_{id(e)}")
     else:
         src_v = _lower_expr(ctx, arg)
         start_v = ctx.tmp(I64)
@@ -6663,11 +7069,18 @@ def _lower_sorted(ctx: _FuncCtx, e: A.Call) -> IRValue:
             el_kind = arg.el_type or "int"
         else:
             el_kind = getattr(arg, "list_el_type", "int") or "int"
-    tuple_key_kind = (
-        "str"
-        if isinstance(arg, A.MethodCall) and arg.method == "items"
-        else getattr(arg, "list_el_value_type", "int") or "int"
-    )
+    if isinstance(arg, A.MethodCall) and arg.method == "items":
+        # The first slot of each pair is the dict's KEY, so the comparison kind
+        # is the dict's key type -- not the constant "str" this used to assume.
+        # That assumption held while every key was stored as its string
+        # encoding; now that keys decode back to their real type, an int-keyed
+        # dict reached _abi_sort_items (a STRING compare) with integers in the
+        # slots and dereferenced them as pointers, so `sorted(h.items())`
+        # segfaulted while `h.items()` alone, iteration over it, and
+        # `sorted([3,1,2])` were all fine.
+        tuple_key_kind = _dict_key_type(arg.obj)
+    else:
+        tuple_key_kind = getattr(arg, "list_el_value_type", "int") or "int"
     return _lower_sort_inplace(
         ctx, e, out_v, el_kind, tuple_key_kind=tuple_key_kind
     )
@@ -8407,9 +8820,9 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         # (dicts and sets share the instance layout). Previously `list(set)`
         # was rejected outright by sema and `list(dict)` reached no lowering
         # at all, falling through to a call of a nonexistent `list` symbol.
-        src_v = _lower_expr(ctx, e.args[0])
-        out_v = ctx.tmp(PTR)
-        ctx.emit(IRInstr("call", out_v, ["_abi_dict_keys", src_v]))
+        # A SET's members then get decoded out of the string encoding they are
+        # stored under, so `list({1, 2})` is [1, 2] and not ['1', '2'].
+        out_v, _ = _lower_keys_of(ctx, e.args[0], f"listof_{id(e)}")
         return out_v
 
     if (
@@ -8624,7 +9037,13 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         zero_v = ctx.tmp(I64)
         ctx.emit(IRInstr("const", zero_v, [0]))
         ctx.emit(IRInstr("store", None, [zero_v, idx_ptr]))
-        el_ty = _iter_element_type(e.args[0])
+        # The member kind sema stamped on THIS call is what the reader will
+        # decode with (`_set_element_type`), so encode with the very same
+        # answer -- writer and reader cannot drift. `_iter_element_type` is the
+        # fallback for a source sema saw no element-kind signal in.
+        el_ty = _set_element_type(e)
+        if el_ty == "?":
+            el_ty = _iter_element_type(e.args[0])
 
         head_b = ctx.new_block("setcallhead")
         body_b = ctx.new_block("setcallbody")
@@ -8645,16 +9064,7 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         addr = _list_elem_addr(ctx, src_v, idx_v2)
         elem_v = ctx.tmp(ir_type_for(el_ty))
         ctx.emit(IRInstr("load", elem_v, [addr]))
-        if el_ty == "int":
-            base10 = ctx.tmp(I64)
-            ctx.emit(IRInstr("const", base10, [10]))
-            empty_name = ctx.mctx.intern_str("")
-            empty_v = ctx.tmp(PTR)
-            ctx.emit(IRInstr("global_addr", empty_v, [empty_name]))
-            key_v = ctx.tmp(PTR)
-            ctx.emit(IRInstr("call", key_v, ["_abi_int_to_base", elem_v, base10, empty_v]))
-        else:
-            key_v = elem_v
+        key_v = _lower_encode_member_key(ctx, elem_v, el_ty)
         out_v = ctx.tmp(PTR)
         ctx.emit(IRInstr("load", out_v, [out_ptr]))
         one_v = ctx.tmp(I64)
@@ -10030,9 +10440,7 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 # exists and is used by several other call sites
                 # (items(), for-in-dict, etc.); this MethodCall shape
                 # alone was never wired up.
-                obj_v = _lower_expr(ctx, e.obj)
-                v = ctx.tmp(PTR)
-                ctx.emit(IRInstr("call", v, ["_abi_dict_keys", obj_v]))
+                v, _ = _lower_keys_of(ctx, e.obj, f"dkeys_{id(e)}")
                 return v
             if e.method == "values" and not e.args:
                 obj_v = _lower_expr(ctx, e.obj)
@@ -10122,13 +10530,47 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("const", pcap_v, [2]))
                 ppair_v = ctx.tmp(PTR)
                 ctx.emit(IRInstr("call", ppair_v, ["_abi_new_list", pcap_v]))
-                ctx.emit(IRInstr("call", None, ["_abi_list_append", ppair_v, pkey_v]))
+                _pkt = _dict_key_type(e.obj)
+                if _decodes_stored_keys(_pkt):
+                    # Same rule as items(): the pop used the STORED key, but the
+                    # pair hands back a real value.
+                    pdec_v = _lower_decode_stored_keys(
+                        ctx, pk_v, _pkt, f"dpopitem_{id(e)}"
+                    )
+                    pdec_addr = _list_elem_addr(ctx, pdec_v, plast_v)
+                    pkey_out = ctx.tmp(ir_type_for(_pkt))
+                    ctx.emit(IRInstr("load", pkey_out, [pdec_addr]))
+                else:
+                    pkey_out = pkey_v
+                ctx.emit(IRInstr("call", None, ["_abi_list_append", ppair_v, pkey_out]))
                 ctx.emit(IRInstr("call", None, ["_abi_list_append", ppair_v, pval_v]))
                 return ppair_v
             if e.method == "items" and not e.args:
                 obj_v = _lower_expr(ctx, e.obj)
                 keys_v = ctx.tmp(PTR)
                 ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", obj_v]))
+                # The pair's KEY cell holds a real value, but the value lookup
+                # still needs the STORED (encoded) key -- so decode a copy and
+                # keep both lists. A str-keyed dict decodes to itself, in which
+                # case `_lower_decode_stored_keys` is a no-op and the two names
+                # simply alias.
+                _ikt = _dict_key_type(e.obj)
+                if _decodes_stored_keys(_ikt):
+                    _sl_lo = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", _sl_lo, [-9223372036854775808]))
+                    _sl_hi = ctx.tmp(I64)
+                    ctx.emit(IRInstr("const", _sl_hi, [9223372036854775807]))
+                    dkeys_v = ctx.tmp(PTR)
+                    ctx.emit(
+                        IRInstr("call", dkeys_v, ["_abi_list_slice", keys_v, _sl_lo, _sl_hi])
+                    )
+                    dkeys_v = _lower_decode_stored_keys(
+                        ctx, dkeys_v, _ikt, f"ditems_{id(e)}"
+                    )
+                else:
+                    dkeys_v = keys_v
+                dkeys_ptr = ctx.ensure_slot(f"__dictitems_dkeys_{id(e)}", PTR)
+                ctx.emit(IRInstr("store", None, [dkeys_v, dkeys_ptr]))
                 len_addr = ctx.tmp(PTR)
                 ctx.emit(IRInstr("gep", len_addr, [keys_v, _LIST_LEN_OFF]))
                 len_v = ctx.tmp(I64)
@@ -10167,11 +10609,16 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 key_addr = _list_elem_addr(ctx, body_keys, body_idx)
                 key_item = ctx.tmp(PTR)
                 ctx.emit(IRInstr("load", key_item, [key_addr]))
+                body_dkeys = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", body_dkeys, [dkeys_ptr]))
+                dkey_addr = _list_elem_addr(ctx, body_dkeys, body_idx)
+                dkey_item = ctx.tmp(PTR)
+                ctx.emit(IRInstr("load", dkey_item, [dkey_addr]))
                 pair_cap = ctx.tmp(I64)
                 ctx.emit(IRInstr("const", pair_cap, [2]))
                 pair_v = ctx.tmp(PTR)
                 ctx.emit(IRInstr("call", pair_v, ["_abi_new_list", pair_cap]))
-                ctx.emit(IRInstr("call", None, ["_abi_list_append", pair_v, key_item]))
+                ctx.emit(IRInstr("call", None, ["_abi_list_append", pair_v, dkey_item]))
                 val_ty = e.tuple_elem_types[1] if len(e.tuple_elem_types) >= 2 else "any"
                 # The pair's value cell is a raw 8-byte slot, and the consumer
                 # (target unpack / repr) already knows the slot's kind, so move
@@ -10456,6 +10903,19 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("load", first_key, [first_addr]))
                 obj_v2 = _lower_expr(ctx, e.obj)
                 ctx.emit(IRInstr("call", None, ["_abi_dict_pop", obj_v2, first_key]))
+                # The popped member is returned as a VALUE, so it has to come
+                # out of the string encoding it was stored under -- reuse the
+                # one decoder by decoding the 1-element key list and reading
+                # its cell back.
+                _pel = _set_element_type(e.obj)
+                if _decodes_stored_keys(_pel):
+                    dec_list = _lower_decode_stored_keys(
+                        ctx, keys_v, _pel, f"setpop_{id(e)}"
+                    )
+                    dec_addr = _list_elem_addr(ctx, dec_list, idx0)
+                    dec_v = ctx.tmp(ir_type_for(_pel))
+                    ctx.emit(IRInstr("load", dec_v, [dec_addr]))
+                    return dec_v
                 return first_key
             raise LowerError(f"unsupported expr MethodCall (set.{e.method})")
         if obj_ty == "str" and e.method == "format" and isinstance(e.obj, A.StrLit):
@@ -14390,8 +14850,16 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         iter_t = A.expr_type(s.iter)
         if iter_t not in ("list", "tuple", "dict", "set", "str", "any", "int"):
             raise LowerError(f"unsupported stmt For (iterating {iter_t!r})")
-        if iter_t in ("dict", "set"):
-            el_ty = "str"
+        if iter_t in ("set", "dict"):
+            # A set's members / a dict's keys are STORED as their canonical
+            # string encoding; the key list is decoded back below, so the loop
+            # variable takes that kind rather than the historical blanket "str".
+            el_ty = (
+                _set_element_type(s.iter) if iter_t == "set"
+                else _dict_key_type(s.iter)
+            )
+            if not _decodes_stored_keys(el_ty):
+                el_ty = "str"
         elif iter_t == "str":
             el_ty = "str"
         elif iter_t in ("any", "int"):
@@ -14422,6 +14890,7 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             dict_v = _lower_expr(ctx, s.iter)
             list_v = ctx.tmp(PTR)
             ctx.emit(IRInstr("call", list_v, ["_abi_dict_keys", dict_v]))
+            list_v = _lower_decode_stored_keys(ctx, list_v, el_ty, f"for_{id(s)}")
         else:
             list_v = _lower_expr(ctx, s.iter)
         list_ptr = ctx.ensure_slot(f"__for_iter_{id(s)}", PTR)

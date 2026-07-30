@@ -1047,6 +1047,11 @@ class DictComprehension:
     inferred_type: str = "dict"
     # Value kind of the produced dict (the static type of `value`).
     value_type: str = "int"
+    # KEY kind of the produced dict (the static type of `key`). The store is
+    # str-keyed, so a non-str key lives there as its canonical string encoding
+    # and this is what lets a reader decode it back -- see sema's
+    # `_dict_key_type`. "str" is both the default and "leave it encoded".
+    key_type: str = "str"
     # For `{k: v for a, b in <iter>}` the unpack targets land here (len >= 2).
     # When empty, the comprehension is single-target and `var` holds the one
     # name. Mirrors `A.For.targets`.
@@ -1209,6 +1214,12 @@ class SetLit:
 
     elems: list["Expr"] = field(default_factory=list)
     pos: SourcePos = field(default_factory=lambda: _NO_POS)
+    # Merged MEMBER kind of the literal's elements ("int"/"str"/"float"/
+    # "bool"/"any"), or "?" for an unknown/empty one. Filled in by sema; the
+    # set analogue of `ListLit.el_type`. A set's members are stored as their
+    # canonical STRING encoding, so this is what lets a reader decode them
+    # back (see sema's `_set_el_type`).
+    set_el_type: str = "?"
 
 
 @dataclass

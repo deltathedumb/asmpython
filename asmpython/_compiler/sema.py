@@ -557,8 +557,24 @@ class Scope:
     # per-slot element kinds of those tuples — so `xs[i][0]` and
     # `for a, b in xs` recover the slot types. Empty when unknown.
     list_el_tuple_types: dict[str, list[str]] = field(default_factory=dict)
-    # For names typed "dict", value kind. Keys are always str in v1.
+    # For names typed "set", the MEMBER kind -- "int" / "str" / "float" /
+    # "bool" / "any", or "?" while still unknown (a bare `set()` that nothing
+    # has added to yet). The set analogue of `list_el_types`: a set's members
+    # live in a str-keyed dict under `_lower_dict_key`'s canonical STRING
+    # encoding, so without this every read of a member (iteration, `sorted`,
+    # `list(s)`, `s.pop()`, `repr`) hands back that encoding instead of a value
+    # of the member's real type -- `sorted({1, 2})` came out as ['1', '2'].
+    set_el_types: dict[str, str] = field(default_factory=dict)
+    # For names typed "dict", value kind.
     dict_value_types: dict[str, str] = field(default_factory=dict)
+    # For names typed "dict", KEY kind. The runtime store is str-keyed, so every
+    # other key type is written as `_lower_dict_key`'s canonical string encoding
+    # -- and this is the only record of what that encoding meant, exactly as
+    # `set_el_types` is for a set's members. Without it an int-keyed dict read
+    # its keys back as strings: `{i: c for i, c in enumerate('abc')}` printed
+    # {'0': 'a', ...}. "str" is both the default and the "leave it encoded"
+    # answer; "?" means an empty `{}` whose first write still gets to pin it.
+    dict_key_types: dict[str, str] = field(default_factory=dict)
     # For names typed "dict" whose value kind is itself a container, the common
     # inner value/element kind of those nested containers — so `d[k][k2]` reads
     # the leaf type. "int"/absent when unknown.
@@ -598,6 +614,7 @@ class Scope:
         el_value_type: str | None = None,
         el_tuple_types: list[str] | None = None,
         value_type: str | None = None,
+        key_type: str | None = None,
         inner_value_type: str | None = None,
         value_tuple_types: list[str] | None = None,
         tuple_types: list[str] | None = None,
@@ -613,8 +630,12 @@ class Scope:
             self.list_el_value_types[name] = el_value_type
         if ty == "list" and el_tuple_types:
             self.list_el_tuple_types[name] = el_tuple_types
+        if ty == "set" and el_type is not None:
+            self.set_el_types[name] = el_type
         if ty == "dict" and value_type is not None:
             self.dict_value_types[name] = value_type
+        if ty == "dict" and key_type is not None:
+            self.dict_key_types[name] = key_type
         if ty == "dict" and inner_value_type is not None:
             self.dict_inner_value_types[name] = inner_value_type
         if ty == "dict" and value_tuple_types:
@@ -3432,7 +3453,9 @@ class SemaAnalyzer:
         g = self.global_scope
         scope.types.update(g.types)
         scope.list_el_types.update(g.list_el_types)
+        scope.set_el_types.update(g.set_el_types)
         scope.dict_value_types.update(g.dict_value_types)
+        scope.dict_key_types.update(g.dict_key_types)
         scope.dict_inner_value_types.update(g.dict_inner_value_types)
         scope.dict_value_tuple_types.update(g.dict_value_tuple_types)
         scope.tuple_elem_types.update(g.tuple_elem_types)
@@ -6205,12 +6228,16 @@ class SemaAnalyzer:
             scope.none_flags[name] = child.none_flags.get(name, False)
             if name in child.list_el_types:
                 scope.list_el_types[name] = child.list_el_types[name]
+            if name in child.set_el_types:
+                scope.set_el_types[name] = child.set_el_types[name]
             if name in child.list_el_value_types:
                 scope.list_el_value_types[name] = child.list_el_value_types[name]
             if name in child.list_el_tuple_types:
                 scope.list_el_tuple_types[name] = child.list_el_tuple_types[name]
             if name in child.dict_value_types:
                 scope.dict_value_types[name] = child.dict_value_types[name]
+            if name in child.dict_key_types:
+                scope.dict_key_types[name] = child.dict_key_types[name]
             if name in child.dict_inner_value_types:
                 scope.dict_inner_value_types[name] = child.dict_inner_value_types[name]
             if name in child.dict_value_tuple_types:
@@ -6275,13 +6302,20 @@ class SemaAnalyzer:
             # read and `_dict_value_type` already do. Scalars/containers/`any`
             # pass through unchanged.
             return "any" if el == "?" else self._normalize_instance_type(el)
-        if t in ("str", "dict", "set"):
-            # Iterating a str yields its chars; a dict/set yields its keys --
-            # all str-shaped values (see A.For's own generic set/dict
-            # iteration, which types the loop var "str" for the same reason).
-            # `set` was previously missing here, so a set-source comprehension
-            # (`[len(x) for x in someset]`) typed its loop var "int" and
-            # mis-lowered every use of it.
+        if t == "set":
+            # Iterating a set yields its MEMBERS. They are stored as their
+            # canonical string encoding, so the loop variable's real type is
+            # the set's member kind (the lowering decodes each key back to it);
+            # an unknown/mixed member kind keeps the historical str answer,
+            # which is literally what an undecoded key is.
+            el = self._set_el_type(e, scope)
+            return "str" if el in ("?", "any") else self._normalize_instance_type(el)
+        if t == "dict":
+            # Iterating a dict yields its KEYS, decoded back out of the string
+            # each is stored under (str keys need no decoding at all).
+            return self._dict_key_read_type(e, scope)
+        if t == "str":
+            # Iterating a str yields its 1-character chars.
             return "str"
         if t == "tuple":
             ets = self._tuple_elem_types(e, scope)
@@ -6406,6 +6440,95 @@ class SemaAnalyzer:
             # A conditional whose arms are lists: sema stamped the element kind.
             return getattr(e, "list_el_type", "int")
         return "int"
+
+    def _set_el_type(self, e, scope: Scope) -> str:
+        """Member type of a set-valued expression; "?" when still unknown.
+
+        The set analogue of `_list_el_type`. A set is a str-keyed dict holding
+        `_lower_dict_key`'s canonical STRING encoding of each member, so this
+        is the only thing that tells a READER (`sorted`, `list(s)`, iteration,
+        `s.pop()`, `repr`) which type to decode a stored key back to. Every
+        set-producing shape stamps `set_el_type` on its node (set literal /
+        `set()` / `frozenset()` / the `|`, `&`, `-` operators / the set methods
+        that return a set), and a set-typed Name reads it back out of the
+        scope, exactly as the list side does.
+
+        "?" (not "str") is the unknown answer so an empty `set()` can be
+        PINNED by the first `.add()`, the way an empty `[]` is pinned by its
+        first `.append()`. Readers treat "?" as "leave the stored key string
+        alone", which is the pre-existing behaviour.
+        """
+        if isinstance(e, A.Name):
+            return scope.set_el_types.get(e.name, "?")
+        return getattr(e, "set_el_type", "?") or "?"
+
+    @staticmethod
+    def _merge_el_type(a: str, b: str) -> str:
+        """Common element kind of two container operands.
+
+        "?" is "nothing known yet", so it yields to any real answer; `bool`
+        widens into `int` (bool IS an int in Python, same rule
+        `list.append()`'s pinning uses); anything else that disagrees widens
+        to the opaque "any", which readers leave undecoded rather than
+        decoding wrongly.
+        """
+        if a in ("?", "", None):
+            return b or "?"
+        if b in ("?", "", None):
+            return a
+        if a == b:
+            return a
+        if {a, b} == {"int", "bool"}:
+            return "int"
+        return "any"
+
+    def _pin_set_el_type(self, obj, el_t: str, scope: Scope) -> None:
+        """Teach a set VARIABLE its member kind from a mutation.
+
+        `s = set()` cannot know its member kind, so the first `s.add(x)` /
+        `s.update(xs)` supplies it -- the set analogue of an empty `[]` learning
+        its element kind from the first `.append()`. Later mutations that
+        disagree widen through `_merge_el_type` rather than letting the last one
+        win, so a genuinely mixed set ends up "any" (undecoded) instead of
+        silently decoding half its members with the wrong type.
+        """
+        if not isinstance(obj, A.Name) or el_t in ("?", "", None):
+            return
+        if scope.types.get(obj.name) != "set":
+            return
+        merged = self._merge_el_type(scope.set_el_types.get(obj.name, "?"), el_t)
+        scope.set_el_types[obj.name] = merged
+        obj.set_el_type = merged  # type: ignore[attr-defined]
+
+    def _iterable_el_type(self, e, scope: Scope) -> str:
+        """Member kind produced by draining `e` into a set/list.
+
+        Shared by `set(x)` / `frozenset(x)` / `s.update(x)`: each of those
+        takes ANY iterable, so the answer has to come from that iterable's own
+        element kind rather than from a single hardcoded guess. Returns "?"
+        when the source carries no element-kind signal.
+        """
+        t = A.expr_type(e)
+        if t == "list":
+            el = self._list_el_type(e, scope)
+            return "?" if el in ("?", "", None) else el
+        if t == "tuple":
+            ets = self._tuple_elem_types(e, scope)
+            if not ets:
+                return "?"
+            merged = "?"
+            for one in ets:
+                merged = self._merge_el_type(merged, one)
+            return merged
+        if t == "str":
+            # Iterating a str yields 1-character strs.
+            return "str"
+        if t == "set":
+            return self._set_el_type(e, scope)
+        if t == "dict":
+            # A dict drains to its KEYS -- whatever those read back as.
+            return self._dict_key_read_type(e, scope)
+        return "?"
 
     def _list_el_type_if_known(self, e, scope: Scope) -> str:
         """Like _list_el_type, but returns "any" (not "int") for shapes
@@ -6559,6 +6682,31 @@ class SemaAnalyzer:
             if cs is not None:
                 sig = cs.methods.get(m_part)
         return sig
+
+    def _dict_key_type(self, e, scope: Scope) -> str:
+        """KEY type of a dict-valued expression; "str" when unknown.
+
+        The dict twin of `_set_el_type`. The store is str-keyed, so a non-str key
+        lives there as `_lower_dict_key`'s canonical string encoding and this is
+        what lets a reader (`repr`, `d.keys()`, `for k in d`, `sorted(d)`,
+        `d.items()`) decode it back. "str" doubles as the unknown answer because
+        an undecoded key literally IS a str -- the pre-existing behaviour.
+        "?" is the distinct "empty `{}`, still pinnable" state.
+        """
+        if isinstance(e, A.Name):
+            return scope.dict_key_types.get(e.name, "str")
+        return getattr(e, "key_type", "str") or "str"
+
+    def _dict_key_read_type(self, e, scope: Scope) -> str:
+        """The type a dict's keys READ BACK as (iteration / `keys()` / `sorted`).
+
+        Only the kinds whose stored encoding is invertible -- int (decimal) and
+        float (`repr`) -- come back as themselves; everything else (including the
+        unknown "str"/"?" answers) reads back as the stored string, which is the
+        pre-existing behaviour and literally correct for a str-keyed dict.
+        """
+        kt = self._dict_key_type(e, scope)
+        return kt if kt in ("int", "float") else "str"
 
     def _dict_value_type(self, e, scope: Scope) -> str:
         """Value type of a dict-valued expression. 'int' if unknown."""
@@ -7384,6 +7532,7 @@ class SemaAnalyzer:
                         target,
                         "dict",
                         value_type=value_type,
+                        key_type=self._dict_key_type(value, scope),
                         inner_value_type=self._dict_inner_value_type(value, scope),
                         value_tuple_types=self._dict_value_tuple_types(value, scope),
                     )
@@ -7411,9 +7560,12 @@ class SemaAnalyzer:
                 target,
                 t,
                 value_type=self._dict_value_type(value, scope),
+                key_type=self._dict_key_type(value, scope),
                 inner_value_type=self._dict_inner_value_type(value, scope),
                 value_tuple_types=self._dict_value_tuple_types(value, scope),
             )
+        elif t == "set":
+            scope.add(target, t, el_type=self._set_el_type(value, scope))
         elif t == "tuple":
             scope.add(target, t, tuple_types=self._tuple_elem_types(value, scope))
         else:
@@ -7950,12 +8102,16 @@ class SemaAnalyzer:
                             ErrorCode.E_HETEROGENEOUS_TUPLE,
                         )
                 elif it_t == "dict":
-                    # Iterating a dict yields its keys (strings).
-                    scope.add(s.var, "str")
+                    # Iterating a dict yields its KEYS, decoded back out of the
+                    # string each is stored under.
+                    scope.add(s.var, self._iter_element_type(s.iter, scope))
                 elif it_t in ("set", "frozenset"):
-                    # Iterating a set yields its elements (opaque — could be str
-                    # or int, but we default to str which is the common case).
-                    scope.add(s.var, "str")
+                    # Iterating a set yields its MEMBERS, decoded back from the
+                    # canonical string each is stored under -- so the loop
+                    # variable takes the set's member kind. An unknown/mixed
+                    # kind stays "str", which is exactly what an undecoded
+                    # stored key is.
+                    scope.add(s.var, self._iter_element_type(s.iter, scope))
                 elif it_t == "str":
                     # Each iteration yields a fresh 1-char str.
                     scope.add(s.var, "str")
@@ -8267,6 +8423,16 @@ class SemaAnalyzer:
                         f"dict key must be hashable (str/int/float/bool/tuple/"
                         f"instance), got {_ikt}",
                         s.pos, ErrorCode.E_DICT_KEY_TYPE,
+                    )
+                if isinstance(s.target.obj, A.Name):
+                    # Record/merge the KEY kind, the mirror of the value-kind
+                    # pinning below: `d = {}` cannot know it, and `d[1] = 'a'`
+                    # is where an int-keyed dict usually comes from. A later
+                    # write with a different kind widens to "any" (undecoded)
+                    # rather than letting one of them win and decoding the
+                    # other's keys wrongly.
+                    scope.dict_key_types[s.target.obj.name] = self._merge_el_type(
+                        scope.dict_key_types.get(s.target.obj.name, "?"), _ikt
                     )
                 dvt = self._dict_value_type(s.target.obj, scope)
                 if (
@@ -9124,9 +9290,17 @@ class SemaAnalyzer:
                     e.el_tuple_types = list(  # type: ignore[attr-defined]
                         scope.list_el_tuple_types.get(e.name, [])
                     )
+            elif e.inferred_type == "set":
+                # A set READ has to carry its member kind onto the node, not
+                # just leave it in the scope: ir_lower decodes the stored key
+                # strings off the expression (see `_set_el_type`).
+                e.set_el_type = scope.set_el_types.get(e.name, "?")
             elif e.inferred_type == "dict":
                 e.value_type = scope.dict_value_types.get(e.name, "int")
                 e.inner_value_type = scope.dict_inner_value_types.get(e.name, "int")
+                # Carry the KEY kind onto the node too: ir_lower decodes the
+                # stored key strings off the expression (see `_dict_key_type`).
+                e.key_type = scope.dict_key_types.get(e.name, "str")
             elif e.inferred_type == "tuple":
                 e.tuple_elem_types = list(scope.tuple_elem_types.get(e.name, []))
             elif e.inferred_type == "int":
@@ -9241,12 +9415,23 @@ class SemaAnalyzer:
             if e.op == "|" and lt == "type" and rt == "type":
                 e.inferred_type = "type"  # type: ignore
                 return
-            # Set union/difference/intersection (|, -, &) returns a set.
+            # Set union/difference/intersection (|, -, &) returns a set. The
+            # result holds members drawn from the operands, so its member kind
+            # is theirs merged -- without it `sorted({1,2} & {2,3})` lost the
+            # int-ness the operands had and printed the stored key strings.
             if e.op in ("|", "&", "-") and lt == "set" and rt == "set":
                 e.inferred_type = "set"  # type: ignore
+                e.set_el_type = self._merge_el_type(  # type: ignore[attr-defined]
+                    self._set_el_type(e.left, scope),
+                    self._set_el_type(e.right, scope),
+                )
                 return
             if e.op == "|=" and lt == "set":
                 e.inferred_type = "set"  # type: ignore
+                e.set_el_type = self._merge_el_type(  # type: ignore[attr-defined]
+                    self._set_el_type(e.left, scope),
+                    self._set_el_type(e.right, scope) if rt == "set" else "?",
+                )
                 return
             # Dict union (PEP 584): `d1 | d2` builds a new dict containing
             # d1's entries with d2's entries merged in on top (d2 wins on
@@ -9736,8 +9921,10 @@ class SemaAnalyzer:
                 child = Scope()
                 child.types.update(scope.types)
                 child.list_el_types.update(scope.list_el_types)
+                child.set_el_types.update(scope.set_el_types)
                 child.list_el_tuple_types.update(scope.list_el_tuple_types)
                 child.dict_value_types.update(scope.dict_value_types)
+                child.dict_key_types.update(scope.dict_key_types)
                 child.dict_inner_value_types.update(scope.dict_inner_value_types)
                 child.tuple_elem_types.update(scope.tuple_elem_types)
                 idx_name: str = e.targets[0] if e.targets else ""
@@ -9791,13 +9978,16 @@ class SemaAnalyzer:
             if it_t == "list":
                 el = self._list_el_type(e.iter, scope)
             elif it_t in ("str", "dict", "set"):
-                # str chars / dict keys / set members are all str-shaped
-                # values in this backend (`_abi_dict_keys` yields the keys as
-                # strings; A.For's own generic set/dict iteration types its
-                # loop var "str" identically). `set` previously bound the
-                # loop var "any", which mis-typed every use of it in the
-                # element expression (e.g. `len(x)` read garbage).
-                el = "str"
+                # str chars and dict keys are str-shaped values in this backend
+                # (`_abi_dict_keys` yields the keys as strings). A SET's members
+                # are stored that way too, but carry a member kind the lowering
+                # decodes them back to, so they follow it -- shared with A.For's
+                # generic set iteration via `_iter_element_type`.
+                el = (
+                    self._iter_element_type(e.iter, scope)
+                    if it_t in ("set", "dict")
+                    else "str"
+                )
             elif it_t == "tuple":
                 ets = A.tuple_element_types(e.iter)
                 el = ets[0] if ets else "int"
@@ -9821,8 +10011,10 @@ class SemaAnalyzer:
             child = Scope()
             child.types.update(scope.types)
             child.list_el_types.update(scope.list_el_types)
+            child.set_el_types.update(scope.set_el_types)
             child.list_el_tuple_types.update(scope.list_el_tuple_types)
             child.dict_value_types.update(scope.dict_value_types)
+            child.dict_key_types.update(scope.dict_key_types)
             child.dict_inner_value_types.update(scope.dict_inner_value_types)
             child.tuple_elem_types.update(scope.tuple_elem_types)
             self._bind_comprehension_targets(e, el, child)
@@ -9895,8 +10087,10 @@ class SemaAnalyzer:
                 child = Scope()
                 child.types.update(scope.types)
                 child.list_el_types.update(scope.list_el_types)
+                child.set_el_types.update(scope.set_el_types)
                 child.list_el_tuple_types.update(scope.list_el_tuple_types)
                 child.dict_value_types.update(scope.dict_value_types)
+                child.dict_key_types.update(scope.dict_key_types)
                 child.dict_inner_value_types.update(scope.dict_inner_value_types)
                 child.tuple_elem_types.update(scope.tuple_elem_types)
                 idx_name: str = e.targets[0] if e.targets else ""
@@ -9931,6 +10125,20 @@ class SemaAnalyzer:
                 if e.cond is not None:
                     self._check_expr(e.cond, child)
                 self._check_expr(e.key, child)
+                # Same round-trip rule the generic dict-comprehension path
+                # applies below -- this enumerate fast path never had it, which
+                # is exactly how `{i: c for i, c in enumerate('abc')}` came out
+                # as {'0': 'a', ...}: an int key with nothing recording that it
+                # WAS an int.
+                if A.expr_type(e.key) not in ("str", "any", "int", "float"):
+                    raise SemaError(
+                        "dict comprehension keys must be str, int or float "
+                        "(other key kinds work for lookup but do not round-trip "
+                        "when the comprehension's result is iterated/printed)",
+                        getattr(e.key, "pos", e.pos),
+                        ErrorCode.E_DICT_KEY_TYPE,
+                    )
+                e.key_type = A.expr_type(e.key)  # type: ignore[attr-defined]
                 self._check_expr(e.value, child)
                 vt = A.expr_type(e.value)
                 e.inferred_type = "dict"
@@ -9942,7 +10150,7 @@ class SemaAnalyzer:
             if it_t == "list":
                 el = self._list_el_type(e.iter, scope)
             elif it_t in ("str", "dict"):
-                el = "str"
+                el = self._iter_element_type(e.iter, scope) if it_t == "dict" else "str"
             elif it_t == "tuple":
                 ets = A.tuple_element_types(e.iter)
                 el = ets[0] if ets else "int"
@@ -9956,8 +10164,10 @@ class SemaAnalyzer:
             child = Scope()
             child.types.update(scope.types)
             child.list_el_types.update(scope.list_el_types)
+            child.set_el_types.update(scope.set_el_types)
             child.list_el_tuple_types.update(scope.list_el_tuple_types)
             child.dict_value_types.update(scope.dict_value_types)
+            child.dict_key_types.update(scope.dict_key_types)
             child.dict_inner_value_types.update(scope.dict_inner_value_types)
             child.tuple_elem_types.update(scope.tuple_elem_types)
             self._bind_comprehension_targets(e, el, child)
@@ -9965,26 +10175,30 @@ class SemaAnalyzer:
             if e.cond is not None:
                 self._check_expr(e.cond, child)
             self._check_expr(e.key, child)
-            # Dict keys are stored as strings at the runtime level. Non-str
-            # keys work for LOOKUP (subscript / `in` / literal construction --
-            # ir_lower's `_lower_dict_key` encodes each to a canonical string),
-            # but a comprehension exists to be MATERIALIZED and then usually
-            # iterated/printed, and iteration yields the stored strings, not
-            # the original keys (`{v: k ...}` with int `v` would print/repr as
-            # `{'1': ...}`, not `{1: ...}`). So a comprehension key stays
-            # restricted to str/any -- where store and iterate agree -- rather
-            # than silently producing a value that round-trips wrong. (A
-            # genuinely non-str-keyed dict that is only ever looked up, like an
-            # lru_cache memo, is still fully supported via the imperative
-            # `cache[k] = v` / `k in cache` spellings, which don't iterate.)
-            if A.expr_type(e.key) not in ("str", "any"):
+            # Dict keys are stored as strings at the runtime level. Non-str keys
+            # always worked for LOOKUP (subscript / `in` / literal construction
+            # -- ir_lower's `_lower_dict_key` encodes each to a canonical
+            # string), but a comprehension exists to be MATERIALIZED and then
+            # usually iterated/printed, and iteration used to yield the stored
+            # strings rather than the original keys.
+            #
+            # The key kind is now RECORDED (`key_type`, see `_dict_key_type`) and
+            # readers decode it back, so the kinds whose encoding is invertible
+            # -- int (decimal) and float (repr) -- round-trip and are accepted.
+            # The rest (tuple/bool/instance) are canonical but NOT invertible, so
+            # they still get a clean refusal instead of a value that reads back
+            # wrong. (Such a dict is still fully supported when it is only ever
+            # looked up, via the imperative `cache[k] = v` / `k in cache`
+            # spellings, which never iterate.)
+            if A.expr_type(e.key) not in ("str", "any", "int", "float"):
                 raise SemaError(
-                    "dict comprehension keys must be strings "
-                    "(other key kinds work for lookup but not when the "
-                    "comprehension's result is iterated/printed)",
+                    "dict comprehension keys must be str, int or float "
+                    "(other key kinds work for lookup but do not round-trip "
+                    "when the comprehension's result is iterated/printed)",
                     getattr(e.key, "pos", e.pos),
                     ErrorCode.E_DICT_KEY_TYPE,
                 )
+            e.key_type = A.expr_type(e.key)  # type: ignore[attr-defined]
             self._check_expr(e.value, child)
             vt = A.expr_type(e.value)
             if vt not in (
@@ -10007,6 +10221,11 @@ class SemaAnalyzer:
             self._merge_walrus_bindings(scope, child, loop_vars)
             return
         if isinstance(e, A.DictLit):
+            # Merged KEY kind, recorded on the literal so a reader can decode
+            # the stored key encoding back (see `_dict_key_type`). An empty `{}`
+            # stays "?" so the first `d[k] = v` can pin it, exactly as an empty
+            # `[]`/`set()` is pinned by its first append/add.
+            _dkt = "?"
             for k, v in zip(e.keys, e.values):
                 if isinstance(k, A.Name) and k.name == "**":
                     # `**other` (PEP 448 dict unpacking): `other` must itself
@@ -10019,6 +10238,11 @@ class SemaAnalyzer:
                             getattr(v, "pos", e.pos),
                             ErrorCode.E_DICT_UNPACK_TYPE,
                         )
+                    # A spread contributes the spread dict's key kind too.
+                    _dkt = self._merge_el_type(
+                        _dkt,
+                        "any" if vt == "any" else self._dict_key_type(v, scope),
+                    )
                     continue
                 self._check_expr(k, scope)
                 _klt = A.expr_type(k)
@@ -10029,6 +10253,8 @@ class SemaAnalyzer:
                         getattr(k, "pos", e.pos),
                         ErrorCode.E_DICT_KEY_TYPE,
                     )
+                _dkt = self._merge_el_type(_dkt, _klt)
+            e.key_type = _dkt  # type: ignore[attr-defined]
             # Dict values must be homogeneous: all int, all str, all float, all
             # instances of one class, or all of one pointer-sized collection
             # kind (dict / list / set / tuple). Nested collections are stored
@@ -10190,11 +10416,13 @@ class SemaAnalyzer:
             e.elem_types = ets
             return
         if isinstance(e, A.SetLit):
-            # A `{a, b, ...}` set literal. Elements are checked but their kind
-            # isn't tracked (set membership is the only operation modelled);
-            # `expr_type` already reports a SetLit as "set". The backing store
-            # is a str-keyed dict; `int` elements are accepted by converting
-            # to their decimal string at codegen time (see _gen_set_lit).
+            # A `{a, b, ...}` set literal. `expr_type` already reports a SetLit
+            # as "set"; the MEMBER kind is merged across the elements and
+            # stamped as `set_el_type` so a later read can decode the stored
+            # key encoding back to it (see `_set_el_type`). The backing store is
+            # a str-keyed dict; `int` elements are accepted by converting to
+            # their decimal string at codegen time (see _gen_set_lit).
+            _set_el = "?"
             for el in e.elems:
                 self._check_expr(el, scope)
                 et = A.expr_type(el)
@@ -10217,6 +10445,8 @@ class SemaAnalyzer:
                         getattr(el, "pos", e.pos),
                         ErrorCode.E_SET_KEY_TYPE,
                     )
+                _set_el = self._merge_el_type(_set_el, et)
+            e.set_el_type = _set_el  # type: ignore[attr-defined]
             return
         if isinstance(e, A.Subscript):
             self._check_expr(e.obj, scope)
@@ -11197,7 +11427,9 @@ class SemaAnalyzer:
                     if e.args:
                         raise SemaError("dict.keys() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "list"
-                    e.list_el_type = "str"
+                    # Element kind = what the dict's keys READ BACK as (str for a
+                    # str-keyed dict, the decoded kind otherwise).
+                    e.list_el_type = self._dict_key_read_type(e.obj, scope)
                 elif e.method == "values":
                     if e.args:
                         raise SemaError("dict.values() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
@@ -11220,7 +11452,10 @@ class SemaAnalyzer:
                     e.inferred_type = "list"
                     e.list_el_type = "tuple"
                     # Pair shape for `for k, v in d.items()` target typing.
-                    e.tuple_elem_types = ["str", self._dict_value_type(e.obj, scope)]
+                    e.tuple_elem_types = [
+                        self._dict_key_read_type(e.obj, scope),
+                        self._dict_value_type(e.obj, scope),
+                    ]
                 elif e.method == "update":
                     # d.update(other): merge another dict in. Lenient on the
                     # argument kind; returns None (~0).
@@ -11258,11 +11493,15 @@ class SemaAnalyzer:
                             ErrorCode.E_ARG_COUNT,
                         )
                     e.inferred_type = "tuple"
-                    e.tuple_elem_types = ["str", self._dict_value_type(e.obj, scope)]
+                    e.tuple_elem_types = [
+                        self._dict_key_read_type(e.obj, scope),
+                        self._dict_value_type(e.obj, scope),
+                    ]
                 elif e.method == "copy":
                     if e.args:
                         raise SemaError("dict.copy() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "dict"
+                    e.key_type = self._dict_key_type(e.obj, scope)
                     e.value_type = self._dict_value_type(e.obj, scope)
                     if e.value_type in ("list", "dict"):
                         e.inner_value_type = self._dict_inner_value_type(e.obj, scope)
@@ -11735,8 +11974,19 @@ class SemaAnalyzer:
                             e.args[0].pos,
                             ErrorCode.E_SET_KEY_TYPE,
                         )
+                    if e.method == "add":
+                        # `s = set()` leaves the member kind unknown; the first
+                        # `.add()` PINS it, exactly as the first `.append()`
+                        # pins an empty list's element kind. Without this
+                        # `set().add(1)` produced a set nothing could read back
+                        # as ints.
+                        self._pin_set_el_type(e.obj, arg_t, scope)
                     e.inferred_type = "int"
                 elif e.method in ("update", "clear"):
+                    if e.method == "update" and len(e.args) == 1:
+                        self._pin_set_el_type(
+                            e.obj, self._iterable_el_type(e.args[0], scope), scope
+                        )
                     e.inferred_type = "int"
                 elif e.method in (
                     "isdisjoint", "issuperset",
@@ -11765,14 +12015,26 @@ class SemaAnalyzer:
                             ErrorCode.E_ARG_COUNT,
                         )
                     e.inferred_type = "set"
+                    # The result's members come from the receiver (and, for
+                    # union, the argument too), so it inherits their kind.
+                    e.set_el_type = self._merge_el_type(  # type: ignore[attr-defined]
+                        self._set_el_type(e.obj, scope),
+                        self._iterable_el_type(e.args[0], scope)
+                        if e.method == "union"
+                        else "?",
+                    )
                 elif e.method == "copy":
                     if e.args:
                         raise SemaError("set.copy() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
                     e.inferred_type = "set"
+                    e.set_el_type = self._set_el_type(e.obj, scope)  # type: ignore[attr-defined]
                 elif e.method == "pop":
                     if e.args:
                         raise SemaError("set.pop() takes no arguments", e.pos, ErrorCode.E_ARG_COUNT)
-                    e.inferred_type = "str"
+                    # A popped member is a real value of the set's member kind,
+                    # not the string it was stored under.
+                    _pel = self._set_el_type(e.obj, scope)
+                    e.inferred_type = "str" if _pel in ("?", "any") else _pel
                 else:
                     e.inferred_type = "any"
             elif isinstance(e.obj, A.Name) and e.obj.name in self.classes:
@@ -13928,6 +14190,15 @@ class SemaAnalyzer:
                             e.pos,
                             ErrorCode.E_SET_KEY_TYPE,
                         )
+                # `set(x)` / `frozenset(x)` / a set comprehension (which the
+                # parser desugars to `set(<list comprehension>)`) all drain an
+                # iterable, so the resulting set's member kind is that
+                # iterable's element kind. Stamping it here is what makes
+                # `sorted(set(range(3)))` a list[int] rather than a list of the
+                # stored key strings.
+                e.set_el_type = (  # type: ignore[attr-defined]
+                    self._iterable_el_type(e.args[0], scope) if e.args else "?"
+                )
                 return
             if e.func in (
                 "bool",
@@ -14008,8 +14279,17 @@ class SemaAnalyzer:
                 # lists/tuples keep their element kind for printing/iteration.
                 self._check_sort_kwargs(e, scope)
                 t = A.expr_type(e.args[0])
-                if t in ("set", "dict"):
-                    e.list_el_type = "str"
+                if t == "set":
+                    # A set's members are STORED as their canonical string
+                    # encoding, but `sorted()` hands back real values, so the
+                    # result's element kind is the set's member kind (the
+                    # lowering decodes each stored key back to it). Unknown
+                    # ("?") keeps the historical str answer -- an undecoded
+                    # key IS a str.
+                    _sel = self._set_el_type(e.args[0], scope)
+                    e.list_el_type = "str" if _sel in ("?", "any") else _sel
+                elif t == "dict":
+                    e.list_el_type = self._dict_key_read_type(e.args[0], scope)
                 else:
                     e.list_el_type = self._list_el_type(e.args[0], scope)
                     if e.list_el_type == "tuple":
@@ -14066,9 +14346,21 @@ class SemaAnalyzer:
                         e.pos,
                         ErrorCode.E_ARG_TYPE,
                     )
-                if t in ("dict", "set", "str"):
-                    # Iterating a dict/set yields its (str) keys; iterating a
-                    # str yields 1-character strings.
+                if t == "set":
+                    # `list(s)` yields the set's MEMBERS, so it carries the
+                    # set's member kind (the lowering decodes each stored key
+                    # string back to it). "?"/"any" keeps the historical str
+                    # answer -- an undecoded key IS a str.
+                    _sel = self._set_el_type(e.args[0], scope)
+                    e.list_el_type = "str" if _sel in ("?", "any") else _sel
+                    return
+                if t == "dict":
+                    # Iterating a dict yields its KEYS, decoded back out of the
+                    # string each is stored under.
+                    e.list_el_type = self._dict_key_read_type(e.args[0], scope)
+                    return
+                if t == "str":
+                    # Iterating a str yields 1-character strings.
                     e.list_el_type = "str"
                     return
                 e.list_el_type = self._list_el_type(e.args[0], scope)
