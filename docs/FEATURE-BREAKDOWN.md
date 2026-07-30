@@ -193,7 +193,7 @@ Legend:
 | Available stdlib | ⚠️ | `math` (22 fns + 5 consts) and `os` (`system`, `getenv`, `_exit`, plus file I/O: `fopen`/`fgetc`/`fclose`/`_access`). That's it today — see the 1.0 `asmpython.libs` plan in [roadmap.md](roadmap.md). |
 | `import x as y` / `from x import a as b` | ✅ | |
 | Unmodeled attr of a known module (`os.environ`, `os.sep`) | ⚠️ | Type-checks as opaque (front-end leniency); no codegen. |
-| Dotted imports (`import os.path`) | ⚠️ | Leading segment binds; submodule lookup is post-bootstrap. |
+| Dotted imports (`import os.path`) | ✅ | `os.path.basename(p)` resolves to the merged symbol, as do `urllib.parse`, `xml.etree`, `http.server`, `concurrent.futures`. `import a.b as c` and shadowing (`os = 5`) behave as CPython. Previously the unaliased dotted form bound nothing, so the name was an unbound local and the call segfaulted. |
 | Relative imports (`from .x import y`) | ⚠️ | Functions and classes from a sibling project module are merged in (whole-program compile). A relative-imported *value* (`from .x import SOME_DICT`) is now materialized too — its initializer is pulled into the program as a global, **transitively** (deps emitted first) when self-contained. Names whose initializer needs a CPython-runtime value stay opaque. |
 | Importing another user `.py` file | ⚠️ | Whole-program loader (`_compiler/program.py`) discovers the import graph and merges sibling modules' funcs, classes, and self-contained value globals into one compilation unit. `from . import mod as M` then `M.func(x)` dispatches to the merged function. No per-file `.o` linking; no executing arbitrary module-level side effects. |
 | `__name__` / `__file__` dunders | ⚠️ | Provided as str (`__name__ == "__main__"` works); one entry point per program. |
@@ -232,6 +232,16 @@ These are intentionally **not** goals — asmpython compiles to flat machine cod
 so the interpreter machinery has no analogue:
 
 - The GIL, bytecode / `dis`, the C-API / C extensions (`.pyd`/`.so` modules).
+- Dotted imports: `import os.path` + `os.path.basename(p)`, and the same for
+  every bundled module whose name has a dot (`urllib.parse`, `xml.etree`,
+  `http.server`, `concurrent.futures`, ...). `import a.b as c` and a shadowing
+  rebind (`os = 5` disabling the rewrite) behave as CPython does.
+
+  Previously this bound NOTHING -- an unaliased dotted import fell through the
+  binder entirely -- so `os` was an unbound local, `os.path.basename` compiled
+  to a dict lookup on it, and the resulting 0 was dereferenced. A segfault, not
+  a diagnostic.
+
 - Developer tracebacks, via `--embed-tracebacks`. An unhandled exception prints
   CPython's structure -- header, one indented frame line per level outermost
   first, exception last -- with native details:

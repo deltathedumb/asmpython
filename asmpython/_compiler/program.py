@@ -1750,29 +1750,44 @@ def _rewrite_module_qualified(
     Reuses `_walk_exprs` for the statement shapes rather than repeating the
     per-node chain a third time.
     """
+    def spelling(e) -> "str | None":
+        """The dotted spelling of a Name/Attr chain (`a.b.c`), else None.
+
+        A module reference can be any depth -- `os.path.basename` is
+        Attr(Attr(Name(os), path), basename) -- so matching only a bare
+        `Name` saw single-segment modules and nothing else.
+        """
+        parts: list[str] = []
+        cur = e
+        while isinstance(cur, A.Attr):
+            parts.append(cur.name)
+            cur = cur.obj
+        if not isinstance(cur, A.Name):
+            return None
+        parts.append(cur.name)
+        parts.reverse()
+        return ".".join(parts)
+
+    def usable(dotted: "str | None") -> bool:
+        # Shadowing is judged on the ROOT name: `os = 5` makes `os.path.x` an
+        # attribute access on an int, however deep the chain goes.
+        return dotted is not None and dotted.split(".", 1)[0] not in shadowed
+
     def fix(e):
         if isinstance(e, A.MethodCall):
-            obj = e.obj
-            if (
-                isinstance(obj, A.Name)
-                and obj.name not in shadowed
-                and f"{obj.name}.{e.method}" in renames
-            ):
+            base = spelling(e.obj)
+            if usable(base) and f"{base}.{e.method}" in renames:
                 return A.Call(
-                    func=renames[f"{obj.name}.{e.method}"],
+                    func=renames[f"{base}.{e.method}"],
                     args=list(e.args),
                     kwargs=list(e.kwargs),
                     pos=e.pos,
                 )
             return None
         if isinstance(e, A.Attr):
-            obj = e.obj
-            if (
-                isinstance(obj, A.Name)
-                and obj.name not in shadowed
-                and f"{obj.name}.{e.name}" in renames
-            ):
-                return A.Name(name=renames[f"{obj.name}.{e.name}"], pos=e.pos)
+            base = spelling(e.obj)
+            if usable(base) and f"{base}.{e.name}" in renames:
+                return A.Name(name=renames[f"{base}.{e.name}"], pos=e.pos)
             return None
         return None
 
@@ -1881,12 +1896,22 @@ def _module_alias_targets(
             target = _resolve_bundled_stdlib(stmt.module)
         if target is None:
             continue
-        # `import a.b.c as d` binds `d`; without an alias the name bound is the
-        # LEADING segment (`import a.b.c` binds `a`), which cannot name the
-        # leaf module's own functions -- only the aliased spelling can.
+        # `import a.b.c as d` binds `d`, and the unaliased form is reached by
+        # its FULL DOTTED SPELLING -- `import os.path` is used as
+        # `os.path.basename(...)`, never as `path.basename(...)`. Keying on the
+        # spelling covers both: "json" for a plain import, "os.path" for a
+        # dotted one.
+        #
+        # This previously bound NOTHING for a dotted import, on the reasoning
+        # that `import a.b.c` binds only the leading segment and so "cannot name
+        # the leaf module's own functions". True of the leading segment, but the
+        # dotted spelling names them exactly, and dropping it meant `os` stayed
+        # unbound: `os.path.basename(p)` lowered to a dict lookup on an
+        # uninitialised local, returned 0, and crashed dereferencing it. Four
+        # ospath cases plus others in the corpus.
         if stmt.alias:
             out[stmt.alias] = str(target.resolve())
-        elif "." not in stmt.module:
+        else:
             out[stmt.module] = str(target.resolve())
     return out
 
