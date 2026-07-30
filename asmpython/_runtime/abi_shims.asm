@@ -30,6 +30,7 @@ extern _runtime_str_char_at
 extern _runtime_str_slice
 extern _runtime_zalloc
 extern _runtime_objalloc
+extern _runtime_gc_is_object
 extern _runtime_objfree
 extern _runtime_list_append
 extern _runtime_list_pop
@@ -119,6 +120,7 @@ global _abi_str_char_at
 global _abi_str_slice
 global _abi_new_instance
 global _abi_new_box
+global _abi_gc_is_object
 global _abi_new_list
 global __chkstk
 global _abi_list_append
@@ -438,6 +440,28 @@ _abi_new_instance:
 ; scalar bits (float bit-pattern for float, string pointer for str).
 ;
 ;   _abi_new_box(tag=rcx, payload=rdx) -> rax
+; _abi_gc_is_object(candidate) -> 1 if `candidate` is a payload pointer the
+; object registry handed out, else 0.
+;
+; Exists because the _runtime_gc_* helpers use a private convention -- argument
+; and result both in RAX -- while compiled code emits ordinary Win64 calls with
+; the first argument in RCX. Calling _runtime_gc_is_object directly from
+; ir_lower passed the candidate in rcx and let the helper test whatever rax
+; happened to hold, which read as "registered" or not at random: a boxed dict
+; value printed as its raw pointer (1794096 instead of 1078200).
+;
+; This is the whole reason the _abi_* layer exists; the fix is to go through it
+; rather than to change the helper's convention, which every other GC caller
+; already relies on.
+_abi_gc_is_object:
+    WIN64_RUNTIME_ENTER
+    sub rsp, 32
+    mov rax, rcx
+    call _runtime_gc_is_object
+    add rsp, 32
+    WIN64_RUNTIME_LEAVE
+    ret
+
 _abi_new_box:
     WIN64_RUNTIME_ENTER
     sub rsp, 48

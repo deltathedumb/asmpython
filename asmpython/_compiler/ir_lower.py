@@ -12711,6 +12711,41 @@ def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     report `UNTAGGED_ID` for a list-shaped value instead of dereferencing it
     as a dict. This is the same low-address discriminator the dynamic-slice
     subscript uses for an opaque index.
+
+    The "is this a heap pointer" question is answered by the OBJECT REGISTRY,
+    not by inspecting the bit pattern. `> PTR_THRESHOLD` and 8-byte alignment
+    are kept only as a cheap reject: they cost two ALU ops and eliminate small
+    integers without a call. Anything that survives them is checked against
+    the registry, which answers "is this exactly an address we handed out" and
+    therefore has NO FALSE POSITIVES.
+
+    That matters because the heuristic alone is not sound. An ordinary integer
+    can be above the threshold and 8-byte aligned, and the code below then
+    DEREFERENCES it looking for BOX_MAGIC. Summing a list of lists --
+
+        for r in keep: total = total + r[0] + r[1] + r[2]
+
+    made sema type the EXPRESSION `total` as "any" (an operand was "any")
+    while the SLOT stayed `i64`, so `print(total)` tag-dispatched on a raw
+    integer. At 600 rows that total is 1078200: above the threshold, 8-byte
+    aligned, and unmapped. gdb showed the fault on `mov (%r12),%rdi` with
+    r12 = 1078200, one instruction before the BOX_MAGIC compare. n=300 and
+    n=500 survived only because their totals happen to be misaligned, which is
+    why this read as a mysterious size limit and why the corpus -- whose
+    numbers are all small -- never caught it.
+
+    Gating on the IR type instead (I64 cannot be a box) was tried first and is
+    WRONG: an instance pointer does reach here in an i64-typed value, and
+    `471_type_parameter_specialization` turned `store.find(Item) is item` from
+    True into False. The registry makes no such assumption -- it asks about the
+    value, not about how the IR happens to type it.
+
+    COST, stated plainly: the registry is a linked list, so each probe is
+    O(live objects). A 3000-row sum went from ~0.9s to 6.1s. That is a real
+    price and the right next move is to make membership O(1) -- a hash set or
+    sorted table, which `_runtime_gc_is_object`'s own comment already
+    anticipates. It is paid here because the alternative is a collector-grade
+    heuristic deciding whether to dereference an integer, and that crashes.
     """
     PTR_THRESHOLD = 0x10000
     DICT_CAP_INIT = 8  # word-0 of an _abi_new_instance dict cell (DICT_CAP_OFF=8)
@@ -12761,7 +12796,33 @@ def _lower_read_any_tag(ctx: "_FuncCtx", obj_v: IRValue) -> IRValue:
     ctx.emit(IRInstr("icmp.eq", aligned, [low_bits, zero_lb]))
     is_heap = ctx.tmp(I64)
     ctx.emit(IRInstr("iand", is_heap, [gt_thr, aligned]))
-    ctx.emit(IRInstr("br.t", None, [is_heap, boxcheck_b.label, rawint_b.label]))
+    # Looks like a pointer. Now ask whether it IS one. The registry answers
+    # "is this exactly an address we handed out", with no false positives, and
+    # only then is `[obj_v]` safe to read.
+    #
+    # Unconditional, on purpose. Two cheaper gates were tried and BOTH are
+    # wrong, because the IR type is untrustworthy in both directions:
+    #   * "an I64 is never a box" -- false; an instance pointer arrives here in
+    #     an i64-typed value, and assuming otherwise turned
+    #     471_type_parameter_specialization's `store.find(Item) is item` from
+    #     True into False.
+    #   * "a PTR is always a real pointer, so skip the check" -- also false; a
+    #     raw integer arrives in a PTR-typed value, and skipping the check
+    #     brought the original segfault straight back.
+    # Anything that keys off the static type is therefore unsound here. The
+    # value has to be asked about directly.
+    #
+    # Through the _abi_ shim, not `_runtime_gc_is_object` directly: the GC
+    # helpers take their argument and result in RAX, while a compiled call puts
+    # the argument in RCX. Calling the helper directly let it test whatever rax
+    # happened to hold, so a boxed dict value printed as its raw pointer
+    # (1794096 instead of 1078200) -- intermittently, which is worse.
+    regcheck_b = ctx.new_block("anytagregcheck")
+    ctx.emit(IRInstr("br.t", None, [is_heap, regcheck_b.label, rawint_b.label]))
+    ctx.switch_to(regcheck_b)
+    registered = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", registered, ["_abi_gc_is_object", obj_v]))
+    ctx.emit(IRInstr("br.t", None, [registered, boxcheck_b.label, rawint_b.label]))
 
     ctx.switch_to(rawint_b)
     rawint_v = ctx.tmp(I64)

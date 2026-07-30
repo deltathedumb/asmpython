@@ -110,70 +110,34 @@ class WindowsCodegen(Codegen):
         self.emitf("mov rbx, [gs:8]")
 
     def _emit_gc_globals_fallback(self) -> None:
-        """Win64: derive the module-globals range from our own PE headers.
+        """Win64: report an EMPTY globals range, so the collector refuses.
 
-        Needs nothing from the backend, which is the point -- the default
-        x86-64 backend emits no entry prologue, so `_runtime_gc_init` is never
-        called and the collector would otherwise refuse forever. Same shape as
-        `_emit_gc_stack_base_fallback` reading the TEB.
+        This USED to walk the PE headers from the PEB and union every writable
+        section, on the reasoning that module globals live in `.data`/`.bss`.
+        The range it produced was real memory -- 174 nonzero words in a small
+        test -- but it contained ZERO registered object pointers, measured with
+        a probe that counted `_runtime_gc_is_object` hits across it. Whatever
+        this backend does with module-level variables, it does not leave a
+        payload pointer in a PE writable section.
 
-            gs:[0x60]            -> PEB (x64: TEB+0x60)
-            PEB+0x10            -> ImageBase
-            ImageBase+0x00      -> "MZ"
-            ImageBase+0x3C      -> e_lfanew
-            +e_lfanew           -> "PE",0,0
-              +0x06             -> NumberOfSections      (COFF+2)
-              +0x14             -> SizeOfOptionalHeader  (COFF+16)
-              +0x18 + optsz     -> section table, 40 bytes each
-                +0x08 VirtualSize  +0x0C VirtualAddress  +0x24 Characteristics
+        The consequence was the worst kind: the collector believed it had a
+        globals root set, so it swept, and every object reachable only from a
+        module-level name was freed while live. Observable as
 
-        Offsets were verified by walking a live image rather than recalled.
+            keep = build(300)          # 301 live objects
+            gc.collect()               # freed 0   -- keep still on the stack
+            gc.collect()               # freed 301 -- ALL of it, keep included
 
-        BOTH signatures are checked, and that is what makes a misparse SAFE:
-        any failure leaves the range empty, so the collector refuses and the
-        program behaves exactly as it does with no collector at all. The only
-        dangerous outcome would be a plausible-but-wrong range, and a bad
-        ImageBase cannot produce one without also failing "MZ"/"PE".
+        with the first collection surviving only because the value was still
+        in a stale stack slot. A collector that frees live data is worse than
+        no collector, so it is off until the real location is known.
 
-        Takes the union over every WRITABLE section rather than hunting for a
-        section called ".data": the name is not load-bearing, and an
-        over-approximation is fine -- the scan is conservative and registry
-        membership rejects any word that is not really a tracked object.
-        Scanning a little extra costs time, never correctness.
+        The stack base needs no such discovery (the TEB has it), and data held
+        in function locals collects correctly -- verified: two consecutive
+        collections over a 100-element structure held in a local free nothing
+        and leave the totals exact. Only module-level roots are missing.
         """
-        self.emitf("xor rbx, rbx", "xor rcx, rcx")        # default: empty
-        self.emitf("mov rax, [gs:0x60]")                  # PEB
-        self.emitf("test rax, rax", "jz ._gcglob_done")
-        self.emitf("mov rax, [rax+0x10]")                 # ImageBase
-        self.emitf("test rax, rax", "jz ._gcglob_done")
-        self.emitf("cmp word [rax], 0x5A4D", "jne ._gcglob_done")        # "MZ"
-        self.emitf("mov edx, [rax+0x3C]")                 # e_lfanew
-        self.emitf("lea rdx, [rax+rdx]")                  # -> PE header
-        self.emitf("cmp dword [rdx], 0x00004550", "jne ._gcglob_done")   # "PE"
-        self.emitf("movzx r8, word [rdx+6]")              # NumberOfSections
-        self.emitf("test r8, r8", "jz ._gcglob_done")
-        self.emitf("movzx r9, word [rdx+20]")             # SizeOfOptionalHeader
-        self.emitf("lea r9, [rdx+r9+24]")                 # -> section table
-        self.label("._gcglob_loop")
-        # bit 31 = IMAGE_SCN_MEM_WRITE, so a 32-bit test puts it in SF.
-        self.emitf("mov r10d, [r9+36]")                   # Characteristics
-        self.emitf("test r10d, r10d", "jns ._gcglob_next")
-        self.emitf("mov r11d, [r9+12]")                   # VirtualAddress
-        self.emitf("lea r11, [rax+r11]")                  # absolute lo
-        self.emitf("mov r10d, [r9+8]")                    # VirtualSize
-        self.emitf("add r10, r11")                        # absolute hi
-        self.emitf("test rbx, rbx", "jz ._gcglob_first")
-        self.emitf("cmp r11, rbx", "jae ._gcglob_hi")
-        self.label("._gcglob_first")
-        self.emitf("mov rbx, r11")
-        self.label("._gcglob_hi")
-        self.emitf("cmp r10, rcx", "jbe ._gcglob_next")
-        self.emitf("mov rcx, r10")
-        self.label("._gcglob_next")
-        self.emitf("add r9, 40")
-        self.emitf("dec r8", "jnz ._gcglob_loop")
-        self.label("._gcglob_done")
-        self.emitf("nop")
+        self.emitf("xor rbx, rbx", "xor rcx, rcx")
 
     def emit_entry_prologue(self, info: FuncInfo) -> None:
         # main(argc, argv): Win64 passes these in rcx/rdx. Stash them before
