@@ -373,6 +373,27 @@ def _apply_passes(ir_mod, passes: "str | None"):
     )
 
 
+#: Set by compile_source/compile_targets before lowering. Read only by
+#: _as_ir_module when it calls ir_lower.lower_module. A module-level setting
+#: because _as_ir_module is reached from three call sites, none of which
+#: currently carry the entry path -- threading a parameter through all of them
+#: would touch more code than this feature is worth, and the value is constant
+#: for the whole compilation.
+_TB_SOURCE_FILE: str = "<unknown>"
+_TB_EXE_NAME: str = "<program>"
+_TB_EMBED: bool = False
+
+
+def _set_traceback_config(source_file: "str | None", exe_name: "str | None",
+                          embed: bool) -> None:
+    global _TB_SOURCE_FILE, _TB_EXE_NAME, _TB_EMBED
+    # Basenames, not full paths: a traceback line is meant to be read, and the
+    # absolute build path makes it unreadable without adding information.
+    _TB_SOURCE_FILE = Path(source_file).name if source_file else "<unknown>"
+    _TB_EXE_NAME = Path(exe_name).name if exe_name else "<program>"
+    _TB_EMBED = bool(embed)
+
+
 def _as_ir_module(module) -> "IRModule":
     """Accept either shape a frontend may return (see ``ir_contract.md``).
 
@@ -400,7 +421,15 @@ def _as_ir_module(module) -> "IRModule":
         return _report(module, "frontend")
     from . import ir_lower
 
-    return _report(ir_lower.lower_module(module), "ir_lower")
+    return _report(
+        ir_lower.lower_module(
+            module,
+            source_file=_TB_SOURCE_FILE,
+            exe_name=_TB_EXE_NAME,
+            embed_tracebacks=_TB_EMBED
+        ),
+        "ir_lower",
+    )
 
 
 #: `--gc=MODE` -> the value baked into the emitted code. Drives what the
@@ -1058,7 +1087,10 @@ def compile_source(
     active_extensions: "frozenset[str] | None" = None,
     frontend: str = "python",
     passes: str | None = None,
+    embed_tracebacks: bool = False,
 ) -> BuildResult:
+    _set_traceback_config(str(entry_path) if entry_path else None,
+                          str(out_path), embed_tracebacks)
     module = _compile_program(
         src,
         source_dir=source_dir,
@@ -1112,6 +1144,7 @@ def compile_targets(
     active_extensions: "frozenset[str] | None" = None,
     frontend: str = "python",
     passes: str | None = None,
+    embed_tracebacks: bool = False,
 ) -> list[BuildResult]:
     """Compile src for multiple targets, sharing the front-end (lex/parse/sema).
 
@@ -1119,6 +1152,9 @@ def compile_targets(
     get a ``-<target>`` suffix (e.g. ``hello-windows.asm``) to avoid collisions
     when two targets share the same output stem.
     """
+    _set_traceback_config(str(entry_path) if entry_path else None,
+                          str(out_paths[0]) if out_paths else None,
+                          embed_tracebacks)
     module = _compile_program(
         src,
         source_dir=source_dir,

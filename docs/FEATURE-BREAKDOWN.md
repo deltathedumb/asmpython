@@ -232,6 +232,48 @@ These are intentionally **not** goals — asmpython compiles to flat machine cod
 so the interpreter machinery has no analogue:
 
 - The GIL, bytecode / `dis`, the C-API / C extensions (`.pyd`/`.so` modules).
+- Developer tracebacks, via `--embed-tracebacks`. An unhandled exception prints
+  CPython's structure -- header, one indented frame line per level outermost
+  first, exception last -- with native details:
+
+      Traceback (most recent last call):
+          File "app.py", index 0x140001798, line 9 (derived), in <module>
+          File "app.py", index 0x140001606, line 5 (derived), in outer
+          File "app.py", index 0x14000108F, line 2 (derived), in inner
+      Unhandled exception: list index out of range
+
+  `index` is the address the frame was entered from; `line` is marked `(derived)`
+  because it is reconstructed from a compile-time table rather than carried by an
+  interpreter frame. `<module>` is CPython's name for module-level code.
+
+  Mechanism: the compiler maintains a frame stack, expressed entirely in
+  existing IR ops, so no backend changes were needed. Each function pushes
+  `(name, file, &line_slot, entry_address)` on entry and pops on return; the
+  line lives in that function's own stack slot, so a statement updates it with a
+  single store at a fixed frame offset -- no depth arithmetic, no call. The
+  push/pop shims are frameless and touch only volatile registers.
+
+  Positions were already available: `pos: SourcePos` is on 65 AST node types and
+  filled by the parser at 174 sites. This only stops discarding it. The same
+  markers feed the `debug_loc` IR op, which the backend has consumed into DWARF
+  `.debug_line` all along without ever having a producer -- so gdb gets real
+  line numbers too.
+
+  OFF BY DEFAULT and a build without it is unchanged: the frame bookkeeping costs
+  a push/pop per call and a store per statement, and the embedded strings cost
+  binary size.
+
+  Caught exceptions are handled: a handler is reached by `longjmp`, which skips
+  every pop between the raise and the catch, so the depth is saved at `try` and
+  restored in the handler -- the same treatment `_runtime_handler_top` already
+  gets. Without it, dead frames' line-slot pointers aimed into reclaimed stack
+  and the printer reported a pointer where a line belonged.
+
+  Not yet done: the source TEXT of each frame's line is not embedded, so a frame
+  shows `file`, `line` and `function` but not the code. That is additive -- each
+  statement's line is already interned as a string constant at the point the
+  marker is emitted.
+
 - Reference counting and `__del__` finalizers. The `gc` module is REAL: `collect()`
   runs a mark-sweep and returns the number of objects actually freed,
   `enable`/`disable`/`isenabled` drive the runtime flag, and

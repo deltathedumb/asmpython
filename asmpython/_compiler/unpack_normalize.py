@@ -112,9 +112,15 @@ def install_ir_lowering_prepass() -> None:
 
     original_lower_module = ir_lower.lower_module
 
-    def lower_module(module):
+    def lower_module(module, **kwargs):
+        # Forward **kwargs: this wrapper replaces ir_lower.lower_module
+        # wholesale, so any keyword the real one grows (source_file,
+        # embed_tracebacks, ...) has to pass through or the prepass silently
+        # becomes a signature wall. It swallowed them before, and adding a
+        # keyword to lower_module failed with "unexpected keyword argument"
+        # from inside this closure rather than anywhere near the caller.
         normalize_typed_unpacks(module)
-        return original_lower_module(module)
+        return original_lower_module(module, **kwargs)
 
     ir_lower.lower_module = lower_module
     ir_lower._typed_unpack_normalizer_installed = True

@@ -590,6 +590,14 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> argparse.Arg
         "a path to a .py plugin that registers one.",
     )
     build_grp.add_argument(
+        "--embed-tracebacks",
+        action="store_true",
+        help="emit developer tracebacks: on an unhandled exception, print the "
+        "call stack with file, line and function for each frame instead of the "
+        "bare message. Costs a store per statement and a push/pop per call, so "
+        "it is off by default and a build without it is unchanged.",
+    )
+    build_grp.add_argument(
         "--gc",
         metavar="MODE",
         default="off",
@@ -1293,6 +1301,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 active_extensions=active_extensions,
                 frontend=effective_frontend,
                 passes=effective_passes,
+                embed_tracebacks=args.embed_tracebacks,
             )
         else:
             compile_targets(
@@ -1316,6 +1325,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 active_extensions=active_extensions,
                 frontend=effective_frontend,
                 passes=effective_passes,
+                embed_tracebacks=args.embed_tracebacks,
             )
     except MultiSemaError as me:
         # Give the target-neutral interpreter a chance before reporting a

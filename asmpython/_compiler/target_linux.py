@@ -523,6 +523,11 @@ class LinuxCodegen(Codegen):
             self.emit("_gc_globals_lo: resq 1")
             self.emit("_gc_globals_hi: resq 1")
             self.emit("_gc_enabled:    resq 1")
+            # Traceback frame stack (--embed-tracebacks). 32 bytes per frame:
+            # name ptr, file ptr, line-slot ptr, entry index.
+            self.emit("_tb_depth:  resq 1")
+            self.emit("_tb_exe:    resq 1")
+            self.emit("_tb_frames: resq 4096")
             self.emit("_gc_memo_hit:  resq 1")
             self.emit("_gc_memo_miss: resq 1")
             self.emit("_gc_alloc_count: resq 1")

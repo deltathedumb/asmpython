@@ -835,6 +835,9 @@ class Codegen:
         publish.append("_gc_head")
         publish.append("_gc_stack_base")
         publish.append("_gc_enabled")
+        publish.append("_tb_exe")
+        publish.append("_tb_depth")
+        publish.append("_tb_frames")
         publish.append("_gc_memo_miss")
         publish.append("_gc_memo_hit")
         publish.append("_gc_threshold")
@@ -874,6 +877,7 @@ class Codegen:
         "_runtime_objfree",
         "_runtime_gc_memcpy",
         "_runtime_gc_init",
+        "_runtime_tb_print",
         "_runtime_gc_get_threshold",
         "_runtime_gc_set_threshold",
         "_runtime_gc_shadow_depth",
@@ -5195,6 +5199,56 @@ class Codegen:
         # out", which has no false positives. O(n) in live objects -- fine for
         # a stop-the-world scan, and the reason a real collector would swap the
         # list for a sorted table or bitmap later.
+        # ---- _runtime_tb_print: print the traceback, outermost frame first.
+        #
+        # Reads the frame stack the compiler maintains under
+        # --embed-tracebacks: `_tb_depth` entries of 32 bytes each,
+        #     [0] name ptr   [8] file ptr   [16] line-slot ptr   [24] index
+        # The line lives in the FRAME'S OWN STACK SLOT rather than in this
+        # array, so a statement updates it with a single store to a fixed
+        # offset -- no depth arithmetic, no call. This array only records where
+        # that slot is.
+        #
+        # A no-op when the depth is zero, which is what a build without
+        # --embed-tracebacks always has: nothing pushes, so nothing prints and
+        # the old one-line message is unchanged.
+        self.label("_runtime_tb_print")
+        self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 64")
+        self.emitf("mov rax, [_tb_depth]", "test rax, rax", "jle ._tb_done")
+        self.emitf("lea rcx, [_tb_header]", "call printf")
+        self.emitf("mov qword [rbp-8], 0")                 # i = 0
+        self.label("._tb_loop")
+        self.emitf("mov rax, [rbp-8]", "cmp rax, [_tb_depth]", "jge ._tb_done")
+        # frame = _tb_frames + i*32
+        self.emitf("mov rax, [rbp-8]", "shl rax, 5")
+        self.emitf("lea rdx, [_tb_frames]", "add rax, rdx", "mov [rbp-16], rax")
+        # printf(fmt, file, index, *line_slot, name)
+        # printf(fmt, exe, source, index, line, function). Win64 varargs: the
+        # first four go in rcx/rdx/r8/r9, the rest at [rsp+32] upward, above
+        # the 32-byte shadow space.
+        self.emitf("mov rax, [rbp-16]")
+        self.emitf("mov r10, [rax+16]")                    # line-slot ptr
+        self.emitf("test r10, r10", "jz ._tb_noline")
+        self.emitf("mov r10, [r10]")                       # *line-slot
+        self.emitf("jmp ._tb_haveline")
+        self.label("._tb_noline")
+        self.emitf("xor r10, r10")
+        self.label("._tb_haveline")
+        self.emitf("mov [rsp+32], r10")                    # line
+        self.emitf("mov r11, [rax+0]")                     # function name
+        self.emitf("mov [rsp+40], r11")
+        self.emitf("mov r9, [rax+24]")                     # index
+        self.emitf("mov r8, [rax+8]")                      # source file
+        self.emitf("mov rdx, [_tb_exe]")                   # executable name
+        self.emitf("test rdx, rdx", "jnz ._tb_haveexe")
+        self.emitf("lea rdx, [_tb_unknown_exe]")
+        self.label("._tb_haveexe")
+        self.emitf("lea rcx, [_tb_frame_fmt]", "call printf")
+        self.emitf("mov rax, [rbp-8]", "inc rax", "mov [rbp-8], rax")
+        self.emitf("jmp ._tb_loop")
+        self.label("._tb_done")
+        self.emitf("leave", "ret")
+
         self.label("_runtime_gc_is_object")
         self.emitf("push rbp", "mov rbp, rsp", "sub rsp, 32")
         # Two one-entry memos in front of the walk. The tag probe calls this on
@@ -10301,6 +10355,19 @@ class Codegen:
 
         self.emit("section .rodata")
         self.emit('_runtime_unhandled_prefix: db "Unhandled exception: ",0')
+        # Traceback presentation. CPython's structure -- header, one indented
+        # `File ...` line per frame outermost-first, then the exception -- but
+        # native details in the frame line: the code address the frame was
+        # entered from, and the line marked `(derived)` because it is
+        # reconstructed from a compile-time table rather than carried by an
+        # interpreter frame.
+        self.emit('_tb_header: db "Traceback (most recent call last)",10,0')
+        self.emit('_tb_unknown_exe: db "<program>",0')
+        # Single-quoted in NASM so the embedded double quotes are literal --
+        # NASM has no doubled-quote escape inside a "..." string, and the
+        # doubled form assembled as a bare `%s` symbol reference.
+        self.emit("_tb_frame_fmt: db '    File \"%s\" (%s), index 0x%llX "
+                  "(line %lld), in %s',10,0")
 
         self.emit("section .text")
 
@@ -10378,6 +10445,9 @@ class Codegen:
             "sub rsp, 48",
         )
         self._emit_set_error_color()
+        # Frames first, then the message -- CPython's order, and it reads
+        # correctly when the terminal scrolls.
+        self.emitf("call _runtime_tb_print")
         self.emitf("lea rax, [rel _runtime_unhandled_prefix]")
         self._emit_print_str_ptr_no_newline()
         self.emitf("mov rax, [rel _runtime_exc_msg]")

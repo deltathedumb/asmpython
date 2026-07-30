@@ -31,6 +31,9 @@ extern _runtime_str_slice
 extern _runtime_zalloc
 extern _runtime_objalloc
 extern _runtime_gc_is_object
+extern _tb_depth
+extern _tb_exe
+extern _tb_frames
 extern _runtime_objfree
 extern _runtime_list_append
 extern _runtime_list_pop
@@ -121,6 +124,8 @@ global _abi_str_slice
 global _abi_new_instance
 global _abi_new_box
 global _abi_gc_is_object
+global _abi_tb_push
+global _abi_tb_pop
 global _abi_new_list
 global __chkstk
 global _abi_list_append
@@ -453,6 +458,56 @@ _abi_new_instance:
 ; This is the whole reason the _abi_* layer exists; the fix is to go through it
 ; rather than to change the helper's convention, which every other GC caller
 ; already relies on.
+; ---- Traceback frame stack (--embed-tracebacks) --------------------------
+; _abi_tb_push(name, file, line_slot, exe)   Win64: rcx, rdx, r8
+;
+; Records one frame: name, file, the address of the caller's own line slot, and
+; the address this frame was entered from (our return address, still at [rsp]
+; because nothing has been pushed yet).
+;
+; Deliberately frameless and call-free -- only volatile registers (rax, r10,
+; r11) are touched, so this is a handful of stores on function entry rather
+; than a real call sequence. It runs on EVERY call in an --embed-tracebacks
+; build, so the cost matters.
+;
+; Overflow (1024 frames) silently stops recording rather than growing: deep
+; recursion would otherwise turn a traceback into a memory problem, and
+; CPython truncates too.
+_abi_tb_push:
+    mov r10, [rel _tb_depth]
+    cmp r10, 1024
+    jge .tbp_full
+    mov r11, r10
+    shl r11, 5                      ; * 32 bytes per frame
+    lea rax, [rel _tb_frames]
+    add rax, r11
+    mov [rax+0], rcx                ; name
+    mov [rax+8], rdx                ; file
+    mov [rax+16], r8                ; line-slot address
+    mov r11, [rsp]                  ; entry index (our return address)
+    mov [rax+24], r11
+    inc r10
+    mov [rel _tb_depth], r10
+    ; The executable name is program-wide, not per-frame, so it is stashed once
+    ; here rather than stored in every frame. Rewriting the same pointer on each
+    ; push is cheaper than a compare-and-branch and there is no program-start
+    ; hook to set it in: only the legacy targets emit an entry prologue.
+    mov [rel _tb_exe], r9
+.tbp_full:
+    ret
+
+; _abi_tb_pop() -- drop the innermost frame. Clamped at zero so an unbalanced
+; pop (an exception unwinding past a push) cannot make the depth negative and
+; send the printer walking backwards through memory.
+_abi_tb_pop:
+    mov rax, [rel _tb_depth]
+    test rax, rax
+    jle .tbo_done
+    dec rax
+    mov [rel _tb_depth], rax
+.tbo_done:
+    ret
+
 _abi_gc_is_object:
     WIN64_RUNTIME_ENTER
     sub rsp, 32

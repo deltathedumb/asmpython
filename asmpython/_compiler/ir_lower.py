@@ -171,7 +171,18 @@ class _ModuleCtx:
         classes: list | None = None,
         mlang_code_funcs: dict | None = None,
         imported_funcs: dict | None = None,
+        source_file: str = "<unknown>",
+        exe_name: str = "<program>",
+        embed_tracebacks: bool = False,
     ) -> None:
+        #: Source path reported in tracebacks, and whether to emit the
+        #: per-statement `debug_loc` markers a traceback is built from. Off by
+        #: default: the markers cost a store per statement and the frame
+        #: bookkeeping costs a push/pop per call, so nothing is paid unless
+        #: --embed-tracebacks asked for it.
+        self.source_file = source_file
+        self.exe_name = exe_name
+        self.embed_tracebacks = embed_tracebacks
         self.data: list[IRGlobal] = []
         self.class_names = class_names
         self.func_names = func_names
@@ -13394,6 +13405,55 @@ def _lower_del_target(ctx: _FuncCtx, tgt: "A.Expr") -> None:
     raise LowerError(f"unsupported stmt Del ({type(tgt).__name__})")
 
 
+#: Name of the per-function stack slot holding the current line. One slot per
+#: function, so a statement updates it with a single store to a fixed frame
+#: offset -- no depth arithmetic and no call, which is what makes a per-
+#: statement update affordable. `_runtime_tb_print` reads it through the
+#: address recorded at push time.
+_TB_LINE_SLOT = "__tb_line"
+
+
+def _tb_enabled(ctx: "_FuncCtx") -> bool:
+    return bool(getattr(ctx.mctx, "embed_tracebacks", False))
+
+
+def _tb_emit_push(ctx: "_FuncCtx", func_name: str) -> None:
+    """Record this frame: name, file, and where its line slot lives."""
+    if not _tb_enabled(ctx):
+        return
+    slot = ctx.ensure_slot(_TB_LINE_SLOT, I64)
+    zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero, [0]))
+    ctx.emit(IRInstr("store", None, [zero, slot]))
+    name_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", name_v, [ctx.mctx.intern_str(func_name)]))
+    file_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", file_v,
+                     [ctx.mctx.intern_str(ctx.mctx.source_file)]))
+    exe_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", exe_v,
+                     [ctx.mctx.intern_str(ctx.mctx.exe_name)]))
+    ctx.emit(IRInstr("call", None,
+                     ["_abi_tb_push", name_v, file_v, slot, exe_v]))
+
+
+def _tb_emit_pop(ctx: "_FuncCtx") -> None:
+    """Drop this frame. Emitted before every return."""
+    if not _tb_enabled(ctx):
+        return
+    ctx.emit(IRInstr("call", None, ["_abi_tb_pop"]))
+
+
+def _tb_emit_line(ctx: "_FuncCtx", line: int) -> None:
+    """Point this frame at the statement about to run."""
+    if not _tb_enabled(ctx) or not line:
+        return
+    slot = ctx.ensure_slot(_TB_LINE_SLOT, I64)
+    lv = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", lv, [line]))
+    ctx.emit(IRInstr("store", None, [lv, slot]))
+
+
 def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
     if ctx.terminated:
         # Unreachable: the current block already ended in ret/br/br.t, so this
@@ -13413,6 +13473,22 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         # does with unreachable code, and keeps the drop consistent: either
         # all of a statement is lowered or none of it is.
         return
+
+    # Source marker for tracebacks. One per statement, which is the finest
+    # granularity worth paying for: a traceback names the statement that
+    # failed, not the sub-expression, and CPython reports the same way.
+    #
+    # `pos` is already on 65 AST node types and filled by the parser at 174
+    # sites, so nothing new has to be tracked -- this only stops throwing the
+    # information away. The backend has consumed `debug_loc` (into
+    # `debug_locs`, and from there DWARF `.debug_line`) since before this
+    # existed; it simply never had a producer, so the table was always empty.
+    if ctx.mctx.embed_tracebacks:
+        _pos = getattr(s, "pos", None)
+        _line = getattr(_pos, "line", 0) if _pos is not None else 0
+        if _line:
+            ctx.emit(IRInstr("debug_loc", None, [ctx.mctx.source_file, _line]))
+            _tb_emit_line(ctx, _line)
     if isinstance(s, A.ConstDecl):
         # Normalize at entry rather than duplicating Assign's lowering in a
         # parallel branch: any future bugfix/feature added to A.Assign's
@@ -14087,6 +14163,9 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             ctx.emit(IRInstr("load", parent_v, [parent_ptr]))
             _store_global(ctx, "_runtime_handler_top", parent_v)
             i = i - 1
+        # Drop this frame before leaving it, so a traceback taken later does
+        # not name a function that has already returned.
+        _tb_emit_pop(ctx)
         ctx.emit(IRInstr("ret", None, [ret_val]))
         return
 
@@ -14827,6 +14906,22 @@ def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
 
     # setjmp(jmp_buf) -> 0 on direct call, nonzero after longjmp
     setjmp_block_label = ctx.cur.label
+    # Traceback depth at try-entry, captured BEFORE the setjmp. The handler is
+    # reached by longjmp, which unwinds the machine stack without running any of
+    # the `_abi_tb_pop` calls between the raise and here, so the frame stack has
+    # to be truncated explicitly -- like `_runtime_handler_top` below.
+    #
+    # Before, not after, the setjmp: code placed after it runs on BOTH returns,
+    # so the longjmp path re-saved the CURRENT (deep) depth over the entry value
+    # and the restore became a no-op. The symptom was dead frames whose
+    # line-slot pointers aimed into reclaimed stack, printing a pointer where a
+    # line number belonged (`line 5368748571`).
+    tb_depth_ptr = None
+    if _tb_enabled(ctx):
+        tb_depth_ptr = ctx.ensure_slot(f"__tb_depth_{uid}", I64)
+        d_v0 = _load_global(ctx, "_tb_depth", I64)
+        ctx.emit(IRInstr("store", None, [d_v0, tb_depth_ptr]))
+
     setjmp_result = ctx.tmp(I64)
     ctx.emit(IRInstr("call", setjmp_result, ["_abi_setjmp", buf_ptr]))
 
@@ -14857,6 +14952,11 @@ def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
     parent_v2 = ctx.tmp(PTR)
     ctx.emit(IRInstr("load", parent_v2, [parent_ptr]))
     _store_global(ctx, "_runtime_handler_top", parent_v2)
+    if tb_depth_ptr is not None:
+        saved_d = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", saved_d, [tb_depth_ptr]))
+        _store_global(ctx, "_tb_depth", saved_d)
+
 
     # Build check blocks: one per handler + one "no match" block.
     n = len(handlers)
@@ -15075,10 +15175,14 @@ def lower_func(
             # the box POINTER in play instead of the value.
             ctx.slot_el_ty[pname] = annot[1]
 
+    # `<module>` matches CPython's name for module-level code.
+    _tb_emit_push(ctx, "<module>" if module_body else f.name)
+
     for st in f.body:
         _lower_stmt(ctx, st)
 
     if not ctx.terminated:
+        _tb_emit_pop(ctx)
         zero = ctx.tmp(I64)
         ctx.emit(IRInstr("const", zero, [0]))
         ctx.emit(IRInstr("ret", None, [zero]))
@@ -15696,7 +15800,9 @@ def _module_init_stmts(mod: A.Module) -> list:
     return out
 
 
-def lower_module(mod: A.Module) -> IRModule:
+def lower_module(mod: A.Module, *, source_file: str = "<unknown>",
+                 exe_name: str = "<program>",
+                 embed_tracebacks: bool = False) -> IRModule:
     top_funcs, method_funcs = _reachable_callables(mod)
     func_sigs = getattr(mod, "funcs_sig", {})
     global_types: dict[str, IRType] = {}
@@ -15729,6 +15835,9 @@ def lower_module(mod: A.Module) -> IRModule:
         mod.classes,
         getattr(mod, "mlang_code_funcs", {}),
         imported_funcs,
+        source_file=source_file,
+        exe_name=exe_name,
+        embed_tracebacks=embed_tracebacks,
     )
     # Raw per-parameter annotation tuples per callee, keyed by the symbol its
     # call sites emit (a plain function's name; `{Class}__{method}` /
