@@ -1731,6 +1731,60 @@ class Parser:
                 return A.FloatLit(value=-operand.value, pos=e.pos)
         return e
 
+    def _fold_const_default(self, e):
+        """Constant-fold a default argument built from numeric/string literals.
+
+        `def f(x, n=2 + 3)` is a compile-time constant, but the default grammar
+        reached the expression through _parse_primary and stopped at the `+`
+        ("expected ',', got '+'"). Parsing the operator is only half of it: a
+        BinOp is not one of the shapes _is_safe_default_value accepts, and
+        every consumer of a default's AST expects an already-folded literal
+        (the same reason _fold_default_negation exists).
+
+        Folding here answers both at once -- `2 + 3` becomes IntLit(5), which
+        is safe to splice per call site by inspection and needs no new case
+        anywhere downstream. Only literal operands fold, so nothing with a name
+        in it, and nothing that could have a side effect, is accepted; anything
+        that does not fold is left alone for _is_safe_default_value to reject
+        exactly as before. A fold that would raise (division by zero) is
+        declined rather than folded, leaving the original error to surface
+        normally.
+        """
+        if not isinstance(e, A.BinOp):
+            return e
+        lhs = self._fold_default_negation(self._fold_const_default(e.left))
+        rhs = self._fold_default_negation(self._fold_const_default(e.right))
+        if isinstance(lhs, A.StrLit) and isinstance(rhs, A.StrLit) and e.op == "+":
+            return A.StrLit(value=lhs.value + rhs.value, pos=e.pos)
+        if not (
+            isinstance(lhs, (A.IntLit, A.FloatLit))
+            and isinstance(rhs, (A.IntLit, A.FloatLit))
+        ):
+            return e
+        a, b = lhs.value, rhs.value
+        try:
+            if e.op == "+":
+                v = a + b
+            elif e.op == "-":
+                v = a - b
+            elif e.op == "*":
+                v = a * b
+            elif e.op == "/":
+                v = a / b
+            elif e.op == "//":
+                v = a // b
+            elif e.op == "%":
+                v = a % b
+            elif e.op == "**":
+                v = a ** b
+            else:
+                return e
+        except (ZeroDivisionError, OverflowError, ValueError):
+            return e
+        if isinstance(v, float):
+            return A.FloatLit(value=v, pos=e.pos)
+        return A.IntLit(value=v, pos=e.pos)
+
     def _parse_default_literal(self):
         """Parse one default-argument value: anything `_is_safe_default_value`
         accepts (see its docstring for the exact set and why it's
@@ -1764,11 +1818,14 @@ class Parser:
             # therefore failed in the parser, before _is_safe_default_value --
             # which does accept it -- ever got a say.
             expr = self._parse_lambda()
-        elif self._check_any_op("-"):
-            minus_pos = self._eat().pos
-            expr = A.UnaryOp(op="-", operand=self._parse_primary(), pos=minus_pos)
         else:
-            expr = self._parse_primary()
+            # The real expression grammar, so operator PRECEDENCE is correct --
+            # a hand-rolled left-to-right operator loop folds `2 + 3 * 4` to 20
+            # instead of 14. _parse_or stops at `,` and `)`, so it cannot run
+            # past the end of this parameter. Shapes it accepts that a default
+            # may not take (`+1`, `~x`, a call) are still rejected below by
+            # _is_safe_default_value, exactly as when they failed to parse.
+            expr = self._fold_const_default(self._parse_or())
         if not self._is_safe_default_value(expr):
             raise ParseError(
                 "default argument must be a literal "
@@ -4473,6 +4530,23 @@ class Parser:
         self._expect("OP", "]")
         return A.ListLit(elems=elems, pos=start)
 
+    def _parse_comprehension_conds(self):
+        """Parse a comprehension's `if` clauses, returning one condition.
+
+        A comprehension may carry more than one filter -- `[x for x in r if a
+        if b]` -- and only the first was ever consumed, so the second failed as
+        "expected ']', got 'if'". The AST has a single `cond` slot, which loses
+        nothing: CPython evaluates the clauses left to right and stops at the
+        first false one, which is exactly `a and b`. Folding left keeps that
+        order for three or more clauses too.
+        """
+        cond = None
+        while self._check("KEYWORD", "if"):
+            self._eat()
+            nxt = self._parse_or()
+            cond = nxt if cond is None else A.BoolOp(op="and", left=cond, right=nxt, pos=cond.pos)
+        return cond
+
     def _parse_comprehension_tail(self, elt, pos):
         """Parse `for <var> in <iter> [if <cond>]` after the element expression,
         returning a Comprehension. Used by list comprehensions and generator
@@ -4489,10 +4563,7 @@ class Parser:
         self._expect("KEYWORD", "in")
         iter_expr = self._parse_or()
         self._reject_nested_for_target(_nested, iter_expr)
-        cond = None
-        if self._check("KEYWORD", "if"):
-            self._eat()
-            cond = self._parse_or()
+        cond = self._parse_comprehension_conds()
         ef_vars: list = []
         ef_targets: list = []
         ef_iters: list = []
@@ -4527,10 +4598,7 @@ class Parser:
         self._expect("KEYWORD", "in")
         iter_expr = self._parse_or()
         self._reject_nested_for_target(_nested, iter_expr)
-        cond = None
-        if self._check("KEYWORD", "if"):
-            self._eat()
-            cond = self._parse_or()
+        cond = self._parse_comprehension_conds()
         return A.DictComprehension(
             key=key,
             value=value,
