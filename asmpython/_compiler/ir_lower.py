@@ -5776,7 +5776,8 @@ def _lower_set_pairop(ctx: _FuncCtx, obj_e: A.Expr, other_e: A.Expr, method: str
 
 
 def _lower_set_setop(ctx: _FuncCtx, obj_e: A.Expr, other_e: A.Expr, method: str, tag: int) -> IRValue:
-    """s.union(o) / s.intersection(o) / s.difference(o) -- ports
+    """s.union(o) / s.intersection(o) / s.difference(o) /
+    s.symmetric_difference(o) -- ports
     codegen.py's _gen_set_setop exactly. union is a fresh set with both
     operands merged in (right wins on conflicts, though sets have no
     payload so that's moot); intersection/difference iterate self's keys,
@@ -5792,66 +5793,77 @@ def _lower_set_setop(ctx: _FuncCtx, obj_e: A.Expr, other_e: A.Expr, method: str,
         ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, other_v]))
         return new_v
 
-    keys_v = ctx.tmp(PTR)
-    ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", obj_v]))
-    keys_ptr = ctx.ensure_slot(f"__setop_keys_{tag}", PTR)
-    ctx.emit(IRInstr("store", None, [keys_v, keys_ptr]))
-    idx_ptr = ctx.ensure_slot(f"__setop_idx_{tag}", I64)
-    zero = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", zero, [0]))
-    ctx.emit(IRInstr("store", None, [zero, idx_ptr]))
+    def _keep_loop(src_v, test_v, keep_when_present: bool, which: str) -> None:
+        """Walk `src_v`'s keys, copying each into `new_v` when its membership in
+        `test_v` matches `keep_when_present`. Slot names are keyed by `which` as
+        well as `tag`, so two loops in one expression do not share a cursor."""
+        keys_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", src_v]))
+        keys_ptr = ctx.ensure_slot(f"__setop_keys_{tag}_{which}", PTR)
+        ctx.emit(IRInstr("store", None, [keys_v, keys_ptr]))
+        idx_ptr = ctx.ensure_slot(f"__setop_idx_{tag}_{which}", I64)
+        zero = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero, [0]))
+        ctx.emit(IRInstr("store", None, [zero, idx_ptr]))
 
-    head_b = ctx.new_block("setopheread")
-    body_b = ctx.new_block("setopbody")
-    keep_b = ctx.new_block("setopkeep")
-    cont_b = ctx.new_block("setopcont")
-    end_b = ctx.new_block("setopend")
+        head_b = ctx.new_block("setopheread")
+        body_b = ctx.new_block("setopbody")
+        keep_b = ctx.new_block("setopkeep")
+        cont_b = ctx.new_block("setopcont")
+        end_b = ctx.new_block("setopend")
 
-    ctx.emit(IRInstr("br", None, [head_b.label]))
-    ctx.switch_to(head_b)
-    idx_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
-    len_addr = ctx.tmp(PTR)
-    ctx.emit(IRInstr("gep", len_addr, [keys_v, _LIST_LEN_OFF]))
-    len_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("load", len_v, [len_addr]))
-    cond = ctx.tmp(I64)
-    ctx.emit(IRInstr("icmp.lt", cond, [idx_v, len_v]))
-    ctx.emit(IRInstr("br.t", None, [cond, body_b.label, end_b.label]))
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+        ctx.switch_to(head_b)
+        idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", len_addr, [keys_v, _LIST_LEN_OFF]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        cond = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", cond, [idx_v, len_v]))
+        ctx.emit(IRInstr("br.t", None, [cond, body_b.label, end_b.label]))
 
-    ctx.switch_to(body_b)
-    key_addr = _list_elem_addr(ctx, keys_v, idx_v)
-    key_v = ctx.tmp(PTR)
-    ctx.emit(IRInstr("load", key_v, [key_addr]))
-    has_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("call", has_v, ["_abi_dict_contains", other_v, key_v]))
-    zero2 = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", zero2, [0]))
-    if method == "intersection":
+        ctx.switch_to(body_b)
+        key_addr = _list_elem_addr(ctx, keys_v, idx_v)
+        key_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", key_v, [key_addr]))
+        has_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", has_v, ["_abi_dict_contains", test_v, key_v]))
+        zero2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero2, [0]))
         should_keep = ctx.tmp(I64)
-        ctx.emit(IRInstr("icmp.ne", should_keep, [has_v, zero2]))
-    else:
-        should_keep = ctx.tmp(I64)
-        ctx.emit(IRInstr("icmp.eq", should_keep, [has_v, zero2]))
-    ctx.emit(IRInstr("br.t", None, [should_keep, keep_b.label, cont_b.label]))
+        ctx.emit(IRInstr(
+            "icmp.ne" if keep_when_present else "icmp.eq", should_keep, [has_v, zero2]
+        ))
+        ctx.emit(IRInstr("br.t", None, [should_keep, keep_b.label, cont_b.label]))
 
-    ctx.switch_to(keep_b)
-    one_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", one_v, [1]))
-    ctx.emit(IRInstr("call", None, ["_abi_dict_set", new_v, key_v, one_v]))
-    ctx.emit(IRInstr("br", None, [cont_b.label]))
+        ctx.switch_to(keep_b)
+        one_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one_v, [1]))
+        ctx.emit(IRInstr("call", None, ["_abi_dict_set", new_v, key_v, one_v]))
+        ctx.emit(IRInstr("br", None, [cont_b.label]))
 
-    ctx.switch_to(cont_b)
-    inc_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("load", inc_v, [idx_ptr]))
-    one2 = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", one2, [1]))
-    next_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("iadd", next_v, [inc_v, one2]))
-    ctx.emit(IRInstr("store", None, [next_v, idx_ptr]))
-    ctx.emit(IRInstr("br", None, [head_b.label]))
+        ctx.switch_to(cont_b)
+        inc_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", inc_v, [idx_ptr]))
+        one2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one2, [1]))
+        next_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", next_v, [inc_v, one2]))
+        ctx.emit(IRInstr("store", None, [next_v, idx_ptr]))
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+        ctx.switch_to(end_b)
 
-    ctx.switch_to(end_b)
+
+    if method == "symmetric_difference":
+        # Everything in exactly one of the two: the difference loop run in both
+        # directions into the same result. This is the only setop that needs
+        # more than one pass, which is why the loop above is a helper.
+        _keep_loop(obj_v, other_v, False, "a")
+        _keep_loop(other_v, obj_v, False, "b")
+        return new_v
+    _keep_loop(obj_v, other_v, method == "intersection", "a")
     return new_v
 
 
@@ -7785,7 +7797,7 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, lhs]))
             ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, rhs]))
             return new_v
-        if lt == "set" and rt == "set" and e.op in ("&", "-"):
+        if lt == "set" and rt == "set" and e.op in ("&", "-", "^"):
             # `s1 & s2` / `s1 - s2`: unlike `|` above, these were never
             # given a BinOp case at all -- only reachable via the
             # equivalent `.intersection()`/`.difference()` METHOD calls
@@ -7805,7 +7817,11 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             # `_gen_set_setop` helper -- mirror that here by reusing this
             # file's own already-correct method-call path instead of
             # duplicating its logic.
-            method = {"&": "intersection", "-": "difference"}[e.op]
+            method = {
+                "&": "intersection",
+                "-": "difference",
+                "^": "symmetric_difference",
+            }[e.op]
             return _lower_set_setop(ctx, e.left, e.right, method, id(e))
         if lt == "float" or rt == "float" or e.op == "/":
             # `/` (true division) is ALWAYS float division in Python, even
@@ -10902,7 +10918,9 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                         )
                     )
                 return ctx.shared_zero
-            if e.method in ("union", "intersection", "difference") and len(e.args) == 1:
+            if e.method in (
+                "union", "intersection", "difference", "symmetric_difference",
+            ) and len(e.args) == 1:
                 return _lower_set_setop(ctx, e.obj, e.args[0], e.method, id(e))
             if (
                 e.method in (

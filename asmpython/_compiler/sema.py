@@ -9625,7 +9625,7 @@ class SemaAnalyzer:
             # result holds members drawn from the operands, so its member kind
             # is theirs merged -- without it `sorted({1,2} & {2,3})` lost the
             # int-ness the operands had and printed the stored key strings.
-            if e.op in ("|", "&", "-") and lt == "set" and rt == "set":
+            if e.op in ("|", "&", "-", "^") and lt == "set" and rt == "set":
                 e.inferred_type = "set"  # type: ignore
                 e.set_el_type = self._merge_el_type(  # type: ignore[attr-defined]
                     self._set_el_type(e.left, scope),
@@ -12259,7 +12259,9 @@ class SemaAnalyzer:
                             ErrorCode.E_ARG_TYPE,
                         )
                     e.inferred_type = "int"
-                elif e.method in ("union", "intersection", "difference"):
+                elif e.method in (
+                    "union", "intersection", "difference", "symmetric_difference",
+                ):
                     if len(e.args) != 1:
                         raise SemaError(
                             f"set.{e.method}() takes 1 argument", e.pos,
