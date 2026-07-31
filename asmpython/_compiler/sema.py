@@ -10489,6 +10489,28 @@ class SemaAnalyzer:
                     e.inferred_type = "str"
                 return
             self._check_expr(e.index, scope)
+            # `arr[obj]` where obj defines __index__: CPython calls it to get
+            # the integer. __index__ was dispatched NOWHERE -- unlike
+            # __getitem__ and __next__, which go through _resolve_method -- so
+            # the instance was used AS the index and the runtime bounds-check
+            # rejected it: `arr[Idx()]` exited 1 with "list index out of
+            # range" (tests/cases/dunder_index.py).
+            #
+            # Rewritten in place rather than handled in lowering, the same way
+            # an iterable argument is desugared to `list(arg)` elsewhere in
+            # this file: once the index is an ordinary int expression every
+            # existing path -- bounds check, negative index, slicing -- applies
+            # unchanged, and no lowering work is needed.
+            _idx_t = A.expr_type(e.index)
+            if isinstance(_idx_t, str) and _idx_t.startswith("instance:"):
+                _idx_cls = _idx_t.split(":", 1)[1]
+                if self._resolve_method(_idx_cls, "__index__") is not None:
+                    _conv = A.MethodCall(
+                        obj=e.index, method="__index__", args=[], kwargs=[],
+                        pos=e.index.pos,
+                    )
+                    self._check_expr(_conv, scope)
+                    e.index = _conv
             if obj_t == "list":
                 # Normalize a bare class-name element kind to `instance:<Class>`
                 # so a method call on the read-out element resolves: indexing a
