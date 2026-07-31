@@ -11546,8 +11546,20 @@ class SemaAnalyzer:
                             "dict.setdefault() takes (key[, default])", e.pos,
                             ErrorCode.E_ARG_COUNT,
                         )
-                    if A.expr_type(e.args[0]) not in ("str", "any"):
-                        raise SemaError("dict.setdefault() key must be a str", e.pos, ErrorCode.E_ARG_TYPE)
+                    # Any hashable key kind, matching `d[k]` and `d.get(k)`.
+                    # This was str-only, which was true when every dict key was
+                    # stored as a string with no element typing -- but keys now
+                    # carry a real key_type and int/float keys round-trip, so
+                    # refusing them here contradicted what plain subscripting
+                    # already accepts (`d[1] = "a"` works; `d.setdefault(1, ...)`
+                    # did not).
+                    if not _is_dict_key_type(A.expr_type(e.args[0])):
+                        raise SemaError(
+                            "dict.setdefault() key must be hashable "
+                            f"(str/int/float/bool/tuple/instance), got "
+                            f"{A.expr_type(e.args[0])}",
+                            e.pos, ErrorCode.E_ARG_TYPE,
+                        )
                     e.inferred_type = self._dict_value_type(e.obj, scope)
                     if len(e.args) == 2 and e.inferred_type in ("int", "?"):
                         # The dict's value kind is unknown (a bare `{}` resolves

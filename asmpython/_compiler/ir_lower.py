@@ -1097,6 +1097,21 @@ def _lower_membership(ctx: _FuncCtx, needle_e: A.Expr, hay_e: A.Expr, negate: bo
         )
     ):
         ctx.emit(IRInstr("call", eq_v, ["_abi_str_eq", cur_needle, elem_v]))
+    elif needle_ty in ("list", "tuple"):
+        # A CONTAINER needle compares BY VALUE, like `==` does. This fell to
+        # the `icmp.eq` below, i.e. pointer equality, so
+        # `(3, 4) in [(1, 2), (3, 4)]` was False -- two structurally equal
+        # tuples are distinct objects. Same defect the `.index` path had, and
+        # it reuses the same `_emit_sequence_eq_value` that `==` uses rather
+        # than introducing a second notion of equality that could drift.
+        eq_v = _emit_sequence_eq_value(
+            ctx,
+            cur_needle,
+            elem_v,
+            _repr_el_kind(needle_e),
+            _inner_el_kind(needle_e),
+            id(needle_e),
+        )
     else:
         ctx.emit(IRInstr("icmp.eq", eq_v, [cur_needle, elem_v]))
     ctx.emit(IRInstr("br.t", None, [eq_v, found_b.label, cont_b.label]))
@@ -1172,8 +1187,28 @@ def _lower_list_remove(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
     ctx.emit(IRInstr("load", elem_v, [elem_addr]))
     cur_needle = ctx.tmp(needle_v.type)
     ctx.emit(IRInstr("load", cur_needle, [needle_ptr]))
-    eq_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("icmp.eq", eq_v, [cur_needle, elem_v]))
+    # By VALUE, matching `==` and the `.index`/`in` paths. A raw icmp.eq here
+    # is pointer equality, so `xs.remove((1, 2))` silently removed NOTHING and
+    # left the list unchanged -- worse than the `.index` version of this bug,
+    # which at least raised "value not in list". A str needle goes through
+    # _abi_str_eq rather than relying on literal interning to make pointers
+    # coincide.
+    _rm_t = A.expr_type(e.args[0])
+    if _rm_t == "str":
+        eq_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", eq_v, ["_abi_str_eq", cur_needle, elem_v]))
+    elif _rm_t in ("list", "tuple"):
+        eq_v = _emit_sequence_eq_value(
+            ctx,
+            cur_needle,
+            elem_v,
+            _repr_el_kind(e.args[0]),
+            _inner_el_kind(e.args[0]),
+            id(e),
+        )
+    else:
+        eq_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.eq", eq_v, [cur_needle, elem_v]))
     ctx.emit(IRInstr("br.t", None, [eq_v, shift_head.label, find_cont.label]))
 
     ctx.switch_to(find_cont)
@@ -1295,8 +1330,34 @@ def _lower_list_index(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
     ctx.emit(IRInstr("load", elem_v, [elem_addr]))
     cur_needle = ctx.tmp(needle_v.type)
     ctx.emit(IRInstr("load", cur_needle, [needle_ptr]))
-    eq_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("icmp.eq", eq_v, [cur_needle, elem_v]))
+    # Compare BY VALUE, not by pointer.
+    #
+    # This was a bare `icmp.eq`, i.e. pointer equality, so
+    # `[(1,2),(3,4)].index((3,4))` raised "value not in list" -- two
+    # structurally equal tuples are distinct objects. Strings appeared to work
+    # only because string LITERALS are interned and happen to share a pointer;
+    # a computed string failed identically, so interning was hiding the bug
+    # rather than the case being correct.
+    #
+    # Reuses the same structural comparison `==` already uses
+    # (_emit_sequence_eq_value) instead of adding a second notion of equality
+    # that could drift from it. Scalars keep icmp.eq, which is what they want.
+    _needle_t = A.expr_type(e.args[0])
+    if _needle_t == "str":
+        eq_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", eq_v, ["_abi_str_eq", cur_needle, elem_v]))
+    elif _needle_t in ("list", "tuple"):
+        eq_v = _emit_sequence_eq_value(
+            ctx,
+            cur_needle,
+            elem_v,
+            _repr_el_kind(e.args[0]),
+            _inner_el_kind(e.args[0]),
+            id(e),
+        )
+    else:
+        eq_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.eq", eq_v, [cur_needle, elem_v]))
     ctx.emit(IRInstr("br.t", None, [eq_v, found_b.label, cont_b.label]))
 
     ctx.switch_to(cont_b)
