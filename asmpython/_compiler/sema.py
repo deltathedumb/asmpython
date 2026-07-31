@@ -10226,7 +10226,7 @@ class SemaAnalyzer:
             # stays "?" so the first `d[k] = v` can pin it, exactly as an empty
             # `[]`/`set()` is pinned by its first append/add.
             _dkt = "?"
-            for k, v in zip(e.keys, e.values):
+            for _ki, (k, v) in enumerate(zip(e.keys, e.values)):
                 if isinstance(k, A.Name) and k.name == "**":
                     # `**other` (PEP 448 dict unpacking): `other` must itself
                     # be dict-typed (or opaque).
@@ -10245,6 +10245,10 @@ class SemaAnalyzer:
                     )
                     continue
                 self._check_expr(k, scope)
+                _hk = self._hashable_key_expr(k, scope)
+                if _hk is not k:
+                    e.keys[_ki] = _hk
+                    k = _hk
                 _klt = A.expr_type(k)
                 if not _is_dict_key_type(_klt):
                     raise SemaError(
@@ -10501,6 +10505,13 @@ class SemaAnalyzer:
             # this file: once the index is an ordinary int expression every
             # existing path -- bounds check, negative index, slicing -- applies
             # unchanged, and no lowering work is needed.
+            # A dict READ with an instance key goes through the same
+            # __hash__ rewrite the DictLit store uses -- both sides must encode
+            # identically or every lookup misses.
+            if obj_t == "dict":
+                _hk = self._hashable_key_expr(e.index, scope)
+                if _hk is not e.index:
+                    e.index = _hk
             _idx_t = A.expr_type(e.index)
             if isinstance(_idx_t, str) and _idx_t.startswith("instance:"):
                 _idx_cls = _idx_t.split(":", 1)[1]
@@ -12408,6 +12419,34 @@ class SemaAnalyzer:
             drained = A.Call(func="list", args=[arg], kwargs=[], pos=arg.pos)
             self._check_expr(drained, scope)
             e.args[i] = drained
+
+    def _hashable_key_expr(self, k, scope):
+        """`k` rewritten to `k.__hash__()` when it is an instance defining it.
+
+        A dict here is STRING-keyed, and an instance with no custom encoding
+        falls back to repr(), which is pointer-derived -- so two value-equal
+        keys landed in different slots and `d = {K('a'): 1}` then `d[K('a')]`
+        raised. __hash__ is exactly the contract that makes value-equal keys
+        agree, and it was dispatched nowhere.
+
+        Rewritten to an int-valued call, which the key encoder already has a
+        canonical decimal spelling for, so this adds no new encoding rule. Done
+        in sema rather than in lowering so the call is visible to reachability
+        -- emitting it only at lower time left the method un-generated and the
+        link failed with "undefined symbol 'K____hash__'".
+
+        Must be applied at BOTH the store and the read, or the two encodings
+        disagree and every lookup misses.
+        """
+        kt = A.expr_type(k)
+        if not (isinstance(kt, str) and kt.startswith("instance:")):
+            return k
+        if self._resolve_method(kt.split(":", 1)[1], "__hash__") is None:
+            return k
+        conv = A.MethodCall(obj=k, method="__hash__", args=[], kwargs=[],
+                            pos=getattr(k, "pos", None))
+        self._check_expr(conv, scope)
+        return conv
 
     def _check_sort_kwargs(self, e, scope: Scope, allow_default: bool = False) -> None:
         """Validate and resolve the `key=`/`reverse=` kwargs shared by
