@@ -10227,9 +10227,14 @@ class SemaAnalyzer:
             # When the outer element is itself a list (list[list[T]]), propagate
             # the inner element type so `_list_el_type(var, child)` returns T.
             if el == "list" and not e.targets:
-                inner_el = self._list_el_value_type(e.iter, scope)
-                if inner_el != "int":
-                    child.list_el_types[e.var] = inner_el
+                # Recorded even when the inner kind is "int". Skipping it
+                # assumed int was the fallback for a missing entry, but
+                # _list_el_type answers "any" instead, so `[x for row in m for
+                # x in row]` over a list[list[int]] typed `x` as "any" -- i.e.
+                # BOXED -- while the lowering stored raw ints. Reading those
+                # back as boxes access-violated in set()/iteration, though
+                # printing or indexing the list still looked right.
+                child.list_el_types[e.var] = self._list_el_value_type(e.iter, scope)
             loop_vars = set(self._flat_target_names(e.targets)) if e.targets else {e.var}
             if e.cond is not None:
                 self._check_expr(e.cond, child)
@@ -10262,9 +10267,11 @@ class SemaAnalyzer:
                     loop_vars.add(ef_evar)
                     # Propagate inner element type for list[list[T]] case
                     if ef_el == "list":
-                        ef_inner = self._list_el_value_type(ef_iter, child)
-                        if ef_inner != "int":
-                            child.list_el_types[ef_evar] = ef_inner
+                        # Unconditional for the same reason as the first clause
+                        # above: a missing entry reads back as "any", not "int".
+                        child.list_el_types[ef_evar] = self._list_el_value_type(
+                            ef_iter, child
+                        )
                     elif ef_el == "dict":
                         ef_inner = self._list_el_value_type(ef_iter, child)
                         child.dict_value_types[ef_evar] = (
