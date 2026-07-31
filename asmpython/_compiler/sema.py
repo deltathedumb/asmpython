@@ -2254,6 +2254,73 @@ class SemaAnalyzer:
             if e.body is not None:
                 self._collect_calls_expr(e.body, out)
 
+    def _module_binding_kinds(self) -> dict:
+        """Module-level names whose type is knowable, as {name: (ty, el, ...)}.
+
+        Parameter inference reads only LITERAL arguments, because
+        _literal_arg_type is deliberately scope-independent. That leaves the
+        most ordinary shape in the corpus uninferred:
+
+            tree = {'root': {'a': {}}}
+            def show(node, depth=0):
+                for key in sorted(node): ...
+            show(tree)                      # a Name, so nothing was learned
+
+        `node` stayed untyped and `sorted(node)` produced ints, so
+        `'  ' * depth + key` was rejected as str + int. A module-level name
+        bound exactly once to a literal has a type that is just as certain as
+        the literal written inline at the call site.
+
+        Only names bound EXACTLY ONCE in the whole program qualify -- a second
+        binding anywhere, at module level or inside any function via `global`,
+        drops the name rather than picking one of the two.
+        """
+        cached = getattr(self, "_mod_binding_kinds_cache", None)
+        if cached is not None:
+            return cached
+        kinds: dict = {}
+        seen_twice: set = set()
+
+        def _note(target, value, top: bool) -> None:
+            if not isinstance(target, str):
+                return
+            if target in seen_twice:
+                return
+            if target in kinds or not top:
+                # A rebinding anywhere makes the single-binding claim false.
+                seen_twice.add(target)
+                kinds.pop(target, None)
+                return
+            lit = self._literal_arg_type(value)
+            if lit is not None:
+                kinds[target] = lit
+
+        for _s in self._walk_stmts_flat(self.mod.body):
+            if isinstance(_s, A.Assign):
+                _note(_s.target, _s.value, True)
+        def _rebinds_globals(body: list) -> None:
+            # Only an assignment to a name the function DECLARED global can
+            # rebind the module binding. A plain `x = 5` inside a function is a
+            # local and says nothing about the module-level `x`, so counting it
+            # would discard a perfectly certain binding.
+            declared: set = set()
+            for _s in self._walk_stmts_flat(body):
+                if isinstance(_s, A.Global):
+                    declared.update(_s.names)
+            if not declared:
+                return
+            for _s in self._walk_stmts_flat(body):
+                if isinstance(_s, A.Assign) and _s.target in declared:
+                    _note(_s.target, _s.value, False)
+
+        for _f in self.mod.funcs:
+            _rebinds_globals(_f.body)
+        for _c in self.mod.classes:
+            for _m in _c.methods:
+                _rebinds_globals(_m.body)
+        self._mod_binding_kinds_cache = kinds
+        return kinds
+
     def _infer_unannotated_params(self) -> None:
         """For function/method parameters with no type annotation and no
         default, scan every call site in the module for arguments whose type
@@ -2375,6 +2442,10 @@ class SemaAnalyzer:
                     if arg is None:
                         continue
                 lit = self._literal_arg_type(arg)
+                if lit is None and isinstance(arg, A.Name):
+                    # Not a literal, but a module-level name bound exactly once
+                    # to one is just as certain -- see _module_binding_kinds.
+                    lit = self._module_binding_kinds().get(arg.name)
                 if lit is None:
                     continue
                 # A CONTAINER literal only informs the parameter's type when its
