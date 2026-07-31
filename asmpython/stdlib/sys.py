@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from . import Func, Const
-from .._version import PYTHON_LANGUAGE_VERSION
+from .. import __version__ as _ASMPYTHON_VERSION
+
+# The Python *language* version is the leading major.minor of the package
+# version: the release identity is Python-prefixed, so "3.14.0" is the build
+# that implements the 3.14 language. Deriving it here rather than restating it
+# keeps one source of truth -- sys.version cannot drift from the version the
+# package declares it targets.
+PYTHON_LANGUAGE_VERSION = ".".join(_ASMPYTHON_VERSION.split(".")[:2])
 
 BINDINGS: dict = {
     # sys.exit(code)
