@@ -37,6 +37,11 @@ class Parser:
         # scope's variable from a module-level function when it sees a name in
         # CALL position -- see `_find_free_vars`.
         self._enclosing_params: list = []
+        # Serial for the temporaries the nested-unpack desugars introduce.
+        self._nested_unpack_seq: int = 0
+        # Per-group shape of the loop target most recently parsed; see
+        # _parse_for_target_list.
+        self._for_target_shape: list = []
         # Nested class definitions are lifted the same way. This keeps
         # function-local helper classes (notably ctypes.Structure declarations)
         # visible to sema/codegen without modeling Python's local class scope.
@@ -2500,6 +2505,10 @@ class Parser:
                 self._eat()
                 values.append(self._parse_expr())
             self._expect("NEWLINE")
+            if any(
+                isinstance(t, (A.TupleLit, A.ListLit)) for t in expr.elems
+            ) and self._nested_assign_leaves_are_names(expr.elems):
+                return self._desugar_nested_assign(expr.elems, values, pos)
             return A.TupleAssign(targets=expr.elems, values=values, pos=pos)
         # Tuple assignment with at least one subscript/attribute target, e.g.
         # `xs[0], xs[1] = xs[1], xs[0]` or `a, self.x = self.x, a`. Pure
@@ -2529,6 +2538,10 @@ class Parser:
             # assignment, not an unpack, and must keep its separate values.
             if len(values) > 1 and any(isinstance(t, A.StarTarget) for t in targets):
                 values = [A.ListLit(elems=values, pos=pos)]
+            if any(
+                isinstance(t, (A.TupleLit, A.ListLit)) for t in targets
+            ) and self._nested_assign_leaves_are_names(targets):
+                return self._desugar_nested_assign(targets, values, pos)
             return A.TupleAssign(targets=targets, values=values, pos=pos)
         if isinstance(expr, A.Subscript) and self._check("OP", "="):
             self._eat()
@@ -2758,6 +2771,79 @@ class Parser:
                 break
             j += 1
         return False
+
+    def _nested_assign_leaves_are_names(self, targets: list) -> bool:
+        """True if every LEAF of a possibly-nested target list is a plain name.
+
+        The desugar below binds each leaf with `A.Assign`, whose `target` is a
+        `str`, so a Subscript/Attr leaf has nowhere to go. Those only occur in
+        the flat parallel form, which sema and ir_lower already handle, so
+        answering False here leaves that path exactly as it was.
+        """
+        for t in targets:
+            if isinstance(t, (A.TupleLit, A.ListLit)):
+                if not self._nested_assign_leaves_are_names(t.elems):
+                    return False
+            elif not isinstance(t, A.Name):
+                return False
+        return True
+
+    def _desugar_nested_assign(self, targets: list, values: list, pos) -> list:
+        """Flatten a NESTED unpack target into plain assignments via temporaries.
+
+        `a, (b, c) = 1, (2, 3)` and `(a, (b, c)) = (1, (2, 3))` were both
+        rejected or worse -- the parenthesised form raised E115, and the bare
+        form COMPILED and then crashed, storing the inner tuple's pointer where
+        a value was expected. The targets parsed fine (`_is_assign_target`
+        accepts a nested list/tuple); nothing downstream knew what to do with
+        one.
+
+        Rewriting here means nothing downstream has to: sema and ir_lower only
+        ever see flat assignments and subscripts, both of which already work on
+        tuples (verified: `t = (1, (2, 3)); b, c = t[1]`).
+
+        The parallel form binds every value to a temporary BEFORE any store, so
+        `a, (b, c) = c, (a, b)` still reads the old values -- the same guarantee
+        TupleAssign's own docstring makes for the flat case.
+        """
+        out: list = []
+
+        def _fresh(kind: str) -> str:
+            self._nested_unpack_seq += 1
+            return f"__nu{self._nested_unpack_seq}{kind}"
+
+        def _bind(tgts: list, src: str) -> None:
+            for i, t in enumerate(tgts):
+                item = A.Subscript(
+                    obj=A.Name(name=src, pos=pos),
+                    index=A.IntLit(value=i, pos=pos),
+                    pos=pos,
+                )
+                if isinstance(t, (A.TupleLit, A.ListLit)):
+                    tmp = _fresh("t")
+                    out.append(A.Assign(target=tmp, value=item, pos=pos))
+                    _bind(t.elems, tmp)
+                else:
+                    out.append(A.Assign(target=t.name, value=item, pos=pos))
+
+        if len(values) == 1:
+            root = _fresh("r")
+            out.append(A.Assign(target=root, value=values[0], pos=pos))
+            _bind(targets, root)
+            return out
+        for t, v in zip(targets, values):
+            tmp = _fresh("v")
+            out.append(A.Assign(target=tmp, value=v, pos=pos))
+            t.desugar_tmp = tmp  # type: ignore[attr-defined]
+        for t in targets:
+            tmp = t.desugar_tmp  # type: ignore[attr-defined]
+            if isinstance(t, (A.TupleLit, A.ListLit)):
+                _bind(t.elems, tmp)
+            else:
+                out.append(
+                    A.Assign(target=t.name, value=A.Name(name=tmp, pos=pos), pos=pos)
+                )
+        return out
 
     def _parse_with(self) -> "A.With":
         kw = self._expect("KEYWORD", "with")
@@ -3883,16 +3969,23 @@ class Parser:
         """
         first = self._peek()
         targets, grouped = self._parse_for_target_group()
+        # Per-group shape, kept alongside the flat list so a caller that WANTS
+        # the nesting can rewrite it (see _desugar_nested_for_target). Recorded
+        # on self rather than returned, because _parse_for_target_list has
+        # several callers -- the same side-channel idiom _for_target_pos uses.
+        shape: list = [list(targets) if grouped else targets[0]]
         groups = 1
         while self._check("OP", ","):
             self._eat()
             if self._check("KEYWORD", "in"):
                 break  # trailing comma before `in`
             names, was_grouped = self._parse_for_target_group()
+            shape.append(list(names) if was_grouped else names[0])
             grouped = grouped or was_grouped
             groups += 1
             targets.extend(names)
         self._for_target_pos = first.pos
+        self._for_target_shape = shape if (grouped and groups > 1) else []
         return targets, (grouped and groups > 1)
 
     # Iterables whose lowering already yields a FLAT tuple, making a flattened
@@ -3904,6 +3997,47 @@ class Parser:
     # 74_zip.py and 388_zip_three.py (`enumerate(zip(...))`) and
     # sim_leaderboard.py (`enumerate(ranked)`).
     _FLATTENING_ITERABLES = ("enumerate",)
+
+    def _desugar_nested_for_target(self, shape: list, body: list, pos) -> tuple:
+        """Turn a nested loop target into one temp plus unpacking in the body.
+
+        `for a, (b, c) in pairs:` has no lowering: flattening it to
+        ['a','b','c'] binds the inner tuple's ADDRESS, which is what
+        `for a, (b, c) in [(1, (2, 3))]` printing `1 8885232 0` was. The fix is
+        the one _reject_nested_for_target's own message recommends -- bind the
+        item and unpack it inside the body:
+
+            for __nf1r in pairs:
+                a = __nf1r[0]
+                __nf2t = __nf1r[1]
+                b = __nf2t[0]
+                c = __nf2t[1]
+                <body>
+
+        Every construct this produces already works on tuples, so nothing
+        downstream needs to learn about nesting. Returns (loop_var, new_body).
+        """
+        self._nested_unpack_seq += 1
+        root = f"__nf{self._nested_unpack_seq}r"
+        prologue: list = []
+
+        def _bind(items: list, src: str) -> None:
+            for i, item in enumerate(items):
+                idx = A.Subscript(
+                    obj=A.Name(name=src, pos=pos),
+                    index=A.IntLit(value=i, pos=pos),
+                    pos=pos,
+                )
+                if isinstance(item, list):
+                    self._nested_unpack_seq += 1
+                    tmp = f"__nf{self._nested_unpack_seq}t"
+                    prologue.append(A.Assign(target=tmp, value=idx, pos=pos))
+                    _bind(item, tmp)
+                else:
+                    prologue.append(A.Assign(target=item, value=idx, pos=pos))
+
+        _bind(shape, root)
+        return root, prologue + list(body)
 
     def _reject_nested_for_target(self, nested: bool, iter_expr) -> None:
         """Refuse a nested loop target the lowering cannot honour.
@@ -3983,9 +4117,27 @@ class Parser:
             return A.For(var=var, range_args=args, body=body, pos=kw.pos, targets=multi, orelse=orelse_f)  # type: ignore
         # Any other expression: treat as iterable.
         iter_expr = self._parse_expr()
-        self._reject_nested_for_target(_nested, iter_expr)
+        # A nested target over a NON-flattening iterable is rewritten rather
+        # than refused. The enumerate family keeps flattening -- there the flat
+        # reading is the correct one and three corpus cases depend on it -- so
+        # _reject_nested_for_target still runs for everything not rewritten
+        # here, and still refuses whatever it refused before.
+        _shape = self._for_target_shape
+        _rewrite_nested = bool(
+            _nested
+            and _shape
+            and not (
+                isinstance(iter_expr, A.Call)
+                and iter_expr.func in self._FLATTENING_ITERABLES
+            )
+        )
+        if not _rewrite_nested:
+            self._reject_nested_for_target(_nested, iter_expr)
         self._expect("OP", ":")
         body = self._parse_block()
+        if _rewrite_nested:
+            var, body = self._desugar_nested_for_target(_shape, body, kw.pos)
+            multi = []
         orelse_f2: list = []
         self._skip_newlines()
         if self._check("KEYWORD", "else"):
