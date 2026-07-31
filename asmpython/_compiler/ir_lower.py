@@ -5466,6 +5466,58 @@ def _emit_int_divzero_check(ctx: _FuncCtx, divisor: IRValue, tag: int) -> None:
     ctx.switch_to(ok_b)
 
 
+def _emit_float_mod_floored(ctx: "_FuncCtx", r: IRValue, b: IRValue, tag: int) -> IRValue:
+    """Correct C `fmod` to Python's floored `%`.
+
+    They agree only when the operands share a sign. C truncates toward zero, so
+    the remainder takes the sign of the DIVIDEND; Python floors, so it takes the
+    sign of the DIVISOR. `-5.5 % 2.0` was -1.5 instead of 0.5, and `5.5 % -2.0`
+    was 1.5 instead of -0.5.
+
+    The correction is Python's own: when the remainder is non-zero and its sign
+    differs from the divisor's, add the divisor. Integer `%` already floors, so
+    only the float path needs this.
+    """
+    out = ctx.ensure_slot(f"__fmodfix_{tag}", F64)
+    ctx.emit(IRInstr("store", None, [r, out]))
+    zero = ctx.tmp(F64)
+    ctx.emit(IRInstr("const", zero, [0.0]))
+    nz = ctx.tmp(I64)
+    ctx.emit(IRInstr("fcmp.ne", nz, [r, zero]))
+    r_neg = ctx.tmp(I64)
+    ctx.emit(IRInstr("fcmp.lt", r_neg, [r, zero]))
+    b_neg = ctx.tmp(I64)
+    ctx.emit(IRInstr("fcmp.lt", b_neg, [b, zero]))
+    differ = ctx.tmp(I64)
+    ctx.emit(IRInstr("ixor", differ, [r_neg, b_neg]))
+    need = ctx.tmp(I64)
+    ctx.emit(IRInstr("iand", need, [nz, differ]))
+    fix_b = ctx.new_block("fmodfix")
+    zero_b = ctx.new_block("fmodzero")
+    chk_b = ctx.new_block("fmodchk")
+    end_b = ctx.new_block("fmodend")
+    ctx.emit(IRInstr("br.t", None, [need, fix_b.label, chk_b.label]))
+    ctx.switch_to(fix_b)
+    adj = ctx.tmp(F64)
+    ctx.emit(IRInstr("fadd", adj, [r, b]))
+    ctx.emit(IRInstr("store", None, [adj, out]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+    # A ZERO remainder still carries a sign, and C's is the dividend's:
+    # fmod(-4.0, 2.0) is -0.0 where Python gives 0.0. CPython's float_rem
+    # answers copysign(0.0, divisor) for this case, so do the same.
+    ctx.switch_to(chk_b)
+    ctx.emit(IRInstr("br.t", None, [nz, end_b.label, zero_b.label]))
+    ctx.switch_to(zero_b)
+    cs = ctx.tmp(F64)
+    ctx.emit(IRInstr("call", cs, ["copysign", zero, b]))
+    ctx.emit(IRInstr("store", None, [cs, out]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+    ctx.switch_to(end_b)
+    res = ctx.tmp(F64)
+    ctx.emit(IRInstr("load", res, [out]))
+    return res
+
+
 def _emit_float_divzero_check(ctx: _FuncCtx, divisor: IRValue, op: str, tag: int) -> None:
     """Raise ZeroDivisionError if `divisor` (an F64) is 0.0, for float
     `/`/`//`/`%`. Unlike int division (a hardware SIGFPE), a float divide
@@ -7857,6 +7909,8 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 v = ctx.tmp(F64)
                 c_name = "fmod" if e.op == "%" else "pow"
                 ctx.emit(IRInstr("call", v, [c_name, a, b]))
+                if e.op == "%":
+                    v = _emit_float_mod_floored(ctx, v, b, id(e))
                 return v
             if e.op == "//":
                 # Float floor division: `a // b` is `floor(a / b)`. No

@@ -2419,6 +2419,17 @@ class SemaAnalyzer:
             if self._resolve_annot(annot) is not None:  # type: ignore
                 continue
             if i < len(fn_defaults) and fn_defaults[i] is not None:
+                # A parameter with a default is skipped for CALL-SITE inference,
+                # because the default already describes it -- but nothing was
+                # reading that description, so the parameter stayed untyped.
+                # For a pointer-sized kind that is merely imprecise; for a FLOAT
+                # it is wrong, because a float travels in an XMM register and an
+                # untyped parameter arrives through a GP one, so `def f(x=1.5)`
+                # returned raw bits (3.2055295e-317). Recording the default's own
+                # kind is the description the skip assumes exists.
+                _dl = self._literal_arg_type(fn_defaults[i])
+                if _dl is not None and _dl[0] in self._INFERRED_PARAM_KINDS:
+                    self.inferred_param_types.setdefault(f"{qualname}:{i}", _dl)
                 continue
             candidates: list = []
             found_any = False
