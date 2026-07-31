@@ -2321,6 +2321,120 @@ class SemaAnalyzer:
         self._mod_binding_kinds_cache = kinds
         return kinds
 
+    def _return_expr_kind(self, fn, ex, kinds: dict, depth: int):
+        """Kind of a RETURNED expression, or None when it cannot be read.
+
+        Recursive, because the shapes that actually appear are nested: a merge
+        step returns `r + a[i:] + b[j:]`, a concatenation whose left operand is
+        itself a concatenation. Handling only the top level left that -- and so
+        every function that returned one -- unreadable.
+        """
+        if ex is None or depth > 6:
+            return None
+        lit = self._literal_arg_type(ex)
+        if lit is not None:
+            return lit
+        if isinstance(ex, A.Name):
+            return self._param_kind_in(fn, ex.name)
+        if isinstance(ex, A.Call) and isinstance(ex.func, str):
+            return kinds.get(ex.func)
+        if isinstance(ex, A.BinOp) and ex.op == "+":
+            # Concatenation carries its operands' kind. Either side answers,
+            # since `+` requires them to agree in the first place.
+            return (self._return_expr_kind(fn, ex.left, kinds, depth + 1)
+                    or self._return_expr_kind(fn, ex.right, kinds, depth + 1))
+        if isinstance(ex, A.Subscript) and isinstance(ex.index, A.Slice):
+            # A slice of a sequence is that same sequence kind.
+            return self._return_expr_kind(fn, ex.obj, kinds, depth + 1)
+        if isinstance(ex, A.IfExp):
+            a = self._return_expr_kind(fn, ex.body, kinds, depth + 1)
+            b = self._return_expr_kind(fn, ex.orelse, kinds, depth + 1)
+            return a if (a is not None and b is not None and a[0] == b[0]) else None
+        return None
+
+    def _infer_return_kinds(self) -> None:
+        """Fill `self._fn_return_kinds` so a CALL can inform the parameter it is
+        passed to.
+
+        Forwarding (see _param_kind_in) covers an argument that is a bare
+        parameter name; this covers one that is a call:
+
+            def msort(xs):
+                if len(xs) <= 1: return xs
+                return merge(msort(xs[:m]), msort(xs[m:]))
+
+        `merge`'s only call site passes two CALLS, so without this its
+        parameters stay int and `len(a)` reads an integer as a list header.
+
+        A returned PARAMETER resolves through what inference already knows, so
+        this runs between rounds. A function whose returns disagree, or that has
+        one unreadable return, is left out entirely -- absence means "nothing
+        known", never a guess.
+        """
+        kinds: dict = {}
+        for f in self.mod.funcs:
+            params: list = f.params
+            merged = None
+            usable = True
+            seen = False
+            for st in self._walk_stmts_flat(f.body):
+                if not isinstance(st, A.Return) or st.value is None:
+                    continue
+                lit = self._return_expr_kind(f, st.value, kinds, 0)
+                if lit is None:
+                    # An unreadable return is NO INFORMATION, not a
+                    # disagreement. Bailing on one made mutually recursive
+                    # functions unresolvable: merge's return needs msort's kind
+                    # and msort's needs merge's, so neither was ever readable
+                    # even though msort also has a plain `return xs` that says
+                    # list. The readable returns must still all agree, and a
+                    # function with none at all is skipped by `seen`.
+                    continue
+                seen = True
+                if merged is None:
+                    merged = tuple(lit) + (None,) * (4 - len(lit))
+                elif merged[0] != lit[0]:
+                    usable = False
+                    break
+                elif merged[1] != lit[1]:
+                    els = {merged[1], lit[1]} - {None}
+                    merged = (merged[0], next(iter(els)) if len(els) == 1 else None) + tuple(merged[2:])
+            if usable and seen and merged is not None and merged[0] != "int":
+                kinds[f.name] = merged
+        self._fn_return_kinds = kinds
+
+    def _param_kind_in(self, owner, nm: str):
+        """The recorded kind of `nm` as a parameter of `owner`, or None.
+
+        Call-site inference only ever read LITERAL arguments, so a call that
+        forwards one of its own parameters taught it nothing:
+
+            def merge(a, b): ... len(a) ... a[i] ...
+            def wrap(x):     return merge(x, x)
+            wrap([1])
+
+        `wrap`'s parameter is inferred from the literal, but `merge`'s only call
+        site passes a NAME, so `a` and `b` stayed int and `len(a)` read an
+        integer as a list header. Forwarding a parameter is the commonest way a
+        call site is not a literal, and the answer is already known by the time
+        it is asked -- from an annotation, or from an earlier round of this
+        same pass.
+        """
+        if owner is None or not isinstance(nm, str):
+            return None
+        params: list = owner.params
+        if nm not in params:
+            return None
+        i = params.index(nm)
+        pts: list = owner.param_types
+        annot = pts[i] if i < len(pts) else None
+        if annot is not None and annot[0] not in (None, "any"):
+            return tuple(annot) + (None,) * (4 - len(annot))
+        got = self.inferred_param_types.get(f"{owner.name}:{i}")
+        if got is not None:
+            return tuple(got) + (None,) * (4 - len(got))
+        return None
+
     def _infer_unannotated_params(self) -> None:
         """For function/method parameters with no type annotation and no
         default, scan every call site in the module for arguments whose type
@@ -2337,52 +2451,74 @@ class SemaAnalyzer:
         existing `int` default -- callers needing a different type still
         annotate explicitly, same as before."""
         calls: list = []
-        self._collect_calls_stmts(self.mod.body, calls)
+        # `_call_owner` maps each collected call to the FUNCTION it is written
+        # in, so an argument that is a bare Name can be resolved against that
+        # function's own parameters -- see _param_kind_in.
+        self._call_owner = {}
+
+        def _collect_owned(body, owner):
+            start = len(calls)
+            self._collect_calls_stmts(body, calls)
+            for _c in calls[start:]:
+                self._call_owner.setdefault(id(_c), owner)
+
+        _collect_owned(self.mod.body, None)
         for f in self.mod.funcs:
-            self._collect_calls_stmts(f.body, calls)
+            _collect_owned(f.body, f)
         for c in self.mod.classes:
             for m in c.methods:
-                self._collect_calls_stmts(m.body, calls)
+                _collect_owned(m.body, m)
 
         _mod_names = {
             _mn for _mn in getattr(self.mod, "project_module_qualifiers", set())
         }
-        for f in self.mod.funcs:
-            sites = [c for c in calls if isinstance(c, A.Call) and c.func == f.name]
-            # A MODULE-QUALIFIED call (`pprint.pformat(x)`) is a call to this
-            # same merged function -- whole-program compilation flattens the
-            # namespace -- but it is still an A.MethodCall at THIS point,
-            # because the rewrite to a plain Call happens during checking,
-            # which runs later. Collecting only A.Call left every such callee's
-            # parameters uninferred: `pformat`'s `o` defaulted to int, so its
-            # `str(o)` formatted a dict POINTER as a decimal integer.
-            for _c in calls:
-                if (
-                    isinstance(_c, A.MethodCall)
-                    and _c.method == f.name
-                    and isinstance(_c.obj, A.Name)
-                    and _c.obj.name not in self.imported_modules
-                ):
-                    sites.append(_c)
-            self._infer_call_target_params(f.name, f, sites, start=0)
+        # Repeated to a fixpoint. A parameter learned by FORWARDING (see
+        # _param_kind_in) depends on the forwarding function already being
+        # typed, which depends on declaration order -- `shout(s)` written above
+        # `go(t)` learned nothing on a single pass. Bounded, and it stops as
+        # soon as a round adds nothing, so the ordinary case still costs one.
+        for _round in range(4):
+            _before = dict(self.inferred_param_types)
+            if _round:
+                self._infer_return_kinds()
+            for f in self.mod.funcs:
+                sites = [c for c in calls if isinstance(c, A.Call) and c.func == f.name]
+                # A MODULE-QUALIFIED call (`pprint.pformat(x)`) is a call to this
+                # same merged function -- whole-program compilation flattens the
+                # namespace -- but it is still an A.MethodCall at THIS point,
+                # because the rewrite to a plain Call happens during checking,
+                # which runs later. Collecting only A.Call left every such callee's
+                # parameters uninferred: `pformat`'s `o` defaulted to int, so its
+                # `str(o)` formatted a dict POINTER as a decimal integer.
+                for _c in calls:
+                    if (
+                        isinstance(_c, A.MethodCall)
+                        and _c.method == f.name
+                        and isinstance(_c.obj, A.Name)
+                        and _c.obj.name not in self.imported_modules
+                    ):
+                        sites.append(_c)
+                self._infer_call_target_params(f.name, f, sites, start=0)
 
-        for c in self.mod.classes:
-            for m in c.methods:
-                if m.name == "__init__":
-                    sites = [
-                        c2 for c2 in calls if isinstance(c2, A.Call) and c2.func == c.name
-                    ]
-                else:
-                    # Matched by method name only (the receiver's static type
-                    # isn't known yet at this pre-pass). If another class has a
-                    # same-named method with conflicting argument types, the
-                    # mismatch just falls back to `int` as before -- no new
-                    # miscompile.
-                    sites = [
-                        mc for mc in calls
-                        if isinstance(mc, A.MethodCall) and mc.method == m.name
-                    ]
-                self._infer_call_target_params(f"{c.name}.{m.name}", m, sites, start=1)
+            for c in self.mod.classes:
+                for m in c.methods:
+                    if m.name == "__init__":
+                        sites = [
+                            c2 for c2 in calls if isinstance(c2, A.Call) and c2.func == c.name
+                        ]
+                    else:
+                        # Matched by method name only (the receiver's static type
+                        # isn't known yet at this pre-pass). If another class has a
+                        # same-named method with conflicting argument types, the
+                        # mismatch just falls back to `int` as before -- no new
+                        # miscompile.
+                        sites = [
+                            mc for mc in calls
+                            if isinstance(mc, A.MethodCall) and mc.method == m.name
+                        ]
+                    self._infer_call_target_params(f"{c.name}.{m.name}", m, sites, start=1)
+            if self.inferred_param_types == _before:
+                break
 
     def _literal_is_uniform(self, value) -> bool:
         """Whether a container literal's elements all share one base kind.
@@ -2453,6 +2589,12 @@ class SemaAnalyzer:
                     if arg is None:
                         continue
                 lit = self._literal_arg_type(arg)
+                if lit is None and isinstance(arg, A.Call) and isinstance(arg.func, str):
+                    lit = getattr(self, "_fn_return_kinds", {}).get(arg.func)
+                if lit is None and isinstance(arg, A.Name):
+                    lit = self._param_kind_in(
+                        getattr(self, "_call_owner", {}).get(id(site)), arg.name
+                    )
                 if lit is None and isinstance(arg, A.Name):
                     # Not a literal, but a module-level name bound exactly once
                     # to one is just as certain -- see _module_binding_kinds.

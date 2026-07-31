@@ -676,6 +676,14 @@ class Lexer:
             self.paren_depth += 1
         elif ch in ")]}":
             self.paren_depth -= 1
+        if ch == ";" and self.paren_depth == 0:
+            # `a = 1; b = 2` -- a semicolon separates simple statements, which
+            # is exactly what a NEWLINE does here, so it becomes one rather
+            # than a token every statement rule would have to learn about. It
+            # was not in the operator set at all, so any program using one
+            # failed to LEX ("unexpected character ';'"). A redundant NEWLINE
+            # (from a trailing `;`) is skipped like any other blank line.
+            return Token("NEWLINE", chr(10), line, col)
         if ch in "+-*/%<>=,:()[]{}&|^~.@":
             return Token("OP", ch, line, col)
         raise LexError(f"unexpected character {ch!r}", SourcePos(line, col), ErrorCode.L_UNEXPECTED_CHAR)
