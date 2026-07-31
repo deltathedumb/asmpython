@@ -1903,6 +1903,29 @@ class SemaAnalyzer:
                 self._scan_field_assigns(s.else_body, sig, pinfo)
                 self._scan_field_assigns(s.finally_body, sig, pinfo)
 
+    def _uniform_elem_kind(self, exprs):
+        """The one element kind every expression in `exprs` shares, "any" when
+        they disagree, or None when there is nothing to learn (an empty
+        literal, which keeps the previous no-information behaviour).
+
+        A container parameter inferred from a literal call site used to report
+        a bare ("list", None) / ("dict", None), so the ELEMENT type was
+        unknown at every read. For a list that meant `for x in lst: s.add(x)`
+        added an untyped value to a set and the program access-violated; for a
+        dict it forced the int default. Reporting the real element kind is what
+        made dict safe to infer at all, and lists and sets need it for exactly
+        the same reason.
+        """
+        kind = None
+        for ex in exprs:
+            lv = self._literal_arg_type(ex)
+            k = lv[0] if lv is not None else "any"
+            if kind is None:
+                kind = k
+            elif kind != k:
+                return "any"
+        return kind
+
     def _literal_arg_type(self, value):
         """(ty, el, val, tuple) for an expression whose type is knowable from
         its syntax alone, independent of scope -- or None if it depends on a
@@ -1916,7 +1939,7 @@ class SemaAnalyzer:
         if isinstance(value, A.StrLit) or isinstance(value, A.FString):
             return ("str", None, None, None)
         if isinstance(value, A.ListLit):
-            return ("list", None, None, None)
+            return ("list", self._uniform_elem_kind(value.elems), None, None)
         if isinstance(value, A.DictLit):
             # Report the VALUE kind too. Writing a bare ("dict", None) forces
             # the int default on every read, which is why dict used to be kept
@@ -1924,18 +1947,9 @@ class SemaAnalyzer:
             # app_validate_form.py an entry. A MIXED dict reports "any", which
             # preserves the dynamic handling that case needs, and a homogeneous
             # one reports its real kind.
-            _vk = None
-            for _dv in value.values:
-                _lv = self._literal_arg_type(_dv)
-                _k = _lv[0] if _lv is not None else "any"
-                if _vk is None:
-                    _vk = _k
-                elif _vk != _k:
-                    _vk = "any"
-                    break
-            return ("dict", _vk, None, None)
+            return ("dict", self._uniform_elem_kind(value.values), None, None)
         if isinstance(value, A.SetLit):
-            return ("set", None, None, None)
+            return ("set", self._uniform_elem_kind(value.elems), None, None)
         if isinstance(value, A.TupleLit):
             return ("tuple", None, None, None)
         if isinstance(value, A.Call) and value.func in (
@@ -2383,6 +2397,26 @@ class SemaAnalyzer:
                     candidates.append(lit)
             if found_any and len(candidates) == 1:
                 self.inferred_param_types[f"{qualname}:{i}"] = candidates[0]
+            elif found_any and len(candidates) > 1:
+                # Sites that differ ONLY in the element slot, where some report
+                # None (nothing to learn -- an EMPTY literal) and the rest agree
+                # on one kind. `process_command([])` then `process_command([1])`
+                # yields ("list", None) and ("list", "int"): before element
+                # kinds were reported at all these were both ("list", None) and
+                # agreed, so requiring exact equality turned a newly more
+                # precise answer into a disagreement and dropped the parameter
+                # to the int default (424_match_structural.py).
+                #
+                # An unknown yields to a known one; two DIFFERENT known kinds
+                # still conflict and inference declines, exactly as before.
+                _rest = {(c[0],) + tuple(c[2:]) for c in candidates}
+                _els = {c[1] for c in candidates if c[1] is not None}
+                if len(_rest) == 1 and len(_els) <= 1:
+                    _c0 = candidates[0]
+                    _el = next(iter(_els)) if _els else None
+                    self.inferred_param_types[f"{qualname}:{i}"] = (
+                        (_c0[0], _el) + tuple(_c0[2:])
+                    )
 
     #: Inferred parameter kinds written through to the IR parameter type.
     #:
