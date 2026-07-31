@@ -9573,6 +9573,18 @@ class SemaAnalyzer:
                 if e.op not in ("&", "|", "^", "<<", ">>") and "float" in (lt, rt):
                     e.inferred_type = "float"  # type: ignore
                     return
+                # True division is ALWAYS float in Python, whatever the operands
+                # are -- the same rule expr_type states for the non-opaque case.
+                # Leaving it opaque contradicted the LOWERING, which does float
+                # division regardless, so the correct bits were computed and
+                # then printed as an integer: `t = (4, 2); t[0] / t[1]` gave
+                # 4611686018427387904, the IEEE-754 pattern for 2.0. Any
+                # subscript operand reached here, since an element read is
+                # opaque, so this hit indexing into tuples, lists and
+                # list-of-lists alike.
+                if e.op == "/":
+                    e.inferred_type = "float"  # type: ignore
+                    return
                 e.inferred_type = "any"  # type: ignore
                 return
             # An operand that's an object instance may overload the operator via
