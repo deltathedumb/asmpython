@@ -9115,8 +9115,15 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("store", None, [out_v0, out_ptr]))
         len_addr = ctx.tmp(PTR)
         ctx.emit(IRInstr("gep", len_addr, [src_v0, _LIST_LEN_OFF]))
-        len_v = ctx.tmp(I64)
-        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        len_v0 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v0, [len_addr]))
+        # The source and output pointers were already parked in slots; the
+        # BOUND was not, and it is stale for exactly the same reason -- when the
+        # argument is a comprehension this load lands in the comprehension's
+        # exit block, not in setcallhead. `for c in range(3): s = set([1 for i
+        # in range(c+1)]); print(len(s))` crashed on the second iteration.
+        len_ptr = ctx.ensure_slot(f"__setcall_len_{id(e)}", I64)
+        ctx.emit(IRInstr("store", None, [len_v0, len_ptr]))
         idx_ptr = ctx.ensure_slot(f"__setcall_idx_{id(e)}", I64)
         zero_v = ctx.tmp(I64)
         ctx.emit(IRInstr("const", zero_v, [0]))
@@ -9136,6 +9143,8 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.switch_to(head_b)
         idx_v = ctx.tmp(I64)
         ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_ptr]))
         cond_v = ctx.tmp(I64)
         ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, len_v]))
         ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
@@ -9277,8 +9286,18 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         xs_v = _lower_expr(ctx, e.args[0])
         len_addr = ctx.tmp(PTR)
         ctx.emit(IRInstr("gep", len_addr, [xs_v, _LIST_LEN_OFF]))
-        len_v = ctx.tmp(I64)
-        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        len_v0 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v0, [len_addr]))
+        # Parked in slots, not carried into the loop blocks as temps -- see the
+        # sum lowering for the full account. When the argument is a
+        # COMPREHENSION this gep/load lands in the comprehension's exit block
+        # rather than in aahead, and the temps read stale on the second
+        # execution: `for c in range(3): print(all([i >= 0 for i in
+        # range(c+1)]))` answered False/False/False instead of True/True/True.
+        len_ptr = ctx.ensure_slot(f"__aa_len_{id(e)}", I64)
+        ctx.emit(IRInstr("store", None, [len_v0, len_ptr]))
+        xs_ptr = ctx.ensure_slot(f"__aa_xs_{id(e)}", PTR)
+        ctx.emit(IRInstr("store", None, [xs_v, xs_ptr]))
         idx_ptr = ctx.ensure_slot(f"__aa_idx_{id(e)}", I64)
         zero0 = ctx.tmp(I64)
         ctx.emit(IRInstr("const", zero0, [0]))
@@ -9296,6 +9315,8 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.switch_to(head_b)
         idx_v = ctx.tmp(I64)
         ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_ptr]))
         cond_v = ctx.tmp(I64)
         ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, len_v]))
         ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
@@ -9303,7 +9324,9 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.switch_to(body_b)
         idx_v2 = ctx.tmp(I64)
         ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
-        addr = _list_elem_addr(ctx, xs_v, idx_v2)
+        xs_v2 = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", xs_v2, [xs_ptr]))
+        addr = _list_elem_addr(ctx, xs_v2, idx_v2)
         elem_v = ctx.tmp(I64)
         ctx.emit(IRInstr("load", elem_v, [addr]))
         truthy_v = _value_truthy_typed(ctx, elem_v, el_kind_aa, id(e))
