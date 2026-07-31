@@ -1700,6 +1700,14 @@ class Parser:
             return all(self._is_safe_default_value(el) for el in e.elems)
         if isinstance(e, A.DictLit):
             return not e.keys and not e.values
+        if isinstance(e, A.Lambda):
+            # A lambda literal is safe to splice for the very reason this check
+            # exists: it is immutable and its evaluation has no side effects, so
+            # re-evaluating it per call site yields an equivalent function. It
+            # is strictly safer than the ListLit accepted just above, which is
+            # the classic mutable default where per-site splicing genuinely does
+            # diverge from CPython's evaluate-once semantics.
+            return True
         return False
 
     def _fold_default_negation(self, e):
@@ -1750,7 +1758,13 @@ class Parser:
         the parse succeed for `+`/`~` in the first place, not rejecting them
         one level later once they've already been silently consumed.
         """
-        if self._check_any_op("-"):
+        if self._check("KEYWORD", "lambda"):
+            # `_parse_primary` sits above lambda in the precedence chain and so
+            # can never reach it. A lambda default (`def f(x, key=lambda v: v)`)
+            # therefore failed in the parser, before _is_safe_default_value --
+            # which does accept it -- ever got a say.
+            expr = self._parse_lambda()
+        elif self._check_any_op("-"):
             minus_pos = self._eat().pos
             expr = A.UnaryOp(op="-", operand=self._parse_primary(), pos=minus_pos)
         else:
@@ -3841,7 +3855,13 @@ class Parser:
                     break
                 more = _param_item()
         self._expect("OP", ":")
-        body = self._parse_ternary()
+        # The body is a full expression, not just a ternary: CPython's grammar
+        # is `lambdef: 'lambda' [varargslist] ':' test` and `test` includes
+        # `lambdef` itself. Parsing at the ternary level -- one rung BELOW
+        # lambda in the precedence chain -- made a curried
+        # `lambda x: lambda y: x + y` unparseable, since the inner lambda sat
+        # at a level the body could never reach.
+        body = self._parse_expr()
         return A.Lambda(params=params, vararg=vararg, body=body, pos=pos)
 
     def _parse_ternary(self) -> "A.Expr":

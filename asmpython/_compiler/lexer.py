@@ -296,7 +296,11 @@ class Lexer:
                 self.tokens.append(self._read_identifier())
                 continue
 
-            if ch.isdigit():
+            # A leading-dot float (`.5`) starts with `.`, not a digit. `...` is
+            # excluded because the char after the dot must be a digit, and an
+            # attribute like `x.5` is not valid Python in the first place, so a
+            # dot-then-digit is unambiguously a float.
+            if ch.isdigit() or (ch == "." and self._peek(1).isdigit()):
                 self.tokens.append(self._read_number())
                 continue
 
@@ -367,7 +371,12 @@ class Lexer:
         while self._peek() and (self._peek().isdigit() or self._peek() == "_"):
             self._advance()
         is_float = False
-        if self._peek() == "." and self._peek(1).isdigit():
+        # A trailing-dot float (`5.`) has no digit after the point. CPython
+        # consumes the dot unconditionally here -- `1.real` is a syntax error,
+        # not attribute access on an int -- so requiring a following digit both
+        # rejected `5.` and diverged from CPython. `1..real` still works: the
+        # first dot ends the float, the second starts the attribute.
+        if self._peek() == ".":
             is_float = True
             self._advance()
             while self._peek() and (self._peek().isdigit() or self._peek() == "_"):
