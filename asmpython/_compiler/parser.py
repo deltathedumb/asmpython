@@ -2024,6 +2024,92 @@ class Parser:
         # name; sema decides whether it's a known class -> instance:<name>.
         return (name, None)
 
+    def _lift_capturing_lambdas(self, stmt) -> list:
+        """Rewrite each CAPTURING lambda in `stmt` into a lifted nested
+        function, returning the ClosureBind statements that must precede it.
+
+        A lambda could never capture: the parser lifts a nested `def` to module
+        level and leaves a ClosureBind at the def's STATEMENT position, and a
+        lambda is an expression, so `def adder(n): return lambda x: x + n`
+        reported "undefined variable 'n'". Rather than build a second closure
+        mechanism, the lambda is turned into exactly the shape that already
+        works -- a lifted nested def plus a bind at the enclosing statement:
+
+            def adder(n):
+                ClosureBind(_lam_1, free_vars=['n'])
+                return _lam_1
+
+        Only lambdas that actually capture are rewritten. A non-capturing one
+        stays an A.Lambda, so everything that pattern-matches on that node
+        (`sorted(key=...)`, map/filter, the sort-key lowering) is untouched.
+        Capture is judged against the enclosing function's PARAMETERS, the
+        frame _find_free_vars already consults; a module-level lambda has no
+        frame and is never rewritten, which is right because module globals
+        resolve without a closure.
+        """
+        if not self._enclosing_params:
+            return []
+        bound: set = set()
+        for _frame in self._enclosing_params:
+            bound.update(_frame)
+        if not bound:
+            return []
+        binds: list = []
+
+        def _lift(lam):
+            import uuid as _uuid
+            fname = f"_lam_{_uuid.uuid4().hex[:8]}"
+            fdef = A.FuncDef(
+                name=fname,
+                params=list(lam.params) + ([lam.vararg] if lam.vararg else []),
+                body=[A.Return(value=lam.body, pos=lam.pos)],
+                pos=lam.pos,
+                param_types=[None] * (len(lam.params) + (1 if lam.vararg else 0)),
+                defaults=[None] * (len(lam.params) + (1 if lam.vararg else 0)),
+                vararg=lam.vararg,
+            )
+            free, nonlocals = self._find_free_vars(fdef)
+            free = [v for v in free if v in bound]
+            if not free:
+                return None
+            fdef.is_lifted = True
+            fdef.free_vars = free
+            fdef.nonlocal_vars = []
+            self._nested_funcs.append(fdef)
+            binds.append(
+                A.ClosureBind(
+                    func_name=fname, free_vars=free, nonlocal_vars=[], pos=lam.pos
+                )
+            )
+            return A.Name(name=fname, pos=lam.pos)
+
+        def _walk(e):
+            if e is None:
+                return None
+            if isinstance(e, A.Lambda):
+                e.body = _walk(e.body)
+                return _lift(e) or e
+            for attr in ("value", "obj", "left", "right", "test", "body", "orelse",
+                         "operand", "iter", "elt", "index", "key", "cond", "start",
+                         "stop", "step"):
+                sub = getattr(e, attr, None)
+                if sub is not None and not isinstance(sub, (list, str, int, float, bool)):
+                    setattr(e, attr, _walk(sub))
+            for attr in ("args", "elems", "values", "keys", "operands"):
+                sub = getattr(e, attr, None)
+                if isinstance(sub, list):
+                    setattr(e, attr, [_walk(x) if x is not None else None for x in sub])
+            kw = getattr(e, "kwargs", None)
+            if isinstance(kw, list) and kw and isinstance(kw[0], tuple):
+                e.kwargs = [(k, _walk(v)) for k, v in kw]
+            return e
+
+        for attr in ("value", "expr", "test", "iter", "cond"):
+            sub = getattr(stmt, attr, None)
+            if sub is not None and not isinstance(sub, (list, str, int, float, bool)):
+                setattr(stmt, attr, _walk(sub))
+        return binds
+
     def _parse_block(self) -> list:
         # Single-line compound-statement body (`def f(): ...`, `if x: y = 1`,
         # `class C: pass`) -- real Python allows exactly one simple statement
@@ -2069,8 +2155,14 @@ class Parser:
                 # Same list-vs-single-node tolerance as the inline-body
                 # case just above -- see its comment for why.
                 if isinstance(result, list):
-                    stmts.extend(result)
+                    for _r in result:
+                        stmts.extend(self._lift_capturing_lambdas(_r))
+                        stmts.append(_r)
                 else:
+                    # The bind must come BEFORE the statement that uses the
+                    # lifted function, same ordering a nested def's own
+                    # ClosureBind has.
+                    stmts.extend(self._lift_capturing_lambdas(result))
                     stmts.append(result)
                 self._skip_newlines()
             self._expect("DEDENT")
