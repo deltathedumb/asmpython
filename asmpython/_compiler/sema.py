@@ -1918,7 +1918,22 @@ class SemaAnalyzer:
         if isinstance(value, A.ListLit):
             return ("list", None, None, None)
         if isinstance(value, A.DictLit):
-            return ("dict", None, None, None)
+            # Report the VALUE kind too. Writing a bare ("dict", None) forces
+            # the int default on every read, which is why dict used to be kept
+            # out of _INFERRED_PARAM_KINDS entirely -- it cost
+            # app_validate_form.py an entry. A MIXED dict reports "any", which
+            # preserves the dynamic handling that case needs, and a homogeneous
+            # one reports its real kind.
+            _vk = None
+            for _dv in value.values:
+                _lv = self._literal_arg_type(_dv)
+                _k = _lv[0] if _lv is not None else "any"
+                if _vk is None:
+                    _vk = _k
+                elif _vk != _k:
+                    _vk = "any"
+                    break
+            return ("dict", _vk, None, None)
         if isinstance(value, A.SetLit):
             return ("set", None, None, None)
         if isinstance(value, A.TupleLit):
@@ -2401,7 +2416,41 @@ class SemaAnalyzer:
     #: list/set/tuple carry the same latent risk whenever their element type is
     #: not int; they are kept because the gate showed no divergence for them and
     #: they account for real fixes.
-    _INFERRED_PARAM_KINDS = ("float", "str", "list", "set", "tuple")
+    _INFERRED_PARAM_KINDS = ("float", "str", "list", "dict", "set", "tuple")
+
+    def _param_is_type_tested(self, fn, pname: str) -> bool:
+        """True if `fn`'s body calls isinstance()/type() on `pname`.
+
+        Evidence the parameter is polymorphic by intent, which one literal call
+        site cannot outweigh. See the use site in _apply_inferred_param_types.
+        """
+        found = [False]
+
+        def _walk(node) -> None:
+            if found[0] or node is None:
+                return
+            if isinstance(node, A.Call) and node.func in ("isinstance", "type"):
+                for a in node.args:
+                    if isinstance(a, A.Name) and a.name == pname:
+                        found[0] = True
+                        return
+            for attr in ("args", "elems", "values", "keys", "operands"):
+                for sub in (getattr(node, attr, None) or []):
+                    _walk(sub)
+            for attr in ("obj", "value", "test", "left", "right", "iter", "elt", "cond"):
+                _walk(getattr(node, attr, None))
+
+        def _walk_stmts(stmts) -> None:
+            for st in (stmts or []):
+                if found[0]:
+                    return
+                for attr in ("value", "test", "expr", "iter", "cond"):
+                    _walk(getattr(st, attr, None))
+                for attr in ("body", "then", "orelse", "finally_body", "else_body"):
+                    _walk_stmts(getattr(st, attr, None))
+
+        _walk_stmts(fn.body)
+        return found[0]
 
     def _apply_inferred_param_types(self) -> None:
         """Propagate a parameter type inferred from call sites (see
@@ -2448,13 +2497,35 @@ class SemaAnalyzer:
                 inferred = self.inferred_param_types.get(f"{qualname}:{i}")
                 if inferred is None or inferred[0] not in self._INFERRED_PARAM_KINDS:
                     continue
+                # A parameter the body TYPE-TESTS is polymorphic by intent, so
+                # the literal call sites do not describe it. Inference sees only
+                # LITERAL arguments, so a recursive helper like
+                #     def to_json(obj):
+                #         if isinstance(obj, dict): ... to_json(v) ...
+                #         elif isinstance(obj, str): ...
+                # has exactly one visible site -- the dict literal at the top
+                # level -- and every recursive call is invisible. Typing `obj`
+                # as dict then made the str/int branches unreachable-but-emitted
+                # and the program access-violated (prog_json_stringify.py).
+                #
+                # An `isinstance` test on the parameter is the author stating
+                # the type varies, which is strictly better evidence than one
+                # literal call site. Only that test disqualifies -- other
+                # "dynamic" uses (iteration, attribute access) do not, since
+                # those are exactly the cases inference exists to type.
+                if self._param_is_type_tested(fn, fn.params[i]):
+                    continue
                 kind = inferred[0]
                 cur = fn_pts[i] if i < len(fn_pts) else None
                 if cur is not None:
                     continue  # never override a real annotation
                 while len(fn_pts) <= i:
                     fn_pts.append(None)
-                fn_pts[i] = (kind, None)
+                # Carry the element/value kind, not just the base. A bare
+                # (kind, None) makes every read take the int default, which is
+                # what made a dict parameter unusable.
+                _el = inferred[1] if len(inferred) > 1 else None
+                fn_pts[i] = (kind, _el if isinstance(_el, str) and _el else None)
                 if sig is not None:
                     sig_pts: list = sig.param_types
                     if i < len(sig_pts):
