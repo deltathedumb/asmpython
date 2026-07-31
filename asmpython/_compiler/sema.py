@@ -3096,7 +3096,7 @@ class SemaAnalyzer:
                 return None
         return seen
 
-    def _yielded_value_kind(self, stmts: list) -> "str | None":
+    def _yielded_value_kind(self, stmts: list, param_kinds=None) -> "str | None":
         """The common kind of every `yield`ed expression in `stmts`, or None if
         they disagree or none is statically knowable.
 
@@ -3114,6 +3114,16 @@ class SemaAnalyzer:
                 return None
             if isinstance(_v, A.MethodCall) and _v.method in _STR_METHOD_RET:
                 _kinds.add(_STR_METHOD_RET[_v.method])
+                continue
+            if isinstance(_v, A.Name):
+                # A bare `yield c` where `c` is the loop variable. Its kind is
+                # not readable from the yield alone, but the enclosing `for`
+                # says what it iterates -- the same question _gen_local_seed
+                # already asks to seed the lifted field.
+                _fk = self._gen_for_var_kind(_v.name, stmts, param_kinds or {})
+                if not _fk:
+                    return None
+                _kinds.add(_fk)
                 continue
             _lit = self._literal_arg_type(_v)
             if _lit is None:
@@ -4291,7 +4301,17 @@ class SemaAnalyzer:
             return "int" if range_args else ""
         if isinstance(it, A.Call) and it.func == "range":
             return "int"
-        if isinstance(it, A.ListLit) and it.elems:
+        if isinstance(it, A.StrLit):
+            # Iterating a string yields its characters, which are strings.
+            # Missing this arm seeded `self.c = 0` for `for c in "abc"`, so
+            # every use of `c` inside the generator was typed int -- the reason
+            # `yield c.upper()` was rejected as "int has no method 'upper'".
+            return "str"
+        if isinstance(it, A.DictLit):
+            # Iterating a dict yields its KEYS, and dict keys are always str in
+            # asmpython's representation (see _lower_dict_key).
+            return "str"
+        if isinstance(it, (A.ListLit, A.TupleLit)) and it.elems:
             first = it.elems[0]
             if isinstance(first, A.FloatLit):
                 return "float"
@@ -4302,11 +4322,13 @@ class SemaAnalyzer:
             return ""
         if isinstance(it, A.Name):
             annot = param_kinds.get(it.name)
-            if isinstance(annot, tuple) and len(annot) >= 2 and annot[0] in (
-                "list",
-                "tuple",
-            ):
-                return annot[1] or ""
+            if isinstance(annot, tuple) and len(annot) >= 2:
+                if annot[0] in ("list", "tuple"):
+                    return annot[1] or ""
+                if annot[0] == "str":
+                    return "str"
+                if annot[0] == "dict":
+                    return "str"
         return ""
 
     def _gen_local_seed(self, name: str, stmts: list, pos, param_kinds=None):
@@ -4755,7 +4777,15 @@ class SemaAnalyzer:
         elif isinstance(_rt, tuple) and _rt and _rt[0] not in ("list", "tuple", "set"):
             next_ret = _rt
         else:
-            next_ret = ("int", None)
+            # No annotation: read the kind off the `yield`ed expressions
+            # themselves. Falling straight to int meant EVERY unannotated
+            # generator yielded ints no matter what was in it, so
+            # `for c in "abc": yield c.upper()` produced a list[int] and
+            # `"".join(...)` on it was rejected. _yielded_value_kind is
+            # syntax-only and answers None unless every yield agrees, so a
+            # generator it cannot read keeps the int fallback exactly as before.
+            _yk = self._yielded_value_kind(f.body, param_kinds)
+            next_ret = (_yk, None) if _yk else ("int", None)
 
         next_func = A.FuncDef(
             name="__next__",
