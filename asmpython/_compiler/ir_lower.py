@@ -9188,8 +9188,22 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("store", None, [zero0, acc_ptr]))
         len_addr = ctx.tmp(PTR)
         ctx.emit(IRInstr("gep", len_addr, [xs_v, _LIST_LEN_OFF]))
-        len_v = ctx.tmp(I64)
-        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        len_v0 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v0, [len_addr]))
+        # The sequence pointer and its length are parked in SLOTS rather than
+        # carried into the loop blocks as temps. Both are computed in whatever
+        # block is current here, which for `xs = [...]; sum(xs)` is the
+        # comprehension's EXIT block, not sum's own head -- and the temps went
+        # stale across that boundary, so every iteration of an enclosing loop
+        # summed the first iteration's length:
+        #   for c in range(3): xs = [1 for i in range(c+1)]
+        #                      print(sum(xs), len(xs))   -> 1 1 / 1 2 / 1 3
+        # len() reads the same field correctly because it consumes its load in
+        # the block that defines it.
+        len_ptr = ctx.ensure_slot(f"__sum_len_{id(e)}", I64)
+        ctx.emit(IRInstr("store", None, [len_v0, len_ptr]))
+        xs_ptr = ctx.ensure_slot(f"__sum_xs_{id(e)}", PTR)
+        ctx.emit(IRInstr("store", None, [xs_v, xs_ptr]))
         idx_ptr = ctx.ensure_slot(f"__sum_idx_{id(e)}", I64)
         zero1 = ctx.tmp(I64)
         ctx.emit(IRInstr("const", zero1, [0]))
@@ -9202,6 +9216,8 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.switch_to(head_b)
         idx_v = ctx.tmp(I64)
         ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_ptr]))
         cond_v = ctx.tmp(I64)
         ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, len_v]))
         ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
@@ -9209,7 +9225,9 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.switch_to(body_b)
         idx_v2 = ctx.tmp(I64)
         ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
-        addr = _list_elem_addr(ctx, xs_v, idx_v2)
+        xs_v2 = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", xs_v2, [xs_ptr]))
+        addr = _list_elem_addr(ctx, xs_v2, idx_v2)
         # An "any"-element list holds BOXED scalars, so the element has to be
         # unboxed before it can be added -- a raw load accumulated the elements'
         # box ADDRESSES. `_load_list_elem` yields the payload; for a float sum
