@@ -14060,6 +14060,11 @@ class SemaAnalyzer:
                 "bitcast_f2i": "int",
                 "bitcast_i2f": "float",
                 "repr": "str",
+                # `ascii` was declared in the builtin ARITY table and in the
+                # known-names list, but missing from this return-kind map, so
+                # the lookup raised a bare KeyError that surfaced as
+                # "asmpython: 'ascii'" -- an internal error, not a diagnostic.
+                "ascii": "str",
                 "type": "any",
                 "id": "int",
                 "open": "any",

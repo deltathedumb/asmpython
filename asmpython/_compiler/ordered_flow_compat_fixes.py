@@ -236,6 +236,14 @@ def _infer_specific_returns(mod: A.Module) -> None:
     class_names = {owner.name for owner in mod.classes}
     parents = _parent_map(mod)
 
+    # Populate the returned-function-reference registry for this module. Only
+    # functions with NO free variables qualify: a nested function is lifted to
+    # module level and is otherwise indistinguishable by name, but typing a
+    # returned CLOSURE as a plain callable throws its binding away.
+    from .field_flow_compat_fixes import PLAIN_FUNCS as _plain
+    _plain.clear()
+    _plain.update(f.name for f in mod.funcs if not getattr(f, "free_vars", None))
+
     for _iteration in range(12):
         changed = False
         function_returns, method_returns = _return_tables(mod)

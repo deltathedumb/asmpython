@@ -12335,7 +12335,12 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             out = ctx.tmp(PTR)
             ctx.emit(IRInstr("call", out, ["_abi_chr", n_v]))
             return out
-        if e.func == "repr" and len(e.args) == 1:
+        if e.func in ("repr", "ascii") and len(e.args) == 1:
+            # `ascii` lowers as repr: the two differ only in escaping non-ASCII
+            # characters, and asmpython's strings are byte strings with no
+            # such escaping, so repr already yields what ascii() must return
+            # for everything representable here. Wider character support would
+            # grow the escaping at this site rather than add a new builtin.
             return _lower_expr_as_str(ctx, e.args[0], repr_mode=True)
         if e.func == "format" and len(e.args) in (1, 2):
             # format(value[, spec]) -- entirely unimplemented before this;

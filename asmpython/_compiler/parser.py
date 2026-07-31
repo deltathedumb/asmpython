@@ -2374,8 +2374,32 @@ class Parser:
             # consumed the first element and left a stray comma for the
             # NEWLINE check to choke on. Confirmed via a real repro:
             # PIL.Image.py's `OPEN[id] = factory, accept`.
+            #
+            # A CHAINED assignment led by a subscript (`a[0] = a[1] = 9`) is
+            # collected the same way the attribute-led branch below does it --
+            # that path already existed, this one did not, so the second `=`
+            # was left for the NEWLINE check and reported as
+            # "[P002] expected NEWLINE, got OP '='". tests/cases/algo_prime_sieve.py
+            # is exactly this shape (`is_prime[0] = is_prime[1] = False`).
+            #
+            # Speculative parse with rewind, for the same reason as the
+            # attribute branch: lookahead alone cannot tell "another chained
+            # target" from "the RHS value", since both start with an arbitrary
+            # expression. Only a following `=` commits it as a target.
+            chain_targets = [expr]
+            while True:
+                save = self.i
+                nxt = self._parse_expr()
+                if self._is_assign_target(nxt) and self._check("OP", "="):
+                    self._eat()
+                    chain_targets.append(nxt)
+                    continue
+                self.i = save
+                break
             value = self._parse_tuple_rhs()
             self._expect("NEWLINE")
+            if len(chain_targets) > 1:
+                return self._desugar_chained_assign(chain_targets, value, pos)
             return A.IndexAssign(target=expr, value=value, pos=pos)
         if isinstance(expr, A.Subscript) and self._peek().kind == "OP" and self._peek().value in AUG_OPS:
             op_tok = self._eat()
