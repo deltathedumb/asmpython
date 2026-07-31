@@ -8229,6 +8229,20 @@ class SemaAnalyzer:
                         # `for k, v in d.items(): inv[v] = k` segfaulted for
                         # any int-valued dict. The slot kind IS known here.
                         is_int = flat and ti < len(shape) and shape[ti] == "int"
+                        # A CONTAINER slot binds to its real kind too, for the
+                        # same reason the int slot does: the kind is known here,
+                        # and "any" forces every consumer to guess. For
+                        # `for o, i in nested.items()` over a dict of dicts, `i`
+                        # bound "any" and the inner `i.items()` had nothing to
+                        # dispatch on, so the program access-violated -- while
+                        # the same loop written through a subscript
+                        # (`i = nested[o]`) worked, which is what places the
+                        # fault here rather than in items().
+                        is_ctr = (
+                            flat
+                            and ti < len(shape)
+                            and shape[ti] in ("dict", "list", "tuple", "set")
+                        )
                         if is_str:
                             scope.add(nm, "str")
                             ttypes.append("str")
@@ -8238,6 +8252,9 @@ class SemaAnalyzer:
                         elif is_int:
                             scope.add(nm, "int")
                             ttypes.append("int")
+                        elif is_ctr:
+                            scope.add(nm, shape[ti])
+                            ttypes.append(shape[ti])
                         else:
                             scope.add(nm, "any")
                             ttypes.append("any")
