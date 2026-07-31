@@ -2636,9 +2636,61 @@ class Parser:
             pos=kw.pos,
         )
 
+    def _with_items_are_parenthesized(self) -> bool:
+        """True if the `with` head is a PARENTHESIZED manager list.
+
+        `with (A() as a, B() as b):` (PEP 617) put the open paren where an
+        expression was expected, so `_parse_expr` read `(A()` and then failed on
+        `as`. The parens here group the ITEM LIST, not an expression.
+
+        Disambiguated by looking for an `as` at paren depth 1, which is the one
+        shape that cannot be an expression: `with (expr):` and `with (a, b):`
+        have no `as` and keep parsing as expressions exactly as before, so a
+        parenthesized tuple of managers is not silently reinterpreted.
+        """
+        if not self._check("OP", "("):
+            return False
+        depth = 0
+        j = self.i
+        while j < len(self.toks):
+            t = self.toks[j]
+            if t.kind == "OP" and t.value in ("(", "[", "{"):
+                depth += 1
+            elif t.kind == "OP" and t.value in (")", "]", "}"):
+                depth -= 1
+                if depth == 0:
+                    return False
+            elif depth == 1 and t.kind == "KEYWORD" and t.value == "as":
+                return True
+            elif t.kind in ("NEWLINE", "EOF"):
+                break
+            j += 1
+        return False
+
     def _parse_with(self) -> "A.With":
         kw = self._expect("KEYWORD", "with")
         items: list[tuple] = []
+        if self._with_items_are_parenthesized():
+            self._eat()  # '('
+            while not self._check("OP", ")"):
+                expr = self._parse_expr()
+                name: "str | None" = None
+                if self._check("KEYWORD", "as"):
+                    self._eat()
+                    name = self._expect("NAME").value
+                items.append((expr, name))
+                if self._check("OP", ","):
+                    self._eat()
+                    continue
+                break
+            self._expect("OP", ")")
+            self._expect("OP", ":")
+            body = self._parse_block()
+            with_stmt: A.With
+            for expr, name in reversed(items):
+                with_stmt = A.With(expr=expr, name=name, body=body, pos=kw.pos)
+                body = [with_stmt]
+            return with_stmt
         while True:
             expr = self._parse_expr()
             name: str | None = None
@@ -4068,7 +4120,13 @@ class Parser:
 
     def _parse_mul(self):
         left = self._parse_unary()
-        while self._check_any_op("*", "/", "//", "%"):
+        # `@` is matrix multiplication at multiplicative precedence, which is
+        # where CPython puts it. sema's DUNDER_BINOP already mapped it to
+        # __matmul__/__rmatmul__ -- the operator simply had no way to be
+        # parsed, since `@` was only ever recognised as a decorator marker.
+        # A decorator is dispatched at STATEMENT level before any expression is
+        # parsed, so reading `@` here cannot shadow one.
+        while self._check_any_op("*", "/", "//", "%", "@"):
             tok = self._eat()
             right = self._parse_unary()
             # Keep '/' distinct from '//'. expr_type / codegen decide whether
@@ -4576,10 +4634,10 @@ class Parser:
             self._expect("KEYWORD", "in")
             eiter2 = self._parse_or()
             self._reject_nested_for_target(_enested, eiter2)
-            econd2 = None
-            if self._check("KEYWORD", "if"):
-                self._eat()
-                econd2 = self._parse_or()
+            # Same multi-`if` fold as the first for-clause above. This copy
+            # still read a single filter, so `[... for y in ys if p if q]`
+            # stopped at the second `if` on any clause after the first.
+            econd2 = self._parse_comprehension_conds()
             ef_vars.append(evar2)
             ef_targets.append(emulti2)
             ef_iters.append(eiter2)
