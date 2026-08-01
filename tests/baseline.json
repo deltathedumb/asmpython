@@ -1,7 +1,7 @@
 {
   "_comment": "Pinned corpus baseline. 'failing' is the set of cases known to fail at this tree state; a case leaving that set is progress, a case entering it is a regression. Regenerate with `python -m tests.baseline --record`.",
   "tree": {
-    "commit": "c20985167619b26b43abe568096040a1f70de154",
+    "commit": "c2a48552db781d66a0b319487c0071b3b1083b0b",
     "branch": "beta/3.14.0",
     "dirty": false,
     "diff_sha256": ""
@@ -12,8 +12,8 @@
   ],
   "counts": {
     "total": 1932,
-    "passing": 1280,
-    "failing": 652
+    "passing": 1282,
+    "failing": 650
   },
   "passing": [
     "01_hello.py",
@@ -597,6 +597,7 @@
     "any_with_map.py",
     "app_build_index.py",
     "app_command_dispatch.py",
+    "app_expression_eval.py",
     "app_frequency_sort.py",
     "app_moving_average.py",
     "app_number_grouping.py",
@@ -708,6 +709,7 @@
     "elem_len_mixed.py",
     "elem_len_str.py",
     "elem_membership_int.py",
+    "elem_membership_mixed.py",
     "elem_membership_str.py",
     "elem_min_max_float.py",
     "elem_min_max_int.py",
@@ -1331,7 +1333,6 @@
     "alias_tuple_holds_mutable_element.py",
     "alias_two_object_cycle.py",
     "app_dependency_resolve.py",
-    "app_expression_eval.py",
     "app_json_config.py",
     "app_matrix_rotate.py",
     "app_pagination.py",
@@ -1401,7 +1402,6 @@
     "elem_index_method_float.py",
     "elem_index_method_mixed.py",
     "elem_membership_float.py",
-    "elem_membership_mixed.py",
     "elem_min_max_key_float.py",
     "elem_min_max_key_mixed.py",
     "elem_min_max_mixed.py",
