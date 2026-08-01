@@ -105,7 +105,15 @@ python conformance/harness.py --shim asmpython --groups generated/boundary
 
 Every run of the whole suite is a compile-and-link per case, so `--groups`
 exists for the quick check while you iterate; run it bare before you conclude
-anything. A group is any directory prefix of a case id, so you choose the
+anything.
+
+`-j N` sets the worker count and `--exec process` runs cases in separate
+processes instead of threads. On a 4-core machine that measured no faster —
+compiling saturates the cores and `subprocess.run` releases the GIL anyway — so
+reach for it only if you have measured a win on your own hardware, **running
+the comparison both ways round**. Ordering matters more than the executor here:
+the first run of any pair pays for a cold runtime build and a cold file cache,
+which is enough to invent a 1.8× speedup that does not exist. A group is any directory prefix of a case id, so you choose the
 granularity. An unknown group is a hard error rather than an empty selection —
 zero cases score 100%, which is the most dangerous way to be wrong.
 

@@ -13,7 +13,9 @@ import argparse
 import importlib.util
 import json
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    ProcessPoolExecutor, ThreadPoolExecutor, as_completed,
+)
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -249,6 +251,22 @@ _MARK = {"PASS": ".", "FAIL": "X", "REFUSED": "C", "TIMEOUT": "T",
          "ERROR": "E", "SKIP": "-"}
 
 
+#: Per-process shim cache. A shim is imported from a path at run time, so the
+#: module object cannot be pickled and sent to a worker -- the NAME goes
+#: instead and each worker imports its own copy once.
+_SHIM_CACHE: dict = {}
+
+
+def _run_case_in_process(case: Case, shim_name: str, timeout: int,
+                         paranoid: bool) -> Result:
+    """Worker entry point for `--exec process`. Must be module-level and
+    picklable by reference, which rules out passing the loaded shim."""
+    shim = _SHIM_CACHE.get(shim_name)
+    if shim is None:
+        shim = _SHIM_CACHE[shim_name] = load_shim(shim_name)
+    return run_case(case, shim, timeout, paranoid)
+
+
 def print_matrix(results: list[Result]) -> None:
     """Collapse a generated cross-product into a grid.
 
@@ -349,6 +367,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--paranoid", action="store_true",
                     help="run every case twice and fail on disagreement")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--exec", dest="exec_mode", default="thread",
+                    choices=("thread", "process"),
+                    help="run cases on threads (default) or separate "
+                         "processes. Measured no faster on a 4-core machine -- "
+                         "compiling saturates the cores and subprocess.run "
+                         "releases the GIL anyway -- but the balance shifts "
+                         "with core count.")
     ap.add_argument("--matrix", action="store_true",
                     help="collapse generated cross-products into a grid")
     ap.add_argument("--json", metavar="PATH",
@@ -385,13 +410,33 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     shim = load_shim(args.shim)
 
-    print(f"pyconform: {len(cases)} case(s), shim={args.shim}, tiers={','.join(tiers)}")
+    use_processes = args.exec_mode == "process" and args.jobs > 1
+    how = "processes" if use_processes else "threads"
+    print(f"pyconform: {len(cases)} case(s), shim={args.shim}, "
+          f"tiers={','.join(tiers)}, {args.jobs} {how}")
     results: list[Result] = []
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futs = {pool.submit(run_case, c, shim, args.timeout, args.paranoid): c
-                for c in cases}
-        for fut in as_completed(futs):
-            results.append(fut.result())
+
+    if use_processes:
+        # Run ONE case here first. An implementation shim may build a shared
+        # artifact on its first compile (asmpython builds its runtime archive
+        # lazily), and the lock that stops two THREADS racing to build it does
+        # not span processes -- so without this, N workers would all find it
+        # missing at once and build into the same directory. Threads keep using
+        # the shim's own lock and need no warm-up.
+        results.append(run_case(cases[0], shim, args.timeout, args.paranoid))
+        remaining = cases[1:]
+        with ProcessPoolExecutor(max_workers=args.jobs) as pool:
+            futs = [pool.submit(_run_case_in_process, c, args.shim,
+                                args.timeout, args.paranoid)
+                    for c in remaining]
+            for fut in as_completed(futs):
+                results.append(fut.result())
+    else:
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            futs = {pool.submit(run_case, c, shim, args.timeout, args.paranoid): c
+                    for c in cases}
+            for fut in as_completed(futs):
+                results.append(fut.result())
 
     results.sort(key=lambda r: r.case.id)
     counted = [r for r in results if r.counted]

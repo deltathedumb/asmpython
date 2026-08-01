@@ -21,7 +21,9 @@ import os
 import subprocess
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    ProcessPoolExecutor, ThreadPoolExecutor, as_completed,
+)
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -312,6 +314,31 @@ def main() -> int:
     args = sys.argv[1:]
     _use_runtime_lib = "--use-runtime-lib" in args
     _no_pyinbin_fallback = "--no-pyinbin-fallback" in args
+    # --exec process runs cases in separate PROCESSES rather than threads.
+    #
+    # MEASURED, on this machine (4 cores), 134 cases at -j 4:
+    #
+    #     threads   37.3s        processes   38.0s
+    #
+    # i.e. no difference. Both modes spend nearly all their time blocked in
+    # subprocess.run compiling and linking, which releases the GIL, and four
+    # concurrent compiles already saturate four cores -- so the interpreter-side
+    # work processes would parallelise is not the bottleneck.
+    #
+    # An earlier A/B showed processes at 1.83x and it was WRONG: threads ran
+    # first, cold, and paid for the runtime-archive build and a cold file cache.
+    # Reversing the order collapsed the gap. Any measurement here must be run
+    # both ways round.
+    #
+    # Kept because it costs nothing when unused and the balance changes with
+    # core count -- on a machine where compiles no longer saturate the cores,
+    # the GIL-bound pipe reading and output decoding becomes the limit.
+    use_processes = False
+    for i, a in enumerate(args):
+        if a == "--exec" and i + 1 < len(args):
+            use_processes = args[i + 1] == "process"
+        elif a == "--exec=process":
+            use_processes = True
     # -j N or --jobs N overrides parallelism; default = CPU count (capped at 8)
     workers = min(os.cpu_count() or 4, 8)
     for i, a in enumerate(args):
@@ -343,6 +370,10 @@ def main() -> int:
 
     target = _detect_target()
     mode = " (runtime-lib)" if _use_runtime_lib else ""
+    # Record the executor in the run's own header: a thread run and a process
+    # run are not interchangeable evidence if one of them has a bug, and the
+    # output is what gets pasted into a report.
+    mode += " (processes)" if use_processes else ""
     if case_filter:
         mode += f" (filter={case_filter!r})"
     print(f"asmpython test runner (target={target}, workers={workers}){mode}")
@@ -363,13 +394,25 @@ def main() -> int:
         print(f"no cases matched filter {case_filter!r}")
         return 1
 
-    # Serialise the one-time runtime-archive build before fanning out.
+    # Serialise the one-time runtime-archive build before fanning out. This
+    # matters MORE in process mode: the lock that stops two threads racing to
+    # build the shared archive does not span processes, so warming here is the
+    # only thing preventing N workers building into the same directory at once.
     if workers > 1:
         _warm_runtime(target)
 
     # Run tests in parallel; collect results in submission order.
     result_map: dict[str, TestResult] = {}
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    if use_processes and workers > 1:
+        pool_ctx = ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_worker_init,
+            initargs=(_RUN_TAG, _use_runtime_lib, _backend,
+                      _no_pyinbin_fallback),
+        )
+    else:
+        pool_ctx = ThreadPoolExecutor(max_workers=workers)
+    with pool_ctx as pool:
         future_to_name = {}
         for fn, case, tgt in tasks:
             fut = pool.submit(_safe_run, fn, case, tgt)
@@ -419,6 +462,30 @@ def _safe_run(fn, case: Path, target: str) -> TestResult:
         return fn(case, target)
     except Exception as exc:
         return TestResult(case.name, False, f"runner error: {exc}")
+
+
+def _worker_init(run_tag: str, use_runtime_lib: bool, backend: str | None,
+                 no_pyinbin_fallback: bool) -> None:
+    """Re-establish main()'s state inside a worker PROCESS.
+
+    Thread workers share the parent's globals; process workers do not. On
+    Windows the pool spawns rather than forks, so a child re-imports this
+    module from scratch and gets the module-level DEFAULTS -- meaning
+    `--backend x86-64 --exec process` would silently compile every case with
+    the default backend and report the result as though the flag had been
+    honoured. A wrong answer that looks like a measurement is the worst
+    failure mode a test runner has.
+
+    `_RUN_TAG` matters for the opposite reason: it is derived from the pid, so
+    each child would invent its own, and `_clean_run_artifacts` -- which globs
+    the PARENT's tag -- would leave every child's binaries behind. The tag
+    identifies the RUN, not the process, so the parent's is pushed down.
+    """
+    global _RUN_TAG, _use_runtime_lib, _backend, _no_pyinbin_fallback
+    _RUN_TAG = run_tag
+    _use_runtime_lib = use_runtime_lib
+    _backend = backend
+    _no_pyinbin_fallback = no_pyinbin_fallback
 
 
 if __name__ == "__main__":
