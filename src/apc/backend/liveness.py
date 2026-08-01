@@ -125,10 +125,22 @@ class Liveness:
         for i, block in enumerate(self.function.blocks):
             per_instruction = self.live_at(i)
             for k, ins in enumerate(block.instructions):
-                if ins.op in (Op.CALL, Op.CALL_PTR):
-                    survives = set(per_instruction[k]) - set(ins.args)
-                    survives.discard(ins.dst)
-                    out |= survives
+                if ins.op not in (Op.CALL, Op.CALL_PTR):
+                    continue
+                # What is live AFTER the call, not before it minus the
+                # arguments. Those differ for the case that matters: a value
+                # passed as an argument AND read again afterwards is live
+                # across the call, and subtracting the argument list removes
+                # exactly it.
+                #
+                # That bug produced a loop counter in a volatile register --
+                # `add(total, i)` clobbered `i`, the increment read garbage,
+                # and the loop terminated early with a plausible-looking sum.
+                after = (set(per_instruction[k + 1])
+                         if k + 1 < len(per_instruction)
+                         else set(self.live_out[i]))
+                after.discard(ins.dst)
+                out |= after
         return out
 
 

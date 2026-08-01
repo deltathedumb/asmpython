@@ -95,4 +95,4 @@ def available() -> dict[str, Backend]:
 
 
 def load_builtin() -> None:
-    from ..backends import c  # noqa: F401
+    from ..backends import c, x86_64  # noqa: F401

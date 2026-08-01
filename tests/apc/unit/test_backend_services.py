@@ -204,3 +204,72 @@ class TestVerifyAllocationDetectsBadness:
             for reg in both:
                 alloc.locations[reg] = InRegister("rX")
             assert verify_allocation(f, alloc) != []
+
+
+class TestValueLiveAcrossACall:
+    """Regression: an argument that is ALSO read after the call.
+
+    `add(total, i)` inside a loop passes `i` as an argument and increments it
+    afterwards. Computing "live across the call" as (live before) minus (the
+    arguments) removes exactly that value, so it was given a caller-saved
+    register, the call destroyed it, and the loop terminated early -- producing
+    15 instead of 55, a number plausible enough to look like a frontend bug.
+    """
+
+    def loop_calling_function(self):
+        m = Module("t")
+        callee = Function("add", T.I64)
+        m.functions.append(callee)
+        for _ in range(2):
+            callee.params.append(callee.new_register(T.I64))
+        cb = Builder(callee)
+        cb.switch_to(cb.new_block("entry"))
+        cb.ret(cb.add(T.I64, callee.params[0], callee.params[1]))
+
+        f = Function("main", T.I64)
+        m.functions.append(f)
+        b = Builder(f)
+        b.switch_to(b.new_block("entry"))
+        total, i = b.reg(T.I64), b.reg(T.I64)
+        limit = b.const(T.I64, 10)
+        b.copy(total, b.const(T.I64, 0))
+        b.copy(i, b.const(T.I64, 0))
+        head, body, done = (b.new_block("head"), b.new_block("body"),
+                            b.new_block("done"))
+        b.jump(head)
+        b.switch_to(head)
+        b.branch(b.cmp(Op.LT, T.I64, i, limit), body, done)
+        b.switch_to(body)
+        b.copy(total, b.call(T.I64, "add", [total, i]))   # i is an ARGUMENT
+        b.copy(i, b.add(T.I64, i, b.const(T.I64, 1)))     # ...and read after
+        b.jump(head)
+        b.switch_to(done)
+        b.ret(total)
+        verify(m)
+        return m, f
+
+    def test_argument_read_after_the_call_counts_as_crossing_it(self):
+        _, f = self.loop_calling_function()
+        live = Liveness.compute(f)
+        body = block_starting(f, "body")
+        call = next(ins for ins in f.blocks[body].instructions
+                    if ins.op is Op.CALL)
+        crossing = live.live_across_calls()
+        assert set(call.args) & crossing, (
+            "a value passed as an argument and read afterwards is live across "
+            "the call")
+
+    def test_such_a_value_never_lands_in_a_volatile_register(self):
+        _, f = self.loop_calling_function()
+        rf = RegisterFile(general=("v0", "v1", "v2", "s0", "s1"),
+                          callee_saved=frozenset({"s0", "s1"}))
+        alloc = allocate(f, rf)
+        for reg in Liveness.compute(f).live_across_calls():
+            loc = alloc.locations[reg]
+            if isinstance(loc, InRegister):
+                assert loc.name in rf.callee_saved
+
+    def test_the_program_still_computes_55(self):
+        from apc.ir.interpreter import run
+        m, _ = self.loop_calling_function()
+        assert run(m, "main") == 45      # sum 0..9
