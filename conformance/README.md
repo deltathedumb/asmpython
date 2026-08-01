@@ -6,6 +6,24 @@ runnable against **any** Python implementation through a thin shim.
 It exists to answer one question precisely: *where does this implementation
 diverge from CPython, and does that divergence matter?*
 
+**1467 cases. 95 PEPs. CPython passes 100% of the counted tiers.**
+
+| area | what it covers |
+|---|---|
+| `generated/` | three cross-products — value × storage trip, container × reader, operand pair × operator |
+| `datamodel/` | every special method: attribute access, containers, numerics, comparison, metaclasses, descriptors |
+| `quirks/` | the famous flaws — `t[0] += [x]` raising *and* mutating, `nan != nan`, `{1: …, True: …}` collapsing |
+| `pep/` | 95 PEPs, from list comprehensions (202) to t-strings (750) |
+| `match/` | every pattern kind: literal, capture, sequence, mapping, class, as, value, guards |
+| `evaluation-order/` | what happened *first* — probes append to a log and the log is asserted |
+| `aliasing/` | two names, one object |
+| `scoping/` `exceptions/` `iteration/` `async/` | the execution model, exception hierarchy, generator protocol, coroutines |
+| `numeric/` `text/` `sequence/` `mapping/` `sets/` | built-in types by behaviour *and* by API surface |
+
+The three areas the cross-products structurally cannot express — **order**,
+**aliasing** and **cleanup** — are hand-written, because a reordering that
+happens to produce the right answer is invisible to a value-comparison test.
+
 ---
 
 ## The problem this format solves
