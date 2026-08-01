@@ -247,16 +247,32 @@ def print_matrix(results: list[Result]) -> None:
             row_fail[row] = fails
             print(f"{line} {fails}" if fails else line)
         print("-" * (width + colw * len(cols)))
-        totals = "".join(str(col_fail[c] % 10).ljust(colw) for c in cols)
-        print("fail".ljust(width) + totals)
-
-        worst_row = sorted(row_fail.items(), key=lambda kv: -kv[1])[:3]
-        worst_col = sorted(col_fail.items(), key=lambda kv: -kv[1])[:3]
         print(f"  legend: {'  '.join(f'{v}={k.lower()}' for k, v in _MARK.items())}")
-        if any(n for _, n in worst_row):
-            print("  worst rows: " + ", ".join(f"{k} ({n})" for k, n in worst_row if n))
-        if any(n for _, n in worst_col):
-            print("  worst cols: " + ", ".join(f"{k} ({n})" for k, n in worst_col if n))
+
+        # Per-column totals go in a LIST, not a footer row. A single digit per
+        # column looked tidy and was actively misleading: 15-of-15 rendered as
+        # "5" once it wrapped, which is the opposite of what a summary is for.
+        n_rows = len(rows)
+        n_cols = len(cols)
+        saturated_cols = [c for c in cols if col_fail[c] == n_rows]
+        saturated_rows = [r for r in rows if row_fail[r] == n_cols]
+
+        if saturated_cols:
+            # A column failing on EVERY trip is broken in the value kind
+            # itself, not in any particular way of moving it. These are the
+            # cheapest wins: one fix clears a whole column.
+            print(f"  broken in the KIND (fail on all {n_rows} rows): "
+                  + ", ".join(saturated_cols))
+        if saturated_rows:
+            print(f"  broken in the TRIP (fail on all {n_cols} cols): "
+                  + ", ".join(saturated_rows))
+
+        print("  per-column failures: " + ", ".join(
+            f"{c}={col_fail[c]}" for c in sorted(cols, key=lambda c: -col_fail[c])
+            if col_fail[c]))
+        print("  per-row failures:    " + ", ".join(
+            f"{r}={row_fail[r]}" for r in sorted(rows, key=lambda r: -row_fail[r])
+            if row_fail[r]))
 
 
 def main(argv: list[str] | None = None) -> int:
