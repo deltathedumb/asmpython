@@ -665,4 +665,40 @@ than intuition suggests. Until it exists, `vm_tuple_through_any`,
 `vm_container_heterogeneous`, `vm_dict_key_through_any` and the `None`/`bool`
 probes all stay blocked on the same thing, which is why they have not been
 attempted piecemeal.
+### The enumeration, and what it implies
+
+`_list_elem_addr` is the chokepoint for element ADDRESSES, so its call sites
+are the consumer list. There are **64, across 27 functions**:
+
+```text
+ 18x _lower_expr_inner          3x _lower_list_remove       1x _lower_list_index
+  8x _lower_stmt                2x emit_level_body          1x _lower_membership
+  4x _lower_dict_comprehension  2x _lower_comprehension     1x _lower_membership_any
+  3x _lower_list_pop_front      2x _lower_decode_stored_keys  1x _store_loop_target
+  2x _lower_minmax              2x _lower_sort_tuple_int_first 1x _lower_for_zip
+  ... and 12 more with one site each
+```
+
+64 sites is too many to keep in agreement by hand -- which is exactly what the
+two failed experiments demonstrated, from opposite directions.
+
+**But the address helper is the wrong choke point.** `_list_elem_addr` returns
+an address; every caller then does its OWN load or store with its own typing
+decision. That is why the representation policy is smeared across 27
+functions: there is no single place that decides how an element is
+represented.
+
+The fix follows a pattern this codebase already uses one level up. At the
+VALUE level there are exactly two choke points -- `_lower_value_into_any_slot`
+for writes and `_lower_expr` for reads -- and the box/unbox policy lives in
+them rather than being re-decided inline. The ELEMENT level has no equivalent.
+
+So: add `_lower_load_element` / `_lower_store_element` owning the policy, and
+migrate the 64 sites onto them. Each migration is mechanical and individually
+verifiable against the pinned baseline; once they all route through one place,
+changing the representation becomes a change to that place rather than a
+64-site coordination problem.
+
+That is the real remaining shape of Phase 1's boxing work, and it is a refactor
+with a clear finish line rather than an open question.
 
