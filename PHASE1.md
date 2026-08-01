@@ -188,7 +188,70 @@ genuinely-unknown values are boxed at all, because both currently claim to be
 `int`. Splitting UNKNOWN out of `int` comes first and is what makes the
 existing `_lower_box_any` machinery start applying.
 
-### Work started: naming the sentinel
+### DONE: the unknown type is split out of `int`
+
+> **Landed in `821ceb9c`: `UNKNOWN_TY = "any"`. Zero regressions, four cases
+> fixed** -- `app_simple_orm`, `class_class_var_shared`, `dict_nested_mutate`,
+> `set_comp_nested_iter`. Corpus 809/1143 -> 813/1143.
+>
+> The endpoint needed no new type. `"any"` already meant "kind not statically
+> known, so box it and dispatch on the tag at read time"; the bug was only
+> that the DEFAULT named the integer type instead. Landing it was one line,
+> because the preceding commits had migrated every site that RETURNS the
+> sentinel, and most sites that CONSUME it self-heal (`x if x != "int" else
+> "any"` becomes the identity it always meant).
+>
+> It was measured, not assumed. A prediction was written first -- 30-80 newly
+> failing cases, refined to 10-40 once the self-healing shape was noticed.
+> The actual answer was **zero**. Being wrong by that margin is worth
+> recording: the audit was the work, and the flip was the cheap part.
+>
+> Caveat kept at the constant: "no corpus regression" is not "no behaviour
+> change". A few sites convert the sentinel to something OTHER than `"any"`
+> (`x if x != "int" else ""`, and a widen-from-unknown guard at sema 1854);
+> they now take the other arm and the corpus does not cover them.
+>
+> This does not by itself fix any `vm_*` probe. It ENABLES the boxing those
+> probes need rather than completing it.
+
+#### The obvious follow-on does NOT work yet (measured)
+
+With the sentinel split, a bare `list` local resolves to `"any"` exactly like
+an explicit `list[object]`, so the `box_element` gate could in principle drop
+its `_explicit_object_lists` membership test. Tried it: **10 regressions
+against 5 fixes, net 809 -> 804.**
+
+    1105_async_gather      152_itertools_module   165_textwrap_module
+    183_queue_module       233_queue_module       240_textwrap_module
+    261_textwrap_module    270_queue_depth        int_prog_observer
+    lib_queue_fifo
+
+They cluster in modules that build a bare `list` and read its elements back
+raw. `stdlib/queue.py` shows the shape -- a bare `list` LOCAL populated from a
+bare `list` FIELD whose elements are already boxed, then assigned back to the
+field:
+
+```python
+self._data: list = []          # field: elements already boxed
+new_data: list = []            # local: elements were raw
+for i in ...:
+    new_data.append(self._data[i])
+```
+
+The precise mechanism has not been isolated, and is deliberately not guessed
+at here. What is established is the shape of the constraint: **boxing the
+write side without moving the read side is half a change**, and the half that
+is missing costs more than the half that is present. The original gate's
+comment said as much ("left raw so existing homogeneous-list code is
+unaffected") and was correct.
+
+So the read side moves first. That is the next unit of work, and it is bigger
+than a gate flip: every path that consumes a list element -- subscript,
+iteration, `pop`, slicing, passing the list onward -- has to agree on whether
+elements are boxed, for a container whose element kind is `"any"`.
+
+The narrative below is kept as written, because the reasoning that led here
+is more useful than a tidied-up version of the conclusion.
 
 `ast_nodes.UNKNOWN_TY` now exists, with the value `"int"` — deliberately
 unchanged, so behaviour is identical and the corpus result must not move.

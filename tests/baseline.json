@@ -1,10 +1,10 @@
 {
   "_comment": "Pinned corpus baseline. 'failing' is the set of cases known to fail at this tree state; a case leaving that set is progress, a case entering it is a regression. Regenerate with `python -m tests.baseline --record`.",
   "tree": {
-    "commit": "3ab1b6939e096951ca8741802ceaa95dfee6a4bd",
+    "commit": "821ceb9cf4cc26a998c4e9129e0973c5917972c8",
     "branch": "beta/3.14.0",
-    "dirty": false,
-    "diff_sha256": ""
+    "dirty": true,
+    "diff_sha256": "18dee53a1158945f"
   },
   "runner_args": [
     "-j",
@@ -12,8 +12,8 @@
   ],
   "counts": {
     "total": 1143,
-    "passing": 809,
-    "failing": 334
+    "passing": 813,
+    "failing": 330
   },
   "passing": [
     "01_hello.py",
@@ -519,6 +519,7 @@
     "app_moving_average.py",
     "app_number_grouping.py",
     "app_run_length_decode.py",
+    "app_simple_orm.py",
     "app_word_wrap.py",
     "async_def_parse.py",
     "augmented_pow.py",
@@ -530,6 +531,7 @@
     "callable_in_dict_dispatch.py",
     "callable_stored_in_attr.py",
     "chained_builtins.py",
+    "class_class_var_shared.py",
     "class_default_field.py",
     "class_getattr_setattr_builtin.py",
     "class_init_calls_method.py",
@@ -577,6 +579,7 @@
     "dict_fromkeys.py",
     "dict_items_sorted_str_keys.py",
     "dict_max_by_value.py",
+    "dict_nested_mutate.py",
     "dict_of_functions.py",
     "dict_of_lists_append.py",
     "dict_popitem.py",
@@ -739,6 +742,7 @@
     "set_add_int.py",
     "set_comp_cond.py",
     "set_comp_int.py",
+    "set_comp_nested_iter.py",
     "set_difference_update.py",
     "set_from_generator.py",
     "set_from_range.py",
@@ -852,7 +856,6 @@
     "app_json_config.py",
     "app_matrix_rotate.py",
     "app_pagination.py",
-    "app_simple_orm.py",
     "app_template_render.py",
     "app_validate_form.py",
     "ascii_builtin.py",
@@ -865,7 +868,6 @@
     "bytes_from_str.py",
     "callable_as_default_arg.py",
     "callback_registry.py",
-    "class_class_var_shared.py",
     "class_comparison_total.py",
     "class_getattr_dynamic.py",
     "class_hash_in_set.py",
@@ -910,7 +912,6 @@
     "default_none_or_list.py",
     "del_slice.py",
     "dict_dict_comprehension.py",
-    "dict_nested_mutate.py",
     "dispatch_table_class_methods.py",
     "docstring_module_access.py",
     "double_star_merge_call.py",
@@ -1114,7 +1115,6 @@
     "repr_string_with_quotes.py",
     "returning_bound_method.py",
     "round_to_negative_places.py",
-    "set_comp_nested_iter.py",
     "set_symmetric_difference.py",
     "set_update_multiple.py",
     "sim_discount_calc.py",

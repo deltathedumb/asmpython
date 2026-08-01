@@ -11192,6 +11192,14 @@ class SemaAnalyzer:
                 # boxes a scalar element (see `_explicit_object_lists`); a bare
                 # `list` (also el "any", but element kind merely unknown) is
                 # left raw so existing homogeneous-list code is unaffected.
+                # NOTE: extending this to every `el_t == "any"` local (which,
+                # since UNKNOWN_TY became "any", is every bare `list` local)
+                # was tried and reverted: 10 regressions against 5 fixes, net
+                # 809 -> 804, clustered in queue/textwrap/itertools -- modules
+                # that build a bare `list` homogeneously and read its elements
+                # RAW. Boxing the writes without also making those reads unbox
+                # is only half the change. The read side has to move first;
+                # until then this stays gated on an explicit list[object].
                 if (
                     e.method == "append"
                     and isinstance(e.obj, A.Name)
