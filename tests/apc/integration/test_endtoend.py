@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import textwrap
 from io import StringIO
 from pathlib import Path
@@ -32,6 +33,24 @@ from apc.ir.interpreter import Interpreter
 from apc.ir.printer import parse_module, print_module
 
 HAS_CC = shutil.which("gcc") or shutil.which("cc")
+
+#: The host's object format decides which assembler directives are legal and
+#: which ABI the system libraries expect. Guessing either produces output that
+#: assembles on one platform and is silently wrong on the other.
+_HOST_OBJECT_FORMAT = "coff" if sys.platform == "win32" else "elf"
+_HOST_TARGET_NAME = ("x86_64-windows" if sys.platform == "win32"
+                     else "x86_64-linux")
+
+#: The runtime the frontend's `print` calls resolve against, plus an entry
+#: point. A frontend chooses its own runtime; the IR has no I/O opcodes.
+_RUNTIME_C = (
+    "#include <stdio.h>\n"
+    "#include <stdint.h>\n"
+    'void print_int(int64_t v)  { printf("%lld\\n", (long long)v); }\n'
+    'void print_float(double v) { printf("%f\\n", v); }\n'
+    "extern int64_t main_ir(void);\n"
+    "int main(void) { return (int)main_ir(); }\n"
+)
 
 PROGRAMS = {
     "arithmetic": """
@@ -176,6 +195,43 @@ class TestAgreement:
         want_out, want_value = cpython_output(src)
         got_out, got_value = interpret(parse_module(text))
         assert got_out == want_out and got_value == want_value
+
+    @pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
+    def test_x86_64_backend_matches_cpython(self, name, tmp_path):
+        """Assemble the generated assembly and run it.
+
+        This is the path that caught a real miscompilation: a loop counter
+        passed as a call argument and read afterwards was placed in a
+        caller-saved register, so the call destroyed it and the loop ended
+        early. The interpreter was right, the backend was wrong, and only
+        running both revealed which.
+        """
+        from apc.backend import Target, get, load_builtin
+        from apc.backends.x86_64.emit import UnsupportedOperation
+        load_builtin()
+        src = self.program(name)
+        want_out, want_value = cpython_output(src)
+        module = compile_module(src, tmp_path, True)
+
+        # The IR entry is `main`; C's main wraps it.
+        module.function("main").name = "main_ir"
+        target = Target(_HOST_TARGET_NAME, object_format=_HOST_OBJECT_FORMAT)
+        try:
+            asm = get("x86-64").emit(module, target)["out.s"]
+        except UnsupportedOperation as exc:
+            pytest.skip(f"backend does not implement this yet: {exc}")
+
+        s_file = tmp_path / "out.s"
+        s_file.write_bytes(asm)
+        rt = tmp_path / "rt.c"
+        rt.write_text(_RUNTIME_C, encoding="utf-8")
+        exe = tmp_path / "out.exe"
+        built = subprocess.run([HAS_CC, str(s_file), str(rt), "-o", str(exe)],
+                               capture_output=True, text=True)
+        assert built.returncode == 0, built.stderr
+        ran = subprocess.run([str(exe)], capture_output=True, text=True)
+        assert ran.stdout.split("\n")[:-1] == want_out
+        assert ran.returncode == (want_value & 0xFF)
 
     @pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
     def test_c_backend_matches_cpython(self, name, tmp_path):

@@ -341,23 +341,28 @@ class X86_64Backend(Backend):
 
             case Op.DIV | Op.REM:
                 # idiv divides rdx:rax and clobbers both, so they are saved
-                # around it -- the allocator does not know an instruction can
-                # demand specific registers, and teaching it that is a much
+                # around it -- the allocator does not model an instruction
+                # demanding specific registers, and teaching it that is a much
                 # larger change than spilling two registers here.
-                a = e.into_scratch(ins.args[0], "r10")
-                b = e.into_scratch(ins.args[1], "r11")
+                #
+                # ORDER MATTERS. The divisor must be moved somewhere safe
+                # BEFORE rax is loaded with the dividend: if the allocator put
+                # the divisor in rax, loading the dividend destroys it, and the
+                # division silently uses the wrong operand. That produced
+                # 17 % -5 == 0 instead of -3.
                 e.emit("pushq %rax")
                 e.emit("pushq %rdx")
-                e.emit(f"movq {a}, %rax")
-                if b in ("%rax", "%rdx"):
-                    e.emit(f"movq {b}, %r11")
-                    b = "%r11"
+                divisor = e.into_scratch(ins.args[1], "r11")
+                if divisor != "%r11":
+                    e.emit(f"movq {divisor}, %r11")
+                dividend = e.into_scratch(ins.args[0], "r10")
+                e.emit(f"movq {dividend}, %rax")
                 if ins.ty.is_signed:
                     e.emit("cqto")
-                    e.emit(f"idivq {b}")
+                    e.emit("idivq %r11")
                 else:
                     e.emit("xorq %rdx, %rdx")
-                    e.emit(f"divq {b}")
+                    e.emit("divq %r11")
                 e.emit(f"movq %{'rax' if op is Op.DIV else 'rdx'}, %r10")
                 e.emit("popq %rdx")
                 e.emit("popq %rax")
