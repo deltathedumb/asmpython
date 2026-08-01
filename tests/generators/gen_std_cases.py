@@ -1530,5 +1530,105 @@ scheduler.run()
 ''')
 
 
+# ===========================================================================
+# Wave 3. The round-1 report listed seven modules as probeable with no new
+# machinery. Four of them are in-memory and belong here; `gc` and `linecache`
+# need a fixture and live in gen_fixture_cases.py.
+#
+# The seventh, `uu`, cannot be probed at all: PEP 594 removed it from CPython
+# in 3.13, so the host has no reference implementation to derive an
+# expectation from. asmpython/stdlib/uu.py still ships a binding for it. That
+# is a finding rather than a probe -- a binding for a module the target
+# language no longer has.
+# ===========================================================================
+
+case("std_token_constants", "the token module exposes its type constants", r'''
+import token
+
+print(token.tok_name[token.NAME])
+print(token.tok_name[token.NUMBER])
+print(token.NAME == token.NUMBER)
+''')
+
+case("std_tokenize_splits_source", "tokenize yields the tokens of a source string", r'''
+import io
+import token
+import tokenize
+
+source = io.StringIO("x = 1\n")
+kinds = []
+for tok in tokenize.generate_tokens(source.readline):
+    if tok.type in (token.NAME, token.OP, token.NUMBER):
+        kinds.append(token.tok_name[tok.type] + ":" + tok.string)
+print(kinds)
+''')
+
+case("std_tokenize_untokenize_roundtrip", "untokenize rebuilds equivalent source", r'''
+import io
+import tokenize
+
+source = "a = 1\n"
+tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+print(tokenize.untokenize(tokens).strip())
+''')
+
+case("std_quopri_encode", "quopri encodes bytes as quoted-printable", r'''
+import quopri
+
+print(quopri.encodestring(b"a=b"))
+''')
+
+case("std_quopri_roundtrip", "quopri decode inverts encode", r'''
+import quopri
+
+payload = b"caf\xc3\xa9 = tasty"
+print(quopri.decodestring(quopri.encodestring(payload)) == payload)
+''')
+
+case("std_html_parser_collects_tags", "HTMLParser reports start tags and data", r'''
+from html.parser import HTMLParser
+
+
+class Collector(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    def handle_starttag(self, tag, attrs):
+        self.events.append("start:" + tag)
+
+    def handle_endtag(self, tag):
+        self.events.append("end:" + tag)
+
+    def handle_data(self, data):
+        text = data.strip()
+        if text:
+            self.events.append("data:" + text)
+
+
+parser = Collector()
+parser.feed("<p>hello <b>world</b></p>")
+print(parser.events)
+''')
+
+case("std_html_parser_reads_attributes", "HTMLParser reports tag attributes", r'''
+from html.parser import HTMLParser
+
+
+class Collector(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.found = []
+
+    def handle_starttag(self, tag, attrs):
+        self.found.append((tag, sorted(attrs)))
+
+
+parser = Collector()
+parser.feed("<a href='x' id='link'>t</a>")
+print(parser.found)
+''')
+
+
 if __name__ == "__main__":
     raise SystemExit(main(CASES, "gen_std_cases.py", sys.argv))
