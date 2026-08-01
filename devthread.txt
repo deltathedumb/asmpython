@@ -436,3 +436,104 @@ against the 658; (3) the crash bucket, which was growing fastest; (4) the 24
 explicitly unattributed and 41 NOT-root-caused entries. Leaving those
 unattributed was the right call and closing them with evidence is the next
 one.
+
+================================================================================
+ROUND 4 -- the parameter slot, and what pyconform decomposed it into
+================================================================================
+
+pyconform is now 585 cases, CPython 582/582 counted, and it does the thing the
+corpus never could: it says which AXIS is broken rather than which programs are.
+First scoreboard recorded at conformance/results/asmpython.json (248/533), so
+from here every change is diffed with compare.py instead of compared against a
+remembered number.
+
+The boundary matrix decomposed 139 failures into a shape:
+
+  broken in the KIND (fail on all 15 trips): bool-false, bool-true, int-big,
+                                             list-nested, none, tuple
+  per-row floor: identity=6, unannotated-param=6, two-calls=6
+
+90 of 139 are six broken VALUE KINDS that fail no matter which boundary they
+cross, and only ~40 are boundary-induced. Those are opposite work queues. Note
+unannotated-param=6 EQUALS the identity floor -- forwarding through a call is
+not itself lossy -- while object-annotated-param=10 is WORSE than both, which
+independently confirms agent 2's finding from its own direction.
+
+TWO PARAMETER-SLOT DEFECTS, both now fixed, both invisible to the corpus:
+
+1. e5ffb741 -- call sites that DISAGREE dropped the slot to the int default.
+   Inference recorded nothing on conflict and `_seed_param` then supplied int,
+   which is not "unknown" but a positive wrong claim:
+
+       def ident(v): return v
+       ident(3.5)  -> 3731456        ident("s") -> 5368766490 (the raw pointer)
+
+   Needs TWO disagreeing sites to appear. One site infers correctly, so a corpus
+   grown alongside the compiler barely contains the shape. This is the general
+   lesson: the corpus cannot find bugs whose precondition is a usage pattern the
+   corpus does not have. A cross-product can, because it enumerates rather than
+   samples.
+
+2. 043a965b -- True/False/None/... all parse to IntLit, so `_literal_arg_type`
+   called every one of them "int". An int slot cannot hold them: the thing that
+   distinguishes them is a FLAG ON THE AST NODE, not anything in the value, so
+   it is gone the moment the value is stored.
+
+   The bisect is worth keeping because it mis-points on purpose:
+       print(True)             -> True   correct
+       x = True; print(x)      -> True   correct   (flag still on the AST)
+       print(ident(True))      -> 1      WRONG
+   Surviving assignment and dying at the first call makes it read as a print
+   bug. It is a slot-typing bug.
+
+Both fixes share one channel (polymorphic_params) because they mean the same
+thing: no concrete slot can represent what arrives here. The dynamic check runs
+BEFORE the inferred-kind lookup -- f(True) plus f(2) records an "int" candidate
+from the second site, and int is exactly the answer that loses the first one.
+
+NONE IS FIXED IN REPRESENTATION, NOT RENDERING, and this is a real blocker
+rather than an oversight. None now travels as the null pointer
+`_lower_box_any` already produces. But `_lower_format_any_value` still has no
+None arm, and the note at that site is correct: a raw 0 arriving there is
+genuinely ambiguous with None (`Point.origin()` reading `p.x` through an "any"
+path is bit-identical), so the arm trades "None prints as 0" for "0 prints as
+None" -- measured at -6/+10 when it was tried. The precondition that makes it
+sound is every value in an "any" slot actually BEING boxed, which is what the
+element choke-point refactor delivers.
+
+CORRECTION to the "57 of 68 sites remain" figure I have been carrying: it is
+wrong, and wrong in a way that overstates the work by nearly half. Measured
+against the current tree:
+
+    67  _list_elem_addr sites in total
+    11  already migrated to _load_list_elem
+    10  stores / address-only -- nothing to migrate
+    46  raw loads
+    13    ...of which read INTERNAL keys/pairs arrays (dict key buffers, pair
+          pointers). Their element genuinely IS a pointer, so migrating them is
+          a no-op at best and wrong at worst. These must be left alone.
+    33  actual candidates.
+
+Only 8 of the 33 have an element-kind variable already in scope, which is the
+real cost and the reason the migration stalled at 11: it is not a find-replace,
+most sites need the kind threaded in from the callee's list type. What makes it
+tractable is that migration only CHANGES behaviour where el_ty is "any" (unbox)
+or "float" (F64 load); every other kind lowers byte-identically, so a migrated
+site that is wrong about a concrete kind is still correct.
+
+So the ordering is now forced rather than chosen. The element refactor is not
+one item among several; it is what unblocks the `none` column (15 boundary
+cells + the consumer mixed column), and it should be picked up before anything
+else on the list.
+
+Method note, since it has now settled four wrong diagnoses in a row: reading
+the source produced a wrong answer every time, and one IR dump settled it every
+time. ASMPYTHON_EMIT_IR=out.ir with --no-pyinbin-fallback. In this round the
+dump showed `_abi_new_box` tagged -1 INSIDE the callee with no box at the call
+site at all, which located the defect in one step -- the caller was not boxing
+because the callee's slot said int.
+
+Corpus contamination: the rule held this round (no source edit or build while a
+sweep was live), with one near-miss -- `tests.runner --help` is not a supported
+flag and silently starts a FULL RUN. It was stopped, but a stray --help is
+enough to corrupt a measurement.

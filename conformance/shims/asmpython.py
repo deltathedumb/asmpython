@@ -13,10 +13,12 @@ loses the distinction.
 """
 from __future__ import annotations
 
+import itertools
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 # The compiler lives one directory up from the suite. This is the ONLY
@@ -30,9 +32,34 @@ _IS_WIN = sys.platform == "win32"
 _BUILD = Path("C:/Temp") if _IS_WIN else Path(tempfile.gettempdir())
 _TAG = f"cf{os.getpid()}"
 
+# A per-call serial number, because the process id is NOT enough to make an
+# artifact name unique: the harness runs cases on THREADS of one process, and a
+# case's stem is only its file name. The cross-products reuse names by design --
+# `tuple-elems.py` exists once per consumer directory, `int.py` once per trip --
+# so eight workers were writing, running and deleting one shared path.
+#
+# That does not fail loudly. It reports as a REFUSED or a wrong answer for
+# whichever case lost the race, and it MOVES between runs, so it reads exactly
+# like a flaky implementation bug. It cost one falsely-reported regression
+# (consumer/negative-index/tuple-elems) that reproduced as a clean pass the
+# moment it was run on its own.
+_SERIAL = itertools.count()
+_SERIAL_LOCK = threading.Lock()
+
+# The compiler builds its runtime into a SHARED directory (asmpython/_runtime/
+# _build/) and caches it. That cache is a benefit once it exists and a hazard
+# while it is being created: eight workers all missing it at once would build
+# into the same place simultaneously. So the first compile of a run holds this
+# lock for its whole duration and the rest proceed in parallel against a cache
+# that is already warm. Costs one serial compile per run.
+_WARMUP_LOCK = threading.Lock()
+_warmed = False
+
 
 def _artifact(stem: str) -> Path:
-    return _BUILD / f"{stem}_{_TAG}{'.exe' if _IS_WIN else ''}"
+    with _SERIAL_LOCK:
+        n = next(_SERIAL)
+    return _BUILD / f"{stem}_{_TAG}_{n}{'.exe' if _IS_WIN else ''}"
 
 
 def run(case_path: str, timeout: int):
@@ -48,10 +75,19 @@ def run(case_path: str, timeout: int):
     cmd = [sys.executable, "-m", "asmpython", str(case_path),
            "--target", "windows" if _IS_WIN else "linux",
            "--no-pyinbin-fallback", "-o", str(out_bin)]
+    def _compile():
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              errors="replace", cwd=str(_ASMPYTHON_ROOT),
+                              timeout=timeout)
+
+    global _warmed
     try:
-        cp = subprocess.run(cmd, capture_output=True, text=True,
-                            errors="replace", cwd=str(_ASMPYTHON_ROOT),
-                            timeout=timeout)
+        if _warmed:
+            cp = _compile()
+        else:
+            with _WARMUP_LOCK:
+                cp = _compile()
+                _warmed = True
     except subprocess.TimeoutExpired:
         raise TimeoutError(f"compile of {case_path}")
 
