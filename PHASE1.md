@@ -702,3 +702,79 @@ changing the representation becomes a change to that place rather than a
 That is the real remaining shape of Phase 1's boxing work, and it is a refactor
 with a clear finish line rather than an open question.
 
+
+---
+
+## Amendment: the instrument, and a correction to the section above
+
+### pyconform
+
+Phase 1's measurements were all made against `tests/` -- a corpus written
+alongside the compiler, which is exactly the wrong instrument for finding what
+the compiler never learned to do. A corpus grown next to an implementation
+cannot contain the shapes that implementation has never been asked to handle.
+
+`conformance/` (pyconform) baselines CPython instead, and asserts the
+*language*: 1166 cases, expectations DERIVED by running each case under CPython
+twice in separate processes, tiered `spec` / `cpython` / `impl` with `spec`
+requiring a citation, and a self-test asserting CPython scores 100% on the
+counted tiers. Three cross-products carry most of it -- boundary (a value
+through a storage trip), consumer (a container through a reader), operator (a
+pair through an operator) -- and each case's PATH is its coordinates, so
+failures collapse into a shape rather than a list.
+
+Its value showed up immediately, and in the form the argument above predicts.
+Two parameter-slot defects that the corpus could not reach:
+
+  - call sites that DISAGREE dropped the slot to the int default, so
+    `ident(3.5)` returned 3731456 and `ident("s")` returned a raw pointer.
+    It needs TWO disagreeing call sites to appear at all.
+  - True/False/None all parse to IntLit, so a bool argument typed the slot
+    `int` and `ident(True)` returned 1.
+
+Neither is exotic. Both are invisible to a corpus that never used a function at
+two types.
+
+### The 64-site migration is NOT mechanical
+
+The section above says the element sites are 64, and that "each migration is
+mechanical and individually verifiable". Measured against the current tree,
+both halves of that are wrong, and the second one is the dangerous half.
+
+The count:
+
+    67  _list_elem_addr sites
+    11  already migrated
+    10  stores / address-only
+    46  raw loads
+    13    ...of which read INTERNAL keys/pairs arrays, whose element genuinely
+          IS a pointer -- migrating them is a no-op at best
+    33  candidates, of which ~10-12 actually need it
+
+The shape matters more than the count. An element read is one of two kinds, and
+they want OPPOSITE treatment:
+
+  CONSUME -- the value is compared, added, formatted, tested for truth. An
+             "any" element MUST be unboxed, or the consumer computes with the
+             box's address.
+  COPY    -- the value moves into another slot that is itself "any". The raw
+             load is already correct: it yields the box pointer, and copying
+             the box preserves the tag. Unboxing STRIPS the tag in transit.
+
+Sites 9082, 2165 and 14472 look like the most migratable in the file and are
+all COPY sites. A mechanical sweep would have broken them.
+
+This was not deduced -- it was measured. Boxing bool list elements
+(c2098516) regressed `all([True, False])` to True, because the any/all loop
+read elements raw and a box pointer is never zero. Fixing that one CONSUME site
+exposed a second, older bug: unboxing emits a tag-dispatch chain between the
+loop body and the continue block, and those blocks are created AFTER it, so the
+loop index was live across blocks the backend allocates out of order. It came
+back stale and the program span forever. That is the documented block-ordering
+hazard, except it did not crash -- it produced a wrong value, where the IR reads
+correctly and only the emitted code is wrong.
+
+So the honest statement of the remaining work is: ~10-12 CONSUME sites, each
+needing a judgement about which kind it is, each capable of exposing a
+live-range hazard in the loop that contains it, and each to be gated
+individually. A finish line, still -- but not a mechanical one.
