@@ -2450,6 +2450,27 @@ class SemaAnalyzer:
                 kinds[f.name] = merged
         self._fn_return_kinds = kinds
 
+    def _param_is_dynamic_in(self, owner, nm: str) -> bool:
+        """True if `nm` is a parameter of `owner` whose slot is already known
+        to need "any" (see `polymorphic_params`).
+
+        The transitive half of the rule. `_param_kind_in` answers "what kind is
+        this forwarded parameter", and for a dynamic one the honest answer is
+        not a kind at all -- it is "no concrete kind can hold this". Reporting
+        ("any", ...) there would be dropped by `_INFERRED_PARAM_KINDS` and the
+        callee would fall back to the int default, so forwarding a dynamic
+        parameter used to lose exactly what made it dynamic:
+
+            def _through(x):  return x
+            def move(v):      return _through(v)   # v is dynamic, x was not
+        """
+        if owner is None or not isinstance(nm, str):
+            return False
+        params: list = owner.params
+        if nm not in params:
+            return False
+        return f"{owner.name}:{params.index(nm)}" in self.polymorphic_params
+
     def _param_kind_in(self, owner, nm: str):
         """The recorded kind of `nm` as a parameter of `owner`, or None.
 
@@ -2526,6 +2547,11 @@ class SemaAnalyzer:
         # soon as a round adds nothing, so the ordinary case still costs one.
         for _round in range(4):
             _before = dict(self.inferred_param_types)
+            # The dynamic set is part of the fixpoint state. Watching only
+            # `inferred_param_types` would stop the loop on the round where a
+            # forwarded parameter first became dynamic, so the propagation
+            # would reach one call deep and no further.
+            _before_dyn = set(self.polymorphic_params)
             if _round:
                 self._infer_return_kinds()
             for f in self.mod.funcs:
@@ -2564,7 +2590,8 @@ class SemaAnalyzer:
                             if isinstance(mc, A.MethodCall) and mc.method == m.name
                         ]
                     self._infer_call_target_params(f"{c.name}.{m.name}", m, sites, start=1)
-            if self.inferred_param_types == _before:
+            if (self.inferred_param_types == _before
+                    and self.polymorphic_params == _before_dyn):
                 break
 
     def _literal_is_uniform(self, value) -> bool:
@@ -2635,6 +2662,15 @@ class SemaAnalyzer:
                             break
                     if arg is None:
                         continue
+                if isinstance(arg, A.Name) and self._param_is_dynamic_in(
+                    getattr(self, "_call_owner", {}).get(id(site)), arg.name
+                ):
+                    # Forwarding an already-dynamic parameter. Propagates
+                    # across the fixpoint rounds below, so a chain of
+                    # forwarding calls all end up dynamic rather than only the
+                    # first.
+                    self.polymorphic_params.add(f"{qualname}:{i}")
+                    continue
                 if isinstance(arg, A.Name) and (
                     arg.name in self._module_dynamic_bindings()
                 ):
