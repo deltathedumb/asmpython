@@ -110,6 +110,14 @@ record disagreement. Things that trip it:
 
 If regen refuses your case, the case is wrong, not regen.
 
+### Keep printed output ASCII
+
+`sys.stdout`'s encoding is environmental. A case that prints U+FFFD raises
+`UnicodeEncodeError` in **CPython itself** on a Windows console codepage, so
+there is no expectation to record and the case is unrunnable for half your
+audience. Print `ascii(x)`, `ord(x)`, or a length instead — the value is what
+the case is about, its console representation is not.
+
 ---
 
 ## Writing a good case
