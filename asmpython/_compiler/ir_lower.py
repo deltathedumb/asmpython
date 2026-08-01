@@ -61,6 +61,20 @@ from .type_ids import (
 # unsigned 0xB0BE11EDB0BE11ED the assembly writes.
 BOX_MAGIC = 0xB0BE11EDB0BE11ED - (1 << 64)
 
+#: str methods that may be dispatched on an OPAQUE ("any") receiver.
+#:
+#: Restricted to the no-argument ones, whose names are unambiguous enough that
+#: sema is willing to type the result from the method alone when the receiver
+#: kind is unknown (it additionally requires that no user class define a method
+#: of that name). Argument-taking methods are deliberately excluded: their
+#: arguments would also need kind checks, and the payoff is smaller.
+_ANY_RECV_STR_METHODS = frozenset({
+    "upper", "lower", "casefold", "capitalize", "swapcase", "title",
+    "strip", "lstrip", "rstrip", "splitlines",
+    "isdigit", "isalpha", "isalnum", "isspace",
+    "isupper", "islower", "isnumeric", "isprintable",
+})
+
 
 # Python builtins that this backend does not model as first-class VALUES --
 # builtin functions and exception/base classes that have no runtime object
@@ -186,6 +200,10 @@ class _ModuleCtx:
         self.data: list[IRGlobal] = []
         self.class_names = class_names
         self.func_names = func_names
+        #: Functions referenced as first-class values; they use a boxed-return
+        #: convention. Populated by `lower_module`; empty for callers that
+        #: build a context directly.
+        self.callable_valued_funcs: frozenset[str] = frozenset()
         self.func_sigs = func_sigs or {}
         self.ffi_funcs = ffi_funcs or {}
         # asmpython.mlang: uid -> {method_name: mlang_support.MlangFuncSig},
@@ -427,6 +445,10 @@ class _FuncCtx:
         # that silently corrupts otherwise-correct, currently-passing
         # code across the test suite.
         self.box_any_returns = False
+        #: True when this function is referenced as a first-class value, so it
+        #: returns BOXED regardless of its declared signature -- an indirect
+        #: call cannot recover a raw value's kind. Direct call sites unbox.
+        self.returns_boxed = False
 
     def push_loop(self, cont_label: str, break_label: str) -> None:
         """Enter a loop body, recording how deep the try stack was on entry so
@@ -8271,7 +8293,14 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         _sd_buf = ctx.tmp(PTR)
         ctx.emit(IRInstr("load", _sd_buf, [_sd_buf_addr]))
 
-        _sd_res_ty = ir_type_for(A.expr_type(e))
+        # The callee is reached indirectly, so it may use the boxed-return
+        # convention (`lower_func`'s `returns_boxed`) -- this IS the decorator
+        # forwarding shape that convention exists for. Carry the result as PTR
+        # so it can be unboxed below; a float destination is excluded because
+        # its raw bits need a bitcast the no-op unbox path cannot distinguish
+        # from a real payload.
+        _sd_unbox = A.expr_type(e) not in ("any", "float")
+        _sd_res_ty = PTR if _sd_unbox else ir_type_for(A.expr_type(e))
         _sd_res = ctx.ensure_slot(f"__stardyn_{id(e)}", _sd_res_ty)
         _sd_check = [ctx.new_block(f"stardynchk{n}_{id(e) % 9999}")
                      for n in range(MAX_STAR_ARITY + 1)]
@@ -8310,6 +8339,11 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.switch_to(_sd_end)
         _out = ctx.tmp(_sd_res_ty)
         ctx.emit(IRInstr("load", _out, [_sd_res]))
+        if _sd_unbox:
+            # A concrete destination expects a raw value; `_lower_unbox_any`
+            # is a no-op when the callee did not box, so the ordinary
+            # non-convention case is unaffected.
+            return _lower_unbox_any(ctx, _out)
         return _out
 
     if isinstance(e, A.Call) and getattr(e, "dunder_call_on_expr", False):
@@ -11069,7 +11103,17 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             raise LowerError(f"unsupported expr MethodCall (set.{e.method})")
         if obj_ty == "str" and e.method == "format" and isinstance(e.obj, A.StrLit):
             return _lower_str_format(ctx, e)
-        if obj_ty == "str":
+        if obj_ty == "str" or (obj_ty == "any" and e.method in _ANY_RECV_STR_METHODS):
+            # An OPAQUE receiver is dispatched here too, for the str methods
+            # whose name is unambiguous (sema only types those as str when no
+            # user class defines a method of that name -- see its matching
+            # `_STR_METHOD_RET` case). `_lower_expr` unboxes an "any" receiver
+            # on the way in, so the helper below sees the real str pointer.
+            #
+            # Without this the call fell through to the graceful
+            # unresolvable-call stub and returned 0, so `s.upper()` inside a
+            # function with an unannotated parameter silently produced an
+            # empty/NULL string (`vm_callable_param_result.py`).
             obj_v = _lower_expr(ctx, e.obj)
             if e.method == "encode":
                 return _lower_str_to_byte_list(ctx, e.obj)
@@ -12864,7 +12908,31 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             # callee is responsible for accepting a `**kwargs` parameter.
             dstar_dict = _lower_expr(ctx, e.dstar)
             args = args + [dstar_dict]
-        v = ctx.tmp(ir_type_for(A.expr_type(e)))
+        # The other half of the boxed-return convention (see `lower_func`'s
+        # `returns_boxed`): a function referenced as a first-class value
+        # returns BOXED so an indirect call can recover the kind. A DIRECT call
+        # resolves the callee statically, so it knows to unbox again -- without
+        # this the box pointer flows on as if it were the value, which broke
+        # every decorator case (decorator_simple, lib_functools_wraps,
+        # 299_signal_module: a decorated function is referenced by name and so
+        # adopts the convention).
+        _boxed_callee = (
+            e.func in getattr(ctx.mctx, "callable_valued_funcs", frozenset())
+            and e.func not in ctx.slot_ty
+        )
+        # A call THROUGH A VARIABLE may reach a boxed-return function too, and
+        # which one is not knowable here -- `g = deco(g)` then `g(5)` lands in
+        # `wrap`, which is referenced by name and so uses the convention. When
+        # such a call's static type is concrete the caller expects a raw value,
+        # so unbox defensively: `_lower_unbox_any` is a documented no-op on a
+        # value that was never boxed, making this safe for the ordinary case.
+        _maybe_boxed_indirect = (
+            e.func not in ctx.mctx.func_names
+            and e.func not in ctx.mctx.class_names
+            and (e.func in ctx.slot_ty or e.func in ctx.mctx.global_types)
+        )
+        _unbox_result = (_boxed_callee or _maybe_boxed_indirect) and A.expr_type(e) not in ("any", "float")
+        v = ctx.tmp(PTR if _unbox_result else ir_type_for(A.expr_type(e)))
         # A call through a plain variable (not a real function/class name)
         # -- e.g. `double = lambda x: x*2; double(21)`, or a lambda/func
         # passed in as a parameter (`def apply(g, v): return g(v)`). This
@@ -12917,6 +12985,13 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("const", zero_v, [0]))
                 return zero_v
             ctx.emit(IRInstr("call", v, [call_target, *args]))
+        if _unbox_result:
+            # Concrete destination: unwrap the convention's box. An "any"
+            # destination deliberately keeps it boxed -- that is exactly the
+            # shape an "any" slot wants -- and a float destination is excluded
+            # because its raw bits would need a bitcast the no-op path cannot
+            # distinguish from a real payload.
+            return _lower_unbox_any(ctx, v)
         return v
 
     raise LowerError(f"unsupported expr {type(e).__name__}")
@@ -15808,8 +15883,23 @@ def lower_func(
             ctx.receiver_param = f.params[0]
     if isinstance(f.ret_type, tuple) and f.ret_type:
         ctx.ret_ty = f.ret_type[0]
+    # A function referenced as a first-class value is reached through an
+    # INDIRECT call, whose result type is "any" -- so its return must be BOXED
+    # for the kind to survive, whatever its own declared signature says. Its
+    # direct call sites unbox again (they resolve the callee statically).
+    # Without this the callee returns raw, the indirect site forwards it as an
+    # "any" that was never boxed, and it reads back UNTAGGED: `apply(shout,
+    # "hi")` printed 8201056 instead of HI (`vm_callable_param_result.py`).
+    ctx.returns_boxed = f.name in getattr(ctx.mctx, "callable_valued_funcs", frozenset())
+    if ctx.returns_boxed:
+        ctx.ret_ty = "any"
     if ctx.ret_ty == "any":
         ctx.box_any_returns = _has_genuinely_heterogeneous_returns(f.body)
+    if ctx.returns_boxed:
+        # `box_any_returns` gates the Return boxing branch on "the function's
+        # own returns provably disagree". Here the reason for boxing is the
+        # calling convention, not heterogeneity, so force it on.
+        ctx.box_any_returns = True
     entry = ctx.new_block("entry")
     ctx.switch_to(entry)
     ctx.shared_zero = ctx.tmp(I64)
@@ -16489,6 +16579,51 @@ def _module_init_stmts(mod: A.Module) -> list:
     return out
 
 
+def _collect_call_arg_names(node: object, out: set) -> None:
+    """Identifiers passed as a bare `A.Name` ARGUMENT to some call.
+
+    Deliberately narrower than "every Name reference". A function merely
+    RETURNED (`return wrap`) or assigned is left out, because the decorator
+    lowering rewrites those shapes -- `@deco def g` becomes an assignment of
+    `deco(__undecorated_1_g)` to `g`, so a name-level scan sees both `g` and a
+    lifted `wrap` and gives them a calling convention their rewritten call
+    sites do not share. Restricting to argument position keeps the case the
+    convention exists for (`apply(shout, x)`, where the callee genuinely is
+    reached through an opaque parameter) and leaves decorator plumbing alone.
+    """
+    if isinstance(node, list):
+        for item in node:
+            _collect_call_arg_names(item, out)
+        return
+    if not hasattr(node, "__dataclass_fields__"):
+        return
+    if isinstance(node, (A.Call, A.MethodCall)):
+        for a in getattr(node, "args", []) or []:
+            if isinstance(a, A.Name):
+                out.add(a.name)
+    for fname in node.__dataclass_fields__:
+        _collect_call_arg_names(getattr(node, fname, None), out)
+
+
+def _callable_valued_funcs(mod: A.Module, func_names: frozenset) -> frozenset:
+    """Functions this module ever references as a value rather than calling
+    directly -- `apply(shout, x)`, `f = shout`, `[shout, double]`.
+
+    Such a function is reached through an INDIRECT call whose result type is
+    "any", so its return has to be BOXED for the kind to survive; a direct
+    call, which resolves the callee statically, unboxes it again. Without the
+    agreement the callee returns raw, the indirect site forwards it as an
+    "any" that was never boxed, and the value reads back UNTAGGED (a str
+    printed as 8201056 -- `vm_callable_param_result.py`).
+    """
+    refs: set = set()
+    _collect_call_arg_names(mod.body, refs)
+    _collect_call_arg_names(mod.funcs, refs)
+    for cls in mod.classes:
+        _collect_call_arg_names(cls.methods, refs)
+    return frozenset(refs & set(func_names))
+
+
 def lower_module(mod: A.Module, *, source_file: str = "<unknown>",
                  exe_name: str = "<program>",
                  embed_tracebacks: bool = False) -> IRModule:
@@ -16534,6 +16669,11 @@ def lower_module(mod: A.Module, *, source_file: str = "<unknown>",
     # annotation (unlike FuncSig.param_types, collapsed to base-strings) so a
     # call site can route each argument through the store choke point with
     # the PARAMETER's slot type. A method's parameter 0 is `self`.
+    #: Functions referenced as first-class values -- see
+    #: `_callable_valued_funcs`. These adopt a BOXED-RETURN convention so an
+    #: indirect call's "any"-typed result carries a recoverable kind; direct
+    #: call sites unbox it back.
+    mctx.callable_valued_funcs = _callable_valued_funcs(mod, mctx.func_names)
     mctx.func_param_annots = {
         f.name: list(getattr(f, "param_types", []) or []) for f in mod.funcs
     }

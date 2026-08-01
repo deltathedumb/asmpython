@@ -11164,6 +11164,33 @@ class SemaAnalyzer:
             self._maybe_bind_method_args(e, obj_t)
             for a in e.args:
                 self._check_expr(a, scope)
+            # A known str method called on an OPAQUE receiver still has a
+            # known return kind: `s.upper()` is a str whatever `s` turned out
+            # to be. Without this the result stays "any" and, because an "any"
+            # value is assumed to be already boxed, it is forwarded raw and
+            # reads back UNTAGGED -- `apply(shout, "hi")` printed a pointer
+            # (`vm_callable_param_result.py`).
+            #
+            # Only when NO user class defines a method of that name: a user
+            # `.upper()` may legitimately return something else, and the
+            # receiver being opaque is exactly the case where we cannot tell
+            # the two apart.
+            if (
+                obj_t == "any"
+                and e.method in _STR_METHOD_RET
+                and not any(
+                    m.name == e.method
+                    for c in self.mod.classes
+                    for m in c.methods
+                )
+            ):
+                e.inferred_type = _STR_METHOD_RET[e.method]
+                if e.inferred_type == "int":
+                    # The predicate methods (isdigit/startswith/...) are bools
+                    # in CPython; mark them so print()/str() render True/False
+                    # rather than 1/0, as every other predicate site does.
+                    e.is_bool = True  # type: ignore[attr-defined]
+                return
             # `re.compile(...)` currently returns the pattern string itself,
             # but CPython-style code naturally calls regex APIs as methods on
             # that compiled object (`pat.finditer(text)`). Retarget those

@@ -230,6 +230,25 @@ print(n[3])
 print(get(n, 3))
 ''')
 
+case("vm_method_on_opaque_receiver", "builtin methods work on an opaque receiver", '''
+def shout(s):
+    return s.upper()
+
+
+def grow(xs, v):
+    xs.append(v)
+    return len(xs)
+
+
+def keys_of(d):
+    return len(d)
+
+
+print(shout("hi"))
+print(grow([1, 2], 3))
+print(keys_of({"a": 1, "b": 2}))
+''')
+
 case("vm_value_in_container", "membership uses value equality", '''
 names = ["ada", "bob"]
 print("ada" in names)
