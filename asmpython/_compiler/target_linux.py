@@ -516,7 +516,7 @@ class LinuxCodegen(Codegen):
         # itoa_str_buf and input_buf are runtime scratch the helpers use.
         if not self.use_runtime_lib:
             self.emit("section .bss")
-            self.emit("itoa_str_buf: resb 32")
+            self.emit(f"itoa_str_buf: resb {self.itoa_buf_bytes}")
             self.emit("input_buf:    resb 256")
             # GC roots, owned by the runtime (_gc_head is defined above).
             self.emit("_gc_stack_base: resq 1")

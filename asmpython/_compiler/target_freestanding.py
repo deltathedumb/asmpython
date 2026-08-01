@@ -326,7 +326,7 @@ class FreestandingCodegen(Codegen):
         self.emit("_vga_row:         resq 1")
         self.emit("_vga_attr:        resb 1")   # current attribute byte (fg|bg<<4)
         self.emit("_heap_ptr:        resq 1")
-        self.emit("itoa_str_buf:     resb 64")
+        self.emit(f"itoa_str_buf:     resb {self.itoa_buf_bytes}")
         self.emit("ftoa_str_buf:     resb 64")
         self.emit("input_buf:        resb 4")    # input stub; not supported
         self.emit(f"_heap_data:       resb {_HEAP_BYTES}")

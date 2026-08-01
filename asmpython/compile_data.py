@@ -94,7 +94,7 @@ class CompileData:
 
 def _host() -> CompileData:
     """What the fields mean when no build has fixed them."""
-    from ._version import __version__ as version
+    from . import __version__ as version
 
     return CompileData(
         backend="cpython",

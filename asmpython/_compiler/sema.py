@@ -549,6 +549,14 @@ class Scope:
     # runtime; we currently support homogeneous lists of any of those four
     # element kinds.
     list_el_types: dict[str, str] = field(default_factory=dict)
+    # For names typed "list" whose elements are all bools. Parallel to
+    # `bool_flags` for scalar names: the element type stays "int" because bool
+    # IS int here (see A.is_bool_expr), so this is the only place the
+    # difference survives, and it is what lets `print(xs)` render
+    # `[True, False]` rather than `[1, 0]`. Absent/False keeps the historical
+    # int rendering, so a propagation site that forgets to carry it degrades to
+    # the old output rather than to a wrong value.
+    list_el_bools: dict[str, bool] = field(default_factory=dict)
     # For names typed "list" whose elements are themselves containers
     # (list[dict] / list[list]), the common value/element kind of those nested
     # containers — so `xs[i][k]` and `for x in xs: x[k]` recover the leaf type.
@@ -620,12 +628,18 @@ class Scope:
         tuple_types: list[str] | None = None,
         is_bool: bool = False,
         is_none: bool = False,
+        el_is_bool: bool = False,
     ) -> None:
         self.types[name] = ty
         self.bool_flags[name] = is_bool
         self.none_flags[name] = is_none
         if ty == "list" and el_type is not None:
             self.list_el_types[name] = el_type
+        if ty == "list":
+            # Written unconditionally, not only when true: rebinding a name from
+            # a bool list to an int list has to CLEAR the flag, or the new value
+            # inherits the old one's rendering.
+            self.list_el_bools[name] = el_is_bool
         if ty == "list" and el_value_type is not None:
             self.list_el_value_types[name] = el_value_type
         if ty == "list" and el_tuple_types:
@@ -3453,6 +3467,7 @@ class SemaAnalyzer:
         g = self.global_scope
         scope.types.update(g.types)
         scope.list_el_types.update(g.list_el_types)
+        scope.list_el_bools.update(g.list_el_bools)
         scope.set_el_types.update(g.set_el_types)
         scope.dict_value_types.update(g.dict_value_types)
         scope.dict_key_types.update(g.dict_key_types)
@@ -6228,6 +6243,8 @@ class SemaAnalyzer:
             scope.none_flags[name] = child.none_flags.get(name, False)
             if name in child.list_el_types:
                 scope.list_el_types[name] = child.list_el_types[name]
+                if name in child.list_el_bools:
+                    scope.list_el_bools[name] = child.list_el_bools[name]
             if name in child.set_el_types:
                 scope.set_el_types[name] = child.set_el_types[name]
             if name in child.list_el_value_types:
@@ -6412,6 +6429,21 @@ class SemaAnalyzer:
         if isinstance(e, A.Name):
             return scope.outparam_el_types.get(e.name, "int")
         return "int"
+
+    def _list_el_is_bool(self, e, scope: Scope) -> bool:
+        """Whether a list-valued expression's elements are all bools.
+
+        Companion to `_list_el_type`, which answers "int" for such a list
+        because bool IS int here. Only the shapes that can actually carry the
+        signal are consulted; everything else answers False and renders the
+        historical way, so an unhandled shape loses the True/False display
+        rather than producing a wrong value.
+        """
+        if isinstance(e, A.ListLit):
+            return getattr(e, "el_is_bool", False)
+        if isinstance(e, A.Name):
+            return scope.list_el_bools.get(e.name, False)
+        return False
 
     def _list_el_type(self, e, scope: Scope) -> str:
         """Element type of a list-valued expression. 'int' if unknown."""
@@ -7554,6 +7586,7 @@ class SemaAnalyzer:
                 el_type=self._list_el_type(value, scope),
                 el_value_type=self._list_el_value_type(value, scope),
                 el_tuple_types=self._list_el_tuple_types(value, scope),
+                el_is_bool=self._list_el_is_bool(value, scope),
             )
         elif t == "dict":
             scope.add(
@@ -9278,6 +9311,10 @@ class SemaAnalyzer:
             if e.inferred_type == "list":
                 e.list_el_type = scope.list_el_types.get(e.name, "int")
                 e.list_el_value_type = scope.list_el_value_types.get(e.name, "int")
+                # Same reason as the list[tuple] carry just below: ir_lower's
+                # repr reads the shape off the EXPRESSION, so a bool list held
+                # in a variable needs the flag on the node, not just in scope.
+                e.el_is_bool = scope.list_el_bools.get(e.name, False)  # type: ignore[attr-defined]
                 if e.list_el_type == "tuple":
                     # A list[tuple] READ has to carry its per-slot kinds onto
                     # the node, not just leave them in the scope: ir_lower's
@@ -9905,6 +9942,22 @@ class SemaAnalyzer:
             # `xs[i][0]` and `for a, b in xs` resolve the slot types.
             elif seen == "tuple":
                 e.el_tuple_types = self._common_tuple_slots(e.elems, scope)
+            # A list of bools stays list[int] -- bool IS int here (see
+            # A.is_bool_expr), and retyping it would change how the elements are
+            # stored. Bool-ness is a RENDER property, carried the same way
+            # `bool_flags` carries it for names and `_field_is_bool` for fields:
+            # alongside the int type, not instead of it. Without this the
+            # formatter only ever sees "int" and `[True, False]` prints `[1, 0]`.
+            #
+            # Every element must be a bool expression, not merely the first:
+            # `[True, 1]` is a list whose elements happen to share a storage
+            # kind, and CPython prints it `[True, 1]` -- a per-element property
+            # that a single whole-list kind cannot express. Such a list renders
+            # correctly only via the boxed/tagged path, so leave it alone here.
+            if seen == "int" and e.elems and all(
+                A.is_bool_expr(el) for el in e.elems
+            ):
+                e.el_is_bool = True  # type: ignore[attr-defined]
             return
         if isinstance(e, A.Comprehension):
             # `[elt for i, x in enumerate(xs) ...]` — treat like the For-loop
@@ -9921,6 +9974,7 @@ class SemaAnalyzer:
                 child = Scope()
                 child.types.update(scope.types)
                 child.list_el_types.update(scope.list_el_types)
+                child.list_el_bools.update(scope.list_el_bools)
                 child.set_el_types.update(scope.set_el_types)
                 child.list_el_tuple_types.update(scope.list_el_tuple_types)
                 child.dict_value_types.update(scope.dict_value_types)
@@ -10011,6 +10065,7 @@ class SemaAnalyzer:
             child = Scope()
             child.types.update(scope.types)
             child.list_el_types.update(scope.list_el_types)
+            child.list_el_bools.update(scope.list_el_bools)
             child.set_el_types.update(scope.set_el_types)
             child.list_el_tuple_types.update(scope.list_el_tuple_types)
             child.dict_value_types.update(scope.dict_value_types)
@@ -10087,6 +10142,7 @@ class SemaAnalyzer:
                 child = Scope()
                 child.types.update(scope.types)
                 child.list_el_types.update(scope.list_el_types)
+                child.list_el_bools.update(scope.list_el_bools)
                 child.set_el_types.update(scope.set_el_types)
                 child.list_el_tuple_types.update(scope.list_el_tuple_types)
                 child.dict_value_types.update(scope.dict_value_types)
@@ -10164,6 +10220,7 @@ class SemaAnalyzer:
             child = Scope()
             child.types.update(scope.types)
             child.list_el_types.update(scope.list_el_types)
+            child.list_el_bools.update(scope.list_el_bools)
             child.set_el_types.update(scope.set_el_types)
             child.list_el_tuple_types.update(scope.list_el_tuple_types)
             child.dict_value_types.update(scope.dict_value_types)

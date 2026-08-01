@@ -5280,9 +5280,31 @@ class X86_32LinuxCodegen(Codegen):
             "je ._fe_dict",
             "cmp ebx, 5",
             "je ._fe_items_tuple",
+            "cmp ebx, 7",
+            "je ._fe_bool",
         )
         self._emit_int_to_str()
         self.emitf("leave", "ret")
+        # kind 7 -- an all-bool list, whose elements are raw 0/1 in the slot
+        # (bool IS int here) and differ only in rendering. Unlike this target's
+        # float gap above there is nothing 64-bit about a bool, so the x86-64
+        # arm ports across unchanged apart from register width.
+        self.label("._fe_bool")
+        self.emitf(
+            "test eax, eax",
+            "jz ._fe_bool_false",
+            "mov eax, _runtime_true_str",
+            "call _runtime_str_concat_dup",
+            "leave",
+            "ret",
+        )
+        self.label("._fe_bool_false")
+        self.emitf(
+            "mov eax, _runtime_false_str",
+            "call _runtime_str_concat_dup",
+            "leave",
+            "ret",
+        )
         self.label("._fe_str")
         # wrap in single quotes -> "'" + elem + "'"
         self.emitf(
@@ -5672,7 +5694,7 @@ class X86_32LinuxCodegen(Codegen):
         """
         if not self.use_runtime_lib:
             self.emit("section .bss")
-            self.emit("itoa_str_buf: resb 32")
+            self.emit(f"itoa_str_buf: resb {self.itoa_buf_bytes}")
             self.emit("input_buf:    resb 256")
             self.emit("_float_repr_x:          resd 2")   # 8 bytes (a double), 4-byte-field-addressable
             self.emit("_float_repr_notation:    resd 1")

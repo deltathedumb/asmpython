@@ -251,6 +251,18 @@ class Codegen:
                 self.global_vars[s.name] = A.expr_type(s.value)
             elif isinstance(s, A.If):
                 self._collect_if_globals(s, bound_in_frame, self.global_vars)
+        # Size of `itoa_str_buf`, the shared sprintf destination used by
+        # `_emit_int_fmt` / `_emit_float_fmt`.
+        #
+        # This was a flat `resb 32` in every target. sprintf does not bound its
+        # output, and `%f` on a large double writes far past that: printing
+        # `"%f" % 1e300` emits ~308 integer digits plus 6 decimals into 32
+        # bytes and terminates the process with STATUS_HEAP_CORRUPTION
+        # (0xC0000374). Every emitted format string's precision and width are
+        # compile-time constants, so the exact worst case is knowable here --
+        # call `_need_itoa_buf()` with it before emitting the sprintf, and each
+        # target reserves the maximum any site requested.
+        self.itoa_buf_bytes: int = 64
         # RTTI: each user class gets a small integer id. Instances are tagged
         # with their id (a hidden `__class__` dict entry) at construction, and
         # isinstance walks the `__class_parents` table to honour inheritance.
@@ -855,6 +867,16 @@ class Codegen:
         publish = sorted(publish)
         for sym in publish:
             self.emit(f"global {sym}")
+        # This path emits the runtime WITHOUT any user code, so no call site has
+        # had a chance to size `itoa_str_buf` via `_reserve_for_conv`. The
+        # object is prebuilt and shared by programs the compiler has not seen,
+        # so it must carry the worst case instead: DBL_MAX under `%f` is
+        # sign + 309 integer digits + '.' + precision. 1152 bytes covers any
+        # precision up to 840, well past anything `%`-formatting produces in
+        # practice. (A literal wider than that in a --use-runtime-lib build
+        # would still overflow; the self-contained build path sizes exactly and
+        # is unaffected.)
+        self._need_itoa_buf(1152)
         self.emit_print_impls()
         # emit_print_impls's runtime bodies intern strings/floats (format
         # strings, error messages) via self.intern_string/self.floats but
@@ -8942,8 +8964,9 @@ class Codegen:
         """
         # ---- _runtime_fmt_elem ------------------------------------------------
         # In:  rax = value, rbx = kind. Low nibble = base kind (0 = int,
-        # 1 = str-quoted, 2 = float, 3 = list, 4 = dict); for base kinds 3/4,
-        # the high nibble is the element/value kind one level down (see
+        # 1 = str-quoted, 2 = float, 3 = list, 4 = dict, 5 = items-tuple,
+        # 6 = boxed/tag-dispatched, 7 = bool); for base kinds 3/4, the high
+        # nibble is the element/value kind one level down (see
         # _composite_repr_kind).
         # Out: rax = repr string for that value.
         self.label("_runtime_fmt_elem")
@@ -8963,9 +8986,32 @@ class Codegen:
             "je ._fe_items_tuple",
             "cmp rbx, 6",
             "je ._fe_tagged",
+            "cmp rbx, 7",
+            "je ._fe_bool",
         )
         self._emit_int_to_str()
         self.emitf("leave", "ret")
+        # kind 7 -- the compiler proved every element is a bool, so the value is
+        # a raw 0/1 in the slot (bool IS int here) and only the RENDERING
+        # differs. No box, no tag read: that is what separates this from kind 6,
+        # which pays for a heap cell per element precisely because the kind is
+        # not a compile-time property there. Body matches ._fe_tagged_bool.
+        self.label("._fe_bool")
+        self.emitf(
+            "test rax, rax",
+            "jz ._fe_bool_false",
+            "lea rax, [_runtime_true_str]",
+            "call _runtime_str_concat_dup",
+            "leave",
+            "ret",
+        )
+        self.label("._fe_bool_false")
+        self.emitf(
+            "lea rax, [_runtime_false_str]",
+            "call _runtime_str_concat_dup",
+            "leave",
+            "ret",
+        )
         self.label("._fe_str")
         # wrap in single quotes -> "'" + elem + "'"
         self.emitf(
@@ -9011,6 +9057,19 @@ class Codegen:
         self.label("._fe_tagged")
         self.emitf(
             "mov [rbp-56], rax",
+            # NOTE: a bare 0 reaching here is ambiguous -- it is either the
+            # integer 0 stored unboxed, or None (which `_lower_box_any`
+            # deliberately leaves as the universal all-zero pointer). It is
+            # rendered as "0", because an unboxed real 0 turns out to be far
+            # more common at a format site than a None. Rendering it as "None"
+            # instead was tried and reverted: it broke `[-1, 0, 1, 2]` into
+            # `[-1, None, 1, 2]` across the itertools/deque/generator cases.
+            # Disambiguating the two needs None to have a static type of its
+            # own so it can be boxed like every other kind -- today None is
+            # parsed as IntLit(0) with an `is_none` flag (see
+            # ast_nodes.is_none_expr), so the information is already gone by
+            # the time a value reaches this formatter. No runtime-only fix
+            # exists here.
             # Guard the dereference exactly as the compiler-side tag reader
             # does: a real box is a heap pointer, so it is above the low-address
             # threshold AND 8-byte aligned. A raw integer that fails either test
@@ -13309,6 +13368,7 @@ class Codegen:
                 cconv = {"i": "d", "u": "d", "d": "d", "o": "o", "x": "x", "X": "X"}[conv]
                 cfmt = "%" + flags + width + precision + "ll" + cconv
                 label, _ = self.intern_string(cfmt)
+                self._reserve_for_conv(cconv, width, precision)
                 self.gen_expr(arg, info)
                 self._emit_int_fmt(label)
                 return
@@ -13316,6 +13376,7 @@ class Codegen:
             prec = precision if precision else ".6"
             cfmt = "%" + flags + width + prec + conv
             label, _ = self.intern_string(cfmt)
+            self._reserve_for_conv(conv, width, prec)
             self._gen_expr_as_float(arg, info, A.expr_type(arg))
             self._emit_float_fmt(label)
 
@@ -16971,6 +17032,42 @@ class Codegen:
             "mov byte [rbx+2], 0",
         )
         self.label(done)
+
+    def _need_itoa_buf(self, nbytes: int) -> None:
+        """Reserve at least `nbytes` (NUL included) in the shared sprintf
+        buffer. Call before emitting any `_emit_int_fmt`/`_emit_float_fmt`
+        whose conversion can exceed the default reservation."""
+        if nbytes > self.itoa_buf_bytes:
+            self.itoa_buf_bytes = nbytes
+
+    def _reserve_for_conv(self, conv: str, width: str, precision: str) -> None:
+        """Size `itoa_str_buf` for one C conversion, from its compile-time
+        width/precision.
+
+        The bounds are the widest a IEEE-754 double or a 64-bit integer can
+        print. For `%f` that is dominated by DBL_MAX's 309 integer digits --
+        the case that made `"%f" % 1e300` corrupt the heap against the old
+        fixed 32-byte buffer."""
+        try:
+            prec = int(precision[1:]) if precision.startswith(".") else (
+                int(precision) if precision else -1
+            )
+        except ValueError:
+            prec = -1
+        try:
+            wid = int(width) if width else 0
+        except ValueError:
+            wid = 0
+        if conv in "fF":
+            # sign + DBL_MAX's integer digits + '.' + precision
+            body = 1 + 309 + 1 + (6 if prec < 0 else prec)
+        elif conv in "eEgG":
+            # sign + one digit + '.' + precision + exponent ("e+308")
+            body = 1 + 1 + 1 + (6 if prec < 0 else prec) + 5
+        else:
+            # %lld / %llo / %llx: 64-bit octal is the widest at 22 digits.
+            body = 1 + 22 + max(0, prec)
+        self._need_itoa_buf(max(body, wid) + 1)
 
     def _emit_float_fmt(self, fmt_label: str) -> None:
         """In: xmm0 = double. Out: rax = ptr to sprintf(buf, <fmt_label>, x).

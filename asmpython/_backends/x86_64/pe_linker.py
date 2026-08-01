@@ -47,6 +47,12 @@ _DLL_FOR_SYMBOL: dict[str, str] = {}
 for _name in (
     "malloc", "realloc", "free", "calloc",
     "printf", "sprintf", "putchar", "puts", "fputs", "fputc",
+    # _scprintf: "how many chars would this conversion produce", used by
+    # _abi_int_fmt/_abi_float_fmt to size their buffer instead of assuming a
+    # fixed 64 bytes. Confirmed a real msvcrt.dll export via
+    # ctypes.WinDLL('msvcrt.dll'), as with the rest of this table. (C99
+    # snprintf is NOT exported by msvcrt.dll -- only UCRT has it.)
+    "_scprintf",
     "strlen", "strcmp", "strstr", "_strdup", "_atoi64",
     "atof", "strtod", "fgets", "fopen", "fgetc", "fclose", "fflush",
     "fread", "fseek", "ftell", "_popen", "_pclose",

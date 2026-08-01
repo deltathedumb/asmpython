@@ -96,6 +96,14 @@ extern _runtime_int_to_binary
 extern _runtime_group_digits
 extern _runtime_group_digits_zeropad
 extern malloc
+; _scprintf returns the length a printf-family conversion WOULD produce,
+; without writing it anywhere -- the size probe _abi_int_fmt/_abi_float_fmt
+; need. C99 snprintf(NULL, 0, ...) would do the same job but msvcrt.dll does
+; not export it (only the pre-C99 _snprintf, which reports truncation as -1
+; rather than the required length); confirmed against the live system DLL via
+; ctypes.WinDLL('msvcrt.dll'), the same way the rest of this runtime's msvcrt
+; dependencies were.
+extern _scprintf
 extern printf
 extern sprintf
 extern putchar
@@ -1815,7 +1823,19 @@ _abi_int_fmt:
     sub rsp, 56
     mov [rsp+40], rcx          ; value
     mov [rsp+48], rdx          ; fmt_ptr
-    mov rcx, 64
+    ; Size from the format, not a guess -- see _abi_float_fmt for the full
+    ; rationale. 64 bytes holds any bare %lld (20 digits), but a width makes
+    ; the result arbitrarily long: `"%500d" % 5` writes 500 bytes into it.
+    mov rcx, [rsp+48]          ; fmt
+    mov rdx, [rsp+40]          ; value
+    xor eax, eax
+    call _scprintf
+    movsxd rax, eax            ; int return -- sign-extend before testing
+    test rax, rax
+    jns ._aif_sized            ; non-negative => the true length
+    mov rax, 1152              ; non-conforming libc => worst-case bound
+._aif_sized:
+    lea rcx, [rax+1]           ; + NUL
     call malloc
     mov [rsp+32], rax          ; stash buf ptr -- rcx/rdx/r8 are volatile
                                 ; across the sprintf call below, so the
@@ -1856,7 +1876,32 @@ _abi_float_fmt:
     sub rsp, 56
     mov [rsp+40], rdx          ; fmt_ptr
     movsd [rsp+48], xmm0       ; value
-    mov rcx, 64
+    ; Size the allocation from the format rather than assuming it fits.
+    ;
+    ; This was `mov rcx, 64` unconditionally. sprintf does not bound its
+    ; output, so any conversion wider than 63 characters ran off the end of
+    ; the heap block: `print("%f" % 1e100)` needs 108 bytes and killed the
+    ; process with STATUS_HEAP_CORRUPTION (0xC0000374), and DBL_MAX under
+    ; `%f` needs 316. snprintf(NULL, 0, ...) returns exactly the length the
+    ; result requires and writes nothing, so one probe pass gives the true
+    ; size for any precision.
+    mov rcx, [rsp+40]          ; fmt
+    mov rdx, [rsp+48]          ; value: GP slot for the vararg...
+    movq xmm1, [rsp+48]        ; ...and its XMM twin (Win64 varargs pass both)
+    xor eax, eax
+    call _scprintf
+    movsxd rax, eax            ; int return -- sign-extend before testing
+    ; A pre-C99 snprintf reports truncation as a negative value instead of
+    ; the required length. Only a negative result is untrustworthy -- a small
+    ; non-negative one is the real (short) length and must be used as-is, or
+    ; every format would allocate the worst-case block. On a negative result
+    ; fall back to a bound covering every conversion the compiler emits, so a
+    ; non-conforming libc over-allocates instead of overflowing.
+    test rax, rax
+    jns ._aff_sized
+    mov rax, 1152
+._aff_sized:
+    lea rcx, [rax+1]           ; + NUL
     call malloc
     mov [rsp+32], rax          ; stash buf ptr (rcx/rdx/r8 volatile below)
     mov rcx, rax

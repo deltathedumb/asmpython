@@ -1101,6 +1101,49 @@ def _rewrite_class_references(
             _rewrite_class_references(nested, bare_names, qualified_names)
 
 
+def _drop_stdlib_funcs_shadowed_by_user_classes(
+    entry: A.Module,
+    parsed: dict[str, A.Module],
+    discovery_order: list[str],
+    func_origin: dict[str, str],
+) -> None:
+    """A user's own definition wins over a same-named bundled stdlib helper.
+
+    The native compiler has one flat symbol table, but Python gives every
+    module its own namespace.  The bundled stdlib carries plain functions
+    for names that are *types* in real Python -- ``typing.Iterator``,
+    ``Sequence``, ``Mapping``, ``Callable`` -- and merging those into the
+    flat table made an ordinary user class called ``Iterator`` collide with
+    a shim it never imported and cannot see.
+
+    Nothing about that collision is meaningful: in Python the two names live
+    in different modules and coexist.  So drop the stdlib function whenever
+    user code defines a class of that name, which restores the language's
+    actual shadowing rule instead of special-casing any one identifier.
+    Only *stdlib* definitions are dropped -- a genuine collision between two
+    pieces of user code is still reported.
+    """
+    user_class_names: set[str] = {c.name for c in entry.classes}
+    for module_path in discovery_order:
+        module = parsed.get(module_path)
+        if module is None or _is_within_stdlib(Path(module_path)):
+            continue
+        for cls in module.classes:
+            user_class_names.add(cls.name)
+
+    if not user_class_names:
+        return
+
+    kept: list = []
+    for func in entry.funcs:
+        if getattr(func, "is_stdlib", False) and func.name in user_class_names:
+            func_origin.pop(func.name, None)
+            continue
+        kept.append(func)
+    if len(kept) != len(entry.funcs):
+        entry.funcs[:] = kept
+
+
 def _merge_classes_with_module_identity(
     entry: A.Module,
     entry_path: Path,
@@ -1707,6 +1750,10 @@ def load_program(
             sub: Path = p
             if str(sub.resolve()) not in seen:
                 queue.append(sub)
+
+    _drop_stdlib_funcs_shadowed_by_user_classes(
+        entry, parsed, discovery_order, func_origin
+    )
 
     _merge_classes_with_module_identity(
         entry,

@@ -12,6 +12,11 @@ import struct
 import sys
 from types import ModuleType
 
+# Declared before the submodule imports below, not after them: `compile_data`
+# builds its host CompileData at import time and needs the version, so it has
+# to already be set on this module by the time that import runs.
+__version__ = "3.14.0"
+
 from . import (
     annotations,
     backend,
@@ -28,8 +33,6 @@ from .annotations import __all__ as _annotations_all
 from .capabilities import CapabilitySet, Dependency
 from .compile_data import COMPILE_DATA, CompileData
 from .extension import Extension
-
-__version__ = "3.14.0"
 
 
 def __getattr__(name: str):

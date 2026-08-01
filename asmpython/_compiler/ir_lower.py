@@ -345,11 +345,26 @@ class _FuncCtx:
         #: the value additionally keeps it off the enclosing scope's slot.
         self.comprehension_shadows: list[dict[str, str]] = []
         self.loop_stack: list[tuple[str, str]] = []  # (continue_label, break_label)
+        # Depth of `try_handler_stack` when each active loop was entered.
+        # `break`/`continue` leave every try scope opened INSIDE the loop, so
+        # they must unwind exactly down to this mark -- not to zero, which
+        # would wrongly run the finallys of trys that enclose the whole loop.
+        self.loop_try_depth: list[int] = []
         # Stack of slot names for active try-block parent-handler pointers.
         # Each entry is the `__try_parent_<uid>` slot name pushed when entering
         # a try body and popped when leaving. A `return` inside a try body must
         # restore `_runtime_handler_top` for every enclosing try before the ret.
         self.try_handler_stack: list[str] = []
+        # Pending `finally` bodies for the same active try scopes, index-aligned
+        # with `try_handler_stack`. Python runs a `finally` on EVERY exit path,
+        # including `return`; the two `if not ctx.terminated:` guards in
+        # `_lower_try` only cover the fall-through paths, so a `return` inside a
+        # try body used to leave the finally unexecuted entirely. A `return`
+        # walks this stack innermost-first, emitting each body inline -- the
+        # same duplicate-per-exit-path approach `_lower_try` already uses for
+        # its normal/handler/no-match exits (see IRFuncCtx.emit_alloca's
+        # docstring, which documents that duplication as the established shape).
+        self.try_finally_stack: list[list] = []
         # (setjmp_block_label, member_block_labels) per try/except this
         # function lowers -- populated by the three setjmp-installing lowerings
         # via `_record_try_region`, consumed by lower_func to stamp
@@ -412,6 +427,16 @@ class _FuncCtx:
         # that silently corrupts otherwise-correct, currently-passing
         # code across the test suite.
         self.box_any_returns = False
+
+    def push_loop(self, cont_label: str, break_label: str) -> None:
+        """Enter a loop body, recording how deep the try stack was on entry so
+        `break`/`continue` know how many try scopes they unwind."""
+        self.loop_stack.append((cont_label, break_label))
+        self.loop_try_depth.append(len(self.try_handler_stack))
+
+    def pop_loop(self) -> None:
+        self.loop_stack.pop()
+        self.loop_try_depth.pop()
 
     def tmp(self, ty: IRType) -> IRValue:
         self._tmp += 1
@@ -3141,6 +3166,13 @@ def _resolve_str_dunder(ctx: _FuncCtx, class_name: str, repr_first: bool = False
 #: `._fe_tagged`, which recurses with this same kind so nesting works.
 TAGGED_REPR_KIND = 6
 
+#: `_runtime_fmt_elem`'s "render this int-stored element as True/False" kind.
+#: Distinct from the tagged kind because it costs nothing at runtime: the
+#: compiler already knows every element is a bool, so no box and no tag read
+#: is needed -- only a different formatter. Appended after the existing kinds
+#: rather than inserted, so no previously-emitted kind changes meaning.
+BOOL_REPR_KIND = 7
+
 
 def _value_repr_kind(t: str) -> int:
     if t == "str":
@@ -3173,6 +3205,12 @@ def _list_repr_kind(e: A.Expr) -> int:
     if isinstance(e, A.ListLit):
         el = e.el_type or "int"
         inner = getattr(e, "el_value_type", "int") or "int"
+    # An all-bool list is stored as list[int] -- bool IS int here -- so the
+    # element type alone cannot distinguish `[True, False]` from `[1, 0]`.
+    # sema flags the difference; honour it before the type-driven mapping,
+    # which would otherwise answer kind 0 and print 1/0.
+    if el == "int" and getattr(e, "el_is_bool", False):
+        return BOOL_REPR_KIND
     return _composite_repr_kind(el, inner)
 
 
@@ -13811,10 +13849,10 @@ def _lower_for_zip(ctx: _FuncCtx, s: A.For, zspec) -> None:
         ctx.emit(IRInstr("load", i_v3, [i_ptr]))
         _store_loop_target(ctx, idx_name, i_v3, "int")
 
-    ctx.loop_stack.append((cont_b.label, end_b.label))
+    ctx.push_loop(cont_b.label, end_b.label)
     for st in s.body:
         _lower_stmt(ctx, st)
-    ctx.loop_stack.pop()
+    ctx.pop_loop()
     if not ctx.terminated:
         ctx.emit(IRInstr("br", None, [cont_b.label]))
 
@@ -13912,6 +13950,49 @@ def _tb_emit_line(ctx: "_FuncCtx", line: int) -> None:
     lv = ctx.tmp(I64)
     ctx.emit(IRInstr("const", lv, [line]))
     ctx.emit(IRInstr("store", None, [lv, slot]))
+
+
+def _unwind_try_scopes(ctx: _FuncCtx, down_to: int) -> bool:
+    """Leave every active try scope above `down_to`, innermost first: restore
+    its parent exception handler, then run its `finally` body.
+
+    Shared by the three statements that exit a try body early -- `return`
+    (unwinds to 0, leaving the function) and `break`/`continue` (unwind only to
+    the depth recorded when the loop was entered, since trys enclosing the
+    whole loop are not being left). Python runs a `finally` on all three
+    paths; `_lower_try` only emits it on its own fall-through exits.
+
+    Restore-then-finally is the required order at each level: the body runs
+    with that level's handler already popped, so a raise inside the finally
+    propagates OUTWARD rather than back into the try it belongs to.
+
+    Returns True if lowering a finally body terminated the block (a `return`
+    or `raise` inside the finally), meaning the caller must NOT emit its own
+    terminator -- Python lets that exit win over the pending one.
+    """
+    i = len(ctx.try_handler_stack) - 1
+    while i >= down_to:
+        parent_ptr = ctx.slot[ctx.try_handler_stack[i]]
+        parent_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", parent_v, [parent_ptr]))
+        _store_global(ctx, "_runtime_handler_top", parent_v)
+        fin_body = ctx.try_finally_stack[i] if i < len(ctx.try_finally_stack) else None
+        if fin_body:
+            # Truncate both scope stacks while lowering, so a `return`/`break`
+            # nested inside this finally unwinds only the levels still
+            # outstanding instead of re-running the ones handled here.
+            saved_h, saved_f = ctx.try_handler_stack, ctx.try_finally_stack
+            ctx.try_handler_stack = saved_h[:i]
+            ctx.try_finally_stack = saved_f[:i]
+            try:
+                for fs in fin_body:
+                    _lower_stmt(ctx, fs)
+            finally:
+                ctx.try_handler_stack, ctx.try_finally_stack = saved_h, saved_f
+            if ctx.terminated:
+                return True
+        i -= 1
+    return False
 
 
 def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
@@ -14611,18 +14692,25 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
             # unified the function's return to a single concrete type while a
             # branch still yielded a differently-typed value).
             ret_val = _lower_for_slot(ctx, s.value, ctx.ret_ty)
-        # Restore any enclosing try-block exception handlers before returning,
-        # innermost first.  Without this the stale handler pointer left in
-        # _runtime_handler_top makes a later `raise` longjmp into a dead frame.
-        n: int = len(ctx.try_handler_stack)
-        i: int = n - 1
-        while i >= 0:
-            slot_name: str = ctx.try_handler_stack[i]
-            parent_ptr = ctx.slot[slot_name]
-            parent_v = ctx.tmp(PTR)
-            ctx.emit(IRInstr("load", parent_v, [parent_ptr]))
-            _store_global(ctx, "_runtime_handler_top", parent_v)
-            i = i - 1
+        # Unwind every enclosing try scope, innermost first: restore its parent
+        # exception handler, then run its `finally` body.
+        #
+        # The restore alone is not enough. Without it a stale handler pointer in
+        # _runtime_handler_top makes a later `raise` longjmp into a dead frame;
+        # without the finally, `try: return x / finally: cleanup()` silently
+        # skips cleanup(), because _lower_try only emits the finally on its
+        # `if not ctx.terminated:` fall-through paths and a return terminates
+        # the block before reaching them.
+        #
+        # Restore-then-finally is the required order at each level: the body
+        # runs with that level's handler already popped, so a raise inside the
+        # finally propagates OUTWARD rather than back into the try it belongs
+        # to. The return value is already materialized in `ret_val` above, so a
+        # finally that mutates the returned name cannot change what is returned
+        # -- matching Python, where the return expression is evaluated before
+        # the finally runs.
+        if _unwind_try_scopes(ctx, 0):
+            return
         # Drop this frame before leaving it, so a traceback taken later does
         # not name a function that has already returned.
         _tb_emit_pop(ctx)
@@ -14702,10 +14790,10 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         ctx.emit(IRInstr("br.t", None, [cond, body_b.label, false_target]))
 
         ctx.switch_to(body_b)
-        ctx.loop_stack.append((head_b.label, end_b.label))
+        ctx.push_loop(head_b.label, end_b.label)
         for st in s.body:
             _lower_stmt(ctx, st)
-        ctx.loop_stack.pop()
+        ctx.pop_loop()
         ctx.emit(IRInstr("br", None, [head_b.label]))
 
         if natural_b is not None:
@@ -14816,10 +14904,10 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
                 ctx.emit(IRInstr("load", elem_v, [addr]))
             _store_loop_target(ctx, s.targets[1], elem_v, elem_ty)
 
-            ctx.loop_stack.append((cont_b.label, end_b.label))
+            ctx.push_loop(cont_b.label, end_b.label)
             for st in s.body:
                 _lower_stmt(ctx, st)
-            ctx.loop_stack.pop()
+            ctx.pop_loop()
             ctx.emit(IRInstr("br", None, [cont_b.label]))
 
             ctx.switch_to(cont_b)
@@ -14956,10 +15044,10 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         else:
             _store_loop_target(ctx, s.var, elem_v, el_ty)
 
-        ctx.loop_stack.append((cont_b.label, end_b.label))
+        ctx.push_loop(cont_b.label, end_b.label)
         for st in s.body:
             _lower_stmt(ctx, st)
-        ctx.loop_stack.pop()
+        ctx.pop_loop()
         ctx.emit(IRInstr("br", None, [cont_b.label]))
 
         ctx.switch_to(cont_b)
@@ -15053,10 +15141,10 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         ctx.emit(IRInstr("br.t", None, [cond_neg, body_b.label, false_target]))
 
         ctx.switch_to(body_b)
-        ctx.loop_stack.append((cont_b.label, end_b.label))
+        ctx.push_loop(cont_b.label, end_b.label)
         for st in s.body:
             _lower_stmt(ctx, st)
-        ctx.loop_stack.pop()
+        ctx.pop_loop()
         ctx.emit(IRInstr("br", None, [cont_b.label]))
 
         ctx.switch_to(cont_b)
@@ -15082,6 +15170,11 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         if not ctx.loop_stack:
             raise LowerError("'break' outside loop")
         _, break_label = ctx.loop_stack[-1]
+        # Leaving the loop also leaves every try opened inside it, so their
+        # finallys run and their handlers are restored first -- same rule as
+        # `return`, bounded to the loop instead of the whole function.
+        if _unwind_try_scopes(ctx, ctx.loop_try_depth[-1]):
+            return
         ctx.emit(IRInstr("br", None, [break_label]))
         return
 
@@ -15089,6 +15182,10 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
         if not ctx.loop_stack:
             raise LowerError("'continue' not properly in loop")
         cont_label, _ = ctx.loop_stack[-1]
+        # `continue` leaves the try scopes inside the loop body exactly as
+        # `break` does -- the next iteration re-enters them fresh.
+        if _unwind_try_scopes(ctx, ctx.loop_try_depth[-1]):
+            return
         ctx.emit(IRInstr("br", None, [cont_label]))
         return
 
@@ -15304,10 +15401,10 @@ def _lower_for_iter_protocol(ctx: _FuncCtx, s: A.For, cls_name: str) -> None:
     _store_global(ctx, "_runtime_handler_top", parent_v)
     _store_loop_target(ctx, s.var, next_v, el_kind)
 
-    ctx.loop_stack.append((cont_b.label, end_b.label))
+    ctx.push_loop(cont_b.label, end_b.label)
     for st in s.body:
         _lower_stmt(ctx, st)
-    ctx.loop_stack.pop()
+    ctx.pop_loop()
     ctx.emit(IRInstr("br", None, [cont_b.label]))
 
     ctx.switch_to(cont_b)
@@ -15403,9 +15500,11 @@ def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
     # --- try body (+ else) ---
     ctx.switch_to(body_b)
     ctx.try_handler_stack.append(f"__try_parent_{uid}")
+    ctx.try_finally_stack.append(fin_body)
     for st in body:
         _lower_stmt(ctx, st)
     ctx.try_handler_stack.pop()
+    ctx.try_finally_stack.pop()
     if not ctx.terminated:
         # Normal completion: restore parent handler, run finally, jump to end.
         parent_v = ctx.tmp(PTR)
@@ -15462,8 +15561,18 @@ def _lower_try(ctx: _FuncCtx, s: A.Try) -> None:
             bind_ptr = _name_ptr(ctx, bind_name, PTR)
             exc_msg_v = _load_global(ctx, "_runtime_exc_msg", PTR)
             ctx.emit(IRInstr("store", None, [exc_msg_v, bind_ptr]))
+        # A `return` inside an `except` body must run this try's finally too.
+        # Only the finally is pushed, not the parent-handler slot: the handler
+        # path above already restored `_runtime_handler_top` before dispatching
+        # here, so re-restoring it would be redundant (it reloads the same slot,
+        # so it is harmless, but the finally is the part that is actually
+        # missing on this path).
+        ctx.try_finally_stack.append(fin_body)
+        ctx.try_handler_stack.append(f"__try_parent_{uid}")
         for st in hbody:
             _lower_stmt(ctx, st)
+        ctx.try_handler_stack.pop()
+        ctx.try_finally_stack.pop()
         if not ctx.terminated:
             # Restore active exception state to what it was before this try.
             prev_msg_v = ctx.tmp(PTR)

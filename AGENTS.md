@@ -23,10 +23,16 @@ is about *how to work here*, not *what to do next*.
   launched 5 simultaneous background agents and all 5 crashed from
   hitting a session API usage limit.
 - **Zero regressions is the bar.** Before considering any change to
-  `sema.py`, `ir_lower.py`, or either backend done, re-run both test
-  suites and diff the pass count/failure list against the last known
-  baseline (see `RESUME.md`'s "Test baseline" section) — not just "did it
-  run without error."
+  `sema.py`, `ir_lower.py`, or either backend done, diff the result set
+  against the pinned baseline — not just "did it run without error", and
+  not just the pass count, which cannot distinguish a regression from a
+  reshuffle inside the known-failing set:
+
+      python -m tests.baseline --check -- -j 8
+
+  It exits nonzero only on a REGRESSION (was passing, now failing), and
+  reports FIXED / NEW / REMOVED separately. Re-record with `--record`
+  after deliberately changing the result set. See `PHASE0.md`.
 - **Multi-agent shared workspace.** This project is sometimes worked by
   more than one agent concurrently against the same git branch (`beta`).
   Check for a `devthread.txt` or similar coordination file, and run `git
