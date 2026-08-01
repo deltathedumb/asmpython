@@ -125,11 +125,16 @@ Nothing else in the suite is implementation-specific.
 
 ## Triaging a result
 
-Most of `cases/` is two cross-products — `generated/boundary/<trip>/<kind>` (a
-value moved across a storage boundary) and `generated/consumer/<consumer>/<kind>`
-(a container read by every reader). The axis names are the path, so a failing
-case names its own coordinates, and hundreds of failures collapse into a handful
-of causes.
+Most of `cases/` is three cross-products, each varying one thing:
+
+| tree | axes | asks |
+|---|---|---|
+| `generated/boundary/<trip>/<kind>` | 20 × 20 | does a value survive being **moved**? |
+| `generated/consumer/<consumer>/<kind>` | 28 × 7 | does a container survive being **read**? |
+| `generated/operator/<op>/<left>-<right>` | 16 × 19 | does a pair survive being **operated on**? |
+
+The axis names are the path, so a failing case names its own coordinates, and
+hundreds of failures collapse into a handful of causes.
 
 `--matrix` prints that decomposition: which whole **columns** fail (a broken
 value kind, independent of any boundary) versus which whole **rows** fail (a

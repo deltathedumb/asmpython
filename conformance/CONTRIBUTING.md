@@ -130,18 +130,30 @@ If regen refuses your case, the case is wrong, not regen.
 
 ## Generated cases
 
-`generators/` builds cross-products — `boundary/` (a value across storage
-boundaries) and `consumer/` (a container read by every consumer). Edit the
-generator, never the generated files:
+`generators/` builds three cross-products — `boundary/` (a value across storage
+boundaries), `consumer/` (a container read by every consumer) and `operator/`
+(a pair of values under every operator). Edit the generator, never the
+generated files:
 
-```
+```text
 python conformance/generators/gen_boundary.py
-python conformance/regen.py --filter generated/boundary
+python conformance/regen.py --groups generated/boundary
 ```
 
 The axis names become the path, so a failing cell names its own coordinates.
 Keep it that way: it is what lets hundreds of failures collapse into a handful
 of causes.
+
+Two rules learned the hard way, both about making a product *mean* something:
+
+- **An impossible pair is excluded explicitly**, not by letting regen fail on
+  it. A dict key must be hashable, so `dict-key-roundtrip × list` cannot exist;
+  `gen_boundary.INCOMPATIBLE` says so and unlinks any stale file. If impossible
+  and broken look the same, a real defect in the oracle hides among them.
+- **Pick literals that exercise the interesting path.** The operator product's
+  containers contain its scalars, so `contains` hits the found path. A
+  membership test that only ever misses never runs the comparison the scan
+  performs on each element — sixteen cells that all pass and assert nothing.
 
 ---
 
