@@ -6212,10 +6212,10 @@ class SemaAnalyzer:
                 child.add(e.var, el, tuple_types=self._tuple_elem_types(e.iter, child))
             elif el == "dict":
                 inner = self._list_el_value_type(e.iter, child)
-                child.add(e.var, "dict", value_type=inner if inner != "int" else "any")
+                child.add(e.var, "dict", value_type=inner if inner != A.UNKNOWN_TY else "any")
             elif el == "list":
                 inner = self._list_el_value_type(e.iter, child)
-                child.add(e.var, "list", el_type=inner if inner != "int" else "any")
+                child.add(e.var, "list", el_type=inner if inner != A.UNKNOWN_TY else "any")
             else:
                 child.add(e.var, el)
             return
@@ -7721,7 +7721,7 @@ class SemaAnalyzer:
                         ErrorCode.E_STARRED_ASSIGN_NOT_LIST,
                     )
                 el = self._list_el_type(s.values[0], scope)
-                el_bound = el if el != "int" else "any"
+                el_bound = el if el != A.UNKNOWN_TY else "any"
                 for t in s.targets:
                     self._require_assignable(t.name, s.pos)
                 for t in s.targets:
@@ -7789,7 +7789,7 @@ class SemaAnalyzer:
                         el = known_el
                     else:
                         el = self._list_el_type(s.values[0], scope)
-                        el = el if el != "int" else "any"
+                        el = el if el != A.UNKNOWN_TY else "any"
                 elif A.expr_type(s.values[0]) == "str":
                     el = "str"
                 for t in s.targets:
@@ -7991,14 +7991,14 @@ class SemaAnalyzer:
                     scope.add(
                         s.targets[1],
                         "dict",
-                        value_type=enum_inner if enum_inner != "int" else "any",
+                        value_type=enum_inner if enum_inner != A.UNKNOWN_TY else "any",
                     )
                 elif enum_el_t == "list":
                     enum_inner = self._list_el_value_type(inner, scope)
                     scope.add(
                         s.targets[1],
                         "list",
-                        el_type=enum_inner if enum_inner != "int" else "any",
+                        el_type=enum_inner if enum_inner != A.UNKNOWN_TY else "any",
                     )
                 else:
                     scope.add(s.targets[1], enum_el_t)
@@ -8111,14 +8111,14 @@ class SemaAnalyzer:
                         # tracked value kind so `x[k]` recovers the leaf type.
                         inner = self._list_el_value_type(s.iter, scope)
                         scope.add(
-                            s.var, "dict", value_type=inner if inner != "int" else "any"
+                            s.var, "dict", value_type=inner if inner != A.UNKNOWN_TY else "any"
                         )
                     elif el_t == "list":
                         # list[list]: bind as a list carrying the inner element
                         # kind so `x[i]` recovers the leaf type.
                         inner = self._list_el_value_type(s.iter, scope)
                         scope.add(
-                            s.var, "list", el_type=inner if inner != "int" else "any"
+                            s.var, "list", el_type=inner if inner != A.UNKNOWN_TY else "any"
                         )
                     else:
                         scope.add(s.var, el_t)
@@ -10006,14 +10006,14 @@ class SemaAnalyzer:
                         child.add(
                             el_name,
                             "dict",
-                            value_type=inner_val if inner_val != "int" else "any",
+                            value_type=inner_val if inner_val != A.UNKNOWN_TY else "any",
                         )
                     elif el_ty == "list":
                         inner_el = self._list_el_value_type(inner, scope)
                         child.add(
                             el_name,
                             "list",
-                            el_type=inner_el if inner_el != "int" else "any",
+                            el_type=inner_el if inner_el != A.UNKNOWN_TY else "any",
                         )
                     else:
                         child.add(el_name, el_ty)
@@ -10129,7 +10129,7 @@ class SemaAnalyzer:
                     elif ef_el == "dict":
                         ef_inner = self._list_el_value_type(ef_iter, child)
                         child.dict_value_types[ef_evar] = (
-                            ef_inner if ef_inner != "int" else "any"
+                            ef_inner if ef_inner != A.UNKNOWN_TY else "any"
                         )
                 if ef_cond is not None:
                     self._check_expr(ef_cond, child)
@@ -10174,14 +10174,14 @@ class SemaAnalyzer:
                         child.add(
                             el_name,
                             "dict",
-                            value_type=inner_val if inner_val != "int" else "any",
+                            value_type=inner_val if inner_val != A.UNKNOWN_TY else "any",
                         )
                     elif el_ty == "list":
                         inner_el = self._list_el_value_type(inner, scope)
                         child.add(
                             el_name,
                             "list",
-                            el_type=inner_el if inner_el != "int" else "any",
+                            el_type=inner_el if inner_el != A.UNKNOWN_TY else "any",
                         )
                     else:
                         child.add(el_name, el_ty)
@@ -10574,7 +10574,7 @@ class SemaAnalyzer:
                 # recovers the value type. Falls back to "any" when untracked.
                 if e.inferred_type in ("dict", "list"):
                     inner = self._list_el_value_type(e.obj, scope)
-                    inner = inner if inner != "int" else "any"
+                    inner = inner if inner != A.UNKNOWN_TY else "any"
                     e.value_type = inner
                     e.list_el_type = inner
                 elif e.inferred_type == "tuple":
@@ -10648,7 +10648,7 @@ class SemaAnalyzer:
                 # back to "any" (lenient) when the inner kind wasn't tracked.
                 if e.inferred_type in ("dict", "list"):
                     inner = self._dict_inner_value_type(e.obj, scope)
-                    inner = inner if inner != "int" else "any"
+                    inner = inner if inner != A.UNKNOWN_TY else "any"
                     e.value_type = inner
                     e.list_el_type = inner
             elif obj_t == "str":

@@ -155,6 +155,29 @@ The consequences are the probe list:
 | `None` reads as `int`, so it is indistinguishable from `0` | `vm_none_is_not_zero` |
 | `bool` reads as `int`, so it renders `1`/`0` | `vm_bool_is_not_int` |
 
+`ast_nodes.IntLit` is where it bottoms out: **four distinct Python values
+share `IntLit(0)`**, told apart only by side-channel flags on the node.
+
+```text
+None      -> IntLit(0) + is_none
+Ellipsis  -> IntLit(0) + is_ellipsis
+False     -> IntLit(0) + is_bool
+0         -> IntLit(0)
+```
+
+The node's own comments say why: the flags let `print`/`str`/f-strings render
+"True"/"None"/"Ellipsis" "without a separate AST node or a distinct static
+type", and `is_ellipsis` exists because `...` "needs its own marker flag
+rather than reusing is_none, even though both share IntLit(0) as their
+storage". A flag on a literal cannot survive being stored, returned, or
+unified -- which is exactly where the probes fail.
+
+The cost is visible in the consumer sites: the same three-way bool/None/int
+dispatch is hand-written at **7 separate call sites** (`str()`, `repr()`,
+`print()`, f-strings, `type()`, `isinstance()`, container formatting) as
+adjacent `arg_t == "int" and A.is_bool_expr(...)` /
+`... and A.is_none_expr(...)` pairs. Real types collapse each to one check.
+
 This is why the runtime-side None fix in §2 had to fail: it tried to
 disambiguate at the read site what the type system had already merged at the
 write site. **No runtime-only fix exists for any of these.**
@@ -195,6 +218,41 @@ ast_nodes 4). Of these, **17 pair the comparison with a side-channel kind
 flag** (`is_bool_expr`, `is_none_expr`, `el_is_bool`) -- e.g. ir_lower's
 `arg_t == "int" and A.is_none_expr(arg)`. Those are not migrations: they are
 the workaround itself, and the split deletes them.
+
+### Where the split most likely lands: `UNKNOWN_TY = "any"`
+
+The endpoint probably does not need a brand-new third type. `"any"` already
+means exactly "kind not statically known, so box it and dispatch on the tag at
+read time" -- that is what `_lower_box_any` and `_lower_value_into_any_slot`
+implement. The defect is only that the DEFAULT, when no kind was recorded, is
+`"int"` rather than `"any"`.
+
+The strongest evidence is that 15 sites in sema.py were already hand-writing
+the conversion at the point of use:
+
+```python
+el_type = inner if inner != "int" else "any"      # sema.py, x15
+```
+
+Those are now spelled `!= A.UNKNOWN_TY`, and when the constant flips to
+`"any"` each collapses to plain `inner`. So the flip is the fix, not a
+prerequisite for one.
+
+**What the flip is gated on.** Some consumer sites treat "int" as a catch-all
+that unknown currently falls into, and would silently change branch:
+
+```python
+if key_ty in ("str", "any"): ...      # handled
+if key_ty == "int":                   # <- unknown lands here today and is
+    ...encode as base-10...           #    encoded as an integer
+```
+
+(`ir_lower.py` dict-key encoding, set/dict key decoding, and list-element
+decoding all have this shape.) These are not renames; each needs a decision
+about what an unknown-kind value should actually do there -- almost certainly
+"box and tag-dispatch" rather than "assume int". That is the real remaining
+work of step 1, and it is why the constant does not flip until every one is
+reviewed.
 
 Every step is verified against the pinned baseline and must leave it at
 809/1142 exactly; both steps so far did.
