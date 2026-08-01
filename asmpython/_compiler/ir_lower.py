@@ -4890,6 +4890,43 @@ def _lower_int_value_str(ctx: _FuncCtx, seg: A.Expr, rest: str) -> IRValue:
     return out
 
 
+def _as_f64_arg(ctx: _FuncCtx, v: IRValue, tag: str) -> IRValue:
+    """Relabel `v` as F64 for use as a float CALL argument.
+
+    A statically-`float` expression does not always arrive in an F64-typed
+    SSA value. A comprehension's loop-variable slot, for instance, reloads
+    as i64:
+
+        %t40: f64 = load %t39          # the element, correctly typed
+        store %t40, %t41
+        %t43: i64 = load %t41          # ...reloaded as i64
+
+    and the x86-64 backend picks a call argument's register CLASS from the
+    value's declared type (`codegen._emit_call`, the `_is_float(typ)` test).
+    So the bits went to a general-purpose register while the callee read
+    xmm0, and every element saw whatever the previous iteration had left
+    there -- `[str(v) for v in vals]` printed `6.9518412305544e-310`.
+
+    That is a real miscompile, and it predates the dtoa work: it reproduces
+    unchanged at 450068a5 for f-strings, `%`-formatting and `str()` alike.
+    Ordinary arithmetic never noticed, because `fmul`/`fdiv` imply float
+    semantics whatever their operands are labelled; only a call makes the
+    label load-bearing.
+
+    The relabel goes through a stack slot rather than editing the type in
+    place, because an in-place relabel breaks the register allocator --
+    same technique, and same reason, as `_lower_format_any_value`'s float
+    arm.
+    """
+    if v.type is F64:
+        return v
+    slot = ctx.ensure_slot(f"__f64arg_{tag}", F64)
+    ctx.emit(IRInstr("store", None, [v, IRValue(slot.name, PTR)]))
+    out = ctx.tmp(F64)
+    ctx.emit(IRInstr("load", out, [slot]))
+    return out
+
+
 def _lower_fstring_aligned(
     ctx: _FuncCtx, seg: A.Expr, t: str, conv: str,
     width: int | None, fill: str, align: str, rest: str,
@@ -4908,7 +4945,7 @@ def _lower_fstring_aligned(
     elif t == "float":
         sep, rest2 = _strip_grouping_option(rest) if rest else (None, rest)
         cfmt = _cfmt_for_spec(rest2, "float") if rest2 else None
-        f_v = _lower_expr(ctx, seg)
+        f_v = _as_f64_arg(ctx, _lower_expr(ctx, seg), f"fsa_{id(seg)}")
         if cfmt is not None:
             fmt_name = ctx.mctx.intern_str(cfmt)
             fmt_v = ctx.tmp(PTR)
@@ -4998,7 +5035,7 @@ def _lower_fstring_segment(ctx: _FuncCtx, seg: A.Expr) -> IRValue:
             cfmt = _cfmt_for_spec(body2, t)
             if cfmt is not None or sep is not None:
                 if t == "float":
-                    v = _lower_expr(ctx, seg)
+                    v = _as_f64_arg(ctx, _lower_expr(ctx, seg), f"fss_{id(seg)}")
                     if cfmt is not None:
                         fmt_name = ctx.mctx.intern_str(cfmt)
                         fmt_v = ctx.tmp(PTR)
@@ -5256,7 +5293,7 @@ def _lower_expr_as_str(ctx: _FuncCtx, e: A.Expr, repr_mode: bool = False) -> IRV
         ctx.emit(IRInstr("call", out, ["_abi_int_to_base", n, base, prefix]))
         return out
     if ty == "float":
-        f_v = _lower_expr(ctx, e)
+        f_v = _as_f64_arg(ctx, _lower_expr(ctx, e), f"str_{id(e)}")
         if getattr(e, "dict_get_none_default", False):
             # Same "d.get(k) with no explicit default: 0 means key missing"
             # sentinel as the int branch above -- IEEE754 0.0 is all-zero
@@ -7330,6 +7367,8 @@ def _lower_pct_format(ctx: _FuncCtx, e: A.BinOp) -> IRValue:
             fv2 = ctx.tmp(F64)
             ctx.emit(IRInstr("sitofp", fv2, [f_v]))
             f_v = fv2
+        else:
+            f_v = _as_f64_arg(ctx, f_v, f"pct_{id(arg)}")
         out = ctx.tmp(PTR)
         ctx.emit(IRInstr("call", out, ["_abi_float_fmt", f_v, fmt_v]))
         return out
@@ -12631,7 +12670,13 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         if e.func == "round" and len(e.args) == 1:
             arg_t = A.expr_type(e.args[0])
             if arg_t == "float":
-                f_v = _lower_expr(ctx, e.args[0])
+                # _as_f64_arg for the same reason as the 2-arg form below:
+                # `[round(v) for v in vals]` reloads v from an i64-typed
+                # slot, so the bits reached a GP register while
+                # _abi_round_f64 reads xmm0 -- every element rounded
+                # whatever the previous iteration had left there, giving
+                # [1, 1, 1] for [1.234, 5.678, 9.012].
+                f_v = _as_f64_arg(ctx, _lower_expr(ctx, e.args[0]), f"rnd1_{id(e)}")
                 rounded = ctx.tmp(F64)
                 ctx.emit(IRInstr("call", rounded, ["_abi_round_f64", f_v]))
                 out = ctx.tmp(I64)
@@ -12644,33 +12689,56 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             # keeps the result a float even for int x -- Python 3's own
             # documented `round(x, n)` type-preservation rule reduces to
             # "always float" here since asmpython has no separate
-            # Decimal/int-exact path). Scale by 10**ndigits, reuse the
-            # existing _abi_round_f64 shim (SSE4.1 roundsd, ties-to-even,
-            # same banker's-rounding the 1-arg form already uses), then
-            # unscale -- mirrors codegen.py's own round(x, ndigits) case
-            # exactly (mulsd/roundsd/divsd around a real `pow` call for
-            # 10**n). Was entirely unimplemented on this backend: only
-            # the 1-arg form existed, so `round(x, 6)` fell through to a
-            # direct-symbol-call linking against a nonexistent `round`.
+            # Decimal/int-exact path).
+            #
+            # This used to scale by 10**ndigits, apply _abi_round_f64
+            # (SSE4.1 roundsd), and unscale -- mirroring codegen.py. That
+            # is wrong for a reason the rounding step cannot fix: 2.55 is
+            # really 2.5499999999999998..., so it must round DOWN to 2.5,
+            # but `2.55 * 10` is EXACTLY 25.5 as a double. The multiply has
+            # already destroyed the digits that decide the question, and
+            # ties-to-even then answers 26 -> 2.6 where CPython gives 2.5.
+            #
+            # _abi_round_ndigits makes the decision on the exact decimal
+            # expansion of x instead (every double is a dyadic rational, so
+            # that expansion terminates) and converts back with a
+            # correctly-rounded search. Same shape as CPython's own
+            # double_round: dtoa, then strtod. Pinned by
+            # tests/cases/vm_round_returns_int.py.
             x_t = A.expr_type(e.args[0])
             x_v = _lower_expr(ctx, e.args[0])
             if x_t != "float":
                 xf = ctx.tmp(F64)
                 ctx.emit(IRInstr("sitofp", xf, [x_v]))
                 x_v = xf
+            elif x_v.type is not F64:
+                # `x` is statically a float, but the SSA value carrying it can
+                # still be I64-TYPED: a comprehension's loop-variable slot
+                # reloads as i64, so `[round(v, 1) for v in vals]` produced
+                #     %t43: i64 = load %t41
+                #     %t45: f64 = call _abi_round_ndigits, %t43, %t44
+                # and the backend picks a call argument's register CLASS from
+                # the value's declared type -- so the bits went to a GP
+                # register while the callee reads xmm0, and every element got
+                # whatever was left in xmm0 from the previous iteration.
+                #
+                # The old scale/roundsd/unscale lowering was immune by
+                # accident: `fmul` implies float semantics whatever its
+                # operand is labelled. Routing through a call is what makes
+                # the label load-bearing.
+                #
+                # Round-trip through an F64 slot to relabel the same bits --
+                # the same technique, for the same reason, as
+                # `_lower_format_any_value`'s float arm (a relabel in place
+                # breaks the register allocator).
+                _slot = ctx.ensure_slot(f"__round_f64_{id(e)}", F64)
+                ctx.emit(IRInstr("store", None, [x_v, IRValue(_slot.name, PTR)]))
+                xf = ctx.tmp(F64)
+                ctx.emit(IRInstr("load", xf, [_slot]))
+                x_v = xf
             nd_v = _lower_expr(ctx, e.args[1])
-            nd_f = ctx.tmp(F64)
-            ctx.emit(IRInstr("sitofp", nd_f, [nd_v]))
-            ten = ctx.tmp(F64)
-            ctx.emit(IRInstr("const", ten, [10.0]))
-            scale = ctx.tmp(F64)
-            ctx.emit(IRInstr("call", scale, ["pow", ten, nd_f]))
-            scaled = ctx.tmp(F64)
-            ctx.emit(IRInstr("fmul", scaled, [x_v, scale]))
-            rounded = ctx.tmp(F64)
-            ctx.emit(IRInstr("call", rounded, ["_abi_round_f64", scaled]))
             out = ctx.tmp(F64)
-            ctx.emit(IRInstr("fdiv", out, [rounded, scale]))
+            ctx.emit(IRInstr("call", out, ["_abi_round_ndigits", x_v, nd_v]))
             return out
         if e.func in ("hex", "oct", "bin") and len(e.args) == 1:
             n_v = _lower_expr(ctx, e.args[0])

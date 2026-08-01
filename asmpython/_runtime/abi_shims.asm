@@ -203,6 +203,7 @@ global _abi_group_digits
 global _abi_group_digits_zeropad
 global _abi_int_fmt
 global _abi_float_fmt
+global _abi_round_ndigits
 
 ; asmpython/stdlib/hardware.py's _hw_* symbols, hosted-target bodies. These
 ; already use the standard Win64 ABI (see codegen.py's target_windows.py /
@@ -1203,6 +1204,36 @@ _abi_fmt_sci_buf:   resb 8
 ; clobbers a still-needed value mid-search).
 _abi_float_search_buf: resb 40
 
+; --------------------------------------------------------------------------
+; dtoa scratch -- see the "Exact decimal conversion" block in .text.
+;
+; A SLOT is one exact non-negative decimal number, laid out as
+;
+;     [+0]  n      qword, count of stored digits (>= 1)
+;     [+8]  f      qword, SIGNED count of fractional digits
+;     [+16] d[]    bytes, one decimal digit each, LITTLE-endian (d[0] is
+;                  the least significant)
+;
+; and denotes the exact rational  int(d) / 10**f.  f may be negative, which
+; scales UP by 10**-f; that is what makes round(x, -2) fall out of the same
+; code as round(x, 2).
+;
+; Capacity: the widest value any finite double produces is (4m-1) * 5**1076
+; for the midpoint below the smallest normal, which is 769 digits. 1200
+; leaves better than 50% headroom, and every writer additionally guards
+; against running past it rather than trusting that arithmetic.
+;
+; These are static, not stack or heap, matching _abi_float_to_str's existing
+; single-threaded static-buffer convention (the results are copied out via
+; _runtime_str_concat_dup / malloc before returning, so a caller never holds
+; a pointer into them).
+; --------------------------------------------------------------------------
+alignb 16
+_dtoa_src: resb 16 + 1200      ; pristine expansion of |x| (repr re-reads it)
+_dtoa_val: resb 16 + 1200      ; the value being rendered / rounded
+_dtoa_tmp: resb 16 + 1200      ; expansion of a candidate double, for compare
+_dtoa_repr_buf: resb 64        ; repr output (bounded: <=17 digits + exponent)
+
 section .rodata
 _abi_fmt_lld:    db "%lld", 0
 _con_fmt_clear:  db 27, "[2J", 27, "[H", 0
@@ -1219,6 +1250,32 @@ _abi_fmt_sci:    db "%.17e", 0
 _abi_str_nan:    db "nan", 0
 _abi_str_pinf:   db "inf", 0
 _abi_str_ninf:   db "-inf", 0
+; Uppercase spellings for %F/%E/%G, matching C's own case rule (the
+; conversion's case selects the case of inf/nan too, not just of the
+; exponent marker). CPython's %-operator inherits this from C.
+_abi_str_NAN:    db "NAN", 0
+_abi_str_PINF:   db "INF", 0
+_abi_str_NINF:   db "-INF", 0
+_dtoa_zero_str:  db "0.0", 0
+_dtoa_negzero_str: db "-0.0", 0
+; 5**0 .. 5**12 -- the remainder step of the x5 chunking below.
+align 8
+_dtoa_pow5:
+    dq 1, 5, 25, 125, 625, 3125, 15625, 78125, 390625, 1953125
+    dq 9765625, 48828125, 244140625
+; 10**0 .. 10**22 as doubles. Every one of these is EXACTLY representable
+; (10**23 is the first that is not), which is what makes the seed guess in
+; _dtoa_guess a single correctly-rounded operation in the common case.
+_dtoa_pow10d:
+    dq 1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0
+    dq 10000000.0, 100000000.0, 1000000000.0, 10000000000.0
+    dq 100000000000.0, 1000000000000.0, 10000000000000.0
+    dq 100000000000000.0, 1000000000000000.0, 10000000000000000.0
+    dq 100000000000000000.0, 1000000000000000000.0
+    dq 10000000000000000000.0, 100000000000000000000.0
+    dq 1000000000000000000000.0, 10000000000000000000000.0
+_dtoa_ten:   dq 10.0
+_dtoa_tenth: dq 0.1
 _math_deg_factor: dq 57.29577951308232
 _math_rad_factor: dq 0.017453292519943295
 _math_inf_bits:   dq 0x7FF0000000000000
@@ -1436,58 +1493,973 @@ _abi_input:
 ; double (mode 0 = SSE4.1 round-to-nearest, ties-to-even -- matches
 ; CPython's round() banker's rounding, same instruction the legacy
 ; codegen.py uses for round(float)).
+;
+; This one is already exact and stays as-is: ROUNDSD rounds the double's
+; own EXACT value, so the 0-decimal case has no representation error to
+; get wrong. It is round(x, ndigits) -- where 10**n scaling introduces
+; one -- that needs _abi_round_ndigits below.
 _abi_round_f64:
     roundsd xmm0, xmm0, 0
     ret
 
-; rax = float_to_str(xmm0) -> ptr to a nul-terminated CPython-repr-style
-; float string. Replaces a plain sprintf(buf, "%g", x): %g's fixed 6
-; significant digits switches to scientific notation far too early
-; compared to CPython (starts at 1e6/1e-4, CPython's repr() only switches
-; outside [1e-4, 1e16)) and, on Windows specifically, zero-pads the
-; exponent to 3 digits ("1e+010" instead of CPython's "1e+10"). Confirmed
-; via direct comparison against real CPython repr() output across a wide
-; range of magnitudes -- this was a genuine, previously-undiscovered bug
-; affecting every float print above ~1e6 or below ~1e-4, present in both
-; backends (this routine and codegen.py's identical hand-port both used
-; bare "%g") and both OS targets (glibc's %g has the same 1e6 threshold,
-; confirmed via a direct WSL/gcc probe, though its exponent padding
-; already happened to match Python's 2-digit form).
+; ==========================================================================
+; Exact decimal conversion (dtoa)
+; ==========================================================================
 ;
-; Correct fix, verified against real CPython repr() output for a battery
-; of magnitudes (0, subnormals, values straddling both thresholds, the
-; float64 max) before being written here: CPython's float repr is the
-; SHORTEST decimal string that round-trips back to the exact same double
-; -- there is no fixed sprintf precision that produces this for every
-; input (a fixed high precision like %.17g shows spurious trailing noise
-; digits, e.g. 0.1 -> "0.10000000000000001"; a fixed low precision
-; rounds real information away for large/precise values). This routine
-; searches: for each candidate precision N = 0..17 (0..17 significant
-; digits after the point is always sufficient -- IEEE-754 double has at
-; most 17 significant decimal digits of information), format with that
-; precision and parse the result back with strtod; the first N whose
-; round-trip exactly reproduces the original bits is used. %f is used
-; when CPython would print fixed notation (abs(x) in [1e-4, 1e16), or
-; x == 0), %e when it would print scientific -- this mirrors CPython's
-; own notation-selection rule, which %g's own internal (different, fixed-
-; threshold) rule can't replicate by itself even with a variable
-; precision.
-_abi_float_to_str:
-    ; The .finite path below uses rbx/rsi/rdi/r12 as scratch across the
-    ; precision-search loop -- all four are callee-saved under the MS x64
-    ; ABI this whole runtime targets, so they must be preserved here
-    ; exactly like every other multi-register-scratch routine in this
-    ; file does via WIN64_RUNTIME_ENTER/LEAVE. (The original single-
-    ; register-scratch version of this routine had the same latent bug
-    ; with bare `rbx` alone -- narrow enough in that version to not
-    ; reliably manifest -- but this version's much heavier register use
-    ; turned it into a real, reproducible corruption: every fixed-
-    ; notation value needing search precision > 0 printed wrong,
-    ; confirmed via 0.0001/0.001/0.01 all incorrectly printing "0.0".)
+; WHY THIS EXISTS. Three separate defects share one root cause: msvcrt's
+; printf cannot state a double's real value, and its strtod cannot read one
+; back.
+;
+;   1. round(x, ndigits) scaled by 10**n, applied ROUNDSD, and unscaled.
+;      2.55*10 is exactly 25.5 in binary, so ties-to-even gave 26 -> 2.6
+;      where CPython gives 2.5. The error is in the SCALING, not the
+;      rounding: 2.55 is really 2.5499999999999998..., so it must round
+;      DOWN, and multiplying by 10 destroys exactly the digits that say so.
+;   2. "%f" % 1e100 produced 108 characters of correct LENGTH and wrong
+;      DIGITS -- msvcrt carries ~17 significant digits and zero-fills the
+;      rest, where CPython prints the exact expansion.
+;   3. float repr past 17 digits, same cause via the same printf.
+;
+; WHY sprintf + strtod IS NOT THE FIX (measured on this box, not assumed):
+;
+;      %.2f of 0.125   msvcrt "0.13"   CPython "0.12"
+;      %.0f of 2.5     msvcrt "3"      CPython "2"
+;
+;   msvcrt rounds halfway cases AWAY FROM ZERO; CPython rounds HALF-TO-EVEN.
+;   So a sprintf/strtod round-trip fixes 2.55 and breaks every exact tie,
+;   and since msvcrt cannot emit the exact expansion the tie cannot even be
+;   DETECTED from its output. msvcrt's strtod is separately unusable as the
+;   decimal->double direction: it came back 1 ULP low on 461/200000 random
+;   decimals and on 37/200000 repr()-shaped strings, and it truncated at
+;   every one of 12 exact midpoints instead of rounding to even.
+;
+; WHAT MAKES THIS TRACTABLE. Every double is m * 2**e with m a 53-bit
+; integer -- a dyadic rational -- so its decimal expansion TERMINATES and is
+; computable with integer arithmetic alone:
+;
+;      e >= 0:  value = m * 2**e             (an integer)
+;      e <  0:  value = m * 5**-e / 10**-e   (since 1/2**k == 5**k / 10**k)
+;
+; That is the whole idea. The rest is bookkeeping: a little-endian decimal
+; digit array (a SLOT, laid out in .bss above), multiply-by-small with
+; carry, half-to-even rounding at a digit position, and an exact comparison.
+;
+; Nothing here calls printf or strtod, so nothing here inherits their bugs,
+; and the same code is correct on any target -- no new libc dependency was
+; added for it.
+;
+; The algorithm was written and validated as a Python reference FIRST,
+; against real CPython, before a line of this was written: repr over 100000
+; random bit patterns, %.Nf/%.Ne/%.Ng over 8 precisions each, and
+; round(x, n) over 19 values of n -- zero mismatches. This is a port of a
+; checked specification, not a fresh derivation.
+
+DTOA_CAP  equ 1200
+DT_N      equ 0
+DT_F      equ 8
+DT_D      equ 16
+
+; rax /= 10 -> quotient in rax, remainder in rdx. Clobbers r10, r11.
+;
+; The reciprocal form rather than DIV: this runs once per digit per
+; multiply pass, so a 20-40 cycle hardware divide would dominate the whole
+; conversion. 0xCCCCCCCCCCCCCCCD is ceil(2**67 / 10), and >>67 (the implicit
+; >>64 of MUL's high half, then >>3) is exact across the entire u64 range.
+%macro UDIV10 0
+    mov r10, rax
+    mov r11, 0xCCCCCCCCCCCCCCCD
+    mul r11                    ; rdx:rax = rax * magic
+    shr rdx, 3                 ; rdx = rax / 10
+    mov rax, rdx
+    lea rdx, [rax+rax*4]
+    add rdx, rdx               ; q * 10
+    sub r10, rdx               ; remainder
+    mov rdx, r10
+%endmacro
+
+; %1 = dest reg <- the digit of slot %2 at decimal position %3 (the 10**%3
+; place), or 0 if that position is outside the stored digits.
+;
+; Reading out-of-range positions as zero is what lets every consumer work
+; in absolute decimal positions and ignore where the stored window happens
+; to sit -- padding, leading zeros and trailing zeros all fall out of it.
+;
+; The index scratch is R11, not RAX, and %1 must not be R11. An earlier
+; version scratched in RAX, which silently broke the one caller that also
+; wanted RAX as the destination: the out-of-range path fell through with
+; the INDEX still in the destination instead of a zero, so "%e" % 0.0
+; printed "0.a`_^]\e+00" (the index 1073 masked to a byte, plus '0').
+%macro DT_DIGIT 3
+    xor %1, %1
+    mov r11, [%2+DT_F]
+    add r11, %3                ; index = pos + f
+    js %%zero
+    cmp r11, [%2+DT_N]
+    jge %%zero
+    movzx %1, byte [%2+r11+DT_D]
+%%zero:
+%endmacro
+
+; _dtoa_set_u64(rcx=slot, rdx=value) -- slot := value, frac := 0.
+_dtoa_set_u64:
+    mov qword [rcx+DT_F], 0
+    xor r8, r8
+    mov rax, rdx
+    test rax, rax
+    jnz .loop
+    mov byte [rcx+DT_D], 0
+    mov qword [rcx+DT_N], 1
+    ret
+.loop:
+    test rax, rax
+    jz .done
+    UDIV10
+    mov [rcx+r8+DT_D], dl
+    inc r8
+    jmp .loop
+.done:
+    mov [rcx+DT_N], r8
+    ret
+
+; _dtoa_mul_u32(rcx=slot, rdx=multiplier) -- slot *= multiplier.
+;
+; The multiplier is bounded by 2**30 so that digit*mult + carry stays well
+; inside 64 bits: the carry settles below the multiplier, so the running
+; product never exceeds 10*mult (~1.2e10).
+_dtoa_mul_u32:
+    push rbx
+    push rsi
+    mov rbx, rcx               ; slot
+    mov rsi, rdx               ; multiplier
+    mov r9, [rbx+DT_N]         ; original digit count
+    xor rcx, rcx               ; i
+    xor r8, r8                 ; carry
+.loop:
+    cmp rcx, r9
+    jae .flush
+    movzx rax, byte [rbx+rcx+DT_D]
+    imul rax, rsi
+    add rax, r8
+    UDIV10
+    mov [rbx+rcx+DT_D], dl
+    mov r8, rax                ; carry = quotient
+    inc rcx
+    jmp .loop
+.flush:
+    test r8, r8
+    jz .done
+    cmp rcx, DTOA_CAP
+    jae .done                  ; capacity guard: unreachable for any finite
+                               ; double (769 digits worst case vs 1200), but
+                               ; clamping beats silently writing past the slot
+    mov rax, r8
+    UDIV10
+    mov [rbx+rcx+DT_D], dl
+    mov r8, rax
+    inc rcx
+    jmp .flush
+.done:
+    mov [rbx+DT_N], rcx
+    pop rsi
+    pop rbx
+    ret
+
+; _dtoa_from_mant(rcx=slot, rdx=m, r8=e) -- slot := the EXACT decimal
+; expansion of m * 2**e.
+;
+; Chunked rather than one factor at a time: x2**30 and x5**13 are the
+; largest powers that keep the per-digit product inside the UDIV10 bound,
+; and they cut the pass count by 30x/13x. That matters -- the subnormal
+; worst case is e = -1074, which is 83 chunked passes instead of 1074.
+_dtoa_from_mant:
+    push rbx
+    push rsi
+    push rdi
+    sub rsp, 32
+    mov rbx, rcx               ; slot
+    mov rsi, r8                ; e
+    mov rcx, rbx               ; (rdx still holds m)
+    call _dtoa_set_u64
+    test rsi, rsi
+    jz .done
+    js .neg
+.pos:                          ; e > 0: multiply by 2**e, frac stays 0
+    cmp rsi, 30
+    jl .pos_tail
+    mov rcx, rbx
+    mov rdx, 1073741824        ; 2**30
+    call _dtoa_mul_u32
+    sub rsi, 30
+    jmp .pos
+.pos_tail:
+    test rsi, rsi
+    jz .done
+    mov rdx, 1
+    mov rcx, rsi
+    shl rdx, cl                ; 2**e for the leftover e < 30
+    mov rcx, rbx
+    call _dtoa_mul_u32
+    jmp .done
+.neg:                          ; e < 0: multiply by 5**k and set frac = k,
+    neg rsi                    ; because m / 2**k == m * 5**k / 10**k
+    mov [rbx+DT_F], rsi
+    mov rdi, rsi
+.nloop:
+    cmp rdi, 13
+    jl .ntail
+    mov rcx, rbx
+    mov rdx, 1220703125        ; 5**13
+    call _dtoa_mul_u32
+    sub rdi, 13
+    jmp .nloop
+.ntail:
+    test rdi, rdi
+    jz .done
+    lea rax, [_dtoa_pow5]
+    mov rdx, [rax+rdi*8]
+    mov rcx, rbx
+    call _dtoa_mul_u32
+.done:
+    add rsp, 32
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; _dtoa_expand_bits(rcx=slot, rdx=bits) -- slot := the exact expansion of
+; the finite, non-negative double with this bit pattern.
+_dtoa_expand_bits:
+    push rbx
+    push rsi
+    push rdi
+    sub rsp, 32
+    mov rbx, rcx
+    mov rsi, rdx
+    mov rax, rsi
+    shr rax, 52
+    and rax, 0x7FF             ; biased exponent
+    mov rdi, rsi
+    mov r10, 0x000FFFFFFFFFFFFF
+    and rdi, r10               ; mantissa field
+    test rax, rax
+    jnz .norm
+    mov r8, -1074              ; subnormal (and zero): no implicit bit
+    jmp .go
+.norm:
+    mov r10, 1
+    shl r10, 52
+    or rdi, r10                ; restore the implicit leading 1
+    lea r8, [rax-1075]         ; unbias, and account for the 52-bit shift
+.go:
+    mov rcx, rbx
+    mov rdx, rdi
+    call _dtoa_from_mant
+    add rsp, 32
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; _dtoa_round_at(rcx=slot, rdx=p) -- round the slot to p fractional digits,
+; HALF-TO-EVEN, in place. p may be negative (round to tens, hundreds, ...).
+;
+; When f <= p the value already has no digits past position p and is
+; returned untouched -- that case is not just an optimisation, it is what
+; makes round(1e100, 5) and round(1234.5, 2) exact identities rather than
+; round-trips through a conversion.
+;
+; The tie test is decidable here precisely because the expansion is exact:
+; "exactly half" means the first dropped digit is 5 AND every digit below it
+; is 0. printf cannot answer that question, which is the whole reason this
+; file no longer asks it.
+_dtoa_round_at:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    mov rbx, rcx               ; slot
+    mov rsi, rdx               ; p
+    mov rax, [rbx+DT_F]
+    cmp rax, rsi
+    jle .done                  ; f <= p: already exact at this position
+    mov rdi, rax
+    sub rdi, rsi               ; t = f - p, digits to drop (>= 1)
+    mov r12, [rbx+DT_N]        ; n
+    ; hd = the highest dropped digit = d[t-1], or 0 if that is past the end
+    lea rax, [rdi-1]
+    xor r8, r8
+    cmp rax, r12
+    jae .no_hd
+    movzx r8, byte [rbx+rax+DT_D]
+.no_hd:
+    ; rest = is any digit BELOW d[t-1] nonzero?
+    xor r9, r9
+    lea rax, [rdi-1]
+    cmp rax, r12
+    jbe .rest_ok
+    mov rax, r12               ; clamp the scan to the stored digits
+.rest_ok:
+    xor rcx, rcx
+.rest_loop:
+    cmp rcx, rax
+    jae .rest_done
+    cmp byte [rbx+rcx+DT_D], 0
+    jne .rest_yes
+    inc rcx
+    jmp .rest_loop
+.rest_yes:
+    mov r9, 1
+.rest_done:
+    ; drop the low t digits
+    cmp rdi, r12
+    jb .shift
+    mov byte [rbx+DT_D], 0     ; everything dropped -> 0
+    mov qword [rbx+DT_N], 1
+    jmp .shifted
+.shift:
+    mov rdx, r12
+    sub rdx, rdi               ; new n
+    xor rcx, rcx
+.shift_loop:
+    cmp rcx, rdx
+    jae .shift_end
+    lea rax, [rcx+rdi]
+    movzx r10, byte [rbx+rax+DT_D]
+    mov [rbx+rcx+DT_D], r10b
+    inc rcx
+    jmp .shift_loop
+.shift_end:
+    mov [rbx+DT_N], rdx
+.shifted:
+    mov [rbx+DT_F], rsi        ; f = p
+    cmp r8, 5
+    ja .up                     ; > half: up
+    jb .trim                   ; < half: down
+    test r9, r9
+    jnz .up                    ; > half by the tail: up
+    movzx rax, byte [rbx+DT_D]
+    test rax, 1
+    jz .trim                   ; exactly half and already even: stay
+.up:
+    xor rcx, rcx
+    mov rdx, [rbx+DT_N]
+.up_loop:
+    cmp rcx, rdx
+    jae .up_grow
+    movzx rax, byte [rbx+rcx+DT_D]
+    inc rax
+    cmp rax, 10
+    jae .up_carry
+    mov [rbx+rcx+DT_D], al
+    jmp .trim
+.up_carry:
+    mov byte [rbx+rcx+DT_D], 0
+    inc rcx
+    jmp .up_loop
+.up_grow:
+    cmp rcx, DTOA_CAP
+    jae .trim
+    mov byte [rbx+rcx+DT_D], 1 ; carried off the top: 999 -> 1000
+    inc rcx
+    mov [rbx+DT_N], rcx
+.trim:
+    mov rcx, [rbx+DT_N]
+.trim_loop:
+    cmp rcx, 1
+    jbe .trim_end
+    cmp byte [rbx+rcx+DT_D-1], 0
+    jne .trim_end
+    dec rcx
+    jmp .trim_loop
+.trim_end:
+    mov [rbx+DT_N], rcx
+.done:
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; rax = _dtoa_cmp(rcx=slotA, rdx=slotB) -> -1 / 0 / 1, exact.
+;
+; Compares by absolute decimal POSITION rather than by aligning the two
+; digit arrays into a common frame. Alignment would mean materialising up
+; to ~1100 leading zeros; walking positions costs nothing and cannot
+; overflow a slot.
+_dtoa_cmp:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rbx, rcx
+    mov rsi, rdx
+    mov rax, [rbx+DT_N]
+    dec rax
+    sub rax, [rbx+DT_F]        ; highest position of A
+    mov r12, rax
+    mov rax, [rsi+DT_N]
+    dec rax
+    sub rax, [rsi+DT_F]        ; highest position of B
+    cmp r12, rax
+    jge .hi_ok
+    mov r12, rax
+.hi_ok:
+    mov rax, [rbx+DT_F]
+    neg rax                    ; lowest position of A
+    mov r13, rax
+    mov rax, [rsi+DT_F]
+    neg rax                    ; lowest position of B
+    cmp r13, rax
+    jle .lo_ok
+    mov r13, rax
+.lo_ok:
+.loop:
+    cmp r12, r13
+    jl .equal
+    DT_DIGIT r14, rbx, r12
+    DT_DIGIT r15, rsi, r12
+    cmp r14, r15
+    jb .less
+    ja .greater
+    dec r12
+    jmp .loop
+.equal:
+    xor eax, eax
+    jmp .out
+.less:
+    mov rax, -1
+    jmp .out
+.greater:
+    mov eax, 1
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; rax = _dtoa_cmp_val_bits(rdx=bits) -> compare _dtoa_val against the double
+; with this bit pattern. Uses _dtoa_tmp as the candidate's expansion.
+_dtoa_cmp_val_bits:
+    sub rsp, 40
+    lea rcx, [_dtoa_tmp]
+    call _dtoa_expand_bits
+    lea rcx, [_dtoa_val]
+    lea rdx, [_dtoa_tmp]
+    call _dtoa_cmp
+    add rsp, 40
+    ret
+
+; xmm0 = _dtoa_nearest(xmm0=seed) -> the double nearest to _dtoa_val,
+; which must hold a non-negative decimal.
+;
+; Positive doubles are monotonically ordered by their bit patterns, so this
+; brackets the value by doubling outward from the seed, bisects down to the
+; adjacent pair that straddles it, and picks by an exact midpoint compare
+; with ties-to-even -- i.e. it IS a correctly-rounded strtod, built from the
+; exact comparator rather than borrowed from a libc that gets it wrong.
+;
+; The seed only has to be finite and positive. A bad one costs a few extra
+; comparisons, never a wrong answer. That robustness is what lets repr reuse
+; this with x itself as the seed (where the bracket collapses immediately)
+; and round() reuse it with a crude power-of-ten estimate.
+;
+; The midpoint of two ADJACENT doubles lo, hi is always (2*m+1) * 2**(e-1)
+; for lo = m * 2**e -- true across every exponent step and across the
+; subnormal boundary, because adjacent doubles always differ by exactly
+; 2**e for lo's own e. That is why no special case is needed here for
+; powers of two, unlike the classic asymmetric-gap formulation.
+_dtoa_nearest:
     WIN64_RUNTIME_ENTER
-    sub rsp, 80
+    sub rsp, 48
+    movq rax, xmm0
     ucomisd xmm0, xmm0
-    jp .is_nan
+    jp .bad                    ; NaN seed
+    xorpd xmm1, xmm1
+    ucomisd xmm0, xmm1
+    jbe .bad                   ; <= 0 seed
+    mov r10, 0x7FF0000000000000
+    mov r11, rax
+    and r11, r10
+    cmp r11, r10
+    jne .have_g                ; finite
+.bad:
+    mov rax, 0x3FF0000000000000 ; fall back to 1.0
+.have_g:
+    mov rbx, rax               ; g = seed bits
+    mov rdx, rbx
+    call _dtoa_cmp_val_bits
+    test rax, rax
+    jz .exact
+    jl .below
+    ; ---- value is above the seed: bracket upward
+    mov r12, rbx               ; lo
+    mov r14, 1                 ; step
+    ; The ceiling is the INFINITY pattern, not DBL_MAX. Expanding it as an
+    ; ordinary (mantissa, exponent) pair gives 2**1024 -- exactly one ulp
+    ; above DBL_MAX -- so the generic midpoint below computes the true IEEE
+    ; overflow threshold 2**1024 - 2**970 with no special case, and an
+    ; overflowing decimal correctly reads back as +inf. Stopping at DBL_MAX
+    ; instead made it read back AS DBL_MAX, which let repr accept the
+    ; 1-digit candidate "2e+308" for 1.7976931348623157e+308. That was a
+    ; real bug, caught by the reference sweep before this was written.
+    mov r15, 0x7FF0000000000000
+.up_loop:
+    mov r13, rbx
+    add r13, r14
+    jc .up_clamp
+    cmp r13, r15
+    jbe .up_have
+.up_clamp:
+    mov r13, r15
+.up_have:
+    mov rdx, r13
+    call _dtoa_cmp_val_bits
+    test rax, rax
+    jle .bracketed
+    cmp r13, r15
+    je .bracketed              ; saturated: value is at/above DBL_MAX
+    mov r12, r13
+    add r14, r14
+    jmp .up_loop
+.below:
+    ; ---- value is below the seed: bracket downward
+    mov r13, rbx               ; hi
+    mov r14, 1                 ; step
+.dn_loop:
+    xor r12, r12
+    cmp rbx, r14
+    jbe .dn_have               ; would go below zero: clamp to +0.0
+    mov r12, rbx
+    sub r12, r14
+.dn_have:
+    mov rdx, r12
+    call _dtoa_cmp_val_bits
+    test rax, rax
+    jge .bracketed
+    test r12, r12
+    jz .bracketed
+    mov r13, r12
+    add r14, r14
+    jmp .dn_loop
+.bracketed:
+    ; r12 = lo, r13 = hi, with double(lo) <= value <= double(hi)
+.bisect:
+    mov rax, r13
+    sub rax, r12
+    cmp rax, 1
+    jbe .adjacent
+    shr rax, 1
+    add rax, r12               ; mid
+    mov rsi, rax
+    mov rdx, rsi
+    call _dtoa_cmp_val_bits
+    test rax, rax
+    jl .bis_hi
+    mov r12, rsi
+    jmp .bisect
+.bis_hi:
+    mov r13, rsi
+    jmp .bisect
+.adjacent:
+    cmp r12, r13
+    je .pick_lo
+    ; midpoint = (2*m + 1) * 2**(e-1) for lo = m * 2**e
+    mov rax, r12
+    mov rsi, rax
+    shr rsi, 52
+    and rsi, 0x7FF
+    mov rdi, rax
+    mov r10, 0x000FFFFFFFFFFFFF
+    and rdi, r10
+    test rsi, rsi
+    jnz .mp_norm
+    mov r8, -1074
+    jmp .mp_go
+.mp_norm:
+    mov r10, 1
+    shl r10, 52
+    or rdi, r10
+    lea r8, [rsi-1075]
+.mp_go:
+    lea rdi, [rdi+rdi+1]       ; 2*m + 1
+    dec r8                     ; e - 1
+    lea rcx, [_dtoa_tmp]
+    mov rdx, rdi
+    call _dtoa_from_mant
+    lea rcx, [_dtoa_val]
+    lea rdx, [_dtoa_tmp]
+    call _dtoa_cmp
+    test rax, rax
+    jl .pick_lo
+    jg .pick_hi
+    mov rax, r12               ; exact tie -> the even mantissa. The low bit
+    test rax, 1                ; of the bit pattern IS the mantissa parity,
+    jz .pick_lo                ; for normals and subnormals alike.
+.pick_hi:
+    mov r12, r13
+.pick_lo:
+    movq xmm0, r12
+    jmp .out
+.exact:
+    movq xmm0, rbx
+.out:
+    add rsp, 48
+    WIN64_RUNTIME_LEAVE
+    ret
+
+; xmm0 = _dtoa_guess() -> a rough double for _dtoa_val, as a seed for
+; _dtoa_nearest.
+;
+; Takes the leading <= 18 digits as a u64 and scales by a power of ten.
+; Through 10**22 both operands are exactly representable, so the single
+; multiply/divide is already correctly rounded and _dtoa_nearest confirms
+; it in one comparison. Beyond that the repeated-scaling fallback drifts a
+; few ULPs, which the bracket step absorbs.
+_dtoa_guess:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    lea rbx, [_dtoa_val]
+    mov rsi, [rbx+DT_N]
+    mov rdi, rsi
+    cmp rdi, 18
+    jbe .take
+    mov rdi, 18
+.take:
+    mov r8, rsi
+    sub r8, rdi                ; index of the lowest digit taken
+    xor rax, rax
+    mov rcx, rsi
+.dloop:
+    cmp rcx, r8
+    jbe .ddone
+    dec rcx
+    lea rax, [rax+rax*4]
+    add rax, rax               ; *= 10
+    movzx r9, byte [rbx+rcx+DT_D]
+    add rax, r9
+    jmp .dloop
+.ddone:
+    mov r12, rsi
+    sub r12, rdi
+    sub r12, [rbx+DT_F]        ; q: value ~= rax * 10**q
+    cvtsi2sd xmm0, rax         ; < 10**18, so the signed convert is fine
+    test r12, r12
+    jz .done
+    js .neg
+    cmp r12, 22
+    jg .pos_big
+    lea rcx, [_dtoa_pow10d]
+    mulsd xmm0, [rcx+r12*8]
+    jmp .done
+.pos_big:
+    mulsd xmm0, [_dtoa_ten]
+    dec r12
+    jnz .pos_big
+    jmp .done
+.neg:
+    neg r12
+    cmp r12, 22
+    jg .neg_big
+    lea rcx, [_dtoa_pow10d]
+    divsd xmm0, [rcx+r12*8]
+    jmp .done
+.neg_big:
+    mulsd xmm0, [_dtoa_tenth]
+    dec r12
+    jnz .neg_big
+.done:
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; _dtoa_copy_src_to_val() -- _dtoa_val := _dtoa_src. repr rounds a fresh
+; copy for each candidate precision, so the pristine expansion has to
+; survive the search.
+_dtoa_copy_src_to_val:
+    push rbx
+    lea rbx, [_dtoa_src]
+    lea rdx, [_dtoa_val]
+    mov rax, [rbx+DT_N]
+    mov [rdx+DT_N], rax
+    mov r8, [rbx+DT_F]
+    mov [rdx+DT_F], r8
+    add rax, 15
+    shr rax, 3                 ; qwords covering n digits, rounded up
+    xor rcx, rcx
+.loop:
+    cmp rcx, rax
+    jae .done
+    mov r9, [rbx+rcx*8+DT_D]
+    mov [rdx+rcx*8+DT_D], r9
+    inc rcx
+    jmp .loop
+.done:
+    pop rbx
+    ret
+
+; rax = _dtoa_low_pos(rcx=slot) -> the decimal position of the lowest
+; NONZERO digit, i.e. where the value stops once trailing zeros are
+; dropped.
+;
+; An all-zero slot returns position 0, NOT -f. Zero has no significant
+; digits at all, and 0 is the answer that makes both consumers degenerate
+; correctly -- %g renders "0" rather than padding out to its precision, and
+; repr never reaches here (it handles zero before expanding). Returning -f
+; instead made "%g" % 0.0 print "0.00000", because the exact expansion of
+; 0.0 carries f = 1074 from the subnormal exponent, so -f asked for 1074
+; fractional digits' worth of stripping room.
+_dtoa_low_pos:
+    mov r8, [rcx+DT_N]
+    xor rax, rax
+.loop:
+    cmp rax, r8
+    jae .zero
+    cmp byte [rcx+rax+DT_D], 0
+    jne .found
+    inc rax
+    jmp .loop
+.found:
+    sub rax, [rcx+DT_F]
+    ret
+.zero:
+    xor eax, eax
+    ret
+
+; rax = _dtoa_sig_round(rcx=slot, rdx=nsig) -> round the slot to nsig
+; SIGNIFICANT digits, returning the decimal exponent of its leading digit
+; afterwards (0 for a zero value).
+;
+; A carry out of the top (9.99 -> 10.0 at 2 significant digits) shifts that
+; exponent by one. No redo is needed for it: the rounded value is already
+; correct, only its leading position moved, and the caller emits from the
+; returned exponent.
+_dtoa_sig_round:
+    push rbx
+    push rsi
+    push rdi
+    sub rsp, 32
+    mov rbx, rcx
+    mov rsi, rdx
+    cmp qword [rbx+DT_N], 1
+    jne .nonzero
+    cmp byte [rbx+DT_D], 0
+    jne .nonzero
+    xor rax, rax
+    jmp .out
+.nonzero:
+    mov rax, [rbx+DT_N]
+    dec rax
+    sub rax, [rbx+DT_F]        ; dexp
+    mov rdi, rsi
+    dec rdi
+    sub rdi, rax               ; p = nsig - 1 - dexp
+    mov rcx, rbx
+    mov rdx, rdi
+    call _dtoa_round_at
+    cmp qword [rbx+DT_N], 1
+    jne .nz2
+    cmp byte [rbx+DT_D], 0
+    jne .nz2
+    xor rax, rax
+    jmp .out
+.nz2:
+    mov rax, [rbx+DT_N]
+    dec rax
+    sub rax, [rbx+DT_F]
+.out:
+    add rsp, 32
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; rax = _dtoa_emit_fixed(rcx=slot, rdx=prec, r8=buf) -> writes the value in
+; fixed notation with exactly prec digits after the point (no sign, no NUL)
+; and returns the end pointer.
+;
+; Digits come from absolute positions, so zero padding on either side is
+; automatic: "%.100f" of 0.1 prints the 55 real digits of its exact
+; expansion and then genuine zeros, which is precisely what CPython does
+; and what msvcrt could not.
+_dtoa_emit_fixed:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    mov rbx, rcx
+    mov r12, rdx               ; prec
+    mov r13, r8                ; out
+    mov rax, [rbx+DT_N]
+    dec rax
+    sub rax, [rbx+DT_F]        ; highest stored position
+    test rax, rax
+    jns .hi_ok
+    xor rax, rax               ; always emit at least one integer digit
+.hi_ok:
+    mov rsi, rax
+.int_loop:
+    DT_DIGIT r14, rbx, rsi
+    add r14b, '0'
+    mov [r13], r14b
+    inc r13
+    dec rsi
+    jns .int_loop
+    test r12, r12
+    jle .done
+    mov byte [r13], '.'
+    inc r13
+    mov rsi, -1
+    mov rdi, r12
+    neg rdi
+.frac_loop:
+    cmp rsi, rdi
+    jl .done
+    DT_DIGIT r14, rbx, rsi
+    add r14b, '0'
+    mov [r13], r14b
+    inc r13
+    dec rsi
+    jmp .frac_loop
+.done:
+    mov rax, r13
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; rax = _dtoa_emit_sig(rcx=slot, rdx=dexp, r8=lopos, r9=buf) -> writes the
+; mantissa in scientific layout: one digit, then '.' and the digits down to
+; lopos if there are any. Returns the end pointer.
+_dtoa_emit_sig:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    mov rbx, rcx
+    mov r12, rdx               ; dexp
+    mov r13, r9                ; out
+    mov rdi, r8                ; lopos
+    DT_DIGIT rsi, rbx, r12
+    add sil, '0'
+    mov [r13], sil
+    inc r13
+    cmp rdi, r12
+    jge .done                  ; a single significant digit: no point at all
+    mov byte [r13], '.'
+    inc r13
+    mov rsi, r12
+    dec rsi
+.loop:
+    cmp rsi, rdi
+    jl .done
+    DT_DIGIT rax, rbx, rsi
+    add al, '0'
+    mov [r13], al
+    inc r13
+    dec rsi
+    jmp .loop
+.done:
+    mov rax, r13
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; rax = _dtoa_emit_exp(rcx=dexp, rdx=buf, r8=expchar) -> writes the
+; exponent suffix and returns the end pointer.
+;
+; Always at least two digits and never more than needed -- C's minimum-two
+; rule, which is also CPython's. MSVC's own %e pads to three ("1e+010"),
+; which is where the corpus's e+003 mismatches came from.
+_dtoa_emit_exp:
+    push rbx
+    mov rbx, rdx
+    mov [rbx], r8b
+    inc rbx
+    mov rax, rcx
+    test rax, rax
+    jns .pos
+    mov byte [rbx], '-'
+    neg rax
+    jmp .sgn
+.pos:
+    mov byte [rbx], '+'
+.sgn:
+    inc rbx
+    sub rsp, 32
+    xor r9, r9
+.dig:
+    UDIV10
+    mov [rsp+r9], dl
+    inc r9
+    test rax, rax
+    jnz .dig
+    cmp r9, 2
+    jae .emit
+    mov byte [rsp+r9], 0       ; pad to the two-digit minimum
+    inc r9
+.emit:
+    dec r9
+.eloop:
+    movzx rax, byte [rsp+r9]
+    add rax, '0'
+    mov [rbx], al
+    inc rbx
+    dec r9
+    jns .eloop
+    add rsp, 32
+    mov rax, rbx
+    pop rbx
+    ret
+
+; rax = float_to_str(xmm0) -> ptr to a nul-terminated CPython-repr-style
+; float string.
+;
+; CPython's float repr is the SHORTEST decimal string that reads back as
+; exactly the same double, rendered fixed for 1e-4 <= |x| < 1e16 and
+; scientific outside that. This finds it exactly:
+;
+;   for nsig = 1 .. 17:
+;       round the exact expansion of |x| to nsig significant digits
+;       if reading that back (correctly rounded) gives x, stop
+;
+; and the first nsig that works is the answer, because rounding to nsig
+; digits produces the CLOSEST nsig-digit decimal to x -- so if any decimal
+; of that length round-trips, this one does.
+;
+; The read-back is _dtoa_nearest, seeded with x itself, so the usual case
+; costs one bracket step and one midpoint compare. Seventeen significant
+; digits always suffice for a double, and the loop falls out at 17 having
+; already produced that rendering.
+;
+; The previous implementation searched sprintf precisions and checked each
+; with strtod. That was defensible before the exact machinery existed, but
+; it inherited both of msvcrt's defects: the candidates could not carry
+; more than ~17 significant digits, and the acceptance test used a strtod
+; that is measurably 1 ULP low on 37 out of 200000 repr-shaped strings.
+; Neither approximation is present here.
+_abi_float_to_str:
+    WIN64_RUNTIME_ENTER
+    sub rsp, 64
+    ucomisd xmm0, xmm0
+    jp .nan
     movq rax, xmm0
     mov r10, 0x7FFFFFFFFFFFFFFF
     and rax, r10
@@ -1502,199 +2474,91 @@ _abi_float_to_str:
 .pinf:
     lea rax, [_abi_str_pinf]
     jmp .done
-.is_nan:
+.nan:
     lea rax, [_abi_str_nan]
     jmp .done
 .finite:
-    ; Locals live at rsp+32 and up, NOT rsp+0 -- the first 32 bytes of
-    ; this frame are the Win64 shadow space every `call` below (sprintf,
-    ; strtod) is entitled to clobber freely as ITS OWN scratch. Storing a
-    ; local at e.g. rsp+8 (inside that region) meant every sprintf/strtod
-    ; call was free to stomp it -- confirmed as the actual root cause of
-    ; a real, reproducible bug via isolated minimal-repro NASM probes
-    ; outside the full compiler (a hand-written loop with locals at
-    ; rsp+32 worked correctly in isolation; moving them to rsp+0 inside
-    ; this same function's frame reproduced the exact "0.001 always
-    ; prints as 0.0" failure this whole routine was rewritten to fix).
-    ;
-    ; rsp+32 = the original double (spilled across the many calls below).
-    ; rsp+40 = notation flag: 0 = fixed (%f), 1 = scientific (%e).
-    ; rsp+48 = current search precision (as a 64-bit int, built into the
-    ; format string's digit(s) each iteration).
-    movsd [rsp+32], xmm0
-    ; abs(x) via the same sign-bit-clear trick used above.
     movq rax, xmm0
+    mov rbx, rax
+    shr rbx, 63                ; sign
     mov r10, 0x7FFFFFFFFFFFFFFF
     and rax, r10
-    movq xmm1, rax               ; xmm1 = abs(x)
-    xorpd xmm2, xmm2              ; xmm2 = 0.0
-    ucomisd xmm1, xmm2
-    je .notation_fixed             ; x == 0.0 -> always fixed ("0", not "0e+00")
-    ; threshold comparisons against 1e-4 and 1e16 as immediate doubles.
-    mov r10, 0x3F1A36E2EB1C432D    ; bit pattern of 1e-4
-    movq xmm3, r10
-    ucomisd xmm1, xmm3
-    jb .notation_sci                ; abs(x) < 1e-4 -> scientific
-    mov r10, 0x4341C37937E08000    ; bit pattern of 1e16
-    movq xmm3, r10
-    ucomisd xmm1, xmm3
-    jae .notation_sci               ; abs(x) >= 1e16 -> scientific
-.notation_fixed:
-    mov qword [rsp+40], 0
-    jmp .search_init
-.notation_sci:
-    mov qword [rsp+40], 1
-.search_init:
-    xor r12, r12                  ; r12 = search precision, 0..17
-.search_loop:
-    mov qword [rsp+48], r12
-    ; Build the format string for this precision: "%." + digit(s) + 'f'/'e' + 0.
-    cmp qword [rsp+40], 0
-    je .use_fixed_fmt
-    lea rbx, [_abi_fmt_sci_buf]
-    mov byte [rbx+0], '%'
-    mov byte [rbx+1], '.'
-    jmp .fmt_digits
-.use_fixed_fmt:
-    lea rbx, [_abi_fmt_fixed_buf]
-    mov byte [rbx+0], '%'
-    mov byte [rbx+1], '.'
-.fmt_digits:
-    ; r12 is 0..17 -- at most two decimal digits.
-    mov rax, r12
-    mov r10, 10
-    xor rdx, rdx
-    div r10                        ; rax = r12/10, rdx = r12%10
+    mov r13, rax               ; |x| as a bit pattern
     test rax, rax
-    jz .one_digit
-    add al, '0'
-    mov [rbx+2], al
-    add dl, '0'
-    mov [rbx+3], dl
-    lea rcx, [rbx+4]
-    jmp .fmt_kind
-.one_digit:
-    add dl, '0'
-    mov [rbx+2], dl
-    lea rcx, [rbx+3]
-.fmt_kind:
-    cmp qword [rsp+40], 0
-    je .fmt_kind_fixed
-    mov byte [rcx], 'e'
-    mov byte [rcx+1], 0
-    jmp .fmt_ready
-.fmt_kind_fixed:
-    mov byte [rcx], 'f'
-    mov byte [rcx+1], 0
-.fmt_ready:
-    ; sprintf(_abi_float_search_buf, fmt, x)
-    movsd xmm0, [rsp+32]
-    movq r8, xmm0
-    mov rdx, rbx
-    lea rcx, [_abi_float_search_buf]
-    xor eax, eax
-    call sprintf
-    ; strtod(_abi_float_search_buf, NULL) and compare bit-for-bit against
-    ; the original -- an epsilon/numeric compare would be wrong here on
-    ; purpose, since round-trip EXACTNESS (not closeness) is the entire
-    ; correctness criterion for a repr algorithm.
-    lea rcx, [_abi_float_search_buf]
-    xor edx, edx
-    call strtod
+    jnz .nonzero
+    lea rax, [_dtoa_zero_str]  ; 118_float_repr.py pins -0.0 rendering as
+    test rbx, rbx              ; "-0.0", so the sign bit is read directly
+    jz .done                   ; rather than inferred from a comparison
+    lea rax, [_dtoa_negzero_str]
+    jmp .done
+.nonzero:
+    lea rcx, [_dtoa_src]
+    mov rdx, r13
+    call _dtoa_expand_bits
+    mov r12, 1                 ; nsig
+.search:
+    call _dtoa_copy_src_to_val
+    lea rcx, [_dtoa_val]
+    mov rdx, r12
+    call _dtoa_sig_round
+    mov r14, rax               ; decimal exponent of the leading digit
+    movq xmm0, r13
+    call _dtoa_nearest
     movq rax, xmm0
-    movsd xmm1, [rsp+32]
-    movq r10, xmm1
-    mov r12, [rsp+48]
-    cmp rax, r10
-    je .search_done
+    cmp rax, r13
+    je .found
     inc r12
     cmp r12, 17
-    jbe .search_loop
-    ; Fell through the loop without an exact match (shouldn't happen for
-    ; a finite double -- 17 significant digits is always sufficient --
-    ; but fail safe rather than loop forever): the last (N=17) candidate
-    ; in _abi_float_search_buf is used as-is.
-.search_done:
-    lea rax, [_abi_float_search_buf]
-    ; CPython repr() never zero-pads a scientific exponent beyond 2 digits
-    ; and never shows a leading zero on it ("1e+10" not "1e+010"/"1e+1")
-    ; -- MSVC's sprintf %e always emits exactly 3 exponent digits (e.g.
-    ; "1.234500e+010"); this scan-and-compact pass fixes that up in
-    ; place. A %f-formatted (fixed-notation) result has no 'e' at all and
-    ; is left untouched by this scan.
-    mov rbx, rax
-.exp_scan:
-    mov cl, [rbx]
-    test cl, cl
-    jz .no_exp
-    cmp cl, 'e'
-    je .found_exp
-    inc rbx
-    jmp .exp_scan
-.found_exp:
-    ; rbx -> 'e'; rbx+1 -> '+'/'-'; rbx+2.. -> digits, nul-terminated.
-    lea rsi, [rbx+2]               ; first digit
-    mov rdi, rsi
-.skip_zeros:
-    ; Leave at least 2 digits even if they're both zero (matches
-    ; CPython's own minimum-2-digit exponent).
-    mov cl, [rdi]
-    cmp cl, '0'
-    jne .zeros_done
-    lea rdx, [rdi+1]
-    cmp byte [rdx], 0
-    je .zeros_done                 ; don't eat the last digit
-    ; also stop once only 2 digits remain before the nul.
-    mov r10, rdi
-.count_rest:
-    cmp byte [r10], 0
-    je .count_done
-    inc r10
-    jmp .count_rest
-.count_done:
-    sub r10, rdi
-    cmp r10, 2
-    jle .zeros_done
+    jbe .search
+    ; Not reached for a finite double (17 significant digits always
+    ; round-trip); if it ever were, _dtoa_val already holds the 17-digit
+    ; rendering, which is the right thing to print anyway.
+.found:
+    lea rcx, [_dtoa_val]
+    call _dtoa_low_pos
+    mov r15, rax               ; lowest nonzero position (trailing zeros gone)
+    lea rdi, [_dtoa_repr_buf]
+    test rbx, rbx
+    jz .no_sign
+    mov byte [rdi], '-'
     inc rdi
-    jmp .skip_zeros
-.zeros_done:
-    cmp rdi, rsi
-    je .no_exp                     ; nothing to compact
-    ; shift [rdi..] left over [rsi..], including the nul terminator.
-.shift_loop:
-    mov cl, [rdi]
-    mov [rsi], cl
-    test cl, cl
-    jz .no_exp
-    inc rdi
-    inc rsi
-    jmp .shift_loop
-.no_exp:
-    lea rax, [_abi_float_search_buf]
-    ; %f/%e never drop the decimal point the way plain %g on a whole
-    ; number does (e.g. "%.0f" on 2.0 gives "2", not "2."), so the same
-    ; "append .0 if no '.'/'e' marker seen" fixup as before is still
-    ; needed for the integral-fixed-notation case.
-    mov rbx, rax
-.scan:
-    mov cl, [rbx]
-    test cl, cl
-    jz .append
-    cmp cl, '.'
-    je .fixup_done
-    cmp cl, 'e'
-    je .fixup_done
-    inc rbx
-    jmp .scan
-.append:
-    mov byte [rbx], '.'
-    mov byte [rbx+1], '0'
-    mov byte [rbx+2], 0
-.fixup_done:
-    lea rax, [_abi_float_search_buf]
+.no_sign:
+    ; CPython switches to scientific outside [1e-4, 1e16); inside it, fixed.
+    cmp r14, -4
+    jl .sci
+    cmp r14, 16
+    jge .sci
+    ; Fixed. Emit down to the lowest nonzero position, but never fewer than
+    ; one fractional digit -- repr always shows a point ("2.0", not "2").
+    mov rdx, r15
+    neg rdx
+    cmp rdx, 1
+    jge .prec_ok
+    mov rdx, 1
+.prec_ok:
+    lea rcx, [_dtoa_val]
+    mov r8, rdi
+    call _dtoa_emit_fixed
+    mov rdi, rax
+    jmp .terminate
+.sci:
+    lea rcx, [_dtoa_val]
+    mov rdx, r14
+    mov r8, r15
+    mov r9, rdi
+    call _dtoa_emit_sig
+    mov rdi, rax
+    mov rcx, r14
+    mov rdx, rdi
+    mov r8, 'e'
+    call _dtoa_emit_exp
+    mov rdi, rax
+.terminate:
+    mov byte [rdi], 0
+    lea rax, [_dtoa_repr_buf]
 .done:
     call _runtime_str_concat_dup
-    add rsp, 80
+    add rsp, 64
     WIN64_RUNTIME_LEAVE
     ret
 
@@ -1870,7 +2734,12 @@ _abi_int_fmt:
 ; (the 3rd sprintf argument, since buf/fmt are the two fixed params
 ; ahead of it) -- moved via a raw bit copy through the stack, matching
 ; codegen.py's _emit_float_fmt.
-_abi_float_fmt:
+;
+; RETAINED AS THE FALLBACK. _abi_float_fmt below handles e/E/f/F/g/G
+; exactly and hands anything else to this routine unchanged, so an
+; unrecognised conversion still formats exactly as it always did rather
+; than failing or silently dropping flags.
+_abi_float_fmt_sprintf:
     ; See _abi_int_fmt's comment: locals must live at/above +32, clear of
     ; the [0,32) shadow space malloc/sprintf are free to scribble on.
     sub rsp, 56
@@ -1912,6 +2781,580 @@ _abi_float_fmt:
     mov rax, [rsp+32]
     add rsp, 56
     ret
+
+; rax = float_fmt(value=xmm0, fmt_ptr=rdx) -- exact printf-style float
+; formatting for e/E/f/F/g/G. See _abi_float_fmt_sprintf above for the
+; register convention (arg0 float -> xmm0, arg1 -> RDX, not RCX).
+;
+; This parses the format itself and generates digits from the exact decimal
+; expansion, because msvcrt's printf cannot: it carries ~17 significant
+; digits and zero-fills the rest, so "%f" % 1e100 printed 108 characters of
+; correct LENGTH and wrong DIGITS, and it rounds halfway cases away from
+; zero where CPython rounds half-to-even ("%.2f" % 0.125 -> "0.13", CPython
+; "0.12"). Both are fixed here at once, since the exact expansion answers
+; "is this exactly half?" definitively.
+;
+; It also fixes the exponent width. MSVC's %e always emits three exponent
+; digits ("1.23e+004"); C and CPython emit a minimum of two ("1.23e+04").
+; That single divergence was four of the corpus's failing cases.
+;
+; Anything this does not recognise -- a conversion outside e/E/f/F/g/G, a
+; length modifier, an absurd width -- is handed to _abi_float_fmt_sprintf
+; unchanged, so no format that worked before can start failing.
+_abi_float_fmt:
+    WIN64_RUNTIME_ENTER
+    sub rsp, 96
+    ; [rsp+32] value bits   [rsp+40] fmt      [rsp+48] malloc'd buffer
+    ; [rsp+56] body start   [rsp+64] sign chr [rsp+72] uppercase?
+    ; [rsp+80] dexp         [rsp+88] lopos / special-value string
+    movsd [rsp+32], xmm0
+    mov [rsp+40], rdx
+    ; ---- parse "%[flags][width][.prec]conv" --------------------------
+    mov rbx, rdx
+    cmp byte [rbx], '%'
+    jne .fallback
+    inc rbx
+    xor r12, r12               ; flags: 1 '-'  2 '0'  4 '+'  8 ' '  16 '#'
+.flag_loop:
+    movzx eax, byte [rbx]
+    cmp al, '-'
+    je .f_minus
+    cmp al, '0'
+    je .f_zero
+    cmp al, '+'
+    je .f_plus
+    cmp al, ' '
+    je .f_space
+    cmp al, '#'
+    je .f_hash
+    jmp .flags_done
+.f_minus:
+    or r12, 1
+    inc rbx
+    jmp .flag_loop
+.f_zero:
+    or r12, 2
+    inc rbx
+    jmp .flag_loop
+.f_plus:
+    or r12, 4
+    inc rbx
+    jmp .flag_loop
+.f_space:
+    or r12, 8
+    inc rbx
+    jmp .flag_loop
+.f_hash:
+    or r12, 16
+    inc rbx
+    jmp .flag_loop
+.flags_done:
+    xor r13, r13               ; width
+.w_loop:
+    movzx eax, byte [rbx]
+    cmp al, '0'
+    jb .w_done
+    cmp al, '9'
+    ja .w_done
+    sub al, '0'
+    imul r13, r13, 10
+    movzx eax, al
+    add r13, rax
+    inc rbx
+    cmp r13, 100000
+    ja .fallback               ; absurd width: not worth a bespoke path
+    jmp .w_loop
+.w_done:
+    mov r14, 6                 ; C's (and Python's) default precision
+    cmp byte [rbx], '.'
+    jne .p_done
+    inc rbx
+    xor r14, r14               ; a bare "." means precision 0
+.p_loop:
+    movzx eax, byte [rbx]
+    cmp al, '0'
+    jb .p_done
+    cmp al, '9'
+    ja .p_done
+    sub al, '0'
+    imul r14, r14, 10
+    movzx eax, al
+    add r14, rax
+    inc rbx
+    cmp r14, 100000
+    ja .fallback
+    jmp .p_loop
+.p_done:
+    movzx eax, byte [rbx]
+    inc rbx
+    cmp byte [rbx], 0
+    jne .fallback              ; trailing junk, e.g. a length modifier
+    xor r15, r15               ; kind: 0 = f, 1 = e, 2 = g
+    mov qword [rsp+72], 0
+    cmp al, 'f'
+    je .k_ok
+    cmp al, 'F'
+    je .k_F
+    cmp al, 'e'
+    je .k_e
+    cmp al, 'E'
+    je .k_E
+    cmp al, 'g'
+    je .k_g
+    cmp al, 'G'
+    je .k_G
+    jmp .fallback
+.k_F:
+    mov qword [rsp+72], 1
+    jmp .k_ok
+.k_e:
+    mov r15, 1
+    jmp .k_ok
+.k_E:
+    mov r15, 1
+    mov qword [rsp+72], 1
+    jmp .k_ok
+.k_g:
+    mov r15, 2
+    jmp .k_ok
+.k_G:
+    mov r15, 2
+    mov qword [rsp+72], 1
+.k_ok:
+    ; ---- non-finite --------------------------------------------------
+    movsd xmm0, [rsp+32]
+    ucomisd xmm0, xmm0
+    jp .nan
+    mov rax, [rsp+32]
+    mov r10, 0x7FFFFFFFFFFFFFFF
+    and rax, r10
+    mov r11, 0x7FF0000000000000
+    cmp rax, r11
+    je .inf
+    ; ---- sign --------------------------------------------------------
+    mov rax, [rsp+32]
+    xor rcx, rcx
+    test rax, rax
+    jns .sgn_pos               ; the sign BIT, so -0.0 keeps its '-'
+    mov rcx, '-'
+    jmp .sgn_done
+.sgn_pos:
+    test r12, 4
+    jz .sgn_sp
+    mov rcx, '+'
+    jmp .sgn_done
+.sgn_sp:
+    test r12, 8
+    jz .sgn_done
+    mov rcx, ' '
+.sgn_done:
+    mov [rsp+64], rcx
+    ; ---- exact expansion of |value| ----------------------------------
+    mov rax, [rsp+32]
+    mov r10, 0x7FFFFFFFFFFFFFFF
+    and rax, r10
+    lea rcx, [_dtoa_val]
+    mov rdx, rax
+    call _dtoa_expand_bits
+    test r15, r15
+    jz .kind_f
+    cmp r15, 1
+    je .kind_e
+    jmp .kind_g
+.kind_f:
+    lea rcx, [_dtoa_val]
+    mov rdx, r14
+    call _dtoa_round_at
+    xor r15, r15               ; render fixed
+    jmp .emit
+.kind_e:
+    lea rcx, [_dtoa_val]
+    lea rdx, [r14+1]           ; nsig = prec + 1
+    call _dtoa_sig_round
+    mov [rsp+80], rax
+    sub rax, r14
+    mov [rsp+88], rax          ; lopos = dexp - prec: %e never strips
+    mov r15, 1
+    jmp .emit
+.kind_g:
+    mov rdx, r14
+    test rdx, rdx
+    jnz .g_p
+    mov rdx, 1                 ; C: precision 0 behaves as 1 for %g
+.g_p:
+    mov r14, rdx               ; P = significant digits
+    lea rcx, [_dtoa_val]
+    call _dtoa_sig_round
+    mov [rsp+80], rax
+    lea rcx, [_dtoa_val]
+    call _dtoa_low_pos
+    mov r9, rax                ; lowest nonzero position
+    mov rax, [rsp+80]
+    cmp rax, -4
+    jl .g_sci
+    cmp rax, r14
+    jge .g_sci
+    ; fixed, with P-1-dexp fractional digits
+    mov rcx, r14
+    dec rcx
+    sub rcx, rax
+    test r12, 16
+    jnz .g_fixed_keep          ; '#' keeps trailing zeros
+    mov rdx, r9
+    neg rdx                    ; digits actually needed below the point
+    test rdx, rdx
+    jns .g_f1
+    xor rdx, rdx
+.g_f1:
+    cmp rdx, rcx
+    jle .g_f2
+    mov rdx, rcx
+.g_f2:
+    mov rcx, rdx
+.g_fixed_keep:
+    mov r14, rcx
+    xor r15, r15
+    jmp .emit
+.g_sci:
+    mov rcx, rax
+    sub rcx, r14
+    inc rcx                    ; dexp - (P-1)
+    test r12, 16
+    jnz .g_sci_keep
+    cmp r9, rcx
+    jle .g_sci_keep
+    mov rcx, r9                ; raise the floor to the last nonzero digit
+.g_sci_keep:
+    mov [rsp+88], rcx
+    mov r15, 1
+    ; ---- render ------------------------------------------------------
+.emit:
+    mov rcx, r13
+    add rcx, r14
+    add rcx, 512               ; 309 integer digits + sign + point +
+    call malloc                ; exponent + NUL, with room to spare
+    mov [rsp+48], rax
+    mov rdi, rax
+    add rdi, r13               ; leave `width` bytes of room for left padding
+    mov [rsp+56], rdi
+    mov rcx, [rsp+64]
+    test rcx, rcx
+    jz .no_sign
+    mov [rdi], cl
+    inc rdi
+.no_sign:
+    test r15, r15
+    jnz .emit_sci
+    lea rcx, [_dtoa_val]
+    mov rdx, r14
+    mov r8, rdi
+    call _dtoa_emit_fixed
+    mov rdi, rax
+    test r12, 16
+    jz .emitted
+    test r14, r14
+    jnz .emitted
+    mov byte [rdi], '.'        ; '#' keeps the point at precision 0
+    inc rdi
+    jmp .emitted
+.emit_sci:
+    lea rcx, [_dtoa_val]
+    mov rdx, [rsp+80]
+    mov r8, [rsp+88]
+    mov r9, rdi
+    call _dtoa_emit_sig
+    mov rdi, rax
+    test r12, 16
+    jz .sci_exp
+    mov rax, [rsp+88]
+    cmp rax, [rsp+80]
+    jl .sci_exp
+    mov byte [rdi], '.'
+    inc rdi
+.sci_exp:
+    mov rcx, [rsp+80]
+    mov rdx, rdi
+    mov r8, 'e'
+    cmp qword [rsp+72], 0
+    je .sci_e
+    mov r8, 'E'
+.sci_e:
+    call _dtoa_emit_exp
+    mov rdi, rax
+.emitted:
+    mov byte [rdi], 0
+    jmp .pad
+    ; ---- inf / nan ---------------------------------------------------
+.nan:
+    lea rax, [_abi_str_nan]
+    cmp qword [rsp+72], 0
+    je .nan_ok
+    lea rax, [_abi_str_NAN]
+.nan_ok:
+    mov [rsp+88], rax
+    mov qword [rsp+64], 0      ; a NaN never carries '-', even when signed
+    test r12, 4
+    jz .nan_sp
+    mov qword [rsp+64], '+'
+    jmp .special
+.nan_sp:
+    test r12, 8
+    jz .special
+    mov qword [rsp+64], ' '
+    jmp .special
+.inf:
+    mov rax, [rsp+32]
+    test rax, rax
+    js .inf_neg
+    lea rax, [_abi_str_pinf]
+    cmp qword [rsp+72], 0
+    je .inf_p_ok
+    lea rax, [_abi_str_PINF]
+.inf_p_ok:
+    mov [rsp+88], rax
+    mov qword [rsp+64], 0
+    test r12, 4
+    jz .inf_sp
+    mov qword [rsp+64], '+'
+    jmp .special
+.inf_sp:
+    test r12, 8
+    jz .special
+    mov qword [rsp+64], ' '
+    jmp .special
+.inf_neg:
+    lea rax, [_abi_str_ninf]
+    cmp qword [rsp+72], 0
+    je .inf_n_ok
+    lea rax, [_abi_str_NINF]
+.inf_n_ok:
+    mov [rsp+88], rax
+    mov qword [rsp+64], 0      ; the '-' is already inside the string
+.special:
+    and r12, -3                ; C never zero-pads inf/nan
+    mov rcx, r13
+    add rcx, 32
+    call malloc
+    mov [rsp+48], rax
+    mov rdi, rax
+    add rdi, r13
+    mov [rsp+56], rdi
+    mov rcx, [rsp+64]
+    test rcx, rcx
+    jz .sp_nosign
+    mov [rdi], cl
+    inc rdi
+.sp_nosign:
+    mov rsi, [rsp+88]
+.sp_copy:
+    mov al, [rsi]
+    test al, al
+    jz .sp_done
+    mov [rdi], al
+    inc rdi
+    inc rsi
+    jmp .sp_copy
+.sp_done:
+    mov byte [rdi], 0
+    ; ---- width and padding -------------------------------------------
+    ; The body was written at buf+width so that left padding always has
+    ; somewhere to go; every copy below moves it DOWN toward the base, so a
+    ; simple forward byte loop is always safe (dest <= src).
+.pad:
+    mov rsi, [rsp+56]
+    mov rax, rdi
+    sub rax, rsi               ; body length
+    mov rbx, [rsp+48]          ; base
+    cmp rax, r13
+    jge .pad_none
+    mov rcx, r13
+    sub rcx, rax               ; pad count
+    test r12, 1
+    jnz .pad_ljust
+    test r12, 2
+    jnz .pad_zeros
+    mov r8, rbx
+    mov r9, rcx
+.psp:
+    test r9, r9
+    jz .psp_done
+    mov byte [r8], ' '
+    inc r8
+    dec r9
+    jmp .psp
+.psp_done:
+    mov r9, rax
+.pcp:
+    test r9, r9
+    jz .pcp_done
+    mov r10b, [rsi]
+    mov [r8], r10b
+    inc rsi
+    inc r8
+    dec r9
+    jmp .pcp
+.pcp_done:
+    mov byte [r8], 0
+    mov rax, rbx
+    jmp .fin
+.pad_zeros:
+    ; zero padding goes AFTER any sign, not before it
+    mov r8, rbx
+    mov r11, [rsp+64]
+    test r11, r11
+    jz .pz_nosign
+    mov [r8], r11b
+    inc r8
+    inc rsi                    ; the body's own copy of the sign is consumed
+    dec rax
+.pz_nosign:
+    mov r9, rcx
+.pz:
+    test r9, r9
+    jz .pz_done
+    mov byte [r8], '0'
+    inc r8
+    dec r9
+    jmp .pz
+.pz_done:
+    mov r9, rax
+.pzc:
+    test r9, r9
+    jz .pzc_done
+    mov r10b, [rsi]
+    mov [r8], r10b
+    inc rsi
+    inc r8
+    dec r9
+    jmp .pzc
+.pzc_done:
+    mov byte [r8], 0
+    mov rax, rbx
+    jmp .fin
+.pad_ljust:
+    mov r8, rbx
+    mov r9, rax
+.plj:
+    test r9, r9
+    jz .plj_done
+    mov r10b, [rsi]
+    mov [r8], r10b
+    inc rsi
+    inc r8
+    dec r9
+    jmp .plj
+.plj_done:
+    mov r9, rcx
+.plt:
+    test r9, r9
+    jz .plt_done
+    mov byte [r8], ' '
+    inc r8
+    dec r9
+    jmp .plt
+.plt_done:
+    mov byte [r8], 0
+    mov rax, rbx
+    jmp .fin
+.pad_none:
+    mov r8, rbx
+    mov r9, rax
+.pn:
+    test r9, r9
+    jz .pn_done
+    mov r10b, [rsi]
+    mov [r8], r10b
+    inc rsi
+    inc r8
+    dec r9
+    jmp .pn
+.pn_done:
+    mov byte [r8], 0
+    mov rax, rbx
+.fin:
+    add rsp, 96
+    WIN64_RUNTIME_LEAVE
+    ret
+.fallback:
+    movsd xmm0, [rsp+32]
+    mov rdx, [rsp+40]
+    add rsp, 96
+    WIN64_RUNTIME_LEAVE
+    jmp _abi_float_fmt_sprintf
+
+; xmm0 = round_ndigits(xmm0 = x, rdx = ndigits) -> CPython's round(x, n)
+; for a float x. Same register convention as _abi_float_fmt (arg0 float ->
+; xmm0, arg1 -> RDX).
+;
+; The old lowering computed roundsd(x * 10**n) / 10**n. That is wrong for a
+; reason no amount of care in the rounding step can fix: 2.55 is really
+; 2.5499999999999998..., so it must round DOWN to 2.5, but 2.55 * 10 is
+; exactly 25.5 as a double -- the multiply has already destroyed the digits
+; that decide the question, and ties-to-even then answers 26.
+;
+; So the decision is made on the exact decimal expansion, where "2.55" still
+; knows it is below the halfway point, and only then is the result converted
+; back to a double. Both halves are exact, which is what CPython does too
+; (dtoa mode 3 followed by a correctly-rounded strtod).
+;
+; Two fast exits carry most real calls: a non-finite or zero x, and -- more
+; usefully -- a value that has no digits past position ndigits at all, which
+; is returned UNCHANGED rather than round-tripped. That is what keeps
+; round(1e100, 5) and round(1234.5, 2) exact identities.
+_abi_round_ndigits:
+    WIN64_RUNTIME_ENTER
+    sub rsp, 64
+    movsd [rsp+32], xmm0
+    mov [rsp+40], rdx
+    ucomisd xmm0, xmm0
+    jp .ret_x                  ; NaN
+    movq rax, xmm0
+    mov r10, 0x7FFFFFFFFFFFFFFF
+    and rax, r10
+    mov r11, 0x7FF0000000000000
+    cmp rax, r11
+    je .ret_x                  ; +-inf
+    mov r12, rax               ; |x| bits
+    movq rax, xmm0
+    shr rax, 63
+    mov r13, rax               ; sign
+    test r12, r12
+    jz .ret_x                  ; +-0.0 rounds to itself, sign intact
+    lea rcx, [_dtoa_val]
+    mov rdx, r12
+    call _dtoa_expand_bits
+    mov rax, [_dtoa_val+DT_F]
+    cmp rax, [rsp+40]
+    jle .ret_x                 ; nothing past position ndigits: already done
+    lea rcx, [_dtoa_val]
+    mov rdx, [rsp+40]
+    call _dtoa_round_at
+    cmp qword [_dtoa_val+DT_N], 1
+    jne .nonzero
+    cmp byte [_dtoa_val+DT_D], 0
+    jne .nonzero
+    xorpd xmm0, xmm0           ; rounded away to zero; CPython keeps the
+    test r13, r13              ; sign here, so round(-0.4) is -0.0
+    jz .out
+    mov r10, 0x8000000000000000
+    movq xmm0, r10
+    jmp .out
+.nonzero:
+    call _dtoa_guess
+    call _dtoa_nearest
+    test r13, r13
+    jz .out
+    movq rax, xmm0
+    mov r10, 0x8000000000000000
+    xor rax, r10
+    movq xmm0, rax
+.out:
+    add rsp, 64
+    WIN64_RUNTIME_LEAVE
+    ret
+.ret_x:
+    movsd xmm0, [rsp+32]
+    jmp .out
 
 ; math.isnan(x: float)/gcd(a: int, b: int)/isqrt(n: int) -- ported directly
 ; from target_windows.py's legacy-backend inline shims (same symbol names,
