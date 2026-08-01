@@ -247,7 +247,16 @@ def run_positive(case: Path, target: str) -> TestResult:
 
     stdin_data = _parse_stdin(case.read_text(encoding="utf-8"))
     try:
+        # errors="replace" on the CHILD's output, not just ours: a compiled
+        # program can legitimately write bytes that are undecodable in the
+        # console codepage, and without this subprocess hands back None for
+        # stdout. The runner then failed with
+        # `runner error: 'NoneType' object has no attribute 'replace'` --
+        # a real FAIL arriving as a message about the harness, exactly the
+        # class of masking fixed in a99c0cff for the pyinbin fallback.
+        # Reported by the corpus-expansion agent on alias_param_setitem_str.
         run = subprocess.run([str(out)], capture_output=True, text=True,
+                             errors="replace",
                              input=stdin_data, timeout=30, **exe_flags)
     except subprocess.TimeoutExpired:
         # A compiled program that never terminates (e.g. asmpython miscompiling
