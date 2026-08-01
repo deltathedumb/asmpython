@@ -3179,6 +3179,147 @@ def _resolved_method_is_static(ctx: _FuncCtx, class_name: str, method: str) -> b
     return "staticmethod" in getattr(msig, "decorators", [])
 
 
+def _lower_sort_by_lt(ctx: _FuncCtx, list_v: IRValue, owner: str, uid: int) -> None:
+    """Selection-sort `list_v` in place, ordering by the elements' own
+    `__lt__`.
+
+    Every other arm of `_lower_sort_inplace` calls a runtime helper that
+    compares raw 8-byte cells -- `_abi_sort_int` for anything that is not a
+    str or a tuple. Instances fell into that arm, so `sorted([Version(3),
+    Version(1), Version(2)])` compared HEAP ADDRESSES and returned the
+    allocation order, `[v3, v1, v2]`, with `__lt__` never called
+    (`obj_lt_drives_sorted.py`; FAILURE_AUDIT rank 21).
+
+    Emitted inline rather than as a new `_abi_sort_cmp(list, fnptr)` shim:
+    the comparison is a direct call to a statically-resolved symbol, so no
+    function-pointer plumbing or new runtime ABI is needed, and this stays in
+    one file. Selection sort is O(n^2) and deliberately so -- correctness
+    first, and the arms that matter for large data (int/str) keep their
+    existing helpers.
+
+    Blocks are created in EMISSION order; the x86-64 regalloc indexes blocks
+    by position in ctx.blocks, so a creation order that does not track real
+    control flow makes its liveness pass emit a bare KeyError('%tN').
+    """
+    lt_sym = f"{owner}____lt__"
+    len_addr = ctx.tmp(PTR)
+    ctx.emit(IRInstr("gep", len_addr, [list_v, _LIST_LEN_OFF]))
+    n_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", n_v, [len_addr]))
+
+    i_ptr = ctx.ensure_slot(f"__sortlt_i_{uid}", I64)
+    j_ptr = ctx.ensure_slot(f"__sortlt_j_{uid}", I64)
+    m_ptr = ctx.ensure_slot(f"__sortlt_m_{uid}", I64)
+    zero = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", zero, [0]))
+    ctx.emit(IRInstr("store", None, [zero, i_ptr]))
+
+    outer_head = ctx.new_block(f"sortlt_ohead_{uid}")
+    outer_body = ctx.new_block(f"sortlt_obody_{uid}")
+    inner_head = ctx.new_block(f"sortlt_ihead_{uid}")
+    inner_body = ctx.new_block(f"sortlt_ibody_{uid}")
+    take_j = ctx.new_block(f"sortlt_take_{uid}")
+    inner_next = ctx.new_block(f"sortlt_inext_{uid}")
+    do_swap = ctx.new_block(f"sortlt_swap_{uid}")
+    outer_next = ctx.new_block(f"sortlt_onext_{uid}")
+    end_b = ctx.new_block(f"sortlt_end_{uid}")
+    ctx.emit(IRInstr("br", None, [outer_head.label]))
+
+    # while i < n
+    ctx.switch_to(outer_head)
+    i_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_v, [i_ptr]))
+    more = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", more, [i_v, n_v]))
+    ctx.emit(IRInstr("br.t", None, [more, outer_body.label, end_b.label]))
+
+    # m = i; j = i + 1
+    ctx.switch_to(outer_body)
+    i_b = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_b, [i_ptr]))
+    ctx.emit(IRInstr("store", None, [i_b, m_ptr]))
+    one = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one, [1]))
+    j0 = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", j0, [i_b, one]))
+    ctx.emit(IRInstr("store", None, [j0, j_ptr]))
+    ctx.emit(IRInstr("br", None, [inner_head.label]))
+
+    # while j < n
+    ctx.switch_to(inner_head)
+    j_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", j_v, [j_ptr]))
+    j_more = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.lt", j_more, [j_v, n_v]))
+    ctx.emit(IRInstr("br.t", None, [j_more, inner_body.label, do_swap.label]))
+
+    # if list[j] < list[m]: m = j
+    ctx.switch_to(inner_body)
+    j_b = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", j_b, [j_ptr]))
+    m_b = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", m_b, [m_ptr]))
+    a_addr = _list_elem_addr(ctx, list_v, j_b)
+    a_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", a_v, [a_addr]))
+    b_addr = _list_elem_addr(ctx, list_v, m_b)
+    b_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", b_v, [b_addr]))
+    lt_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("call", lt_v, [lt_sym, a_v, b_v]))
+    z2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", z2, [0]))
+    is_lt = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.ne", is_lt, [lt_v, z2]))
+    ctx.emit(IRInstr("br.t", None, [is_lt, take_j.label, inner_next.label]))
+
+    ctx.switch_to(take_j)
+    j_t = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", j_t, [j_ptr]))
+    ctx.emit(IRInstr("store", None, [j_t, m_ptr]))
+    ctx.emit(IRInstr("br", None, [inner_next.label]))
+
+    # j += 1
+    ctx.switch_to(inner_next)
+    j_c = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", j_c, [j_ptr]))
+    one2 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one2, [1]))
+    j_n = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", j_n, [j_c, one2]))
+    ctx.emit(IRInstr("store", None, [j_n, j_ptr]))
+    ctx.emit(IRInstr("br", None, [inner_head.label]))
+
+    # swap list[i], list[m]
+    ctx.switch_to(do_swap)
+    i_s = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_s, [i_ptr]))
+    m_s = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", m_s, [m_ptr]))
+    si_addr = _list_elem_addr(ctx, list_v, i_s)
+    si_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", si_v, [si_addr]))
+    sm_addr = _list_elem_addr(ctx, list_v, m_s)
+    sm_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", sm_v, [sm_addr]))
+    ctx.emit(IRInstr("store", None, [sm_v, si_addr]))
+    ctx.emit(IRInstr("store", None, [si_v, sm_addr]))
+    ctx.emit(IRInstr("br", None, [outer_next.label]))
+
+    # i += 1
+    ctx.switch_to(outer_next)
+    i_c = ctx.tmp(I64)
+    ctx.emit(IRInstr("load", i_c, [i_ptr]))
+    one3 = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", one3, [1]))
+    i_n = ctx.tmp(I64)
+    ctx.emit(IRInstr("iadd", i_n, [i_c, one3]))
+    ctx.emit(IRInstr("store", None, [i_n, i_ptr]))
+    ctx.emit(IRInstr("br", None, [outer_head.label]))
+
+    ctx.switch_to(end_b)
+
+
 def _resolve_method_owner(ctx: _FuncCtx, class_name: str, method: str) -> str | None:
     for cname in _resolve_class_chain(ctx, class_name):
         sig = ctx.mctx.classes_sig.get(cname)
@@ -7185,7 +7326,18 @@ def _lower_sort_inplace(
         ctx.emit(IRInstr("call", None, [sort_sym, elems_final, keys_final]))
         out_v = elems_final
     else:
-        if el_kind == "str":
+        _lt_owner = (
+            _resolve_method_owner(ctx, el_kind.split(":", 1)[1], "__lt__")
+            if el_kind.startswith("instance:")
+            else None
+        )
+        if _lt_owner is not None:
+            # Instances order by their own __lt__. Without this they fell to
+            # the `_abi_sort_int` arm below, which compares the raw 8-byte
+            # cells -- i.e. heap ADDRESSES -- so the result was allocation
+            # order and __lt__ was never called.
+            _lower_sort_by_lt(ctx, out_v, _lt_owner, id(e))
+        elif el_kind == "str":
             ctx.emit(IRInstr("call", None, ["_abi_sort_str", out_v]))
         elif el_kind == "tuple" and tuple_key_kind == "int":
             out_v = _lower_sort_tuple_int_first(ctx, e, out_v)
@@ -16508,6 +16660,21 @@ def _reachable_callables(mod: A.Module) -> tuple[list[A.FuncDef], list[A.FuncDef
                 arg_t = A.expr_type(node.args[0])
                 if arg_t.startswith("instance:"):
                     add_resolved(arg_t.split(":", 1)[1], "__hash__")
+            if node.func == "sorted" and len(node.args) >= 1:
+                # `sorted([Instance, ...])` orders by the elements' __lt__
+                # (see _lower_sort_by_lt), so the walker has to keep that
+                # method alive -- the lowering alone links against an
+                # undefined `Version____lt__`. Same two-part shape every other
+                # dunder dispatch in this file needs: a lowering case AND a
+                # matching reachability case.
+                _sa = node.args[0]
+                _sel = ""
+                if isinstance(_sa, A.ListLit):
+                    _sel = _sa.el_type or ""
+                elif isinstance(_sa, A.Name):
+                    _sel = getattr(_sa, "list_el_type", "") or ""
+                if _sel.startswith("instance:"):
+                    add_resolved(_sel.split(":", 1)[1], "__lt__")
             if node.func in ("next", "iter") and len(node.args) >= 1:
                 # `next(g)` / `iter(g)` called DIRECTLY on an iterator object --
                 # including a generator function's result, which sema desugars
