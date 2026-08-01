@@ -243,3 +243,163 @@ To regenerate any batch (expectations are re-derived from the host CPython):
 ```bash
 python tests/generators/gen_std_cases.py tests/cases
 ```
+
+---
+
+# Round 2 — aliasing, fixtures, and the 63 re-classified
+
+Measured in the same worktree, now pinned to `a99c0cff`.
+
+Round 1's 511 probes were re-run first. **Zero verdicts changed** across
+`aa81784b` (the unknown/int split, the boxed-return convention, and field-type
+recovery through opaque receivers). The totals are identical to round 1's:
+281 failing of 511, 55.0%.
+
+## 1. The 63 masked refusals, grouped by cause
+
+`a99c0cff` made this channel legible, so round 1's largest opaque bucket can
+now be routed. One caveat on the fix: the runner surfaces the CLI's summary,
+which says `native backend rejected this source: N semantic error(s)` — it
+names the *count*, not the codes. Recovering the individual `[Exxx]` still
+requires re-running with `--no-pyinbin-fallback`, so grouping the 63 needed a
+second pass. Folding the per-error detail into that summary would remove it.
+
+| cause | cases |
+|---|---:|
+| **C. a user-defined type is refused where a builtin is accepted** | **15** |
+| **A. stdlib binding missing (a function, or the whole module)** | **13** |
+| **E. language feature unimplemented** | **11** |
+| D. operator unimplemented for a builtin container type | 9 |
+| B. stdlib binding has the wrong signature | 6 |
+| G. an unannotated value is typed `int` when it is not | 5 |
+| F. parser: syntax not supported | 4 |
+
+Three causes exceed 10 cases. A fourth appears if **A and B are read as one
+workstream** — "the stdlib binding is missing or wrong" is **19 cases**, the
+largest single routable group in the set.
+
+**C (15)** is the most coherent. Everywhere a builtin type is accepted, a
+user-defined one is refused: `list()`, `reversed()` and `zip()` reject an
+object with `__iter__`; slicing and indexing are refused on an instance and on
+a `list` subclass; `in` demands `__contains__` instead of falling back to
+iteration; a set cannot hold instances. These are the documented protocol
+fallbacks, missing as a group rather than one at a time.
+
+**G (5)** is small but diagnostic: every case is `unsupported operand type for
++: str + int`, inside a decorator or a nested closure. The value is a `str`
+that was typed `int` because nothing annotated it — the default-to-int rule
+meeting first-class functions.
+
+**F (4)** is worth separating because a parser refusal cannot be fixed in
+sema: `yield` as an expression (`[P001]`), nested unpacking in a loop target
+(`[P026]`), and the f-string `=` debug form (twice).
+
+## 2. Aliasing — a confirmed silent miscompile
+
+60 probes, 17 failing (28.3%). The headline is not the rate; it is *which* 17.
+
+| sub-area | result |
+|---|---|
+| mutation through an alias, same scope | **9/9 pass** |
+| identity across a call boundary | **5/5 pass** |
+| mutation across a call boundary | 3/5 — **2 fail** |
+| copy semantics | 7/10 |
+| mutable default arguments | **0/3** |
+| self-reference and cycles | **0/4** |
+| `id()` and `is` | 7/9 |
+
+Same-scope aliasing is correct, and identity *survives* a call:
+`passthrough(a) is a` is `True`. But a list mutated through a **parameter**
+does not reach the caller. Reduced to a standalone program and confirmed
+outside the corpus:
+
+```text
+def f_setitem(xs): xs[0] = 99      CPython [99]     asmpython [8490768]
+def f_append(xs):  xs.append(2)    CPython [1, 2]   asmpython [1]
+def f_extend(xs):  xs.extend([3])  CPython [1, 3]   asmpython [1]
+def f_dict_insert(d): d["new"] = 1 CPython len 2    asmpython len 2  (correct)
+o.items.append(1) through a param  CPython [1]      asmpython [1]    (correct)
+```
+
+The buffer is shared — `xs[0] = 99` *does* reach the caller's list, writing a
+raw pointer into it, which is a separate boxing bug. The **length** is not
+shared: `append` and `extend` are lost. Dicts are unaffected, and a list
+reached through an instance field is unaffected. That is the signature of a
+list whose data pointer is passed by reference while its length lives in a
+copied header.
+
+This compiles cleanly, exits 0, and prints a plausible wrong answer. It is the
+only failure class in this corpus that does not announce itself.
+
+The inverse error is present in the same build: **`set(a)` does not copy.**
+
+```text
+a = {1, 2}; b = set(a); b.add(3)   CPython len(a) = 2   asmpython len(a) = 3
+```
+
+`copy.copy` and `copy.deepcopy` fail the same way. So values are copied where
+they must be aliased *and* aliased where they must be copied.
+
+The two `is` failures are the ones flagged in advance as implementation
+details: `1 is True` returns `True` (bool is not distinguished from int), and
+`1000 is int("1000")` returns `True` (no boxed identity for large ints).
+Self-referential structures crash (`0xC0000005`) or print a raw pointer where
+CPython prints `[...]`.
+
+## 3. Fixtures — the convention works; the prerequisite does not
+
+41 probes, 39 failing (95.1%). That is **not** 39 independent findings, and
+the file is built so this can be said precisely: `fix_tempdir_write_read` owns
+the shared prerequisite, and it is the one that fails. Reduced:
+
+```text
+h = open(p, "w"); h.write("payload"); h.close()
+h = open(p); print(h.read())      CPython: payload      asmpython: 0
+```
+
+`read()` returns `0`. Every probe that reads a file back — `open`,
+`linecache`, `fileinput`, `csv`, `json`, `configparser`, `shutil`, `os.stat`
+— is downstream of that one defect, and the crashes among them are what
+happens when `.rstrip()` or iteration is applied to the `0`. The convention
+itself is sound: the probes build and remove their own fixtures, print nothing
+environment-derived, and assert clocks as orderings. They begin reporting
+independent facts as soon as file reads return their contents.
+
+Three failures are genuinely separate: `os.rename`, `shutil.copy` and
+`time.perf_counter` fail at *link* time — `undefined symbol 'rename' has no
+known DLL`, likewise `feof` and `_time_perf_counter`. Those are missing
+`native_libraries` declarations rather than compiler bugs.
+
+## 4. Hit rate per wave
+
+| wave | probes | failing | rate |
+|---|---:|---:|---:|
+| 1 — std/obj/flow/proto/fmt | 340 | 158 | 46.5% |
+| 2 — the same areas, deeper | 172 | 124 | 72.1% |
+| 3 — aliasing, fixtures, in-memory stdlib | 108 | 63 | 58.3% |
+| **all** | **619** | **344** | **55.6%** |
+
+Corpus: 1628 → **1736 cases**.
+
+The rate has not bent. Wave 3 sits between waves 1 and 2, and its sub-areas
+differ enormously — aliasing at 28% is the most conformant area measured so
+far, fixtures at 95% the least. Averaging them hides that, which is the
+argument for continuing to report per area rather than per wave.
+
+## 5. Still uncovered after round 2
+
+- **`uu` cannot be probed at all.** PEP 594 removed it from CPython in 3.13,
+  so there is no reference implementation to derive an expectation from.
+  `asmpython/stdlib/uu.py` ships a binding for a module the target language no
+  longer has.
+- **34 stdlib modules remain unprobed**, now for narrower reasons: network
+  peers (`socket`, `ssl`, `smtplib`, `ftplib`, `imaplib`, `poplib`,
+  `http_server`, `socketserver`, `urllib_error`), interactive or
+  platform-specific surfaces (`getpass`, `locale`, `platform`, `signal`), and
+  profiling (`profile`, `pstats`, `timeit`) whose output is inherently
+  variable.
+- **Concurrency semantics.** `threading` is probed only for "a joined thread
+  ran"; nothing tests interleaving, locks under contention, or `queue` across
+  real threads.
+- **Multi-module programs**, the C ABI, and non-x86-64 backends, all unchanged
+  from round 1.
