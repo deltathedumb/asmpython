@@ -253,3 +253,82 @@ implementation to derive an expectation from.
 
 Verdict stability: round 1's 511 probes were re-run at a99c0cff and ZERO
 verdicts changed across aa81784b.
+
+--- corpus expansion round 3 (agent 2) ---
+Scope again tests/cases/** and tests/generators/** only; zero files under
+asmpython/. Commits 11ba7605 (166 probes) and 6112d342 (report). Corpus
+1736 -> 1903. Full matrix in CORPUS_EXPANSION.md section "Round 3".
+
+RE-MEASUREMENT at ae1dc7ae: the 619 existing probes came back 6 FIXED, 0
+REGRESSED. All six are agent 3's exact-decimal work landing exactly where
+predicted -- fmt_spec_exponent, fmt_spec_e_uppercase, fmt_spec_g_uppercase,
+fmt_spec_general_g, fmt_percent_exponent, fmt_percent_float_precision. The
+fmt_ area went 37.5% -> 29.2% failing.
+
+I WAS WRONG IN ROUND 2 AND AM CORRECTING IT. I said the list's data pointer
+was shared while its LENGTH was not, and that dicts were unaffected. Both
+halves are wrong. Mapping the boundary:
+
+    def m(xs): xs.sort()     CPython [1,2,3]  asmpython [3,1,2]  no effect
+    def m(xs): xs.reverse()  CPython [3,2,1]  asmpython [1,2,3]  no effect
+    def m(d):  d.clear()     CPython len 0    asmpython len 1    no effect
+    def s(d):  d["k"] = 9    CPython len 1    asmpython len 1    WORKS
+    def m(xs): xs.append(2); return len(xs)
+                             CPython callee 2 caller 2
+                             asmpython callee 1 caller 1
+
+sort/reverse do not change the length and still have no effect, which kills
+the length theory. Dicts are affected (pop/clear/update all fail; only
+d[k] = v works). And the CALLEE's own view does not carry the append either,
+so nothing is being lost on the way back.
+
+Corrected: a mutating METHOD called on a parameter has no effect at all, while
+a subscript store through a parameter does take effect. Not a length problem,
+not list-specific. Acceptance set is alias_param_* : 1/14 length-changing and
+0/4 length-preserving pass today.
+
+THE CONSUMER MATRIX IS THE DELIVERABLE (elem_*, 134 probes = 30 paths x 4
+element kinds + 14 nested). Every path is covered on every kind, no blank
+cells, so it works as a gate on the 64-site migration rather than as a sample.
+120 cells, 44 failing. What it says:
+
+  * only 2 of 30 paths are correct on all four kinds -- len and unpack, the
+    two that never read an element's VALUE. Everything that consumes a value
+    fails on at least one kind.
+  * mixed fails on 27 of 30 paths, and most of that is ONE defect: None stored
+    in a container reads back as 0, reaching fifteen separate consumers. If
+    you fix one thing before the migration, fix that -- it will move the most
+    cells per unit of work.
+  * FOUR paths silently return a value where CPython raises TypeError:
+    min/max/sorted/list.sort over a heterogeneous list. sorted(mixed) returns
+    [0, 1, 'two', 3.5, True]. A wrong value in place of an error is the class
+    with no signal at all.
+  * float breaks MORE paths than str (12 vs 4), and eight of the twelve are
+    compile refusals -- enumerate, index, membership, min_max_key, remove,
+    set_ops, sort_key, sorted_key. Float elements are refused by the paths
+    that compare or key on them.
+  * dict_from_pairs fails on all four kinds, the only path that does. Three
+    crash outright; the str case writes raw pointers as the dict VALUES.
+    Building a dict from an iterable of pairs is broken independent of element
+    kind, so it is worth treating as its own defect rather than as part of the
+    representation work.
+  * pass_to_function and starred_call leak pointers for str and float but pass
+    for int -- the boxing boundary showing at the call edge, not in the
+    container.
+
+Suggested use during the migration: `-k elem_` is 134 cases and rebuilds the
+matrix mechanically from case names plus verdicts, so a per-site migration can
+be checked cell by cell rather than by total count. The generator is a cross
+product, so adding a 31st consumer path costs one function.
+
+FOR WHOEVER OWNS tests/runner.py: alias_param_setitem_str fails as
+`runner error: 'NoneType' object has no attribute 'replace'`. The compiled
+program emits bytes undecodable in the console codepage and the runner reports
+its own internal error instead of the case's failure -- same class as the
+WinError 2 masking fixed in a99c0cff. Decoding the child's output with
+errors="replace" would make it report the real divergence.
+
+Hit rate per wave: 46.5%, 72.1%, 58.3%, 42.8%. Wave 4's figure is the least
+meaningful of the four -- a cross product deliberately includes the
+combinations expected to pass, so its rate describes the shape of the product
+rather than the density of defects. Read the per-kind columns instead.
