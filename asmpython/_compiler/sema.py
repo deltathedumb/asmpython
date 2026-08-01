@@ -2300,6 +2300,7 @@ class SemaAnalyzer:
         if cached is not None:
             return cached
         kinds: dict = {}
+        dynamic: set = set()
         seen_twice: set = set()
 
         def _note(target, value, top: bool) -> None:
@@ -2311,6 +2312,21 @@ class SemaAnalyzer:
                 # A rebinding anywhere makes the single-binding claim false.
                 seen_twice.add(target)
                 kinds.pop(target, None)
+                return
+            if isinstance(value, A.IntLit) and (
+                value.is_bool or value.is_none or value.is_ellipsis
+            ):
+                # `x = True` binds a name whose kind `_literal_arg_type` can
+                # only call "int" -- what makes it a bool is a flag on the AST
+                # node, which does not survive being stored. Recording "int"
+                # here is what let a bool reach a parameter slot typed int even
+                # after 043a965b, because that fix only saw bool LITERALS at
+                # the call site and the ordinary shape passes a name:
+                #     _original = True
+                #     move(_original)     -> prints 1
+                # Tracked separately so the slot can be made dynamic, and NOT
+                # recorded as a kind, since "int" is the wrong answer.
+                dynamic.add(target)
                 return
             lit = self._literal_arg_type(value)
             if lit is not None:
@@ -2340,7 +2356,17 @@ class SemaAnalyzer:
             for _m in _c.methods:
                 _rebinds_globals(_m.body)
         self._mod_binding_kinds_cache = kinds
+        self._mod_dynamic_bindings_cache = dynamic
         return kinds
+
+    def _module_dynamic_bindings(self) -> set:
+        """Module-level names bound to True/False/None/... exactly once.
+
+        A parameter receiving one of these must be typed "any": no concrete
+        slot can carry what distinguishes them (see `_module_binding_kinds`).
+        """
+        self._module_binding_kinds()   # builds both caches
+        return getattr(self, "_mod_dynamic_bindings_cache", set())
 
     def _return_expr_kind(self, fn, ex, kinds: dict, depth: int):
         """Kind of a RETURNED expression, or None when it cannot be read.
@@ -2609,6 +2635,15 @@ class SemaAnalyzer:
                             break
                     if arg is None:
                         continue
+                if isinstance(arg, A.Name) and (
+                    arg.name in self._module_dynamic_bindings()
+                ):
+                    # The same fact one indirection away: a name bound once to
+                    # True/False/None. Passing `_original` is the ordinary
+                    # shape -- passing the bare literal is the rare one -- so
+                    # without this the fix below almost never fires.
+                    self.polymorphic_params.add(f"{qualname}:{i}")
+                    continue
                 if isinstance(arg, A.IntLit) and (
                     arg.is_bool or arg.is_none or arg.is_ellipsis
                 ):
