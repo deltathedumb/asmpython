@@ -903,8 +903,12 @@ def _lower_membership_any(ctx: _FuncCtx, needle_e: A.Expr, hay_e: A.Expr, negate
     b_idx = ctx.tmp(I64)
     ctx.emit(IRInstr("load", b_idx, [scan_idx_ptr]))
     elem_addr = _list_elem_addr(ctx, b_hay, b_idx)
-    elem_v = ctx.tmp(needle_v.type)
-    ctx.emit(IRInstr("load", elem_v, [elem_addr]))
+    # A CONSUME site: the element is COMPARED, so a boxed one must be unboxed
+    # first or the compare tests the box's address. Typing the element by
+    # `needle_v.type` was the tell -- the needle's type says nothing about how
+    # the haystack stores its elements. The haystack is "any" here, so its
+    # elements are too.
+    elem_v = _load_list_elem(ctx, elem_addr, "any")
     b_needle = ctx.tmp(needle_v.type)
     ctx.emit(IRInstr("load", b_needle, [needle_ptr]))
     eq_v = ctx.tmp(I64)
@@ -1127,12 +1131,16 @@ def _lower_membership(ctx: _FuncCtx, needle_e: A.Expr, hay_e: A.Expr, negate: bo
     body_idx = ctx.tmp(I64)
     ctx.emit(IRInstr("load", body_idx, [idx_ptr]))
     elem_addr = _list_elem_addr(ctx, body_hay, body_idx)
-    elem_v = ctx.tmp(needle_v.type)
-    ctx.emit(IRInstr("load", elem_v, [elem_addr]))
-    cur_needle = ctx.tmp(needle_v.type)
-    ctx.emit(IRInstr("load", cur_needle, [needle_ptr]))
     needle_ty = A.expr_type(needle_e)
     hay_elem_ty = _iter_element_type(hay_e)
+    # A CONSUME site: the element is COMPARED. Read it in the HAYSTACK's
+    # element representation, not `needle_v.type` -- the needle's type says
+    # nothing about how the haystack stores its elements, and for a boxed
+    # ("any") element a raw load compares the box's address, so `False in
+    # [True, False]` answered False.
+    elem_v = _load_list_elem(ctx, elem_addr, hay_elem_ty)
+    cur_needle = ctx.tmp(needle_v.type)
+    ctx.emit(IRInstr("load", cur_needle, [needle_ptr]))
     hay_tuple_elem_tys = A.tuple_element_types(hay_e)
     eq_v = ctx.tmp(I64)
     if (
@@ -1230,8 +1238,10 @@ def _lower_list_remove(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
     body_idx = ctx.tmp(I64)
     ctx.emit(IRInstr("load", body_idx, [idx_ptr]))
     elem_addr = _list_elem_addr(ctx, body_obj, body_idx)
-    elem_v = ctx.tmp(needle_v.type)
-    ctx.emit(IRInstr("load", elem_v, [elem_addr]))
+    # A CONSUME site: read the element in the LIST's element representation,
+    # not the needle's type. A boxed element compared raw tests the box's
+    # address, which for `.remove()` means silently removing nothing.
+    elem_v = _load_list_elem(ctx, elem_addr, _iter_element_type(e.obj))
     cur_needle = ctx.tmp(needle_v.type)
     ctx.emit(IRInstr("load", cur_needle, [needle_ptr]))
     # By VALUE, matching `==` and the `.index`/`in` paths. A raw icmp.eq here
@@ -1373,8 +1383,11 @@ def _lower_list_index(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
     body_idx = ctx.tmp(I64)
     ctx.emit(IRInstr("load", body_idx, [idx_ptr]))
     elem_addr = _list_elem_addr(ctx, body_obj, body_idx)
-    elem_v = ctx.tmp(needle_v.type)
-    ctx.emit(IRInstr("load", elem_v, [elem_addr]))
+    # A CONSUME site: read the element in the LIST's element representation,
+    # not the needle's type. The needle's type says nothing about how the list
+    # stores its elements, and a boxed element compared raw tests the box's
+    # address -- so `.index()` on a bool list missed every entry.
+    elem_v = _load_list_elem(ctx, elem_addr, _iter_element_type(e.obj))
     cur_needle = ctx.tmp(needle_v.type)
     ctx.emit(IRInstr("load", cur_needle, [needle_ptr]))
     # Compare BY VALUE, not by pointer.
